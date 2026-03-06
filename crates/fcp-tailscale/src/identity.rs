@@ -158,7 +158,7 @@ impl MeshIdentity {
         let attestation = self
             .attestation
             .as_ref()
-            .ok_or_else(|| TailscaleError::InvalidAttestation)?;
+            .ok_or(TailscaleError::InvalidAttestation)?;
 
         attestation.verify(
             &self.owner_pubkey,

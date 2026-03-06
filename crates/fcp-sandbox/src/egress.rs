@@ -203,7 +203,8 @@ const LINK_LOCAL_CIDRS: &[&str] = &[
 /// Default CIDR ranges that are denied when `deny_tailnet_ranges` is true.
 /// Tailscale uses CGNAT space (100.64.0.0/10) for its mesh network.
 const TAILNET_CIDRS: &[&str] = &[
-    "100.64.0.0/10", // CGNAT / Tailscale address space
+    "100.64.0.0/10",      // CGNAT / Tailscale IPv4 address space
+    "fd7a:115c:a1e0::/48", // Tailscale IPv6 address space
 ];
 
 // ============================================================================
@@ -1022,6 +1023,11 @@ mod tests {
         assert!(is_tailnet_range("100.127.255.255".parse().unwrap()));
         assert!(!is_tailnet_range("100.128.0.1".parse().unwrap()));
         assert!(!is_tailnet_range("100.63.255.255".parse().unwrap()));
+        
+        // IPv6 Tailscale range
+        assert!(is_tailnet_range("fd7a:115c:a1e0::1".parse().unwrap()));
+        assert!(is_tailnet_range("fd7a:115c:a1e0::ffff".parse().unwrap()));
+        assert!(!is_tailnet_range("fd7a:115c:a1e1::1".parse().unwrap()));
     }
 
     // ------------------------------------------------------------------------

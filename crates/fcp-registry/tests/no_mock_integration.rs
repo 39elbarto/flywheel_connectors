@@ -1,0 +1,1132 @@
+//! Integration tests for fcp-registry verification and mirroring.
+//!
+//! These tests exercise real code paths: Ed25519 key generation/signing,
+//! manifest parsing, capability ceiling enforcement, supply chain policy,
+//! and object store mirroring without mocks.
+
+use base64::Engine;
+use fcp_core::{
+    CapabilityId, DecisionReceiptPolicy, ObjectIdKey, Provenance, ZoneId, ZonePolicyObject,
+    ZoneTransportPolicy,
+};
+use fcp_crypto::ed25519::Ed25519SigningKey;
+use fcp_manifest::{AttestationType, Base64Bytes, ConnectorManifest};
+use fcp_registry::{
+    AttestationEvidence, ConnectorBundle, ConnectorTarget, RegistryError, RegistryTrustPolicy,
+    RegistryVerifier, SupplyChainEvidence,
+};
+use fcp_store::{MemoryObjectStore, MemoryObjectStoreConfig, ObjectStore};
+use semver::Version;
+
+const PLACEHOLDER_HASH: &str =
+    "blake3-256:fcp.interface.v2:0000000000000000000000000000000000000000000000000000000000000000";
+
+// ── helpers ──
+
+fn base_manifest_toml() -> String {
+    let raw = include_str!("../../../tests/vectors/manifest/manifest_minimal.toml");
+    let unchecked = ConnectorManifest::parse_str_unchecked(raw).expect("manifest");
+    let hash = unchecked.compute_interface_hash().expect("interface hash");
+    raw.replace(PLACEHOLDER_HASH, &hash.to_string())
+}
+
+fn unsigned_manifest_toml(extra: &str) -> String {
+    if extra.trim().is_empty() {
+        base_manifest_toml()
+    } else {
+        format!("{}\n{}", base_manifest_toml(), extra)
+    }
+}
+
+fn sign_manifest(
+    manifest_toml: &str,
+    signing_key: &Ed25519SigningKey,
+    binary_hash: &str,
+) -> Base64Bytes {
+    let manifest = ConnectorManifest::parse_str(manifest_toml).expect("manifest");
+    let signing_bytes = fcp_registry::manifest_signing_bytes(&manifest).expect("signing bytes");
+    let message = fcp_registry::signature_message(&signing_bytes, binary_hash);
+    let signature =
+        signing_key.sign_with_context(fcp_registry::MANIFEST_SIGNATURE_CONTEXT, &message);
+    Base64Bytes::try_from(format!(
+        "base64:{}",
+        base64::engine::general_purpose::STANDARD.encode(signature.to_bytes())
+    ))
+    .expect("base64 sig")
+}
+
+fn publisher_sig_toml(kid: &str, sig: &Base64Bytes) -> String {
+    format!(
+        r#"[signatures]
+publisher_threshold = "1-of-1"
+
+[[signatures.publisher_signatures]]
+kid = "{kid}"
+sig = "{sig}"
+"#,
+        sig = String::from(sig.clone())
+    )
+}
+
+fn registry_sig_toml(kid: &str, sig: &Base64Bytes) -> String {
+    format!(
+        r#"[signatures.registry_signature]
+kid = "{kid}"
+sig = "{sig}"
+"#,
+        sig = String::from(sig.clone())
+    )
+}
+
+fn test_target() -> ConnectorTarget {
+    ConnectorTarget {
+        os: "linux".to_string(),
+        arch: "amd64".to_string(),
+    }
+}
+
+fn test_binary() -> Vec<u8> {
+    b"fake-binary-payload-for-tests".to_vec()
+}
+
+fn binary_hash(binary: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(binary);
+    format!("sha256:{}", hex::encode(hasher.finalize()))
+}
+
+fn signed_bundle(kid: &str) -> (ConnectorBundle, RegistryTrustPolicy) {
+    let signing_key = Ed25519SigningKey::generate();
+    let verifying_key = signing_key.verifying_key();
+    let binary = test_binary();
+    let b_hash = binary_hash(&binary);
+    let unsigned = unsigned_manifest_toml("");
+    let sig = sign_manifest(&unsigned, &signing_key, &b_hash);
+    let sig_section = publisher_sig_toml(kid, &sig);
+    let manifest_toml = format!("{unsigned}\n{sig_section}");
+
+    let bundle = ConnectorBundle {
+        manifest_toml,
+        binary,
+        target: test_target(),
+    };
+
+    let mut trust = RegistryTrustPolicy::default();
+    trust
+        .publisher_keys
+        .insert(kid.to_string(), verifying_key);
+
+    (bundle, trust)
+}
+
+fn zone_policy_with_ceiling(caps: &[&str]) -> ZonePolicyObject {
+    let zone = ZoneId::work();
+    ZonePolicyObject {
+        header: fcp_core::ObjectHeader {
+            schema: fcp_cbor::SchemaId::new("fcp.test", "ZonePolicyObject", Version::new(1, 0, 0)),
+            zone_id: zone.clone(),
+            created_at: 1_700_000_000,
+            provenance: Provenance::new(zone.clone()),
+            refs: vec![],
+            foreign_refs: vec![],
+            ttl_secs: None,
+            placement: None,
+        },
+        zone_id: zone,
+        principal_allow: vec![],
+        principal_deny: vec![],
+        connector_allow: vec![],
+        connector_deny: vec![],
+        capability_allow: vec![],
+        capability_deny: vec![],
+        capability_ceiling: caps
+            .iter()
+            .map(|c| CapabilityId::new(c.to_string()).expect("valid cap"))
+            .collect(),
+        transport_policy: ZoneTransportPolicy::default(),
+        decision_receipts: DecisionReceiptPolicy::default(),
+        usage_budget: None,
+        requires_posture: None,
+    }
+}
+
+// ── verify_bundle: signature validation ──
+
+#[test]
+fn verify_bundle_valid_publisher_signature() {
+    let (bundle, trust) = signed_bundle("pub1");
+    let verifier = RegistryVerifier::new(trust);
+
+    let result = verifier.verify_bundle(&bundle, None, None, None);
+    assert!(result.is_ok(), "valid publisher sig should pass: {result:?}");
+
+    let verified = result.unwrap();
+    assert_eq!(verified.manifest.connector.id.to_string(), "fcp.minimal");
+    assert!(verified.binary_hash.starts_with("sha256:"));
+    assert!(verified.manifest_hash.starts_with("sha256:"));
+}
+
+#[test]
+fn verify_bundle_wrong_key_fails() {
+    let (bundle, mut trust) = signed_bundle("pub1");
+    // Replace with different key
+    let wrong_key = Ed25519SigningKey::generate().verifying_key();
+    trust.publisher_keys.insert("pub1".to_string(), wrong_key);
+
+    let verifier = RegistryVerifier::new(trust);
+    let result = verifier.verify_bundle(&bundle, None, None, None);
+    assert!(result.is_err());
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("signature verification failed"),
+        "expected sig invalid: {err}"
+    );
+}
+
+#[test]
+fn verify_bundle_unknown_kid_fails() {
+    let (bundle, mut trust) = signed_bundle("pub1");
+    // Remove the key so kid is unknown
+    trust.publisher_keys.clear();
+
+    let verifier = RegistryVerifier::new(trust);
+    let result = verifier.verify_bundle(&bundle, None, None, None);
+    assert!(result.is_err());
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("no trusted key for kid"),
+        "expected unknown kid: {err}"
+    );
+}
+
+#[test]
+fn verify_bundle_missing_signatures_fails() {
+    let unsigned = unsigned_manifest_toml("");
+    let bundle = ConnectorBundle {
+        manifest_toml: unsigned,
+        binary: test_binary(),
+        target: test_target(),
+    };
+    let trust = RegistryTrustPolicy::default();
+    let verifier = RegistryVerifier::new(trust);
+
+    let result = verifier.verify_bundle(&bundle, None, None, None);
+    assert!(result.is_err());
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("signature section missing"),
+        "expected missing sigs: {err}"
+    );
+}
+
+#[test]
+fn verify_bundle_tampered_binary_fails() {
+    let signing_key = Ed25519SigningKey::generate();
+    let verifying_key = signing_key.verifying_key();
+    let binary = test_binary();
+    let b_hash = binary_hash(&binary);
+    let unsigned = unsigned_manifest_toml("");
+    let sig = sign_manifest(&unsigned, &signing_key, &b_hash);
+    let sig_section = publisher_sig_toml("pub1", &sig);
+    let manifest_toml = format!("{unsigned}\n{sig_section}");
+
+    // Tamper with binary
+    let tampered = b"tampered-binary-content".to_vec();
+
+    let bundle = ConnectorBundle {
+        manifest_toml,
+        binary: tampered,
+        target: test_target(),
+    };
+
+    let mut trust = RegistryTrustPolicy::default();
+    trust
+        .publisher_keys
+        .insert("pub1".to_string(), verifying_key);
+
+    let verifier = RegistryVerifier::new(trust);
+    let result = verifier.verify_bundle(&bundle, None, None, None);
+    assert!(
+        result.is_err(),
+        "tampered binary should invalidate signature"
+    );
+}
+
+// ── verify_bundle: registry signature ──
+
+#[test]
+fn verify_bundle_registry_signature_required_and_present() {
+    let signing_key = Ed25519SigningKey::generate();
+    let verifying_key = signing_key.verifying_key();
+    let binary = test_binary();
+    let b_hash = binary_hash(&binary);
+    let unsigned = unsigned_manifest_toml("");
+    let sig = sign_manifest(&unsigned, &signing_key, &b_hash);
+    let pub_section = publisher_sig_toml("pub1", &sig);
+    let reg_sig = sign_manifest(&unsigned, &signing_key, &b_hash);
+    let reg_section = registry_sig_toml("reg1", &reg_sig);
+    let manifest_toml = format!("{unsigned}\n{pub_section}\n{reg_section}");
+
+    let bundle = ConnectorBundle {
+        manifest_toml,
+        binary,
+        target: test_target(),
+    };
+
+    let mut trust = RegistryTrustPolicy {
+        require_registry_signature: true,
+        ..Default::default()
+    };
+    trust
+        .publisher_keys
+        .insert("pub1".to_string(), verifying_key.clone());
+    trust
+        .registry_keys
+        .insert("reg1".to_string(), verifying_key);
+
+    let verifier = RegistryVerifier::new(trust);
+    let result = verifier.verify_bundle(&bundle, None, None, None);
+    assert!(
+        result.is_ok(),
+        "registry sig present+valid should pass: {result:?}"
+    );
+}
+
+#[test]
+fn verify_bundle_registry_signature_required_but_missing() {
+    let (bundle, mut trust) = signed_bundle("pub1");
+    trust.require_registry_signature = true;
+
+    let verifier = RegistryVerifier::new(trust);
+    let result = verifier.verify_bundle(&bundle, None, None, None);
+    assert!(result.is_err());
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("registry signature required"),
+        "expected registry sig required: {err}"
+    );
+}
+
+// ── verify_bundle: target matching ──
+
+#[test]
+fn verify_bundle_target_mismatch_fails() {
+    let (bundle, trust) = signed_bundle("pub1");
+    let wrong_target = ConnectorTarget {
+        os: "windows".to_string(),
+        arch: "arm64".to_string(),
+    };
+
+    let verifier = RegistryVerifier::new(trust);
+    let result = verifier.verify_bundle(&bundle, None, None, Some(&wrong_target));
+    assert!(result.is_err());
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("target mismatch"),
+        "expected target mismatch: {err}"
+    );
+}
+
+#[test]
+fn verify_bundle_target_match_passes() {
+    let (bundle, trust) = signed_bundle("pub1");
+    let expected = test_target();
+
+    let verifier = RegistryVerifier::new(trust);
+    let result = verifier.verify_bundle(&bundle, None, None, Some(&expected));
+    assert!(
+        result.is_ok(),
+        "matching target should pass: {result:?}"
+    );
+}
+
+#[test]
+fn verify_bundle_no_expected_target_passes() {
+    let (bundle, trust) = signed_bundle("pub1");
+    let verifier = RegistryVerifier::new(trust);
+    let result = verifier.verify_bundle(&bundle, None, None, None);
+    assert!(result.is_ok(), "no expected target should pass: {result:?}");
+}
+
+// ── verify_bundle: capability ceiling ──
+
+#[test]
+fn verify_bundle_capability_ceiling_allows_matching_caps() {
+    let (bundle, trust) = signed_bundle("pub1");
+    // The minimal manifest requires "network.dns" and uses "minimal.op"
+    let policy = zone_policy_with_ceiling(&["network.dns", "minimal.op"]);
+
+    let verifier = RegistryVerifier::new(trust);
+    let result = verifier.verify_bundle(&bundle, Some(&policy), None, None);
+    assert!(
+        result.is_ok(),
+        "caps within ceiling should pass: {result:?}"
+    );
+}
+
+#[test]
+fn verify_bundle_capability_ceiling_violation() {
+    let (bundle, trust) = signed_bundle("pub1");
+    // Ceiling only includes "network.dns" but not "minimal.op"
+    let policy = zone_policy_with_ceiling(&["network.dns"]);
+
+    let verifier = RegistryVerifier::new(trust);
+    let result = verifier.verify_bundle(&bundle, Some(&policy), None, None);
+    assert!(result.is_err());
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("exceeds zone ceiling"),
+        "expected ceiling violation: {err}"
+    );
+}
+
+#[test]
+fn verify_bundle_empty_capability_ceiling_passes() {
+    let (bundle, trust) = signed_bundle("pub1");
+    // Empty ceiling means no restriction
+    let policy = zone_policy_with_ceiling(&[]);
+
+    let verifier = RegistryVerifier::new(trust);
+    let result = verifier.verify_bundle(&bundle, Some(&policy), None, None);
+    assert!(
+        result.is_ok(),
+        "empty ceiling should pass: {result:?}"
+    );
+}
+
+#[test]
+fn verify_bundle_no_zone_policy_passes() {
+    let (bundle, trust) = signed_bundle("pub1");
+    let verifier = RegistryVerifier::new(trust);
+    let result = verifier.verify_bundle(&bundle, None, None, None);
+    assert!(
+        result.is_ok(),
+        "no zone policy should pass: {result:?}"
+    );
+}
+
+// ── verify_bundle: supply chain policy enforcement ──
+
+#[test]
+fn verify_bundle_transparency_log_required_but_missing() {
+    let signing_key = Ed25519SigningKey::generate();
+    let verifying_key = signing_key.verifying_key();
+    let binary = test_binary();
+    let b_hash = binary_hash(&binary);
+
+    let policy_section = r#"
+[policy]
+require_transparency_log = true
+require_attestation_types = []
+trusted_builders = []
+"#;
+    let unsigned = unsigned_manifest_toml(policy_section);
+    let sig = sign_manifest(&unsigned, &signing_key, &b_hash);
+    let sig_section = publisher_sig_toml("pub1", &sig);
+    let manifest_toml = format!("{unsigned}\n{sig_section}");
+
+    let bundle = ConnectorBundle {
+        manifest_toml,
+        binary,
+        target: test_target(),
+    };
+
+    let mut trust = RegistryTrustPolicy::default();
+    trust
+        .publisher_keys
+        .insert("pub1".to_string(), verifying_key);
+
+    let verifier = RegistryVerifier::new(trust);
+    let result = verifier.verify_bundle(&bundle, None, None, None);
+    assert!(result.is_err());
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("transparency log"),
+        "expected transparency log error: {err}"
+    );
+}
+
+#[test]
+fn verify_bundle_slsa_level_insufficient() {
+    let signing_key = Ed25519SigningKey::generate();
+    let verifying_key = signing_key.verifying_key();
+    let binary = test_binary();
+    let b_hash = binary_hash(&binary);
+
+    let policy_section = r#"
+[policy]
+require_transparency_log = false
+require_attestation_types = []
+trusted_builders = []
+min_slsa_level = 3
+"#;
+    let unsigned = unsigned_manifest_toml(policy_section);
+    let sig = sign_manifest(&unsigned, &signing_key, &b_hash);
+    let sig_section = publisher_sig_toml("pub1", &sig);
+    let manifest_toml = format!("{unsigned}\n{sig_section}");
+
+    let bundle = ConnectorBundle {
+        manifest_toml,
+        binary,
+        target: test_target(),
+    };
+
+    let mut trust = RegistryTrustPolicy::default();
+    trust
+        .publisher_keys
+        .insert("pub1".to_string(), verifying_key);
+
+    // Evidence with SLSA level 1 (below required 3)
+    let evidence = SupplyChainEvidence {
+        transparency_log_present: false,
+        attestations: vec![AttestationEvidence {
+            attestation_type: AttestationType::InToto,
+            slsa_level: Some(1),
+            builder_id: None,
+        }],
+    };
+
+    let verifier = RegistryVerifier::new(trust);
+    let result = verifier.verify_bundle(&bundle, None, Some(&evidence), None);
+    assert!(result.is_err());
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("SLSA level"),
+        "expected SLSA level error: {err}"
+    );
+}
+
+#[test]
+fn verify_bundle_untrusted_builder() {
+    let signing_key = Ed25519SigningKey::generate();
+    let verifying_key = signing_key.verifying_key();
+    let binary = test_binary();
+    let b_hash = binary_hash(&binary);
+
+    let policy_section = r#"
+[policy]
+require_transparency_log = false
+require_attestation_types = []
+trusted_builders = ["github-actions"]
+"#;
+    let unsigned = unsigned_manifest_toml(policy_section);
+    let sig = sign_manifest(&unsigned, &signing_key, &b_hash);
+    let sig_section = publisher_sig_toml("pub1", &sig);
+    let manifest_toml = format!("{unsigned}\n{sig_section}");
+
+    let bundle = ConnectorBundle {
+        manifest_toml,
+        binary,
+        target: test_target(),
+    };
+
+    let mut trust = RegistryTrustPolicy::default();
+    trust
+        .publisher_keys
+        .insert("pub1".to_string(), verifying_key);
+
+    let evidence = SupplyChainEvidence {
+        transparency_log_present: false,
+        attestations: vec![AttestationEvidence {
+            attestation_type: AttestationType::InToto,
+            slsa_level: None,
+            builder_id: Some("evil-builder".to_string()),
+        }],
+    };
+
+    let verifier = RegistryVerifier::new(trust);
+    let result = verifier.verify_bundle(&bundle, None, Some(&evidence), None);
+    assert!(result.is_err());
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("not in trusted builders"),
+        "expected untrusted builder: {err}"
+    );
+}
+
+// ── signature_message determinism ──
+
+#[test]
+fn signature_message_deterministic() {
+    let signing_bytes = b"test-signing-bytes";
+    let binary_hash = "sha256:abcdef";
+    let msg1 = fcp_registry::signature_message(signing_bytes, binary_hash);
+    let msg2 = fcp_registry::signature_message(signing_bytes, binary_hash);
+    assert_eq!(msg1, msg2, "signature_message must be deterministic");
+}
+
+#[test]
+fn signature_message_different_inputs_differ() {
+    let msg1 = fcp_registry::signature_message(b"aaa", "sha256:111");
+    let msg2 = fcp_registry::signature_message(b"bbb", "sha256:222");
+    assert_ne!(msg1, msg2);
+}
+
+#[test]
+fn signature_message_empty_inputs() {
+    let msg = fcp_registry::signature_message(b"", "");
+    // Should contain two zero-length prefixes (4 bytes each)
+    assert_eq!(msg.len(), 8);
+    assert_eq!(&msg[..4], &[0, 0, 0, 0]);
+    assert_eq!(&msg[4..8], &[0, 0, 0, 0]);
+}
+
+// ── manifest_signing_bytes ──
+
+#[test]
+fn manifest_signing_bytes_excludes_signatures() {
+    let signing_key = Ed25519SigningKey::generate();
+    let binary = test_binary();
+    let b_hash = binary_hash(&binary);
+    let unsigned = unsigned_manifest_toml("");
+    let sig = sign_manifest(&unsigned, &signing_key, &b_hash);
+    let sig_section = publisher_sig_toml("pub1", &sig);
+    let manifest_toml = format!("{unsigned}\n{sig_section}");
+
+    let manifest_with_sig = ConnectorManifest::parse_str(&manifest_toml).expect("parse");
+    let manifest_without_sig = ConnectorManifest::parse_str(&unsigned).expect("parse");
+
+    let bytes_with = fcp_registry::manifest_signing_bytes(&manifest_with_sig).expect("with");
+    let bytes_without = fcp_registry::manifest_signing_bytes(&manifest_without_sig).expect("without");
+
+    assert_eq!(
+        bytes_with, bytes_without,
+        "signing bytes must be identical regardless of signatures section"
+    );
+}
+
+#[test]
+fn manifest_signing_bytes_deterministic() {
+    let manifest = ConnectorManifest::parse_str(&unsigned_manifest_toml("")).expect("parse");
+    let bytes1 = fcp_registry::manifest_signing_bytes(&manifest).expect("bytes1");
+    let bytes2 = fcp_registry::manifest_signing_bytes(&manifest).expect("bytes2");
+    assert_eq!(bytes1, bytes2, "signing bytes must be deterministic");
+}
+
+// ── ConnectorTarget ──
+
+#[test]
+fn connector_target_from_env() {
+    let target = ConnectorTarget::from_env();
+    assert!(!target.os.is_empty());
+    assert!(!target.arch.is_empty());
+}
+
+#[test]
+fn connector_target_as_string() {
+    let target = ConnectorTarget {
+        os: "linux".to_string(),
+        arch: "amd64".to_string(),
+    };
+    assert_eq!(target.as_string(), "linux-amd64");
+}
+
+#[test]
+fn connector_target_equality() {
+    let a = ConnectorTarget {
+        os: "linux".to_string(),
+        arch: "amd64".to_string(),
+    };
+    let b = a.clone();
+    assert_eq!(a, b);
+
+    let c = ConnectorTarget {
+        os: "macos".to_string(),
+        arch: "arm64".to_string(),
+    };
+    assert_ne!(a, c);
+}
+
+#[test]
+fn connector_target_serde_roundtrip() {
+    let target = test_target();
+    let json = serde_json::to_string(&target).expect("serialize");
+    let deserialized: ConnectorTarget = serde_json::from_str(&json).expect("deserialize");
+    assert_eq!(target, deserialized);
+}
+
+// ── VerifiedConnectorBundle::report ──
+
+#[test]
+fn verified_bundle_report_fields() {
+    let (bundle, trust) = signed_bundle("pub1");
+    let verifier = RegistryVerifier::new(trust);
+    let verified = verifier
+        .verify_bundle(&bundle, None, None, None)
+        .expect("verify");
+
+    let report = verified.report("success");
+    assert_eq!(report.connector_id, "fcp.minimal");
+    assert_eq!(report.outcome, "success");
+    assert!(report.manifest_hash.starts_with("sha256:"));
+    assert!(report.binary_hash.starts_with("sha256:"));
+    assert_eq!(report.target, test_target());
+    assert!(report.verified_at > 0);
+}
+
+#[test]
+fn verified_bundle_report_serde_roundtrip() {
+    let (bundle, trust) = signed_bundle("pub1");
+    let verifier = RegistryVerifier::new(trust);
+    let verified = verifier
+        .verify_bundle(&bundle, None, None, None)
+        .expect("verify");
+
+    let report = verified.report("verified");
+    let json = serde_json::to_string(&report).expect("serialize");
+    let deserialized: fcp_registry::RegistryVerificationReport =
+        serde_json::from_str(&json).expect("deserialize");
+    assert_eq!(deserialized.connector_id, report.connector_id);
+    assert_eq!(deserialized.outcome, report.outcome);
+}
+
+// ── mirror_bundle ──
+
+#[fcp_async_core::runtime::test]
+async fn mirror_bundle_stores_two_objects() {
+    let (bundle, trust) = signed_bundle("pub1");
+    let verifier = RegistryVerifier::new(trust);
+    let verified = verifier
+        .verify_bundle(&bundle, None, None, None)
+        .expect("verify");
+
+    let store = MemoryObjectStore::new(MemoryObjectStoreConfig::default());
+    let zone = ZoneId::work();
+    let object_id_key = ObjectIdKey::from_bytes([1u8; 32]);
+
+    let result = verifier
+        .mirror_bundle(&verified, &bundle, zone, &object_id_key, &store)
+        .await
+        .expect("mirror");
+
+    assert!(result.manifest_hash.starts_with("sha256:"));
+    assert!(result.binary_hash.starts_with("sha256:"));
+    // Object IDs should be distinct
+    assert_ne!(result.manifest_object_id, result.binary_object_id);
+
+    // Objects should be retrievable from store
+    let _manifest_obj = store.get(&result.manifest_object_id).await.expect("manifest should be in store");
+    let _binary_obj = store.get(&result.binary_object_id).await.expect("binary should be in store");
+}
+
+#[fcp_async_core::runtime::test]
+async fn mirror_bundle_binary_refs_manifest() {
+    let (bundle, trust) = signed_bundle("pub1");
+    let verifier = RegistryVerifier::new(trust);
+    let verified = verifier
+        .verify_bundle(&bundle, None, None, None)
+        .expect("verify");
+
+    let store = MemoryObjectStore::new(MemoryObjectStoreConfig::default());
+    let zone = ZoneId::work();
+    let object_id_key = ObjectIdKey::from_bytes([1u8; 32]);
+
+    let result = verifier
+        .mirror_bundle(&verified, &bundle, zone, &object_id_key, &store)
+        .await
+        .expect("mirror");
+
+    let binary_obj = store
+        .get(&result.binary_object_id)
+        .await
+        .expect("binary present");
+
+    // Binary object should reference manifest
+    assert!(
+        binary_obj.header.refs.contains(&result.manifest_object_id),
+        "binary should ref manifest"
+    );
+}
+
+#[fcp_async_core::runtime::test]
+async fn mirror_bundle_deterministic_hashes() {
+    let (bundle, trust) = signed_bundle("pub1");
+    let verifier = RegistryVerifier::new(trust.clone());
+    let verified = verifier
+        .verify_bundle(&bundle, None, None, None)
+        .expect("verify");
+
+    let store1 = MemoryObjectStore::new(MemoryObjectStoreConfig::default());
+    let store2 = MemoryObjectStore::new(MemoryObjectStoreConfig::default());
+    let zone = ZoneId::work();
+    let key = ObjectIdKey::from_bytes([1u8; 32]);
+
+    let r1 = verifier
+        .mirror_bundle(&verified, &bundle, zone.clone(), &key, &store1)
+        .await
+        .expect("mirror1");
+    let r2 = verifier
+        .mirror_bundle(&verified, &bundle, zone, &key, &store2)
+        .await
+        .expect("mirror2");
+
+    assert_eq!(r1.manifest_hash, r2.manifest_hash);
+    assert_eq!(r1.binary_hash, r2.binary_hash);
+    assert_eq!(r1.manifest_object_id, r2.manifest_object_id);
+    assert_eq!(r1.binary_object_id, r2.binary_object_id);
+}
+
+// ── full pipeline: verify + mirror ──
+
+#[fcp_async_core::runtime::test]
+async fn full_pipeline_verify_and_mirror() {
+    let signing_key = Ed25519SigningKey::generate();
+    let verifying_key = signing_key.verifying_key();
+    let binary = test_binary();
+    let b_hash = binary_hash(&binary);
+    let unsigned = unsigned_manifest_toml("");
+    let sig = sign_manifest(&unsigned, &signing_key, &b_hash);
+    let sig_section = publisher_sig_toml("pub1", &sig);
+    let manifest_toml = format!("{unsigned}\n{sig_section}");
+
+    let bundle = ConnectorBundle {
+        manifest_toml,
+        binary,
+        target: test_target(),
+    };
+
+    let mut trust = RegistryTrustPolicy::default();
+    trust
+        .publisher_keys
+        .insert("pub1".to_string(), verifying_key);
+
+    let expected_target = test_target();
+    let zone_policy = zone_policy_with_ceiling(&["network.dns", "minimal.op"]);
+
+    let verifier = RegistryVerifier::new(trust);
+    let verified = verifier
+        .verify_bundle(&bundle, Some(&zone_policy), None, Some(&expected_target))
+        .expect("verify");
+
+    assert_eq!(verified.manifest.connector.id.to_string(), "fcp.minimal");
+
+    let store = MemoryObjectStore::new(MemoryObjectStoreConfig::default());
+    let zone = ZoneId::work();
+    let key = ObjectIdKey::from_bytes([1u8; 32]);
+
+    let result = verifier
+        .mirror_bundle(&verified, &bundle, zone, &key, &store)
+        .await
+        .expect("mirror");
+
+    let report = verified.report("verified");
+    assert_eq!(report.binary_hash, result.binary_hash);
+    assert_eq!(report.manifest_hash, result.manifest_hash);
+}
+
+#[fcp_async_core::runtime::test]
+async fn full_pipeline_denied_by_ceiling_never_mirrors() {
+    let (bundle, trust) = signed_bundle("pub1");
+    // Ceiling missing "minimal.op"
+    let policy = zone_policy_with_ceiling(&["network.dns"]);
+
+    let verifier = RegistryVerifier::new(trust);
+    let result = verifier.verify_bundle(&bundle, Some(&policy), None, None);
+    assert!(result.is_err(), "should be denied by ceiling");
+
+    // No mirror should happen since verify failed
+}
+
+// ── RegistryError display ──
+
+#[test]
+fn registry_error_display_missing_signatures() {
+    let err = RegistryError::MissingSignatures;
+    assert_eq!(
+        err.to_string(),
+        "signature section missing from manifest"
+    );
+}
+
+#[test]
+fn registry_error_display_unknown_kid() {
+    let err = RegistryError::UnknownKid {
+        kid: "abc123".to_string(),
+    };
+    assert!(err.to_string().contains("abc123"));
+}
+
+#[test]
+fn registry_error_display_threshold_unmet() {
+    let err = RegistryError::PublisherThresholdUnmet {
+        required: 3,
+        valid: 1,
+    };
+    let msg = err.to_string();
+    assert!(msg.contains("3"));
+    assert!(msg.contains("1"));
+}
+
+#[test]
+fn registry_error_display_capability_violation() {
+    let err = RegistryError::CapabilityCeilingViolation {
+        capability: "system.exec".to_string(),
+    };
+    assert!(err.to_string().contains("system.exec"));
+}
+
+#[test]
+fn registry_error_display_slsa_insufficient() {
+    let err = RegistryError::SlsaLevelInsufficient { required: 3 };
+    assert!(err.to_string().contains("3"));
+}
+
+#[test]
+fn registry_error_display_untrusted_builder() {
+    let err = RegistryError::UntrustedBuilder {
+        builder: "evil-ci".to_string(),
+    };
+    assert!(err.to_string().contains("evil-ci"));
+}
+
+// ── publisher threshold ──
+
+#[test]
+fn verify_bundle_publisher_threshold_2_of_3() {
+    let key1 = Ed25519SigningKey::generate();
+    let key2 = Ed25519SigningKey::generate();
+    let key3 = Ed25519SigningKey::generate();
+
+    let binary = test_binary();
+    let b_hash = binary_hash(&binary);
+    let unsigned = unsigned_manifest_toml("");
+    let manifest = ConnectorManifest::parse_str(&unsigned).expect("parse");
+    let signing_bytes = fcp_registry::manifest_signing_bytes(&manifest).expect("signing bytes");
+    let message = fcp_registry::signature_message(&signing_bytes, &b_hash);
+
+    let sig1 = key1.sign_with_context(fcp_registry::MANIFEST_SIGNATURE_CONTEXT, &message);
+    let sig2 = key2.sign_with_context(fcp_registry::MANIFEST_SIGNATURE_CONTEXT, &message);
+
+    let b64_sig1 = Base64Bytes::try_from(format!(
+        "base64:{}",
+        base64::engine::general_purpose::STANDARD.encode(sig1.to_bytes())
+    ))
+    .expect("b64");
+    let b64_sig2 = Base64Bytes::try_from(format!(
+        "base64:{}",
+        base64::engine::general_purpose::STANDARD.encode(sig2.to_bytes())
+    ))
+    .expect("b64");
+
+    let sig_section = format!(
+        r#"[signatures]
+publisher_threshold = "2-of-3"
+
+[[signatures.publisher_signatures]]
+kid = "key1"
+sig = "{}"
+
+[[signatures.publisher_signatures]]
+kid = "key2"
+sig = "{}"
+"#,
+        String::from(b64_sig1),
+        String::from(b64_sig2),
+    );
+    let manifest_toml = format!("{unsigned}\n{sig_section}");
+
+    let bundle = ConnectorBundle {
+        manifest_toml,
+        binary,
+        target: test_target(),
+    };
+
+    let mut trust = RegistryTrustPolicy::default();
+    trust
+        .publisher_keys
+        .insert("key1".to_string(), key1.verifying_key());
+    trust
+        .publisher_keys
+        .insert("key2".to_string(), key2.verifying_key());
+    trust
+        .publisher_keys
+        .insert("key3".to_string(), key3.verifying_key());
+
+    let verifier = RegistryVerifier::new(trust);
+    let result = verifier.verify_bundle(&bundle, None, None, None);
+    assert!(result.is_ok(), "2-of-3 with 2 valid sigs should pass: {result:?}");
+}
+
+// ── NoOp verifiers ──
+
+#[fcp_async_core::runtime::test]
+async fn noop_transparency_verifier_returns_verified() {
+    use fcp_registry::{NoOpTransparencyVerifier, TransparencyLogVerifier};
+
+    let verifier = NoOpTransparencyVerifier;
+    let result = verifier
+        .verify_entry("sha256:abc", None)
+        .await
+        .expect("noop verify");
+    assert!(result.verified, "NoOp transparency should return verified");
+}
+
+#[fcp_async_core::runtime::test]
+async fn noop_tuf_verifier_returns_verified() {
+    use fcp_registry::{NoOpTufVerifier, TufVerifier, TufRootMetadata};
+
+    let verifier = NoOpTufVerifier;
+    let root = TufRootMetadata {
+        version: 1,
+        root_hash: String::new(),
+        expires: u64::MAX,
+        key_ids: vec![],
+        threshold: 1,
+    };
+    let result = verifier
+        .verify_target(&root, "some/target")
+        .await
+        .expect("noop verify");
+    assert!(result.verified, "NoOp TUF should return verified");
+    assert_eq!(result.root_version, 1);
+}
+
+#[fcp_async_core::runtime::test]
+async fn noop_sigstore_verifier_returns_verified() {
+    use fcp_registry::{NoOpSigstoreVerifier, SigstoreVerifier, SigstoreBundle};
+
+    let verifier = NoOpSigstoreVerifier;
+    let bundle = SigstoreBundle {
+        signature: "sig".to_string(),
+        certificate: "cert".to_string(),
+        rekor_entry: None,
+        identity: "test@test.com".to_string(),
+        issuer: "https://issuer".to_string(),
+    };
+    let result = verifier
+        .verify_bundle(&bundle, "sha256:artifact", &[], &[])
+        .await
+        .expect("noop verify");
+    assert!(result.verified, "NoOp Sigstore should return verified");
+}
+
+// ── Mock verifiers ──
+
+#[fcp_async_core::runtime::test]
+async fn mock_transparency_verifier_accepts_valid_entry() {
+    use fcp_registry::{MockTransparencyVerifier, TransparencyLogVerifier, TransparencyLogEntry, InclusionProof};
+
+    let verifier = MockTransparencyVerifier::new();
+    let entry = TransparencyLogEntry {
+        log_index: 42,
+        entry_hash: "sha256:abc".to_string(),
+        inclusion_proof: InclusionProof {
+            root_hash: "sha256:root".to_string(),
+            tree_size: 100,
+            hashes: vec![],
+            leaf_index: 42,
+        },
+        signed_entry_timestamp: vec![],
+        log_id: "test-log".to_string(),
+    };
+    verifier.add_valid_entry("sha256:abc".to_string(), entry);
+    let result = verifier
+        .verify_entry("sha256:abc", None)
+        .await
+        .expect("mock verify");
+    assert!(result.verified);
+    assert_eq!(result.log_index, Some(42));
+}
+
+#[fcp_async_core::runtime::test]
+async fn mock_transparency_verifier_rejects_unknown_entry() {
+    use fcp_registry::{MockTransparencyVerifier, TransparencyLogVerifier};
+
+    let verifier = MockTransparencyVerifier::new();
+    let result = verifier.verify_entry("sha256:unknown", None).await;
+    assert!(result.is_err(), "unknown entry should fail");
+}
+
+#[fcp_async_core::runtime::test]
+async fn mock_tuf_verifier_accepts_valid_target() {
+    use fcp_registry::{MockTufVerifier, TufVerifier, TufRootMetadata, TufTargetInfo};
+
+    let root = TufRootMetadata {
+        version: 5,
+        root_hash: "sha256:root".to_string(),
+        expires: 9999999999,
+        key_ids: vec![],
+        threshold: 1,
+    };
+    let verifier = MockTufVerifier::new(root.clone());
+    let target_info = TufTargetInfo {
+        target_path: "connectors/test".to_string(),
+        hash: "sha256:abc".to_string(),
+        length: 1024,
+        delegations: vec!["root".to_string()],
+    };
+    verifier.add_valid_target("connectors/test".to_string(), target_info);
+
+    let result = verifier
+        .verify_target(&root, "connectors/test")
+        .await
+        .expect("mock verify");
+    assert!(result.verified);
+    assert_eq!(result.root_version, 5);
+    assert!(result.target.is_some());
+}
+
+#[fcp_async_core::runtime::test]
+async fn mock_tuf_verifier_rejects_unknown_target() {
+    use fcp_registry::{MockTufVerifier, TufVerifier, TufRootMetadata};
+
+    let root = TufRootMetadata {
+        version: 1,
+        root_hash: "sha256:root".to_string(),
+        expires: 9999999999,
+        key_ids: vec![],
+        threshold: 1,
+    };
+    let verifier = MockTufVerifier::new(root.clone());
+    let result = verifier.verify_target(&root, "missing/target").await;
+    assert!(result.is_err(), "unknown target should fail");
+}
+
+#[fcp_async_core::runtime::test]
+async fn mock_sigstore_verifier_accepts_valid_bundle() {
+    use fcp_registry::{MockSigstoreVerifier, SigstoreVerifier, SigstoreBundle, SigstoreVerificationResult};
+
+    let verifier = MockSigstoreVerifier::new();
+    verifier.add_valid_bundle(
+        "sha256:artifact".to_string(),
+        SigstoreVerificationResult {
+            verified: true,
+            identity: Some("github-actions".to_string()),
+            issuer: Some("https://token.actions.githubusercontent.com".to_string()),
+            rekor_log_index: Some(12345),
+        },
+    );
+
+    let bundle = SigstoreBundle {
+        signature: "sig".to_string(),
+        certificate: "cert".to_string(),
+        rekor_entry: None,
+        identity: "github-actions".to_string(),
+        issuer: "https://token.actions.githubusercontent.com".to_string(),
+    };
+    let result = verifier
+        .verify_bundle(&bundle, "sha256:artifact", &[], &[])
+        .await
+        .expect("mock verify");
+    assert!(result.verified);
+    assert_eq!(result.identity.as_deref(), Some("github-actions"));
+}
+
+#[fcp_async_core::runtime::test]
+async fn mock_sigstore_verifier_rejects_unknown_artifact() {
+    use fcp_registry::{MockSigstoreVerifier, SigstoreVerifier, SigstoreBundle};
+
+    let verifier = MockSigstoreVerifier::new();
+    let bundle = SigstoreBundle {
+        signature: "sig".to_string(),
+        certificate: "cert".to_string(),
+        rekor_entry: None,
+        identity: "test".to_string(),
+        issuer: "https://issuer".to_string(),
+    };
+    let result = verifier
+        .verify_bundle(&bundle, "sha256:unknown", &[], &[])
+        .await;
+    assert!(result.is_err(), "unknown artifact should fail");
+}

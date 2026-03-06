@@ -1,0 +1,276 @@
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = []
+max_datagram_bytes = 65000
+interface_hash = "blake3-256:fcp.interface.v2:0000000000000000000000000000000000000000000000000000000000000000"
+
+[connector]
+id = "fcp.terraform"
+name = "Terraform Connector"
+version = "0.1.0"
+description = "FCP connector for Terraform Cloud/Enterprise IaC management"
+archetypes = ["operational"]
+format = "native"
+
+[connector.state]
+model = "singleton_writer"
+state_schema_version = "1"
+migration_hint = "Stores plan artifact hashes and drift checkpoints."
+
+[zones]
+home = "z:infra"
+allowed_sources = ["z:owner", "z:infra"]
+allowed_targets = ["z:infra"]
+forbidden = ["z:public", "z:community", "z:work"]
+
+[capabilities]
+required = ["network.dns", "network.egress", "network.tls.sni", "storage.state"]
+optional = []
+forbidden = ["system.exec", "network.listen", "media.download", "media.upload"]
+
+# ── Read-only plan operations ───────────────────────────────────────
+
+[provides.operations."terraform.init"]
+description = "Initialize a Terraform working directory"
+capability = "terraform.plan"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+input_schema = { type = "object", required = ["workspace_id"] }
+output_schema = { type = "object", required = ["status"] }
+
+[provides.operations."terraform.init".network_constraints]
+host_allow = ["app.terraform.io", "*.terraform.io"]
+port_allow = [443]
+require_sni = true
+
+[provides.operations."terraform.validate"]
+description = "Validate Terraform configuration syntax and consistency"
+capability = "terraform.plan"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+input_schema = { type = "object", required = ["workspace_id"] }
+output_schema = { type = "object", required = ["valid", "diagnostics"] }
+
+[provides.operations."terraform.validate".network_constraints]
+host_allow = ["app.terraform.io", "*.terraform.io"]
+port_allow = [443]
+require_sni = true
+
+[provides.operations."terraform.plan"]
+description = "Generate a Terraform execution plan (read-only)"
+capability = "terraform.plan"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+input_schema = { type = "object", required = ["workspace_id"] }
+output_schema = { type = "object", required = ["plan_id", "status", "resource_changes"] }
+
+[provides.operations."terraform.plan".network_constraints]
+host_allow = ["app.terraform.io", "*.terraform.io"]
+port_allow = [443]
+require_sni = true
+
+[provides.operations."terraform.show_plan"]
+description = "Display details of a saved plan file"
+capability = "terraform.plan"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+input_schema = { type = "object", required = ["plan_id"] }
+output_schema = { type = "object", required = ["plan_id", "status", "resources"] }
+
+[provides.operations."terraform.show_plan".network_constraints]
+host_allow = ["app.terraform.io", "*.terraform.io"]
+port_allow = [443]
+require_sni = true
+
+[provides.operations."terraform.detect_drift"]
+description = "Detect configuration drift against real infrastructure"
+capability = "terraform.plan"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+input_schema = { type = "object", required = ["workspace_id"] }
+output_schema = { type = "object", required = ["drifted", "changes"] }
+
+[provides.operations."terraform.detect_drift".network_constraints]
+host_allow = ["app.terraform.io", "*.terraform.io"]
+port_allow = [443]
+require_sni = true
+
+[provides.operations."terraform.list_modules"]
+description = "List modules used in the configuration"
+capability = "terraform.plan"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+input_schema = { type = "object", required = ["organization"] }
+output_schema = { type = "object", required = ["modules"] }
+
+[provides.operations."terraform.list_modules".network_constraints]
+host_allow = ["app.terraform.io", "*.terraform.io"]
+port_allow = [443]
+require_sni = true
+
+# ── Dangerous apply/destroy operations ──────────────────────────────
+
+[provides.operations."terraform.apply"]
+description = "Apply a previously generated plan to modify infrastructure"
+capability = "terraform.apply"
+risk_level = "high"
+safety_tier = "dangerous"
+requires_approval = "interactive"
+idempotency = "best_effort"
+input_schema = { type = "object", required = ["run_id"] }
+output_schema = { type = "object", required = ["status", "applied"] }
+
+[provides.operations."terraform.apply".network_constraints]
+host_allow = ["app.terraform.io", "*.terraform.io"]
+port_allow = [443]
+require_sni = true
+
+[provides.operations."terraform.destroy"]
+description = "Destroy all resources managed by a configuration"
+capability = "terraform.apply"
+risk_level = "high"
+safety_tier = "dangerous"
+requires_approval = "interactive"
+idempotency = "best_effort"
+input_schema = { type = "object", required = ["workspace_id"] }
+output_schema = { type = "object", required = ["status", "destroyed"] }
+
+[provides.operations."terraform.destroy".network_constraints]
+host_allow = ["app.terraform.io", "*.terraform.io"]
+port_allow = [443]
+require_sni = true
+
+# ── State read operations ───────────────────────────────────────────
+
+[provides.operations."terraform.state_list"]
+description = "List all resources in the Terraform state"
+capability = "terraform.state"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+input_schema = { type = "object", required = ["workspace_id"] }
+output_schema = { type = "object", required = ["resources"] }
+
+[provides.operations."terraform.state_list".network_constraints]
+host_allow = ["app.terraform.io", "*.terraform.io"]
+port_allow = [443]
+require_sni = true
+
+[provides.operations."terraform.state_show"]
+description = "Show attributes of a single resource in state"
+capability = "terraform.state"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+input_schema = { type = "object", required = ["workspace_id", "resource_address"] }
+output_schema = { type = "object", required = ["resource"] }
+
+[provides.operations."terraform.state_show".network_constraints]
+host_allow = ["app.terraform.io", "*.terraform.io"]
+port_allow = [443]
+require_sni = true
+
+[provides.operations."terraform.output"]
+description = "Read Terraform output values"
+capability = "terraform.state"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+input_schema = { type = "object", required = ["workspace_id"] }
+output_schema = { type = "object", required = ["outputs"] }
+
+[provides.operations."terraform.output".network_constraints]
+host_allow = ["app.terraform.io", "*.terraform.io"]
+port_allow = [443]
+require_sni = true
+
+# ── State write operation ───────────────────────────────────────────
+
+[provides.operations."terraform.import"]
+description = "Import an existing resource into Terraform state"
+capability = "terraform.state_write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "strict"
+input_schema = { type = "object", required = ["workspace_id", "resource_address", "resource_id"] }
+output_schema = { type = "object", required = ["status", "imported"] }
+
+[provides.operations."terraform.import".network_constraints]
+host_allow = ["app.terraform.io", "*.terraform.io"]
+port_allow = [443]
+require_sni = true
+
+# ── Sandbox ─────────────────────────────────────────────────────────
+
+[sandbox]
+profile = "strict"
+memory_mb = 512
+cpu_percent = 75
+wall_clock_timeout_ms = 1800000
+fs_readonly_paths = ["/usr", "/lib"]
+fs_writable_paths = ["$CONNECTOR_STATE"]
+deny_exec = true
+deny_ptrace = true
+
+# ── Rate limits ─────────────────────────────────────────────────────
+
+[[rate_limits.pools]]
+id = "terraform.plan"
+requests = 100
+window_ms = 3600000
+burst = 10
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "terraform.apply"
+requests = 20
+window_ms = 3600000
+burst = 3
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "terraform.state"
+requests = 200
+window_ms = 3600000
+burst = 20
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "terraform.state_write"
+requests = 50
+window_ms = 3600000
+burst = 5
+scope = "instance"
+
+[rate_limits.operation_pools]
+"terraform.init" = ["terraform.plan"]
+"terraform.validate" = ["terraform.plan"]
+"terraform.plan" = ["terraform.plan"]
+"terraform.show_plan" = ["terraform.plan"]
+"terraform.detect_drift" = ["terraform.plan"]
+"terraform.list_modules" = ["terraform.plan"]
+"terraform.apply" = ["terraform.apply"]
+"terraform.destroy" = ["terraform.apply"]
+"terraform.state_list" = ["terraform.state"]
+"terraform.state_show" = ["terraform.state"]
+"terraform.output" = ["terraform.state"]
+"terraform.import" = ["terraform.state_write"]

@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/fcp-async-core",
+    "crates/fcp-async-core-macros",
     "crates/fcp-audit",
     "crates/fcp-bootstrap",
     "crates/fcp-cbor",

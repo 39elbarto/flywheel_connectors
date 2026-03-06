@@ -27,14 +27,14 @@ async fn setup_connector(mock_url: &str) -> GitLabConnector {
 
 // ── Lifecycle ────────────────────────────────────────────────────────
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn lifecycle_health_unconfigured() {
     let c = GitLabConnector::new();
     let h = c.handle_health().await.unwrap();
     assert_eq!(h["status"], "unconfigured");
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn lifecycle_full() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -42,13 +42,13 @@ async fn lifecycle_full() {
     assert_eq!(h["status"], "healthy");
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn lifecycle_handshake_before_configure_fails() {
     let mut c = GitLabConnector::new();
     assert!(c.handle_handshake(json!({})).await.is_err());
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn lifecycle_shutdown() {
     let server = MockServer::start().await;
     let mut c = setup_connector(&server.uri()).await;
@@ -56,7 +56,7 @@ async fn lifecycle_shutdown() {
     assert_eq!(c.handle_health().await.unwrap()["status"], "unconfigured");
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn lifecycle_self_check() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -64,14 +64,14 @@ async fn lifecycle_self_check() {
     assert_eq!(check["status"], "ready");
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn lifecycle_doctor() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
     assert_eq!(c.handle_doctor().await.unwrap()["status"], "healthy");
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn lifecycle_introspect() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -81,7 +81,7 @@ async fn lifecycle_introspect() {
 
 // ── Projects List ────────────────────────────────────────────────────
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn projects_list() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -100,7 +100,7 @@ async fn projects_list() {
 
 // ── Issues List ──────────────────────────────────────────────────────
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn issues_list() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -115,7 +115,7 @@ async fn issues_list() {
     assert_eq!(result["issues"].as_array().unwrap().len(), 1);
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn issues_list_missing_project_id() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -124,7 +124,7 @@ async fn issues_list_missing_project_id() {
 
 // ── Issues Create ────────────────────────────────────────────────────
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn issues_create() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -142,7 +142,7 @@ async fn issues_create() {
     assert_eq!(result["iid"], 43);
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn issues_create_missing_title() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -151,7 +151,7 @@ async fn issues_create_missing_title() {
 
 // ── Merge Requests List ──────────────────────────────────────────────
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn merge_requests_list() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -168,7 +168,7 @@ async fn merge_requests_list() {
 
 // ── Pipelines List ───────────────────────────────────────────────────
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn pipelines_list() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -185,7 +185,7 @@ async fn pipelines_list() {
 
 // ── Error handling ───────────────────────────────────────────────────
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn error_401() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -197,7 +197,7 @@ async fn error_401() {
     assert!(c.handle_invoke(json!({"operation_id": "gitlab.projects.list", "input": {}})).await.is_err());
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn error_404() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -209,7 +209,7 @@ async fn error_404() {
     assert!(c.handle_invoke(json!({"operation_id": "gitlab.issues.list", "input": {"project_id": "999"}})).await.is_err());
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn error_429() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -223,21 +223,21 @@ async fn error_429() {
 
 // ── Unknown op / Simulate ────────────────────────────────────────────
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn unknown_operation() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
     assert!(c.handle_invoke(json!({"operation_id": "gitlab.nope", "input": {}})).await.is_err());
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn simulate_known() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
     assert!(c.handle_simulate(json!({"operation_id": "gitlab.projects.list"})).await.unwrap()["allowed"].as_bool().unwrap());
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn simulate_unknown() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -246,7 +246,7 @@ async fn simulate_unknown() {
 
 // ── Counters ─────────────────────────────────────────────────────────
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn counters() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -263,7 +263,7 @@ async fn counters() {
 
 // ── Additional Lifecycle Tests ──────────────────────────────────────
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn lifecycle_health_degraded_no_handshake() {
     let server = MockServer::start().await;
     let mut c = GitLabConnector::new();
@@ -276,21 +276,21 @@ async fn lifecycle_health_degraded_no_handshake() {
     assert_eq!(h["handshaken"], false);
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn lifecycle_doctor_unconfigured() {
     let c = GitLabConnector::new();
     let d = c.handle_doctor().await.unwrap();
     assert_eq!(d["status"], "unhealthy");
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn lifecycle_self_check_unconfigured() {
     let c = GitLabConnector::new();
     let check = c.handle_self_check().await.unwrap();
     assert_eq!(check["status"], "unconfigured");
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn lifecycle_shutdown_then_reinvoke() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -315,7 +315,7 @@ async fn lifecycle_shutdown_then_reinvoke() {
     );
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn lifecycle_reconfigure_after_shutdown() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -345,7 +345,7 @@ async fn lifecycle_reconfigure_after_shutdown() {
     assert!(result["projects"].is_array());
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn lifecycle_introspect_contains_expected_ops() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -359,7 +359,7 @@ async fn lifecycle_introspect_contains_expected_ops() {
     assert!(ids.contains(&"gitlab.pipelines.list"));
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn lifecycle_handshake_returns_capabilities() {
     let server = MockServer::start().await;
     let mut c = GitLabConnector::new();
@@ -375,13 +375,13 @@ async fn lifecycle_handshake_returns_capabilities() {
 
 // ── Configuration Tests ─────────────────────────────────────────────
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn configure_no_auth_fails() {
     let mut c = GitLabConnector::new();
     assert!(c.handle_configure(json!({})).await.is_err());
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn configure_both_auth_rejected() {
     let mut c = GitLabConnector::new();
     let result = c
@@ -393,7 +393,7 @@ async fn configure_both_auth_rejected() {
     assert!(result.is_err());
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn configure_credential_id_mode() {
     let mut c = GitLabConnector::new();
     let result = c
@@ -404,7 +404,7 @@ async fn configure_credential_id_mode() {
     assert!(result.is_ok());
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn configure_custom_base_url() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -429,19 +429,19 @@ async fn configure_custom_base_url() {
     assert!(result["projects"].is_array());
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn configure_empty_token_fails() {
     let mut c = GitLabConnector::new();
     assert!(c.handle_configure(json!({"private_token": ""})).await.is_err());
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn configure_whitespace_token_fails() {
     let mut c = GitLabConnector::new();
     assert!(c.handle_configure(json!({"private_token": "   "})).await.is_err());
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn configure_invalid_credential_id_fails() {
     let mut c = GitLabConnector::new();
     assert!(c.handle_configure(json!({"credential_id": "not-a-uuid"})).await.is_err());
@@ -449,7 +449,7 @@ async fn configure_invalid_credential_id_fails() {
 
 // ── Input Validation ────────────────────────────────────────────────
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn merge_requests_list_missing_project_id() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -460,7 +460,7 @@ async fn merge_requests_list_missing_project_id() {
     );
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn pipelines_list_missing_project_id() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -471,7 +471,7 @@ async fn pipelines_list_missing_project_id() {
     );
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn issues_create_missing_project_id() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -485,14 +485,14 @@ async fn issues_create_missing_project_id() {
     );
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn invoke_missing_operation_id() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
     assert!(c.handle_invoke(json!({"input": {}})).await.is_err());
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn issues_list_project_id_not_string() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -508,7 +508,7 @@ async fn issues_list_project_id_not_string() {
 
 // ── Error Handling: 403 Forbidden ───────────────────────────────────
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn error_403_projects() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -530,7 +530,7 @@ async fn error_403_projects() {
 
 // ── Error Handling: 500 Internal Server Error ───────────────────────
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn error_500_projects() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -550,7 +550,7 @@ async fn error_500_projects() {
     );
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn error_500_issues() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -573,7 +573,7 @@ async fn error_500_issues() {
     );
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn error_401_merge_requests() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -596,7 +596,7 @@ async fn error_401_merge_requests() {
     );
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn error_403_pipelines() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -619,7 +619,7 @@ async fn error_403_pipelines() {
     );
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn error_404_merge_requests() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -642,7 +642,7 @@ async fn error_404_merge_requests() {
     );
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn error_429_issues_create() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -668,7 +668,7 @@ async fn error_429_issues_create() {
 
 // ── Empty Response Arrays ───────────────────────────────────────────
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn projects_list_empty() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -685,7 +685,7 @@ async fn projects_list_empty() {
     assert_eq!(result["projects"].as_array().unwrap().len(), 0);
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn issues_list_empty() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -705,7 +705,7 @@ async fn issues_list_empty() {
     assert_eq!(result["issues"].as_array().unwrap().len(), 0);
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn merge_requests_list_empty() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -725,7 +725,7 @@ async fn merge_requests_list_empty() {
     assert_eq!(result["merge_requests"].as_array().unwrap().len(), 0);
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn pipelines_list_empty() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -747,7 +747,7 @@ async fn pipelines_list_empty() {
 
 // ── Rich Response Data ──────────────────────────────────────────────
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn merge_requests_rich_response() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -784,7 +784,7 @@ async fn merge_requests_rich_response() {
     assert_eq!(mrs[1]["state"], "merged");
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn pipelines_rich_response() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -812,7 +812,7 @@ async fn pipelines_rich_response() {
     assert_eq!(pipelines[2]["status"], "running");
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn issues_create_with_description() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -841,7 +841,7 @@ async fn issues_create_with_description() {
     assert_eq!(result["state"], "opened");
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn issues_create_without_description() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -865,7 +865,7 @@ async fn issues_create_without_description() {
 
 // ── Simulate All Operations ─────────────────────────────────────────
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn simulate_all_known_operations() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -888,7 +888,7 @@ async fn simulate_all_known_operations() {
     }
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn simulate_reason_fields() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -908,7 +908,7 @@ async fn simulate_reason_fields() {
 
 // ── Counters: Error Tracking ────────────────────────────────────────
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn counters_track_errors() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -929,7 +929,7 @@ async fn counters_track_errors() {
     assert_eq!(h["errors"], 1);
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn counters_multiple_requests() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -951,7 +951,7 @@ async fn counters_multiple_requests() {
 
 // ── Invoke Before Handshake ─────────────────────────────────────────
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn invoke_before_handshake_fails() {
     let server = MockServer::start().await;
     let mut c = GitLabConnector::new();
@@ -966,7 +966,7 @@ async fn invoke_before_handshake_fails() {
     );
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn invoke_unconfigured_fails() {
     let c = GitLabConnector::new();
     assert!(
@@ -978,7 +978,7 @@ async fn invoke_unconfigured_fails() {
 
 // ── Doctor Checks Detail ────────────────────────────────────────────
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn doctor_configured_no_handshake() {
     let server = MockServer::start().await;
     let mut c = GitLabConnector::new();

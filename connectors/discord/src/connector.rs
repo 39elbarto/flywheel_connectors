@@ -998,7 +998,6 @@ impl DiscordConnector {
     /// This is an optimization to avoid wasting resources on capability verification
     /// for requests that will fail validation anyway.
     fn validate_input_early(operation: &str, input: &serde_json::Value) -> FcpResult<()> {
-        const MAX_CONTENT_LENGTH: usize = 2000;
         const MAX_EMBEDS: usize = 10;
         const MAX_EMBED_TOTAL_CHARS: usize = 6000;
 
@@ -1017,19 +1016,6 @@ impl DiscordConnector {
                         code: 1003,
                         message: "Either 'content' or 'embeds' must be provided".into(),
                     });
-                }
-
-                // Validate content length
-                if let Some(content) = content {
-                    if content.chars().count() > MAX_CONTENT_LENGTH {
-                        return Err(FcpError::InvalidRequest {
-                            code: 1004,
-                            message: format!(
-                                "Message content exceeds {MAX_CONTENT_LENGTH} character limit (got {} characters)",
-                                content.chars().count()
-                            ),
-                        });
-                    }
                 }
 
                 // Validate embed limits
@@ -1193,7 +1179,6 @@ impl DiscordConnector {
     }
 
     async fn invoke_send_message(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
-        const MAX_CONTENT_LENGTH: usize = 2000;
 
         // Validate input first (before checking api) for better error messages
         let channel_id = input
@@ -1216,19 +1201,6 @@ impl DiscordConnector {
                 code: 1003,
                 message: "Either 'content' or 'embeds' must be provided".into(),
             });
-        }
-
-        // Validate message content length (Discord limit: 2000 characters)
-        if let Some(content) = content {
-            if content.chars().count() > MAX_CONTENT_LENGTH {
-                return Err(FcpError::InvalidRequest {
-                    code: 1004,
-                    message: format!(
-                        "Message content exceeds {MAX_CONTENT_LENGTH} character limit (got {} characters)",
-                        content.chars().count()
-                    ),
-                });
-            }
         }
 
         // Validate embed limits
@@ -1315,7 +1287,6 @@ impl DiscordConnector {
     }
 
     async fn invoke_edit_message(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
-        const MAX_CONTENT_LENGTH: usize = 2000;
 
         // Validate input first (before checking api) for better error messages
         let channel_id = input
@@ -1338,19 +1309,6 @@ impl DiscordConnector {
         let embeds: Option<Vec<Embed>> = input
             .get("embeds")
             .and_then(|v| serde_json::from_value(v.clone()).ok());
-
-        // Validate message content length (Discord limit: 2000 characters)
-        if let Some(content) = content {
-            if content.chars().count() > MAX_CONTENT_LENGTH {
-                return Err(FcpError::InvalidRequest {
-                    code: 1004,
-                    message: format!(
-                        "Message content exceeds {MAX_CONTENT_LENGTH} character limit (got {} characters)",
-                        content.chars().count()
-                    ),
-                });
-            }
-        }
 
         // Validate embed limits
         if let Some(ref embeds) = embeds {

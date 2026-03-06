@@ -144,7 +144,7 @@ async fn full_setup(
 // Happy-path operation tests
 // ============================================================================
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn send_message_happy_path() {
     let _ctx = AsyncTestContext::for_scenario("telegram.send_message.happy_path");
     let mut connector = TelegramConnector::new();
@@ -178,7 +178,7 @@ async fn send_message_happy_path() {
     assert_eq!(result["chat_id"], 123456);
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn get_file_happy_path() {
     let _ctx = AsyncTestContext::for_scenario("telegram.get_file.happy_path");
     let mut connector = TelegramConnector::new();
@@ -213,7 +213,7 @@ async fn get_file_happy_path() {
     assert!(result.get("download_url").is_some());
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn answer_callback_query_happy_path() {
     let _ctx = AsyncTestContext::for_scenario("telegram.answer_callback_query.happy_path");
     let mut connector = TelegramConnector::new();
@@ -246,7 +246,7 @@ async fn answer_callback_query_happy_path() {
 // Error taxonomy tests
 // ============================================================================
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn unauthorized_maps_to_fcp_error() {
     let _ctx = AsyncTestContext::for_scenario("telegram.error.unauthorized");
     let mut connector = TelegramConnector::new();
@@ -275,7 +275,7 @@ async fn unauthorized_maps_to_fcp_error() {
     assert!(result.is_err());
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn rate_limited_maps_to_fcp_error() {
     let _ctx = AsyncTestContext::for_scenario("telegram.error.rate_limited");
     let mut connector = TelegramConnector::new();
@@ -308,7 +308,7 @@ async fn rate_limited_maps_to_fcp_error() {
 // FCP2 default-deny + capability verification
 // ============================================================================
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn invoke_without_configure_fails() {
     let _ctx = AsyncTestContext::for_scenario("telegram.deny.not_configured");
     let connector = TelegramConnector::new();
@@ -327,7 +327,7 @@ async fn invoke_without_configure_fails() {
     assert!(result.is_err());
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn invoke_with_wrong_capability_denied() {
     let _ctx = AsyncTestContext::for_scenario("telegram.deny.wrong_capability");
     let mut connector = TelegramConnector::new();
@@ -346,7 +346,7 @@ async fn invoke_with_wrong_capability_denied() {
     assert!(result.is_err());
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn invoke_unknown_operation_denied() {
     let _ctx = AsyncTestContext::for_scenario("telegram.deny.unknown_operation");
     let mut connector = TelegramConnector::new();
@@ -368,7 +368,7 @@ async fn invoke_unknown_operation_denied() {
 // Lifecycle tests
 // ============================================================================
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn health_not_configured() {
     let _ctx = AsyncTestContext::for_scenario("telegram.lifecycle.health_not_configured");
     let connector = TelegramConnector::new();
@@ -379,7 +379,7 @@ async fn health_not_configured() {
     assert_eq!(result["status"], "not_configured");
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn health_configured_and_ready() {
     let _ctx = AsyncTestContext::for_scenario("telegram.lifecycle.health_configured");
     let mock_server = MockServer::start().await;
@@ -396,7 +396,7 @@ async fn health_configured_and_ready() {
     assert_eq!(result["status"], "ready");
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn introspect_lists_all_operations() {
     let _ctx = AsyncTestContext::for_scenario("telegram.lifecycle.introspect");
     let connector = TelegramConnector::new();
@@ -415,7 +415,7 @@ async fn introspect_lists_all_operations() {
     assert_eq!(ops.len(), 4);
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn shutdown_succeeds() {
     let _ctx = AsyncTestContext::for_scenario("telegram.lifecycle.shutdown");
     let mut connector = TelegramConnector::new();
@@ -430,7 +430,7 @@ async fn shutdown_succeeds() {
 // Send media tests
 // ============================================================================
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn send_media_photo_happy_path() {
     let _ctx = AsyncTestContext::for_scenario("telegram.send_media.photo.happy_path");
     let mut connector = TelegramConnector::new();
@@ -467,7 +467,7 @@ async fn send_media_photo_happy_path() {
     assert_eq!(result["message_id"], 100);
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn send_media_document_with_caption() {
     let _ctx = AsyncTestContext::for_scenario("telegram.send_media.document.caption");
     let mut connector = TelegramConnector::new();
@@ -509,7 +509,7 @@ async fn send_media_document_with_caption() {
 // Additional error taxonomy tests
 // ============================================================================
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn server_error_500_maps_to_external_error() {
     let _ctx = AsyncTestContext::for_scenario("telegram.error.server_500");
     let mut connector = TelegramConnector::new();
@@ -537,7 +537,7 @@ async fn server_error_500_maps_to_external_error() {
     assert!(result.is_err());
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn invoke_with_null_capability_token_denied() {
     let _ctx = AsyncTestContext::for_scenario("telegram.deny.null_token");
     let mut connector = TelegramConnector::new();
@@ -558,7 +558,7 @@ async fn invoke_with_null_capability_token_denied() {
 // Self-check lifecycle
 // ============================================================================
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn self_check_not_configured() {
     let _ctx = AsyncTestContext::for_scenario("telegram.lifecycle.self_check_not_configured");
     let connector = TelegramConnector::new();
@@ -569,7 +569,7 @@ async fn self_check_not_configured() {
     assert_eq!(result["status"], "degraded");
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn self_check_healthy() {
     let _ctx = AsyncTestContext::for_scenario("telegram.lifecycle.self_check_healthy");
     let mock_server = MockServer::start().await;
@@ -590,7 +590,7 @@ async fn self_check_healthy() {
 // Input validation edge cases
 // ============================================================================
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn send_message_missing_chat_id_fails() {
     let _ctx = AsyncTestContext::for_scenario("telegram.validation.send_message_missing_chat_id");
     let mut connector = TelegramConnector::new();
@@ -614,7 +614,7 @@ async fn send_message_missing_chat_id_fails() {
     }
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn send_message_missing_text_fails() {
     let _ctx = AsyncTestContext::for_scenario("telegram.validation.send_message_missing_text");
     let mut connector = TelegramConnector::new();
@@ -638,7 +638,7 @@ async fn send_message_missing_text_fails() {
     }
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn send_message_with_parse_mode() {
     let _ctx = AsyncTestContext::for_scenario("telegram.validation.send_message_html");
     let mut connector = TelegramConnector::new();
@@ -675,7 +675,7 @@ async fn send_message_with_parse_mode() {
     assert_eq!(result["message_id"], 55);
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn send_message_invalid_parse_mode_rejected() {
     let _ctx = AsyncTestContext::for_scenario("telegram.validation.invalid_parse_mode");
     let mut connector = TelegramConnector::new();
@@ -697,7 +697,7 @@ async fn send_message_invalid_parse_mode_rejected() {
     assert!(result.is_err());
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn send_media_invalid_type_rejected() {
     let _ctx = AsyncTestContext::for_scenario("telegram.validation.invalid_media_type");
     let mut connector = TelegramConnector::new();
@@ -719,7 +719,7 @@ async fn send_media_invalid_type_rejected() {
     assert!(result.is_err());
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn doctor_not_configured() {
     let _ctx = AsyncTestContext::for_scenario("telegram.lifecycle.doctor_not_configured");
     let connector = TelegramConnector::new();
@@ -731,7 +731,7 @@ async fn doctor_not_configured() {
     assert!(result.get("checks").is_some());
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn concurrent_handshake_same_zone_dir_is_fenced() {
     let _ctx = AsyncTestContext::for_scenario("telegram.polling.concurrent_handshake_fenced");
     let mock_server = MockServer::start().await;
@@ -787,7 +787,7 @@ async fn concurrent_handshake_same_zone_dir_is_fenced() {
 // Additional happy-path operation tests (media subtypes)
 // ============================================================================
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn send_media_audio_happy_path() {
     let _ctx = AsyncTestContext::for_scenario("telegram.send_media.audio.happy_path");
     let mut connector = TelegramConnector::new();
@@ -824,7 +824,7 @@ async fn send_media_audio_happy_path() {
     assert_eq!(result["message_id"], 200);
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn send_media_video_happy_path() {
     let _ctx = AsyncTestContext::for_scenario("telegram.send_media.video.happy_path");
     let mut connector = TelegramConnector::new();
@@ -861,7 +861,7 @@ async fn send_media_video_happy_path() {
     assert_eq!(result["message_id"], 201);
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn send_media_voice_happy_path() {
     let _ctx = AsyncTestContext::for_scenario("telegram.send_media.voice.happy_path");
     let mut connector = TelegramConnector::new();
@@ -898,7 +898,7 @@ async fn send_media_voice_happy_path() {
     assert_eq!(result["message_id"], 202);
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn send_message_with_integer_chat_id() {
     let _ctx = AsyncTestContext::for_scenario("telegram.send_message.integer_chat_id");
     let mut connector = TelegramConnector::new();
@@ -931,7 +931,7 @@ async fn send_message_with_integer_chat_id() {
     assert_eq!(result["message_id"], 77);
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn send_message_with_reply_to() {
     let _ctx = AsyncTestContext::for_scenario("telegram.send_message.reply_to");
     let mut connector = TelegramConnector::new();
@@ -969,7 +969,7 @@ async fn send_message_with_reply_to() {
     assert_eq!(result["message_id"], 78);
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn send_message_markdownv2_parse_mode() {
     let _ctx = AsyncTestContext::for_scenario("telegram.send_message.markdownv2");
     let mut connector = TelegramConnector::new();
@@ -1010,7 +1010,7 @@ async fn send_message_markdownv2_parse_mode() {
 // Additional error taxonomy tests
 // ============================================================================
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn forbidden_403_maps_to_fcp_error() {
     let _ctx = AsyncTestContext::for_scenario("telegram.error.forbidden_403");
     let mut connector = TelegramConnector::new();
@@ -1043,7 +1043,7 @@ async fn forbidden_403_maps_to_fcp_error() {
     );
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn telegram_api_error_structure_chat_not_found() {
     let _ctx = AsyncTestContext::for_scenario("telegram.error.chat_not_found");
     let mut connector = TelegramConnector::new();
@@ -1071,7 +1071,7 @@ async fn telegram_api_error_structure_chat_not_found() {
     assert!(result.is_err());
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn get_file_api_error() {
     let _ctx = AsyncTestContext::for_scenario("telegram.error.get_file_bad_id");
     let mut connector = TelegramConnector::new();
@@ -1099,7 +1099,7 @@ async fn get_file_api_error() {
     assert!(result.is_err());
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn send_media_photo_api_error_500() {
     let _ctx = AsyncTestContext::for_scenario("telegram.error.send_media_500");
     let mut connector = TelegramConnector::new();
@@ -1135,7 +1135,7 @@ async fn send_media_photo_api_error_500() {
 // Additional input validation tests
 // ============================================================================
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn send_media_missing_chat_id_fails() {
     let _ctx = AsyncTestContext::for_scenario("telegram.validation.send_media_missing_chat_id");
     let mut connector = TelegramConnector::new();
@@ -1156,7 +1156,7 @@ async fn send_media_missing_chat_id_fails() {
     assert!(result.is_err());
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn send_media_missing_media_fails() {
     let _ctx = AsyncTestContext::for_scenario("telegram.validation.send_media_missing_media");
     let mut connector = TelegramConnector::new();
@@ -1177,7 +1177,7 @@ async fn send_media_missing_media_fails() {
     assert!(result.is_err());
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn send_media_missing_media_type_fails() {
     let _ctx = AsyncTestContext::for_scenario("telegram.validation.send_media_missing_media_type");
     let mut connector = TelegramConnector::new();
@@ -1198,7 +1198,7 @@ async fn send_media_missing_media_type_fails() {
     assert!(result.is_err());
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn get_file_missing_file_id_fails() {
     let _ctx = AsyncTestContext::for_scenario("telegram.validation.get_file_missing_file_id");
     let mut connector = TelegramConnector::new();
@@ -1225,7 +1225,7 @@ async fn get_file_missing_file_id_fails() {
     }
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn answer_callback_query_missing_id_fails() {
     let _ctx = AsyncTestContext::for_scenario("telegram.validation.callback_missing_id");
     let mut connector = TelegramConnector::new();
@@ -1253,7 +1253,7 @@ async fn answer_callback_query_missing_id_fails() {
     }
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn send_message_text_exceeds_limit_fails() {
     let _ctx = AsyncTestContext::for_scenario("telegram.validation.text_too_long");
     let mut connector = TelegramConnector::new();
@@ -1282,7 +1282,7 @@ async fn send_message_text_exceeds_limit_fails() {
     }
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn send_media_caption_exceeds_limit_fails() {
     let _ctx = AsyncTestContext::for_scenario("telegram.validation.caption_too_long");
     let mut connector = TelegramConnector::new();
@@ -1320,7 +1320,7 @@ async fn send_media_caption_exceeds_limit_fails() {
 // Configuration edge cases
 // ============================================================================
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn configure_with_credential_id_mode() {
     let _ctx = AsyncTestContext::for_scenario("telegram.config.credential_id_mode");
     let mut connector = TelegramConnector::new();
@@ -1336,7 +1336,7 @@ async fn configure_with_credential_id_mode() {
     assert_eq!(result["auth_mode"], "credential_id");
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn configure_both_credential_and_credential_id_rejected() {
     let _ctx = AsyncTestContext::for_scenario("telegram.config.both_auth_rejected");
     let mut connector = TelegramConnector::new();
@@ -1360,7 +1360,7 @@ async fn configure_both_credential_and_credential_id_rejected() {
     }
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn configure_empty_bot_token_rejected() {
     let _ctx = AsyncTestContext::for_scenario("telegram.config.empty_token");
     let mut connector = TelegramConnector::new();
@@ -1383,7 +1383,7 @@ async fn configure_empty_bot_token_rejected() {
     }
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn configure_whitespace_only_bot_token_rejected() {
     let _ctx = AsyncTestContext::for_scenario("telegram.config.whitespace_token");
     let mut connector = TelegramConnector::new();
@@ -1397,7 +1397,7 @@ async fn configure_whitespace_only_bot_token_rejected() {
     assert!(result.is_err());
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn configure_invalid_base_url_scheme_rejected() {
     let _ctx = AsyncTestContext::for_scenario("telegram.config.invalid_base_url_scheme");
     let mut connector = TelegramConnector::new();
@@ -1421,7 +1421,7 @@ async fn configure_invalid_base_url_scheme_rejected() {
     }
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn configure_empty_base_url_rejected() {
     let _ctx = AsyncTestContext::for_scenario("telegram.config.empty_base_url");
     let mut connector = TelegramConnector::new();
@@ -1449,7 +1449,7 @@ async fn configure_empty_base_url_rejected() {
 // Lifecycle: health, doctor, self-check, shutdown edge cases
 // ============================================================================
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn health_credential_id_mode_returns_degraded() {
     let _ctx = AsyncTestContext::for_scenario("telegram.lifecycle.health_credential_id");
     let mut connector = TelegramConnector::new();
@@ -1470,7 +1470,7 @@ async fn health_credential_id_mode_returns_degraded() {
     assert_eq!(result["auth_mode"], "credential_id");
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn self_check_credential_id_mode_returns_degraded() {
     let _ctx = AsyncTestContext::for_scenario("telegram.lifecycle.self_check_credential_id");
     let mut connector = TelegramConnector::new();
@@ -1490,7 +1490,7 @@ async fn self_check_credential_id_mode_returns_degraded() {
     assert_eq!(result["status"], "degraded");
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn doctor_configured_healthy() {
     let _ctx = AsyncTestContext::for_scenario("telegram.lifecycle.doctor_configured");
     let mock_server = MockServer::start().await;
@@ -1513,7 +1513,7 @@ async fn doctor_configured_healthy() {
     assert_eq!(config_check["passed"], true);
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn shutdown_then_reinvoke_fails() {
     let _ctx = AsyncTestContext::for_scenario("telegram.lifecycle.shutdown_reinvoke");
     let mut connector = TelegramConnector::new();
@@ -1563,7 +1563,7 @@ async fn shutdown_then_reinvoke_fails() {
 // Simulate operations
 // ============================================================================
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn simulate_known_operation() {
     let _ctx = AsyncTestContext::for_scenario("telegram.simulate.known_op");
     let mut connector = TelegramConnector::new();
@@ -1587,7 +1587,7 @@ async fn simulate_known_operation() {
     drop(mock_server);
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn simulate_unknown_operation() {
     let _ctx = AsyncTestContext::for_scenario("telegram.simulate.unknown_op");
     let mut connector = TelegramConnector::new();
@@ -1616,7 +1616,7 @@ async fn simulate_unknown_operation() {
 // Subscribe lifecycle
 // ============================================================================
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn subscribe_returns_confirmed_topics() {
     let _ctx = AsyncTestContext::for_scenario("telegram.lifecycle.subscribe");
     let mut connector = TelegramConnector::new();
@@ -1640,7 +1640,7 @@ async fn subscribe_returns_confirmed_topics() {
 // Introspect edge case: verify schema fields
 // ============================================================================
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn introspect_operations_have_schemas() {
     let _ctx = AsyncTestContext::for_scenario("telegram.lifecycle.introspect_schemas");
     let connector = TelegramConnector::new();
@@ -1673,7 +1673,7 @@ async fn introspect_operations_have_schemas() {
     assert!(events.len() >= 5, "Expected at least 5 event types, got {}", events.len());
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn malformed_get_updates_payload_does_not_panic() {
     let _ctx = AsyncTestContext::for_scenario("telegram.polling.malformed_update_payload");
     let mock_server = MockServer::start().await;

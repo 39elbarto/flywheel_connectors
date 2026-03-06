@@ -83,7 +83,7 @@ async fn full_setup(
 // Happy-path operation tests
 // ============================================================================
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn list_collections_happy_path() {
     let _ctx = AsyncTestContext::for_scenario("qdrant.list_collections.happy_path");
     let mut connector = QdrantConnector::new();
@@ -118,7 +118,7 @@ async fn list_collections_happy_path() {
     assert_eq!(collections.len(), 2);
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn search_happy_path() {
     let _ctx = AsyncTestContext::for_scenario("qdrant.search.happy_path");
     let mut connector = QdrantConnector::new();
@@ -155,7 +155,7 @@ async fn search_happy_path() {
     assert_eq!(results.len(), 2);
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn upsert_points_happy_path() {
     let _ctx = AsyncTestContext::for_scenario("qdrant.upsert_points.happy_path");
     let mut connector = QdrantConnector::new();
@@ -189,7 +189,7 @@ async fn upsert_points_happy_path() {
     assert_eq!(result["status"], "completed");
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn collection_info_happy_path() {
     let _ctx = AsyncTestContext::for_scenario("qdrant.collection_info.happy_path");
     let mut connector = QdrantConnector::new();
@@ -233,7 +233,7 @@ async fn collection_info_happy_path() {
 // Error taxonomy tests
 // ============================================================================
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn unauthorized_maps_to_fcp_error() {
     let _ctx = AsyncTestContext::for_scenario("qdrant.error.unauthorized");
     let mut connector = QdrantConnector::new();
@@ -260,7 +260,7 @@ async fn unauthorized_maps_to_fcp_error() {
     assert!(result.is_err());
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn not_found_maps_to_fcp_error() {
     let _ctx = AsyncTestContext::for_scenario("qdrant.error.not_found");
     let mut connector = QdrantConnector::new();
@@ -291,7 +291,7 @@ async fn not_found_maps_to_fcp_error() {
 // FCP2 default-deny + capability verification
 // ============================================================================
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn invoke_without_configure_fails() {
     let _ctx = AsyncTestContext::for_scenario("qdrant.deny.not_configured");
     let connector = QdrantConnector::new();
@@ -310,7 +310,7 @@ async fn invoke_without_configure_fails() {
     assert!(result.is_err());
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn invoke_with_wrong_capability_denied() {
     let _ctx = AsyncTestContext::for_scenario("qdrant.deny.wrong_capability");
     let mut connector = QdrantConnector::new();
@@ -329,7 +329,7 @@ async fn invoke_with_wrong_capability_denied() {
     assert!(result.is_err());
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn invoke_unknown_operation_denied() {
     let _ctx = AsyncTestContext::for_scenario("qdrant.deny.unknown_operation");
     let mut connector = QdrantConnector::new();
@@ -351,7 +351,7 @@ async fn invoke_unknown_operation_denied() {
 // Lifecycle tests
 // ============================================================================
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn health_not_configured() {
     let _ctx = AsyncTestContext::for_scenario("qdrant.lifecycle.health_not_configured");
     let connector = QdrantConnector::new();
@@ -362,7 +362,7 @@ async fn health_not_configured() {
     assert_eq!(result["status"], "not_configured");
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn health_configured() {
     let _ctx = AsyncTestContext::for_scenario("qdrant.lifecycle.health_configured");
     let mock_server = MockServer::start().await;
@@ -376,7 +376,7 @@ async fn health_configured() {
     assert_eq!(result["status"], "healthy");
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn introspect_lists_all_operations() {
     let _ctx = AsyncTestContext::for_scenario("qdrant.lifecycle.introspect");
     let connector = QdrantConnector::new();
@@ -395,7 +395,7 @@ async fn introspect_lists_all_operations() {
     assert_eq!(ops.len(), 12);
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn shutdown_succeeds() {
     let _ctx = AsyncTestContext::for_scenario("qdrant.lifecycle.shutdown");
     let connector = QdrantConnector::new();
@@ -410,7 +410,7 @@ async fn shutdown_succeeds() {
 // Input validation edge cases
 // ============================================================================
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn search_missing_collection_name_fails() {
     let _ctx = AsyncTestContext::for_scenario("qdrant.validation.search_missing_collection");
     let mut connector = QdrantConnector::new();
@@ -434,7 +434,7 @@ async fn search_missing_collection_name_fails() {
     }
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn upsert_points_missing_points_fails() {
     let _ctx = AsyncTestContext::for_scenario("qdrant.validation.upsert_missing_points");
     let mut connector = QdrantConnector::new();
@@ -462,7 +462,7 @@ async fn upsert_points_missing_points_fails() {
 // Happy-path tests for remaining operations
 // ============================================================================
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn query_points_happy_path() {
     let _ctx = AsyncTestContext::for_scenario("qdrant.query_points.happy_path");
     let mut connector = QdrantConnector::new();
@@ -501,7 +501,7 @@ async fn query_points_happy_path() {
     assert_eq!(points.len(), 2);
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn query_points_array_result_format() {
     let _ctx = AsyncTestContext::for_scenario("qdrant.query_points.array_result");
     let mut connector = QdrantConnector::new();
@@ -538,7 +538,7 @@ async fn query_points_array_result_format() {
     assert_eq!(points[0]["id"], 10);
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn batch_query_points_happy_path() {
     let _ctx = AsyncTestContext::for_scenario("qdrant.batch_query_points.happy_path");
     let mut connector = QdrantConnector::new();
@@ -578,7 +578,7 @@ async fn batch_query_points_happy_path() {
     assert_eq!(batches.len(), 2);
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn get_points_happy_path() {
     let _ctx = AsyncTestContext::for_scenario("qdrant.get_points.happy_path");
     let mut connector = QdrantConnector::new();
@@ -617,7 +617,7 @@ async fn get_points_happy_path() {
     assert_eq!(points[0]["id"], 1);
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn scroll_happy_path() {
     let _ctx = AsyncTestContext::for_scenario("qdrant.scroll.happy_path");
     let mut connector = QdrantConnector::new();
@@ -659,7 +659,7 @@ async fn scroll_happy_path() {
     assert_eq!(scroll_result["next_page_offset"], 3);
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn count_happy_path() {
     let _ctx = AsyncTestContext::for_scenario("qdrant.count.happy_path");
     let mut connector = QdrantConnector::new();
@@ -691,7 +691,7 @@ async fn count_happy_path() {
     assert_eq!(result["count"], 42);
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn create_collection_happy_path() {
     let _ctx = AsyncTestContext::for_scenario("qdrant.create_collection.happy_path");
     let mut connector = QdrantConnector::new();
@@ -729,7 +729,7 @@ async fn create_collection_happy_path() {
         .contains("new_embeddings"));
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn delete_collection_happy_path() {
     let _ctx = AsyncTestContext::for_scenario("qdrant.delete_collection.happy_path");
     let mut connector = QdrantConnector::new();
@@ -764,7 +764,7 @@ async fn delete_collection_happy_path() {
         .contains("deleted"));
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn delete_points_happy_path() {
     let _ctx = AsyncTestContext::for_scenario("qdrant.delete_points.happy_path");
     let mut connector = QdrantConnector::new();
@@ -797,7 +797,7 @@ async fn delete_points_happy_path() {
     assert_eq!(result["receipt"]["operation"], "qdrant.delete_points");
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn delete_points_with_filter() {
     let _ctx = AsyncTestContext::for_scenario("qdrant.delete_points.with_filter");
     let mut connector = QdrantConnector::new();
@@ -837,7 +837,7 @@ async fn delete_points_with_filter() {
 // Error taxonomy tests (extended)
 // ============================================================================
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn rate_limit_429_maps_to_fcp_error() {
     let _ctx = AsyncTestContext::for_scenario("qdrant.error.rate_limit_429");
     let mut connector = QdrantConnector::new();
@@ -868,7 +868,7 @@ async fn rate_limit_429_maps_to_fcp_error() {
     }
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn server_error_500_maps_to_fcp_error() {
     let _ctx = AsyncTestContext::for_scenario("qdrant.error.server_500");
     let mut connector = QdrantConnector::new();
@@ -906,7 +906,7 @@ async fn server_error_500_maps_to_fcp_error() {
     }
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn json_parse_failure_from_api() {
     let _ctx = AsyncTestContext::for_scenario("qdrant.error.json_parse_failure");
     let mut connector = QdrantConnector::new();
@@ -932,7 +932,7 @@ async fn json_parse_failure_from_api() {
     assert!(result.is_err());
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn forbidden_403_maps_to_fcp_error() {
     let _ctx = AsyncTestContext::for_scenario("qdrant.error.forbidden_403");
     let mut connector = QdrantConnector::new();
@@ -963,7 +963,7 @@ async fn forbidden_403_maps_to_fcp_error() {
 // Configuration validation tests
 // ============================================================================
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn configure_missing_cluster_url_fails() {
     let _ctx = AsyncTestContext::for_scenario("qdrant.config.missing_cluster_url");
     let mut connector = QdrantConnector::new();
@@ -982,7 +982,7 @@ async fn configure_missing_cluster_url_fails() {
     }
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn configure_missing_auth_fails() {
     let _ctx = AsyncTestContext::for_scenario("qdrant.config.missing_auth");
     let mut connector = QdrantConnector::new();
@@ -1001,7 +1001,7 @@ async fn configure_missing_auth_fails() {
     }
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn configure_empty_api_key_fails() {
     let _ctx = AsyncTestContext::for_scenario("qdrant.config.empty_api_key");
     let mut connector = QdrantConnector::new();
@@ -1021,7 +1021,7 @@ async fn configure_empty_api_key_fails() {
     }
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn configure_empty_cluster_url_fails() {
     let _ctx = AsyncTestContext::for_scenario("qdrant.config.empty_cluster_url");
     let mut connector = QdrantConnector::new();
@@ -1041,7 +1041,7 @@ async fn configure_empty_cluster_url_fails() {
     }
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn configure_invalid_cluster_url_scheme_fails() {
     let _ctx = AsyncTestContext::for_scenario("qdrant.config.bad_url_scheme");
     let mut connector = QdrantConnector::new();
@@ -1061,7 +1061,7 @@ async fn configure_invalid_cluster_url_scheme_fails() {
     }
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn configure_credential_id_mode() {
     let _ctx = AsyncTestContext::for_scenario("qdrant.config.credential_id");
     let mut connector = QdrantConnector::new();
@@ -1077,7 +1077,7 @@ async fn configure_credential_id_mode() {
     assert_eq!(result["details"]["auth_mode"], "credential_id");
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn configure_both_auth_modes_fails() {
     let _ctx = AsyncTestContext::for_scenario("qdrant.config.both_auth");
     let mut connector = QdrantConnector::new();
@@ -1098,7 +1098,7 @@ async fn configure_both_auth_modes_fails() {
     }
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn configure_invalid_credential_id_format_fails() {
     let _ctx = AsyncTestContext::for_scenario("qdrant.config.bad_credential_id");
     let mut connector = QdrantConnector::new();
@@ -1122,7 +1122,7 @@ async fn configure_invalid_credential_id_format_fails() {
 // Missing required field validation tests
 // ============================================================================
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn query_points_missing_query_fails() {
     let _ctx = AsyncTestContext::for_scenario("qdrant.validation.query_points_missing_query");
     let mut connector = QdrantConnector::new();
@@ -1146,7 +1146,7 @@ async fn query_points_missing_query_fails() {
     }
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn query_points_missing_collection_name_fails() {
     let _ctx = AsyncTestContext::for_scenario("qdrant.validation.query_points_missing_collection");
     let mut connector = QdrantConnector::new();
@@ -1170,7 +1170,7 @@ async fn query_points_missing_collection_name_fails() {
     }
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn batch_query_points_missing_queries_fails() {
     let _ctx = AsyncTestContext::for_scenario("qdrant.validation.batch_query_missing_queries");
     let mut connector = QdrantConnector::new();
@@ -1195,7 +1195,7 @@ async fn batch_query_points_missing_queries_fails() {
     }
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn batch_query_points_missing_collection_name_fails() {
     let _ctx =
         AsyncTestContext::for_scenario("qdrant.validation.batch_query_missing_collection");
@@ -1221,7 +1221,7 @@ async fn batch_query_points_missing_collection_name_fails() {
     }
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn get_points_missing_collection_name_fails() {
     let _ctx = AsyncTestContext::for_scenario("qdrant.validation.get_points_missing_collection");
     let mut connector = QdrantConnector::new();
@@ -1245,7 +1245,7 @@ async fn get_points_missing_collection_name_fails() {
     }
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn scroll_missing_collection_name_fails() {
     let _ctx = AsyncTestContext::for_scenario("qdrant.validation.scroll_missing_collection");
     let mut connector = QdrantConnector::new();
@@ -1269,7 +1269,7 @@ async fn scroll_missing_collection_name_fails() {
     }
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn count_missing_collection_name_fails() {
     let _ctx = AsyncTestContext::for_scenario("qdrant.validation.count_missing_collection");
     let mut connector = QdrantConnector::new();
@@ -1293,7 +1293,7 @@ async fn count_missing_collection_name_fails() {
     }
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn create_collection_missing_vectors_fails() {
     let _ctx = AsyncTestContext::for_scenario("qdrant.validation.create_missing_vectors");
     let mut connector = QdrantConnector::new();
@@ -1318,7 +1318,7 @@ async fn create_collection_missing_vectors_fails() {
     }
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn create_collection_missing_name_fails() {
     let _ctx = AsyncTestContext::for_scenario("qdrant.validation.create_missing_name");
     let mut connector = QdrantConnector::new();
@@ -1343,7 +1343,7 @@ async fn create_collection_missing_name_fails() {
     }
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn delete_collection_missing_name_fails() {
     let _ctx = AsyncTestContext::for_scenario("qdrant.validation.delete_collection_missing_name");
     let mut connector = QdrantConnector::new();
@@ -1368,7 +1368,7 @@ async fn delete_collection_missing_name_fails() {
     }
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn delete_points_missing_collection_name_fails() {
     let _ctx =
         AsyncTestContext::for_scenario("qdrant.validation.delete_points_missing_collection");
@@ -1393,7 +1393,7 @@ async fn delete_points_missing_collection_name_fails() {
     }
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn collection_info_missing_collection_name_fails() {
     let _ctx =
         AsyncTestContext::for_scenario("qdrant.validation.collection_info_missing_collection");
@@ -1422,7 +1422,7 @@ async fn collection_info_missing_collection_name_fails() {
 // Empty results tests
 // ============================================================================
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn list_collections_empty() {
     let _ctx = AsyncTestContext::for_scenario("qdrant.list_collections.empty");
     let mut connector = QdrantConnector::new();
@@ -1452,7 +1452,7 @@ async fn list_collections_empty() {
     assert!(collections.is_empty());
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn search_empty_results() {
     let _ctx = AsyncTestContext::for_scenario("qdrant.search.empty_results");
     let mut connector = QdrantConnector::new();
@@ -1486,7 +1486,7 @@ async fn search_empty_results() {
     assert!(results.is_empty());
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn scroll_empty_results() {
     let _ctx = AsyncTestContext::for_scenario("qdrant.scroll.empty_results");
     let mut connector = QdrantConnector::new();
@@ -1523,7 +1523,7 @@ async fn scroll_empty_results() {
     assert!(scroll_result["next_page_offset"].is_null());
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn count_zero_result() {
     let _ctx = AsyncTestContext::for_scenario("qdrant.count.zero");
     let mut connector = QdrantConnector::new();
@@ -1555,7 +1555,7 @@ async fn count_zero_result() {
     assert_eq!(result["count"], 0);
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn get_points_empty_results() {
     let _ctx = AsyncTestContext::for_scenario("qdrant.get_points.empty_results");
     let mut connector = QdrantConnector::new();
@@ -1592,7 +1592,7 @@ async fn get_points_empty_results() {
 // Doctor / self-check tests
 // ============================================================================
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn doctor_not_configured_is_unhealthy() {
     let _ctx = AsyncTestContext::for_scenario("qdrant.doctor.not_configured");
     let connector = QdrantConnector::new();
@@ -1611,7 +1611,7 @@ async fn doctor_not_configured_is_unhealthy() {
     assert!(config_check["critical"].as_bool().unwrap());
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn doctor_healthy_when_configured_and_connected() {
     let _ctx = AsyncTestContext::for_scenario("qdrant.doctor.healthy");
     let mock_server = MockServer::start().await;
@@ -1645,7 +1645,7 @@ async fn doctor_healthy_when_configured_and_connected() {
     assert!(connectivity["passed"].as_bool().unwrap());
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn doctor_degraded_with_credential_id() {
     let _ctx = AsyncTestContext::for_scenario("qdrant.doctor.credential_id_degraded");
     let mut connector = QdrantConnector::new();
@@ -1672,7 +1672,7 @@ async fn doctor_degraded_with_credential_id() {
     assert!(!materialization["critical"].as_bool().unwrap());
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn doctor_unhealthy_when_api_unreachable() {
     let _ctx = AsyncTestContext::for_scenario("qdrant.doctor.api_unreachable");
     let mock_server = MockServer::start().await;
@@ -1705,7 +1705,7 @@ async fn doctor_unhealthy_when_api_unreachable() {
 // Lifecycle edge case tests
 // ============================================================================
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn health_after_credential_id_configure() {
     let _ctx = AsyncTestContext::for_scenario("qdrant.lifecycle.health_credential_id");
     let mut connector = QdrantConnector::new();
@@ -1724,7 +1724,7 @@ async fn health_after_credential_id_configure() {
     assert_eq!(result["status"], "degraded_pending_credential_materialization");
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn invoke_without_handshake_fails() {
     let _ctx = AsyncTestContext::for_scenario("qdrant.deny.no_handshake");
     let mock_server = MockServer::start().await;
@@ -1745,7 +1745,7 @@ async fn invoke_without_handshake_fails() {
     assert!(result.is_err());
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn invoke_missing_operation_field_fails() {
     let _ctx = AsyncTestContext::for_scenario("qdrant.deny.missing_operation_field");
     let mut connector = QdrantConnector::new();
@@ -1768,7 +1768,7 @@ async fn invoke_missing_operation_field_fails() {
     }
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn invoke_missing_capability_token_fails() {
     let _ctx = AsyncTestContext::for_scenario("qdrant.deny.missing_token");
     let mut connector = QdrantConnector::new();
@@ -1798,7 +1798,7 @@ async fn invoke_missing_capability_token_fails() {
 // Search with optional parameters
 // ============================================================================
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn search_with_filter_and_threshold() {
     let _ctx = AsyncTestContext::for_scenario("qdrant.search.with_filter");
     let mut connector = QdrantConnector::new();
@@ -1847,7 +1847,7 @@ async fn search_with_filter_and_threshold() {
 // Scroll with pagination
 // ============================================================================
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn scroll_with_offset_parameter() {
     let _ctx = AsyncTestContext::for_scenario("qdrant.scroll.with_offset");
     let mut connector = QdrantConnector::new();
@@ -1892,7 +1892,7 @@ async fn scroll_with_offset_parameter() {
 // Count with filter
 // ============================================================================
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn count_with_filter() {
     let _ctx = AsyncTestContext::for_scenario("qdrant.count.with_filter");
     let mut connector = QdrantConnector::new();
@@ -1933,7 +1933,7 @@ async fn count_with_filter() {
 // Simulate method tests
 // ============================================================================
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn simulate_returns_allowed() {
     let _ctx = AsyncTestContext::for_scenario("qdrant.simulate.allowed");
     let mut connector = QdrantConnector::new();
@@ -1963,7 +1963,7 @@ async fn simulate_returns_allowed() {
 // Create collection with optional config fields
 // ============================================================================
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn create_collection_with_optional_config() {
     let _ctx = AsyncTestContext::for_scenario("qdrant.create_collection.with_config");
     let mut connector = QdrantConnector::new();

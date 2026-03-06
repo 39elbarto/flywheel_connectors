@@ -50,14 +50,18 @@ pub enum ReplayError {
         topic: String,
     },
     /// The cursor string could not be parsed as a sequence number.
-    #[error("invalid cursor '{cursor}'")]
+    #[error("invalid cursor '{cursor}' for topic '{topic}'")]
     InvalidCursor {
+        /// The topic that had an invalid cursor.
+        topic: String,
         /// The invalid cursor string.
         cursor: String,
     },
     /// The cursor points to an event that has been trimmed from the buffer.
-    #[error("cursor {cursor_seq} is older than oldest buffered seq {oldest_seq}")]
+    #[error("cursor {cursor_seq} is older than oldest buffered seq {oldest_seq} for topic '{topic}'")]
     CursorStale {
+        /// The topic that had a stale cursor.
+        topic: String,
         /// The sequence number from the cursor.
         cursor_seq: u64,
         /// The oldest sequence number still in the buffer.
@@ -146,7 +150,7 @@ impl TopicState {
         self.buffer.back().map(|env| env.cursor.clone())
     }
 
-    fn replay_from_cursor(&self, cursor: &str) -> Result<Vec<EventEnvelope>, ReplayError> {
+    fn replay_from_cursor(&self, topic: &str, cursor: &str) -> Result<Vec<EventEnvelope>, ReplayError> {
         if cursor.is_empty() {
             return Ok(self.buffer.iter().cloned().collect());
         }
@@ -154,6 +158,7 @@ impl TopicState {
         let cursor_seq = cursor
             .parse::<u64>()
             .map_err(|_| ReplayError::InvalidCursor {
+                topic: topic.to_string(),
                 cursor: cursor.to_string(),
             })?;
 
@@ -162,6 +167,7 @@ impl TopicState {
         };
         if cursor_seq < oldest.seq {
             return Err(ReplayError::CursorStale {
+                topic: topic.to_string(),
                 cursor_seq,
                 oldest_seq: oldest.seq,
             });
@@ -349,7 +355,7 @@ impl EventStreamManager {
                     topic: topic.to_string(),
                 })
             },
-            |state| state.replay_from_cursor(cursor),
+            |state| state.replay_from_cursor(topic, cursor),
         )
     }
 
@@ -695,16 +701,19 @@ mod tests {
         assert_eq!(e.to_string(), "unknown topic 't'");
 
         let e = ReplayError::InvalidCursor {
+            topic: "t".into(),
             cursor: "bad".into(),
         };
-        assert_eq!(e.to_string(), "invalid cursor 'bad'");
+        assert_eq!(e.to_string(), "invalid cursor 'bad' for topic 't'");
 
         let e = ReplayError::CursorStale {
+            topic: "t".into(),
             cursor_seq: 5,
             oldest_seq: 10,
         };
         assert!(e.to_string().contains('5'));
         assert!(e.to_string().contains("10"));
+        assert!(e.to_string().contains("'t'"));
     }
 
     #[test]
@@ -895,6 +904,7 @@ mod tests {
     #[test]
     fn replay_error_clone() {
         let e = ReplayError::CursorStale {
+            topic: "t".into(),
             cursor_seq: 5,
             oldest_seq: 10,
         };

@@ -121,7 +121,7 @@ async fn setup_full(
 // Lifecycle Tests
 // ============================================================================
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn lifecycle_configure_handshake_health() {
     let mock_server = MockServer::start().await;
     let mut connector = DiscordConnector::new();
@@ -148,7 +148,7 @@ async fn lifecycle_configure_handshake_health() {
     assert_eq!(health["status"], "ready");
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn lifecycle_introspect_operations() {
     let connector = DiscordConnector::new();
 
@@ -194,7 +194,7 @@ async fn lifecycle_introspect_operations() {
 // Send Message Tests
 // ============================================================================
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn send_message_happy_path() {
     let mock_server = MockServer::start().await;
     let mut connector = DiscordConnector::new();
@@ -230,7 +230,7 @@ async fn send_message_happy_path() {
     assert_eq!(result["content"], "Hello Discord!");
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn send_message_content_too_long() {
     let mock_server = MockServer::start().await;
     let mut connector = DiscordConnector::new();
@@ -253,7 +253,7 @@ async fn send_message_content_too_long() {
     assert!(result.is_err(), "should reject oversized content");
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn send_message_missing_content_and_embeds() {
     let mock_server = MockServer::start().await;
     let mut connector = DiscordConnector::new();
@@ -275,7 +275,7 @@ async fn send_message_missing_content_and_embeds() {
 // Edit Message Tests
 // ============================================================================
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn edit_message_happy_path() {
     let mock_server = MockServer::start().await;
     let mut connector = DiscordConnector::new();
@@ -314,7 +314,7 @@ async fn edit_message_happy_path() {
 // Delete Message Tests
 // ============================================================================
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn delete_message_happy_path() {
     let mock_server = MockServer::start().await;
     let mut connector = DiscordConnector::new();
@@ -346,7 +346,7 @@ async fn delete_message_happy_path() {
 // Get Channel Tests
 // ============================================================================
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn get_channel_happy_path() {
     let mock_server = MockServer::start().await;
     let mut connector = DiscordConnector::new();
@@ -381,7 +381,7 @@ async fn get_channel_happy_path() {
 // Get Guild Tests
 // ============================================================================
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn get_guild_happy_path() {
     let mock_server = MockServer::start().await;
     let mut connector = DiscordConnector::new();
@@ -416,7 +416,7 @@ async fn get_guild_happy_path() {
 // Trigger Typing Tests
 // ============================================================================
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn trigger_typing_happy_path() {
     let mock_server = MockServer::start().await;
     let mut connector = DiscordConnector::new();
@@ -447,7 +447,7 @@ async fn trigger_typing_happy_path() {
 // Add Reaction Tests
 // ============================================================================
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn add_reaction_happy_path() {
     let mock_server = MockServer::start().await;
     let mut connector = DiscordConnector::new();
@@ -480,7 +480,7 @@ async fn add_reaction_happy_path() {
     assert_eq!(result["added"], true);
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn add_reaction_missing_emoji() {
     let mock_server = MockServer::start().await;
     let mut connector = DiscordConnector::new();
@@ -505,7 +505,7 @@ async fn add_reaction_missing_emoji() {
 // List Channels Tests
 // ============================================================================
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn list_channels_happy_path() {
     let mock_server = MockServer::start().await;
     let mut connector = DiscordConnector::new();
@@ -540,7 +540,7 @@ async fn list_channels_happy_path() {
 // Create Thread Tests
 // ============================================================================
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn create_thread_happy_path() {
     let mock_server = MockServer::start().await;
     let mut connector = DiscordConnector::new();
@@ -575,7 +575,7 @@ async fn create_thread_happy_path() {
     assert_eq!(result["name"], "Discussion");
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn create_thread_name_too_long() {
     let mock_server = MockServer::start().await;
     let mut connector = DiscordConnector::new();
@@ -598,7 +598,7 @@ async fn create_thread_name_too_long() {
     assert!(result.is_err(), "should reject thread name > 100 chars");
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn create_thread_empty_name() {
     let mock_server = MockServer::start().await;
     let mut connector = DiscordConnector::new();
@@ -624,7 +624,7 @@ async fn create_thread_empty_name() {
 // Capability Gating Tests
 // ============================================================================
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn invoke_without_capability_token_fails() {
     let mock_server = MockServer::start().await;
     let mut connector = DiscordConnector::new();
@@ -647,7 +647,7 @@ async fn invoke_without_capability_token_fails() {
     );
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn invoke_with_wrong_capability_fails() {
     let mock_server = MockServer::start().await;
     let mut connector = DiscordConnector::new();
@@ -670,7 +670,7 @@ async fn invoke_with_wrong_capability_fails() {
 // Error Taxonomy Tests
 // ============================================================================
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn api_401_maps_to_unauthorized() {
     let mock_server = MockServer::start().await;
     let mut connector = DiscordConnector::new();
@@ -697,7 +697,7 @@ async fn api_401_maps_to_unauthorized() {
     assert!(result.is_err(), "401 should map to error");
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn api_429_maps_to_rate_limited() {
     let mock_server = MockServer::start().await;
     let mut connector = DiscordConnector::new();
@@ -729,7 +729,7 @@ async fn api_429_maps_to_rate_limited() {
     assert!(result.is_err(), "429 should map to error");
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn api_500_maps_to_external_error() {
     let mock_server = MockServer::start().await;
     let mut connector = DiscordConnector::new();
@@ -760,7 +760,7 @@ async fn api_500_maps_to_external_error() {
 // Self-Check & Health Tests
 // ============================================================================
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn self_check_passes_when_configured() {
     let mock_server = MockServer::start().await;
     let mut connector = DiscordConnector::new();
@@ -783,7 +783,7 @@ async fn self_check_passes_when_configured() {
 // Shutdown Tests
 // ============================================================================
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn shutdown_returns_status() {
     let mut connector = DiscordConnector::new();
     let result = connector
@@ -798,7 +798,7 @@ async fn shutdown_returns_status() {
 // Error Handling Depth Tests
 // ============================================================================
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn api_403_forbidden_maps_to_error() {
     let mock_server = MockServer::start().await;
     let mut connector = DiscordConnector::new();
@@ -825,7 +825,7 @@ async fn api_403_forbidden_maps_to_error() {
     assert!(result.is_err(), "403 should map to error");
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn api_404_get_channel_maps_to_error() {
     let mock_server = MockServer::start().await;
     let mut connector = DiscordConnector::new();
@@ -852,7 +852,7 @@ async fn api_404_get_channel_maps_to_error() {
     assert!(result.is_err(), "404 on get_channel should map to error");
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn api_404_get_guild_maps_to_error() {
     let mock_server = MockServer::start().await;
     let mut connector = DiscordConnector::new();
@@ -879,7 +879,7 @@ async fn api_404_get_guild_maps_to_error() {
     assert!(result.is_err(), "404 on get_guild should map to error");
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn api_404_edit_message_maps_to_error() {
     let mock_server = MockServer::start().await;
     let mut connector = DiscordConnector::new();
@@ -910,7 +910,7 @@ async fn api_404_edit_message_maps_to_error() {
     assert!(result.is_err(), "404 on edit_message should map to error");
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn non_json_error_response_handled() {
     let mock_server = MockServer::start().await;
     let mut connector = DiscordConnector::new();
@@ -940,7 +940,7 @@ async fn non_json_error_response_handled() {
 // Input Validation Boundary Tests
 // ============================================================================
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn send_message_exactly_2000_chars_accepted() {
     let mock_server = MockServer::start().await;
     let mut connector = DiscordConnector::new();
@@ -975,7 +975,7 @@ async fn send_message_exactly_2000_chars_accepted() {
     assert_eq!(result.unwrap()["id"], "msg_boundary");
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn send_message_2001_chars_rejected() {
     let mock_server = MockServer::start().await;
     let mut connector = DiscordConnector::new();
@@ -997,7 +997,7 @@ async fn send_message_2001_chars_rejected() {
     assert!(result.is_err(), "2001 chars should be rejected");
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn send_message_exactly_10_embeds_accepted() {
     let mock_server = MockServer::start().await;
     let mut connector = DiscordConnector::new();
@@ -1033,7 +1033,7 @@ async fn send_message_exactly_10_embeds_accepted() {
     assert!(result.is_ok(), "exactly 10 embeds should be accepted");
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn send_message_11_embeds_rejected() {
     let mock_server = MockServer::start().await;
     let mut connector = DiscordConnector::new();
@@ -1058,7 +1058,7 @@ async fn send_message_11_embeds_rejected() {
     assert!(result.is_err(), "11 embeds should be rejected");
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn send_message_embed_near_4096_description_accepted() {
     let mock_server = MockServer::start().await;
     let mut connector = DiscordConnector::new();
@@ -1093,7 +1093,7 @@ async fn send_message_embed_near_4096_description_accepted() {
     assert!(result.is_ok(), "embed with 4096-char description should be accepted");
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn send_message_embed_over_4096_description_rejected() {
     let mock_server = MockServer::start().await;
     let mut connector = DiscordConnector::new();
@@ -1115,7 +1115,7 @@ async fn send_message_embed_over_4096_description_rejected() {
     assert!(result.is_err(), "embed with 4097-char description should be rejected");
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn send_message_total_embed_chars_at_6000_accepted() {
     let mock_server = MockServer::start().await;
     let mut connector = DiscordConnector::new();
@@ -1153,7 +1153,7 @@ async fn send_message_total_embed_chars_at_6000_accepted() {
     assert!(result.is_ok(), "total embed chars exactly 6000 should be accepted");
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn send_message_total_embed_chars_over_6000_rejected() {
     let mock_server = MockServer::start().await;
     let mut connector = DiscordConnector::new();
@@ -1180,7 +1180,7 @@ async fn send_message_total_embed_chars_over_6000_rejected() {
     assert!(result.is_err(), "total embed chars over 6000 should be rejected");
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn create_thread_name_exactly_100_chars_accepted() {
     let mock_server = MockServer::start().await;
     let mut connector = DiscordConnector::new();
@@ -1216,7 +1216,7 @@ async fn create_thread_name_exactly_100_chars_accepted() {
     assert_eq!(result.unwrap()["id"], "thread_100");
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn add_reaction_custom_emoji_format() {
     let mock_server = MockServer::start().await;
     let mut connector = DiscordConnector::new();
@@ -1252,7 +1252,7 @@ async fn add_reaction_custom_emoji_format() {
 // Lifecycle Edge-Case Tests
 // ============================================================================
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn health_check_when_not_configured() {
     let connector = DiscordConnector::new();
     let health = connector
@@ -1264,7 +1264,7 @@ async fn health_check_when_not_configured() {
     assert!(health["uptime_ms"].as_u64().is_some());
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn self_check_when_not_configured() {
     let connector = DiscordConnector::new();
     let result = connector
@@ -1275,7 +1275,7 @@ async fn self_check_when_not_configured() {
     assert_eq!(result["status"], "degraded");
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn configure_with_empty_bot_credential_fails() {
     let mut connector = DiscordConnector::new();
     let result = connector
@@ -1288,7 +1288,7 @@ async fn configure_with_empty_bot_credential_fails() {
     assert!(result.is_err(), "empty bot_credential should fail");
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn configure_with_missing_intents_fails() {
     let mock_server = MockServer::start().await;
     let mut connector = DiscordConnector::new();
@@ -1306,7 +1306,7 @@ async fn configure_with_missing_intents_fails() {
     assert!(result.is_err(), "missing required intents should fail");
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn invoke_before_handshake_fails() {
     let mock_server = MockServer::start().await;
     let mut connector = DiscordConnector::new();
@@ -1327,7 +1327,7 @@ async fn invoke_before_handshake_fails() {
     assert!(result.is_err(), "invoke before handshake should fail");
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn shutdown_clears_state_reinvoke_fails() {
     let mock_server = MockServer::start().await;
     let mut connector = DiscordConnector::new();
@@ -1354,7 +1354,7 @@ async fn shutdown_clears_state_reinvoke_fails() {
 // Operation Edge-Case Tests
 // ============================================================================
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn edit_message_with_embeds_only_no_content() {
     let mock_server = MockServer::start().await;
     let mut connector = DiscordConnector::new();
@@ -1389,7 +1389,7 @@ async fn edit_message_with_embeds_only_no_content() {
     assert_eq!(result.unwrap()["id"], "msg_001");
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn send_message_with_reply_to() {
     let mock_server = MockServer::start().await;
     let mut connector = DiscordConnector::new();
@@ -1423,7 +1423,7 @@ async fn send_message_with_reply_to() {
     assert_eq!(result.unwrap()["id"], "msg_reply");
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn delete_message_returns_deleted_true() {
     let mock_server = MockServer::start().await;
     let mut connector = DiscordConnector::new();
@@ -1451,7 +1451,7 @@ async fn delete_message_returns_deleted_true() {
     assert_eq!(result["deleted"], true);
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn list_channels_empty_guild() {
     let mock_server = MockServer::start().await;
     let mut connector = DiscordConnector::new();
@@ -1477,7 +1477,7 @@ async fn list_channels_empty_guild() {
     assert_eq!(channels.len(), 0, "empty guild should return empty array");
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn get_guild_with_detailed_fields() {
     let mock_server = MockServer::start().await;
     let mut connector = DiscordConnector::new();
@@ -1510,7 +1510,7 @@ async fn get_guild_with_detailed_fields() {
     assert_eq!(result["owner_id"], "owner_456");
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn unknown_operation_fails() {
     let mock_server = MockServer::start().await;
     let mut connector = DiscordConnector::new();
@@ -1528,7 +1528,7 @@ async fn unknown_operation_fails() {
     assert!(result.is_err(), "unknown operation should fail");
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn send_message_with_embeds_and_content() {
     let mock_server = MockServer::start().await;
     let mut connector = DiscordConnector::new();
@@ -1567,7 +1567,7 @@ async fn send_message_with_embeds_and_content() {
 // Introspection Depth Tests
 // ============================================================================
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn introspect_operations_have_schemas() {
     let connector = DiscordConnector::new();
     let introspection = connector
@@ -1597,7 +1597,7 @@ async fn introspect_operations_have_schemas() {
     }
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn introspect_event_caps() {
     let connector = DiscordConnector::new();
     let introspection = connector
@@ -1611,7 +1611,7 @@ async fn introspect_event_caps() {
     assert_eq!(event_caps["replay"], false);
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn introspect_operation_risk_levels() {
     let connector = DiscordConnector::new();
     let introspection = connector
@@ -1649,7 +1649,7 @@ async fn introspect_operation_risk_levels() {
 // Additional Error Taxonomy Tests
 // ============================================================================
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn api_403_on_send_message() {
     let mock_server = MockServer::start().await;
     let mut connector = DiscordConnector::new();
@@ -1679,7 +1679,7 @@ async fn api_403_on_send_message() {
     assert!(result.is_err(), "403 on send_message should fail");
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn api_404_on_delete_message() {
     let mock_server = MockServer::start().await;
     let mut connector = DiscordConnector::new();
@@ -1709,7 +1709,7 @@ async fn api_404_on_delete_message() {
     assert!(result.is_err(), "404 on delete_message should fail");
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn api_403_on_add_reaction() {
     let mock_server = MockServer::start().await;
     let mut connector = DiscordConnector::new();
@@ -1741,7 +1741,7 @@ async fn api_403_on_add_reaction() {
     assert!(result.is_err(), "403 on add_reaction should fail");
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn api_503_maps_to_retryable_error() {
     let mock_server = MockServer::start().await;
     let mut connector = DiscordConnector::new();
@@ -1772,7 +1772,7 @@ async fn api_503_maps_to_retryable_error() {
 // Subscribe Tests
 // ============================================================================
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn subscribe_confirms_topics() {
     let mock_server = MockServer::start().await;
     let mut connector = DiscordConnector::new();
@@ -1791,7 +1791,7 @@ async fn subscribe_confirms_topics() {
     assert_eq!(result["replay_supported"], false);
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn subscribe_empty_topics() {
     let mock_server = MockServer::start().await;
     let mut connector = DiscordConnector::new();
@@ -1812,7 +1812,7 @@ async fn subscribe_empty_topics() {
 // Simulate Tests
 // ============================================================================
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn simulate_returns_allowed() {
     let mock_server = MockServer::start().await;
     let mut connector = DiscordConnector::new();
@@ -1842,7 +1842,7 @@ async fn simulate_returns_allowed() {
 // Create Thread Additional Tests
 // ============================================================================
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn create_thread_with_auto_archive_duration() {
     let mock_server = MockServer::start().await;
     let mut connector = DiscordConnector::new();
@@ -1877,7 +1877,7 @@ async fn create_thread_with_auto_archive_duration() {
     assert_eq!(result.unwrap()["name"], "Archivable Thread");
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn create_thread_missing_message_id() {
     let mock_server = MockServer::start().await;
     let mut connector = DiscordConnector::new();

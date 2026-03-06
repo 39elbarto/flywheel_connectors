@@ -119,6 +119,13 @@ impl PoolState {
 
     /// Try to consume requests, returns error if exceeded.
     fn try_consume(&mut self, amount: u32) -> Result<(), RateLimitError> {
+        self.check_consume(amount)?;
+        self.count += amount;
+        Ok(())
+    }
+
+    /// Check if requests can be consumed without actually consuming them.
+    fn check_consume(&mut self, amount: u32) -> Result<(), RateLimitError> {
         self.maybe_reset_window();
 
         let effective_limit = self.config.config.requests + self.config.config.burst.unwrap_or(0);
@@ -132,8 +139,13 @@ impl PoolState {
             ));
         }
 
-        self.count += amount;
         Ok(())
+    }
+
+    /// Force consume requests (used for soft limits).
+    fn force_consume(&mut self, amount: u32) {
+        self.maybe_reset_window();
+        self.count += amount;
     }
 
     /// Get milliseconds until window reset.
@@ -236,6 +248,18 @@ impl RateLimitTracker {
         let pool_ids = self.operation_map.get(operation)?;
         let mut pools = self.pools.write().expect("lock poisoned");
 
+        // Phase 1: Check capacity (all-or-nothing)
+        for pool_id in pool_ids {
+            if let Some(pool_state) = pools.get_mut(pool_id) {
+                if let Err(err) = pool_state.check_consume(amount) {
+                    if !err.is_soft() {
+                        return Some(err);
+                    }
+                }
+            }
+        }
+
+        // Phase 2: Consume
         for pool_id in pool_ids {
             if let Some(pool_state) = pools.get_mut(pool_id) {
                 if let Err(err) = pool_state.try_consume(amount) {
@@ -246,8 +270,7 @@ impl RateLimitTracker {
                             "Soft rate limit exceeded: {}",
                             err.message
                         );
-                    } else {
-                        return Some(err);
+                        pool_state.force_consume(amount);
                     }
                 }
             }
@@ -922,7 +945,7 @@ mod tests {
             limits: vec![pool1, pool2],
             tool_pool_map: HashMap::from([(
                 "op".to_string(),
-                vec!["tight".to_string(), "loose".to_string()],
+                vec!["loose".to_string(), "tight".to_string()], // Put loose first to ensure it's not consumed if tight fails
             )]),
         };
         let tracker = RateLimitTracker::from_declarations(&decls);
@@ -930,6 +953,10 @@ mod tests {
         tracker.try_consume("op", 2);
         let err = tracker.try_consume("op", 1).unwrap();
         assert_eq!(err.pool_id, "tight");
+        
+        let status = tracker.pool_status("loose").unwrap();
+        // Since the 3rd operation failed on 'tight', 'loose' should not be consumed for the 3rd time
+        assert_eq!(status.remaining, 98); // 100 - 2, not 97!
     }
 
     // ---- Pool status window_seconds ----

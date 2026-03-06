@@ -141,7 +141,7 @@ fn anthropic_error(error_type: &str, message: &str) -> serde_json::Value {
 // ============================================================================
 
 /// Happy path: anthropic.chat invoke returns text response.
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn chat_invoke_happy_path() {
     let _ctx = AsyncTestContext::for_scenario("anthropic.chat.happy_path");
     let mock = MockApiServer::start().await;
@@ -176,7 +176,7 @@ async fn chat_invoke_happy_path() {
 }
 
 /// Happy path: anthropic.message invoke with multi-turn messages.
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn message_invoke_multi_turn() {
     let _ctx = AsyncTestContext::for_scenario("anthropic.message.multi_turn");
     let mock = MockApiServer::start().await;
@@ -213,7 +213,7 @@ async fn message_invoke_multi_turn() {
 }
 
 /// anthropic.message with system prompt.
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn message_invoke_with_system() {
     let mock = MockApiServer::start().await;
 
@@ -260,7 +260,7 @@ fn build_sse_body(events: &[(&str, serde_json::Value)]) -> String {
 }
 
 /// Streaming: parse complete SSE chunks.
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn streaming_sse_chunk_parsing() {
     let _ctx = AsyncTestContext::for_scenario("anthropic.stream.chunk_parsing");
     let mock_server = MockServer::start().await;
@@ -361,7 +361,7 @@ async fn streaming_sse_chunk_parsing() {
 }
 
 /// Streaming: SSE error mid-stream.
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn streaming_sse_error_mid_stream() {
     let _ctx = AsyncTestContext::for_scenario("anthropic.stream.error_mid_stream");
     let mock_server = MockServer::start().await;
@@ -437,7 +437,7 @@ async fn streaming_sse_error_mid_stream() {
 }
 
 /// Streaming: SSE ping keepalive events are parsed.
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn streaming_sse_ping_keepalive() {
     let mock_server = MockServer::start().await;
 
@@ -504,7 +504,7 @@ async fn streaming_sse_ping_keepalive() {
 // ============================================================================
 
 /// Tool use: model requests tool call and response includes `tool_use` content.
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn tool_use_invoke_shape() {
     let _ctx = AsyncTestContext::for_scenario("anthropic.tool_use.shape");
     let mock = MockApiServer::start().await;
@@ -559,7 +559,7 @@ async fn tool_use_invoke_shape() {
 }
 
 /// Tool use: streaming response with tool use block.
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn tool_use_streaming_shape() {
     let _ctx = AsyncTestContext::for_scenario("anthropic.tool_use.streaming");
     let mock_server = MockServer::start().await;
@@ -698,7 +698,7 @@ async fn tool_use_streaming_shape() {
 // ============================================================================
 
 /// 401 Unauthorized maps to `FcpError::Unauthorized`.
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn error_401_maps_to_unauthorized() {
     let _ctx = AsyncTestContext::for_scenario("anthropic.error.401");
     let mock = MockApiServer::start().await;
@@ -732,7 +732,7 @@ async fn error_401_maps_to_unauthorized() {
 
 /// 429 Rate Limited maps to `FcpError::RateLimited`.
 /// Uses client directly with minimal retry config to avoid slow backoff.
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn error_429_maps_to_rate_limited() {
     let _ctx = AsyncTestContext::for_scenario("anthropic.error.429");
     let mock_server = MockServer::start().await;
@@ -773,7 +773,7 @@ async fn error_429_maps_to_rate_limited() {
 
 /// 529 Overloaded maps to `FcpError::External` with retryable=true.
 /// Uses client directly with minimal retry config to avoid slow backoff.
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn error_529_maps_to_external_retryable() {
     let _ctx = AsyncTestContext::for_scenario("anthropic.error.529");
     let mock_server = MockServer::start().await;
@@ -820,7 +820,7 @@ async fn error_529_maps_to_external_retryable() {
 
 /// 500 Server Error maps to `FcpError::External`.
 /// Uses client directly with minimal retry config.
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn error_500_maps_to_external() {
     let mock_server = MockServer::start().await;
 
@@ -849,7 +849,7 @@ async fn error_500_maps_to_external() {
 }
 
 /// 400 with `context_length_exceeded` maps to `InvalidRequest`.
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn error_context_length_maps_to_invalid_request() {
     let mock = MockApiServer::start().await;
 
@@ -893,7 +893,7 @@ async fn error_context_length_maps_to_invalid_request() {
 // ============================================================================
 
 /// Usage metrics accumulate across multiple invocations.
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn usage_metrics_accumulate() {
     let _ctx = AsyncTestContext::for_scenario("anthropic.usage.accumulate");
     let mock_server = MockServer::start().await;
@@ -950,7 +950,7 @@ async fn usage_metrics_accumulate() {
 }
 
 /// Usage cost is model-dependent (not hard-coded).
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn usage_cost_is_model_dependent() {
     let mock_server = MockServer::start().await;
 
@@ -1007,7 +1007,7 @@ async fn usage_cost_is_model_dependent() {
 // ============================================================================
 
 /// Invoke without `capability_token` fails.
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn capability_missing_token_fails() {
     let _ctx = AsyncTestContext::for_scenario("anthropic.capability.missing_token");
     let mock = MockApiServer::start().await;
@@ -1031,7 +1031,7 @@ async fn capability_missing_token_fails() {
 }
 
 /// Invoke before handshake fails (no verifier).
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn capability_no_handshake_fails() {
     let _ctx = AsyncTestContext::for_scenario("anthropic.capability.no_handshake");
     let mock = MockApiServer::start().await;
@@ -1059,7 +1059,7 @@ async fn capability_no_handshake_fails() {
 }
 
 /// Invoke before configure fails (no client).
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn capability_no_configure_fails() {
     let _ctx = AsyncTestContext::for_scenario("anthropic.capability.no_configure");
 
@@ -1083,7 +1083,7 @@ async fn capability_no_configure_fails() {
 }
 
 /// Invoke with wrong capability (signed for different operation) fails.
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn capability_wrong_operation_fails() {
     let _ctx = AsyncTestContext::for_scenario("anthropic.capability.wrong_op");
     let mock = MockApiServer::start().await;
@@ -1119,7 +1119,7 @@ async fn capability_wrong_operation_fails() {
 }
 
 /// Unknown operation fails with `OperationNotGranted`.
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn capability_unknown_operation_fails() {
     let mock = MockApiServer::start().await;
 
@@ -1148,7 +1148,7 @@ async fn capability_unknown_operation_fails() {
 // ============================================================================
 
 /// Health check before configure reports `not_configured`.
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn lifecycle_health_before_configure() {
     let connector = AnthropicConnector::new();
     let result = connector
@@ -1159,7 +1159,7 @@ async fn lifecycle_health_before_configure() {
 }
 
 /// Health check after configure reports healthy.
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn lifecycle_health_after_configure() {
     let mock = MockApiServer::start().await;
     let mut connector = AnthropicConnector::new();
@@ -1173,7 +1173,7 @@ async fn lifecycle_health_after_configure() {
 }
 
 /// Handshake returns accepted with capabilities granted.
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn lifecycle_handshake_grants_capabilities() {
     let mut connector = AnthropicConnector::new();
     let signing_key = Ed25519SigningKey::generate();
@@ -1197,7 +1197,7 @@ async fn lifecycle_handshake_grants_capabilities() {
 }
 
 /// Shutdown returns clean status.
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn lifecycle_shutdown_clean() {
     let connector = AnthropicConnector::new();
     let result = connector
@@ -1208,7 +1208,7 @@ async fn lifecycle_shutdown_clean() {
 }
 
 /// Introspect exposes expected operations.
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn lifecycle_introspect_operations() {
     let connector = AnthropicConnector::new();
     let result = connector
@@ -1243,7 +1243,7 @@ async fn lifecycle_introspect_operations() {
 // ============================================================================
 
 /// Empty messages array fails with clear error.
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn validation_empty_messages_fails() {
     let mock = MockApiServer::start().await;
     let mut connector = AnthropicConnector::new();
@@ -1273,7 +1273,7 @@ async fn validation_empty_messages_fails() {
 }
 
 /// Unknown model name fails.
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn validation_unknown_model_fails() {
     let mock = MockApiServer::start().await;
     let mut connector = AnthropicConnector::new();
@@ -1300,7 +1300,7 @@ async fn validation_unknown_model_fails() {
 }
 
 /// Missing required message field in chat invoke fails.
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn validation_chat_missing_message_fails() {
     let mock = MockApiServer::start().await;
     let mut connector = AnthropicConnector::new();
@@ -1330,7 +1330,7 @@ async fn validation_chat_missing_message_fails() {
 
 /// Error counters increment on failures.
 /// Uses 401 (non-retryable) to avoid slow retry backoff.
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn metrics_error_counter_increments() {
     let mock = MockApiServer::start().await;
 
@@ -1371,7 +1371,7 @@ async fn metrics_error_counter_increments() {
 // ============================================================================
 
 /// Provenance: chat invoke includes provenance/taint metadata.
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn chat_invoke_provenance_metadata() {
     let _ctx = AsyncTestContext::for_scenario("anthropic.chat.provenance");
     let mock = MockApiServer::start().await;
@@ -1415,7 +1415,7 @@ async fn chat_invoke_provenance_metadata() {
 }
 
 /// Provenance: message invoke includes provenance/taint metadata.
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn message_invoke_provenance_metadata() {
     let _ctx = AsyncTestContext::for_scenario("anthropic.message.provenance");
     let mock = MockApiServer::start().await;
@@ -1462,7 +1462,7 @@ async fn message_invoke_provenance_metadata() {
 // ============================================================================
 
 /// Streaming via `handle_invoke`: message.stream operation assembles full response with provenance.
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn message_stream_invoke_full_response() {
     let _ctx = AsyncTestContext::for_scenario("anthropic.message.stream.invoke");
     let mock_server = MockServer::start().await;
@@ -1574,7 +1574,7 @@ async fn message_stream_invoke_full_response() {
 // ============================================================================
 
 /// 403 Forbidden maps to FcpError::External (not Unauthorized).
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn error_403_maps_to_external() {
     let mock_server = MockServer::start().await;
 
@@ -1612,7 +1612,7 @@ async fn error_403_maps_to_external() {
 }
 
 /// 404 Not Found maps to FcpError::External.
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn error_404_maps_to_external() {
     let mock_server = MockServer::start().await;
 
@@ -1648,7 +1648,7 @@ async fn error_404_maps_to_external() {
 }
 
 /// 502 Bad Gateway maps to retryable FcpError::External.
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn error_502_maps_to_retryable_external() {
     let mock_server = MockServer::start().await;
 
@@ -1683,7 +1683,7 @@ async fn error_502_maps_to_retryable_external() {
 }
 
 /// Non-JSON error response body is handled gracefully.
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn error_non_json_response_body() {
     let mock_server = MockServer::start().await;
 
@@ -1717,7 +1717,7 @@ async fn error_non_json_response_body() {
 }
 
 /// 529 Overloaded via full connector invoke path.
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn error_529_via_connector_invoke() {
     let mock = MockApiServer::start().await;
 
@@ -1762,7 +1762,7 @@ async fn error_529_via_connector_invoke() {
 // ============================================================================
 
 /// Missing messages field entirely in anthropic.message fails.
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn validation_message_missing_messages_field() {
     let mock = MockApiServer::start().await;
     let mut connector = AnthropicConnector::new();
@@ -1792,7 +1792,7 @@ async fn validation_message_missing_messages_field() {
 }
 
 /// Empty message string in chat invoke fails at API level.
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn validation_chat_empty_message_string() {
     let mock = MockApiServer::start().await;
 
@@ -1831,7 +1831,7 @@ async fn validation_chat_empty_message_string() {
 }
 
 /// Missing operation field in invoke request fails.
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn validation_missing_operation_field() {
     let mock = MockApiServer::start().await;
     let mut connector = AnthropicConnector::new();
@@ -1859,7 +1859,7 @@ async fn validation_missing_operation_field() {
 }
 
 /// Empty messages array in message.stream fails.
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn validation_stream_empty_messages_fails() {
     let mock = MockApiServer::start().await;
     let mut connector = AnthropicConnector::new();
@@ -1883,7 +1883,7 @@ async fn validation_stream_empty_messages_fails() {
 }
 
 /// Unknown model in message.stream fails.
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn validation_stream_unknown_model_fails() {
     let mock = MockApiServer::start().await;
     let mut connector = AnthropicConnector::new();
@@ -1914,7 +1914,7 @@ async fn validation_stream_unknown_model_fails() {
 // ============================================================================
 
 /// Configure with credential_id mode creates secretless client.
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn config_credential_id_mode() {
     let mut connector = AnthropicConnector::new();
     let cred_uuid = uuid::Uuid::new_v4().to_string();
@@ -1939,7 +1939,7 @@ async fn config_credential_id_mode() {
 }
 
 /// Configure with both api_key and credential_id is rejected.
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn config_both_auth_modes_rejected() {
     let mut connector = AnthropicConnector::new();
     let cred_uuid = uuid::Uuid::new_v4().to_string();
@@ -1964,7 +1964,7 @@ async fn config_both_auth_modes_rejected() {
 }
 
 /// Configure with no auth at all is rejected.
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn config_no_auth_rejected() {
     let mut connector = AnthropicConnector::new();
     let err = connector
@@ -1984,7 +1984,7 @@ async fn config_no_auth_rejected() {
 }
 
 /// Configure with custom base_url is accepted and reflected.
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn config_custom_base_url() {
     let mut connector = AnthropicConnector::new();
     connector
@@ -2000,7 +2000,7 @@ async fn config_custom_base_url() {
 }
 
 /// Configure with whitespace-only api_key is rejected (treated as empty).
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn config_whitespace_api_key_rejected() {
     let mut connector = AnthropicConnector::new();
     let err = connector
@@ -2015,7 +2015,7 @@ async fn config_whitespace_api_key_rejected() {
 }
 
 /// Configure with invalid credential_id format is rejected.
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn config_invalid_credential_id_format() {
     let mut connector = AnthropicConnector::new();
     let err = connector
@@ -2039,7 +2039,7 @@ async fn config_invalid_credential_id_format() {
 // ============================================================================
 
 /// Doctor report before configure is unhealthy.
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn doctor_before_configure_is_unhealthy() {
     let connector = AnthropicConnector::new();
     let result = connector.handle_doctor().await.unwrap();
@@ -2053,7 +2053,7 @@ async fn doctor_before_configure_is_unhealthy() {
 }
 
 /// Doctor report after configure with api_key is healthy.
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn doctor_after_configure_healthy() {
     let mock = MockApiServer::start().await;
     let mut connector = AnthropicConnector::new();
@@ -2076,7 +2076,7 @@ async fn doctor_after_configure_healthy() {
 }
 
 /// Self-check before configure returns degraded.
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn self_check_before_configure() {
     let connector = AnthropicConnector::new();
     let result = connector.handle_self_check().await.unwrap();
@@ -2093,7 +2093,7 @@ async fn self_check_before_configure() {
 }
 
 /// Self-check with credential_id returns degraded (cannot validate directly).
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn self_check_credential_id_degraded() {
     let mut connector = AnthropicConnector::new();
     let cred_uuid = uuid::Uuid::new_v4().to_string();
@@ -2107,7 +2107,7 @@ async fn self_check_credential_id_degraded() {
 }
 
 /// Self-check with valid API key and healthy API returns ok.
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn self_check_healthy_api_returns_ok() {
     let mock_server = MockServer::start().await;
 
@@ -2139,7 +2139,7 @@ async fn self_check_healthy_api_returns_ok() {
 }
 
 /// Self-check with failing API returns failed.
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn self_check_failing_api_returns_failed() {
     let mock_server = MockServer::start().await;
 
@@ -2166,7 +2166,7 @@ async fn self_check_failing_api_returns_failed() {
 }
 
 /// Shutdown then re-invoke works (connector is stateless after shutdown).
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn lifecycle_shutdown_then_reinvoke() {
     let mock = MockApiServer::start().await;
 
@@ -2199,7 +2199,7 @@ async fn lifecycle_shutdown_then_reinvoke() {
 }
 
 /// Health metrics show correct counts after multiple operations.
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn health_metrics_after_operations() {
     let mock = MockApiServer::start().await;
 
@@ -2240,7 +2240,7 @@ async fn health_metrics_after_operations() {
 // ============================================================================
 
 /// Chat with Opus 4.5 model works and tracks higher cost.
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn chat_opus_model_higher_cost() {
     let mock = MockApiServer::start().await;
 
@@ -2281,7 +2281,7 @@ async fn chat_opus_model_higher_cost() {
 }
 
 /// Chat with Claude 3.5 Sonnet model works.
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn chat_claude35_sonnet_model() {
     let mock = MockApiServer::start().await;
 
@@ -2321,7 +2321,7 @@ async fn chat_claude35_sonnet_model() {
 }
 
 /// Message with temperature=0 uses zero temperature.
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn message_with_zero_temperature() {
     let mock = MockApiServer::start().await;
 
@@ -2356,7 +2356,7 @@ async fn message_with_zero_temperature() {
 // ============================================================================
 
 /// Response with empty content array still returns successfully.
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn message_empty_content_response() {
     let mock = MockApiServer::start().await;
 
@@ -2398,7 +2398,7 @@ async fn message_empty_content_response() {
 }
 
 /// Token counters accumulate across the client correctly.
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn client_token_counter_accumulation() {
     let mock_server = MockServer::start().await;
 
@@ -2440,7 +2440,7 @@ async fn client_token_counter_accumulation() {
 }
 
 /// Simulate returns allowed for all operations.
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn simulate_returns_allowed() {
     let connector = AnthropicConnector::new();
     let result = connector
@@ -2459,7 +2459,7 @@ async fn simulate_returns_allowed() {
 }
 
 /// Introspect schema has required fields for all operations.
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn introspect_schema_required_fields() {
     let connector = AnthropicConnector::new();
     let result = connector.handle_introspect().await.unwrap();
@@ -2501,7 +2501,7 @@ async fn introspect_schema_required_fields() {
 }
 
 /// get_usage operation returns correct shape with no prior calls.
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn get_usage_initial_state() {
     let mock = MockApiServer::start().await;
     let mut connector = AnthropicConnector::new();
@@ -2529,7 +2529,7 @@ async fn get_usage_initial_state() {
 // ============================================================================
 
 /// Streaming with tool use via connector-level invoke.
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn stream_tool_use_via_connector_invoke() {
     let mock_server = MockServer::start().await;
 
@@ -2630,7 +2630,7 @@ async fn stream_tool_use_via_connector_invoke() {
 }
 
 /// Streaming error via connector invoke returns FcpError::External.
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn stream_error_via_connector_invoke() {
     let mock_server = MockServer::start().await;
 
@@ -2695,7 +2695,7 @@ async fn stream_error_via_connector_invoke() {
 }
 
 /// Streaming with 401 pre-stream error returns proper FcpError.
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn stream_pre_stream_auth_error() {
     let mock_server = MockServer::start().await;
 

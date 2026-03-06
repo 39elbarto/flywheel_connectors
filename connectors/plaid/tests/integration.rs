@@ -71,7 +71,7 @@ async fn setup_configure(connector: &mut PlaidConnector, base_url: &str) {
 // ============================================================================
 
 /// Parse `link_token_create` response correctly.
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn parse_link_token_create_response() {
     let mock = MockApiServer::start().await;
     Mock::given(method("POST"))
@@ -103,7 +103,7 @@ async fn parse_link_token_create_response() {
 }
 
 /// Parse `token_exchange` response correctly.
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn parse_token_exchange_response() {
     let mock = MockApiServer::start().await;
     Mock::given(method("POST"))
@@ -126,7 +126,7 @@ async fn parse_token_exchange_response() {
 }
 
 /// Parse `accounts_get` response with account details.
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn parse_accounts_get_response() {
     let mock = MockApiServer::start().await;
     Mock::given(method("POST"))
@@ -178,7 +178,7 @@ async fn parse_accounts_get_response() {
 }
 
 /// Parse `transactions_sync` response with cursor and transactions.
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn parse_transactions_sync_response() {
     let mock = MockApiServer::start().await;
     Mock::given(method("POST"))
@@ -226,7 +226,7 @@ async fn parse_transactions_sync_response() {
 }
 
 /// Parse `accounts_balance_get` response.
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn parse_accounts_balance_response() {
     let mock = MockApiServer::start().await;
     Mock::given(method("POST"))
@@ -269,7 +269,7 @@ async fn parse_accounts_balance_response() {
 // ============================================================================
 
 /// 401 Unauthorized -> `FcpError::Unauthorized`.
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn error_401_maps_to_unauthorized() {
     let mock = MockApiServer::start().await;
     Mock::given(method("POST"))
@@ -299,7 +299,7 @@ async fn error_401_maps_to_unauthorized() {
 }
 
 /// 403 Forbidden -> `FcpError::Unauthorized`.
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn error_403_maps_to_unauthorized() {
     let mock = MockApiServer::start().await;
     Mock::given(method("POST"))
@@ -329,7 +329,7 @@ async fn error_403_maps_to_unauthorized() {
 }
 
 /// 429 Too Many Requests -> `FcpError::RateLimited`.
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn error_429_maps_to_rate_limited() {
     let mock = MockApiServer::start().await;
     Mock::given(method("POST"))
@@ -355,7 +355,7 @@ async fn error_429_maps_to_rate_limited() {
 }
 
 /// 500 Server Error -> `FcpError::External` (retryable).
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn error_500_maps_to_external_retryable() {
     let mock = MockApiServer::start().await;
     Mock::given(method("POST"))
@@ -402,7 +402,7 @@ fn error_invalid_config_maps_to_internal() {
 // ============================================================================
 
 /// `client_id` must not appear in error messages produced by the connector.
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn client_id_not_in_error_messages() {
     let mock = MockApiServer::start().await;
     Mock::given(method("POST"))
@@ -428,7 +428,7 @@ async fn client_id_not_in_error_messages() {
 }
 
 /// `secret` must not appear in error messages produced by the connector.
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn secret_not_in_error_messages() {
     let mock = MockApiServer::start().await;
     Mock::given(method("POST"))
@@ -454,7 +454,7 @@ async fn secret_not_in_error_messages() {
 }
 
 /// Access token must not appear in connector invoke error messages.
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn access_token_not_in_invoke_errors() {
     let mock = MockApiServer::start().await;
     Mock::given(method("POST"))
@@ -492,7 +492,7 @@ async fn access_token_not_in_invoke_errors() {
 // ============================================================================
 
 /// Cursor advances from initial (empty) to `next_cursor`.
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn transactions_sync_cursor_advances() {
     let mock = MockApiServer::start().await;
     Mock::given(method("POST"))
@@ -533,7 +533,7 @@ async fn transactions_sync_cursor_advances() {
 }
 
 /// Pagination: `has_more=true` signals more pages to fetch.
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn transactions_sync_has_more_pagination() {
     let mock = MockApiServer::start().await;
     Mock::given(method("POST"))
@@ -590,7 +590,7 @@ async fn transactions_sync_has_more_pagination() {
 // ============================================================================
 
 /// Dispatch `accounts_get` through the full invoke pipeline.
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn dispatch_accounts_get_through_invoke() {
     let mock = MockApiServer::start().await;
     Mock::given(method("POST"))
@@ -638,7 +638,7 @@ async fn dispatch_accounts_get_through_invoke() {
 }
 
 /// Dispatch `transactions_sync` through the full invoke pipeline.
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn dispatch_transactions_sync_through_invoke() {
     let mock = MockApiServer::start().await;
     Mock::given(method("POST"))
@@ -689,7 +689,7 @@ async fn dispatch_transactions_sync_through_invoke() {
 }
 
 /// Dispatch `link_token_create` through the full invoke pipeline.
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn dispatch_link_token_create_through_invoke() {
     let mock = MockApiServer::start().await;
     Mock::given(method("POST"))
@@ -728,7 +728,7 @@ async fn dispatch_link_token_create_through_invoke() {
 // ============================================================================
 
 /// Parse `auth_get` response with ACH routing numbers.
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn parse_auth_get_response() {
     let mock = MockApiServer::start().await;
     Mock::given(method("POST"))
@@ -778,7 +778,7 @@ async fn parse_auth_get_response() {
 }
 
 /// Parse `auth_get` response with empty routing numbers.
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn parse_auth_get_empty_numbers() {
     let mock = MockApiServer::start().await;
     Mock::given(method("POST"))
@@ -806,7 +806,7 @@ async fn parse_auth_get_empty_numbers() {
 }
 
 /// Parse `identity_get` response with PII.
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn parse_identity_get_response() {
     let mock = MockApiServer::start().await;
     Mock::given(method("POST"))
@@ -846,7 +846,7 @@ async fn parse_identity_get_response() {
 }
 
 /// Parse `identity_get` with empty accounts.
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn parse_identity_get_empty_accounts() {
     let mock = MockApiServer::start().await;
     Mock::given(method("POST"))
@@ -866,7 +866,7 @@ async fn parse_identity_get_empty_accounts() {
 }
 
 /// Parse `investments_holdings_get` response with holdings and securities.
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn parse_investments_holdings_get_response() {
     let mock = MockApiServer::start().await;
     Mock::given(method("POST"))
@@ -927,7 +927,7 @@ async fn parse_investments_holdings_get_response() {
 }
 
 /// Parse `investments_holdings_get` with empty portfolio.
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn parse_investments_holdings_get_empty() {
     let mock = MockApiServer::start().await;
     Mock::given(method("POST"))
@@ -953,7 +953,7 @@ async fn parse_investments_holdings_get_empty() {
 }
 
 /// Parse `liabilities_get` response with credit cards, student loans, and mortgages.
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn parse_liabilities_get_response() {
     let mock = MockApiServer::start().await;
     Mock::given(method("POST"))
@@ -1014,7 +1014,7 @@ async fn parse_liabilities_get_response() {
 }
 
 /// Parse `liabilities_get` with empty liabilities.
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn parse_liabilities_get_empty() {
     let mock = MockApiServer::start().await;
     Mock::given(method("POST"))
@@ -1041,7 +1041,7 @@ async fn parse_liabilities_get_empty() {
 }
 
 /// Parse `transactions_get` response (legacy endpoint).
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn parse_transactions_get_response() {
     let mock = MockApiServer::start().await;
     Mock::given(method("POST"))
@@ -1094,7 +1094,7 @@ async fn parse_transactions_get_response() {
 }
 
 /// Parse `transactions_get` with pagination options.
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn parse_transactions_get_with_options() {
     let mock = MockApiServer::start().await;
     Mock::given(method("POST"))
@@ -1125,7 +1125,7 @@ async fn parse_transactions_get_with_options() {
 // ============================================================================
 
 /// Dispatch `auth_get` through the full invoke pipeline.
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn dispatch_auth_get_through_invoke() {
     let mock = MockApiServer::start().await;
     Mock::given(method("POST"))
@@ -1176,7 +1176,7 @@ async fn dispatch_auth_get_through_invoke() {
 }
 
 /// Dispatch `identity_get` through the full invoke pipeline.
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn dispatch_identity_get_through_invoke() {
     let mock = MockApiServer::start().await;
     Mock::given(method("POST"))
@@ -1214,7 +1214,7 @@ async fn dispatch_identity_get_through_invoke() {
 }
 
 /// Dispatch `investments_holdings_get` through the full invoke pipeline.
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn dispatch_investments_holdings_get_through_invoke() {
     let mock = MockApiServer::start().await;
     Mock::given(method("POST"))
@@ -1278,7 +1278,7 @@ async fn dispatch_investments_holdings_get_through_invoke() {
 }
 
 /// Dispatch `liabilities_get` through the full invoke pipeline.
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn dispatch_liabilities_get_through_invoke() {
     let mock = MockApiServer::start().await;
     Mock::given(method("POST"))
@@ -1328,7 +1328,7 @@ async fn dispatch_liabilities_get_through_invoke() {
 }
 
 /// Dispatch `transactions_get` through the full invoke pipeline.
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn dispatch_transactions_get_through_invoke() {
     let mock = MockApiServer::start().await;
     Mock::given(method("POST"))
@@ -1376,7 +1376,7 @@ async fn dispatch_transactions_get_through_invoke() {
 }
 
 /// Dispatch `accounts_balance_get` through the full invoke pipeline.
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn dispatch_accounts_balance_get_through_invoke() {
     let mock = MockApiServer::start().await;
     Mock::given(method("POST"))
@@ -1421,7 +1421,7 @@ async fn dispatch_accounts_balance_get_through_invoke() {
 }
 
 /// Dispatch `token_exchange` through the full invoke pipeline.
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn dispatch_token_exchange_through_invoke() {
     let mock = MockApiServer::start().await;
     Mock::given(method("POST"))
@@ -1456,7 +1456,7 @@ async fn dispatch_token_exchange_through_invoke() {
 // ============================================================================
 
 /// Error 401 on auth_get maps to Unauthorized.
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn error_401_on_auth_get() {
     let mock = MockApiServer::start().await;
     Mock::given(method("POST"))
@@ -1479,7 +1479,7 @@ async fn error_401_on_auth_get() {
 }
 
 /// Error 401 on identity_get maps to Unauthorized.
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn error_401_on_identity_get() {
     let mock = MockApiServer::start().await;
     Mock::given(method("POST"))
@@ -1505,7 +1505,7 @@ async fn error_401_on_identity_get() {
 }
 
 /// Error 400 on investments_holdings_get maps to External.
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn error_400_on_investments_holdings_get() {
     let mock = MockApiServer::start().await;
     Mock::given(method("POST"))
@@ -1540,7 +1540,7 @@ async fn error_400_on_investments_holdings_get() {
 }
 
 /// Error 500 on liabilities_get is retryable.
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn error_500_on_liabilities_get() {
     let mock = MockApiServer::start().await;
     Mock::given(method("POST"))
@@ -1562,7 +1562,7 @@ async fn error_500_on_liabilities_get() {
 }
 
 /// Error 429 on transactions_get maps to RateLimited.
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn error_429_on_transactions_get() {
     let mock = MockApiServer::start().await;
     Mock::given(method("POST"))
@@ -1588,7 +1588,7 @@ async fn error_429_on_transactions_get() {
 // ============================================================================
 
 /// Missing client_id in configure yields InvalidRequest.
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn configure_missing_client_id() {
     let mut connector = PlaidConnector::new();
     let result = connector
@@ -1606,7 +1606,7 @@ async fn configure_missing_client_id() {
 }
 
 /// Missing both secret and credential_id in configure yields error.
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn configure_missing_auth() {
     let mut connector = PlaidConnector::new();
     let result = connector
@@ -1624,7 +1624,7 @@ async fn configure_missing_auth() {
 }
 
 /// Empty client_id rejected.
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn configure_empty_client_id() {
     let mut connector = PlaidConnector::new();
     let result = connector
@@ -1643,7 +1643,7 @@ async fn configure_empty_client_id() {
 }
 
 /// Empty secret with no credential_id rejected.
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn configure_empty_secret_no_credential() {
     let mut connector = PlaidConnector::new();
     let result = connector
@@ -1662,7 +1662,7 @@ async fn configure_empty_secret_no_credential() {
 }
 
 /// Invalid environment string rejected.
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn configure_invalid_environment() {
     let mut connector = PlaidConnector::new();
     let result = connector
@@ -1682,7 +1682,7 @@ async fn configure_invalid_environment() {
 }
 
 /// Both secret and credential_id provided yields error.
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn configure_both_auth_modes_rejected() {
     let mut connector = PlaidConnector::new();
     let result = connector
@@ -1702,7 +1702,7 @@ async fn configure_both_auth_modes_rejected() {
 }
 
 /// credential_id auth mode configures but client is None.
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn configure_credential_id_mode() {
     let mut connector = PlaidConnector::new();
     let result = connector
@@ -1717,7 +1717,7 @@ async fn configure_credential_id_mode() {
 }
 
 /// Development environment accepted.
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn configure_development_environment() {
     let mut connector = PlaidConnector::new();
     let result = connector
@@ -1733,7 +1733,7 @@ async fn configure_development_environment() {
 }
 
 /// Production environment accepted.
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn configure_production_environment() {
     let mut connector = PlaidConnector::new();
     let result = connector
@@ -1753,7 +1753,7 @@ async fn configure_production_environment() {
 // ============================================================================
 
 /// Missing access_token on auth_get yields InvalidRequest.
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn invoke_auth_get_missing_access_token() {
     let mock = MockApiServer::start().await;
     let mut connector = PlaidConnector::new();
@@ -1778,7 +1778,7 @@ async fn invoke_auth_get_missing_access_token() {
 }
 
 /// Missing access_token on identity_get yields InvalidRequest.
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn invoke_identity_get_missing_access_token() {
     let mock = MockApiServer::start().await;
     let mut connector = PlaidConnector::new();
@@ -1803,7 +1803,7 @@ async fn invoke_identity_get_missing_access_token() {
 }
 
 /// Missing access_token on investments_holdings_get yields InvalidRequest.
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn invoke_investments_holdings_get_missing_access_token() {
     let mock = MockApiServer::start().await;
     let mut connector = PlaidConnector::new();
@@ -1829,7 +1829,7 @@ async fn invoke_investments_holdings_get_missing_access_token() {
 }
 
 /// Missing access_token on liabilities_get yields InvalidRequest.
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn invoke_liabilities_get_missing_access_token() {
     let mock = MockApiServer::start().await;
     let mut connector = PlaidConnector::new();
@@ -1854,7 +1854,7 @@ async fn invoke_liabilities_get_missing_access_token() {
 }
 
 /// Missing start_date on transactions_get yields InvalidRequest.
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn invoke_transactions_get_missing_start_date() {
     let mock = MockApiServer::start().await;
     let mut connector = PlaidConnector::new();
@@ -1879,7 +1879,7 @@ async fn invoke_transactions_get_missing_start_date() {
 }
 
 /// Missing end_date on transactions_get yields InvalidRequest.
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn invoke_transactions_get_missing_end_date() {
     let mock = MockApiServer::start().await;
     let mut connector = PlaidConnector::new();
@@ -1904,7 +1904,7 @@ async fn invoke_transactions_get_missing_end_date() {
 }
 
 /// Missing client_name on link_token_create yields InvalidRequest.
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn invoke_link_token_create_missing_client_name() {
     let mock = MockApiServer::start().await;
     let mut connector = PlaidConnector::new();
@@ -1934,7 +1934,7 @@ async fn invoke_link_token_create_missing_client_name() {
 }
 
 /// Missing public_token on token_exchange yields InvalidRequest.
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn invoke_token_exchange_missing_public_token() {
     let mock = MockApiServer::start().await;
     let mut connector = PlaidConnector::new();
@@ -1963,7 +1963,7 @@ async fn invoke_token_exchange_missing_public_token() {
 // ============================================================================
 
 /// Health check before configuration returns not_configured.
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn health_check_not_configured() {
     let connector = PlaidConnector::new();
     let result = connector.handle_health().await.unwrap();
@@ -1971,7 +1971,7 @@ async fn health_check_not_configured() {
 }
 
 /// Health check after configuration returns healthy.
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn health_check_after_configure() {
     let mut connector = PlaidConnector::new();
     connector
@@ -1987,7 +1987,7 @@ async fn health_check_after_configure() {
 }
 
 /// Health check with credential_id mode returns degraded.
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn health_check_credential_id_degraded() {
     let mut connector = PlaidConnector::new();
     connector
@@ -2002,7 +2002,7 @@ async fn health_check_credential_id_degraded() {
 }
 
 /// Doctor before configuration reports unhealthy.
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn doctor_not_configured_is_unhealthy() {
     let connector = PlaidConnector::new();
     let result = connector.handle_doctor().await.unwrap();
@@ -2017,7 +2017,7 @@ async fn doctor_not_configured_is_unhealthy() {
 }
 
 /// Doctor with valid secret mode and passing credentials is healthy.
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn doctor_secret_mode_healthy() {
     let mock = MockApiServer::start().await;
     Mock::given(method("POST"))
@@ -2050,7 +2050,7 @@ async fn doctor_secret_mode_healthy() {
 }
 
 /// Doctor with failing credentials reports unhealthy.
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn doctor_secret_mode_invalid_creds() {
     let mock = MockApiServer::start().await;
     Mock::given(method("POST"))
@@ -2078,7 +2078,7 @@ async fn doctor_secret_mode_invalid_creds() {
 }
 
 /// Introspect returns exactly 10 operations.
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn introspect_returns_all_10_operations() {
     let connector = PlaidConnector::new();
     let result = connector.handle_introspect().await.unwrap();
@@ -2107,7 +2107,7 @@ async fn introspect_returns_all_10_operations() {
 }
 
 /// Introspect operations have required schema fields.
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn introspect_operations_have_schemas() {
     let connector = PlaidConnector::new();
     let result = connector.handle_introspect().await.unwrap();
@@ -2132,7 +2132,7 @@ async fn introspect_operations_have_schemas() {
 }
 
 /// Shutdown returns status shutdown.
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn shutdown_returns_status() {
     let connector = PlaidConnector::new();
     let result = connector.handle_shutdown(json!({})).await.unwrap();
@@ -2140,7 +2140,7 @@ async fn shutdown_returns_status() {
 }
 
 /// Unknown operation yields OperationNotGranted.
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn invoke_unknown_operation() {
     let mock = MockApiServer::start().await;
     let mut connector = PlaidConnector::new();
@@ -2164,7 +2164,7 @@ async fn invoke_unknown_operation() {
 }
 
 /// Invoke without handshake returns NotConfigured.
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn invoke_without_handshake() {
     let mock = MockApiServer::start().await;
     let mut connector = PlaidConnector::new();
@@ -2185,7 +2185,7 @@ async fn invoke_without_handshake() {
 }
 
 /// Reconfiguration: connector can be reconfigured with new credentials.
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn reconfigure_connector() {
     let mut connector = PlaidConnector::new();
 
@@ -2221,7 +2221,7 @@ async fn reconfigure_connector() {
 // ============================================================================
 
 /// Accounts get with multiple accounts.
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn parse_accounts_get_multiple_accounts() {
     let mock = MockApiServer::start().await;
     Mock::given(method("POST"))
@@ -2277,7 +2277,7 @@ async fn parse_accounts_get_multiple_accounts() {
 }
 
 /// Transactions sync with empty lists.
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn transactions_sync_empty_response() {
     let mock = MockApiServer::start().await;
     Mock::given(method("POST"))
@@ -2308,7 +2308,7 @@ async fn transactions_sync_empty_response() {
 }
 
 /// Link token create with custom user object.
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn link_token_create_with_custom_user() {
     let mock = MockApiServer::start().await;
     Mock::given(method("POST"))
@@ -2344,7 +2344,7 @@ async fn link_token_create_with_custom_user() {
 }
 
 /// Error 400 maps to External non-retryable with Plaid error details.
-#[fcp_async_core::runtime::test]
+#[tokio::test]
 async fn error_400_with_plaid_error_body() {
     let mock = MockApiServer::start().await;
     Mock::given(method("POST"))

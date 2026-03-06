@@ -1158,14 +1158,6 @@ impl TwitterConnector {
                     message: "Missing 'text' argument".into(),
                 })?;
 
-        // Validate tweet length (280 characters max)
-        if text.chars().count() > 280 {
-            return Err(FcpError::InvalidRequest {
-                code: 1007,
-                message: "Tweet exceeds 280 character limit".into(),
-            });
-        }
-
         let request = CreateTweetRequest {
             text: Some(text.to_string()),
             ..Default::default()
@@ -1202,14 +1194,6 @@ impl TwitterConnector {
                 code: 1006,
                 message: "Missing 'reply_to' argument".into(),
             })?;
-
-        // Validate tweet length
-        if text.chars().count() > 280 {
-            return Err(FcpError::InvalidRequest {
-                code: 1007,
-                message: "Tweet exceeds 280 character limit".into(),
-            });
-        }
 
         let request = CreateTweetRequest {
             text: Some(text.to_string()),

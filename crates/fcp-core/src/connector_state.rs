@@ -21,11 +21,17 @@
 //! - Fork detection MUST pause connector execution and require resolution
 //! - Snapshots enable compaction of older state objects
 
-use fcp_cbor::{SerializationError, to_canonical_cbor};
+use fcp_cbor::{to_canonical_cbor, SerializationError};
 use serde::{Deserialize, Serialize};
 use std::fmt;
+use thiserror::Error;
+use uuid::Uuid;
 
-use crate::{ConnectorId, InstanceId, ObjectHeader, ObjectId, TailscaleNodeId, ZoneId};
+use crate::{
+    validate_lease, validate_lease_handoff, ComputationCheckpoint, ConnectorId, InstanceId, Lease,
+    LeaseHandoff, LeaseId, LeasePurpose, LeaseTransferValidationError, LeaseValidationError,
+    MigrationCapabilityContext, ObjectHeader, ObjectId, TailscaleNodeId, ZoneId,
+};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Signature Type
@@ -541,6 +547,366 @@ pub fn cursor_state_from_object(
     state_obj: &ConnectorStateObject,
 ) -> Result<CursorState, SerializationError> {
     CursorState::from_cbor(&state_obj.state_cbor)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Computation Migration (NORMATIVE)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Explicit migration state machine for movable computations.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum MigratableComputationState {
+    /// Computation is actively executing on the current holder.
+    Running,
+    /// Computation is quiesced at a checkpoint and may resume locally.
+    Suspended,
+    /// Lease ownership has been transferred but the target has not resumed yet.
+    Transferring {
+        target_holder: TailscaleNodeId,
+        next_lease_id: LeaseId,
+        next_fencing_token: u64,
+    },
+    /// Computation finished successfully.
+    Completed,
+    /// Computation terminated with an unrecoverable failure.
+    Failed,
+}
+
+impl MigratableComputationState {
+    /// Returns true when the computation can no longer resume.
+    #[must_use]
+    pub const fn is_terminal(&self) -> bool {
+        matches!(self, Self::Completed | Self::Failed)
+    }
+}
+
+/// Canonical migration state tracked across suspend, handoff, and resume.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MigratableComputation {
+    /// Stable object identity for the computation itself.
+    pub computation_id: ObjectId,
+    /// Zone boundary the computation is constrained to.
+    pub zone_id: ZoneId,
+    /// Holder that most recently executed the computation.
+    pub current_holder: TailscaleNodeId,
+    /// Explicit migration state machine.
+    pub state: MigratableComputationState,
+    /// Last durable checkpoint object, if one exists.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub checkpoint_object_id: Option<ObjectId>,
+    /// Lease authorizing the current holder.
+    pub execution_lease_id: LeaseId,
+    /// Fencing token tied to the current lease/checkpoint.
+    pub lease_fencing_token: u64,
+    /// Minimal authority binding for safe resumption.
+    pub capability_context: MigrationCapabilityContext,
+}
+
+impl MigratableComputation {
+    /// Create a new running computation with an active execution lease.
+    #[must_use]
+    pub const fn new(
+        computation_id: ObjectId,
+        zone_id: ZoneId,
+        current_holder: TailscaleNodeId,
+        execution_lease_id: LeaseId,
+        lease_fencing_token: u64,
+        capability_context: MigrationCapabilityContext,
+    ) -> Self {
+        Self {
+            computation_id,
+            zone_id,
+            current_holder,
+            state: MigratableComputationState::Running,
+            checkpoint_object_id: None,
+            execution_lease_id,
+            lease_fencing_token,
+            capability_context,
+        }
+    }
+
+    fn validate_checkpoint_binding(
+        &self,
+        checkpoint: &ComputationCheckpoint,
+        checkpoint_object_id: ObjectId,
+    ) -> Result<(), ComputationMigrationError> {
+        let derived_checkpoint_object_id = checkpoint.object_id()?;
+        if derived_checkpoint_object_id != checkpoint_object_id {
+            return Err(ComputationMigrationError::CheckpointObjectMismatch {
+                expected: Some(derived_checkpoint_object_id),
+                got: checkpoint_object_id,
+            });
+        }
+
+        if checkpoint.computation_id != self.computation_id {
+            return Err(ComputationMigrationError::CheckpointComputationMismatch {
+                expected: self.computation_id,
+                got: checkpoint.computation_id,
+            });
+        }
+
+        if checkpoint.zone_id() != &self.zone_id {
+            return Err(ComputationMigrationError::CheckpointZoneMismatch {
+                expected: self.zone_id.clone(),
+                got: checkpoint.zone_id().clone(),
+            });
+        }
+
+        if checkpoint.current_holder != self.current_holder {
+            return Err(ComputationMigrationError::CheckpointHolderMismatch {
+                expected: self.current_holder.clone(),
+                got: checkpoint.current_holder.clone(),
+            });
+        }
+
+        if checkpoint.lease_id != self.execution_lease_id {
+            return Err(ComputationMigrationError::CheckpointLeaseIdMismatch {
+                expected: self.execution_lease_id,
+                got: checkpoint.lease_id,
+            });
+        }
+
+        if checkpoint.lease_fencing_token != self.lease_fencing_token {
+            return Err(ComputationMigrationError::CheckpointFenceMismatch {
+                expected: self.lease_fencing_token,
+                got: checkpoint.lease_fencing_token,
+            });
+        }
+
+        if checkpoint.capability_context.capability_token_jti
+            != self.capability_context.capability_token_jti
+        {
+            return Err(ComputationMigrationError::CapabilityTokenMismatch {
+                expected: self.capability_context.capability_token_jti,
+                got: checkpoint.capability_context.capability_token_jti,
+            });
+        }
+
+        if self
+            .checkpoint_object_id
+            .is_some_and(|expected| expected != checkpoint_object_id)
+        {
+            return Err(ComputationMigrationError::CheckpointObjectMismatch {
+                expected: self.checkpoint_object_id,
+                got: checkpoint_object_id,
+            });
+        }
+
+        Ok(())
+    }
+
+    /// Suspend a running computation onto a durable checkpoint.
+    ///
+    /// # Errors
+    /// Returns a [`ComputationMigrationError`] if the state transition is invalid or the
+    /// checkpoint does not bind to the current computation/lease.
+    pub fn suspend(
+        &mut self,
+        checkpoint: &ComputationCheckpoint,
+        checkpoint_object_id: ObjectId,
+    ) -> Result<(), ComputationMigrationError> {
+        if self.state != MigratableComputationState::Running {
+            return Err(ComputationMigrationError::InvalidStateTransition {
+                state: self.state.clone(),
+                action: "suspend",
+            });
+        }
+
+        self.validate_checkpoint_binding(checkpoint, checkpoint_object_id)?;
+        self.state = MigratableComputationState::Suspended;
+        self.checkpoint_object_id = Some(checkpoint_object_id);
+        self.capability_context = checkpoint.capability_context.clone();
+        self.capability_context.checkpoint_id = Some(checkpoint_object_id);
+        self.capability_context.checkpoint_seq = checkpoint.checkpoint_seq;
+        Ok(())
+    }
+
+    /// Begin a migration handoff after a computation has been suspended.
+    ///
+    /// # Errors
+    /// Returns a [`ComputationMigrationError`] if the computation is not suspended,
+    /// the handoff references the wrong prior lease, or lease handoff validation fails.
+    pub fn begin_transfer(
+        &mut self,
+        active_lease: &Lease,
+        handoff: &LeaseHandoff,
+        now: u64,
+    ) -> Result<(), ComputationMigrationError> {
+        if self.state != MigratableComputationState::Suspended {
+            return Err(ComputationMigrationError::InvalidStateTransition {
+                state: self.state.clone(),
+                action: "begin_transfer",
+            });
+        }
+
+        if handoff.previous_lease_id != self.execution_lease_id {
+            return Err(ComputationMigrationError::UnexpectedPriorLeaseId {
+                expected: self.execution_lease_id,
+                got: handoff.previous_lease_id,
+            });
+        }
+
+        validate_lease_handoff(active_lease, handoff, now)?;
+        self.state = MigratableComputationState::Transferring {
+            target_holder: handoff.to_holder.clone(),
+            next_lease_id: handoff.next_lease_id,
+            next_fencing_token: handoff.next_fencing_token,
+        };
+        Ok(())
+    }
+
+    /// Resume a suspended or transferred computation using a validated lease.
+    ///
+    /// # Errors
+    /// Returns a [`ComputationMigrationError`] if checkpoint bindings fail, the
+    /// computation is in the wrong state, or the lease/holder does not match the
+    /// expected resumption authority.
+    pub fn resume(
+        &mut self,
+        checkpoint: &ComputationCheckpoint,
+        checkpoint_object_id: ObjectId,
+        resumed_lease_id: LeaseId,
+        resumed_lease: &Lease,
+        now: u64,
+    ) -> Result<(), ComputationMigrationError> {
+        self.validate_checkpoint_binding(checkpoint, checkpoint_object_id)?;
+
+        match &self.state {
+            MigratableComputationState::Suspended => {
+                validate_lease(
+                    resumed_lease,
+                    &self.computation_id,
+                    &self.zone_id,
+                    LeasePurpose::ComputationMigration,
+                    self.lease_fencing_token,
+                    now,
+                    0,
+                )?;
+
+                if resumed_lease_id != self.execution_lease_id {
+                    return Err(ComputationMigrationError::ResumeLeaseIdMismatch {
+                        expected: self.execution_lease_id,
+                        got: resumed_lease_id,
+                    });
+                }
+
+                if resumed_lease.holder != self.current_holder {
+                    return Err(ComputationMigrationError::ResumeHolderMismatch {
+                        expected: self.current_holder.clone(),
+                        got: resumed_lease.holder.clone(),
+                    });
+                }
+
+                if resumed_lease.fencing_token() != self.lease_fencing_token {
+                    return Err(ComputationMigrationError::ResumeFenceMismatch {
+                        expected: self.lease_fencing_token,
+                        got: resumed_lease.fencing_token(),
+                    });
+                }
+            }
+            MigratableComputationState::Transferring {
+                target_holder,
+                next_lease_id,
+                next_fencing_token,
+            } => {
+                validate_lease(
+                    resumed_lease,
+                    &self.computation_id,
+                    &self.zone_id,
+                    LeasePurpose::ComputationMigration,
+                    *next_fencing_token,
+                    now,
+                    0,
+                )?;
+
+                if resumed_lease_id != *next_lease_id {
+                    return Err(ComputationMigrationError::ResumeLeaseIdMismatch {
+                        expected: *next_lease_id,
+                        got: resumed_lease_id,
+                    });
+                }
+
+                if resumed_lease.holder != *target_holder {
+                    return Err(ComputationMigrationError::ResumeHolderMismatch {
+                        expected: target_holder.clone(),
+                        got: resumed_lease.holder.clone(),
+                    });
+                }
+
+                if resumed_lease.fencing_token() != *next_fencing_token {
+                    return Err(ComputationMigrationError::ResumeFenceMismatch {
+                        expected: *next_fencing_token,
+                        got: resumed_lease.fencing_token(),
+                    });
+                }
+
+                self.current_holder = target_holder.clone();
+                self.execution_lease_id = *next_lease_id;
+                self.lease_fencing_token = *next_fencing_token;
+            }
+            _ => {
+                return Err(ComputationMigrationError::InvalidStateTransition {
+                    state: self.state.clone(),
+                    action: "resume",
+                })
+            }
+        }
+
+        self.state = MigratableComputationState::Running;
+        self.checkpoint_object_id = Some(checkpoint_object_id);
+        self.capability_context = checkpoint.capability_context.clone();
+        self.capability_context.checkpoint_id = Some(checkpoint_object_id);
+        self.capability_context.checkpoint_seq = checkpoint.checkpoint_seq;
+        Ok(())
+    }
+}
+
+/// Errors produced while advancing the computation migration state machine.
+#[derive(Debug, Error)]
+pub enum ComputationMigrationError {
+    #[error("cannot {action} while computation is in state {state:?}")]
+    InvalidStateTransition {
+        state: MigratableComputationState,
+        action: &'static str,
+    },
+    #[error("checkpoint computation mismatch: expected {expected}, got {got}")]
+    CheckpointComputationMismatch { expected: ObjectId, got: ObjectId },
+    #[error("checkpoint zone mismatch: expected {expected}, got {got}")]
+    CheckpointZoneMismatch { expected: ZoneId, got: ZoneId },
+    #[error("checkpoint holder mismatch: expected {expected:?}, got {got:?}")]
+    CheckpointHolderMismatch {
+        expected: TailscaleNodeId,
+        got: TailscaleNodeId,
+    },
+    #[error("checkpoint lease id mismatch: expected {expected}, got {got}")]
+    CheckpointLeaseIdMismatch { expected: LeaseId, got: LeaseId },
+    #[error("checkpoint fencing token mismatch: expected {expected}, got {got}")]
+    CheckpointFenceMismatch { expected: u64, got: u64 },
+    #[error("capability token mismatch: expected {expected}, got {got}")]
+    CapabilityTokenMismatch { expected: Uuid, got: Uuid },
+    #[error("checkpoint object mismatch: expected {expected:?}, got {got}")]
+    CheckpointObjectMismatch {
+        expected: Option<ObjectId>,
+        got: ObjectId,
+    },
+    #[error("handoff referenced prior lease {got}, expected {expected}")]
+    UnexpectedPriorLeaseId { expected: LeaseId, got: LeaseId },
+    #[error("resume holder mismatch: expected {expected:?}, got {got:?}")]
+    ResumeHolderMismatch {
+        expected: TailscaleNodeId,
+        got: TailscaleNodeId,
+    },
+    #[error("resume lease id mismatch: expected {expected}, got {got}")]
+    ResumeLeaseIdMismatch { expected: LeaseId, got: LeaseId },
+    #[error("resume fencing token mismatch: expected {expected}, got {got}")]
+    ResumeFenceMismatch { expected: u64, got: u64 },
+    #[error(transparent)]
+    CheckpointEncoding(#[from] SerializationError),
+    #[error(transparent)]
+    LeaseValidation(#[from] LeaseValidationError),
+    #[error(transparent)]
+    LeaseTransfer(#[from] LeaseTransferValidationError),
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1084,6 +1450,7 @@ mod tests {
     use crate::{Provenance, TaintLevel};
     use fcp_cbor::SchemaId;
     use semver::Version;
+    use uuid::Uuid;
 
     // ─────────────────────────────────────────────────────────────────────────
     // CrdtType Tests
@@ -1379,6 +1746,97 @@ mod tests {
         ConnectorId::from_static("fcp.test:fork:v1")
     }
 
+    fn test_header() -> ObjectHeader {
+        ObjectHeader {
+            schema: SchemaId::new("fcp.test", "Test", Version::new(1, 0, 0)),
+            zone_id: ZoneId::work(),
+            created_at: 1_700_000_000,
+            provenance: Provenance::new(ZoneId::work()),
+            refs: Vec::new(),
+            foreign_refs: Vec::new(),
+            ttl_secs: None,
+            placement: None,
+        }
+    }
+
+    fn test_node_id(name: &str) -> TailscaleNodeId {
+        TailscaleNodeId::new(name)
+    }
+
+    fn test_migration_context(checkpoint_seq: u64) -> MigrationCapabilityContext {
+        MigrationCapabilityContext {
+            capability_token_jti: Uuid::from_bytes([0xCD; 16]),
+            checkpoint_id: None,
+            checkpoint_seq,
+            audit_event_id: Some(test_object_id("audit-event")),
+        }
+    }
+
+    fn test_computation_checkpoint(
+        holder: &str,
+        lease_id: LeaseId,
+        lease_fencing_token: u64,
+        checkpoint_seq: u64,
+    ) -> ComputationCheckpoint {
+        let computation_id = test_object_id("computation");
+        let mut header = test_header();
+        header.schema = SchemaId::new("fcp.core", "ComputationCheckpoint", Version::new(1, 0, 0));
+        header.refs = vec![computation_id, lease_id];
+
+        ComputationCheckpoint {
+            header,
+            computation_id,
+            current_holder: test_node_id(holder),
+            checkpoint_seq,
+            suspended_at: 1_700_000_050,
+            lease_id,
+            lease_fencing_token,
+            capability_context: test_migration_context(checkpoint_seq),
+            state_cbor: vec![0xAA; 128],
+        }
+    }
+
+    fn test_migration_lease(holder: &str, lease_seq: u64, exp: u64) -> Lease {
+        let computation_id = test_object_id("computation");
+        let mut header = test_header();
+        header.schema = SchemaId::new("fcp.lease", "lease", Version::new(1, 0, 0));
+        header.created_at = 1_000;
+        header.refs = vec![computation_id];
+
+        Lease {
+            header,
+            holder: test_node_id(holder),
+            lease_seq,
+            exp,
+            subject_object_id: computation_id,
+            purpose: LeasePurpose::ComputationMigration,
+            quorum_signatures: crate::SignatureSet::new(),
+        }
+    }
+
+    fn test_migration_handoff(
+        previous_lease_id: LeaseId,
+        next_lease_id: LeaseId,
+        from: &str,
+        to: &str,
+        previous_fencing_token: u64,
+        next_fencing_token: u64,
+    ) -> LeaseHandoff {
+        LeaseHandoff {
+            previous_lease_id,
+            next_lease_id,
+            from_holder: test_node_id(from),
+            to_holder: test_node_id(to),
+            zone_id: ZoneId::work(),
+            subject_object_id: test_object_id("computation"),
+            purpose: LeasePurpose::ComputationMigration,
+            previous_fencing_token,
+            next_fencing_token,
+            transferred_at: 1_500,
+            checkpoint_object_id: Some(test_object_id("checkpoint")),
+        }
+    }
+
     #[test]
     fn fork_detector_no_fork_single_chain() {
         let mut detector = StateForkDetector::new();
@@ -1485,56 +1943,6 @@ mod tests {
         let genesis = test_object_id("genesis");
         let branch_a = test_object_id("branch_a");
         let branch_b = test_object_id("branch_b");
-
-        detector.register(genesis, None, 0, 100);
-        detector.register(branch_a, Some(genesis), 1, 200);
-        detector.register(branch_b, Some(genesis), 1, 150);
-
-        let result = detector.detect_fork(ZoneId::work(), test_connector_id(), 1_700_000_000);
-        let fork = result.fork_event().unwrap();
-
-        // ChooseByLease is not valid for CRDT model
-        let outcome = detector.resolve(
-            fork,
-            ForkResolution::ChooseByLease,
-            &ConnectorStateModel::Crdt {
-                crdt_type: CrdtType::LwwMap,
-            },
-            1_700_000_001,
-        );
-
-        assert!(!outcome.resolved);
-        assert!(outcome.failure_reason.unwrap().contains("not valid"));
-    }
-
-    #[test]
-    fn fork_detector_manual_resolution() {
-        let mut detector = StateForkDetector::new();
-        let genesis = test_object_id("genesis");
-        let branch_a = test_object_id("branch_a");
-        let branch_b = test_object_id("branch_b");
-
-        detector.register(genesis, None, 0, 100);
-        detector.register(branch_a, Some(genesis), 1, 100);
-        detector.register(branch_b, Some(genesis), 1, 100);
-
-        let result = detector.detect_fork(ZoneId::work(), test_connector_id(), 1_700_000_000);
-        let fork = result.fork_event().unwrap();
-
-        // Manually select branch_b as winner
-        let outcome = detector.resolve_manual(fork, branch_b, 1_700_000_001);
-
-        assert!(outcome.resolved);
-        assert_eq!(outcome.winning_head, Some(branch_b));
-        assert_eq!(outcome.strategy, ForkResolution::ManualResolution);
-    }
-
-    #[test]
-    fn fork_detector_manual_resolution_invalid_head() {
-        let mut detector = StateForkDetector::new();
-        let genesis = test_object_id("genesis");
-        let branch_a = test_object_id("branch_a");
-        let branch_b = test_object_id("branch_b");
         let invalid_head = test_object_id("invalid");
 
         detector.register(genesis, None, 0, 100);
@@ -1548,12 +1956,10 @@ mod tests {
         let outcome = detector.resolve_manual(fork, invalid_head, 1_700_000_001);
 
         assert!(!outcome.resolved);
-        assert!(
-            outcome
-                .failure_reason
-                .unwrap()
-                .contains("not one of the fork branches")
-        );
+        assert!(outcome
+            .failure_reason
+            .unwrap()
+            .contains("not one of the fork branches"));
     }
 
     #[test]
@@ -1642,24 +2048,11 @@ mod tests {
         assert!(json.contains("\"type\":\"singleton_writer\""));
 
         let json = serde_json::to_string(&ConnectorStateModel::Crdt {
-            crdt_type: CrdtType::OrSet,
+            crdt_type: CrdtType::LwwMap,
         })
         .unwrap();
         assert!(json.contains("\"type\":\"crdt\""));
-        assert!(json.contains("\"crdt_type\":\"or_set\""));
-    }
-
-    fn test_header() -> ObjectHeader {
-        ObjectHeader {
-            schema: SchemaId::new("fcp.test", "Test", Version::new(1, 0, 0)),
-            zone_id: ZoneId::work(),
-            created_at: 1_700_000_000,
-            provenance: Provenance::new(ZoneId::work()),
-            refs: Vec::new(),
-            foreign_refs: Vec::new(),
-            ttl_secs: None,
-            placement: None,
-        }
+        assert!(json.contains("\"crdt_type\":\"lww_map\""));
     }
 
     #[test]
@@ -1741,269 +2134,166 @@ mod tests {
     }
 
     #[test]
-    fn validate_fencing_success() {
-        let lease_id = test_object_id("lease");
-        let mut header = test_header();
-        header.refs.push(lease_id);
-
-        let state_obj = ConnectorStateObject {
-            header,
-            connector_id: test_connector_id(),
-            instance_id: None,
-            zone_id: ZoneId::work(),
-            prev: None,
-            seq: 1,
-            state_cbor: vec![],
-            updated_at: 1_700_000_000,
-            lease_seq: 5,
-            lease_object_id: lease_id,
-            signature: Signature::zero(),
-        };
-
-        // Valid: now < lease_exp, lease_seq >= current_known_seq, lease in refs
-        let result = validate_singleton_writer_fencing(&state_obj, 5, 1_700_000_100, 1_700_001_000);
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn validate_fencing_lease_expired() {
-        let lease_id = test_object_id("lease");
-        let mut header = test_header();
-        header.refs.push(lease_id);
-
-        let state_obj = ConnectorStateObject {
-            header,
-            connector_id: test_connector_id(),
-            instance_id: None,
-            zone_id: ZoneId::work(),
-            prev: None,
-            seq: 1,
-            state_cbor: vec![],
-            updated_at: 1_700_000_000,
-            lease_seq: 5,
-            lease_object_id: lease_id,
-            signature: Signature::zero(),
-        };
-
-        let result = validate_singleton_writer_fencing(&state_obj, 5, 1_700_002_000, 1_700_001_000);
-        assert!(matches!(result, Err(FencingError::LeaseExpired { .. })));
-    }
-
-    #[test]
-    fn validate_fencing_stale_seq() {
-        let lease_id = test_object_id("lease");
-        let mut header = test_header();
-        header.refs.push(lease_id);
-
-        let state_obj = ConnectorStateObject {
-            header,
-            connector_id: test_connector_id(),
-            instance_id: None,
-            zone_id: ZoneId::work(),
-            prev: None,
-            seq: 1,
-            state_cbor: vec![],
-            updated_at: 1_700_000_000,
-            lease_seq: 3, // Less than current known seq
-            lease_object_id: lease_id,
-            signature: Signature::zero(),
-        };
-
-        let result =
-            validate_singleton_writer_fencing(&state_obj, 10, 1_700_000_100, 1_700_001_000);
-        assert!(matches!(result, Err(FencingError::StaleLeaseSeq { .. })));
-    }
-
-    #[test]
-    fn validate_fencing_lease_not_in_refs() {
-        let lease_id = test_object_id("lease");
-        let header = test_header(); // No refs
-
-        let state_obj = ConnectorStateObject {
-            header,
-            connector_id: test_connector_id(),
-            instance_id: None,
-            zone_id: ZoneId::work(),
-            prev: None,
-            seq: 1,
-            state_cbor: vec![],
-            updated_at: 1_700_000_000,
-            lease_seq: 5,
-            lease_object_id: lease_id,
-            signature: Signature::zero(),
-        };
-
-        let result = validate_singleton_writer_fencing(&state_obj, 5, 1_700_000_100, 1_700_001_000);
-        assert!(matches!(result, Err(FencingError::LeaseNotFound { .. })));
-    }
-
-    #[test]
-    fn cursor_state_empty_fields() {
-        let state = CursorState {
-            offset: None,
-            last_seen_id: None,
-            watermark: None,
-        };
-        let encoded = state.to_cbor().unwrap();
-        let decoded = CursorState::from_cbor(&encoded).unwrap();
-        assert_eq!(decoded, state);
-    }
-
-    #[test]
-    fn fork_resolution_outcome_success() {
-        let fork = ForkEvent::new(
-            test_object_id("prev"),
-            test_object_id("a"),
-            test_object_id("b"),
-            1,
-            1_700_000_000,
+    fn migratable_computation_suspend_resume_same_holder() {
+        let lease_id = test_object_id("lease-source");
+        let checkpoint = test_computation_checkpoint("node-source", lease_id, 7, 1);
+        let checkpoint_object_id = checkpoint.object_id().unwrap();
+        let mut computation = MigratableComputation::new(
+            test_object_id("computation"),
             ZoneId::work(),
-            test_connector_id(),
+            test_node_id("node-source"),
+            lease_id,
+            7,
+            test_migration_context(0),
         );
-        let outcome = ForkResolutionOutcome::success(
-            fork,
-            ForkResolution::ChooseByLease,
-            test_object_id("a"),
-            1_700_000_001,
-        );
-        assert!(outcome.resolved);
-        assert_eq!(outcome.winning_head, Some(test_object_id("a")));
-        assert!(outcome.failure_reason.is_none());
+
+        computation
+            .suspend(&checkpoint, checkpoint_object_id)
+            .unwrap();
+        assert_eq!(computation.state, MigratableComputationState::Suspended);
+
+        let local_resume_lease = test_migration_lease("node-source", 7, 2_000);
+        computation
+            .resume(
+                &checkpoint,
+                checkpoint_object_id,
+                lease_id,
+                &local_resume_lease,
+                1_500,
+            )
+            .unwrap();
+
+        assert_eq!(computation.state, MigratableComputationState::Running);
+        assert_eq!(computation.current_holder, test_node_id("node-source"));
     }
 
     #[test]
-    fn fork_resolution_outcome_failure() {
-        let fork = ForkEvent::new(
-            test_object_id("prev"),
-            test_object_id("a"),
-            test_object_id("b"),
-            1,
-            1_700_000_000,
+    fn migratable_computation_suspend_transfer_resume() {
+        let source_lease_id = test_object_id("lease-source");
+        let target_lease_id = test_object_id("lease-target");
+        let checkpoint = test_computation_checkpoint("node-source", source_lease_id, 7, 1);
+        let checkpoint_object_id = checkpoint.object_id().unwrap();
+        let mut computation = MigratableComputation::new(
+            test_object_id("computation"),
             ZoneId::work(),
-            test_connector_id(),
+            test_node_id("node-source"),
+            source_lease_id,
+            7,
+            test_migration_context(0),
         );
-        let outcome = ForkResolutionOutcome::failure(
-            fork,
-            ForkResolution::ManualResolution,
-            1_700_000_001,
-            "operator not available",
+
+        computation
+            .suspend(&checkpoint, checkpoint_object_id)
+            .unwrap();
+
+        let active_lease = test_migration_lease("node-source", 7, 2_000);
+        let handoff = test_migration_handoff(
+            source_lease_id,
+            target_lease_id,
+            "node-source",
+            "node-target",
+            7,
+            8,
         );
-        assert!(!outcome.resolved);
-        assert!(outcome.winning_head.is_none());
-        assert!(outcome.failure_reason.unwrap().contains("operator"));
-    }
-
-    #[test]
-    fn snapshot_config_serde_roundtrip() {
-        let config = SnapshotConfig {
-            snapshot_every_updates: 100,
-            snapshot_every_bytes: 2048,
-        };
-        let json = serde_json::to_string(&config).unwrap();
-        let back: SnapshotConfig = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.snapshot_every_updates, 100);
-        assert_eq!(back.snapshot_every_bytes, 2048);
-    }
-
-    #[test]
-    fn fork_event_serde_roundtrip() {
-        let fork = ForkEvent::new(
-            test_object_id("prev"),
-            test_object_id("a"),
-            test_object_id("b"),
-            5,
-            1_700_000_000,
-            ZoneId::work(),
-            test_connector_id(),
-        );
-        let json = serde_json::to_string(&fork).unwrap();
-        let back: ForkEvent = serde_json::from_str(&json).unwrap();
-        assert_eq!(fork, back);
-    }
-
-    #[test]
-    fn fork_detector_lease_seq_lookup() {
-        let mut detector = StateForkDetector::new();
-        let obj = test_object_id("obj");
-        detector.register(obj, None, 0, 42);
-        assert_eq!(detector.lease_seq(&obj), Some(42));
-
-        let unknown = test_object_id("unknown");
-        assert!(detector.lease_seq(&unknown).is_none());
-    }
-
-    #[test]
-    fn fork_resolve_crdt_merge_returns_failure() {
-        let mut detector = StateForkDetector::new();
-        let genesis = test_object_id("genesis");
-        let branch_a = test_object_id("branch_a");
-        let branch_b = test_object_id("branch_b");
-
-        detector.register(genesis, None, 0, 100);
-        detector.register(branch_a, Some(genesis), 1, 100);
-        detector.register(branch_b, Some(genesis), 1, 100);
-
-        let result = detector.detect_fork(ZoneId::work(), test_connector_id(), 1_700_000_000);
-        let fork = result.fork_event().unwrap();
-
-        let outcome = detector.resolve(
-            fork,
-            ForkResolution::CrdtMerge,
-            &ConnectorStateModel::Crdt {
-                crdt_type: CrdtType::LwwMap,
-            },
-            1_700_000_001,
-        );
-        assert!(!outcome.resolved);
-        assert!(outcome.failure_reason.unwrap().contains("delta-level"));
-    }
-
-    #[test]
-    fn fork_resolve_lease_tie() {
-        let mut detector = StateForkDetector::new();
-        let genesis = test_object_id("genesis");
-        let branch_a = test_object_id("branch_a");
-        let branch_b = test_object_id("branch_b");
-
-        detector.register(genesis, None, 0, 100);
-        detector.register(branch_a, Some(genesis), 1, 100); // Same lease_seq
-        detector.register(branch_b, Some(genesis), 1, 100); // Same lease_seq
-
-        let result = detector.detect_fork(ZoneId::work(), test_connector_id(), 1_700_000_000);
-        let fork = result.fork_event().unwrap();
-
-        let outcome = detector.resolve(
-            fork,
-            ForkResolution::ChooseByLease,
-            &ConnectorStateModel::SingletonWriter,
-            1_700_000_001,
-        );
-        assert!(!outcome.resolved);
-        assert!(outcome.failure_reason.unwrap().contains("tie"));
-    }
-
-    #[test]
-    fn state_fork_detection_result_serde() {
-        let no_fork = StateForkDetectionResult::NoFork {
-            head: test_object_id("head"),
-            seq: 42,
-        };
-        let json = serde_json::to_string(&no_fork).unwrap();
-        let decoded: StateForkDetectionResult = serde_json::from_str(&json).unwrap();
-        assert!(!decoded.is_fork());
-
-        let fork = StateForkDetectionResult::ForkDetected(ForkEvent::new(
-            test_object_id("prev"),
-            test_object_id("a"),
-            test_object_id("b"),
-            10,
-            1_700_000_000,
-            ZoneId::work(),
-            test_connector_id(),
+        computation
+            .begin_transfer(&active_lease, &handoff, 1_500)
+            .unwrap();
+        assert!(matches!(
+            computation.state,
+            MigratableComputationState::Transferring {
+                ref target_holder,
+                next_lease_id,
+                next_fencing_token
+            } if target_holder == &test_node_id("node-target")
+                && next_lease_id == target_lease_id
+                && next_fencing_token == 8
         ));
-        let json = serde_json::to_string(&fork).unwrap();
-        let decoded: StateForkDetectionResult = serde_json::from_str(&json).unwrap();
-        assert!(decoded.is_fork());
+
+        let target_lease = test_migration_lease("node-target", 8, 2_500);
+        computation
+            .resume(
+                &checkpoint,
+                checkpoint_object_id,
+                target_lease_id,
+                &target_lease,
+                1_600,
+            )
+            .unwrap();
+
+        assert_eq!(computation.state, MigratableComputationState::Running);
+        assert_eq!(computation.current_holder, test_node_id("node-target"));
+        assert_eq!(computation.execution_lease_id, target_lease_id);
+        assert_eq!(computation.lease_fencing_token, 8);
+    }
+
+    #[test]
+    fn migratable_computation_resume_rejects_non_holder() {
+        let source_lease_id = test_object_id("lease-source");
+        let target_lease_id = test_object_id("lease-target");
+        let checkpoint = test_computation_checkpoint("node-source", source_lease_id, 7, 1);
+        let checkpoint_object_id = checkpoint.object_id().unwrap();
+        let mut computation = MigratableComputation::new(
+            test_object_id("computation"),
+            ZoneId::work(),
+            test_node_id("node-source"),
+            source_lease_id,
+            7,
+            test_migration_context(0),
+        );
+
+        computation
+            .suspend(&checkpoint, checkpoint_object_id)
+            .unwrap();
+        let active_lease = test_migration_lease("node-source", 7, 2_000);
+        let handoff = test_migration_handoff(
+            source_lease_id,
+            target_lease_id,
+            "node-source",
+            "node-target",
+            7,
+            8,
+        );
+        computation
+            .begin_transfer(&active_lease, &handoff, 1_500)
+            .unwrap();
+
+        let wrong_holder_lease = test_migration_lease("node-wrong", 8, 2_500);
+        let err = computation
+            .resume(
+                &checkpoint,
+                checkpoint_object_id,
+                target_lease_id,
+                &wrong_holder_lease,
+                1_600,
+            )
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            ComputationMigrationError::ResumeHolderMismatch { .. }
+        ));
+    }
+
+    #[test]
+    fn migratable_computation_suspend_rejects_stale_checkpoint_fence() {
+        let lease_id = test_object_id("lease-source");
+        let checkpoint = test_computation_checkpoint("node-source", lease_id, 6, 1);
+        let checkpoint_object_id = checkpoint.object_id().unwrap();
+        let mut computation = MigratableComputation::new(
+            test_object_id("computation"),
+            ZoneId::work(),
+            test_node_id("node-source"),
+            lease_id,
+            7,
+            test_migration_context(0),
+        );
+
+        let err = computation
+            .suspend(&checkpoint, checkpoint_object_id)
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            ComputationMigrationError::CheckpointFenceMismatch { .. }
+        ));
     }
 
     // ─────────────────────────────────────────────────────────────────────────

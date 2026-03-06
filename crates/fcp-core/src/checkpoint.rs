@@ -15,9 +15,15 @@
 
 use std::collections::BTreeSet;
 
+use fcp_cbor::{CanonicalSerializer, SchemaId, SerializationError};
+use semver::Version;
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
+use uuid::Uuid;
 
-use crate::{EpochId, NodeSignature, ObjectId, SignatureSet, TailscaleNodeId, ZoneId};
+use crate::{
+    EpochId, NodeSignature, ObjectHeader, ObjectId, SignatureSet, TailscaleNodeId, ZoneId,
+};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Checkpoint Trigger Conditions
@@ -278,6 +284,302 @@ impl ForkEvidence {
             .cloned()
             .collect()
     }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Computation Migration Checkpoints
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Default payload size that triggers chunked checkpoint transfer encoding.
+pub const DEFAULT_COMPUTATION_CHECKPOINT_CHUNK_THRESHOLD_BYTES: usize = 256 * 1024;
+
+/// Default chunk size used when splitting large computation checkpoints.
+pub const DEFAULT_COMPUTATION_CHECKPOINT_CHUNK_SIZE_BYTES: usize = 64 * 1024;
+
+/// Minimal authority binding carried across computation migration.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MigrationCapabilityContext {
+    /// Capability token JTI authorizing this computation.
+    pub capability_token_jti: Uuid,
+    /// Latest bound checkpoint object, when one exists.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub checkpoint_id: Option<ObjectId>,
+    /// Freshness binding for checkpoint-aware resumption.
+    pub checkpoint_seq: u64,
+    /// Audit event/object binding for authoritative replay checks.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub audit_event_id: Option<ObjectId>,
+}
+
+/// Manifest describing a chunked canonical checkpoint payload.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChunkedObjectManifest {
+    /// Content-addressed identifier for the full canonical payload.
+    pub payload_object_id: ObjectId,
+    /// Total canonical payload length in bytes.
+    pub total_bytes: u64,
+    /// Chunk size used to segment the payload.
+    pub chunk_size_bytes: u32,
+    /// Content-addressed identifiers for each chunk in order.
+    pub chunk_object_ids: Vec<ObjectId>,
+}
+
+impl ChunkedObjectManifest {
+    /// Number of chunks described by this manifest.
+    #[must_use]
+    pub fn chunk_count(&self) -> usize {
+        self.chunk_object_ids.len()
+    }
+}
+
+/// Canonical checkpoint payload carried as ordered chunks.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChunkedCheckpoint {
+    pub manifest: ChunkedObjectManifest,
+    pub chunks: Vec<Vec<u8>>,
+}
+
+/// Wire encoding for checkpoint transfer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "encoding", rename_all = "snake_case")]
+pub enum CheckpointTransferEncoding {
+    /// Small checkpoints travel inline as a canonical schema-bound payload.
+    Inline {
+        object_id: ObjectId,
+        canonical_bytes: Vec<u8>,
+    },
+    /// Large checkpoints are transferred as a manifest plus ordered chunks.
+    Chunked(ChunkedCheckpoint),
+}
+
+impl CheckpointTransferEncoding {
+    /// Get the content-addressed identifier for the full checkpoint payload.
+    #[must_use]
+    pub const fn object_id(&self) -> ObjectId {
+        match self {
+            Self::Inline { object_id, .. } => *object_id,
+            Self::Chunked(chunked) => chunked.manifest.payload_object_id,
+        }
+    }
+}
+
+/// Canonical checkpoint required for safe migration and resume.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ComputationCheckpoint {
+    /// Object header for zone/provenance binding.
+    pub header: ObjectHeader,
+    /// Content-addressed identifier for the suspended computation.
+    pub computation_id: ObjectId,
+    /// Node holding execution authority when the checkpoint was written.
+    pub current_holder: TailscaleNodeId,
+    /// Monotonic checkpoint sequence for freshness checks.
+    pub checkpoint_seq: u64,
+    /// Suspension time in Unix seconds.
+    pub suspended_at: u64,
+    /// Lease authorizing the suspended computation.
+    pub lease_id: ObjectId,
+    /// Lease fencing token observed when the checkpoint was taken.
+    pub lease_fencing_token: u64,
+    /// Minimal authority binding required for resume validation.
+    pub capability_context: MigrationCapabilityContext,
+    /// Canonical connector/runtime state blob.
+    pub state_cbor: Vec<u8>,
+}
+
+impl ComputationCheckpoint {
+    /// Canonical schema identifier for computation migration checkpoints.
+    #[must_use]
+    pub fn schema() -> SchemaId {
+        SchemaId::new("fcp.core", "ComputationCheckpoint", Version::new(1, 0, 0))
+    }
+
+    /// Zone in which the checkpoint is valid.
+    #[must_use]
+    pub const fn zone_id(&self) -> &ZoneId {
+        &self.header.zone_id
+    }
+
+    /// Serialize to the canonical schema-bound checkpoint payload.
+    ///
+    /// # Errors
+    /// Returns a [`SerializationError`] if canonical encoding fails.
+    pub fn canonical_bytes(&self) -> Result<Vec<u8>, SerializationError> {
+        CanonicalSerializer::serialize(self, &Self::schema())
+    }
+
+    /// Derive the content-addressed identifier for the canonical payload.
+    ///
+    /// # Errors
+    /// Returns a [`SerializationError`] if canonical encoding fails.
+    pub fn object_id(&self) -> Result<ObjectId, SerializationError> {
+        Ok(ObjectId::from_unscoped_bytes(&self.canonical_bytes()?))
+    }
+
+    /// Convert this checkpoint into a transfer encoding suitable for the mesh.
+    ///
+    /// # Errors
+    /// Returns a [`CheckpointChunkError`] if canonical encoding fails or the
+    /// requested chunk size cannot be represented safely.
+    pub fn to_transfer_encoding(
+        &self,
+        chunk_threshold_bytes: usize,
+        chunk_size_bytes: usize,
+    ) -> Result<CheckpointTransferEncoding, CheckpointChunkError> {
+        if chunk_size_bytes == 0 {
+            return Err(CheckpointChunkError::InvalidChunkSize);
+        }
+
+        let canonical_bytes = self.canonical_bytes()?;
+        let object_id = ObjectId::from_unscoped_bytes(&canonical_bytes);
+        if canonical_bytes.len() <= chunk_threshold_bytes {
+            return Ok(CheckpointTransferEncoding::Inline {
+                object_id,
+                canonical_bytes,
+            });
+        }
+
+        let total_bytes = u64::try_from(canonical_bytes.len()).map_err(|_| {
+            CheckpointChunkError::ManifestLengthOverflow {
+                total_bytes: canonical_bytes.len(),
+            }
+        })?;
+        let chunk_size_bytes_u32 = u32::try_from(chunk_size_bytes)
+            .map_err(|_| CheckpointChunkError::ManifestChunkSizeOverflow { chunk_size_bytes })?;
+
+        let chunks: Vec<Vec<u8>> = canonical_bytes
+            .chunks(chunk_size_bytes)
+            .map(<[u8]>::to_vec)
+            .collect();
+        let chunk_object_ids = chunks
+            .iter()
+            .map(|chunk| ObjectId::from_unscoped_bytes(chunk))
+            .collect();
+
+        Ok(CheckpointTransferEncoding::Chunked(ChunkedCheckpoint {
+            manifest: ChunkedObjectManifest {
+                payload_object_id: object_id,
+                total_bytes,
+                chunk_size_bytes: chunk_size_bytes_u32,
+                chunk_object_ids,
+            },
+            chunks,
+        }))
+    }
+
+    /// Reconstruct a checkpoint from inline or chunked transfer encoding.
+    ///
+    /// # Errors
+    /// Returns a [`CheckpointChunkError`] if integrity checks fail or decoding is invalid.
+    pub fn from_transfer_encoding(
+        encoding: &CheckpointTransferEncoding,
+    ) -> Result<Self, CheckpointChunkError> {
+        let canonical_bytes = match encoding {
+            CheckpointTransferEncoding::Inline {
+                object_id,
+                canonical_bytes,
+            } => {
+                let derived_object_id = ObjectId::from_unscoped_bytes(canonical_bytes);
+                if &derived_object_id != object_id {
+                    return Err(CheckpointChunkError::PayloadIntegrityMismatch {
+                        expected: *object_id,
+                        got: derived_object_id,
+                    });
+                }
+                canonical_bytes.clone()
+            }
+            CheckpointTransferEncoding::Chunked(chunked) => reconstruct_chunked_payload(chunked)?,
+        };
+
+        Ok(CanonicalSerializer::deserialize(
+            &canonical_bytes,
+            &Self::schema(),
+        )?)
+    }
+}
+
+/// Errors produced while splitting or reconstructing chunked checkpoints.
+#[derive(Debug, Error)]
+pub enum CheckpointChunkError {
+    #[error("checkpoint chunk size must be greater than zero")]
+    InvalidChunkSize,
+    #[error("checkpoint payload length {total_bytes} does not fit in manifest")]
+    ManifestLengthOverflow { total_bytes: usize },
+    #[error("checkpoint chunk size {chunk_size_bytes} does not fit in manifest")]
+    ManifestChunkSizeOverflow { chunk_size_bytes: usize },
+    #[error("checkpoint payload length {total_bytes} cannot be represented on this platform")]
+    ManifestLengthUnsupported { total_bytes: u64 },
+    #[error("checkpoint chunk count mismatch: expected {expected}, got {got}")]
+    ChunkCountMismatch { expected: usize, got: usize },
+    #[error("checkpoint payload length mismatch: expected {expected}, got {got}")]
+    PayloadLengthMismatch { expected: usize, got: usize },
+    #[error("checkpoint chunk {index} failed integrity validation")]
+    ChunkIntegrityMismatch {
+        index: usize,
+        expected: ObjectId,
+        got: ObjectId,
+    },
+    #[error("checkpoint payload failed integrity validation")]
+    PayloadIntegrityMismatch { expected: ObjectId, got: ObjectId },
+    #[error(transparent)]
+    Serialization(#[from] SerializationError),
+}
+
+/// Reassemble a chunked canonical checkpoint payload with integrity checks.
+///
+/// # Errors
+/// Returns a [`CheckpointChunkError`] if any chunk is missing, corrupted, or if
+/// the reconstructed payload does not match the manifest digest.
+pub fn reconstruct_chunked_payload(
+    chunked: &ChunkedCheckpoint,
+) -> Result<Vec<u8>, CheckpointChunkError> {
+    let expected_chunks = chunked.manifest.chunk_count();
+    if chunked.chunks.len() != expected_chunks {
+        return Err(CheckpointChunkError::ChunkCountMismatch {
+            expected: expected_chunks,
+            got: chunked.chunks.len(),
+        });
+    }
+
+    let expected_total_bytes = usize::try_from(chunked.manifest.total_bytes).map_err(|_| {
+        CheckpointChunkError::ManifestLengthUnsupported {
+            total_bytes: chunked.manifest.total_bytes,
+        }
+    })?;
+
+    let mut payload = Vec::with_capacity(expected_total_bytes);
+    for (index, (chunk, expected_object_id)) in chunked
+        .chunks
+        .iter()
+        .zip(&chunked.manifest.chunk_object_ids)
+        .enumerate()
+    {
+        let derived_object_id = ObjectId::from_unscoped_bytes(chunk);
+        if &derived_object_id != expected_object_id {
+            return Err(CheckpointChunkError::ChunkIntegrityMismatch {
+                index,
+                expected: *expected_object_id,
+                got: derived_object_id,
+            });
+        }
+        payload.extend_from_slice(chunk);
+    }
+
+    if payload.len() != expected_total_bytes {
+        return Err(CheckpointChunkError::PayloadLengthMismatch {
+            expected: expected_total_bytes,
+            got: payload.len(),
+        });
+    }
+
+    let derived_payload_id = ObjectId::from_unscoped_bytes(&payload);
+    if derived_payload_id != chunked.manifest.payload_object_id {
+        return Err(CheckpointChunkError::PayloadIntegrityMismatch {
+            expected: chunked.manifest.payload_object_id,
+            got: derived_payload_id,
+        });
+    }
+
+    Ok(payload)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -582,7 +884,7 @@ impl FreshnessResult {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::NodeId;
+    use crate::{NodeId, Provenance};
 
     // ─────────────────────────────────────────────────────────────────────────
     // Test Helpers
@@ -602,6 +904,44 @@ mod tests {
 
     fn test_object_id(label: &str) -> ObjectId {
         ObjectId::test_id(label)
+    }
+
+    fn test_migration_header(kind: &str, refs: Vec<ObjectId>) -> ObjectHeader {
+        ObjectHeader {
+            schema: SchemaId::new("fcp.core", kind, Version::new(1, 0, 0)),
+            zone_id: test_zone(),
+            created_at: 1_700_000_000,
+            provenance: Provenance::new(test_zone()),
+            refs,
+            foreign_refs: Vec::new(),
+            ttl_secs: None,
+            placement: None,
+        }
+    }
+
+    fn test_migration_context(checkpoint_seq: u64) -> MigrationCapabilityContext {
+        MigrationCapabilityContext {
+            capability_token_jti: Uuid::from_bytes([0xAB; 16]),
+            checkpoint_id: None,
+            checkpoint_seq,
+            audit_event_id: Some(test_object_id("audit-event")),
+        }
+    }
+
+    fn test_computation_checkpoint(state_cbor: Vec<u8>) -> ComputationCheckpoint {
+        let computation_id = test_object_id("computation");
+        let lease_id = test_object_id("lease");
+        ComputationCheckpoint {
+            header: test_migration_header("ComputationCheckpoint", vec![computation_id, lease_id]),
+            computation_id,
+            current_holder: test_node("node-source"),
+            checkpoint_seq: 7,
+            suspended_at: 1_700_000_100,
+            lease_id,
+            lease_fencing_token: 11,
+            capability_context: test_migration_context(7),
+            state_cbor,
+        }
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -1790,5 +2130,66 @@ mod tests {
             decoded.double_signers(),
             std::iter::once("bob".to_string()).collect()
         );
+    }
+
+    #[test]
+    fn computation_checkpoint_canonical_roundtrip() {
+        let checkpoint = test_computation_checkpoint(vec![1, 2, 3, 4, 5]);
+
+        let bytes1 = checkpoint.canonical_bytes().unwrap();
+        let bytes2 = checkpoint.canonical_bytes().unwrap();
+        assert_eq!(bytes1, bytes2);
+
+        let decoded: ComputationCheckpoint =
+            CanonicalSerializer::deserialize(&bytes1, &ComputationCheckpoint::schema()).unwrap();
+        assert_eq!(
+            decoded.canonical_bytes().unwrap(),
+            checkpoint.canonical_bytes().unwrap()
+        );
+        assert_eq!(
+            checkpoint.object_id().unwrap(),
+            ObjectId::from_unscoped_bytes(&bytes1)
+        );
+    }
+
+    #[test]
+    fn computation_checkpoint_chunked_transfer_roundtrip() {
+        let checkpoint = test_computation_checkpoint(vec![0x5Au8; 4096]);
+        let encoding = checkpoint
+            .to_transfer_encoding(
+                DEFAULT_COMPUTATION_CHECKPOINT_CHUNK_THRESHOLD_BYTES.min(128),
+                DEFAULT_COMPUTATION_CHECKPOINT_CHUNK_SIZE_BYTES.min(256),
+            )
+            .unwrap();
+
+        let CheckpointTransferEncoding::Chunked(chunked) = &encoding else {
+            panic!("expected chunked checkpoint encoding");
+        };
+        assert!(chunked.manifest.chunk_count() > 1);
+        assert_eq!(encoding.object_id(), chunked.manifest.payload_object_id);
+
+        let restored = ComputationCheckpoint::from_transfer_encoding(&encoding).unwrap();
+        assert_eq!(
+            restored.canonical_bytes().unwrap(),
+            checkpoint.canonical_bytes().unwrap()
+        );
+    }
+
+    #[test]
+    fn computation_checkpoint_chunked_transfer_detects_corruption() {
+        let checkpoint = test_computation_checkpoint(vec![0x33u8; 4096]);
+        let mut encoding = checkpoint.to_transfer_encoding(64, 128).unwrap();
+
+        let CheckpointTransferEncoding::Chunked(chunked) = &mut encoding else {
+            panic!("expected chunked checkpoint encoding");
+        };
+        chunked.chunks[0][0] ^= 0xFF;
+
+        let err = ComputationCheckpoint::from_transfer_encoding(&encoding).unwrap_err();
+        assert!(matches!(
+            err,
+            CheckpointChunkError::ChunkIntegrityMismatch { .. }
+                | CheckpointChunkError::PayloadIntegrityMismatch { .. }
+        ));
     }
 }

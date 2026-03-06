@@ -15,6 +15,7 @@
 //! - Exclusive resource access (e.g., specific hardware)
 use fcp_cbor::SchemaId;
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
 
 use crate::{ObjectHeader, ObjectId, SignatureSet, TailscaleNodeId, ZoneId};
 
@@ -145,6 +146,37 @@ pub struct LeaseParams {
     pub quorum_signatures: SignatureSet,
 }
 
+/// Canonical identifier for a lease object referenced elsewhere in the mesh.
+pub type LeaseId = ObjectId;
+
+/// Auditable transfer of exclusive execution authority between nodes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LeaseHandoff {
+    /// Lease being relinquished by the source holder.
+    pub previous_lease_id: LeaseId,
+    /// Lease that the target holder will resume under.
+    pub next_lease_id: LeaseId,
+    /// Node that currently holds the lease.
+    pub from_holder: TailscaleNodeId,
+    /// Node that is receiving the lease.
+    pub to_holder: TailscaleNodeId,
+    /// Zone in which the handoff is valid.
+    pub zone_id: ZoneId,
+    /// Subject covered by the lease.
+    pub subject_object_id: ObjectId,
+    /// Purpose preserved across the handoff.
+    pub purpose: LeasePurpose,
+    /// Fencing token held by the source lease.
+    pub previous_fencing_token: u64,
+    /// Fencing token that the target must resume under.
+    pub next_fencing_token: u64,
+    /// Unix timestamp when the handoff was authorized.
+    pub transferred_at: u64,
+    /// Optional checkpoint object that the target must reconstruct before resume.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub checkpoint_object_id: Option<ObjectId>,
+}
+
 impl Lease {
     /// Create a new lease.
     #[must_use]
@@ -189,6 +221,111 @@ impl Lease {
     pub const fn zone_id(&self) -> &ZoneId {
         &self.header.zone_id
     }
+}
+
+/// Errors returned when lease handoff validation fails.
+#[derive(Debug, Error)]
+pub enum LeaseTransferValidationError {
+    #[error("cannot transfer expired lease (expired at {expired_at}, current time {now})")]
+    LeaseExpired { expired_at: u64, now: u64 },
+    #[error("lease handoff reused lease id {lease_id}")]
+    LeaseIdReused { lease_id: LeaseId },
+    #[error("lease handoff must transfer to a different holder (holder {holder:?})")]
+    SelfTransfer { holder: TailscaleNodeId },
+    #[error("handoff source holder mismatch: expected {expected:?}, got {got:?}")]
+    FromHolderMismatch {
+        expected: TailscaleNodeId,
+        got: TailscaleNodeId,
+    },
+    #[error("handoff subject mismatch: expected {expected}, got {got}")]
+    SubjectMismatch { expected: ObjectId, got: ObjectId },
+    #[error("handoff zone mismatch: expected {expected}, got {got}")]
+    ZoneMismatch { expected: ZoneId, got: ZoneId },
+    #[error("handoff purpose mismatch: expected {expected}, got {got}")]
+    PurposeMismatch {
+        expected: LeasePurpose,
+        got: LeasePurpose,
+    },
+    #[error("handoff previous fencing token mismatch: expected {expected}, got {got}")]
+    PreviousFenceMismatch { expected: u64, got: u64 },
+    #[error(
+        "handoff fencing token must increase monotonically (previous {previous}, next {next})"
+    )]
+    NonMonotonicFence { previous: u64, next: u64 },
+}
+
+/// Validate a lease handoff before resumption on another node.
+///
+/// # Errors
+/// Returns a [`LeaseTransferValidationError`] if the active lease does not match the
+/// handoff, if the handoff is stale, or if fencing token monotonicity is violated.
+pub fn validate_lease_handoff(
+    active_lease: &Lease,
+    handoff: &LeaseHandoff,
+    now: u64,
+) -> Result<(), LeaseTransferValidationError> {
+    if active_lease.is_expired(now) {
+        return Err(LeaseTransferValidationError::LeaseExpired {
+            expired_at: active_lease.exp,
+            now,
+        });
+    }
+
+    if handoff.previous_lease_id == handoff.next_lease_id {
+        return Err(LeaseTransferValidationError::LeaseIdReused {
+            lease_id: handoff.previous_lease_id,
+        });
+    }
+
+    if handoff.from_holder == handoff.to_holder {
+        return Err(LeaseTransferValidationError::SelfTransfer {
+            holder: handoff.from_holder.clone(),
+        });
+    }
+
+    if active_lease.holder != handoff.from_holder {
+        return Err(LeaseTransferValidationError::FromHolderMismatch {
+            expected: active_lease.holder.clone(),
+            got: handoff.from_holder.clone(),
+        });
+    }
+
+    if active_lease.subject_object_id != handoff.subject_object_id {
+        return Err(LeaseTransferValidationError::SubjectMismatch {
+            expected: active_lease.subject_object_id,
+            got: handoff.subject_object_id,
+        });
+    }
+
+    if active_lease.zone_id() != &handoff.zone_id {
+        return Err(LeaseTransferValidationError::ZoneMismatch {
+            expected: active_lease.zone_id().clone(),
+            got: handoff.zone_id.clone(),
+        });
+    }
+
+    if active_lease.purpose != handoff.purpose {
+        return Err(LeaseTransferValidationError::PurposeMismatch {
+            expected: active_lease.purpose,
+            got: handoff.purpose,
+        });
+    }
+
+    if active_lease.fencing_token() != handoff.previous_fencing_token {
+        return Err(LeaseTransferValidationError::PreviousFenceMismatch {
+            expected: active_lease.fencing_token(),
+            got: handoff.previous_fencing_token,
+        });
+    }
+
+    if handoff.next_fencing_token <= handoff.previous_fencing_token {
+        return Err(LeaseTransferValidationError::NonMonotonicFence {
+            previous: handoff.previous_fencing_token,
+            next: handoff.next_fencing_token,
+        });
+    }
+
+    Ok(())
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -759,6 +896,84 @@ mod tests {
         assert!(matches!(
             result,
             Err(LeaseValidationError::ZoneMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn validate_lease_handoff_accepts_monotonic_transfer() {
+        let subject = test_object_id("computation");
+        let mut active_lease = create_test_lease_with_subject(7, 2_000, subject);
+        active_lease.purpose = LeasePurpose::ComputationMigration;
+
+        let handoff = LeaseHandoff {
+            previous_lease_id: test_object_id("lease-source"),
+            next_lease_id: test_object_id("lease-target"),
+            from_holder: active_lease.holder.clone(),
+            to_holder: test_node("target-node"),
+            zone_id: active_lease.zone_id().clone(),
+            subject_object_id: subject,
+            purpose: LeasePurpose::ComputationMigration,
+            previous_fencing_token: active_lease.fencing_token(),
+            next_fencing_token: active_lease.fencing_token() + 1,
+            transferred_at: 1_500,
+            checkpoint_object_id: Some(test_object_id("checkpoint")),
+        };
+
+        assert!(validate_lease_handoff(&active_lease, &handoff, 1_500).is_ok());
+    }
+
+    #[test]
+    fn validate_lease_handoff_rejects_stale_fencing_token() {
+        let subject = test_object_id("computation");
+        let mut active_lease = create_test_lease_with_subject(7, 2_000, subject);
+        active_lease.purpose = LeasePurpose::ComputationMigration;
+
+        let handoff = LeaseHandoff {
+            previous_lease_id: test_object_id("lease-source"),
+            next_lease_id: test_object_id("lease-target"),
+            from_holder: active_lease.holder.clone(),
+            to_holder: test_node("target-node"),
+            zone_id: active_lease.zone_id().clone(),
+            subject_object_id: subject,
+            purpose: LeasePurpose::ComputationMigration,
+            previous_fencing_token: active_lease.fencing_token(),
+            next_fencing_token: active_lease.fencing_token(),
+            transferred_at: 1_500,
+            checkpoint_object_id: None,
+        };
+
+        let err = validate_lease_handoff(&active_lease, &handoff, 1_500).unwrap_err();
+        assert!(matches!(
+            err,
+            LeaseTransferValidationError::NonMonotonicFence { .. }
+        ));
+    }
+
+    #[test]
+    fn validate_lease_handoff_rejects_reused_lease_id() {
+        let subject = test_object_id("computation");
+        let mut active_lease = create_test_lease_with_subject(7, 2_000, subject);
+        active_lease.purpose = LeasePurpose::ComputationMigration;
+
+        let reused_lease_id = test_object_id("lease-source");
+        let handoff = LeaseHandoff {
+            previous_lease_id: reused_lease_id,
+            next_lease_id: reused_lease_id,
+            from_holder: active_lease.holder.clone(),
+            to_holder: test_node("target-node"),
+            zone_id: active_lease.zone_id().clone(),
+            subject_object_id: subject,
+            purpose: LeasePurpose::ComputationMigration,
+            previous_fencing_token: active_lease.fencing_token(),
+            next_fencing_token: active_lease.fencing_token() + 1,
+            transferred_at: 1_500,
+            checkpoint_object_id: None,
+        };
+
+        let err = validate_lease_handoff(&active_lease, &handoff, 1_500).unwrap_err();
+        assert!(matches!(
+            err,
+            LeaseTransferValidationError::LeaseIdReused { .. }
         ));
     }
 

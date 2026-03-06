@@ -46,7 +46,6 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 chrono = { workspace = true }
 tracing = { workspace = true }
-tokio = { workspace = true, features = ["macros", "rt"] }
 
 [dev-dependencies]
 fcp-crypto = { workspace = true }

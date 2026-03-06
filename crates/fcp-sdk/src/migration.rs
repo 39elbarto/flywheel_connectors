@@ -24,7 +24,7 @@
 //!
 //! ## Phase 1: Runtime Bootstrap
 //!
-//! - [ ] Replace any direct `tokio::runtime` or `tokio::spawn` with
+//! - [ ] Replace any direct runtime builders or spawn calls with
 //!   `ConnectorRuntime::new()` during `configure()`.
 //! - [ ] All request paths create contexts via `runtime.request_context()`
 //!   or `runtime.request_context_with_timeout()`.
@@ -42,7 +42,7 @@
 //!
 //! ## Phase 3: Correctness & Observability
 //!
-//! - [ ] **No direct tokio imports** — `grep -r "tokio::" connectors/<name>/src/`
+//! - [ ] **No direct runtime imports** — scan connector sources for raw runtime paths
 //!   must return zero matches (except `tokio_stream` for SSE if needed).
 //! - [ ] All failure paths emit tracing spans with `error_type`, `attempt`,
 //!   `delay_ms` fields (handled by `RetryLoop` automatically).

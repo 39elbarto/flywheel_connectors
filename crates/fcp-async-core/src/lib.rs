@@ -8,6 +8,8 @@
 #![warn(clippy::all, clippy::pedantic, clippy::nursery)]
 #![allow(clippy::module_name_repetitions)]
 
+extern crate self as fcp_async_core;
+
 use std::future::Future;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -106,8 +108,7 @@ pub mod runtime {
 
     use super::{AsyncError, Future};
 
-    pub use tokio::main;
-    pub use tokio::test;
+    pub use fcp_async_core_macros::{main, test};
 
     /// Runtime builder abstraction owned by async-core.
     pub struct Builder {
@@ -220,14 +221,32 @@ pub mod runtime {
 pub mod time {
     use std::future::Future;
     use std::pin::Pin;
+    use std::sync::OnceLock;
     use std::task::{Context, Poll};
     use std::time::Duration;
 
+    use asupersync::types::Time;
+
     use super::AsyncError;
+
+    static TIMER_EPOCH: OnceLock<std::time::Instant> = OnceLock::new();
+
+    fn wall_now() -> Time {
+        let now = asupersync::time::wall_now();
+        let _ = TIMER_EPOCH.get_or_init(std::time::Instant::now);
+        now
+    }
+
+    fn instant_from_time(time: Time) -> std::time::Instant {
+        let epoch = *TIMER_EPOCH.get_or_init(std::time::Instant::now);
+        epoch
+            .checked_add(Duration::from_nanos(time.as_nanos()))
+            .unwrap_or(epoch)
+    }
 
     /// Sleep future abstraction owned by async-core.
     pub struct Sleep {
-        inner: Pin<Box<tokio::time::Sleep>>,
+        inner: Pin<Box<asupersync::time::Sleep>>,
     }
 
     impl Future for Sleep {
@@ -240,13 +259,20 @@ pub mod time {
 
     /// Interval abstraction owned by async-core.
     pub struct Interval {
-        inner: tokio::time::Interval,
+        inner: asupersync::time::Interval,
     }
 
     impl Interval {
         /// Wait for the next interval tick.
         pub async fn tick(&mut self) -> std::time::Instant {
-            self.inner.tick().await.into()
+            loop {
+                let now = wall_now();
+                if self.inner.is_ready(now) {
+                    return instant_from_time(self.inner.tick(now));
+                }
+
+                asupersync::time::sleep_until(self.inner.deadline()).await;
+            }
         }
     }
 
@@ -254,7 +280,7 @@ pub mod time {
     #[must_use]
     pub fn sleep(duration: Duration) -> Sleep {
         Sleep {
-            inner: Box::pin(tokio::time::sleep(duration)),
+            inner: Box::pin(asupersync::time::sleep(wall_now(), duration)),
         }
     }
 
@@ -262,7 +288,7 @@ pub mod time {
     #[must_use]
     pub fn interval(period: Duration) -> Interval {
         Interval {
-            inner: tokio::time::interval(period),
+            inner: asupersync::time::interval(wall_now(), period),
         }
     }
 

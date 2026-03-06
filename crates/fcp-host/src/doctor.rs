@@ -184,7 +184,8 @@ impl DoctorReport {
     /// Schema version constant (aligned with fcp-cli).
     pub const SCHEMA_VERSION: &'static str = "1.1.0";
 
-    fn baseline(zone_id: &str) -> Self {
+    #[must_use]
+    pub fn baseline(zone_id: &str) -> Self {
         Self {
             schema_version: Self::SCHEMA_VERSION.to_string(),
             generated_at: Utc::now(),
@@ -921,5 +922,266 @@ mod tests {
         let json = serde_json::to_value(&result).unwrap();
         assert_eq!(json["status"], "FAIL");
         assert_eq!(json["severity"], "critical");
+    }
+
+    // ── OverallStatus serde names ──
+
+    #[test]
+    fn overall_status_serde_uppercase() {
+        assert_eq!(serde_json::to_string(&OverallStatus::Ok).unwrap(), "\"OK\"");
+        assert_eq!(
+            serde_json::to_string(&OverallStatus::Warn).unwrap(),
+            "\"WARN\""
+        );
+        assert_eq!(
+            serde_json::to_string(&OverallStatus::Fail).unwrap(),
+            "\"FAIL\""
+        );
+    }
+
+    // ── CheckStatus serde ──
+
+    #[test]
+    fn check_status_serde_names() {
+        assert_eq!(serde_json::to_string(&CheckStatus::Ok).unwrap(), "\"OK\"");
+        assert_eq!(
+            serde_json::to_string(&CheckStatus::Warn).unwrap(),
+            "\"WARN\""
+        );
+        assert_eq!(
+            serde_json::to_string(&CheckStatus::Fail).unwrap(),
+            "\"FAIL\""
+        );
+    }
+
+    // ── CheckSeverity serde ──
+
+    #[test]
+    fn check_severity_serde_names() {
+        assert_eq!(
+            serde_json::to_string(&CheckSeverity::Info).unwrap(),
+            "\"info\""
+        );
+        assert_eq!(
+            serde_json::to_string(&CheckSeverity::Warning).unwrap(),
+            "\"warning\""
+        );
+        assert_eq!(
+            serde_json::to_string(&CheckSeverity::Critical).unwrap(),
+            "\"critical\""
+        );
+    }
+
+    // ── FreshnessLevel serde names ──
+
+    #[test]
+    fn freshness_level_serde_names() {
+        assert_eq!(
+            serde_json::to_string(&FreshnessLevel::Fresh).unwrap(),
+            "\"fresh\""
+        );
+        assert_eq!(
+            serde_json::to_string(&FreshnessLevel::Stale).unwrap(),
+            "\"stale\""
+        );
+        assert_eq!(
+            serde_json::to_string(&FreshnessLevel::TooStale).unwrap(),
+            "\"too_stale\""
+        );
+        assert_eq!(
+            serde_json::to_string(&FreshnessLevel::Missing).unwrap(),
+            "\"missing\""
+        );
+    }
+
+    // ── Status struct serialization with non-default values ──
+
+    #[test]
+    fn checkpoint_status_stale_serialization() {
+        let s = CheckpointStatus {
+            freshness: FreshnessLevel::Stale,
+        };
+        let json = serde_json::to_value(&s).unwrap();
+        assert_eq!(json["freshness"], "stale");
+    }
+
+    #[test]
+    fn transport_policy_custom_serialization() {
+        let s = TransportPolicyStatus {
+            allow_lan: true,
+            allow_derp: true,
+            allow_funnel: false,
+        };
+        let json = serde_json::to_value(&s).unwrap();
+        assert_eq!(json["allow_lan"], true);
+        assert_eq!(json["allow_derp"], true);
+        assert_eq!(json["allow_funnel"], false);
+    }
+
+    #[test]
+    fn store_coverage_healthy_serialization() {
+        let s = StoreCoverageStatus {
+            store_healthy: true,
+        };
+        let json = serde_json::to_value(&s).unwrap();
+        assert_eq!(json["store_healthy"], true);
+    }
+
+    #[test]
+    fn degraded_mode_active_serialization() {
+        let s = DegradedModeStatus { is_degraded: true };
+        let json = serde_json::to_value(&s).unwrap();
+        assert_eq!(json["is_degraded"], true);
+    }
+
+    // ── with_self_checks precedence ──
+
+    #[test]
+    fn with_self_checks_mixed_ok_warn_fail_returns_fail() {
+        let checks = vec![
+            ConnectorSelfCheck {
+                connector_id: "a".to_string(),
+                report: SelfCheckReport::ok(),
+            },
+            ConnectorSelfCheck {
+                connector_id: "b".to_string(),
+                report: SelfCheckReport::degraded("slow", "slow response"),
+            },
+            ConnectorSelfCheck {
+                connector_id: "c".to_string(),
+                report: SelfCheckReport::failed("test", "down"),
+            },
+        ];
+        let report = DoctorReport::baseline("z:test").with_self_checks(checks);
+        assert_eq!(report.overall_status, OverallStatus::Fail);
+    }
+
+    #[test]
+    fn with_self_checks_warn_only_returns_warn() {
+        let checks = vec![
+            ConnectorSelfCheck {
+                connector_id: "a".to_string(),
+                report: SelfCheckReport::ok(),
+            },
+            ConnectorSelfCheck {
+                connector_id: "b".to_string(),
+                report: SelfCheckReport::degraded("slow", "slow response"),
+            },
+        ];
+        let report = DoctorReport::baseline("z:test").with_self_checks(checks);
+        assert_eq!(report.overall_status, OverallStatus::Warn);
+    }
+
+    // ── DoctorReport baseline values ──
+
+    #[test]
+    fn baseline_report_schema_version() {
+        let report = DoctorReport::baseline("z:test");
+        assert_eq!(report.schema_version, "1.1.0");
+    }
+
+    #[test]
+    fn baseline_report_zone_id_preserved() {
+        let report = DoctorReport::baseline("z:custom");
+        assert_eq!(report.zone_id, "z:custom");
+    }
+
+    #[test]
+    fn baseline_report_transport_policy_defaults() {
+        let report = DoctorReport::baseline("z:test");
+        assert!(report.transport_policy.allow_lan);
+        assert!(!report.transport_policy.allow_derp);
+        assert!(!report.transport_policy.allow_funnel);
+    }
+
+    #[test]
+    fn baseline_report_store_coverage_healthy() {
+        let report = DoctorReport::baseline("z:test");
+        assert!(report.store_coverage.store_healthy);
+    }
+
+    #[test]
+    fn baseline_report_no_degraded_mode() {
+        let report = DoctorReport::baseline("z:test");
+        assert!(!report.degraded_mode.is_degraded);
+    }
+
+    // ── ConnectorSelfCheck serde roundtrip ──
+
+    #[test]
+    fn connector_self_check_roundtrip() {
+        let check = ConnectorSelfCheck {
+            connector_id: "test:conn:1.0.0".to_string(),
+            report: SelfCheckReport::ok(),
+        };
+        let json = serde_json::to_string(&check).unwrap();
+        assert!(json.contains("test:conn:1.0.0"));
+        assert!(json.contains("ok"));
+    }
+
+    #[test]
+    fn connector_self_check_failed_report() {
+        let check = ConnectorSelfCheck {
+            connector_id: "test:fail:1.0.0".to_string(),
+            report: SelfCheckReport::failed("auth", "token expired"),
+        };
+        let json = serde_json::to_string(&check).unwrap();
+        assert!(json.contains("failed"));
+        assert!(json.contains("token expired"));
+    }
+
+    // ── DoctorReport full serialization ──
+
+    #[test]
+    fn doctor_report_full_serialization_roundtrip() {
+        let report = DoctorReport::baseline("z:roundtrip");
+        let json = serde_json::to_string(&report).unwrap();
+        assert!(json.contains("z:roundtrip"));
+        assert!(json.contains("1.1.0"));
+        assert!(json.contains("\"OK\""));
+        assert!(json.contains("\"fresh\""));
+    }
+
+    // ── CheckResult all status-severity combinations ──
+
+    #[test]
+    fn check_result_all_status_severity_combinations() {
+        let statuses = [CheckStatus::Ok, CheckStatus::Warn, CheckStatus::Fail];
+        let severities = [
+            CheckSeverity::Info,
+            CheckSeverity::Warning,
+            CheckSeverity::Critical,
+        ];
+        for status in &statuses {
+            for severity in &severities {
+                let result = CheckResult {
+                    name: format!("{status:?}_{severity:?}"),
+                    status: *status,
+                    severity: *severity,
+                    message: "test".to_string(),
+                };
+                let json = serde_json::to_value(&result).unwrap();
+                assert!(!json["status"].as_str().unwrap().is_empty());
+                assert!(!json["severity"].as_str().unwrap().is_empty());
+            }
+        }
+    }
+
+    // ── DoctorRequest deserialization edge cases ──
+
+    #[test]
+    fn doctor_request_empty_zone_id() {
+        let json = r#"{"zone_id": ""}"#;
+        let req: DoctorRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.zone_id, "");
+    }
+
+    #[test]
+    fn doctor_request_serde_roundtrip() {
+        let json = r#"{"zone_id": "z:test", "connectors": ["a", "b"], "self_check": true}"#;
+        let req: DoctorRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.zone_id, "z:test");
+        assert_eq!(req.connectors, vec!["a", "b"]);
+        assert!(req.self_check);
     }
 }

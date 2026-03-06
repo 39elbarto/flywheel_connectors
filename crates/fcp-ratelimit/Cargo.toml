@@ -39,4 +39,3 @@ rand = "0.9"
 [dev-dependencies]
 ciborium.workspace = true
 uuid.workspace = true
-tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "sync"] }

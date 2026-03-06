@@ -27,4 +27,3 @@ tracing.workspace = true
 [dev-dependencies]
 semver = "1.0"
 fcp-cbor = { path = "../fcp-cbor" }
-tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }

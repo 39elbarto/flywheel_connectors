@@ -49,7 +49,6 @@ ed25519-dalek.workspace = true
 
 [dev-dependencies]
 assert_cmd = "2.0"
-tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 insta = { version = "1.40", features = ["json", "redactions"] }
 predicates = "3.1"
 tempfile = "3.14"

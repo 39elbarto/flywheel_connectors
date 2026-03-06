@@ -10,46 +10,6 @@
   ],
   "dependency_exceptions": [
     {
-      "crate": "fcp-anthropic",
-      "dependency": "tokio",
-      "kind": "any",
-      "owner_bead": "flywheel_connectors-1ud0u.8.2",
-      "expires_on": "2026-03-21T00:00:00Z",
-      "reason": "Connector migration wave not complete"
-    },
-    {
-      "crate": "fcp-anthropic",
-      "dependency": "tokio-stream",
-      "kind": "any",
-      "owner_bead": "flywheel_connectors-1ud0u.8.2",
-      "expires_on": "2026-03-21T00:00:00Z",
-      "reason": "Connector migration wave not complete"
-    },
-    {
-      "crate": "fcp-bootstrap",
-      "dependency": "tokio",
-      "kind": "any",
-      "owner_bead": "flywheel_connectors-1ud0u.5.6",
-      "expires_on": "2026-03-21T00:00:00Z",
-      "reason": "Runtime primitive migration not complete"
-    },
-    {
-      "crate": "fcp-cli",
-      "dependency": "tokio",
-      "kind": "any",
-      "owner_bead": "flywheel_connectors-1ud0u.7.4",
-      "expires_on": "2026-03-21T00:00:00Z",
-      "reason": "CLI async flow migration not complete"
-    },
-    {
-      "crate": "fcp-conformance",
-      "dependency": "tokio",
-      "kind": "any",
-      "owner_bead": "flywheel_connectors-1ud0u.7.2",
-      "expires_on": "2026-03-21T00:00:00Z",
-      "reason": "Test harness migration not complete"
-    },
-    {
       "crate": "fcp-core",
       "dependency": "tokio",
       "kind": "any",
@@ -64,14 +24,6 @@
       "owner_bead": "flywheel_connectors-1ud0u.5.1",
       "expires_on": "2026-03-21T00:00:00Z",
       "reason": "Runtime substrate migration not complete"
-    },
-    {
-      "crate": "fcp-discord",
-      "dependency": "tokio",
-      "kind": "any",
-      "owner_bead": "flywheel_connectors-1ud0u.9.1",
-      "expires_on": "2026-03-21T00:00:00Z",
-      "reason": "Connector migration wave not complete"
     },
     {
       "crate": "fcp-discord",
@@ -88,22 +40,6 @@
       "owner_bead": "flywheel_connectors-1ud0u.9.1",
       "expires_on": "2026-03-21T00:00:00Z",
       "reason": "WebSocket transport migration not complete"
-    },
-    {
-      "crate": "fcp-e2e",
-      "dependency": "tokio",
-      "kind": "any",
-      "owner_bead": "flywheel_connectors-1ud0u.7.3",
-      "expires_on": "2026-03-21T00:00:00Z",
-      "reason": "E2E harness migration not complete"
-    },
-    {
-      "crate": "fcp-graphql",
-      "dependency": "tokio",
-      "kind": "any",
-      "owner_bead": "flywheel_connectors-1ud0u.6.2",
-      "expires_on": "2026-03-21T00:00:00Z",
-      "reason": "GraphQL transport migration not complete"
     },
     {
       "crate": "fcp-graphql",
@@ -130,14 +66,6 @@
       "reason": "Host runtime migration not complete"
     },
     {
-      "crate": "fcp-mesh",
-      "dependency": "tokio",
-      "kind": "any",
-      "owner_bead": "flywheel_connectors-1ud0u.6.5",
-      "expires_on": "2026-03-21T00:00:00Z",
-      "reason": "Mesh degraded routing migration not complete"
-    },
-    {
       "crate": "fcp-oauth",
       "dependency": "tokio",
       "kind": "any",
@@ -147,35 +75,11 @@
     },
     {
       "crate": "fcp-openai",
-      "dependency": "tokio",
-      "kind": "any",
-      "owner_bead": "flywheel_connectors-1ud0u.8.12",
-      "expires_on": "2026-03-21T00:00:00Z",
-      "reason": "Connector migration wave not complete"
-    },
-    {
-      "crate": "fcp-openai",
       "dependency": "tokio-stream",
       "kind": "any",
       "owner_bead": "flywheel_connectors-1ud0u.8.12",
       "expires_on": "2026-03-21T00:00:00Z",
       "reason": "Connector migration wave not complete"
-    },
-    {
-      "crate": "fcp-ratelimit",
-      "dependency": "tokio",
-      "kind": "any",
-      "owner_bead": "flywheel_connectors-1ud0u.5.3",
-      "expires_on": "2026-03-21T00:00:00Z",
-      "reason": "Async primitive migration not complete"
-    },
-    {
-      "crate": "fcp-registry",
-      "dependency": "tokio",
-      "kind": "any",
-      "owner_bead": "flywheel_connectors-1ud0u.6.6",
-      "expires_on": "2026-03-21T00:00:00Z",
-      "reason": "Tokio-coupled transport replacement pending"
     },
     {
       "crate": "fcp-sandbox",
@@ -203,14 +107,6 @@
     },
     {
       "crate": "fcp-streaming",
-      "dependency": "tokio",
-      "kind": "any",
-      "owner_bead": "flywheel_connectors-1ud0u.6.1",
-      "expires_on": "2026-03-21T00:00:00Z",
-      "reason": "Streaming runtime migration not complete"
-    },
-    {
-      "crate": "fcp-streaming",
       "dependency": "tokio-stream",
       "kind": "any",
       "owner_bead": "flywheel_connectors-1ud0u.6.1",
@@ -226,38 +122,6 @@
       "reason": "WebSocket transport migration not complete"
     },
     {
-      "crate": "fcp-tailscale",
-      "dependency": "tokio",
-      "kind": "any",
-      "owner_bead": "flywheel_connectors-1ud0u.6.3",
-      "expires_on": "2026-03-21T00:00:00Z",
-      "reason": "Tokio-coupled transport replacement pending"
-    },
-    {
-      "crate": "fcp-telegram",
-      "dependency": "tokio",
-      "kind": "any",
-      "owner_bead": "flywheel_connectors-1ud0u.9.3",
-      "expires_on": "2026-03-21T00:00:00Z",
-      "reason": "Connector migration wave not complete"
-    },
-    {
-      "crate": "fcp-telegram",
-      "dependency": "tokio-stream",
-      "kind": "any",
-      "owner_bead": "flywheel_connectors-1ud0u.9.3",
-      "expires_on": "2026-03-21T00:00:00Z",
-      "reason": "Connector migration wave not complete"
-    },
-    {
-      "crate": "fcp-telemetry",
-      "dependency": "tokio",
-      "kind": "any",
-      "owner_bead": "flywheel_connectors-1ud0u.5.5",
-      "expires_on": "2026-03-21T00:00:00Z",
-      "reason": "Async primitive migration not complete"
-    },
-    {
       "crate": "fcp-testkit",
       "dependency": "tokio",
       "kind": "any",
@@ -272,30 +136,6 @@
       "owner_bead": "flywheel_connectors-1ud0u.7.1",
       "expires_on": "2026-03-21T00:00:00Z",
       "reason": "Test harness migration not complete"
-    },
-    {
-      "crate": "fcp-twitter",
-      "dependency": "tokio",
-      "kind": "any",
-      "owner_bead": "flywheel_connectors-1ud0u.9.4",
-      "expires_on": "2026-03-21T00:00:00Z",
-      "reason": "Connector migration wave not complete"
-    },
-    {
-      "crate": "fcp-twitter",
-      "dependency": "tokio-stream",
-      "kind": "any",
-      "owner_bead": "flywheel_connectors-1ud0u.9.4",
-      "expires_on": "2026-03-21T00:00:00Z",
-      "reason": "Connector migration wave not complete"
-    },
-    {
-      "crate": "fcp-vectordb",
-      "dependency": "tokio",
-      "kind": "any",
-      "owner_bead": "flywheel_connectors-1ud0u.8.19",
-      "expires_on": "2026-03-21T00:00:00Z",
-      "reason": "Connector migration wave not complete"
     },
     {
       "crate": "fcp-webhook",
@@ -323,190 +163,22 @@
     },
     {
       "crate": "fcp-slack",
-      "dependency": "tokio",
-      "kind": "any",
-      "owner_bead": "flywheel_connectors-1ud0u.9.2",
-      "expires_on": "2026-03-21T00:00:00Z",
-      "reason": "Connector migration wave not complete"
-    },
-    {
-      "crate": "fcp-slack",
       "dependency": "tokio-tungstenite",
       "kind": "any",
       "owner_bead": "flywheel_connectors-1ud0u.9.2",
       "expires_on": "2026-03-21T00:00:00Z",
       "reason": "WebSocket transport migration not complete"
     },
-    {
-      "crate": "fcp-airtable",
-      "dependency": "tokio",
-      "kind": "dev",
-      "owner_bead": "flywheel_connectors-1ud0u.8.1",
-      "expires_on": "2026-03-21T00:00:00Z",
-      "reason": "Dev-dependency for integration tests"
-    },
-    {
-      "crate": "fcp-browser",
-      "dependency": "tokio",
-      "kind": "dev",
-      "owner_bead": "flywheel_connectors-1ud0u.9.6",
-      "expires_on": "2026-03-21T00:00:00Z",
-      "reason": "Dev-dependency for integration tests"
-    },
-    {
-      "crate": "fcp-figma",
-      "dependency": "tokio",
-      "kind": "dev",
-      "owner_bead": "flywheel_connectors-1ud0u.8.3",
-      "expires_on": "2026-03-21T00:00:00Z",
-      "reason": "Dev-dependency for integration tests"
-    },
-    {
-      "crate": "fcp-github",
-      "dependency": "tokio",
-      "kind": "dev",
-      "owner_bead": "flywheel_connectors-1ud0u.8.4",
-      "expires_on": "2026-03-21T00:00:00Z",
-      "reason": "Dev-dependency for integration tests"
-    },
-    {
-      "crate": "fcp-gmail",
-      "dependency": "tokio",
-      "kind": "dev",
-      "owner_bead": "flywheel_connectors-1ud0u.8.5",
-      "expires_on": "2026-03-21T00:00:00Z",
-      "reason": "Dev-dependency for integration tests"
-    },
-    {
-      "crate": "fcp-google-ai",
-      "dependency": "tokio",
-      "kind": "dev",
-      "owner_bead": "flywheel_connectors-1ud0u.8.7",
-      "expires_on": "2026-03-21T00:00:00Z",
-      "reason": "Dev-dependency for integration tests"
-    },
-    {
-      "crate": "fcp-google-calendar",
-      "dependency": "tokio",
-      "kind": "dev",
-      "owner_bead": "flywheel_connectors-1ud0u.8.6",
-      "expires_on": "2026-03-21T00:00:00Z",
-      "reason": "Dev-dependency for integration tests"
-    },
-    {
-      "crate": "fcp-jira",
-      "dependency": "tokio",
-      "kind": "dev",
-      "owner_bead": "flywheel_connectors-1ud0u.8.8",
-      "expires_on": "2026-03-21T00:00:00Z",
-      "reason": "Dev-dependency for integration tests"
-    },
-    {
-      "crate": "fcp-linear",
-      "dependency": "tokio",
-      "kind": "dev",
-      "owner_bead": "flywheel_connectors-1ud0u.8.9",
-      "expires_on": "2026-03-21T00:00:00Z",
-      "reason": "Dev-dependency for integration tests"
-    },
-    {
-      "crate": "fcp-llm-router",
-      "dependency": "tokio",
-      "kind": "dev",
-      "owner_bead": "flywheel_connectors-1ud0u.9.5",
-      "expires_on": "2026-03-21T00:00:00Z",
-      "reason": "Dev-dependency for integration tests"
-    },
-    {
-      "crate": "fcp-microsoft365",
-      "dependency": "tokio",
-      "kind": "dev",
-      "owner_bead": "flywheel_connectors-1ud0u.8.10",
-      "expires_on": "2026-03-21T00:00:00Z",
-      "reason": "Dev-dependency for integration tests"
-    },
-    {
-      "crate": "fcp-notion",
-      "dependency": "tokio",
-      "kind": "dev",
-      "owner_bead": "flywheel_connectors-1ud0u.8.11",
-      "expires_on": "2026-03-21T00:00:00Z",
-      "reason": "Dev-dependency for integration tests"
-    },
-    {
-      "crate": "fcp-pinecone",
-      "dependency": "tokio",
-      "kind": "dev",
-      "owner_bead": "flywheel_connectors-1ud0u.8.14",
-      "expires_on": "2026-03-21T00:00:00Z",
-      "reason": "Dev-dependency for integration tests"
-    },
-    {
-      "crate": "fcp-plaid",
-      "dependency": "tokio",
-      "kind": "dev",
-      "owner_bead": "flywheel_connectors-1ud0u.8.13",
-      "expires_on": "2026-03-21T00:00:00Z",
-      "reason": "Dev-dependency for integration tests"
-    },
-    {
-      "crate": "fcp-qdrant",
-      "dependency": "tokio",
-      "kind": "dev",
-      "owner_bead": "flywheel_connectors-1ud0u.8.15",
-      "expires_on": "2026-03-21T00:00:00Z",
-      "reason": "Dev-dependency for integration tests"
-    },
-    {
-      "crate": "fcp-s3",
-      "dependency": "tokio",
-      "kind": "dev",
-      "owner_bead": "flywheel_connectors-1ud0u.8.16",
-      "expires_on": "2026-03-21T00:00:00Z",
-      "reason": "Dev-dependency for integration tests"
-    },
-    {
-      "crate": "fcp-stripe",
-      "dependency": "tokio",
-      "kind": "dev",
-      "owner_bead": "flywheel_connectors-1ud0u.8.17",
-      "expires_on": "2026-03-21T00:00:00Z",
-      "reason": "Dev-dependency for integration tests"
-    },
-    {
-      "crate": "fcp-youtube",
-      "dependency": "tokio",
-      "kind": "dev",
-      "owner_bead": "flywheel_connectors-1ud0u.8.20",
-      "expires_on": "2026-03-21T00:00:00Z",
-      "reason": "Dev-dependency for integration tests"
-    },
-    {
-      "crate": "fcp-zendesk",
-      "dependency": "tokio",
-      "kind": "dev",
-      "owner_bead": "flywheel_connectors-1ud0u.8.21",
-      "expires_on": "2026-03-21T00:00:00Z",
-      "reason": "Dev-dependency for integration tests"
-    },
-    {
-      "crate": "fcp-twilio",
-      "dependency": "tokio",
-      "kind": "dev",
-      "owner_bead": "flywheel_connectors-1ud0u.8.18",
-      "expires_on": "2026-03-21T00:00:00Z",
-      "reason": "Dev-dependency for integration tests"
-    }
   ],
   "source_invariants": [
     {
       "id": "tokio_refs_total",
       "pattern": "tokio::",
       "scope": ["crates", "connectors", "tests", "fuzz"],
-      "max_count": 102,
+      "max_count": 95,
       "owner_bead": "flywheel_connectors-1ud0u.4",
       "expires_on": "2026-03-21T00:00:00Z",
-      "reason": "56 in fcp-async-core + 2 doc comments + 44 in differential_regression.rs (intentional raw tokio comparison tests)"
+      "reason": "50 in fcp-async-core + 44 in differential_regression.rs parity tests + 1 UnixListener use in fcp-host"
     },
     {
       "id": "tokio_test_attributes",
@@ -530,10 +202,10 @@
       "id": "tokio_spawn_usage",
       "pattern": "tokio::(task::)?spawn",
       "scope": ["crates", "connectors", "tests", "fuzz"],
-      "max_count": 7,
+      "max_count": 6,
       "owner_bead": "flywheel_connectors-1ud0u.2",
       "expires_on": "2026-03-21T00:00:00Z",
-      "reason": "2 in fcp-async-core + 5 in differential_regression.rs (tokio::task::spawn parity tests)"
+      "reason": "2 in fcp-async-core + 4 in differential_regression.rs (tokio::task::spawn parity tests)"
     },
     {
       "id": "tokio_select_usage",
@@ -557,10 +229,10 @@
       "id": "tokio_time_usage",
       "pattern": "tokio::time::(sleep|timeout|interval)",
       "scope": ["crates", "connectors", "tests", "fuzz"],
-      "max_count": 23,
+      "max_count": 21,
       "owner_bead": "flywheel_connectors-1ud0u.3",
       "expires_on": "2026-03-21T00:00:00Z",
-      "reason": "2 in fcp-async-core + 21 in differential_regression.rs (tokio::time parity tests)"
+      "reason": "21 in differential_regression.rs (intentional raw tokio time parity tests)"
     },
     {
       "id": "workspace_tokio_dependency_entry",

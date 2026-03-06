@@ -973,8 +973,9 @@ mod tests {
     #[test]
     fn mock_tailscale_client_clone() {
         let client = MockTailscaleClient::new();
-        let _cloned = client.clone();
-        // Clone should work without panic
+        let cloned = client.clone();
+        // Clone should produce equivalent instance
+        assert_eq!(format!("{client:?}"), format!("{cloned:?}"));
     }
 
     #[test]

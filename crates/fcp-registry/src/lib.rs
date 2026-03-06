@@ -5817,6 +5817,7 @@ sig = "base64:{sig_b64}"
             );
         }
     }
+    #[test]
     fn supply_chain_verification_config_debug_clone() {
         let config = SupplyChainVerificationConfig {
             tuf_pinned_root: Some(TufRootMetadata {
@@ -5833,7 +5834,7 @@ sig = "base64:{sig_b64}"
             require_sigstore: false,
         };
         let cloned = config.clone();
-        assert_eq!(cloned.require_transparency, true);
+        assert!(cloned.require_transparency);
         assert_eq!(cloned.trusted_sigstore_identities.len(), 1);
         let debug = format!("{config:?}");
         assert!(debug.contains("SupplyChainVerificationConfig"));
@@ -5869,6 +5870,7 @@ sig = "base64:{sig_b64}"
         assert!(!result.verified);
         assert!(result.identity.is_none());
     }
+    #[test]
     fn supply_chain_evidence_with_attestations() {
         let evidence = SupplyChainEvidence {
             transparency_log_present: true,
@@ -5922,21 +5924,21 @@ sig = "base64:{sig_b64}"
     }
     #[test]
     fn noop_transparency_verifier_debug_default() {
-        let v = NoOpTransparencyVerifier::default();
+        let v = NoOpTransparencyVerifier;
         let debug = format!("{v:?}");
         assert!(debug.contains("NoOpTransparencyVerifier"));
     }
 
     #[test]
     fn noop_tuf_verifier_debug_default() {
-        let v = NoOpTufVerifier::default();
+        let v = NoOpTufVerifier;
         let debug = format!("{v:?}");
         assert!(debug.contains("NoOpTufVerifier"));
     }
 
     #[test]
     fn noop_sigstore_verifier_debug_default() {
-        let v = NoOpSigstoreVerifier::default();
+        let v = NoOpSigstoreVerifier;
         let debug = format!("{v:?}");
         assert!(debug.contains("NoOpSigstoreVerifier"));
     }
@@ -6580,5 +6582,622 @@ sig = "base64:{sig_b64}"
             arch: "amd64".into(),
         };
         assert_eq!(t.as_string(), "windows-amd64");
+    }
+
+    // ── mirror_bundle error paths ────────────────────────────────────
+
+    struct FailingObjectStore;
+
+    #[async_trait]
+    impl ObjectStore for FailingObjectStore {
+        async fn put(&self, _object: StoredObject) -> Result<(), ObjectStoreError> {
+            Err(ObjectStoreError::Io("simulated disk failure".into()))
+        }
+        async fn get(&self, id: &ObjectId) -> Result<StoredObject, ObjectStoreError> {
+            Err(ObjectStoreError::NotFound(*id))
+        }
+        async fn exists(&self, _id: &ObjectId) -> bool {
+            false
+        }
+        async fn delete(&self, id: &ObjectId) -> Result<(), ObjectStoreError> {
+            Err(ObjectStoreError::NotFound(*id))
+        }
+        async fn get_header(&self, id: &ObjectId) -> Result<ObjectHeader, ObjectStoreError> {
+            Err(ObjectStoreError::NotFound(*id))
+        }
+        async fn get_storage_meta(
+            &self,
+            id: &ObjectId,
+        ) -> Result<StorageMeta, ObjectStoreError> {
+            Err(ObjectStoreError::NotFound(*id))
+        }
+        async fn set_retention(
+            &self,
+            id: &ObjectId,
+            _retention: RetentionClass,
+        ) -> Result<(), ObjectStoreError> {
+            Err(ObjectStoreError::NotFound(*id))
+        }
+        async fn list_zone(&self, _zone_id: &ZoneId) -> Vec<ObjectId> {
+            vec![]
+        }
+        async fn storage_used(&self) -> u64 {
+            0
+        }
+        async fn storage_quota(&self) -> u64 {
+            0
+        }
+    }
+
+    #[test]
+    fn mirror_bundle_store_put_failure() {
+        run_registry_test(
+            "mirror_bundle_store_put_failure",
+            "mirror",
+            "error",
+            1,
+            || async {
+                let signing_key = Ed25519SigningKey::generate();
+                let verifying_key = signing_key.verifying_key();
+
+                let binary = b"registry-binary".to_vec();
+                let binary_hash = hash_bytes(&binary);
+                let unsigned = unsigned_manifest_toml("");
+                let sig = sign_manifest_toml(&unsigned, &signing_key, &binary_hash);
+                let manifest_toml =
+                    with_signatures(&unsigned, &publisher_signature_section("pub1", &sig));
+
+                let bundle = ConnectorBundle {
+                    manifest_toml,
+                    binary,
+                    target: test_target(),
+                };
+
+                let mut trust = RegistryTrustPolicy::default();
+                trust
+                    .publisher_keys
+                    .insert("pub1".to_string(), verifying_key);
+
+                let verifier = RegistryVerifier::new(trust);
+                let verified = verifier
+                    .verify_bundle(&bundle, None, None, None)
+                    .expect("verify");
+
+                let store = FailingObjectStore;
+                let zone_id = ZoneId::work();
+                let object_id_key = ObjectIdKey::from_bytes([1u8; 32]);
+
+                let err = verifier
+                    .mirror_bundle(&verified, &bundle, zone_id, &object_id_key, &store)
+                    .await
+                    .expect_err("store put should fail");
+                assert!(matches!(err, RegistryError::ObjectStore(_)));
+
+                RegistryLogData {
+                    reason_code: Some("store_put_failure".to_string()),
+                    ..RegistryLogData::default()
+                }
+            },
+        );
+    }
+
+    // ── mirror_bundle result consistency ─────────────────────────────
+
+    #[test]
+    fn mirror_bundle_result_hashes_match_verified() {
+        run_registry_test(
+            "mirror_bundle_result_hashes_match_verified",
+            "mirror",
+            "consistency",
+            4,
+            || async {
+                let signing_key = Ed25519SigningKey::generate();
+                let verifying_key = signing_key.verifying_key();
+
+                let binary = b"consistency-check-binary".to_vec();
+                let binary_hash = hash_bytes(&binary);
+                let unsigned = unsigned_manifest_toml("");
+                let sig = sign_manifest_toml(&unsigned, &signing_key, &binary_hash);
+                let manifest_toml =
+                    with_signatures(&unsigned, &publisher_signature_section("pub1", &sig));
+
+                let bundle = ConnectorBundle {
+                    manifest_toml,
+                    binary,
+                    target: test_target(),
+                };
+
+                let mut trust = RegistryTrustPolicy::default();
+                trust
+                    .publisher_keys
+                    .insert("pub1".to_string(), verifying_key);
+
+                let verifier = RegistryVerifier::new(trust);
+                let verified = verifier
+                    .verify_bundle(&bundle, None, None, None)
+                    .expect("verify");
+
+                let store = MemoryObjectStore::new(MemoryObjectStoreConfig::default());
+                let zone_id = ZoneId::work();
+                let object_id_key = ObjectIdKey::from_bytes([2u8; 32]);
+
+                let result = verifier
+                    .mirror_bundle(&verified, &bundle, zone_id, &object_id_key, &store)
+                    .await
+                    .expect("mirror bundle");
+
+                assert_eq!(result.manifest_hash, verified.manifest_hash);
+                assert_eq!(result.binary_hash, verified.binary_hash);
+                assert_ne!(result.manifest_object_id, result.binary_object_id);
+                assert!(store.exists(&result.manifest_object_id).await);
+
+                RegistryLogData {
+                    manifest_hash: Some(result.manifest_hash),
+                    binary_hash: Some(result.binary_hash),
+                    ..RegistryLogData::default()
+                }
+            },
+        );
+    }
+
+    // ── mirror_bundle binary refs manifest ───────────────────────────
+
+    #[test]
+    fn mirror_bundle_binary_object_refs_manifest() {
+        run_registry_test(
+            "mirror_bundle_binary_object_refs_manifest",
+            "mirror",
+            "refs",
+            2,
+            || async {
+                let signing_key = Ed25519SigningKey::generate();
+                let verifying_key = signing_key.verifying_key();
+
+                let binary = b"refs-check".to_vec();
+                let binary_hash = hash_bytes(&binary);
+                let unsigned = unsigned_manifest_toml("");
+                let sig = sign_manifest_toml(&unsigned, &signing_key, &binary_hash);
+                let manifest_toml =
+                    with_signatures(&unsigned, &publisher_signature_section("pub1", &sig));
+
+                let bundle = ConnectorBundle {
+                    manifest_toml,
+                    binary,
+                    target: test_target(),
+                };
+
+                let mut trust = RegistryTrustPolicy::default();
+                trust
+                    .publisher_keys
+                    .insert("pub1".to_string(), verifying_key);
+
+                let verifier = RegistryVerifier::new(trust);
+                let verified = verifier
+                    .verify_bundle(&bundle, None, None, None)
+                    .expect("verify");
+
+                let store = MemoryObjectStore::new(MemoryObjectStoreConfig::default());
+                let zone_id = ZoneId::work();
+                let object_id_key = ObjectIdKey::from_bytes([3u8; 32]);
+
+                let result = verifier
+                    .mirror_bundle(&verified, &bundle, zone_id, &object_id_key, &store)
+                    .await
+                    .expect("mirror bundle");
+
+                let binary_obj = store
+                    .get(&result.binary_object_id)
+                    .await
+                    .expect("binary object");
+                assert_eq!(binary_obj.header.refs, vec![result.manifest_object_id]);
+
+                let manifest_obj = store
+                    .get(&result.manifest_object_id)
+                    .await
+                    .expect("manifest object");
+                assert!(manifest_obj.header.refs.is_empty());
+
+                RegistryLogData {
+                    manifest_hash: Some(result.manifest_hash),
+                    binary_hash: Some(result.binary_hash),
+                    ..RegistryLogData::default()
+                }
+            },
+        );
+    }
+
+    // ── supply chain: combined requirements ──────────────────────────
+
+    #[test]
+    fn supply_chain_combined_requirements_all_met() {
+        run_registry_test(
+            "supply_chain_combined_requirements_all_met",
+            "verify",
+            "supply-chain",
+            1,
+            || async {
+                let signing_key = Ed25519SigningKey::generate();
+                let verifying_key = signing_key.verifying_key();
+
+                let policy = r#"[policy]
+require_transparency_log = true
+require_attestation_types = ["in-toto", "code-review"]
+min_slsa_level = 2
+trusted_builders = ["trusted-ci"]
+"#;
+                let binary = b"combined-policy-binary".to_vec();
+                let binary_hash = hash_bytes(&binary);
+                let unsigned = unsigned_manifest_toml(policy);
+                let sig = sign_manifest_toml(&unsigned, &signing_key, &binary_hash);
+
+                // Custom signatures section with transparency_log_entry
+                let signatures_section = format!(
+                    r#"[signatures]
+publisher_threshold = "1-of-1"
+transparency_log_entry = "objectid:{}"
+
+[[signatures.publisher_signatures]]
+kid = "pub1"
+sig = "{}"
+"#,
+                    hex::encode([0u8; 32]),
+                    String::from(sig)
+                );
+                let manifest_toml = with_signatures(&unsigned, &signatures_section);
+
+                let bundle = ConnectorBundle {
+                    manifest_toml,
+                    binary,
+                    target: test_target(),
+                };
+
+                let evidence = SupplyChainEvidence {
+                    transparency_log_present: true,
+                    attestations: vec![
+                        AttestationEvidence {
+                            attestation_type: AttestationType::InToto,
+                            slsa_level: Some(3),
+                            builder_id: Some("trusted-ci".to_string()),
+                        },
+                        AttestationEvidence {
+                            attestation_type: AttestationType::CodeReview,
+                            slsa_level: None,
+                            builder_id: None,
+                        },
+                    ],
+                };
+
+                let mut trust = RegistryTrustPolicy::default();
+                trust
+                    .publisher_keys
+                    .insert("pub1".to_string(), verifying_key);
+
+                let verifier = RegistryVerifier::new(trust);
+                let verified = verifier
+                    .verify_bundle(&bundle, None, Some(&evidence), None)
+                    .expect("all requirements met");
+                assert!(!verified.manifest_hash.is_empty());
+
+                RegistryLogData {
+                    manifest_hash: Some(verified.manifest_hash),
+                    ..RegistryLogData::default()
+                }
+            },
+        );
+    }
+
+    #[test]
+    fn supply_chain_combined_fails_on_missing_attestation_type() {
+        run_registry_test(
+            "supply_chain_combined_fails_on_missing_attestation_type",
+            "verify",
+            "supply-chain",
+            1,
+            || async {
+                let signing_key = Ed25519SigningKey::generate();
+                let verifying_key = signing_key.verifying_key();
+
+                let policy = r#"[policy]
+require_attestation_types = ["in-toto", "code-review"]
+min_slsa_level = 2
+trusted_builders = ["trusted-ci"]
+"#;
+                let binary = b"combined-policy-binary".to_vec();
+                let binary_hash = hash_bytes(&binary);
+                let unsigned = unsigned_manifest_toml(policy);
+                let sig = sign_manifest_toml(&unsigned, &signing_key, &binary_hash);
+                let manifest_toml =
+                    with_signatures(&unsigned, &publisher_signature_section("pub1", &sig));
+
+                let bundle = ConnectorBundle {
+                    manifest_toml,
+                    binary,
+                    target: test_target(),
+                };
+
+                // Only provide in-toto, not code-review
+                let evidence = SupplyChainEvidence {
+                    transparency_log_present: false,
+                    attestations: vec![AttestationEvidence {
+                        attestation_type: AttestationType::InToto,
+                        slsa_level: Some(3),
+                        builder_id: Some("trusted-ci".to_string()),
+                    }],
+                };
+
+                let mut trust = RegistryTrustPolicy::default();
+                trust
+                    .publisher_keys
+                    .insert("pub1".to_string(), verifying_key);
+
+                let verifier = RegistryVerifier::new(trust);
+                let err = verifier
+                    .verify_bundle(&bundle, None, Some(&evidence), None)
+                    .expect_err("missing code-review");
+                assert!(matches!(
+                    err,
+                    RegistryError::RequiredAttestationMissing { .. }
+                ));
+
+                RegistryLogData {
+                    reason_code: Some("missing_attestation_type".to_string()),
+                    ..RegistryLogData::default()
+                }
+            },
+        );
+    }
+
+    // ── signature_from_entry direct test ─────────────────────────────
+
+    #[test]
+    fn signature_from_entry_too_short() {
+        run_registry_test(
+            "signature_from_entry_too_short",
+            "unit",
+            "signature",
+            1,
+            || async {
+                let short_sig =
+                    Base64Bytes::try_from("base64:AAAA".to_string()).expect("base64 parse");
+                let err = signature_from_entry(&short_sig).expect_err("too short");
+                assert!(matches!(err, RegistryError::SignatureBytes));
+
+                RegistryLogData {
+                    reason_code: Some("signature_too_short".to_string()),
+                    ..RegistryLogData::default()
+                }
+            },
+        );
+    }
+
+    #[test]
+    fn signature_from_entry_valid_length() {
+        run_registry_test(
+            "signature_from_entry_valid_length",
+            "unit",
+            "signature",
+            1,
+            || async {
+                // Ed25519 signatures are 64 bytes
+                let sig_bytes = [0u8; 64];
+                let encoded = base64::engine::general_purpose::STANDARD.encode(sig_bytes);
+                let sig =
+                    Base64Bytes::try_from(format!("base64:{encoded}")).expect("base64 parse");
+                let result = signature_from_entry(&sig);
+                assert!(result.is_ok());
+
+                RegistryLogData {
+                    reason_code: Some("signature_valid_length".to_string()),
+                    ..RegistryLogData::default()
+                }
+            },
+        );
+    }
+
+    // ── struct trait coverage ────────────────────────────────────────
+
+    #[test]
+    fn mirror_result_debug_and_clone() {
+        run_registry_test(
+            "mirror_result_debug_and_clone",
+            "unit",
+            "traits",
+            2,
+            || async {
+                let result = MirrorResult {
+                    manifest_object_id: ObjectId::from_bytes([1u8; 32]),
+                    binary_object_id: ObjectId::from_bytes([2u8; 32]),
+                    manifest_hash: "sha256:aaa".to_string(),
+                    binary_hash: "sha256:bbb".to_string(),
+                };
+                let debug = format!("{result:?}");
+                assert!(debug.contains("MirrorResult"));
+
+                let cloned = result.clone();
+                assert_eq!(cloned.manifest_hash, result.manifest_hash);
+
+                RegistryLogData::default()
+            },
+        );
+    }
+
+    #[test]
+    fn registry_verifier_debug_and_clone() {
+        run_registry_test(
+            "registry_verifier_debug_and_clone",
+            "unit",
+            "traits",
+            2,
+            || async {
+                let trust = RegistryTrustPolicy::default();
+                let verifier = RegistryVerifier::new(trust);
+                let debug = format!("{verifier:?}");
+                assert!(debug.contains("RegistryVerifier"));
+
+                let cloned = verifier.clone();
+                let _ = format!("{cloned:?}");
+
+                RegistryLogData::default()
+            },
+        );
+    }
+
+    #[test]
+    fn verified_bundle_report_fields() {
+        run_registry_test(
+            "verified_bundle_report_fields",
+            "unit",
+            "report",
+            4,
+            || async {
+                let signing_key = Ed25519SigningKey::generate();
+                let verifying_key = signing_key.verifying_key();
+
+                let binary = b"report-test-binary".to_vec();
+                let binary_hash = hash_bytes(&binary);
+                let unsigned = unsigned_manifest_toml("");
+                let sig = sign_manifest_toml(&unsigned, &signing_key, &binary_hash);
+                let manifest_toml =
+                    with_signatures(&unsigned, &publisher_signature_section("pub1", &sig));
+
+                let bundle = ConnectorBundle {
+                    manifest_toml,
+                    binary,
+                    target: test_target(),
+                };
+
+                let mut trust = RegistryTrustPolicy::default();
+                trust
+                    .publisher_keys
+                    .insert("pub1".to_string(), verifying_key);
+
+                let verifier = RegistryVerifier::new(trust);
+                let verified = verifier
+                    .verify_bundle(&bundle, None, None, None)
+                    .expect("verify");
+
+                let report = verified.report("pass");
+                assert_eq!(report.outcome, "pass");
+                assert_eq!(report.manifest_hash, verified.manifest_hash);
+                assert_eq!(report.binary_hash, verified.binary_hash);
+                assert!(report.verified_at > 0);
+
+                RegistryLogData {
+                    connector_id: Some(report.connector_id),
+                    ..RegistryLogData::default()
+                }
+            },
+        );
+    }
+
+    #[test]
+    fn registry_error_object_store_from_conversion() {
+        run_registry_test(
+            "registry_error_object_store_from_conversion",
+            "unit",
+            "error",
+            2,
+            || async {
+                let store_err = ObjectStoreError::Io("disk full".into());
+                let reg_err: RegistryError = store_err.into();
+                assert!(matches!(reg_err, RegistryError::ObjectStore(_)));
+                assert!(reg_err.to_string().contains("disk full"));
+
+                RegistryLogData {
+                    reason_code: Some("object_store_error_conversion".to_string()),
+                    ..RegistryLogData::default()
+                }
+            },
+        );
+    }
+
+    // ── signature_message determinism ────────────────────────────────
+
+    #[test]
+    fn signature_message_wire_format_layout() {
+        run_registry_test(
+            "signature_message_wire_format_layout",
+            "unit",
+            "signature",
+            3,
+            || async {
+                let signing_bytes = b"test-signing-bytes";
+                let binary_hash = "sha256:abc123";
+                let msg = signature_message(signing_bytes, binary_hash);
+
+                // Message format: le_u32(signing_len) || signing_bytes || le_u32(hash_len) || hash_bytes
+                let signing_len =
+                    u32::from_le_bytes(msg[0..4].try_into().expect("4 bytes"));
+                assert_eq!(signing_len as usize, signing_bytes.len());
+
+                let hash_offset = 4 + signing_bytes.len();
+                let hash_len = u32::from_le_bytes(
+                    msg[hash_offset..hash_offset + 4].try_into().expect("4 bytes"),
+                );
+                assert_eq!(hash_len as usize, binary_hash.len());
+
+                let total = 4 + signing_bytes.len() + 4 + binary_hash.len();
+                assert_eq!(msg.len(), total);
+
+                RegistryLogData::default()
+            },
+        );
+    }
+
+    // ── verify_bundle with both publisher and registry signatures ────
+
+    #[test]
+    fn verify_bundle_both_publisher_and_registry_valid() {
+        run_registry_test(
+            "verify_bundle_both_publisher_and_registry_valid",
+            "verify",
+            "signature",
+            1,
+            || async {
+                let pub_key = Ed25519SigningKey::generate();
+                let reg_key = Ed25519SigningKey::generate();
+
+                let binary = b"dual-sig-binary".to_vec();
+                let binary_hash = hash_bytes(&binary);
+                let unsigned = unsigned_manifest_toml("");
+                let pub_sig = sign_manifest_toml(&unsigned, &pub_key, &binary_hash);
+                let reg_sig = sign_manifest_toml(&unsigned, &reg_key, &binary_hash);
+
+                let sigs = format!(
+                    "{}\n{}",
+                    publisher_signature_section("pub1", &pub_sig),
+                    registry_signature_section("reg1", &reg_sig)
+                );
+                let manifest_toml = with_signatures(&unsigned, &sigs);
+
+                let bundle = ConnectorBundle {
+                    manifest_toml,
+                    binary,
+                    target: test_target(),
+                };
+
+                let mut trust = RegistryTrustPolicy {
+                    require_registry_signature: true,
+                    ..RegistryTrustPolicy::default()
+                };
+                trust
+                    .publisher_keys
+                    .insert("pub1".to_string(), pub_key.verifying_key());
+                trust
+                    .registry_keys
+                    .insert("reg1".to_string(), reg_key.verifying_key());
+
+                let verifier = RegistryVerifier::new(trust);
+                let verified = verifier
+                    .verify_bundle(&bundle, None, None, None)
+                    .expect("both sigs valid");
+                assert!(!verified.manifest_hash.is_empty());
+
+                RegistryLogData {
+                    manifest_hash: Some(verified.manifest_hash),
+                    ..RegistryLogData::default()
+                }
+            },
+        );
     }
 }

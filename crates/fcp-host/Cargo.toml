@@ -38,10 +38,11 @@ semver = { version = "1", features = ["serde"] }
 # HTTP server (doctor endpoint)
 axum = { version = "0.8", features = ["json"] }
 fcp-sandbox = { version = "0.1.0", path = "../fcp-sandbox" }
+tokio = { workspace = true, features = ["net"] }
 
 [dev-dependencies]
 fcp-conformance = { path = "../fcp-conformance" }
 fcp-e2e = { path = "../fcp-e2e" }
 fcp-testkit = { path = "../fcp-testkit" }
 reqwest.workspace = true
-tokio = { version = "1.49", features = ["rt-multi-thread", "macros", "test-util", "time"] }
+tempfile = "3"

@@ -2,6 +2,8 @@
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
+#[cfg(unix)]
+use std::path::{Path as FsPath, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -29,6 +31,8 @@ use fcp_host::{
 use fcp_host::{HostError, HostResult};
 use serde::Deserialize;
 use serde_json::json;
+#[cfg(unix)]
+use tokio::net::UnixListener;
 
 #[derive(Debug, Deserialize)]
 struct ConnectorConfig {
@@ -322,6 +326,13 @@ struct AppState {
     started_at: Instant,
 }
 
+#[derive(Debug)]
+enum BindTarget {
+    Tcp(SocketAddr),
+    #[cfg(unix)]
+    Unix(PathBuf),
+}
+
 fn load_connector_configs() -> HostResult<Vec<ConnectorConfig>> {
     let payload = if let Ok(path) = std::env::var("FCP_HOST_CONNECTORS_FILE") {
         if path.trim().is_empty() {
@@ -360,6 +371,81 @@ fn resolve_self_check_timeout() -> HostResult<Option<Duration>> {
     Ok(Some(Duration::from_millis(millis)))
 }
 
+fn resolve_bind_target() -> HostResult<BindTarget> {
+    let raw = std::env::var("FCP_HOST_BIND").unwrap_or_else(|_| "127.0.0.1:9090".to_string());
+    parse_bind_target(&raw)
+}
+
+fn parse_bind_target(raw: &str) -> HostResult<BindTarget> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err(HostError::Internal(
+            "FCP_HOST_BIND cannot be empty".to_string(),
+        ));
+    }
+
+    #[cfg(unix)]
+    {
+        if let Some(path) = trimmed.strip_prefix("unix://") {
+            return parse_unix_bind_target(path, raw);
+        }
+
+        if trimmed.starts_with('/') {
+            return parse_unix_bind_target(trimmed, raw);
+        }
+    }
+
+    #[cfg(not(unix))]
+    if trimmed.starts_with("unix://") {
+        return Err(HostError::Internal(format!(
+            "unix sockets are not supported on this platform: {raw}"
+        )));
+    }
+
+    parse_tcp_bind_target(trimmed, raw)
+}
+
+fn parse_tcp_bind_target(addr: &str, raw: &str) -> HostResult<BindTarget> {
+    let target = addr.strip_prefix("tcp://").unwrap_or(addr);
+    let socket_addr = target
+        .parse()
+        .map_err(|err| HostError::Internal(format!("invalid bind address '{raw}': {err}")))?;
+    Ok(BindTarget::Tcp(socket_addr))
+}
+
+#[cfg(unix)]
+fn parse_unix_bind_target(path: &str, raw: &str) -> HostResult<BindTarget> {
+    if path.trim().is_empty() {
+        return Err(HostError::Internal(format!(
+            "unix socket path in FCP_HOST_BIND cannot be empty: {raw}"
+        )));
+    }
+    Ok(BindTarget::Unix(PathBuf::from(path)))
+}
+
+#[cfg(unix)]
+fn prepare_unix_socket_path(path: &FsPath) -> HostResult<()> {
+    if path.exists() {
+        return Err(HostError::Internal(format!(
+            "unix socket path already exists: {}. Remove it manually before starting fcp-host",
+            path.display()
+        )));
+    }
+
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent).map_err(|err| {
+            HostError::Internal(format!(
+                "failed to create unix socket parent directory '{}': {err}",
+                parent.display()
+            ))
+        })?;
+    }
+
+    Ok(())
+}
+
 fn main() -> HostResult<()> {
     match fcp_async_core::runtime::block_on_sync(async_main()) {
         Ok(result) => result,
@@ -370,10 +456,7 @@ fn main() -> HostResult<()> {
 }
 
 async fn async_main() -> HostResult<()> {
-    let addr: SocketAddr = std::env::var("FCP_HOST_BIND")
-        .unwrap_or_else(|_| "127.0.0.1:9090".to_string())
-        .parse()
-        .map_err(|err| HostError::Internal(format!("invalid bind address: {err}")))?;
+    let bind_target = resolve_bind_target()?;
 
     let configs = load_connector_configs()?;
     if configs.is_empty() {
@@ -404,14 +487,31 @@ async fn async_main() -> HostResult<()> {
         .route("/rpc/health", get(health_handler))
         .with_state(state);
 
-    let listener = TcpListener::bind(addr)
-        .await
-        .map_err(|err| HostError::Internal(format!("bind error: {err}")))?;
-
-    tracing::info!(%addr, "fcp-host listening");
-    axum::serve(listener, app)
-        .await
-        .map_err(|err| HostError::Internal(format!("server error: {err}")))?;
+    match bind_target {
+        BindTarget::Tcp(addr) => {
+            let listener = TcpListener::bind(addr)
+                .await
+                .map_err(|err| HostError::Internal(format!("tcp bind error: {err}")))?;
+            tracing::info!(transport = "tcp", %addr, "fcp-host listening");
+            axum::serve(listener, app)
+                .await
+                .map_err(|err| HostError::Internal(format!("server error: {err}")))?;
+        }
+        #[cfg(unix)]
+        BindTarget::Unix(path) => {
+            prepare_unix_socket_path(&path)?;
+            let listener = UnixListener::bind(&path)
+                .map_err(|err| HostError::Internal(format!("unix bind error: {err}")))?;
+            tracing::info!(
+                transport = "unix",
+                socket_path = %path.display(),
+                "fcp-host listening"
+            );
+            axum::serve(listener, app)
+                .await
+                .map_err(|err| HostError::Internal(format!("server error: {err}")))?;
+        }
+    }
 
     Ok(())
 }
@@ -584,4 +684,405 @@ fn map_host_error(err: HostError) -> (StatusCode, String) {
             (StatusCode::INTERNAL_SERVER_ERROR, err.to_string())
         }
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── parse_bind_target: TCP ──
+
+    #[test]
+    fn parse_bind_target_accepts_bare_tcp_socket_addr() {
+        match parse_bind_target("127.0.0.1:9090").expect("tcp bind target should parse") {
+            BindTarget::Tcp(addr) => assert_eq!(addr.to_string(), "127.0.0.1:9090"),
+            #[cfg(unix)]
+            BindTarget::Unix(path) => panic!("expected tcp bind target, got {}", path.display()),
+        }
+    }
+
+    #[test]
+    fn parse_bind_target_accepts_tcp_uri() {
+        match parse_bind_target("tcp://127.0.0.1:9090").expect("tcp uri should parse") {
+            BindTarget::Tcp(addr) => assert_eq!(addr.to_string(), "127.0.0.1:9090"),
+            #[cfg(unix)]
+            BindTarget::Unix(path) => panic!("expected tcp bind target, got {}", path.display()),
+        }
+    }
+
+    #[test]
+    fn parse_bind_target_accepts_ipv6() {
+        match parse_bind_target("[::1]:8080").expect("ipv6 should parse") {
+            BindTarget::Tcp(addr) => assert_eq!(addr.to_string(), "[::1]:8080"),
+            #[cfg(unix)]
+            BindTarget::Unix(_) => panic!("expected tcp"),
+        }
+    }
+
+    #[test]
+    fn parse_bind_target_accepts_ipv6_with_tcp_prefix() {
+        match parse_bind_target("tcp://[::1]:8080").expect("tcp+ipv6 should parse") {
+            BindTarget::Tcp(addr) => assert_eq!(addr.to_string(), "[::1]:8080"),
+            #[cfg(unix)]
+            BindTarget::Unix(_) => panic!("expected tcp"),
+        }
+    }
+
+    #[test]
+    fn parse_bind_target_accepts_zero_addr() {
+        match parse_bind_target("0.0.0.0:0").expect("zero addr should parse") {
+            BindTarget::Tcp(addr) => {
+                assert_eq!(addr.ip().to_string(), "0.0.0.0");
+                assert_eq!(addr.port(), 0);
+            }
+            #[cfg(unix)]
+            BindTarget::Unix(_) => panic!("expected tcp"),
+        }
+    }
+
+    #[test]
+    fn parse_bind_target_accepts_high_port() {
+        match parse_bind_target("127.0.0.1:65535").expect("high port should parse") {
+            BindTarget::Tcp(addr) => assert_eq!(addr.port(), 65535),
+            #[cfg(unix)]
+            BindTarget::Unix(_) => panic!("expected tcp"),
+        }
+    }
+
+    #[test]
+    fn parse_bind_target_rejects_empty() {
+        assert!(parse_bind_target("").is_err());
+    }
+
+    #[test]
+    fn parse_bind_target_rejects_whitespace_only() {
+        assert!(parse_bind_target("   ").is_err());
+    }
+
+    #[test]
+    fn parse_bind_target_rejects_invalid_addr() {
+        assert!(parse_bind_target("not-an-address").is_err());
+    }
+
+    #[test]
+    fn parse_bind_target_rejects_missing_port() {
+        assert!(parse_bind_target("127.0.0.1").is_err());
+    }
+
+    #[test]
+    fn parse_bind_target_trims_whitespace() {
+        match parse_bind_target("  127.0.0.1:9090  ").expect("trimmed should parse") {
+            BindTarget::Tcp(addr) => assert_eq!(addr.to_string(), "127.0.0.1:9090"),
+            #[cfg(unix)]
+            BindTarget::Unix(_) => panic!("expected tcp"),
+        }
+    }
+
+    // ── parse_bind_target: Unix ──
+
+    #[cfg(unix)]
+    #[test]
+    fn parse_bind_target_accepts_unix_uri() {
+        match parse_bind_target("unix:///tmp/fcp-host.sock").expect("unix uri should parse") {
+            BindTarget::Unix(path) => {
+                assert_eq!(path, std::path::PathBuf::from("/tmp/fcp-host.sock"))
+            }
+            BindTarget::Tcp(addr) => panic!("expected unix bind target, got {addr}"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn parse_bind_target_accepts_absolute_path() {
+        match parse_bind_target("/run/fcp/host.sock").expect("abs path should parse") {
+            BindTarget::Unix(path) => {
+                assert_eq!(path, std::path::PathBuf::from("/run/fcp/host.sock"))
+            }
+            BindTarget::Tcp(addr) => panic!("expected unix, got tcp {addr}"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn parse_bind_target_rejects_empty_unix_path() {
+        assert!(parse_bind_target("unix://").is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn parse_bind_target_rejects_whitespace_unix_path() {
+        assert!(parse_bind_target("unix://   ").is_err());
+    }
+
+    // ── parse_tcp_bind_target ──
+
+    #[test]
+    fn parse_tcp_bind_target_strips_prefix() {
+        match parse_tcp_bind_target("tcp://127.0.0.1:3000", "tcp://127.0.0.1:3000")
+            .expect("should strip tcp prefix")
+        {
+            BindTarget::Tcp(addr) => assert_eq!(addr.to_string(), "127.0.0.1:3000"),
+            #[cfg(unix)]
+            BindTarget::Unix(_) => panic!("expected tcp"),
+        }
+    }
+
+    #[test]
+    fn parse_tcp_bind_target_without_prefix() {
+        match parse_tcp_bind_target("127.0.0.1:3000", "127.0.0.1:3000")
+            .expect("should parse without prefix")
+        {
+            BindTarget::Tcp(addr) => assert_eq!(addr.to_string(), "127.0.0.1:3000"),
+            #[cfg(unix)]
+            BindTarget::Unix(_) => panic!("expected tcp"),
+        }
+    }
+
+    #[test]
+    fn parse_tcp_bind_target_invalid() {
+        let err = parse_tcp_bind_target("garbage", "garbage");
+        assert!(err.is_err());
+    }
+
+    // ── prepare_unix_socket_path ──
+
+    #[cfg(unix)]
+    #[test]
+    fn prepare_unix_socket_rejects_existing_path() {
+        // /tmp always exists
+        let err = prepare_unix_socket_path(std::path::Path::new("/tmp"));
+        assert!(err.is_err());
+        let msg = err.unwrap_err().to_string();
+        assert!(msg.contains("already exists"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn prepare_unix_socket_creates_parent_dirs() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("sub").join("deep").join("host.sock");
+        prepare_unix_socket_path(&path).expect("should create parent dirs");
+        assert!(path.parent().unwrap().exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn prepare_unix_socket_ok_with_existing_parent() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("host.sock");
+        prepare_unix_socket_path(&path).expect("should succeed with existing parent");
+    }
+
+    // ── map_host_error ──
+
+    #[test]
+    fn map_host_error_connector_not_found() {
+        let (status, msg) = map_host_error(HostError::ConnectorNotFound("test".into()));
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert!(msg.contains("connector not found"));
+    }
+
+    #[test]
+    fn map_host_error_invalid_filter() {
+        let (status, msg) = map_host_error(HostError::InvalidFilter("bad".into()));
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(msg.contains("invalid filter"));
+    }
+
+    #[test]
+    fn map_host_error_preflight_failed() {
+        let (status, msg) = map_host_error(HostError::PreflightFailed("denied".into()));
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert!(msg.contains("preflight failed"));
+    }
+
+    #[test]
+    fn map_host_error_cache_error() {
+        let (status, msg) = map_host_error(HostError::CacheError("stale".into()));
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert!(msg.contains("cache error"));
+    }
+
+    #[test]
+    fn map_host_error_registry_error() {
+        let (status, msg) = map_host_error(HostError::RegistryError("unreachable".into()));
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(msg.contains("registry error"));
+    }
+
+    #[test]
+    fn map_host_error_internal() {
+        let (status, msg) = map_host_error(HostError::Internal("panic".into()));
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(msg.contains("internal error"));
+    }
+
+    // ── parse_connector_id ──
+
+    #[test]
+    fn parse_connector_id_valid() {
+        let id = parse_connector_id("fcp.test:echo:1.0.0").expect("should parse valid id");
+        assert_eq!(id.to_string(), "fcp.test:echo:1.0.0");
+    }
+
+    #[test]
+    fn parse_connector_id_invalid() {
+        let (status, msg) = parse_connector_id("").unwrap_err();
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(msg.contains("invalid"));
+    }
+
+    // ── ConnectorConfig deserialization ──
+
+    #[test]
+    fn connector_config_minimal_json() {
+        let json = r#"{"id": "fcp.test:echo:1.0.0", "binary": "/usr/bin/echo"}"#;
+        let config: ConnectorConfig = serde_json::from_str(json).expect("should parse");
+        assert_eq!(config.id, "fcp.test:echo:1.0.0");
+        assert_eq!(config.binary, "/usr/bin/echo");
+        assert!(config.name.is_none());
+        assert!(config.description.is_none());
+        assert!(config.args.is_empty());
+        assert!(config.env.is_empty());
+        assert!(config.config.is_none());
+        assert!(config.categories.is_empty());
+        assert!(config.version.is_none());
+    }
+
+    #[test]
+    fn connector_config_full_json() {
+        let json = r#"{
+            "id": "fcp.test:echo:1.0.0",
+            "binary": "/usr/bin/echo",
+            "name": "Echo Connector",
+            "description": "Echoes input",
+            "args": ["--verbose"],
+            "env": {"LOG_LEVEL": "debug"},
+            "config": {"key": "value"},
+            "categories": ["utility", "test"],
+            "version": "2.3.4"
+        }"#;
+        let config: ConnectorConfig = serde_json::from_str(json).expect("should parse");
+        assert_eq!(config.name.as_deref(), Some("Echo Connector"));
+        assert_eq!(config.description.as_deref(), Some("Echoes input"));
+        assert_eq!(config.args, vec!["--verbose"]);
+        assert_eq!(config.env.get("LOG_LEVEL").unwrap(), "debug");
+        assert!(config.config.is_some());
+        assert_eq!(config.categories, vec!["utility", "test"]);
+        assert_eq!(config.version.as_deref(), Some("2.3.4"));
+    }
+
+    #[test]
+    fn connector_config_array_json() {
+        let json = r#"[
+            {"id": "fcp.a:b:1.0.0", "binary": "/bin/a"},
+            {"id": "fcp.c:d:1.0.0", "binary": "/bin/c"}
+        ]"#;
+        let configs: Vec<ConnectorConfig> = serde_json::from_str(json).expect("should parse");
+        assert_eq!(configs.len(), 2);
+        assert_eq!(configs[0].id, "fcp.a:b:1.0.0");
+        assert_eq!(configs[1].id, "fcp.c:d:1.0.0");
+    }
+
+    // ── BindTarget debug ──
+
+    #[test]
+    fn bind_target_debug_tcp() {
+        let target = BindTarget::Tcp("127.0.0.1:9090".parse().unwrap());
+        let dbg = format!("{target:?}");
+        assert!(dbg.contains("Tcp"));
+        assert!(dbg.contains("9090"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bind_target_debug_unix() {
+        let target = BindTarget::Unix(std::path::PathBuf::from("/tmp/test.sock"));
+        let dbg = format!("{target:?}");
+        assert!(dbg.contains("Unix"));
+        assert!(dbg.contains("test.sock"));
+    }
+
+    // ── SubprocessRegistry version() ──
+
+    #[test]
+    fn subprocess_registry_version() {
+        let registry = SubprocessRegistry {
+            connectors: HashMap::new(),
+            version: 42,
+        };
+        assert_eq!(registry.version(), 42);
+    }
+
+    #[test]
+    fn subprocess_registry_clone() {
+        let registry = SubprocessRegistry {
+            connectors: HashMap::new(),
+            version: 7,
+        };
+        let cloned = registry.clone();
+        assert_eq!(cloned.version(), 7);
+        assert!(cloned.connectors.is_empty());
+    }
+
+    // ── AppState clone ──
+
+    #[fcp_async_core::runtime::test]
+    async fn app_state_clone_preserves_started_at() {
+        let registry = Arc::new(SubprocessRegistry {
+            connectors: HashMap::new(),
+            version: 1,
+        });
+        let doctor = DoctorService::new(Arc::clone(&registry));
+        let discovery = Arc::new(DiscoveryEndpoint::new(
+            Arc::clone(&registry),
+            Arc::new(BudgetPolicyEngine::new()),
+        ));
+        let state = AppState {
+            registry,
+            doctor,
+            discovery,
+            started_at: Instant::now(),
+        };
+        let cloned = state.clone();
+        // started_at should be equal (same instant)
+        assert_eq!(state.started_at, cloned.started_at);
+    }
+
+    // ── ConnectorSummary defaults in SubprocessConnector ──
+
+    #[test]
+    fn connector_config_defaults_name_to_id() {
+        let json = r#"{"id": "fcp.test:echo:1.0.0", "binary": "/bin/echo"}"#;
+        let config: ConnectorConfig = serde_json::from_str(json).expect("parse");
+        assert!(config.name.is_none());
+        // When name is None, SubprocessConnector::spawn would use connector_id.to_string()
+    }
+
+    #[test]
+    fn connector_config_defaults_version_none() {
+        let json = r#"{"id": "fcp.test:echo:1.0.0", "binary": "/bin/echo"}"#;
+        let config: ConnectorConfig = serde_json::from_str(json).expect("parse");
+        assert!(config.version.is_none());
+        // When version is None, SubprocessConnector::spawn defaults to 1.0.0
+    }
+
+    #[test]
+    fn connector_config_debug() {
+        let config = ConnectorConfig {
+            id: "fcp.test:echo:1.0.0".to_string(),
+            binary: "/bin/echo".to_string(),
+            name: None,
+            description: None,
+            args: vec![],
+            env: HashMap::new(),
+            config: None,
+            categories: vec![],
+            version: None,
+        };
+        let dbg = format!("{config:?}");
+        assert!(dbg.contains("ConnectorConfig"));
+        assert!(dbg.contains("fcp.test:echo:1.0.0"));
+    }
+
 }

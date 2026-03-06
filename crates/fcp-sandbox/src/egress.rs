@@ -2145,4 +2145,321 @@ mod tests {
         let result = verifier.verify_spki(&cert, &[pin]);
         assert!(result.is_err());
     }
+
+    // ── EgressError display ────────────────────────────────────────────
+
+    #[test]
+    fn test_egress_error_denied_display() {
+        let err = EgressError::Denied {
+            reason: "host not allowed".into(),
+            code: DenyReason::HostNotAllowed,
+        };
+        assert!(err.to_string().contains("host not allowed"));
+    }
+
+    #[test]
+    fn test_egress_error_all_variants_display() {
+        let errors: Vec<EgressError> = vec![
+            EgressError::InvalidRequest("bad".into()),
+            EgressError::InvalidUrl("http://".into()),
+            EgressError::CanonicalizationFailed("failed".into()),
+            EgressError::DnsResolutionFailed("timeout".into()),
+            EgressError::CredentialError("not found".into()),
+            EgressError::TlsVerificationFailed("cert mismatch".into()),
+        ];
+        for err in &errors {
+            assert!(!err.to_string().is_empty());
+        }
+    }
+
+    // ── DenyReason serde roundtrip (all variants) ──────────────────────
+
+    #[test]
+    fn test_deny_reason_serde_all_variants() {
+        let reasons = [
+            DenyReason::HostNotAllowed,
+            DenyReason::PortNotAllowed,
+            DenyReason::IpLiteralDenied,
+            DenyReason::LocalhostDenied,
+            DenyReason::PrivateRangeDenied,
+            DenyReason::TailnetRangeDenied,
+            DenyReason::LinkLocalDenied,
+            DenyReason::CidrDenyMatched,
+            DenyReason::SniMismatch,
+            DenyReason::SpkiPinMismatch,
+            DenyReason::CredentialNotAuthorized,
+            DenyReason::CredentialHostNotAllowed,
+            DenyReason::HostnameNotCanonical,
+            DenyReason::DnsMaxIpsExceeded,
+            DenyReason::MaxRedirectsExceeded,
+        ];
+        for reason in reasons {
+            let json = serde_json::to_string(&reason).unwrap();
+            let deserialized: DenyReason = serde_json::from_str(&json).unwrap();
+            assert_eq!(deserialized, reason);
+        }
+    }
+
+    #[test]
+    fn test_deny_reason_snake_case_names() {
+        assert_eq!(
+            serde_json::to_string(&DenyReason::HostNotAllowed).unwrap(),
+            "\"host_not_allowed\""
+        );
+        assert_eq!(
+            serde_json::to_string(&DenyReason::IpLiteralDenied).unwrap(),
+            "\"ip_literal_denied\""
+        );
+        assert_eq!(
+            serde_json::to_string(&DenyReason::DnsMaxIpsExceeded).unwrap(),
+            "\"dns_max_ips_exceeded\""
+        );
+    }
+
+    // ── EgressRequest serde ────────────────────────────────────────────
+
+    #[test]
+    fn test_egress_request_http_serde_roundtrip() {
+        let req = EgressRequest::Http(EgressHttpRequest {
+            url: "https://api.example.com/data".into(),
+            method: "GET".into(),
+            headers: vec![HttpHeader {
+                name: "Accept".into(),
+                value: "application/json".into(),
+            }],
+            body: None,
+            credential_id: None,
+        });
+        let json = serde_json::to_string(&req).unwrap();
+        let deserialized: EgressRequest = serde_json::from_str(&json).unwrap();
+        match deserialized {
+            EgressRequest::Http(http) => {
+                assert_eq!(http.url, "https://api.example.com/data");
+                assert_eq!(http.method, "GET");
+                assert_eq!(http.headers.len(), 1);
+                assert!(http.body.is_none());
+            }
+            EgressRequest::TcpConnect(_) => panic!("expected Http variant"),
+        }
+    }
+
+    #[test]
+    fn test_egress_request_tcp_serde_roundtrip() {
+        let req = EgressRequest::TcpConnect(EgressTcpConnectRequest {
+            host: "db.example.com".into(),
+            port: 5432,
+            tls: true,
+            sni_override: Some("custom-sni.example.com".into()),
+            credential_id: Some("pg-cred".into()),
+        });
+        let json = serde_json::to_string(&req).unwrap();
+        let deserialized: EgressRequest = serde_json::from_str(&json).unwrap();
+        match deserialized {
+            EgressRequest::TcpConnect(tcp) => {
+                assert_eq!(tcp.host, "db.example.com");
+                assert_eq!(tcp.port, 5432);
+                assert!(tcp.tls);
+                assert_eq!(tcp.sni_override.as_deref(), Some("custom-sni.example.com"));
+                assert_eq!(tcp.credential_id.as_deref(), Some("pg-cred"));
+            }
+            EgressRequest::Http(_) => panic!("expected TcpConnect variant"),
+        }
+    }
+
+    #[test]
+    fn test_egress_http_request_with_body() {
+        let req = EgressHttpRequest {
+            url: "https://api.example.com/upload".into(),
+            method: "POST".into(),
+            headers: vec![],
+            body: Some(vec![1, 2, 3, 4]),
+            credential_id: Some("upload-key".into()),
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        let deserialized: EgressHttpRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.body, Some(vec![1, 2, 3, 4]));
+        assert_eq!(deserialized.credential_id.as_deref(), Some("upload-key"));
+    }
+
+    // ── IP range classification ────────────────────────────────────────
+
+    #[test]
+    fn test_is_localhost_ipv4_boundary() {
+        assert!(is_localhost("127.0.0.1".parse().unwrap()));
+        assert!(is_localhost("127.255.255.255".parse().unwrap()));
+        assert!(!is_localhost("128.0.0.1".parse().unwrap()));
+    }
+
+    #[test]
+    fn test_is_localhost_ipv6_loopback() {
+        assert!(is_localhost("::1".parse().unwrap()));
+        assert!(!is_localhost("::2".parse().unwrap()));
+    }
+
+    #[test]
+    fn test_is_private_range_ipv4() {
+        assert!(is_private_range("10.0.0.1".parse().unwrap()));
+        assert!(is_private_range("172.16.0.1".parse().unwrap()));
+        assert!(is_private_range("192.168.1.1".parse().unwrap()));
+        assert!(!is_private_range("8.8.8.8".parse().unwrap()));
+    }
+
+    #[test]
+    fn test_is_private_range_ipv6_ula_fc_fd() {
+        assert!(is_private_range("fc00::1".parse().unwrap()));
+        assert!(is_private_range("fd12:3456::1".parse().unwrap()));
+        assert!(!is_private_range("2001:db8::1".parse().unwrap()));
+    }
+
+    #[test]
+    fn test_is_link_local_ipv4_boundary() {
+        assert!(is_link_local("169.254.0.1".parse().unwrap()));
+        assert!(is_link_local("169.254.255.255".parse().unwrap()));
+        assert!(!is_link_local("169.255.0.1".parse().unwrap()));
+    }
+
+    #[test]
+    fn test_is_link_local_ipv6_fe80() {
+        assert!(is_link_local("fe80::1".parse().unwrap()));
+        assert!(!is_link_local("fe00::1".parse().unwrap()));
+    }
+
+    #[test]
+    fn test_is_tailnet_range_boundaries() {
+        assert!(is_tailnet_range("100.64.0.1".parse().unwrap()));
+        assert!(is_tailnet_range("100.127.255.255".parse().unwrap()));
+        assert!(!is_tailnet_range("100.128.0.1".parse().unwrap()));
+        assert!(!is_tailnet_range("100.63.255.255".parse().unwrap()));
+    }
+
+    // ── canonicalize_host_pattern ──────────────────────────────────────
+
+    #[test]
+    fn test_canonicalize_host_pattern_empty_returns_none() {
+        assert_eq!(canonicalize_host_pattern(""), None);
+    }
+
+    #[test]
+    fn test_canonicalize_host_pattern_star() {
+        assert_eq!(canonicalize_host_pattern("*"), Some("*".into()));
+    }
+
+    #[test]
+    fn test_canonicalize_host_pattern_wildcard_lowercased() {
+        assert_eq!(
+            canonicalize_host_pattern("*.Example.COM"),
+            Some("*.example.com".into())
+        );
+    }
+
+    #[test]
+    fn test_canonicalize_host_pattern_plain() {
+        assert_eq!(
+            canonicalize_host_pattern("API.Example.COM"),
+            Some("api.example.com".into())
+        );
+    }
+
+    #[test]
+    fn test_canonicalize_host_pattern_ip_literal_passthrough() {
+        assert_eq!(
+            canonicalize_host_pattern("192.168.1.1"),
+            Some("192.168.1.1".into())
+        );
+    }
+
+    // ── is_hostname_canonical ──────────────────────────────────────────
+
+    #[test]
+    fn test_is_hostname_canonical_valid() {
+        assert!(is_hostname_canonical("api.example.com"));
+        assert!(is_hostname_canonical("a.b.c"));
+    }
+
+    #[test]
+    fn test_is_hostname_canonical_empty_string() {
+        assert!(!is_hostname_canonical(""));
+    }
+
+    #[test]
+    fn test_is_hostname_canonical_trailing_dot() {
+        assert!(!is_hostname_canonical("example.com."));
+    }
+
+    #[test]
+    fn test_is_hostname_canonical_uppercase() {
+        assert!(!is_hostname_canonical("API.Example.com"));
+    }
+
+    #[test]
+    fn test_is_hostname_canonical_non_ascii_rejected() {
+        assert!(!is_hostname_canonical("例え.jp"));
+    }
+
+    // ── SandboxError display ───────────────────────────────────────────
+
+    #[test]
+    fn test_sandbox_error_variants() {
+        use crate::SandboxError;
+
+        let errors: Vec<SandboxError> = vec![
+            SandboxError::UnsupportedPlatform("plan9".into()),
+            SandboxError::PolicyCompilationFailed("bad policy".into()),
+            SandboxError::ApplyFailed("denied".into()),
+            SandboxError::ResourceLimitExceeded("memory".into()),
+            SandboxError::InvalidConfig("missing field".into()),
+            SandboxError::SyscallFailed("seccomp".into()),
+            SandboxError::Timeout,
+        ];
+        for err in &errors {
+            assert!(!err.to_string().is_empty());
+        }
+        assert!(errors[0].to_string().contains("plan9"));
+        assert!(errors[6].to_string().contains("timeout"));
+    }
+
+    // ── EgressGuard constructor ────────────────────────────────────────
+
+    #[test]
+    fn test_egress_guard_new() {
+        let _guard = EgressGuard::new();
+        let _guard2 = EgressGuard::default();
+    }
+
+    // ── HttpHeader serde ───────────────────────────────────────────────
+
+    #[test]
+    fn test_http_header_serde_roundtrip() {
+        let header = HttpHeader {
+            name: "X-Custom-Header".into(),
+            value: "custom-value".into(),
+        };
+        let json = serde_json::to_string(&header).unwrap();
+        let deserialized: HttpHeader = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.name, "X-Custom-Header");
+        assert_eq!(deserialized.value, "custom-value");
+    }
+
+    // ── canonicalize_hostname edge cases ──────────────────────────────
+
+    #[test]
+    fn test_canonicalize_hostname_empty() {
+        assert!(canonicalize_hostname("").is_err());
+    }
+
+    #[test]
+    fn test_canonicalize_hostname_trailing_dot() {
+        assert_eq!(
+            canonicalize_hostname("example.com.").unwrap(),
+            "example.com"
+        );
+    }
+
+    #[test]
+    fn test_canonicalize_hostname_idempotent() {
+        let hostname = "api.example.com";
+        let canonical = canonicalize_hostname(hostname).unwrap();
+        let canonical2 = canonicalize_hostname(&canonical).unwrap();
+        assert_eq!(canonical, canonical2);
+    }
 }

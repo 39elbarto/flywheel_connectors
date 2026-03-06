@@ -33,7 +33,9 @@ mod error;
 mod identity;
 mod tag;
 
-pub use client::{LocalApiClient, MockTailscaleClient, PeerInfo, TailscaleClient, TailscaleStatus};
+pub use client::{
+    LocalApiClient, MockTailscaleClient, PeerInfo, SelfNode, TailscaleClient, TailscaleStatus,
+};
 pub use error::{TailscaleError, TailscaleResult};
 pub use identity::{MeshIdentity, NodeId, NodeKeyAttestation, NodeKeys};
 pub use tag::{TailscaleTag, ZoneAclGenerator, ZoneAclRule, ZoneTagMapping};

@@ -63,8 +63,6 @@ windows = { version = "0.62", features = ["Win32_System_Time"] }
 
 [dev-dependencies]
 # Testing
-tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
-tokio-test = "0.4"
 pretty_assertions.workspace = true
 rand_chacha = "0.3"
 tempfile = "3.15"

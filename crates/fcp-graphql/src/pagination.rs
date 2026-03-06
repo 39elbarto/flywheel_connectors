@@ -331,7 +331,7 @@ mod tests {
         assert_error(&PaginationError::LimitExceeded("x".into()));
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn paginate_cursor_single_page() {
         let items = paginate_cursor(None, None, |_cursor| async {
             Ok(CursorPage {
@@ -348,7 +348,7 @@ mod tests {
         assert_eq!(items, vec![1, 2, 3]);
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn paginate_cursor_multi_page() {
         let call_count = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
         let cc = call_count.clone();
@@ -384,7 +384,7 @@ mod tests {
         assert_eq!(items, vec![1, 2, 3]);
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn paginate_cursor_with_limit() {
         let result: Result<Vec<i32>, _> =
             paginate_cursor(None, Some(PageLimit::new(2)), |_cursor| async {
@@ -401,7 +401,7 @@ mod tests {
         assert!(matches!(result, Err(PaginationError::LimitExceeded(_))));
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn paginate_offset_single_page() {
         let items = paginate_offset(0, None, |_offset| async {
             Ok(OffsetPage {
@@ -415,7 +415,7 @@ mod tests {
         assert_eq!(items, vec!["a", "b"]);
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn paginate_offset_multi_page() {
         let call_count = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
         let cc = call_count.clone();
@@ -448,7 +448,7 @@ mod tests {
 
     // ── Additional async pagination tests ──
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn paginate_offset_with_limit() {
         let result: Result<Vec<i32>, _> =
             paginate_offset(0, Some(PageLimit::new(2)), |_offset| async {
@@ -462,7 +462,7 @@ mod tests {
         assert!(matches!(result, Err(PaginationError::LimitExceeded(_))));
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn paginate_cursor_empty_single_page() {
         let items: Vec<i32> = paginate_cursor(None, None, |_cursor| async {
             Ok(CursorPage {
@@ -479,7 +479,7 @@ mod tests {
         assert!(items.is_empty());
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn paginate_offset_empty_single_page() {
         let items: Vec<i32> = paginate_offset(0, None, |_offset| async {
             Ok(OffsetPage {
@@ -493,7 +493,7 @@ mod tests {
         assert!(items.is_empty());
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn paginate_cursor_stops_when_end_cursor_is_none() {
         // has_next_page = true but end_cursor = None → should stop
         let items = paginate_cursor(None, None, |_cursor| async {
@@ -511,7 +511,7 @@ mod tests {
         assert_eq!(items, vec![1, 2]);
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn paginate_cursor_with_initial_cursor() {
         let items = paginate_cursor(Some("start".into()), None, |cursor| async move {
             assert_eq!(cursor, Some("start".to_string()));
@@ -529,7 +529,7 @@ mod tests {
         assert_eq!(items, vec![10, 20]);
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn paginate_offset_with_initial_offset() {
         let items = paginate_offset(100, None, |offset| async move {
             assert_eq!(offset, 100);
@@ -544,7 +544,7 @@ mod tests {
         assert_eq!(items, vec![101, 102]);
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn paginate_cursor_limit_exact_fit() {
         // Page returns exactly max_items — should succeed without error
         let items = paginate_cursor(None, Some(PageLimit::new(3)), |_cursor| async {
@@ -562,7 +562,7 @@ mod tests {
         assert_eq!(items, vec![1, 2, 3]);
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn paginate_offset_limit_exact_fit() {
         let items = paginate_offset(0, Some(PageLimit::new(2)), |_offset| async {
             Ok(OffsetPage {

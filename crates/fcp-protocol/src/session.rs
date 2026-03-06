@@ -2042,4 +2042,542 @@ mod tests {
             assert_eq!(ts, 0, "Pre-epoch clock should produce timestamp 0");
         }
     }
+
+    // ── SessionCryptoSuite serde roundtrip ─────────────────────────────
+
+    #[test]
+    fn test_session_crypto_suite_serde_roundtrip() {
+        for suite in [SessionCryptoSuite::Suite1, SessionCryptoSuite::Suite2] {
+            let json = serde_json::to_string(&suite).unwrap();
+            let deserialized: SessionCryptoSuite = serde_json::from_str(&json).unwrap();
+            assert_eq!(deserialized, suite);
+        }
+    }
+
+    #[test]
+    fn test_session_crypto_suite_as_str() {
+        assert_eq!(SessionCryptoSuite::Suite1.as_str(), "suite1-hmacsha256");
+        assert_eq!(SessionCryptoSuite::Suite2.as_str(), "suite2-blake3");
+    }
+
+    #[test]
+    fn test_session_crypto_suite_invalid_id() {
+        let err = SessionCryptoSuite::try_from_id(0);
+        assert!(err.is_err());
+        let err = SessionCryptoSuite::try_from_id(3);
+        assert!(err.is_err());
+        let err = SessionCryptoSuite::try_from_id(255);
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn test_session_crypto_suite_serde_invalid() {
+        let result = serde_json::from_str::<SessionCryptoSuite>("0");
+        assert!(result.is_err());
+        let result = serde_json::from_str::<SessionCryptoSuite>("99");
+        assert!(result.is_err());
+    }
+
+    // ── SessionNonce / MeshSessionId defaults ──────────────────────────
+
+    #[test]
+    fn test_session_nonce_default_is_random() {
+        let n1 = SessionNonce::default();
+        let n2 = SessionNonce::default();
+        // Extremely unlikely to be equal
+        assert_ne!(n1.as_bytes(), n2.as_bytes());
+    }
+
+    #[test]
+    fn test_mesh_session_id_default_is_random() {
+        let id1 = MeshSessionId::default();
+        let id2 = MeshSessionId::default();
+        assert_ne!(id1.as_bytes(), id2.as_bytes());
+    }
+
+    // ── SessionCookie ──────────────────────────────────────────────────
+
+    #[test]
+    fn test_session_cookie_try_from_slice_valid() {
+        let bytes = [42u8; SESSION_COOKIE_SIZE];
+        let cookie = SessionCookie::try_from_slice(&bytes).unwrap();
+        assert_eq!(cookie.as_bytes(), &bytes);
+    }
+
+    #[test]
+    fn test_session_cookie_try_from_slice_wrong_length() {
+        let err = SessionCookie::try_from_slice(&[0u8; 16]).unwrap_err();
+        assert!(matches!(err, SessionError::InvalidCookieLength { len: 16 }));
+    }
+
+    // ── TransportLimits ────────────────────────────────────────────────
+
+    #[test]
+    fn test_transport_limits_effective_max_zero() {
+        let tl = TransportLimits {
+            max_datagram_bytes: 0,
+        };
+        assert_eq!(tl.effective_max(), DEFAULT_MAX_DATAGRAM_BYTES);
+    }
+
+    #[test]
+    fn test_transport_limits_effective_max_nonzero() {
+        let tl = TransportLimits {
+            max_datagram_bytes: 2000,
+        };
+        assert_eq!(tl.effective_max(), 2000);
+    }
+
+    #[test]
+    fn test_transport_limits_default() {
+        let tl = TransportLimits::default();
+        assert_eq!(tl.max_datagram_bytes, DEFAULT_MAX_DATAGRAM_BYTES);
+    }
+
+    // ── ReplayWindow edge cases ────────────────────────────────────────
+
+    #[test]
+    fn test_replay_window_seq_zero_rejected() {
+        let mut rw = ReplayWindow::new(128);
+        assert!(!rw.check_and_update(0));
+    }
+
+    #[test]
+    fn test_replay_window_small_window() {
+        let mut rw = ReplayWindow::new(1);
+        assert!(rw.check_and_update(1));
+        assert!(!rw.check_and_update(1)); // replay
+        assert!(rw.check_and_update(2));
+        // seq 1 is now too old for window of 1
+    }
+
+    #[test]
+    fn test_replay_window_window_size_zero_becomes_one() {
+        let rw = ReplayWindow::new(0);
+        // Constructor forces window_size = max(0, 1) = 1
+        assert_eq!(rw.highest_seq(), 0);
+    }
+
+    #[test]
+    fn test_replay_window_large_jump() {
+        let mut rw = ReplayWindow::new(128);
+        assert!(rw.check_and_update(1));
+        assert!(rw.check_and_update(1000));
+        // After a jump of 999, seq 1 is too old
+        assert!(!rw.check_and_update(1));
+        assert_eq!(rw.highest_seq(), 1000);
+    }
+
+    #[test]
+    fn test_replay_window_out_of_order_within_window() {
+        let mut rw = ReplayWindow::new(128);
+        assert!(rw.check_and_update(5));
+        assert!(rw.check_and_update(3)); // out of order, within window
+        assert!(rw.check_and_update(4)); // out of order, within window
+        assert!(!rw.check_and_update(3)); // replay
+        assert!(!rw.check_and_update(4)); // replay
+    }
+
+    // ── SessionReplayPolicy / TimePolicy defaults ──────────────────────
+
+    #[test]
+    fn test_session_replay_policy_defaults() {
+        let policy = SessionReplayPolicy::default();
+        assert_eq!(policy.max_reorder_window, 128);
+        assert_eq!(policy.rekey_after_frames, 1_000_000_000);
+        assert_eq!(policy.rekey_after_seconds, 86_400);
+        assert_eq!(policy.rekey_after_bytes, 1_099_511_627_776);
+    }
+
+    #[test]
+    fn test_time_policy_defaults() {
+        let policy = TimePolicy::default();
+        assert_eq!(policy.max_skew_secs, 120);
+        assert!(policy.log_skew_events);
+    }
+
+    // ── SessionDirection ───────────────────────────────────────────────
+
+    #[test]
+    fn test_session_direction_as_u8() {
+        assert_eq!(SessionDirection::InitiatorToResponder.as_u8(), 0x00);
+        assert_eq!(SessionDirection::ResponderToInitiator.as_u8(), 0x01);
+    }
+
+    // ── SessionKeys mac_key ────────────────────────────────────────────
+
+    #[test]
+    fn test_session_keys_mac_key_direction() {
+        let keys = SessionKeys {
+            k_mac_i2r: [1u8; 32],
+            k_mac_r2i: [2u8; 32],
+            k_ctx: [3u8; 32],
+        };
+        assert_eq!(
+            keys.mac_key(SessionDirection::InitiatorToResponder),
+            &[1u8; 32]
+        );
+        assert_eq!(
+            keys.mac_key(SessionDirection::ResponderToInitiator),
+            &[2u8; 32]
+        );
+    }
+
+    // ── negotiate_suite edge cases ─────────────────────────────────────
+
+    #[test]
+    fn test_negotiate_suite_empty_initiator() {
+        assert!(negotiate_suite(&[], &[SessionCryptoSuite::Suite1]).is_none());
+    }
+
+    #[test]
+    fn test_negotiate_suite_empty_responder() {
+        assert!(negotiate_suite(&[SessionCryptoSuite::Suite1], &[]).is_none());
+    }
+
+    #[test]
+    fn test_negotiate_suite_both_empty() {
+        assert!(negotiate_suite(&[], &[]).is_none());
+    }
+
+    #[test]
+    fn test_negotiate_suite_initiator_preference() {
+        // Initiator prefers Suite2, responder supports both
+        let result = negotiate_suite(
+            &[SessionCryptoSuite::Suite2, SessionCryptoSuite::Suite1],
+            &[SessionCryptoSuite::Suite1, SessionCryptoSuite::Suite2],
+        );
+        assert_eq!(result, Some(SessionCryptoSuite::Suite2));
+    }
+
+    // ── compute_cookie determinism ─────────────────────────────────────
+
+    #[test]
+    fn test_compute_cookie_deterministic() {
+        let key = [0xABu8; 32];
+        let hello = make_hello();
+        let cookie1 = compute_cookie(&key, &hello).unwrap();
+        let cookie2 = compute_cookie(&key, &hello).unwrap();
+        assert_eq!(cookie1.as_bytes(), cookie2.as_bytes());
+    }
+
+    #[test]
+    fn test_compute_cookie_different_keys() {
+        let key1 = [0xABu8; 32];
+        let key2 = [0xCDu8; 32];
+        let hello = make_hello();
+        let cookie1 = compute_cookie(&key1, &hello).unwrap();
+        let cookie2 = compute_cookie(&key2, &hello).unwrap();
+        assert_ne!(cookie1.as_bytes(), cookie2.as_bytes());
+    }
+
+    fn make_hello() -> MeshSessionHello {
+        use fcp_crypto::X25519SecretKey;
+        let secret = X25519SecretKey::generate();
+        MeshSessionHello {
+            from: TailscaleNodeId::new("node-init"),
+            to: TailscaleNodeId::new("node-resp"),
+            eph_pubkey: secret.public_key(),
+            nonce: SessionNonce([0u8; 16]),
+            cookie: None,
+            timestamp: 1_700_000_000,
+            suites: vec![SessionCryptoSuite::Suite1],
+            transport_limits: None,
+            signature: None,
+        }
+    }
+
+    fn make_ack() -> MeshSessionAck {
+        use fcp_crypto::X25519SecretKey;
+        let secret = X25519SecretKey::generate();
+        MeshSessionAck {
+            from: TailscaleNodeId::new("node-resp"),
+            to: TailscaleNodeId::new("node-init"),
+            eph_pubkey: secret.public_key(),
+            nonce: SessionNonce([1u8; 16]),
+            session_id: MeshSessionId([0xAA; 16]),
+            suite: SessionCryptoSuite::Suite1,
+            timestamp: 1_700_000_001,
+            signature: None,
+        }
+    }
+
+    // ── decode_hello_cbor tests ─────────────────────────────────────
+
+    #[test]
+    fn decode_hello_cbor_valid_round_trip() {
+        let context = LogContext::new("handshake", "decode_hello_cbor");
+        run_logged_test("decode_hello_cbor_valid_round_trip", 2, &context, || {
+            let hello = make_hello();
+            let encoded = to_canonical_cbor(&hello).expect("encode hello");
+            let decoded = decode_hello_cbor(&encoded).expect("decode hello");
+            assert_eq!(decoded.from.as_str(), hello.from.as_str());
+            assert_eq!(decoded.timestamp, hello.timestamp);
+        });
+    }
+
+    #[test]
+    fn decode_hello_cbor_rejects_empty() {
+        let context = LogContext::new("handshake", "decode_hello_cbor")
+            .with_reason("empty_input");
+        run_logged_test("decode_hello_cbor_rejects_empty", 1, &context, || {
+            let err = decode_hello_cbor(&[]).expect_err("empty should fail");
+            assert!(matches!(err, SessionError::Cbor(_)));
+        });
+    }
+
+    #[test]
+    fn decode_hello_cbor_rejects_garbage() {
+        let context = LogContext::new("handshake", "decode_hello_cbor")
+            .with_reason("garbage_input");
+        run_logged_test("decode_hello_cbor_rejects_garbage", 1, &context, || {
+            let err = decode_hello_cbor(&[0xFF, 0xFE, 0xFD]).expect_err("garbage");
+            assert!(matches!(err, SessionError::Cbor(_)));
+        });
+    }
+
+    #[test]
+    fn decode_hello_cbor_rejects_oversized() {
+        let context = LogContext::new("handshake", "decode_hello_cbor")
+            .with_reason("oversized");
+        run_logged_test("decode_hello_cbor_rejects_oversized", 1, &context, || {
+            let oversized = vec![0u8; MAX_HANDSHAKE_BYTES + 1];
+            let err = decode_hello_cbor(&oversized).expect_err("oversized");
+            assert!(matches!(err, SessionError::Cbor(_)));
+        });
+    }
+
+    // ── decode_ack_cbor tests ───────────────────────────────────────
+
+    #[test]
+    fn decode_ack_cbor_valid_round_trip() {
+        let context = LogContext::new("handshake", "decode_ack_cbor");
+        run_logged_test("decode_ack_cbor_valid_round_trip", 2, &context, || {
+            let ack = make_ack();
+            let encoded = to_canonical_cbor(&ack).expect("encode ack");
+            let decoded = decode_ack_cbor(&encoded).expect("decode ack");
+            assert_eq!(decoded.from.as_str(), ack.from.as_str());
+            assert_eq!(decoded.session_id, ack.session_id);
+        });
+    }
+
+    #[test]
+    fn decode_ack_cbor_rejects_invalid() {
+        let context = LogContext::new("handshake", "decode_ack_cbor")
+            .with_reason("invalid_cbor");
+        run_logged_test("decode_ack_cbor_rejects_invalid", 1, &context, || {
+            let err = decode_ack_cbor(&[0xAA, 0xBB]).expect_err("invalid");
+            assert!(matches!(err, SessionError::Cbor(_)));
+        });
+    }
+
+    // ── decode_cookie_bytes tests ───────────────────────────────────
+
+    #[test]
+    fn decode_cookie_bytes_valid() {
+        let context = LogContext::new("handshake", "decode_cookie");
+        run_logged_test("decode_cookie_bytes_valid", 1, &context, || {
+            let bytes = [0xCC; SESSION_COOKIE_SIZE];
+            let cookie = decode_cookie_bytes(&bytes).expect("valid cookie");
+            assert_eq!(cookie.as_bytes(), &bytes);
+        });
+    }
+
+    #[test]
+    fn decode_cookie_bytes_invalid_length() {
+        let context = LogContext::new("handshake", "decode_cookie")
+            .with_reason("invalid_length");
+        run_logged_test("decode_cookie_bytes_invalid_length", 1, &context, || {
+            let err = decode_cookie_bytes(&[0u8; 16]).expect_err("too short");
+            assert!(matches!(err, SessionError::InvalidCookieLength { len: 16 }));
+        });
+    }
+
+    #[test]
+    fn decode_cookie_bytes_empty() {
+        let context = LogContext::new("handshake", "decode_cookie")
+            .with_reason("empty");
+        run_logged_test("decode_cookie_bytes_empty", 1, &context, || {
+            let err = decode_cookie_bytes(&[]).expect_err("empty");
+            assert!(matches!(err, SessionError::InvalidCookieLength { len: 0 }));
+        });
+    }
+
+    // ── hello verify missing signature ──────────────────────────────
+
+    #[test]
+    fn hello_verify_missing_signature() {
+        let context = LogContext::new("handshake", "verify")
+            .with_reason("missing_signature");
+        run_logged_test("hello_verify_missing_signature", 1, &context, || {
+            let hello = make_hello(); // signature is None
+            let key = Ed25519SigningKey::generate();
+            let err = hello.verify(&key.verifying_key()).expect_err("missing sig");
+            assert!(matches!(err, SessionError::MissingSignature));
+        });
+    }
+
+    #[test]
+    fn ack_verify_missing_signature() {
+        let context = LogContext::new("handshake", "verify")
+            .with_reason("missing_signature");
+        run_logged_test("ack_verify_missing_signature", 1, &context, || {
+            let ack = make_ack(); // signature is None
+            let hello = make_hello();
+            let key = Ed25519SigningKey::generate();
+            let err = ack
+                .verify(&hello, &key.verifying_key())
+                .expect_err("missing sig");
+            assert!(matches!(err, SessionError::MissingSignature));
+        });
+    }
+
+    // ── suite id roundtrip ──────────────────────────────────────────
+
+    #[test]
+    fn suite_id_roundtrip_both_variants() {
+        let context = LogContext::new("handshake", "suite_id");
+        run_logged_test("suite_id_roundtrip_both_variants", 4, &context, || {
+            assert_eq!(SessionCryptoSuite::Suite1.id(), 1);
+            assert_eq!(SessionCryptoSuite::Suite2.id(), 2);
+            assert_eq!(
+                SessionCryptoSuite::try_from_id(1).unwrap(),
+                SessionCryptoSuite::Suite1
+            );
+            assert_eq!(
+                SessionCryptoSuite::try_from_id(2).unwrap(),
+                SessionCryptoSuite::Suite2
+            );
+        });
+    }
+
+    #[test]
+    fn suite_try_from_id_invalid() {
+        let context = LogContext::new("handshake", "suite_id")
+            .with_reason("invalid_id");
+        run_logged_test("suite_try_from_id_invalid", 3, &context, || {
+            assert!(matches!(
+                SessionCryptoSuite::try_from_id(0),
+                Err(SessionError::InvalidSuiteId(0))
+            ));
+            assert!(matches!(
+                SessionCryptoSuite::try_from_id(3),
+                Err(SessionError::InvalidSuiteId(3))
+            ));
+            assert!(matches!(
+                SessionCryptoSuite::try_from_id(255),
+                Err(SessionError::InvalidSuiteId(255))
+            ));
+        });
+    }
+
+    #[test]
+    fn suite_as_str_values() {
+        let context = LogContext::new("handshake", "suite_label");
+        run_logged_test("suite_as_str_values", 2, &context, || {
+            assert_eq!(SessionCryptoSuite::Suite1.as_str(), "suite1-hmacsha256");
+            assert_eq!(SessionCryptoSuite::Suite2.as_str(), "suite2-blake3");
+        });
+    }
+
+    // ── as_bytes direct assertions ──────────────────────────────────
+
+    #[test]
+    fn mesh_session_id_as_bytes() {
+        let context = LogContext::new("types", "as_bytes");
+        run_logged_test("mesh_session_id_as_bytes", 2, &context, || {
+            let id = MeshSessionId([0xAB; 16]);
+            assert_eq!(id.as_bytes().len(), SESSION_ID_SIZE);
+            assert_eq!(id.as_bytes(), &[0xAB; 16]);
+        });
+    }
+
+    #[test]
+    fn session_nonce_as_bytes() {
+        let context = LogContext::new("types", "as_bytes");
+        run_logged_test("session_nonce_as_bytes", 2, &context, || {
+            let nonce = SessionNonce([0xCD; 16]);
+            assert_eq!(nonce.as_bytes().len(), SESSION_NONCE_SIZE);
+            assert_eq!(nonce.as_bytes(), &[0xCD; 16]);
+        });
+    }
+
+    #[test]
+    fn session_cookie_as_bytes() {
+        let context = LogContext::new("types", "as_bytes");
+        run_logged_test("session_cookie_as_bytes", 2, &context, || {
+            let cookie = SessionCookie([0xEF; 32]);
+            assert_eq!(cookie.as_bytes().len(), SESSION_COOKIE_SIZE);
+            assert_eq!(cookie.as_bytes(), &[0xEF; 32]);
+        });
+    }
+
+    // ── transport limits edge cases ─────────────────────────────────
+
+    #[test]
+    fn transport_limits_zero_uses_default() {
+        let context = LogContext::new("types", "transport_limits");
+        run_logged_test("transport_limits_zero_uses_default", 1, &context, || {
+            let limits = TransportLimits {
+                max_datagram_bytes: 0,
+            };
+            assert_eq!(limits.effective_max(), DEFAULT_MAX_DATAGRAM_BYTES);
+        });
+    }
+
+    #[test]
+    fn transport_limits_nonzero_preserved() {
+        let context = LogContext::new("types", "transport_limits");
+        run_logged_test("transport_limits_nonzero_preserved", 1, &context, || {
+            let limits = TransportLimits {
+                max_datagram_bytes: 500,
+            };
+            assert_eq!(limits.effective_max(), 500);
+        });
+    }
+
+    // ── session error display ───────────────────────────────────────
+
+    #[test]
+    fn session_error_display_variants() {
+        let context = LogContext::new("types", "error_display");
+        run_logged_test("session_error_display_variants", 5, &context, || {
+            assert!(SessionError::MissingSignature
+                .to_string()
+                .contains("missing signature"));
+            assert!(SessionError::InvalidSignature
+                .to_string()
+                .contains("signature verification"));
+            assert!(SessionError::InvalidCookie
+                .to_string()
+                .contains("invalid stateless cookie"));
+            assert!(SessionError::InvalidAttestation
+                .to_string()
+                .contains("attestation"));
+            assert!(SessionError::InvalidMacKeyLength
+                .to_string()
+                .contains("MAC key"));
+        });
+    }
+
+    // ── hello_retry serde ───────────────────────────────────────────
+
+    #[test]
+    fn hello_retry_serde_roundtrip() {
+        let context = LogContext::new("handshake", "hello_retry");
+        run_logged_test("hello_retry_serde_roundtrip", 3, &context, || {
+            let retry = MeshSessionHelloRetry {
+                from: TailscaleNodeId::new("node-a"),
+                to: TailscaleNodeId::new("node-b"),
+                cookie: SessionCookie([0x77; 32]),
+                timestamp: 1_700_000_000,
+            };
+            let json = serde_json::to_string(&retry).expect("serialize");
+            let decoded: MeshSessionHelloRetry =
+                serde_json::from_str(&json).expect("deserialize");
+            assert_eq!(decoded.from.as_str(), "node-a");
+            assert_eq!(decoded.to.as_str(), "node-b");
+            assert_eq!(decoded.timestamp, 1_700_000_000);
+        });
+    }
 }

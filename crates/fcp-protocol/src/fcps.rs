@@ -2039,4 +2039,254 @@ mod tests {
         signed.source_id = TailscaleNodeId::new("node-spoofed");
         assert!(signed.verify(&signing_key.verifying_key()).is_err());
     }
+
+    // ── FrameError display ─────────────────────────────────────────────
+
+    #[test]
+    fn frame_error_symbol_count_overflow_display() {
+        let err = FrameError::SymbolCountOverflow;
+        assert_eq!(err.to_string(), "symbol count overflow");
+    }
+
+    #[test]
+    fn frame_error_invalid_symbol_size_display() {
+        let err = FrameError::InvalidSymbolSize;
+        assert_eq!(err.to_string(), "invalid symbol size (must be > 0)");
+    }
+
+    #[test]
+    fn frame_error_invalid_utf8_display() {
+        let err = FrameError::InvalidUtf8;
+        assert_eq!(err.to_string(), "invalid utf-8 string");
+    }
+
+    #[test]
+    fn frame_error_too_short_display() {
+        let err = FrameError::TooShort { len: 10, min: 114 };
+        assert!(err.to_string().contains("10"));
+        assert!(err.to_string().contains("114"));
+    }
+
+    #[test]
+    fn frame_error_exceeds_mtu_display() {
+        let err = FrameError::ExceedsMtu {
+            len: 2000,
+            max: 1200,
+        };
+        assert!(err.to_string().contains("2000"));
+        assert!(err.to_string().contains("1200"));
+    }
+
+    #[test]
+    fn frame_error_invalid_magic_display() {
+        let err = FrameError::InvalidMagic {
+            got: [0, 0, 0, 0],
+        };
+        assert!(err.to_string().contains("magic"));
+    }
+
+    #[test]
+    fn frame_error_unsupported_version_display() {
+        let err = FrameError::UnsupportedVersion { version: 99 };
+        assert!(err.to_string().contains("99"));
+    }
+
+    #[test]
+    fn frame_error_length_mismatch_display() {
+        let err = FrameError::LengthMismatch {
+            claimed: 100,
+            computed: 200,
+        };
+        assert!(err.to_string().contains("100"));
+        assert!(err.to_string().contains("200"));
+    }
+
+    #[test]
+    fn frame_error_frame_size_mismatch_display() {
+        let err = FrameError::FrameSizeMismatch;
+        assert!(err.to_string().contains("mismatch"));
+    }
+
+    // ── SymbolAckReason serde names ───────────────────────────────────
+
+    #[test]
+    fn symbol_ack_reason_serialization_names() {
+        assert_eq!(
+            serde_json::to_string(&SymbolAckReason::Complete).unwrap(),
+            "\"complete\""
+        );
+        assert_eq!(
+            serde_json::to_string(&SymbolAckReason::Cancelled).unwrap(),
+            "\"cancelled\""
+        );
+        assert_eq!(
+            serde_json::to_string(&SymbolAckReason::Duplicate).unwrap(),
+            "\"duplicate\""
+        );
+        assert_eq!(
+            serde_json::to_string(&SymbolAckReason::BudgetExceeded).unwrap(),
+            "\"budget_exceeded\""
+        );
+    }
+
+    // ── FrameFlags defaults and operations ─────────────────────────────
+
+    #[test]
+    fn frame_flags_default() {
+        let flags = FrameFlags::default();
+        assert!(flags.contains(FrameFlags::ENCRYPTED));
+        assert!(flags.contains(FrameFlags::RAPTORQ));
+        assert!(!flags.contains(FrameFlags::COMPRESSED));
+    }
+
+    #[test]
+    fn frame_flags_empty() {
+        let flags = FrameFlags::empty();
+        assert!(flags.is_empty());
+    }
+
+    #[test]
+    fn frame_flags_combination() {
+        let flags = FrameFlags::ENCRYPTED | FrameFlags::COMPRESSED | FrameFlags::STREAMING;
+        assert!(flags.contains(FrameFlags::ENCRYPTED));
+        assert!(flags.contains(FrameFlags::COMPRESSED));
+        assert!(flags.contains(FrameFlags::STREAMING));
+        assert!(!flags.contains(FrameFlags::PRIORITY));
+    }
+
+    // ── SymbolRecord encode/decode roundtrip ───────────────────────────
+
+    #[test]
+    fn symbol_record_encode_decode_roundtrip() {
+        let record = SymbolRecord {
+            esi: 42,
+            k: 100,
+            data: vec![0xAB; 64],
+            auth_tag: [0xCC; 16],
+        };
+        let encoded = record.encode();
+        let decoded = SymbolRecord::decode(&encoded, 64).unwrap();
+        assert_eq!(decoded.esi, 42);
+        assert_eq!(decoded.k, 100);
+        assert_eq!(decoded.data, vec![0xAB; 64]);
+        assert_eq!(decoded.auth_tag, [0xCC; 16]);
+    }
+
+    #[test]
+    fn symbol_record_wire_size() {
+        let record = SymbolRecord {
+            esi: 0,
+            k: 0,
+            data: vec![0; 64],
+            auth_tag: [0; 16],
+        };
+        assert_eq!(record.wire_size(), SYMBOL_RECORD_OVERHEAD + 64);
+    }
+
+    // ── DecodeStatus edge cases ────────────────────────────────────────
+
+    fn make_test_object_header() -> ObjectHeader {
+        use fcp_cbor::SchemaId;
+        use fcp_core::Provenance;
+        use semver::Version;
+        let zone_id: ZoneId = "z:test".parse().unwrap();
+        ObjectHeader {
+            schema: SchemaId::new("fcp.test", "TestObject", Version::new(1, 0, 0)),
+            zone_id: zone_id.clone(),
+            created_at: 1_704_067_200,
+            provenance: Provenance::new(zone_id),
+            refs: vec![],
+            foreign_refs: vec![],
+            ttl_secs: None,
+            placement: None,
+        }
+    }
+
+    #[test]
+    fn decode_status_complete_with_hint_sign_verify() {
+        let signing_key = Ed25519SigningKey::generate();
+        let zone_id: ZoneId = "z:test".parse().unwrap();
+        let mut status = DecodeStatus {
+            header: make_test_object_header(),
+            object_id: ObjectId::from_bytes([0; 32]),
+            zone_id,
+            zone_key_id: ZoneKeyId::from_bytes([0; 8]),
+            epoch_id: 1,
+            received_unique: 100,
+            needed: 100,
+            complete: true,
+            missing_hint: Some(vec![5, 10, 15]),
+            signature: Ed25519Signature::from_bytes(&[0; 64]),
+        };
+        status.sign(&signing_key);
+        assert!(status.verify(&signing_key.verifying_key()).is_ok());
+    }
+
+    #[test]
+    fn decode_status_hint_bounds_at_max_ok() {
+        let zone_id: ZoneId = "z:test".parse().unwrap();
+        let status = DecodeStatus {
+            header: make_test_object_header(),
+            object_id: ObjectId::from_bytes([0; 32]),
+            zone_id,
+            zone_key_id: ZoneKeyId::from_bytes([0; 8]),
+            epoch_id: 1,
+            received_unique: 50,
+            needed: 100,
+            complete: false,
+            missing_hint: Some(vec![0; MAX_MISSING_HINT_ENTRIES]),
+            signature: Ed25519Signature::from_bytes(&[0; 64]),
+        };
+        assert!(status.validate_hint_bounds().is_ok());
+    }
+
+    #[test]
+    fn decode_status_hint_bounds_exceeded() {
+        let zone_id: ZoneId = "z:test".parse().unwrap();
+        let status = DecodeStatus {
+            header: make_test_object_header(),
+            object_id: ObjectId::from_bytes([0; 32]),
+            zone_id,
+            zone_key_id: ZoneKeyId::from_bytes([0; 8]),
+            epoch_id: 1,
+            received_unique: 50,
+            needed: 100,
+            complete: false,
+            missing_hint: Some(vec![0; MAX_MISSING_HINT_ENTRIES + 1]),
+            signature: Ed25519Signature::from_bytes(&[0; 64]),
+        };
+        assert!(status.validate_hint_bounds().is_err());
+    }
+
+    // ── SymbolRequest builder ──────────────────────────────────────────
+
+    #[test]
+    fn symbol_request_builder_with_hint() {
+        let zone_id: ZoneId = "z:test".parse().unwrap();
+        let request = SymbolRequest::new(
+            make_test_object_header(),
+            ObjectId::from_bytes([0; 32]),
+            zone_id,
+            ZoneKeyId::from_bytes([0; 8]),
+            0,
+            100,
+            50,
+        )
+        .with_missing_hint(vec![1, 2, 3]);
+        assert_eq!(request.missing_hint, Some(vec![1, 2, 3]));
+    }
+
+    // ── Constants ──────────────────────────────────────────────────────
+
+    #[test]
+    fn test_constants() {
+        assert_eq!(FCPS_MAGIC, [0x46, 0x43, 0x50, 0x53]);
+        assert_eq!(FCPS_VERSION, 1);
+        assert_eq!(FCPS_HEADER_LEN, 114);
+        assert_eq!(DEFAULT_SYMBOL_SIZE, 1024);
+        assert_eq!(SYMBOL_RECORD_OVERHEAD, 22);
+        assert_eq!(MAX_MISSING_HINT_ENTRIES, 100);
+        assert_eq!(DEFAULT_MAX_SYMBOLS_UNAUTHENTICATED, 32);
+        assert_eq!(DEFAULT_MAX_SYMBOLS_AUTHENTICATED, 1000);
+    }
 }

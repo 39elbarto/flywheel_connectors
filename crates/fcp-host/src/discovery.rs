@@ -2444,4 +2444,449 @@ mod tests {
         assert!(result.is_empty());
         assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // SafetyTier reflexivity and transitivity
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn safety_tier_is_at_most_reflexive() {
+        for tier in [
+            SafetyTier::Safe,
+            SafetyTier::Risky,
+            SafetyTier::Dangerous,
+            SafetyTier::Critical,
+            SafetyTier::Forbidden,
+        ] {
+            assert!(tier.is_at_most(tier), "{tier:?} should be at most itself");
+        }
+    }
+
+    #[test]
+    fn safety_tier_level_consistent_with_is_at_most() {
+        let tiers = [
+            SafetyTier::Safe,
+            SafetyTier::Risky,
+            SafetyTier::Dangerous,
+            SafetyTier::Critical,
+            SafetyTier::Forbidden,
+        ];
+        for (i, a) in tiers.iter().enumerate() {
+            for (j, b) in tiers.iter().enumerate() {
+                assert_eq!(
+                    a.is_at_most(*b),
+                    i <= j,
+                    "{a:?}.is_at_most({b:?}) should be {}",
+                    i <= j,
+                );
+            }
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // ConnectorArchetype serde roundtrip (all variants)
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn connector_archetype_serde_roundtrip_all() {
+        let archetypes = [
+            ConnectorArchetype::RequestResponse,
+            ConnectorArchetype::Streaming,
+            ConnectorArchetype::Bidirectional,
+            ConnectorArchetype::Polling,
+            ConnectorArchetype::Webhook,
+        ];
+        for arch in archetypes {
+            let json = serde_json::to_string(&arch).unwrap();
+            let parsed: ConnectorArchetype = serde_json::from_str(&json).unwrap();
+            assert_eq!(parsed, arch);
+        }
+    }
+
+    #[test]
+    fn connector_archetype_snake_case_names() {
+        assert_eq!(
+            serde_json::to_string(&ConnectorArchetype::RequestResponse).unwrap(),
+            "\"request_response\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ConnectorArchetype::Webhook).unwrap(),
+            "\"webhook\""
+        );
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // LatencyHint serde roundtrip
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn latency_hint_serde_roundtrip_all() {
+        let hints = [
+            LatencyHint::Fast,
+            LatencyHint::Medium,
+            LatencyHint::Slow,
+            LatencyHint::VerySlow,
+        ];
+        for hint in hints {
+            let json = serde_json::to_string(&hint).unwrap();
+            let parsed: LatencyHint = serde_json::from_str(&json).unwrap();
+            assert_eq!(parsed, hint);
+        }
+    }
+
+    #[test]
+    fn latency_hint_snake_case() {
+        assert_eq!(
+            serde_json::to_string(&LatencyHint::VerySlow).unwrap(),
+            "\"very_slow\""
+        );
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // HostHealthStatus serde roundtrip
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn host_health_status_serde_roundtrip_all() {
+        let statuses = [
+            HostHealthStatus::Healthy,
+            HostHealthStatus::Degraded,
+            HostHealthStatus::Unhealthy,
+        ];
+        for status in statuses {
+            let json = serde_json::to_string(&status).unwrap();
+            let parsed: HostHealthStatus = serde_json::from_str(&json).unwrap();
+            assert_eq!(parsed, status);
+        }
+    }
+
+    #[test]
+    fn host_health_status_lowercase_names() {
+        assert_eq!(
+            serde_json::to_string(&HostHealthStatus::Healthy).unwrap(),
+            "\"healthy\""
+        );
+        assert_eq!(
+            serde_json::to_string(&HostHealthStatus::Degraded).unwrap(),
+            "\"degraded\""
+        );
+        assert_eq!(
+            serde_json::to_string(&HostHealthStatus::Unhealthy).unwrap(),
+            "\"unhealthy\""
+        );
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // HostHealthResponse edge cases
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn host_health_response_zero_uptime() {
+        let resp = HostHealthResponse {
+            status: HostHealthStatus::Healthy,
+            connectors: HashMap::new(),
+            uptime_seconds: 0,
+            active_connections: 0,
+            timestamp: Utc::now(),
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        let parsed: HostHealthResponse = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.uptime_seconds, 0);
+        assert!(parsed.connectors.is_empty());
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // DiscoveryResponse constructor
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn discovery_response_new_empty_connectors() {
+        let resp = DiscoveryResponse::new(vec![], 1);
+        assert!(resp.connectors.is_empty());
+        assert_eq!(resp.registry_version, 1);
+        assert!(resp.supports_streaming);
+        assert!(resp.supports_batching);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // EstimatedCost edge cases
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn estimated_cost_all_fields_present() {
+        let cost = EstimatedCost {
+            api_calls: Some(10),
+            tokens: Some(5000),
+            cost_cents: Some(250),
+        };
+        let json = serde_json::to_string(&cost).unwrap();
+        let parsed: EstimatedCost = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.api_calls, Some(10));
+        assert_eq!(parsed.tokens, Some(5000));
+        assert_eq!(parsed.cost_cents, Some(250));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // PreflightRateLimit serde roundtrip
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn preflight_rate_limit_limited_with_reset() {
+        let rl = PreflightRateLimit {
+            limited: true,
+            remaining: 0,
+            reset_at: Some(Utc::now()),
+        };
+        let json = serde_json::to_string(&rl).unwrap();
+        let parsed: PreflightRateLimit = serde_json::from_str(&json).unwrap();
+        assert!(parsed.limited);
+        assert_eq!(parsed.remaining, 0);
+        assert!(parsed.reset_at.is_some());
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // PreflightResponse factory methods
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn preflight_response_denied_has_reason() {
+        let resp = PreflightResponse::denied("rate limited");
+        assert!(!resp.allowed);
+        assert_eq!(resp.reason.as_deref(), Some("rate limited"));
+    }
+
+    #[test]
+    fn preflight_response_allowed_no_reason() {
+        let resp = PreflightResponse::allowed();
+        assert!(resp.allowed);
+        assert!(resp.reason.is_none());
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // DiscoveryFilter combined category+risk+health
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn filter_all_dimensions_match() {
+        let filter = DiscoveryFilter {
+            category: Some("ai".into()),
+            max_risk: Some(SafetyTier::Risky),
+            health: Some(HealthFilter::Available),
+        };
+        let summary = make_summary(
+            "test",
+            "good",
+            "v1",
+            vec!["ai"],
+            SafetyTier::Safe,
+            ConnectorHealth::healthy(),
+        );
+        assert!(filter.matches(&summary));
+    }
+
+    #[test]
+    fn filter_all_dimensions_category_mismatch() {
+        let filter = DiscoveryFilter {
+            category: Some("messaging".into()),
+            max_risk: Some(SafetyTier::Dangerous),
+            health: Some(HealthFilter::Available),
+        };
+        let summary = make_summary(
+            "test",
+            "cat",
+            "v1",
+            vec!["ai"],
+            SafetyTier::Safe,
+            ConnectorHealth::healthy(),
+        );
+        assert!(!filter.matches(&summary));
+    }
+
+    #[test]
+    fn filter_all_dimensions_risk_exceeded() {
+        let filter = DiscoveryFilter {
+            category: Some("ai".into()),
+            max_risk: Some(SafetyTier::Safe),
+            health: Some(HealthFilter::Available),
+        };
+        let summary = make_summary(
+            "test",
+            "risky",
+            "v1",
+            vec!["ai"],
+            SafetyTier::Dangerous,
+            ConnectorHealth::healthy(),
+        );
+        assert!(!filter.matches(&summary));
+    }
+
+    #[test]
+    fn filter_all_dimensions_health_mismatch() {
+        let filter = DiscoveryFilter {
+            category: Some("ai".into()),
+            max_risk: Some(SafetyTier::Dangerous),
+            health: Some(HealthFilter::Healthy),
+        };
+        let summary = make_summary(
+            "test",
+            "unhealthy",
+            "v1",
+            vec!["ai"],
+            SafetyTier::Safe,
+            ConnectorHealth::unavailable("down"),
+        );
+        assert!(!filter.matches(&summary));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // ConnectorHealth convenience constructors
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn connector_health_healthy_status() {
+        let h = ConnectorHealth::healthy();
+        assert!(h.is_healthy());
+        assert!(h.is_available());
+    }
+
+    #[test]
+    fn connector_health_degraded_has_reason() {
+        let h = ConnectorHealth::degraded("slow response");
+        assert!(!h.is_healthy());
+        assert!(h.is_available());
+        assert!(matches!(h, ConnectorHealth::Degraded { .. }));
+    }
+
+    #[test]
+    fn connector_health_unavailable_has_reason() {
+        let h = ConnectorHealth::unavailable("timeout");
+        assert!(!h.is_healthy());
+        assert!(!h.is_available());
+        assert!(matches!(h, ConnectorHealth::Unavailable { .. }));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Introspect with missing introspection data
+    // ─────────────────────────────────────────────────────────────────────────
+
+    struct RegistryNoIntrospection {
+        connectors: Vec<ConnectorSummary>,
+    }
+
+    #[async_trait::async_trait]
+    impl ConnectorRegistry for RegistryNoIntrospection {
+        async fn list(&self) -> Vec<ConnectorSummary> {
+            self.connectors.clone()
+        }
+
+        async fn get(&self, id: &ConnectorId) -> Option<ConnectorSummary> {
+            self.connectors.iter().find(|c| &c.id == id).cloned()
+        }
+
+        async fn get_introspection(&self, _id: &ConnectorId) -> Option<Introspection> {
+            None
+        }
+
+        async fn get_archetype(&self, _id: &ConnectorId) -> Option<ConnectorArchetype> {
+            None
+        }
+
+        async fn get_rate_limits(&self, _id: &ConnectorId) -> Option<RateLimitDeclarations> {
+            None
+        }
+
+        async fn self_check(&self, _id: &ConnectorId) -> Option<SelfCheckReport> {
+            None
+        }
+
+        fn version(&self) -> u64 {
+            1
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn introspect_missing_introspection_returns_error() {
+        let summary = make_summary(
+            "test",
+            "nointro",
+            "v1",
+            vec!["ai"],
+            SafetyTier::Safe,
+            ConnectorHealth::healthy(),
+        );
+        let registry = RegistryNoIntrospection {
+            connectors: vec![summary.clone()],
+        };
+        let endpoint = DiscoveryEndpoint::new(Arc::new(registry), Arc::new(AllowPolicy));
+
+        let result = endpoint.introspect(&summary.id).await;
+        // Should return error when introspection is not available
+        assert!(result.is_err());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn introspect_missing_connector_returns_error() {
+        let registry = RegistryNoIntrospection {
+            connectors: vec![],
+        };
+        let endpoint = DiscoveryEndpoint::new(Arc::new(registry), Arc::new(AllowPolicy));
+        let missing_id = ConnectorId::new("test", "missing", "v1").unwrap();
+        let result = endpoint.introspect(&missing_id).await;
+        assert!(result.is_err());
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // DenyPolicy preflight
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[fcp_async_core::runtime::test]
+    async fn discovery_endpoint_preflight_deny_policy() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let registry = CountingRegistry::new(vec![], Arc::clone(&calls));
+        let endpoint = DiscoveryEndpoint::new(Arc::new(registry), Arc::new(DenyPolicy));
+
+        let request = PreflightRequest {
+            connector_id: ConnectorId::new("test", "denied", "v1").unwrap(),
+            operation: "write".into(),
+            params: None,
+            principal: None,
+            zone_id: None,
+        };
+
+        let response = endpoint.preflight(request).await;
+        assert!(!response.allowed);
+        assert!(response.reason.is_some());
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // DiscoveryCache invalidate idempotent
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[fcp_async_core::runtime::test]
+    async fn discovery_cache_invalidate_idempotent() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let summary = make_summary(
+            "idem",
+            "test",
+            "v1",
+            vec![],
+            SafetyTier::Safe,
+            ConnectorHealth::healthy(),
+        );
+        let registry = CountingRegistry::new(vec![summary], Arc::clone(&calls));
+        #[allow(clippy::duration_suboptimal_units)]
+        let cache = DiscoveryCache::new(Duration::from_secs(300));
+
+        let _ = cache.get_or_refresh(&registry).await;
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        // Multiple invalidations are safe
+        cache.invalidate().await;
+        cache.invalidate().await;
+        cache.invalidate().await;
+
+        let _ = cache.get_or_refresh(&registry).await;
+        // Only one refresh after multiple invalidations
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
 }

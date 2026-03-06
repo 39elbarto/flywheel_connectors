@@ -3373,4 +3373,817 @@ deny_ptrace = true
         let text = std::str::from_utf8(EMBEDDED_MINIMAL_MANIFEST);
         assert!(text.is_ok());
     }
+
+    // ── ProtocolVersion ────────────────────────────────────────────────
+
+    #[test]
+    fn protocol_version_display() {
+        let pv = ProtocolVersion { major: 2, minor: 1 };
+        assert_eq!(pv.to_string(), "2.1");
+    }
+
+    #[test]
+    fn protocol_version_try_from_valid() {
+        let pv = ProtocolVersion::try_from("2.0".to_string()).unwrap();
+        assert_eq!(pv.major, 2);
+        assert_eq!(pv.minor, 0);
+    }
+
+    #[test]
+    fn protocol_version_try_from_missing_dot() {
+        let err = ProtocolVersion::try_from("20".to_string()).unwrap_err();
+        assert!(err.to_string().contains("MAJOR.MINOR"));
+    }
+
+    #[test]
+    fn protocol_version_try_from_non_numeric_major() {
+        let err = ProtocolVersion::try_from("abc.0".to_string()).unwrap_err();
+        assert!(err.to_string().contains("major"));
+    }
+
+    #[test]
+    fn protocol_version_try_from_non_numeric_minor() {
+        let err = ProtocolVersion::try_from("2.xyz".to_string()).unwrap_err();
+        assert!(err.to_string().contains("minor"));
+    }
+
+    // ── FeatureId edge cases ───────────────────────────────────────────
+
+    #[test]
+    fn feature_id_as_str() {
+        let fid = FeatureId::try_from("fcps.aead".to_string()).unwrap();
+        assert_eq!(fid.as_str(), "fcps.aead");
+    }
+
+    #[test]
+    fn feature_id_into_string() {
+        let fid = FeatureId::try_from("fcps.test".to_string()).unwrap();
+        let s: String = fid.into();
+        assert_eq!(s, "fcps.test");
+    }
+
+    // ── SignatureThreshold ─────────────────────────────────────────────
+
+    #[test]
+    fn signature_threshold_display() {
+        let st = SignatureThreshold { k: 2, n: 3 };
+        assert_eq!(st.to_string(), "2-of-3");
+    }
+
+    #[test]
+    fn signature_threshold_serde_roundtrip() {
+        let st = SignatureThreshold { k: 2, n: 3 };
+        let json = serde_json::to_string(&st).unwrap();
+        assert_eq!(json, "\"2-of-3\"");
+        let deserialized: SignatureThreshold = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized, st);
+    }
+
+    #[test]
+    fn signature_threshold_try_from_valid() {
+        let st = SignatureThreshold::try_from("1-of-5".to_string()).unwrap();
+        assert_eq!(st.k, 1);
+        assert_eq!(st.n, 5);
+    }
+
+    #[test]
+    fn signature_threshold_try_from_missing_separator() {
+        let err = SignatureThreshold::try_from("2/3".to_string()).unwrap_err();
+        assert!(err.to_string().contains("2-of-3"));
+    }
+
+    #[test]
+    fn signature_threshold_try_from_non_numeric_k() {
+        let err = SignatureThreshold::try_from("x-of-3".to_string()).unwrap_err();
+        assert!(err.to_string().contains("k must be"));
+    }
+
+    #[test]
+    fn signature_threshold_validate_zero_k() {
+        let st = SignatureThreshold { k: 0, n: 3 };
+        let err = st.validate(3).unwrap_err();
+        assert!(err.to_string().contains("invalid threshold"));
+    }
+
+    #[test]
+    fn signature_threshold_validate_k_gt_n() {
+        let st = SignatureThreshold { k: 4, n: 3 };
+        let err = st.validate(4).unwrap_err();
+        assert!(err.to_string().contains("invalid threshold"));
+    }
+
+    #[test]
+    fn signature_threshold_validate_insufficient_sigs() {
+        let st = SignatureThreshold { k: 3, n: 5 };
+        let err = st.validate(2).unwrap_err();
+        assert!(err.to_string().contains("insufficient"));
+    }
+
+    // ── ObjectIdRef ────────────────────────────────────────────────────
+
+    #[test]
+    fn object_id_ref_roundtrip() {
+        let hex_str = "objectid:".to_string() + &"ab".repeat(32);
+        let oid = ObjectIdRef::try_from(hex_str.clone()).unwrap();
+        let display = oid.to_string();
+        assert_eq!(display, hex_str);
+    }
+
+    #[test]
+    fn object_id_ref_serde_roundtrip() {
+        let hex_str = format!("objectid:{}", "cd".repeat(32));
+        let oid = ObjectIdRef::try_from(hex_str).unwrap();
+        let json = serde_json::to_string(&oid).unwrap();
+        let deserialized: ObjectIdRef = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized, oid);
+    }
+
+    #[test]
+    fn object_id_ref_wrong_length() {
+        let err = ObjectIdRef::try_from("objectid:abcdef".to_string()).unwrap_err();
+        assert!(err.to_string().contains("32 bytes"));
+    }
+
+    #[test]
+    fn object_id_ref_invalid_hex() {
+        let err = ObjectIdRef::try_from("objectid:zzzz".to_string()).unwrap_err();
+        assert!(err.to_string().contains("hex"));
+    }
+
+    #[test]
+    fn object_id_ref_without_prefix() {
+        // ObjectIdRef::try_from strips "objectid:" prefix or uses raw hex
+        let hex_str = "ab".repeat(32);
+        let oid = ObjectIdRef::try_from(hex_str).unwrap();
+        assert!(oid.to_string().starts_with("objectid:"));
+    }
+
+    // ── Base64Bytes edge cases ─────────────────────────────────────────
+
+    #[test]
+    fn base64_bytes_as_bytes() {
+        let b = Base64Bytes(vec![1, 2, 3]);
+        assert_eq!(b.as_bytes(), &[1, 2, 3]);
+    }
+
+    #[test]
+    fn base64_bytes_missing_prefix() {
+        let err = Base64Bytes::try_from("SGVsbG8=".to_string()).unwrap_err();
+        assert!(err.to_string().contains("base64:"));
+    }
+
+    #[test]
+    fn base64_bytes_invalid_chars() {
+        let err = Base64Bytes::try_from("base64:!!!invalid!!!".to_string()).unwrap_err();
+        assert!(err.to_string().contains("invalid base64"));
+    }
+
+    #[test]
+    fn base64_bytes_empty_data() {
+        let b = Base64Bytes::try_from("base64:".to_string()).unwrap();
+        assert!(b.as_bytes().is_empty());
+    }
+
+    // ── AttestationType ────────────────────────────────────────────────
+
+    #[test]
+    fn attestation_type_serde_roundtrip() {
+        for (variant, expected) in [
+            (AttestationType::InToto, "\"in-toto\""),
+            (AttestationType::ReproducibleBuild, "\"reproducible-build\""),
+            (AttestationType::CodeReview, "\"code-review\""),
+        ] {
+            let json = serde_json::to_string(&variant).unwrap();
+            assert_eq!(json, expected);
+            let deserialized: AttestationType = serde_json::from_str(&json).unwrap();
+            assert_eq!(deserialized, variant);
+        }
+    }
+
+    #[test]
+    fn attestation_type_invalid() {
+        let result = serde_json::from_str::<AttestationType>("\"unknown\"");
+        assert!(result.is_err());
+    }
+
+    // ── ManifestApprovalMode ───────────────────────────────────────────
+
+    #[test]
+    fn manifest_approval_mode_to_core() {
+        assert_eq!(
+            CoreApprovalMode::from(ManifestApprovalMode::None),
+            CoreApprovalMode::None
+        );
+        assert_eq!(
+            CoreApprovalMode::from(ManifestApprovalMode::Policy),
+            CoreApprovalMode::Policy
+        );
+        assert_eq!(
+            CoreApprovalMode::from(ManifestApprovalMode::Interactive),
+            CoreApprovalMode::Interactive
+        );
+        assert_eq!(
+            CoreApprovalMode::from(ManifestApprovalMode::ElevationToken),
+            CoreApprovalMode::ElevationToken
+        );
+    }
+
+    #[test]
+    fn manifest_approval_mode_backward_compat() {
+        let mode: ManifestApprovalMode =
+            serde_json::from_str("\"approval_required\"").unwrap();
+        assert_eq!(mode, ManifestApprovalMode::ElevationToken);
+    }
+
+    #[test]
+    fn manifest_approval_mode_invalid() {
+        let result = serde_json::from_str::<ManifestApprovalMode>("\"bogus\"");
+        assert!(result.is_err());
+    }
+
+    // ── RateLimit ──────────────────────────────────────────────────────
+
+    #[test]
+    fn rate_limit_as_inner() {
+        let rl: RateLimit = serde_json::from_str("\"100/hour\"").unwrap();
+        assert_eq!(rl.as_inner().max, 100);
+        assert_eq!(rl.as_inner().per_ms, 3_600_000);
+    }
+
+    #[test]
+    fn rate_limit_all_shorthand_units() {
+        for (input, expected_ms) in [
+            ("\"10/sec\"", 1_000_u64),
+            ("\"10/s\"", 1_000),
+            ("\"10/min\"", 60_000),
+            ("\"10/m\"", 60_000),
+            ("\"10/hour\"", 3_600_000),
+            ("\"10/h\"", 3_600_000),
+            ("\"10/day\"", 86_400_000),
+            ("\"10/d\"", 86_400_000),
+        ] {
+            let rl: RateLimit = serde_json::from_str(input).unwrap();
+            assert_eq!(rl.as_inner().per_ms, expected_ms, "failed for {input}");
+            assert_eq!(rl.as_inner().max, 10);
+        }
+    }
+
+    #[test]
+    fn rate_limit_shorthand_invalid_unit() {
+        let result = serde_json::from_str::<RateLimit>("\"10/year\"");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn rate_limit_shorthand_invalid_format() {
+        let result = serde_json::from_str::<RateLimit>("\"10\"");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn rate_limit_shorthand_non_numeric_max() {
+        let result = serde_json::from_str::<RateLimit>("\"abc/min\"");
+        assert!(result.is_err());
+    }
+
+    // ── ConnectorStateModel serde roundtrip ────────────────────────────
+
+    #[test]
+    fn connector_state_model_serde_roundtrip_stateless() {
+        let model = ConnectorStateModel::Stateless;
+        let json = serde_json::to_string(&model).unwrap();
+        let deserialized: ConnectorStateModel = serde_json::from_str(&json).unwrap();
+        assert!(deserialized.is_stateless());
+    }
+
+    #[test]
+    fn connector_state_model_serde_roundtrip_singleton() {
+        let model = ConnectorStateModel::SingletonWriter;
+        let json = serde_json::to_string(&model).unwrap();
+        let deserialized: ConnectorStateModel = serde_json::from_str(&json).unwrap();
+        assert!(deserialized.is_singleton_writer());
+    }
+
+    #[test]
+    fn connector_state_model_serde_roundtrip_crdt() {
+        let model = ConnectorStateModel::Crdt {
+            crdt_type: ConnectorCrdtType::LwwMap,
+        };
+        let json = serde_json::to_string(&model).unwrap();
+        let deserialized: ConnectorStateModel = serde_json::from_str(&json).unwrap();
+        assert!(deserialized.is_crdt());
+        assert_eq!(deserialized.crdt_type(), Some(ConnectorCrdtType::LwwMap));
+    }
+
+    // ── ConnectorStateSection ──────────────────────────────────────────
+
+    #[test]
+    fn state_section_to_model_stateless() {
+        let section: ConnectorStateSection = serde_json::from_value(json!({
+            "model": "stateless",
+            "state_schema_version": "1.0"
+        }))
+        .unwrap();
+        assert!(section.to_state_model().unwrap().is_stateless());
+    }
+
+    #[test]
+    fn state_section_to_model_crdt_missing_type() {
+        let section: ConnectorStateSection = serde_json::from_value(json!({
+            "model": "crdt",
+            "state_schema_version": "1.0"
+        }))
+        .unwrap();
+        let err = section.to_state_model().unwrap_err();
+        assert!(err.to_string().contains("crdt_type"));
+    }
+
+    #[test]
+    fn state_section_to_model_crdt_with_type() {
+        let section: ConnectorStateSection = serde_json::from_value(json!({
+            "model": "crdt",
+            "state_schema_version": "1.0",
+            "crdt_type": "lww_map"
+        }))
+        .unwrap();
+        let model = section.to_state_model().unwrap();
+        assert_eq!(model.crdt_type(), Some(ConnectorCrdtType::LwwMap));
+    }
+
+    #[test]
+    fn state_section_validate_empty_schema_version() {
+        let section: ConnectorStateSection = serde_json::from_value(json!({
+            "model": "stateless",
+            "state_schema_version": "  "
+        }))
+        .unwrap();
+        let err = section.validate().unwrap_err();
+        assert!(err.to_string().contains("state_schema_version"));
+    }
+
+    // ── EventSection serde ─────────────────────────────────────────────
+
+    #[test]
+    fn event_section_serde_minimal() {
+        let section: EventSection = serde_json::from_value(json!({
+            "description": "Test event"
+        }))
+        .unwrap();
+        assert_eq!(section.description, "Test event");
+        assert!(!section.streaming);
+        assert!(!section.replay);
+        assert!(!section.requires_ack);
+        assert!(section.topic.is_none());
+        assert!(section.schema.is_none());
+    }
+
+    #[test]
+    fn event_section_serde_full() {
+        let section: EventSection = serde_json::from_value(json!({
+            "description": "Full event",
+            "streaming": true,
+            "replay": true,
+            "topic": "events.test",
+            "requires_ack": true,
+            "schema": {"type": "object"}
+        }))
+        .unwrap();
+        assert!(section.streaming);
+        assert!(section.replay);
+        assert!(section.requires_ack);
+        assert_eq!(section.topic.as_deref(), Some("events.test"));
+    }
+
+    #[test]
+    fn event_section_serde_roundtrip() {
+        let section = EventSection {
+            description: "Roundtrip test".into(),
+            streaming: true,
+            replay: false,
+            topic: Some("t".into()),
+            requires_ack: true,
+            schema: Some(json!({"type": "string"})),
+        };
+        let json = serde_json::to_string(&section).unwrap();
+        let deserialized: EventSection = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.description, "Roundtrip test");
+        assert!(deserialized.streaming);
+        assert!(!deserialized.replay);
+    }
+
+    // ── EventCapsSection validation ────────────────────────────────────
+
+    #[test]
+    fn event_caps_streaming_requires_nonzero_buffer() {
+        let caps = EventCapsSection {
+            streaming: true,
+            replay: false,
+            min_buffer_events: 0,
+        };
+        let err = caps.validate().unwrap_err();
+        assert!(err.to_string().contains("min_buffer_events"));
+    }
+
+    #[test]
+    fn event_caps_no_streaming_allows_zero_buffer() {
+        let caps = EventCapsSection {
+            streaming: false,
+            replay: false,
+            min_buffer_events: 0,
+        };
+        assert!(caps.validate().is_ok());
+    }
+
+    // ── RateLimitsSection to_declarations ──────────────────────────────
+
+    #[test]
+    fn rate_limits_section_to_declarations_empty() {
+        let section = RateLimitsSection::default();
+        let decls = section.to_declarations();
+        assert!(decls.limits.is_empty());
+        assert!(decls.tool_pool_map.is_empty());
+    }
+
+    #[test]
+    fn rate_limits_section_to_declarations_with_pool() {
+        let section = RateLimitsSection {
+            pools: vec![RateLimitPoolSection {
+                id: "api_global".into(),
+                description: Some("Global API limit".into()),
+                requests: 100,
+                window_ms: 60_000,
+                burst: Some(10),
+                unit: Some("tokens".into()),
+                enforcement: Some("soft".into()),
+                scope: Some("credential".into()),
+            }],
+            operation_pools: {
+                let mut m = std::collections::HashMap::new();
+                m.insert("list_items".into(), vec!["api_global".into()]);
+                m
+            },
+        };
+        let decls = section.to_declarations();
+        assert_eq!(decls.limits.len(), 1);
+        assert_eq!(decls.limits[0].id, "api_global");
+        assert_eq!(decls.limits[0].config.requests, 100);
+        assert_eq!(decls.limits[0].config.burst, Some(10));
+        assert_eq!(
+            decls.tool_pool_map.get("list_items").unwrap(),
+            &vec!["api_global".to_string()]
+        );
+    }
+
+    #[test]
+    fn rate_limits_section_unit_mapping() {
+        use fcp_core::RateLimitUnit;
+        let make_section = |unit: &str| RateLimitsSection {
+            pools: vec![RateLimitPoolSection {
+                id: "test".into(),
+                description: None,
+                requests: 10,
+                window_ms: 1000,
+                burst: None,
+                unit: Some(unit.into()),
+                enforcement: None,
+                scope: None,
+            }],
+            operation_pools: std::collections::HashMap::default(),
+        };
+        assert_eq!(
+            make_section("tokens").to_declarations().limits[0].config.unit,
+            RateLimitUnit::Tokens
+        );
+        assert_eq!(
+            make_section("bytes").to_declarations().limits[0].config.unit,
+            RateLimitUnit::Bytes
+        );
+        assert_eq!(
+            make_section("custom").to_declarations().limits[0].config.unit,
+            RateLimitUnit::Custom
+        );
+        assert_eq!(
+            make_section("requests").to_declarations().limits[0].config.unit,
+            RateLimitUnit::Requests
+        );
+    }
+
+    #[test]
+    fn rate_limits_section_enforcement_mapping() {
+        use fcp_core::RateLimitEnforcement;
+        let make_section = |enforcement: &str| RateLimitsSection {
+            pools: vec![RateLimitPoolSection {
+                id: "test".into(),
+                description: None,
+                requests: 10,
+                window_ms: 1000,
+                burst: None,
+                unit: None,
+                enforcement: Some(enforcement.into()),
+                scope: None,
+            }],
+            operation_pools: std::collections::HashMap::default(),
+        };
+        assert_eq!(
+            make_section("soft").to_declarations().limits[0].enforcement,
+            RateLimitEnforcement::Soft
+        );
+        assert_eq!(
+            make_section("advisory").to_declarations().limits[0].enforcement,
+            RateLimitEnforcement::Advisory
+        );
+        assert_eq!(
+            make_section("hard").to_declarations().limits[0].enforcement,
+            RateLimitEnforcement::Hard
+        );
+    }
+
+    #[test]
+    fn rate_limits_section_scope_mapping() {
+        use fcp_core::RateLimitScope;
+        let make_section = |scope: &str| RateLimitsSection {
+            pools: vec![RateLimitPoolSection {
+                id: "test".into(),
+                description: None,
+                requests: 10,
+                window_ms: 1000,
+                burst: None,
+                unit: None,
+                enforcement: None,
+                scope: Some(scope.into()),
+            }],
+            operation_pools: std::collections::HashMap::default(),
+        };
+        assert_eq!(
+            make_section("credential").to_declarations().limits[0].scope,
+            RateLimitScope::Credential
+        );
+        assert_eq!(
+            make_section("global").to_declarations().limits[0].scope,
+            RateLimitScope::Global
+        );
+        assert_eq!(
+            make_section("instance").to_declarations().limits[0].scope,
+            RateLimitScope::Instance
+        );
+    }
+
+    // ── PolicySection validation ───────────────────────────────────────
+
+    #[test]
+    fn policy_section_valid_slsa_level() {
+        let policy = PolicySection {
+            require_transparency_log: false,
+            require_attestation_types: vec![],
+            min_slsa_level: Some(4),
+            trusted_builders: vec![],
+        };
+        assert!(policy.validate().is_ok());
+    }
+
+    #[test]
+    fn policy_section_invalid_slsa_level() {
+        let policy = PolicySection {
+            require_transparency_log: false,
+            require_attestation_types: vec![],
+            min_slsa_level: Some(5),
+            trusted_builders: vec![],
+        };
+        let err = policy.validate().unwrap_err();
+        assert!(err.to_string().contains("0..=4"));
+    }
+
+    #[test]
+    fn policy_section_serde_roundtrip() {
+        let policy = PolicySection {
+            require_transparency_log: true,
+            require_attestation_types: vec![AttestationType::InToto],
+            min_slsa_level: Some(3),
+            trusted_builders: vec!["builder1".into()],
+        };
+        let json = serde_json::to_string(&policy).unwrap();
+        let deserialized: PolicySection = serde_json::from_str(&json).unwrap();
+        assert!(deserialized.require_transparency_log);
+        assert_eq!(deserialized.min_slsa_level, Some(3));
+        assert_eq!(deserialized.trusted_builders.len(), 1);
+    }
+
+    // ── SandboxSection validation ──────────────────────────────────────
+
+    #[test]
+    fn sandbox_section_zero_cpu_percent() {
+        let section = SandboxSection {
+            profile: SandboxProfile::Strict,
+            memory_mb: 128,
+            cpu_percent: 0,
+            wall_clock_timeout_ms: 30_000,
+            fs_readonly_paths: vec![],
+            fs_writable_paths: vec![],
+            deny_exec: true,
+            deny_ptrace: true,
+        };
+        let err = section.validate().unwrap_err();
+        assert!(err.to_string().contains("cpu_percent"));
+    }
+
+    #[test]
+    fn sandbox_section_zero_timeout() {
+        let section = SandboxSection {
+            profile: SandboxProfile::Strict,
+            memory_mb: 128,
+            cpu_percent: 50,
+            wall_clock_timeout_ms: 0,
+            fs_readonly_paths: vec![],
+            fs_writable_paths: vec![],
+            deny_exec: true,
+            deny_ptrace: true,
+        };
+        let err = section.validate().unwrap_err();
+        assert!(err.to_string().contains("wall_clock_timeout_ms"));
+    }
+
+    // ── ManifestError display ──────────────────────────────────────────
+
+    #[test]
+    fn manifest_error_all_variants_display() {
+        let toml_err = toml::from_str::<ConnectorManifest>("invalid").unwrap_err();
+        let err = ManifestError::Toml(toml_err);
+        assert!(err.to_string().contains("parse manifest TOML"));
+
+        let err = ManifestError::Invalid {
+            field: "test.field",
+            message: "test message".into(),
+        };
+        assert!(err.to_string().contains("test.field"));
+        assert!(err.to_string().contains("test message"));
+
+        let err = ManifestError::InterfaceHashMismatch {
+            expected: "a".into(),
+            found: "b".into(),
+        };
+        assert!(err.to_string().contains("hash mismatch"));
+    }
+
+    // ── validate_host_allow_entry ──────────────────────────────────────
+
+    #[test]
+    fn host_allow_empty_rejected() {
+        let err = validate_host_allow_entry("", true, true).unwrap_err();
+        assert!(err.to_string().contains("empty"));
+    }
+
+    #[test]
+    fn host_allow_ip_literal_denied() {
+        let err = validate_host_allow_entry("192.168.1.1", true, false).unwrap_err();
+        assert!(err.to_string().contains("IP literals"));
+    }
+
+    #[test]
+    fn host_allow_ip_literal_allowed() {
+        assert!(validate_host_allow_entry("192.168.1.1", false, false).is_ok());
+    }
+
+    #[test]
+    fn host_allow_non_ascii_rejected_with_canonicalization() {
+        let err = validate_host_allow_entry("例え.jp", true, true).unwrap_err();
+        assert!(err.to_string().contains("ASCII"));
+    }
+
+    #[test]
+    fn host_allow_trailing_dot_rejected_with_canonicalization() {
+        let err = validate_host_allow_entry("example.com.", true, true).unwrap_err();
+        assert!(err.to_string().contains("trailing dot"));
+    }
+
+    #[test]
+    fn host_allow_valid_wildcard() {
+        assert!(validate_host_allow_entry("*.example.com", false, false).is_ok());
+    }
+
+    #[test]
+    fn host_allow_wildcard_too_broad() {
+        let err = validate_host_allow_entry("*.com", false, false).unwrap_err();
+        assert!(err.to_string().contains("too broad"));
+    }
+
+    #[test]
+    fn host_allow_wildcard_invalid_middle() {
+        let err = validate_host_allow_entry("ex*.com", false, false).unwrap_err();
+        assert!(err.to_string().contains("*.example.com"));
+    }
+
+    #[test]
+    fn host_allow_valid_hostname() {
+        assert!(validate_host_allow_entry("api.example.com", true, true).is_ok());
+    }
+
+    // ── NetworkConstraints defaults ────────────────────────────────────
+
+    #[test]
+    fn network_constraints_default_values() {
+        assert!(default_true());
+        assert_eq!(default_dns_max_ips(), 16);
+        assert_eq!(default_max_redirects(), 5);
+        assert_eq!(default_connect_timeout_ms(), 10_000);
+        assert_eq!(default_total_timeout_ms(), 60_000);
+        assert_eq!(default_max_response_bytes(), 10_485_760);
+    }
+
+    // ── SignaturesSection validation ───────────────────────────────────
+
+    #[test]
+    fn signatures_section_sigs_without_threshold() {
+        let section = SignaturesSection {
+            publisher_signatures: vec![SignatureEntry {
+                kid: "key1".into(),
+                sig: Base64Bytes(vec![1, 2, 3]),
+            }],
+            publisher_threshold: None,
+            registry_signature: None,
+            transparency_log_entry: None,
+        };
+        let err = section.validate().unwrap_err();
+        assert!(err.to_string().contains("publisher_threshold"));
+    }
+
+    #[test]
+    fn signatures_section_duplicate_kid() {
+        let section = SignaturesSection {
+            publisher_signatures: vec![
+                SignatureEntry {
+                    kid: "key1".into(),
+                    sig: Base64Bytes(vec![1]),
+                },
+                SignatureEntry {
+                    kid: "key1".into(),
+                    sig: Base64Bytes(vec![2]),
+                },
+            ],
+            publisher_threshold: Some(SignatureThreshold { k: 1, n: 2 }),
+            registry_signature: None,
+            transparency_log_entry: None,
+        };
+        let err = section.validate().unwrap_err();
+        assert!(err.to_string().contains("duplicate kid"));
+    }
+
+    #[test]
+    fn signatures_section_valid() {
+        let section = SignaturesSection {
+            publisher_signatures: vec![
+                SignatureEntry {
+                    kid: "key1".into(),
+                    sig: Base64Bytes(vec![1]),
+                },
+                SignatureEntry {
+                    kid: "key2".into(),
+                    sig: Base64Bytes(vec![2]),
+                },
+            ],
+            publisher_threshold: Some(SignatureThreshold { k: 1, n: 2 }),
+            registry_signature: None,
+            transparency_log_entry: None,
+        };
+        assert!(section.validate().is_ok());
+    }
+
+    // ── SupplyChainSection validation ──────────────────────────────────
+
+    #[test]
+    fn supply_chain_duplicate_object_id() {
+        let oid = ObjectIdRef::try_from("objectid:".to_string() + &"aa".repeat(32)).unwrap();
+        let section = SupplyChainSection {
+            attestations: vec![
+                SupplyChainAttestationRef {
+                    attestation_type: AttestationType::InToto,
+                    object_id: oid,
+                },
+                SupplyChainAttestationRef {
+                    attestation_type: AttestationType::CodeReview,
+                    object_id: oid,
+                },
+            ],
+        };
+        let err = section.validate().unwrap_err();
+        assert!(err.to_string().contains("duplicate"));
+    }
+
+    #[test]
+    fn supply_chain_valid() {
+        let oid1 = ObjectIdRef::try_from("objectid:".to_string() + &"aa".repeat(32)).unwrap();
+        let oid2 = ObjectIdRef::try_from("objectid:".to_string() + &"bb".repeat(32)).unwrap();
+        let section = SupplyChainSection {
+            attestations: vec![
+                SupplyChainAttestationRef {
+                    attestation_type: AttestationType::InToto,
+                    object_id: oid1,
+                },
+                SupplyChainAttestationRef {
+                    attestation_type: AttestationType::CodeReview,
+                    object_id: oid2,
+                },
+            ],
+        };
+        assert!(section.validate().is_ok());
+    }
 }

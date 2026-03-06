@@ -1111,4 +1111,346 @@ mod tests {
         assert_eq!(eval.action, BudgetAction::Allow);
         assert!(eval.snapshot.budgets.is_empty());
     }
+
+    // ── MetricWindow roll_if_needed edge cases ──
+
+    #[test]
+    fn metric_window_roll_resets_when_window_size_changes() {
+        let mut window = MetricWindow::new(60, 1000);
+        window.used = 42;
+        // configured_window differs from window_seconds → full reset
+        window.roll_if_needed(1005, 120);
+        assert_eq!(window.window_seconds, 120);
+        assert_eq!(window.window_started_at, 1005);
+        assert_eq!(window.used, 0);
+    }
+
+    #[test]
+    fn metric_window_roll_resets_when_configured_window_zero() {
+        let mut window = MetricWindow::new(0, 1000);
+        window.used = 99;
+        // configured_window == 0 → always reset
+        window.roll_if_needed(1050, 0);
+        assert_eq!(window.window_started_at, 1050);
+        assert_eq!(window.used, 0);
+    }
+
+    #[test]
+    fn metric_window_roll_no_roll_within_window() {
+        let mut window = MetricWindow::new(60, 1000);
+        window.used = 10;
+        // 30s elapsed < 60s window → no roll
+        window.roll_if_needed(1030, 60);
+        assert_eq!(window.used, 10);
+        assert_eq!(window.window_started_at, 1000);
+    }
+
+    #[test]
+    fn metric_window_roll_exactly_at_boundary() {
+        let mut window = MetricWindow::new(60, 1000);
+        window.used = 50;
+        // elapsed == window_seconds → rolls
+        window.roll_if_needed(1060, 60);
+        assert_eq!(window.used, 0);
+        assert_eq!(window.window_started_at, 1060);
+    }
+
+    #[test]
+    fn metric_window_roll_multiple_windows_passed() {
+        let mut window = MetricWindow::new(60, 1000);
+        window.used = 77;
+        // 180s elapsed = 3 windows → should align start to 1000 + 3*60 = 1180
+        window.roll_if_needed(1180, 60);
+        assert_eq!(window.used, 0);
+        assert_eq!(window.window_started_at, 1180);
+    }
+
+    #[test]
+    fn metric_window_roll_partial_extra_window() {
+        let mut window = MetricWindow::new(60, 1000);
+        window.used = 33;
+        // 150s = 2 full windows + 30s partial
+        // windows_passed = 150/60 = 2, new start = 1000 + 2*60 = 1120
+        window.roll_if_needed(1150, 60);
+        assert_eq!(window.used, 0);
+        assert_eq!(window.window_started_at, 1120);
+    }
+
+    #[test]
+    fn metric_window_roll_now_before_start_saturates() {
+        let mut window = MetricWindow::new(60, 1000);
+        window.used = 5;
+        // now < window_started_at → saturating_sub gives 0, no roll
+        window.roll_if_needed(500, 60);
+        assert_eq!(window.used, 5);
+        assert_eq!(window.window_started_at, 1000);
+    }
+
+    // ── aggregate_metrics edge cases ──
+
+    #[test]
+    fn aggregate_metrics_saturates_on_overflow() {
+        let metrics = vec![
+            UsageMetric::tokens(u64::MAX),
+            UsageMetric::tokens(1),
+        ];
+        let result = aggregate_metrics(&metrics);
+        assert_eq!(*result.get(&UsageMetricKind::Tokens).unwrap(), u64::MAX);
+    }
+
+    #[test]
+    fn aggregate_metrics_single_entry() {
+        let metrics = vec![UsageMetric::requests(42)];
+        let result = aggregate_metrics(&metrics);
+        assert_eq!(result.len(), 1);
+        assert_eq!(*result.get(&UsageMetricKind::Requests).unwrap(), 42);
+    }
+
+    // ── Budget limit = 0 ──
+
+    #[test]
+    fn budget_tracker_zero_limit_exceeds_on_any_usage() {
+        let zone = ZoneId::work();
+        let policy = UsageBudgetPolicy {
+            enforcement: BudgetEnforcement::Deny,
+            budgets: vec![UsageBudgetLimit {
+                metric: UsageMetricKind::Tokens,
+                limit: 0,
+                window_seconds: 60,
+            }],
+        };
+
+        let mut tracker = BudgetTracker::new();
+        let eval = tracker.record_usage(&zone, &policy, &[UsageMetric::tokens(1)]);
+        assert_eq!(eval.action, BudgetAction::Deny);
+        assert_eq!(eval.snapshot.budgets[0].status, BudgetStatus::Exceeded);
+        assert_eq!(eval.snapshot.budgets[0].remaining, 0);
+    }
+
+    #[test]
+    fn budget_tracker_zero_limit_allows_zero_usage() {
+        let zone = ZoneId::work();
+        let policy = UsageBudgetPolicy {
+            enforcement: BudgetEnforcement::Deny,
+            budgets: vec![UsageBudgetLimit {
+                metric: UsageMetricKind::Tokens,
+                limit: 0,
+                window_seconds: 60,
+            }],
+        };
+
+        let mut tracker = BudgetTracker::new();
+        let eval = tracker.record_usage(&zone, &policy, &[]);
+        assert_eq!(eval.action, BudgetAction::Allow);
+        assert_eq!(eval.snapshot.budgets[0].used, 0);
+    }
+
+    // ── BudgetEvaluation to_error picks first exceeded ──
+
+    #[test]
+    fn budget_evaluation_to_error_picks_first_exceeded_budget() {
+        let zone = ZoneId::work();
+        let policy = UsageBudgetPolicy {
+            enforcement: BudgetEnforcement::Deny,
+            budgets: vec![
+                UsageBudgetLimit {
+                    metric: UsageMetricKind::Tokens,
+                    limit: 10,
+                    window_seconds: 60,
+                },
+                UsageBudgetLimit {
+                    metric: UsageMetricKind::Requests,
+                    limit: 5,
+                    window_seconds: 60,
+                },
+            ],
+        };
+
+        let mut tracker = BudgetTracker::new();
+        // Exceed both
+        let eval = tracker.record_usage(
+            &zone,
+            &policy,
+            &[UsageMetric::tokens(20), UsageMetric::requests(10)],
+        );
+        assert_eq!(eval.action, BudgetAction::Deny);
+
+        let error = eval.to_error().expect("should produce error");
+        // First exceeded in the budgets vec is Tokens
+        if let FcpError::BudgetExceeded { metric, .. } = error {
+            assert_eq!(metric, UsageMetricKind::Tokens);
+        } else {
+            unreachable!("expected BudgetExceeded");
+        }
+    }
+
+    // ── BudgetPolicyEngine::with_policies ──
+
+    #[fcp_async_core::runtime::test]
+    async fn budget_policy_engine_with_policies_constructor() {
+        let zone = ZoneId::work();
+        let mut policies = HashMap::new();
+        policies.insert(
+            zone.clone(),
+            UsageBudgetPolicy {
+                enforcement: BudgetEnforcement::Deny,
+                budgets: vec![UsageBudgetLimit {
+                    metric: UsageMetricKind::Tokens,
+                    limit: 500,
+                    window_seconds: 3600,
+                }],
+            },
+        );
+
+        let engine = BudgetPolicyEngine::with_policies(policies);
+        let snap = engine.snapshot(&zone).await.unwrap();
+        assert_eq!(snap.budgets[0].limit, 500);
+        assert_eq!(snap.budgets[0].used, 0);
+        assert_eq!(snap.enforcement, BudgetEnforcement::Deny);
+    }
+
+    // ── BudgetPolicyEngine remove_policy idempotency ──
+
+    #[fcp_async_core::runtime::test]
+    async fn budget_policy_engine_remove_policy_idempotent() {
+        let engine = BudgetPolicyEngine::new();
+        let zone = ZoneId::work();
+
+        // Remove from empty → None
+        assert!(engine.remove_policy(&zone).await.is_none());
+
+        engine
+            .upsert_policy(
+                zone.clone(),
+                UsageBudgetPolicy {
+                    enforcement: BudgetEnforcement::Warn,
+                    budgets: vec![],
+                },
+            )
+            .await;
+
+        // First removal → Some
+        assert!(engine.remove_policy(&zone).await.is_some());
+        // Second removal → None
+        assert!(engine.remove_policy(&zone).await.is_none());
+    }
+
+    // ── BudgetPolicyEngine record_usage with empty metrics ──
+
+    #[fcp_async_core::runtime::test]
+    async fn budget_policy_engine_record_usage_empty_metrics() {
+        let engine = BudgetPolicyEngine::new();
+        let zone = ZoneId::work();
+        engine
+            .upsert_policy(
+                zone.clone(),
+                UsageBudgetPolicy {
+                    enforcement: BudgetEnforcement::Deny,
+                    budgets: vec![UsageBudgetLimit {
+                        metric: UsageMetricKind::Tokens,
+                        limit: 100,
+                        window_seconds: 60,
+                    }],
+                },
+            )
+            .await;
+
+        let eval = engine.record_usage(&zone, &[]).await.unwrap();
+        assert_eq!(eval.action, BudgetAction::Allow);
+        assert_eq!(eval.snapshot.budgets[0].used, 0);
+    }
+
+    // ── BudgetAction Debug ──
+
+    #[test]
+    fn budget_action_debug() {
+        assert_eq!(format!("{:?}", BudgetAction::Allow), "Allow");
+        assert_eq!(format!("{:?}", BudgetAction::Warn), "Warn");
+        assert_eq!(format!("{:?}", BudgetAction::Deny), "Deny");
+    }
+
+    // ── BudgetEvaluation clone ──
+
+    #[test]
+    fn budget_evaluation_clone() {
+        let eval = BudgetEvaluation {
+            action: BudgetAction::Allow,
+            snapshot: UsageBudgetSnapshot {
+                zone_id: ZoneId::work(),
+                enforcement: BudgetEnforcement::Warn,
+                budgets: vec![],
+                updated_at: 123,
+            },
+        };
+        let cloned = eval.clone();
+        assert_eq!(cloned.action, eval.action);
+        assert_eq!(cloned.snapshot.zone_id, eval.snapshot.zone_id);
+        assert_eq!(cloned.snapshot.updated_at, eval.snapshot.updated_at);
+    }
+
+    // ── Snapshot window timing ──
+
+    #[test]
+    fn budget_snapshot_window_resets_at_correct() {
+        let zone = ZoneId::work();
+        let policy = UsageBudgetPolicy {
+            enforcement: BudgetEnforcement::Deny,
+            budgets: vec![UsageBudgetLimit {
+                metric: UsageMetricKind::Tokens,
+                limit: 100,
+                window_seconds: 3600,
+            }],
+        };
+
+        let mut tracker = BudgetTracker::new();
+        let eval = tracker.record_usage(&zone, &policy, &[UsageMetric::tokens(10)]);
+        let entry = &eval.snapshot.budgets[0];
+        // resets_at should be started_at + window_seconds
+        assert_eq!(
+            entry.window_resets_at,
+            entry.window_started_at + 3600
+        );
+    }
+
+    // ── Multiple record_usage calls with different metric types ──
+
+    #[test]
+    fn budget_tracker_untracked_metric_ignored() {
+        let zone = ZoneId::work();
+        let policy = UsageBudgetPolicy {
+            enforcement: BudgetEnforcement::Deny,
+            budgets: vec![UsageBudgetLimit {
+                metric: UsageMetricKind::Tokens,
+                limit: 100,
+                window_seconds: 60,
+            }],
+        };
+
+        let mut tracker = BudgetTracker::new();
+        // Record requests but policy only tracks tokens
+        let eval = tracker.record_usage(&zone, &policy, &[UsageMetric::requests(1000)]);
+        assert_eq!(eval.action, BudgetAction::Allow);
+        assert_eq!(eval.snapshot.budgets[0].used, 0);
+    }
+
+    // ── Budget enforcement field in snapshot ──
+
+    #[test]
+    fn budget_snapshot_enforcement_preserved() {
+        let zone = ZoneId::work();
+        for enforcement in [BudgetEnforcement::Deny, BudgetEnforcement::Warn] {
+            let policy = UsageBudgetPolicy {
+                enforcement,
+                budgets: vec![UsageBudgetLimit {
+                    metric: UsageMetricKind::Tokens,
+                    limit: 100,
+                    window_seconds: 60,
+                }],
+            };
+
+            let mut tracker = BudgetTracker::new();
+            let snap = tracker.snapshot(&zone, &policy);
+            assert_eq!(snap.enforcement, enforcement);
+        }
+    }
 }

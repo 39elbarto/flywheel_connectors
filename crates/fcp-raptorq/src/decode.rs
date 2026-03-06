@@ -8,9 +8,11 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
+use asupersync::raptorq::decoder::{
+    DecodeError as AsupersyncDecodeError, InactivationDecoder, ReceivedSymbol,
+};
 use fcp_async_core::{AsyncError, ExecutionContext};
 
-use crate::codec::decoder::{InactivationDecoder, ReceivedSymbol};
 use crate::config::RaptorQConfig;
 use crate::error::DecodeError;
 use crate::oti::ObjectTransmissionInformation;
@@ -144,14 +146,8 @@ impl RaptorQDecoder {
                 ReceivedSymbol::source(esi, data.clone())
             } else {
                 // Repair symbol: RFC 6330 LT equation (ESI >= K')
-                let (columns, coefficients) = decoder.repair_equation(esi);
-                ReceivedSymbol {
-                    esi,
-                    is_source: false,
-                    columns,
-                    coefficients,
-                    data: data.clone(),
-                }
+                let (columns, coefficients) = decoder.repair_equation_rfc6330(esi);
+                ReceivedSymbol::repair(esi, columns, coefficients, data.clone())
             };
             symbols.push(sym);
         }
@@ -176,10 +172,53 @@ impl RaptorQDecoder {
                 payload.truncate(transfer_len);
                 Ok(payload)
             }
-            Err(_) => Err(DecodeError::InsufficientSymbols {
-                received: self.received_count(),
-                needed: self.needed(),
-            }),
+            Err(error) => Err(Self::map_decode_error(
+                error,
+                self.received_count(),
+                self.needed(),
+            )),
+        }
+    }
+
+    #[allow(clippy::needless_pass_by_value)]
+    fn map_decode_error(error: AsupersyncDecodeError, received: u32, needed: u32) -> DecodeError {
+        match error {
+            AsupersyncDecodeError::InsufficientSymbols { .. }
+            | AsupersyncDecodeError::SingularMatrix { .. } => {
+                DecodeError::InsufficientSymbols { received, needed }
+            }
+            AsupersyncDecodeError::SymbolSizeMismatch { expected, actual } => {
+                DecodeError::InvalidSymbol {
+                    reason: format!(
+                        "symbol size mismatch: expected {expected} bytes, got {actual} bytes"
+                    ),
+                }
+            }
+            AsupersyncDecodeError::SymbolEquationArityMismatch {
+                esi,
+                columns,
+                coefficients,
+            } => DecodeError::InvalidSymbol {
+                reason: format!(
+                    "symbol equation mismatch for ESI {esi}: {columns} columns vs {coefficients} coefficients"
+                ),
+            },
+            AsupersyncDecodeError::ColumnIndexOutOfRange {
+                esi,
+                column,
+                max_valid,
+            } => DecodeError::InvalidSymbol {
+                reason: format!(
+                    "symbol ESI {esi} referenced out-of-range column {column} (max valid {max_valid})"
+                ),
+            },
+            AsupersyncDecodeError::CorruptDecodedOutput {
+                esi, byte_index, ..
+            } => DecodeError::InvalidSymbol {
+                reason: format!(
+                    "decoded output failed verification for ESI {esi} at byte {byte_index}"
+                ),
+            },
         }
     }
 

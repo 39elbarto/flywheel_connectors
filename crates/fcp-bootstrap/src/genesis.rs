@@ -515,4 +515,444 @@ mod tests {
         let signature = keypair.sign(message);
         assert!(verifying_key.verify(message, &signature).is_ok());
     }
+
+    // ---- GenesisState Clone ----
+
+    #[test]
+    fn genesis_clone_preserves_fingerprint() {
+        let signing_key = Ed25519SigningKey::generate();
+        let genesis = GenesisState::create(&signing_key.verifying_key());
+        let cloned = genesis.clone();
+        drop(genesis);
+        assert!(cloned.validate().is_ok());
+        assert!(cloned.fingerprint().starts_with("SHA256:"));
+    }
+
+    #[test]
+    fn genesis_clone_preserves_all_fields() {
+        let signing_key = Ed25519SigningKey::generate();
+        let genesis = GenesisState::create(&signing_key.verifying_key());
+        let cloned = genesis.clone();
+        assert_eq!(genesis.schema_version, cloned.schema_version);
+        assert_eq!(genesis.owner_public_key, cloned.owner_public_key);
+        assert_eq!(genesis.created_at, cloned.created_at);
+        assert_eq!(genesis.initial_zones.len(), cloned.initial_zones.len());
+        assert_eq!(genesis.fingerprint(), cloned.fingerprint());
+    }
+
+    // ---- GenesisState Debug ----
+
+    #[test]
+    fn genesis_debug_output() {
+        let signing_key = Ed25519SigningKey::generate();
+        let genesis = GenesisState::create(&signing_key.verifying_key());
+        let debug = format!("{genesis:?}");
+        assert!(debug.contains("GenesisState"));
+        assert!(debug.contains("schema_version"));
+        assert!(debug.contains("initial_zones"));
+    }
+
+    // ---- Serde JSON roundtrip ----
+
+    #[test]
+    fn genesis_json_roundtrip() {
+        let signing_key = Ed25519SigningKey::generate();
+        let genesis = GenesisState::create(&signing_key.verifying_key());
+        let json = serde_json::to_string(&genesis).unwrap();
+        let restored: GenesisState = serde_json::from_str(&json).unwrap();
+        assert_eq!(genesis.fingerprint(), restored.fingerprint());
+        assert_eq!(genesis.owner_public_key, restored.owner_public_key);
+        assert_eq!(genesis.schema_version, restored.schema_version);
+    }
+
+    #[test]
+    fn genesis_json_pretty_roundtrip() {
+        let signing_key = Ed25519SigningKey::generate();
+        let genesis = GenesisState::create(&signing_key.verifying_key());
+        let json = serde_json::to_string_pretty(&genesis).unwrap();
+        let restored: GenesisState = serde_json::from_str(&json).unwrap();
+        assert_eq!(genesis.fingerprint(), restored.fingerprint());
+    }
+
+    // ---- CBOR edge cases ----
+
+    #[test]
+    fn genesis_cbor_invalid_data() {
+        let result = GenesisState::from_cbor(&[0xFF, 0xFE, 0xFD]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn genesis_cbor_empty_data() {
+        let result = GenesisState::from_cbor(&[]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn genesis_cbor_deterministic_roundtrip() {
+        let signing_key = Ed25519SigningKey::generate();
+        let genesis = GenesisState::create_deterministic(&signing_key.verifying_key());
+        let cbor = genesis.to_cbor().unwrap();
+        let restored = GenesisState::from_cbor(&cbor).unwrap();
+        assert_eq!(genesis.fingerprint(), restored.fingerprint());
+        assert_eq!(
+            restored.created_at,
+            DateTime::from_timestamp(0, 0).unwrap()
+        );
+    }
+
+    // ---- Validation: timestamp within tolerance ----
+
+    #[test]
+    fn genesis_validation_accepts_near_future_timestamp() {
+        let signing_key = Ed25519SigningKey::generate();
+        let mut genesis = GenesisState::create(&signing_key.verifying_key());
+        // 3 minutes in the future is within the 5-minute tolerance
+        genesis.created_at = Utc::now() + chrono::Duration::minutes(3);
+        assert!(genesis.validate().is_ok());
+    }
+
+    #[test]
+    fn genesis_validation_accepts_past_timestamp() {
+        let signing_key = Ed25519SigningKey::generate();
+        let mut genesis = GenesisState::create(&signing_key.verifying_key());
+        // Far in the past should be fine
+        genesis.created_at = DateTime::from_timestamp(1_000_000, 0).unwrap();
+        assert!(genesis.validate().is_ok());
+    }
+
+    #[test]
+    fn genesis_validation_accepts_epoch_timestamp() {
+        let signing_key = Ed25519SigningKey::generate();
+        let genesis = GenesisState::create_deterministic(&signing_key.verifying_key());
+        assert!(genesis.validate().is_ok());
+    }
+
+    // ---- Validation: schema version boundary ----
+
+    #[test]
+    fn genesis_validation_rejects_schema_version_zero() {
+        let signing_key = Ed25519SigningKey::generate();
+        let mut genesis = GenesisState::create(&signing_key.verifying_key());
+        genesis.schema_version = 0;
+        let result = genesis.validate();
+        assert!(matches!(
+            result,
+            Err(GenesisValidationError::UnsupportedSchemaVersion(0))
+        ));
+    }
+
+    // ---- Validation: missing specific zones ----
+
+    #[test]
+    fn genesis_validation_missing_private_zone() {
+        let signing_key = Ed25519SigningKey::generate();
+        let mut genesis = GenesisState::create(&signing_key.verifying_key());
+        genesis.initial_zones.retain(|z| z.zone_id != "z:private");
+        let result = genesis.validate();
+        assert!(matches!(
+            result,
+            Err(GenesisValidationError::MissingRequiredZone(ref z)) if z == "z:private"
+        ));
+    }
+
+    #[test]
+    fn genesis_validation_missing_work_zone() {
+        let signing_key = Ed25519SigningKey::generate();
+        let mut genesis = GenesisState::create(&signing_key.verifying_key());
+        genesis.initial_zones.retain(|z| z.zone_id != "z:work");
+        let result = genesis.validate();
+        assert!(matches!(
+            result,
+            Err(GenesisValidationError::MissingRequiredZone(ref z)) if z == "z:work"
+        ));
+    }
+
+    #[test]
+    fn genesis_validation_missing_community_zone() {
+        let signing_key = Ed25519SigningKey::generate();
+        let mut genesis = GenesisState::create(&signing_key.verifying_key());
+        genesis
+            .initial_zones
+            .retain(|z| z.zone_id != "z:community");
+        let result = genesis.validate();
+        assert!(matches!(
+            result,
+            Err(GenesisValidationError::MissingRequiredZone(ref z)) if z == "z:community"
+        ));
+    }
+
+    #[test]
+    fn genesis_validation_missing_public_zone() {
+        let signing_key = Ed25519SigningKey::generate();
+        let mut genesis = GenesisState::create(&signing_key.verifying_key());
+        genesis.initial_zones.retain(|z| z.zone_id != "z:public");
+        let result = genesis.validate();
+        assert!(matches!(
+            result,
+            Err(GenesisValidationError::MissingRequiredZone(ref z)) if z == "z:public"
+        ));
+    }
+
+    // ---- Validation: invalid zone IDs at various positions ----
+
+    #[test]
+    fn genesis_validation_rejects_zone_without_prefix() {
+        let signing_key = Ed25519SigningKey::generate();
+        let mut genesis = GenesisState::create(&signing_key.verifying_key());
+        genesis.initial_zones.push(InitialZone {
+            zone_id: "custom_no_prefix".to_string(),
+            name: "Custom".to_string(),
+            integrity_level: 10,
+            confidentiality_level: 10,
+        });
+        let result = genesis.validate();
+        assert!(matches!(
+            result,
+            Err(GenesisValidationError::InvalidZoneId(ref z)) if z == "custom_no_prefix"
+        ));
+    }
+
+    #[test]
+    fn genesis_validation_accepts_custom_zone_with_prefix() {
+        let signing_key = Ed25519SigningKey::generate();
+        let mut genesis = GenesisState::create(&signing_key.verifying_key());
+        genesis.initial_zones.push(InitialZone {
+            zone_id: "z:custom".to_string(),
+            name: "Custom Zone".to_string(),
+            integrity_level: 25,
+            confidentiality_level: 25,
+        });
+        assert!(genesis.validate().is_ok());
+    }
+
+    // ---- InitialZone properties ----
+
+    #[test]
+    fn initial_zone_clone() {
+        let zone = InitialZone {
+            zone_id: "z:test".to_string(),
+            name: "Test Zone".to_string(),
+            integrity_level: 42,
+            confidentiality_level: 99,
+        };
+        let cloned = zone.clone();
+        assert_eq!(zone.zone_id, cloned.zone_id);
+        assert_eq!(zone.name, cloned.name);
+        assert_eq!(zone.integrity_level, cloned.integrity_level);
+        assert_eq!(zone.confidentiality_level, cloned.confidentiality_level);
+    }
+
+    #[test]
+    fn initial_zone_debug() {
+        let zone = InitialZone {
+            zone_id: "z:debug".to_string(),
+            name: "Debug Zone".to_string(),
+            integrity_level: 0,
+            confidentiality_level: 255,
+        };
+        let debug = format!("{zone:?}");
+        assert!(debug.contains("InitialZone"));
+        assert!(debug.contains("z:debug"));
+        assert!(debug.contains("Debug Zone"));
+    }
+
+    #[test]
+    fn initial_zone_serde_roundtrip() {
+        let zone = InitialZone {
+            zone_id: "z:serde".to_string(),
+            name: "Serde Zone".to_string(),
+            integrity_level: 128,
+            confidentiality_level: 64,
+        };
+        let json = serde_json::to_string(&zone).unwrap();
+        let restored: InitialZone = serde_json::from_str(&json).unwrap();
+        assert_eq!(zone.zone_id, restored.zone_id);
+        assert_eq!(zone.name, restored.name);
+        assert_eq!(zone.integrity_level, restored.integrity_level);
+        assert_eq!(zone.confidentiality_level, restored.confidentiality_level);
+    }
+
+    // ---- Zone ordering in genesis ----
+
+    #[test]
+    fn genesis_zone_ids_in_expected_order() {
+        let signing_key = Ed25519SigningKey::generate();
+        let genesis = GenesisState::create(&signing_key.verifying_key());
+        let zone_ids: Vec<&str> = genesis
+            .initial_zones
+            .iter()
+            .map(|z| z.zone_id.as_str())
+            .collect();
+        assert_eq!(
+            zone_ids,
+            vec!["z:owner", "z:private", "z:work", "z:community", "z:public"]
+        );
+    }
+
+    #[test]
+    fn genesis_zone_names_in_expected_order() {
+        let signing_key = Ed25519SigningKey::generate();
+        let genesis = GenesisState::create(&signing_key.verifying_key());
+        let names: Vec<&str> = genesis
+            .initial_zones
+            .iter()
+            .map(|z| z.name.as_str())
+            .collect();
+        assert_eq!(
+            names,
+            vec![
+                "Owner Zone",
+                "Private Zone",
+                "Work Zone",
+                "Community Zone",
+                "Public Zone"
+            ]
+        );
+    }
+
+    #[test]
+    fn genesis_confidentiality_levels_are_descending() {
+        let signing_key = Ed25519SigningKey::generate();
+        let genesis = GenesisState::create(&signing_key.verifying_key());
+        let levels: Vec<u8> = genesis
+            .initial_zones
+            .iter()
+            .map(|z| z.confidentiality_level)
+            .collect();
+        // z:owner=255, z:private=200, z:work=150, z:community=100, z:public=0
+        for w in levels.windows(2) {
+            assert!(
+                w[0] > w[1],
+                "confidentiality levels should be strictly descending"
+            );
+        }
+    }
+
+    // ---- Fingerprint length and format ----
+
+    #[test]
+    fn genesis_fingerprint_format_details() {
+        let signing_key = Ed25519SigningKey::generate();
+        let genesis = GenesisState::create(&signing_key.verifying_key());
+        let fp = genesis.fingerprint();
+        assert!(fp.starts_with("SHA256:"));
+        let b64_part = &fp["SHA256:".len()..];
+        // 12 bytes base64 URL-safe no padding = 16 chars
+        assert_eq!(b64_part.len(), 16, "base64 part should be 16 chars");
+        // Should only contain URL-safe base64 characters
+        assert!(b64_part.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_'));
+    }
+
+    // ---- owner_verifying_key consistency ----
+
+    #[test]
+    fn genesis_owner_verifying_key_consistent_with_fingerprint() {
+        let signing_key = Ed25519SigningKey::generate();
+        let verifying_key = signing_key.verifying_key();
+        let genesis = GenesisState::create(&verifying_key);
+        // The recovered key should match what's stored
+        let recovered = genesis.owner_verifying_key().unwrap();
+        assert_eq!(recovered.to_bytes(), genesis.owner_public_key);
+    }
+
+    // ---- OwnerKeypair verifying_key ----
+
+    #[test]
+    fn owner_keypair_verifying_key_matches_signing_key() {
+        let signing_key = Ed25519SigningKey::generate();
+        let expected_pub = signing_key.verifying_key();
+        let keypair = super::OwnerKeypair::new(signing_key);
+        assert_eq!(keypair.verifying_key().to_bytes(), expected_pub.to_bytes());
+    }
+
+    // ---- OwnerKeypair sign with different messages ----
+
+    #[test]
+    fn owner_keypair_sign_empty_message() {
+        let signing_key = Ed25519SigningKey::generate();
+        let verifying_key = signing_key.verifying_key();
+        let keypair = super::OwnerKeypair::new(signing_key);
+        let signature = keypair.sign(b"");
+        assert!(verifying_key.verify(b"", &signature).is_ok());
+    }
+
+    #[test]
+    fn owner_keypair_sign_large_message() {
+        let signing_key = Ed25519SigningKey::generate();
+        let verifying_key = signing_key.verifying_key();
+        let keypair = super::OwnerKeypair::new(signing_key);
+        let large_msg = vec![0xABu8; 10_000];
+        let signature = keypair.sign(&large_msg);
+        assert!(verifying_key.verify(&large_msg, &signature).is_ok());
+    }
+
+    // ---- GenesisValidationError Display ----
+
+    #[test]
+    fn genesis_validation_error_display_invalid_owner_key() {
+        let err = GenesisValidationError::InvalidOwnerKey;
+        assert_eq!(err.to_string(), "invalid owner public key");
+    }
+
+    #[test]
+    fn genesis_validation_error_display_missing_zone() {
+        let err = GenesisValidationError::MissingRequiredZone("z:owner".to_string());
+        assert!(err.to_string().contains("z:owner"));
+    }
+
+    #[test]
+    fn genesis_validation_error_display_invalid_zone_id() {
+        let err = GenesisValidationError::InvalidZoneId("bad_zone".to_string());
+        assert!(err.to_string().contains("bad_zone"));
+    }
+
+    #[test]
+    fn genesis_validation_error_display_future_timestamp() {
+        let err = GenesisValidationError::FutureTimestamp;
+        assert!(err.to_string().contains("future"));
+    }
+
+    #[test]
+    fn genesis_validation_error_display_unsupported_version() {
+        let err = GenesisValidationError::UnsupportedSchemaVersion(42);
+        assert!(err.to_string().contains("42"));
+    }
+
+    // ---- Schema version constant ----
+
+    #[test]
+    fn genesis_schema_version_is_one() {
+        assert_eq!(GENESIS_SCHEMA_VERSION, 1);
+    }
+
+    // ---- Required zones constant ----
+
+    #[test]
+    fn required_zones_has_five_entries() {
+        assert_eq!(REQUIRED_ZONES.len(), 5);
+    }
+
+    #[test]
+    fn required_zones_all_start_with_z_prefix() {
+        for zone in REQUIRED_ZONES {
+            assert!(zone.starts_with("z:"), "zone {zone} missing z: prefix");
+        }
+    }
+
+    // ---- base64_encode ----
+
+    #[test]
+    fn base64_encode_deterministic() {
+        let data = [1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12];
+        let encoded1 = base64_encode(&data);
+        let encoded2 = base64_encode(&data);
+        assert_eq!(encoded1, encoded2);
+    }
+
+    #[test]
+    fn base64_encode_empty() {
+        let encoded = base64_encode(&[]);
+        assert!(encoded.is_empty());
+    }
 }

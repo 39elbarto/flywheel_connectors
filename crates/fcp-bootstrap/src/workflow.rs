@@ -707,4 +707,508 @@ mod tests {
         // tokens will be empty in CI environment
         let _ = tokens;
     }
+
+    // ---- BootstrapMode Clone ----
+
+    #[test]
+    fn test_mode_clone_single_device() {
+        let mode = BootstrapMode::SingleDevice;
+        let cloned = mode.clone();
+        assert_eq!(mode, cloned);
+    }
+
+    #[test]
+    fn test_mode_clone_multi_device() {
+        let mode = BootstrapMode::MultiDevice {
+            device_count: 5,
+            threshold: 3,
+        };
+        let cloned = mode.clone();
+        assert_eq!(mode, cloned);
+    }
+
+    #[test]
+    fn test_mode_clone_import() {
+        let phrase = RecoveryPhrase::generate().unwrap();
+        let mode = BootstrapMode::Import { phrase };
+        let cloned = mode.clone();
+        assert_eq!(mode, cloned);
+    }
+
+    #[test]
+    fn test_mode_clone_hardware_token() {
+        let token = DetectedToken {
+            provider: std::path::PathBuf::from("/test/pkcs11.so"),
+            slot: 1,
+            label: "YubiKey".to_string(),
+            manufacturer: "Yubico".to_string(),
+            serial: "SN001".to_string(),
+            mechanisms: vec!["CKM_ED25519".to_string()],
+        };
+        let mode = BootstrapMode::HardwareToken { token };
+        let cloned = mode.clone();
+        assert_eq!(mode, cloned);
+    }
+
+    // ---- BootstrapMode Debug ----
+
+    #[test]
+    fn test_mode_debug_single_device() {
+        let mode = BootstrapMode::SingleDevice;
+        let debug = format!("{mode:?}");
+        assert!(debug.contains("SingleDevice"));
+    }
+
+    #[test]
+    fn test_mode_debug_multi_device() {
+        let mode = BootstrapMode::MultiDevice {
+            device_count: 7,
+            threshold: 4,
+        };
+        let debug = format!("{mode:?}");
+        assert!(debug.contains("MultiDevice"));
+        assert!(debug.contains('7'));
+        assert!(debug.contains('4'));
+    }
+
+    #[test]
+    fn test_mode_debug_import() {
+        let phrase = RecoveryPhrase::generate().unwrap();
+        let mode = BootstrapMode::Import { phrase };
+        let debug = format!("{mode:?}");
+        assert!(debug.contains("Import"));
+    }
+
+    #[test]
+    fn test_mode_debug_hardware_token() {
+        let token = DetectedToken {
+            provider: std::path::PathBuf::from("/dev/token"),
+            slot: 0,
+            label: "TestHSM".to_string(),
+            manufacturer: "TestMfg".to_string(),
+            serial: "SER123".to_string(),
+            mechanisms: vec![],
+        };
+        let mode = BootstrapMode::HardwareToken { token };
+        let debug = format!("{mode:?}");
+        assert!(debug.contains("HardwareToken"));
+        assert!(debug.contains("TestHSM"));
+    }
+
+    // ---- BootstrapMode Display edge cases ----
+
+    #[test]
+    fn test_mode_display_hardware_token() {
+        let token = DetectedToken {
+            provider: std::path::PathBuf::from("/usr/lib/pkcs11.so"),
+            slot: 2,
+            label: "SmartCard".to_string(),
+            manufacturer: "Gemalto".to_string(),
+            serial: "SC999".to_string(),
+            mechanisms: vec!["CKM_EDDSA".to_string()],
+        };
+        let mode = BootstrapMode::HardwareToken { token };
+        let display = mode.to_string();
+        assert!(display.starts_with("Hardware Token"));
+        assert!(display.contains("SmartCard"));
+    }
+
+    #[test]
+    fn test_mode_display_multi_device_various_thresholds() {
+        let mode = BootstrapMode::MultiDevice {
+            device_count: 10,
+            threshold: 7,
+        };
+        assert_eq!(mode.to_string(), "Multi-Device (7/10)");
+
+        let mode2 = BootstrapMode::MultiDevice {
+            device_count: 2,
+            threshold: 1,
+        };
+        assert_eq!(mode2.to_string(), "Multi-Device (1/2)");
+    }
+
+    // ---- BootstrapMode Eq exhaustive ----
+
+    #[test]
+    fn test_mode_eq_multi_device_same_params() {
+        let a = BootstrapMode::MultiDevice {
+            device_count: 5,
+            threshold: 3,
+        };
+        let b = BootstrapMode::MultiDevice {
+            device_count: 5,
+            threshold: 3,
+        };
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn test_mode_ne_multi_device_different_threshold() {
+        let a = BootstrapMode::MultiDevice {
+            device_count: 5,
+            threshold: 3,
+        };
+        let b = BootstrapMode::MultiDevice {
+            device_count: 5,
+            threshold: 2,
+        };
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn test_mode_ne_multi_device_different_device_count() {
+        let a = BootstrapMode::MultiDevice {
+            device_count: 5,
+            threshold: 3,
+        };
+        let b = BootstrapMode::MultiDevice {
+            device_count: 7,
+            threshold: 3,
+        };
+        assert_ne!(a, b);
+    }
+
+    // ---- BootstrapConfigBuilder Debug ----
+
+    #[test]
+    fn test_config_builder_debug() {
+        let builder = BootstrapConfig::builder();
+        let debug = format!("{builder:?}");
+        assert!(debug.contains("BootstrapConfigBuilder"));
+    }
+
+    #[test]
+    fn test_config_builder_default_debug() {
+        let builder = BootstrapConfigBuilder::default();
+        let debug = format!("{builder:?}");
+        assert!(debug.contains("BootstrapConfigBuilder"));
+    }
+
+    // ---- BootstrapConfig Debug ----
+
+    #[test]
+    fn test_config_debug() {
+        let dir = tempdir().unwrap();
+        let config = BootstrapConfig::builder()
+            .data_dir(dir.path())
+            .mode(BootstrapMode::SingleDevice)
+            .build()
+            .unwrap();
+        let debug = format!("{config:?}");
+        assert!(debug.contains("BootstrapConfig"));
+        assert!(debug.contains("SingleDevice"));
+    }
+
+    // ---- Config builder error messages ----
+
+    #[test]
+    fn test_config_builder_missing_data_dir_error_message() {
+        let result = BootstrapConfig::builder()
+            .mode(BootstrapMode::SingleDevice)
+            .build();
+        match result {
+            Err(BootstrapError::Config(msg)) => assert!(msg.contains("data_dir")),
+            other => panic!("expected Config error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_config_builder_missing_mode_error_message() {
+        let dir = tempdir().unwrap();
+        let result = BootstrapConfig::builder().data_dir(dir.path()).build();
+        match result {
+            Err(BootstrapError::Config(msg)) => assert!(msg.contains("mode")),
+            other => panic!("expected Config error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_config_builder_empty_build_error() {
+        let result = BootstrapConfig::builder().build();
+        assert!(result.is_err());
+    }
+
+    // ---- Config builder flag toggling ----
+
+    #[test]
+    fn test_config_builder_skip_time_false() {
+        let dir = tempdir().unwrap();
+        let config = BootstrapConfig::builder()
+            .data_dir(dir.path())
+            .mode(BootstrapMode::SingleDevice)
+            .skip_time_validation(false)
+            .build()
+            .unwrap();
+        assert!(!config.skip_time_validation);
+    }
+
+    #[test]
+    fn test_config_builder_force_overwrite_false() {
+        let dir = tempdir().unwrap();
+        let config = BootstrapConfig::builder()
+            .data_dir(dir.path())
+            .mode(BootstrapMode::SingleDevice)
+            .force_overwrite(false)
+            .build()
+            .unwrap();
+        assert!(!config.force_overwrite);
+    }
+
+    #[test]
+    fn test_config_builder_allow_time_drift_false() {
+        let dir = tempdir().unwrap();
+        let config = BootstrapConfig::builder()
+            .data_dir(dir.path())
+            .mode(BootstrapMode::SingleDevice)
+            .allow_time_drift_warning(false)
+            .build()
+            .unwrap();
+        assert!(!config.allow_time_drift_warning);
+    }
+
+    // ---- Workflow with different modes ----
+
+    #[test]
+    fn test_workflow_creation_multi_device() {
+        let dir = tempdir().unwrap();
+        let config = BootstrapConfig::builder()
+            .data_dir(dir.path())
+            .mode(BootstrapMode::MultiDevice {
+                device_count: 5,
+                threshold: 3,
+            })
+            .build()
+            .unwrap();
+        let workflow = BootstrapWorkflow::new(config).unwrap();
+        assert!(matches!(workflow.phase(), BootstrapPhase::Uninitialized));
+    }
+
+    #[test]
+    fn test_workflow_creation_import_mode() {
+        let dir = tempdir().unwrap();
+        let phrase = RecoveryPhrase::generate().unwrap();
+        let config = BootstrapConfig::builder()
+            .data_dir(dir.path())
+            .mode(BootstrapMode::Import { phrase })
+            .build()
+            .unwrap();
+        let workflow = BootstrapWorkflow::new(config).unwrap();
+        assert!(matches!(workflow.phase(), BootstrapPhase::Uninitialized));
+    }
+
+    // ---- Workflow creates data directory ----
+
+    #[test]
+    fn test_workflow_creates_data_dir() {
+        let dir = tempdir().unwrap();
+        let nested = dir.path().join("deeply").join("nested").join("dir");
+        assert!(!nested.exists());
+
+        let config = BootstrapConfig::builder()
+            .data_dir(&nested)
+            .mode(BootstrapMode::SingleDevice)
+            .build()
+            .unwrap();
+        let _workflow = BootstrapWorkflow::new(config).unwrap();
+        assert!(nested.exists());
+    }
+
+    // ---- Import produces deterministic fingerprint ----
+
+    #[test]
+    fn test_import_produces_deterministic_fingerprint() {
+        let test_phrase = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon art";
+
+        let dir1 = tempdir().unwrap();
+        let phrase1 = RecoveryPhrase::from_mnemonic(test_phrase).unwrap();
+        let config1 = BootstrapConfig::builder()
+            .data_dir(dir1.path())
+            .mode(BootstrapMode::Import { phrase: phrase1 })
+            .skip_time_validation(true)
+            .build()
+            .unwrap();
+        let genesis1 = BootstrapWorkflow::new(config1).unwrap().run().unwrap();
+
+        let dir2 = tempdir().unwrap();
+        let phrase2 = RecoveryPhrase::from_mnemonic(test_phrase).unwrap();
+        let config2 = BootstrapConfig::builder()
+            .data_dir(dir2.path())
+            .mode(BootstrapMode::Import { phrase: phrase2 })
+            .skip_time_validation(true)
+            .build()
+            .unwrap();
+        let genesis2 = BootstrapWorkflow::new(config2).unwrap().run().unwrap();
+
+        assert_eq!(genesis1.fingerprint(), genesis2.fingerprint());
+    }
+
+    // ---- Single device genesis file contents ----
+
+    #[test]
+    fn test_single_device_saves_valid_cbor() {
+        let dir = tempdir().unwrap();
+        let config = BootstrapConfig::builder()
+            .data_dir(dir.path())
+            .mode(BootstrapMode::SingleDevice)
+            .skip_time_validation(true)
+            .build()
+            .unwrap();
+
+        let genesis = BootstrapWorkflow::new(config).unwrap().run().unwrap();
+
+        // Read back the saved genesis and verify
+        let cbor = std::fs::read(dir.path().join("genesis.cbor")).unwrap();
+        let loaded = GenesisState::from_cbor(&cbor).unwrap();
+        assert_eq!(genesis.fingerprint(), loaded.fingerprint());
+        assert_eq!(genesis.owner_public_key, loaded.owner_public_key);
+    }
+
+    // ---- Hardware token not implemented ----
+
+    #[test]
+    fn test_hardware_token_not_implemented() {
+        let dir = tempdir().unwrap();
+        let token = DetectedToken {
+            provider: std::path::PathBuf::from("/test/pkcs11.so"),
+            slot: 0,
+            label: "TestToken".to_string(),
+            manufacturer: "TestMfg".to_string(),
+            serial: "SN123".to_string(),
+            mechanisms: vec!["CKM_ED25519".to_string()],
+        };
+        let config = BootstrapConfig::builder()
+            .data_dir(dir.path())
+            .mode(BootstrapMode::HardwareToken { token })
+            .skip_time_validation(true)
+            .build()
+            .unwrap();
+
+        let workflow = BootstrapWorkflow::new(config).unwrap();
+        let result = workflow.run();
+        assert!(matches!(result, Err(BootstrapError::HardwareToken(_))));
+    }
+
+    // ---- Force overwrite cleans genesis.cbor ----
+
+    #[test]
+    fn test_force_overwrite_removes_old_genesis() {
+        let dir = tempdir().unwrap();
+
+        // Create an initial genesis with one key
+        let key1 = fcp_crypto::Ed25519SigningKey::generate();
+        let genesis1 = GenesisState::create(&key1.verifying_key());
+        let fp1 = genesis1.fingerprint();
+        let cbor = genesis1.to_cbor().unwrap();
+        std::fs::write(dir.path().join("genesis.cbor"), cbor).unwrap();
+
+        // Force overwrite and run a new bootstrap
+        let config = BootstrapConfig::builder()
+            .data_dir(dir.path())
+            .mode(BootstrapMode::SingleDevice)
+            .skip_time_validation(true)
+            .force_overwrite(true)
+            .build()
+            .unwrap();
+
+        let genesis2 = BootstrapWorkflow::new(config).unwrap().run().unwrap();
+        // New genesis should have a different fingerprint (different key)
+        assert_ne!(fp1, genesis2.fingerprint());
+    }
+
+    // ---- Workflow phase accessor ----
+
+    #[test]
+    fn test_workflow_phase_accessor_returns_uninitialized() {
+        let dir = tempdir().unwrap();
+        let config = BootstrapConfig::builder()
+            .data_dir(dir.path())
+            .mode(BootstrapMode::SingleDevice)
+            .build()
+            .unwrap();
+        let workflow = BootstrapWorkflow::new(config).unwrap();
+        let phase = workflow.phase();
+        assert!(matches!(phase, BootstrapPhase::Uninitialized));
+        // Also verify it implements Display via the phase
+        let display = format!("{phase}");
+        assert_eq!(display, "Uninitialized");
+    }
+
+    // ---- check_initialization_state fresh directory ----
+
+    #[test]
+    fn test_check_init_state_fresh() {
+        let dir = tempdir().unwrap();
+        let result = check_initialization_state(dir.path(), false).unwrap();
+        assert!(matches!(result, InitCheckResult::Fresh));
+    }
+
+    // ---- check_initialization_state with genesis.cbor ----
+
+    #[test]
+    fn test_check_init_state_already_exists() {
+        let dir = tempdir().unwrap();
+        let key = fcp_crypto::Ed25519SigningKey::generate();
+        let genesis = GenesisState::create(&key.verifying_key());
+        let cbor = genesis.to_cbor().unwrap();
+        std::fs::write(dir.path().join("genesis.cbor"), cbor).unwrap();
+
+        let result = check_initialization_state(dir.path(), false).unwrap();
+        assert!(matches!(result, InitCheckResult::AlreadyExists { .. }));
+    }
+
+    // ---- check_initialization_state with force_overwrite ----
+
+    #[test]
+    fn test_check_init_state_force_overwrite_removes_genesis() {
+        let dir = tempdir().unwrap();
+        let key = fcp_crypto::Ed25519SigningKey::generate();
+        let genesis = GenesisState::create(&key.verifying_key());
+        let cbor = genesis.to_cbor().unwrap();
+        let genesis_path = dir.path().join("genesis.cbor");
+        std::fs::write(&genesis_path, cbor).unwrap();
+        assert!(genesis_path.exists());
+
+        let result = check_initialization_state(dir.path(), true).unwrap();
+        assert!(matches!(result, InitCheckResult::Fresh));
+        assert!(!genesis_path.exists());
+    }
+
+    // ---- check_initialization_state with partial state ----
+
+    #[test]
+    fn test_check_init_state_partial_state() {
+        let dir = tempdir().unwrap();
+        let phase = BootstrapPhase::KeyGeneration;
+        crate::phase::write_phase_lock(dir.path(), &phase).unwrap();
+
+        let result = check_initialization_state(dir.path(), false).unwrap();
+        assert!(matches!(result, InitCheckResult::PartialState { .. }));
+    }
+
+    // ---- Config builder with PathBuf vs &Path ----
+
+    #[test]
+    fn test_config_builder_accepts_pathbuf() {
+        let dir = tempdir().unwrap();
+        let path_buf = dir.path().to_path_buf();
+        let config = BootstrapConfig::builder()
+            .data_dir(path_buf)
+            .mode(BootstrapMode::SingleDevice)
+            .build()
+            .unwrap();
+        assert_eq!(config.data_dir, dir.path());
+    }
+
+    #[test]
+    fn test_config_builder_accepts_string() {
+        let dir = tempdir().unwrap();
+        let path_string = dir.path().to_string_lossy().to_string();
+        let config = BootstrapConfig::builder()
+            .data_dir(path_string)
+            .mode(BootstrapMode::SingleDevice)
+            .build()
+            .unwrap();
+        assert_eq!(config.data_dir, dir.path());
+    }
 }

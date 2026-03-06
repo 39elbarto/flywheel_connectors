@@ -529,29 +529,36 @@ impl EgressGuard {
         tls_required: bool,
         constraints: &NetworkConstraints,
     ) -> Result<EgressDecision, EgressError> {
+        // Strip IPv6 brackets if present (url::Url::host_str() retains them)
+        let clean_host = if host.starts_with('[') && host.ends_with(']') {
+            &host[1..host.len() - 1]
+        } else {
+            host
+        };
+
         // Step 1: Check if host is an IP literal
-        let is_ip_literal = host.parse::<IpAddr>().is_ok();
+        let is_ip_literal = clean_host.parse::<IpAddr>().is_ok();
         if is_ip_literal && constraints.deny_ip_literals {
-            warn!(host = %host, "IP literal denied");
+            warn!(host = %clean_host, "IP literal denied");
             return Err(EgressError::Denied {
-                reason: format!("IP literals are not allowed: {host}"),
+                reason: format!("IP literals are not allowed: {clean_host}"),
                 code: DenyReason::IpLiteralDenied,
             });
         }
 
         // Step 2: Canonicalize hostname
         let canonical_host = if is_ip_literal {
-            host.to_string()
+            clean_host.to_string()
         } else {
-            let canonical = canonicalize_hostname(host)?;
-            if canonical != host {
+            let canonical = canonicalize_hostname(clean_host)?;
+            if canonical != clean_host {
                 if constraints.require_host_canonicalization {
                     return Err(EgressError::Denied {
-                        reason: format!("hostname not canonical: {host}"),
+                        reason: format!("hostname not canonical: {clean_host}"),
                         code: DenyReason::HostnameNotCanonical,
                     });
                 }
-                debug!(original = %host, canonical = %canonical, "hostname canonicalized");
+                debug!(original = %clean_host, canonical = %canonical, "hostname canonicalized");
             }
             canonical
         };
@@ -1127,6 +1134,26 @@ mod tests {
 
         let request = EgressRequest::Http(EgressHttpRequest {
             url: "https://93.184.216.34/".into(),
+            method: "GET".into(),
+            headers: vec![],
+            body: None,
+            credential_id: None,
+        });
+
+        let result = guard.evaluate(&request, &constraints);
+        assert!(result.is_err());
+        if let Err(EgressError::Denied { code, .. }) = result {
+            assert_eq!(code, DenyReason::IpLiteralDenied);
+        }
+    }
+
+    #[test]
+    fn test_evaluate_ipv6_literal_denied() {
+        let guard = EgressGuard::new();
+        let constraints = test_constraints();
+
+        let request = EgressRequest::Http(EgressHttpRequest {
+            url: "https://[2001:db8::1]/".into(),
             method: "GET".into(),
             headers: vec![],
             body: None,

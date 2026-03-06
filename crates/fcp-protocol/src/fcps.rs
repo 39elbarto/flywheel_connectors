@@ -2289,4 +2289,270 @@ mod tests {
         assert_eq!(DEFAULT_MAX_SYMBOLS_UNAUTHENTICATED, 32);
         assert_eq!(DEFAULT_MAX_SYMBOLS_AUTHENTICATED, 1000);
     }
+
+    // ── Batch 3: SunnyMoose deep-coverage expansion ──
+
+    #[test]
+    fn magic_is_fcps_ascii() {
+        assert_eq!(&FCPS_MAGIC, b"FCPS");
+    }
+
+    #[test]
+    fn unknown_flag_bits_truncated() {
+        let flags = FrameFlags::from_bits_truncate(0xFFFF);
+        // Only the 12 defined bits survive
+        assert_eq!(flags.bits(), 0b1111_1111_1111);
+        assert_eq!(flags, FrameFlags::all());
+    }
+
+    #[test]
+    fn header_decode_ignores_trailing_bytes() {
+        let header = test_header();
+        let encoded = header.encode();
+        let mut extended = encoded.to_vec();
+        extended.extend_from_slice(&[0xDE, 0xAD, 0xBE, 0xEF]);
+        let decoded = FcpsFrameHeader::decode(&extended).expect("trailing ok");
+        assert_eq!(decoded, header);
+    }
+
+    #[test]
+    fn header_preserves_all_fields() {
+        let header = FcpsFrameHeader {
+            version: FCPS_VERSION,
+            flags: FrameFlags::ENCRYPTED | FrameFlags::PRIORITY | FrameFlags::ZONE_CROSSING,
+            symbol_count: 42,
+            total_payload_len: 99999,
+            object_id: ObjectId::from_bytes([0xAB; 32]),
+            symbol_size: 2048,
+            zone_key_id: ZoneKeyId::from_bytes([0xCD; 8]),
+            zone_id_hash: ZoneIdHash::from_bytes([0xEF; 32]),
+            epoch_id: 0xDEAD_BEEF_CAFE_1234,
+            sender_instance_id: 0x1234_5678_9ABC_DEF0,
+            frame_seq: u64::MAX,
+        };
+        let decoded = FcpsFrameHeader::decode(&header.encode()).expect("decode");
+        assert_eq!(decoded.version, FCPS_VERSION);
+        assert!(decoded.flags.contains(FrameFlags::ENCRYPTED));
+        assert!(decoded.flags.contains(FrameFlags::PRIORITY));
+        assert!(decoded.flags.contains(FrameFlags::ZONE_CROSSING));
+        assert_eq!(decoded.symbol_count, 42);
+        assert_eq!(decoded.total_payload_len, 99999);
+        assert_eq!(decoded.symbol_size, 2048);
+        assert_eq!(decoded.epoch_id, 0xDEAD_BEEF_CAFE_1234);
+        assert_eq!(decoded.sender_instance_id, 0x1234_5678_9ABC_DEF0);
+        assert_eq!(decoded.frame_seq, u64::MAX);
+    }
+
+    #[test]
+    fn frame_clone_eq() {
+        let header = test_header();
+        let symbols = vec![test_symbol(0, 64), test_symbol(1, 64)];
+        let frame = FcpsFrame { header, symbols };
+        let cloned = frame.clone();
+        assert_eq!(frame, cloned);
+    }
+
+    #[test]
+    fn frame_many_symbols() {
+        let symbol_count = 10;
+        let header = FcpsFrameHeader {
+            version: FCPS_VERSION,
+            flags: FrameFlags::default(),
+            symbol_count,
+            total_payload_len: u32::try_from(
+                (symbol_count as usize) * (SYMBOL_RECORD_OVERHEAD + 64),
+            )
+            .unwrap(),
+            object_id: ObjectId::from_bytes([0x11; 32]),
+            symbol_size: 64,
+            zone_key_id: ZoneKeyId::from_bytes([0x22; 8]),
+            zone_id_hash: ZoneIdHash::from_bytes([0x33; 32]),
+            epoch_id: 1,
+            sender_instance_id: 1,
+            frame_seq: 1,
+        };
+        let symbols: Vec<_> = (0..symbol_count).map(|i| test_symbol(i, 64)).collect();
+        let frame = FcpsFrame { header, symbols };
+        let encoded = frame.encode();
+        let decoded = FcpsFrame::decode(&encoded, 10000).expect("decode");
+        assert_eq!(decoded.symbols.len(), 10);
+        for (i, sym) in decoded.symbols.iter().enumerate() {
+            assert_eq!(sym.esi, u32::try_from(i).expect("symbol index fits in u32"));
+        }
+    }
+
+    #[test]
+    fn frame_decode_empty_input() {
+        let err = FcpsFrame::decode(&[], 2000).expect_err("empty");
+        assert!(matches!(err, FrameError::TooShort { len: 0, .. }));
+    }
+
+    #[test]
+    fn symbol_record_max_esi_and_k() {
+        let record = SymbolRecord {
+            esi: u32::MAX,
+            k: u16::MAX,
+            data: vec![0xFF; 32],
+            auth_tag: [0xAA; 16],
+        };
+        let encoded = record.encode();
+        let decoded = SymbolRecord::decode(&encoded, 32).expect("decode");
+        assert_eq!(decoded.esi, u32::MAX);
+        assert_eq!(decoded.k, u16::MAX);
+    }
+
+    #[test]
+    fn symbol_ack_transcript_starts_with_domain() {
+        let zone_id: ZoneId = "z:dom-test".parse().unwrap();
+        let ack = SymbolAck::new(
+            make_test_object_header(),
+            ObjectId::from_bytes([0; 32]),
+            zone_id,
+            ZoneKeyId::from_bytes([0; 8]),
+            1,
+            SymbolAckReason::Complete,
+            100,
+        );
+        let transcript = ack.transcript_bytes();
+        assert!(transcript.starts_with(b"FCP2-SYMBOL-ACK-V1"));
+    }
+
+    #[test]
+    fn symbol_ack_transcript_deterministic() {
+        let zone_id: ZoneId = "z:det".parse().unwrap();
+        let ack = SymbolAck::new(
+            make_test_object_header(),
+            ObjectId::from_bytes([0x11; 32]),
+            zone_id,
+            ZoneKeyId::from_bytes([0x22; 8]),
+            42,
+            SymbolAckReason::Cancelled,
+            200,
+        );
+        assert_eq!(ack.transcript_bytes(), ack.transcript_bytes());
+    }
+
+    #[test]
+    fn symbol_request_transcript_starts_with_domain() {
+        let zone_id: ZoneId = "z:req-dom".parse().unwrap();
+        let request = SymbolRequest::new(
+            make_test_object_header(),
+            ObjectId::from_bytes([0; 32]),
+            zone_id,
+            ZoneKeyId::from_bytes([0; 8]),
+            1,
+            10,
+            5,
+        );
+        let transcript = request.transcript_bytes();
+        assert!(transcript.starts_with(b"FCP2-SYMBOL-REQ-V1"));
+    }
+
+    #[test]
+    fn symbol_request_transcript_with_and_without_hint_differ() {
+        let zone_id: ZoneId = "z:req-diff".parse().unwrap();
+        let no_hint = SymbolRequest::new(
+            make_test_object_header(),
+            ObjectId::from_bytes([0; 32]),
+            zone_id,
+            ZoneKeyId::from_bytes([0; 8]),
+            1,
+            10,
+            5,
+        );
+        let with_hint = no_hint.clone().with_missing_hint(vec![1, 2, 3]);
+        assert_ne!(no_hint.transcript_bytes(), with_hint.transcript_bytes());
+    }
+
+    #[test]
+    fn symbol_request_rejects_wrong_key() {
+        let signing_key = Ed25519SigningKey::generate();
+        let wrong_key = Ed25519SigningKey::generate();
+        let zone_id: ZoneId = "z:req-wk".parse().unwrap();
+        let mut request = SymbolRequest::new(
+            make_test_object_header(),
+            ObjectId::from_bytes([0; 32]),
+            zone_id,
+            ZoneKeyId::from_bytes([0; 8]),
+            1,
+            10,
+            0,
+        );
+        request.sign(&signing_key);
+        assert!(request.verify(&wrong_key.verifying_key()).is_err());
+    }
+
+    #[test]
+    fn symbol_ack_reason_debug_coverage() {
+        let reasons = [
+            SymbolAckReason::Complete,
+            SymbolAckReason::Cancelled,
+            SymbolAckReason::Duplicate,
+            SymbolAckReason::BudgetExceeded,
+        ];
+        for reason in reasons {
+            let dbg = format!("{reason:?}");
+            assert!(!dbg.is_empty());
+        }
+    }
+
+    #[test]
+    fn signed_frame_signature_domain_constant() {
+        assert_eq!(SignedFcpsFrame::SIGNATURE_DOMAIN, b"FCP2-FRAME-SIG-V1");
+    }
+
+    #[test]
+    fn frame_flags_hash_in_hashset() {
+        use std::collections::HashSet;
+        let mut set = HashSet::new();
+        set.insert(FrameFlags::ENCRYPTED);
+        set.insert(FrameFlags::RAPTORQ);
+        set.insert(FrameFlags::ENCRYPTED); // duplicate
+        assert_eq!(set.len(), 2);
+    }
+
+    #[test]
+    fn validate_frame_lengths_frame_size_mismatch() {
+        // Header claims correct symbol_count and total_payload_len,
+        // but actual bytes don't match expected total
+        let header = test_header(); // 2 symbols, 64 bytes each
+        // Provide a buffer that's too short (just the header)
+        let just_header = header.encode();
+        let err = validate_frame_lengths(&just_header, &header).expect_err("size mismatch");
+        assert!(matches!(err, FrameError::FrameSizeMismatch));
+    }
+
+    #[test]
+    fn decode_status_none_hint_passes_bounds() {
+        let zone_id: ZoneId = "z:test".parse().unwrap();
+        let status = DecodeStatus {
+            header: make_test_object_header(),
+            object_id: ObjectId::from_bytes([0; 32]),
+            zone_id,
+            zone_key_id: ZoneKeyId::from_bytes([0; 8]),
+            epoch_id: 0,
+            received_unique: 0,
+            needed: 0,
+            complete: true,
+            missing_hint: None,
+            signature: Ed25519Signature::from_bytes(&[0; 64]),
+        };
+        status.validate_hint_bounds().expect("none hint ok");
+    }
+
+    #[test]
+    fn symbol_request_no_hint_passes_bounds() {
+        let zone_id: ZoneId = "z:test".parse().unwrap();
+        let request = SymbolRequest::new(
+            make_test_object_header(),
+            ObjectId::from_bytes([0; 32]),
+            zone_id,
+            ZoneKeyId::from_bytes([0; 8]),
+            0,
+            10,
+            0,
+        );
+        request.validate_hint_bounds().expect("no hint ok");
+        request.validate_bounds(true).expect("authenticated ok");
+    }
 }

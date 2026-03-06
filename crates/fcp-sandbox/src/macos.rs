@@ -195,13 +195,19 @@ impl MacOsSandbox {
 
     /// Apply resource limits using setrlimit.
     fn apply_rlimits(policy: &CompiledPolicy) {
-        // Memory limit
+        // Virtual memory limits (RLIMIT_AS) are specifically NOT set here because
+        // modern runtimes like Go and Rust (with certain allocators) reserve large
+        // blocks of virtual address space up-front. Limiting RLIMIT_AS will cause
+        // them to crash immediately on startup, even if their actual physical memory
+        // usage is well within bounds.
+
+        // Data segment limit instead
         let memory_limit = libc::rlimit {
             rlim_cur: policy.memory_limit_bytes,
             rlim_max: policy.memory_limit_bytes,
         };
         unsafe {
-            if libc::setrlimit(libc::RLIMIT_AS, &memory_limit) != 0 {
+            if libc::setrlimit(libc::RLIMIT_DATA, &memory_limit) != 0 {
                 warn!(
                     error = %std::io::Error::last_os_error(),
                     "Failed to set memory limit"
@@ -326,14 +332,53 @@ impl Sandbox for MacOsSandbox {
         // we can apply it `pre_exec` exactly like Linux seccomp.
         use std::os::unix::process::CommandExt;
 
-        let policy_clone = policy.clone();
+        let profile = Self::generate_profile(policy);
+        let c_profile = CString::new(profile.as_bytes())
+            .map_err(|e| SandboxError::PolicyCompilationFailed(format!("invalid profile: {e}")))?;
+
+        let memory_limit_bytes = policy.memory_limit_bytes;
+        let cpu_seconds = policy.wall_clock_timeout.as_secs();
 
         unsafe {
             cmd.pre_exec(move || {
-                let sandbox = Self::new();
-                if let Err(e) = sandbox.apply(&policy_clone) {
-                    return Err(std::io::Error::other(format!("sandbox apply failed: {e}")));
+                // Virtual memory limits (RLIMIT_AS) are specifically NOT set here.
+                // We use RLIMIT_DATA instead.
+                let memory_limit = libc::rlimit {
+                    rlim_cur: memory_limit_bytes,
+                    rlim_max: memory_limit_bytes,
+                };
+                libc::setrlimit(libc::RLIMIT_DATA, &memory_limit);
+
+                let cpu_limit = libc::rlimit {
+                    rlim_cur: cpu_seconds,
+                    rlim_max: cpu_seconds + 5,
+                };
+                libc::setrlimit(libc::RLIMIT_CPU, &cpu_limit);
+
+                let fd_limit = libc::rlimit {
+                    rlim_cur: 1024,
+                    rlim_max: 4096,
+                };
+                libc::setrlimit(libc::RLIMIT_NOFILE, &fd_limit);
+
+                let core_limit = libc::rlimit {
+                    rlim_cur: 0,
+                    rlim_max: 0,
+                };
+                libc::setrlimit(libc::RLIMIT_CORE, &core_limit);
+
+                // Apply sandbox
+                let mut errorbuf: *mut i8 = std::ptr::null_mut();
+                let result = sandbox_init(
+                    c_profile.as_ptr(),
+                    0, // SANDBOX_NAMED (profile is inline)
+                    &mut errorbuf,
+                );
+
+                if result != 0 {
+                    return Err(std::io::Error::other("sandbox_init failed in pre_exec"));
                 }
+
                 Ok(())
             });
         }

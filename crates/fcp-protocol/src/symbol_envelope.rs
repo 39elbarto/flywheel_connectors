@@ -795,4 +795,181 @@ mod tests {
         c.epoch_id = 9999;
         assert_ne!(build_symbol_aad(&c), base_aad, "epoch_id should be bound");
     }
+
+    // ── Batch 3: SunnyMoose additional coverage ──
+
+    #[test]
+    fn cross_algorithm_mismatch_fails() {
+        let zone_key = AeadKey::generate();
+        let ctx = test_context();
+        let plaintext = b"cross algorithm test";
+
+        let (ciphertext, auth_tag) = encrypt_symbol(
+            &zone_key,
+            ZoneKeyAlgorithm::ChaCha20Poly1305,
+            &ctx,
+            plaintext,
+        )
+        .unwrap();
+
+        // Decrypting ChaCha20 ciphertext with XChaCha20 should fail
+        let result = decrypt_symbol(
+            &zone_key,
+            ZoneKeyAlgorithm::XChaCha20Poly1305,
+            &ctx,
+            &ciphertext,
+            &auth_tag,
+        );
+        assert!(matches!(result, Err(SymbolEnvelopeError::DecryptFailed)));
+    }
+
+    #[test]
+    fn nonce12_unique_across_frame_seq() {
+        let nonce_a = derive_nonce12(0, 42);
+        let nonce_b = derive_nonce12(1, 42);
+        assert_ne!(nonce_a.as_bytes(), nonce_b.as_bytes());
+    }
+
+    #[test]
+    fn nonce12_unique_across_esi() {
+        let nonce_a = derive_nonce12(100, 0);
+        let nonce_b = derive_nonce12(100, 1);
+        assert_ne!(nonce_a.as_bytes(), nonce_b.as_bytes());
+    }
+
+    #[test]
+    fn nonce24_unique_across_sender_instance() {
+        let nonce_a = derive_nonce24(1, 100, 42);
+        let nonce_b = derive_nonce24(2, 100, 42);
+        assert_ne!(nonce_a.as_bytes(), nonce_b.as_bytes());
+    }
+
+    #[test]
+    fn nonce12_boundary_values() {
+        // u32::MAX ESI, u64::MAX frame_seq
+        let nonce = derive_nonce12(u64::MAX, u32::MAX);
+        let bytes = nonce.as_bytes();
+        assert_eq!(&bytes[0..8], &u64::MAX.to_le_bytes());
+        assert_eq!(&bytes[8..12], &u32::MAX.to_le_bytes());
+    }
+
+    #[test]
+    fn nonce24_boundary_values() {
+        let nonce = derive_nonce24(u64::MAX, u64::MAX, u32::MAX);
+        let bytes = nonce.as_bytes();
+        assert_eq!(&bytes[0..8], &u64::MAX.to_le_bytes());
+        assert_eq!(&bytes[8..16], &u64::MAX.to_le_bytes());
+        assert_eq!(&bytes[16..20], &u32::MAX.to_le_bytes());
+        assert_eq!(&bytes[20..24], &[0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn subkey_unique_per_zone_key_id() {
+        let zone_key = AeadKey::from_bytes([0xBB; 32]);
+        let node = TailscaleNodeId::new("node-z");
+        let subkey_a =
+            derive_sender_subkey(&zone_key, &ZoneKeyId::from_bytes([0x01; 8]), &node, 1);
+        let subkey_b =
+            derive_sender_subkey(&zone_key, &ZoneKeyId::from_bytes([0x02; 8]), &node, 1);
+        assert_ne!(subkey_a.as_bytes(), subkey_b.as_bytes());
+    }
+
+    #[test]
+    fn subkey_unique_per_zone_key() {
+        let key_a = AeadKey::from_bytes([0xAA; 32]);
+        let key_b = AeadKey::from_bytes([0xBB; 32]);
+        let zone_key_id = ZoneKeyId::from_bytes([0x10; 8]);
+        let node = TailscaleNodeId::new("node-z");
+        let subkey_a = derive_sender_subkey(&key_a, &zone_key_id, &node, 1);
+        let subkey_b = derive_sender_subkey(&key_b, &zone_key_id, &node, 1);
+        assert_ne!(subkey_a.as_bytes(), subkey_b.as_bytes());
+    }
+
+    #[test]
+    fn aad_constant_size() {
+        assert_eq!(SYMBOL_AAD_SIZE, 86);
+    }
+
+    #[test]
+    fn auth_tag_constant_size() {
+        assert_eq!(AUTH_TAG_SIZE, 16);
+    }
+
+    #[test]
+    fn xchacha20_empty_plaintext_roundtrip() {
+        let zone_key = AeadKey::generate();
+        let ctx = test_context();
+
+        let (ciphertext, auth_tag) = encrypt_symbol(
+            &zone_key,
+            ZoneKeyAlgorithm::XChaCha20Poly1305,
+            &ctx,
+            b"",
+        )
+        .unwrap();
+        assert!(ciphertext.is_empty());
+
+        let decrypted = decrypt_symbol(
+            &zone_key,
+            ZoneKeyAlgorithm::XChaCha20Poly1305,
+            &ctx,
+            &ciphertext,
+            &auth_tag,
+        )
+        .unwrap();
+        assert!(decrypted.is_empty());
+    }
+
+    #[test]
+    fn different_frame_seq_different_ciphertext() {
+        let zone_key = AeadKey::generate();
+        let mut ctx1 = test_context();
+        ctx1.frame_seq = 0;
+        let mut ctx2 = test_context();
+        ctx2.frame_seq = 1;
+        let plaintext = b"frame sequence uniqueness";
+
+        let (enc1, _) = encrypt_symbol(
+            &zone_key,
+            ZoneKeyAlgorithm::ChaCha20Poly1305,
+            &ctx1,
+            plaintext,
+        )
+        .unwrap();
+        let (enc2, _) = encrypt_symbol(
+            &zone_key,
+            ZoneKeyAlgorithm::ChaCha20Poly1305,
+            &ctx2,
+            plaintext,
+        )
+        .unwrap();
+        assert_ne!(enc1, enc2);
+    }
+
+    #[test]
+    fn zone_key_algorithm_debug_eq_clone() {
+        let algo = ZoneKeyAlgorithm::XChaCha20Poly1305;
+        let cloned = algo;
+        assert_eq!(algo, cloned);
+        let dbg = format!("{algo:?}");
+        assert!(dbg.contains("XChaCha20Poly1305"));
+    }
+
+    #[test]
+    fn symbol_context_debug_clone() {
+        let ctx = test_context();
+        let cloned = ctx.clone();
+        assert_eq!(cloned.esi, ctx.esi);
+        let dbg = format!("{ctx:?}");
+        assert!(dbg.contains("SymbolContext"));
+    }
+
+    #[test]
+    fn error_debug_coverage() {
+        let err = SymbolEnvelopeError::CiphertextTooShort { len: 3, min: 16 };
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("CiphertextTooShort"));
+        assert!(dbg.contains('3'));
+        assert!(dbg.contains("16"));
+    }
 }

@@ -616,15 +616,32 @@ impl Sandbox for LinuxSandbox {
         use std::os::unix::process::CommandExt;
 
         let policy_clone = policy.clone();
+        let userns_available = self.userns_available;
+        let landlock_available = self.landlock_available;
+
+        // Pre-compute seccomp filter to avoid allocation in child
+        let filter = self.build_seccomp_filter(policy);
+        
+        // Pre-compute CStrings for Landlock paths to avoid allocation in child
+        let mut readonly_cpaths = Vec::new();
+        for p in &policy.readonly_paths {
+            use std::os::unix::ffi::OsStrExt;
+            readonly_cpaths.push(std::ffi::CString::new(p.as_os_str().as_bytes())
+                .map_err(|e| SandboxError::InvalidConfig(format!("invalid path: {e}")))?);
+        }
+        
+        let mut writable_cpaths = Vec::new();
+        for p in &policy.writable_paths {
+            use std::os::unix::ffi::OsStrExt;
+            writable_cpaths.push(std::ffi::CString::new(p.as_os_str().as_bytes())
+                .map_err(|e| SandboxError::InvalidConfig(format!("invalid path: {e}")))?);
+        }
 
         unsafe {
             cmd.pre_exec(move || {
-                let sandbox = LinuxSandbox::new();
-
-                // If unshare is available, we unshare user, network, ipc, and mount namespaces.
-                // We cannot use CLONE_NEWPID cleanly in pre_exec without more complex setup.
-                if sandbox.userns_available {
-                    // Try to unshare namespaces
+                // Avoid logging or allocating in pre_exec to maintain async-signal-safety.
+                
+                if userns_available {
                     let mut flags = libc::CLONE_NEWUSER
                         | libc::CLONE_NEWNS
                         | libc::CLONE_NEWIPC
@@ -632,27 +649,107 @@ impl Sandbox for LinuxSandbox {
                     if policy_clone.block_direct_network {
                         flags |= libc::CLONE_NEWNET;
                     }
+                    libc::unshare(flags); // Ignore errors silently in child
+                }
 
-                    let ret = libc::unshare(flags);
-                    if ret == 0 {
-                        // Successfully unshared. We don't remount or map uids here because that requires
-                        // elevated capabilities or writing to /proc/self/uid_map, which might fail.
-                        // At a minimum, this provides strict network and IPC isolation.
-                        tracing::debug!("Successfully unshared namespaces via pre_exec");
-                    } else {
-                        tracing::warn!(
-                            "Failed to unshare namespaces in pre_exec: {}",
-                            std::io::Error::last_os_error()
-                        );
+                // Apply rlimits directly
+                let memory_limit_bytes = policy_clone.memory_limit_bytes;
+                let cpu_seconds = policy_clone.wall_clock_timeout.as_secs();
+                
+                let limit_data = libc::rlimit { rlim_cur: memory_limit_bytes, rlim_max: memory_limit_bytes };
+                libc::setrlimit(libc::RLIMIT_DATA, &limit_data);
+                
+                let limit_cpu = libc::rlimit { rlim_cur: cpu_seconds, rlim_max: cpu_seconds + 5 };
+                libc::setrlimit(libc::RLIMIT_CPU, &limit_cpu);
+                
+                let limit_fd = libc::rlimit { rlim_cur: 1024, rlim_max: 4096 };
+                libc::setrlimit(libc::RLIMIT_NOFILE, &limit_fd);
+                
+                let limit_core = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+                libc::setrlimit(libc::RLIMIT_CORE, &limit_core);
+
+                // Apply Landlock if available
+                if landlock_available && policy_clone.platform_flags.linux_use_landlock {
+                    let all_fs_access = LANDLOCK_ACCESS_FS_EXECUTE
+                        | LANDLOCK_ACCESS_FS_WRITE_FILE
+                        | LANDLOCK_ACCESS_FS_READ_FILE
+                        | LANDLOCK_ACCESS_FS_READ_DIR
+                        | LANDLOCK_ACCESS_FS_REMOVE_DIR
+                        | LANDLOCK_ACCESS_FS_REMOVE_FILE
+                        | LANDLOCK_ACCESS_FS_MAKE_CHAR
+                        | LANDLOCK_ACCESS_FS_MAKE_DIR
+                        | LANDLOCK_ACCESS_FS_MAKE_REG
+                        | LANDLOCK_ACCESS_FS_MAKE_SOCK
+                        | LANDLOCK_ACCESS_FS_MAKE_FIFO
+                        | LANDLOCK_ACCESS_FS_MAKE_BLOCK
+                        | LANDLOCK_ACCESS_FS_MAKE_SYM;
+
+                    let readonly_access = LANDLOCK_ACCESS_FS_READ_FILE | LANDLOCK_ACCESS_FS_READ_DIR;
+
+                    let writable_access = readonly_access
+                        | LANDLOCK_ACCESS_FS_WRITE_FILE
+                        | LANDLOCK_ACCESS_FS_REMOVE_DIR
+                        | LANDLOCK_ACCESS_FS_REMOVE_FILE
+                        | LANDLOCK_ACCESS_FS_MAKE_DIR
+                        | LANDLOCK_ACCESS_FS_MAKE_REG
+                        | LANDLOCK_ACCESS_FS_MAKE_SYM;
+
+                    let attr = LandlockRulesetAttr { handled_access_fs: all_fs_access };
+                    let ruleset_fd = libc::syscall(
+                        libc::SYS_landlock_create_ruleset,
+                        &attr as *const _,
+                        std::mem::size_of::<LandlockRulesetAttr>(),
+                        0,
+                    ) as i32;
+
+                    if ruleset_fd >= 0 {
+                        // Add rules
+                        let mut apply_rule = |c_path: &std::ffi::CString, access: u64| {
+                            let fd = libc::open(c_path.as_ptr(), libc::O_PATH | libc::O_CLOEXEC);
+                            if fd >= 0 {
+                                let rule_attr = LandlockPathBeneathAttr {
+                                    allowed_access: access,
+                                    parent_fd: fd,
+                                };
+                                libc::syscall(
+                                    libc::SYS_landlock_add_rule,
+                                    ruleset_fd,
+                                    LANDLOCK_RULE_PATH_BENEATH,
+                                    &rule_attr as *const _,
+                                    0,
+                                );
+                                libc::close(fd);
+                            }
+                        };
+
+                        for c_path in &readonly_cpaths {
+                            apply_rule(c_path, readonly_access);
+                        }
+                        for c_path in &writable_cpaths {
+                            apply_rule(c_path, writable_access);
+                        }
+
+                        libc::syscall(libc::SYS_landlock_restrict_self, ruleset_fd, 0);
+                        libc::close(ruleset_fd);
                     }
                 }
 
-                if let Err(e) = sandbox.apply(&policy_clone) {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::Other,
-                        format!("sandbox apply failed: {e}"),
-                    ));
+                // Apply seccomp filter
+                let prog = SockFprog {
+                    len: filter.len() as u16,
+                    filter: filter.as_ptr(),
+                };
+                
+                if libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) == 0 {
+                    libc::prctl(
+                        libc::PR_SET_SECCOMP,
+                        libc::SECCOMP_MODE_FILTER,
+                        &prog as *const _,
+                        0,
+                        0,
+                    );
                 }
+
                 Ok(())
             });
         }

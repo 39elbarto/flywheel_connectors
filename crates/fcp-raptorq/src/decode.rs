@@ -93,8 +93,11 @@ impl RaptorQDecoder {
         // The internal codec handles K < K' padding automatically.
         // We try at K (optimistic) and keep collecting on failure.
         if self.received_count() >= self.k {
-            self.try_reconstruct()
-                .map_or_else(|_| Ok(None), |payload| Ok(Some(payload)))
+            match self.try_reconstruct() {
+                Ok(payload) => Ok(Some(payload)),
+                Err(DecodeError::InsufficientSymbols { .. }) => Ok(None),
+                Err(err) => Err(err),
+            }
         } else {
             Ok(None)
         }

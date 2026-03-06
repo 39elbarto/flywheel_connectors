@@ -12,7 +12,7 @@ authors.workspace = true
 workspace = true
 
 [dependencies]
-tokio = { workspace = true, features = ["full"] }
 asupersync = { path = "/dp/asupersync", default-features = false }
 fcp-async-core-macros = { path = "../fcp-async-core-macros" }
+futures-util.workspace = true
 thiserror.workspace = true

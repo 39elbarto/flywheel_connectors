@@ -2,6 +2,9 @@
 
 use std::time::Duration;
 
+use asupersync::http::h1::ClientError as HttpClientError;
+use fcp_async_core::AsyncError;
+
 /// OAuth errors.
 #[derive(Debug, thiserror::Error)]
 pub enum OAuthError {
@@ -51,7 +54,7 @@ pub enum OAuthError {
 
     /// HTTP request failed.
     #[error("HTTP request failed: {0}")]
-    HttpError(#[from] reqwest::Error),
+    HttpError(String),
 
     /// JSON parsing failed.
     #[error("JSON parsing failed: {0}")]
@@ -80,6 +83,30 @@ pub enum OAuthError {
 
 /// Result type for OAuth operations.
 pub type OAuthResult<T> = Result<T, OAuthError>;
+
+impl OAuthError {
+    /// Convert an ASUPERSYNC HTTP client error into an OAuth transport error.
+    #[must_use]
+    pub fn from_http_client_error(error: &HttpClientError) -> Self {
+        Self::HttpError(error.to_string())
+    }
+
+    /// Convert an async-core request failure into an OAuth transport error.
+    #[must_use]
+    pub fn from_async_error(error: AsyncError, timeout: Duration) -> Self {
+        match error {
+            AsyncError::Timeout { .. } => {
+                Self::HttpError(format!("request timed out after {}ms", timeout.as_millis()))
+            }
+            AsyncError::Cancelled => Self::HttpError("request cancelled".to_string()),
+            AsyncError::ProtocolIo { message }
+            | AsyncError::Join { message }
+            | AsyncError::Runtime { message } => Self::HttpError(message),
+            AsyncError::ChannelClosed => Self::HttpError("request channel closed".to_string()),
+            AsyncError::ChannelFull => Self::HttpError("request channel full".to_string()),
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {

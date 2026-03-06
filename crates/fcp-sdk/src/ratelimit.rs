@@ -120,7 +120,7 @@ impl PoolState {
     /// Try to consume requests, returns error if exceeded.
     fn try_consume(&mut self, amount: u32) -> Result<(), RateLimitError> {
         self.check_consume(amount)?;
-        self.count += amount;
+        self.count = self.count.saturating_add(amount);
         Ok(())
     }
 
@@ -130,7 +130,7 @@ impl PoolState {
 
         let effective_limit = self.config.config.requests + self.config.config.burst.unwrap_or(0);
 
-        if self.count + amount > effective_limit {
+        if self.count.saturating_add(amount) > effective_limit {
             let retry_after_ms = self.ms_until_reset();
             return Err(RateLimitError::for_pool(
                 &self.config,
@@ -145,7 +145,7 @@ impl PoolState {
     /// Force consume requests (used for soft limits).
     fn force_consume(&mut self, amount: u32) {
         self.maybe_reset_window();
-        self.count += amount;
+        self.count = self.count.saturating_add(amount);
     }
 
     /// Get milliseconds until window reset.

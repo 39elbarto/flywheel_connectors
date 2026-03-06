@@ -2,6 +2,8 @@
 
 use std::time::Duration;
 
+use asupersync::http::h1::ClientError as HttpClientError;
+use fcp_async_core::AsyncError;
 use fcp_core::FcpError;
 use thiserror::Error;
 
@@ -9,8 +11,15 @@ use thiserror::Error;
 #[derive(Error, Debug)]
 pub enum SlackError {
     /// HTTP request failed
-    #[error("HTTP error: {0}")]
-    Http(#[from] reqwest::Error),
+    #[error("HTTP error: {message}")]
+    Http {
+        /// Human-readable error detail.
+        message: String,
+        /// Optional HTTP-like status associated with the failure.
+        status_code: Option<u16>,
+        /// Whether the failure was a timeout.
+        is_timeout: bool,
+    },
 
     /// JSON serialization/deserialization failed
     #[error("JSON error: {0}")]
@@ -42,11 +51,59 @@ pub enum SlackError {
 }
 
 impl SlackError {
+    /// Create an HTTP transport error.
+    #[must_use]
+    pub fn http(message: impl Into<String>) -> Self {
+        Self::Http {
+            message: message.into(),
+            status_code: None,
+            is_timeout: false,
+        }
+    }
+
+    /// Create a timeout transport error.
+    #[must_use]
+    pub fn timeout(timeout: Duration) -> Self {
+        Self::Http {
+            message: format!("request timed out after {}ms", timeout.as_millis()),
+            status_code: None,
+            is_timeout: true,
+        }
+    }
+
+    /// Convert an ASUPERSYNC HTTP client error.
+    #[must_use]
+    pub fn from_http_client_error(error: &HttpClientError) -> Self {
+        let status_code = match error {
+            HttpClientError::ConnectTunnelRefused { status, .. } => Some(*status),
+            _ => None,
+        };
+        Self::Http {
+            message: error.to_string(),
+            status_code,
+            is_timeout: false,
+        }
+    }
+
+    /// Convert an async-core request failure into a transport error.
+    #[must_use]
+    pub fn from_async_error(error: AsyncError, timeout: Duration) -> Self {
+        match error {
+            AsyncError::Timeout { .. } => Self::timeout(timeout),
+            AsyncError::Cancelled => Self::http("request cancelled"),
+            AsyncError::ProtocolIo { message }
+            | AsyncError::Join { message }
+            | AsyncError::Runtime { message } => Self::http(message),
+            AsyncError::ChannelClosed => Self::http("request channel closed"),
+            AsyncError::ChannelFull => Self::http("request channel full"),
+        }
+    }
+
     /// Check if this error is retryable.
     #[must_use]
     pub fn is_retryable(&self) -> bool {
         match self {
-            Self::Http(_) | Self::RateLimited { .. } => true,
+            Self::Http { .. } | Self::RateLimited { .. } => true,
             Self::Api { error, .. } => {
                 // Slack transient errors
                 matches!(
@@ -71,10 +128,14 @@ impl SlackError {
     #[must_use]
     pub fn to_fcp_error(&self) -> FcpError {
         match self {
-            Self::Http(e) => FcpError::External {
+            Self::Http {
+                message,
+                status_code,
+                ..
+            } => FcpError::External {
                 service: "slack".into(),
-                message: e.to_string(),
-                status_code: e.status().map(|s| s.as_u16()),
+                message: message.clone(),
+                status_code: *status_code,
                 retryable: self.is_retryable(),
                 retry_after: self.retry_after(),
             },
@@ -623,7 +684,9 @@ mod tests {
     #[test]
     fn slack_result_ok() {
         let result: SlackResult<u32> = Ok(42);
-        let Ok(val) = result else { panic!("expected Ok") };
+        let Ok(val) = result else {
+            panic!("expected Ok")
+        };
         assert_eq!(val, 42);
     }
 

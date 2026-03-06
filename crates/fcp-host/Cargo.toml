@@ -15,6 +15,7 @@ unsafe_code = "forbid"
 # Core FCP types
 fcp-core = { path = "../fcp-core" }
 fcp-async-core = { path = "../fcp-async-core" }
+asupersync-tokio-compat = { path = "/dp/asupersync/asupersync-tokio-compat", features = ["tokio-io"] }
 
 # Async runtime
 async-trait = "0.1"
@@ -38,7 +39,6 @@ semver = { version = "1", features = ["serde"] }
 # HTTP server (doctor endpoint)
 axum = { version = "0.8", features = ["json"] }
 fcp-sandbox = { version = "0.1.0", path = "../fcp-sandbox" }
-tokio = { workspace = true, features = ["net"] }
 
 [dev-dependencies]
 fcp-conformance = { path = "../fcp-conformance" }

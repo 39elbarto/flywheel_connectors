@@ -3,16 +3,28 @@
 //! Implements SSE parsing and client per the WHATWG HTML Living Standard.
 
 use std::collections::HashMap;
+use std::fmt;
 use std::pin::Pin;
-use std::task::{Context, Poll};
+use std::sync::Arc;
+use std::task::{Context, Poll, ready};
 use std::time::Duration;
 
+use asupersync::bytes::Buf as _;
+use asupersync::http::body::Body as _;
+use asupersync::http::h1::http_client::ClientIo;
+use asupersync::http::h1::{ClientIncomingBody, HttpClient, HttpClientBuilder, Method};
 use bytes::{Buf, Bytes, BytesMut};
+use fcp_async_core::time;
 use futures_util::stream::Stream;
 use pin_project_lite::pin_project;
-use reqwest::Client;
 
 use crate::{StreamError, StreamResult};
+
+const ACCEPT_HEADER: &str = "Accept";
+const CACHE_CONTROL_HEADER: &str = "Cache-Control";
+const LAST_EVENT_ID_HEADER: &str = "Last-Event-ID";
+const NO_CACHE_VALUE: &str = "no-cache";
+const SSE_MIME_TYPE: &str = "text/event-stream";
 
 /// SSE event.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -282,11 +294,20 @@ impl SseConfig {
 }
 
 /// SSE client.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct SseClient {
     url: String,
     config: SseConfig,
-    http_client: Client,
+    http_client: Arc<HttpClient>,
+}
+
+impl fmt::Debug for SseClient {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SseClient")
+            .field("url", &self.url)
+            .field("config", &self.config)
+            .finish_non_exhaustive()
+    }
 }
 
 impl SseClient {
@@ -296,7 +317,7 @@ impl SseClient {
         Self {
             url: url.into(),
             config: SseConfig::default(),
-            http_client: Client::new(),
+            http_client: Arc::new(HttpClientBuilder::new().build()),
         }
     }
 
@@ -306,17 +327,17 @@ impl SseClient {
         Self {
             url: url.into(),
             config,
-            http_client: Client::new(),
+            http_client: Arc::new(HttpClientBuilder::new().build()),
         }
     }
 
     /// Create with custom HTTP client.
     #[must_use]
-    pub fn with_http_client(url: impl Into<String>, http_client: Client) -> Self {
+    pub fn with_http_client(url: impl Into<String>, http_client: HttpClient) -> Self {
         Self {
             url: url.into(),
             config: SseConfig::default(),
-            http_client,
+            http_client: Arc::new(http_client),
         }
     }
 
@@ -336,33 +357,42 @@ impl SseClient {
         &self,
         last_event_id: Option<&str>,
     ) -> StreamResult<SseStream> {
-        let mut request = self
-            .http_client
-            .get(&self.url)
-            .header("Accept", "text/event-stream")
-            .header("Cache-Control", "no-cache");
-
+        let mut headers = vec![
+            (ACCEPT_HEADER.to_string(), SSE_MIME_TYPE.to_string()),
+            (CACHE_CONTROL_HEADER.to_string(), NO_CACHE_VALUE.to_string()),
+        ];
         if let Some(id) = last_event_id {
-            request = request.header("Last-Event-ID", id);
+            headers.push((LAST_EVENT_ID_HEADER.to_string(), id.to_string()));
         }
 
-        for (key, value) in &self.config.headers {
-            request = request.header(key, value);
-        }
+        headers.extend(
+            self.config
+                .headers
+                .iter()
+                .map(|(key, value)| (key.clone(), value.clone())),
+        );
 
-        let response = request.send().await?;
+        let request =
+            self.http_client
+                .request_streaming(Method::Get, &self.url, headers, Vec::new());
+        let response = if let Some(timeout) = self.config.timeout {
+            match time::timeout(timeout, request).await {
+                Ok(Ok(response)) => response,
+                Ok(Err(error)) => return Err(StreamError::from(error)),
+                Err(_) => return Err(StreamError::Timeout(timeout)),
+            }
+        } else {
+            request.await?
+        };
 
-        if !response.status().is_success() {
+        if !(200..300).contains(&response.head.status) {
             return Err(StreamError::HttpError {
-                status: response.status().as_u16(),
-                message: response.status().to_string(),
+                status: response.head.status,
+                message: response.head.reason,
             });
         }
 
-        Ok(SseStream::new(
-            response.bytes_stream(),
-            self.config.max_buffer_size,
-        ))
+        Ok(SseStream::new(response.body, self.config.max_buffer_size))
     }
 
     /// Get the URL.
@@ -379,10 +409,53 @@ impl SseClient {
 }
 
 pin_project! {
+    #[derive(Debug)]
+    struct SseChunkStream {
+        #[pin]
+        body: Option<ClientIncomingBody<ClientIo>>,
+    }
+}
+
+impl SseChunkStream {
+    const fn new(body: ClientIncomingBody<ClientIo>) -> Self {
+        Self { body: Some(body) }
+    }
+}
+
+impl Stream for SseChunkStream {
+    type Item = StreamResult<Bytes>;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let mut this = self.project();
+        loop {
+            let Some(body) = this.body.as_mut().as_pin_mut() else {
+                return Poll::Ready(None);
+            };
+
+            match ready!(body.poll_frame(cx)) {
+                Some(Ok(frame)) => {
+                    if let Some(data) = frame.into_data() {
+                        return Poll::Ready(Some(Ok(Bytes::copy_from_slice(data.chunk()))));
+                    }
+                }
+                Some(Err(error)) => {
+                    this.body.set(None);
+                    return Poll::Ready(Some(Err(StreamError::from(error))));
+                }
+                None => {
+                    this.body.set(None);
+                    return Poll::Ready(None);
+                }
+            }
+        }
+    }
+}
+
+pin_project! {
     /// SSE event stream.
     pub struct SseStream {
         #[pin]
-        inner: futures_util::stream::BoxStream<'static, Result<Bytes, reqwest::Error>>,
+        inner: SseChunkStream,
         parser: SseParser,
         pending_events: Vec<SseEvent>,
         max_buffer_size: usize,
@@ -391,12 +464,9 @@ pin_project! {
 
 impl SseStream {
     /// Create a new SSE stream.
-    fn new<S>(stream: S, max_buffer_size: usize) -> Self
-    where
-        S: Stream<Item = Result<Bytes, reqwest::Error>> + Send + 'static,
-    {
+    fn new(body: ClientIncomingBody<ClientIo>, max_buffer_size: usize) -> Self {
         Self {
-            inner: Box::pin(stream),
+            inner: SseChunkStream::new(body),
             parser: SseParser::new(),
             pending_events: Vec::new(),
             max_buffer_size,
@@ -444,7 +514,7 @@ impl Stream for SseStream {
                     Poll::Ready(Some(Ok(this.pending_events.remove(0))))
                 }
             }
-            Poll::Ready(Some(Err(e))) => Poll::Ready(Some(Err(StreamError::ReqwestError(e)))),
+            Poll::Ready(Some(Err(error))) => Poll::Ready(Some(Err(error))),
             Poll::Ready(None) => Poll::Ready(None),
             Poll::Pending => Poll::Pending,
         }
@@ -910,7 +980,7 @@ mod tests {
 
     #[test]
     fn test_sse_client_with_http_client() {
-        let http_client = Client::new();
+        let http_client = HttpClient::new();
         let client = SseClient::with_http_client("https://example.com/events", http_client);
         assert_eq!(client.url(), "https://example.com/events");
     }

@@ -1645,7 +1645,7 @@ impl<S: StreamingSession> StreamingSupervisor<S> {
                             }
                             return SupervisorOutcome::Shutdown;
                         }
-                    }
+                    },
                     maybe_event = events.recv() => {
                         if let Some(event) = maybe_event {
                             self.stats.events_processed += 1;
@@ -1670,7 +1670,7 @@ impl<S: StreamingSession> StreamingSupervisor<S> {
                         } else {
                             break;
                         }
-                    }
+                    },
                     result = &mut join_handle => {
                         match result {
                             Ok(Ok(())) => {}
@@ -1682,12 +1682,14 @@ impl<S: StreamingSession> StreamingSupervisor<S> {
                             }
                         }
                         break;
-                    }
+                    },
                     () = async {
                         if let Some(interval) = &mut heartbeat_interval {
                             interval.tick().await;
+                        } else {
+                            std::future::pending::<()>().await;
                         }
-                    }, if heartbeat_interval.is_some() => {
+                    } => {
                         if let Some(timeout) = self.config.heartbeat_timeout() {
                             if self.session.is_heartbeat_timeout(timeout) {
                                 self.stats.missed_heartbeats = self.stats.missed_heartbeats.saturating_add(1);

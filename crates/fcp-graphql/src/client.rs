@@ -1,15 +1,16 @@
 //! GraphQL HTTP client implementation.
 
+use asupersync::http::h1::{HttpClient, HttpClientBuilder, Method};
 use std::collections::HashMap;
 use std::collections::hash_map::DefaultHasher;
+use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use fcp_async_core::{sync::Mutex, time};
+use fcp_async_core::{AsyncError, sync::Mutex, time};
 use futures_util::future::{BoxFuture, FutureExt, Shared};
-use reqwest::header::{CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue, RETRY_AFTER};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use tracing::debug;
@@ -34,6 +35,12 @@ pub enum SchemaValidationMode {
 }
 
 type SharedRequestFuture = Shared<BoxFuture<'static, Result<Vec<u8>, GraphqlClientError>>>;
+type HeaderList = Vec<(String, String)>;
+
+const AUTHORIZATION_HEADER: &str = "Authorization";
+const CONTENT_TYPE_HEADER: &str = "Content-Type";
+const JSON_CONTENT_TYPE: &str = "application/json";
+const RETRY_AFTER_HEADER: &str = "Retry-After";
 
 /// GraphQL client metrics.
 #[derive(Debug, Default)]
@@ -85,13 +92,33 @@ impl DedupState {
     }
 }
 
+fn upsert_header(headers: &mut HeaderList, name: impl Into<String>, value: impl Into<String>) {
+    let name = name.into();
+    let value = value.into();
+    if let Some((_, existing_value)) = headers
+        .iter_mut()
+        .find(|(existing_name, _)| existing_name.eq_ignore_ascii_case(&name))
+    {
+        *existing_value = value;
+    } else {
+        headers.push((name, value));
+    }
+}
+
+fn header_value<'a>(headers: &'a HeaderList, name: &str) -> Option<&'a str> {
+    headers
+        .iter()
+        .find(|(header_name, _)| header_name.eq_ignore_ascii_case(name))
+        .map(|(_, value)| value.as_str())
+}
+
 /// GraphQL client configuration.
 #[derive(Debug, Clone)]
 pub struct GraphqlClientConfig {
     /// Service name for error mapping.
     pub service_name: String,
     /// Default headers applied to every request.
-    pub headers: HeaderMap,
+    pub headers: HeaderList,
     /// Request timeout.
     pub timeout: Duration,
     /// Retry policy.
@@ -104,8 +131,8 @@ pub struct GraphqlClientConfig {
 
 impl Default for GraphqlClientConfig {
     fn default() -> Self {
-        let mut headers = HeaderMap::new();
-        headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+        let mut headers = HeaderList::new();
+        upsert_header(&mut headers, CONTENT_TYPE_HEADER, JSON_CONTENT_TYPE);
         Self {
             service_name: "graphql".to_string(),
             headers,
@@ -143,20 +170,19 @@ impl GraphqlClientBuilder {
 
     /// Add a header.
     #[must_use]
-    pub fn with_header(mut self, name: HeaderName, value: HeaderValue) -> Self {
-        self.config.headers.insert(name, value);
+    pub fn with_header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        upsert_header(&mut self.config.headers, name, value);
         self
     }
 
     /// Add a bearer token header.
     #[must_use]
     pub fn with_bearer_token(mut self, token: impl AsRef<str>) -> Self {
-        let value = format!("Bearer {}", token.as_ref());
-        if let Ok(header) = HeaderValue::from_str(&value) {
-            self.config
-                .headers
-                .insert(reqwest::header::AUTHORIZATION, header);
-        }
+        upsert_header(
+            &mut self.config.headers,
+            AUTHORIZATION_HEADER,
+            format!("Bearer {}", token.as_ref()),
+        );
         self
     }
 
@@ -195,14 +221,37 @@ impl GraphqlClientBuilder {
 }
 
 /// GraphQL client.
-#[derive(Debug, Clone)]
 pub struct GraphqlClient {
     endpoint: String,
-    http: reqwest::Client,
+    http: Arc<HttpClient>,
     config: GraphqlClientConfig,
     schema_cache: Arc<SchemaCache>,
     dedup_state: Option<DedupState>,
     metrics: Arc<GraphqlClientMetrics>,
+}
+
+impl Clone for GraphqlClient {
+    fn clone(&self) -> Self {
+        Self {
+            endpoint: self.endpoint.clone(),
+            http: Arc::clone(&self.http),
+            config: self.config.clone(),
+            schema_cache: Arc::clone(&self.schema_cache),
+            dedup_state: self.dedup_state.clone(),
+            metrics: Arc::clone(&self.metrics),
+        }
+    }
+}
+
+impl fmt::Debug for GraphqlClient {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("GraphqlClient")
+            .field("endpoint", &self.endpoint)
+            .field("config", &self.config)
+            .field("dedup_in_flight", &self.dedup_state.is_some())
+            .field("metrics", &self.metrics.snapshot())
+            .finish_non_exhaustive()
+    }
 }
 
 impl GraphqlClient {
@@ -211,13 +260,7 @@ impl GraphqlClient {
     pub fn new(endpoint: impl Into<String>) -> Self {
         let endpoint = endpoint.into();
         let config = GraphqlClientConfig::default();
-        Self::with_config(endpoint.clone(), config).unwrap_or_else(|_| {
-            Self::new_with_client(
-                endpoint,
-                reqwest::Client::new(),
-                GraphqlClientConfig::default(),
-            )
-        })
+        Self::new_with_client(endpoint, Arc::new(HttpClientBuilder::new().build()), config)
     }
 
     /// Create a client with custom configuration.
@@ -225,16 +268,16 @@ impl GraphqlClient {
         endpoint: impl Into<String>,
         config: GraphqlClientConfig,
     ) -> Result<Self, GraphqlClientError> {
-        let http = reqwest::Client::builder()
-            .default_headers(config.headers.clone())
-            .timeout(config.timeout)
-            .build()?;
-        Ok(Self::new_with_client(endpoint, http, config))
+        Ok(Self::new_with_client(
+            endpoint,
+            Arc::new(HttpClientBuilder::new().build()),
+            config,
+        ))
     }
 
     fn new_with_client(
         endpoint: impl Into<String>,
-        http: reqwest::Client,
+        http: Arc<HttpClient>,
         config: GraphqlClientConfig,
     ) -> Self {
         let dedup_state = if config.dedup_in_flight {
@@ -482,16 +525,27 @@ impl GraphqlClient {
     }
 
     async fn send_once(&self, body_bytes: &[u8]) -> Result<Vec<u8>, GraphqlClientError> {
-        let response = self
-            .http
-            .post(&self.endpoint)
-            .body(body_bytes.to_vec())
-            .send()
-            .await?;
+        let response = match time::timeout(
+            self.config.timeout,
+            self.http.request(
+                Method::Post,
+                &self.endpoint,
+                self.config.headers.clone(),
+                body_bytes.to_vec(),
+            ),
+        )
+        .await
+        {
+            Ok(Ok(response)) => response,
+            Ok(Err(error)) => return Err(error.into()),
+            Err(async_error) => {
+                return Err(map_request_async_error(async_error, self.config.timeout));
+            }
+        };
 
-        let status = response.status();
-        let retry_after = parse_retry_after(response.headers());
-        let bytes = response.bytes().await?;
+        let status = response.status_code();
+        let retry_after = parse_retry_after(&response.headers);
+        let bytes = response.body;
 
         if !status.is_success() {
             let body = truncate_body(&bytes);
@@ -503,17 +557,31 @@ impl GraphqlClient {
             });
         }
 
-        Ok(bytes.to_vec())
+        Ok(bytes)
     }
 }
 
-fn parse_retry_after(headers: &HeaderMap) -> Option<Duration> {
-    let header = headers.get(RETRY_AFTER)?;
-    let value = header.to_str().ok()?;
-    if let Ok(seconds) = value.parse::<u64>() {
-        return Some(Duration::from_secs(seconds));
+fn map_request_async_error(error: AsyncError, timeout: Duration) -> GraphqlClientError {
+    match error {
+        AsyncError::Timeout { .. } => {
+            GraphqlClientError::Http(crate::error::HttpErrorInfo::timeout(timeout))
+        }
+        AsyncError::Cancelled => GraphqlClientError::Http(crate::error::HttpErrorInfo::cancelled()),
+        AsyncError::ProtocolIo { message }
+        | AsyncError::Join { message }
+        | AsyncError::Runtime { message } => GraphqlClientError::Protocol { message },
+        AsyncError::ChannelClosed => GraphqlClientError::Protocol {
+            message: "HTTP request channel closed".to_string(),
+        },
+        AsyncError::ChannelFull => GraphqlClientError::Protocol {
+            message: "HTTP request channel full".to_string(),
+        },
     }
-    None
+}
+
+fn parse_retry_after(headers: &HeaderList) -> Option<Duration> {
+    let value = header_value(headers, RETRY_AFTER_HEADER)?;
+    value.parse::<u64>().ok().map(Duration::from_secs)
 }
 
 fn truncate_body(bytes: &[u8]) -> String {
@@ -548,7 +616,6 @@ impl GraphqlClient {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderValue};
     use std::time::Duration;
 
     // ---- SchemaValidationMode ----
@@ -648,8 +715,8 @@ mod tests {
         assert_eq!(config.validation, SchemaValidationMode::Off);
         assert!(!config.dedup_in_flight);
         assert_eq!(
-            config.headers.get(CONTENT_TYPE),
-            Some(&HeaderValue::from_static("application/json"))
+            header_value(&config.headers, CONTENT_TYPE_HEADER),
+            Some(JSON_CONTENT_TYPE)
         );
     }
 
@@ -678,13 +745,11 @@ mod tests {
 
     #[test]
     fn builder_with_header() {
-        let builder = GraphqlClientBuilder::new("https://api.test.com/graphql").with_header(
-            HeaderName::from_static("x-custom"),
-            HeaderValue::from_static("value"),
-        );
+        let builder = GraphqlClientBuilder::new("https://api.test.com/graphql")
+            .with_header("x-custom", "value");
         assert_eq!(
-            builder.config.headers.get("x-custom"),
-            Some(&HeaderValue::from_static("value"))
+            header_value(&builder.config.headers, "x-custom"),
+            Some("value")
         );
     }
 
@@ -692,8 +757,10 @@ mod tests {
     fn builder_with_bearer_token() {
         let builder = GraphqlClientBuilder::new("https://api.test.com/graphql")
             .with_bearer_token("tok_abc123");
-        let auth = builder.config.headers.get(AUTHORIZATION).unwrap();
-        assert_eq!(auth.to_str().unwrap(), "Bearer tok_abc123");
+        assert_eq!(
+            header_value(&builder.config.headers, AUTHORIZATION_HEADER),
+            Some("Bearer tok_abc123")
+        );
     }
 
     #[test]
@@ -852,28 +919,25 @@ mod tests {
 
     #[test]
     fn parse_retry_after_with_seconds() {
-        let mut headers = HeaderMap::new();
-        headers.insert(RETRY_AFTER, HeaderValue::from_static("30"));
+        let headers = vec![(RETRY_AFTER_HEADER.to_string(), "30".to_string())];
         assert_eq!(parse_retry_after(&headers), Some(Duration::from_secs(30)));
     }
 
     #[test]
     fn parse_retry_after_missing_header() {
-        let headers = HeaderMap::new();
+        let headers = Vec::new();
         assert_eq!(parse_retry_after(&headers), None);
     }
 
     #[test]
     fn parse_retry_after_non_numeric() {
-        let mut headers = HeaderMap::new();
-        headers.insert(RETRY_AFTER, HeaderValue::from_static("not-a-number"));
+        let headers = vec![(RETRY_AFTER_HEADER.to_string(), "not-a-number".to_string())];
         assert_eq!(parse_retry_after(&headers), None);
     }
 
     #[test]
     fn parse_retry_after_zero() {
-        let mut headers = HeaderMap::new();
-        headers.insert(RETRY_AFTER, HeaderValue::from_static("0"));
+        let headers = vec![(RETRY_AFTER_HEADER.to_string(), "0".to_string())];
         assert_eq!(parse_retry_after(&headers), Some(Duration::from_secs(0)));
     }
 
@@ -930,5 +994,136 @@ mod tests {
     #[test]
     fn hash_bytes_empty() {
         let _ = hash_bytes(b""); // should not panic
+    }
+
+    // ---- additional edge case tests ----
+
+    #[test]
+    fn truncate_body_multibyte_utf8_at_boundary() {
+        // Place a multi-byte UTF-8 char (emoji = 4 bytes) straddling the 4096 boundary
+        let mut body = vec![b'x'; 4094];
+        // Append a 4-byte UTF-8 char: 🦀 = F0 9F A6 80
+        body.extend_from_slice("🦀".as_bytes());
+        assert_eq!(body.len(), 4098);
+        let result = truncate_body(&body);
+        // Should truncate before the emoji to maintain valid UTF-8
+        assert!(result.ends_with('…'));
+        // The truncated string must be valid UTF-8 (from_utf8_lossy guarantees this,
+        // but the truncation must find a char boundary)
+        assert!(result.len() <= 4097); // 4094 'x' + ellipsis (3 bytes)
+    }
+
+    #[test]
+    fn truncate_body_multibyte_utf8_two_byte_at_boundary() {
+        // Place a 2-byte UTF-8 char (é = C3 A9) so it straddles 4096
+        let mut body = vec![b'x'; 4095];
+        body.extend_from_slice("é".as_bytes()); // 2 bytes
+        assert_eq!(body.len(), 4097);
+        let result = truncate_body(&body);
+        assert!(result.ends_with('…'));
+    }
+
+    #[test]
+    fn parse_retry_after_large_value() {
+        let headers = vec![(RETRY_AFTER_HEADER.to_string(), "3600".to_string())];
+        assert_eq!(parse_retry_after(&headers), Some(Duration::from_secs(3600)));
+    }
+
+    #[test]
+    fn parse_retry_after_empty_string() {
+        let headers = vec![(RETRY_AFTER_HEADER.to_string(), String::new())];
+        assert_eq!(parse_retry_after(&headers), None);
+    }
+
+    #[test]
+    fn builder_debug_contains_endpoint() {
+        let builder = GraphqlClientBuilder::new("https://api.test.com/graphql");
+        let dbg = format!("{builder:?}");
+        assert!(dbg.contains("api.test.com"));
+        assert!(dbg.contains("GraphqlClientBuilder"));
+    }
+
+    #[test]
+    fn config_clone_preserves_all_fields() {
+        let config = GraphqlClientConfig {
+            service_name: "custom".to_string(),
+            timeout: Duration::from_secs(99),
+            dedup_in_flight: true,
+            validation: SchemaValidationMode::ResponseOnly,
+            ..GraphqlClientConfig::default()
+        };
+        let cloned = config.clone();
+        assert_eq!(config.service_name, cloned.service_name);
+        assert_eq!(config.timeout, cloned.timeout);
+        assert_eq!(config.dedup_in_flight, cloned.dedup_in_flight);
+        assert_eq!(config.validation, cloned.validation);
+        assert_eq!(cloned.service_name, "custom");
+        assert_eq!(cloned.timeout, Duration::from_secs(99));
+        assert!(cloned.dedup_in_flight);
+        assert_eq!(cloned.validation, SchemaValidationMode::ResponseOnly);
+    }
+
+    #[test]
+    fn metrics_snapshot_clone() {
+        let snap = GraphqlClientMetricsSnapshot {
+            requests_total: 10,
+            requests_success: 8,
+            requests_error: 2,
+            requests_retried: 1,
+        };
+        let cloned = snap;
+        assert_eq!(snap, cloned);
+    }
+
+    #[test]
+    fn hash_bytes_large_payload() {
+        let data = vec![0xABu8; 100_000];
+        let h1 = hash_bytes(&data);
+        let h2 = hash_bytes(&data);
+        assert_eq!(h1, h2);
+    }
+
+    #[test]
+    fn builder_with_empty_bearer_token() {
+        let builder =
+            GraphqlClientBuilder::new("https://api.test.com/graphql").with_bearer_token("");
+        assert_eq!(
+            header_value(&builder.config.headers, AUTHORIZATION_HEADER),
+            Some("Bearer ")
+        );
+    }
+
+    #[test]
+    fn client_with_dedup_config_produces_some_dedup_state() {
+        let client = GraphqlClientBuilder::new("https://api.test.com/graphql")
+            .with_dedup_in_flight(true)
+            .build()
+            .unwrap();
+        assert!(client.dedup_state.is_some());
+    }
+
+    #[test]
+    fn client_graphql_errors_multiple() {
+        let errors = vec![
+            GraphqlError {
+                message: "error 1".into(),
+                locations: vec![],
+                path: vec![],
+                extensions: None,
+            },
+            GraphqlError {
+                message: "error 2".into(),
+                locations: vec![],
+                path: vec![],
+                extensions: None,
+            },
+        ];
+        let err = GraphqlClient::graphql_errors(errors);
+        match err {
+            GraphqlClientError::GraphqlErrors { errors } => {
+                assert_eq!(errors.len(), 2);
+            }
+            other => panic!("expected GraphqlErrors, got {other:?}"),
+        }
     }
 }

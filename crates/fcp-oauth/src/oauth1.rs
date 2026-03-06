@@ -3,15 +3,20 @@
 //! Supports the three-legged OAuth 1.0a flow used by Twitter and other providers.
 
 use std::collections::BTreeMap;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::Arc;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use asupersync::http::h1::{HttpClient, HttpClientBuilder, Method, Response as HttpResponse};
 use base64::{Engine, engine::general_purpose::STANDARD};
+use fcp_async_core::time;
 use hmac::{Hmac, Mac};
-use reqwest::Client;
 use sha1::Sha1;
 use url::Url;
 
 use crate::{OAuthError, OAuthResult};
+
+const FORM_CONTENT_TYPE: &str = "application/x-www-form-urlencoded";
+const OAUTH1_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// OAuth 1.0a configuration.
 #[derive(Debug, Clone)]
@@ -83,10 +88,18 @@ pub struct RequestToken {
 }
 
 /// OAuth 1.0a client.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct OAuth1Client {
     config: OAuth1Config,
-    http_client: Client,
+    http_client: Arc<HttpClient>,
+}
+
+impl std::fmt::Debug for OAuth1Client {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OAuth1Client")
+            .field("config", &self.config)
+            .finish_non_exhaustive()
+    }
 }
 
 impl OAuth1Client {
@@ -95,16 +108,20 @@ impl OAuth1Client {
     pub fn new(config: OAuth1Config) -> Self {
         Self {
             config,
-            http_client: Client::new(),
+            http_client: Arc::new(
+                HttpClientBuilder::new()
+                    .user_agent("fcp-oauth/0.1.0")
+                    .build(),
+            ),
         }
     }
 
     /// Create with a custom HTTP client.
     #[must_use]
-    pub const fn with_http_client(config: OAuth1Config, http_client: Client) -> Self {
+    pub fn with_http_client(config: OAuth1Config, http_client: HttpClient) -> Self {
         Self {
             config,
-            http_client,
+            http_client: Arc::new(http_client),
         }
     }
 
@@ -124,20 +141,22 @@ impl OAuth1Client {
             self.build_auth_header("POST", &self.config.request_token_url, &params, None, None)?;
 
         let response = self
-            .http_client
-            .post(&self.config.request_token_url)
-            .header("Authorization", auth_header)
-            .send()
+            .send_request(
+                Method::Post,
+                &self.config.request_token_url,
+                vec![("Authorization".to_string(), auth_header)],
+                Vec::new(),
+            )
             .await?;
 
-        if !response.status().is_success() {
-            let text = response.text().await.unwrap_or_default();
+        if !response.is_success() {
+            let text = response_text(&response);
             return Err(OAuthError::TokenExchangeFailed(format!(
                 "Request token failed: {text}"
             )));
         }
 
-        let body = response.text().await?;
+        let body = response_text(&response);
         parse_request_token(&body)
     }
 
@@ -171,22 +190,28 @@ impl OAuth1Client {
             Some(&request_token.token_secret),
         )?;
 
+        let body = serde_urlencoded::to_string([("oauth_verifier", oauth_verifier)])
+            .map_err(|e| OAuthError::InvalidTokenResponse(e.to_string()))?;
         let response = self
-            .http_client
-            .post(&self.config.access_token_url)
-            .header("Authorization", auth_header)
-            .form(&[("oauth_verifier", oauth_verifier)])
-            .send()
+            .send_request(
+                Method::Post,
+                &self.config.access_token_url,
+                vec![
+                    ("Authorization".to_string(), auth_header),
+                    ("Content-Type".to_string(), FORM_CONTENT_TYPE.to_string()),
+                ],
+                body.into_bytes(),
+            )
             .await?;
 
-        if !response.status().is_success() {
-            let text = response.text().await.unwrap_or_default();
+        if !response.is_success() {
+            let text = response_text(&response);
             return Err(OAuthError::TokenExchangeFailed(format!(
                 "Access token failed: {text}"
             )));
         }
 
-        let body = response.text().await?;
+        let body = response_text(&response);
         parse_access_token(&body)
     }
 
@@ -329,6 +354,29 @@ impl OAuth1Client {
     pub const fn config(&self) -> &OAuth1Config {
         &self.config
     }
+
+    async fn send_request(
+        &self,
+        method: Method,
+        url: &str,
+        headers: Vec<(String, String)>,
+        body: Vec<u8>,
+    ) -> OAuthResult<HttpResponse> {
+        match time::timeout(
+            OAUTH1_REQUEST_TIMEOUT,
+            self.http_client.request(method, url, headers, body),
+        )
+        .await
+        {
+            Ok(Ok(response)) => Ok(response),
+            Ok(Err(error)) => Err(OAuthError::from_http_client_error(&error)),
+            Err(error) => Err(OAuthError::from_async_error(error, OAUTH1_REQUEST_TIMEOUT)),
+        }
+    }
+}
+
+fn response_text(response: &HttpResponse) -> String {
+    String::from_utf8_lossy(&response.body).into_owned()
 }
 
 /// Parse request token response.
@@ -923,7 +971,7 @@ mod tests {
     #[test]
     fn test_oauth1_client_with_custom_http_client() {
         let config = test_config();
-        let http_client = Client::new();
+        let http_client = HttpClientBuilder::new().build();
         let client = OAuth1Client::with_http_client(config, http_client);
         assert_eq!(client.config().consumer_key, "consumer_key");
     }

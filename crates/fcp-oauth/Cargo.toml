@@ -19,7 +19,7 @@ fcp-async-core = { path = "../fcp-async-core" }
 async-trait.workspace = true
 
 # HTTP client
-reqwest = { workspace = true, features = ["json", "form"] }
+asupersync = { path = "/dp/asupersync", default-features = false, features = ["tls", "tls-native-roots"] }
 
 # Serialization
 serde.workspace = true
@@ -47,4 +47,5 @@ serde_urlencoded = "0.7"
 parking_lot = "0.12"
 
 [dev-dependencies]
+tokio = { version = "1.49", features = ["rt", "macros"] }
 wiremock.workspace = true

@@ -314,8 +314,13 @@ impl GitHubClient {
                     if status == StatusCode::NO_CONTENT {
                         return Ok(());
                     }
+                    let retry_after_secs = response
+                        .headers()
+                        .get("retry-after")
+                        .and_then(|v| v.to_str().ok())
+                        .and_then(|v| v.parse::<u64>().ok());
                     let bytes = response.bytes().await.map_err(GitHubError::Http)?;
-                    let err = parse_error_response(status, &bytes);
+                    let err = parse_error_response(status, &bytes, retry_after_secs);
                     if err.is_retryable() && attempts < self.max_retries {
                         if let Some(retry_after) = err.retry_after() {
                             delay = retry_after;
@@ -546,17 +551,17 @@ impl GitHubClient {
                     retry_after_ms: retry_ms,
                 });
             }
-            Err(parse_error_response(status, &bytes))
+            Err(parse_error_response(status, &bytes, retry_after_secs))
         }
     }
 }
 
 /// Parse an error response body.
-fn parse_error_response(status: StatusCode, bytes: &Bytes) -> GitHubError {
+fn parse_error_response(status: StatusCode, bytes: &Bytes, retry_after_secs: Option<u64>) -> GitHubError {
     if let Ok(err_resp) = serde_json::from_slice::<ApiErrorResponse>(bytes) {
         if status == StatusCode::TOO_MANY_REQUESTS {
             return GitHubError::RateLimited {
-                retry_after_ms: 60_000,
+                retry_after_ms: retry_after_secs.unwrap_or(60) * 1000,
             };
         }
         if status == StatusCode::UNAUTHORIZED {
@@ -582,6 +587,12 @@ fn parse_error_response(status: StatusCode, bytes: &Bytes) -> GitHubError {
             message: err_resp.message,
             status_code: Some(status.as_u16()),
             documentation_url: err_resp.documentation_url,
+        };
+    }
+
+    if status == StatusCode::TOO_MANY_REQUESTS {
+        return GitHubError::RateLimited {
+            retry_after_ms: retry_after_secs.unwrap_or(60) * 1000,
         };
     }
 

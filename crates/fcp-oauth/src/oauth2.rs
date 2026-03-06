@@ -3,15 +3,21 @@
 //! Supports authorization code flow (with PKCE) and client credentials flow.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Duration;
 
-use reqwest::Client;
+use asupersync::http::h1::{HttpClient, HttpClientBuilder, Method, Response as HttpResponse};
+use base64::{Engine, engine::general_purpose::STANDARD};
+use fcp_async_core::time;
 use serde::{Deserialize, Serialize};
 use url::Url;
 
 use crate::{
     GrantType, OAuthError, OAuthResult, OAuthTokens, Pkce, PkceMethod, ResponseMode, TokenResponse,
 };
+
+const FORM_CONTENT_TYPE: &str = "application/x-www-form-urlencoded";
+const JSON_CONTENT_TYPE: &str = "application/json";
 
 /// OAuth authentication style.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -178,32 +184,49 @@ impl OAuth2Config {
 }
 
 /// OAuth 2.0 client.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct OAuth2Client {
     config: OAuth2Config,
-    http_client: Client,
+    http_client: Arc<HttpClient>,
+}
+
+impl std::fmt::Debug for OAuth2Client {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OAuth2Client")
+            .field("config", &self.config)
+            .finish_non_exhaustive()
+    }
 }
 
 impl OAuth2Client {
     /// Create a new OAuth 2.0 client.
     ///
     /// # Errors
-    /// Returns `OAuthError::HttpError` if the HTTP client fails to build.
+    /// Returns an error when the configured authorization URL, token URL,
+    /// or redirect URI is invalid.
     pub fn new(config: OAuth2Config) -> OAuthResult<Self> {
-        let http_client = Client::builder().timeout(config.timeout).build()?;
+        Url::parse(&config.authorization_url)?;
+        Url::parse(&config.token_url)?;
+        if let Some(redirect_uri) = config.redirect_uri.as_deref() {
+            Url::parse(redirect_uri)?;
+        }
 
         Ok(Self {
             config,
-            http_client,
+            http_client: Arc::new(
+                HttpClientBuilder::new()
+                    .user_agent("fcp-oauth/0.1.0")
+                    .build(),
+            ),
         })
     }
 
     /// Create with a custom HTTP client.
     #[must_use]
-    pub const fn with_http_client(config: OAuth2Config, http_client: Client) -> Self {
+    pub fn with_http_client(config: OAuth2Config, http_client: HttpClient) -> Self {
         Self {
             config,
-            http_client,
+            http_client: Arc::new(http_client),
         }
     }
 
@@ -391,15 +414,22 @@ impl OAuth2Client {
 
     /// Make a token request.
     async fn token_request(&self, mut params: HashMap<&str, String>) -> OAuthResult<OAuthTokens> {
-        let mut request = self.http_client.post(&self.config.token_url);
+        let mut headers = vec![
+            ("Content-Type".to_string(), FORM_CONTENT_TYPE.to_string()),
+            ("Accept".to_string(), JSON_CONTENT_TYPE.to_string()),
+        ];
 
         match self.config.auth_style {
             AuthStyle::Basic => {
-                if let Some(secret) = &self.config.client_secret {
-                    request = request.basic_auth(&self.config.client_id, Some(secret));
-                } else {
-                    request = request.basic_auth(&self.config.client_id, Some(""));
-                }
+                let credentials = format!(
+                    "{}:{}",
+                    self.config.client_id,
+                    self.config.client_secret.as_deref().unwrap_or("")
+                );
+                headers.push((
+                    "Authorization".to_string(),
+                    format!("Basic {}", STANDARD.encode(credentials)),
+                ));
             }
             AuthStyle::Post => {
                 params.insert("client_id", self.config.client_id.clone());
@@ -409,18 +439,24 @@ impl OAuth2Client {
             }
         }
 
-        let response = request.form(&params).send().await?;
+        let body = serde_urlencoded::to_string(&params)
+            .map_err(|e| OAuthError::InvalidTokenResponse(e.to_string()))?;
+        let response = self
+            .send_request(
+                Method::Post,
+                &self.config.token_url,
+                headers,
+                body.into_bytes(),
+            )
+            .await?;
 
-        if !response.status().is_success() {
+        if !response.is_success() {
             let error: TokenErrorResponse =
-                response
-                    .json()
-                    .await
-                    .unwrap_or_else(|_| TokenErrorResponse {
-                        error: "unknown_error".to_string(),
-                        error_description: None,
-                        error_uri: None,
-                    });
+                response.json().unwrap_or_else(|_| TokenErrorResponse {
+                    error: "unknown_error".to_string(),
+                    error_description: None,
+                    error_uri: None,
+                });
 
             return Err(OAuthError::TokenExchangeFailed(format!(
                 "{}: {}",
@@ -429,7 +465,7 @@ impl OAuth2Client {
             )));
         }
 
-        let token_response: TokenResponse = response.json().await?;
+        let token_response: TokenResponse = response.json()?;
         Ok(OAuthTokens::from_response(token_response))
     }
 
@@ -437,6 +473,25 @@ impl OAuth2Client {
     #[must_use]
     pub const fn config(&self) -> &OAuth2Config {
         &self.config
+    }
+
+    async fn send_request(
+        &self,
+        method: Method,
+        url: &str,
+        headers: Vec<(String, String)>,
+        body: Vec<u8>,
+    ) -> OAuthResult<HttpResponse> {
+        match time::timeout(
+            self.config.timeout,
+            self.http_client.request(method, url, headers, body),
+        )
+        .await
+        {
+            Ok(Ok(response)) => Ok(response),
+            Ok(Err(error)) => Err(OAuthError::from_http_client_error(&error)),
+            Err(error) => Err(OAuthError::from_async_error(error, self.config.timeout)),
+        }
     }
 }
 
@@ -533,6 +588,17 @@ mod tests {
     use super::*;
     use wiremock::matchers::{body_string_contains, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn run_with_tokio_reactor<F, T>(future: F) -> T
+    where
+        F: std::future::Future<Output = T>,
+    {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build tokio test runtime")
+            .block_on(future)
+    }
 
     fn test_config() -> OAuth2Config {
         OAuth2Config::new(
@@ -745,7 +811,7 @@ mod tests {
 
     #[test]
     fn test_exchange_code_with_mock_server() {
-        fcp_async_core::runtime::block_on_sync(async {
+        run_with_tokio_reactor(async {
             let server = MockServer::start().await;
             Mock::given(method("POST"))
                 .and(path("/token"))
@@ -778,13 +844,12 @@ mod tests {
             assert_eq!(tokens.access_token(), "access-123");
             assert_eq!(tokens.refresh_token(), Some("refresh-123"));
             assert_eq!(tokens.scopes(), &["read", "write"]);
-        })
-        .unwrap();
+        });
     }
 
     #[test]
     fn test_exchange_code_with_pkce_sends_verifier() {
-        fcp_async_core::runtime::block_on_sync(async {
+        run_with_tokio_reactor(async {
             let server = MockServer::start().await;
             let pkce = Pkce::with_method(PkceMethod::S256);
             let expected_verifier = pkce.verifier().to_string();
@@ -819,13 +884,12 @@ mod tests {
                 .unwrap();
             assert_eq!(tokens.access_token(), "pkce-access");
             assert_eq!(tokens.refresh_token(), Some("pkce-refresh"));
-        })
-        .unwrap();
+        });
     }
 
     #[test]
     fn test_refresh_tokens_with_mock_server() {
-        fcp_async_core::runtime::block_on_sync(async {
+        run_with_tokio_reactor(async {
             let server = MockServer::start().await;
             Mock::given(method("POST"))
                 .and(path("/token"))
@@ -852,13 +916,12 @@ mod tests {
             let tokens = client.refresh_tokens("refresh-token-xyz").await.unwrap();
             assert_eq!(tokens.access_token(), "fresh-access-token");
             assert_eq!(tokens.refresh_token(), Some("new-refresh-token"));
-        })
-        .unwrap();
+        });
     }
 
     #[test]
     fn test_exchange_code_maps_error_response() {
-        fcp_async_core::runtime::block_on_sync(async {
+        run_with_tokio_reactor(async {
             let server = MockServer::start().await;
             Mock::given(method("POST"))
                 .and(path("/token"))
@@ -884,7 +947,6 @@ mod tests {
             };
             assert!(message.contains("invalid_grant"));
             assert!(message.contains("authorization code expired"));
-        })
-        .unwrap();
+        });
     }
 }

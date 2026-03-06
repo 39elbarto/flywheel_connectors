@@ -4,7 +4,8 @@ use std::fmt::Write;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use reqwest::{Client, Response, StatusCode};
+use asupersync::http::h1::{HttpClient, HttpClientBuilder, Method, Response as HttpResponse};
+use fcp_async_core::time;
 use tracing::{debug, instrument, warn};
 
 use crate::{
@@ -18,35 +19,46 @@ use crate::{
 
 /// Default Slack API base URL.
 const DEFAULT_BASE_URL: &str = "https://slack.com/api";
+const JSON_CONTENT_TYPE: &str = "application/json";
 
 /// Slack Web API client with retry logic and rate limit awareness.
-#[derive(Debug)]
 pub struct SlackClient {
-    client: Client,
+    client: HttpClient,
     token: String,
     base_url: String,
     max_retries: u32,
     initial_delay_ms: u64,
     max_delay_ms: u64,
+    request_timeout: Duration,
     total_requests: AtomicU64,
+}
+
+impl std::fmt::Debug for SlackClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SlackClient")
+            .field("base_url", &self.base_url)
+            .field("max_retries", &self.max_retries)
+            .field("initial_delay_ms", &self.initial_delay_ms)
+            .field("max_delay_ms", &self.max_delay_ms)
+            .field("request_timeout", &self.request_timeout)
+            .field("total_requests", &self.total_requests())
+            .finish_non_exhaustive()
+    }
 }
 
 impl SlackClient {
     /// Create a new Slack client with a bot or user token.
     pub fn new(token: impl Into<String>) -> SlackResult<Self> {
-        let client = Client::builder()
-            .timeout(Duration::from_secs(30))
-            .user_agent("fcp-slack/0.1.0")
-            .build()
-            .map_err(SlackError::Http)?;
-
         Ok(Self {
-            client,
+            client: HttpClientBuilder::new()
+                .user_agent("fcp-slack/0.1.0")
+                .build(),
             token: token.into(),
             base_url: DEFAULT_BASE_URL.into(),
             max_retries: 3,
             initial_delay_ms: 1000,
             max_delay_ms: 60_000,
+            request_timeout: Duration::from_secs(30),
             total_requests: AtomicU64::new(0),
         })
     }
@@ -125,24 +137,14 @@ impl SlackClient {
         let url = format!("{}/auth.test", self.base_url);
         self.total_requests.fetch_add(1, Ordering::Relaxed);
 
-        let resp = self
-            .client
-            .post(&url)
-            .bearer_auth(&self.token)
-            .send()
-            .await
-            .map_err(SlackError::Http)?;
+        let resp = self.send_request(Method::Post, &url, Vec::new()).await?;
 
         // Extract scopes from response header before consuming the body.
-        let scopes: Vec<String> = resp
-            .headers()
-            .get("x-oauth-scopes")
-            .and_then(|v| v.to_str().ok())
+        let scopes: Vec<String> = header_value(&resp.headers, "x-oauth-scopes")
             .map(|s| s.split(',').map(|scope| scope.trim().to_string()).collect())
             .unwrap_or_default();
 
-        let api_resp: SlackApiResponse<AuthTestData> =
-            resp.json().await.map_err(SlackError::Http)?;
+        let api_resp: SlackApiResponse<AuthTestData> = resp.json().map_err(SlackError::Json)?;
         Self::check_response(&api_resp)?;
 
         let data = api_resp.data.expect("ok response has data");
@@ -347,7 +349,7 @@ impl SlackClient {
 
         loop {
             attempt += 1;
-            let response = self.client.get(&url).bearer_auth(&self.token).send().await;
+            let response = self.send_request(Method::Get, &url, Vec::new()).await;
 
             match response {
                 Ok(resp) => {
@@ -355,21 +357,21 @@ impl SlackClient {
                         if attempt <= self.max_retries {
                             let wait = retry_result.unwrap_or(delay);
                             warn!(method, attempt, "Rate limited, waiting {wait:?}");
-                            fcp_async_core::time::sleep(wait).await;
+                            time::sleep(wait).await;
                             continue;
                         }
                         return Err(SlackError::RateLimited {
                             retry_after_secs: retry_result.map_or(60, |d| d.as_secs()),
                         });
                     }
-                    return resp.json::<T>().await.map_err(Into::into);
+                    return resp.json::<T>().map_err(SlackError::Json);
                 }
-                Err(e) if e.is_timeout() && attempt <= self.max_retries => {
-                    warn!(method, attempt, "Request timed out, retrying in {delay:?}");
-                    fcp_async_core::time::sleep(delay).await;
+                Err(err) if err.is_retryable() && attempt <= self.max_retries => {
+                    warn!(method, attempt, error = %err, "Request failed, retrying in {delay:?}");
+                    time::sleep(delay).await;
                     delay = std::cmp::min(delay * 2, Duration::from_millis(self.max_delay_ms));
                 }
-                Err(e) => return Err(e.into()),
+                Err(err) => return Err(err),
             }
         }
     }
@@ -387,13 +389,8 @@ impl SlackClient {
 
         loop {
             attempt += 1;
-            let response = self
-                .client
-                .post(&url)
-                .bearer_auth(&self.token)
-                .json(body)
-                .send()
-                .await;
+            let body_bytes = serde_json::to_vec(body).map_err(SlackError::Json)?;
+            let response = self.send_request(Method::Post, &url, body_bytes).await;
 
             match response {
                 Ok(resp) => {
@@ -401,33 +398,30 @@ impl SlackClient {
                         if attempt <= self.max_retries {
                             let wait = retry_result.unwrap_or(delay);
                             warn!(method, attempt, "Rate limited, waiting {wait:?}");
-                            fcp_async_core::time::sleep(wait).await;
+                            time::sleep(wait).await;
                             continue;
                         }
                         return Err(SlackError::RateLimited {
                             retry_after_secs: retry_result.map_or(60, |d| d.as_secs()),
                         });
                     }
-                    return resp.json::<T>().await.map_err(Into::into);
+                    return resp.json::<T>().map_err(SlackError::Json);
                 }
-                Err(e) if e.is_timeout() && attempt <= self.max_retries => {
-                    warn!(method, attempt, "Request timed out, retrying in {delay:?}");
-                    fcp_async_core::time::sleep(delay).await;
+                Err(err) if err.is_retryable() && attempt <= self.max_retries => {
+                    warn!(method, attempt, error = %err, "Request failed, retrying in {delay:?}");
+                    time::sleep(delay).await;
                     delay = std::cmp::min(delay * 2, Duration::from_millis(self.max_delay_ms));
                 }
-                Err(e) => return Err(e.into()),
+                Err(err) => return Err(err),
             }
         }
     }
 
     #[allow(clippy::option_option)]
-    fn check_rate_limit(response: &Response) -> Option<Option<Duration>> {
-        if response.status() == StatusCode::TOO_MANY_REQUESTS {
-            let retry_after = response
-                .headers()
-                .get("retry-after")
-                .and_then(|v| v.to_str().ok())
-                .and_then(|v| v.parse::<u64>().ok())
+    fn check_rate_limit(response: &HttpResponse) -> Option<Option<Duration>> {
+        if response.status == 429 {
+            let retry_after = header_value(&response.headers, "retry-after")
+                .and_then(|value| value.parse::<u64>().ok())
                 .map(Duration::from_secs);
             Some(retry_after)
         } else {
@@ -448,4 +442,40 @@ impl SlackClient {
             })
         }
     }
+
+    async fn send_request(
+        &self,
+        method: Method,
+        url: &str,
+        body: Vec<u8>,
+    ) -> SlackResult<HttpResponse> {
+        let mut headers = vec![
+            (
+                "Authorization".to_string(),
+                format!("Bearer {}", self.token),
+            ),
+            ("Accept".to_string(), JSON_CONTENT_TYPE.to_string()),
+        ];
+        if !body.is_empty() {
+            headers.push(("Content-Type".to_string(), JSON_CONTENT_TYPE.to_string()));
+        }
+
+        match time::timeout(
+            self.request_timeout,
+            self.client.request(method, url, headers, body),
+        )
+        .await
+        {
+            Ok(Ok(response)) => Ok(response),
+            Ok(Err(error)) => Err(SlackError::from_http_client_error(&error)),
+            Err(error) => Err(SlackError::from_async_error(error, self.request_timeout)),
+        }
+    }
+}
+
+fn header_value<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a str> {
+    headers
+        .iter()
+        .find(|(header_name, _)| header_name.eq_ignore_ascii_case(name))
+        .map(|(_, value)| value.as_str())
 }

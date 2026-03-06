@@ -186,4 +186,144 @@ mod tests {
         let cache = SchemaCache::default();
         assert!(cache.validate(schema, &json!({})).is_ok());
     }
+
+    // ---- additional schema edge cases ----
+
+    #[test]
+    fn schema_cache_debug_contains_type_name() {
+        let cache = SchemaCache::default();
+        let dbg = format!("{cache:?}");
+        assert!(dbg.contains("SchemaCache"));
+    }
+
+    #[test]
+    fn validate_null_against_null_type() {
+        let schema = r#"{"type": "null"}"#;
+        let cache = SchemaCache::default();
+        assert!(cache.validate(schema, &json!(null)).is_ok());
+    }
+
+    #[test]
+    fn validate_string_against_string_type() {
+        let schema = r#"{"type": "string", "minLength": 1}"#;
+        let cache = SchemaCache::default();
+        assert!(cache.validate(schema, &json!("hello")).is_ok());
+        assert!(cache.validate(schema, &json!("")).is_err());
+    }
+
+    #[test]
+    fn validate_array_against_array_schema() {
+        let schema = r#"{"type": "array", "items": {"type": "integer"}, "minItems": 1}"#;
+        let cache = SchemaCache::default();
+        assert!(cache.validate(schema, &json!([1, 2, 3])).is_ok());
+        assert!(cache.validate(schema, &json!([])).is_err());
+        assert!(cache.validate(schema, &json!(["not int"])).is_err());
+    }
+
+    #[test]
+    fn validate_number_against_number_schema() {
+        let schema = r#"{"type": "number", "minimum": 0, "maximum": 100}"#;
+        let cache = SchemaCache::default();
+        assert!(cache.validate(schema, &json!(50)).is_ok());
+        assert!(cache.validate(schema, &json!(0)).is_ok());
+        assert!(cache.validate(schema, &json!(100)).is_ok());
+        assert!(cache.validate(schema, &json!(-1)).is_err());
+        assert!(cache.validate(schema, &json!(101)).is_err());
+    }
+
+    #[test]
+    fn validate_additional_properties_false_rejects_extra() {
+        let schema = r#"{
+            "type": "object",
+            "properties": {"name": {"type": "string"}},
+            "additionalProperties": false
+        }"#;
+        let cache = SchemaCache::default();
+        assert!(cache.validate(schema, &json!({"name": "Alice"})).is_ok());
+        assert!(cache
+            .validate(schema, &json!({"name": "Alice", "extra": true}))
+            .is_err());
+    }
+
+    #[test]
+    fn validate_any_of_schema() {
+        let schema = r#"{"anyOf": [{"type": "string"}, {"type": "integer"}]}"#;
+        let cache = SchemaCache::default();
+        assert!(cache.validate(schema, &json!("hello")).is_ok());
+        assert!(cache.validate(schema, &json!(42)).is_ok());
+        assert!(cache.validate(schema, &json!(true)).is_err());
+    }
+
+    #[test]
+    fn validate_boolean_schema_true_accepts_anything() {
+        let schema = r"true";
+        let cache = SchemaCache::default();
+        assert!(cache.validate(schema, &json!(null)).is_ok());
+        assert!(cache.validate(schema, &json!("anything")).is_ok());
+        assert!(cache.validate(schema, &json!(42)).is_ok());
+    }
+
+    #[test]
+    fn validate_boolean_schema_false_rejects_everything() {
+        let schema = r"false";
+        let cache = SchemaCache::default();
+        assert!(cache.validate(schema, &json!(null)).is_err());
+        assert!(cache.validate(schema, &json!("anything")).is_err());
+    }
+
+    #[test]
+    fn compile_empty_object_schema() {
+        let cache = SchemaCache::default();
+        // Empty object is a valid schema that accepts anything
+        let result = cache.get_or_compile(r"{}");
+        assert!(result.is_ok());
+        assert!(cache.validate(r"{}", &json!("anything")).is_ok());
+    }
+
+    #[test]
+    fn validate_nested_object_schema() {
+        let schema = r#"{
+            "type": "object",
+            "properties": {
+                "address": {
+                    "type": "object",
+                    "required": ["city"],
+                    "properties": {
+                        "city": {"type": "string"},
+                        "zip": {"type": "string"}
+                    }
+                }
+            },
+            "required": ["address"]
+        }"#;
+        let cache = SchemaCache::default();
+        assert!(cache
+            .validate(schema, &json!({"address": {"city": "NYC"}}))
+            .is_ok());
+        assert!(cache
+            .validate(schema, &json!({"address": {}}))
+            .is_err());
+        assert!(cache.validate(schema, &json!({})).is_err());
+    }
+
+    #[test]
+    fn validate_schema_validation_error_contains_message() {
+        let cache = SchemaCache::default();
+        let result = cache.validate(SIMPLE_SCHEMA, &json!({}));
+        match result {
+            Err(GraphqlClientError::SchemaValidation { message, errors }) => {
+                assert_eq!(message, "schema validation failed");
+                assert!(!errors.is_empty());
+            }
+            other => panic!("expected SchemaValidation error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_pattern_property() {
+        let schema = r#"{"type": "string", "pattern": "^[a-z]+$"}"#;
+        let cache = SchemaCache::default();
+        assert!(cache.validate(schema, &json!("hello")).is_ok());
+        assert!(cache.validate(schema, &json!("Hello123")).is_err());
+    }
 }

@@ -9,9 +9,8 @@ use fcp_core::CredentialId;
 use fcp_sdk::migration::{
     AttemptOutcome, ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig, RetryLoop,
 };
-use futures_util::StreamExt;
+use futures_util::{Stream, StreamExt};
 use reqwest::{Client, Response, StatusCode};
-use tokio_stream::Stream;
 use tracing::{debug, instrument};
 
 use crate::{
@@ -200,7 +199,7 @@ impl OpenAIClient {
         if status.is_success() {
             Ok(())
         } else {
-            Err(parse_error_response(status, &bytes))
+            Err(parse_error_response(status, response.headers(), &bytes))
         }
     }
 
@@ -419,7 +418,7 @@ impl OpenAIClient {
         if status.is_success() {
             serde_json::from_slice(&bytes).map_err(OpenAIError::from)
         } else {
-            Err(parse_error_response(status, &bytes))
+            Err(parse_error_response(status, response.headers(), &bytes))
         }
     }
 
@@ -463,7 +462,7 @@ impl OpenAIClient {
         if status.is_success() {
             Ok(bytes.to_vec())
         } else {
-            Err(parse_error_response(status, &bytes))
+            Err(parse_error_response(status, response.headers(), &bytes))
         }
     }
 
@@ -552,7 +551,7 @@ impl OpenAIClient {
         if status.is_success() {
             serde_json::from_slice(&bytes).map_err(OpenAIError::from)
         } else {
-            Err(parse_error_response(status, &bytes))
+            Err(parse_error_response(status, response.headers(), &bytes))
         }
     }
 
@@ -599,7 +598,7 @@ impl OpenAIClient {
         if status.is_success() {
             serde_json::from_slice(&bytes).map_err(OpenAIError::from)
         } else {
-            Err(parse_error_response(status, &bytes))
+            Err(parse_error_response(status, response.headers(), &bytes))
         }
     }
 
@@ -664,7 +663,7 @@ impl OpenAIClient {
         let status = response.status();
         if !status.is_success() {
             let bytes = response.bytes().await?;
-            return Err(parse_error_response(status, &bytes));
+            return Err(parse_error_response(status, response.headers(), &bytes));
         }
 
         Ok(response)
@@ -681,7 +680,7 @@ impl OpenAIClient {
         if status.is_success() {
             serde_json::from_slice(&bytes).map_err(OpenAIError::from)
         } else {
-            Err(parse_error_response(status, &bytes))
+            Err(parse_error_response(status, response.headers(), &bytes))
         }
     }
 
@@ -703,7 +702,7 @@ impl OpenAIClient {
         if status.is_success() {
             serde_json::from_slice(&bytes).map_err(OpenAIError::from)
         } else {
-            Err(parse_error_response(status, &bytes))
+            Err(parse_error_response(status, response.headers(), &bytes))
         }
     }
 
@@ -722,7 +721,7 @@ impl OpenAIClient {
         if status.is_success() {
             serde_json::from_slice(&bytes).map_err(OpenAIError::from)
         } else {
-            Err(parse_error_response(status, &bytes))
+            Err(parse_error_response(status, response.headers(), &bytes))
         }
     }
 
@@ -745,7 +744,7 @@ impl OpenAIClient {
         if status.is_success() {
             serde_json::from_slice(&bytes).map_err(OpenAIError::from)
         } else {
-            Err(parse_error_response(status, &bytes))
+            Err(parse_error_response(status, response.headers(), &bytes))
         }
     }
 
@@ -1012,13 +1011,27 @@ impl OpenAIClient {
         if status.is_success() {
             serde_json::from_slice(&bytes).map_err(OpenAIError::from)
         } else {
-            Err(parse_error_response(status, &bytes))
+            Err(parse_error_response(status, response.headers(), &bytes))
         }
     }
 }
 
 /// Parse an error response.
-fn parse_error_response(status: StatusCode, bytes: &Bytes) -> OpenAIError {
+fn parse_error_response(status: StatusCode, headers: &reqwest::header::HeaderMap, bytes: &Bytes) -> OpenAIError {
+    let mut retry_after_ms = 30_000; // Default 30s
+    if let Some(reset) = headers.get("x-ratelimit-reset-requests").and_then(|v| v.to_str().ok()) {
+        // OpenAI reset strings look like "1s", "6m0s"
+        if let Some(s) = reset.strip_suffix('s') {
+            if let Ok(secs) = s.parse::<f64>() {
+                retry_after_ms = (secs * 1000.0) as u64;
+            }
+        }
+    } else if let Some(retry) = headers.get("retry-after").and_then(|v| v.to_str().ok()) {
+        if let Ok(secs) = retry.parse::<f64>() {
+            retry_after_ms = (secs * 1000.0) as u64;
+        }
+    }
+
     // Try to parse as API error
     if let Ok(api_error) = serde_json::from_slice::<ApiError>(bytes) {
         let details = api_error.error;
@@ -1026,7 +1039,7 @@ fn parse_error_response(status: StatusCode, bytes: &Bytes) -> OpenAIError {
         // Check for specific error types
         if status == StatusCode::TOO_MANY_REQUESTS {
             return OpenAIError::RateLimited {
-                retry_after_ms: 30_000, // Default 30s
+                retry_after_ms,
             };
         }
 

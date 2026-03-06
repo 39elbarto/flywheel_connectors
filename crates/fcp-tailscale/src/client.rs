@@ -8,15 +8,19 @@
 //! - `/localapi/v0/status` - Get current tailnet status
 //! - `/localapi/v0/whois?addr=<ip>` - Look up peer by IP address
 
-use fcp_async_core::sync::RwLock;
-use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::net::IpAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
+use asupersync::http::h1::{HttpClient, HttpClientBuilder, Method};
+use fcp_async_core::{sync::RwLock, time};
+use serde::{Deserialize, Serialize};
 use crate::error::{TailscaleError, TailscaleResult};
 use crate::identity::NodeId;
 use crate::tag::TailscaleTag;
+
+const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Trait for Tailscale `LocalAPI` clients.
 ///
@@ -38,8 +42,11 @@ pub trait TailscaleClient: Send + Sync {
 
     /// Check if connected to the tailnet.
     async fn is_connected(&self) -> TailscaleResult<bool> {
-        let status = self.status().await?;
-        Ok(status.backend_state == "Running")
+        match self.status().await {
+            Ok(status) => Ok(status.backend_state == "Running"),
+            Err(TailscaleError::NotConnected | TailscaleError::LocalApiRequest(_)) => Ok(false),
+            Err(e) => Err(e),
+        }
     }
 }
 
@@ -199,10 +206,13 @@ pub struct TailnetInfo {
 /// Real `LocalAPI` client using Unix socket or HTTP.
 pub struct LocalApiClient {
     /// HTTP client for making requests.
-    client: reqwest::Client,
+    client: HttpClient,
 
     /// Base URL for the `LocalAPI` (socket path or HTTP URL).
     base_url: String,
+
+    /// Request timeout for `LocalAPI` calls.
+    request_timeout: Duration,
 }
 
 impl LocalApiClient {
@@ -231,48 +241,51 @@ impl LocalApiClient {
     ///
     /// This is useful for testing or when the `LocalAPI` is exposed over HTTP.
     ///
-    /// # Errors
-    ///
-    /// Returns an error if the HTTP client cannot be created.
-    pub fn with_http(base_url: impl Into<String>) -> TailscaleResult<Self> {
-        let client = reqwest::Client::builder()
-            .build()
-            .map_err(|e| TailscaleError::LocalApiRequest(e.to_string()))?;
-
+    #[must_use]
+    pub fn with_http(base_url: impl Into<String>) -> Self {
         let mut base_url_str = base_url.into();
         if base_url_str.ends_with('/') {
             base_url_str.pop();
         }
 
-        Ok(Self {
-            client,
+        Self {
+            client: HttpClientBuilder::new()
+                .user_agent("fcp-tailscale/0.1.0")
+                .build(),
             base_url: base_url_str,
-        })
+            request_timeout: DEFAULT_REQUEST_TIMEOUT,
+        }
     }
 
     async fn get<T: for<'de> Deserialize<'de>>(&self, path: &str) -> TailscaleResult<T> {
         let url = format!("{}{path}", self.base_url);
 
-        let response = self
-            .client
-            .get(&url)
-            .send()
-            .await
-            .map_err(|e| TailscaleError::LocalApiRequest(e.to_string()))?;
+        let response = match time::timeout(
+            self.request_timeout,
+            self.client.request(Method::Get, &url, Vec::new(), Vec::new()),
+        )
+        .await
+        {
+            Ok(Ok(response)) => response,
+            Ok(Err(error)) => return Err(TailscaleError::from_http_client_error(&error)),
+            Err(error) => return Err(TailscaleError::from_async_error(error, self.request_timeout)),
+        };
 
-        if !response.status().is_success() {
-            let status = response.status();
+        if !response.is_success() {
             // Limit body size for error messages to prevent DoS
-            let body_bytes = response.bytes().await.unwrap_or_default();
+            let body_bytes = response.bytes();
             let body =
                 String::from_utf8_lossy(&body_bytes[..body_bytes.len().min(4096)]).into_owned();
-            return Err(TailscaleError::LocalApiError(format!("{status}: {body}")));
+            let status = format!("{} {}", response.status, response.reason);
+            let message = if body.is_empty() {
+                status
+            } else {
+                format!("{status}: {body}")
+            };
+            return Err(TailscaleError::LocalApiError(message));
         }
 
-        response
-            .json()
-            .await
-            .map_err(|e| TailscaleError::ParseError(e.to_string()))
+        response.json().map_err(|e| TailscaleError::ParseError(e.to_string()))
     }
 }
 
@@ -563,8 +576,8 @@ mod tests {
         assert!(connected.is_connected().await.unwrap());
 
         let disconnected = MockTailscaleClient::disconnected();
-        // Disconnected returns error, not false
-        assert!(disconnected.is_connected().await.is_err());
+        // Disconnected returns Ok(false) instead of an error
+        assert!(!disconnected.is_connected().await.unwrap());
     }
 
     #[fcp_async_core::runtime::test]
@@ -686,8 +699,8 @@ mod tests {
 
     #[test]
     fn test_local_api_client_with_http() {
-        let result = LocalApiClient::with_http("http://127.0.0.1:8080");
-        assert!(result.is_ok());
+        let client = LocalApiClient::with_http("http://127.0.0.1:8080");
+        assert_eq!(client.base_url, "http://127.0.0.1:8080");
     }
 
     #[fcp_async_core::runtime::test]
@@ -990,13 +1003,13 @@ mod tests {
 
     #[test]
     fn local_api_client_strips_trailing_slash() {
-        let client = LocalApiClient::with_http("http://127.0.0.1:8080/").unwrap();
+        let client = LocalApiClient::with_http("http://127.0.0.1:8080/");
         assert_eq!(client.base_url, "http://127.0.0.1:8080");
     }
 
     #[test]
     fn local_api_client_no_trailing_slash() {
-        let client = LocalApiClient::with_http("http://127.0.0.1:8080").unwrap();
+        let client = LocalApiClient::with_http("http://127.0.0.1:8080");
         assert_eq!(client.base_url, "http://127.0.0.1:8080");
     }
 

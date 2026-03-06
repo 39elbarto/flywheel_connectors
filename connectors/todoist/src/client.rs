@@ -138,13 +138,22 @@ impl TodoistClient {
         }
     }
 
-    #[instrument(skip(self), fields(url))]
-    async fn get(&self, path: &str) -> TodoistResult<serde_json::Value> {
+    #[instrument(skip(self, query), fields(url))]
+    async fn get(
+        &self,
+        path: &str,
+        query: Option<&[(&str, &str)]>,
+    ) -> TodoistResult<serde_json::Value> {
         let url = format!("{}{path}", self.base_url);
         debug!(url = %url, "GET request");
-        let req = self
+        let mut req = self
             .add_auth(self.client.get(&url))
             .header("Accept", "application/json");
+        
+        if let Some(q) = query {
+            req = req.query(q);
+        }
+            
         let resp = req.send().await?;
         self.handle_response(resp).await
     }
@@ -191,7 +200,7 @@ impl TodoistClient {
 
     /// List all projects for the authenticated user.
     pub async fn list_projects(&self) -> TodoistResult<serde_json::Value> {
-        self.get("/projects").await
+        self.get("/projects", None).await
     }
 
     // -- Tasks --
@@ -201,8 +210,11 @@ impl TodoistClient {
         &self,
         project_id: Option<&str>,
     ) -> TodoistResult<serde_json::Value> {
-        let qs = build_query(&[project_id.map(|pid| ("project_id", pid.to_string()))]);
-        self.get(&format!("/tasks{qs}")).await
+        if let Some(pid) = project_id {
+            self.get("/tasks", Some(&[("project_id", pid)])).await
+        } else {
+            self.get("/tasks", None).await
+        }
     }
 
     /// Create a new task.
@@ -222,19 +234,6 @@ impl TodoistClient {
     pub async fn delete_task(&self, task_id: &str) -> TodoistResult<serde_json::Value> {
         self.delete(&format!("/tasks/{task_id}")).await
     }
-}
-
-fn build_query(params: &[Option<(&str, String)>]) -> String {
-    let mut qs = String::new();
-    let mut sep = '?';
-    for param in params.iter().flatten() {
-        qs.push(sep);
-        qs.push_str(param.0);
-        qs.push('=');
-        qs.push_str(&param.1);
-        sep = '&';
-    }
-    qs
 }
 
 #[cfg(test)]
@@ -268,30 +267,6 @@ mod tests {
         let cred = TodoistAuth::CredentialId(CredentialId::new());
         let label = cred.redacted_label();
         assert!(label.starts_with("credential_id:"));
-    }
-
-    #[test]
-    fn build_query_empty() {
-        assert_eq!(build_query(&[None, None]), "");
-    }
-
-    #[test]
-    fn build_query_one() {
-        assert_eq!(
-            build_query(&[Some(("project_id", "proj_abc".into()))]),
-            "?project_id=proj_abc"
-        );
-    }
-
-    #[test]
-    fn build_query_two() {
-        assert_eq!(
-            build_query(&[
-                Some(("project_id", "proj_abc".into())),
-                Some(("filter", "today".into()))
-            ]),
-            "?project_id=proj_abc&filter=today"
-        );
     }
 
     #[test]

@@ -25,10 +25,10 @@ use fcp_sdk::{
     },
     validate_input_with_limits, validate_output_with_limits,
 };
-use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tracing::{info, warn};
+use url::Url;
 
 use crate::{
     api::DiscordApiClient,
@@ -998,6 +998,7 @@ impl DiscordConnector {
     /// This is an optimization to avoid wasting resources on capability verification
     /// for requests that will fail validation anyway.
     fn validate_input_early(operation: &str, input: &serde_json::Value) -> FcpResult<()> {
+        const MAX_CONTENT_LENGTH: usize = 2000;
         const MAX_EMBEDS: usize = 10;
         const MAX_EMBED_TOTAL_CHARS: usize = 6000;
 
@@ -1015,6 +1016,18 @@ impl DiscordConnector {
                     return Err(FcpError::InvalidRequest {
                         code: 1003,
                         message: "Either 'content' or 'embeds' must be provided".into(),
+                    });
+                }
+
+                if let Some(content) = content
+                    && content.len() > MAX_CONTENT_LENGTH
+                {
+                    return Err(FcpError::InvalidRequest {
+                        code: 1004,
+                        message: format!(
+                            "Content exceeds {MAX_CONTENT_LENGTH} character limit (got {} characters)",
+                            content.len()
+                        ),
                     });
                 }
 
@@ -1179,7 +1192,6 @@ impl DiscordConnector {
     }
 
     async fn invoke_send_message(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
-
         // Validate input first (before checking api) for better error messages
         let channel_id = input
             .get("channel_id")
@@ -1287,7 +1299,6 @@ impl DiscordConnector {
     }
 
     async fn invoke_edit_message(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
-
         // Validate input first (before checking api) for better error messages
         let channel_id = input
             .get("channel_id")
@@ -1743,7 +1754,7 @@ impl DiscordConnector {
                             let _ = lease_shutdown_tx.send(true);
                             break;
                         }
-                    }
+                    },
                     changed = lease_shutdown_rx.changed() => {
                         if changed.is_err() || *lease_shutdown_rx.borrow() {
                             break;

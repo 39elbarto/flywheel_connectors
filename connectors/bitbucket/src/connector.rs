@@ -77,10 +77,10 @@ impl BitbucketConfig {
             });
         }
 
-        let auth = if has_app_password {
+        let auth = if let (Some(u), Some(p)) = (app_password_username.clone(), app_password_value.clone()) {
             BitbucketAuth::AppPassword {
-                username: app_password_username.unwrap(),
-                app_password: app_password_value.unwrap(),
+                username: u,
+                app_password: p,
             }
         } else if let Some(token) = access_token {
             BitbucketAuth::AccessToken(token)

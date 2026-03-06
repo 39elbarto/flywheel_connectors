@@ -4,11 +4,10 @@
 //! stdin/stdout. It is intentionally lightweight and deterministic.
 
 use std::io;
-use std::process::Stdio;
 use std::sync::Arc;
 
 use fcp_async_core::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use fcp_async_core::process::{Child, ChildStdin, ChildStdout, Command};
+use fcp_async_core::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use fcp_async_core::sync::Mutex;
 use fcp_async_core::task::JoinHandle;
 
@@ -40,16 +39,13 @@ impl ConnectorProcessRunner {
 
         let mut child = cmd.spawn()?;
         let stdin = child
-            .stdin
-            .take()
+            .stdin()
             .ok_or_else(|| io::Error::other("connector stdin unavailable"))?;
         let stdout = child
-            .stdout
-            .take()
+            .stdout()
             .ok_or_else(|| io::Error::other("connector stdout unavailable"))?;
         let stderr = child
-            .stderr
-            .take()
+            .stderr()
             .ok_or_else(|| io::Error::other("connector stderr unavailable"))?;
 
         let stderr_lines = Arc::new(Mutex::new(Vec::new()));
@@ -124,8 +120,8 @@ impl ConnectorProcessRunner {
     ///
     /// # Errors
     /// Returns an IO error if the process cannot be terminated.
-    pub async fn terminate(&mut self) -> io::Result<()> {
-        self.child.kill().await
+    pub fn terminate(&mut self) -> io::Result<()> {
+        self.child.kill().map_err(Into::into)
     }
 
     /// Drain captured stderr lines since the last call.
@@ -147,7 +143,7 @@ mod tests {
         let mut runner = ConnectorProcessRunner::spawn("cat", &[], &[])
             .await
             .expect("cat should spawn");
-        runner.terminate().await.expect("should terminate");
+        runner.terminate().expect("should terminate");
     }
 
     #[fcp_async_core::runtime::test]
@@ -159,7 +155,7 @@ mod tests {
         runner.send_json(&msg).await.unwrap();
         let response = runner.read_json().await.unwrap();
         assert_eq!(response, msg);
-        runner.terminate().await.unwrap();
+        runner.terminate().unwrap();
     }
 
     #[fcp_async_core::runtime::test]
@@ -170,7 +166,7 @@ mod tests {
         let msg = json!({"jsonrpc": "2.0", "method": "test", "params": [1, 2, 3]});
         let response = runner.request(&msg).await.unwrap();
         assert_eq!(response, msg);
-        runner.terminate().await.unwrap();
+        runner.terminate().unwrap();
     }
 
     #[fcp_async_core::runtime::test]
@@ -183,7 +179,7 @@ mod tests {
             let response = runner.request(&msg).await.unwrap();
             assert_eq!(response["id"], i);
         }
-        runner.terminate().await.unwrap();
+        runner.terminate().unwrap();
     }
 
     #[fcp_async_core::runtime::test]
@@ -251,7 +247,7 @@ mod tests {
         );
         assert!(lines[0].contains("error line 1"));
         assert!(lines[1].contains("error line 2"));
-        runner.terminate().await.unwrap();
+        runner.terminate().unwrap();
     }
 
     #[fcp_async_core::runtime::test]
@@ -264,7 +260,7 @@ mod tests {
         assert!(!first.is_empty());
         let second = runner.drain_stderr_lines().await;
         assert!(second.is_empty(), "drain should clear buffer");
-        runner.terminate().await.unwrap();
+        runner.terminate().unwrap();
     }
 
     #[fcp_async_core::runtime::test]
@@ -284,7 +280,7 @@ mod tests {
         let response = runner.request(&msg).await.unwrap();
         assert_eq!(response["params"]["nested"]["a"], json!([1, 2, 3]));
         assert!(response["params"]["nested"]["b"].is_null());
-        runner.terminate().await.unwrap();
+        runner.terminate().unwrap();
     }
 
     #[fcp_async_core::runtime::test]
@@ -295,6 +291,6 @@ mod tests {
         let msg = json!({});
         let response = runner.request(&msg).await.unwrap();
         assert!(response.as_object().unwrap().is_empty());
-        runner.terminate().await.unwrap();
+        runner.terminate().unwrap();
     }
 }

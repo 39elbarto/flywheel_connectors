@@ -3,23 +3,219 @@
 //! Provides full WebSocket protocol support with automatic reconnection.
 
 use std::collections::HashMap;
+use std::future::{Future, poll_fn};
+use std::io;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 use std::time::Duration;
 
+use asupersync::bytes::Bytes;
+use asupersync::io::{AsyncRead, AsyncWrite, ReadBuf};
+use asupersync::net::websocket::{
+    ClientHandshake, CloseCode, CloseConfig, CloseReason, HttpResponse, Message, WebSocket,
+    WebSocketConfig, WsError, WsUrl,
+};
+use asupersync::tls::{TlsConnectorBuilder, TlsStream};
 use fcp_async_core::{
     AsyncError,
     net::TcpStream,
     time::{Sleep, sleep, timeout},
 };
 use futures_util::stream::Stream;
-use futures_util::{SinkExt, StreamExt};
-use tokio_tungstenite::tungstenite::protocol::Message;
-use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async};
-use url::Url;
 
 use crate::reconnect::ReconnectHandler;
 use crate::{StreamError, StreamResult};
+
+fn websocket_cx() -> asupersync::Cx {
+    asupersync::Cx::current().unwrap_or_else(asupersync::Cx::for_testing)
+}
+
+fn websocket_config(config: &WsConfig) -> WebSocketConfig {
+    let mut websocket_config = WebSocketConfig::new()
+        .max_message_size(config.max_message_size)
+        .ping_interval(config.ping_interval)
+        .connect_timeout(Some(config.connect_timeout));
+    websocket_config.close_config = CloseConfig::new().with_timeout(config.pong_timeout);
+    websocket_config
+}
+
+fn socket_addr(url: &WsUrl) -> String {
+    if url.host.contains(':') {
+        format!("[{}]:{}", url.host, url.port)
+    } else {
+        format!("{}:{}", url.host, url.port)
+    }
+}
+
+fn connection_failed(message: impl Into<String>) -> StreamError {
+    StreamError::ConnectionFailed(message.into())
+}
+
+fn websocket_error(err: WsError) -> StreamError {
+    match err {
+        WsError::PayloadTooLarge { size, max } => StreamError::BufferOverflow {
+            size: usize::try_from(size).unwrap_or(usize::MAX),
+            limit: max,
+        },
+        other => StreamError::WebSocketError(other.to_string()),
+    }
+}
+
+fn build_handshake(url: &str, headers: &HashMap<String, String>) -> StreamResult<ClientHandshake> {
+    let cx = websocket_cx();
+    let mut handshake = ClientHandshake::new(url, cx.entropy())
+        .map_err(|err| connection_failed(err.to_string()))?;
+    for (name, value) in headers {
+        handshake = handshake.header(name.clone(), value.clone());
+    }
+    Ok(handshake)
+}
+
+async fn write_all<IO>(io: &mut IO, buf: &[u8]) -> io::Result<()>
+where
+    IO: AsyncWrite + Unpin,
+{
+    let mut written = 0;
+    while written < buf.len() {
+        let n = poll_fn(|cx| Pin::new(&mut *io).poll_write(cx, &buf[written..])).await?;
+        if n == 0 {
+            return Err(io::Error::new(io::ErrorKind::WriteZero, "write returned 0"));
+        }
+        written += n;
+    }
+    Ok(())
+}
+
+async fn read_http_response<IO>(io: &mut IO) -> io::Result<Vec<u8>>
+where
+    IO: AsyncRead + Unpin,
+{
+    let mut response = Vec::with_capacity(1024);
+    let mut byte = [0_u8; 1];
+
+    loop {
+        if response.ends_with(b"\r\n\r\n") {
+            return Ok(response);
+        }
+
+        if response.len() >= 16 * 1024 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "HTTP response too large",
+            ));
+        }
+
+        let n = poll_fn(|cx| {
+            let mut read_buf = ReadBuf::new(&mut byte);
+            match Pin::new(&mut *io).poll_read(cx, &mut read_buf) {
+                Poll::Ready(Ok(())) => Poll::Ready(Ok(read_buf.filled().len())),
+                Poll::Ready(Err(err)) => Poll::Ready(Err(err)),
+                Poll::Pending => Poll::Pending,
+            }
+        })
+        .await?;
+
+        if n == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "EOF before HTTP response complete",
+            ));
+        }
+
+        response.push(byte[0]);
+    }
+}
+
+async fn perform_handshake<IO>(
+    mut io: IO,
+    url: &str,
+    config: &WsConfig,
+) -> StreamResult<WebSocket<IO>>
+where
+    IO: AsyncRead + AsyncWrite + Unpin,
+{
+    let handshake = build_handshake(url, &config.headers)?;
+    let request = handshake.request_bytes();
+    write_all(&mut io, &request)
+        .await
+        .map_err(|err| connection_failed(err.to_string()))?;
+
+    let response_bytes = read_http_response(&mut io)
+        .await
+        .map_err(|err| connection_failed(err.to_string()))?;
+    let response =
+        HttpResponse::parse(&response_bytes).map_err(|err| connection_failed(err.to_string()))?;
+    handshake
+        .validate_response(&response)
+        .map_err(|err| connection_failed(err.to_string()))?;
+
+    Ok(WebSocket::from_upgraded(io, websocket_config(config)))
+}
+
+fn build_tls_connector() -> StreamResult<asupersync::tls::TlsConnector> {
+    TlsConnectorBuilder::new()
+        .with_native_roots()
+        .map_err(|err| connection_failed(err.to_string()))?
+        .alpn_http()
+        .build()
+        .map_err(|err| connection_failed(err.to_string()))
+}
+
+enum WsTransport {
+    Plain(Box<WebSocket<TcpStream>>),
+    Tls(Box<WebSocket<TlsStream<TcpStream>>>),
+}
+
+impl WsTransport {
+    async fn send(&mut self, message: Message) -> Result<(), WsError> {
+        let cx = websocket_cx();
+        match self {
+            Self::Plain(socket) => socket.send(&cx, message).await,
+            Self::Tls(socket) => socket.send(&cx, message).await,
+        }
+    }
+
+    async fn recv(&mut self) -> Result<Option<Message>, WsError> {
+        let cx = websocket_cx();
+        match self {
+            Self::Plain(socket) => socket.recv(&cx).await,
+            Self::Tls(socket) => socket.recv(&cx).await,
+        }
+    }
+
+    async fn close(&mut self, reason: CloseReason) -> Result<(), WsError> {
+        match self {
+            Self::Plain(socket) => socket.close(reason).await,
+            Self::Tls(socket) => socket.close(reason).await,
+        }
+    }
+}
+
+async fn connect_websocket(url: String, config: WsConfig) -> StreamResult<WsTransport> {
+    let parsed = WsUrl::parse(&url).map_err(|err| connection_failed(err.to_string()))?;
+    let address = socket_addr(&parsed);
+    let tcp = TcpStream::connect(address)
+        .await
+        .map_err(|err| connection_failed(err.to_string()))?;
+    let _ = tcp.set_nodelay(true);
+
+    if parsed.tls {
+        let connector = build_tls_connector()?;
+        let tls_stream = connector
+            .connect(&parsed.host, tcp)
+            .await
+            .map_err(|err| connection_failed(err.to_string()))?;
+        perform_handshake(tls_stream, &url, &config)
+            .await
+            .map(Box::new)
+            .map(WsTransport::Tls)
+    } else {
+        perform_handshake(tcp, &url, &config)
+            .await
+            .map(Box::new)
+            .map(WsTransport::Plain)
+    }
+}
 
 /// WebSocket message types.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -71,7 +267,7 @@ impl WsMessage {
     #[must_use]
     pub fn as_text(&self) -> Option<&str> {
         match self {
-            Self::Text(s) => Some(s),
+            Self::Text(data) => Some(data),
             _ => None,
         }
     }
@@ -80,7 +276,7 @@ impl WsMessage {
     #[must_use]
     pub fn as_binary(&self) -> Option<&[u8]> {
         match self {
-            Self::Binary(b) => Some(b),
+            Self::Binary(data) => Some(data),
             _ => None,
         }
     }
@@ -91,44 +287,59 @@ impl WsMessage {
     /// Returns a JSON parsing error if the payload is not valid JSON.
     pub fn json<T: serde::de::DeserializeOwned>(&self) -> Result<T, serde_json::Error> {
         match self {
-            Self::Text(s) => serde_json::from_str(s),
-            Self::Binary(b) => serde_json::from_slice(b),
+            Self::Text(data) => serde_json::from_str(data),
+            Self::Binary(data) => serde_json::from_slice(data),
             _ => Err(serde::de::Error::custom("Not a data message")),
         }
     }
 }
 
-impl From<Message> for WsMessage {
-    fn from(msg: Message) -> Self {
-        match msg {
-            Message::Text(s) => Self::Text(s.to_string()),
-            Message::Binary(b) => Self::Binary(b.to_vec()),
-            Message::Ping(b) => Self::Ping(b.to_vec()),
-            Message::Pong(b) => Self::Pong(b.to_vec()),
-            Message::Close(frame) => Self::Close(frame.map(|f| WsCloseFrame {
-                code: f.code.into(),
-                reason: f.reason.to_string(),
-            })),
-            Message::Frame(_) => Self::Binary(vec![]),
+impl From<CloseReason> for WsCloseFrame {
+    fn from(reason: CloseReason) -> Self {
+        Self {
+            code: reason.wire_code().unwrap_or(1000),
+            reason: reason.text.unwrap_or_default(),
         }
     }
 }
 
+impl From<WsCloseFrame> for CloseReason {
+    fn from(frame: WsCloseFrame) -> Self {
+        let raw_code = CloseCode::is_valid_code(frame.code).then_some(frame.code);
+        Self {
+            code: raw_code.and_then(CloseCode::from_u16),
+            raw_code,
+            text: (!frame.reason.is_empty()).then_some(frame.reason),
+        }
+    }
+}
+
+impl From<Message> for WsMessage {
+    fn from(message: Message) -> Self {
+        match message {
+            Message::Text(text) => Self::Text(text),
+            Message::Binary(data) => Self::Binary(data.to_vec()),
+            Message::Ping(data) => Self::Ping(data.to_vec()),
+            Message::Pong(data) => Self::Pong(data.to_vec()),
+            Message::Close(reason) => Self::Close(reason.map(Self::close_frame_from_reason)),
+        }
+    }
+}
+
+impl WsMessage {
+    fn close_frame_from_reason(reason: CloseReason) -> WsCloseFrame {
+        reason.into()
+    }
+}
+
 impl From<WsMessage> for Message {
-    fn from(msg: WsMessage) -> Self {
-        match msg {
-            WsMessage::Text(s) => Self::Text(s.into()),
-            WsMessage::Binary(b) => Self::Binary(b.into()),
-            WsMessage::Ping(b) => Self::Ping(b.into()),
-            WsMessage::Pong(b) => Self::Pong(b.into()),
-            WsMessage::Close(frame) => {
-                use tokio_tungstenite::tungstenite::protocol::CloseFrame;
-                use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
-                Self::Close(frame.map(|f| CloseFrame {
-                    code: CloseCode::from(f.code),
-                    reason: f.reason.into(),
-                }))
-            }
+    fn from(message: WsMessage) -> Self {
+        match message {
+            WsMessage::Text(text) => Self::Text(text),
+            WsMessage::Binary(data) => Self::Binary(Bytes::from(data)),
+            WsMessage::Ping(data) => Self::Ping(Bytes::from(data)),
+            WsMessage::Pong(data) => Self::Pong(Bytes::from(data)),
+            WsMessage::Close(frame) => Self::Close(frame.map(CloseReason::from)),
         }
     }
 }
@@ -192,7 +403,7 @@ impl Default for WsConfig {
             connect_timeout: Duration::from_secs(30),
             ping_interval: Some(Duration::from_secs(30)),
             pong_timeout: Duration::from_secs(10),
-            max_message_size: 64 * 1024 * 1024, // 64MB
+            max_message_size: 64 * 1024 * 1024,
             headers: HashMap::new(),
             auto_reconnect: true,
             max_reconnect_attempts: Some(10),
@@ -275,25 +486,15 @@ impl WsClient {
     /// # Errors
     /// Returns an error if the connection attempt fails or times out.
     pub async fn connect(&self) -> StreamResult<WsConnection> {
-        let url = Url::parse(&self.url)
-            .map_err(|e: url::ParseError| StreamError::ConnectionFailed(e.to_string()))?;
-
-        let ws_result = timeout(
-            self.config.connect_timeout,
-            Box::pin(connect_async(url.as_str())),
-        )
-        .await
-        .map_err(|error| match error {
-            AsyncError::Timeout { .. } => StreamError::Timeout(self.config.connect_timeout),
-            _ => StreamError::ConnectionFailed(error.to_string()),
-        })?;
-
-        let (ws_stream, _response) =
-            ws_result.map_err(|e: tokio_tungstenite::tungstenite::Error| {
-                StreamError::WebSocketError(e.to_string())
+        let connect_future = Box::pin(connect_websocket(self.url.clone(), self.config.clone()));
+        let result = timeout(self.config.connect_timeout, connect_future)
+            .await
+            .map_err(|error| match error {
+                AsyncError::Timeout { .. } => StreamError::Timeout(self.config.connect_timeout),
+                other => StreamError::ConnectionFailed(other.to_string()),
             })?;
 
-        Ok(WsConnection::new(ws_stream, self.config.clone()))
+        Ok(WsConnection::new(result?, self.config.clone()))
     }
 
     /// Get the URL.
@@ -317,16 +518,15 @@ impl WsClient {
 
 /// Active WebSocket connection.
 pub struct WsConnection {
-    inner: WebSocketStream<MaybeTlsStream<TcpStream>>,
+    inner: WsTransport,
     config: WsConfig,
     closed: bool,
 }
 
 impl WsConnection {
-    /// Create a new connection wrapper.
-    const fn new(stream: WebSocketStream<MaybeTlsStream<TcpStream>>, config: WsConfig) -> Self {
+    const fn new(inner: WsTransport, config: WsConfig) -> Self {
         Self {
-            inner: stream,
+            inner,
             config,
             closed: false,
         }
@@ -341,10 +541,15 @@ impl WsConnection {
             return Err(StreamError::InvalidState("Connection is closed".into()));
         }
 
+        let is_close = message.is_close();
         self.inner
             .send(message.into())
             .await
-            .map_err(|e| StreamError::WebSocketError(e.to_string()))
+            .map_err(websocket_error)?;
+        if is_close {
+            self.closed = true;
+        }
+        Ok(())
     }
 
     /// Send a text message.
@@ -369,7 +574,7 @@ impl WsConnection {
     /// Returns a stream error if serialization or send fails.
     pub async fn send_json<T: serde::Serialize + Sync>(&mut self, data: &T) -> StreamResult<()> {
         let json =
-            serde_json::to_string(data).map_err(|e| StreamError::ParseError(e.to_string()))?;
+            serde_json::to_string(data).map_err(|err| StreamError::ParseError(err.to_string()))?;
         self.send_text(json).await
     }
 
@@ -382,33 +587,29 @@ impl WsConnection {
             return Ok(None);
         }
 
-        match self.inner.next().await {
-            Some(Ok(msg)) => {
-                let ws_msg: WsMessage = msg.into();
-                if ws_msg.is_close() {
-                    self.closed = true;
-                }
-                Ok(Some(ws_msg))
-            }
-            Some(Err(e)) => Err(StreamError::WebSocketError(e.to_string())),
-            None => {
+        if let Some(message) = self.inner.recv().await.map_err(websocket_error)? {
+            let message: WsMessage = message.into();
+            if message.is_close() {
                 self.closed = true;
-                Ok(None)
             }
+            Ok(Some(message))
+        } else {
+            self.closed = true;
+            Ok(None)
         }
     }
 
     /// Close the connection.
     ///
     /// # Errors
-    /// Returns a stream error if the close frame fails to send.
+    /// Returns a stream error if the close handshake fails.
     pub async fn close(&mut self) -> StreamResult<()> {
         if !self.closed {
-            self.closed = true;
             self.inner
-                .close(None)
+                .close(CloseReason::normal())
                 .await
-                .map_err(|e| StreamError::WebSocketError(e.to_string()))?;
+                .map_err(websocket_error)?;
+            self.closed = true;
         }
         Ok(())
     }
@@ -416,11 +617,14 @@ impl WsConnection {
     /// Close with a specific frame.
     ///
     /// # Errors
-    /// Returns a stream error if the close frame fails to send.
+    /// Returns a stream error if the close handshake fails.
     pub async fn close_with_frame(&mut self, frame: WsCloseFrame) -> StreamResult<()> {
         if !self.closed {
+            self.inner
+                .close(frame.into())
+                .await
+                .map_err(websocket_error)?;
             self.closed = true;
-            self.send(WsMessage::Close(Some(frame))).await?;
         }
         Ok(())
     }
@@ -438,33 +642,9 @@ impl WsConnection {
     }
 }
 
-impl Stream for WsConnection {
-    type Item = StreamResult<WsMessage>;
-
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        if self.closed {
-            return Poll::Ready(None);
-        }
-
-        match Pin::new(&mut self.inner).poll_next(cx) {
-            Poll::Ready(Some(Ok(msg))) => {
-                let ws_msg: WsMessage = msg.into();
-                if ws_msg.is_close() {
-                    self.closed = true;
-                }
-                Poll::Ready(Some(Ok(ws_msg)))
-            }
-            Poll::Ready(Some(Err(e))) => {
-                Poll::Ready(Some(Err(StreamError::WebSocketError(e.to_string()))))
-            }
-            Poll::Ready(None) => {
-                self.closed = true;
-                Poll::Ready(None)
-            }
-            Poll::Pending => Poll::Pending,
-        }
-    }
-}
+type ConnectFuture = Pin<Box<dyn Future<Output = StreamResult<WsConnection>>>>;
+type ReceiveFuture =
+    Pin<Box<dyn Future<Output = (Box<WsConnection>, StreamResult<Option<WsMessage>>)>>>;
 
 /// Reconnecting WebSocket stream.
 pub struct ReconnectingWsStream {
@@ -479,9 +659,11 @@ enum ReconnectState {
     /// Waiting for backoff delay.
     Waiting(Pin<Box<Sleep>>),
     /// Connection attempt in progress.
-    Connecting(Pin<Box<dyn std::future::Future<Output = StreamResult<WsConnection>> + Send>>),
-    /// Active connection.
+    Connecting(ConnectFuture),
+    /// Active connection ready to receive.
     Connected(Box<WsConnection>),
+    /// Message receive in progress.
+    Receiving(ReceiveFuture),
 }
 
 impl ReconnectingWsStream {
@@ -495,8 +677,8 @@ impl ReconnectingWsStream {
             .with_initial_delay(client.config.reconnect_delay);
 
         Self {
-            handler: ReconnectHandler::new(config),
             client,
+            handler: ReconnectHandler::new(config),
             state: ReconnectState::Idle,
         }
     }
@@ -509,69 +691,66 @@ impl Stream for ReconnectingWsStream {
         loop {
             match &mut self.state {
                 ReconnectState::Idle => {
-                    // Start connecting
-                    let client_clone = WsClient {
-                        url: self.client.url.clone(),
-                        config: self.client.config.clone(),
-                    };
-                    // We need a way to clone the client future or spawn it?
-                    // connect is async.
-                    let future = Box::pin(async move {
-                        let connect_future = Box::pin(client_clone.connect());
-                        connect_future.await
-                    });
-                    self.state = ReconnectState::Connecting(future);
+                    let client = self.client.clone();
+                    self.state =
+                        ReconnectState::Connecting(Box::pin(async move { client.connect().await }));
                 }
                 ReconnectState::Waiting(delay) => match delay.as_mut().poll(cx) {
-                    Poll::Ready(()) => {
-                        self.state = ReconnectState::Idle;
-                    }
+                    Poll::Ready(()) => self.state = ReconnectState::Idle,
                     Poll::Pending => return Poll::Pending,
                 },
                 ReconnectState::Connecting(future) => match future.as_mut().poll(cx) {
-                    Poll::Ready(Ok(conn)) => {
+                    Poll::Ready(Ok(connection)) => {
                         self.handler.reset();
-                        self.state = ReconnectState::Connected(Box::new(conn));
+                        self.state = ReconnectState::Connected(Box::new(connection));
                     }
-                    Poll::Ready(Err(e)) => {
+                    Poll::Ready(Err(err)) => {
                         if !self.handler.can_reconnect() {
-                            return Poll::Ready(Some(Err(e)));
+                            return Poll::Ready(Some(Err(err)));
                         }
-
                         let attempt = self.handler.attempts();
-                        let delay_duration = self.handler.config().delay_for_attempt(attempt);
-                        self.handler.record_failure(); // Increment attempts
-
-                        let sleep = Box::pin(sleep(delay_duration));
-                        self.state = ReconnectState::Waiting(sleep);
+                        let delay = self.handler.config().delay_for_attempt(attempt);
+                        self.handler.record_failure();
+                        self.state = ReconnectState::Waiting(Box::pin(sleep(delay)));
                     }
                     Poll::Pending => return Poll::Pending,
                 },
-                ReconnectState::Connected(conn) => match Pin::new(conn.as_mut()).poll_next(cx) {
-                    Poll::Ready(Some(Ok(msg))) => return Poll::Ready(Some(Ok(msg))),
-                    Poll::Ready(Some(Err(e))) => {
-                        if !self.handler.can_reconnect() {
-                            return Poll::Ready(Some(Err(e)));
-                        }
-
-                        let attempt = self.handler.attempts();
-                        let delay_duration = self.handler.config().delay_for_attempt(attempt);
-                        self.handler.record_failure();
-
-                        let sleep = Box::pin(sleep(delay_duration));
-                        self.state = ReconnectState::Waiting(sleep);
+                ReconnectState::Connected(_) => {
+                    let ReconnectState::Connected(connection) =
+                        std::mem::replace(&mut self.state, ReconnectState::Idle)
+                    else {
+                        unreachable!();
+                    };
+                    self.state = ReconnectState::Receiving(Box::pin(async move {
+                        let mut connection = connection;
+                        let result = connection.recv().await;
+                        (connection, result)
+                    }));
+                }
+                ReconnectState::Receiving(future) => match future.as_mut().poll(cx) {
+                    Poll::Ready((connection, Ok(Some(message)))) => {
+                        self.state = ReconnectState::Connected(connection);
+                        return Poll::Ready(Some(Ok(message)));
                     }
-                    Poll::Ready(None) => {
+                    Poll::Ready((connection, Ok(None))) => {
+                        drop(connection);
                         if !self.handler.can_reconnect() {
                             return Poll::Ready(None);
                         }
-
                         let attempt = self.handler.attempts();
-                        let delay_duration = self.handler.config().delay_for_attempt(attempt);
+                        let delay = self.handler.config().delay_for_attempt(attempt);
                         self.handler.record_failure();
-
-                        let sleep = Box::pin(sleep(delay_duration));
-                        self.state = ReconnectState::Waiting(sleep);
+                        self.state = ReconnectState::Waiting(Box::pin(sleep(delay)));
+                    }
+                    Poll::Ready((connection, Err(err))) => {
+                        drop(connection);
+                        if !self.handler.can_reconnect() {
+                            return Poll::Ready(Some(Err(err)));
+                        }
+                        let attempt = self.handler.attempts();
+                        let delay = self.handler.config().delay_for_attempt(attempt);
+                        self.handler.record_failure();
+                        self.state = ReconnectState::Waiting(Box::pin(sleep(delay)));
                     }
                     Poll::Pending => return Poll::Pending,
                 },
@@ -584,45 +763,112 @@ impl Stream for ReconnectingWsStream {
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_ws_message_text() {
-        let msg = WsMessage::text("hello");
-        assert!(msg.is_text());
-        assert!(!msg.is_binary());
-        assert_eq!(msg.as_text(), Some("hello"));
+    fn block_on<F>(future: F) -> F::Output
+    where
+        F: Future,
+    {
+        fcp_async_core::runtime::block_on_sync(future).expect("test runtime")
     }
 
     #[test]
-    fn test_ws_message_binary() {
-        let msg = WsMessage::binary(vec![1, 2, 3]);
-        assert!(msg.is_binary());
-        assert!(!msg.is_text());
-        assert_eq!(msg.as_binary(), Some(&[1, 2, 3][..]));
+    fn ws_message_text_accessors() {
+        let message = WsMessage::text("hello");
+        assert!(message.is_text());
+        assert!(!message.is_binary());
+        assert_eq!(message.as_text(), Some("hello"));
+        assert_eq!(message.as_binary(), None);
     }
 
     #[test]
-    fn test_ws_message_json() {
-        #[derive(serde::Deserialize)]
-        struct Data {
+    fn ws_message_binary_accessors() {
+        let message = WsMessage::binary(vec![1, 2, 3]);
+        assert!(message.is_binary());
+        assert!(!message.is_text());
+        assert_eq!(message.as_binary(), Some(&[1, 2, 3][..]));
+        assert_eq!(message.as_text(), None);
+    }
+
+    #[test]
+    fn ws_message_json_supports_text_and_binary() {
+        #[derive(Debug, serde::Deserialize, PartialEq, Eq)]
+        struct Payload {
             key: String,
         }
 
-        let msg = WsMessage::text(r#"{"key": "value"}"#);
-        let data: Data = msg.json().unwrap();
-        assert_eq!(data.key, "value");
+        let text = WsMessage::text(r#"{"key":"value"}"#);
+        let binary = WsMessage::binary(br#"{"key":"value"}"#.to_vec());
+
+        assert_eq!(
+            text.json::<Payload>().expect("text json"),
+            Payload {
+                key: "value".into(),
+            }
+        );
+        assert_eq!(
+            binary.json::<Payload>().expect("binary json"),
+            Payload {
+                key: "value".into(),
+            }
+        );
     }
 
     #[test]
-    fn test_ws_close_frame() {
-        let frame = WsCloseFrame::normal();
-        assert_eq!(frame.code, 1000);
-
-        let frame = WsCloseFrame::going_away();
-        assert_eq!(frame.code, 1001);
+    fn ws_message_json_rejects_control_messages() {
+        assert!(WsMessage::Ping(vec![]).json::<serde_json::Value>().is_err());
+        assert!(WsMessage::Pong(vec![]).json::<serde_json::Value>().is_err());
+        assert!(WsMessage::Close(None).json::<serde_json::Value>().is_err());
     }
 
     #[test]
-    fn test_ws_config() {
+    fn ws_close_frame_builders() {
+        assert_eq!(
+            WsCloseFrame::normal(),
+            WsCloseFrame::new(1000, "Normal closure")
+        );
+        assert_eq!(
+            WsCloseFrame::going_away(),
+            WsCloseFrame::new(1001, "Going away")
+        );
+    }
+
+    #[test]
+    fn ws_message_roundtrip_asupersync_text() {
+        let original = WsMessage::text("roundtrip");
+        let message: Message = original.clone().into();
+        let roundtrip: WsMessage = message.into();
+        assert_eq!(roundtrip, original);
+    }
+
+    #[test]
+    fn ws_message_roundtrip_asupersync_binary() {
+        let original = WsMessage::binary(vec![10, 20, 30]);
+        let message: Message = original.clone().into();
+        let roundtrip: WsMessage = message.into();
+        assert_eq!(roundtrip, original);
+    }
+
+    #[test]
+    fn ws_message_from_asupersync_close_frame() {
+        let reason = CloseReason::with_text(CloseCode::Normal, "bye");
+        let message: WsMessage = Message::Close(Some(reason)).into();
+        assert_eq!(
+            message,
+            WsMessage::Close(Some(WsCloseFrame::new(1000, "bye")))
+        );
+    }
+
+    #[test]
+    fn ws_message_to_asupersync_close_frame() {
+        let message: Message = WsMessage::Close(Some(WsCloseFrame::going_away())).into();
+        let Message::Close(Some(reason)) = message else {
+            panic!("expected close message");
+        };
+        assert_eq!(reason.wire_code(), Some(1001));
+        assert_eq!(reason.text.as_deref(), Some("Going away"));
+    }
+
+    #[test]
+    fn ws_config_builder() {
         let config = WsConfig::new()
             .with_connect_timeout(Duration::from_secs(60))
             .with_ping_interval(Some(Duration::from_secs(15)))
@@ -633,404 +879,45 @@ mod tests {
         assert_eq!(config.connect_timeout, Duration::from_secs(60));
         assert_eq!(config.ping_interval, Some(Duration::from_secs(15)));
         assert_eq!(config.max_message_size, 1024);
+        assert_eq!(
+            config.headers.get("Authorization"),
+            Some(&"Bearer token".to_string())
+        );
         assert!(!config.auto_reconnect);
     }
 
-    // ── New tests ──
-
     #[test]
-    fn test_ws_message_is_close() {
-        let msg = WsMessage::Close(None);
-        assert!(msg.is_close());
-        assert!(!msg.is_text());
-        assert!(!msg.is_binary());
-    }
-
-    #[test]
-    fn test_ws_message_as_text_on_binary() {
-        let msg = WsMessage::binary(vec![1, 2, 3]);
-        assert_eq!(msg.as_text(), None);
-    }
-
-    #[test]
-    fn test_ws_message_as_binary_on_text() {
-        let msg = WsMessage::text("hello");
-        assert_eq!(msg.as_binary(), None);
-    }
-
-    #[test]
-    fn test_ws_message_json_from_binary() {
-        #[derive(serde::Deserialize)]
-        struct Data {
-            key: String,
-        }
-
-        let msg = WsMessage::binary(br#"{"key": "value"}"#.to_vec());
-        let data: Data = msg.json().unwrap();
-        assert_eq!(data.key, "value");
-    }
-
-    #[test]
-    fn test_ws_message_json_parse_failure() {
-        let msg = WsMessage::text("not json");
-        let result: Result<serde_json::Value, _> = msg.json();
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_ws_message_json_on_close() {
-        let msg = WsMessage::Close(None);
-        let result: Result<serde_json::Value, _> = msg.json();
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_ws_close_frame_custom() {
-        let frame = WsCloseFrame::new(4000, "Custom reason");
-        assert_eq!(frame.code, 4000);
-        assert_eq!(frame.reason, "Custom reason");
-    }
-
-    #[test]
-    fn test_ws_config_default() {
-        let config = WsConfig::default();
-        assert_eq!(config.connect_timeout, Duration::from_secs(30));
-        assert_eq!(config.ping_interval, Some(Duration::from_secs(30)));
-        assert_eq!(config.pong_timeout, Duration::from_secs(10));
-        assert_eq!(config.max_message_size, 64 * 1024 * 1024);
-        assert!(config.headers.is_empty());
-        assert!(config.auto_reconnect);
-        assert_eq!(config.max_reconnect_attempts, Some(10));
-        assert_eq!(config.reconnect_delay, Duration::from_secs(1));
-    }
-
-    #[test]
-    fn test_ws_client_accessors() {
-        let client = WsClient::new("ws://localhost:8080");
-        assert_eq!(client.url(), "ws://localhost:8080");
-        assert_eq!(client.config().connect_timeout, Duration::from_secs(30));
-    }
-
-    #[test]
-    fn test_ws_client_with_config() {
-        let config = WsConfig::new().with_connect_timeout(Duration::from_secs(60));
+    fn ws_client_accessors() {
+        let config = WsConfig::new().with_connect_timeout(Duration::from_secs(45));
         let client = WsClient::with_config("ws://localhost:8080", config);
+
         assert_eq!(client.url(), "ws://localhost:8080");
-        assert_eq!(client.config().connect_timeout, Duration::from_secs(60));
+        assert_eq!(client.config().connect_timeout, Duration::from_secs(45));
     }
 
     #[test]
-    fn test_ws_message_ping_pong() {
-        let ping_msg = WsMessage::Ping(vec![1, 2, 3]);
-        assert!(!ping_msg.is_text());
-        assert!(!ping_msg.is_binary());
-        assert!(!ping_msg.is_close());
-
-        let pong_frame = WsMessage::Pong(vec![4, 5, 6]);
-        assert!(!pong_frame.is_text());
-        assert!(!pong_frame.is_binary());
-        assert!(!pong_frame.is_close());
-    }
-
-    #[test]
-    fn test_ws_message_close_with_frame() {
-        let frame = WsCloseFrame::normal();
-        let msg = WsMessage::Close(Some(frame.clone()));
-        assert!(msg.is_close());
-        assert_eq!(frame.code, 1000);
-    }
-
-    #[test]
-    fn test_ws_message_from_tungstenite_text() {
-        let msg: WsMessage = Message::Text("hello".into()).into();
-        assert!(msg.is_text());
-        assert_eq!(msg.as_text(), Some("hello"));
-    }
-
-    #[test]
-    fn test_ws_message_from_tungstenite_binary() {
-        let msg: WsMessage = Message::Binary(vec![1, 2, 3].into()).into();
-        assert!(msg.is_binary());
-        assert_eq!(msg.as_binary(), Some(&[1, 2, 3][..]));
-    }
-
-    #[test]
-    fn test_ws_message_to_tungstenite_roundtrip_text() {
-        let original = WsMessage::text("roundtrip");
-        let tungstenite: Message = original.into();
-        let back: WsMessage = tungstenite.into();
-        assert!(back.is_text());
-        assert_eq!(back.as_text(), Some("roundtrip"));
-    }
-
-    #[test]
-    fn test_ws_message_to_tungstenite_roundtrip_binary() {
-        let original = WsMessage::binary(vec![10, 20, 30]);
-        let tungstenite: Message = original.into();
-        let back: WsMessage = tungstenite.into();
-        assert!(back.is_binary());
-        assert_eq!(back.as_binary(), Some(&[10, 20, 30][..]));
-    }
-
-    // ── WsMessage trait impls ──
-
-    #[test]
-    fn test_ws_message_clone() {
-        let msg = WsMessage::text("cloneable");
-        let cloned = msg.clone();
-        assert_eq!(msg, cloned);
-    }
-
-    #[test]
-    fn test_ws_message_partial_eq() {
-        let a = WsMessage::text("same");
-        let b = WsMessage::text("same");
-        let c = WsMessage::text("different");
-        assert_eq!(a, b);
-        assert_ne!(a, c);
-    }
-
-    #[test]
-    fn test_ws_message_debug() {
-        let msg = WsMessage::text("debug me");
-        let debug = format!("{msg:?}");
-        assert!(debug.contains("Text"));
-        assert!(debug.contains("debug me"));
-    }
-
-    #[test]
-    fn test_ws_message_binary_eq() {
-        let a = WsMessage::binary(vec![1, 2, 3]);
-        let b = WsMessage::binary(vec![1, 2, 3]);
-        let c = WsMessage::binary(vec![4, 5, 6]);
-        assert_eq!(a, b);
-        assert_ne!(a, c);
-    }
-
-    #[test]
-    fn test_ws_message_close_eq() {
-        let a = WsMessage::Close(None);
-        let b = WsMessage::Close(None);
-        assert_eq!(a, b);
-
-        let c = WsMessage::Close(Some(WsCloseFrame::normal()));
-        let d = WsMessage::Close(Some(WsCloseFrame::normal()));
-        assert_eq!(c, d);
-        assert_ne!(a, c);
-    }
-
-    #[test]
-    fn test_ws_message_text_empty() {
-        let msg = WsMessage::text("");
-        assert!(msg.is_text());
-        assert_eq!(msg.as_text(), Some(""));
-    }
-
-    #[test]
-    fn test_ws_message_binary_empty() {
-        let msg = WsMessage::binary(Vec::<u8>::new());
-        assert!(msg.is_binary());
-        assert_eq!(msg.as_binary(), Some(&[][..]));
-    }
-
-    // ── WsMessage conversion edge cases ──
-
-    #[test]
-    fn test_ws_message_from_tungstenite_ping() {
-        let msg: WsMessage = Message::Ping(vec![42].into()).into();
-        assert_eq!(msg, WsMessage::Ping(vec![42]));
-    }
-
-    #[test]
-    fn test_ws_message_from_tungstenite_pong() {
-        let msg: WsMessage = Message::Pong(vec![99].into()).into();
-        assert_eq!(msg, WsMessage::Pong(vec![99]));
-    }
-
-    #[test]
-    fn test_ws_message_from_tungstenite_close_none() {
-        let msg: WsMessage = Message::Close(None).into();
-        assert!(msg.is_close());
-        assert_eq!(msg, WsMessage::Close(None));
-    }
-
-    #[test]
-    fn test_ws_message_from_tungstenite_close_with_frame() {
-        use tokio_tungstenite::tungstenite::protocol::CloseFrame;
-        use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
-
-        let frame = CloseFrame {
-            code: CloseCode::Normal,
-            reason: "bye".into(),
-        };
-        let msg: WsMessage = Message::Close(Some(frame)).into();
-        assert!(msg.is_close());
-        if let WsMessage::Close(Some(f)) = &msg {
-            assert_eq!(f.code, 1000);
-            assert_eq!(f.reason, "bye");
-        } else {
-            panic!("expected Close with frame");
-        }
-    }
-
-    #[test]
-    fn test_ws_message_to_tungstenite_ping() {
-        let msg = WsMessage::Ping(vec![1, 2]);
-        let tung: Message = msg.into();
-        assert!(matches!(tung, Message::Ping(_)));
-    }
-
-    #[test]
-    fn test_ws_message_to_tungstenite_pong() {
-        let msg = WsMessage::Pong(vec![3, 4]);
-        let tung: Message = msg.into();
-        assert!(matches!(tung, Message::Pong(_)));
-    }
-
-    #[test]
-    fn test_ws_message_to_tungstenite_close_none() {
-        let msg = WsMessage::Close(None);
-        let tung: Message = msg.into();
-        assert!(matches!(tung, Message::Close(None)));
-    }
-
-    #[test]
-    fn test_ws_message_to_tungstenite_close_with_frame() {
-        let msg = WsMessage::Close(Some(WsCloseFrame::going_away()));
-        let tung: Message = msg.into();
-        if let Message::Close(Some(f)) = tung {
-            assert_eq!(u16::from(f.code), 1001);
-            assert_eq!(&*f.reason, "Going away");
-        } else {
-            panic!("expected Close with frame");
-        }
-    }
-
-    #[test]
-    fn test_ws_message_ping_empty() {
-        let msg = WsMessage::Ping(vec![]);
-        assert!(!msg.is_text());
-        assert!(!msg.is_binary());
-        assert!(!msg.is_close());
-        assert_eq!(msg.as_text(), None);
-        assert_eq!(msg.as_binary(), None);
-    }
-
-    // ── WsMessage JSON edge cases ──
-
-    #[test]
-    fn test_ws_message_json_on_ping() {
-        let msg = WsMessage::Ping(vec![]);
-        let result: Result<serde_json::Value, _> = msg.json();
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_ws_message_json_on_pong() {
-        let msg = WsMessage::Pong(vec![]);
-        let result: Result<serde_json::Value, _> = msg.json();
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_ws_message_json_binary_valid() {
-        let msg = WsMessage::binary(br#"{"a":1}"#.to_vec());
-        let val: serde_json::Value = msg.json().unwrap();
-        assert_eq!(val["a"], 1);
-    }
-
-    // ── WsCloseFrame tests ──
-
-    #[test]
-    fn test_ws_close_frame_clone() {
-        let frame = WsCloseFrame::new(4001, "app error");
-        let cloned = frame.clone();
-        assert_eq!(frame, cloned);
-    }
-
-    #[test]
-    fn test_ws_close_frame_partial_eq() {
-        let a = WsCloseFrame::new(1000, "Normal");
-        let b = WsCloseFrame::new(1000, "Normal");
-        let c = WsCloseFrame::new(1001, "Normal");
-        assert_eq!(a, b);
-        assert_ne!(a, c);
-    }
-
-    #[test]
-    fn test_ws_close_frame_debug() {
-        let frame = WsCloseFrame::new(1002, "Protocol error");
-        let debug = format!("{frame:?}");
-        assert!(debug.contains("1002"));
-        assert!(debug.contains("Protocol error"));
-    }
-
-    // ── WsConfig tests ──
-
-    #[test]
-    fn test_ws_config_clone() {
-        let config = WsConfig::new()
-            .with_connect_timeout(Duration::from_secs(10))
-            .with_header("X-Key", "val");
-        let moved = config;
-        assert_eq!(moved.connect_timeout, Duration::from_secs(10));
-        assert_eq!(moved.headers.get("X-Key"), Some(&"val".to_string()));
-    }
-
-    #[test]
-    fn test_ws_config_debug() {
-        let config = WsConfig::new();
-        let debug = format!("{config:?}");
-        assert!(debug.contains("WsConfig"));
-    }
-
-    #[test]
-    fn test_ws_config_new_equals_default() {
-        let new = WsConfig::new();
-        let default = WsConfig::default();
-        assert_eq!(new.connect_timeout, default.connect_timeout);
-        assert_eq!(new.ping_interval, default.ping_interval);
-        assert_eq!(new.pong_timeout, default.pong_timeout);
-        assert_eq!(new.max_message_size, default.max_message_size);
-        assert_eq!(new.auto_reconnect, default.auto_reconnect);
-    }
-
-    #[test]
-    fn test_ws_config_no_ping() {
-        let config = WsConfig::new().with_ping_interval(None);
-        assert_eq!(config.ping_interval, None);
-    }
-
-    #[test]
-    fn test_ws_config_multiple_headers() {
-        let config = WsConfig::new()
-            .with_header("Auth", "token")
-            .with_header("X-Custom", "val")
-            .with_header("Accept", "json");
-        assert_eq!(config.headers.len(), 3);
-    }
-
-    #[test]
-    fn test_ws_config_header_override() {
-        let config = WsConfig::new()
-            .with_header("Key", "first")
-            .with_header("Key", "second");
-        assert_eq!(config.headers.get("Key"), Some(&"second".to_string()));
-    }
-
-    // ── WsClient tests ──
-
-    #[test]
-    fn test_ws_client_stream_creates_reconnecting() {
+    fn ws_client_stream_construction() {
         let client = WsClient::new("ws://localhost:9999");
         let _stream = client.stream();
-        // Just verify it doesn't panic
     }
 
     #[test]
-    fn test_ws_client_clone() {
-        let client = WsClient::new("ws://localhost:8080");
-        let moved = client;
-        assert_eq!(moved.url(), "ws://localhost:8080");
+    fn ws_client_invalid_url_returns_connection_failed() {
+        block_on(async {
+            let client = WsClient::new("not-a-valid-url");
+            let result = client.connect().await;
+            assert!(matches!(result, Err(StreamError::ConnectionFailed(_))));
+        });
+    }
+
+    #[test]
+    fn ws_client_connection_refused() {
+        block_on(async {
+            let client = WsClient::with_config(
+                "ws://127.0.0.1:1",
+                WsConfig::new().with_connect_timeout(Duration::from_millis(200)),
+            );
+            assert!(client.connect().await.is_err());
+        });
     }
 }

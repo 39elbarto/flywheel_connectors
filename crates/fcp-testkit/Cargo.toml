@@ -51,9 +51,6 @@ reqwest.workspace = true
 # Log scanning
 regex.workspace = true
 
-[dev-dependencies]
-tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
-
 [features]
 default = ["cursor-store-object-store"]
 cursor-store-object-store = ["fcp-sdk/cursor-store-object-store", "dep:fcp-store"]

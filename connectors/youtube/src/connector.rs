@@ -258,11 +258,9 @@ impl YouTubeConnector {
             },
         });
 
-        if self.config.is_none() {
+        let Some(config) = self.config.as_ref() else {
             return DoctorResult::from_checks(checks);
-        }
-
-        let config = self.config.as_ref().unwrap();
+        };
 
         // 2. Client initialized
         checks.push(DoctorCheck {
@@ -342,7 +340,13 @@ impl YouTubeConnector {
             });
         };
 
-        let config = self.config.as_ref().unwrap();
+        let Some(config) = self.config.as_ref() else {
+            let report =
+                SelfCheckReport::failed("not_configured", "Not configured — call configure first");
+            return serde_json::to_value(report).map_err(|e| FcpError::Internal {
+                message: format!("Failed to serialize self-check report: {e}"),
+            });
+        };
 
         // In credential_id mode, we can't verify connectivity without the egress proxy
         if config.auth.is_secretless() {

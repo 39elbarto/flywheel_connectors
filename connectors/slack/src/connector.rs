@@ -16,10 +16,9 @@ use fcp_core::{
     OperationInfo, Principal, RiskLevel, SafetyTier, SessionId, SimulateRequest, SimulateResponse,
     TrustLevel, ZoneId,
 };
-use futures_util::{SinkExt, StreamExt};
+use fcp_streaming::{WsClient, WsConnection, WsMessage};
 use serde::Deserialize;
 use serde_json::{Value, json};
-use tokio_tungstenite::{connect_async, tungstenite::protocol::Message as WsMessage};
 use tracing::{info, instrument, warn};
 
 use crate::{
@@ -38,6 +37,12 @@ const SOCKET_DEFAULT_TOPICS: &[&str] = &[
     "slack.reaction.added",
     "slack.reaction.removed",
 ];
+
+async fn connect_socket_mode_websocket(
+    url: &str,
+) -> Result<WsConnection, fcp_streaming::StreamError> {
+    WsClient::new(url).connect().await
+}
 
 /// FCP Slack Connector.
 pub struct SlackConnector {
@@ -612,29 +617,25 @@ impl SlackConnector {
                     }
                 };
 
-                match connect_async(&ws_url).await {
-                    Ok((stream, _response)) => {
+                match connect_socket_mode_websocket(&ws_url).await {
+                    Ok(mut ws_stream) => {
                         reconnect_delay_ms = SOCKET_RECONNECT_MIN_MS;
-                        let (mut ws_write, mut ws_read) = stream.split();
 
                         loop {
                             fcp_async_core::select! {
                                 changed = shutdown_rx.changed() => {
                                     if changed.is_ok() && *shutdown_rx.borrow() {
-                                        let _ = ws_write.send(WsMessage::Close(None)).await;
+                                        let _ = ws_stream.close().await;
                                         break;
                                     }
                                     if changed.is_err() {
                                         break;
                                     }
-                                }
-                                inbound = ws_read.next() => {
-                                    let Some(frame_result) = inbound else {
-                                        break;
-                                    };
-
-                                    let frame = match frame_result {
-                                        Ok(frame) => frame,
+                                },
+                                inbound = ws_stream.recv() => {
+                                    let frame = match inbound {
+                                        Ok(Some(frame)) => frame,
+                                        Ok(None) => break,
                                         Err(err) => {
                                             warn!("Socket Mode websocket receive error: {err}");
                                             break;
@@ -657,7 +658,7 @@ impl SlackConnector {
 
                                             if let Some(envelope_id) = parsed_frame.envelope_id.as_deref() {
                                                 let ack = json!({ "envelope_id": envelope_id }).to_string();
-                                                if let Err(err) = ws_write.send(WsMessage::Text(ack.into())).await {
+                                                if let Err(err) = ws_stream.send_text(ack).await {
                                                     warn!("Socket Mode ack send failed: {err}");
                                                     break;
                                                 }
@@ -688,7 +689,7 @@ impl SlackConnector {
                                             }
                                         }
                                         WsMessage::Ping(data) => {
-                                            if let Err(err) = ws_write.send(WsMessage::Pong(data)).await {
+                                            if let Err(err) = ws_stream.send(WsMessage::Pong(data)).await {
                                                 warn!("Socket Mode pong send failed: {err}");
                                                 break;
                                             }
@@ -696,9 +697,7 @@ impl SlackConnector {
                                         WsMessage::Close(_frame) => {
                                             break;
                                         }
-                                        WsMessage::Binary(_)
-                                        | WsMessage::Pong(_)
-                                        | WsMessage::Frame(_) => {
+                                        WsMessage::Binary(_) | WsMessage::Pong(_) => {
                                             // ignore non-text control/data frames for socket-mode events
                                         }
                                     }
@@ -1363,6 +1362,17 @@ mod tests {
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
+    fn run_with_tokio_reactor<F, T>(future: F) -> T
+    where
+        F: std::future::Future<Output = T>,
+    {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build tokio test runtime")
+            .block_on(future)
+    }
+
     fn generate_valid_token(signing_key: &Ed25519SigningKey, cap: &str) -> CapabilityToken {
         let now = Utc::now();
         let cose = CapabilityTokenBuilder::new()
@@ -1510,125 +1520,130 @@ mod tests {
         assert!(!checks[0]["passed"].as_bool().unwrap());
     }
 
-    #[fcp_async_core::runtime::test]
-    async fn test_doctor_valid_token_all_scopes() {
-        let mock_server = MockServer::start().await;
+    #[test]
+    fn test_doctor_valid_token_all_scopes() {
+        run_with_tokio_reactor(async {
+            let mock_server = MockServer::start().await;
 
-        Mock::given(method("POST"))
-            .and(path("/auth.test"))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .insert_header(
-                        "x-oauth-scopes",
-                        "channels:read,channels:history,chat:write,users:read,reactions:write",
-                    )
-                    .set_body_json(json!({
-                        "ok": true,
-                        "url": "https://test-workspace.slack.com/",
-                        "team": "Test Workspace",
-                        "user": "testbot",
-                        "team_id": "T00000001",
-                        "user_id": "U00000001",
-                        "bot_id": "B00000001",
-                        "is_enterprise_install": false
-                    })),
-            )
-            .mount(&mock_server)
-            .await;
+            Mock::given(method("POST"))
+                .and(path("/auth.test"))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .insert_header(
+                            "x-oauth-scopes",
+                            "channels:read,channels:history,chat:write,users:read,reactions:write",
+                        )
+                        .set_body_json(json!({
+                            "ok": true,
+                            "url": "https://test-workspace.slack.com/",
+                            "team": "Test Workspace",
+                            "user": "testbot",
+                            "team_id": "T00000001",
+                            "user_id": "U00000001",
+                            "bot_id": "B00000001",
+                            "is_enterprise_install": false
+                        })),
+                )
+                .mount(&mock_server)
+                .await;
 
-        let mut connector = SlackConnector::new();
-        connector.client = Some(
-            SlackClient::new("xoxb-test-token")
-                .unwrap()
-                .with_base_url(mock_server.uri()),
-        );
-
-        let result = connector.handle_doctor().await.unwrap();
-
-        assert!(result["ready"].as_bool().unwrap());
-        let checks = result["checks"].as_array().unwrap();
-        assert_eq!(checks.len(), 3);
-
-        // All checks should pass
-        for check in checks {
-            assert!(
-                check["passed"].as_bool().unwrap(),
-                "Check {} failed: {}",
-                check["name"],
-                check["message"]
+            let mut connector = SlackConnector::new();
+            connector.client = Some(
+                SlackClient::new("xoxb-test-token")
+                    .unwrap()
+                    .with_base_url(mock_server.uri()),
             );
-        }
+
+            let result = connector.handle_doctor().await.unwrap();
+
+            assert!(result["ready"].as_bool().unwrap());
+            let checks = result["checks"].as_array().unwrap();
+            assert_eq!(checks.len(), 3);
+
+            for check in checks {
+                assert!(
+                    check["passed"].as_bool().unwrap(),
+                    "Check {} failed: {}",
+                    check["name"],
+                    check["message"]
+                );
+            }
+        });
     }
 
-    #[fcp_async_core::runtime::test]
-    async fn test_doctor_missing_scopes() {
-        let mock_server = MockServer::start().await;
+    #[test]
+    fn test_doctor_missing_scopes() {
+        run_with_tokio_reactor(async {
+            let mock_server = MockServer::start().await;
 
-        Mock::given(method("POST"))
-            .and(path("/auth.test"))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .insert_header("x-oauth-scopes", "channels:read")
-                    .set_body_json(json!({
-                        "ok": true,
-                        "url": "https://test.slack.com/",
-                        "team": "Test",
-                        "user": "bot",
-                        "team_id": "T1",
-                        "user_id": "U1"
-                    })),
-            )
-            .mount(&mock_server)
-            .await;
+            Mock::given(method("POST"))
+                .and(path("/auth.test"))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .insert_header("x-oauth-scopes", "channels:read")
+                        .set_body_json(json!({
+                            "ok": true,
+                            "url": "https://test.slack.com/",
+                            "team": "Test",
+                            "user": "bot",
+                            "team_id": "T1",
+                            "user_id": "U1"
+                        })),
+                )
+                .mount(&mock_server)
+                .await;
 
-        let mut connector = SlackConnector::new();
-        connector.client = Some(
-            SlackClient::new("xoxb-test")
-                .unwrap()
-                .with_base_url(mock_server.uri()),
-        );
+            let mut connector = SlackConnector::new();
+            connector.client = Some(
+                SlackClient::new("xoxb-test")
+                    .unwrap()
+                    .with_base_url(mock_server.uri()),
+            );
 
-        let result = connector.handle_doctor().await.unwrap();
+            let result = connector.handle_doctor().await.unwrap();
 
-        assert!(!result["ready"].as_bool().unwrap());
-        let checks = result["checks"].as_array().unwrap();
+            assert!(!result["ready"].as_bool().unwrap());
+            let checks = result["checks"].as_array().unwrap();
 
-        let scope_check = checks.iter().find(|c| c["name"] == "scopes_valid").unwrap();
-        assert!(!scope_check["passed"].as_bool().unwrap());
-        let msg = scope_check["message"].as_str().unwrap();
-        assert!(msg.contains("channels:history"));
-        assert!(msg.contains("chat:write"));
-        assert!(msg.contains("users:read"));
+            let scope_check = checks.iter().find(|c| c["name"] == "scopes_valid").unwrap();
+            assert!(!scope_check["passed"].as_bool().unwrap());
+            let msg = scope_check["message"].as_str().unwrap();
+            assert!(msg.contains("channels:history"));
+            assert!(msg.contains("chat:write"));
+            assert!(msg.contains("users:read"));
+        });
     }
 
-    #[fcp_async_core::runtime::test]
-    async fn test_doctor_invalid_token() {
-        let mock_server = MockServer::start().await;
+    #[test]
+    fn test_doctor_invalid_token() {
+        run_with_tokio_reactor(async {
+            let mock_server = MockServer::start().await;
 
-        Mock::given(method("POST"))
-            .and(path("/auth.test"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "ok": false,
-                "error": "invalid_auth"
-            })))
-            .mount(&mock_server)
-            .await;
+            Mock::given(method("POST"))
+                .and(path("/auth.test"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                    "ok": false,
+                    "error": "invalid_auth"
+                })))
+                .mount(&mock_server)
+                .await;
 
-        let mut connector = SlackConnector::new();
-        connector.client = Some(
-            SlackClient::new("xoxb-bad-token")
-                .unwrap()
-                .with_base_url(mock_server.uri()),
-        );
+            let mut connector = SlackConnector::new();
+            connector.client = Some(
+                SlackClient::new("xoxb-bad-token")
+                    .unwrap()
+                    .with_base_url(mock_server.uri()),
+            );
 
-        let result = connector.handle_doctor().await.unwrap();
+            let result = connector.handle_doctor().await.unwrap();
 
-        assert!(!result["ready"].as_bool().unwrap());
-        let checks = result["checks"].as_array().unwrap();
+            assert!(!result["ready"].as_bool().unwrap());
+            let checks = result["checks"].as_array().unwrap();
 
-        let token_check = checks.iter().find(|c| c["name"] == "token_valid").unwrap();
-        assert!(!token_check["passed"].as_bool().unwrap());
-        assert!(token_check["message"].as_str().unwrap().contains("invalid"));
+            let token_check = checks.iter().find(|c| c["name"] == "token_valid").unwrap();
+            assert!(!token_check["passed"].as_bool().unwrap());
+            assert!(token_check["message"].as_str().unwrap().contains("invalid"));
+        });
     }
 
     #[test]

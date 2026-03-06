@@ -11,14 +11,10 @@ use std::{
 };
 
 use fcp_async_core::channel::mpsc;
-use fcp_async_core::net::TcpStream;
 use fcp_async_core::sync::Mutex;
-use futures_util::{SinkExt, StreamExt};
+use fcp_streaming::{WsClient, WsConnection, WsMessage};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use tokio_tungstenite::{
-    MaybeTlsStream, WebSocketStream, connect_async, tungstenite::protocol::Message as WsMessage,
-};
 use tracing::{debug, error, info, instrument, warn};
 
 use crate::{
@@ -62,23 +58,34 @@ pub enum GatewayOpcode {
 const GATEWAY_EVENT_BUFFER_CAPACITY: usize = 256;
 pub const DISCORD_GATEWAY_STATE_FILE: &str = "discord_gateway_state.json";
 
+async fn connect_gateway_websocket(url: &str) -> DiscordResult<WsConnection> {
+    WsClient::new(url)
+        .connect()
+        .await
+        .map_err(DiscordError::from)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use asupersync_tokio_compat::io::TokioIo;
     use fcp_async_core::net::TcpListener;
     use fcp_async_core::time::sleep;
+    use futures_util::{SinkExt, StreamExt};
     use serde_json::json;
-    use tokio_tungstenite::accept_async;
+    use tokio_tungstenite::{accept_async, tungstenite::protocol::Message as ServerWsMessage};
 
-    fn parse_payload(msg: WsMessage) -> GatewayPayload {
+    fn parse_payload(msg: ServerWsMessage) -> GatewayPayload {
         match msg {
-            WsMessage::Text(text) => serde_json::from_str(&text).expect("valid gateway payload"),
+            ServerWsMessage::Text(text) => {
+                serde_json::from_str(&text).expect("valid gateway payload")
+            }
             other => panic!("expected text payload, got {other:?}"),
         }
     }
 
-    fn hello_payload(interval_ms: u64) -> WsMessage {
-        WsMessage::Text(
+    fn hello_payload(interval_ms: u64) -> ServerWsMessage {
+        ServerWsMessage::Text(
             json!({
                 "op": GatewayOpcode::Hello as i32,
                 "d": { "heartbeat_interval": interval_ms },
@@ -90,8 +97,12 @@ mod tests {
         )
     }
 
-    fn dispatch_payload(event_name: &str, sequence: u64, data: &serde_json::Value) -> WsMessage {
-        WsMessage::Text(
+    fn dispatch_payload(
+        event_name: &str,
+        sequence: u64,
+        data: &serde_json::Value,
+    ) -> ServerWsMessage {
+        ServerWsMessage::Text(
             json!({
                 "op": GatewayOpcode::Dispatch as i32,
                 "d": data,
@@ -205,7 +216,9 @@ mod tests {
 
         let server = fcp_async_core::task::spawn(async move {
             let (socket, _) = listener.accept().await.expect("accept client");
-            let mut ws = accept_async(socket).await.expect("accept websocket");
+            let mut ws = accept_async(TokioIo::new(socket))
+                .await
+                .expect("accept websocket");
 
             ws.send(hello_payload(1_000)).await.expect("send hello");
 
@@ -241,7 +254,9 @@ mod tests {
             ws.close(None).await.expect("close websocket");
         });
 
-        let (client_ws, _) = connect_async(&ws_url).await.expect("connect websocket");
+        let client_ws = connect_gateway_websocket(&ws_url)
+            .await
+            .expect("connect websocket");
         let (event_tx, mut event_rx) = mpsc::channel(8);
         let mut state = GatewayState::default();
 
@@ -279,7 +294,9 @@ mod tests {
 
         let server = fcp_async_core::task::spawn(async move {
             let (socket, _) = listener.accept().await.expect("accept client");
-            let mut ws = accept_async(socket).await.expect("accept websocket");
+            let mut ws = accept_async(TokioIo::new(socket))
+                .await
+                .expect("accept websocket");
 
             ws.send(hello_payload(1_000)).await.expect("send hello");
 
@@ -300,7 +317,9 @@ mod tests {
             ws.close(None).await.expect("close websocket");
         });
 
-        let (client_ws, _) = connect_async(&ws_url).await.expect("connect websocket");
+        let client_ws = connect_gateway_websocket(&ws_url)
+            .await
+            .expect("connect websocket");
         let (event_tx, mut event_rx) = mpsc::channel(8);
         let mut state = GatewayState {
             session_id: Some("sess-resume".into()),
@@ -331,7 +350,9 @@ mod tests {
 
         let server = fcp_async_core::task::spawn(async move {
             let (socket, _) = listener.accept().await.expect("accept client");
-            let mut ws = accept_async(socket).await.expect("accept websocket");
+            let mut ws = accept_async(TokioIo::new(socket))
+                .await
+                .expect("accept websocket");
 
             ws.send(hello_payload(1_000)).await.expect("send hello");
             let _ = ws
@@ -340,7 +361,7 @@ mod tests {
                 .expect("identify frame")
                 .expect("identify frame ok");
 
-            ws.send(WsMessage::Text("{ this is not json".into()))
+            ws.send(ServerWsMessage::Text("{ this is not json".into()))
                 .await
                 .expect("send malformed frame");
             ws.send(dispatch_payload(
@@ -353,7 +374,9 @@ mod tests {
             ws.close(None).await.expect("close websocket");
         });
 
-        let (client_ws, _) = connect_async(&ws_url).await.expect("connect websocket");
+        let client_ws = connect_gateway_websocket(&ws_url)
+            .await
+            .expect("connect websocket");
         let (event_tx, mut event_rx) = mpsc::channel(8);
         let mut state = GatewayState::default();
 
@@ -380,7 +403,9 @@ mod tests {
 
         let server = fcp_async_core::task::spawn(async move {
             let (socket, _) = listener.accept().await.expect("accept client");
-            let mut ws = accept_async(socket).await.expect("accept websocket");
+            let mut ws = accept_async(TokioIo::new(socket))
+                .await
+                .expect("accept websocket");
 
             ws.send(hello_payload(1_000)).await.expect("send hello");
 
@@ -394,7 +419,9 @@ mod tests {
             ws.close(None).await.expect("close websocket");
         });
 
-        let (client_ws, _) = connect_async(&ws_url).await.expect("connect websocket");
+        let client_ws = connect_gateway_websocket(&ws_url)
+            .await
+            .expect("connect websocket");
         let (event_tx, _event_rx) = mpsc::channel(8);
         let mut state = GatewayState {
             session_id: Some("sess-incomplete".into()),
@@ -423,7 +450,9 @@ mod tests {
 
         let server = fcp_async_core::task::spawn(async move {
             let (socket, _) = listener.accept().await.expect("accept client");
-            let mut ws = accept_async(socket).await.expect("accept websocket");
+            let mut ws = accept_async(TokioIo::new(socket))
+                .await
+                .expect("accept websocket");
 
             ws.send(hello_payload(1_000)).await.expect("send hello");
             let _ = ws
@@ -469,7 +498,9 @@ mod tests {
 
         let server = fcp_async_core::task::spawn(async move {
             let (socket, _) = listener.accept().await.expect("accept client");
-            let mut ws = accept_async(socket).await.expect("accept websocket");
+            let mut ws = accept_async(TokioIo::new(socket))
+                .await
+                .expect("accept websocket");
             ws.send(hello_payload(1_000)).await.expect("send hello");
             let _ = ws
                 .next()
@@ -545,7 +576,9 @@ mod tests {
 
         let server = fcp_async_core::task::spawn(async move {
             let (socket, _) = listener.accept().await.expect("accept client");
-            let mut ws = accept_async(socket).await.expect("accept websocket");
+            let mut ws = accept_async(TokioIo::new(socket))
+                .await
+                .expect("accept websocket");
             ws.send(hello_payload(1_000)).await.expect("send hello");
 
             let resume = parse_payload(
@@ -612,7 +645,9 @@ mod tests {
 
         let server = fcp_async_core::task::spawn(async move {
             let (socket, _) = listener.accept().await.expect("accept client");
-            let mut ws = accept_async(socket).await.expect("accept websocket");
+            let mut ws = accept_async(TokioIo::new(socket))
+                .await
+                .expect("accept websocket");
             ws.send(hello_payload(1_000)).await.expect("send hello");
 
             let first_payload = parse_payload(
@@ -783,8 +818,8 @@ impl GatewayConnection {
             "Connecting to Discord gateway"
         );
 
-        let (ws_stream, _) = match connect_async(&ws_url).await {
-            Ok(pair) => pair,
+        let ws_stream = match connect_gateway_websocket(&ws_url).await {
+            Ok(stream) => stream,
             Err(e) => {
                 self.active_connection.store(false, Ordering::Release);
                 return Err(DiscordError::Gateway(format!("Failed to connect WS: {e}")));
@@ -983,7 +1018,7 @@ impl std::fmt::Debug for GatewayStream {
 
 /// Run the gateway event loop.
 async fn run_gateway_loop(
-    ws_stream: WebSocketStream<MaybeTlsStream<TcpStream>>,
+    ws_stream: WsConnection,
     config: DiscordConfig,
     event_tx: mpsc::Sender<GatewayEvent>,
     mut state: GatewayState,
@@ -1007,17 +1042,15 @@ async fn run_gateway_loop(
 }
 
 async fn run_gateway_loop_inner(
-    ws_stream: WebSocketStream<MaybeTlsStream<TcpStream>>,
+    mut ws_stream: WsConnection,
     config: DiscordConfig,
     event_tx: &mpsc::Sender<GatewayEvent>,
     state: &mut GatewayState,
     state_path: Option<&Path>,
 ) -> DiscordResult<()> {
-    let (mut write, mut read) = ws_stream.split();
-
     // Wait for Hello
-    let hello = match read.next().await {
-        Some(Ok(WsMessage::Text(text))) => match serde_json::from_str::<GatewayPayload>(&text) {
+    let hello = match ws_stream.recv().await {
+        Ok(Some(WsMessage::Text(text))) => match serde_json::from_str::<GatewayPayload>(&text) {
             Ok(payload) => {
                 if payload.op != GatewayOpcode::Hello as i32 {
                     return Err(DiscordError::Gateway("Expected Hello opcode".into()));
@@ -1029,19 +1062,17 @@ async fn run_gateway_loop_inner(
             }
             Err(e) => return Err(e.into()),
         },
-        Some(Ok(msg)) => {
+        Ok(Some(msg)) => {
             return Err(DiscordError::Gateway(format!(
                 "Unexpected message: {msg:?}"
             )));
         }
-        Some(Err(e)) => {
-            return Err(DiscordError::Gateway(format!("WebSocket error: {e}")));
-        }
-        None => {
+        Ok(None) => {
             return Err(DiscordError::Gateway(
                 "Connection closed before Hello".into(),
             ));
         }
+        Err(e) => return Err(DiscordError::Gateway(format!("WebSocket error: {e}"))),
     };
 
     let heartbeat_interval = Duration::from_millis(hello.heartbeat_interval);
@@ -1074,13 +1105,11 @@ async fn run_gateway_loop_inner(
             t: None,
         };
 
-        if let Err(e) = write
-            .send(WsMessage::Text(
-                match serde_json::to_string(&resume_payload) {
-                    Ok(s) => s.into(),
-                    Err(e) => return Err(e.into()),
-                },
-            ))
+        if let Err(e) = ws_stream
+            .send_text(match serde_json::to_string(&resume_payload) {
+                Ok(s) => s,
+                Err(e) => return Err(e.into()),
+            })
             .await
         {
             return Err(DiscordError::Gateway(format!("Failed to send Resume: {e}")));
@@ -1108,13 +1137,11 @@ async fn run_gateway_loop_inner(
             t: None,
         };
 
-        if let Err(e) = write
-            .send(WsMessage::Text(
-                match serde_json::to_string(&identify_payload) {
-                    Ok(s) => s.into(),
-                    Err(e) => return Err(e.into()),
-                },
-            ))
+        if let Err(e) = ws_stream
+            .send_text(match serde_json::to_string(&identify_payload) {
+                Ok(s) => s,
+                Err(e) => return Err(e.into()),
+            })
             .await
         {
             return Err(DiscordError::Gateway(format!(
@@ -1125,14 +1152,14 @@ async fn run_gateway_loop_inner(
 
     // Main event loop
     let mut heartbeat_acked = true;
-    let mut heartbeat_interval_timer = fcp_async_core::time::interval(heartbeat_interval);
-    // Skip the first tick which fires immediately
-    heartbeat_interval_timer.tick().await;
+    let mut next_heartbeat_at = std::time::Instant::now() + heartbeat_interval;
 
     loop {
-        fcp_async_core::select! {
-            // Handle heartbeat timer
-            _ = heartbeat_interval_timer.tick() => {
+        let now = std::time::Instant::now();
+        let wait_for_message = next_heartbeat_at.saturating_duration_since(now);
+
+        match fcp_async_core::time::timeout(wait_for_message, ws_stream.recv()).await {
+            Err(_) => {
                 if !heartbeat_acked {
                     warn!("Heartbeat not acknowledged, connection zombied");
                     return Err(DiscordError::Gateway("Heartbeat timeout (zombied)".into()));
@@ -1141,94 +1168,92 @@ async fn run_gateway_loop_inner(
                     "op": GatewayOpcode::Heartbeat as i32,
                     "d": state.sequence
                 });
-                if let Err(e) = write.send(WsMessage::Text(heartbeat.to_string().into())).await {
+                if let Err(e) = ws_stream.send_text(heartbeat.to_string()).await {
                     error!(error = %e, "Failed to send heartbeat");
-                    return Err(DiscordError::Gateway(format!("Failed to send heartbeat: {e}")));
+                    return Err(DiscordError::Gateway(format!(
+                        "Failed to send heartbeat: {e}"
+                    )));
                 }
                 heartbeat_acked = false;
+                next_heartbeat_at = std::time::Instant::now() + heartbeat_interval;
                 debug!("Sent heartbeat");
             }
+            Ok(Ok(Some(WsMessage::Text(text)))) => {
+                let payload: GatewayPayload = match serde_json::from_str(&text) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        warn!(error = %e, "Failed to parse gateway payload");
+                        continue;
+                    }
+                };
 
-            // Handle incoming messages
-            msg = read.next() => {
-                match msg {
-                    Some(Ok(WsMessage::Text(text))) => {
-                        let payload: GatewayPayload = match serde_json::from_str(&text) {
-                            Ok(p) => p,
-                            Err(e) => {
-                                warn!(error = %e, "Failed to parse gateway payload");
-                                continue;
-                            }
-                        };
+                // Update sequence
+                if let Some(s) = payload.s {
+                    state.sequence = Some(s);
+                    persist_gateway_state_if_configured(state_path, state)?;
+                }
 
-                        // Update sequence
-                        if let Some(s) = payload.s {
-                            state.sequence = Some(s);
+                match GatewayOpcode::try_from(payload.op) {
+                    Ok(GatewayOpcode::Dispatch) => {
+                        let event_name = payload.t.clone().unwrap_or_default();
+                        let data = payload.d.clone().unwrap_or_default();
+                        let event = dispatch_event(event_name, data, state)?;
+                        persist_gateway_state_if_configured(state_path, state)?;
+
+                        if event_tx.send(event).await.is_err() {
+                            info!("Event receiver dropped, closing gateway");
+                            return Ok(());
+                        }
+                    }
+                    Ok(GatewayOpcode::HeartbeatAck) => {
+                        heartbeat_acked = true;
+                        debug!("Heartbeat acknowledged");
+                    }
+                    Ok(GatewayOpcode::Reconnect) => {
+                        info!("Received reconnect request");
+                        return Ok(());
+                    }
+                    Ok(GatewayOpcode::InvalidSession) => {
+                        let resumable = payload.d.and_then(|v| v.as_bool()).unwrap_or(false);
+                        warn!(resumable, "Session invalidated");
+                        if !resumable {
+                            // Clear session state - must re-identify
+                            state.clear_resume();
                             persist_gateway_state_if_configured(state_path, state)?;
                         }
-
-                        match GatewayOpcode::try_from(payload.op) {
-                            Ok(GatewayOpcode::Dispatch) => {
-                                let event_name = payload.t.clone().unwrap_or_default();
-                                let data = payload.d.clone().unwrap_or_default();
-                                let event = dispatch_event(event_name, data, state)?;
-                                persist_gateway_state_if_configured(state_path, state)?;
-
-                                if event_tx.send(event).await.is_err() {
-                                    info!("Event receiver dropped, closing gateway");
-                                    return Ok(());
-                                }
-                            }
-                            Ok(GatewayOpcode::HeartbeatAck) => {
-                                heartbeat_acked = true;
-                                debug!("Heartbeat acknowledged");
-                            }
-                            Ok(GatewayOpcode::Reconnect) => {
-                                info!("Received reconnect request");
-                                return Ok(());
-                            }
-                            Ok(GatewayOpcode::InvalidSession) => {
-                                let resumable = payload.d.and_then(|v| v.as_bool()).unwrap_or(false);
-                                warn!(resumable, "Session invalidated");
-                                if !resumable {
-                                    // Clear session state - must re-identify
-                                    state.clear_resume();
-                                    persist_gateway_state_if_configured(state_path, state)?;
-                                }
-                                return Ok(());
-                            }
-                            Ok(GatewayOpcode::Heartbeat) => {
-                                // Immediately send heartbeat
-                                let heartbeat = json!({
-                                    "op": GatewayOpcode::Heartbeat as i32,
-                                    "d": state.sequence
-                                });
-                                if let Err(e) = write.send(WsMessage::Text(heartbeat.to_string().into())).await {
-                                    error!(error = %e, "Failed to send heartbeat response");
-                                    return Err(DiscordError::Gateway(format!("Failed to send heartbeat: {e}")));
-                                }
-                            }
-                            _ => {
-                                debug!(op = payload.op, "Unhandled opcode");
-                            }
+                        return Ok(());
+                    }
+                    Ok(GatewayOpcode::Heartbeat) => {
+                        let heartbeat = json!({
+                            "op": GatewayOpcode::Heartbeat as i32,
+                            "d": state.sequence
+                        });
+                        if let Err(e) = ws_stream.send_text(heartbeat.to_string()).await {
+                            error!(error = %e, "Failed to send heartbeat response");
+                            return Err(DiscordError::Gateway(format!(
+                                "Failed to send heartbeat: {e}"
+                            )));
                         }
                     }
-                    Some(Ok(WsMessage::Close(frame))) => {
-                        info!(frame = ?frame, "Gateway connection closed");
-                        return Ok(());
-                    }
-                    Some(Ok(_)) => {
-                        // Ignore other message types (ping, pong, binary)
-                    }
-                    Some(Err(e)) => {
-                        error!(error = %e, "WebSocket error");
-                        return Err(DiscordError::Gateway(format!("WebSocket error: {e}")));
-                    }
-                    None => {
-                        info!("Gateway connection ended");
-                        return Ok(());
+                    _ => {
+                        debug!(op = payload.op, "Unhandled opcode");
                     }
                 }
+            }
+            Ok(Ok(Some(WsMessage::Close(frame)))) => {
+                info!(frame = ?frame, "Gateway connection closed");
+                return Ok(());
+            }
+            Ok(Ok(Some(_))) => {
+                // Ignore other message types (ping, pong, binary)
+            }
+            Ok(Ok(None)) => {
+                info!("Gateway connection ended");
+                return Ok(());
+            }
+            Ok(Err(e)) => {
+                error!(error = %e, "WebSocket error");
+                return Err(DiscordError::Gateway(format!("WebSocket error: {e}")));
             }
         }
     }

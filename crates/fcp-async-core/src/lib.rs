@@ -16,24 +16,25 @@ use std::time::{Duration, Instant};
 
 use thiserror::Error;
 
+pub use fcp_async_core_macros::{main, test};
+
 #[doc(hidden)]
 pub mod __private {
-    pub use tokio;
+    pub use futures_util;
 }
 
 /// `select!` macro routed through the async-core substrate.
 #[macro_export]
 macro_rules! select {
-    ($($tokens:tt)*) => {
-        $crate::__private::tokio::select! { $($tokens)* }
+    (biased; $( $pattern:pat = $future:expr => $body:expr ),+ $(,)?) => {
+        $crate::__private::futures_util::select_biased! {
+            $( $pattern = $crate::__private::futures_util::FutureExt::fuse($future) => $body, )+
+        }
     };
-}
-
-/// `task_local!` macro routed through the async-core substrate.
-#[macro_export]
-macro_rules! task_local {
-    ($($tokens:tt)*) => {
-        $crate::__private::tokio::task_local! { $($tokens)* }
+    ($( $pattern:pat = $future:expr => $body:expr ),+ $(,)?) => {
+        $crate::__private::futures_util::select! {
+            $( $pattern = $crate::__private::futures_util::FutureExt::fuse($future) => $body, )+
+        }
     };
 }
 
@@ -101,6 +102,10 @@ pub trait Instrumentation: Send + Sync {
 pub struct NoopInstrumentation;
 
 impl Instrumentation for NoopInstrumentation {}
+
+fn compatibility_cx() -> asupersync::Cx {
+    asupersync::Cx::current().unwrap_or_else(asupersync::Cx::for_testing)
+}
 
 /// Runtime bridging helpers.
 pub mod runtime {
@@ -260,7 +265,8 @@ pub mod runtime {
     where
         F: Future,
     {
-        if let Some(flavor) = CURRENT_RUNTIME.with(|slot| slot.borrow().last().map(|ctx| ctx.flavor))
+        if let Some(flavor) =
+            CURRENT_RUNTIME.with(|slot| slot.borrow().last().map(|ctx| ctx.flavor))
         {
             let flavor_name = match flavor {
                 RuntimeFlavor::CurrentThread => "current-thread",
@@ -551,86 +557,685 @@ impl ExecutionContext {
 
 /// Channel helpers and re-exports.
 pub mod channel {
+    use std::collections::VecDeque;
+    use std::future::Future;
+    use std::pin::Pin;
     use std::sync::Arc;
-
-    use tokio::sync::mpsc::{self as tokio_mpsc, error::TrySendError};
+    use std::sync::Mutex as StdMutex;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::task::{Context, Poll};
 
     use super::{AsyncError, Instrumentation, NoopInstrumentation};
 
+    fn decrement_depth(depth: &AtomicUsize) {
+        let _ = depth.fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+            current.checked_sub(1)
+        });
+    }
+
     /// Tokio broadcast compatibility surface owned by async-core.
     pub mod broadcast {
-        pub type Sender<T> = tokio::sync::broadcast::Sender<T>;
-        pub type Receiver<T> = tokio::sync::broadcast::Receiver<T>;
+        use crate::compatibility_cx;
+
+        /// Broadcast send error.
+        #[derive(Debug, Clone, PartialEq, Eq)]
+        pub struct SendError<T>(pub T);
+
+        impl<T> std::fmt::Display for SendError<T> {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("sending on a closed broadcast channel")
+            }
+        }
+
+        impl<T: std::fmt::Debug> std::error::Error for SendError<T> {}
 
         pub mod error {
-            pub type RecvError = tokio::sync::broadcast::error::RecvError;
-            pub type SendError<T> = tokio::sync::broadcast::error::SendError<T>;
+            /// Broadcast receive error.
+            #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+            pub enum RecvError {
+                Closed,
+                Lagged(u64),
+            }
+
+            impl std::fmt::Display for RecvError {
+                fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                    match self {
+                        Self::Closed => f.write_str("channel closed"),
+                        Self::Lagged(skipped) => write!(f, "channel lagged by {skipped} messages"),
+                    }
+                }
+            }
+
+            impl std::error::Error for RecvError {}
+        }
+
+        /// Broadcast sender wrapper.
+        #[derive(Clone, Debug)]
+        pub struct Sender<T> {
+            inner: asupersync::channel::broadcast::Sender<T>,
+        }
+
+        /// Broadcast receiver wrapper.
+        #[derive(Debug)]
+        pub struct Receiver<T> {
+            inner: asupersync::channel::broadcast::Receiver<T>,
+        }
+
+        impl<T: Clone> Sender<T> {
+            /// Send a value to all active subscribers.
+            ///
+            /// # Errors
+            /// Returns `SendError` when the channel is closed and there are no receivers left.
+            pub fn send(&self, value: T) -> Result<usize, SendError<T>> {
+                let cx = compatibility_cx();
+                self.inner.send(&cx, value).map_err(|err| match err {
+                    asupersync::channel::broadcast::SendError::Closed(value) => SendError(value),
+                })
+            }
+
+            #[must_use]
+            pub fn subscribe(&self) -> Receiver<T> {
+                Receiver {
+                    inner: self.inner.subscribe(),
+                }
+            }
+        }
+
+        impl<T: Clone> Receiver<T> {
+            /// Receive the next broadcast value.
+            ///
+            /// # Errors
+            /// Returns `RecvError::Closed` when the channel is closed or cancelled, and
+            /// `RecvError::Lagged` when messages were skipped due to backpressure.
+            pub async fn recv(&mut self) -> Result<T, error::RecvError> {
+                let cx = compatibility_cx();
+                self.inner.recv(&cx).await.map_err(|err| match err {
+                    asupersync::channel::broadcast::RecvError::Closed
+                    | asupersync::channel::broadcast::RecvError::Cancelled => {
+                        error::RecvError::Closed
+                    }
+                    asupersync::channel::broadcast::RecvError::Lagged(skipped) => {
+                        error::RecvError::Lagged(skipped)
+                    }
+                })
+            }
         }
 
         /// Create a bounded broadcast channel.
         #[must_use]
         pub fn channel<T: Clone>(capacity: usize) -> (Sender<T>, Receiver<T>) {
-            tokio::sync::broadcast::channel(capacity)
+            let (sender, receiver) = asupersync::channel::broadcast::channel(capacity);
+            (Sender { inner: sender }, Receiver { inner: receiver })
         }
     }
 
     /// Tokio mpsc compatibility surface owned by async-core.
     pub mod mpsc {
-        pub type Sender<T> = tokio::sync::mpsc::Sender<T>;
-        pub type Receiver<T> = tokio::sync::mpsc::Receiver<T>;
-        pub type UnboundedSender<T> = tokio::sync::mpsc::UnboundedSender<T>;
-        pub type UnboundedReceiver<T> = tokio::sync::mpsc::UnboundedReceiver<T>;
+        use std::sync::Arc;
+
+        use super::{AtomicBool, AtomicUsize, Ordering, StdMutex, VecDeque, decrement_depth};
+        use crate::compatibility_cx;
+
+        /// Bounded mpsc send error.
+        #[derive(Debug, PartialEq, Eq)]
+        pub struct SendError<T>(pub T);
+
+        impl<T> std::fmt::Display for SendError<T> {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("channel closed")
+            }
+        }
+
+        impl<T: std::fmt::Debug> std::error::Error for SendError<T> {}
 
         pub mod error {
-            pub type SendError<T> = tokio::sync::mpsc::error::SendError<T>;
-            pub type TrySendError<T> = tokio::sync::mpsc::error::TrySendError<T>;
-            pub type TryRecvError = tokio::sync::mpsc::error::TryRecvError;
+            /// Bounded mpsc try-send error.
+            #[derive(Debug, PartialEq, Eq)]
+            pub enum TrySendError<T> {
+                Closed(T),
+                Full(T),
+            }
+
+            impl<T> std::fmt::Display for TrySendError<T> {
+                fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                    match self {
+                        Self::Closed(_) => f.write_str("channel closed"),
+                        Self::Full(_) => f.write_str("channel full"),
+                    }
+                }
+            }
+
+            impl<T: std::fmt::Debug> std::error::Error for TrySendError<T> {}
+
+            /// Bounded mpsc try-recv error.
+            #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+            pub enum TryRecvError {
+                Empty,
+                Disconnected,
+            }
+
+            impl std::fmt::Display for TryRecvError {
+                fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                    match self {
+                        Self::Empty => f.write_str("channel empty"),
+                        Self::Disconnected => f.write_str("channel disconnected"),
+                    }
+                }
+            }
+
+            impl std::error::Error for TryRecvError {}
+        }
+
+        /// Bounded sender wrapper.
+        #[derive(Debug)]
+        pub struct Sender<T> {
+            inner: asupersync::channel::mpsc::Sender<T>,
+            capacity: usize,
+            depth: Arc<AtomicUsize>,
+        }
+
+        impl<T> Clone for Sender<T> {
+            fn clone(&self) -> Self {
+                Self {
+                    inner: self.inner.clone(),
+                    capacity: self.capacity,
+                    depth: Arc::clone(&self.depth),
+                }
+            }
+        }
+
+        /// Bounded receiver wrapper.
+        #[derive(Debug)]
+        pub struct Receiver<T> {
+            inner: asupersync::channel::mpsc::Receiver<T>,
+            capacity: usize,
+            depth: Arc<AtomicUsize>,
+        }
+
+        struct UnboundedShared<T> {
+            queue: StdMutex<VecDeque<T>>,
+            closed: AtomicBool,
+            sender_count: AtomicUsize,
+            notify: asupersync::sync::Notify,
+        }
+
+        impl<T> std::fmt::Debug for UnboundedShared<T> {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.debug_struct("UnboundedShared")
+                    .field("closed", &self.closed.load(Ordering::Relaxed))
+                    .field("sender_count", &self.sender_count.load(Ordering::Relaxed))
+                    .finish_non_exhaustive()
+            }
+        }
+
+        impl<T> UnboundedShared<T> {
+            fn push(&self, value: T) {
+                self.queue
+                    .lock()
+                    .expect("unbounded queue poisoned")
+                    .push_back(value);
+                self.notify.notify_one();
+            }
+
+            fn pop(&self) -> Option<T> {
+                self.queue
+                    .lock()
+                    .expect("unbounded queue poisoned")
+                    .pop_front()
+            }
+        }
+
+        /// Unbounded sender wrapper.
+        #[derive(Debug)]
+        pub struct UnboundedSender<T> {
+            shared: Arc<UnboundedShared<T>>,
+        }
+
+        impl<T> Clone for UnboundedSender<T> {
+            fn clone(&self) -> Self {
+                self.shared.sender_count.fetch_add(1, Ordering::Relaxed);
+                Self {
+                    shared: Arc::clone(&self.shared),
+                }
+            }
+        }
+
+        impl<T> Drop for UnboundedSender<T> {
+            fn drop(&mut self) {
+                if self.shared.sender_count.fetch_sub(1, Ordering::AcqRel) == 1 {
+                    self.shared.closed.store(true, Ordering::Release);
+                    self.shared.notify.notify_waiters();
+                }
+            }
+        }
+
+        /// Unbounded receiver wrapper.
+        #[derive(Debug)]
+        pub struct UnboundedReceiver<T> {
+            shared: Arc<UnboundedShared<T>>,
+        }
+
+        impl<T> Sender<T> {
+            /// Send a value, waiting for capacity if necessary.
+            ///
+            /// # Errors
+            /// Returns `SendError` when the receiver side has been closed.
+            pub async fn send(&self, value: T) -> Result<(), SendError<T>> {
+                let cx = compatibility_cx();
+                self.inner
+                    .send(&cx, value)
+                    .await
+                    .map(|()| {
+                        self.depth.fetch_add(1, Ordering::AcqRel);
+                    })
+                    .map_err(|err| match err {
+                        asupersync::channel::mpsc::SendError::Disconnected(value)
+                        | asupersync::channel::mpsc::SendError::Full(value)
+                        | asupersync::channel::mpsc::SendError::Cancelled(value) => {
+                            SendError(value)
+                        }
+                    })
+            }
+
+            /// Try to send a value without waiting for capacity.
+            ///
+            /// # Errors
+            /// Returns `TrySendError::Closed` when the channel is closed and
+            /// `TrySendError::Full` when the queue has no remaining capacity.
+            pub fn try_send(&self, value: T) -> Result<(), error::TrySendError<T>> {
+                self.inner
+                    .try_send(value)
+                    .map(|()| {
+                        self.depth.fetch_add(1, Ordering::AcqRel);
+                    })
+                    .map_err(|err| match err {
+                        asupersync::channel::mpsc::SendError::Disconnected(value) => {
+                            error::TrySendError::Closed(value)
+                        }
+                        asupersync::channel::mpsc::SendError::Full(value)
+                        | asupersync::channel::mpsc::SendError::Cancelled(value) => {
+                            error::TrySendError::Full(value)
+                        }
+                    })
+            }
+
+            #[must_use]
+            pub fn capacity(&self) -> usize {
+                self.capacity
+                    .saturating_sub(self.depth.load(Ordering::Acquire))
+            }
+
+            #[must_use]
+            pub fn len(&self) -> usize {
+                self.depth.load(Ordering::Acquire)
+            }
+
+            #[must_use]
+            pub fn is_empty(&self) -> bool {
+                self.len() == 0
+            }
+
+            #[must_use]
+            pub fn is_closed(&self) -> bool {
+                self.inner.is_closed()
+            }
+
+            pub async fn closed(&self) {
+                while !self.is_closed() {
+                    crate::task::yield_now().await;
+                }
+            }
+        }
+
+        impl<T> Receiver<T> {
+            pub async fn recv(&mut self) -> Option<T> {
+                let cx = compatibility_cx();
+                match self.inner.recv(&cx).await {
+                    Ok(value) => {
+                        decrement_depth(&self.depth);
+                        Some(value)
+                    }
+                    Err(
+                        asupersync::channel::mpsc::RecvError::Disconnected
+                        | asupersync::channel::mpsc::RecvError::Cancelled
+                        | asupersync::channel::mpsc::RecvError::Empty,
+                    ) => None,
+                }
+            }
+
+            /// Try to receive a queued value without waiting.
+            ///
+            /// # Errors
+            /// Returns `TryRecvError::Empty` when no value is available yet and
+            /// `TryRecvError::Disconnected` when all senders are gone.
+            pub fn try_recv(&self) -> Result<T, error::TryRecvError> {
+                self.inner
+                    .try_recv()
+                    .inspect(|_| {
+                        decrement_depth(&self.depth);
+                    })
+                    .map_err(|err| match err {
+                        asupersync::channel::mpsc::RecvError::Empty
+                        | asupersync::channel::mpsc::RecvError::Cancelled => {
+                            error::TryRecvError::Empty
+                        }
+                        asupersync::channel::mpsc::RecvError::Disconnected => {
+                            error::TryRecvError::Disconnected
+                        }
+                    })
+            }
+
+            pub fn close(&mut self) {
+                self.inner.close();
+            }
+
+            #[must_use]
+            pub fn capacity(&self) -> usize {
+                self.capacity
+                    .saturating_sub(self.depth.load(Ordering::Acquire))
+            }
+        }
+
+        impl<T> UnboundedSender<T> {
+            /// Send a value into the unbounded queue.
+            ///
+            /// # Errors
+            /// Returns `SendError` when the receiver has already been closed.
+            pub fn send(&self, value: T) -> Result<(), SendError<T>> {
+                if self.shared.closed.load(Ordering::Acquire) {
+                    return Err(SendError(value));
+                }
+                self.shared.push(value);
+                Ok(())
+            }
+        }
+
+        impl<T> UnboundedReceiver<T> {
+            pub async fn recv(&mut self) -> Option<T> {
+                loop {
+                    if let Some(value) = self.shared.pop() {
+                        return Some(value);
+                    }
+
+                    if self.shared.closed.load(Ordering::Acquire)
+                        || self.shared.sender_count.load(Ordering::Acquire) == 0
+                    {
+                        return None;
+                    }
+
+                    self.shared.notify.notified().await;
+                }
+            }
+
+            pub fn close(&mut self) {
+                self.shared.closed.store(true, Ordering::Release);
+                self.shared.notify.notify_waiters();
+            }
         }
 
         /// Create a bounded mpsc channel.
         #[must_use]
         pub fn channel<T>(capacity: usize) -> (Sender<T>, Receiver<T>) {
-            tokio::sync::mpsc::channel(capacity)
+            let (sender, receiver) = asupersync::channel::mpsc::channel(capacity);
+            let depth = Arc::new(AtomicUsize::new(0));
+            (
+                Sender {
+                    inner: sender,
+                    capacity,
+                    depth: Arc::clone(&depth),
+                },
+                Receiver {
+                    inner: receiver,
+                    capacity,
+                    depth,
+                },
+            )
         }
 
         /// Create an unbounded mpsc channel.
         #[must_use]
         pub fn unbounded_channel<T>() -> (UnboundedSender<T>, UnboundedReceiver<T>) {
-            tokio::sync::mpsc::unbounded_channel()
+            let shared = Arc::new(UnboundedShared {
+                queue: StdMutex::new(VecDeque::new()),
+                closed: AtomicBool::new(false),
+                sender_count: AtomicUsize::new(1),
+                notify: asupersync::sync::Notify::new(),
+            });
+            (
+                UnboundedSender {
+                    shared: Arc::clone(&shared),
+                },
+                UnboundedReceiver { shared },
+            )
         }
     }
 
     /// Tokio oneshot compatibility surface owned by async-core.
     pub mod oneshot {
-        pub type Sender<T> = tokio::sync::oneshot::Sender<T>;
-        pub type Receiver<T> = tokio::sync::oneshot::Receiver<T>;
+        use super::{Context, Future, Pin, Poll};
+        use crate::compatibility_cx;
 
         pub mod error {
-            pub type RecvError = tokio::sync::oneshot::error::RecvError;
+            /// Oneshot receive error.
+            #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+            pub struct RecvError;
+
+            impl std::fmt::Display for RecvError {
+                fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                    f.write_str("channel closed")
+                }
+            }
+
+            impl std::error::Error for RecvError {}
+        }
+
+        /// Oneshot send error.
+        #[derive(Debug, PartialEq, Eq)]
+        pub struct SendError<T>(pub T);
+
+        impl<T> std::fmt::Display for SendError<T> {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("channel closed")
+            }
+        }
+
+        impl<T: std::fmt::Debug> std::error::Error for SendError<T> {}
+
+        /// Oneshot sender wrapper.
+        #[derive(Debug)]
+        pub struct Sender<T> {
+            inner: Option<asupersync::channel::oneshot::Sender<T>>,
+        }
+
+        /// Oneshot receiver wrapper.
+        #[derive(Debug)]
+        pub struct Receiver<T> {
+            inner: asupersync::channel::oneshot::Receiver<T>,
+        }
+
+        impl<T> Sender<T> {
+            /// Deliver the one-shot value to the receiver.
+            ///
+            /// # Errors
+            /// Returns `SendError` when the receiver has already been dropped.
+            ///
+            /// # Panics
+            /// Panics if the same sender is reused after a prior `send` call.
+            pub fn send(mut self, value: T) -> Result<(), SendError<T>> {
+                let cx = compatibility_cx();
+                self.inner
+                    .take()
+                    .expect("oneshot sender reused")
+                    .send(&cx, value)
+                    .map_err(|err| match err {
+                        asupersync::channel::oneshot::SendError::Disconnected(value) => {
+                            SendError(value)
+                        }
+                    })
+            }
+        }
+
+        impl<T> Receiver<T> {
+            /// Try to receive the one-shot value without blocking.
+            ///
+            /// # Errors
+            /// Returns `RecvError` when the value is not yet available or the sender was dropped.
+            pub fn try_recv(&self) -> Result<T, error::RecvError> {
+                self.inner.try_recv().map_err(|_| error::RecvError)
+            }
+        }
+
+        impl<T> Future for Receiver<T> {
+            type Output = Result<T, error::RecvError>;
+
+            fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+                let compat = compatibility_cx();
+                let mut recv = Box::pin(self.inner.recv(&compat));
+                recv.as_mut().poll(cx).map_err(|_| error::RecvError)
+            }
         }
 
         /// Create a one-shot channel.
         #[must_use]
         pub fn channel<T>() -> (Sender<T>, Receiver<T>) {
-            tokio::sync::oneshot::channel()
+            let (sender, receiver) = asupersync::channel::oneshot::channel();
+            (
+                Sender {
+                    inner: Some(sender),
+                },
+                Receiver { inner: receiver },
+            )
         }
     }
 
     /// Tokio watch compatibility surface owned by async-core.
     pub mod watch {
-        pub type Sender<T> = tokio::sync::watch::Sender<T>;
-        pub type Receiver<T> = tokio::sync::watch::Receiver<T>;
-        pub type Ref<'a, T> = tokio::sync::watch::Ref<'a, T>;
+        use std::sync::Arc;
+
+        use crate::compatibility_cx;
+
+        pub type Ref<'a, T> = asupersync::channel::watch::Ref<'a, T>;
 
         pub mod error {
-            pub type RecvError = tokio::sync::watch::error::RecvError;
-            pub type SendError<T> = tokio::sync::watch::error::SendError<T>;
+            /// Watch receive error.
+            #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+            pub struct RecvError;
+
+            impl std::fmt::Display for RecvError {
+                fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                    f.write_str("channel closed")
+                }
+            }
+
+            impl std::error::Error for RecvError {}
+        }
+
+        /// Watch send error.
+        #[derive(Debug, PartialEq, Eq)]
+        pub struct SendError<T>(pub T);
+
+        impl<T> std::fmt::Display for SendError<T> {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("channel closed")
+            }
+        }
+
+        impl<T: std::fmt::Debug> std::error::Error for SendError<T> {}
+
+        /// Watch sender wrapper.
+        #[derive(Clone, Debug)]
+        pub struct Sender<T> {
+            inner: Arc<asupersync::channel::watch::Sender<T>>,
+        }
+
+        /// Watch receiver wrapper.
+        #[derive(Debug)]
+        pub struct Receiver<T> {
+            inner: asupersync::channel::watch::Receiver<T>,
+        }
+
+        impl<T> Clone for Receiver<T> {
+            fn clone(&self) -> Self {
+                Self {
+                    inner: self.inner.clone(),
+                }
+            }
+        }
+
+        impl<T> Sender<T> {
+            /// Publish a new watched value.
+            ///
+            /// # Errors
+            /// Returns `SendError` when all receivers have been dropped.
+            pub fn send(&self, value: T) -> Result<(), SendError<T>> {
+                self.inner.send(value).map_err(|err| match err {
+                    asupersync::channel::watch::SendError::Closed(value) => SendError(value),
+                })
+            }
+
+            pub fn send_modify<F>(&self, f: F)
+            where
+                F: FnOnce(&mut T),
+            {
+                let _ = self.inner.send_modify(f);
+            }
+
+            #[must_use]
+            pub fn borrow(&self) -> Ref<'_, T> {
+                self.inner.borrow()
+            }
+
+            #[must_use]
+            pub fn subscribe(&self) -> Receiver<T> {
+                Receiver {
+                    inner: self.inner.subscribe(),
+                }
+            }
+
+            #[must_use]
+            pub fn is_closed(&self) -> bool {
+                self.inner.is_closed()
+            }
+        }
+
+        impl<T> Receiver<T> {
+            /// Wait until the watched value changes.
+            ///
+            /// # Errors
+            /// Returns `RecvError` when the sender side is closed before a new value arrives.
+            #[allow(clippy::future_not_send)]
+            pub async fn changed(&mut self) -> Result<(), error::RecvError> {
+                let cx = compatibility_cx();
+                self.inner.changed(&cx).await.map_err(|_| error::RecvError)
+            }
+
+            #[must_use]
+            pub fn borrow(&self) -> Ref<'_, T> {
+                self.inner.borrow()
+            }
+
+            #[must_use]
+            pub fn borrow_and_update(&mut self) -> Ref<'_, T> {
+                self.inner.mark_seen();
+                self.inner.borrow()
+            }
+
+            #[must_use]
+            pub fn has_changed(&self) -> bool {
+                self.inner.has_changed()
+            }
         }
 
         /// Create a watch channel.
         #[must_use]
         pub fn channel<T>(value: T) -> (Sender<T>, Receiver<T>) {
-            tokio::sync::watch::channel(value)
+            let (sender, receiver) = asupersync::channel::watch::channel(value);
+            (
+                Sender {
+                    inner: Arc::new(sender),
+                },
+                Receiver { inner: receiver },
+            )
         }
     }
 
@@ -639,13 +1244,13 @@ pub mod channel {
     pub struct BoundedSender<T> {
         name: String,
         capacity: usize,
-        inner: tokio_mpsc::Sender<T>,
+        inner: mpsc::Sender<T>,
         instrumentation: Arc<dyn Instrumentation>,
     }
 
     impl<T> BoundedSender<T> {
         fn current_depth(&self) -> usize {
-            self.capacity.saturating_sub(self.inner.capacity())
+            self.inner.len()
         }
 
         /// Send with backpressure.
@@ -679,8 +1284,8 @@ pub mod channel {
                     );
                     Ok(())
                 }
-                Err(TrySendError::Closed(_)) => Err(AsyncError::ChannelClosed),
-                Err(TrySendError::Full(_)) => Err(AsyncError::ChannelFull),
+                Err(mpsc::error::TrySendError::Closed(_)) => Err(AsyncError::ChannelClosed),
+                Err(mpsc::error::TrySendError::Full(_)) => Err(AsyncError::ChannelFull),
             }
         }
     }
@@ -689,7 +1294,7 @@ pub mod channel {
     pub struct BoundedReceiver<T> {
         name: String,
         capacity: usize,
-        inner: tokio_mpsc::Receiver<T>,
+        inner: mpsc::Receiver<T>,
         instrumentation: Arc<dyn Instrumentation>,
     }
 
@@ -729,7 +1334,7 @@ pub mod channel {
         instrumentation: Arc<dyn Instrumentation>,
     ) -> (BoundedSender<T>, BoundedReceiver<T>) {
         let name = name.into();
-        let (sender, receiver) = tokio_mpsc::channel(capacity);
+        let (sender, receiver) = mpsc::channel(capacity);
         (
             BoundedSender {
                 name: name.clone(),
@@ -797,84 +1402,455 @@ pub mod shutdown {
 
 /// Synchronization compatibility surface owned by async-core.
 pub mod sync {
-    pub type Mutex<T> = tokio::sync::Mutex<T>;
-    pub type OwnedSemaphorePermit = tokio::sync::OwnedSemaphorePermit;
-    pub type RwLock<T> = tokio::sync::RwLock<T>;
-    pub type Semaphore = tokio::sync::Semaphore;
+    use std::sync::Arc;
+
+    pub use asupersync::sync::OwnedSemaphorePermit;
+    use asupersync::sync::{
+        MutexGuard, RwLockReadGuard, RwLockWriteGuard, SemaphorePermit as AsupersyncSemaphorePermit,
+    };
+
+    use crate::compatibility_cx;
+
+    /// Async mutex compatibility wrapper.
+    #[derive(Debug, Default)]
+    pub struct Mutex<T> {
+        inner: asupersync::sync::Mutex<T>,
+    }
+
+    impl<T> Mutex<T> {
+        #[must_use]
+        pub fn new(value: T) -> Self {
+            Self {
+                inner: asupersync::sync::Mutex::new(value),
+            }
+        }
+
+        /// Acquire the mutex asynchronously.
+        ///
+        /// # Panics
+        /// Panics if the underlying lock operation is cancelled or poisoned.
+        pub async fn lock(&self) -> MutexGuard<'_, T> {
+            let cx = compatibility_cx();
+            self.inner
+                .lock(&cx)
+                .await
+                .expect("fcp_async_core::sync::Mutex lock cancelled or poisoned")
+        }
+
+        /// Try to acquire the mutex without waiting.
+        ///
+        /// # Errors
+        /// Returns `TryLockError` when the mutex is already locked.
+        pub fn try_lock(&self) -> Result<MutexGuard<'_, T>, TryLockError> {
+            self.inner.try_lock().map_err(|_| TryLockError(()))
+        }
+
+        pub fn get_mut(&mut self) -> &mut T {
+            self.inner.get_mut()
+        }
+
+        pub fn into_inner(self) -> T {
+            self.inner.into_inner()
+        }
+    }
+
+    /// Async read/write lock compatibility wrapper.
+    #[derive(Debug)]
+    pub struct RwLock<T> {
+        inner: asupersync::sync::RwLock<T>,
+    }
+
+    impl<T: Default> Default for RwLock<T> {
+        fn default() -> Self {
+            Self::new(T::default())
+        }
+    }
+
+    impl<T> RwLock<T> {
+        #[must_use]
+        pub fn new(value: T) -> Self {
+            Self {
+                inner: asupersync::sync::RwLock::new(value),
+            }
+        }
+
+        /// Acquire a shared read guard asynchronously.
+        ///
+        /// # Panics
+        /// Panics if the underlying lock operation is cancelled or poisoned.
+        #[allow(clippy::future_not_send)]
+        pub async fn read(&self) -> RwLockReadGuard<'_, T> {
+            let cx = compatibility_cx();
+            self.inner
+                .read(&cx)
+                .await
+                .expect("fcp_async_core::sync::RwLock read cancelled or poisoned")
+        }
+
+        /// Acquire an exclusive write guard asynchronously.
+        ///
+        /// # Panics
+        /// Panics if the underlying lock operation is cancelled or poisoned.
+        #[allow(clippy::future_not_send)]
+        pub async fn write(&self) -> RwLockWriteGuard<'_, T> {
+            let cx = compatibility_cx();
+            self.inner
+                .write(&cx)
+                .await
+                .expect("fcp_async_core::sync::RwLock write cancelled or poisoned")
+        }
+
+        /// Try to acquire a shared read guard without waiting.
+        ///
+        /// # Errors
+        /// Returns `TryLockError` when the lock cannot be acquired immediately.
+        pub fn try_read(&self) -> Result<RwLockReadGuard<'_, T>, TryLockError> {
+            self.inner.try_read().map_err(|_| TryLockError(()))
+        }
+
+        /// Try to acquire an exclusive write guard without waiting.
+        ///
+        /// # Errors
+        /// Returns `TryLockError` when the lock cannot be acquired immediately.
+        pub fn try_write(&self) -> Result<RwLockWriteGuard<'_, T>, TryLockError> {
+            self.inner.try_write().map_err(|_| TryLockError(()))
+        }
+
+        pub fn get_mut(&mut self) -> &mut T {
+            self.inner.get_mut()
+        }
+
+        pub fn into_inner(self) -> T {
+            self.inner.into_inner()
+        }
+    }
+
+    /// Async semaphore compatibility wrapper.
+    #[derive(Debug)]
+    pub struct Semaphore {
+        inner: Arc<asupersync::sync::Semaphore>,
+    }
+
+    impl Default for Semaphore {
+        fn default() -> Self {
+            Self::new(0)
+        }
+    }
+
+    impl Semaphore {
+        #[must_use]
+        pub fn new(permits: usize) -> Self {
+            Self {
+                inner: Arc::new(asupersync::sync::Semaphore::new(permits)),
+            }
+        }
+
+        #[must_use]
+        pub fn available_permits(&self) -> usize {
+            self.inner.available_permits()
+        }
+
+        /// Try to acquire a single permit without waiting.
+        ///
+        /// # Errors
+        /// Returns `TryAcquireError` when no permit is currently available.
+        pub fn try_acquire(&self) -> Result<SemaphorePermit<'_>, TryAcquireError> {
+            self.inner.try_acquire(1).map_err(|_| TryAcquireError(()))
+        }
+
+        /// Acquire a single permit asynchronously.
+        ///
+        /// # Errors
+        /// Returns `AcquireError` when the semaphore is closed before a permit is acquired.
+        pub async fn acquire(&self) -> Result<SemaphorePermit<'_>, AcquireError> {
+            let cx = compatibility_cx();
+            self.inner
+                .acquire(&cx, 1)
+                .await
+                .map_err(|_| AcquireError(()))
+        }
+
+        pub fn add_permits(&self, permits: usize) {
+            self.inner.add_permits(permits);
+        }
+
+        /// Try to acquire an owned permit without waiting.
+        ///
+        /// # Errors
+        /// Returns `TryAcquireError` when no permit is currently available.
+        pub fn try_acquire_owned(self: Arc<Self>) -> Result<OwnedSemaphorePermit, TryAcquireError> {
+            asupersync::sync::OwnedSemaphorePermit::try_acquire_arc(&self.inner, 1)
+                .map_err(|_| TryAcquireError(()))
+        }
+
+        /// Acquire an owned permit asynchronously.
+        ///
+        /// # Errors
+        /// Returns `AcquireError` when the semaphore is closed before a permit is acquired.
+        pub async fn acquire_owned(self: Arc<Self>) -> Result<OwnedSemaphorePermit, AcquireError> {
+            let cx = compatibility_cx();
+            asupersync::sync::OwnedSemaphorePermit::acquire(Arc::clone(&self.inner), &cx, 1)
+                .await
+                .map_err(|_| AcquireError(()))
+        }
+    }
+
+    /// Borrowed semaphore permit.
+    pub type SemaphorePermit<'a> = AsupersyncSemaphorePermit<'a>;
+
+    /// Minimal try-lock error compatible with existing call sites.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct TryLockError(());
+
+    impl std::fmt::Display for TryLockError {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("operation would block")
+        }
+    }
+
+    impl std::error::Error for TryLockError {}
+
+    /// Minimal acquire error compatible with existing call sites.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct AcquireError(());
+
+    impl std::fmt::Display for AcquireError {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("semaphore closed or cancelled")
+        }
+    }
+
+    impl std::error::Error for AcquireError {}
+
+    /// Minimal try-acquire error compatible with existing call sites.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct TryAcquireError(());
+
+    impl std::fmt::Display for TryAcquireError {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("no permits available")
+        }
+    }
+
+    impl std::error::Error for TryAcquireError {}
 }
 
 /// Task compatibility surface owned by async-core.
 pub mod task {
     use std::future::Future;
+    use std::pin::Pin;
+    use std::task::{Context, Poll};
 
-    pub type JoinHandle<T> = tokio::task::JoinHandle<T>;
+    use futures_util::future::{AbortHandle, Abortable, FutureExt};
+
+    use crate::runtime::current_runtime_handle;
+
+    /// Join error returned by spawned tasks.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct JoinError {
+        kind: JoinErrorKind,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    enum JoinErrorKind {
+        Cancelled,
+        Panicked(String),
+    }
+
+    impl JoinError {
+        const fn cancelled() -> Self {
+            Self {
+                kind: JoinErrorKind::Cancelled,
+            }
+        }
+
+        fn panicked(payload: &(dyn std::any::Any + Send)) -> Self {
+            let message = payload.downcast_ref::<&str>().map_or_else(
+                || {
+                    payload.downcast_ref::<String>().map_or_else(
+                        || "task panicked with non-string payload".to_string(),
+                        Clone::clone,
+                    )
+                },
+                |message| (*message).to_string(),
+            );
+
+            Self {
+                kind: JoinErrorKind::Panicked(message),
+            }
+        }
+
+        /// Returns true when the task was aborted.
+        #[must_use]
+        pub const fn is_cancelled(&self) -> bool {
+            matches!(self.kind, JoinErrorKind::Cancelled)
+        }
+
+        /// Returns true when the task panicked.
+        #[must_use]
+        pub const fn is_panic(&self) -> bool {
+            matches!(self.kind, JoinErrorKind::Panicked(_))
+        }
+    }
+
+    impl std::fmt::Display for JoinError {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            match &self.kind {
+                JoinErrorKind::Cancelled => f.write_str("task was cancelled"),
+                JoinErrorKind::Panicked(message) => write!(f, "task panicked: {message}"),
+            }
+        }
+    }
+
+    impl std::error::Error for JoinError {}
+
+    /// Join handle returned from [`spawn`].
+    pub struct JoinHandle<T> {
+        inner: Pin<Box<asupersync::runtime::JoinHandle<Result<T, JoinError>>>>,
+        abort_handle: AbortHandle,
+    }
+
+    impl<T> std::fmt::Debug for JoinHandle<T> {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.debug_struct("JoinHandle")
+                .field("is_finished", &self.is_finished())
+                .finish()
+        }
+    }
+
+    impl<T> JoinHandle<T> {
+        /// Requests cancellation for the spawned task.
+        pub fn abort(&self) {
+            self.abort_handle.abort();
+        }
+
+        /// Returns true if the task has already completed.
+        #[must_use]
+        pub fn is_finished(&self) -> bool {
+            self.inner.as_ref().get_ref().is_finished()
+        }
+    }
+
+    impl<T> Future for JoinHandle<T> {
+        type Output = Result<T, JoinError>;
+
+        fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+            self.inner.as_mut().poll(cx)
+        }
+    }
 
     /// Spawn an asynchronous task.
+    ///
+    /// # Panics
+    /// Panics when called outside an active `fcp_async_core` runtime.
     pub fn spawn<F>(future: F) -> JoinHandle<F::Output>
     where
         F: Future + Send + 'static,
         F::Output: Send + 'static,
     {
-        tokio::task::spawn(future)
+        let runtime = current_runtime_handle()
+            .expect("fcp_async_core::task::spawn called outside an active runtime");
+        let (abort_handle, abort_registration) = AbortHandle::new_pair();
+        let future = Abortable::new(
+            std::panic::AssertUnwindSafe(future).catch_unwind(),
+            abort_registration,
+        );
+
+        let inner = runtime.spawn(async move {
+            match future.await {
+                Ok(Ok(output)) => Ok(output),
+                Ok(Err(payload)) => Err(JoinError::panicked(payload.as_ref())),
+                Err(_) => Err(JoinError::cancelled()),
+            }
+        });
+
+        JoinHandle {
+            inner: Box::pin(inner),
+            abort_handle,
+        }
     }
 
     /// Cooperatively yield execution.
     pub async fn yield_now() {
-        tokio::task::yield_now().await;
+        asupersync::runtime::yield_now().await;
     }
 }
 
-/// Tokio IO re-exports.
+/// Async I/O re-exports and compatibility extensions.
 pub mod io {
-    pub use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
-    pub type BufReader<R> = tokio::io::BufReader<R>;
+    pub use asupersync::io::{
+        AsyncBufRead, AsyncReadExt, AsyncWriteExt, BufReader, ReadLine, read_line,
+    };
+
+    /// Extension trait that preserves the Tokio-style `read_line` method shape.
+    pub trait AsyncBufReadExt: AsyncBufRead + Unpin {
+        /// Read bytes until a newline is found, appending them to `buf`.
+        fn read_line<'a>(&'a mut self, buf: &'a mut String) -> ReadLine<'a, Self>
+        where
+            Self: Sized,
+        {
+            read_line(self, buf)
+        }
+    }
+
+    impl<T> AsyncBufReadExt for T where T: AsyncBufRead + Unpin + ?Sized {}
 }
 
-/// Tokio process re-exports.
+/// Async process re-exports.
 pub mod process {
-    pub type Child = tokio::process::Child;
-    pub type ChildStderr = tokio::process::ChildStderr;
-    pub type ChildStdin = tokio::process::ChildStdin;
-    pub type ChildStdout = tokio::process::ChildStdout;
-    pub type Command = tokio::process::Command;
+    pub use asupersync::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, Stdio};
 }
 
-/// Tokio net re-exports.
+/// Async network re-exports.
 pub mod net {
-    pub type TcpListener = tokio::net::TcpListener;
-    pub type TcpStream = tokio::net::TcpStream;
+    #[cfg(unix)]
+    pub use asupersync::net::UnixListener;
+    #[cfg(unix)]
+    pub use asupersync::net::UnixStream;
+    pub use asupersync::net::{TcpListener, TcpStream};
+}
+
+#[derive(Debug)]
+struct CancellationState {
+    sender: channel::watch::Sender<bool>,
+    _keepalive: std::sync::Mutex<channel::watch::Receiver<bool>>,
 }
 
 /// Cooperative cancellation token.
 #[derive(Clone, Debug)]
 pub struct CancellationToken {
-    sender: channel::watch::Sender<bool>,
+    inner: Arc<CancellationState>,
 }
 
 impl CancellationToken {
     /// Create token.
     #[must_use]
     pub fn new() -> Self {
-        let (sender, _receiver) = channel::watch::channel(false);
-        Self { sender }
+        let (sender, receiver) = channel::watch::channel(false);
+        Self {
+            inner: Arc::new(CancellationState {
+                sender,
+                _keepalive: std::sync::Mutex::new(receiver),
+            }),
+        }
     }
 
     /// Trigger cancellation.
     pub fn cancel(&self) {
-        self.sender.send_replace(true);
+        let _ = self.inner.sender.send(true);
     }
 
     /// Current cancellation state.
     #[must_use]
     pub fn is_cancelled(&self) -> bool {
-        *self.sender.borrow()
+        *self.inner.sender.borrow()
     }
 
     /// Subscribe cancellation updates.
     #[must_use]
     pub fn subscribe(&self) -> CancellationListener {
         CancellationListener {
-            receiver: self.sender.subscribe(),
+            receiver: self.inner.sender.subscribe(),
         }
     }
 }
@@ -1610,7 +2586,7 @@ mod tests {
 
         task::spawn(async move {
             time::sleep(Duration::from_millis(20)).await;
-            tx.send_replace(true);
+            tx.send(true).unwrap();
         });
 
         let err = super::shutdown::wait_for_shutdown(&mut rx)
@@ -1632,7 +2608,7 @@ mod tests {
 
         task::spawn(async move {
             time::sleep(Duration::from_millis(10)).await;
-            tx.send_replace(true);
+            tx.send(true).unwrap();
         });
 
         let err = super::shutdown::sleep_or_shutdown(Duration::from_secs(60), &mut rx)
@@ -1729,7 +2705,7 @@ mod tests {
         let (tx, mut rx) = channel::watch::channel(0_u32);
         assert_eq!(*rx.borrow(), 0);
 
-        tx.send_replace(42);
+        tx.send(42).unwrap();
         rx.changed().await.unwrap();
         assert_eq!(*rx.borrow(), 42);
     }

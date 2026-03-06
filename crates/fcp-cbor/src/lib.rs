@@ -2671,7 +2671,7 @@ mod tests {
     fn deserialize_non_canonical_encoding_detected() {
         let schema = SchemaId::new("fcp.test", "NonCanon", Version::new(1, 0, 0));
         let value = 42_u32;
-        let mut data = CanonicalSerializer::serialize(&value, &schema).unwrap();
+        let data = CanonicalSerializer::serialize(&value, &schema).unwrap();
 
         // Tamper with one CBOR byte (after the 32-byte hash prefix)
         // The value 42 is encoded as 0x18 0x2A in CBOR (2-byte form).
@@ -2929,7 +2929,9 @@ mod tests {
 
         let schema = SchemaId::new("fcp.test", "Shape", Version::new(1, 0, 0));
         let shapes = vec![
-            Shape::Circle { radius: 3.14 },
+            Shape::Circle {
+                radius: std::f64::consts::PI,
+            },
             Shape::Rectangle {
                 width: 10.0,
                 height: 5.0,

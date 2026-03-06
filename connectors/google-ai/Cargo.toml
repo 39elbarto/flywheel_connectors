@@ -40,7 +40,6 @@ uuid.workspace = true
 [dev-dependencies]
 wiremock.workspace = true
 futures-util.workspace = true
-tokio.workspace = true
 fcp-crypto = { path = "../../crates/fcp-crypto" }
 fcp-manifest = { path = "../../crates/fcp-manifest" }
 fcp-testkit = { path = "../../crates/fcp-testkit" }

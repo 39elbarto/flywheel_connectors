@@ -2,17 +2,100 @@
 
 use std::time::Duration;
 
+use asupersync::http::h1::ClientError as HttpClientError;
 use fcp_async_core::AsyncError;
 use fcp_core::FcpError;
 use fcp_sdk::migration::ConnectorErrorMapping;
+use fcp_streaming::StreamError;
 use thiserror::Error;
+
+/// HTTP transport error information captured from ASUPERSYNC.
+#[derive(Debug, Clone, Error)]
+#[error("{message}")]
+pub struct DiscordHttpErrorInfo {
+    /// Human-readable error string.
+    pub message: String,
+    /// HTTP status when available.
+    pub status_code: Option<u16>,
+    /// Whether the failure was a timeout.
+    pub is_timeout: bool,
+    /// Whether the failure was a connection/setup problem.
+    pub is_connect: bool,
+}
+
+impl From<HttpClientError> for DiscordHttpErrorInfo {
+    fn from(error: HttpClientError) -> Self {
+        match error {
+            HttpClientError::InvalidUrl(url) => Self {
+                message: format!("invalid URL: {url}"),
+                status_code: None,
+                is_timeout: false,
+                is_connect: false,
+            },
+            HttpClientError::DnsError(error) => Self {
+                message: format!("DNS resolution failed: {error}"),
+                status_code: None,
+                is_timeout: error.kind() == std::io::ErrorKind::TimedOut,
+                is_connect: true,
+            },
+            HttpClientError::ConnectError(error) => Self {
+                message: format!("connection failed: {error}"),
+                status_code: None,
+                is_timeout: error.kind() == std::io::ErrorKind::TimedOut,
+                is_connect: true,
+            },
+            HttpClientError::TlsError(error) => Self {
+                message: format!("TLS error: {error}"),
+                status_code: None,
+                is_timeout: false,
+                is_connect: true,
+            },
+            HttpClientError::HttpError(error) => Self {
+                message: format!("HTTP error: {error}"),
+                status_code: None,
+                is_timeout: false,
+                is_connect: false,
+            },
+            HttpClientError::TooManyRedirects { count, max } => Self {
+                message: format!("too many redirects ({count} of max {max})"),
+                status_code: None,
+                is_timeout: false,
+                is_connect: false,
+            },
+            HttpClientError::Io(error) => Self {
+                message: format!("I/O error: {error}"),
+                status_code: None,
+                is_timeout: error.kind() == std::io::ErrorKind::TimedOut,
+                is_connect: false,
+            },
+            HttpClientError::ConnectTunnelRefused { status, reason } => Self {
+                message: format!("HTTP CONNECT tunnel rejected with status {status} ({reason})"),
+                status_code: Some(status),
+                is_timeout: false,
+                is_connect: true,
+            },
+            HttpClientError::InvalidConnectInput(message) => Self {
+                message: format!("invalid CONNECT input: {message}"),
+                status_code: None,
+                is_timeout: false,
+                is_connect: false,
+            },
+            HttpClientError::ProxyError(message) => Self {
+                message: format!("proxy error: {message}"),
+                status_code: None,
+                is_timeout: false,
+                is_connect: true,
+            },
+        }
+    }
+}
 
 /// Discord-specific errors.
 #[derive(Error, Debug)]
 pub enum DiscordError {
     /// HTTP request failed
     #[error("HTTP error: {0}")]
-    Http(#[from] reqwest::Error),
+    Http(DiscordHttpErrorInfo),
 
     /// JSON serialization/deserialization failed
     #[error("JSON error: {0}")]
@@ -20,7 +103,7 @@ pub enum DiscordError {
 
     /// WebSocket error
     #[error("WebSocket error: {0}")]
-    WebSocket(#[from] tokio_tungstenite::tungstenite::Error),
+    WebSocket(#[from] StreamError),
 
     /// Discord API returned an error
     #[error("Discord API error {code}: {message}")]
@@ -40,6 +123,12 @@ pub enum DiscordError {
 }
 
 impl DiscordError {
+    /// Create an HTTP transport error from the ASUPERSYNC client.
+    #[must_use]
+    pub fn from_http_client_error(error: HttpClientError) -> Self {
+        Self::Http(error.into())
+    }
+
     /// Check if this error is retryable.
     #[must_use]
     pub const fn is_retryable(&self) -> bool {
@@ -73,8 +162,8 @@ impl DiscordError {
         match self {
             Self::Http(e) => FcpError::External {
                 service: "discord".into(),
-                message: e.to_string(),
-                status_code: e.status().map(|s| s.as_u16()),
+                message: e.message.clone(),
+                status_code: e.status_code,
                 retryable: self.is_retryable(),
                 retry_after: self.retry_after(),
             },

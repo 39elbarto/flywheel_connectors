@@ -139,8 +139,6 @@ repository = "https://github.com/flywheel/flywheel_connectors"
 authors = ["Flywheel Core Team <core@flywheel.dev>"]
 
 [workspace.dependencies]
-# Async runtime
-tokio = { version = "1.49", features = ["full"] }
 async-trait = "0.1"
 futures-util = "0.3"
 parking_lot = "0.12"
@@ -195,9 +193,6 @@ reqwest = { version = "0.13", features = ["json", "rustls"], default-features = 
 
 # WebSocket
 tokio-tungstenite = { version = "0.28", features = ["rustls-tls-native-roots"] }
-
-# Streams
-tokio-stream = "0.1"
 
 # Testing
 wiremock = "0.6"

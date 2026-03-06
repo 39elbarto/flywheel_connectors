@@ -382,7 +382,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    runner.terminate().await?;
+    runner.terminate()?;
     let stderr_lines = runner.drain_stderr_lines().await;
     for line in stderr_lines {
         let entry = E2eLogEntry::new(

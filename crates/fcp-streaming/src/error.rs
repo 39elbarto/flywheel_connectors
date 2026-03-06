@@ -2,6 +2,8 @@
 
 use std::time::Duration;
 
+use asupersync::http::h1::{ClientError as HttpClientError, HttpError};
+
 /// Streaming errors.
 #[derive(Debug, thiserror::Error)]
 pub enum StreamError {
@@ -69,7 +71,11 @@ pub enum StreamError {
 
     /// HTTP client error.
     #[error("HTTP client error: {0}")]
-    ReqwestError(#[from] reqwest::Error),
+    HttpClientError(#[from] HttpClientError),
+
+    /// HTTP protocol/body error.
+    #[error("HTTP protocol error: {0}")]
+    HttpProtocolError(#[from] HttpError),
 }
 
 /// Result type for streaming operations.

@@ -7,6 +7,7 @@ use std::path::{Path as FsPath, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use asupersync_tokio_compat::io::TokioIo;
 use axum::{
     Json, Router,
     extract::{Path, State},
@@ -15,7 +16,9 @@ use axum::{
 };
 use fcp_async_core::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use fcp_async_core::net::TcpListener;
-use fcp_async_core::process::{Child, ChildStdin, ChildStdout, Command};
+#[cfg(unix)]
+use fcp_async_core::net::UnixListener;
+use fcp_async_core::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use fcp_async_core::sync::Mutex;
 use fcp_async_core::task::{self, JoinHandle};
 use fcp_core::{
@@ -31,8 +34,6 @@ use fcp_host::{
 use fcp_host::{HostError, HostResult};
 use serde::Deserialize;
 use serde_json::json;
-#[cfg(unix)]
-use tokio::net::UnixListener;
 
 #[derive(Debug, Deserialize)]
 struct ConnectorConfig {
@@ -243,9 +244,9 @@ impl ConnectorProcessRunner {
     ) -> std::io::Result<Self> {
         let mut cmd = Command::new(command);
         cmd.args(args)
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped());
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
 
         for (key, value) in env {
             cmd.env(key, value);
@@ -253,16 +254,13 @@ impl ConnectorProcessRunner {
 
         let mut child = cmd.spawn()?;
         let stdin = child
-            .stdin
-            .take()
+            .stdin()
             .ok_or_else(|| std::io::Error::other("connector stdin unavailable"))?;
         let stdout = child
-            .stdout
-            .take()
+            .stdout()
             .ok_or_else(|| std::io::Error::other("connector stdout unavailable"))?;
         let stderr = child
-            .stderr
-            .take()
+            .stderr()
             .ok_or_else(|| std::io::Error::other("connector stderr unavailable"))?;
 
         let stderr_task = task::spawn(async move {
@@ -316,6 +314,79 @@ impl ConnectorProcessRunner {
         self.send_json(value).await?;
         self.read_json().await
     }
+}
+
+struct AxumTcpListener {
+    inner: TcpListener,
+}
+
+impl AxumTcpListener {
+    const fn new(inner: TcpListener) -> Self {
+        Self { inner }
+    }
+}
+
+impl axum::serve::Listener for AxumTcpListener {
+    type Io = TokioIo<fcp_async_core::net::TcpStream>;
+    type Addr = SocketAddr;
+
+    async fn accept(&mut self) -> (Self::Io, Self::Addr) {
+        loop {
+            match self.inner.accept().await {
+                Ok((stream, addr)) => return (TokioIo::new(stream), addr),
+                Err(err) => handle_accept_error(err).await,
+            }
+        }
+    }
+
+    fn local_addr(&self) -> std::io::Result<Self::Addr> {
+        self.inner.local_addr()
+    }
+}
+
+#[cfg(unix)]
+struct AxumUnixListener {
+    inner: UnixListener,
+}
+
+#[cfg(unix)]
+impl AxumUnixListener {
+    const fn new(inner: UnixListener) -> Self {
+        Self { inner }
+    }
+}
+
+#[cfg(unix)]
+impl axum::serve::Listener for AxumUnixListener {
+    type Io = TokioIo<fcp_async_core::net::UnixStream>;
+    type Addr = std::os::unix::net::SocketAddr;
+
+    async fn accept(&mut self) -> (Self::Io, Self::Addr) {
+        loop {
+            match self.inner.accept().await {
+                Ok((stream, addr)) => return (TokioIo::new(stream), addr),
+                Err(err) => handle_accept_error(err).await,
+            }
+        }
+    }
+
+    fn local_addr(&self) -> std::io::Result<Self::Addr> {
+        self.inner.local_addr()
+    }
+}
+
+async fn handle_accept_error(err: std::io::Error) {
+    if matches!(
+        err.kind(),
+        std::io::ErrorKind::ConnectionRefused
+            | std::io::ErrorKind::ConnectionAborted
+            | std::io::ErrorKind::ConnectionReset
+    ) {
+        return;
+    }
+
+    tracing::error!(error = %err, "accept error");
+    fcp_async_core::time::sleep(Duration::from_secs(1)).await;
 }
 
 #[derive(Clone)]
@@ -493,7 +564,7 @@ async fn async_main() -> HostResult<()> {
                 .await
                 .map_err(|err| HostError::Internal(format!("tcp bind error: {err}")))?;
             tracing::info!(transport = "tcp", %addr, "fcp-host listening");
-            axum::serve(listener, app)
+            axum::serve(AxumTcpListener::new(listener), app)
                 .await
                 .map_err(|err| HostError::Internal(format!("server error: {err}")))?;
         }
@@ -501,13 +572,14 @@ async fn async_main() -> HostResult<()> {
         BindTarget::Unix(path) => {
             prepare_unix_socket_path(&path)?;
             let listener = UnixListener::bind(&path)
+                .await
                 .map_err(|err| HostError::Internal(format!("unix bind error: {err}")))?;
             tracing::info!(
                 transport = "unix",
                 socket_path = %path.display(),
                 "fcp-host listening"
             );
-            axum::serve(listener, app)
+            axum::serve(AxumUnixListener::new(listener), app)
                 .await
                 .map_err(|err| HostError::Internal(format!("server error: {err}")))?;
         }
@@ -1084,5 +1156,4 @@ mod tests {
         assert!(dbg.contains("ConnectorConfig"));
         assert!(dbg.contains("fcp.test:echo:1.0.0"));
     }
-
 }

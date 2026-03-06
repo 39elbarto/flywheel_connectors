@@ -271,9 +271,10 @@ where
                     let context = ExecutionContext::request_scoped(timeout);
                     let report = match context.run(registry.self_check(&connector_id)).await {
                         Ok(Some(report)) => report,
-                        Ok(None) => {
-                            return Err(HostError::ConnectorNotFound(connector_id.to_string()));
-                        }
+                        Ok(None) => SelfCheckReport::failed(
+                            "not_found",
+                            "connector not found in registry".to_string(),
+                        ),
                         Err(AsyncError::Timeout { .. }) => SelfCheckReport::failed(
                             "self_check_timeout",
                             format!("self_check exceeded {}ms", timeout.as_millis()),
@@ -602,8 +603,17 @@ mod tests {
             self_check: true,
         };
 
-        let result = service.handle(request).await;
-        assert!(result.is_err());
+        let result = service.handle(request).await.unwrap();
+        assert_eq!(result.overall_status, OverallStatus::Fail);
+        assert_eq!(result.connector_self_checks.len(), 1);
+        assert_eq!(
+            result.connector_self_checks[0].report.status,
+            SelfCheckStatus::Failed
+        );
+        assert_eq!(
+            result.connector_self_checks[0].report.reason_code,
+            Some("not_found".to_string())
+        );
     }
 
     #[fcp_async_core::runtime::test]

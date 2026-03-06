@@ -1,5 +1,9 @@
 //! Error types for Tailscale integration.
 
+use std::time::Duration;
+
+use asupersync::http::h1::ClientError as HttpClientError;
+use fcp_async_core::AsyncError;
 use thiserror::Error;
 
 /// Result type for Tailscale operations.
@@ -56,13 +60,34 @@ pub enum TailscaleError {
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
 
-    /// HTTP request error.
-    #[error("HTTP error: {0}")]
-    Http(#[from] reqwest::Error),
-
     /// JSON serialization/deserialization error.
     #[error("JSON error: {0}")]
     Json(#[from] serde_json::Error),
+}
+
+impl TailscaleError {
+    /// Convert an ASUPERSYNC HTTP client error into a `LocalAPI` request failure.
+    #[must_use]
+    pub fn from_http_client_error(error: &HttpClientError) -> Self {
+        Self::LocalApiRequest(error.to_string())
+    }
+
+    /// Convert an async-core timeout/cancellation into a `LocalAPI` request failure.
+    #[must_use]
+    pub fn from_async_error(error: AsyncError, timeout: Duration) -> Self {
+        match error {
+            AsyncError::Timeout { .. } => Self::LocalApiRequest(format!(
+                "request timed out after {}ms",
+                timeout.as_millis()
+            )),
+            AsyncError::Cancelled => Self::LocalApiRequest("request cancelled".to_string()),
+            AsyncError::ProtocolIo { message }
+            | AsyncError::Join { message }
+            | AsyncError::Runtime { message } => Self::LocalApiRequest(message),
+            AsyncError::ChannelClosed => Self::LocalApiRequest("request channel closed".to_string()),
+            AsyncError::ChannelFull => Self::LocalApiRequest("request channel full".to_string()),
+        }
+    }
 }
 
 #[cfg(test)]

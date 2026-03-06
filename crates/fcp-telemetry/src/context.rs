@@ -27,11 +27,10 @@ fn context_stacks() -> &'static Mutex<HashMap<String, Vec<Arc<TelemetryContext>>
 }
 
 fn context_slot_key() -> String {
-    if let Some(cx) = asupersync::Cx::current() {
-        format!("task:{:?}", cx.task_id())
-    } else {
-        format!("thread:{:?}", std::thread::current().id())
-    }
+    asupersync::Cx::current().map_or_else(
+        || format!("thread:{:?}", std::thread::current().id()),
+        |cx| format!("task:{:?}", cx.task_id()),
+    )
 }
 
 fn push_context(ctx: Arc<TelemetryContext>) -> String {
@@ -643,6 +642,7 @@ where
 /// Get a clone of the current telemetry context.
 ///
 /// Returns `None` if no context is set.
+#[must_use]
 pub fn current_context() -> Option<Arc<TelemetryContext>> {
     context_stacks()
         .lock()

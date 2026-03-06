@@ -22,25 +22,27 @@ workspace = true
 [dependencies]
 fcp-core = { path = "../../crates/fcp-core" }
 fcp-async-core = { path = "../../crates/fcp-async-core" }
+fcp-streaming = { path = "../../crates/fcp-streaming" }
+asupersync = { path = "/dp/asupersync", default-features = false, features = ["tls", "tls-native-roots"] }
 
 anyhow.workspace = true
 async-trait.workspace = true
 bytes.workspace = true
 chrono.workspace = true
-futures-util.workspace = true
-reqwest = { workspace = true, features = ["stream", "multipart"] }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 percent-encoding.workspace = true
-tokio-tungstenite.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
-wiremock.workspace = true
+asupersync-tokio-compat = { path = "/dp/asupersync/asupersync-tokio-compat", features = ["tokio-io"] }
 futures-util.workspace = true
+tokio = { version = "1.49", features = ["rt", "macros"] }
+tokio-tungstenite.workspace = true
+wiremock.workspace = true
 fcp-crypto = { path = "../../crates/fcp-crypto" }
 fcp-manifest = { path = "../../crates/fcp-manifest" }
 fcp-testkit = { path = "../../crates/fcp-testkit" }

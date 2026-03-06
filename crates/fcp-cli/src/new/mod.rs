@@ -1016,7 +1016,7 @@ fn generate_stream_rs(short_name: &str) -> String {
 use std::collections::HashSet;
 
 use fcp_sdk::prelude::{{EventEnvelope, EventStream, FcpResult, SubscribeRequest}};
-use tokio_stream::iter;
+use futures_util::stream::iter;
 
 /// Supervisor for streaming subscriptions (placeholder).
 #[derive(Debug, Default)]
@@ -1080,7 +1080,7 @@ fn generate_polling_rs(short_name: &str) -> String {
 use std::time::{{Duration, Instant}};
 
 use fcp_sdk::prelude::CursorState;
-use tokio_stream::iter;
+use futures_util::stream::iter;
 
 /// Cursor wrapper with sequentialization hints.
 #[derive(Debug, Clone)]

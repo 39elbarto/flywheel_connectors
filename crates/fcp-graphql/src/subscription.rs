@@ -4,8 +4,8 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use fcp_async_core::{channel::mpsc, task, time};
+use futures_util::stream::BoxStream;
 use serde::{Deserialize, Serialize};
-use tokio_stream::wrappers::ReceiverStream;
 use tracing::debug;
 
 use fcp_streaming::{
@@ -51,7 +51,7 @@ impl Default for GraphqlSubscriptionConfig {
 
 /// Subscription stream type.
 pub type GraphqlSubscriptionStream<T> =
-    ReceiverStream<Result<GraphqlResponse<T>, GraphqlClientError>>;
+    BoxStream<'static, Result<GraphqlResponse<T>, GraphqlClientError>>;
 
 /// GraphQL subscription client.
 #[derive(Debug, Clone)]
@@ -129,7 +129,7 @@ impl GraphqlSubscriptionClient {
                     () = tx.closed() => {
                         send_complete_and_close(&mut conn).await;
                         break;
-                    }
+                    },
                     recv = conn.recv() => {
                         let message = match recv {
                             Ok(Some(message)) => message,
@@ -293,7 +293,10 @@ impl GraphqlSubscriptionClient {
             }
         });
 
-        Ok(ReceiverStream::new(rx))
+        Ok(Box::pin(futures_util::stream::unfold(
+            rx,
+            |mut receiver| async move { receiver.recv().await.map(|item| (item, receiver)) },
+        )))
     }
 }
 
@@ -770,5 +773,92 @@ mod tests {
             }
             other => panic!("expected Protocol error, got {other:?}"),
         }
+    }
+
+    // ---- additional edge case tests ----
+
+    #[test]
+    fn ws_message_deserialize_with_extra_fields() {
+        // Unknown fields should be silently ignored by serde
+        let json = r#"{"type":"next","id":"1","payload":null,"extra_field":"ignored"}"#;
+        let msg: GraphqlWsMessage = serde_json::from_str(json).unwrap();
+        assert_eq!(msg.message_type, "next");
+        assert_eq!(msg.id.as_deref(), Some("1"));
+    }
+
+    #[test]
+    fn ws_message_serialize_pong() {
+        let msg = GraphqlWsMessage {
+            message_type: "pong".to_string(),
+            id: Some("1".to_string()),
+            payload: None,
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains(r#""type":"pong"#));
+        assert!(json.contains(r#""id":"1"#));
+    }
+
+    #[test]
+    fn ws_message_deserialize_missing_optional_fields() {
+        // Only type is mandatory; id and payload have #[serde(default)]
+        let json = r#"{"type":"ka"}"#;
+        let msg: GraphqlWsMessage = serde_json::from_str(json).unwrap();
+        assert_eq!(msg.message_type, "ka");
+        assert!(msg.id.is_none());
+        assert!(msg.payload.is_none());
+    }
+
+    #[test]
+    fn decode_close_with_frame() {
+        use fcp_streaming::WsCloseFrame;
+        let frame = WsCloseFrame {
+            code: 1000,
+            reason: "normal closure".to_string(),
+        };
+        let msg = WsMessage::Close(Some(frame));
+        let result = decode_ws_message(msg);
+        match result.unwrap_err() {
+            GraphqlClientError::Protocol { message } => {
+                assert!(message.contains("closed"));
+            }
+            other => panic!("expected Protocol error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn reconnect_config_zero_delay() {
+        let ws_config = WsConfig {
+            auto_reconnect: true,
+            reconnect_delay: Duration::from_secs(0),
+            max_reconnect_attempts: Some(3),
+            ..WsConfig::default()
+        };
+        let config = reconnect_config_from_ws(&ws_config);
+        assert_eq!(config.initial_delay, Duration::from_secs(0));
+        assert_eq!(config.max_attempts, Some(3));
+    }
+
+    #[test]
+    fn subscription_client_header_overwrite() {
+        let client = GraphqlSubscriptionClient::new("wss://api.test.com/graphql", "svc")
+            .with_header("Authorization", "Bearer old")
+            .with_header("Authorization", "Bearer new");
+        assert_eq!(
+            client.headers.get("Authorization").unwrap(),
+            "Bearer new"
+        );
+        assert_eq!(client.headers.len(), 1);
+    }
+
+    #[test]
+    fn subscription_config_custom_init_payload() {
+        let config = GraphqlSubscriptionConfig {
+            init_payload: Some(serde_json::json!({"type": "connection_init", "payload": {"token": "abc"}})),
+            ack_timeout: Duration::from_secs(5),
+            ..GraphqlSubscriptionConfig::default()
+        };
+        assert!(config.init_payload.is_some());
+        let payload = config.init_payload.unwrap();
+        assert_eq!(payload["payload"]["token"], "abc");
     }
 }

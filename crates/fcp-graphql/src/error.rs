@@ -2,12 +2,12 @@
 
 use std::time::Duration;
 
+use asupersync::http::h1::{ClientError as HttpClientError, StatusCode};
 use fcp_core::FcpError;
-use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-/// HTTP error information captured from reqwest.
+/// HTTP error information captured from the transport layer.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HttpErrorInfo {
     /// Error message.
@@ -22,14 +22,106 @@ pub struct HttpErrorInfo {
     pub is_request: bool,
 }
 
-impl From<reqwest::Error> for HttpErrorInfo {
-    fn from(err: reqwest::Error) -> Self {
+impl HttpErrorInfo {
+    /// Construct a timeout-shaped HTTP error.
+    #[must_use]
+    pub fn timeout(timeout: Duration) -> Self {
+        let timeout_ms = u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX);
         Self {
-            message: err.to_string(),
-            status_code: err.status().map(|status| status.as_u16()),
-            is_timeout: err.is_timeout(),
-            is_connect: err.is_connect(),
-            is_request: err.is_request(),
+            message: format!("request deadline exceeded after {timeout_ms}ms"),
+            status_code: Some(StatusCode::REQUEST_TIMEOUT.as_u16()),
+            is_timeout: true,
+            is_connect: false,
+            is_request: false,
+        }
+    }
+
+    /// Construct a cancelled request error.
+    #[must_use]
+    pub fn cancelled() -> Self {
+        Self {
+            message: "request cancelled".into(),
+            status_code: None,
+            is_timeout: false,
+            is_connect: false,
+            is_request: false,
+        }
+    }
+}
+
+impl From<HttpClientError> for HttpErrorInfo {
+    fn from(err: HttpClientError) -> Self {
+        match err {
+            HttpClientError::InvalidUrl(url) => Self {
+                message: format!("invalid URL: {url}"),
+                status_code: None,
+                is_timeout: false,
+                is_connect: false,
+                is_request: false,
+            },
+            HttpClientError::DnsError(error) => Self {
+                message: format!("DNS resolution failed: {error}"),
+                status_code: None,
+                is_timeout: error.kind() == std::io::ErrorKind::TimedOut,
+                is_connect: true,
+                is_request: false,
+            },
+            HttpClientError::ConnectError(error) => Self {
+                message: format!("connection failed: {error}"),
+                status_code: None,
+                is_timeout: error.kind() == std::io::ErrorKind::TimedOut,
+                is_connect: true,
+                is_request: false,
+            },
+            HttpClientError::TlsError(error) => Self {
+                message: format!("TLS error: {error}"),
+                status_code: None,
+                is_timeout: false,
+                is_connect: true,
+                is_request: false,
+            },
+            HttpClientError::HttpError(error) => Self {
+                message: format!("HTTP error: {error}"),
+                status_code: None,
+                is_timeout: false,
+                is_connect: false,
+                is_request: false,
+            },
+            HttpClientError::TooManyRedirects { count, max } => Self {
+                message: format!("too many redirects ({count} of max {max})"),
+                status_code: None,
+                is_timeout: false,
+                is_connect: false,
+                is_request: false,
+            },
+            HttpClientError::Io(error) => Self {
+                message: format!("I/O error: {error}"),
+                status_code: None,
+                is_timeout: error.kind() == std::io::ErrorKind::TimedOut,
+                is_connect: false,
+                is_request: false,
+            },
+            HttpClientError::ConnectTunnelRefused { status, reason } => Self {
+                message: format!("HTTP CONNECT tunnel rejected with status {status} ({reason})"),
+                status_code: Some(status),
+                is_timeout: false,
+                is_connect: true,
+                is_request: false,
+            },
+            HttpClientError::InvalidConnectInput(message) => Self {
+                message: format!("invalid CONNECT input: {message}"),
+                status_code: None,
+                is_timeout: false,
+                is_connect: false,
+                is_request: false,
+            },
+            HttpClientError::ProxyError(message) => Self {
+                message: format!("proxy error: {message}"),
+                status_code: None,
+                is_timeout: false,
+                is_connect: true,
+                is_request: false,
+            },
         }
     }
 }
@@ -123,8 +215,8 @@ pub enum GraphqlClientError {
     },
 }
 
-impl From<reqwest::Error> for GraphqlClientError {
-    fn from(err: reqwest::Error) -> Self {
+impl From<HttpClientError> for GraphqlClientError {
+    fn from(err: HttpClientError) -> Self {
         Self::Http(HttpErrorInfo::from(err))
     }
 }

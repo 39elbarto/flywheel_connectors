@@ -1,11 +1,11 @@
 //! Discord REST API client.
 
-use std::time::Duration;
-
+use asupersync::http::h1::{HttpClient, HttpClientBuilder, Method, Response as HttpResponse};
+use fcp_async_core::ExecutionContext;
 use fcp_sdk::migration::{
-    AttemptOutcome, ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig, RetryLoop,
+    AttemptOutcome, ConnectorErrorMapping, ConnectorRuntime, ConnectorRuntimeConfig,
+    HttpRetryConfig, RetryLoop,
 };
-use reqwest::{Client, Response, StatusCode};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use tracing::{debug, instrument};
 
@@ -15,10 +15,12 @@ use crate::{
     types::{Channel, Guild, Message, User},
 };
 
+const JSON_CONTENT_TYPE: &str = "application/json";
+const STATUS_TOO_MANY_REQUESTS: u16 = 429;
+
 /// Discord REST API client.
-#[derive(Debug, Clone)]
 pub struct DiscordApiClient {
-    client: Client,
+    client: HttpClient,
     base_url: String,
     bot_credential: String,
     runtime: ConnectorRuntime,
@@ -28,10 +30,9 @@ pub struct DiscordApiClient {
 impl DiscordApiClient {
     /// Create a new API client from configuration.
     pub fn new(config: &DiscordConfig) -> DiscordResult<Self> {
-        let client = Client::builder()
-            .timeout(config.timeout)
+        let client = HttpClientBuilder::new()
             .user_agent(format!("fcp-discord/{}", env!("CARGO_PKG_VERSION")))
-            .build()?;
+            .build();
 
         // Normalize credential (remove "Bot " prefix if present)
         let bot_credential = config
@@ -59,7 +60,8 @@ impl DiscordApiClient {
     /// Make a GET request.
     #[instrument(skip(self))]
     pub async fn get<T: DeserializeOwned>(&self, endpoint: &str) -> DiscordResult<T> {
-        self.request("GET", endpoint, None::<&()>).await
+        self.request(Method::Get, "GET", endpoint, None::<&()>)
+            .await
     }
 
     /// Make a POST request.
@@ -69,7 +71,8 @@ impl DiscordApiClient {
         endpoint: &str,
         body: &B,
     ) -> DiscordResult<T> {
-        self.request("POST", endpoint, Some(body)).await
+        self.request(Method::Post, "POST", endpoint, Some(body))
+            .await
     }
 
     /// Make a PATCH request.
@@ -79,104 +82,64 @@ impl DiscordApiClient {
         endpoint: &str,
         body: &B,
     ) -> DiscordResult<T> {
-        self.request("PATCH", endpoint, Some(body)).await
+        self.request(Method::Patch, "PATCH", endpoint, Some(body))
+            .await
     }
 
     /// Make a PUT request with no response body (e.g., reactions returning 204).
     #[instrument(skip(self))]
     pub async fn put_no_response(&self, endpoint: &str) -> DiscordResult<()> {
-        self.request_no_response("PUT", endpoint).await
+        self.request_no_response(Method::Put, "PUT", endpoint).await
     }
 
     /// Make a DELETE request.
     #[instrument(skip(self))]
     pub async fn delete(&self, endpoint: &str) -> DiscordResult<()> {
-        self.request_no_response("DELETE", endpoint).await
+        self.request_no_response(Method::Delete, "DELETE", endpoint)
+            .await
     }
 
     /// Make a request that expects no response body (e.g., DELETE returning 204).
-    #[allow(clippy::items_after_statements)]
-    async fn request_no_response(&self, method: &str, endpoint: &str) -> DiscordResult<()> {
+    async fn request_no_response(
+        &self,
+        method: Method,
+        method_name: &'static str,
+        endpoint: &str,
+    ) -> DiscordResult<()> {
         let url = format!("{}{}", self.base_url, endpoint);
         let ctx = self.runtime.request_context();
         let policy = self.retry_config.to_retry_policy();
-        let bot_credential = &self.bot_credential;
+        let request_ctx = ctx.clone();
 
         RetryLoop::execute(&ctx, &policy, |attempt| {
             let url = &url;
+            let method = method.clone();
+            let request_ctx = request_ctx.clone();
             async move {
                 debug!(
                     attempt,
-                    method, endpoint, "Making Discord API request (no response expected)"
+                    method = method_name,
+                    endpoint,
+                    "Making Discord API request (no response expected)"
                 );
 
-                let req = match method {
-                    "PUT" => self.client.put(url),
-                    "DELETE" => self.client.delete(url),
-                    "POST" => self.client.post(url),
-                    _ => self.client.get(url),
-                };
-
-                let req = req.header("Authorization", format!("Bot {bot_credential}"));
-
-                match req.send().await {
-                    Ok(response) => {
-                        let status = response.status();
-
-                        if status == StatusCode::TOO_MANY_REQUESTS {
-                            let retry_after = response
-                                .headers()
-                                .get("retry-after")
-                                .and_then(|v| v.to_str().ok())
-                                .and_then(|v| v.parse::<f64>().ok())
-                                .unwrap_or(30.0);
-                            return AttemptOutcome::Retryable {
-                                error: DiscordError::RateLimited { retry_after },
-                                retry_after: Some(Duration::from_secs_f64(retry_after)),
-                            };
-                        }
-
-                        if status.is_success() {
-                            return AttemptOutcome::Success(());
-                        }
-
-                        #[derive(Deserialize)]
-                        struct DiscordApiError {
-                            code: Option<i32>,
-                            message: Option<String>,
-                        }
-
-                        let bytes = match response.bytes().await {
-                            Ok(b) => b,
-                            Err(e) => return AttemptOutcome::Terminal(DiscordError::Http(e)),
-                        };
-
-                        let error: DiscordApiError =
-                            serde_json::from_slice(&bytes).unwrap_or_else(|_| DiscordApiError {
-                                code: Some(i32::from(status.as_u16())),
-                                message: Some(String::from_utf8_lossy(&bytes).into_owned()),
-                            });
-
-                        let err = DiscordError::Api {
-                            code: error.code.unwrap_or_else(|| i32::from(status.as_u16())),
-                            message: error.message.unwrap_or_else(|| "Unknown error".into()),
-                            retry_after: None,
-                        };
-
-                        if err.is_retryable() {
-                            AttemptOutcome::Retryable {
-                                retry_after: err.retry_after(),
-                                error: err,
-                            }
-                        } else {
-                            AttemptOutcome::Terminal(err)
-                        }
-                    }
-                    Err(e) if e.is_timeout() || e.is_connect() => AttemptOutcome::Retryable {
-                        error: DiscordError::Http(e),
-                        retry_after: None,
+                match self
+                    .send_http_request(&request_ctx, method, url, None)
+                    .await
+                {
+                    Ok(response) => match Self::handle_no_response(&response) {
+                        Ok(()) => AttemptOutcome::Success(()),
+                        Err(error) if error.is_retryable() => AttemptOutcome::Retryable {
+                            retry_after: error.retry_after(),
+                            error,
+                        },
+                        Err(error) => AttemptOutcome::Terminal(error),
                     },
-                    Err(e) => AttemptOutcome::Terminal(DiscordError::Http(e)),
+                    Err(error) if error.is_retryable() => AttemptOutcome::Retryable {
+                        retry_after: error.retry_after(),
+                        error,
+                    },
+                    Err(error) => AttemptOutcome::Terminal(error),
                 }
             }
         })
@@ -184,98 +147,142 @@ impl DiscordApiClient {
     }
 
     /// Make a request with retry via the migration framework.
-    #[allow(clippy::items_after_statements)]
     async fn request<T: DeserializeOwned, B: Serialize>(
         &self,
-        method: &str,
+        method: Method,
+        method_name: &'static str,
         endpoint: &str,
         body: Option<&B>,
     ) -> DiscordResult<T> {
         let url = format!("{}{}", self.base_url, endpoint);
         let ctx = self.runtime.request_context();
         let policy = self.retry_config.to_retry_policy();
-        let bot_credential = &self.bot_credential;
+        let body_bytes = body.map(serde_json::to_vec).transpose()?;
+        let request_ctx = ctx.clone();
 
         RetryLoop::execute(&ctx, &policy, |attempt| {
             let url = &url;
+            let method = method.clone();
+            let body_bytes = body_bytes.clone();
+            let request_ctx = request_ctx.clone();
             async move {
-                debug!(attempt, method, endpoint, "Making Discord API request");
+                debug!(
+                    attempt,
+                    method = method_name,
+                    endpoint,
+                    "Making Discord API request"
+                );
 
-                let mut req = match method {
-                    "GET" => self.client.get(url),
-                    "POST" => self.client.post(url),
-                    "PATCH" => self.client.patch(url),
-                    "DELETE" => self.client.delete(url),
-                    _ => self.client.get(url),
-                };
-
-                req = req.header("Authorization", format!("Bot {bot_credential}"));
-
-                if let Some(b) = body {
-                    req = req.json(b);
-                }
-
-                match req.send().await {
-                    Ok(response) => match self.handle_response(response).await {
+                match self
+                    .send_http_request(&request_ctx, method, url, body_bytes.as_deref())
+                    .await
+                {
+                    Ok(response) => match Self::handle_response(&response) {
                         Ok(data) => AttemptOutcome::Success(data),
-                        Err(e) if e.is_retryable() => AttemptOutcome::Retryable {
-                            retry_after: e.retry_after(),
-                            error: e,
+                        Err(error) if error.is_retryable() => AttemptOutcome::Retryable {
+                            retry_after: error.retry_after(),
+                            error,
                         },
-                        Err(e) => AttemptOutcome::Terminal(e),
+                        Err(error) => AttemptOutcome::Terminal(error),
                     },
-                    Err(e) if e.is_timeout() || e.is_connect() => AttemptOutcome::Retryable {
-                        error: DiscordError::Http(e),
-                        retry_after: None,
+                    Err(error) if error.is_retryable() => AttemptOutcome::Retryable {
+                        retry_after: error.retry_after(),
+                        error,
                     },
-                    Err(e) => AttemptOutcome::Terminal(DiscordError::Http(e)),
+                    Err(error) => AttemptOutcome::Terminal(error),
                 }
             }
         })
         .await
     }
 
-    async fn handle_response<T: DeserializeOwned>(&self, response: Response) -> DiscordResult<T> {
-        let status = response.status();
+    async fn send_http_request(
+        &self,
+        ctx: &ExecutionContext,
+        method: Method,
+        url: &str,
+        body: Option<&[u8]>,
+    ) -> DiscordResult<HttpResponse> {
+        let mut headers = vec![
+            (
+                "Authorization".to_owned(),
+                format!("Bot {}", self.bot_credential),
+            ),
+            ("Accept".to_owned(), JSON_CONTENT_TYPE.to_owned()),
+        ];
+        let request_body = body.map_or_else(Vec::new, |body| {
+            headers.push(("Content-Type".to_owned(), JSON_CONTENT_TYPE.to_owned()));
+            body.to_vec()
+        });
 
-        // Handle rate limiting
-        if status == StatusCode::TOO_MANY_REQUESTS {
-            let retry_after = response
-                .headers()
-                .get("retry-after")
-                .and_then(|v| v.to_str().ok())
-                .and_then(|v| v.parse::<f64>().ok())
-                .unwrap_or(30.0);
+        match ctx
+            .run(self.client.request(method, url, headers, request_body))
+            .await
+        {
+            Ok(Ok(response)) => Ok(response),
+            Ok(Err(error)) => Err(DiscordError::from_http_client_error(error)),
+            Err(async_error) => Err(<DiscordError as ConnectorErrorMapping>::from_async_error(
+                async_error,
+            )),
+        }
+    }
 
-            return Err(DiscordError::RateLimited { retry_after });
+    fn handle_no_response(response: &HttpResponse) -> DiscordResult<()> {
+        if response.status == STATUS_TOO_MANY_REQUESTS {
+            return Err(DiscordError::RateLimited {
+                retry_after: Self::retry_after_seconds(response),
+            });
         }
 
-        let bytes = response.bytes().await?;
-
-        if status.is_success() {
-            serde_json::from_slice(&bytes).map_err(DiscordError::from)
-        } else {
-            // Try to parse Discord error
-            #[derive(Deserialize)]
-            struct DiscordApiError {
-                code: Option<i32>,
-                message: Option<String>,
-                retry_after: Option<f64>,
-            }
-
-            let error: DiscordApiError =
-                serde_json::from_slice(&bytes).unwrap_or_else(|_| DiscordApiError {
-                    code: Some(i32::from(status.as_u16())),
-                    message: Some(String::from_utf8_lossy(&bytes).into_owned()),
-                    retry_after: None,
-                });
-
-            Err(DiscordError::Api {
-                code: error.code.unwrap_or_else(|| i32::from(status.as_u16())),
-                message: error.message.unwrap_or_else(|| "Unknown error".into()),
-                retry_after: error.retry_after,
-            })
+        if response.is_success() {
+            return Ok(());
         }
+
+        Err(Self::api_error_from_response(response))
+    }
+
+    fn handle_response<T: DeserializeOwned>(response: &HttpResponse) -> DiscordResult<T> {
+        if response.status == STATUS_TOO_MANY_REQUESTS {
+            return Err(DiscordError::RateLimited {
+                retry_after: Self::retry_after_seconds(response),
+            });
+        }
+
+        if response.is_success() {
+            return response.json::<T>().map_err(DiscordError::from);
+        }
+
+        Err(Self::api_error_from_response(response))
+    }
+
+    fn api_error_from_response(response: &HttpResponse) -> DiscordError {
+        #[derive(Deserialize)]
+        struct DiscordApiError {
+            code: Option<i32>,
+            message: Option<String>,
+            retry_after: Option<f64>,
+        }
+
+        let body = response.bytes();
+        let error: DiscordApiError =
+            serde_json::from_slice(body).unwrap_or_else(|_| DiscordApiError {
+                code: Some(i32::from(response.status)),
+                message: Some(String::from_utf8_lossy(body).into_owned()),
+                retry_after: None,
+            });
+
+        DiscordError::Api {
+            code: error.code.unwrap_or_else(|| i32::from(response.status)),
+            message: error.message.unwrap_or_else(|| "Unknown error".into()),
+            retry_after: error.retry_after,
+        }
+    }
+
+    fn retry_after_seconds(response: &HttpResponse) -> f64 {
+        response
+            .header_value("retry-after")
+            .and_then(|value| value.parse::<f64>().ok())
+            .unwrap_or(30.0)
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -459,6 +466,8 @@ impl DiscordApiClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
+
     use fcp_testkit::LogCapture;
     use wiremock::{
         Mock, MockServer, ResponseTemplate,

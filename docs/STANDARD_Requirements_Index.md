@@ -2,7 +2,7 @@
 
 > **Status**: NORMATIVE
 > **Version**: 1.0.0
-> **Last Updated**: January 2026
+> **Last Updated**: March 2026
 > **Bead Reference**: `flywheel_connectors-1n78.1`
 
 ---
@@ -77,6 +77,25 @@ All beads under `flywheel_connectors-235t.*` MUST treat that ADR as the runtime 
 - RaptorQ architecture contract and phased P7 migration ownership from `flywheel_connectors-235t.20`
 - Transport/runtime replacement ownership and adapter debt register from `flywheel_connectors-235t.31`
 - Structured forensics schema + replayable evidence artifact ownership from `flywheel_connectors-235t.32`
+
+---
+
+## Google Connector Foundation Baseline
+
+The Google connector foundation has an additional normative architecture contract:
+
+- **ADR**: `docs/ADR_GOOGLE_Discovery_Snapshot_Baseline.md`
+- **Owner Bead**: `flywheel_connectors-lszk.45.1.1`
+- **Foundation Epic**: `flywheel_connectors-lszk.45.1`
+- **Program Track**: `flywheel_connectors-lszk.45`
+
+All beads under `flywheel_connectors-lszk.45.1.*` and downstream migration beads under `flywheel_connectors-lszk.45.2.*` MUST treat that ADR as the baseline for:
+
+- pinned Discovery snapshots as the reviewed unit of change,
+- deterministic generation from frozen upstream inputs,
+- explicit handwritten override layers above generated metadata,
+- stable manifest/interface/introspection surfaces per shipped connector version,
+- rejection of live runtime Discovery-driven surface mutation.
 
 ---
 

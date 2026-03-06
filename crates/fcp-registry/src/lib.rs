@@ -819,8 +819,13 @@ fn verify_publishers(
     let mut valid = 0u8;
 
     for entry in &sigs.publisher_signatures {
-        if verify_signature_entry(trust, entry, signing_bytes, binary_hash, true)? {
-            valid = valid.saturating_add(1);
+        // We ignore individual signature verification errors (like UnknownKid or SignatureInvalid)
+        // because a manifest may be signed by multiple publishers, and the local node
+        // might only trust a subset of them. We only care if the threshold of *trusted*
+        // signatures is met.
+        match verify_signature_entry(trust, entry, signing_bytes, binary_hash, true) {
+            Ok(true) => valid = valid.saturating_add(1),
+            _ => continue,
         }
     }
 
@@ -878,10 +883,10 @@ fn signature_from_entry(sig: &Base64Bytes) -> Result<Ed25519Signature, RegistryE
 /// Build the message to sign/verify: `len(signing_bytes) || signing_bytes || len(binary_hash) || binary_hash`.
 #[must_use]
 pub fn signature_message(signing_bytes: &[u8], binary_hash: &str) -> Vec<u8> {
-    let mut message = Vec::with_capacity(signing_bytes.len() + binary_hash.len() + 8);
-    message.extend_from_slice(&(signing_bytes.len() as u32).to_le_bytes());
+    let mut message = Vec::with_capacity(signing_bytes.len() + binary_hash.len() + 16);
+    message.extend_from_slice(&(signing_bytes.len() as u64).to_le_bytes());
     message.extend_from_slice(signing_bytes);
-    message.extend_from_slice(&(binary_hash.len() as u32).to_le_bytes());
+    message.extend_from_slice(&(binary_hash.len() as u64).to_le_bytes());
     message.extend_from_slice(binary_hash.as_bytes());
     message
 }

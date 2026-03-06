@@ -314,34 +314,37 @@ fn random_poly<R: RngCore + CryptoRng>(rng: &mut R, constant: u8, degree: usize)
     coefficients
 }
 
-/// Lagrange interpolation at x=0 to recover the secret.
+/// Lagrange interpolation at x = 0.
 ///
-/// Given points `(xᵢ, yᵢ)`, computes `f(0)` where f is the unique polynomial of degree < k
-/// passing through all points.
+/// Given a set of points `(x_i, y_i)`, compute the value of the unique
+/// polynomial of degree ≤ n-1 at x = 0 using Lagrange basis polynomials.
 fn lagrange_interpolate_at_zero(points: &[(Gf256, Gf256)]) -> Gf256 {
     let mut result = Gf256::new(0);
 
-    for (i, &(x_i, y_i)) in points.iter().enumerate() {
-        // Compute Lagrange basis polynomial L_i(0)
+    for (i, &(xi, yi)) in points.iter().enumerate() {
+        // Compute the Lagrange basis polynomial evaluated at 0:
         // L_i(0) = ∏_{j≠i} (0 - x_j) / (x_i - x_j) = ∏_{j≠i} x_j / (x_i - x_j)
-        // In GF(2^8), subtraction is XOR, so x_i - x_j = x_i ^ x_j
-        let mut basis = Gf256::new(1);
-        for (j, &(x_j, _)) in points.iter().enumerate() {
-            if i != j {
-                // Numerator: x_j (since 0 - x_j = x_j in GF(2^8))
-                // Denominator: x_i - x_j = x_i ^ x_j
-                let numerator = x_j;
-                let denominator = x_i.sub(x_j);
-                basis = basis.mul(numerator.div(denominator));
+        // In GF(2^8), subtraction is XOR (same as addition).
+        let mut numerator = Gf256::new(1);
+        let mut denominator = Gf256::new(1);
+
+        for (j, &(xj, _)) in points.iter().enumerate() {
+            if i == j {
+                continue;
             }
+            // numerator *= (0 - x_j) = x_j  (in GF(2^8), -x = x)
+            numerator = numerator.mul(xj);
+            // denominator *= (x_i - x_j) = (x_i XOR x_j)
+            denominator = denominator.mul(xi.sub(xj));
         }
 
-        // Add y_i * L_i(0) to result
-        result = result.add(y_i.mul(basis));
+        let basis_val = numerator.div(denominator);
+        result = result.add(yi.mul(basis_val));
     }
 
     result
 }
+
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Public API

@@ -89,6 +89,7 @@ impl Ed25519SigningKey {
     #[must_use]
     pub fn sign_with_context(&self, context: &[u8], message: &[u8]) -> Ed25519Signature {
         let mut hasher = blake3::Hasher::new();
+        hasher.update(&(context.len() as u64).to_le_bytes());
         hasher.update(context);
         hasher.update(message);
         let digest = hasher.finalize();
@@ -169,6 +170,7 @@ impl Ed25519VerifyingKey {
         signature: &Ed25519Signature,
     ) -> CryptoResult<()> {
         let mut hasher = blake3::Hasher::new();
+        hasher.update(&(context.len() as u64).to_le_bytes());
         hasher.update(context);
         hasher.update(message);
         let digest = hasher.finalize();

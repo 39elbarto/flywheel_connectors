@@ -152,7 +152,7 @@ impl Fcp2KeyDerivation {
         zone_key_material: &[u8],
         zone_id: &[u8],
     ) -> CryptoResult<DerivedKey<32>> {
-        let mut info = Vec::with_capacity(10 + zone_id.len());
+        let mut info = Vec::with_capacity(13 + zone_id.len());
         info.extend_from_slice(b"FCP2-ZONE-KEY");
         info.extend_from_slice(zone_id);
         DerivedKey::derive(None, zone_key_material, &info)
@@ -167,7 +167,7 @@ impl Fcp2KeyDerivation {
         zone_key_material: &[u8],
         zone_id: &[u8],
     ) -> CryptoResult<DerivedKey<32>> {
-        let mut info = Vec::with_capacity(18 + zone_id.len());
+        let mut info = Vec::with_capacity(17 + zone_id.len());
         info.extend_from_slice(b"FCP2-OBJECTID-KEY");
         info.extend_from_slice(zone_id);
         DerivedKey::derive(None, zone_key_material, &info)
@@ -183,7 +183,7 @@ impl Fcp2KeyDerivation {
         session_id: &[u8],
         direction: &str,
     ) -> CryptoResult<DerivedKey<32>> {
-        let mut info = Vec::with_capacity(20 + session_id.len() + direction.len());
+        let mut info = Vec::with_capacity(13 + session_id.len() + direction.len());
         info.extend_from_slice(b"FCP2-SESSION-");
         info.extend_from_slice(direction.as_bytes());
         info.extend_from_slice(session_id);
@@ -196,7 +196,7 @@ impl Fcp2KeyDerivation {
     ///
     /// Returns an error if key derivation fails.
     pub fn derive_mac_key(session_key: &[u8], purpose: &str) -> CryptoResult<DerivedKey<32>> {
-        let mut info = Vec::with_capacity(10 + purpose.len());
+        let mut info = Vec::with_capacity(9 + purpose.len());
         info.extend_from_slice(b"FCP2-MAC-");
         info.extend_from_slice(purpose.as_bytes());
         DerivedKey::derive(None, session_key, &info)

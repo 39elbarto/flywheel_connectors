@@ -12,16 +12,42 @@
 //! - Trace flags (sampled, etc.)
 //! - Optional tracestate for vendor-specific context
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, OnceLock};
 
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use tracing::Span;
 use uuid::Uuid;
 
-fcp_async_core::task_local! {
-    static CONTEXT: Arc<TelemetryContext>;
+fn context_stacks() -> &'static Mutex<HashMap<String, Vec<Arc<TelemetryContext>>>> {
+    static STACKS: OnceLock<Mutex<HashMap<String, Vec<Arc<TelemetryContext>>>>> = OnceLock::new();
+    STACKS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn context_slot_key() -> String {
+    if let Some(cx) = asupersync::Cx::current() {
+        format!("task:{:?}", cx.task_id())
+    } else {
+        format!("thread:{:?}", std::thread::current().id())
+    }
+}
+
+fn push_context(ctx: Arc<TelemetryContext>) -> String {
+    let key = context_slot_key();
+    context_stacks().lock().entry(key.clone()).or_default().push(ctx);
+    key
+}
+
+fn pop_context(key: &str) {
+    let mut stacks = context_stacks().lock();
+    if let Some(stack) = stacks.get_mut(key) {
+        stack.pop();
+        if stack.is_empty() {
+            stacks.remove(key);
+        }
+    }
 }
 
 /// W3C Trace Context size constants.
@@ -608,14 +634,20 @@ pub async fn with_context<F, T>(ctx: TelemetryContext, f: F) -> T
 where
     F: std::future::Future<Output = T>,
 {
-    CONTEXT.scope(Arc::new(ctx), f).await
+    let key = push_context(Arc::new(ctx));
+    let result = f.await;
+    pop_context(&key);
+    result
 }
 
 /// Get a clone of the current telemetry context.
 ///
 /// Returns `None` if no context is set.
 pub fn current_context() -> Option<Arc<TelemetryContext>> {
-    CONTEXT.try_with(Arc::clone).ok()
+    context_stacks()
+        .lock()
+        .get(&context_slot_key())
+        .and_then(|stack| stack.last().cloned())
 }
 
 /// Get the current correlation ID.

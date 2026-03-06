@@ -5,7 +5,7 @@ use fcp_cbor::{SerializationError, to_canonical_cbor};
 use fcp_core::TailscaleNodeId;
 use fcp_crypto::{
     CryptoError, Ed25519Signature, Ed25519SigningKey, Ed25519VerifyingKey, HkdfSha256,
-    X25519PublicKey, X25519SharedSecret, hkdf_sha256_array,
+    X25519PublicKey, X25519SharedSecret,
 };
 use fcp_tailscale::{MeshIdentity, TailscaleError};
 use hmac::{Hmac, Mac};
@@ -753,11 +753,8 @@ pub fn derive_session_keys(
     info.extend_from_slice(hello_nonce.as_bytes());
     info.extend_from_slice(ack_nonce.as_bytes());
 
-    let prk =
-        hkdf_sha256_array::<32>(Some(session_id.as_bytes()), shared_secret.as_bytes(), &info)?;
-
-    let hkdf = HkdfSha256::new(None, &prk);
-    let okm = hkdf.expand_to_array::<96>(b"FCP2-SESSION-KEYS-V1")?;
+    let hkdf = HkdfSha256::new(Some(session_id.as_bytes()), shared_secret.as_bytes());
+    let okm = hkdf.expand_to_array::<96>(&info)?;
 
     let mut k_mac_i2r = [0u8; 32];
     let mut k_mac_r2i = [0u8; 32];

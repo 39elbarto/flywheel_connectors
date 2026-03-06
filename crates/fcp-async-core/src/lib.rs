@@ -104,15 +104,61 @@ impl Instrumentation for NoopInstrumentation {}
 
 /// Runtime bridging helpers.
 pub mod runtime {
+    use std::cell::RefCell;
     use std::io;
+
+    use asupersync::runtime::{
+        Runtime as AsupersyncRuntime, RuntimeBuilder as AsupersyncRuntimeBuilder,
+        RuntimeHandle as AsupersyncRuntimeHandle,
+    };
 
     use super::{AsyncError, Future};
 
     pub use fcp_async_core_macros::{main, test};
 
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum RuntimeFlavor {
+        CurrentThread,
+        MultiThread,
+    }
+
+    #[derive(Clone)]
+    struct RuntimeContext {
+        handle: AsupersyncRuntimeHandle,
+        flavor: RuntimeFlavor,
+    }
+
+    std::thread_local! {
+        static CURRENT_RUNTIME: RefCell<Vec<RuntimeContext>> = const { RefCell::new(Vec::new()) };
+    }
+
+    struct RuntimeGuard;
+
+    impl RuntimeGuard {
+        fn enter(context: RuntimeContext) -> Self {
+            CURRENT_RUNTIME.with(|slot| {
+                slot.borrow_mut().push(context);
+            });
+            Self
+        }
+    }
+
+    impl Drop for RuntimeGuard {
+        fn drop(&mut self) {
+            CURRENT_RUNTIME.with(|slot| {
+                let _ = slot.borrow_mut().pop();
+            });
+        }
+    }
+
+    pub(crate) fn current_runtime_handle() -> Option<AsupersyncRuntimeHandle> {
+        CURRENT_RUNTIME.with(|slot| slot.borrow().last().map(|context| context.handle.clone()))
+    }
+
     /// Runtime builder abstraction owned by async-core.
     pub struct Builder {
-        inner: tokio::runtime::Builder,
+        inner: AsupersyncRuntimeBuilder,
+        flavor: RuntimeFlavor,
     }
 
     impl Builder {
@@ -120,7 +166,8 @@ pub mod runtime {
         #[must_use]
         pub fn new_current_thread() -> Self {
             Self {
-                inner: tokio::runtime::Builder::new_current_thread(),
+                inner: AsupersyncRuntimeBuilder::current_thread(),
+                flavor: RuntimeFlavor::CurrentThread,
             }
         }
 
@@ -128,28 +175,26 @@ pub mod runtime {
         #[must_use]
         pub fn new_multi_thread() -> Self {
             Self {
-                inner: tokio::runtime::Builder::new_multi_thread(),
+                inner: AsupersyncRuntimeBuilder::multi_thread(),
+                flavor: RuntimeFlavor::MultiThread,
             }
         }
 
-        /// Enable all Tokio drivers.
+        /// Enable all runtime services.
         #[must_use]
-        pub fn enable_all(mut self) -> Self {
-            self.inner.enable_all();
+        pub const fn enable_all(self) -> Self {
             self
         }
 
-        /// Enable Tokio time driver.
+        /// Enable time services.
         #[must_use]
-        pub fn enable_time(mut self) -> Self {
-            self.inner.enable_time();
+        pub const fn enable_time(self) -> Self {
             self
         }
 
-        /// Enable Tokio I/O driver.
+        /// Enable I/O services.
         #[must_use]
-        pub fn enable_io(mut self) -> Self {
-            self.inner.enable_io();
+        pub const fn enable_io(self) -> Self {
             self
         }
 
@@ -158,15 +203,29 @@ pub mod runtime {
         /// # Errors
         ///
         /// Returns I/O errors from runtime initialization.
-        pub fn build(mut self) -> io::Result<Runtime> {
-            self.inner.build().map(|inner| Runtime { inner })
+        pub fn build(self) -> io::Result<Runtime> {
+            self.inner
+                .build()
+                .map(|inner| Runtime {
+                    inner,
+                    flavor: self.flavor,
+                })
+                .map_err(|err| io::Error::other(err.to_string()))
         }
     }
 
     /// Runtime abstraction owned by async-core.
-    #[derive(Debug)]
     pub struct Runtime {
-        inner: tokio::runtime::Runtime,
+        inner: AsupersyncRuntime,
+        flavor: RuntimeFlavor,
+    }
+
+    impl std::fmt::Debug for Runtime {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.debug_struct("Runtime")
+                .field("flavor", &self.flavor)
+                .finish_non_exhaustive()
+        }
     }
 
     impl Runtime {
@@ -184,6 +243,10 @@ pub mod runtime {
         where
             F: Future,
         {
+            let _guard = RuntimeGuard::enter(RuntimeContext {
+                handle: self.inner.handle(),
+                flavor: self.flavor,
+            });
             self.inner.block_on(future)
         }
     }
@@ -197,13 +260,14 @@ pub mod runtime {
     where
         F: Future,
     {
-        if let Ok(handle) = tokio::runtime::Handle::try_current() {
-            if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread {
-                return Ok(tokio::task::block_in_place(|| handle.block_on(future)));
-            }
-
+        if let Some(flavor) = CURRENT_RUNTIME.with(|slot| slot.borrow().last().map(|ctx| ctx.flavor))
+        {
+            let flavor_name = match flavor {
+                RuntimeFlavor::CurrentThread => "current-thread",
+                RuntimeFlavor::MultiThread => "multi-thread",
+            };
             return Err(AsyncError::Runtime {
-                message: "cannot block_on_sync inside a current-thread runtime".to_string(),
+                message: format!("cannot block_on_sync inside an active {flavor_name} runtime"),
             });
         }
 

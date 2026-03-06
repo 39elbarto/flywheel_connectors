@@ -34,14 +34,14 @@ async fn setup_connector(mock_url: &str) -> AlgoliaConnector {
 
 // -- Lifecycle ---------------------------------------------------------------
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_health_unconfigured() {
     let c = AlgoliaConnector::new();
     let h = c.handle_health().await.unwrap();
     assert_eq!(h["status"], "unconfigured");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_full() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -49,13 +49,13 @@ async fn lifecycle_full() {
     assert_eq!(h["status"], "healthy");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_handshake_before_configure_fails() {
     let mut c = AlgoliaConnector::new();
     assert!(c.handle_handshake(json!({})).await.is_err());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_shutdown() {
     let server = MockServer::start().await;
     let mut c = setup_connector(&server.uri()).await;
@@ -63,7 +63,7 @@ async fn lifecycle_shutdown() {
     assert_eq!(c.handle_health().await.unwrap()["status"], "unconfigured");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_self_check() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -71,27 +71,27 @@ async fn lifecycle_self_check() {
     assert_eq!(check["status"], "ready");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_self_check_unconfigured() {
     let c = AlgoliaConnector::new();
     let check = c.handle_self_check().await.unwrap();
     assert_eq!(check["status"], "unconfigured");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_doctor() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
     assert_eq!(c.handle_doctor().await.unwrap()["status"], "healthy");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_doctor_unconfigured() {
     let c = AlgoliaConnector::new();
     assert_eq!(c.handle_doctor().await.unwrap()["status"], "unhealthy");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_introspect() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -99,7 +99,7 @@ async fn lifecycle_introspect() {
     assert_eq!(intro["operations"].as_array().unwrap().len(), 4);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_health_configured_not_handshaken() {
     let mut c = AlgoliaConnector::new();
     c.handle_configure(json!({
@@ -115,7 +115,7 @@ async fn lifecycle_health_configured_not_handshaken() {
 
 // -- Search ------------------------------------------------------------------
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn search_basic() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -148,7 +148,7 @@ async fn search_basic() {
     assert_eq!(result["nbHits"], 2);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn search_with_hits_per_page() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -172,7 +172,7 @@ async fn search_with_hits_per_page() {
     assert_eq!(result["hits"].as_array().unwrap().len(), 1);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn search_empty_results() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -196,7 +196,7 @@ async fn search_empty_results() {
     assert!(result["hits"].as_array().unwrap().is_empty());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn search_missing_index_name() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -210,7 +210,7 @@ async fn search_missing_index_name() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn search_missing_query() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -226,7 +226,7 @@ async fn search_missing_query() {
 
 // -- Indices List ------------------------------------------------------------
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn indices_list() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -253,7 +253,7 @@ async fn indices_list() {
     assert_eq!(result["items"].as_array().unwrap().len(), 2);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn indices_list_empty() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -277,7 +277,7 @@ async fn indices_list_empty() {
 
 // -- Records Get -------------------------------------------------------------
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn records_get() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -302,7 +302,7 @@ async fn records_get() {
     assert_eq!(result["name"], "Laptop Pro");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn records_get_missing_index_name() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -316,7 +316,7 @@ async fn records_get_missing_index_name() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn records_get_missing_object_id() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -332,7 +332,7 @@ async fn records_get_missing_object_id() {
 
 // -- Records Delete ----------------------------------------------------------
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn records_delete() {
     let server = MockServer::start().await;
     Mock::given(method("DELETE"))
@@ -355,7 +355,7 @@ async fn records_delete() {
     assert_eq!(result["taskID"], 12345);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn records_delete_missing_index_name() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -369,7 +369,7 @@ async fn records_delete_missing_index_name() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn records_delete_missing_object_id() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -385,7 +385,7 @@ async fn records_delete_missing_object_id() {
 
 // -- Error handling ----------------------------------------------------------
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn error_401() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -408,7 +408,7 @@ async fn error_401() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn error_403() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -431,7 +431,7 @@ async fn error_403() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn error_404() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -454,7 +454,7 @@ async fn error_404() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn error_429() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -478,7 +478,7 @@ async fn error_429() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn error_500() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -503,7 +503,7 @@ async fn error_500() {
 
 // -- Unknown op / Simulate ---------------------------------------------------
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn unknown_operation() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -517,7 +517,7 @@ async fn unknown_operation() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn simulate_known_search() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -530,7 +530,7 @@ async fn simulate_known_search() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn simulate_known_indices_list() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -543,7 +543,7 @@ async fn simulate_known_indices_list() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn simulate_known_records_get() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -556,7 +556,7 @@ async fn simulate_known_records_get() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn simulate_known_records_delete() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -569,7 +569,7 @@ async fn simulate_known_records_delete() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn simulate_unknown() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -584,7 +584,7 @@ async fn simulate_unknown() {
 
 // -- Counters ----------------------------------------------------------------
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn counters_increment() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -607,7 +607,7 @@ async fn counters_increment() {
     assert_eq!(h["errors"], 0);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn counters_error_increment() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -631,7 +631,7 @@ async fn counters_error_increment() {
     assert_eq!(h["errors"], 1);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn counters_multiple_requests() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -658,7 +658,7 @@ async fn counters_multiple_requests() {
 
 // -- Handshake response ------------------------------------------------------
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn handshake_returns_capabilities() {
     let server = MockServer::start().await;
     let mut c = AlgoliaConnector::new();
@@ -679,7 +679,7 @@ async fn handshake_returns_capabilities() {
 
 // -- Invoke before ready -----------------------------------------------------
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn invoke_before_configure_fails() {
     let c = AlgoliaConnector::new();
     assert!(

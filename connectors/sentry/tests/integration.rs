@@ -28,7 +28,7 @@ async fn configured_connector(mock_server: &MockServer) -> SentryConnector {
 
 // ── Lifecycle ─────────────────────────────────────────────────────────
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn configure_with_auth_token() {
     let mut connector = SentryConnector::new();
     let result = connector
@@ -39,14 +39,14 @@ async fn configure_with_auth_token() {
     assert!(result.is_ok());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn configure_missing_auth() {
     let mut connector = SentryConnector::new();
     let result = connector.handle_configure(json!({})).await;
     assert!(result.is_err());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn configure_both_auth_methods_rejected() {
     let mut connector = SentryConnector::new();
     let result = connector
@@ -58,7 +58,7 @@ async fn configure_both_auth_methods_rejected() {
     assert!(result.is_err());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn handshake_before_configure_fails() {
     let mut connector = SentryConnector::new();
     let result = connector
@@ -69,14 +69,14 @@ async fn handshake_before_configure_fails() {
     assert!(result.is_err());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn health_unconfigured() {
     let connector = SentryConnector::new();
     let result = connector.handle_health().await.unwrap();
     assert_eq!(result["status"], "unconfigured");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn health_configured_not_handshaken() {
     let mut connector = SentryConnector::new();
     connector
@@ -87,7 +87,7 @@ async fn health_configured_not_handshaken() {
     assert_eq!(result["status"], "degraded");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn health_fully_configured() {
     let mock = MockServer::start().await;
     let connector = configured_connector(&mock).await;
@@ -95,14 +95,14 @@ async fn health_fully_configured() {
     assert_eq!(result["status"], "healthy");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn doctor_unconfigured() {
     let connector = SentryConnector::new();
     let result = connector.handle_doctor().await.unwrap();
     assert_eq!(result["status"], "unhealthy");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn self_check_reports_version() {
     let connector = SentryConnector::new();
     let result = connector.handle_self_check().await.unwrap();
@@ -110,7 +110,7 @@ async fn self_check_reports_version() {
     assert_eq!(result["version"], "0.1.0");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn introspect_lists_operations() {
     let connector = SentryConnector::new();
     let result = connector.handle_introspect().await.unwrap();
@@ -123,7 +123,7 @@ async fn introspect_lists_operations() {
     assert!(ids.contains(&"sentry.create_alert_rule"));
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn simulate_known_operation() {
     let connector = SentryConnector::new();
     let result = connector
@@ -133,7 +133,7 @@ async fn simulate_known_operation() {
     assert_eq!(result["allowed"], true);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn simulate_unknown_operation() {
     let connector = SentryConnector::new();
     let result = connector
@@ -143,7 +143,7 @@ async fn simulate_unknown_operation() {
     assert_eq!(result["allowed"], false);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn shutdown_resets_state() {
     let mock = MockServer::start().await;
     let mut connector = configured_connector(&mock).await;
@@ -157,7 +157,7 @@ async fn shutdown_resets_state() {
 
 // ── Invoke: List Projects ─────────────────────────────────────────────
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn invoke_list_projects() {
     let mock = MockServer::start().await;
     Mock::given(method("GET"))
@@ -186,7 +186,7 @@ async fn invoke_list_projects() {
 
 // ── Invoke: List Issues ───────────────────────────────────────────────
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn invoke_list_issues() {
     let mock = MockServer::start().await;
     Mock::given(method("GET"))
@@ -217,7 +217,7 @@ async fn invoke_list_issues() {
 
 // ── Invoke: Get Issue ─────────────────────────────────────────────────
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn invoke_get_issue() {
     let mock = MockServer::start().await;
     Mock::given(method("GET"))
@@ -250,7 +250,7 @@ async fn invoke_get_issue() {
 
 // ── Invoke: Update Issue ──────────────────────────────────────────────
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn invoke_update_issue() {
     let mock = MockServer::start().await;
     Mock::given(method("PUT"))
@@ -276,7 +276,7 @@ async fn invoke_update_issue() {
 
 // ── Invoke: Delete Issue ──────────────────────────────────────────────
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn invoke_delete_issue() {
     let mock = MockServer::start().await;
     Mock::given(method("DELETE"))
@@ -299,7 +299,7 @@ async fn invoke_delete_issue() {
 
 // ── Invoke: Get Event ─────────────────────────────────────────────────
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn invoke_get_event() {
     let mock = MockServer::start().await;
     Mock::given(method("GET"))
@@ -331,7 +331,7 @@ async fn invoke_get_event() {
 
 // ── Invoke: List Issue Events ─────────────────────────────────────────
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn invoke_list_issue_events() {
     let mock = MockServer::start().await;
     Mock::given(method("GET"))
@@ -358,7 +358,7 @@ async fn invoke_list_issue_events() {
 
 // ── Invoke: Releases ──────────────────────────────────────────────────
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn invoke_list_releases() {
     let mock = MockServer::start().await;
     Mock::given(method("GET"))
@@ -382,7 +382,7 @@ async fn invoke_list_releases() {
     assert_eq!(releases.len(), 1);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn invoke_get_release() {
     let mock = MockServer::start().await;
     Mock::given(method("GET"))
@@ -412,7 +412,7 @@ async fn invoke_get_release() {
 
 // ── Invoke: Alert Rules ───────────────────────────────────────────────
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn invoke_list_alert_rules() {
     let mock = MockServer::start().await;
     Mock::given(method("GET"))
@@ -440,7 +440,7 @@ async fn invoke_list_alert_rules() {
     assert_eq!(rules[0]["name"], "High error rate");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn invoke_create_alert_rule() {
     let mock = MockServer::start().await;
     Mock::given(method("POST"))
@@ -472,7 +472,7 @@ async fn invoke_create_alert_rule() {
     assert_eq!(result["rule"]["name"], "New alert");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn invoke_delete_alert_rule() {
     let mock = MockServer::start().await;
     Mock::given(method("DELETE"))
@@ -499,7 +499,7 @@ async fn invoke_delete_alert_rule() {
 
 // ── Invoke: Discover Query ────────────────────────────────────────────
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn invoke_discover_query() {
     let mock = MockServer::start().await;
     Mock::given(method("GET"))
@@ -534,7 +534,7 @@ async fn invoke_discover_query() {
 
 // ── Error Handling ────────────────────────────────────────────────────
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn invoke_unknown_operation() {
     let mock = MockServer::start().await;
     let connector = configured_connector(&mock).await;
@@ -547,7 +547,7 @@ async fn invoke_unknown_operation() {
     assert!(result.is_err());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn invoke_missing_required_field() {
     let mock = MockServer::start().await;
     let connector = configured_connector(&mock).await;
@@ -560,7 +560,7 @@ async fn invoke_missing_required_field() {
     assert!(result.is_err());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn invoke_not_configured() {
     let connector = SentryConnector::new();
     let result = connector
@@ -572,7 +572,7 @@ async fn invoke_not_configured() {
     assert!(result.is_err());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn invoke_api_401_unauthorized() {
     let mock = MockServer::start().await;
     Mock::given(method("GET"))
@@ -593,7 +593,7 @@ async fn invoke_api_401_unauthorized() {
     assert!(result.is_err());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn invoke_api_404_not_found() {
     let mock = MockServer::start().await;
     Mock::given(method("GET"))
@@ -614,7 +614,7 @@ async fn invoke_api_404_not_found() {
     assert!(result.is_err());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn invoke_api_429_rate_limited() {
     let mock = MockServer::start().await;
     Mock::given(method("GET"))
@@ -637,7 +637,7 @@ async fn invoke_api_429_rate_limited() {
     assert!(result.is_err());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn invoke_api_403_forbidden() {
     let mock = MockServer::start().await;
     Mock::given(method("GET"))
@@ -658,7 +658,7 @@ async fn invoke_api_403_forbidden() {
     assert!(result.is_err());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn invoke_api_500_server_error() {
     let mock = MockServer::start().await;
     Mock::given(method("GET"))
@@ -681,7 +681,7 @@ async fn invoke_api_500_server_error() {
 
 // ── Invoke: Update Alert Rule ────────────────────────────────────────
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn invoke_update_alert_rule() {
     let mock = MockServer::start().await;
     Mock::given(method("PUT"))
@@ -714,7 +714,7 @@ async fn invoke_update_alert_rule() {
 
 // ── Invoke: List Release Deploys ─────────────────────────────────────
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn invoke_list_release_deploys() {
     let mock = MockServer::start().await;
     Mock::given(method("GET"))
@@ -744,7 +744,7 @@ async fn invoke_list_release_deploys() {
 
 // ── Invoke: Get Transaction ──────────────────────────────────────────
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn invoke_get_transaction() {
     let mock = MockServer::start().await;
     Mock::given(method("GET"))
@@ -775,7 +775,7 @@ async fn invoke_get_transaction() {
 
 // ── Health: error/request counters ───────────────────────────────────
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn health_tracks_request_count() {
     let mock = MockServer::start().await;
     Mock::given(method("GET"))
@@ -798,7 +798,7 @@ async fn health_tracks_request_count() {
     assert_eq!(health["errors"], 0);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn health_tracks_error_count() {
     let mock = MockServer::start().await;
     Mock::given(method("GET"))
@@ -822,7 +822,7 @@ async fn health_tracks_error_count() {
 
 // ── Doctor: fully configured ─────────────────────────────────────────
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn doctor_fully_configured() {
     let mock = MockServer::start().await;
     let connector = configured_connector(&mock).await;
@@ -834,7 +834,7 @@ async fn doctor_fully_configured() {
 
 // ── Simulate: all 16 operations ──────────────────────────────────────
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn simulate_all_known_operations() {
     let connector = SentryConnector::new();
     let ops = [
@@ -866,7 +866,7 @@ async fn simulate_all_known_operations() {
 
 // ── Configure: credential_id ─────────────────────────────────────────
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn configure_with_credential_id() {
     let mut connector = SentryConnector::new();
     let result = connector
@@ -879,7 +879,7 @@ async fn configure_with_credential_id() {
 
 // ── Handshake: returns capabilities ──────────────────────────────────
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn handshake_returns_capabilities() {
     let mut connector = SentryConnector::new();
     connector
@@ -901,7 +901,7 @@ async fn handshake_returns_capabilities() {
 
 // ── Invoke: missing operation_id ─────────────────────────────────────
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn invoke_missing_operation_id() {
     let mock = MockServer::start().await;
     let connector = configured_connector(&mock).await;
@@ -911,7 +911,7 @@ async fn invoke_missing_operation_id() {
 
 // ── List Issues Events: with full=true ───────────────────────────────
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn invoke_list_issue_events_full() {
     let mock = MockServer::start().await;
     Mock::given(method("GET"))

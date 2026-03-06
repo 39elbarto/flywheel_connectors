@@ -30,14 +30,14 @@ async fn setup_connector(mock_url: &str) -> EvernoteConnector {
 
 // -- Lifecycle --------------------------------------------------------
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_health_unconfigured() {
     let c = EvernoteConnector::new();
     let h = c.handle_health().await.unwrap();
     assert_eq!(h["status"], "unconfigured");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_full() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -45,13 +45,13 @@ async fn lifecycle_full() {
     assert_eq!(h["status"], "healthy");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_handshake_before_configure_fails() {
     let mut c = EvernoteConnector::new();
     assert!(c.handle_handshake(json!({})).await.is_err());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_shutdown() {
     let server = MockServer::start().await;
     let mut c = setup_connector(&server.uri()).await;
@@ -59,7 +59,7 @@ async fn lifecycle_shutdown() {
     assert_eq!(c.handle_health().await.unwrap()["status"], "unconfigured");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_self_check() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -67,27 +67,27 @@ async fn lifecycle_self_check() {
     assert_eq!(check["status"], "ready");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_self_check_unconfigured() {
     let c = EvernoteConnector::new();
     let check = c.handle_self_check().await.unwrap();
     assert_eq!(check["status"], "unconfigured");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_doctor() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
     assert_eq!(c.handle_doctor().await.unwrap()["status"], "healthy");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_doctor_unconfigured() {
     let c = EvernoteConnector::new();
     assert_eq!(c.handle_doctor().await.unwrap()["status"], "unhealthy");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_introspect() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -95,7 +95,7 @@ async fn lifecycle_introspect() {
     assert_eq!(intro["operations"].as_array().unwrap().len(), 5);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_introspect_connector_id() {
     let c = EvernoteConnector::new();
     let intro = c.handle_introspect().await.unwrap();
@@ -104,7 +104,7 @@ async fn lifecycle_introspect_connector_id() {
 
 // -- Notebooks List ---------------------------------------------------
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn notebooks_list() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -130,7 +130,7 @@ async fn notebooks_list() {
     assert_eq!(result["notebooks"].as_array().unwrap().len(), 2);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn notebooks_list_empty() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -154,7 +154,7 @@ async fn notebooks_list_empty() {
 
 // -- Notes List -------------------------------------------------------
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn notes_list() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -181,7 +181,7 @@ async fn notes_list() {
     assert_eq!(result["total_count"], 2);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn notes_list_missing_notebook_id() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -197,7 +197,7 @@ async fn notes_list_missing_notebook_id() {
 
 // -- Notes Get --------------------------------------------------------
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn notes_get() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -224,7 +224,7 @@ async fn notes_get() {
     assert_eq!(result["content"], "Discussed roadmap items.");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn notes_get_missing_note_id() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -240,7 +240,7 @@ async fn notes_get_missing_note_id() {
 
 // -- Notes Create -----------------------------------------------------
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn notes_create() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -264,7 +264,7 @@ async fn notes_create() {
     assert_eq!(result["noteId"], "note-new123");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn notes_create_missing_notebook_id() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -278,7 +278,7 @@ async fn notes_create_missing_notebook_id() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn notes_create_missing_title() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -292,7 +292,7 @@ async fn notes_create_missing_title() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn notes_create_minimal() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -318,7 +318,7 @@ async fn notes_create_minimal() {
 
 // -- Notes Delete -----------------------------------------------------
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn notes_delete() {
     let server = MockServer::start().await;
     Mock::given(method("DELETE"))
@@ -338,7 +338,7 @@ async fn notes_delete() {
     assert_eq!(result["deleted"], true);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn notes_delete_missing_id() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -354,7 +354,7 @@ async fn notes_delete_missing_id() {
 
 // -- Error Handling ---------------------------------------------------
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn error_401() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -377,7 +377,7 @@ async fn error_401() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn error_403() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -400,7 +400,7 @@ async fn error_403() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn error_404() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -423,7 +423,7 @@ async fn error_404() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn error_429() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -447,7 +447,7 @@ async fn error_429() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn error_500() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -472,7 +472,7 @@ async fn error_500() {
 
 // -- Unknown Op / Simulate --------------------------------------------
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn unknown_operation() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -486,7 +486,7 @@ async fn unknown_operation() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn simulate_known_notebooks_list() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -499,7 +499,7 @@ async fn simulate_known_notebooks_list() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn simulate_known_notes_get() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -512,7 +512,7 @@ async fn simulate_known_notes_get() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn simulate_known_notes_create() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -525,7 +525,7 @@ async fn simulate_known_notes_create() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn simulate_known_notes_delete() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -538,7 +538,7 @@ async fn simulate_known_notes_delete() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn simulate_unknown() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -553,7 +553,7 @@ async fn simulate_unknown() {
 
 // -- Counters ---------------------------------------------------------
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn counters_increment() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -576,7 +576,7 @@ async fn counters_increment() {
     assert_eq!(h["errors"], 0);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn counters_error_increment() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -602,7 +602,7 @@ async fn counters_error_increment() {
 
 // -- Handshake --------------------------------------------------------
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn handshake_returns_capabilities() {
     let server = MockServer::start().await;
     let mut c = EvernoteConnector::new();
@@ -619,7 +619,7 @@ async fn handshake_returns_capabilities() {
     assert_eq!(caps.len(), 3);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn handshake_without_session_id() {
     let server = MockServer::start().await;
     let mut c = EvernoteConnector::new();
@@ -632,7 +632,7 @@ async fn handshake_without_session_id() {
 
 // -- Health Degraded --------------------------------------------------
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn health_degraded_when_configured_but_not_handshaken() {
     let server = MockServer::start().await;
     let mut c = EvernoteConnector::new();

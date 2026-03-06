@@ -26,14 +26,14 @@ async fn setup_connector(mock_url: &str) -> PandaDocConnector {
 
 // -- Lifecycle --
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_health_unconfigured() {
     let c = PandaDocConnector::new();
     let h = c.handle_health().await.unwrap();
     assert_eq!(h["status"], "unconfigured");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_full() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -41,13 +41,13 @@ async fn lifecycle_full() {
     assert_eq!(h["status"], "healthy");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_handshake_before_configure_fails() {
     let mut c = PandaDocConnector::new();
     assert!(c.handle_handshake(json!({})).await.is_err());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_shutdown() {
     let server = MockServer::start().await;
     let mut c = setup_connector(&server.uri()).await;
@@ -55,7 +55,7 @@ async fn lifecycle_shutdown() {
     assert_eq!(c.handle_health().await.unwrap()["status"], "unconfigured");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_self_check() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -63,14 +63,14 @@ async fn lifecycle_self_check() {
     assert_eq!(check["status"], "ready");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_doctor() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
     assert_eq!(c.handle_doctor().await.unwrap()["status"], "healthy");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_introspect() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -80,7 +80,7 @@ async fn lifecycle_introspect() {
 
 // -- Documents List --
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn documents_list() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -102,7 +102,7 @@ async fn documents_list() {
     assert_eq!(result["results"].as_array().unwrap().len(), 2);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn documents_list_empty() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -122,7 +122,7 @@ async fn documents_list_empty() {
 
 // -- Documents Get --
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn documents_get() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -144,7 +144,7 @@ async fn documents_get() {
     assert_eq!(result["name"], "Test NDA");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn documents_get_missing_id() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -156,7 +156,7 @@ async fn documents_get_missing_id() {
 
 // -- Documents Create --
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn documents_create() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -180,7 +180,7 @@ async fn documents_create() {
     assert_eq!(result["id"], "new_doc_123");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn documents_create_missing_name() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -193,7 +193,7 @@ async fn documents_create_missing_name() {
     })).await.is_err());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn documents_create_missing_template() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -206,7 +206,7 @@ async fn documents_create_missing_template() {
     })).await.is_err());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn documents_create_missing_recipients() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -219,7 +219,7 @@ async fn documents_create_missing_recipients() {
     })).await.is_err());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn documents_create_recipients_not_array() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -235,7 +235,7 @@ async fn documents_create_recipients_not_array() {
 
 // -- Documents Send --
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn documents_send() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -257,7 +257,7 @@ async fn documents_send() {
     assert_eq!(result["status"], "document.sent");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn documents_send_without_message() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -276,7 +276,7 @@ async fn documents_send_without_message() {
     assert_eq!(result["status"], "document.sent");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn documents_send_missing_document_id() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -288,7 +288,7 @@ async fn documents_send_missing_document_id() {
 
 // -- Documents Delete --
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn documents_delete() {
     let server = MockServer::start().await;
     Mock::given(method("DELETE"))
@@ -304,7 +304,7 @@ async fn documents_delete() {
     assert_eq!(result["deleted"], true);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn documents_delete_missing_id() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -316,7 +316,7 @@ async fn documents_delete_missing_id() {
 
 // -- Templates List --
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn templates_list() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -339,7 +339,7 @@ async fn templates_list() {
 
 // -- Error handling --
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn error_401() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -354,7 +354,7 @@ async fn error_401() {
     })).await.is_err());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn error_403() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -369,7 +369,7 @@ async fn error_403() {
     })).await.is_err());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn error_404() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -384,7 +384,7 @@ async fn error_404() {
     })).await.is_err());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn error_429() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -405,7 +405,7 @@ async fn error_429() {
 
 // -- Unknown op / Simulate --
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn unknown_operation() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -415,14 +415,14 @@ async fn unknown_operation() {
     })).await.is_err());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn simulate_known() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
     assert!(c.handle_simulate(json!({"operation_id": "pandadoc.documents.list"})).await.unwrap()["allowed"].as_bool().unwrap());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn simulate_unknown() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -431,7 +431,7 @@ async fn simulate_unknown() {
 
 // -- Counters --
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn counters_increment() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -451,7 +451,7 @@ async fn counters_increment() {
     assert_eq!(h["errors"], 0);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn counters_error_increment() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))

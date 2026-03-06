@@ -33,5 +33,4 @@ tracing-subscriber.workspace = true
 
 [dev-dependencies]
 wiremock.workspace = true
-tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 toml = "0.8"

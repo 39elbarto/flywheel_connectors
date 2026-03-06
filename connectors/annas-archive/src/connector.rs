@@ -315,14 +315,14 @@ mod tests {
         AnnasArchiveConnector::new()
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn configure_succeeds() {
         let mut c = connector();
         let resp = c.handle_configure(json!({})).await.unwrap();
         assert_eq!(resp, json!({}));
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn configure_with_custom_url() {
         let mut c = connector();
         let resp = c
@@ -333,14 +333,14 @@ mod tests {
         assert_eq!(c.base_url, "https://custom.example.com");
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn handshake_fails_without_configure() {
         let mut c = connector();
         let err = c.handle_handshake(json!({})).await.unwrap_err();
         assert!(matches!(err, FcpError::InvalidRequest { .. }));
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn handshake_succeeds_after_configure() {
         let mut c = connector();
         c.handle_configure(json!({})).await.unwrap();
@@ -349,7 +349,7 @@ mod tests {
         assert_eq!(resp["connector_version"], "0.1.0");
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn health_unconfigured() {
         let c = connector();
         let resp = c.handle_health().await.unwrap();
@@ -357,7 +357,7 @@ mod tests {
         assert_eq!(resp["configured"], false);
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn health_configured_not_handshaken() {
         let mut c = connector();
         c.handle_configure(json!({})).await.unwrap();
@@ -365,7 +365,7 @@ mod tests {
         assert_eq!(resp["status"], "degraded");
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn health_fully_ready() {
         let mut c = connector();
         c.handle_configure(json!({})).await.unwrap();
@@ -374,21 +374,21 @@ mod tests {
         assert_eq!(resp["status"], "healthy");
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn doctor_checks() {
         let c = connector();
         let resp = c.handle_doctor().await.unwrap();
         assert!(resp["checks"].is_array());
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn self_check() {
         let c = connector();
         let resp = c.handle_self_check().await.unwrap();
         assert_eq!(resp["connector_id"], "fcp.annas-archive");
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn introspect_has_operations() {
         let c = connector();
         let resp = c.handle_introspect().await.unwrap();
@@ -401,7 +401,7 @@ mod tests {
         assert!(ids.contains(&"annas.lookup.md5"));
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn introspect_all_safe() {
         let c = connector();
         let resp = c.handle_introspect().await.unwrap();
@@ -411,14 +411,14 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn invoke_requires_ready() {
         let c = connector();
         let err = c.handle_invoke(json!({"operation_id": "annas.search", "input": {}})).await.unwrap_err();
         assert!(matches!(err, FcpError::NotConfigured | FcpError::NotHandshaken));
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn invoke_unknown_operation() {
         let mut c = connector();
         c.handle_configure(json!({})).await.unwrap();
@@ -430,7 +430,7 @@ mod tests {
         assert!(matches!(err, FcpError::InvalidRequest { .. }));
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn invoke_missing_operation_id() {
         let mut c = connector();
         c.handle_configure(json!({})).await.unwrap();
@@ -439,7 +439,7 @@ mod tests {
         assert!(matches!(err, FcpError::InvalidRequest { .. }));
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn simulate_known_operation() {
         let c = connector();
         let resp = c
@@ -449,7 +449,7 @@ mod tests {
         assert_eq!(resp["allowed"], true);
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn simulate_unknown_operation() {
         let c = connector();
         let resp = c
@@ -459,7 +459,7 @@ mod tests {
         assert_eq!(resp["allowed"], false);
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn shutdown() {
         let mut c = connector();
         c.handle_configure(json!({})).await.unwrap();

@@ -42,5 +42,4 @@ fcp-discord = { path = ".", features = ["testing"] }
 fcp-crypto = { path = "../../crates/fcp-crypto" }
 fcp-manifest = { path = "../../crates/fcp-manifest" }
 fcp-testkit = { path = "../../crates/fcp-testkit" }
-tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 wiremock.workspace = true

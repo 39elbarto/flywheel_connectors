@@ -24,7 +24,7 @@ async fn configured_connector(mock_url: &str) -> DatadogConnector {
 
 // -- Lifecycle tests --
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn configure_with_api_keys() {
     let mut connector = DatadogConnector::new();
     let result = connector
@@ -36,7 +36,7 @@ async fn configure_with_api_keys() {
     assert!(result.is_ok());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn configure_missing_app_key_fails() {
     let mut connector = DatadogConnector::new();
     let result = connector
@@ -45,14 +45,14 @@ async fn configure_missing_app_key_fails() {
     assert!(result.is_err());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn configure_missing_all_auth_fails() {
     let mut connector = DatadogConnector::new();
     let result = connector.handle_configure(json!({})).await;
     assert!(result.is_err());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn handshake_before_configure_fails() {
     let mut connector = DatadogConnector::new();
     let result = connector
@@ -61,7 +61,7 @@ async fn handshake_before_configure_fails() {
     assert!(result.is_err());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn handshake_after_configure_succeeds() {
     let mut connector = DatadogConnector::new();
     connector
@@ -77,7 +77,7 @@ async fn handshake_after_configure_succeeds() {
     assert_eq!(val["protocol_version"], "2.0");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn health_unconfigured() {
     let connector = DatadogConnector::new();
     let result = connector.handle_health().await.unwrap();
@@ -86,7 +86,7 @@ async fn health_unconfigured() {
     assert_eq!(result["handshaken"], false);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn health_configured_not_handshaken() {
     let mut connector = DatadogConnector::new();
     connector
@@ -99,7 +99,7 @@ async fn health_configured_not_handshaken() {
     assert_eq!(result["handshaken"], false);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn health_fully_configured() {
     let server = MockServer::start().await;
     let connector = configured_connector(&server.uri()).await;
@@ -109,14 +109,14 @@ async fn health_fully_configured() {
     assert_eq!(result["handshaken"], true);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn doctor_unconfigured() {
     let connector = DatadogConnector::new();
     let result = connector.handle_doctor().await.unwrap();
     assert_eq!(result["status"], "unhealthy");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn doctor_fully_configured() {
     let server = MockServer::start().await;
     let connector = configured_connector(&server.uri()).await;
@@ -124,7 +124,7 @@ async fn doctor_fully_configured() {
     assert_eq!(result["status"], "healthy");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn self_check_unconfigured() {
     let connector = DatadogConnector::new();
     let result = connector.handle_self_check().await.unwrap();
@@ -132,7 +132,7 @@ async fn self_check_unconfigured() {
     assert_eq!(result["connector_id"], "fcp.datadog");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn self_check_configured() {
     let mut connector = DatadogConnector::new();
     connector
@@ -143,7 +143,7 @@ async fn self_check_configured() {
     assert_eq!(result["status"], "ready");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn introspect_returns_operations() {
     let connector = DatadogConnector::new();
     let result = connector.handle_introspect().await.unwrap();
@@ -164,7 +164,7 @@ async fn introspect_returns_operations() {
     assert!(op_ids.contains(&"datadog.monitors.list"));
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn simulate_known_operation() {
     let connector = DatadogConnector::new();
     let result = connector
@@ -174,7 +174,7 @@ async fn simulate_known_operation() {
     assert_eq!(result["allowed"], true);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn simulate_unknown_operation() {
     let connector = DatadogConnector::new();
     let result = connector
@@ -184,7 +184,7 @@ async fn simulate_unknown_operation() {
     assert_eq!(result["allowed"], false);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn shutdown_resets_state() {
     let server = MockServer::start().await;
     let mut connector = configured_connector(&server.uri()).await;
@@ -195,7 +195,7 @@ async fn shutdown_resets_state() {
 
 // -- Events --
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn invoke_events_create() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -218,7 +218,7 @@ async fn invoke_events_create() {
     assert!(result.get("event").is_some());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn invoke_events_list() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -244,7 +244,7 @@ async fn invoke_events_list() {
     assert_eq!(events.len(), 2);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn invoke_events_list_missing_start_fails() {
     let server = MockServer::start().await;
     let connector = configured_connector(&server.uri()).await;
@@ -259,7 +259,7 @@ async fn invoke_events_list_missing_start_fails() {
 
 // -- Metrics --
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn invoke_metrics_query() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -289,7 +289,7 @@ async fn invoke_metrics_query() {
     assert_eq!(series.len(), 1);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn invoke_metrics_submit() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -311,7 +311,7 @@ async fn invoke_metrics_submit() {
     assert!(result.get("status").is_some());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn invoke_metrics_submit_missing_series_fails() {
     let server = MockServer::start().await;
     let connector = configured_connector(&server.uri()).await;
@@ -326,7 +326,7 @@ async fn invoke_metrics_submit_missing_series_fails() {
 
 // -- Monitors --
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn invoke_monitors_list() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -350,7 +350,7 @@ async fn invoke_monitors_list() {
     assert_eq!(monitors.len(), 2);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn invoke_monitors_create() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -378,7 +378,7 @@ async fn invoke_monitors_create() {
     assert_eq!(result["id"], 12345);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn invoke_monitors_delete() {
     let server = MockServer::start().await;
     Mock::given(method("DELETE"))
@@ -400,7 +400,7 @@ async fn invoke_monitors_delete() {
 
 // -- Logs --
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn invoke_logs_search() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -428,7 +428,7 @@ async fn invoke_logs_search() {
 
 // -- Error handling --
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn invoke_unauthorized_error() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -447,7 +447,7 @@ async fn invoke_unauthorized_error() {
     assert!(result.is_err());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn invoke_forbidden_error() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -466,7 +466,7 @@ async fn invoke_forbidden_error() {
     assert!(result.is_err());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn invoke_not_found_error() {
     let server = MockServer::start().await;
     Mock::given(method("DELETE"))
@@ -487,7 +487,7 @@ async fn invoke_not_found_error() {
     assert!(result.is_err());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn invoke_rate_limited_error() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -510,7 +510,7 @@ async fn invoke_rate_limited_error() {
     assert!(result.is_err());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn invoke_unknown_operation_fails() {
     let server = MockServer::start().await;
     let connector = configured_connector(&server.uri()).await;
@@ -523,7 +523,7 @@ async fn invoke_unknown_operation_fails() {
     assert!(result.is_err());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn invoke_missing_operation_id_fails() {
     let server = MockServer::start().await;
     let connector = configured_connector(&server.uri()).await;
@@ -531,7 +531,7 @@ async fn invoke_missing_operation_id_fails() {
     assert!(result.is_err());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn invoke_before_handshake_fails() {
     let mut connector = DatadogConnector::new();
     connector
@@ -549,7 +549,7 @@ async fn invoke_before_handshake_fails() {
 
 // -- Region configuration --
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn configure_with_region() {
     let mut connector = DatadogConnector::new();
     let result = connector
@@ -564,7 +564,7 @@ async fn configure_with_region() {
 
 // -- Error counters --
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn error_counter_increments() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -588,7 +588,7 @@ async fn error_counter_increments() {
 
 // -- Simulate: all 8 operations --
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn simulate_all_known_operations() {
     let connector = DatadogConnector::new();
     let ops = [
@@ -612,7 +612,7 @@ async fn simulate_all_known_operations() {
 
 // -- Configure: credential_id --
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn configure_with_credential_id() {
     let mut connector = DatadogConnector::new();
     let result = connector
@@ -625,7 +625,7 @@ async fn configure_with_credential_id() {
 
 // -- Configure: both methods rejected --
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn configure_both_auth_methods_rejected() {
     let mut connector = DatadogConnector::new();
     let result = connector
@@ -640,7 +640,7 @@ async fn configure_both_auth_methods_rejected() {
 
 // -- Handshake: returns capabilities --
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn handshake_returns_capabilities() {
     let mut connector = DatadogConnector::new();
     connector
@@ -661,7 +661,7 @@ async fn handshake_returns_capabilities() {
 
 // -- Logs search: missing query fails --
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn invoke_logs_search_missing_query_fails() {
     let server = MockServer::start().await;
     let connector = configured_connector(&server.uri()).await;
@@ -676,7 +676,7 @@ async fn invoke_logs_search_missing_query_fails() {
 
 // -- Metrics query: missing fields fails --
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn invoke_metrics_query_missing_query_fails() {
     let server = MockServer::start().await;
     let connector = configured_connector(&server.uri()).await;
@@ -691,7 +691,7 @@ async fn invoke_metrics_query_missing_query_fails() {
 
 // -- Request counter --
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn request_counter_increments_on_success() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -716,7 +716,7 @@ async fn request_counter_increments_on_success() {
 
 // -- Monitors delete: missing monitor_id fails --
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn invoke_monitors_delete_missing_id_fails() {
     let server = MockServer::start().await;
     let connector = configured_connector(&server.uri()).await;

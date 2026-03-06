@@ -28,7 +28,7 @@ async fn setup_connector() -> CronConnector {
 // Lifecycle tests
 // ==========================================================================
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_health_unconfigured() {
     let c = CronConnector::new();
     let h = c.handle_health().await.unwrap();
@@ -37,7 +37,7 @@ async fn lifecycle_health_unconfigured() {
     assert_eq!(h["handshaken"], false);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_configure() {
     let mut c = CronConnector::new();
     let result = c.handle_configure(json!({})).await;
@@ -47,7 +47,7 @@ async fn lifecycle_configure() {
     assert_eq!(h["configured"], true);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_full() {
     let c = setup_connector().await;
     let h = c.handle_health().await.unwrap();
@@ -56,13 +56,13 @@ async fn lifecycle_full() {
     assert_eq!(h["handshaken"], true);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_handshake_before_configure_fails() {
     let mut c = CronConnector::new();
     assert!(c.handle_handshake(json!({})).await.is_err());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_shutdown() {
     let mut c = setup_connector().await;
     c.handle_shutdown(json!({})).await.unwrap();
@@ -70,7 +70,7 @@ async fn lifecycle_shutdown() {
     assert_eq!(h["status"], "unconfigured");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_self_check_configured() {
     let c = setup_connector().await;
     let check = c.handle_self_check().await.unwrap();
@@ -78,28 +78,28 @@ async fn lifecycle_self_check_configured() {
     assert_eq!(check["connector_id"], "fcp.cron");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_self_check_unconfigured() {
     let c = CronConnector::new();
     let check = c.handle_self_check().await.unwrap();
     assert_eq!(check["status"], "unconfigured");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_doctor_healthy() {
     let c = setup_connector().await;
     let doc = c.handle_doctor().await.unwrap();
     assert_eq!(doc["status"], "healthy");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_doctor_unconfigured() {
     let c = CronConnector::new();
     let doc = c.handle_doctor().await.unwrap();
     assert_eq!(doc["status"], "unhealthy");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_doctor_configured_not_handshaken() {
     let mut c = CronConnector::new();
     c.handle_configure(json!({})).await.unwrap();
@@ -107,7 +107,7 @@ async fn lifecycle_doctor_configured_not_handshaken() {
     assert_eq!(doc["status"], "degraded");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_introspect() {
     let c = setup_connector().await;
     let intro = c.handle_introspect().await.unwrap();
@@ -115,7 +115,7 @@ async fn lifecycle_introspect() {
     assert_eq!(intro["operations"].as_array().unwrap().len(), 5);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_health_shows_counts() {
     let c = setup_connector().await;
     let h = c.handle_health().await.unwrap();
@@ -129,7 +129,7 @@ async fn lifecycle_health_shows_counts() {
 // Simulate tests
 // ==========================================================================
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn simulate_known_operation() {
     let c = setup_connector().await;
     let sim = c
@@ -139,7 +139,7 @@ async fn simulate_known_operation() {
     assert_eq!(sim["allowed"], true);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn simulate_unknown_operation() {
     let c = setup_connector().await;
     let sim = c
@@ -149,7 +149,7 @@ async fn simulate_unknown_operation() {
     assert_eq!(sim["allowed"], false);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn simulate_all_operations() {
     let c = setup_connector().await;
     let ops = [
@@ -172,7 +172,7 @@ async fn simulate_all_operations() {
 // Invoke: schedules.create
 // ==========================================================================
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn invoke_create_schedule() {
     let mut c = setup_connector().await;
     let result = c
@@ -190,7 +190,7 @@ async fn invoke_create_schedule() {
     assert_eq!(c.schedule_count(), 1);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn invoke_create_schedule_with_payload() {
     let mut c = setup_connector().await;
     let result = c
@@ -208,7 +208,7 @@ async fn invoke_create_schedule_with_payload() {
     assert!(result["schedule_id"].as_str().is_some());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn invoke_create_schedule_disabled() {
     let mut c = setup_connector().await;
     c.handle_invoke(json!({
@@ -225,7 +225,7 @@ async fn invoke_create_schedule_disabled() {
     assert_eq!(c.schedule_count(), 1);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn invoke_create_schedule_invalid_expression() {
     let mut c = setup_connector().await;
     let err = c
@@ -241,7 +241,7 @@ async fn invoke_create_schedule_invalid_expression() {
     assert!(err.is_err());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn invoke_create_schedule_duplicate_name() {
     let mut c = setup_connector().await;
     c.handle_invoke(json!({
@@ -268,7 +268,7 @@ async fn invoke_create_schedule_duplicate_name() {
     assert!(err.is_err());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn invoke_create_schedule_missing_name() {
     let mut c = setup_connector().await;
     let err = c
@@ -283,7 +283,7 @@ async fn invoke_create_schedule_missing_name() {
     assert!(err.is_err());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn invoke_create_schedule_missing_expression() {
     let mut c = setup_connector().await;
     let err = c
@@ -298,7 +298,7 @@ async fn invoke_create_schedule_missing_expression() {
     assert!(err.is_err());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn invoke_create_schedule_missing_target_operation() {
     let mut c = setup_connector().await;
     let err = c
@@ -317,7 +317,7 @@ async fn invoke_create_schedule_missing_target_operation() {
 // Invoke: schedules.list
 // ==========================================================================
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn invoke_list_schedules_empty() {
     let mut c = setup_connector().await;
     let result = c
@@ -330,7 +330,7 @@ async fn invoke_list_schedules_empty() {
     assert_eq!(result["schedules"].as_array().unwrap().len(), 0);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn invoke_list_schedules_after_create() {
     let mut c = setup_connector().await;
     c.handle_invoke(json!({
@@ -371,7 +371,7 @@ async fn invoke_list_schedules_after_create() {
 // Invoke: schedules.delete
 // ==========================================================================
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn invoke_delete_schedule() {
     let mut c = setup_connector().await;
     let created = c
@@ -396,7 +396,7 @@ async fn invoke_delete_schedule() {
     assert_eq!(c.schedule_count(), 0);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn invoke_delete_schedule_not_found() {
     let mut c = setup_connector().await;
     let err = c
@@ -412,7 +412,7 @@ async fn invoke_delete_schedule_not_found() {
 // Invoke: cron.trigger
 // ==========================================================================
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn invoke_trigger() {
     let mut c = setup_connector().await;
     let created = c
@@ -439,7 +439,7 @@ async fn invoke_trigger() {
     assert_eq!(c.execution_count(), 1);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn invoke_trigger_nonexistent() {
     let mut c = setup_connector().await;
     let err = c
@@ -451,7 +451,7 @@ async fn invoke_trigger_nonexistent() {
     assert!(err.is_err());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn invoke_trigger_multiple_times() {
     let mut c = setup_connector().await;
     let created = c
@@ -482,7 +482,7 @@ async fn invoke_trigger_multiple_times() {
 // Invoke: executions.list
 // ==========================================================================
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn invoke_executions_list_empty() {
     let mut c = setup_connector().await;
     let result = c
@@ -495,7 +495,7 @@ async fn invoke_executions_list_empty() {
     assert_eq!(result["executions"].as_array().unwrap().len(), 0);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn invoke_executions_list_after_triggers() {
     let mut c = setup_connector().await;
     let created = c
@@ -534,7 +534,7 @@ async fn invoke_executions_list_after_triggers() {
     assert_eq!(result["executions"].as_array().unwrap().len(), 2);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn invoke_executions_list_filter_by_schedule() {
     let mut c = setup_connector().await;
 
@@ -602,7 +602,7 @@ async fn invoke_executions_list_filter_by_schedule() {
     assert_eq!(filtered2["executions"].as_array().unwrap().len(), 1);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn invoke_executions_list_with_limit() {
     let mut c = setup_connector().await;
     let created = c
@@ -641,7 +641,7 @@ async fn invoke_executions_list_with_limit() {
 // Invoke: unknown operation
 // ==========================================================================
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn invoke_unknown_operation() {
     let mut c = setup_connector().await;
     let err = c
@@ -653,7 +653,7 @@ async fn invoke_unknown_operation() {
     assert!(err.is_err());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn invoke_missing_operation_id() {
     let mut c = setup_connector().await;
     let err = c.handle_invoke(json!({"input": {}})).await;
@@ -664,7 +664,7 @@ async fn invoke_missing_operation_id() {
 // Invoke: not ready
 // ==========================================================================
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn invoke_before_configure_fails() {
     let mut c = CronConnector::new();
     let err = c
@@ -676,7 +676,7 @@ async fn invoke_before_configure_fails() {
     assert!(err.is_err());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn invoke_after_configure_but_before_handshake_fails() {
     let mut c = CronConnector::new();
     c.handle_configure(json!({})).await.unwrap();
@@ -693,7 +693,7 @@ async fn invoke_after_configure_but_before_handshake_fails() {
 // End-to-end workflow
 // ==========================================================================
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn e2e_create_trigger_list_delete() {
     let mut c = setup_connector().await;
 
@@ -766,7 +766,7 @@ async fn e2e_create_trigger_list_delete() {
     assert_eq!(execs_after["executions"].as_array().unwrap().len(), 1);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn e2e_shutdown_clears_state_flags() {
     let mut c = setup_connector().await;
 
@@ -795,7 +795,7 @@ async fn e2e_shutdown_clears_state_flags() {
     assert!(err.is_err());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn e2e_reconfigure_after_shutdown() {
     let mut c = setup_connector().await;
 
@@ -832,7 +832,7 @@ async fn e2e_reconfigure_after_shutdown() {
     assert_eq!(list["schedules"].as_array().unwrap().len(), 1);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn health_counts_increment() {
     let mut c = setup_connector().await;
 

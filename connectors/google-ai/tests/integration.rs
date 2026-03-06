@@ -1,3 +1,4 @@
+#![allow(clippy::doc_markdown)]
 //! Integration tests for the Google AI (Gemini) connector.
 //!
 //! Covers the connector testing requirements (flywheel_connectors-e27.6):
@@ -963,4 +964,965 @@ async fn wrong_capability_rejects_generate() {
         .await;
 
     assert!(result.is_err(), "should reject mismatched capability");
+}
+
+// ============================================================================
+// Operation happy-path tests (connector-level invoke)
+// ============================================================================
+
+/// embed_content through connector invoke returns embedding values.
+#[fcp_async_core::runtime::test]
+async fn invoke_embed_content_happy_path() {
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/v1beta/models/text-embedding-004:embedContent"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "embedding": { "values": [0.1, 0.2, 0.3] }
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = GoogleAiConnector::new();
+    setup_configure(&mut connector, &format!("{}/v1beta", mock_server.uri())).await;
+    let signing_key = setup_handshake(&mut connector, &["google-ai.embed_content"]).await;
+    let token = generate_valid_token(&signing_key, "google-ai.embed_content");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "google-ai.embed_content",
+            "input": {"content": {"parts": [{"text": "hello"}]}},
+            "capability_token": token
+        }))
+        .await
+        .unwrap();
+
+    let values = result["embedding"]["values"].as_array().unwrap();
+    assert_eq!(values.len(), 3);
+}
+
+/// batch_embed_contents through connector invoke returns multiple embeddings.
+#[fcp_async_core::runtime::test]
+async fn invoke_batch_embed_contents_happy_path() {
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/v1beta/models/text-embedding-004:batchEmbedContents"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "embeddings": [
+                {"values": [0.1, 0.2]},
+                {"values": [0.3, 0.4]}
+            ]
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = GoogleAiConnector::new();
+    setup_configure(&mut connector, &format!("{}/v1beta", mock_server.uri())).await;
+    let signing_key = setup_handshake(&mut connector, &["google-ai.batch_embed_contents"]).await;
+    let token = generate_valid_token(&signing_key, "google-ai.batch_embed_contents");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "google-ai.batch_embed_contents",
+            "input": {
+                "requests": [
+                    {"content": {"parts": [{"text": "doc 1"}]}},
+                    {"content": {"parts": [{"text": "doc 2"}]}}
+                ]
+            },
+            "capability_token": token
+        }))
+        .await
+        .unwrap();
+
+    let embeddings = result["embeddings"].as_array().unwrap();
+    assert_eq!(embeddings.len(), 2);
+}
+
+/// count_tokens through connector invoke returns total_tokens.
+#[fcp_async_core::runtime::test]
+async fn invoke_count_tokens_happy_path() {
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/v1beta/models/gemini-2.0-flash:countTokens"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "totalTokens": 99
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = GoogleAiConnector::new();
+    setup_configure(&mut connector, &format!("{}/v1beta", mock_server.uri())).await;
+    let signing_key = setup_handshake(&mut connector, &["google-ai.count_tokens"]).await;
+    let token = generate_valid_token(&signing_key, "google-ai.count_tokens");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "google-ai.count_tokens",
+            "input": {"contents": [{"role": "user", "parts": [{"text": "Hello world"}]}]},
+            "capability_token": token
+        }))
+        .await
+        .unwrap();
+
+    assert_eq!(result["total_tokens"], 99);
+}
+
+/// list_models through connector invoke returns model list.
+#[fcp_async_core::runtime::test]
+async fn invoke_list_models_happy_path() {
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/v1beta/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "models": [
+                {
+                    "name": "models/gemini-2.0-flash",
+                    "displayName": "Gemini 2.0 Flash",
+                    "supportedGenerationMethods": ["generateContent"],
+                    "inputTokenLimit": 1_048_576,
+                    "outputTokenLimit": 8192
+                }
+            ]
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = GoogleAiConnector::new();
+    setup_configure(&mut connector, &format!("{}/v1beta", mock_server.uri())).await;
+    let signing_key = setup_handshake(&mut connector, &["google-ai.list_models"]).await;
+    let token = generate_valid_token(&signing_key, "google-ai.list_models");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "google-ai.list_models",
+            "input": {},
+            "capability_token": token
+        }))
+        .await
+        .unwrap();
+
+    let models = result["models"].as_array().unwrap();
+    assert_eq!(models.len(), 1);
+    assert_eq!(models[0]["name"], "models/gemini-2.0-flash");
+}
+
+/// get_model through connector invoke returns model info.
+#[fcp_async_core::runtime::test]
+async fn invoke_get_model_happy_path() {
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/v1beta/models/gemini-2.0-flash"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "name": "models/gemini-2.0-flash",
+            "displayName": "Gemini 2.0 Flash",
+            "supportedGenerationMethods": ["generateContent", "countTokens"],
+            "inputTokenLimit": 1_048_576,
+            "outputTokenLimit": 8192
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = GoogleAiConnector::new();
+    setup_configure(&mut connector, &format!("{}/v1beta", mock_server.uri())).await;
+    let signing_key = setup_handshake(&mut connector, &["google-ai.get_model"]).await;
+    let token = generate_valid_token(&signing_key, "google-ai.get_model");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "google-ai.get_model",
+            "input": {"model": "gemini-2.0-flash"},
+            "capability_token": token
+        }))
+        .await
+        .unwrap();
+
+    assert_eq!(result["name"], "models/gemini-2.0-flash");
+    assert_eq!(result["inputTokenLimit"], 1_048_576);
+}
+
+// ============================================================================
+// Error handling tests (additional HTTP status codes)
+// ============================================================================
+
+/// 429 from client-level wiremock returns rate limit header.
+#[fcp_async_core::runtime::test]
+async fn error_429_with_retry_after_header() {
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/v1beta/models/gemini-2.0-flash:generateContent"))
+        .respond_with(
+            ResponseTemplate::new(429)
+                .insert_header("retry-after", "5"),
+        )
+        .mount(&mock_server)
+        .await;
+
+    let client = GoogleAiClient::new("test-key")
+        .unwrap()
+        .with_base_url(&format!("{}/v1beta", mock_server.uri()))
+        .with_retry_config(0);
+
+    let body = json!({"contents": [{"role": "user", "parts": [{"text": "hi"}]}]});
+    let err = client
+        .generate_content("gemini-2.0-flash", &body)
+        .await
+        .unwrap_err();
+
+    match &err {
+        GoogleAiError::RateLimit { retry_after_ms } => {
+            assert_eq!(*retry_after_ms, 5000, "retry-after header of 5 seconds = 5000ms");
+        }
+        other => panic!("expected RateLimit, got: {other:?}"),
+    }
+}
+
+/// Non-JSON 200 response on streaming endpoint triggers serialization error.
+#[fcp_async_core::runtime::test]
+async fn error_non_json_streaming_response() {
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/v1beta/models/gemini-2.0-flash:streamGenerateContent"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("<html>not json</html>"))
+        .mount(&mock_server)
+        .await;
+
+    let client = GoogleAiClient::new("test-key")
+        .unwrap()
+        .with_base_url(&format!("{}/v1beta", mock_server.uri()))
+        .with_retry_config(0);
+
+    let body = json!({"contents": [{"role": "user", "parts": [{"text": "hi"}]}]});
+    let err = client
+        .generate_content_stream("gemini-2.0-flash", &body)
+        .await
+        .unwrap_err();
+
+    assert!(!err.is_retryable(), "serialization errors are not retryable");
+}
+
+/// 502 Bad Gateway maps to retryable External error.
+#[fcp_async_core::runtime::test]
+async fn error_502_maps_to_external_retryable() {
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/v1beta/models/gemini-2.0-flash:generateContent"))
+        .respond_with(ResponseTemplate::new(502).set_body_string("Bad Gateway"))
+        .mount(&mock_server)
+        .await;
+
+    let client = GoogleAiClient::new("test-key")
+        .unwrap()
+        .with_base_url(&format!("{}/v1beta", mock_server.uri()))
+        .with_retry_config(0);
+
+    let body = json!({"contents": [{"role": "user", "parts": [{"text": "hi"}]}]});
+    let err = client
+        .generate_content("gemini-2.0-flash", &body)
+        .await
+        .unwrap_err();
+
+    assert!(err.is_retryable());
+    let fcp_err = err.to_fcp_error();
+    assert!(
+        matches!(
+            fcp_err,
+            FcpError::External {
+                retryable: true,
+                status_code: Some(502),
+                ..
+            }
+        ),
+        "expected External(502, retryable), got: {fcp_err:?}"
+    );
+}
+
+/// 400 Bad Request from API returns structured error.
+#[fcp_async_core::runtime::test]
+async fn error_400_structured_api_error() {
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/v1beta/models/gemini-2.0-flash:generateContent"))
+        .respond_with(ResponseTemplate::new(400).set_body_json(json!({
+            "error": {
+                "code": 400,
+                "message": "Request contains an invalid argument.",
+                "status": "INVALID_ARGUMENT"
+            }
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let client = GoogleAiClient::new("test-key")
+        .unwrap()
+        .with_base_url(&format!("{}/v1beta", mock_server.uri()))
+        .with_retry_config(0);
+
+    let body = json!({"contents": [{"role": "user", "parts": [{"text": "hi"}]}]});
+    let err = client
+        .generate_content("gemini-2.0-flash", &body)
+        .await
+        .unwrap_err();
+
+    assert!(!err.is_retryable());
+    let fcp_err = err.to_fcp_error();
+    assert!(
+        matches!(fcp_err, FcpError::External { status_code: Some(400), retryable: false, .. }),
+        "expected External(400, not retryable), got: {fcp_err:?}"
+    );
+}
+
+// ============================================================================
+// Input validation tests
+// ============================================================================
+
+/// get_model invoke with missing required `model` field returns InvalidRequest.
+#[fcp_async_core::runtime::test]
+async fn invoke_get_model_missing_model_field() {
+    let mock_server = MockServer::start().await;
+
+    // Mount a dummy mock so we don't need a real API
+    Mock::given(method("GET"))
+        .and(path("/v1beta/models/anything"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = GoogleAiConnector::new();
+    setup_configure(&mut connector, &format!("{}/v1beta", mock_server.uri())).await;
+    let signing_key = setup_handshake(&mut connector, &["google-ai.get_model"]).await;
+    let token = generate_valid_token(&signing_key, "google-ai.get_model");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "google-ai.get_model",
+            "input": {},
+            "capability_token": token
+        }))
+        .await;
+
+    assert!(result.is_err());
+    match result.unwrap_err() {
+        FcpError::InvalidRequest { message, .. } => {
+            assert!(message.contains("model"), "error should mention missing field 'model'");
+        }
+        e => panic!("expected InvalidRequest, got: {e:?}"),
+    }
+}
+
+/// Invoke with missing `operation` field returns InvalidRequest.
+#[fcp_async_core::runtime::test]
+async fn invoke_missing_operation_field() {
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/v1beta/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"models": []})))
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = GoogleAiConnector::new();
+    setup_configure(&mut connector, &format!("{}/v1beta", mock_server.uri())).await;
+    let signing_key = setup_handshake(&mut connector, &["google-ai.list_models"]).await;
+    let token = generate_valid_token(&signing_key, "google-ai.list_models");
+
+    let result = connector
+        .handle_invoke(json!({
+            "input": {},
+            "capability_token": token
+        }))
+        .await;
+
+    assert!(result.is_err());
+    match result.unwrap_err() {
+        FcpError::InvalidRequest { message, .. } => {
+            assert!(message.contains("operation"), "error should mention missing 'operation'");
+        }
+        e => panic!("expected InvalidRequest, got: {e:?}"),
+    }
+}
+
+/// Invoke with missing `capability_token` field returns InvalidRequest.
+#[fcp_async_core::runtime::test]
+async fn invoke_missing_capability_token() {
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/v1beta/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"models": []})))
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = GoogleAiConnector::new();
+    setup_configure(&mut connector, &format!("{}/v1beta", mock_server.uri())).await;
+    let _signing_key = setup_handshake(&mut connector, &["google-ai.list_models"]).await;
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "google-ai.list_models",
+            "input": {}
+        }))
+        .await;
+
+    assert!(result.is_err());
+    match result.unwrap_err() {
+        FcpError::InvalidRequest { message, .. } => {
+            assert!(message.contains("capability_token"));
+        }
+        e => panic!("expected InvalidRequest, got: {e:?}"),
+    }
+}
+
+// ============================================================================
+// Configuration edge-case tests
+// ============================================================================
+
+/// Empty api_key (whitespace only) is rejected.
+#[fcp_async_core::runtime::test]
+async fn configure_empty_whitespace_api_key_rejected() {
+    let mut connector = GoogleAiConnector::new();
+    let result = connector
+        .handle_configure(json!({ "api_key": "   " }))
+        .await;
+
+    assert!(result.is_err());
+    match result.unwrap_err() {
+        FcpError::InvalidRequest { message, .. } => {
+            assert!(message.contains("Missing api_key or credential_id"));
+        }
+        e => panic!("expected InvalidRequest, got: {e:?}"),
+    }
+}
+
+/// credential_id as a non-string value is rejected.
+#[fcp_async_core::runtime::test]
+async fn configure_credential_id_non_string_rejected() {
+    let mut connector = GoogleAiConnector::new();
+    let result = connector
+        .handle_configure(json!({ "credential_id": 12345 }))
+        .await;
+
+    assert!(result.is_err());
+    match result.unwrap_err() {
+        FcpError::InvalidRequest { message, .. } => {
+            assert!(message.contains("credential_id must be a string"));
+        }
+        e => panic!("expected InvalidRequest, got: {e:?}"),
+    }
+}
+
+/// Both api_key and credential_id provided is rejected.
+#[fcp_async_core::runtime::test]
+async fn configure_both_auth_modes_rejected() {
+    let mut connector = GoogleAiConnector::new();
+    let result = connector
+        .handle_configure(json!({
+            "api_key": "my-key",
+            "credential_id": "550e8400-e29b-41d4-a716-446655440000"
+        }))
+        .await;
+
+    assert!(result.is_err());
+    match result.unwrap_err() {
+        FcpError::InvalidRequest { message, .. } => {
+            assert!(message.contains("exactly one"));
+        }
+        e => panic!("expected InvalidRequest, got: {e:?}"),
+    }
+}
+
+/// Neither auth method provided is rejected.
+#[fcp_async_core::runtime::test]
+async fn configure_no_auth_rejected() {
+    let mut connector = GoogleAiConnector::new();
+    let result = connector
+        .handle_configure(json!({"base_url": "http://localhost:9999"}))
+        .await;
+
+    assert!(result.is_err());
+    match result.unwrap_err() {
+        FcpError::InvalidRequest { message, .. } => {
+            assert!(message.contains("Missing api_key or credential_id"));
+        }
+        e => panic!("expected InvalidRequest, got: {e:?}"),
+    }
+}
+
+/// Configure with custom base_url overrides default.
+#[fcp_async_core::runtime::test]
+async fn configure_custom_base_url() {
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/v1beta/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "models": [{"name": "models/gemini-2.0-flash"}]
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = GoogleAiConnector::new();
+    let custom_url = format!("{}/v1beta", mock_server.uri());
+    setup_configure(&mut connector, &custom_url).await;
+
+    let health = connector.handle_health().await.unwrap();
+    assert_eq!(health["status"], "healthy");
+    assert_eq!(health["base_url"], custom_url);
+}
+
+// ============================================================================
+// Lifecycle tests
+// ============================================================================
+
+/// Health check before configuration returns not_configured.
+#[fcp_async_core::runtime::test]
+async fn health_before_configure_returns_not_configured() {
+    let connector = GoogleAiConnector::new();
+    let result = connector.handle_health().await.unwrap();
+    assert_eq!(result["status"], "not_configured");
+    assert_eq!(result["auth"], "unconfigured");
+}
+
+/// Health check after configuration returns healthy.
+#[fcp_async_core::runtime::test]
+async fn health_after_configure_returns_healthy() {
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/v1beta/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"models": []})))
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = GoogleAiConnector::new();
+    setup_configure(&mut connector, &format!("{}/v1beta", mock_server.uri())).await;
+
+    let result = connector.handle_health().await.unwrap();
+    assert_eq!(result["status"], "healthy");
+    assert_eq!(result["auth"], "api_key:redacted");
+}
+
+/// Doctor report returns structured checks with expected fields.
+#[fcp_async_core::runtime::test]
+async fn doctor_report_has_all_checks_when_configured() {
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/v1beta/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"models": []})))
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = GoogleAiConnector::new();
+    setup_configure(&mut connector, &format!("{}/v1beta", mock_server.uri())).await;
+
+    let result = connector.handle_doctor().await.unwrap();
+    let checks = result["checks"].as_array().unwrap();
+
+    let check_names: Vec<&str> = checks.iter().map(|c| c["name"].as_str().unwrap()).collect();
+    assert!(check_names.contains(&"configuration"));
+    assert!(check_names.contains(&"client_initialized"));
+    assert!(check_names.contains(&"base_url"));
+    assert!(check_names.contains(&"auth_mode"));
+    assert!(check_names.contains(&"network_constraints"));
+    assert!(check_names.contains(&"credential_injection"));
+    assert!(checks.len() >= 6, "expected at least 6 checks, got {}", checks.len());
+}
+
+/// Self-check before configuration returns degraded.
+#[fcp_async_core::runtime::test]
+async fn self_check_before_configure_returns_degraded() {
+    let connector = GoogleAiConnector::new();
+    let result = connector.handle_self_check().await.unwrap();
+    assert_eq!(result["status"], "degraded");
+    assert_eq!(result["reason_code"], "not_configured");
+}
+
+/// Self-check with valid API key and working endpoint returns ok.
+#[fcp_async_core::runtime::test]
+async fn self_check_success_returns_ok() {
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/v1beta/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "models": [{"name": "models/gemini-2.0-flash"}]
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = GoogleAiConnector::new();
+    setup_configure(&mut connector, &format!("{}/v1beta", mock_server.uri())).await;
+
+    let result = connector.handle_self_check().await.unwrap();
+    assert_eq!(result["status"], "ok");
+}
+
+/// Shutdown returns status and connector can be re-invoked after re-configure.
+#[fcp_async_core::runtime::test]
+async fn shutdown_then_reinvoke() {
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/v1beta/models/gemini-2.0-flash:generateContent"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(success_response("hello", 5, 3)))
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = GoogleAiConnector::new();
+    setup_configure(&mut connector, &format!("{}/v1beta", mock_server.uri())).await;
+    let signing_key = setup_handshake(&mut connector, &["google-ai.generate_content"]).await;
+
+    // Shutdown
+    let shutdown = connector.handle_shutdown(json!({})).await.unwrap();
+    assert_eq!(shutdown["status"], "shutdown");
+
+    // Re-configure and re-handshake
+    setup_configure(&mut connector, &format!("{}/v1beta", mock_server.uri())).await;
+    let signing_key2 = setup_handshake(&mut connector, &["google-ai.generate_content"]).await;
+    let token = generate_valid_token(&signing_key2, "google-ai.generate_content");
+
+    // Should work after re-init
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "google-ai.generate_content",
+            "input": {"contents": [{"role": "user", "parts": [{"text": "hi"}]}]},
+            "capability_token": token
+        }))
+        .await
+        .unwrap();
+
+    assert!(result["candidates"].is_array());
+    // Suppress unused variable warning
+    let _ = signing_key;
+}
+
+/// Introspect returns all 8 operations with correct structure.
+#[fcp_async_core::runtime::test]
+async fn introspect_returns_complete_operation_catalog() {
+    let connector = GoogleAiConnector::new();
+    let result = connector.handle_introspect().await.unwrap();
+
+    let ops = result["operations"].as_array().unwrap();
+    assert_eq!(ops.len(), 8, "should have 8 operations");
+
+    for op in ops {
+        assert!(op["id"].is_string(), "each op should have an id");
+        assert!(op["summary"].is_string(), "each op should have a summary");
+        assert!(op["input_schema"].is_object(), "each op should have input_schema");
+        assert!(op["output_schema"].is_object(), "each op should have output_schema");
+    }
+}
+
+// ============================================================================
+// Simulate tests
+// ============================================================================
+
+/// Simulate with a known operation returns allowed.
+#[fcp_async_core::runtime::test]
+async fn simulate_known_operation_returns_allowed() {
+    let mut connector = GoogleAiConnector::new();
+    setup_configure(&mut connector, "http://localhost:9999/v1beta").await;
+    let signing_key = setup_handshake(&mut connector, &["google-ai.generate_content"]).await;
+    let token = generate_valid_token(&signing_key, "google-ai.generate_content");
+
+    let result = connector
+        .handle_simulate(json!({
+            "type": "simulate",
+            "id": "req-001",
+            "connector_id": "google-ai",
+            "operation": "google-ai.generate_content",
+            "zone_id": "z:work",
+            "input": {"contents": [{"role": "user", "parts": [{"text": "test"}]}]},
+            "capability_token": token
+        }))
+        .await
+        .unwrap();
+
+    assert_eq!(result["would_succeed"], true);
+}
+
+/// Simulate with an unknown operation still returns allowed (current impl).
+#[fcp_async_core::runtime::test]
+async fn simulate_unknown_operation_returns_allowed() {
+    let mut connector = GoogleAiConnector::new();
+    setup_configure(&mut connector, "http://localhost:9999/v1beta").await;
+    let signing_key = setup_handshake(&mut connector, &["google-ai.nonexistent_operation"]).await;
+    let token = generate_valid_token(&signing_key, "google-ai.nonexistent_operation");
+
+    let result = connector
+        .handle_simulate(json!({
+            "type": "simulate",
+            "id": "req-002",
+            "connector_id": "google-ai",
+            "operation": "google-ai.nonexistent_operation",
+            "zone_id": "z:work",
+            "input": {},
+            "capability_token": token
+        }))
+        .await
+        .unwrap();
+
+    // Current implementation always returns allowed
+    assert_eq!(result["would_succeed"], true);
+}
+
+// ============================================================================
+// Empty results / edge-case response tests
+// ============================================================================
+
+/// list_models returning empty array is handled correctly.
+#[fcp_async_core::runtime::test]
+async fn invoke_list_models_empty_result() {
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/v1beta/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "models": []
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = GoogleAiConnector::new();
+    setup_configure(&mut connector, &format!("{}/v1beta", mock_server.uri())).await;
+    let signing_key = setup_handshake(&mut connector, &["google-ai.list_models"]).await;
+    let token = generate_valid_token(&signing_key, "google-ai.list_models");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "google-ai.list_models",
+            "input": {},
+            "capability_token": token
+        }))
+        .await
+        .unwrap();
+
+    let models = result["models"].as_array().unwrap();
+    assert!(models.is_empty(), "empty model list should be returned as empty array");
+}
+
+/// generate_content response with no usage_metadata is handled.
+#[fcp_async_core::runtime::test]
+async fn generate_content_no_usage_metadata() {
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/v1beta/models/gemini-2.0-flash:generateContent"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "candidates": [{
+                "content": {
+                    "parts": [{"text": "response without usage"}],
+                    "role": "model"
+                },
+                "finishReason": "STOP",
+                "index": 0
+            }]
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let client = GoogleAiClient::new("test-key")
+        .unwrap()
+        .with_base_url(&format!("{}/v1beta", mock_server.uri()));
+
+    let body = json!({"contents": [{"role": "user", "parts": [{"text": "hi"}]}]});
+    let result = client
+        .generate_content("gemini-2.0-flash", &body)
+        .await
+        .unwrap();
+
+    assert_eq!(result.candidates.len(), 1);
+    assert!(result.usage_metadata.is_none());
+    let usage = client.get_usage();
+    assert_eq!(usage.input_tokens, 0, "no usage metadata means 0 tokens");
+    assert_eq!(usage.output_tokens, 0);
+    assert_eq!(usage.requests_total, 1);
+}
+
+/// generate_content with empty candidates list.
+#[fcp_async_core::runtime::test]
+async fn generate_content_empty_candidates() {
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/v1beta/models/gemini-2.0-flash:generateContent"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "candidates": [],
+            "usageMetadata": {
+                "promptTokenCount": 5,
+                "candidatesTokenCount": 0,
+                "totalTokenCount": 5
+            }
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let client = GoogleAiClient::new("test-key")
+        .unwrap()
+        .with_base_url(&format!("{}/v1beta", mock_server.uri()));
+
+    let body = json!({"contents": [{"role": "user", "parts": [{"text": "hi"}]}]});
+    let result = client
+        .generate_content("gemini-2.0-flash", &body)
+        .await
+        .unwrap();
+
+    assert!(result.candidates.is_empty());
+    assert_eq!(result.usage_metadata.as_ref().unwrap().prompt_token_count, 5);
+}
+
+// ============================================================================
+// Invoke without handshake
+// ============================================================================
+
+/// Invoke without prior handshake returns NotConfigured.
+#[fcp_async_core::runtime::test]
+async fn invoke_without_handshake_returns_not_configured() {
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/v1beta/models/gemini-2.0-flash:generateContent"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(success_response("ok", 1, 1)))
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = GoogleAiConnector::new();
+    setup_configure(&mut connector, &format!("{}/v1beta", mock_server.uri())).await;
+    // Deliberately skip handshake
+
+    // Build a dummy token
+    let signing_key = fcp_crypto::ed25519::Ed25519SigningKey::generate();
+    let token = generate_valid_token(&signing_key, "google-ai.generate_content");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "google-ai.generate_content",
+            "input": {"contents": [{"role": "user", "parts": [{"text": "hi"}]}]},
+            "capability_token": token
+        }))
+        .await;
+
+    assert!(result.is_err(), "invoke without handshake should fail");
+    assert!(
+        matches!(result.unwrap_err(), FcpError::NotConfigured),
+        "expected NotConfigured"
+    );
+}
+
+// ============================================================================
+// Unknown operation tests
+// ============================================================================
+
+/// Invoke with unknown operation returns OperationNotGranted.
+#[fcp_async_core::runtime::test]
+async fn invoke_unknown_operation_returns_not_granted() {
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/v1beta/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"models": []})))
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = GoogleAiConnector::new();
+    setup_configure(&mut connector, &format!("{}/v1beta", mock_server.uri())).await;
+    let signing_key = setup_handshake(
+        &mut connector,
+        &["google-ai.nonexistent_op"],
+    )
+    .await;
+    let token = generate_valid_token(&signing_key, "google-ai.nonexistent_op");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "google-ai.nonexistent_op",
+            "input": {},
+            "capability_token": token
+        }))
+        .await;
+
+    assert!(result.is_err());
+    match result.unwrap_err() {
+        FcpError::OperationNotGranted { operation } => {
+            assert_eq!(operation, "google-ai.nonexistent_op");
+        }
+        e => panic!("expected OperationNotGranted, got: {e:?}"),
+    }
+}
+
+// ============================================================================
+// Custom model parameter tests
+// ============================================================================
+
+/// generate_content with a custom model name uses that model.
+#[fcp_async_core::runtime::test]
+async fn invoke_generate_content_custom_model() {
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/v1beta/models/gemini-1.5-pro:generateContent"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(success_response("custom model", 10, 5)))
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = GoogleAiConnector::new();
+    setup_configure(&mut connector, &format!("{}/v1beta", mock_server.uri())).await;
+    let signing_key = setup_handshake(&mut connector, &["google-ai.generate_content"]).await;
+    let token = generate_valid_token(&signing_key, "google-ai.generate_content");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "google-ai.generate_content",
+            "input": {
+                "model": "gemini-1.5-pro",
+                "contents": [{"role": "user", "parts": [{"text": "hi"}]}]
+            },
+            "capability_token": token
+        }))
+        .await
+        .unwrap();
+
+    assert_eq!(result["provenance"]["model"], "gemini-1.5-pro");
+}
+
+/// list_models with page_size parameter.
+#[fcp_async_core::runtime::test]
+async fn invoke_list_models_with_page_size() {
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/v1beta/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "models": [{"name": "models/gemini-2.0-flash"}],
+            "nextPageToken": "page2"
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = GoogleAiConnector::new();
+    setup_configure(&mut connector, &format!("{}/v1beta", mock_server.uri())).await;
+    let signing_key = setup_handshake(&mut connector, &["google-ai.list_models"]).await;
+    let token = generate_valid_token(&signing_key, "google-ai.list_models");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "google-ai.list_models",
+            "input": {"page_size": 1},
+            "capability_token": token
+        }))
+        .await
+        .unwrap();
+
+    let models = result["models"].as_array().unwrap();
+    assert_eq!(models.len(), 1);
+    assert!(result["nextPageToken"].is_string());
 }

@@ -38,14 +38,14 @@ fn listing_response(posts: &serde_json::Value, after: Option<&str>) -> serde_jso
 
 // ── Lifecycle ────────────────────────────────────────────────────────
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_health_unconfigured() {
     let c = RedditConnector::new();
     let h = c.handle_health().await.unwrap();
     assert_eq!(h["status"], "unconfigured");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_full() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -53,13 +53,13 @@ async fn lifecycle_full() {
     assert_eq!(h["status"], "healthy");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_handshake_before_configure_fails() {
     let mut c = RedditConnector::new();
     assert!(c.handle_handshake(json!({})).await.is_err());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_shutdown() {
     let server = MockServer::start().await;
     let mut c = setup_connector(&server.uri()).await;
@@ -67,7 +67,7 @@ async fn lifecycle_shutdown() {
     assert_eq!(c.handle_health().await.unwrap()["status"], "unconfigured");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_self_check() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -75,14 +75,14 @@ async fn lifecycle_self_check() {
     assert_eq!(check["status"], "ready");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_doctor() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
     assert_eq!(c.handle_doctor().await.unwrap()["status"], "healthy");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_introspect() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -92,7 +92,7 @@ async fn lifecycle_introspect() {
 
 // ── Search Posts ─────────────────────────────────────────────────────
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn search_posts() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -116,7 +116,7 @@ async fn search_posts() {
     assert_eq!(result["next_after"], "t3_def");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn search_posts_missing_query() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -125,7 +125,7 @@ async fn search_posts_missing_query() {
 
 // ── List Subreddit New ───────────────────────────────────────────────
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn list_subreddit_new() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -144,7 +144,7 @@ async fn list_subreddit_new() {
     assert_eq!(result["posts"].as_array().unwrap().len(), 1);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn list_subreddit_new_missing_subreddit() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -153,7 +153,7 @@ async fn list_subreddit_new_missing_subreddit() {
 
 // ── Get Post Thread ──────────────────────────────────────────────────
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn get_post_thread() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -173,7 +173,7 @@ async fn get_post_thread() {
     assert!(result.get("comments").is_some());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn get_post_thread_missing_fullname() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -182,7 +182,7 @@ async fn get_post_thread_missing_fullname() {
 
 // ── Create Post ──────────────────────────────────────────────────────
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn create_post() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -200,7 +200,7 @@ async fn create_post() {
     assert!(result.get("json").is_some());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn create_post_missing_title() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -209,7 +209,7 @@ async fn create_post_missing_title() {
 
 // ── Create Comment ───────────────────────────────────────────────────
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn create_comment() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -227,7 +227,7 @@ async fn create_comment() {
     assert!(result.get("json").is_some());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn create_comment_missing_text() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -236,7 +236,7 @@ async fn create_comment_missing_text() {
 
 // ── Send Message ─────────────────────────────────────────────────────
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn send_message() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -252,7 +252,7 @@ async fn send_message() {
     assert!(result.get("json").is_some());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn send_message_missing_recipient() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -261,7 +261,7 @@ async fn send_message_missing_recipient() {
 
 // ── Mod Remove ───────────────────────────────────────────────────────
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn mod_remove() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -277,7 +277,7 @@ async fn mod_remove() {
     assert_eq!(result["removed"], true);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn mod_remove_missing_fullname() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -286,7 +286,7 @@ async fn mod_remove_missing_fullname() {
 
 // ── Stream Subreddit New ─────────────────────────────────────────────
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn stream_subreddit_new() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -308,7 +308,7 @@ async fn stream_subreddit_new() {
 
 // ── Error handling ───────────────────────────────────────────────────
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn error_401() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -320,7 +320,7 @@ async fn error_401() {
     assert!(c.handle_invoke(json!({"operation_id": "reddit.search_posts", "input": {"query": "test"}})).await.is_err());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn error_404() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -332,7 +332,7 @@ async fn error_404() {
     assert!(c.handle_invoke(json!({"operation_id": "reddit.get_post_thread", "input": {"post_fullname": "t3_missing"}})).await.is_err());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn error_429() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -346,21 +346,21 @@ async fn error_429() {
 
 // ── Unknown op / Simulate ────────────────────────────────────────────
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn unknown_operation() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
     assert!(c.handle_invoke(json!({"operation_id": "reddit.nope", "input": {}})).await.is_err());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn simulate_known() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
     assert!(c.handle_simulate(json!({"operation_id": "reddit.search_posts"})).await.unwrap()["allowed"].as_bool().unwrap());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn simulate_unknown() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -369,7 +369,7 @@ async fn simulate_unknown() {
 
 // ── Counters ─────────────────────────────────────────────────────────
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn counters() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))

@@ -30,14 +30,14 @@ async fn setup_connector(mock_url: &str) -> DocuSignConnector {
 
 // -- Lifecycle --
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_health_unconfigured() {
     let c = DocuSignConnector::new();
     let h = c.handle_health().await.unwrap();
     assert_eq!(h["status"], "unconfigured");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_full() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -45,13 +45,13 @@ async fn lifecycle_full() {
     assert_eq!(h["status"], "healthy");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_handshake_before_configure_fails() {
     let mut c = DocuSignConnector::new();
     assert!(c.handle_handshake(json!({})).await.is_err());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_shutdown() {
     let server = MockServer::start().await;
     let mut c = setup_connector(&server.uri()).await;
@@ -59,7 +59,7 @@ async fn lifecycle_shutdown() {
     assert_eq!(c.handle_health().await.unwrap()["status"], "unconfigured");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_self_check() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -67,14 +67,14 @@ async fn lifecycle_self_check() {
     assert_eq!(check["status"], "ready");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_doctor() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
     assert_eq!(c.handle_doctor().await.unwrap()["status"], "healthy");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_introspect() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -82,7 +82,7 @@ async fn lifecycle_introspect() {
     assert_eq!(intro["operations"].as_array().unwrap().len(), 10);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_configured_but_not_handshaken() {
     let mut c = DocuSignConnector::new();
     c.handle_configure(json!({ "access_token": "tok", "base_url": "http://localhost:9999" }))
@@ -94,7 +94,7 @@ async fn lifecycle_configured_but_not_handshaken() {
 
 // -- List Envelopes --
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn list_envelopes() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -123,7 +123,7 @@ async fn list_envelopes() {
     assert_eq!(result["totalSetSize"], "100");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn list_envelopes_missing_account_id() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -139,7 +139,7 @@ async fn list_envelopes_missing_account_id() {
 
 // -- Get Envelope --
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn get_envelope() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -167,7 +167,7 @@ async fn get_envelope() {
     assert_eq!(result["envelope"]["status"], "completed");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn get_envelope_missing_envelope_id() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -183,7 +183,7 @@ async fn get_envelope_missing_envelope_id() {
 
 // -- Create Envelope --
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn create_envelope() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -216,7 +216,7 @@ async fn create_envelope() {
     assert_eq!(result["status"], "created");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn create_envelope_missing_definition() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -232,7 +232,7 @@ async fn create_envelope_missing_definition() {
 
 // -- Send Envelope --
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn send_envelope() {
     let server = MockServer::start().await;
     Mock::given(method("PUT"))
@@ -256,7 +256,7 @@ async fn send_envelope() {
     assert_eq!(result["status"], "sent");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn send_envelope_missing_envelope_id() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -272,7 +272,7 @@ async fn send_envelope_missing_envelope_id() {
 
 // -- Void Envelope --
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn void_envelope() {
     let server = MockServer::start().await;
     Mock::given(method("PUT"))
@@ -299,7 +299,7 @@ async fn void_envelope() {
     assert_eq!(result["status"], "voided");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn void_envelope_missing_reason() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -315,7 +315,7 @@ async fn void_envelope_missing_reason() {
 
 // -- Add Recipients --
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn add_recipients() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -344,7 +344,7 @@ async fn add_recipients() {
     assert!(result["recipients"].is_object());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn add_recipients_missing_recipients() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -360,7 +360,7 @@ async fn add_recipients_missing_recipients() {
 
 // -- List Templates --
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn list_templates() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -389,7 +389,7 @@ async fn list_templates() {
 
 // -- Get Template --
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn get_template() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -414,7 +414,7 @@ async fn get_template() {
     assert_eq!(result["template"]["name"], "NDA Template");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn get_template_missing_template_id() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -430,7 +430,7 @@ async fn get_template_missing_template_id() {
 
 // -- Download Documents --
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn download_documents() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -456,7 +456,7 @@ async fn download_documents() {
     assert!(doc.chars().all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '/' || c == '='));
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn download_documents_missing_envelope_id() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -472,7 +472,7 @@ async fn download_documents_missing_envelope_id() {
 
 // -- Stream Connect Events --
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn stream_connect_events() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -487,7 +487,7 @@ async fn stream_connect_events() {
     assert_eq!(result["streaming"], true);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn stream_connect_events_with_since_ts() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -503,7 +503,7 @@ async fn stream_connect_events_with_since_ts() {
 
 // -- Error Handling --
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn error_401() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -526,7 +526,7 @@ async fn error_401() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn error_403() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -549,7 +549,7 @@ async fn error_403() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn error_404() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -572,7 +572,7 @@ async fn error_404() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn error_429() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -596,7 +596,7 @@ async fn error_429() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn error_500() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -624,7 +624,7 @@ async fn error_500() {
 
 // -- Unknown Op / Simulate --
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn unknown_operation() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -638,7 +638,7 @@ async fn unknown_operation() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn simulate_known() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -651,7 +651,7 @@ async fn simulate_known() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn simulate_unknown() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -664,7 +664,7 @@ async fn simulate_unknown() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn simulate_all_operations() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -691,7 +691,7 @@ async fn simulate_all_operations() {
 
 // -- Counters --
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn counters_increment() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -716,7 +716,7 @@ async fn counters_increment() {
     assert_eq!(h["errors"], 0);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn counters_error_increment() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))

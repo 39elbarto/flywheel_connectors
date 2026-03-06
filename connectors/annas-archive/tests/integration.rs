@@ -7,7 +7,7 @@ use fcp_annas_archive::connector::AnnasArchiveConnector;
 
 // -- Client integration tests --
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn client_search_success() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -21,7 +21,7 @@ async fn client_search_success() {
                     "author": "Author A",
                     "year": "2023",
                     "extension": "pdf",
-                    "filesize": 5000000
+                    "filesize": 5_000_000
                 }
             ]
         })))
@@ -34,7 +34,7 @@ async fn client_search_success() {
     assert_eq!(result["results"][0]["md5"], "abc123");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn client_search_with_filters() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -56,7 +56,7 @@ async fn client_search_with_filters() {
     assert_eq!(result["results"][0]["title"], "Rust Programming");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn client_search_with_sort() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -77,7 +77,7 @@ async fn client_search_with_sort() {
     assert!(result["results"].is_array());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn client_get_metadata_success() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -97,7 +97,7 @@ async fn client_get_metadata_success() {
     assert_eq!(result["isbn"], "9780134685991");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn client_lookup_isbn_success() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -114,7 +114,7 @@ async fn client_lookup_isbn_success() {
     assert_eq!(result["results"][0]["title"], "Clean Architecture");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn client_lookup_md5_success() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -131,7 +131,7 @@ async fn client_lookup_md5_success() {
     assert_eq!(result["title"], "Found Book");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn client_404_returns_not_found() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -147,7 +147,7 @@ async fn client_404_returns_not_found() {
     assert!(!err.is_retryable());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn client_429_returns_rate_limited() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -166,7 +166,7 @@ async fn client_429_returns_rate_limited() {
     assert!(err.retry_after().is_some());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn client_503_returns_unavailable() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -180,7 +180,7 @@ async fn client_503_returns_unavailable() {
     assert!(err.is_retryable());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn client_500_returns_api_error() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -196,7 +196,7 @@ async fn client_500_returns_api_error() {
     assert!(!err.is_retryable());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn client_empty_response_returns_empty_json() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -210,7 +210,7 @@ async fn client_empty_response_returns_empty_json() {
     assert_eq!(result, json!({}));
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn client_search_multiple_results() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -232,14 +232,14 @@ async fn client_search_multiple_results() {
 
 // -- Connector lifecycle integration tests --
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn connector_configure() {
     let mut c = AnnasArchiveConnector::new();
     let resp = c.handle_configure(json!({})).await.unwrap();
     assert_eq!(resp, json!({}));
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn connector_handshake() {
     let mut c = AnnasArchiveConnector::new();
     c.handle_configure(json!({})).await.unwrap();
@@ -247,35 +247,35 @@ async fn connector_handshake() {
     assert_eq!(resp["connector_id"], "fcp.annas-archive");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn connector_health() {
     let c = AnnasArchiveConnector::new();
     let resp = c.handle_health().await.unwrap();
     assert!(resp["status"].is_string());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn connector_doctor() {
     let c = AnnasArchiveConnector::new();
     let resp = c.handle_doctor().await.unwrap();
     assert!(resp["checks"].is_array());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn connector_self_check() {
     let c = AnnasArchiveConnector::new();
     let resp = c.handle_self_check().await.unwrap();
     assert_eq!(resp["connector_id"], "fcp.annas-archive");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn connector_introspect() {
     let c = AnnasArchiveConnector::new();
     let resp = c.handle_introspect().await.unwrap();
     assert_eq!(resp["operations"].as_array().unwrap().len(), 4);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn connector_simulate_search() {
     let c = AnnasArchiveConnector::new();
     let resp = c
@@ -285,7 +285,7 @@ async fn connector_simulate_search() {
     assert_eq!(resp["allowed"], true);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn connector_simulate_metadata() {
     let c = AnnasArchiveConnector::new();
     let resp = c
@@ -295,7 +295,7 @@ async fn connector_simulate_metadata() {
     assert_eq!(resp["allowed"], true);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn connector_simulate_isbn() {
     let c = AnnasArchiveConnector::new();
     let resp = c
@@ -305,7 +305,7 @@ async fn connector_simulate_isbn() {
     assert_eq!(resp["allowed"], true);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn connector_simulate_md5() {
     let c = AnnasArchiveConnector::new();
     let resp = c
@@ -315,7 +315,7 @@ async fn connector_simulate_md5() {
     assert_eq!(resp["allowed"], true);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn connector_simulate_unknown() {
     let c = AnnasArchiveConnector::new();
     let resp = c
@@ -325,7 +325,7 @@ async fn connector_simulate_unknown() {
     assert_eq!(resp["allowed"], false);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn connector_shutdown() {
     let mut c = AnnasArchiveConnector::new();
     c.handle_configure(json!({})).await.unwrap();
@@ -333,7 +333,7 @@ async fn connector_shutdown() {
     assert_eq!(resp, json!({}));
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn connector_invoke_requires_ready() {
     let c = AnnasArchiveConnector::new();
     let err = c
@@ -346,7 +346,7 @@ async fn connector_invoke_requires_ready() {
     ));
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn connector_invoke_unknown_op() {
     let mut c = AnnasArchiveConnector::new();
     c.handle_configure(json!({})).await.unwrap();
@@ -358,7 +358,7 @@ async fn connector_invoke_unknown_op() {
     assert!(matches!(err, fcp_core::FcpError::InvalidRequest { .. }));
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn connector_full_lifecycle() {
     let mut c = AnnasArchiveConnector::new();
 

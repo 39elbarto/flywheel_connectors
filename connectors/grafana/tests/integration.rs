@@ -25,7 +25,7 @@ async fn configured_connector(mock_url: &str) -> GrafanaConnector {
 
 // -- Lifecycle --
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn configure_with_bearer_token() {
     let mut connector = GrafanaConnector::new();
     let result = connector
@@ -34,21 +34,21 @@ async fn configure_with_bearer_token() {
     assert!(result.is_ok());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn configure_missing_auth_fails() {
     let mut connector = GrafanaConnector::new();
     let result = connector.handle_configure(json!({})).await;
     assert!(result.is_err());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn handshake_before_configure_fails() {
     let mut connector = GrafanaConnector::new();
     let result = connector.handle_handshake(json!({"session_id": "s1"})).await;
     assert!(result.is_err());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn handshake_after_configure_succeeds() {
     let mut connector = GrafanaConnector::new();
     connector
@@ -62,14 +62,14 @@ async fn handshake_after_configure_succeeds() {
     assert_eq!(val["protocol_version"], "2.0");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn health_unconfigured() {
     let connector = GrafanaConnector::new();
     let result = connector.handle_health().await.unwrap();
     assert_eq!(result["status"], "unconfigured");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn health_fully_configured() {
     let server = MockServer::start().await;
     let connector = configured_connector(&server.uri()).await;
@@ -77,14 +77,14 @@ async fn health_fully_configured() {
     assert_eq!(result["status"], "healthy");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn doctor_unconfigured() {
     let connector = GrafanaConnector::new();
     let result = connector.handle_doctor().await.unwrap();
     assert_eq!(result["status"], "unhealthy");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn doctor_fully_configured() {
     let server = MockServer::start().await;
     let connector = configured_connector(&server.uri()).await;
@@ -92,14 +92,14 @@ async fn doctor_fully_configured() {
     assert_eq!(result["status"], "healthy");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn self_check_unconfigured() {
     let connector = GrafanaConnector::new();
     let result = connector.handle_self_check().await.unwrap();
     assert_eq!(result["status"], "unconfigured");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn introspect_returns_operations() {
     let connector = GrafanaConnector::new();
     let result = connector.handle_introspect().await.unwrap();
@@ -121,7 +121,7 @@ async fn introspect_returns_operations() {
     assert!(op_ids.contains(&"grafana.annotations.create"));
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn simulate_known_operation() {
     let connector = GrafanaConnector::new();
     let result = connector
@@ -131,7 +131,7 @@ async fn simulate_known_operation() {
     assert_eq!(result["allowed"], true);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn simulate_unknown_operation() {
     let connector = GrafanaConnector::new();
     let result = connector
@@ -141,7 +141,7 @@ async fn simulate_unknown_operation() {
     assert_eq!(result["allowed"], false);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn shutdown_resets_state() {
     let server = MockServer::start().await;
     let mut connector = configured_connector(&server.uri()).await;
@@ -152,7 +152,7 @@ async fn shutdown_resets_state() {
 
 // -- Dashboards --
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn invoke_dashboards_list() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -176,7 +176,7 @@ async fn invoke_dashboards_list() {
     assert_eq!(dashboards.len(), 2);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn invoke_dashboards_get() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -200,7 +200,7 @@ async fn invoke_dashboards_get() {
     assert!(result.get("meta").is_some());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn invoke_dashboards_get_missing_uid_fails() {
     let server = MockServer::start().await;
     let connector = configured_connector(&server.uri()).await;
@@ -213,7 +213,7 @@ async fn invoke_dashboards_get_missing_uid_fails() {
     assert!(result.is_err());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn invoke_dashboards_create() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -239,7 +239,7 @@ async fn invoke_dashboards_create() {
     assert!(result.get("url").is_some());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn invoke_dashboards_create_missing_dashboard_fails() {
     let server = MockServer::start().await;
     let connector = configured_connector(&server.uri()).await;
@@ -252,7 +252,7 @@ async fn invoke_dashboards_create_missing_dashboard_fails() {
     assert!(result.is_err());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn invoke_dashboards_delete() {
     let server = MockServer::start().await;
     Mock::given(method("DELETE"))
@@ -274,7 +274,7 @@ async fn invoke_dashboards_delete() {
 
 // -- Datasources --
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn invoke_datasources_list() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -298,7 +298,7 @@ async fn invoke_datasources_list() {
     assert_eq!(datasources.len(), 2);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn invoke_datasources_query() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -325,7 +325,7 @@ async fn invoke_datasources_query() {
     assert!(result.get("results").is_some());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn invoke_datasources_query_missing_uid_fails() {
     let server = MockServer::start().await;
     let connector = configured_connector(&server.uri()).await;
@@ -340,7 +340,7 @@ async fn invoke_datasources_query_missing_uid_fails() {
 
 // -- Alerts --
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn invoke_alerts_list() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -362,7 +362,7 @@ async fn invoke_alerts_list() {
     assert!(result.get("rules").is_some());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn invoke_alerts_create() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -386,7 +386,7 @@ async fn invoke_alerts_create() {
     assert_eq!(result["uid"], "alert-new");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn invoke_alerts_create_missing_rule_fails() {
     let server = MockServer::start().await;
     let connector = configured_connector(&server.uri()).await;
@@ -401,7 +401,7 @@ async fn invoke_alerts_create_missing_rule_fails() {
 
 // -- Annotations --
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn invoke_annotations_create() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -427,7 +427,7 @@ async fn invoke_annotations_create() {
     assert_eq!(result["id"], 42);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn invoke_annotations_create_missing_text_fails() {
     let server = MockServer::start().await;
     let connector = configured_connector(&server.uri()).await;
@@ -442,7 +442,7 @@ async fn invoke_annotations_create_missing_text_fails() {
 
 // -- Error handling --
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn invoke_unauthorized_error() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -461,7 +461,7 @@ async fn invoke_unauthorized_error() {
     assert!(result.is_err());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn invoke_not_found_error() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -480,7 +480,7 @@ async fn invoke_not_found_error() {
     assert!(result.is_err());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn invoke_rate_limited_error() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -503,7 +503,7 @@ async fn invoke_rate_limited_error() {
     assert!(result.is_err());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn invoke_unknown_operation_fails() {
     let server = MockServer::start().await;
     let connector = configured_connector(&server.uri()).await;
@@ -516,7 +516,7 @@ async fn invoke_unknown_operation_fails() {
     assert!(result.is_err());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn invoke_before_handshake_fails() {
     let mut connector = GrafanaConnector::new();
     connector
@@ -534,7 +534,7 @@ async fn invoke_before_handshake_fails() {
 
 // -- Counters --
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn error_counter_increments() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -556,7 +556,7 @@ async fn error_counter_increments() {
     assert_eq!(health["requests"], 1);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn request_counter_increments_on_success() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -581,7 +581,7 @@ async fn request_counter_increments_on_success() {
 
 // -- Auth modes --
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn configure_with_credential_id() {
     let mut connector = GrafanaConnector::new();
     let result = connector
@@ -592,7 +592,7 @@ async fn configure_with_credential_id() {
     assert!(result.is_ok());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn configure_both_auth_methods_rejected() {
     let mut connector = GrafanaConnector::new();
     let result = connector
@@ -606,7 +606,7 @@ async fn configure_both_auth_methods_rejected() {
 
 // -- Handshake --
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn handshake_returns_capabilities() {
     let mut connector = GrafanaConnector::new();
     connector
@@ -624,7 +624,7 @@ async fn handshake_returns_capabilities() {
 
 // -- Simulate --
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn simulate_all_known_operations() {
     let connector = GrafanaConnector::new();
     let ops = [
@@ -649,7 +649,7 @@ async fn simulate_all_known_operations() {
 
 // -- Missing operation --
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn invoke_missing_operation_id_fails() {
     let server = MockServer::start().await;
     let connector = configured_connector(&server.uri()).await;
@@ -661,7 +661,7 @@ async fn invoke_missing_operation_id_fails() {
 
 // -- Additional error statuses --
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn invoke_api_403_forbidden() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -683,7 +683,7 @@ async fn invoke_api_403_forbidden() {
     assert!(result.is_err());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn invoke_api_500_server_error() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -707,7 +707,7 @@ async fn invoke_api_500_server_error() {
 
 // -- Health state transitions --
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn health_configured_but_not_handshaken() {
     let mut connector = GrafanaConnector::new();
     connector
@@ -722,7 +722,7 @@ async fn health_configured_but_not_handshaken() {
 
 // -- Doctor state --
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn doctor_configured_not_handshaken_is_degraded() {
     let mut connector = GrafanaConnector::new();
     connector

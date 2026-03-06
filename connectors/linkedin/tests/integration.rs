@@ -21,14 +21,14 @@ async fn setup_connector(mock_url: &str) -> LinkedInConnector {
 
 // -- Lifecycle --
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_health_unconfigured() {
     let c = LinkedInConnector::new();
     let h = c.handle_health().await.unwrap();
     assert_eq!(h["status"], "unconfigured");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_full() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -36,13 +36,13 @@ async fn lifecycle_full() {
     assert_eq!(h["status"], "healthy");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_handshake_before_configure_fails() {
     let mut c = LinkedInConnector::new();
     assert!(c.handle_handshake(json!({})).await.is_err());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_shutdown() {
     let server = MockServer::start().await;
     let mut c = setup_connector(&server.uri()).await;
@@ -50,7 +50,7 @@ async fn lifecycle_shutdown() {
     assert_eq!(c.handle_health().await.unwrap()["status"], "unconfigured");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_self_check() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -58,14 +58,14 @@ async fn lifecycle_self_check() {
     assert_eq!(check["status"], "ready");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_doctor() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
     assert_eq!(c.handle_doctor().await.unwrap()["status"], "healthy");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_introspect() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -75,7 +75,7 @@ async fn lifecycle_introspect() {
 
 // -- Verify X-Restli-Protocol-Version header --
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn restli_header_sent() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -102,7 +102,7 @@ async fn restli_header_sent() {
 
 // -- Bearer auth header --
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn bearer_auth_header_sent() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -127,7 +127,7 @@ async fn bearer_auth_header_sent() {
 
 // -- Profile Get --
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn profile_get() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -155,7 +155,7 @@ async fn profile_get() {
 
 // -- Profile Get By ID --
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn profile_get_by_id() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -178,7 +178,7 @@ async fn profile_get_by_id() {
     assert_eq!(result["id"], "person_xyz");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn profile_get_by_id_missing_person_id() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -194,7 +194,7 @@ async fn profile_get_by_id_missing_person_id() {
 
 // -- Connections List --
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn connections_list() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -221,7 +221,7 @@ async fn connections_list() {
 
 // -- Company Get --
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn company_get() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -245,7 +245,7 @@ async fn company_get() {
     assert_eq!(result["localizedName"], "ACME Corp");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn company_get_missing_company_id() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -261,7 +261,7 @@ async fn company_get_missing_company_id() {
 
 // -- Company Followers --
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn company_followers() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -285,7 +285,7 @@ async fn company_followers() {
     assert!(result["elements"].is_array());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn company_followers_missing_company_id() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -301,7 +301,7 @@ async fn company_followers_missing_company_id() {
 
 // -- Posts Create --
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn posts_create() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -326,7 +326,7 @@ async fn posts_create() {
     assert_eq!(result["id"], "urn:li:share:12345");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn posts_create_missing_author() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -340,7 +340,7 @@ async fn posts_create_missing_author() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn posts_create_missing_text() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -356,7 +356,7 @@ async fn posts_create_missing_text() {
 
 // -- Posts Delete --
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn posts_delete() {
     let server = MockServer::start().await;
     Mock::given(method("DELETE"))
@@ -376,7 +376,7 @@ async fn posts_delete() {
     assert!(result.is_object());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn posts_delete_missing_post_urn() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -392,7 +392,7 @@ async fn posts_delete_missing_post_urn() {
 
 // -- Posts Get --
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn posts_get() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -416,7 +416,7 @@ async fn posts_get() {
     assert_eq!(result["lifecycleState"], "PUBLISHED");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn posts_get_missing_post_urn() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -432,7 +432,7 @@ async fn posts_get_missing_post_urn() {
 
 // -- Analytics Shares --
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn analytics_shares() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -459,7 +459,7 @@ async fn analytics_shares() {
     assert!(result["elements"].is_array());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn analytics_shares_missing_share_urn() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -475,7 +475,7 @@ async fn analytics_shares_missing_share_urn() {
 
 // -- Search Companies --
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn search_companies() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -500,7 +500,7 @@ async fn search_companies() {
     assert_eq!(result["elements"].as_array().unwrap().len(), 2);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn search_companies_missing_keywords() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -516,7 +516,7 @@ async fn search_companies_missing_keywords() {
 
 // -- Error handling --
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn error_401() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -538,7 +538,7 @@ async fn error_401() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn error_403() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -561,7 +561,7 @@ async fn error_403() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn error_404() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -584,7 +584,7 @@ async fn error_404() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn error_429() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -608,7 +608,7 @@ async fn error_429() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn error_500() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -630,7 +630,7 @@ async fn error_500() {
 
 // -- Unknown op / Simulate --
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn unknown_operation() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -644,7 +644,7 @@ async fn unknown_operation() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn simulate_known() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -657,7 +657,7 @@ async fn simulate_known() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn simulate_unknown() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -672,7 +672,7 @@ async fn simulate_unknown() {
 
 // -- Counters --
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn counters_increment() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -693,7 +693,7 @@ async fn counters_increment() {
     assert_eq!(h["errors"], 0);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn counters_error_increment() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -716,7 +716,7 @@ async fn counters_error_increment() {
 
 // -- Health status transitions --
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn health_configured_but_not_handshaken() {
     let mut c = LinkedInConnector::new();
     c.handle_configure(json!({ "access_token": "tok" }))
@@ -726,14 +726,14 @@ async fn health_configured_but_not_handshaken() {
     assert_eq!(h["status"], "degraded");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn self_check_unconfigured() {
     let c = LinkedInConnector::new();
     let check = c.handle_self_check().await.unwrap();
     assert_eq!(check["status"], "unconfigured");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn doctor_unconfigured() {
     let c = LinkedInConnector::new();
     let d = c.handle_doctor().await.unwrap();

@@ -26,7 +26,7 @@ async fn setup_connector() -> WebhookReceiverConnector {
 
 // -- Lifecycle --
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_health_unconfigured() {
     let c = WebhookReceiverConnector::new();
     let h = c.handle_health().await.unwrap();
@@ -35,7 +35,7 @@ async fn lifecycle_health_unconfigured() {
     assert_eq!(h["handshaken"], false);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_configured_not_handshaken() {
     let mut c = WebhookReceiverConnector::new();
     c.handle_configure(json!({})).await.unwrap();
@@ -45,7 +45,7 @@ async fn lifecycle_configured_not_handshaken() {
     assert_eq!(h["handshaken"], false);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_full() {
     let c = setup_connector().await;
     let h = c.handle_health().await.unwrap();
@@ -54,13 +54,13 @@ async fn lifecycle_full() {
     assert_eq!(h["handshaken"], true);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_handshake_before_configure_fails() {
     let mut c = WebhookReceiverConnector::new();
     assert!(c.handle_handshake(json!({})).await.is_err());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_shutdown() {
     let mut c = setup_connector().await;
     c.handle_shutdown(json!({})).await.unwrap();
@@ -68,7 +68,7 @@ async fn lifecycle_shutdown() {
     assert_eq!(h["status"], "unconfigured");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_self_check_ready() {
     let c = setup_connector().await;
     let check = c.handle_self_check().await.unwrap();
@@ -76,28 +76,28 @@ async fn lifecycle_self_check_ready() {
     assert_eq!(check["connector_id"], "fcp.webhook-receiver");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_self_check_unconfigured() {
     let c = WebhookReceiverConnector::new();
     let check = c.handle_self_check().await.unwrap();
     assert_eq!(check["status"], "unconfigured");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_doctor_healthy() {
     let c = setup_connector().await;
     let doc = c.handle_doctor().await.unwrap();
     assert_eq!(doc["status"], "healthy");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_doctor_unconfigured() {
     let c = WebhookReceiverConnector::new();
     let doc = c.handle_doctor().await.unwrap();
     assert_eq!(doc["status"], "unhealthy");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_introspect() {
     let c = setup_connector().await;
     let intro = c.handle_introspect().await.unwrap();
@@ -105,7 +105,7 @@ async fn lifecycle_introspect() {
     assert_eq!(intro["operations"].as_array().unwrap().len(), 4);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_handshake_returns_capabilities() {
     let mut c = WebhookReceiverConnector::new();
     c.handle_configure(json!({})).await.unwrap();
@@ -121,7 +121,7 @@ async fn lifecycle_handshake_returns_capabilities() {
 
 // -- Endpoints Create --
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn endpoints_create_basic() {
     let mut c = setup_connector().await;
     let result = c
@@ -138,7 +138,7 @@ async fn endpoints_create_basic() {
     assert!(result["url"].as_str().unwrap().contains("/hooks/github"));
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn endpoints_create_with_allowed_sources() {
     let mut c = setup_connector().await;
     let result = c
@@ -155,7 +155,7 @@ async fn endpoints_create_with_allowed_sources() {
     assert!(result["endpoint_id"].as_str().is_some());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn endpoints_create_duplicate_path_rejected() {
     let mut c = setup_connector().await;
     c.handle_invoke(json!({
@@ -180,7 +180,7 @@ async fn endpoints_create_duplicate_path_rejected() {
     assert!(result.is_err());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn endpoints_create_missing_path() {
     let mut c = setup_connector().await;
     assert!(
@@ -195,7 +195,7 @@ async fn endpoints_create_missing_path() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn endpoints_create_missing_signing_secret() {
     let mut c = setup_connector().await;
     assert!(
@@ -210,7 +210,7 @@ async fn endpoints_create_missing_signing_secret() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn endpoints_create_multiple_different_paths() {
     let mut c = setup_connector().await;
     for i in 0..5 {
@@ -237,7 +237,7 @@ async fn endpoints_create_multiple_different_paths() {
 
 // -- Endpoints Delete --
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn endpoints_delete_success() {
     let mut c = setup_connector().await;
     let created = c
@@ -272,7 +272,7 @@ async fn endpoints_delete_success() {
     assert!(list["endpoints"].as_array().unwrap().is_empty());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn endpoints_delete_not_found() {
     let mut c = setup_connector().await;
     assert!(
@@ -285,7 +285,7 @@ async fn endpoints_delete_not_found() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn endpoints_delete_missing_endpoint_id() {
     let mut c = setup_connector().await;
     assert!(
@@ -300,7 +300,7 @@ async fn endpoints_delete_missing_endpoint_id() {
 
 // -- Endpoints List --
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn endpoints_list_empty() {
     let mut c = setup_connector().await;
     let result = c
@@ -313,7 +313,7 @@ async fn endpoints_list_empty() {
     assert!(result["endpoints"].as_array().unwrap().is_empty());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn endpoints_list_returns_all() {
     let mut c = setup_connector().await;
     c.handle_invoke(json!({
@@ -352,7 +352,7 @@ async fn endpoints_list_returns_all() {
 
 // -- Events Recent --
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn events_recent_empty() {
     let mut c = setup_connector().await;
     let result = c
@@ -365,7 +365,7 @@ async fn events_recent_empty() {
     assert!(result["events"].as_array().unwrap().is_empty());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn events_recent_after_endpoint_receives_events() {
     let mut c = setup_connector().await;
 
@@ -391,7 +391,7 @@ async fn events_recent_after_endpoint_receives_events() {
     assert!(result["events"].as_array().unwrap().is_empty());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn events_recent_with_limit() {
     let mut c = setup_connector().await;
     let result = c
@@ -404,7 +404,7 @@ async fn events_recent_with_limit() {
     assert!(result["events"].as_array().unwrap().is_empty());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn events_recent_with_since_ts() {
     let mut c = setup_connector().await;
     let result = c
@@ -417,7 +417,7 @@ async fn events_recent_with_since_ts() {
     assert!(result["events"].as_array().unwrap().is_empty());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn events_recent_endpoint_not_found() {
     let mut c = setup_connector().await;
     assert!(
@@ -432,7 +432,7 @@ async fn events_recent_endpoint_not_found() {
 
 // -- Unknown operation / Simulate --
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn unknown_operation() {
     let mut c = setup_connector().await;
     assert!(
@@ -445,7 +445,7 @@ async fn unknown_operation() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn simulate_known_operations() {
     let c = setup_connector().await;
     for op_id in [
@@ -465,7 +465,7 @@ async fn simulate_known_operations() {
     }
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn simulate_unknown() {
     let c = setup_connector().await;
     assert!(
@@ -479,7 +479,7 @@ async fn simulate_unknown() {
 
 // -- Invoke before ready --
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn invoke_before_configure_fails() {
     let mut c = WebhookReceiverConnector::new();
     assert!(
@@ -492,7 +492,7 @@ async fn invoke_before_configure_fails() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn invoke_missing_operation_id() {
     let mut c = setup_connector().await;
     assert!(c.handle_invoke(json!({"input": {}})).await.is_err());
@@ -500,7 +500,7 @@ async fn invoke_missing_operation_id() {
 
 // -- Counters --
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn counters_increment_on_success() {
     let mut c = setup_connector().await;
     c.handle_invoke(json!({
@@ -514,7 +514,7 @@ async fn counters_increment_on_success() {
     assert_eq!(h["errors"], 0);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn counters_error_increment() {
     let mut c = setup_connector().await;
     let _ = c
@@ -528,7 +528,7 @@ async fn counters_error_increment() {
     assert_eq!(h["errors"], 1);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn counters_multiple_requests() {
     let mut c = setup_connector().await;
     for _ in 0..5 {
@@ -546,7 +546,7 @@ async fn counters_multiple_requests() {
 
 // -- Health shows store stats --
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn health_shows_endpoint_count() {
     let mut c = setup_connector().await;
     c.handle_invoke(json!({
@@ -559,7 +559,7 @@ async fn health_shows_endpoint_count() {
     assert_eq!(h["endpoints"], 1);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn health_shows_event_count() {
     let c = setup_connector().await;
     let h = c.handle_health().await.unwrap();
@@ -568,7 +568,7 @@ async fn health_shows_event_count() {
 
 // -- Shutdown clears store --
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn shutdown_clears_endpoints() {
     let mut c = setup_connector().await;
     c.handle_invoke(json!({
@@ -596,7 +596,7 @@ async fn shutdown_clears_endpoints() {
 
 // -- Full create-list-delete lifecycle --
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn full_endpoint_lifecycle() {
     let mut c = setup_connector().await;
 
@@ -641,7 +641,7 @@ async fn full_endpoint_lifecycle() {
 
 // -- Double delete --
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn double_delete_fails() {
     let mut c = setup_connector().await;
     let created = c
@@ -673,7 +673,7 @@ async fn double_delete_fails() {
 
 // -- Reconfigure after shutdown --
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn reconfigure_after_shutdown() {
     let mut c = setup_connector().await;
     c.handle_shutdown(json!({})).await.unwrap();

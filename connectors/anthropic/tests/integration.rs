@@ -10,6 +10,7 @@
 //! - FCP2 default-deny + capability verification
 
 #![allow(clippy::too_many_lines)]
+#![allow(clippy::doc_markdown)]
 
 use chrono::{Duration, Utc};
 use fcp_crypto::cose::CapabilityTokenBuilder;
@@ -1566,4 +1567,1165 @@ async fn message_stream_invoke_full_response() {
     // Cost should be present
     let cost = result["cost_usd"].as_f64().unwrap();
     assert!(cost >= 0.0, "cost should be non-negative");
+}
+
+// ============================================================================
+// Additional Error Handling Tests (403, 404, 502, non-JSON, 529 via connector)
+// ============================================================================
+
+/// 403 Forbidden maps to FcpError::External (not Unauthorized).
+#[fcp_async_core::runtime::test]
+async fn error_403_maps_to_external() {
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(
+            ResponseTemplate::new(403)
+                .set_body_json(anthropic_error("permission_error", "Permission denied")),
+        )
+        .mount(&mock_server)
+        .await;
+
+    let client = AnthropicClient::new("test-key")
+        .unwrap()
+        .with_base_url(mock_server.uri())
+        .with_retry_config(1, 10, 100);
+
+    let result = client.chat(Model::ClaudeSonnet4, "Hi", None, 1024).await;
+    let err = result.expect_err("should fail with 403");
+
+    let fcp_err = err.to_fcp_error();
+    match &fcp_err {
+        fcp_core::FcpError::External {
+            service,
+            status_code,
+            retryable,
+            ..
+        } => {
+            assert_eq!(service, "anthropic");
+            assert_eq!(*status_code, Some(403));
+            assert!(!retryable, "403 should not be retryable");
+        }
+        other => panic!("expected FcpError::External, got: {other:?}"),
+    }
+}
+
+/// 404 Not Found maps to FcpError::External.
+#[fcp_async_core::runtime::test]
+async fn error_404_maps_to_external() {
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(
+            ResponseTemplate::new(404)
+                .set_body_json(anthropic_error("not_found_error", "Resource not found")),
+        )
+        .mount(&mock_server)
+        .await;
+
+    let client = AnthropicClient::new("test-key")
+        .unwrap()
+        .with_base_url(mock_server.uri())
+        .with_retry_config(1, 10, 100);
+
+    let result = client.chat(Model::ClaudeSonnet4, "Hi", None, 1024).await;
+    let err = result.expect_err("should fail with 404");
+
+    let fcp_err = err.to_fcp_error();
+    match &fcp_err {
+        fcp_core::FcpError::External {
+            status_code,
+            retryable,
+            ..
+        } => {
+            assert_eq!(*status_code, Some(404));
+            assert!(!retryable, "404 should not be retryable");
+        }
+        other => panic!("expected FcpError::External, got: {other:?}"),
+    }
+}
+
+/// 502 Bad Gateway maps to retryable FcpError::External.
+#[fcp_async_core::runtime::test]
+async fn error_502_maps_to_retryable_external() {
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(
+            ResponseTemplate::new(502).set_body_json(anthropic_error("api_error", "Bad gateway")),
+        )
+        .mount(&mock_server)
+        .await;
+
+    let client = AnthropicClient::new("test-key")
+        .unwrap()
+        .with_base_url(mock_server.uri())
+        .with_retry_config(1, 10, 100);
+
+    let result = client.chat(Model::ClaudeSonnet4, "Hi", None, 1024).await;
+    let err = result.expect_err("should fail with 502");
+
+    let fcp_err = err.to_fcp_error();
+    match &fcp_err {
+        fcp_core::FcpError::External {
+            status_code,
+            retryable,
+            ..
+        } => {
+            assert_eq!(*status_code, Some(502));
+            assert!(retryable, "502 should be retryable");
+        }
+        other => panic!("expected FcpError::External, got: {other:?}"),
+    }
+}
+
+/// Non-JSON error response body is handled gracefully.
+#[fcp_async_core::runtime::test]
+async fn error_non_json_response_body() {
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(
+            ResponseTemplate::new(500).set_body_string("Internal Server Error: upstream timeout"),
+        )
+        .mount(&mock_server)
+        .await;
+
+    let client = AnthropicClient::new("test-key")
+        .unwrap()
+        .with_base_url(mock_server.uri())
+        .with_retry_config(1, 10, 100);
+
+    let result = client.chat(Model::ClaudeSonnet4, "Hi", None, 1024).await;
+    let err = result.expect_err("should fail with non-JSON 500");
+
+    // Should still produce a meaningful error even with non-JSON body
+    let fcp_err = err.to_fcp_error();
+    match &fcp_err {
+        fcp_core::FcpError::External { message, .. } => {
+            assert!(
+                message.contains("upstream timeout") || message.contains("Internal Server Error"),
+                "error message should contain the raw body text: {message}"
+            );
+        }
+        other => panic!("expected FcpError::External, got: {other:?}"),
+    }
+}
+
+/// 529 Overloaded via full connector invoke path.
+#[fcp_async_core::runtime::test]
+async fn error_529_via_connector_invoke() {
+    let mock = MockApiServer::start().await;
+
+    mock.expect_error(
+        "/v1/messages",
+        529,
+        anthropic_error("overloaded_error", "API overloaded"),
+    )
+    .await;
+
+    let mut connector = AnthropicConnector::new();
+    setup_configure(&mut connector, &mock.base_url()).await;
+    let signing_key = setup_handshake(&mut connector, &["anthropic.chat"]).await;
+    let token = generate_valid_token(&signing_key, "anthropic.chat");
+
+    let err = connector
+        .handle_invoke(json!({
+            "operation": "anthropic.chat",
+            "input": { "message": "Hi" },
+            "capability_token": token
+        }))
+        .await
+        .expect_err("should fail with 529");
+
+    match &err {
+        fcp_core::FcpError::External {
+            service,
+            retryable,
+            status_code,
+            ..
+        } => {
+            assert_eq!(service, "anthropic");
+            assert!(retryable, "529 should be retryable");
+            assert_eq!(*status_code, Some(529));
+        }
+        other => panic!("expected FcpError::External, got: {other:?}"),
+    }
+}
+
+// ============================================================================
+// Additional Input Validation Tests
+// ============================================================================
+
+/// Missing messages field entirely in anthropic.message fails.
+#[fcp_async_core::runtime::test]
+async fn validation_message_missing_messages_field() {
+    let mock = MockApiServer::start().await;
+    let mut connector = AnthropicConnector::new();
+    setup_configure(&mut connector, &mock.base_url()).await;
+    let signing_key = setup_handshake(&mut connector, &["anthropic.message"]).await;
+    let token = generate_valid_token(&signing_key, "anthropic.message");
+
+    let err = connector
+        .handle_invoke(json!({
+            "operation": "anthropic.message",
+            "input": { "system": "You are helpful" },
+            "capability_token": token
+        }))
+        .await
+        .expect_err("missing messages should fail");
+
+    match &err {
+        fcp_core::FcpError::InvalidRequest { message, .. } => {
+            assert!(
+                message.to_lowercase().contains("messages")
+                    || message.to_lowercase().contains("missing"),
+                "error should mention messages: {message}"
+            );
+        }
+        other => panic!("expected InvalidRequest, got: {other:?}"),
+    }
+}
+
+/// Empty message string in chat invoke fails at API level.
+#[fcp_async_core::runtime::test]
+async fn validation_chat_empty_message_string() {
+    let mock = MockApiServer::start().await;
+
+    mock.expect_error(
+        "/v1/messages",
+        400,
+        anthropic_error(
+            "invalid_request_error",
+            "messages.0.content: Input should be a non-empty string",
+        ),
+    )
+    .await;
+
+    let mut connector = AnthropicConnector::new();
+    setup_configure(&mut connector, &mock.base_url()).await;
+    let signing_key = setup_handshake(&mut connector, &["anthropic.chat"]).await;
+    let token = generate_valid_token(&signing_key, "anthropic.chat");
+
+    let err = connector
+        .handle_invoke(json!({
+            "operation": "anthropic.chat",
+            "input": { "message": "" },
+            "capability_token": token
+        }))
+        .await
+        .expect_err("empty message string should fail");
+
+    // This exercises the full path: connector -> client -> API -> error mapping
+    assert!(
+        matches!(
+            err,
+            fcp_core::FcpError::External { .. } | fcp_core::FcpError::InvalidRequest { .. }
+        ),
+        "expected error, got: {err:?}"
+    );
+}
+
+/// Missing operation field in invoke request fails.
+#[fcp_async_core::runtime::test]
+async fn validation_missing_operation_field() {
+    let mock = MockApiServer::start().await;
+    let mut connector = AnthropicConnector::new();
+    setup_configure(&mut connector, &mock.base_url()).await;
+    let signing_key = setup_handshake(&mut connector, &["anthropic.chat"]).await;
+    let token = generate_valid_token(&signing_key, "anthropic.chat");
+
+    let err = connector
+        .handle_invoke(json!({
+            "input": { "message": "Hi" },
+            "capability_token": token
+        }))
+        .await
+        .expect_err("missing operation should fail");
+
+    match &err {
+        fcp_core::FcpError::InvalidRequest { message, .. } => {
+            assert!(
+                message.to_lowercase().contains("operation"),
+                "error should mention operation: {message}"
+            );
+        }
+        other => panic!("expected InvalidRequest, got: {other:?}"),
+    }
+}
+
+/// Empty messages array in message.stream fails.
+#[fcp_async_core::runtime::test]
+async fn validation_stream_empty_messages_fails() {
+    let mock = MockApiServer::start().await;
+    let mut connector = AnthropicConnector::new();
+    setup_configure(&mut connector, &mock.base_url()).await;
+    let signing_key = setup_handshake(&mut connector, &["anthropic.message.stream"]).await;
+    let token = generate_valid_token(&signing_key, "anthropic.message.stream");
+
+    let err = connector
+        .handle_invoke(json!({
+            "operation": "anthropic.message.stream",
+            "input": { "messages": [] },
+            "capability_token": token
+        }))
+        .await
+        .expect_err("empty messages in stream should fail");
+
+    assert!(
+        matches!(err, fcp_core::FcpError::InvalidRequest { .. }),
+        "expected InvalidRequest, got: {err:?}"
+    );
+}
+
+/// Unknown model in message.stream fails.
+#[fcp_async_core::runtime::test]
+async fn validation_stream_unknown_model_fails() {
+    let mock = MockApiServer::start().await;
+    let mut connector = AnthropicConnector::new();
+    setup_configure(&mut connector, &mock.base_url()).await;
+    let signing_key = setup_handshake(&mut connector, &["anthropic.message.stream"]).await;
+    let token = generate_valid_token(&signing_key, "anthropic.message.stream");
+
+    let err = connector
+        .handle_invoke(json!({
+            "operation": "anthropic.message.stream",
+            "input": {
+                "messages": [{"role": "user", "content": "Hi"}],
+                "model": "claude-fake-model"
+            },
+            "capability_token": token
+        }))
+        .await
+        .expect_err("unknown model in stream should fail");
+
+    assert!(
+        matches!(err, fcp_core::FcpError::InvalidRequest { .. }),
+        "expected InvalidRequest, got: {err:?}"
+    );
+}
+
+// ============================================================================
+// Configuration Edge Case Tests
+// ============================================================================
+
+/// Configure with credential_id mode creates secretless client.
+#[fcp_async_core::runtime::test]
+async fn config_credential_id_mode() {
+    let mut connector = AnthropicConnector::new();
+    let cred_uuid = uuid::Uuid::new_v4().to_string();
+
+    let result = connector
+        .handle_configure(json!({
+            "credential_id": cred_uuid
+        }))
+        .await
+        .expect("credential_id config should succeed");
+
+    assert_eq!(result["status"], "configured");
+
+    // Health should show credential mode
+    let health = connector.handle_health().await.unwrap();
+    assert_eq!(health["status"], "healthy");
+    let auth_str = health["auth"].as_str().unwrap();
+    assert!(
+        auth_str.starts_with("credential_id:"),
+        "auth should show credential_id mode: {auth_str}"
+    );
+}
+
+/// Configure with both api_key and credential_id is rejected.
+#[fcp_async_core::runtime::test]
+async fn config_both_auth_modes_rejected() {
+    let mut connector = AnthropicConnector::new();
+    let cred_uuid = uuid::Uuid::new_v4().to_string();
+
+    let err = connector
+        .handle_configure(json!({
+            "api_key": "sk-test-key",
+            "credential_id": cred_uuid
+        }))
+        .await
+        .expect_err("both auth modes should be rejected");
+
+    match &err {
+        fcp_core::FcpError::InvalidRequest { message, .. } => {
+            assert!(
+                message.contains("exactly one"),
+                "error should mention 'exactly one': {message}"
+            );
+        }
+        other => panic!("expected InvalidRequest, got: {other:?}"),
+    }
+}
+
+/// Configure with no auth at all is rejected.
+#[fcp_async_core::runtime::test]
+async fn config_no_auth_rejected() {
+    let mut connector = AnthropicConnector::new();
+    let err = connector
+        .handle_configure(json!({}))
+        .await
+        .expect_err("no auth should be rejected");
+
+    match &err {
+        fcp_core::FcpError::InvalidRequest { message, .. } => {
+            assert!(
+                message.contains("Missing api_key or credential_id"),
+                "error should mention missing auth: {message}"
+            );
+        }
+        other => panic!("expected InvalidRequest, got: {other:?}"),
+    }
+}
+
+/// Configure with custom base_url is accepted and reflected.
+#[fcp_async_core::runtime::test]
+async fn config_custom_base_url() {
+    let mut connector = AnthropicConnector::new();
+    connector
+        .handle_configure(json!({
+            "api_key": "sk-test",
+            "base_url": "https://proxy.example.com/v1"
+        }))
+        .await
+        .expect("custom base_url should work");
+
+    let health = connector.handle_health().await.unwrap();
+    assert_eq!(health["base_url"], "https://proxy.example.com/v1");
+}
+
+/// Configure with whitespace-only api_key is rejected (treated as empty).
+#[fcp_async_core::runtime::test]
+async fn config_whitespace_api_key_rejected() {
+    let mut connector = AnthropicConnector::new();
+    let err = connector
+        .handle_configure(json!({ "api_key": "   " }))
+        .await
+        .expect_err("whitespace-only api_key should be rejected");
+
+    assert!(
+        matches!(err, fcp_core::FcpError::InvalidRequest { .. }),
+        "expected InvalidRequest, got: {err:?}"
+    );
+}
+
+/// Configure with invalid credential_id format is rejected.
+#[fcp_async_core::runtime::test]
+async fn config_invalid_credential_id_format() {
+    let mut connector = AnthropicConnector::new();
+    let err = connector
+        .handle_configure(json!({ "credential_id": "not-a-uuid" }))
+        .await
+        .expect_err("invalid credential_id should be rejected");
+
+    match &err {
+        fcp_core::FcpError::InvalidRequest { message, .. } => {
+            assert!(
+                message.contains("UUID") || message.contains("credential_id"),
+                "error should mention UUID or credential_id: {message}"
+            );
+        }
+        other => panic!("expected InvalidRequest, got: {other:?}"),
+    }
+}
+
+// ============================================================================
+// Lifecycle / Doctor / Self-Check Tests
+// ============================================================================
+
+/// Doctor report before configure is unhealthy.
+#[fcp_async_core::runtime::test]
+async fn doctor_before_configure_is_unhealthy() {
+    let connector = AnthropicConnector::new();
+    let result = connector.handle_doctor().await.unwrap();
+
+    assert_eq!(result["status"], "unhealthy");
+    let checks = result["checks"].as_array().unwrap();
+    assert!(!checks.is_empty());
+    // First check (configuration) should fail
+    assert!(!checks[0]["passed"].as_bool().unwrap());
+    assert!(checks[0]["critical"].as_bool().unwrap());
+}
+
+/// Doctor report after configure with api_key is healthy.
+#[fcp_async_core::runtime::test]
+async fn doctor_after_configure_healthy() {
+    let mock = MockApiServer::start().await;
+    let mut connector = AnthropicConnector::new();
+    setup_configure(&mut connector, &mock.base_url()).await;
+
+    let result = connector.handle_doctor().await.unwrap();
+    assert_eq!(result["status"], "healthy");
+
+    let checks = result["checks"].as_array().unwrap();
+    // All critical checks should pass
+    for check in checks {
+        if check["critical"].as_bool().unwrap() {
+            assert!(
+                check["passed"].as_bool().unwrap(),
+                "critical check '{}' should pass",
+                check["name"]
+            );
+        }
+    }
+}
+
+/// Self-check before configure returns degraded.
+#[fcp_async_core::runtime::test]
+async fn self_check_before_configure() {
+    let connector = AnthropicConnector::new();
+    let result = connector.handle_self_check().await.unwrap();
+
+    assert_eq!(result["status"], "degraded");
+    assert!(
+        result["reason"]
+            .as_str()
+            .unwrap()
+            .contains("not_configured"),
+        "reason should mention not_configured: {}",
+        result["reason"]
+    );
+}
+
+/// Self-check with credential_id returns degraded (cannot validate directly).
+#[fcp_async_core::runtime::test]
+async fn self_check_credential_id_degraded() {
+    let mut connector = AnthropicConnector::new();
+    let cred_uuid = uuid::Uuid::new_v4().to_string();
+    connector
+        .handle_configure(json!({ "credential_id": cred_uuid }))
+        .await
+        .unwrap();
+
+    let result = connector.handle_self_check().await.unwrap();
+    assert_eq!(result["status"], "degraded");
+}
+
+/// Self-check with valid API key and healthy API returns ok.
+#[fcp_async_core::runtime::test]
+async fn self_check_healthy_api_returns_ok() {
+    let mock_server = MockServer::start().await;
+
+    // Health check sends a minimal message request
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(anthropic_success_response(
+                "msg_health",
+                "ok",
+                1,
+                1,
+            )),
+        )
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = AnthropicConnector::new();
+    connector
+        .handle_configure(json!({
+            "api_key": "sk-valid-key",
+            "base_url": mock_server.uri()
+        }))
+        .await
+        .unwrap();
+
+    let result = connector.handle_self_check().await.unwrap();
+    assert_eq!(result["status"], "ok");
+}
+
+/// Self-check with failing API returns failed.
+#[fcp_async_core::runtime::test]
+async fn self_check_failing_api_returns_failed() {
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(
+            ResponseTemplate::new(401)
+                .set_body_json(anthropic_error("authentication_error", "Invalid API key")),
+        )
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = AnthropicConnector::new();
+    connector
+        .handle_configure(json!({
+            "api_key": "sk-bad-key",
+            "base_url": mock_server.uri()
+        }))
+        .await
+        .unwrap();
+
+    let result = connector.handle_self_check().await.unwrap();
+    assert_eq!(result["status"], "failed");
+}
+
+/// Shutdown then re-invoke works (connector is stateless after shutdown).
+#[fcp_async_core::runtime::test]
+async fn lifecycle_shutdown_then_reinvoke() {
+    let mock = MockApiServer::start().await;
+
+    mock.expect_post(
+        "/v1/messages",
+        anthropic_success_response("msg_reinvoke", "After shutdown", 5, 3),
+    )
+    .await;
+
+    let mut connector = AnthropicConnector::new();
+    setup_configure(&mut connector, &mock.base_url()).await;
+    let signing_key = setup_handshake(&mut connector, &["anthropic.chat"]).await;
+
+    // Shutdown
+    let shutdown_result = connector.handle_shutdown(json!({})).await.unwrap();
+    assert_eq!(shutdown_result["status"], "shutdown");
+
+    // Re-invoke (client and config are still present since shutdown is soft)
+    let token = generate_valid_token(&signing_key, "anthropic.chat");
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "anthropic.chat",
+            "input": { "message": "Post-shutdown test" },
+            "capability_token": token
+        }))
+        .await
+        .expect("invoke after shutdown should still work (soft shutdown)");
+
+    assert_eq!(result["response"], "After shutdown");
+}
+
+/// Health metrics show correct counts after multiple operations.
+#[fcp_async_core::runtime::test]
+async fn health_metrics_after_operations() {
+    let mock = MockApiServer::start().await;
+
+    mock.expect_post(
+        "/v1/messages",
+        anthropic_success_response("msg_m1", "Response 1", 10, 5),
+    )
+    .await;
+
+    let mut connector = AnthropicConnector::new();
+    setup_configure(&mut connector, &mock.base_url()).await;
+    let signing_key = setup_handshake(&mut connector, &["anthropic.chat"]).await;
+
+    let token = generate_valid_token(&signing_key, "anthropic.chat");
+    connector
+        .handle_invoke(json!({
+            "operation": "anthropic.chat",
+            "input": { "message": "Test" },
+            "capability_token": token
+        }))
+        .await
+        .unwrap();
+
+    let health = connector.handle_health().await.unwrap();
+    let metrics = &health["metrics"];
+    assert!(
+        metrics["requests_total"].as_u64().unwrap() >= 1,
+        "should have at least 1 request"
+    );
+    assert!(
+        metrics["total_cost_usd"].as_f64().unwrap() > 0.0,
+        "cost should be positive after a request"
+    );
+}
+
+// ============================================================================
+// Model Parameter Variation Tests
+// ============================================================================
+
+/// Chat with Opus 4.5 model works and tracks higher cost.
+#[fcp_async_core::runtime::test]
+async fn chat_opus_model_higher_cost() {
+    let mock = MockApiServer::start().await;
+
+    mock.expect_post(
+        "/v1/messages",
+        json!({
+            "id": "msg_opus",
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "text", "text": "Opus response"}],
+            "model": "claude-opus-4-5-20251101",
+            "stop_reason": "end_turn",
+            "usage": {"input_tokens": 100, "output_tokens": 50}
+        }),
+    )
+    .await;
+
+    let mut connector = AnthropicConnector::new();
+    setup_configure(&mut connector, &mock.base_url()).await;
+    let signing_key = setup_handshake(&mut connector, &["anthropic.message"]).await;
+    let token = generate_valid_token(&signing_key, "anthropic.message");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "anthropic.message",
+            "input": {
+                "messages": [{"role": "user", "content": "Hi"}],
+                "model": "claude-opus-4-5-20251101"
+            },
+            "capability_token": token
+        }))
+        .await
+        .expect("opus model should work");
+
+    let cost = result["cost_usd"].as_f64().unwrap();
+    // Opus: 100 * $15/M + 50 * $75/M = 0.0015 + 0.00375 = 0.00525
+    assert!(cost > 0.005, "opus cost should be substantial: {cost}");
+}
+
+/// Chat with Claude 3.5 Sonnet model works.
+#[fcp_async_core::runtime::test]
+async fn chat_claude35_sonnet_model() {
+    let mock = MockApiServer::start().await;
+
+    mock.expect_post(
+        "/v1/messages",
+        json!({
+            "id": "msg_35s",
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "text", "text": "3.5 Sonnet response"}],
+            "model": "claude-3-5-sonnet-20241022",
+            "stop_reason": "end_turn",
+            "usage": {"input_tokens": 10, "output_tokens": 5}
+        }),
+    )
+    .await;
+
+    let mut connector = AnthropicConnector::new();
+    setup_configure(&mut connector, &mock.base_url()).await;
+    let signing_key = setup_handshake(&mut connector, &["anthropic.message"]).await;
+    let token = generate_valid_token(&signing_key, "anthropic.message");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "anthropic.message",
+            "input": {
+                "messages": [{"role": "user", "content": "Hi"}],
+                "model": "claude-3-5-sonnet-20241022"
+            },
+            "capability_token": token
+        }))
+        .await
+        .expect("claude-3-5-sonnet should work");
+
+    assert_eq!(result["content"], "3.5 Sonnet response");
+    assert_eq!(result["provenance"]["model"], "claude-3-5-sonnet-20241022");
+}
+
+/// Message with temperature=0 uses zero temperature.
+#[fcp_async_core::runtime::test]
+async fn message_with_zero_temperature() {
+    let mock = MockApiServer::start().await;
+
+    mock.expect_post(
+        "/v1/messages",
+        anthropic_success_response("msg_temp0", "Deterministic", 10, 5),
+    )
+    .await;
+
+    let mut connector = AnthropicConnector::new();
+    setup_configure(&mut connector, &mock.base_url()).await;
+    let signing_key = setup_handshake(&mut connector, &["anthropic.message"]).await;
+    let token = generate_valid_token(&signing_key, "anthropic.message");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "anthropic.message",
+            "input": {
+                "messages": [{"role": "user", "content": "Test"}],
+                "temperature": 0.0
+            },
+            "capability_token": token
+        }))
+        .await
+        .expect("zero temperature should work");
+
+    assert_eq!(result["content"], "Deterministic");
+}
+
+// ============================================================================
+// Edge Cases: Empty Response, Token Counting, Simulate
+// ============================================================================
+
+/// Response with empty content array still returns successfully.
+#[fcp_async_core::runtime::test]
+async fn message_empty_content_response() {
+    let mock = MockApiServer::start().await;
+
+    mock.expect_post(
+        "/v1/messages",
+        json!({
+            "id": "msg_empty",
+            "type": "message",
+            "role": "assistant",
+            "content": [],
+            "model": "claude-sonnet-4-20250514",
+            "stop_reason": "end_turn",
+            "usage": {"input_tokens": 5, "output_tokens": 0}
+        }),
+    )
+    .await;
+
+    let mut connector = AnthropicConnector::new();
+    setup_configure(&mut connector, &mock.base_url()).await;
+    let signing_key = setup_handshake(&mut connector, &["anthropic.message"]).await;
+    let token = generate_valid_token(&signing_key, "anthropic.message");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "anthropic.message",
+            "input": {
+                "messages": [{"role": "user", "content": "Hi"}],
+                "max_tokens": 1
+            },
+            "capability_token": token
+        }))
+        .await
+        .expect("empty content should succeed");
+
+    assert_eq!(result["id"], "msg_empty");
+    assert_eq!(result["content"], "");
+    let blocks = result["content_blocks"].as_array().unwrap();
+    assert!(blocks.is_empty(), "content_blocks should be empty");
+}
+
+/// Token counters accumulate across the client correctly.
+#[fcp_async_core::runtime::test]
+async fn client_token_counter_accumulation() {
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(anthropic_success_response("msg_tc1", "ok", 100, 50)),
+        )
+        .mount(&mock_server)
+        .await;
+
+    let client = AnthropicClient::new("test-key")
+        .unwrap()
+        .with_base_url(mock_server.uri());
+
+    // First call
+    client
+        .chat(Model::ClaudeSonnet4, "Hi", None, 1024)
+        .await
+        .unwrap();
+
+    assert_eq!(client.total_input_tokens(), 100);
+    assert_eq!(client.total_output_tokens(), 50);
+
+    // Second call
+    client
+        .chat(Model::ClaudeSonnet4, "Hi again", None, 1024)
+        .await
+        .unwrap();
+
+    assert_eq!(client.total_input_tokens(), 200);
+    assert_eq!(client.total_output_tokens(), 100);
+
+    // Reset
+    client.reset_token_counts();
+    assert_eq!(client.total_input_tokens(), 0);
+    assert_eq!(client.total_output_tokens(), 0);
+}
+
+/// Simulate returns allowed for all operations.
+#[fcp_async_core::runtime::test]
+async fn simulate_returns_allowed() {
+    let connector = AnthropicConnector::new();
+    let result = connector
+        .handle_simulate(json!({
+            "id": "sim_001",
+            "operation": "anthropic.message",
+            "input": {
+                "messages": [{"role": "user", "content": "test"}]
+            }
+        }))
+        .await
+        .expect("simulate should succeed");
+
+    assert_eq!(result["id"], "sim_001");
+    assert_eq!(result["allowed"], true);
+}
+
+/// Introspect schema has required fields for all operations.
+#[fcp_async_core::runtime::test]
+async fn introspect_schema_required_fields() {
+    let connector = AnthropicConnector::new();
+    let result = connector.handle_introspect().await.unwrap();
+    let ops = result["operations"].as_array().unwrap();
+
+    for op in ops {
+        let id = op["id"].as_str().unwrap();
+
+        // All operations should have capability, risk_level, safety_tier
+        assert!(
+            op["capability"].as_str().is_some(),
+            "op {id} missing capability"
+        );
+        assert!(
+            op["risk_level"].as_str().is_some(),
+            "op {id} missing risk_level"
+        );
+        assert!(
+            op["safety_tier"].as_str().is_some(),
+            "op {id} missing safety_tier"
+        );
+
+        // Input and output schemas should be objects
+        assert!(
+            op["input_schema"].is_object(),
+            "op {id} missing input_schema"
+        );
+        assert!(
+            op["output_schema"].is_object(),
+            "op {id} missing output_schema"
+        );
+
+        // AI hints should be present
+        assert!(
+            op["ai_hints"]["when_to_use"].as_str().is_some(),
+            "op {id} missing ai_hints.when_to_use"
+        );
+    }
+}
+
+/// get_usage operation returns correct shape with no prior calls.
+#[fcp_async_core::runtime::test]
+async fn get_usage_initial_state() {
+    let mock = MockApiServer::start().await;
+    let mut connector = AnthropicConnector::new();
+    setup_configure(&mut connector, &mock.base_url()).await;
+    let signing_key = setup_handshake(&mut connector, &["anthropic.get_usage"]).await;
+    let token = generate_valid_token(&signing_key, "anthropic.get_usage");
+
+    let usage = connector
+        .handle_invoke(json!({
+            "operation": "anthropic.get_usage",
+            "input": {},
+            "capability_token": token
+        }))
+        .await
+        .expect("get_usage should succeed");
+
+    assert_eq!(usage["total_input_tokens"], 0);
+    assert_eq!(usage["total_output_tokens"], 0);
+    assert_eq!(usage["total_cost_usd"], 0.0);
+    assert_eq!(usage["requests_error"], 0);
+}
+
+// ============================================================================
+// Streaming Edge Cases
+// ============================================================================
+
+/// Streaming with tool use via connector-level invoke.
+#[fcp_async_core::runtime::test]
+async fn stream_tool_use_via_connector_invoke() {
+    let mock_server = MockServer::start().await;
+
+    let sse_body = build_sse_body(&[
+        (
+            "message_start",
+            json!({
+                "type": "message_start",
+                "message": {
+                    "id": "msg_stool_001",
+                    "type": "message",
+                    "role": "assistant",
+                    "model": "claude-sonnet-4-20250514",
+                    "usage": {"input_tokens": 30, "output_tokens": 0}
+                }
+            }),
+        ),
+        (
+            "content_block_start",
+            json!({
+                "type": "content_block_start",
+                "index": 0,
+                "content_block": {
+                    "type": "tool_use",
+                    "id": "tool_inv_001",
+                    "name": "search",
+                    "input": {}
+                }
+            }),
+        ),
+        (
+            "content_block_delta",
+            json!({
+                "type": "content_block_delta",
+                "index": 0,
+                "delta": {"type": "input_json_delta", "partial_json": "{\"query\": \"test\"}"}
+            }),
+        ),
+        (
+            "content_block_stop",
+            json!({"type": "content_block_stop", "index": 0}),
+        ),
+        (
+            "message_delta",
+            json!({
+                "type": "message_delta",
+                "delta": {"stop_reason": "tool_use", "stop_sequence": null},
+                "usage": {"input_tokens": 30, "output_tokens": 12}
+            }),
+        ),
+        ("message_stop", json!({"type": "message_stop"})),
+    ]);
+
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_string(sse_body)
+                .insert_header("content-type", "text/event-stream"),
+        )
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = AnthropicConnector::new();
+    setup_configure(&mut connector, &mock_server.uri()).await;
+    let signing_key = setup_handshake(&mut connector, &["anthropic.message.stream"]).await;
+    let token = generate_valid_token(&signing_key, "anthropic.message.stream");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "anthropic.message.stream",
+            "input": {
+                "messages": [{"role": "user", "content": "Search test"}],
+                "tools": [{
+                    "name": "search",
+                    "description": "Search the web",
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {"query": {"type": "string"}},
+                        "required": ["query"]
+                    }
+                }]
+            },
+            "capability_token": token
+        }))
+        .await
+        .expect("stream tool_use invoke should succeed");
+
+    // Verify tool call assembled correctly
+    assert_eq!(result["id"], "msg_stool_001");
+    assert_eq!(result["streamed"], true);
+    assert_eq!(result["provenance"]["has_tool_calls"], true);
+    let blocks = result["content_blocks"].as_array().unwrap();
+    assert_eq!(blocks.len(), 1);
+    assert_eq!(blocks[0]["type"], "tool_use");
+    assert_eq!(blocks[0]["name"], "search");
+    assert_eq!(blocks[0]["input"]["query"], "test");
+}
+
+/// Streaming error via connector invoke returns FcpError::External.
+#[fcp_async_core::runtime::test]
+async fn stream_error_via_connector_invoke() {
+    let mock_server = MockServer::start().await;
+
+    let sse_body = build_sse_body(&[
+        (
+            "message_start",
+            json!({
+                "type": "message_start",
+                "message": {
+                    "id": "msg_serr_001",
+                    "type": "message",
+                    "role": "assistant",
+                    "model": "claude-sonnet-4-20250514",
+                    "usage": {"input_tokens": 10, "output_tokens": 0}
+                }
+            }),
+        ),
+        (
+            "error",
+            json!({
+                "type": "error",
+                "error": {"type": "overloaded_error", "message": "Too many requests"}
+            }),
+        ),
+    ]);
+
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_string(sse_body)
+                .insert_header("content-type", "text/event-stream"),
+        )
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = AnthropicConnector::new();
+    setup_configure(&mut connector, &mock_server.uri()).await;
+    let signing_key = setup_handshake(&mut connector, &["anthropic.message.stream"]).await;
+    let token = generate_valid_token(&signing_key, "anthropic.message.stream");
+
+    let err = connector
+        .handle_invoke(json!({
+            "operation": "anthropic.message.stream",
+            "input": {
+                "messages": [{"role": "user", "content": "Error test"}]
+            },
+            "capability_token": token
+        }))
+        .await
+        .expect_err("streaming error should propagate");
+
+    match &err {
+        fcp_core::FcpError::External { message, .. } => {
+            assert!(
+                message.contains("Too many requests"),
+                "error message should propagate: {message}"
+            );
+        }
+        other => panic!("expected FcpError::External, got: {other:?}"),
+    }
+}
+
+/// Streaming with 401 pre-stream error returns proper FcpError.
+#[fcp_async_core::runtime::test]
+async fn stream_pre_stream_auth_error() {
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(
+            ResponseTemplate::new(401)
+                .set_body_json(anthropic_error("authentication_error", "Bad key")),
+        )
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = AnthropicConnector::new();
+    setup_configure(&mut connector, &mock_server.uri()).await;
+    let signing_key = setup_handshake(&mut connector, &["anthropic.message.stream"]).await;
+    let token = generate_valid_token(&signing_key, "anthropic.message.stream");
+
+    let err = connector
+        .handle_invoke(json!({
+            "operation": "anthropic.message.stream",
+            "input": {
+                "messages": [{"role": "user", "content": "Hi"}]
+            },
+            "capability_token": token
+        }))
+        .await
+        .expect_err("401 on stream should fail");
+
+    assert!(
+        matches!(err, fcp_core::FcpError::Unauthorized { .. }),
+        "expected Unauthorized, got: {err:?}"
+    );
 }

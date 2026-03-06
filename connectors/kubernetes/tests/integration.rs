@@ -30,27 +30,27 @@ async fn setup_connector(mock_url: &str) -> KubernetesConnector {
 
 // -- Lifecycle --
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_health_unconfigured() {
     let c = KubernetesConnector::new();
     let h = c.handle_health().await.unwrap();
     assert_eq!(h["status"], "unconfigured");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_full() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
     assert_eq!(c.handle_health().await.unwrap()["status"], "healthy");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_handshake_before_configure_fails() {
     let mut c = KubernetesConnector::new();
     assert!(c.handle_handshake(json!({})).await.is_err());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_shutdown() {
     let server = MockServer::start().await;
     let mut c = setup_connector(&server.uri()).await;
@@ -58,21 +58,21 @@ async fn lifecycle_shutdown() {
     assert_eq!(c.handle_health().await.unwrap()["status"], "unconfigured");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_self_check() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
     assert_eq!(c.handle_self_check().await.unwrap()["status"], "ready");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_doctor() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
     assert_eq!(c.handle_doctor().await.unwrap()["status"], "healthy");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_introspect() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -82,7 +82,7 @@ async fn lifecycle_introspect() {
 
 // -- list_pods --
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn list_pods() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -103,7 +103,7 @@ async fn list_pods() {
     assert_eq!(result["pods"].as_array().unwrap().len(), 2);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn list_pods_empty() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -117,7 +117,7 @@ async fn list_pods_empty() {
     assert!(result["pods"].as_array().unwrap().is_empty());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn list_pods_missing_namespace() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -126,7 +126,7 @@ async fn list_pods_missing_namespace() {
 
 // -- get_pod --
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn get_pod() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -142,14 +142,14 @@ async fn get_pod() {
     assert_eq!(result["pod"]["metadata"]["name"], "nginx-abc123");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn get_pod_missing_namespace() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
     assert!(c.handle_invoke(json!({"operation_id": "kubernetes.get_pod", "input": {"name": "nginx"}})).await.is_err());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn get_pod_missing_name() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -158,7 +158,7 @@ async fn get_pod_missing_name() {
 
 // -- delete_pod --
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn delete_pod() {
     let server = MockServer::start().await;
     Mock::given(method("DELETE"))
@@ -172,7 +172,7 @@ async fn delete_pod() {
     assert_eq!(result["deleted"], true);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn delete_pod_missing_name() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -181,7 +181,7 @@ async fn delete_pod_missing_name() {
 
 // -- get_pod_logs --
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn get_pod_logs() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -195,7 +195,7 @@ async fn get_pod_logs() {
     assert!(result["logs"].as_str().unwrap().contains("Starting nginx"));
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn get_pod_logs_missing_namespace() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -204,7 +204,7 @@ async fn get_pod_logs_missing_namespace() {
 
 // -- stream_pod_logs --
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn stream_pod_logs() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -220,7 +220,7 @@ async fn stream_pod_logs() {
 
 // -- list_deployments --
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn list_deployments() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -237,7 +237,7 @@ async fn list_deployments() {
     assert_eq!(result["deployments"].as_array().unwrap().len(), 1);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn list_deployments_missing_namespace() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -246,7 +246,7 @@ async fn list_deployments_missing_namespace() {
 
 // -- get_deployment --
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn get_deployment() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -262,7 +262,7 @@ async fn get_deployment() {
 
 // -- scale_deployment --
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn scale_deployment() {
     let server = MockServer::start().await;
     Mock::given(method("PATCH"))
@@ -277,7 +277,7 @@ async fn scale_deployment() {
     assert_eq!(result["deployment"]["spec"]["replicas"], 5);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn scale_deployment_missing_replicas() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -286,7 +286,7 @@ async fn scale_deployment_missing_replicas() {
 
 // -- rollout_restart --
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn rollout_restart() {
     let server = MockServer::start().await;
     Mock::given(method("PATCH"))
@@ -301,7 +301,7 @@ async fn rollout_restart() {
     assert_eq!(result["deployment"]["metadata"]["name"], "web-app");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn rollout_restart_missing_name() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -310,7 +310,7 @@ async fn rollout_restart_missing_name() {
 
 // -- get_service --
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn get_service() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -326,7 +326,7 @@ async fn get_service() {
 
 // -- get_configmap --
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn get_configmap() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -342,7 +342,7 @@ async fn get_configmap() {
 
 // -- update_configmap --
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn update_configmap() {
     let server = MockServer::start().await;
     Mock::given(method("PATCH"))
@@ -356,7 +356,7 @@ async fn update_configmap() {
     assert_eq!(result["configmap"]["data"]["LOG_LEVEL"], "debug");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn update_configmap_missing_data() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -365,7 +365,7 @@ async fn update_configmap_missing_data() {
 
 // -- get_secret --
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn get_secret_redacted() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -383,7 +383,7 @@ async fn get_secret_redacted() {
     assert_eq!(result["secret"]["data_keys"].as_array().unwrap().len(), 2);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn get_secret_unmasked() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -402,7 +402,7 @@ async fn get_secret_unmasked() {
 
 // -- watch_events --
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn watch_events() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -419,7 +419,7 @@ async fn watch_events() {
     assert_eq!(result["events"].as_array().unwrap().len(), 1);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn watch_events_missing_namespace() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -428,7 +428,7 @@ async fn watch_events_missing_namespace() {
 
 // -- Error handling --
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn error_401() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -441,7 +441,7 @@ async fn error_401() {
     assert!(c.handle_invoke(json!({"operation_id": "kubernetes.list_pods", "input": {"namespace": "default"}})).await.is_err());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn error_403() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -454,7 +454,7 @@ async fn error_403() {
     assert!(c.handle_invoke(json!({"operation_id": "kubernetes.list_pods", "input": {"namespace": "kube-system"}})).await.is_err());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn error_404() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -467,7 +467,7 @@ async fn error_404() {
     assert!(c.handle_invoke(json!({"operation_id": "kubernetes.get_pod", "input": {"namespace": "default", "name": "missing-pod"}})).await.is_err());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn error_429() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -484,7 +484,7 @@ async fn error_429() {
     assert!(c.handle_invoke(json!({"operation_id": "kubernetes.list_pods", "input": {"namespace": "default"}})).await.is_err());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn error_500() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -499,42 +499,42 @@ async fn error_500() {
 
 // -- Unknown op / Simulate --
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn unknown_operation() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
     assert!(c.handle_invoke(json!({"operation_id": "kubernetes.nope", "input": {}})).await.is_err());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn simulate_known() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
     assert!(c.handle_simulate(json!({"operation_id": "kubernetes.list_pods"})).await.unwrap()["allowed"].as_bool().unwrap());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn simulate_unknown() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
     assert!(!c.handle_simulate(json!({"operation_id": "kubernetes.nope"})).await.unwrap()["allowed"].as_bool().unwrap());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn simulate_delete_pod() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
     assert!(c.handle_simulate(json!({"operation_id": "kubernetes.delete_pod"})).await.unwrap()["allowed"].as_bool().unwrap());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn simulate_get_secret() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
     assert!(c.handle_simulate(json!({"operation_id": "kubernetes.get_secret"})).await.unwrap()["allowed"].as_bool().unwrap());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn simulate_watch_events() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -543,7 +543,7 @@ async fn simulate_watch_events() {
 
 // -- Counters --
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn counters_increment() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -559,7 +559,7 @@ async fn counters_increment() {
     assert_eq!(h["errors"], 0);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn counters_error_increment() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))

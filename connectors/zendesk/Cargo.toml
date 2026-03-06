@@ -39,7 +39,6 @@ uuid.workspace = true
 
 [dev-dependencies]
 wiremock.workspace = true
-tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 futures-util.workspace = true
 fcp-crypto = { path = "../../crates/fcp-crypto" }
 fcp-manifest = { path = "../../crates/fcp-manifest" }

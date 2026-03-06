@@ -34,14 +34,14 @@ async fn setup_connector(mock_url: &str) -> DropboxConnector {
 
 // -- Lifecycle ----------------------------------------------------------------
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_health_unconfigured() {
     let c = DropboxConnector::new();
     let h = c.handle_health().await.unwrap();
     assert_eq!(h["status"], "unconfigured");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_full() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -49,13 +49,13 @@ async fn lifecycle_full() {
     assert_eq!(h["status"], "healthy");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_handshake_before_configure_fails() {
     let mut c = DropboxConnector::new();
     assert!(c.handle_handshake(json!({})).await.is_err());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_shutdown() {
     let server = MockServer::start().await;
     let mut c = setup_connector(&server.uri()).await;
@@ -63,7 +63,7 @@ async fn lifecycle_shutdown() {
     assert_eq!(c.handle_health().await.unwrap()["status"], "unconfigured");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_self_check() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -71,27 +71,27 @@ async fn lifecycle_self_check() {
     assert_eq!(check["status"], "ready");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_self_check_unconfigured() {
     let c = DropboxConnector::new();
     let check = c.handle_self_check().await.unwrap();
     assert_eq!(check["status"], "unconfigured");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_doctor() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
     assert_eq!(c.handle_doctor().await.unwrap()["status"], "healthy");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_doctor_unconfigured() {
     let c = DropboxConnector::new();
     assert_eq!(c.handle_doctor().await.unwrap()["status"], "unhealthy");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_introspect() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -99,7 +99,7 @@ async fn lifecycle_introspect() {
     assert_eq!(intro["operations"].as_array().unwrap().len(), 10);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_handshake_response_fields() {
     let server = MockServer::start().await;
     let mut c = DropboxConnector::new();
@@ -118,7 +118,7 @@ async fn lifecycle_handshake_response_fields() {
     assert!(hs["capabilities"].as_array().unwrap().len() >= 3);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_health_configured_not_handshaken() {
     let server = MockServer::start().await;
     let mut c = DropboxConnector::new();
@@ -134,7 +134,7 @@ async fn lifecycle_health_configured_not_handshaken() {
 
 // -- Files List ---------------------------------------------------------------
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn files_list() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -164,7 +164,7 @@ async fn files_list() {
     assert_eq!(result["has_more"], false);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn files_list_root() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -191,7 +191,7 @@ async fn files_list_root() {
     assert_eq!(result["entries"].as_array().unwrap().len(), 1);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn files_list_missing_path() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -207,7 +207,7 @@ async fn files_list_missing_path() {
 
 // -- Files List Continue ------------------------------------------------------
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn files_list_continue() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -235,7 +235,7 @@ async fn files_list_continue() {
     assert_eq!(result["cursor"], "cursor_def");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn files_list_continue_missing_cursor() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -251,7 +251,7 @@ async fn files_list_continue_missing_cursor() {
 
 // -- Files Get Metadata -------------------------------------------------------
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn files_get_metadata() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -280,7 +280,7 @@ async fn files_get_metadata() {
     assert_eq!(result["size"], 2048);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn files_get_metadata_missing_path() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -296,7 +296,7 @@ async fn files_get_metadata_missing_path() {
 
 // -- Files Create Folder ------------------------------------------------------
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn files_create_folder() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -325,7 +325,7 @@ async fn files_create_folder() {
     assert!(result["metadata"].is_object());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn files_create_folder_missing_path() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -341,7 +341,7 @@ async fn files_create_folder_missing_path() {
 
 // -- Files Delete -------------------------------------------------------------
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn files_delete() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -367,7 +367,7 @@ async fn files_delete() {
     assert!(result.is_object());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn files_delete_missing_path() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -383,7 +383,7 @@ async fn files_delete_missing_path() {
 
 // -- Files Move ---------------------------------------------------------------
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn files_move() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -412,7 +412,7 @@ async fn files_move() {
     assert!(result["metadata"].is_object());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn files_move_missing_from_path() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -426,7 +426,7 @@ async fn files_move_missing_from_path() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn files_move_missing_to_path() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -442,7 +442,7 @@ async fn files_move_missing_to_path() {
 
 // -- Files Copy ---------------------------------------------------------------
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn files_copy() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -471,7 +471,7 @@ async fn files_copy() {
     assert!(result["metadata"].is_object());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn files_copy_missing_from_path() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -487,7 +487,7 @@ async fn files_copy_missing_from_path() {
 
 // -- Files Search -------------------------------------------------------------
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn files_search() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -515,7 +515,7 @@ async fn files_search() {
     assert_eq!(result["has_more"], false);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn files_search_missing_query() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -531,7 +531,7 @@ async fn files_search_missing_query() {
 
 // -- Account: Space Usage -----------------------------------------------------
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn account_get_space_usage() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -559,7 +559,7 @@ async fn account_get_space_usage() {
 
 // -- Account: Get Current -----------------------------------------------------
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn account_get_current() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -590,7 +590,7 @@ async fn account_get_current() {
 
 // -- Error handling -----------------------------------------------------------
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn error_401() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -613,7 +613,7 @@ async fn error_401() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn error_403() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -635,7 +635,7 @@ async fn error_403() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn error_409_not_found() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -658,7 +658,7 @@ async fn error_409_not_found() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn error_409_conflict() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -681,7 +681,7 @@ async fn error_409_conflict() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn error_429() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -705,7 +705,7 @@ async fn error_429() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn error_500() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -727,7 +727,7 @@ async fn error_500() {
 
 // -- Unknown op / Simulate ----------------------------------------------------
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn unknown_operation() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -741,7 +741,7 @@ async fn unknown_operation() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn simulate_known() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -754,7 +754,7 @@ async fn simulate_known() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn simulate_known_search() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -767,7 +767,7 @@ async fn simulate_known_search() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn simulate_known_account() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -780,7 +780,7 @@ async fn simulate_known_account() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn simulate_unknown() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -795,7 +795,7 @@ async fn simulate_unknown() {
 
 // -- Counters -----------------------------------------------------------------
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn counters_increment() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -820,7 +820,7 @@ async fn counters_increment() {
     assert_eq!(h["errors"], 0);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn counters_error_increment() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -843,7 +843,7 @@ async fn counters_error_increment() {
 
 // -- Auth header verification -------------------------------------------------
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn bearer_token_sent_in_header() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))

@@ -80,7 +80,7 @@ mod tests {
             "filesize": 1000,
             "coverurl": "https://example.com/cover.jpg"
         });
-        let result: SearchResult = serde_json::from_value(json.clone()).unwrap();
+        let result: SearchResult = serde_json::from_value(json).unwrap();
         assert_eq!(result.md5, "abc123");
         assert_eq!(result.title, "Test Book");
         assert_eq!(result.author, "Author");
@@ -194,7 +194,7 @@ mod tests {
             language: "en".into(),
             extension: "pdf".into(),
             filesize: 100,
-            coverurl: "".into(),
+            coverurl: String::new(),
         };
         let cloned = result.clone();
         assert_eq!(cloned.md5, result.md5);
@@ -212,14 +212,14 @@ mod tests {
             language: "en".into(),
             extension: "pdf".into(),
             filesize: 100,
-            coverurl: "".into(),
+            coverurl: String::new(),
             isbn: "978".into(),
             doi: "10.1".into(),
             description: "desc".into(),
             pages: "100".into(),
             source: "libgen".into(),
         };
-        let cloned = meta.clone();
+        let cloned = meta;
         assert_eq!(cloned.isbn, "978");
     }
 
@@ -228,13 +228,13 @@ mod tests {
         let result = SearchResult {
             md5: "abc".into(),
             title: "Test".into(),
-            author: "".into(),
-            publisher: "".into(),
-            year: "".into(),
-            language: "".into(),
-            extension: "".into(),
+            author: String::new(),
+            publisher: String::new(),
+            year: String::new(),
+            language: String::new(),
+            extension: String::new(),
             filesize: 0,
-            coverurl: "".into(),
+            coverurl: String::new(),
         };
         let dbg = format!("{result:?}");
         assert!(dbg.contains("SearchResult"));

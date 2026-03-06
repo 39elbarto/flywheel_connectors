@@ -76,14 +76,14 @@ fn workspace_mock(id: &str, name: &str, version: &str) -> serde_json::Value {
 // Lifecycle tests
 // ==========================================================================
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_health_unconfigured() {
     let c = TerraformConnector::new();
     let h = c.handle_health().await.unwrap();
     assert_eq!(h["status"], "unconfigured");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_full() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -91,13 +91,13 @@ async fn lifecycle_full() {
     assert_eq!(h["status"], "healthy");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_handshake_before_configure() {
     let mut c = TerraformConnector::new();
     assert!(c.handle_handshake(json!({})).await.is_err());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_shutdown() {
     let server = MockServer::start().await;
     let mut c = setup_connector(&server.uri()).await;
@@ -105,7 +105,7 @@ async fn lifecycle_shutdown() {
     assert_eq!(c.handle_health().await.unwrap()["status"], "unconfigured");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_self_check() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -113,14 +113,14 @@ async fn lifecycle_self_check() {
     assert_eq!(check["status"], "ready");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_doctor() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
     assert_eq!(c.handle_doctor().await.unwrap()["status"], "healthy");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_introspect() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -128,7 +128,7 @@ async fn lifecycle_introspect() {
     assert_eq!(intro["operations"].as_array().unwrap().len(), 12);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_configured_not_handshaken() {
     let mut c = TerraformConnector::new();
     c.handle_configure(json!({
@@ -144,7 +144,7 @@ async fn lifecycle_configured_not_handshaken() {
 // terraform.init
 // ==========================================================================
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn init_success() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -169,7 +169,7 @@ async fn init_success() {
     assert_eq!(r["workspace_id"], "ws-1");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn init_missing_working_dir() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -187,7 +187,7 @@ async fn init_missing_working_dir() {
 // terraform.validate
 // ==========================================================================
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn validate_success() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -214,7 +214,7 @@ async fn validate_success() {
 // terraform.plan
 // ==========================================================================
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn plan_success() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -247,7 +247,7 @@ async fn plan_success() {
     assert_eq!(r["plan_file"], "run-plan1");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn plan_missing_working_dir() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -265,7 +265,7 @@ async fn plan_missing_working_dir() {
 // terraform.show_plan
 // ==========================================================================
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn show_plan_success() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -291,7 +291,7 @@ async fn show_plan_success() {
     assert_eq!(r["plan_detail"]["status"], "planned");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn show_plan_missing_plan_file() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -309,7 +309,7 @@ async fn show_plan_missing_plan_file() {
 // terraform.apply
 // ==========================================================================
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn apply_success() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -330,7 +330,7 @@ async fn apply_success() {
     assert_eq!(r["applied"], true);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn apply_with_comment() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -350,7 +350,7 @@ async fn apply_with_comment() {
     assert_eq!(r["applied"], true);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn apply_missing_working_dir() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -368,7 +368,7 @@ async fn apply_missing_working_dir() {
 // terraform.destroy
 // ==========================================================================
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn destroy_success() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -388,7 +388,7 @@ async fn destroy_success() {
     assert_eq!(r["destroyed"], true);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn destroy_missing_working_dir() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -406,7 +406,7 @@ async fn destroy_missing_working_dir() {
 // terraform.state_list
 // ==========================================================================
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn state_list_success() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -454,7 +454,7 @@ async fn state_list_success() {
     assert_eq!(r["resources"].as_array().unwrap().len(), 2);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn state_list_with_filter() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -507,7 +507,7 @@ async fn state_list_with_filter() {
 // terraform.state_show
 // ==========================================================================
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn state_show_success() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -550,7 +550,7 @@ async fn state_show_success() {
     assert!(r.get("resource").is_some());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn state_show_missing_address() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -568,7 +568,7 @@ async fn state_show_missing_address() {
 // terraform.output
 // ==========================================================================
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn output_success() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -611,7 +611,7 @@ async fn output_success() {
     assert!(r.get("outputs").is_some());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn output_missing_working_dir() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -629,7 +629,7 @@ async fn output_missing_working_dir() {
 // terraform.import
 // ==========================================================================
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn import_success() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -666,7 +666,7 @@ async fn import_success() {
     assert_eq!(r["address"], "aws_instance.web");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn import_missing_address() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -680,7 +680,7 @@ async fn import_missing_address() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn import_missing_id() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -698,7 +698,7 @@ async fn import_missing_id() {
 // terraform.detect_drift
 // ==========================================================================
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn detect_drift_success() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -731,7 +731,7 @@ async fn detect_drift_success() {
     assert!(r.get("checkpoint_ts").is_some());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn detect_drift_missing_working_dir() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -749,7 +749,7 @@ async fn detect_drift_missing_working_dir() {
 // terraform.list_modules
 // ==========================================================================
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn list_modules_success() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -787,7 +787,7 @@ async fn list_modules_success() {
 // Error handling
 // ==========================================================================
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn error_401_unauthorized() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -809,7 +809,7 @@ async fn error_401_unauthorized() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn error_403_forbidden() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -831,7 +831,7 @@ async fn error_403_forbidden() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn error_404_not_found() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -853,7 +853,7 @@ async fn error_404_not_found() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn error_409_conflict() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -875,7 +875,7 @@ async fn error_409_conflict() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn error_429_rate_limited() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -901,7 +901,7 @@ async fn error_429_rate_limited() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn error_500_server_error() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -925,7 +925,7 @@ async fn error_500_server_error() {
 // Unknown op / Simulate
 // ==========================================================================
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn unknown_operation() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -939,7 +939,7 @@ async fn unknown_operation() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn simulate_known_op() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -952,7 +952,7 @@ async fn simulate_known_op() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn simulate_unknown_op() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -965,7 +965,7 @@ async fn simulate_unknown_op() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn simulate_all_ops() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -988,7 +988,7 @@ async fn simulate_all_ops() {
 // Counters
 // ==========================================================================
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn counters_increment_on_success() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -1012,7 +1012,7 @@ async fn counters_increment_on_success() {
     assert_eq!(h["errors"], 0);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn counters_increment_on_error() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -1037,7 +1037,7 @@ async fn counters_increment_on_error() {
 // Custom organization override
 // ==========================================================================
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn init_with_custom_org() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))

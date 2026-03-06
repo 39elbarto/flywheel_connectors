@@ -32,7 +32,7 @@ async fn setup_connector(mock_url: &str) -> SpotifyConnector {
 // Lifecycle tests
 // ============================================================
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_health_unconfigured() {
     let c = SpotifyConnector::new();
     let h = c.handle_health().await.unwrap();
@@ -41,7 +41,7 @@ async fn lifecycle_health_unconfigured() {
     assert_eq!(h["handshaken"], false);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_full() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -53,13 +53,13 @@ async fn lifecycle_full() {
     assert_eq!(h["errors"], 0);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_handshake_before_configure_fails() {
     let mut c = SpotifyConnector::new();
     assert!(c.handle_handshake(json!({})).await.is_err());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_shutdown() {
     let server = MockServer::start().await;
     let mut c = setup_connector(&server.uri()).await;
@@ -70,7 +70,7 @@ async fn lifecycle_shutdown() {
     // session_id is not cleared by shutdown, but config is gone so status is unconfigured
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_self_check() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -80,7 +80,7 @@ async fn lifecycle_self_check() {
     assert_eq!(check["version"], "0.1.0");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_doctor() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -93,7 +93,7 @@ async fn lifecycle_doctor() {
     }
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_doctor_unconfigured() {
     let c = SpotifyConnector::new();
     let doc = c.handle_doctor().await.unwrap();
@@ -104,7 +104,7 @@ async fn lifecycle_doctor_unconfigured() {
     assert!(config_check["critical"].as_bool().unwrap());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_introspect() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -115,7 +115,7 @@ async fn lifecycle_introspect() {
     assert_eq!(ops.len(), 10);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_introspect_all_ops_have_required_fields() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -130,7 +130,7 @@ async fn lifecycle_introspect_all_ops_have_required_fields() {
     }
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_handshake_response_fields() {
     let server = MockServer::start().await;
     let mut c = SpotifyConnector::new();
@@ -145,7 +145,7 @@ async fn lifecycle_handshake_response_fields() {
     assert!(caps.iter().any(|c| c == "spotify.read"));
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_reconfigure_after_shutdown() {
     let server = MockServer::start().await;
     let mut c = setup_connector(&server.uri()).await;
@@ -166,25 +166,25 @@ async fn lifecycle_reconfigure_after_shutdown() {
 // Configuration validation
 // ============================================================
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn configure_missing_auth() {
     let mut c = SpotifyConnector::new();
     assert!(c.handle_configure(json!({})).await.is_err());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn configure_empty_access_token() {
     let mut c = SpotifyConnector::new();
     assert!(c.handle_configure(json!({"access_token": ""})).await.is_err());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn configure_whitespace_access_token() {
     let mut c = SpotifyConnector::new();
     assert!(c.handle_configure(json!({"access_token": "   "})).await.is_err());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn configure_both_auth_methods() {
     let mut c = SpotifyConnector::new();
     assert!(
@@ -197,7 +197,7 @@ async fn configure_both_auth_methods() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn configure_credential_id() {
     let mut c = SpotifyConnector::new();
     let result = c
@@ -208,7 +208,7 @@ async fn configure_credential_id() {
     assert!(result.is_ok());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn configure_invalid_credential_id() {
     let mut c = SpotifyConnector::new();
     assert!(
@@ -218,7 +218,7 @@ async fn configure_invalid_credential_id() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn configure_non_string_credential_id() {
     let mut c = SpotifyConnector::new();
     assert!(
@@ -228,7 +228,7 @@ async fn configure_non_string_credential_id() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn configure_custom_base_url() {
     let server = MockServer::start().await;
     let mut c = SpotifyConnector::new();
@@ -247,7 +247,7 @@ async fn configure_custom_base_url() {
 // Invoke before ready
 // ============================================================
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn invoke_before_configure_fails() {
     let c = SpotifyConnector::new();
     assert!(
@@ -260,7 +260,7 @@ async fn invoke_before_configure_fails() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn invoke_missing_operation_id() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -271,7 +271,7 @@ async fn invoke_missing_operation_id() {
 // Profile Get
 // ============================================================
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn profile_get() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -303,7 +303,7 @@ async fn profile_get() {
 // Search
 // ============================================================
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn search_tracks() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -332,7 +332,7 @@ async fn search_tracks() {
     assert!(result["results"]["tracks"].is_object());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn search_albums() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -357,7 +357,7 @@ async fn search_albums() {
     assert!(result["results"]["albums"].is_object());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn search_defaults() {
     let server = MockServer::start().await;
     // Default type is "track", default limit is 20
@@ -382,7 +382,7 @@ async fn search_defaults() {
     assert!(result["results"].is_object());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn search_missing_query() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -400,7 +400,7 @@ async fn search_missing_query() {
 // Tracks Get
 // ============================================================
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn tracks_get() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -428,7 +428,7 @@ async fn tracks_get() {
     assert_eq!(result["track"]["duration_ms"], 207959);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn tracks_get_missing_id() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -446,7 +446,7 @@ async fn tracks_get_missing_id() {
 // Albums Get
 // ============================================================
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn albums_get() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -472,7 +472,7 @@ async fn albums_get() {
     assert_eq!(result["album"]["release_date"], "1959-08-17");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn albums_get_missing_id() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -490,7 +490,7 @@ async fn albums_get_missing_id() {
 // Artists Get
 // ============================================================
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn artists_get() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -516,7 +516,7 @@ async fn artists_get() {
     assert_eq!(result["artist"]["followers"]["total"], 100000000);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn artists_get_missing_id() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -534,7 +534,7 @@ async fn artists_get_missing_id() {
 // Playlists Get
 // ============================================================
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn playlists_get() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -560,7 +560,7 @@ async fn playlists_get() {
     assert_eq!(result["playlist"]["tracks"]["total"], 50);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn playlists_get_missing_id() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -578,7 +578,7 @@ async fn playlists_get_missing_id() {
 // Playlists List
 // ============================================================
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn playlists_list() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -604,7 +604,7 @@ async fn playlists_list() {
     assert_eq!(result["playlists"][0]["name"], "My Playlist");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn playlists_list_empty() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -630,7 +630,7 @@ async fn playlists_list_empty() {
 // Recently Played
 // ============================================================
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn recently_played() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -655,7 +655,7 @@ async fn recently_played() {
     assert_eq!(result["items"].as_array().unwrap().len(), 2);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn recently_played_default_limit() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -678,7 +678,7 @@ async fn recently_played_default_limit() {
     assert!(result["items"].as_array().unwrap().is_empty());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn recently_played_empty() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -704,7 +704,7 @@ async fn recently_played_empty() {
 // Top Items
 // ============================================================
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn top_items_artists() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -730,7 +730,7 @@ async fn top_items_artists() {
     assert_eq!(result["items"].as_array().unwrap().len(), 2);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn top_items_tracks() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -755,7 +755,7 @@ async fn top_items_tracks() {
     assert_eq!(result["items"].as_array().unwrap().len(), 1);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn top_items_default_time_range() {
     let server = MockServer::start().await;
     // Default time_range is "medium_term", default limit is 20
@@ -780,7 +780,7 @@ async fn top_items_default_time_range() {
     assert!(result["items"].as_array().unwrap().is_empty());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn top_items_missing_type() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -798,7 +798,7 @@ async fn top_items_missing_type() {
 // Recommendations
 // ============================================================
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn recommendations_get() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -826,7 +826,7 @@ async fn recommendations_get() {
     assert_eq!(result["tracks"][0]["name"], "Rec 1");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn recommendations_empty_seeds() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -852,7 +852,7 @@ async fn recommendations_empty_seeds() {
 // Error handling
 // ============================================================
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn error_401() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -874,7 +874,7 @@ async fn error_401() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn error_403() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -896,7 +896,7 @@ async fn error_403() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn error_404() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -918,7 +918,7 @@ async fn error_404() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn error_429() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -944,7 +944,7 @@ async fn error_429() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn error_500() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -964,7 +964,7 @@ async fn error_500() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn error_502() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -984,7 +984,7 @@ async fn error_502() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn error_empty_body() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -1005,7 +1005,7 @@ async fn error_empty_body() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn error_non_json_body() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -1031,7 +1031,7 @@ async fn error_non_json_body() {
 // Unknown op / Simulate
 // ============================================================
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn unknown_operation() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -1045,7 +1045,7 @@ async fn unknown_operation() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn simulate_known_search() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -1057,7 +1057,7 @@ async fn simulate_known_search() {
     assert_eq!(sim["reason"], "Operation supported");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn simulate_known_profile() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -1070,7 +1070,7 @@ async fn simulate_known_profile() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn simulate_known_tracks() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -1083,7 +1083,7 @@ async fn simulate_known_tracks() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn simulate_known_albums() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -1096,7 +1096,7 @@ async fn simulate_known_albums() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn simulate_known_playlists_list() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -1109,7 +1109,7 @@ async fn simulate_known_playlists_list() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn simulate_known_recommendations() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -1122,7 +1122,7 @@ async fn simulate_known_recommendations() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn simulate_unknown() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -1134,7 +1134,7 @@ async fn simulate_unknown() {
     assert_eq!(sim["reason"], "Unknown operation");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn simulate_empty_operation() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -1149,7 +1149,7 @@ async fn simulate_empty_operation() {
 // Counters
 // ============================================================
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn counters_increment() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -1170,7 +1170,7 @@ async fn counters_increment() {
     assert_eq!(h["errors"], 0);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn counters_error_increment() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -1191,7 +1191,7 @@ async fn counters_error_increment() {
     assert_eq!(h["errors"], 1);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn counters_multiple_requests() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -1230,7 +1230,7 @@ async fn counters_multiple_requests() {
     assert_eq!(h["errors"], 0);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn counters_mixed_success_and_error() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -1269,7 +1269,7 @@ async fn counters_mixed_success_and_error() {
 // Health / Doctor edge cases
 // ============================================================
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn health_degraded_after_configure_only() {
     let mut c = SpotifyConnector::new();
     c.handle_configure(json!({ "access_token": "BQtoken" }))
@@ -1281,7 +1281,7 @@ async fn health_degraded_after_configure_only() {
     assert_eq!(h["handshaken"], false);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn self_check_unconfigured() {
     let c = SpotifyConnector::new();
     let check = c.handle_self_check().await.unwrap();
@@ -1289,7 +1289,7 @@ async fn self_check_unconfigured() {
     assert_eq!(check["connector_id"], "fcp.spotify");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn doctor_degraded_without_handshake() {
     let mut c = SpotifyConnector::new();
     c.handle_configure(json!({ "access_token": "BQtoken" }))
@@ -1308,7 +1308,7 @@ async fn doctor_degraded_without_handshake() {
 // Auth header verification
 // ============================================================
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn auth_header_is_bearer() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -1328,7 +1328,7 @@ async fn auth_header_is_bearer() {
     .unwrap();
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn accept_header_is_json() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -1352,7 +1352,7 @@ async fn accept_header_is_json() {
 // Response wrapping
 // ============================================================
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn playlists_list_unwraps_items() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -1377,7 +1377,7 @@ async fn playlists_list_unwraps_items() {
     assert_eq!(result["playlists"].as_array().unwrap().len(), 3);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn recently_played_unwraps_items() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -1400,7 +1400,7 @@ async fn recently_played_unwraps_items() {
     assert_eq!(result["items"].as_array().unwrap().len(), 1);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn recommendations_unwraps_tracks() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -1428,7 +1428,7 @@ async fn recommendations_unwraps_tracks() {
 // Empty response body from API (200 with empty body)
 // ============================================================
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn empty_200_response() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))

@@ -33,14 +33,14 @@ async fn setup_connector(mock_url: &str) -> MetabaseConnector {
 
 // -- Lifecycle ---------------------------------------------------------------
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_health_unconfigured() {
     let c = MetabaseConnector::new();
     let h = c.handle_health().await.unwrap();
     assert_eq!(h["status"], "unconfigured");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_full() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -48,13 +48,13 @@ async fn lifecycle_full() {
     assert_eq!(h["status"], "healthy");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_handshake_before_configure_fails() {
     let mut c = MetabaseConnector::new();
     assert!(c.handle_handshake(json!({})).await.is_err());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_shutdown() {
     let server = MockServer::start().await;
     let mut c = setup_connector(&server.uri()).await;
@@ -62,7 +62,7 @@ async fn lifecycle_shutdown() {
     assert_eq!(c.handle_health().await.unwrap()["status"], "unconfigured");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_self_check() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -70,27 +70,27 @@ async fn lifecycle_self_check() {
     assert_eq!(check["status"], "ready");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_self_check_unconfigured() {
     let c = MetabaseConnector::new();
     let check = c.handle_self_check().await.unwrap();
     assert_eq!(check["status"], "unconfigured");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_doctor() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
     assert_eq!(c.handle_doctor().await.unwrap()["status"], "healthy");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_doctor_unconfigured() {
     let c = MetabaseConnector::new();
     assert_eq!(c.handle_doctor().await.unwrap()["status"], "unhealthy");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_introspect() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -98,7 +98,7 @@ async fn lifecycle_introspect() {
     assert_eq!(intro["operations"].as_array().unwrap().len(), 3);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_health_configured_not_handshaken() {
     let mut c = MetabaseConnector::new();
     c.handle_configure(json!({
@@ -113,7 +113,7 @@ async fn lifecycle_health_configured_not_handshaken() {
 
 // -- Dashboards List ---------------------------------------------------------
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn dashboards_list_basic() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -148,7 +148,7 @@ async fn dashboards_list_basic() {
     assert_eq!(result["dashboards"].as_array().unwrap().len(), 2);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn dashboards_list_empty() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -170,7 +170,7 @@ async fn dashboards_list_empty() {
 
 // -- Questions List ----------------------------------------------------------
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn questions_list_basic() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -212,7 +212,7 @@ async fn questions_list_basic() {
     assert_eq!(result["questions"].as_array().unwrap().len(), 3);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn questions_list_empty() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -234,7 +234,7 @@ async fn questions_list_empty() {
 
 // -- Questions Run -----------------------------------------------------------
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn questions_run_basic() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -272,7 +272,7 @@ async fn questions_run_basic() {
     assert_eq!(result["status"], "completed");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn questions_run_empty_results() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -300,7 +300,7 @@ async fn questions_run_empty_results() {
     assert_eq!(result["status"], "completed");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn questions_run_missing_card_id() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -314,7 +314,7 @@ async fn questions_run_missing_card_id() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn questions_run_numeric_card_id_fails() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -331,7 +331,7 @@ async fn questions_run_numeric_card_id_fails() {
 
 // -- Error handling ----------------------------------------------------------
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn error_401() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -354,7 +354,7 @@ async fn error_401() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn error_403() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -377,7 +377,7 @@ async fn error_403() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn error_404() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -400,7 +400,7 @@ async fn error_404() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn error_429() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -424,7 +424,7 @@ async fn error_429() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn error_500() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -447,7 +447,7 @@ async fn error_500() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn error_with_error_message_field() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -472,7 +472,7 @@ async fn error_with_error_message_field() {
 
 // -- Unknown op / Simulate ---------------------------------------------------
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn unknown_operation() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -486,7 +486,7 @@ async fn unknown_operation() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn simulate_known_dashboards_list() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -499,7 +499,7 @@ async fn simulate_known_dashboards_list() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn simulate_known_questions_list() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -512,7 +512,7 @@ async fn simulate_known_questions_list() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn simulate_known_questions_run() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -525,7 +525,7 @@ async fn simulate_known_questions_run() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn simulate_unknown() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -540,7 +540,7 @@ async fn simulate_unknown() {
 
 // -- Counters ----------------------------------------------------------------
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn counters_increment() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -561,7 +561,7 @@ async fn counters_increment() {
     assert_eq!(h["errors"], 0);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn counters_error_increment() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -585,7 +585,7 @@ async fn counters_error_increment() {
     assert_eq!(h["errors"], 1);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn counters_multiple_requests() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -610,7 +610,7 @@ async fn counters_multiple_requests() {
 
 // -- Handshake response ------------------------------------------------------
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn handshake_returns_capabilities() {
     let server = MockServer::start().await;
     let mut c = MetabaseConnector::new();
@@ -633,7 +633,7 @@ async fn handshake_returns_capabilities() {
 
 // -- Invoke before ready -----------------------------------------------------
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn invoke_before_configure_fails() {
     let c = MetabaseConnector::new();
     assert!(
@@ -648,7 +648,7 @@ async fn invoke_before_configure_fails() {
 
 // -- Mixed operations --------------------------------------------------------
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn mixed_operations_sequence() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -714,7 +714,7 @@ async fn mixed_operations_sequence() {
 
 // -- Reconfigure -------------------------------------------------------------
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn reconfigure_resets_client() {
     let server1 = MockServer::start().await;
     let server2 = MockServer::start().await;

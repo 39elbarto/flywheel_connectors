@@ -30,14 +30,14 @@ async fn setup_connector(mock_url: &str) -> MakeConnector {
 
 // -- Lifecycle --
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_health_unconfigured() {
     let c = MakeConnector::new();
     let h = c.handle_health().await.unwrap();
     assert_eq!(h["status"], "unconfigured");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_full() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -45,13 +45,13 @@ async fn lifecycle_full() {
     assert_eq!(h["status"], "healthy");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_handshake_before_configure_fails() {
     let mut c = MakeConnector::new();
     assert!(c.handle_handshake(json!({})).await.is_err());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_shutdown() {
     let server = MockServer::start().await;
     let mut c = setup_connector(&server.uri()).await;
@@ -59,7 +59,7 @@ async fn lifecycle_shutdown() {
     assert_eq!(c.handle_health().await.unwrap()["status"], "unconfigured");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_self_check() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -67,14 +67,14 @@ async fn lifecycle_self_check() {
     assert_eq!(check["status"], "ready");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_doctor() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
     assert_eq!(c.handle_doctor().await.unwrap()["status"], "healthy");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_introspect() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -82,7 +82,7 @@ async fn lifecycle_introspect() {
     assert_eq!(intro["operations"].as_array().unwrap().len(), 3);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_health_configured_but_not_handshaken() {
     let server = MockServer::start().await;
     let mut c = MakeConnector::new();
@@ -95,7 +95,7 @@ async fn lifecycle_health_configured_but_not_handshaken() {
 
 // -- Scenarios List --
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn scenarios_list() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -121,7 +121,7 @@ async fn scenarios_list() {
     assert_eq!(result["scenarios"].as_array().unwrap().len(), 2);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn scenarios_list_empty() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -145,7 +145,7 @@ async fn scenarios_list_empty() {
 
 // -- Scenarios Run --
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn scenarios_run() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -168,7 +168,7 @@ async fn scenarios_run() {
     assert_eq!(result["execution_id"], "exec_abc123");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn scenarios_run_missing_scenario_id() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -184,7 +184,7 @@ async fn scenarios_run_missing_scenario_id() {
 
 // -- Executions List --
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn executions_list() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -210,7 +210,7 @@ async fn executions_list() {
     assert_eq!(result["executions"].as_array().unwrap().len(), 2);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn executions_list_empty() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -232,7 +232,7 @@ async fn executions_list_empty() {
     assert!(result["executions"].as_array().unwrap().is_empty());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn executions_list_missing_scenario_id() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -248,7 +248,7 @@ async fn executions_list_missing_scenario_id() {
 
 // -- Error handling --
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn error_401() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -271,7 +271,7 @@ async fn error_401() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn error_403() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -294,7 +294,7 @@ async fn error_403() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn error_404() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -317,7 +317,7 @@ async fn error_404() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn error_429() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -341,7 +341,7 @@ async fn error_429() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn error_500() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -363,7 +363,7 @@ async fn error_500() {
 
 // -- Unknown op / Simulate --
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn unknown_operation() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -377,7 +377,7 @@ async fn unknown_operation() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn simulate_known_scenarios_list() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -390,7 +390,7 @@ async fn simulate_known_scenarios_list() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn simulate_known_scenarios_run() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -403,7 +403,7 @@ async fn simulate_known_scenarios_run() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn simulate_known_executions_list() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -416,7 +416,7 @@ async fn simulate_known_executions_list() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn simulate_unknown() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -431,7 +431,7 @@ async fn simulate_unknown() {
 
 // -- Counters --
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn counters_increment() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -452,7 +452,7 @@ async fn counters_increment() {
     assert_eq!(h["errors"], 0);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn counters_error_increment() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -473,7 +473,7 @@ async fn counters_error_increment() {
     assert_eq!(h["errors"], 1);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn counters_multiple_requests() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -498,7 +498,7 @@ async fn counters_multiple_requests() {
 
 // -- Auth header verification --
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn auth_header_uses_token_prefix() {
     let server = MockServer::start().await;
     // This mock specifically requires "Token test_token_123" in the Authorization header
@@ -522,7 +522,7 @@ async fn auth_header_uses_token_prefix() {
 
 // -- Handshake response --
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn handshake_response_contains_capabilities() {
     let server = MockServer::start().await;
     let mut c = MakeConnector::new();
@@ -538,7 +538,7 @@ async fn handshake_response_contains_capabilities() {
 
 // -- Self check when unconfigured --
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn self_check_unconfigured() {
     let c = MakeConnector::new();
     let check = c.handle_self_check().await.unwrap();
@@ -547,7 +547,7 @@ async fn self_check_unconfigured() {
 
 // -- Doctor when unconfigured --
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn doctor_unconfigured() {
     let c = MakeConnector::new();
     let doc = c.handle_doctor().await.unwrap();
@@ -556,7 +556,7 @@ async fn doctor_unconfigured() {
 
 // -- Invoke before handshake --
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn invoke_before_handshake_fails() {
     let server = MockServer::start().await;
     let mut c = MakeConnector::new();

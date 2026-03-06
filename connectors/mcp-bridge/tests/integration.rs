@@ -46,14 +46,14 @@ async fn setup_connector_no_auth(mock_url: &str) -> McpBridgeConnector {
 
 // -- Lifecycle ---------------------------------------------------------------
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_health_unconfigured() {
     let c = McpBridgeConnector::new();
     let h = c.handle_health().await.unwrap();
     assert_eq!(h["status"], "unconfigured");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_full() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -61,13 +61,13 @@ async fn lifecycle_full() {
     assert_eq!(h["status"], "healthy");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_handshake_before_configure_fails() {
     let mut c = McpBridgeConnector::new();
     assert!(c.handle_handshake(json!({})).await.is_err());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_shutdown() {
     let server = MockServer::start().await;
     let mut c = setup_connector(&server.uri()).await;
@@ -75,7 +75,7 @@ async fn lifecycle_shutdown() {
     assert_eq!(c.handle_health().await.unwrap()["status"], "unconfigured");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_self_check() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -83,27 +83,27 @@ async fn lifecycle_self_check() {
     assert_eq!(check["status"], "ready");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_self_check_unconfigured() {
     let c = McpBridgeConnector::new();
     let check = c.handle_self_check().await.unwrap();
     assert_eq!(check["status"], "unconfigured");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_doctor() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
     assert_eq!(c.handle_doctor().await.unwrap()["status"], "healthy");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_doctor_unconfigured() {
     let c = McpBridgeConnector::new();
     assert_eq!(c.handle_doctor().await.unwrap()["status"], "unhealthy");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_introspect() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -111,7 +111,7 @@ async fn lifecycle_introspect() {
     assert_eq!(intro["operations"].as_array().unwrap().len(), 5);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_health_configured_not_handshaken() {
     let mut c = McpBridgeConnector::new();
     c.handle_configure(json!({
@@ -125,7 +125,7 @@ async fn lifecycle_health_configured_not_handshaken() {
 
 // -- tools/list --------------------------------------------------------------
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn tools_list_basic() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -168,7 +168,7 @@ async fn tools_list_basic() {
     assert_eq!(result["tools"][0]["name"], "read_file");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn tools_list_empty() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -193,7 +193,7 @@ async fn tools_list_empty() {
     assert!(result["tools"].as_array().unwrap().is_empty());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn tools_list_without_auth() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -220,7 +220,7 @@ async fn tools_list_without_auth() {
 
 // -- tools/call --------------------------------------------------------------
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn tools_call_basic() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -258,7 +258,7 @@ async fn tools_call_basic() {
     assert_eq!(result["content"][0]["text"], "file contents here");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn tools_call_missing_name() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -272,7 +272,7 @@ async fn tools_call_missing_name() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn tools_call_with_empty_arguments() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -302,7 +302,7 @@ async fn tools_call_with_empty_arguments() {
     assert_eq!(result["content"][0]["text"], "pong");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn tools_call_invalid_arguments_type() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -319,7 +319,7 @@ async fn tools_call_invalid_arguments_type() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn tools_call_with_complex_result() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -353,7 +353,7 @@ async fn tools_call_with_complex_result() {
 
 // -- resources/list ----------------------------------------------------------
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn resources_list_basic() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -392,7 +392,7 @@ async fn resources_list_basic() {
     assert_eq!(result["resources"][0]["uri"], "file:///tmp/data.txt");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn resources_list_empty() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -419,7 +419,7 @@ async fn resources_list_empty() {
 
 // -- resources/read ----------------------------------------------------------
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn resources_read_text() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -455,7 +455,7 @@ async fn resources_read_text() {
     assert_eq!(result["contents"][0]["text"], "Hello, world!");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn resources_read_binary() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -488,7 +488,7 @@ async fn resources_read_binary() {
     assert!(result["contents"][0]["blob"].as_str().is_some());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn resources_read_missing_uri() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -504,7 +504,7 @@ async fn resources_read_missing_uri() {
 
 // -- prompts/list ------------------------------------------------------------
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn prompts_list_basic() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -544,7 +544,7 @@ async fn prompts_list_basic() {
     assert_eq!(result["prompts"][0]["name"], "summarize");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn prompts_list_empty() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -571,7 +571,7 @@ async fn prompts_list_empty() {
 
 // -- JSON-RPC error handling -------------------------------------------------
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn jsonrpc_error_method_not_found() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -598,7 +598,7 @@ async fn jsonrpc_error_method_not_found() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn jsonrpc_error_invalid_params() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -627,7 +627,7 @@ async fn jsonrpc_error_invalid_params() {
 
 // -- HTTP error handling -----------------------------------------------------
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn error_401() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -650,7 +650,7 @@ async fn error_401() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn error_403() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -673,7 +673,7 @@ async fn error_403() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn error_404() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -696,7 +696,7 @@ async fn error_404() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn error_429() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -720,7 +720,7 @@ async fn error_429() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn error_500() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -745,7 +745,7 @@ async fn error_500() {
 
 // -- Unknown op / Simulate ---------------------------------------------------
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn unknown_operation() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -759,7 +759,7 @@ async fn unknown_operation() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn simulate_known_tools_list() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -772,7 +772,7 @@ async fn simulate_known_tools_list() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn simulate_known_tools_call() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -785,7 +785,7 @@ async fn simulate_known_tools_call() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn simulate_known_resources_list() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -798,7 +798,7 @@ async fn simulate_known_resources_list() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn simulate_known_resources_read() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -811,7 +811,7 @@ async fn simulate_known_resources_read() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn simulate_known_prompts_list() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -824,7 +824,7 @@ async fn simulate_known_prompts_list() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn simulate_unknown() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -839,7 +839,7 @@ async fn simulate_unknown() {
 
 // -- Counters ----------------------------------------------------------------
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn counters_increment() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -864,7 +864,7 @@ async fn counters_increment() {
     assert_eq!(h["errors"], 0);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn counters_error_increment() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -888,7 +888,7 @@ async fn counters_error_increment() {
     assert_eq!(h["errors"], 1);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn counters_multiple_requests() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -917,7 +917,7 @@ async fn counters_multiple_requests() {
 
 // -- Handshake response ------------------------------------------------------
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn handshake_returns_capabilities() {
     let server = MockServer::start().await;
     let mut c = McpBridgeConnector::new();
@@ -941,7 +941,7 @@ async fn handshake_returns_capabilities() {
 
 // -- Invoke before ready -----------------------------------------------------
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn invoke_before_configure_fails() {
     let c = McpBridgeConnector::new();
     assert!(
@@ -956,7 +956,7 @@ async fn invoke_before_configure_fails() {
 
 // -- Configure with various params -------------------------------------------
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn configure_without_api_key() {
     let mut c = McpBridgeConnector::new();
     let result = c
@@ -967,7 +967,7 @@ async fn configure_without_api_key() {
     assert!(result.is_ok());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn configure_rejects_empty_url() {
     let mut c = McpBridgeConnector::new();
     let result = c
@@ -978,7 +978,7 @@ async fn configure_rejects_empty_url() {
     assert!(result.is_err());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn configure_rejects_missing_url() {
     let mut c = McpBridgeConnector::new();
     let result = c.handle_configure(json!({})).await;

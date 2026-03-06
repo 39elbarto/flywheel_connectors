@@ -30,7 +30,7 @@ async fn setup_connector(mock_url: &str) -> ZapierConnector {
 
 // -- Lifecycle --
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_health_unconfigured() {
     let c = ZapierConnector::new();
     let h = c.handle_health().await.unwrap();
@@ -39,7 +39,7 @@ async fn lifecycle_health_unconfigured() {
     assert_eq!(h["handshaken"], false);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_health_configured_not_handshaken() {
     let server = MockServer::start().await;
     let mut c = ZapierConnector::new();
@@ -52,7 +52,7 @@ async fn lifecycle_health_configured_not_handshaken() {
     assert_eq!(h["handshaken"], false);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_full() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -62,13 +62,13 @@ async fn lifecycle_full() {
     assert_eq!(h["handshaken"], true);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_handshake_before_configure_fails() {
     let mut c = ZapierConnector::new();
     assert!(c.handle_handshake(json!({})).await.is_err());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_shutdown() {
     let server = MockServer::start().await;
     let mut c = setup_connector(&server.uri()).await;
@@ -76,7 +76,7 @@ async fn lifecycle_shutdown() {
     assert_eq!(c.handle_health().await.unwrap()["status"], "unconfigured");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_self_check_ready() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -86,14 +86,14 @@ async fn lifecycle_self_check_ready() {
     assert_eq!(check["version"], "0.1.0");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_self_check_unconfigured() {
     let c = ZapierConnector::new();
     let check = c.handle_self_check().await.unwrap();
     assert_eq!(check["status"], "unconfigured");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_doctor_healthy() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -101,14 +101,14 @@ async fn lifecycle_doctor_healthy() {
     assert_eq!(doc["status"], "healthy");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_doctor_unhealthy_when_unconfigured() {
     let c = ZapierConnector::new();
     let doc = c.handle_doctor().await.unwrap();
     assert_eq!(doc["status"], "unhealthy");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_introspect() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -117,7 +117,7 @@ async fn lifecycle_introspect() {
     assert_eq!(intro["operations"].as_array().unwrap().len(), 2);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_handshake_returns_capabilities() {
     let server = MockServer::start().await;
     let mut c = ZapierConnector::new();
@@ -132,7 +132,7 @@ async fn lifecycle_handshake_returns_capabilities() {
     assert!(caps.iter().any(|v| v == "zapier.zaps.write"));
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_reconfigure() {
     let server = MockServer::start().await;
     let mut c = setup_connector(&server.uri()).await;
@@ -146,7 +146,7 @@ async fn lifecycle_reconfigure() {
 
 // -- Zaps List --
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn zaps_list_array_response() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -174,7 +174,7 @@ async fn zaps_list_array_response() {
     assert_eq!(zaps[1]["id"], "z2");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn zaps_list_object_response() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -198,7 +198,7 @@ async fn zaps_list_object_response() {
     assert_eq!(result["zaps"].as_array().unwrap().len(), 1);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn zaps_list_empty() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -218,7 +218,7 @@ async fn zaps_list_empty() {
     assert!(result["zaps"].as_array().unwrap().is_empty());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn zaps_list_no_input_required() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -240,7 +240,7 @@ async fn zaps_list_no_input_required() {
 
 // -- Zaps Execute --
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn zaps_execute() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -270,7 +270,7 @@ async fn zaps_execute() {
     assert_eq!(result["result"]["result"]["message_id"], "msg_123");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn zaps_execute_missing_action_id() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -284,7 +284,7 @@ async fn zaps_execute_missing_action_id() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn zaps_execute_with_empty_params() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -310,7 +310,7 @@ async fn zaps_execute_with_empty_params() {
     assert_eq!(result["result"]["status"], "success");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn zaps_execute_no_params_field() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -335,7 +335,7 @@ async fn zaps_execute_no_params_field() {
 
 // -- Error Handling --
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn error_401() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -358,7 +358,7 @@ async fn error_401() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn error_403() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -381,7 +381,7 @@ async fn error_403() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn error_404() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -404,7 +404,7 @@ async fn error_404() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn error_429() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -428,7 +428,7 @@ async fn error_429() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn error_500() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -448,7 +448,7 @@ async fn error_500() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn error_502() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -468,7 +468,7 @@ async fn error_502() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn error_empty_body() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -490,7 +490,7 @@ async fn error_empty_body() {
 
 // -- Unknown op / Simulate --
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn unknown_operation() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -504,7 +504,7 @@ async fn unknown_operation() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn invoke_missing_operation_id() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -517,7 +517,7 @@ async fn invoke_missing_operation_id() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn simulate_known_list() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -529,7 +529,7 @@ async fn simulate_known_list() {
     assert_eq!(result["reason"], "Operation supported");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn simulate_known_execute() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -540,7 +540,7 @@ async fn simulate_known_execute() {
     assert!(result["allowed"].as_bool().unwrap());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn simulate_unknown() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -552,7 +552,7 @@ async fn simulate_unknown() {
     assert_eq!(result["reason"], "Unknown operation");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn simulate_empty_operation() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -565,7 +565,7 @@ async fn simulate_empty_operation() {
 
 // -- Counters --
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn counters_increment_on_success() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -586,7 +586,7 @@ async fn counters_increment_on_success() {
     assert_eq!(h["errors"], 0);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn counters_error_increment() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -607,7 +607,7 @@ async fn counters_error_increment() {
     assert_eq!(h["errors"], 1);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn counters_multiple_requests() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -632,25 +632,25 @@ async fn counters_multiple_requests() {
 
 // -- Configuration edge cases --
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn configure_rejects_empty_api_key() {
     let mut c = ZapierConnector::new();
     assert!(c.handle_configure(json!({ "api_key": "" })).await.is_err());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn configure_rejects_whitespace_api_key() {
     let mut c = ZapierConnector::new();
     assert!(c.handle_configure(json!({ "api_key": "   " })).await.is_err());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn configure_rejects_no_auth() {
     let mut c = ZapierConnector::new();
     assert!(c.handle_configure(json!({})).await.is_err());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn configure_rejects_both_auth() {
     let mut c = ZapierConnector::new();
     assert!(
@@ -663,7 +663,7 @@ async fn configure_rejects_both_auth() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn configure_with_credential_id() {
     let mut c = ZapierConnector::new();
     c.handle_configure(json!({
@@ -675,7 +675,7 @@ async fn configure_with_credential_id() {
     assert_eq!(h["configured"], true);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn configure_with_custom_base_url() {
     let server = MockServer::start().await;
     let mut c = ZapierConnector::new();
@@ -691,7 +691,7 @@ async fn configure_with_custom_base_url() {
 
 // -- Shutdown and re-lifecycle --
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn shutdown_resets_counters_display() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -712,7 +712,7 @@ async fn shutdown_resets_counters_display() {
     assert_eq!(h["status"], "unconfigured");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn invoke_before_configure_fails() {
     let c = ZapierConnector::new();
     assert!(

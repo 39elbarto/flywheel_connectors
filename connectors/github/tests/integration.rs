@@ -13,6 +13,7 @@
 //! - Input validation edge cases
 
 #![allow(clippy::too_many_lines)]
+#![allow(clippy::doc_markdown)]
 
 use chrono::{Duration, Utc};
 use fcp_crypto::cose::CapabilityTokenBuilder;
@@ -21,7 +22,7 @@ use fcp_testkit::AsyncTestContext;
 use serde_json::json;
 use wiremock::{
     Mock, MockServer, ResponseTemplate,
-    matchers::{method, path},
+    matchers::{header, method, path},
 };
 
 use fcp_github::client::GitHubClient;
@@ -1341,4 +1342,930 @@ async fn validation_search_issues_missing_query() {
         }
         other => panic!("expected InvalidRequest, got: {other:?}"),
     }
+}
+
+// ============================================================================
+// Additional Error Taxonomy Tests
+// ============================================================================
+
+/// 403 with x-ratelimit-remaining: 0 is a secondary rate limit.
+#[fcp_async_core::runtime::test]
+async fn error_403_secondary_rate_limit() {
+    let _ctx = AsyncTestContext::for_scenario("github.error.403_secondary_rate_limit");
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/repos/octocat/hello-world"))
+        .respond_with(
+            ResponseTemplate::new(403)
+                .set_body_json(github_error_response("You have exceeded a secondary rate limit"))
+                .insert_header("x-ratelimit-remaining", "0")
+                .insert_header("retry-after", "120"),
+        )
+        .mount(&mock_server)
+        .await;
+
+    let client = GitHubClient::new("token")
+        .unwrap()
+        .with_base_url(mock_server.uri())
+        .with_retry_config(0, 10, 100);
+
+    let err = client
+        .get_repo("octocat", "hello-world")
+        .await
+        .expect_err("should fail with 403 secondary rate limit");
+
+    assert!(
+        matches!(err, fcp_github::error::GitHubError::RateLimited { .. }),
+        "expected RateLimited for secondary rate limit, got: {err:?}"
+    );
+
+    let fcp_err = err.to_fcp_error();
+    assert!(
+        matches!(fcp_err, fcp_core::FcpError::RateLimited { .. }),
+        "expected FcpError::RateLimited, got: {fcp_err:?}"
+    );
+}
+
+/// 403 without rate-limit headers is a permission denied (maps to Unauthorized).
+#[fcp_async_core::runtime::test]
+async fn error_403_permission_denied() {
+    let _ctx = AsyncTestContext::for_scenario("github.error.403_permission");
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/repos/octocat/hello-world"))
+        .respond_with(
+            ResponseTemplate::new(403)
+                .set_body_json(github_error_response("Resource not accessible by integration")),
+        )
+        .mount(&mock_server)
+        .await;
+
+    let client = GitHubClient::new("token")
+        .unwrap()
+        .with_base_url(mock_server.uri())
+        .with_retry_config(0, 10, 100);
+
+    let err = client
+        .get_repo("octocat", "hello-world")
+        .await
+        .expect_err("should fail with 403 permission denied");
+
+    let fcp_err = err.to_fcp_error();
+    assert!(
+        matches!(fcp_err, fcp_core::FcpError::Unauthorized { .. }),
+        "expected FcpError::Unauthorized for 403 without rate limit headers, got: {fcp_err:?}"
+    );
+}
+
+/// 503 Service Unavailable maps to retryable External error.
+#[fcp_async_core::runtime::test]
+async fn error_503_maps_to_external_retryable() {
+    let _ctx = AsyncTestContext::for_scenario("github.error.503");
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/repos/octocat/hello-world"))
+        .respond_with(
+            ResponseTemplate::new(503)
+                .set_body_json(github_error_response("Service temporarily unavailable")),
+        )
+        .mount(&mock_server)
+        .await;
+
+    let client = GitHubClient::new("token")
+        .unwrap()
+        .with_base_url(mock_server.uri())
+        .with_retry_config(0, 10, 100);
+
+    let err = client
+        .get_repo("octocat", "hello-world")
+        .await
+        .expect_err("should fail with 503");
+
+    let fcp_err = err.to_fcp_error();
+    match &fcp_err {
+        fcp_core::FcpError::External {
+            service,
+            retryable,
+            status_code,
+            ..
+        } => {
+            assert_eq!(service, "github");
+            assert!(retryable, "503 should be retryable");
+            assert_eq!(*status_code, Some(503));
+        }
+        other => panic!("expected FcpError::External, got: {other:?}"),
+    }
+}
+
+/// Non-JSON error body is handled gracefully.
+#[fcp_async_core::runtime::test]
+async fn error_non_json_response_body() {
+    let _ctx = AsyncTestContext::for_scenario("github.error.non_json");
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/repos/octocat/hello-world"))
+        .respond_with(
+            ResponseTemplate::new(502).set_body_string("Bad Gateway"),
+        )
+        .mount(&mock_server)
+        .await;
+
+    let client = GitHubClient::new("token")
+        .unwrap()
+        .with_base_url(mock_server.uri())
+        .with_retry_config(0, 10, 100);
+
+    let err = client
+        .get_repo("octocat", "hello-world")
+        .await
+        .expect_err("should fail with 502 non-JSON");
+
+    let fcp_err = err.to_fcp_error();
+    match &fcp_err {
+        fcp_core::FcpError::External {
+            service,
+            status_code,
+            ..
+        } => {
+            assert_eq!(service, "github");
+            assert_eq!(*status_code, Some(502));
+        }
+        other => panic!("expected FcpError::External, got: {other:?}"),
+    }
+}
+
+// ============================================================================
+// Configuration Tests
+// ============================================================================
+
+/// Providing both token and credential_id fails.
+#[fcp_async_core::runtime::test]
+async fn config_both_token_and_credential_id_fails() {
+    let _ctx = AsyncTestContext::for_scenario("github.config.both_auth");
+    let mut connector = GitHubConnector::new();
+
+    let err = connector
+        .handle_configure(json!({
+            "token": "ghp_test",
+            "credential_id": "550e8400-e29b-41d4-a716-446655440000"
+        }))
+        .await
+        .expect_err("should fail when both token and credential_id provided");
+
+    match &err {
+        fcp_core::FcpError::InvalidRequest { message, .. } => {
+            assert!(
+                message.contains("not both"),
+                "error should mention mutual exclusion: {message}"
+            );
+        }
+        other => panic!("expected InvalidRequest, got: {other:?}"),
+    }
+}
+
+/// Missing both token and credential_id fails.
+#[fcp_async_core::runtime::test]
+async fn config_missing_auth_fails() {
+    let _ctx = AsyncTestContext::for_scenario("github.config.no_auth");
+    let mut connector = GitHubConnector::new();
+
+    let err = connector
+        .handle_configure(json!({
+            "base_url": "https://api.example.com"
+        }))
+        .await
+        .expect_err("should fail when no auth provided");
+
+    match &err {
+        fcp_core::FcpError::InvalidRequest { message, .. } => {
+            assert!(
+                message.contains("token") || message.contains("credential_id"),
+                "error should mention missing auth: {message}"
+            );
+        }
+        other => panic!("expected InvalidRequest, got: {other:?}"),
+    }
+}
+
+/// Configure with credential_id succeeds.
+#[fcp_async_core::runtime::test]
+async fn config_credential_id_mode() {
+    let _ctx = AsyncTestContext::for_scenario("github.config.credential_id");
+    let mut connector = GitHubConnector::new();
+
+    let result = connector
+        .handle_configure(json!({
+            "credential_id": "550e8400-e29b-41d4-a716-446655440000"
+        }))
+        .await
+        .expect("credential_id config should succeed");
+
+    assert_eq!(result["status"], "configured");
+}
+
+/// Invalid credential_id (bad UUID) fails.
+#[fcp_async_core::runtime::test]
+async fn config_invalid_credential_id_fails() {
+    let _ctx = AsyncTestContext::for_scenario("github.config.bad_credential");
+    let mut connector = GitHubConnector::new();
+
+    let err = connector
+        .handle_configure(json!({
+            "credential_id": "not-a-valid-uuid"
+        }))
+        .await
+        .expect_err("invalid credential_id should fail");
+
+    match &err {
+        fcp_core::FcpError::InvalidRequest { message, .. } => {
+            assert!(
+                message.contains("credential_id"),
+                "error should mention credential_id: {message}"
+            );
+        }
+        other => panic!("expected InvalidRequest, got: {other:?}"),
+    }
+}
+
+/// Custom base_url is used for API requests.
+#[fcp_async_core::runtime::test]
+async fn config_custom_base_url() {
+    let _ctx = AsyncTestContext::for_scenario("github.config.custom_base_url");
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/repos/octocat/hello-world"))
+        .and(header("Authorization", "Bearer custom_token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": 1_296_269,
+            "name": "hello-world",
+            "full_name": "octocat/hello-world",
+            "owner": { "login": "octocat", "id": 1, "avatar_url": "", "type": "User" },
+            "description": "Custom endpoint",
+            "private": false,
+            "fork": false,
+            "html_url": "https://github.example.com/octocat/hello-world",
+            "default_branch": "main",
+            "language": "Rust",
+            "stargazers_count": 99,
+            "forks_count": 10,
+            "open_issues_count": 5,
+            "created_at": "2024-01-01T00:00:00Z",
+            "updated_at": "2024-06-01T00:00:00Z"
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = GitHubConnector::new();
+    connector
+        .handle_configure(json!({
+            "token": "custom_token",
+            "base_url": mock_server.uri()
+        }))
+        .await
+        .expect("configure with custom base_url should succeed");
+
+    let signing_key = setup_handshake(&mut connector, &["github.get_repo"]).await;
+    let token = generate_valid_token(&signing_key, "github.get_repo");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "github.get_repo",
+            "input": { "owner": "octocat", "repo": "hello-world" },
+            "capability_token": token
+        }))
+        .await
+        .expect("get_repo via custom base_url should succeed");
+
+    assert_eq!(result["repository"]["stargazers_count"], 99);
+}
+
+// ============================================================================
+// Doctor & SelfCheck Tests
+// ============================================================================
+
+/// Doctor before configure reports unhealthy.
+#[fcp_async_core::runtime::test]
+async fn doctor_before_configure() {
+    let _ctx = AsyncTestContext::for_scenario("github.doctor.before_configure");
+    let connector = GitHubConnector::new();
+
+    let result = connector
+        .handle_doctor()
+        .await
+        .expect("doctor should succeed even unconfigured");
+
+    assert_eq!(result["status"], "unhealthy");
+    let checks = result["checks"].as_array().unwrap();
+    let config_check = checks.iter().find(|c| c["name"] == "configuration").unwrap();
+    assert_eq!(config_check["status"], "fail");
+}
+
+/// Doctor after configure with token auth reports healthy.
+#[fcp_async_core::runtime::test]
+async fn doctor_after_configure() {
+    let _ctx = AsyncTestContext::for_scenario("github.doctor.after_configure");
+    let mock_server = MockServer::start().await;
+
+    let mut connector = GitHubConnector::new();
+    setup_configure(&mut connector, &mock_server.uri()).await;
+
+    let result = connector
+        .handle_doctor()
+        .await
+        .expect("doctor should succeed");
+
+    assert_eq!(result["status"], "healthy");
+    let checks = result["checks"].as_array().unwrap();
+    let config_check = checks.iter().find(|c| c["name"] == "configuration").unwrap();
+    assert_eq!(config_check["status"], "pass");
+    let client_check = checks
+        .iter()
+        .find(|c| c["name"] == "client_initialized")
+        .unwrap();
+    assert_eq!(client_check["status"], "pass");
+}
+
+/// Doctor with credential_id mode reports degraded (warn on credential_injection).
+#[fcp_async_core::runtime::test]
+async fn doctor_credential_id_mode_degraded() {
+    let _ctx = AsyncTestContext::for_scenario("github.doctor.credential_id");
+    let mut connector = GitHubConnector::new();
+
+    connector
+        .handle_configure(json!({
+            "credential_id": "550e8400-e29b-41d4-a716-446655440000"
+        }))
+        .await
+        .expect("configure should succeed");
+
+    let result = connector
+        .handle_doctor()
+        .await
+        .expect("doctor should succeed");
+
+    // All pass except credential_injection is warn => overall "degraded"
+    assert_eq!(
+        result["status"], "degraded",
+        "doctor should be degraded with credential_id auth: {result}"
+    );
+
+    let checks = result["checks"].as_array().unwrap();
+    let cred_check = checks
+        .iter()
+        .find(|c| c["name"] == "credential_injection")
+        .unwrap();
+    assert_eq!(cred_check["status"], "warn");
+}
+
+/// SelfCheck before configure reports failed.
+#[fcp_async_core::runtime::test]
+async fn self_check_before_configure() {
+    let _ctx = AsyncTestContext::for_scenario("github.self_check.before_configure");
+    let connector = GitHubConnector::new();
+
+    let result = connector
+        .handle_self_check()
+        .await
+        .expect("self_check should return a report");
+
+    assert_eq!(result["status"], "failed");
+}
+
+/// SelfCheck with credential_id mode reports degraded.
+#[fcp_async_core::runtime::test]
+async fn self_check_credential_id_mode() {
+    let _ctx = AsyncTestContext::for_scenario("github.self_check.credential_id");
+    let mut connector = GitHubConnector::new();
+
+    connector
+        .handle_configure(json!({
+            "credential_id": "550e8400-e29b-41d4-a716-446655440000"
+        }))
+        .await
+        .expect("configure should succeed");
+
+    let result = connector
+        .handle_self_check()
+        .await
+        .expect("self_check should return a report");
+
+    assert_eq!(result["status"], "degraded");
+}
+
+/// SelfCheck with successful health check reports ok.
+#[fcp_async_core::runtime::test]
+async fn self_check_connectivity_ok() {
+    let _ctx = AsyncTestContext::for_scenario("github.self_check.ok");
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/user"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "login": "octocat",
+            "id": 1
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = GitHubConnector::new();
+    setup_configure(&mut connector, &mock_server.uri()).await;
+
+    let result = connector
+        .handle_self_check()
+        .await
+        .expect("self_check should return a report");
+
+    assert_eq!(result["status"], "ok");
+}
+
+/// SelfCheck with failed health check reports failed.
+#[fcp_async_core::runtime::test]
+async fn self_check_connectivity_failed() {
+    let _ctx = AsyncTestContext::for_scenario("github.self_check.failed");
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/user"))
+        .respond_with(
+            ResponseTemplate::new(401)
+                .set_body_json(github_error_response("Bad credentials")),
+        )
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = GitHubConnector::new();
+    setup_configure(&mut connector, &mock_server.uri()).await;
+
+    let result = connector
+        .handle_self_check()
+        .await
+        .expect("self_check should return a report");
+
+    assert_eq!(result["status"], "failed");
+}
+
+// ============================================================================
+// Simulate Tests
+// ============================================================================
+
+/// Simulate returns allowed for known operation.
+#[fcp_async_core::runtime::test]
+async fn simulate_returns_allowed() {
+    let _ctx = AsyncTestContext::for_scenario("github.simulate.allowed");
+    let connector = GitHubConnector::new();
+
+    let signing_key = fcp_crypto::ed25519::Ed25519SigningKey::generate();
+    let token = generate_valid_token(&signing_key, "github.get_repo");
+
+    let result = connector
+        .handle_simulate(json!({
+            "type": "simulate",
+            "id": "req-001",
+            "connector_id": "github",
+            "operation": "github.get_repo",
+            "zone_id": "z:work",
+            "input": { "owner": "octocat", "repo": "hello-world" },
+            "capability_token": token,
+            "estimate_cost": false,
+            "check_availability": false
+        }))
+        .await
+        .expect("simulate should succeed");
+
+    assert_eq!(result["outcome"], "allowed");
+}
+
+// ============================================================================
+// Additional Lifecycle Tests
+// ============================================================================
+
+/// Health check includes metrics fields.
+#[fcp_async_core::runtime::test]
+async fn health_includes_metrics() {
+    let _ctx = AsyncTestContext::for_scenario("github.health.metrics");
+    let mock_server = MockServer::start().await;
+    let mut connector = GitHubConnector::new();
+    setup_configure(&mut connector, &mock_server.uri()).await;
+
+    let result = connector
+        .handle_health()
+        .await
+        .expect("health should succeed");
+
+    assert!(result["metrics"].is_object(), "metrics should be an object");
+    assert!(
+        result["metrics"]["requests_total"].is_number(),
+        "requests_total should be present"
+    );
+    assert!(
+        result["metrics"]["requests_error"].is_number(),
+        "requests_error should be present"
+    );
+}
+
+/// Health check reports auth_mode field.
+#[fcp_async_core::runtime::test]
+async fn health_auth_mode_field() {
+    let _ctx = AsyncTestContext::for_scenario("github.health.auth_mode");
+    let mock_server = MockServer::start().await;
+    let mut connector = GitHubConnector::new();
+    setup_configure(&mut connector, &mock_server.uri()).await;
+
+    let result = connector
+        .handle_health()
+        .await
+        .expect("health should succeed");
+
+    assert_eq!(result["auth_mode"], "token");
+
+    // Also check credential_id mode
+    let mut connector2 = GitHubConnector::new();
+    connector2
+        .handle_configure(json!({
+            "credential_id": "550e8400-e29b-41d4-a716-446655440000"
+        }))
+        .await
+        .expect("configure should succeed");
+
+    let result2 = connector2
+        .handle_health()
+        .await
+        .expect("health should succeed");
+
+    assert_eq!(result2["auth_mode"], "credential_id");
+}
+
+/// Shutdown then re-invoke: connector can still respond after shutdown.
+/// (GitHub connector does not tear down resources on shutdown.)
+#[fcp_async_core::runtime::test]
+async fn shutdown_then_reinvoke() {
+    let _ctx = AsyncTestContext::for_scenario("github.lifecycle.shutdown_reinvoke");
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/repos/octocat/hello-world"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": 1_296_269,
+            "name": "hello-world",
+            "full_name": "octocat/hello-world",
+            "owner": { "login": "octocat", "id": 1, "avatar_url": "", "type": "User" },
+            "description": "Test",
+            "private": false,
+            "fork": false,
+            "html_url": "https://github.com/octocat/hello-world",
+            "default_branch": "main",
+            "language": "Rust",
+            "stargazers_count": 1,
+            "forks_count": 0,
+            "open_issues_count": 0,
+            "created_at": "2024-01-01T00:00:00Z",
+            "updated_at": "2024-06-01T00:00:00Z"
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = GitHubConnector::new();
+    setup_configure(&mut connector, &mock_server.uri()).await;
+    let signing_key = setup_handshake(&mut connector, &["github.get_repo"]).await;
+
+    // Shutdown
+    let shutdown_result = connector
+        .handle_shutdown(json!({}))
+        .await
+        .expect("shutdown should succeed");
+    assert_eq!(shutdown_result["status"], "shutdown");
+
+    // Verify that health still returns (connector is not destroyed)
+    let health_result = connector
+        .handle_health()
+        .await
+        .expect("health after shutdown should still work");
+    assert_eq!(health_result["status"], "healthy");
+
+    // Invoke should still work (no teardown in current impl)
+    let token = generate_valid_token(&signing_key, "github.get_repo");
+    let invoke_result = connector
+        .handle_invoke(json!({
+            "operation": "github.get_repo",
+            "input": { "owner": "octocat", "repo": "hello-world" },
+            "capability_token": token
+        }))
+        .await
+        .expect("invoke after shutdown should still work");
+    assert_eq!(invoke_result["repository"]["name"], "hello-world");
+}
+
+// ============================================================================
+// Additional Input Validation Edge Cases
+// ============================================================================
+
+/// Missing `base` in `create_pull_request` fails.
+#[fcp_async_core::runtime::test]
+async fn validation_create_pr_missing_base() {
+    let _ctx = AsyncTestContext::for_scenario("github.validation.create_pr.missing_base");
+    let mock_server = MockServer::start().await;
+    let mut connector = GitHubConnector::new();
+    setup_configure(&mut connector, &mock_server.uri()).await;
+    let signing_key = setup_handshake(&mut connector, &["github.create_pull_request"]).await;
+    let token = generate_valid_token(&signing_key, "github.create_pull_request");
+
+    let err = connector
+        .handle_invoke(json!({
+            "operation": "github.create_pull_request",
+            "input": {
+                "owner": "octocat",
+                "repo": "hello-world",
+                "title": "Fix typo",
+                "head": "feature"
+            },
+            "capability_token": token
+        }))
+        .await
+        .expect_err("missing base should fail");
+
+    match &err {
+        fcp_core::FcpError::InvalidRequest { message, .. } => {
+            assert!(
+                message.contains("base"),
+                "error should mention `base`: {message}"
+            );
+        }
+        other => panic!("expected InvalidRequest, got: {other:?}"),
+    }
+}
+
+/// Missing `ref` in `trigger_workflow` fails.
+#[fcp_async_core::runtime::test]
+async fn validation_trigger_workflow_missing_ref() {
+    let _ctx = AsyncTestContext::for_scenario("github.validation.trigger_workflow.missing_ref");
+    let mock_server = MockServer::start().await;
+    let mut connector = GitHubConnector::new();
+    setup_configure(&mut connector, &mock_server.uri()).await;
+    let signing_key = setup_handshake(&mut connector, &["github.trigger_workflow"]).await;
+    let token = generate_valid_token(&signing_key, "github.trigger_workflow");
+
+    let err = connector
+        .handle_invoke(json!({
+            "operation": "github.trigger_workflow",
+            "input": {
+                "owner": "octocat",
+                "repo": "hello-world",
+                "workflow_id": "ci.yml"
+            },
+            "capability_token": token
+        }))
+        .await
+        .expect_err("missing ref should fail");
+
+    match &err {
+        fcp_core::FcpError::InvalidRequest { message, .. } => {
+            assert!(
+                message.contains("ref"),
+                "error should mention `ref`: {message}"
+            );
+        }
+        other => panic!("expected InvalidRequest, got: {other:?}"),
+    }
+}
+
+/// Missing `path` in `get_file_content` fails.
+#[fcp_async_core::runtime::test]
+async fn validation_get_file_content_missing_path() {
+    let _ctx = AsyncTestContext::for_scenario("github.validation.get_file_content.missing_path");
+    let mock_server = MockServer::start().await;
+    let mut connector = GitHubConnector::new();
+    setup_configure(&mut connector, &mock_server.uri()).await;
+    let signing_key = setup_handshake(&mut connector, &["github.get_file_content"]).await;
+    let token = generate_valid_token(&signing_key, "github.get_file_content");
+
+    let err = connector
+        .handle_invoke(json!({
+            "operation": "github.get_file_content",
+            "input": {
+                "owner": "octocat",
+                "repo": "hello-world"
+            },
+            "capability_token": token
+        }))
+        .await
+        .expect_err("missing path should fail");
+
+    match &err {
+        fcp_core::FcpError::InvalidRequest { message, .. } => {
+            assert!(
+                message.contains("path"),
+                "error should mention `path`: {message}"
+            );
+        }
+        other => panic!("expected InvalidRequest, got: {other:?}"),
+    }
+}
+
+/// Missing `pull_number` in `merge_pull_request` fails.
+#[fcp_async_core::runtime::test]
+async fn validation_merge_pr_missing_pull_number() {
+    let _ctx = AsyncTestContext::for_scenario("github.validation.merge_pr.missing_pull_number");
+    let mock_server = MockServer::start().await;
+    let mut connector = GitHubConnector::new();
+    setup_configure(&mut connector, &mock_server.uri()).await;
+    let signing_key = setup_handshake(&mut connector, &["github.merge_pull_request"]).await;
+    let token = generate_valid_token(&signing_key, "github.merge_pull_request");
+
+    let err = connector
+        .handle_invoke(json!({
+            "operation": "github.merge_pull_request",
+            "input": {
+                "owner": "octocat",
+                "repo": "hello-world"
+            },
+            "capability_token": token
+        }))
+        .await
+        .expect_err("missing pull_number should fail");
+
+    match &err {
+        fcp_core::FcpError::InvalidRequest { message, .. } => {
+            assert!(
+                message.contains("pull_number"),
+                "error should mention `pull_number`: {message}"
+            );
+        }
+        other => panic!("expected InvalidRequest, got: {other:?}"),
+    }
+}
+
+/// Missing `query` in `search_repos` fails.
+#[fcp_async_core::runtime::test]
+async fn validation_search_repos_missing_query() {
+    let _ctx = AsyncTestContext::for_scenario("github.validation.search_repos.missing_query");
+    let mock_server = MockServer::start().await;
+    let mut connector = GitHubConnector::new();
+    setup_configure(&mut connector, &mock_server.uri()).await;
+    let signing_key = setup_handshake(&mut connector, &["github.search_repos"]).await;
+    let token = generate_valid_token(&signing_key, "github.search_repos");
+
+    let err = connector
+        .handle_invoke(json!({
+            "operation": "github.search_repos",
+            "input": {},
+            "capability_token": token
+        }))
+        .await
+        .expect_err("missing query should fail");
+
+    match &err {
+        fcp_core::FcpError::InvalidRequest { message, .. } => {
+            assert!(
+                message.contains("query"),
+                "error should mention `query`: {message}"
+            );
+        }
+        other => panic!("expected InvalidRequest, got: {other:?}"),
+    }
+}
+
+/// Missing `query` in `search_code` fails.
+#[fcp_async_core::runtime::test]
+async fn validation_search_code_missing_query() {
+    let _ctx = AsyncTestContext::for_scenario("github.validation.search_code.missing_query");
+    let mock_server = MockServer::start().await;
+    let mut connector = GitHubConnector::new();
+    setup_configure(&mut connector, &mock_server.uri()).await;
+    let signing_key = setup_handshake(&mut connector, &["github.search_code"]).await;
+    let token = generate_valid_token(&signing_key, "github.search_code");
+
+    let err = connector
+        .handle_invoke(json!({
+            "operation": "github.search_code",
+            "input": {},
+            "capability_token": token
+        }))
+        .await
+        .expect_err("missing query should fail");
+
+    match &err {
+        fcp_core::FcpError::InvalidRequest { message, .. } => {
+            assert!(
+                message.contains("query"),
+                "error should mention `query`: {message}"
+            );
+        }
+        other => panic!("expected InvalidRequest, got: {other:?}"),
+    }
+}
+
+// ============================================================================
+// Introspect Detail Tests
+// ============================================================================
+
+/// Introspect operations have ai_hints with when_to_use for all ops.
+#[fcp_async_core::runtime::test]
+async fn introspect_operations_have_ai_hints() {
+    let _ctx = AsyncTestContext::for_scenario("github.introspect.ai_hints");
+    let connector = GitHubConnector::new();
+
+    let result = connector
+        .handle_introspect()
+        .await
+        .expect("introspect should succeed");
+
+    let ops = result["operations"].as_array().unwrap();
+    for op in ops {
+        let id = op["id"].as_str().unwrap();
+        assert!(
+            op["ai_hints"].is_object(),
+            "ai_hints should be object for {id}"
+        );
+        let when_to_use = op["ai_hints"]["when_to_use"].as_str();
+        assert!(
+            when_to_use.is_some() && !when_to_use.unwrap().is_empty(),
+            "ai_hints.when_to_use should be non-empty for {id}"
+        );
+    }
+}
+
+/// Introspect operations have correct capability groupings.
+#[fcp_async_core::runtime::test]
+async fn introspect_capability_groupings() {
+    let _ctx = AsyncTestContext::for_scenario("github.introspect.capability_groups");
+    let connector = GitHubConnector::new();
+
+    let result = connector
+        .handle_introspect()
+        .await
+        .expect("introspect should succeed");
+
+    let ops = result["operations"].as_array().unwrap();
+
+    // Read operations should have github.read capability
+    let read_ops = ["github.get_issue", "github.search_issues", "github.get_pull_request",
+        "github.get_repo", "github.search_repos", "github.list_workflows",
+        "github.get_file_content", "github.search_code"];
+    for op_id in &read_ops {
+        let op = ops.iter().find(|o| o["id"].as_str() == Some(op_id)).unwrap();
+        assert_eq!(
+            op["capability"].as_str(),
+            Some("github.read"),
+            "{op_id} should have github.read capability"
+        );
+    }
+
+    // Write operations should have github.write capability
+    let write_ops = ["github.create_issue", "github.create_pull_request"];
+    for op_id in &write_ops {
+        let op = ops.iter().find(|o| o["id"].as_str() == Some(op_id)).unwrap();
+        assert_eq!(
+            op["capability"].as_str(),
+            Some("github.write"),
+            "{op_id} should have github.write capability"
+        );
+    }
+
+    // Admin operations should have github.admin capability
+    let admin_ops = ["github.merge_pull_request", "github.trigger_workflow"];
+    for op_id in &admin_ops {
+        let op = ops.iter().find(|o| o["id"].as_str() == Some(op_id)).unwrap();
+        assert_eq!(
+            op["capability"].as_str(),
+            Some("github.admin"),
+            "{op_id} should have github.admin capability"
+        );
+    }
+}
+
+/// Introspect operations have risk_level and safety_tier fields.
+#[fcp_async_core::runtime::test]
+async fn introspect_risk_and_safety() {
+    let _ctx = AsyncTestContext::for_scenario("github.introspect.risk_safety");
+    let connector = GitHubConnector::new();
+
+    let result = connector
+        .handle_introspect()
+        .await
+        .expect("introspect should succeed");
+
+    let ops = result["operations"].as_array().unwrap();
+    for op in ops {
+        let id = op["id"].as_str().unwrap();
+        assert!(
+            op["risk_level"].as_str().is_some(),
+            "risk_level should be present for {id}"
+        );
+        assert!(
+            op["safety_tier"].as_str().is_some(),
+            "safety_tier should be present for {id}"
+        );
+    }
+
+    // Merge PR should be high risk
+    let merge_op = ops
+        .iter()
+        .find(|o| o["id"].as_str() == Some("github.merge_pull_request"))
+        .unwrap();
+    assert_eq!(merge_op["risk_level"].as_str(), Some("high"));
 }

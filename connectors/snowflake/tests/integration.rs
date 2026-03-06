@@ -37,14 +37,14 @@ async fn setup_connector(mock_url: &str) -> SnowflakeConnector {
 
 // -- Lifecycle ---------------------------------------------------------------
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_health_unconfigured() {
     let c = SnowflakeConnector::new();
     let h = c.handle_health().await.unwrap();
     assert_eq!(h["status"], "unconfigured");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_full() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -52,13 +52,13 @@ async fn lifecycle_full() {
     assert_eq!(h["status"], "healthy");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_handshake_before_configure_fails() {
     let mut c = SnowflakeConnector::new();
     assert!(c.handle_handshake(json!({})).await.is_err());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_shutdown() {
     let server = MockServer::start().await;
     let mut c = setup_connector(&server.uri()).await;
@@ -66,7 +66,7 @@ async fn lifecycle_shutdown() {
     assert_eq!(c.handle_health().await.unwrap()["status"], "unconfigured");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_self_check() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -74,27 +74,27 @@ async fn lifecycle_self_check() {
     assert_eq!(check["status"], "ready");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_self_check_unconfigured() {
     let c = SnowflakeConnector::new();
     let check = c.handle_self_check().await.unwrap();
     assert_eq!(check["status"], "unconfigured");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_doctor() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
     assert_eq!(c.handle_doctor().await.unwrap()["status"], "healthy");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_doctor_unconfigured() {
     let c = SnowflakeConnector::new();
     assert_eq!(c.handle_doctor().await.unwrap()["status"], "unhealthy");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_introspect() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -102,7 +102,7 @@ async fn lifecycle_introspect() {
     assert_eq!(intro["operations"].as_array().unwrap().len(), 5);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_health_configured_not_handshaken() {
     let mut c = SnowflakeConnector::new();
     c.handle_configure(json!({
@@ -118,7 +118,7 @@ async fn lifecycle_health_configured_not_handshaken() {
 
 // -- Databases List ----------------------------------------------------------
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn databases_list() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -142,7 +142,7 @@ async fn databases_list() {
     assert!(result.get("databases").is_some());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn databases_list_empty() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -164,7 +164,7 @@ async fn databases_list_empty() {
 
 // -- Warehouses List ---------------------------------------------------------
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn warehouses_list() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -188,7 +188,7 @@ async fn warehouses_list() {
     assert!(result.get("warehouses").is_some());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn warehouses_list_empty() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -210,7 +210,7 @@ async fn warehouses_list_empty() {
 
 // -- SQL Query ---------------------------------------------------------------
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn sql_query_basic() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -254,7 +254,7 @@ async fn sql_query_basic() {
     assert_eq!(data.len(), 2);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn sql_query_empty_results() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -285,7 +285,7 @@ async fn sql_query_empty_results() {
     assert!(result["data"].as_array().unwrap().is_empty());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn sql_query_missing_statement() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -299,7 +299,7 @@ async fn sql_query_missing_statement() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn sql_query_with_schema() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -329,7 +329,7 @@ async fn sql_query_with_schema() {
 
 // -- SQL Execute -------------------------------------------------------------
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn sql_execute_basic() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -359,7 +359,7 @@ async fn sql_execute_basic() {
     assert!(result.get("statement_handle").is_some());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn sql_execute_missing_statement() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -373,7 +373,7 @@ async fn sql_execute_missing_statement() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn sql_execute_insert() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -401,7 +401,7 @@ async fn sql_execute_insert() {
 
 // -- Tables List -------------------------------------------------------------
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn tables_list() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -437,7 +437,7 @@ async fn tables_list() {
     assert!(result.get("tables").is_some());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn tables_list_with_schema() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -465,7 +465,7 @@ async fn tables_list_with_schema() {
     assert!(result.get("tables").is_some());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn tables_list_missing_database() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -479,7 +479,7 @@ async fn tables_list_missing_database() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn tables_list_empty() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -506,7 +506,7 @@ async fn tables_list_empty() {
 
 // -- Error handling ----------------------------------------------------------
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn error_401() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -529,7 +529,7 @@ async fn error_401() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn error_403() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -552,7 +552,7 @@ async fn error_403() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn error_404() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -575,7 +575,7 @@ async fn error_404() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn error_429() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -599,7 +599,7 @@ async fn error_429() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn error_500() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -622,7 +622,7 @@ async fn error_500() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn error_sql_compilation() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -647,7 +647,7 @@ async fn error_sql_compilation() {
 
 // -- Unknown op / Simulate ---------------------------------------------------
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn unknown_operation() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -661,7 +661,7 @@ async fn unknown_operation() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn simulate_known_databases_list() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -674,7 +674,7 @@ async fn simulate_known_databases_list() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn simulate_known_warehouses_list() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -687,7 +687,7 @@ async fn simulate_known_warehouses_list() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn simulate_known_sql_query() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -700,7 +700,7 @@ async fn simulate_known_sql_query() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn simulate_known_sql_execute() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -713,7 +713,7 @@ async fn simulate_known_sql_execute() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn simulate_known_tables_list() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -726,7 +726,7 @@ async fn simulate_known_tables_list() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn simulate_unknown() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -741,7 +741,7 @@ async fn simulate_unknown() {
 
 // -- Counters ----------------------------------------------------------------
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn counters_increment() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -762,7 +762,7 @@ async fn counters_increment() {
     assert_eq!(h["errors"], 0);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn counters_error_increment() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -786,7 +786,7 @@ async fn counters_error_increment() {
     assert_eq!(h["errors"], 1);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn counters_multiple_requests() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -811,7 +811,7 @@ async fn counters_multiple_requests() {
 
 // -- Handshake response ------------------------------------------------------
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn handshake_returns_capabilities() {
     let server = MockServer::start().await;
     let mut c = SnowflakeConnector::new();
@@ -837,7 +837,7 @@ async fn handshake_returns_capabilities() {
 
 // -- Invoke before ready -----------------------------------------------------
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn invoke_before_configure_fails() {
     let c = SnowflakeConnector::new();
     assert!(
@@ -852,7 +852,7 @@ async fn invoke_before_configure_fails() {
 
 // -- Configure edge cases ----------------------------------------------------
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn configure_with_minimal_params() {
     let mut c = SnowflakeConnector::new();
     let result = c
@@ -864,7 +864,7 @@ async fn configure_with_minimal_params() {
     assert!(result.is_ok());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn configure_rejects_empty_token() {
     let mut c = SnowflakeConnector::new();
     let result = c
@@ -876,7 +876,7 @@ async fn configure_rejects_empty_token() {
     assert!(result.is_err());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn configure_rejects_empty_account() {
     let mut c = SnowflakeConnector::new();
     let result = c
@@ -888,7 +888,7 @@ async fn configure_rejects_empty_account() {
     assert!(result.is_err());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn configure_rejects_missing_fields() {
     let mut c = SnowflakeConnector::new();
     assert!(c.handle_configure(json!({})).await.is_err());

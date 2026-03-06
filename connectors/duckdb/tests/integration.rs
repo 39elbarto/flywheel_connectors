@@ -30,14 +30,14 @@ async fn setup_connector(mock_url: &str) -> DuckDbConnector {
 
 // -- Lifecycle --
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_health_unconfigured() {
     let c = DuckDbConnector::new();
     let h = c.handle_health().await.unwrap();
     assert_eq!(h["status"], "unconfigured");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_full() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -45,13 +45,13 @@ async fn lifecycle_full() {
     assert_eq!(h["status"], "healthy");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_handshake_before_configure_fails() {
     let mut c = DuckDbConnector::new();
     assert!(c.handle_handshake(json!({})).await.is_err());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_shutdown() {
     let server = MockServer::start().await;
     let mut c = setup_connector(&server.uri()).await;
@@ -59,7 +59,7 @@ async fn lifecycle_shutdown() {
     assert_eq!(c.handle_health().await.unwrap()["status"], "unconfigured");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_self_check() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -67,14 +67,14 @@ async fn lifecycle_self_check() {
     assert_eq!(check["status"], "ready");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_doctor() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
     assert_eq!(c.handle_doctor().await.unwrap()["status"], "healthy");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_introspect() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -82,7 +82,7 @@ async fn lifecycle_introspect() {
     assert_eq!(intro["operations"].as_array().unwrap().len(), 9);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_health_degraded() {
     let server = MockServer::start().await;
     let mut c = DuckDbConnector::new();
@@ -95,7 +95,7 @@ async fn lifecycle_health_degraded() {
 
 // -- Query Execute --
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn query_execute() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -121,7 +121,7 @@ async fn query_execute() {
     assert_eq!(result["query_id"], "q-abc123");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn query_execute_missing_sql() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -137,7 +137,7 @@ async fn query_execute_missing_sql() {
 
 // -- Databases List --
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn databases_list() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -163,7 +163,7 @@ async fn databases_list() {
     assert_eq!(result["databases"].as_array().unwrap().len(), 2);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn databases_list_empty() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -187,7 +187,7 @@ async fn databases_list_empty() {
 
 // -- Databases Get --
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn databases_get() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -211,7 +211,7 @@ async fn databases_get() {
     assert_eq!(result["database"]["name"], "analytics");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn databases_get_missing_database() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -227,7 +227,7 @@ async fn databases_get_missing_database() {
 
 // -- Tables List --
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn tables_list() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -252,7 +252,7 @@ async fn tables_list() {
     assert_eq!(result["tables"].as_array().unwrap().len(), 2);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn tables_list_missing_database() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -268,7 +268,7 @@ async fn tables_list_missing_database() {
 
 // -- Tables Get --
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn tables_get() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -293,7 +293,7 @@ async fn tables_get() {
     assert_eq!(result["table"]["name"], "sales");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn tables_get_missing_database() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -307,7 +307,7 @@ async fn tables_get_missing_database() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn tables_get_missing_table() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -323,7 +323,7 @@ async fn tables_get_missing_table() {
 
 // -- Schemas List --
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn schemas_list() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -348,7 +348,7 @@ async fn schemas_list() {
     assert_eq!(result["schemas"].as_array().unwrap().len(), 2);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn schemas_list_missing_database() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -364,7 +364,7 @@ async fn schemas_list_missing_database() {
 
 // -- Queries Status --
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn queries_status() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -388,7 +388,7 @@ async fn queries_status() {
     assert_eq!(result["status"]["status"], "completed");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn queries_status_missing_query_id() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -404,7 +404,7 @@ async fn queries_status_missing_query_id() {
 
 // -- Shares List --
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn shares_list() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -428,7 +428,7 @@ async fn shares_list() {
     assert_eq!(result["shares"].as_array().unwrap().len(), 1);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn shares_list_empty() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -452,7 +452,7 @@ async fn shares_list_empty() {
 
 // -- Shares Create --
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn shares_create() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -476,7 +476,7 @@ async fn shares_create() {
     assert_eq!(result["share"]["name"], "team_analytics");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn shares_create_missing_name() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -490,7 +490,7 @@ async fn shares_create_missing_name() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn shares_create_missing_database() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -506,7 +506,7 @@ async fn shares_create_missing_database() {
 
 // -- Error handling --
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn error_401() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -529,7 +529,7 @@ async fn error_401() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn error_403() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -552,7 +552,7 @@ async fn error_403() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn error_404() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -575,7 +575,7 @@ async fn error_404() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn error_429() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -599,7 +599,7 @@ async fn error_429() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn error_500() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -621,7 +621,7 @@ async fn error_500() {
 
 // -- Unknown op / Simulate --
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn unknown_operation() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -635,7 +635,7 @@ async fn unknown_operation() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn simulate_known() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -648,7 +648,7 @@ async fn simulate_known() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn simulate_unknown() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -661,7 +661,7 @@ async fn simulate_unknown() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn simulate_all_operations() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -687,7 +687,7 @@ async fn simulate_all_operations() {
 
 // -- Counters --
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn counters_increment() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -708,7 +708,7 @@ async fn counters_increment() {
     assert_eq!(h["errors"], 0);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn counters_error_increment() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -729,7 +729,7 @@ async fn counters_error_increment() {
     assert_eq!(h["errors"], 1);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn counters_multiple_requests() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))

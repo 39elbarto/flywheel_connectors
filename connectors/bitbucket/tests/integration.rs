@@ -30,14 +30,14 @@ async fn setup_connector(mock_url: &str) -> BitbucketConnector {
 
 // -- Lifecycle --
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_health_unconfigured() {
     let c = BitbucketConnector::new();
     let h = c.handle_health().await.unwrap();
     assert_eq!(h["status"], "unconfigured");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_full() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -45,13 +45,13 @@ async fn lifecycle_full() {
     assert_eq!(h["status"], "healthy");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_handshake_before_configure_fails() {
     let mut c = BitbucketConnector::new();
     assert!(c.handle_handshake(json!({})).await.is_err());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_shutdown() {
     let server = MockServer::start().await;
     let mut c = setup_connector(&server.uri()).await;
@@ -59,7 +59,7 @@ async fn lifecycle_shutdown() {
     assert_eq!(c.handle_health().await.unwrap()["status"], "unconfigured");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_self_check() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -67,14 +67,14 @@ async fn lifecycle_self_check() {
     assert_eq!(check["status"], "ready");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_doctor() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
     assert_eq!(c.handle_doctor().await.unwrap()["status"], "healthy");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn lifecycle_introspect() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -84,7 +84,7 @@ async fn lifecycle_introspect() {
 
 // -- User Get --
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn user_get() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -111,7 +111,7 @@ async fn user_get() {
 
 // -- Workspaces List --
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn workspaces_list() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -136,7 +136,7 @@ async fn workspaces_list() {
     assert_eq!(result["workspaces"].as_array().unwrap().len(), 2);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn workspaces_list_empty() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -160,7 +160,7 @@ async fn workspaces_list_empty() {
 
 // -- Repositories List --
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn repositories_list() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -186,7 +186,7 @@ async fn repositories_list() {
     assert_eq!(result["repositories"].as_array().unwrap().len(), 2);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn repositories_list_missing_workspace() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -202,7 +202,7 @@ async fn repositories_list_missing_workspace() {
 
 // -- Repository Get --
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn repositories_get() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -229,7 +229,7 @@ async fn repositories_get() {
     assert_eq!(result["repository"]["language"], "rust");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn repositories_get_missing_repo_slug() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -245,7 +245,7 @@ async fn repositories_get_missing_repo_slug() {
 
 // -- Pull Requests List --
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn pull_requests_list() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -270,7 +270,7 @@ async fn pull_requests_list() {
     assert_eq!(result["pull_requests"].as_array().unwrap().len(), 2);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn pull_requests_list_missing_workspace() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -286,7 +286,7 @@ async fn pull_requests_list_missing_workspace() {
 
 // -- Pull Request Get --
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn pull_requests_get() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -312,7 +312,7 @@ async fn pull_requests_get() {
     assert_eq!(result["pull_request"]["title"], "Fix login bug");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn pull_requests_get_missing_pr_id() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -328,7 +328,7 @@ async fn pull_requests_get_missing_pr_id() {
 
 // -- Pull Requests Create --
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn pull_requests_create() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -357,7 +357,7 @@ async fn pull_requests_create() {
     assert_eq!(result["id"], 99);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn pull_requests_create_missing_title() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -375,7 +375,7 @@ async fn pull_requests_create_missing_title() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn pull_requests_create_missing_source_branch() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -395,7 +395,7 @@ async fn pull_requests_create_missing_source_branch() {
 
 // -- Branches List --
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn branches_list() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -420,7 +420,7 @@ async fn branches_list() {
     assert_eq!(result["branches"].as_array().unwrap().len(), 2);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn branches_list_missing_repo_slug() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -436,7 +436,7 @@ async fn branches_list_missing_repo_slug() {
 
 // -- Commits List --
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn commits_list() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -463,7 +463,7 @@ async fn commits_list() {
 
 // -- Pipelines List --
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn pipelines_list() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -487,7 +487,7 @@ async fn pipelines_list() {
     assert_eq!(result["pipelines"].as_array().unwrap().len(), 1);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn pipelines_list_empty() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -511,7 +511,7 @@ async fn pipelines_list_empty() {
 
 // -- Error handling --
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn error_401() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -535,7 +535,7 @@ async fn error_401() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn error_403() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -559,7 +559,7 @@ async fn error_403() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn error_404() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -583,7 +583,7 @@ async fn error_404() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn error_429() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -609,7 +609,7 @@ async fn error_429() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn error_500() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -631,7 +631,7 @@ async fn error_500() {
 
 // -- Unknown op / Simulate --
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn unknown_operation() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -645,7 +645,7 @@ async fn unknown_operation() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn simulate_known() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -658,7 +658,7 @@ async fn simulate_known() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn simulate_unknown() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -673,7 +673,7 @@ async fn simulate_unknown() {
 
 // -- Counters --
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn counters_increment() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -696,7 +696,7 @@ async fn counters_increment() {
     assert_eq!(h["errors"], 0);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn counters_error_increment() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))

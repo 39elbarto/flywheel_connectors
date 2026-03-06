@@ -272,14 +272,13 @@ impl Ed25519Signature {
         self.inner.to_bytes()
     }
 
-    /// Try to create from a slice.
+    /// Create a signature from a byte slice.
     ///
     /// # Errors
-    ///
-    /// Returns an error if the slice is not exactly `SIGNATURE_SIZE` bytes.
+    /// Returns [`CryptoError::InvalidSignatureLength`] if slice length != 64.
     pub fn try_from_slice(slice: &[u8]) -> CryptoResult<Self> {
         if slice.len() != SIGNATURE_SIZE {
-            return Err(CryptoError::InvalidKeyLength {
+            return Err(CryptoError::InvalidSignatureLength {
                 expected: SIGNATURE_SIZE,
                 actual: slice.len(),
             });

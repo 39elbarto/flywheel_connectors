@@ -949,4 +949,646 @@ mod tests {
             assert!(message.contains("authorization code expired"));
         });
     }
+
+    // ── New batch: OAuth2Config construction and builder ──
+
+    #[test]
+    fn test_config_new_defaults() {
+        let config = OAuth2Config::new("id", "secret", "https://a.com/auth", "https://a.com/tok");
+        assert_eq!(config.client_id, "id");
+        assert_eq!(config.client_secret, Some("secret".to_string()));
+        assert_eq!(config.authorization_url, "https://a.com/auth");
+        assert_eq!(config.token_url, "https://a.com/tok");
+        assert!(config.redirect_uri.is_none());
+        assert!(config.default_scopes.is_empty());
+        assert!(config.use_pkce);
+        assert_eq!(config.pkce_method, PkceMethod::S256);
+        assert_eq!(config.response_mode, ResponseMode::Query);
+        assert_eq!(config.auth_style, AuthStyle::Post);
+        assert!(config.extra_auth_params.is_empty());
+        assert!(config.extra_token_params.is_empty());
+        assert_eq!(config.timeout, Duration::from_secs(30));
+    }
+
+    #[test]
+    fn test_config_public_client_defaults() {
+        let config =
+            OAuth2Config::public_client("pub", "https://a.com/auth", "https://a.com/tok");
+        assert_eq!(config.client_id, "pub");
+        assert!(config.client_secret.is_none());
+        assert!(config.use_pkce);
+        assert_eq!(config.pkce_method, PkceMethod::S256);
+        assert_eq!(config.auth_style, AuthStyle::Post);
+        assert_eq!(config.timeout, Duration::from_secs(30));
+    }
+
+    #[test]
+    fn test_config_clone() {
+        let config = test_config()
+            .with_scopes(vec!["read".into()])
+            .with_auth_param("prompt", "login");
+        let cloned = config.clone();
+        assert_eq!(config.client_id, cloned.client_id);
+        assert_eq!(config.client_secret, cloned.client_secret);
+        assert_eq!(config.default_scopes, cloned.default_scopes);
+        assert_eq!(
+            config.extra_auth_params.get("prompt"),
+            cloned.extra_auth_params.get("prompt")
+        );
+    }
+
+    #[test]
+    fn test_config_debug() {
+        let config = test_config();
+        let debug = format!("{config:?}");
+        assert!(debug.contains("OAuth2Config"));
+        assert!(debug.contains("test_client_id"));
+    }
+
+    #[test]
+    fn test_config_with_multiple_auth_params() {
+        let config = test_config()
+            .with_auth_param("prompt", "consent")
+            .with_auth_param("login_hint", "user@example.com")
+            .with_auth_param("access_type", "offline");
+        assert_eq!(config.extra_auth_params.len(), 3);
+        assert_eq!(
+            config.extra_auth_params.get("prompt"),
+            Some(&"consent".to_string())
+        );
+        assert_eq!(
+            config.extra_auth_params.get("login_hint"),
+            Some(&"user@example.com".to_string())
+        );
+        assert_eq!(
+            config.extra_auth_params.get("access_type"),
+            Some(&"offline".to_string())
+        );
+    }
+
+    #[test]
+    fn test_config_with_multiple_token_params() {
+        let config = test_config()
+            .with_token_param("audience", "https://api.example.com")
+            .with_token_param("resource", "urn:example:resource");
+        assert_eq!(config.extra_token_params.len(), 2);
+    }
+
+    // ── New batch: OAuth2Client creation and validation ──
+
+    #[test]
+    fn test_client_rejects_invalid_authorization_url() {
+        let config = OAuth2Config::new(
+            "id",
+            "secret",
+            "not-a-url",
+            "https://auth.example.com/token",
+        );
+        let result = OAuth2Client::new(config);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_client_rejects_invalid_token_url() {
+        let config = OAuth2Config::new(
+            "id",
+            "secret",
+            "https://auth.example.com/authorize",
+            "not-a-url",
+        );
+        let result = OAuth2Client::new(config);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_client_rejects_invalid_redirect_uri() {
+        let config = OAuth2Config::new(
+            "id",
+            "secret",
+            "https://auth.example.com/authorize",
+            "https://auth.example.com/token",
+        )
+        .with_redirect_uri("://bad");
+        let result = OAuth2Client::new(config);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_client_accepts_no_redirect_uri() {
+        let config = OAuth2Config::new(
+            "id",
+            "secret",
+            "https://auth.example.com/authorize",
+            "https://auth.example.com/token",
+        );
+        // No redirect_uri set — should succeed
+        assert!(OAuth2Client::new(config).is_ok());
+    }
+
+    #[test]
+    fn test_client_debug() {
+        let client = OAuth2Client::new(test_config()).unwrap();
+        let debug = format!("{client:?}");
+        assert!(debug.contains("OAuth2Client"));
+        assert!(debug.contains("test_client_id"));
+    }
+
+    #[test]
+    #[allow(clippy::redundant_clone)]
+    fn test_client_clone() {
+        let client = OAuth2Client::new(test_config()).unwrap();
+        let cloned = client.clone();
+        assert_eq!(cloned.config().client_id, "test_client_id");
+    }
+
+    // ── New batch: Authorization URL generation edge cases ──
+
+    #[test]
+    fn test_authorization_url_empty_scopes() {
+        let config = test_config();
+        let client = OAuth2Client::new(config).unwrap();
+        let (url, _) = client.authorization_url(&[]).unwrap();
+        // With no scopes, scope param should not appear
+        assert!(!url.contains("scope="));
+    }
+
+    #[test]
+    fn test_authorization_url_single_scope() {
+        let config = test_config();
+        let client = OAuth2Client::new(config).unwrap();
+        let (url, _) = client.authorization_url(&["openid"]).unwrap();
+        assert!(url.contains("scope=openid"));
+    }
+
+    #[test]
+    fn test_authorization_url_many_scopes() {
+        let config = test_config();
+        let client = OAuth2Client::new(config).unwrap();
+        let (url, _) = client
+            .authorization_url(&["openid", "email", "profile", "offline_access"])
+            .unwrap();
+        assert!(url.contains("scope=openid+email+profile+offline_access"));
+    }
+
+    #[test]
+    fn test_authorization_url_contains_redirect_uri() {
+        let config = test_config();
+        let client = OAuth2Client::new(config).unwrap();
+        let (url, _) = client.authorization_url(&[]).unwrap();
+        // redirect_uri should be URL-encoded
+        assert!(url.contains("redirect_uri=https%3A%2F%2Flocalhost%3A3000%2Fcallback"));
+    }
+
+    #[test]
+    fn test_authorization_url_without_redirect_uri() {
+        let config = OAuth2Config::new(
+            "id",
+            "secret",
+            "https://auth.example.com/authorize",
+            "https://auth.example.com/token",
+        );
+        let client = OAuth2Client::new(config).unwrap();
+        let (url, _) = client.authorization_url(&[]).unwrap();
+        assert!(!url.contains("redirect_uri="));
+    }
+
+    #[test]
+    fn test_authorization_url_state_is_unique() {
+        let client = OAuth2Client::new(test_config()).unwrap();
+        let (_, state1) = client.authorization_url(&[]).unwrap();
+        let (_, state2) = client.authorization_url(&[]).unwrap();
+        let (_, state3) = client.authorization_url(&[]).unwrap();
+        assert_ne!(state1, state2);
+        assert_ne!(state2, state3);
+    }
+
+    #[test]
+    fn test_authorization_url_state_not_empty() {
+        let client = OAuth2Client::new(test_config()).unwrap();
+        let (_, state) = client.authorization_url(&[]).unwrap();
+        assert!(!state.is_empty());
+    }
+
+    #[test]
+    fn test_authorization_url_with_extra_auth_params() {
+        let config = test_config()
+            .with_auth_param("prompt", "consent")
+            .with_auth_param("access_type", "offline");
+        let client = OAuth2Client::new(config).unwrap();
+        let (url, _) = client.authorization_url(&[]).unwrap();
+        assert!(url.contains("prompt=consent"));
+        assert!(url.contains("access_type=offline"));
+    }
+
+    #[test]
+    fn test_authorization_url_query_response_mode_not_in_url() {
+        // Default response_mode is Query; it should NOT be appended
+        let config = test_config();
+        let client = OAuth2Client::new(config).unwrap();
+        let (url, _) = client.authorization_url(&[]).unwrap();
+        assert!(!url.contains("response_mode="));
+    }
+
+    #[test]
+    fn test_authorization_url_fragment_response_mode() {
+        let config = test_config().with_response_mode(ResponseMode::Fragment);
+        let client = OAuth2Client::new(config).unwrap();
+        let (url, _) = client.authorization_url(&[]).unwrap();
+        assert!(url.contains("response_mode=fragment"));
+    }
+
+    #[test]
+    fn test_authorization_url_with_pkce_plain_method() {
+        let config = test_config().with_pkce_method(PkceMethod::Plain);
+        let client = OAuth2Client::new(config).unwrap();
+        let (url, _, pkce) = client.authorization_url_with_pkce(&[]).unwrap();
+        assert!(url.contains("code_challenge_method=plain"));
+        // For plain method, challenge equals verifier
+        assert_eq!(pkce.verifier(), pkce.challenge());
+    }
+
+    #[test]
+    fn test_authorization_url_with_pkce_returns_unique_pkce() {
+        let client = OAuth2Client::new(test_config()).unwrap();
+        let (_, _, pkce1) = client.authorization_url_with_pkce(&[]).unwrap();
+        let (_, _, pkce2) = client.authorization_url_with_pkce(&[]).unwrap();
+        assert_ne!(pkce1.verifier(), pkce2.verifier());
+    }
+
+    // ── New batch: AuthorizationCallback edge cases ──
+
+    #[test]
+    fn test_callback_from_query_empty() {
+        let callback = AuthorizationCallback::from_query("").unwrap();
+        assert!(callback.code.is_none());
+        assert!(callback.state.is_none());
+        assert!(callback.error.is_none());
+    }
+
+    #[test]
+    fn test_callback_from_url_no_query() {
+        let callback = AuthorizationCallback::from_url("https://localhost/callback").unwrap();
+        assert!(callback.code.is_none());
+        assert!(callback.state.is_none());
+    }
+
+    #[test]
+    fn test_callback_from_url_invalid_url() {
+        let result = AuthorizationCallback::from_url("://bad");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_callback_error_with_description_and_uri() {
+        let callback = AuthorizationCallback {
+            code: None,
+            state: Some("state".into()),
+            error: Some("server_error".into()),
+            error_description: Some("Internal server error".into()),
+            error_uri: Some("https://provider.com/errors/500".into()),
+        };
+        let result = callback.validate("state");
+        match result {
+            Err(OAuthError::AuthorizationError {
+                error,
+                description,
+                error_uri,
+            }) => {
+                assert_eq!(error, "server_error");
+                assert_eq!(description, "Internal server error");
+                assert_eq!(
+                    error_uri,
+                    Some("https://provider.com/errors/500".to_string())
+                );
+            }
+            other => panic!("expected AuthorizationError, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_callback_error_takes_precedence_over_code() {
+        // If both error and code are present, error should be returned first
+        let callback = AuthorizationCallback {
+            code: Some("code".into()),
+            state: Some("state".into()),
+            error: Some("access_denied".into()),
+            error_description: None,
+            error_uri: None,
+        };
+        let result = callback.validate("state");
+        assert!(matches!(result, Err(OAuthError::AuthorizationError { .. })));
+    }
+
+    #[test]
+    fn test_callback_serde_roundtrip() {
+        let callback = AuthorizationCallback {
+            code: Some("code123".into()),
+            state: Some("state456".into()),
+            error: None,
+            error_description: None,
+            error_uri: None,
+        };
+        let json = serde_json::to_string(&callback).unwrap();
+        let roundtrip: AuthorizationCallback = serde_json::from_str(&json).unwrap();
+        assert_eq!(roundtrip.code, Some("code123".to_string()));
+        assert_eq!(roundtrip.state, Some("state456".to_string()));
+    }
+
+    #[test]
+    fn test_callback_clone() {
+        let callback = AuthorizationCallback {
+            code: Some("c".into()),
+            state: Some("s".into()),
+            error: None,
+            error_description: None,
+            error_uri: None,
+        };
+        let cloned = callback.clone();
+        assert_eq!(callback.code, cloned.code);
+        assert_eq!(callback.state, cloned.state);
+    }
+
+    #[test]
+    fn test_callback_debug() {
+        let callback = AuthorizationCallback {
+            code: Some("c".into()),
+            state: Some("s".into()),
+            error: None,
+            error_description: None,
+            error_uri: None,
+        };
+        let debug = format!("{callback:?}");
+        assert!(debug.contains("AuthorizationCallback"));
+    }
+
+    // ── New batch: AuthStyle ──
+
+    #[test]
+    fn test_auth_style_eq() {
+        assert_eq!(AuthStyle::Basic, AuthStyle::Basic);
+        assert_eq!(AuthStyle::Post, AuthStyle::Post);
+        assert_ne!(AuthStyle::Basic, AuthStyle::Post);
+    }
+
+    #[test]
+    fn test_auth_style_clone_copy() {
+        let style = AuthStyle::Basic;
+        let copied = style;
+        let cloned = style.clone();
+        assert_eq!(style, copied);
+        assert_eq!(style, cloned);
+    }
+
+    #[test]
+    fn test_auth_style_debug() {
+        let debug = format!("{:?}", AuthStyle::Basic);
+        assert!(debug.contains("Basic"));
+        let debug = format!("{:?}", AuthStyle::Post);
+        assert!(debug.contains("Post"));
+    }
+
+    // ── New batch: Mock server flows ──
+
+    #[test]
+    fn test_client_credentials_requires_secret() {
+        run_with_tokio_reactor(async {
+            let config = OAuth2Config::public_client(
+                "public",
+                "https://auth.example.com/authorize",
+                "https://auth.example.com/token",
+            );
+            let client = OAuth2Client::new(config).unwrap();
+            let result = client.client_credentials(&["read"]).await;
+            assert!(matches!(result, Err(OAuthError::InvalidConfig(_))));
+        });
+    }
+
+    #[test]
+    fn test_client_credentials_with_mock_server() {
+        run_with_tokio_reactor(async {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/token"))
+                .and(body_string_contains("grant_type=client_credentials"))
+                .and(body_string_contains("client_id=cc_client"))
+                .and(body_string_contains("scope=api.read+api.write"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "access_token": "cc-access-tok",
+                    "token_type": "Bearer",
+                    "expires_in": 1800
+                })))
+                .mount(&server)
+                .await;
+
+            let config = OAuth2Config::new(
+                "cc_client",
+                "cc_secret",
+                format!("{}/authorize", server.uri()),
+                format!("{}/token", server.uri()),
+            );
+            let client = OAuth2Client::new(config).unwrap();
+            let tokens = client
+                .client_credentials(&["api.read", "api.write"])
+                .await
+                .unwrap();
+            assert_eq!(tokens.access_token(), "cc-access-tok");
+            assert!(tokens.refresh_token().is_none());
+        });
+    }
+
+    #[test]
+    fn test_client_credentials_with_default_scopes() {
+        run_with_tokio_reactor(async {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/token"))
+                .and(body_string_contains("grant_type=client_credentials"))
+                .and(body_string_contains("scope=default.scope+extra.scope"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "access_token": "tok",
+                    "token_type": "Bearer",
+                    "expires_in": 3600
+                })))
+                .mount(&server)
+                .await;
+
+            let config = OAuth2Config::new(
+                "id",
+                "secret",
+                format!("{}/authorize", server.uri()),
+                format!("{}/token", server.uri()),
+            )
+            .with_scopes(vec!["default.scope".into()]);
+            let client = OAuth2Client::new(config).unwrap();
+            let tokens = client
+                .client_credentials(&["extra.scope"])
+                .await
+                .unwrap();
+            assert_eq!(tokens.access_token(), "tok");
+        });
+    }
+
+    #[test]
+    fn test_exchange_code_error_non_json_body() {
+        run_with_tokio_reactor(async {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/token"))
+                .respond_with(
+                    ResponseTemplate::new(500).set_body_string("Internal Server Error"),
+                )
+                .mount(&server)
+                .await;
+
+            let config = OAuth2Config::new(
+                "id",
+                "secret",
+                format!("{}/authorize", server.uri()),
+                format!("{}/token", server.uri()),
+            );
+            let client = OAuth2Client::new(config).unwrap();
+            let result = client.exchange_code("code").await;
+            // Should get a TokenExchangeFailed with fallback error parsing
+            assert!(matches!(result, Err(OAuthError::TokenExchangeFailed(_))));
+        });
+    }
+
+    #[test]
+    fn test_exchange_code_with_extra_token_params() {
+        run_with_tokio_reactor(async {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/token"))
+                .and(body_string_contains("audience=https%3A%2F%2Fapi.example.com"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "access_token": "tok-extra",
+                    "token_type": "Bearer",
+                    "expires_in": 3600
+                })))
+                .mount(&server)
+                .await;
+
+            let config = OAuth2Config::new(
+                "id",
+                "secret",
+                format!("{}/authorize", server.uri()),
+                format!("{}/token", server.uri()),
+            )
+            .with_token_param("audience", "https://api.example.com");
+            let client = OAuth2Client::new(config).unwrap();
+            let tokens = client.exchange_code("code").await.unwrap();
+            assert_eq!(tokens.access_token(), "tok-extra");
+        });
+    }
+
+    #[test]
+    fn test_refresh_with_extra_token_params() {
+        run_with_tokio_reactor(async {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/token"))
+                .and(body_string_contains("grant_type=refresh_token"))
+                .and(body_string_contains("audience=https%3A%2F%2Fapi.example.com"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "access_token": "refreshed-tok",
+                    "token_type": "Bearer",
+                    "expires_in": 3600
+                })))
+                .mount(&server)
+                .await;
+
+            let config = OAuth2Config::new(
+                "id",
+                "secret",
+                format!("{}/authorize", server.uri()),
+                format!("{}/token", server.uri()),
+            )
+            .with_token_param("audience", "https://api.example.com");
+            let client = OAuth2Client::new(config).unwrap();
+            let tokens = client.refresh_tokens("old-refresh").await.unwrap();
+            assert_eq!(tokens.access_token(), "refreshed-tok");
+        });
+    }
+
+    #[test]
+    fn test_token_response_without_refresh_token() {
+        run_with_tokio_reactor(async {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/token"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "access_token": "no-refresh-tok",
+                    "token_type": "Bearer",
+                    "expires_in": 3600
+                })))
+                .mount(&server)
+                .await;
+
+            let config = OAuth2Config::new(
+                "id",
+                "secret",
+                format!("{}/authorize", server.uri()),
+                format!("{}/token", server.uri()),
+            );
+            let client = OAuth2Client::new(config).unwrap();
+            let tokens = client.exchange_code("code").await.unwrap();
+            assert!(tokens.refresh_token().is_none());
+        });
+    }
+
+    #[test]
+    fn test_token_response_with_scopes_parsed() {
+        run_with_tokio_reactor(async {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/token"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "access_token": "tok",
+                    "token_type": "Bearer",
+                    "expires_in": 3600,
+                    "scope": "openid email profile"
+                })))
+                .mount(&server)
+                .await;
+
+            let config = OAuth2Config::new(
+                "id",
+                "secret",
+                format!("{}/authorize", server.uri()),
+                format!("{}/token", server.uri()),
+            );
+            let client = OAuth2Client::new(config).unwrap();
+            let tokens = client.exchange_code("code").await.unwrap();
+            assert_eq!(tokens.scopes(), &["openid", "email", "profile"]);
+        });
+    }
+
+    #[test]
+    fn test_basic_auth_style_sends_authorization_header() {
+        run_with_tokio_reactor(async {
+            let server = MockServer::start().await;
+            // With Basic auth, client_id/secret should be in Authorization header, not body
+            Mock::given(method("POST"))
+                .and(path("/token"))
+                .and(wiremock::matchers::header_exists("Authorization"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "access_token": "basic-tok",
+                    "token_type": "Bearer",
+                    "expires_in": 3600
+                })))
+                .mount(&server)
+                .await;
+
+            let config = OAuth2Config::new(
+                "id",
+                "secret",
+                format!("{}/authorize", server.uri()),
+                format!("{}/token", server.uri()),
+            )
+            .with_auth_style(AuthStyle::Basic);
+            let client = OAuth2Client::new(config).unwrap();
+            let tokens = client.exchange_code("code").await.unwrap();
+            assert_eq!(tokens.access_token(), "basic-tok");
+        });
+    }
 }

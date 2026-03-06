@@ -1188,4 +1188,838 @@ mod tests {
             assert_eq!(event.timestamp(), parsed.timestamp());
         }
     }
+
+    // ====================================================================
+    // New tests: RedactionPolicy
+    // ====================================================================
+
+    #[test]
+    fn test_redaction_policy_none_redacts_nothing() {
+        let policy = RedactionPolicy::none();
+        assert!(!policy.should_redact("password"));
+        assert!(!policy.should_redact("api_key"));
+        assert!(!policy.should_redact("secret"));
+        assert!(!policy.should_redact("token"));
+        assert!(policy.redact_fields.is_empty());
+        assert!(policy.redact_prefixes.is_empty());
+    }
+
+    #[test]
+    fn test_redaction_policy_marker_without_hash() {
+        let policy = RedactionPolicy::default();
+        assert!(!policy.hash_redacted);
+        let redacted = policy.redact_value("sensitive-data");
+        assert_eq!(redacted, "[REDACTED]");
+    }
+
+    #[test]
+    fn test_redaction_policy_custom_marker() {
+        let policy = RedactionPolicy::none().with_marker("***REMOVED***");
+        let redacted = policy.redact_value("anything");
+        assert_eq!(redacted, "***REMOVED***");
+    }
+
+    #[test]
+    fn test_redaction_policy_hash_deterministic() {
+        let policy = RedactionPolicy::none().with_hash_redacted(true);
+        let a = policy.redact_value("same-input");
+        let b = policy.redact_value("same-input");
+        assert_eq!(a, b);
+        assert!(a.starts_with("[REDACTED:"));
+        assert!(a.ends_with(']'));
+        // Hash portion is 8 hex chars
+        let inner = a.strip_prefix("[REDACTED:").unwrap().strip_suffix(']').unwrap();
+        assert_eq!(inner.len(), 8);
+    }
+
+    #[test]
+    fn test_redaction_policy_builder_chaining() {
+        let policy = RedactionPolicy::none()
+            .with_field("field_a")
+            .with_field("field_b")
+            .with_prefix("custom-")
+            .with_hash_redacted(true)
+            .with_marker("[GONE]");
+
+        assert!(policy.should_redact("field_a"));
+        assert!(policy.should_redact("field_b"));
+        assert!(policy.should_redact("custom-header"));
+        assert!(!policy.should_redact("other"));
+        assert!(policy.hash_redacted);
+        // hash_redacted overrides marker
+        let val = policy.redact_value("x");
+        assert!(val.starts_with("[REDACTED:"));
+    }
+
+    #[test]
+    fn test_redaction_policy_default_all_fields() {
+        let policy = RedactionPolicy::default();
+        let expected = [
+            "password",
+            "api_key",
+            "secret",
+            "token",
+            "authorization",
+            "credential",
+            "private_key",
+            "session_key",
+            "bearer",
+        ];
+        for field in &expected {
+            assert!(
+                policy.should_redact(field),
+                "Expected '{field}' to be redacted"
+            );
+        }
+    }
+
+    #[test]
+    fn test_redaction_policy_default_all_prefixes() {
+        let policy = RedactionPolicy::default();
+        assert!(policy.should_redact("x-api-foo"));
+        assert!(policy.should_redact("x-auth-bar"));
+        assert!(policy.should_redact("secret_something"));
+    }
+
+    #[test]
+    fn test_redaction_policy_prefix_case_insensitive() {
+        let policy = RedactionPolicy::none().with_prefix("X-My-Secret-");
+        assert!(policy.should_redact("x-my-secret-value"));
+        assert!(policy.should_redact("X-MY-SECRET-VALUE"));
+    }
+
+    // ====================================================================
+    // New tests: TraceEvent variants
+    // ====================================================================
+
+    #[test]
+    fn test_gossip_event_timestamp_and_trace_id() {
+        let event = TraceEvent::Gossip(GossipEvent {
+            timestamp: 9999,
+            trace_id: "gossip-trace".to_string(),
+            gossip_type: "reconcile".to_string(),
+            object_count: 42,
+            peer_node: Some("peer-x".to_string()),
+            success: false,
+        });
+        assert_eq!(event.timestamp(), 9999);
+        assert_eq!(event.trace_id(), "gossip-trace");
+    }
+
+    #[test]
+    fn test_lease_event_timestamp_and_trace_id() {
+        let event = TraceEvent::Lease(LeaseEvent {
+            timestamp: 7777,
+            trace_id: "lease-trace".to_string(),
+            operation: "renew".to_string(),
+            subject_id: "sub-99".to_string(),
+            purpose: "coordinator".to_string(),
+            node_id: "node-a".to_string(),
+            success: false,
+            conflict_holder: Some("node-b".to_string()),
+        });
+        assert_eq!(event.timestamp(), 7777);
+        assert_eq!(event.trace_id(), "lease-trace");
+    }
+
+    #[test]
+    fn test_session_event_timestamp_and_trace_id() {
+        let event = TraceEvent::Session(SessionEvent {
+            timestamp: 5555,
+            trace_id: "sess-trace".to_string(),
+            session_id: "sid-123".to_string(),
+            kind: "failed".to_string(),
+            peer_node: "peer-z".to_string(),
+            suite: None,
+            failure_reason: Some("timeout".to_string()),
+        });
+        assert_eq!(event.timestamp(), 5555);
+        assert_eq!(event.trace_id(), "sess-trace");
+    }
+
+    #[test]
+    fn test_policy_event_timestamp_and_trace_id() {
+        let event = TraceEvent::Policy(PolicyDecision {
+            timestamp: 3333,
+            trace_id: "pol-trace".to_string(),
+            zone_id: "z:test".to_string(),
+            operation: "read".to_string(),
+            connector_id: "fcp.example".to_string(),
+            decision: "deny".to_string(),
+            reason_code: "FCP-5001".to_string(),
+            evidence: vec!["ev1".to_string()],
+        });
+        assert_eq!(event.timestamp(), 3333);
+        assert_eq!(event.trace_id(), "pol-trace");
+    }
+
+    #[test]
+    fn test_routing_decision_with_reason() {
+        let event = TraceEvent::Routing(RoutingDecision {
+            timestamp: 100,
+            trace_id: "rt-1".to_string(),
+            source_node: "src".to_string(),
+            target_node: None,
+            object_id: "obj".to_string(),
+            path_type: "mesh".to_string(),
+            decision: "dropped".to_string(),
+            reason: Some("no route".to_string()),
+        });
+        assert_eq!(event.timestamp(), 100);
+        assert_eq!(event.trace_id(), "rt-1");
+    }
+
+    // ====================================================================
+    // New tests: TraceEvent redaction per variant
+    // ====================================================================
+
+    #[test]
+    fn test_routing_redaction_preserves_fields() {
+        let rd = RoutingDecision {
+            timestamp: 10,
+            trace_id: "r1".to_string(),
+            source_node: "s1".to_string(),
+            target_node: Some("t1".to_string()),
+            object_id: "o1".to_string(),
+            path_type: "funnel".to_string(),
+            decision: "deferred".to_string(),
+            reason: Some("capacity".to_string()),
+        };
+        let event = TraceEvent::Routing(rd.clone());
+        let policy = RedactionPolicy::default().with_field("session_id");
+        let redacted = event.with_redaction(&policy);
+        // Routing doesn't redact anything — should be identical
+        assert_eq!(event, redacted);
+    }
+
+    #[test]
+    fn test_admission_redaction_preserves_fields() {
+        let event = TraceEvent::Admission(AdmissionOutcome {
+            timestamp: 20,
+            trace_id: "a1".to_string(),
+            peer_node: "p1".to_string(),
+            request_type: "gossip".to_string(),
+            decision: "reject".to_string(),
+            reason_code: Some("FCP-4001".to_string()),
+            budget_remaining: Some(0),
+            authenticated: false,
+        });
+        let policy = RedactionPolicy::default();
+        let redacted = event.with_redaction(&policy);
+        assert_eq!(event, redacted);
+    }
+
+    #[test]
+    fn test_gossip_redaction_preserves_fields() {
+        let event = TraceEvent::Gossip(GossipEvent {
+            timestamp: 30,
+            trace_id: "g1".to_string(),
+            gossip_type: "announce".to_string(),
+            object_count: 7,
+            peer_node: None,
+            success: true,
+        });
+        let policy = RedactionPolicy::default();
+        let redacted = event.with_redaction(&policy);
+        assert_eq!(event, redacted);
+    }
+
+    #[test]
+    fn test_lease_redaction_preserves_fields() {
+        let event = TraceEvent::Lease(LeaseEvent {
+            timestamp: 40,
+            trace_id: "l1".to_string(),
+            operation: "conflict".to_string(),
+            subject_id: "s1".to_string(),
+            purpose: "singleton_writer".to_string(),
+            node_id: "n1".to_string(),
+            success: false,
+            conflict_holder: Some("n2".to_string()),
+        });
+        let policy = RedactionPolicy::default();
+        let redacted = event.with_redaction(&policy);
+        assert_eq!(event, redacted);
+    }
+
+    #[test]
+    fn test_policy_redaction_preserves_fields() {
+        let event = TraceEvent::Policy(PolicyDecision {
+            timestamp: 50,
+            trace_id: "p1".to_string(),
+            zone_id: "z1".to_string(),
+            operation: "invoke".to_string(),
+            connector_id: "c1".to_string(),
+            decision: "allow".to_string(),
+            reason_code: "OK".to_string(),
+            evidence: vec!["e1".to_string(), "e2".to_string()],
+        });
+        let policy = RedactionPolicy::default();
+        let redacted = event.with_redaction(&policy);
+        assert_eq!(event, redacted);
+    }
+
+    #[test]
+    fn test_session_redaction_with_hash() {
+        let event = TraceEvent::Session(SessionEvent {
+            timestamp: 60,
+            trace_id: "s1".to_string(),
+            session_id: "my-secret-session".to_string(),
+            kind: "ack".to_string(),
+            peer_node: "peer-1".to_string(),
+            suite: Some("chacha20poly1305".to_string()),
+            failure_reason: None,
+        });
+        let policy = RedactionPolicy::default()
+            .with_field("session_id")
+            .with_hash_redacted(true);
+        let redacted = event.with_redaction(&policy);
+        if let TraceEvent::Session(sess) = &redacted {
+            assert!(sess.session_id.starts_with("[REDACTED:"));
+            // Other fields preserved
+            assert_eq!(sess.kind, "ack");
+            assert_eq!(sess.peer_node, "peer-1");
+            assert_eq!(sess.suite, Some("chacha20poly1305".to_string()));
+        } else {
+            panic!("Expected Session event");
+        }
+    }
+
+    // ====================================================================
+    // New tests: CapturedTrace
+    // ====================================================================
+
+    #[test]
+    fn test_captured_trace_multiple_events() {
+        let mut trace = CapturedTrace::new("multi-event");
+        for i in 0..10 {
+            trace.push(TraceEvent::Gossip(GossipEvent {
+                timestamp: i * 100,
+                trace_id: format!("t-{i}"),
+                gossip_type: "announce".to_string(),
+                object_count: i as u32,
+                peer_node: None,
+                success: true,
+            }));
+        }
+        assert_eq!(trace.len(), 10);
+        assert!(!trace.is_empty());
+    }
+
+    #[test]
+    fn test_captured_trace_duration_before_finish_is_none() {
+        let trace = CapturedTrace::new("no-finish");
+        assert!(trace.duration_ms().is_none());
+        assert!(trace.ended_at.is_none());
+    }
+
+    #[test]
+    fn test_captured_trace_version() {
+        let trace = CapturedTrace::new("version-check");
+        assert_eq!(trace.version, TRACE_VERSION);
+        assert_eq!(trace.version, 1);
+    }
+
+    #[test]
+    fn test_captured_trace_started_at_nonzero() {
+        let trace = CapturedTrace::new("ts-check");
+        // started_at should be a reasonable timestamp (post-2020)
+        assert!(trace.started_at > 1_577_836_800_000); // 2020-01-01
+    }
+
+    #[test]
+    fn test_captured_trace_redaction_sets_flag() {
+        let trace = CapturedTrace::new("flag-check");
+        assert!(!trace.redacted);
+        let redacted = trace.with_redaction(&RedactionPolicy::none());
+        assert!(redacted.redacted);
+    }
+
+    #[test]
+    fn test_captured_trace_json_roundtrip_preserves_all_fields() {
+        let mut trace = CapturedTrace::new("full-roundtrip");
+        trace.capturing_node = Some("node-42".to_string());
+        trace.push(TraceEvent::Routing(RoutingDecision {
+            timestamp: 1000,
+            trace_id: "rt".to_string(),
+            source_node: "src".to_string(),
+            target_node: Some("tgt".to_string()),
+            object_id: "obj".to_string(),
+            path_type: "derp".to_string(),
+            decision: "routed".to_string(),
+            reason: None,
+        }));
+        trace.push(TraceEvent::Admission(AdmissionOutcome {
+            timestamp: 2000,
+            trace_id: "ad".to_string(),
+            peer_node: "peer".to_string(),
+            request_type: "invoke".to_string(),
+            decision: "throttle".to_string(),
+            reason_code: Some("RATE_LIMIT".to_string()),
+            budget_remaining: Some(500),
+            authenticated: true,
+        }));
+        trace.finish();
+
+        let json = trace.to_json().unwrap();
+        let parsed = CapturedTrace::from_json(&json).unwrap();
+
+        assert_eq!(parsed.id, "full-roundtrip");
+        assert_eq!(parsed.version, TRACE_VERSION);
+        assert_eq!(parsed.capturing_node, Some("node-42".to_string()));
+        assert_eq!(parsed.events.len(), 2);
+        assert_eq!(parsed.events[0].timestamp(), 1000);
+        assert_eq!(parsed.events[1].timestamp(), 2000);
+        assert!(parsed.ended_at.is_some());
+    }
+
+    #[test]
+    fn test_captured_trace_cbor_roundtrip_preserves_all_fields() {
+        let mut trace = CapturedTrace::new("cbor-full");
+        trace.push(TraceEvent::Policy(PolicyDecision {
+            timestamp: 999,
+            trace_id: "p99".to_string(),
+            zone_id: "z:prod".to_string(),
+            operation: "write".to_string(),
+            connector_id: "fcp.db".to_string(),
+            decision: "deny".to_string(),
+            reason_code: "FCP-6000".to_string(),
+            evidence: vec!["e-a".to_string(), "e-b".to_string(), "e-c".to_string()],
+        }));
+
+        let cbor = trace.to_cbor().unwrap();
+        let parsed = CapturedTrace::from_cbor(&cbor).unwrap();
+
+        assert_eq!(parsed.id, "cbor-full");
+        assert_eq!(parsed.events.len(), 1);
+        if let TraceEvent::Policy(p) = &parsed.events[0] {
+            assert_eq!(p.evidence.len(), 3);
+            assert_eq!(p.zone_id, "z:prod");
+        } else {
+            panic!("Expected Policy event");
+        }
+    }
+
+    #[test]
+    fn test_captured_trace_clone() {
+        let mut trace = CapturedTrace::new("clone-test");
+        trace.push(TraceEvent::Gossip(GossipEvent {
+            timestamp: 500,
+            trace_id: "cl".to_string(),
+            gossip_type: "merge".to_string(),
+            object_count: 3,
+            peer_node: Some("peer-c".to_string()),
+            success: true,
+        }));
+        let cloned = trace.clone();
+        drop(trace);
+
+        assert_eq!(cloned.id, "clone-test");
+        assert_eq!(cloned.len(), 1);
+    }
+
+    #[test]
+    fn test_captured_trace_debug_format() {
+        let trace = CapturedTrace::new("debug-fmt");
+        let dbg = format!("{trace:?}");
+        assert!(dbg.contains("debug-fmt"));
+        assert!(dbg.contains("CapturedTrace"));
+    }
+
+    // ====================================================================
+    // New tests: TraceCapture
+    // ====================================================================
+
+    #[test]
+    fn test_trace_capture_disabled_ignores_events() {
+        let config = TraceCaptureConfig::new(); // enabled = false by default
+        let mut capture = TraceCapture::new("disabled-trace", config);
+
+        let event = TraceEvent::Routing(RoutingDecision {
+            timestamp: 1,
+            trace_id: "d1".to_string(),
+            source_node: "s".to_string(),
+            target_node: None,
+            object_id: "o".to_string(),
+            path_type: "direct".to_string(),
+            decision: "routed".to_string(),
+            reason: None,
+        });
+
+        // Should succeed even when disabled (silently drops)
+        capture.record(event).expect("disabled capture should succeed");
+        assert!(capture.snapshot().is_empty());
+    }
+
+    #[test]
+    fn test_trace_capture_ids() {
+        let config = TraceCaptureConfig::new().enabled();
+        let capture = TraceCapture::new("cap-id-test", config);
+        assert_eq!(capture.trace_id(), "cap-id-test");
+        assert_eq!(capture.capture_id(), "cap-id-test");
+    }
+
+    #[test]
+    fn test_trace_capture_with_node() {
+        let config = TraceCaptureConfig::new().enabled();
+        let capture = TraceCapture::new("node-test", config).with_node("my-node");
+        let snap = capture.snapshot();
+        assert_eq!(snap.capturing_node, Some("my-node".to_string()));
+    }
+
+    #[test]
+    fn test_trace_capture_config_accessor() {
+        let config = TraceCaptureConfig::new()
+            .enabled()
+            .with_max_events(42)
+            .with_max_size_bytes(1024)
+            .with_sample_rate(0.75);
+        let capture = TraceCapture::new("cfg-test", config);
+        let cfg = capture.config();
+        assert!(cfg.enabled);
+        assert_eq!(cfg.max_events, 42);
+        assert_eq!(cfg.max_size_bytes, 1024);
+        assert!((cfg.sample_rate - 0.75).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_trace_capture_finish_sets_ended_at() {
+        let config = TraceCaptureConfig::new().enabled();
+        let mut capture = TraceCapture::new("finish-test", config);
+        capture.finish();
+        let snap = capture.snapshot();
+        assert!(snap.ended_at.is_some());
+        assert!(snap.duration_ms().is_some());
+    }
+
+    #[test]
+    fn test_trace_capture_redacted_snapshot() {
+        let policy = RedactionPolicy::default().with_field("session_id");
+        let config = TraceCaptureConfig::new().enabled().with_redaction(policy);
+        let mut capture = TraceCapture::new("redact-snap", config);
+
+        capture
+            .record(TraceEvent::Session(SessionEvent {
+                timestamp: 100,
+                trace_id: "rs1".to_string(),
+                session_id: "secret-sid".to_string(),
+                kind: "established".to_string(),
+                peer_node: "peer".to_string(),
+                suite: Some("aes256".to_string()),
+                failure_reason: None,
+            }))
+            .unwrap();
+
+        let snap = capture.redacted_snapshot();
+        assert!(snap.redacted);
+        if let TraceEvent::Session(sess) = &snap.events[0] {
+            assert_eq!(sess.session_id, "[REDACTED]");
+        } else {
+            panic!("Expected Session event");
+        }
+
+        // Unredacted snapshot should preserve original
+        let raw = capture.snapshot();
+        assert!(!raw.redacted);
+        if let TraceEvent::Session(sess) = &raw.events[0] {
+            assert_eq!(sess.session_id, "secret-sid");
+        } else {
+            panic!("Expected Session event");
+        }
+    }
+
+    #[test]
+    fn test_trace_capture_max_size_bytes_limit() {
+        let config = TraceCaptureConfig::new()
+            .enabled()
+            .with_max_events(10_000)
+            .with_max_size_bytes(200); // very small byte limit
+        let mut capture = TraceCapture::new("size-limit", config);
+
+        let mut hit_buffer_full = false;
+        for i in 0..100 {
+            let event = TraceEvent::Policy(PolicyDecision {
+                timestamp: i,
+                trace_id: format!("t-{i}"),
+                zone_id: "z".to_string(),
+                operation: "op".to_string(),
+                connector_id: "c".to_string(),
+                decision: "allow".to_string(),
+                reason_code: "OK".to_string(),
+                evidence: vec!["evidence-data-padding".to_string()],
+            });
+            if let Err(TraceError::BufferFull) = capture.record(event) {
+                hit_buffer_full = true;
+                break;
+            }
+        }
+        assert!(hit_buffer_full, "Expected BufferFull due to byte limit");
+    }
+
+    #[test]
+    fn test_trace_capture_sampling_full_rate() {
+        let config = TraceCaptureConfig::new()
+            .enabled()
+            .with_sample_rate(1.0);
+        let mut capture = TraceCapture::new("full-rate", config);
+
+        for i in 0..20 {
+            let event = TraceEvent::Gossip(GossipEvent {
+                timestamp: i,
+                trace_id: format!("fr-{i}"),
+                gossip_type: "announce".to_string(),
+                object_count: 1,
+                peer_node: None,
+                success: true,
+            });
+            capture.record(event).unwrap();
+        }
+        // All 20 should be captured at 100% sample rate
+        assert_eq!(capture.snapshot().events.len(), 20);
+    }
+
+    // ====================================================================
+    // New tests: TraceCaptureConfig
+    // ====================================================================
+
+    #[test]
+    fn test_trace_capture_config_max_size_bytes_default() {
+        let config = TraceCaptureConfig::default();
+        assert_eq!(config.max_size_bytes, 10 * 1024 * 1024);
+    }
+
+    #[test]
+    fn test_trace_capture_config_with_redaction() {
+        let policy = RedactionPolicy::none().with_field("custom_field");
+        let config = TraceCaptureConfig::new().with_redaction(policy);
+        assert!(config.redaction_policy.should_redact("custom_field"));
+        assert!(!config.redaction_policy.should_redact("password"));
+    }
+
+    // ====================================================================
+    // New tests: TraceError
+    // ====================================================================
+
+    #[test]
+    fn test_trace_error_deserialization_display() {
+        let err = TraceError::Deserialization("bad input".to_string());
+        let msg = format!("{err}");
+        assert!(msg.contains("deserialization"));
+        assert!(msg.contains("bad input"));
+    }
+
+    #[test]
+    fn test_trace_error_debug() {
+        let err = TraceError::BufferFull;
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("BufferFull"));
+    }
+
+    // ====================================================================
+    // New tests: TraceExportFormat
+    // ====================================================================
+
+    #[test]
+    fn test_trace_export_format_eq() {
+        assert_eq!(TraceExportFormat::Json, TraceExportFormat::Json);
+        assert_eq!(TraceExportFormat::Cbor, TraceExportFormat::Cbor);
+        assert_ne!(TraceExportFormat::Json, TraceExportFormat::Cbor);
+    }
+
+    #[test]
+    fn test_trace_export_format_clone_and_copy() {
+        let fmt = TraceExportFormat::Json;
+        let copied = fmt;
+        let cloned = fmt.clone();
+        assert_eq!(fmt, copied);
+        assert_eq!(fmt, cloned);
+    }
+
+    #[test]
+    fn test_trace_export_format_debug() {
+        let dbg = format!("{:?}", TraceExportFormat::Cbor);
+        assert!(dbg.contains("Cbor"));
+    }
+
+    // ====================================================================
+    // New tests: TraceEvent serde (all event types via CBOR)
+    // ====================================================================
+
+    #[test]
+    fn test_all_event_types_cbor_roundtrip() {
+        let events = vec![
+            TraceEvent::Routing(RoutingDecision {
+                timestamp: 10,
+                trace_id: "r10".to_string(),
+                source_node: "s".to_string(),
+                target_node: Some("t".to_string()),
+                object_id: "o".to_string(),
+                path_type: "direct".to_string(),
+                decision: "routed".to_string(),
+                reason: None,
+            }),
+            TraceEvent::Admission(AdmissionOutcome {
+                timestamp: 20,
+                trace_id: "a20".to_string(),
+                peer_node: "p".to_string(),
+                request_type: "invoke".to_string(),
+                decision: "quarantine".to_string(),
+                reason_code: Some("QUARANTINE".to_string()),
+                budget_remaining: None,
+                authenticated: false,
+            }),
+            TraceEvent::Gossip(GossipEvent {
+                timestamp: 30,
+                trace_id: "g30".to_string(),
+                gossip_type: "reconcile".to_string(),
+                object_count: 99,
+                peer_node: Some("gp".to_string()),
+                success: false,
+            }),
+            TraceEvent::Lease(LeaseEvent {
+                timestamp: 40,
+                trace_id: "l40".to_string(),
+                operation: "acquire".to_string(),
+                subject_id: "sub".to_string(),
+                purpose: "operation".to_string(),
+                node_id: "nd".to_string(),
+                success: true,
+                conflict_holder: None,
+            }),
+            TraceEvent::Session(SessionEvent {
+                timestamp: 50,
+                trace_id: "s50".to_string(),
+                session_id: "sid".to_string(),
+                kind: "established".to_string(),
+                peer_node: "sp".to_string(),
+                suite: Some("aes128".to_string()),
+                failure_reason: None,
+            }),
+            TraceEvent::Policy(PolicyDecision {
+                timestamp: 60,
+                trace_id: "p60".to_string(),
+                zone_id: "z".to_string(),
+                operation: "op".to_string(),
+                connector_id: "c".to_string(),
+                decision: "allow".to_string(),
+                reason_code: "OK".to_string(),
+                evidence: vec!["ev".to_string()],
+            }),
+        ];
+
+        let mut trace = CapturedTrace::new("cbor-all-types");
+        for event in &events {
+            trace.push(event.clone());
+        }
+        let cbor = trace.to_cbor().unwrap();
+        let parsed = CapturedTrace::from_cbor(&cbor).unwrap();
+
+        assert_eq!(parsed.events.len(), events.len());
+        for (original, roundtripped) in events.iter().zip(parsed.events.iter()) {
+            assert_eq!(original, roundtripped);
+        }
+    }
+
+    #[test]
+    fn test_trace_event_json_tag_names() {
+        let event = TraceEvent::Routing(RoutingDecision {
+            timestamp: 1,
+            trace_id: "t".to_string(),
+            source_node: "s".to_string(),
+            target_node: None,
+            object_id: "o".to_string(),
+            path_type: "d".to_string(),
+            decision: "r".to_string(),
+            reason: None,
+        });
+        let json = serde_json::to_string(&event).unwrap();
+        // Verify serde tag "event_type" with snake_case rename
+        assert!(json.contains("\"event_type\":\"routing\""));
+
+        let admission = TraceEvent::Admission(AdmissionOutcome {
+            timestamp: 2,
+            trace_id: "t2".to_string(),
+            peer_node: "p".to_string(),
+            request_type: "invoke".to_string(),
+            decision: "admit".to_string(),
+            reason_code: None,
+            budget_remaining: None,
+            authenticated: true,
+        });
+        let json2 = serde_json::to_string(&admission).unwrap();
+        assert!(json2.contains("\"event_type\":\"admission\""));
+    }
+
+    // ====================================================================
+    // New tests: File I/O (write + read back)
+    // ====================================================================
+
+    #[test]
+    fn test_write_and_read_json_file() {
+        let dir = std::env::temp_dir().join("fcp-telemetry-test-json");
+        std::fs::create_dir_all(&dir).ok();
+        let path = dir.join("trace.json");
+
+        let mut trace = CapturedTrace::new("file-json-test");
+        trace.push(TraceEvent::Lease(LeaseEvent {
+            timestamp: 777,
+            trace_id: "fj1".to_string(),
+            operation: "acquire".to_string(),
+            subject_id: "s".to_string(),
+            purpose: "op".to_string(),
+            node_id: "n".to_string(),
+            success: true,
+            conflict_holder: None,
+        }));
+        trace.write_json(&path).unwrap();
+
+        let contents = std::fs::read_to_string(&path).unwrap();
+        let parsed = CapturedTrace::from_json(&contents).unwrap();
+        assert_eq!(parsed.id, "file-json-test");
+        assert_eq!(parsed.events.len(), 1);
+
+        // Cleanup
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn test_write_and_read_cbor_file() {
+        let dir = std::env::temp_dir().join("fcp-telemetry-test-cbor");
+        std::fs::create_dir_all(&dir).ok();
+        let path = dir.join("trace.cbor");
+
+        let mut trace = CapturedTrace::new("file-cbor-test");
+        trace.push(TraceEvent::Gossip(GossipEvent {
+            timestamp: 888,
+            trace_id: "fc1".to_string(),
+            gossip_type: "merge".to_string(),
+            object_count: 5,
+            peer_node: None,
+            success: true,
+        }));
+        trace.write_cbor(&path).unwrap();
+
+        let bytes = std::fs::read(&path).unwrap();
+        let parsed = CapturedTrace::from_cbor(&bytes).unwrap();
+        assert_eq!(parsed.id, "file-cbor-test");
+        assert_eq!(parsed.events.len(), 1);
+
+        // Cleanup
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn test_from_json_invalid_returns_error() {
+        let result = CapturedTrace::from_json("not valid json {{{");
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(err, TraceError::Deserialization(_)));
+    }
+
+    #[test]
+    fn test_from_cbor_invalid_returns_error() {
+        let result = CapturedTrace::from_cbor(&[0xFF, 0xFE, 0x00]);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(err, TraceError::Deserialization(_)));
+    }
 }

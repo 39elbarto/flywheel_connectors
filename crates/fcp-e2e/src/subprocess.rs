@@ -296,6 +296,24 @@ mod tests {
     }
 
     #[fcp_async_core::runtime::test]
+    async fn stderr_lines_returns_snapshot() {
+        let mut runner = ConnectorProcessRunner::spawn(
+            "sh",
+            &["-c", "echo 'line1' >&2; echo 'line2' >&2; cat"],
+            &[],
+        )
+        .await
+        .unwrap();
+        fcp_async_core::time::sleep(std::time::Duration::from_millis(100)).await;
+        let snapshot = runner.stderr_lines().await;
+        assert!(snapshot.len() >= 2);
+        // stderr_lines doesn't drain, so calling again returns same content
+        let snapshot2 = runner.stderr_lines().await;
+        assert_eq!(snapshot.len(), snapshot2.len());
+        runner.terminate().unwrap();
+    }
+
+    #[fcp_async_core::runtime::test]
     async fn send_json_empty_object() {
         let mut runner = ConnectorProcessRunner::spawn("cat", &[], &[])
             .await

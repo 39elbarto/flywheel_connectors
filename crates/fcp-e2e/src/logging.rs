@@ -776,4 +776,67 @@ mod tests {
     fn validate_log_entry_value_rejects_null() {
         assert!(validate_log_entry_value(&json!(null)).is_err());
     }
+
+    #[test]
+    fn logger_write_json_lines_to_file() {
+        let mut logger = super::E2eLogger::new();
+        logger.push(super::E2eLogEntry::new(
+            "info",
+            "write_test",
+            "fcp-e2e",
+            "verify",
+            "00000000-0000-0000-0000-000000000000",
+            "pass",
+            10,
+            super::AssertionsSummary::new(1, 0),
+            json!({}),
+        ));
+
+        let dir = std::env::temp_dir().join("fcp-e2e-test-write-jsonl");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("test.jsonl");
+
+        logger
+            .write_json_lines(&path)
+            .expect("write should succeed");
+        let content = std::fs::read_to_string(&path).expect("read back");
+        assert!(!content.is_empty());
+        let parsed: serde_json::Value =
+            serde_json::from_str(content.lines().next().unwrap()).expect("valid json");
+        assert_eq!(parsed["test_name"], "write_test");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn logger_default_is_empty() {
+        let logger = super::E2eLogger::default();
+        assert!(logger.entries().is_empty());
+    }
+
+    #[test]
+    fn assertions_summary_copy_semantics() {
+        let a = super::AssertionsSummary::new(5, 2);
+        let b = a; // Copy
+        assert_eq!(a.passed, b.passed);
+        assert_eq!(a.failed, b.failed);
+    }
+
+    #[test]
+    fn log_entry_clone() {
+        let entry = super::E2eLogEntry::new(
+            "info",
+            "clone_test",
+            "fcp-e2e",
+            "verify",
+            "00000000-0000-0000-0000-000000000000",
+            "pass",
+            5,
+            super::AssertionsSummary::new(1, 0),
+            json!({}),
+        );
+        let cloned = entry.clone();
+        assert_eq!(cloned.test_name, entry.test_name);
+        assert_eq!(cloned.module, entry.module);
+    }
 }

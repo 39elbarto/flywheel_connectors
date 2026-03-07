@@ -799,27 +799,39 @@ mod tests {
 
     #[test]
     fn set_retention_from_pinned_to_ephemeral() {
-        run_store_test("retention_pinned_to_ephemeral", "verify", "retention", 2, || async {
-            let store = MemoryObjectStore::new(MemoryObjectStoreConfig::default());
-            let obj = test_stored_object(1, b"body");
-            let id = obj.object_id;
+        run_store_test(
+            "retention_pinned_to_ephemeral",
+            "verify",
+            "retention",
+            2,
+            || async {
+                let store = MemoryObjectStore::new(MemoryObjectStoreConfig::default());
+                let obj = test_stored_object(1, b"body");
+                let id = obj.object_id;
 
-            store.put(obj).await.unwrap();
-            store.set_retention(&id, RetentionClass::Pinned).await.unwrap();
+                store.put(obj).await.unwrap();
+                store
+                    .set_retention(&id, RetentionClass::Pinned)
+                    .await
+                    .unwrap();
 
-            let meta = store.get_storage_meta(&id).await.unwrap();
-            assert!(matches!(meta.retention, RetentionClass::Pinned));
+                let meta = store.get_storage_meta(&id).await.unwrap();
+                assert!(matches!(meta.retention, RetentionClass::Pinned));
 
-            store.set_retention(&id, RetentionClass::Ephemeral).await.unwrap();
-            let meta = store.get_storage_meta(&id).await.unwrap();
-            assert!(matches!(meta.retention, RetentionClass::Ephemeral));
+                store
+                    .set_retention(&id, RetentionClass::Ephemeral)
+                    .await
+                    .unwrap();
+                let meta = store.get_storage_meta(&id).await.unwrap();
+                assert!(matches!(meta.retention, RetentionClass::Ephemeral));
 
-            StoreLogData {
-                object_id: Some(id),
-                details: Some(json!({"pinned_to_ephemeral": true})),
-                ..StoreLogData::default()
-            }
-        });
+                StoreLogData {
+                    object_id: Some(id),
+                    details: Some(json!({"pinned_to_ephemeral": true})),
+                    ..StoreLogData::default()
+                }
+            },
+        );
     }
 
     #[test]
@@ -875,7 +887,10 @@ mod tests {
             // Second object should fail
             let obj2 = test_stored_object(2, b"x");
             let result = store.put(obj2).await;
-            assert!(matches!(result, Err(ObjectStoreError::QuotaExceeded { .. })));
+            assert!(matches!(
+                result,
+                Err(ObjectStoreError::QuotaExceeded { .. })
+            ));
 
             StoreLogData {
                 details: Some(json!({"boundary": true})),

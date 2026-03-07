@@ -1935,7 +1935,11 @@ mod tests {
             "https://example.test",
         )
         .expect("normalize");
-        let schema = result.snapshot.schemas.get("Status").expect("schema exists");
+        let schema = result
+            .snapshot
+            .schemas
+            .get("Status")
+            .expect("schema exists");
         assert_eq!(schema.enum_values, vec!["ACTIVE", "DONE", "PENDING"]);
     }
 
@@ -1960,7 +1964,11 @@ mod tests {
             "https://example.test",
         )
         .expect("normalize");
-        let schema = result.snapshot.schemas.get("Labels").expect("schema exists");
+        let schema = result
+            .snapshot
+            .schemas
+            .get("Labels")
+            .expect("schema exists");
         let ap = schema
             .additional_properties
             .as_ref()
@@ -2404,10 +2412,7 @@ mod tests {
             .methods
             .get("projects.datasets.tables.get")
             .expect("deep method");
-        assert_eq!(
-            method.resource_path,
-            vec!["projects", "datasets", "tables"]
-        );
+        assert_eq!(method.resource_path, vec!["projects", "datasets", "tables"]);
         assert_eq!(method.id, "bq.projects.datasets.tables.get");
 
         // Verify the hierarchy in resources
@@ -2420,10 +2425,7 @@ mod tests {
             .resources
             .get("datasets")
             .expect("datasets resource");
-        let tables = datasets
-            .resources
-            .get("tables")
-            .expect("tables resource");
+        let tables = datasets.resources.get("tables").expect("tables resource");
         assert!(tables.methods.contains_key("projects.datasets.tables.get"));
     }
 
@@ -2461,14 +2463,8 @@ mod tests {
             "https://example.test",
         )
         .expect("normalize");
-        assert!(result
-            .snapshot
-            .methods
-            .contains_key("users.getProfile"));
-        assert!(result
-            .snapshot
-            .methods
-            .contains_key("users.messages.list"));
+        assert!(result.snapshot.methods.contains_key("users.getProfile"));
+        assert!(result.snapshot.methods.contains_key("users.messages.list"));
         let profile = result
             .snapshot
             .methods
@@ -2492,9 +2488,7 @@ mod tests {
         assert_eq!(gmail_before.api_name, "gmail");
 
         let custom = DiscoveryServiceId::new("custom-gmail", "v2").expect("valid");
-        registry
-            .insert("gmail", custom.clone())
-            .expect("overwrite");
+        registry.insert("gmail", custom.clone()).expect("overwrite");
         let gmail_after = registry.resolve("gmail").expect("resolve gmail");
         assert_eq!(gmail_after, custom);
     }
@@ -2503,12 +2497,8 @@ mod tests {
     fn alias_registry_serde_roundtrip() {
         let registry = ServiceAliasRegistry::default();
         let json = serde_json::to_string(&registry).expect("serialize");
-        let deserialized: ServiceAliasRegistry =
-            serde_json::from_str(&json).expect("deserialize");
-        assert_eq!(
-            deserialized.aliases().len(),
-            registry.aliases().len()
-        );
+        let deserialized: ServiceAliasRegistry = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(deserialized.aliases().len(), registry.aliases().len());
         for (key, val) in registry.aliases() {
             let deser_val = deserialized.aliases().get(key).expect("key present");
             assert_eq!(val, deser_val);
@@ -2856,16 +2846,12 @@ mod tests {
             // Both return 200 but with invalid JSON
             Mock::given(method("GET"))
                 .and(path("/discovery/v1/apis/test/v1/rest"))
-                .respond_with(
-                    ResponseTemplate::new(200).set_body_string("not valid json"),
-                )
+                .respond_with(ResponseTemplate::new(200).set_body_string("not valid json"))
                 .mount(&server)
                 .await;
             Mock::given(method("GET"))
                 .and(path("/$discovery/rest"))
-                .respond_with(
-                    ResponseTemplate::new(200).set_body_string("{broken"),
-                )
+                .respond_with(ResponseTemplate::new(200).set_body_string("{broken"))
                 .mount(&server)
                 .await;
 
@@ -3033,10 +3019,7 @@ mod tests {
 
     #[test]
     fn method_key_with_single_resource() {
-        assert_eq!(
-            method_key(&["users".to_string()], "get"),
-            "users.get"
-        );
+        assert_eq!(method_key(&["users".to_string()], "get"), "users.get");
     }
 
     #[test]
@@ -3058,17 +3041,26 @@ mod tests {
 
     #[test]
     fn trim_trailing_slash_removes_single() {
-        assert_eq!(trim_trailing_slash("https://example.com/"), "https://example.com");
+        assert_eq!(
+            trim_trailing_slash("https://example.com/"),
+            "https://example.com"
+        );
     }
 
     #[test]
     fn trim_trailing_slash_removes_multiple() {
-        assert_eq!(trim_trailing_slash("https://example.com///"), "https://example.com");
+        assert_eq!(
+            trim_trailing_slash("https://example.com///"),
+            "https://example.com"
+        );
     }
 
     #[test]
     fn trim_trailing_slash_no_slash() {
-        assert_eq!(trim_trailing_slash("https://example.com"), "https://example.com");
+        assert_eq!(
+            trim_trailing_slash("https://example.com"),
+            "https://example.com"
+        );
     }
 
     // ── is_allowed_component_char ───────────────────────────────────────
@@ -3175,8 +3167,7 @@ mod tests {
         )
         .expect("normalize");
         let json = serde_json::to_string(&fetched).expect("serialize");
-        let deser: FetchedDiscoverySnapshot =
-            serde_json::from_str(&json).expect("deserialize");
+        let deser: FetchedDiscoverySnapshot = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(fetched, deser);
         assert_eq!(deser.endpoint, DiscoveryEndpointKind::Alternate);
         assert_eq!(deser.source_url, "https://alt.example.test");

@@ -91,6 +91,10 @@ pub fn init_metrics() {
         "Total diversity policy violations during reconstruction attempts"
     );
     describe_counter!(
+        "fcp_symbol_concentration_violations_total",
+        "Total source concentration policy violations during reconstruction attempts"
+    );
+    describe_counter!(
         "fcp_symbol_coverage_evaluations_total",
         "Total coverage evaluations performed"
     );
@@ -409,6 +413,18 @@ pub fn record_diversity_violation(zone_id: &str, required: u8, actual: usize) {
         &[
             ("zone", zone_id),
             ("required", &required.to_string()),
+            ("actual", &actual.to_string()),
+        ],
+    );
+}
+
+/// Record a concentration policy violation during reconstruction.
+pub fn record_concentration_violation(zone_id: &str, allowed: u16, actual: u16) {
+    increment_counter(
+        "fcp_symbol_concentration_violations_total",
+        &[
+            ("zone", zone_id),
+            ("allowed", &allowed.to_string()),
             ("actual", &actual.to_string()),
         ],
     );
@@ -822,6 +838,18 @@ mod tests {
         record_diversity_violation("z:high-diversity", 10, 2);
         // Edge case: required 0 (shouldn't happen but handle gracefully)
         record_diversity_violation("z:edge", 0, 5);
+    }
+
+    #[test]
+    fn test_record_concentration_violation_no_panic() {
+        record_concentration_violation("z:work", 5000, 7500);
+    }
+
+    #[test]
+    fn test_record_concentration_violation_various_values() {
+        record_concentration_violation("z:test", 5000, 7500);
+        record_concentration_violation("z:tight", 3333, 6666);
+        record_concentration_violation("z:edge", 0, 10_000);
     }
 
     #[test]

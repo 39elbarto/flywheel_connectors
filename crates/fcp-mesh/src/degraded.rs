@@ -1384,4 +1384,135 @@ mod tests {
         let epochs = handler.list_epochs(&zone_id, Some(0));
         assert_eq!(epochs, vec![1, 3, 5, 7, 9]);
     }
+
+    // ── DegradedTransportError Display coverage ────────────────
+
+    #[test]
+    fn error_encode_display() {
+        let err = DegradedTransportError::Incomplete {
+            received: 5,
+            needed: 10,
+        };
+        let s = err.to_string();
+        assert!(s.contains('5'));
+        assert!(s.contains("10"));
+    }
+
+    #[test]
+    fn error_schema_hash_mismatch_fields() {
+        let err = DegradedTransportError::SchemaHashMismatch {
+            expected: [0xAA; 32],
+            actual: [0xBB; 32],
+        };
+        let s = err.to_string();
+        assert!(s.contains("schema hash mismatch"));
+    }
+
+    #[test]
+    fn error_object_id_mismatch_display() {
+        let err = DegradedTransportError::ObjectIdMismatch;
+        assert!(err.to_string().contains("object ID mismatch"));
+    }
+
+    #[test]
+    fn error_retention_violation_display() {
+        let err = DegradedTransportError::RetentionViolation;
+        assert!(err.to_string().contains("retention"));
+    }
+
+    #[test]
+    fn error_zone_mismatch_fields() {
+        let z1 = ZoneId::work().hash();
+        let z2 = ZoneId::community().hash();
+        let err = DegradedTransportError::ZoneMismatch {
+            expected: z1,
+            got: z2,
+        };
+        let s = err.to_string();
+        assert!(s.contains("zone id hash mismatch"));
+    }
+
+    // ── ControlPlaneEnvelope field access ──────────────────────
+
+    #[test]
+    fn envelope_field_access() {
+        let env = test_envelope();
+        assert_eq!(env.payload, vec![0x42; 256]);
+        assert_eq!(env.schema_hash, [0xAA; 32]);
+        assert_eq!(env.epoch_id, 0);
+        assert_eq!(env.retention, RetentionClass::Required);
+    }
+
+    #[test]
+    fn envelope_ephemeral_retention() {
+        let env = ControlPlaneEnvelope::new(
+            b"eph-data".to_vec(),
+            [0xDD; 32],
+            ObjectId::from_bytes([0xEE; 32]),
+            test_zone_id(),
+            ZoneKeyId::from_bytes([0xBB; 8]),
+            99,
+            RetentionClass::Ephemeral,
+        );
+        assert_eq!(env.retention, RetentionClass::Ephemeral);
+        assert_eq!(env.epoch_id, 99);
+    }
+
+    // ── Encoder additional tests ───────────────────────────────
+
+    #[test]
+    fn encoder_default_frame_seq_is_zero() {
+        let mut encoder = DegradedModeEncoder::new(test_config(), 42);
+        let env = test_envelope();
+        let frames = encoder.encode(&env, 1).unwrap();
+        assert_eq!(frames[0].header.frame_seq, 0);
+    }
+
+    #[test]
+    fn encoder_multiple_encodes_increment_frame_seq() {
+        let mut encoder = DegradedModeEncoder::new(test_config(), 42);
+        let env = test_envelope();
+        let frames1 = encoder.encode(&env, 1).unwrap();
+        let frames2 = encoder.encode(&env, 2).unwrap();
+        assert_eq!(frames1[0].header.frame_seq, 0);
+        assert_eq!(frames2[0].header.frame_seq, 1);
+    }
+
+    // ── Decoder additional tests ───────────────────────────────
+
+    #[test]
+    fn decoder_new_has_no_pending() {
+        let decoder = DegradedModeDecoder::new(test_config());
+        assert_eq!(decoder.pending_count(), 0);
+    }
+
+    // ── Handler additional tests ───────────────────────────────
+
+    #[test]
+    fn handler_list_epochs_none_filter_returns_all() {
+        let handler = InMemoryControlPlaneHandler::new();
+        let zone_id = test_zone_id();
+        for epoch in [2, 4, 6] {
+            let mut env = test_envelope();
+            env.object_id = ObjectId::from_bytes([epoch as u8; 32]);
+            env.epoch_id = epoch;
+            handler.handle(env).unwrap();
+        }
+        let epochs = handler.list_epochs(&zone_id, None);
+        assert_eq!(epochs, vec![2, 4, 6]);
+    }
+
+    #[test]
+    fn handler_fetch_epoch_empty_for_unknown() {
+        let handler = InMemoryControlPlaneHandler::new();
+        let zone_id = test_zone_id();
+        let objects = handler.fetch_epoch(&zone_id, 42);
+        assert!(objects.is_empty());
+    }
+
+    #[test]
+    fn handler_count_is_zero_initially() {
+        let handler = InMemoryControlPlaneHandler::new();
+        assert_eq!(handler.count(), 0);
+    }
 }

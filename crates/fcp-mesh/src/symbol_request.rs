@@ -1682,4 +1682,153 @@ mod tests {
         let moved = vr;
         assert_eq!(moved.max_response_symbols, 10);
     }
+
+    // ── Constants validation ────────────────────────────────────
+
+    #[test]
+    fn constants_are_sensible() {
+        assert_eq!(DEFAULT_RESPONSE_LIMIT_UNAUTHENTICATED, 32);
+        assert_eq!(DEFAULT_RESPONSE_LIMIT_AUTHENTICATED, 1000);
+        assert_eq!(DEFAULT_MIN_BOOTSTRAP_SYMBOLS, 8);
+        const { assert!(DEFAULT_RESPONSE_LIMIT_AUTHENTICATED > DEFAULT_RESPONSE_LIMIT_UNAUTHENTICATED) };
+    }
+
+    // ── SymbolRequestError Display and From ─────────────────────
+
+    #[test]
+    fn error_invalid_request_display() {
+        let err = SymbolRequestError::InvalidRequest {
+            reason: "bad zone".into(),
+        };
+        assert!(err.to_string().contains("bad zone"));
+    }
+
+    #[test]
+    fn error_bounds_exceeded_display() {
+        let err = SymbolRequestError::BoundsExceeded {
+            requested: 200,
+            max_allowed: 100,
+        };
+        let s = err.to_string();
+        assert!(s.contains("200"));
+        assert!(s.contains("100"));
+    }
+
+    #[test]
+    fn error_hint_too_large_display() {
+        let err = SymbolRequestError::HintTooLarge {
+            count: 500,
+            max: 256,
+        };
+        let s = err.to_string();
+        assert!(s.contains("500"));
+        assert!(s.contains("256"));
+    }
+
+    #[test]
+    fn error_object_not_found_display() {
+        let err = SymbolRequestError::ObjectNotFound {
+            object_id: "abc".into(),
+        };
+        assert!(err.to_string().contains("abc"));
+    }
+
+    #[test]
+    fn error_already_complete_display() {
+        let err = SymbolRequestError::AlreadyComplete {
+            object_id: "done".into(),
+        };
+        assert!(err.to_string().contains("done"));
+    }
+
+    #[test]
+    fn error_signature_invalid_display() {
+        let err = SymbolRequestError::SignatureInvalid;
+        assert!(err.to_string().contains("signature"));
+    }
+
+    #[test]
+    fn error_from_admission_error() {
+        let adm = AdmissionError::AuthenticationRequired;
+        let err: SymbolRequestError = adm.into();
+        assert!(err.to_string().contains("admission"));
+    }
+
+    // ── SymbolRequestPolicy edge cases ──────────────────────────
+
+    #[test]
+    fn policy_custom_values() {
+        let policy = SymbolRequestPolicy {
+            max_unauthenticated_response: 16,
+            max_authenticated_response: 500,
+            min_bootstrap_symbols: 4,
+            require_proof_of_need_above: 50,
+            allow_unauthenticated: false,
+            transfer_state_ttl_ms: 1_800_000,
+        };
+        assert_eq!(policy.max_unauthenticated_response, 16);
+        assert_eq!(policy.max_authenticated_response, 500);
+        assert!(!policy.allow_unauthenticated);
+    }
+
+    // ── Handler constructor variants ────────────────────────────
+
+    #[test]
+    fn handler_with_default_policy_matches_defaults() {
+        let handler = SymbolRequestHandler::with_default_policy();
+        let policy = handler.policy();
+        assert_eq!(policy.max_unauthenticated_response, DEFAULT_RESPONSE_LIMIT_UNAUTHENTICATED);
+        assert_eq!(policy.max_authenticated_response, DEFAULT_RESPONSE_LIMIT_AUTHENTICATED);
+        assert!(policy.allow_unauthenticated);
+    }
+
+    // ── Metrics additional tests ────────────────────────────────
+
+    #[test]
+    fn metrics_record_symbols_sent_targeted() {
+        let mut metrics = SymbolRequestMetrics::default();
+        metrics.record_symbols_sent(10, true);
+        assert_eq!(metrics.symbols_sent, 10);
+        assert_eq!(metrics.targeted_repairs, 1);
+    }
+
+    #[test]
+    fn metrics_record_ack() {
+        let mut metrics = SymbolRequestMetrics::default();
+        metrics.record_ack();
+        assert_eq!(metrics.acks_received, 1);
+        metrics.record_ack();
+        assert_eq!(metrics.acks_received, 2);
+    }
+
+    // ── SymbolResponse edge cases ───────────────────────────────
+
+    #[test]
+    fn symbol_response_is_final_field() {
+        let resp = SymbolResponse {
+            object_id: ObjectId::from_bytes([0; 32]),
+            zone_id: test_zone_id(),
+            zone_key_id: ZoneKeyId::from_bytes([0; 8]),
+            symbol_esis: vec![0, 1, 2],
+            is_final: true,
+            was_bounded: false,
+        };
+        assert!(resp.is_final);
+        assert!(!resp.was_bounded);
+        assert_eq!(resp.symbol_count(), 3);
+    }
+
+    #[test]
+    fn symbol_response_was_bounded_field() {
+        let resp = SymbolResponse {
+            object_id: ObjectId::from_bytes([0; 32]),
+            zone_id: test_zone_id(),
+            zone_key_id: ZoneKeyId::from_bytes([0; 8]),
+            symbol_esis: vec![0],
+            is_final: false,
+            was_bounded: true,
+        };
+        assert!(resp.was_bounded);
+        assert!(!resp.is_final);
+    }
 }

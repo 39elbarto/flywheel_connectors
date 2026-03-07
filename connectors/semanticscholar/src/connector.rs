@@ -3,7 +3,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use fcp_core::{BaseConnector, ConnectorId, FcpError, FcpResult, SelfCheckReport};
+use fcp_core::{BaseConnector, ConnectorId, CredentialId, FcpError, FcpResult, SelfCheckReport};
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -27,7 +27,6 @@ struct SemanticScholarConfig {
 }
 
 impl SemanticScholarConfig {
-    #[allow(clippy::unnecessary_wraps)]
     fn from_params(params: &serde_json::Value) -> FcpResult<Self> {
         let api_key = params
             .get("api_key")
@@ -36,9 +35,32 @@ impl SemanticScholarConfig {
             .filter(|v| !v.is_empty())
             .map(str::to_string);
 
-        let auth = match api_key {
-            Some(key) => SemanticScholarAuth::ApiKey(key),
-            None => SemanticScholarAuth::None,
+        let credential_id = match params.get("credential_id") {
+            Some(value) => {
+                let raw = value.as_str().ok_or(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "credential_id must be a string".into(),
+                })?;
+                Some(
+                    CredentialId::parse(raw).map_err(|_| FcpError::InvalidRequest {
+                        code: 1003,
+                        message: "credential_id must be a valid UUID".into(),
+                    })?,
+                )
+            }
+            None => None,
+        };
+
+        let auth = match (api_key, credential_id) {
+            (Some(key), None) => SemanticScholarAuth::ApiKey(key),
+            (None, Some(id)) => SemanticScholarAuth::CredentialId(id),
+            (None, None) => SemanticScholarAuth::None,
+            (Some(_), Some(_)) => {
+                return Err(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "Provide at most one of api_key or credential_id".into(),
+                });
+            }
         };
 
         let base_url = params
@@ -52,19 +74,21 @@ impl SemanticScholarConfig {
         Ok(Self { auth, base_url })
     }
 
-    fn auth_mode(&self) -> &'static str {
-        if self.auth.has_key() {
-            "api_key"
-        } else {
-            "public"
+    const fn auth_mode(&self) -> &'static str {
+        match &self.auth {
+            SemanticScholarAuth::ApiKey(_) => "api_key",
+            SemanticScholarAuth::CredentialId(_) => "credential_id",
+            SemanticScholarAuth::None => "public",
         }
     }
 
-    fn rate_limit_profile(&self) -> &'static str {
-        if self.auth.has_key() {
-            "api_key: 1 request/second sustained"
-        } else {
-            "public: 100 requests/5 minutes"
+    const fn rate_limit_profile(&self) -> &'static str {
+        match &self.auth {
+            SemanticScholarAuth::ApiKey(_) => "api_key: 1 request/second sustained",
+            SemanticScholarAuth::CredentialId(_) => {
+                "credential_id: authenticated via egress proxy injection"
+            }
+            SemanticScholarAuth::None => "public: 100 requests/5 minutes",
         }
     }
 
@@ -74,6 +98,8 @@ impl SemanticScholarConfig {
         ProvisioningReadiness {
             auth_mode: self.auth_mode(),
             api_key_configured: self.auth.has_key(),
+            credential_id_configured: self.auth.is_secretless(),
+            requires_credential_injection: self.auth.is_secretless(),
             network_ok,
             network_message,
             rate_limit_profile: self.rate_limit_profile(),
@@ -105,9 +131,12 @@ impl Default for RequestBounds {
 }
 
 #[derive(Debug, Clone, Serialize)]
+#[allow(clippy::struct_excessive_bools)]
 struct ProvisioningReadiness {
     auth_mode: &'static str,
     api_key_configured: bool,
+    credential_id_configured: bool,
+    requires_credential_injection: bool,
     network_ok: bool,
     network_message: String,
     rate_limit_profile: &'static str,
@@ -154,7 +183,7 @@ impl DoctorResult {
         Self { status, checks }
     }
 
-    fn status_label(&self) -> &'static str {
+    const fn status_label(&self) -> &'static str {
         match self.status {
             DoctorStatus::Healthy => "healthy",
             DoctorStatus::Degraded => "degraded",
@@ -308,7 +337,7 @@ impl SemanticScholarConnector {
             let mut report =
                 SelfCheckReport::degraded("not_configured", "Connector is not configured");
             report.details = Some(json!({ "request_bounds": RequestBounds::default() }));
-            return self.serialize_self_check_report(report);
+            return Self::serialize_self_check_report(report);
         };
 
         let readiness = config.provisioning_readiness();
@@ -318,7 +347,7 @@ impl SemanticScholarConnector {
                 readiness.network_message.clone(),
             );
             report.details = Some(json!({ "provisioning": readiness }));
-            return self.serialize_self_check_report(report);
+            return Self::serialize_self_check_report(report);
         }
 
         let Some(client) = &self.client else {
@@ -327,8 +356,17 @@ impl SemanticScholarConnector {
                 "API client not initialized; re-run configure",
             );
             report.details = Some(json!({ "provisioning": readiness }));
-            return self.serialize_self_check_report(report);
+            return Self::serialize_self_check_report(report);
         };
+
+        if readiness.requires_credential_injection {
+            let mut report = SelfCheckReport::degraded(
+                "credential_injection_required",
+                "credential_id mode requires egress proxy injection; skipping live probe",
+            );
+            report.details = Some(json!({ "provisioning": readiness }));
+            return Self::serialize_self_check_report(report);
+        }
 
         let mut report = match client.health_check().await {
             Ok(()) => {
@@ -351,7 +389,7 @@ impl SemanticScholarConnector {
         };
         report.details = Some(json!({ "provisioning": readiness }));
 
-        self.serialize_self_check_report(report)
+        Self::serialize_self_check_report(report)
     }
 
     /// Handle the `introspect` method.
@@ -580,11 +618,24 @@ impl SemanticScholarConnector {
 
         checks.push(DoctorCheck {
             name: "api_key".into(),
-            passed: readiness.api_key_configured,
+            passed: readiness.api_key_configured || readiness.credential_id_configured,
             message: Some(if readiness.api_key_configured {
                 "API key configured for higher Semantic Scholar throughput".into()
+            } else if readiness.credential_id_configured {
+                "credential_id configured for secretless authenticated access".into()
             } else {
                 "No API key configured — using public tier rate limits".into()
+            }),
+            critical: false,
+        });
+
+        checks.push(DoctorCheck {
+            name: "credential_injection".into(),
+            passed: !readiness.requires_credential_injection,
+            message: Some(if readiness.requires_credential_injection {
+                "credential_id mode requires egress proxy injection".into()
+            } else {
+                "Credential injection not required".into()
             }),
             critical: false,
         });
@@ -593,8 +644,7 @@ impl SemanticScholarConnector {
             name: "request_bounds".into(),
             passed: true,
             message: Some(format!(
-                "paper.search limit <= {}, citations/references/author.papers limit <= {}, recommendations limit <= {}, offset >= 0",
-                MAX_PAPER_SEARCH_LIMIT, MAX_GRAPH_LIST_LIMIT, MAX_RECOMMENDATIONS_LIMIT
+                "paper.search limit <= {MAX_PAPER_SEARCH_LIMIT}, citations/references/author.papers limit <= {MAX_GRAPH_LIST_LIMIT}, recommendations limit <= {MAX_RECOMMENDATIONS_LIMIT}, offset >= 0"
             )),
             critical: false,
         });
@@ -602,7 +652,7 @@ impl SemanticScholarConnector {
         DoctorResult::from_checks(checks)
     }
 
-    fn serialize_self_check_report(&self, report: SelfCheckReport) -> FcpResult<serde_json::Value> {
+    fn serialize_self_check_report(report: SelfCheckReport) -> FcpResult<serde_json::Value> {
         info!(
             event = "semanticscholar.provisioning.self_check",
             status = ?report.status,
@@ -820,6 +870,16 @@ mod tests {
     }
 
     #[test]
+    fn config_with_credential_id() {
+        let config = SemanticScholarConfig::from_params(&json!({
+            "credential_id": "550e8400-e29b-41d4-a716-446655440000",
+        }))
+        .unwrap();
+        assert!(config.auth.is_secretless());
+        assert_eq!(config.base_url, DEFAULT_BASE_URL);
+    }
+
+    #[test]
     fn config_custom_base_url() {
         let config = SemanticScholarConfig::from_params(&json!({
             "base_url": "https://custom.example.com/v1",
@@ -863,10 +923,10 @@ mod tests {
             "api_key": "  key_test  ",
         }))
         .unwrap();
-        match &config.auth {
-            SemanticScholarAuth::ApiKey(k) => assert_eq!(k, "key_test"),
-            SemanticScholarAuth::None => panic!("expected ApiKey"),
-        }
+        assert!(matches!(
+            &config.auth,
+            SemanticScholarAuth::ApiKey(key) if key == "key_test"
+        ));
     }
 
     #[test]
@@ -888,6 +948,28 @@ mod tests {
     }
 
     #[test]
+    fn config_rejects_invalid_credential_id() {
+        let err = SemanticScholarConfig::from_params(&json!({
+            "credential_id": "not-a-uuid",
+        }))
+        .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("credential_id must be a valid UUID")
+        );
+    }
+
+    #[test]
+    fn config_rejects_api_key_and_credential_id_together() {
+        let err = SemanticScholarConfig::from_params(&json!({
+            "api_key": "test-key",
+            "credential_id": "550e8400-e29b-41d4-a716-446655440000",
+        }))
+        .unwrap_err();
+        assert!(err.to_string().contains("api_key or credential_id"));
+    }
+
+    #[test]
     fn config_trims_trailing_slash_from_base_url() {
         let config = SemanticScholarConfig::from_params(&json!({
             "base_url": "https://api.semanticscholar.org/graph/v1/",
@@ -902,6 +984,8 @@ mod tests {
         let readiness = config.provisioning_readiness();
         assert_eq!(readiness.auth_mode, "public");
         assert!(!readiness.api_key_configured);
+        assert!(!readiness.credential_id_configured);
+        assert!(!readiness.requires_credential_injection);
         assert!(readiness.network_ok);
         assert_eq!(readiness.request_bounds.paper_search_limit_max, 100);
     }
@@ -915,9 +999,28 @@ mod tests {
         let readiness = config.provisioning_readiness();
         assert_eq!(readiness.auth_mode, "api_key");
         assert!(readiness.api_key_configured);
+        assert!(!readiness.credential_id_configured);
+        assert!(!readiness.requires_credential_injection);
         assert_eq!(
             readiness.rate_limit_profile,
             "api_key: 1 request/second sustained"
+        );
+    }
+
+    #[test]
+    fn provisioning_readiness_credential_id_mode() {
+        let config = SemanticScholarConfig::from_params(&json!({
+            "credential_id": "550e8400-e29b-41d4-a716-446655440000",
+        }))
+        .unwrap();
+        let readiness = config.provisioning_readiness();
+        assert_eq!(readiness.auth_mode, "credential_id");
+        assert!(!readiness.api_key_configured);
+        assert!(readiness.credential_id_configured);
+        assert!(readiness.requires_credential_injection);
+        assert_eq!(
+            readiness.rate_limit_profile,
+            "credential_id: authenticated via egress proxy injection"
         );
     }
 

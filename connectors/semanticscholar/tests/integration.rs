@@ -40,6 +40,20 @@ async fn setup_connector_no_key(mock_url: &str) -> SemanticScholarConnector {
     c
 }
 
+async fn setup_connector_credential_id(mock_url: &str) -> SemanticScholarConnector {
+    let mut c = SemanticScholarConnector::new();
+    c.handle_configure(json!({
+        "credential_id": "550e8400-e29b-41d4-a716-446655440000",
+        "base_url": mock_url
+    }))
+    .await
+    .unwrap();
+    c.handle_handshake(json!({"session_id": "test"}))
+        .await
+        .unwrap();
+    c
+}
+
 // -- Lifecycle --
 
 #[fcp_async_core::runtime::test]
@@ -130,6 +144,20 @@ async fn lifecycle_doctor_no_key_degraded() {
 }
 
 #[fcp_async_core::runtime::test]
+async fn lifecycle_doctor_credential_id_degraded() {
+    let server = MockServer::start().await;
+    let c = setup_connector_credential_id(&server.uri()).await;
+    let doc = c.handle_doctor().await.unwrap();
+    assert_eq!(doc["status"], "degraded");
+    let checks = doc["checks"].as_array().unwrap();
+    let injection = checks
+        .iter()
+        .find(|check| check["name"] == "credential_injection")
+        .unwrap();
+    assert_eq!(injection["passed"], false);
+}
+
+#[fcp_async_core::runtime::test]
 async fn lifecycle_doctor_unconfigured() {
     let c = SemanticScholarConnector::new();
     let doc = c.handle_doctor().await.unwrap();
@@ -157,6 +185,25 @@ async fn lifecycle_configure_no_key() {
     assert_eq!(h["configured"], true);
     assert_eq!(result["provisioning"]["auth_mode"], "public");
     assert_eq!(result["provisioning"]["network_ok"], true);
+}
+
+#[fcp_async_core::runtime::test]
+async fn lifecycle_configure_credential_id() {
+    let server = MockServer::start().await;
+    let mut c = SemanticScholarConnector::new();
+    let result = c
+        .handle_configure(json!({
+            "credential_id": "550e8400-e29b-41d4-a716-446655440000",
+            "base_url": server.uri()
+        }))
+        .await
+        .unwrap();
+    assert_eq!(result["provisioning"]["auth_mode"], "credential_id");
+    assert_eq!(result["provisioning"]["credential_id_configured"], true);
+    assert_eq!(
+        result["provisioning"]["requires_credential_injection"],
+        true
+    );
 }
 
 #[fcp_async_core::runtime::test]
@@ -194,6 +241,19 @@ async fn lifecycle_self_check_rejects_invalid_network_constraints() {
     let check = c.handle_self_check().await.unwrap();
     assert_eq!(check["status"], "failed");
     assert_eq!(check["reason_code"], "network_constraints_invalid");
+}
+
+#[fcp_async_core::runtime::test]
+async fn lifecycle_self_check_credential_id_requires_proxy() {
+    let server = MockServer::start().await;
+    let c = setup_connector_credential_id(&server.uri()).await;
+    let check = c.handle_self_check().await.unwrap();
+    assert_eq!(check["status"], "degraded");
+    assert_eq!(check["reason_code"], "credential_injection_required");
+    assert_eq!(
+        check["details"]["provisioning"]["auth_mode"],
+        "credential_id"
+    );
 }
 
 // -- Paper Search --
@@ -293,6 +353,34 @@ async fn paper_search_rejects_negative_offset() {
         .await
         .is_err()
     );
+}
+
+#[fcp_async_core::runtime::test]
+async fn paper_search_with_credential_id() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/paper/search"))
+        .and(query_param("query", "semantic scholar"))
+        .and(header(
+            "X-FCP-Credential-Id",
+            "550e8400-e29b-41d4-a716-446655440000",
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "total": 1,
+            "data": [{"paperId": "p1", "title": "Credential Flow"}]
+        })))
+        .mount(&server)
+        .await;
+
+    let c = setup_connector_credential_id(&server.uri()).await;
+    let result = c
+        .handle_invoke(json!({
+            "operation_id": "semanticscholar.paper.search",
+            "input": {"query": "semantic scholar"}
+        }))
+        .await
+        .unwrap();
+    assert_eq!(result["total"], 1);
 }
 
 #[fcp_async_core::runtime::test]

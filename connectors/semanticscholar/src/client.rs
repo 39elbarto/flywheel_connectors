@@ -3,6 +3,7 @@
 use std::fmt;
 use std::time::Duration;
 
+use fcp_core::CredentialId;
 use reqwest::{Client, Response, StatusCode};
 use tracing::{debug, instrument};
 
@@ -35,6 +36,8 @@ pub const DEFAULT_AUTHOR_PAPERS_FIELDS: &str = "paperId,title,year,citationCount
 pub enum SemanticScholarAuth {
     /// API key header authentication.
     ApiKey(String),
+    /// Secretless credential reference (egress proxy injection).
+    CredentialId(CredentialId),
     /// No authentication (free tier).
     None,
 }
@@ -44,6 +47,7 @@ impl SemanticScholarAuth {
     pub fn redacted_label(&self) -> String {
         match self {
             Self::ApiKey(_) => "api_key:redacted".to_string(),
+            Self::CredentialId(id) => format!("credential_id:{}", redact_credential_id(id)),
             Self::None => "none".to_string(),
         }
     }
@@ -52,12 +56,21 @@ impl SemanticScholarAuth {
     pub const fn has_key(&self) -> bool {
         matches!(self, Self::ApiKey(_))
     }
+
+    #[must_use]
+    pub const fn is_secretless(&self) -> bool {
+        matches!(self, Self::CredentialId(_))
+    }
 }
 
 impl fmt::Debug for SemanticScholarAuth {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::ApiKey(_) => f.debug_tuple("ApiKey").field(&"<redacted>").finish(),
+            Self::CredentialId(id) => {
+                let redacted = redact_credential_id(id);
+                f.debug_tuple("CredentialId").field(&redacted).finish()
+            }
             Self::None => f.write_str("None"),
         }
     }
@@ -100,6 +113,9 @@ impl SemanticScholarClient {
     fn add_auth(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
         match &self.auth {
             SemanticScholarAuth::ApiKey(key) => req.header("x-api-key", key),
+            SemanticScholarAuth::CredentialId(id) => {
+                req.header("X-FCP-Credential-Id", id.to_string())
+            }
             SemanticScholarAuth::None => req,
         }
     }
@@ -297,6 +313,12 @@ impl SemanticScholarClient {
     }
 }
 
+fn redact_credential_id(id: &CredentialId) -> String {
+    let raw = id.to_string();
+    let prefix: String = raw.chars().take(8).collect();
+    format!("{prefix}...redacted")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -317,17 +339,52 @@ mod tests {
     }
 
     #[test]
+    fn auth_debug_credential_id_redacts_value() {
+        let raw = "550e8400-e29b-41d4-a716-446655440000";
+        let auth = SemanticScholarAuth::CredentialId(CredentialId::parse(raw).unwrap());
+        let dbg = format!("{auth:?}");
+        assert!(dbg.contains("CredentialId"));
+        assert!(dbg.contains("550e8400"));
+        assert!(!dbg.contains(raw));
+    }
+
+    #[test]
     fn auth_has_key_detection() {
         let key = SemanticScholarAuth::ApiKey("key".into());
         assert!(key.has_key());
+        let credential = SemanticScholarAuth::CredentialId(
+            CredentialId::parse("550e8400-e29b-41d4-a716-446655440000").unwrap(),
+        );
+        assert!(!credential.has_key());
         let none = SemanticScholarAuth::None;
         assert!(!none.has_key());
+    }
+
+    #[test]
+    fn auth_is_secretless_detection() {
+        let key = SemanticScholarAuth::ApiKey("key".into());
+        assert!(!key.is_secretless());
+        let credential = SemanticScholarAuth::CredentialId(
+            CredentialId::parse("550e8400-e29b-41d4-a716-446655440000").unwrap(),
+        );
+        assert!(credential.is_secretless());
+        let none = SemanticScholarAuth::None;
+        assert!(!none.is_secretless());
     }
 
     #[test]
     fn auth_redacted_label_api_key() {
         let auth = SemanticScholarAuth::ApiKey("key".into());
         assert_eq!(auth.redacted_label(), "api_key:redacted");
+    }
+
+    #[test]
+    fn auth_redacted_label_credential_id() {
+        let raw = "550e8400-e29b-41d4-a716-446655440000";
+        let auth = SemanticScholarAuth::CredentialId(CredentialId::parse(raw).unwrap());
+        let label = auth.redacted_label();
+        assert!(label.starts_with("credential_id:550e8400"));
+        assert!(!label.contains(raw));
     }
 
     #[test]
@@ -423,6 +480,16 @@ mod tests {
         assert!(!cloned.has_key());
     }
 
+    #[test]
+    fn auth_clone_credential_id() {
+        let original = SemanticScholarAuth::CredentialId(
+            CredentialId::parse("550e8400-e29b-41d4-a716-446655440000").unwrap(),
+        );
+        let cloned = original.clone();
+        drop(original);
+        assert!(cloned.is_secretless());
+    }
+
     // --- Constants content checks ---
 
     #[test]
@@ -505,5 +572,19 @@ mod tests {
         let client = SemanticScholarClient::new(SemanticScholarAuth::None, None).unwrap();
         let dbg = format!("{client:?}");
         assert!(dbg.contains("None"));
+    }
+
+    #[test]
+    fn client_stores_credential_id_auth() {
+        let client = SemanticScholarClient::new(
+            SemanticScholarAuth::CredentialId(
+                CredentialId::parse("550e8400-e29b-41d4-a716-446655440000").unwrap(),
+            ),
+            None,
+        )
+        .unwrap();
+        let dbg = format!("{client:?}");
+        assert!(dbg.contains("CredentialId"));
+        assert!(!dbg.contains("550e8400-e29b-41d4-a716-446655440000"));
     }
 }

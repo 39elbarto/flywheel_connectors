@@ -1510,4 +1510,182 @@ mod tests {
         assert!(debug_str.contains("debug-zone"));
         assert!(debug_str.contains("debug-connector"));
     }
+
+    // ============ Additional TraceContext tests ============
+
+    #[test]
+    fn test_trace_context_with_sampled_toggle() {
+        let ctx = TraceContext::generate()
+            .with_sampled(false)
+            .with_sampled(true)
+            .with_sampled(false);
+        assert!(!ctx.is_sampled());
+        assert_eq!(ctx.trace_flags & TRACE_FLAG_SAMPLED, 0);
+    }
+
+    #[test]
+    fn test_trace_context_display_matches_traceparent() {
+        let ctx = TraceContext::generate();
+        assert_eq!(format!("{ctx}"), ctx.to_traceparent());
+    }
+
+    #[test]
+    fn test_trace_context_eq_different_flags() {
+        let trace_id = [1u8; TRACE_ID_SIZE];
+        let span_id = [2u8; SPAN_ID_SIZE];
+        let ctx1 = TraceContext::new(trace_id, span_id).with_sampled(true);
+        let ctx2 = TraceContext::new(trace_id, span_id).with_sampled(false);
+        assert_ne!(ctx1, ctx2);
+    }
+
+    #[test]
+    fn test_trace_context_eq_different_trace_state() {
+        let trace_id = [1u8; TRACE_ID_SIZE];
+        let span_id = [2u8; SPAN_ID_SIZE];
+        let ctx1 = TraceContext::new(trace_id, span_id).with_trace_state("a=1");
+        let ctx2 = TraceContext::new(trace_id, span_id).with_trace_state("b=2");
+        assert_ne!(ctx1, ctx2);
+    }
+
+    #[test]
+    fn test_trace_context_new_span_preserves_trace_state() {
+        let parent = TraceContext::generate().with_trace_state("vendor=data");
+        let child = parent.new_span();
+        assert_eq!(child.trace_state, Some("vendor=data".to_string()));
+        assert_eq!(child.trace_id, parent.trace_id);
+    }
+
+    #[test]
+    fn test_trace_context_from_traceparent_too_many_parts() {
+        let traceparent = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01-extra";
+        let result = TraceContext::from_traceparent(traceparent);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_trace_context_from_traceparent_empty_string() {
+        let result = TraceContext::from_traceparent("");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_trace_context_traceparent_all_zeros_span() {
+        let traceparent = "00-4bf92f3577b34da6a3ce929d0e0e4736-0000000000000000-01";
+        let result = TraceContext::from_traceparent(traceparent);
+        assert!(matches!(result, Err(TraceContextError::InvalidFormat(_))));
+    }
+
+    #[test]
+    fn test_trace_context_default_is_sampled() {
+        let ctx = TraceContext::default();
+        assert!(ctx.is_sampled());
+    }
+
+    #[test]
+    fn test_trace_context_serde_json_roundtrip_no_state() {
+        let ctx = TraceContext::new([0xab; TRACE_ID_SIZE], [0xcd; SPAN_ID_SIZE]);
+        let json = serde_json::to_string(&ctx).unwrap();
+        let parsed: TraceContext = serde_json::from_str(&json).unwrap();
+        assert_eq!(ctx, parsed);
+    }
+
+    #[test]
+    fn test_trace_context_trace_id_hex_length() {
+        let ctx = TraceContext::generate();
+        assert_eq!(ctx.trace_id_hex().len(), 32);
+        assert!(ctx.trace_id_hex().chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn test_trace_context_span_id_hex_length() {
+        let ctx = TraceContext::generate();
+        assert_eq!(ctx.span_id_hex().len(), 16);
+        assert!(ctx.span_id_hex().chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    // ============ Additional TelemetryContext tests ============
+
+    #[test]
+    fn test_telemetry_context_empty_fields() {
+        let ctx = TelemetryContext::new();
+        assert!(ctx.all_fields().is_empty());
+        assert!(ctx.trace_context.is_none());
+        assert!(ctx.get_trace_context().is_none());
+    }
+
+    #[test]
+    fn test_telemetry_context_full_builder_chain() {
+        let uuid = Uuid::new_v4();
+        let ctx = TelemetryContext::new()
+            .correlation_id("c1")
+            .zone_id("z1")
+            .connector_id("conn1")
+            .operation_id("op1")
+            .request_id(uuid)
+            .principal_id("p1")
+            .node_id("n1")
+            .decision("allow")
+            .reason_code("VALID");
+
+        assert_eq!(ctx.correlation_id, Some("c1".to_string()));
+        assert_eq!(ctx.zone_id, Some("z1".to_string()));
+        assert_eq!(ctx.connector_id, Some("conn1".to_string()));
+        assert_eq!(ctx.operation_id, Some("op1".to_string()));
+        assert_eq!(ctx.request_id, Some(uuid));
+        assert_eq!(ctx.principal_id, Some("p1".to_string()));
+        assert_eq!(ctx.node_id, Some("n1".to_string()));
+        assert_eq!(ctx.decision, Some("allow".to_string()));
+        assert_eq!(ctx.reason_code, Some("VALID".to_string()));
+    }
+
+    #[test]
+    fn test_telemetry_context_clone_preserves_custom_fields() {
+        let ctx = TelemetryContext::new().zone_id("z1");
+        ctx.add_field("key1", "val1");
+        ctx.add_field("key2", "val2");
+        let cloned = ctx.clone();
+        // Use original after clone to avoid redundant_clone
+        assert_eq!(ctx.zone_id, Some("z1".to_string()));
+        let fields = cloned.all_fields();
+        assert!(fields.iter().any(|(k, v)| k == "key1" && v == "val1"));
+        assert!(fields.iter().any(|(k, v)| k == "key2" && v == "val2"));
+    }
+
+    #[test]
+    fn test_telemetry_context_child_span_generates_new_span_id() {
+        let ctx = TelemetryContext::with_trace();
+        let child1 = ctx.child_span();
+        let child2 = ctx.child_span();
+
+        let parent_span = ctx.trace_context.as_ref().unwrap().span_id;
+        let child1_span = child1.trace_context.as_ref().unwrap().span_id;
+        let child2_span = child2.trace_context.as_ref().unwrap().span_id;
+
+        assert_ne!(parent_span, child1_span);
+        assert_ne!(parent_span, child2_span);
+        // Children have independent span IDs (statistically different)
+    }
+
+    #[test]
+    fn test_trace_context_constants() {
+        assert_eq!(TRACE_ID_SIZE, 16);
+        assert_eq!(SPAN_ID_SIZE, 8);
+        assert_eq!(TRACE_FLAG_SAMPLED, 0x01);
+    }
+
+    #[test]
+    fn test_trace_context_error_invalid_format_display() {
+        let err = TraceContextError::InvalidFormat("bad data".to_string());
+        let display = format!("{err}");
+        assert!(display.contains("Invalid traceparent format"));
+        assert!(display.contains("bad data"));
+    }
+
+    #[test]
+    fn test_trace_context_error_unsupported_version_display() {
+        let err = TraceContextError::UnsupportedVersion("ff".to_string());
+        let display = format!("{err}");
+        assert!(display.contains("Unsupported traceparent version"));
+        assert!(display.contains("ff"));
+    }
 }

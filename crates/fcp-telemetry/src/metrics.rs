@@ -862,4 +862,92 @@ mod tests {
     fn test_diversity_violation_with_unicode_zone() {
         record_diversity_violation("z:日本語", 3, 1);
     }
+
+    #[test]
+    fn test_health_status_metric_copy() {
+        let status = HealthStatusMetric::Ready;
+        let copied = status;
+        assert!(matches!(copied, HealthStatusMetric::Ready));
+        // Original is still usable because it's Copy
+        assert!(matches!(status, HealthStatusMetric::Ready));
+    }
+
+    #[test]
+    fn test_health_status_metric_debug_all_variants() {
+        let variants = [
+            HealthStatusMetric::Ready,
+            HealthStatusMetric::Degraded,
+            HealthStatusMetric::Error,
+        ];
+        for v in &variants {
+            let debug = format!("{v:?}");
+            assert!(!debug.is_empty());
+        }
+    }
+
+    #[test]
+    fn test_timer_labels_preserved() {
+        let timer = Timer::start(
+            "label_check",
+            &[("env", "production"), ("region", "us-east")],
+        );
+        assert_eq!(timer.labels.len(), 2);
+        assert_eq!(timer.labels[0].0, "env");
+        assert_eq!(timer.labels[0].1, "production");
+        assert_eq!(timer.labels[1].0, "region");
+        assert_eq!(timer.labels[1].1, "us-east");
+    }
+
+    #[test]
+    fn test_timer_name_preserved() {
+        let timer = Timer::start("my_timer_metric", &[]);
+        assert_eq!(timer.name, "my_timer_metric");
+    }
+
+    #[test]
+    fn test_timer_guard_with_multiple_labels() {
+        let guard = TimerGuard::new(
+            "guarded_metric",
+            &[("a", "1"), ("b", "2"), ("c", "3")],
+        );
+        let elapsed = guard.elapsed_seconds();
+        assert!(elapsed >= 0.0);
+    }
+
+    #[test]
+    fn test_counter_increment_by_zero() {
+        // Incrementing by zero should not panic
+        increment_counter_by("zero_inc_counter", 0, &[("test", "zero_inc")]);
+    }
+
+    #[test]
+    fn test_counter_increment_by_max() {
+        increment_counter_by("max_inc_counter", u64::MAX, &[("test", "max_inc")]);
+    }
+
+    #[test]
+    fn test_gauge_increment_then_decrement() {
+        increment_gauge("inc_dec_gauge", 10.0, &[("test", "inc_dec")]);
+        decrement_gauge("inc_dec_gauge", 5.0, &[("test", "inc_dec")]);
+    }
+
+    #[test]
+    fn test_record_symbol_coverage_max_values() {
+        record_symbol_coverage("z:max", usize::MAX, u32::MAX, u16::MAX, u32::MAX);
+    }
+
+    #[test]
+    fn test_concentration_violation_zero_values() {
+        record_concentration_violation("z:zero", 0, 0);
+    }
+
+    #[test]
+    fn test_diversity_violation_max_required() {
+        record_diversity_violation("z:max-req", u8::MAX, usize::MAX);
+    }
+
+    #[test]
+    fn test_histogram_with_large_value() {
+        record_histogram("large_hist", f64::MAX / 2.0, &[("test", "large")]);
+    }
 }

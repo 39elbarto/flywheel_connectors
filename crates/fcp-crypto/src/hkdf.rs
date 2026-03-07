@@ -415,4 +415,112 @@ mod tests {
         // Same HKDF instance, different info → different keys
         assert_ne!(key1, key2);
     }
+
+    // ---- Expand to different sizes ----
+
+    #[test]
+    fn hkdf_expand_to_16_bytes() {
+        let key: [u8; 16] = hkdf_sha256_array(None, b"ikm", b"info").unwrap();
+        assert_eq!(key.len(), 16);
+    }
+
+    #[test]
+    fn hkdf_expand_to_64_bytes() {
+        let key: [u8; 64] = hkdf_sha256_array(None, b"ikm", b"info").unwrap();
+        assert_eq!(key.len(), 64);
+    }
+
+    #[test]
+    fn hkdf_expand_to_1_byte() {
+        let key: [u8; 1] = hkdf_sha256_array(None, b"ikm", b"info").unwrap();
+        assert_eq!(key.len(), 1);
+    }
+
+    // ---- DerivedKey debug redacts ----
+
+    #[test]
+    fn derived_key_debug_redacted() {
+        let key = DerivedKey::<32>::derive(None, b"ikm", b"info").unwrap();
+        let debug = format!("{key:?}");
+        assert!(debug.contains("DerivedKey"));
+        assert!(debug.contains("len"));
+        assert!(debug.contains("32"));
+        // Must not contain key material
+        assert!(!debug.contains("0x"));
+    }
+
+    // ---- DerivedKey AsRef ----
+
+    #[test]
+    fn derived_key_as_ref_matches_as_bytes() {
+        let key = DerivedKey::<32>::derive(None, b"ikm", b"info").unwrap();
+        let from_ref: &[u8] = key.as_ref();
+        assert_eq!(from_ref, key.as_bytes());
+    }
+
+    // ---- Empty inputs ----
+
+    #[test]
+    fn hkdf_empty_ikm() {
+        let mut out = [0u8; 32];
+        hkdf_sha256(None, b"", b"info", &mut out).unwrap();
+        // Should produce deterministic output
+        let mut out2 = [0u8; 32];
+        hkdf_sha256(None, b"", b"info", &mut out2).unwrap();
+        assert_eq!(out, out2);
+    }
+
+    #[test]
+    fn hkdf_empty_info() {
+        let mut out = [0u8; 32];
+        hkdf_sha256(None, b"ikm", b"", &mut out).unwrap();
+        // Non-empty IKM with empty info should produce output
+        assert_ne!(out, [0u8; 32]);
+    }
+
+    #[test]
+    fn hkdf_empty_salt_explicit_vs_none() {
+        let mut out1 = [0u8; 32];
+        let mut out2 = [0u8; 32];
+        // None salt should be equivalent to Some(&[0u8; 32]) per RFC
+        hkdf_sha256(None, b"ikm", b"info", &mut out1).unwrap();
+        hkdf_sha256(Some(&[0u8; 32]), b"ikm", b"info", &mut out2).unwrap();
+        // Per RFC 5869: if salt is not provided, it defaults to HashLen zeros
+        assert_eq!(out1, out2);
+    }
+
+    // ---- FCP2 derivation domain separation ----
+
+    #[test]
+    fn fcp2_zone_key_differs_from_objectid_key() {
+        let material = [1u8; 32];
+        let zone_id = b"z:test";
+        let zk = Fcp2KeyDerivation::derive_zone_key(&material, zone_id).unwrap();
+        let ok = Fcp2KeyDerivation::derive_objectid_key(&material, zone_id).unwrap();
+        assert_ne!(zk.as_bytes(), ok.as_bytes());
+    }
+
+    #[test]
+    fn fcp2_session_key_different_session_ids() {
+        let shared = [42u8; 32];
+        let k1 = Fcp2KeyDerivation::derive_session_key(&shared, b"sess-1", "send").unwrap();
+        let k2 = Fcp2KeyDerivation::derive_session_key(&shared, b"sess-2", "send").unwrap();
+        assert_ne!(k1.as_bytes(), k2.as_bytes());
+    }
+
+    #[test]
+    fn fcp2_mac_key_deterministic() {
+        let session_key = [99u8; 32];
+        let k1 = Fcp2KeyDerivation::derive_mac_key(&session_key, "auth").unwrap();
+        let k2 = Fcp2KeyDerivation::derive_mac_key(&session_key, "auth").unwrap();
+        assert_eq!(k1.as_bytes(), k2.as_bytes());
+    }
+
+    // ---- HKDF_MAX_OUTPUT_LENGTH constant ----
+
+    #[test]
+    fn hkdf_max_output_length_constant() {
+        assert_eq!(HKDF_MAX_OUTPUT_LENGTH, 255 * 32);
+        assert_eq!(HKDF_MAX_OUTPUT_LENGTH, 8160);
+    }
 }

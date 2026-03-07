@@ -529,4 +529,85 @@ mod tests {
         let shared2 = sk.diffie_hellman(&pk);
         assert_eq!(shared1.as_bytes(), shared2.as_bytes());
     }
+
+    // ---- Secret key to/from bytes roundtrip ----
+
+    #[test]
+    fn secret_key_bytes_roundtrip() {
+        let bytes = [77u8; 32];
+        let sk = X25519SecretKey::from_bytes(bytes);
+        // Due to X25519 clamping, to_bytes may differ from input.
+        // But from_bytes(to_bytes()) should produce same public key.
+        let sk2 = X25519SecretKey::from_bytes(sk.to_bytes());
+        assert_eq!(sk.public_key(), sk2.public_key());
+    }
+
+    // ---- Public key from_bytes with specific values ----
+
+    #[test]
+    fn public_key_from_bytes_all_zeros() {
+        let pk = X25519PublicKey::from_bytes([0u8; 32]);
+        assert_eq!(pk.to_bytes(), [0u8; 32]);
+    }
+
+    #[test]
+    fn public_key_from_bytes_all_ones() {
+        let pk = X25519PublicKey::from_bytes([0xFF; 32]);
+        assert_eq!(pk.to_bytes(), [0xFF; 32]);
+    }
+
+    // ---- Key ID derivation is deterministic for same public key ----
+
+    #[test]
+    fn key_id_from_same_bytes_deterministic() {
+        let pk1 = X25519PublicKey::from_bytes([99u8; 32]);
+        let pk2 = X25519PublicKey::from_bytes([99u8; 32]);
+        assert_eq!(pk1.key_id(), pk2.key_id());
+    }
+
+    // ---- Public key deserialization invalid length ----
+
+    #[test]
+    fn public_key_deserialize_too_short() {
+        let short = vec![0u8; 16];
+        let json = serde_json::to_string(&short).unwrap();
+        let result: Result<X25519PublicKey, _> = serde_json::from_str(&json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn public_key_deserialize_too_long() {
+        let long = vec![0u8; 64];
+        let json = serde_json::to_string(&long).unwrap();
+        let result: Result<X25519PublicKey, _> = serde_json::from_str(&json);
+        assert!(result.is_err());
+    }
+
+    // ---- DH commutativity with three parties ----
+
+    #[test]
+    fn dh_commutativity_three_parties() {
+        let a = X25519SecretKey::generate();
+        let b = X25519SecretKey::generate();
+        let c = X25519SecretKey::generate();
+
+        // a-b and b-a should match
+        let ab = a.diffie_hellman(&b.public_key());
+        let ba = b.diffie_hellman(&a.public_key());
+        assert_eq!(ab.as_bytes(), ba.as_bytes());
+
+        // a-c and c-a should match
+        let ac = a.diffie_hellman(&c.public_key());
+        let ca = c.diffie_hellman(&a.public_key());
+        assert_eq!(ac.as_bytes(), ca.as_bytes());
+
+        // b-c and c-b should match
+        let bc = b.diffie_hellman(&c.public_key());
+        let cb = c.diffie_hellman(&b.public_key());
+        assert_eq!(bc.as_bytes(), cb.as_bytes());
+
+        // All three shared secrets should be different
+        assert_ne!(ab.as_bytes(), ac.as_bytes());
+        assert_ne!(ab.as_bytes(), bc.as_bytes());
+    }
 }

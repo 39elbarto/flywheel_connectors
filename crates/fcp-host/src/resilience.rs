@@ -3014,4 +3014,404 @@ mod tests {
         assert_eq!(original.load_shed, cloned.load_shed);
         assert_eq!(original.probe_requests, cloned.probe_requests);
     }
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    // 14. RequestPriority trait coverage
+    // ─────────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn request_priority_debug() {
+        for p in [
+            RequestPriority::Critical,
+            RequestPriority::High,
+            RequestPriority::Normal,
+            RequestPriority::Low,
+        ] {
+            let dbg = format!("{p:?}");
+            assert!(!dbg.is_empty());
+        }
+    }
+
+    #[test]
+    fn request_priority_clone() {
+        let a = RequestPriority::High;
+        let b = a;
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn request_priority_hash() {
+        use std::collections::HashSet;
+        let mut set = HashSet::new();
+        set.insert(RequestPriority::Critical);
+        set.insert(RequestPriority::High);
+        set.insert(RequestPriority::Normal);
+        set.insert(RequestPriority::Low);
+        assert_eq!(set.len(), 4);
+        // Duplicates should not increase size
+        set.insert(RequestPriority::Critical);
+        assert_eq!(set.len(), 4);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    // 15. ResilienceError trait coverage
+    // ─────────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn resilience_error_debug_all_variants() {
+        let variants: Vec<ResilienceError<&str>> = vec![
+            ResilienceError::LoadShed {
+                load_per_mille: 900,
+            },
+            ResilienceError::Unhealthy {
+                reason: "down".into(),
+            },
+            ResilienceError::CircuitOpen {
+                retry_after: Duration::from_secs(10),
+            },
+            ResilienceError::HalfOpenLimited,
+            ResilienceError::BulkheadFull,
+            ResilienceError::QueueTimeout {
+                timeout: Duration::from_millis(100),
+            },
+            ResilienceError::TimedOut {
+                timeout: Duration::from_secs(5),
+            },
+            ResilienceError::Inner("test"),
+        ];
+        for err in &variants {
+            let dbg = format!("{err:?}");
+            assert!(!dbg.is_empty());
+        }
+    }
+
+    #[test]
+    fn resilience_error_eq_load_shed() {
+        let a: ResilienceError<&str> = ResilienceError::LoadShed {
+            load_per_mille: 800,
+        };
+        let b: ResilienceError<&str> = ResilienceError::LoadShed {
+            load_per_mille: 800,
+        };
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn resilience_error_ne_different_variants() {
+        let a: ResilienceError<&str> = ResilienceError::BulkheadFull;
+        let b: ResilienceError<&str> = ResilienceError::HalfOpenLimited;
+        assert_ne!(a, b);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    // 16. CircuitState trait coverage
+    // ─────────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn circuit_state_debug() {
+        for state in [
+            CircuitState::Closed,
+            CircuitState::Open,
+            CircuitState::HalfOpen,
+        ] {
+            let dbg = format!("{state:?}");
+            assert!(!dbg.is_empty());
+        }
+    }
+
+    #[test]
+    fn circuit_state_clone() {
+        let a = CircuitState::HalfOpen;
+        let b = a;
+        assert_eq!(a, b);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    // 17. RoutingDecision trait coverage
+    // ─────────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn routing_decision_debug() {
+        let decisions = vec![
+            RoutingDecision::Allow,
+            RoutingDecision::AllowDegraded {
+                reason: "slow".into(),
+            },
+            RoutingDecision::AllowProbe,
+            RoutingDecision::Reject {
+                reason: "down".into(),
+            },
+        ];
+        for d in &decisions {
+            let dbg = format!("{d:?}");
+            assert!(!dbg.is_empty());
+        }
+    }
+
+    #[test]
+    fn routing_decision_eq() {
+        assert_eq!(RoutingDecision::Allow, RoutingDecision::Allow);
+        assert_eq!(RoutingDecision::AllowProbe, RoutingDecision::AllowProbe);
+        assert_ne!(RoutingDecision::Allow, RoutingDecision::AllowProbe);
+    }
+
+    #[test]
+    fn routing_decision_clone() {
+        let a = RoutingDecision::AllowDegraded {
+            reason: "slow".into(),
+        };
+        let b = a.clone();
+        assert_eq!(a, b);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    // 18. Config clone coverage
+    // ─────────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn resilience_config_clone() {
+        let config = ResilienceConfig {
+            operation_timeout: Some(Duration::from_secs(10)),
+            ..ResilienceConfig::default()
+        };
+        let cloned = config.clone();
+        assert_eq!(config.operation_timeout, cloned.operation_timeout);
+        assert_eq!(
+            config.circuit_breaker.failure_threshold,
+            cloned.circuit_breaker.failure_threshold
+        );
+    }
+
+    #[test]
+    fn circuit_breaker_config_clone() {
+        let config = CircuitBreakerConfig {
+            failure_threshold: 5,
+            success_threshold: 3,
+            ..CircuitBreakerConfig::default()
+        };
+        let cloned = config.clone();
+        assert_eq!(config.failure_threshold, cloned.failure_threshold);
+        assert_eq!(config.success_threshold, cloned.success_threshold);
+    }
+
+    #[test]
+    fn bulkhead_config_clone() {
+        let config = BulkheadConfig {
+            max_concurrent: 8,
+            max_queued: 16,
+            queue_timeout: Duration::from_millis(500),
+        };
+        let cloned = config.clone();
+        assert_eq!(config.max_concurrent, cloned.max_concurrent);
+        assert_eq!(config.max_queued, cloned.max_queued);
+        assert_eq!(config.queue_timeout, cloned.queue_timeout);
+    }
+
+    #[test]
+    fn health_router_config_clone() {
+        let config = HealthRouterConfig {
+            unhealthy_threshold: 5,
+            recovery_success_threshold: 3,
+            ..HealthRouterConfig::default()
+        };
+        let cloned = config.clone();
+        assert_eq!(config.unhealthy_threshold, cloned.unhealthy_threshold);
+        assert_eq!(
+            config.recovery_success_threshold,
+            cloned.recovery_success_threshold
+        );
+    }
+
+    #[test]
+    fn load_shed_config_clone() {
+        let config = LoadShedConfig {
+            shed_threshold_per_mille: 600,
+            full_shed_threshold_per_mille: 900,
+            sheddable_priorities: vec![RequestPriority::Low],
+        };
+        let cloned = config.clone();
+        assert_eq!(
+            config.shed_threshold_per_mille,
+            cloned.shed_threshold_per_mille
+        );
+        assert_eq!(config.sheddable_priorities, cloned.sheddable_priorities);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    // 19. Config debug coverage
+    // ─────────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn resilience_config_debug() {
+        let config = ResilienceConfig::default();
+        let dbg = format!("{config:?}");
+        assert!(dbg.contains("ResilienceConfig"));
+    }
+
+    #[test]
+    fn circuit_breaker_config_debug() {
+        let config = CircuitBreakerConfig::default();
+        let dbg = format!("{config:?}");
+        assert!(dbg.contains("CircuitBreakerConfig"));
+    }
+
+    #[test]
+    fn bulkhead_config_debug() {
+        let config = BulkheadConfig::default();
+        let dbg = format!("{config:?}");
+        assert!(dbg.contains("BulkheadConfig"));
+    }
+
+    #[test]
+    fn health_router_config_debug() {
+        let config = HealthRouterConfig::default();
+        let dbg = format!("{config:?}");
+        assert!(dbg.contains("HealthRouterConfig"));
+    }
+
+    #[test]
+    fn load_shed_config_debug() {
+        let config = LoadShedConfig::default();
+        let dbg = format!("{config:?}");
+        assert!(dbg.contains("LoadShedConfig"));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    // 20. FailurePredicate edge cases
+    // ─────────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn failure_predicate_slow_responses_exact_threshold() {
+        let pred = FailurePredicate::SlowResponses {
+            threshold: Duration::from_millis(100),
+        };
+        // Exact threshold should NOT match (only strictly above)
+        assert!(!pred.matches(OutcomeKind::Success, Duration::from_millis(100)));
+    }
+
+    #[test]
+    fn failure_predicate_slow_responses_does_not_match_failure() {
+        let pred = FailurePredicate::SlowResponses {
+            threshold: Duration::from_millis(100),
+        };
+        // SlowResponses only matches Success, not Failure
+        assert!(!pred.matches(OutcomeKind::Failure, Duration::from_millis(200)));
+    }
+
+    #[test]
+    fn failure_predicate_error_or_slow_exact_threshold() {
+        let pred = FailurePredicate::ErrorOrSlowResponses {
+            threshold: Duration::from_millis(100),
+        };
+        // At exact threshold, slow success should NOT match
+        assert!(!pred.matches(OutcomeKind::Success, Duration::from_millis(100)));
+        // But one ms over should
+        assert!(pred.matches(OutcomeKind::Success, Duration::from_millis(101)));
+    }
+
+    #[test]
+    fn failure_predicate_clone() {
+        let a = FailurePredicate::AnyError;
+        let b = a;
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn failure_predicate_debug() {
+        let dbg = format!("{:?}", FailurePredicate::TimeoutsOnly);
+        assert!(dbg.contains("TimeoutsOnly"));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    // 21. HealthSeverity ordering
+    // ─────────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn health_severity_ordering() {
+        assert!(HealthSeverity::Healthy < HealthSeverity::Degraded);
+        assert!(HealthSeverity::Degraded < HealthSeverity::Unavailable);
+        assert!(HealthSeverity::Healthy < HealthSeverity::Unavailable);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    // 22. merge_connector_health edge cases
+    // ─────────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn merge_connector_health_healthy_plus_degraded() {
+        let merged = merge_connector_health(
+            ConnectorHealth::Healthy,
+            ConnectorHealth::degraded("lag"),
+        );
+        assert!(matches!(merged, ConnectorHealth::Degraded { .. }));
+        if let ConnectorHealth::Degraded { reason } = &merged {
+            assert!(reason.contains("lag"));
+        }
+    }
+
+    #[test]
+    fn merge_connector_health_unavailable_plus_degraded() {
+        let merged = merge_connector_health(
+            ConnectorHealth::unavailable("crash"),
+            ConnectorHealth::degraded("slow"),
+        );
+        assert!(matches!(merged, ConnectorHealth::Unavailable { .. }));
+    }
+
+    #[test]
+    fn merge_connector_health_both_unavailable_combines_reasons() {
+        let merged = merge_connector_health(
+            ConnectorHealth::unavailable("err1"),
+            ConnectorHealth::unavailable("err2"),
+        );
+        if let ConnectorHealth::Unavailable { reason, .. } = &merged {
+            assert!(reason.contains("err1"));
+            assert!(reason.contains("err2"));
+        } else {
+            panic!("expected Unavailable");
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    // 23. LatencyEwma edge cases
+    // ─────────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn latency_ewma_zero_alpha() {
+        let mut ewma = LatencyEwma::new(0);
+        ewma.record(Duration::from_millis(100));
+        ewma.record(Duration::from_millis(500));
+        // alpha=0 means new sample has zero weight, retained=1000
+        // new = (100 * 1000 + 500 * 0) / 1000 = 100
+        assert_eq!(ewma.value(), Some(Duration::from_millis(100)));
+    }
+
+    #[test]
+    fn latency_ewma_max_alpha() {
+        let mut ewma = LatencyEwma::new(1000);
+        ewma.record(Duration::from_millis(100));
+        ewma.record(Duration::from_millis(500));
+        // alpha=1000, retained=0
+        // new = (100 * 0 + 500 * 1000) / 1000 = 500
+        assert_eq!(ewma.value(), Some(Duration::from_millis(500)));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    // 24. ratio_per_mille edge cases
+    // ─────────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn ratio_per_mille_one_of_one() {
+        assert_eq!(ratio_per_mille(1, 1), 1_000);
+    }
+
+    #[test]
+    fn ratio_per_mille_one_of_three() {
+        assert_eq!(ratio_per_mille(1, 3), 333);
+    }
+
+    #[test]
+    fn ratio_per_mille_two_of_three() {
+        assert_eq!(ratio_per_mille(2, 3), 666);
+    }
 }

@@ -563,4 +563,202 @@ mod tests {
         let sig = sk.sign(&large_message);
         assert!(pk.verify(&large_message, &sig).is_ok());
     }
+
+    // ---- Signing key clone and debug ----
+
+    #[test]
+    fn signing_key_clone_preserves_key_id() {
+        let sk = Ed25519SigningKey::generate();
+        let cloned = sk.clone();
+        assert_eq!(sk.key_id(), cloned.key_id());
+    }
+
+    #[test]
+    fn signing_key_clone_produces_same_signatures() {
+        let sk = Ed25519SigningKey::generate();
+        let cloned = sk.clone();
+        let message = b"clone test";
+        let sig1 = sk.sign(message);
+        let sig2 = cloned.sign(message);
+        assert_eq!(sig1, sig2);
+    }
+
+    #[test]
+    fn signing_key_clone_verifying_keys_match() {
+        let sk = Ed25519SigningKey::generate();
+        let cloned = sk.clone();
+        assert_eq!(sk.verifying_key(), cloned.verifying_key());
+    }
+
+    #[test]
+    fn signing_key_debug_redacts_secret() {
+        let sk = Ed25519SigningKey::generate();
+        let debug = format!("{sk:?}");
+        assert!(debug.contains("Ed25519SigningKey"));
+        assert!(debug.contains("kid"));
+        // Must not contain inner secret bytes or raw key material
+        assert!(!debug.contains("inner"));
+    }
+
+    #[test]
+    fn signing_key_debug_contains_kid() {
+        let sk = Ed25519SigningKey::generate();
+        let kid_hex = sk.key_id().to_hex();
+        let debug = format!("{sk:?}");
+        assert!(debug.contains(&kid_hex));
+    }
+
+    // ---- Verifying key serde roundtrip ----
+
+    #[test]
+    fn verifying_key_serde_roundtrip() {
+        let sk = Ed25519SigningKey::generate();
+        let pk = sk.verifying_key();
+        let serialized = serde_json::to_string(&pk).unwrap();
+        let deserialized: Ed25519VerifyingKey = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(pk, deserialized);
+    }
+
+    #[test]
+    fn verifying_key_serde_wrong_length_fails() {
+        // Serialize a Vec<u8> of wrong length
+        let short = vec![0u8; 16];
+        let json = serde_json::to_string(&short).unwrap();
+        let result: Result<Ed25519VerifyingKey, _> = serde_json::from_str(&json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn verifying_key_debug_shows_hex() {
+        let sk = Ed25519SigningKey::generate();
+        let pk = sk.verifying_key();
+        let debug = format!("{pk:?}");
+        assert!(debug.contains("Ed25519VerifyingKey"));
+        assert!(debug.contains(&hex::encode(pk.to_bytes())));
+    }
+
+    #[test]
+    fn verifying_key_clone() {
+        let sk = Ed25519SigningKey::generate();
+        let pk = sk.verifying_key();
+        let cloned = pk.clone();
+        assert_eq!(pk, cloned);
+        // Verify using original after clone
+        let sig = sk.sign(b"test");
+        assert!(pk.verify(b"test", &sig).is_ok());
+    }
+
+    // ---- Signature edge cases ----
+
+    #[test]
+    fn signature_try_from_slice_empty() {
+        let result = Ed25519Signature::try_from_slice(&[]);
+        assert!(matches!(
+            result,
+            Err(crate::error::CryptoError::InvalidSignatureLength {
+                expected: 64,
+                actual: 0
+            })
+        ));
+    }
+
+    #[test]
+    fn signature_try_from_slice_too_short() {
+        let result = Ed25519Signature::try_from_slice(&[0u8; 32]);
+        assert!(matches!(
+            result,
+            Err(crate::error::CryptoError::InvalidSignatureLength {
+                expected: 64,
+                actual: 32
+            })
+        ));
+    }
+
+    #[test]
+    fn signature_try_from_slice_too_long() {
+        let result = Ed25519Signature::try_from_slice(&[0u8; 128]);
+        assert!(matches!(
+            result,
+            Err(crate::error::CryptoError::InvalidSignatureLength {
+                expected: 64,
+                actual: 128
+            })
+        ));
+    }
+
+    #[test]
+    fn signature_try_from_slice_valid() {
+        let sk = Ed25519SigningKey::generate();
+        let sig = sk.sign(b"msg");
+        let bytes = sig.to_bytes();
+        let recovered = Ed25519Signature::try_from_slice(&bytes).unwrap();
+        assert_eq!(sig, recovered);
+    }
+
+    #[test]
+    fn signature_display_matches_hex() {
+        let sk = Ed25519SigningKey::generate();
+        let sig = sk.sign(b"display test");
+        let display = format!("{sig}");
+        let hex = sig.to_hex();
+        assert_eq!(display, hex);
+    }
+
+    #[test]
+    fn signature_debug_format() {
+        let sk = Ed25519SigningKey::generate();
+        let sig = sk.sign(b"debug test");
+        let debug = format!("{sig:?}");
+        assert!(debug.starts_with("Ed25519Signature("));
+        assert!(debug.ends_with(')'));
+        assert!(debug.contains(&sig.to_hex()));
+    }
+
+    #[test]
+    fn signature_copy_semantics() {
+        let sk = Ed25519SigningKey::generate();
+        let sig = sk.sign(b"copy test");
+        let copied = sig;
+        // Both should be usable (Copy)
+        assert_eq!(sig.to_bytes(), copied.to_bytes());
+    }
+
+    // ---- Context signing edge cases ----
+
+    #[test]
+    fn sign_with_empty_context() {
+        let sk = Ed25519SigningKey::generate();
+        let pk = sk.verifying_key();
+        let sig = sk.sign_with_context(b"", b"msg");
+        assert!(pk.verify_with_context(b"", b"msg", &sig).is_ok());
+    }
+
+    #[test]
+    fn sign_with_context_wrong_message_fails() {
+        let sk = Ed25519SigningKey::generate();
+        let pk = sk.verifying_key();
+        let sig = sk.sign_with_context(b"ctx", b"msg1");
+        assert!(pk.verify_with_context(b"ctx", b"msg2", &sig).is_err());
+    }
+
+    // ---- Constants ----
+
+    #[test]
+    fn ed25519_key_size_constants() {
+        assert_eq!(SECRET_KEY_SIZE, 32);
+        assert_eq!(PUBLIC_KEY_SIZE, 32);
+        assert_eq!(SIGNATURE_SIZE, 64);
+    }
+
+    // ---- Verifying key from_bytes with invalid key ----
+
+    #[test]
+    fn verifying_key_from_bytes_all_zeros_is_identity() {
+        // All-zero bytes represent the identity point, which ed25519-dalek may reject
+        // depending on version. We just verify the error path works.
+        let result = Ed25519VerifyingKey::from_bytes(&[0u8; 32]);
+        // Ed25519 identity point may or may not be rejected; either outcome is valid.
+        // The key thing is it doesn't panic.
+        let _ = result;
+    }
 }

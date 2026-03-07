@@ -1447,4 +1447,168 @@ mod tests {
             assert_eq!(snap.enforcement, enforcement);
         }
     }
+
+    // ── BudgetAction debug for all variants ──
+
+    #[test]
+    fn budget_action_all_variants_debug() {
+        let actions = [BudgetAction::Allow, BudgetAction::Warn, BudgetAction::Deny];
+        for action in &actions {
+            let dbg = format!("{action:?}");
+            assert!(!dbg.is_empty());
+        }
+    }
+
+    // ── BudgetEvaluation debug ──
+
+    #[test]
+    fn budget_evaluation_debug() {
+        let eval = BudgetEvaluation {
+            action: BudgetAction::Allow,
+            snapshot: UsageBudgetSnapshot {
+                zone_id: ZoneId::work(),
+                enforcement: BudgetEnforcement::Warn,
+                budgets: vec![],
+                updated_at: 0,
+            },
+        };
+        let dbg = format!("{eval:?}");
+        assert!(dbg.contains("BudgetEvaluation"));
+        assert!(dbg.contains("Allow"));
+    }
+
+    // ── BudgetTracker debug ──
+
+    #[test]
+    fn budget_tracker_debug() {
+        let tracker = BudgetTracker::new();
+        let dbg = format!("{tracker:?}");
+        assert!(dbg.contains("BudgetTracker"));
+    }
+
+    // ── BudgetPolicyEngine debug ──
+
+    #[test]
+    fn budget_policy_engine_debug() {
+        let engine = BudgetPolicyEngine::new();
+        let dbg = format!("{engine:?}");
+        assert!(dbg.contains("BudgetPolicyEngine"));
+    }
+
+    // ── BudgetPolicyEngine default ──
+
+    #[test]
+    fn budget_policy_engine_default() {
+        let engine = BudgetPolicyEngine::default();
+        let dbg = format!("{engine:?}");
+        assert!(dbg.contains("BudgetPolicyEngine"));
+    }
+
+    // ── MetricWindow constructor ──
+
+    #[test]
+    fn metric_window_new_fields() {
+        let w = MetricWindow::new(300, 5000);
+        assert_eq!(w.window_seconds, 300);
+        assert_eq!(w.window_started_at, 5000);
+        assert_eq!(w.used, 0);
+    }
+
+    // ── MetricWindow clone ──
+
+    #[test]
+    fn metric_window_clone() {
+        let original = MetricWindow::new(60, 1000);
+        let cloned = original.clone();
+        assert_eq!(original.window_seconds, cloned.window_seconds);
+        assert_eq!(original.window_started_at, cloned.window_started_at);
+        assert_eq!(original.used, cloned.used);
+    }
+
+    // ── aggregate_metrics with many entries ──
+
+    #[test]
+    fn aggregate_metrics_many_same_kind() {
+        let metrics: Vec<UsageMetric> = (0..100).map(|_| UsageMetric::tokens(1)).collect();
+        let result = aggregate_metrics(&metrics);
+        assert_eq!(*result.get(&UsageMetricKind::Tokens).unwrap(), 100);
+    }
+
+    // ── Budget tracker snapshot does not modify state ──
+
+    #[test]
+    fn budget_tracker_snapshot_idempotent() {
+        let zone = ZoneId::work();
+        let policy = UsageBudgetPolicy {
+            enforcement: BudgetEnforcement::Deny,
+            budgets: vec![UsageBudgetLimit {
+                metric: UsageMetricKind::Tokens,
+                limit: 100,
+                window_seconds: 60,
+            }],
+        };
+
+        let mut tracker = BudgetTracker::new();
+        let _ = tracker.record_usage(&zone, &policy, &[UsageMetric::tokens(50)]);
+        let snap1 = tracker.snapshot(&zone, &policy);
+        let snap2 = tracker.snapshot(&zone, &policy);
+        assert_eq!(snap1.budgets[0].used, snap2.budgets[0].used);
+        assert_eq!(snap1.budgets[0].remaining, snap2.budgets[0].remaining);
+    }
+
+    // ── Budget evaluation to_error with non-exceeded budgets ──
+
+    #[test]
+    fn budget_evaluation_deny_no_exceeded_returns_none() {
+        let eval = BudgetEvaluation {
+            action: BudgetAction::Deny,
+            snapshot: UsageBudgetSnapshot {
+                zone_id: ZoneId::work(),
+                enforcement: BudgetEnforcement::Deny,
+                budgets: vec![UsageBudgetUsage {
+                    metric: UsageMetricKind::Tokens,
+                    used: 50,
+                    limit: 100,
+                    remaining: 50,
+                    window_started_at: 0,
+                    window_resets_at: 60,
+                    status: BudgetStatus::Ok,
+                }],
+                updated_at: 0,
+            },
+        };
+        // Even though action is Deny, no budget has Exceeded status
+        assert!(eval.to_error().is_none());
+    }
+
+    // ── Budget saturating add ──
+
+    #[test]
+    fn budget_tracker_saturating_usage() {
+        let zone = ZoneId::work();
+        let policy = UsageBudgetPolicy {
+            enforcement: BudgetEnforcement::Deny,
+            budgets: vec![UsageBudgetLimit {
+                metric: UsageMetricKind::Tokens,
+                limit: u64::MAX,
+                window_seconds: 60,
+            }],
+        };
+
+        let mut tracker = BudgetTracker::new();
+        let _ =
+            tracker.record_usage(&zone, &policy, &[UsageMetric::tokens(u64::MAX - 10)]);
+        let eval = tracker.record_usage(&zone, &policy, &[UsageMetric::tokens(20)]);
+        // Should saturate at u64::MAX
+        assert_eq!(eval.snapshot.budgets[0].used, u64::MAX);
+    }
+
+    // ── now_secs ──
+
+    #[test]
+    fn now_secs_is_positive() {
+        let ts = now_secs();
+        // Should be well past epoch year 2000 = 946684800
+        assert!(ts > 946_684_800);
+    }
 }

@@ -445,4 +445,100 @@ mod tests {
         assert_eq!(cloned.node_id, sig.node_id);
         assert_eq!(cloned.signature, sig.signature);
     }
+
+    // ---- Signing domain constant ----
+
+    #[test]
+    fn signing_domain_value() {
+        assert_eq!(SIGNING_DOMAIN, b"FCP2-SIGN-V1");
+    }
+
+    #[test]
+    fn schema_hash_size_value() {
+        assert_eq!(SCHEMA_HASH_SIZE, 8);
+    }
+
+    // ---- Signable trait default impl ----
+
+    #[test]
+    fn signable_trait_signing_bytes() {
+        struct TestSignable;
+        impl Signable for TestSignable {
+            fn schema_id(&self) -> &'static str {
+                "test.schema/1.0.0"
+            }
+            fn unsigned_cbor(&self) -> CryptoResult<Vec<u8>> {
+                Ok(b"test-payload".to_vec())
+            }
+        }
+
+        let s = TestSignable;
+        let signing_bytes = s.signing_bytes().unwrap();
+        let expected = canonical_signing_bytes("test.schema/1.0.0", b"test-payload");
+        assert_eq!(signing_bytes, expected);
+    }
+
+    // ---- NodeSignature debug ----
+
+    #[test]
+    fn node_signature_debug() {
+        let sig = NodeSignature::new(b"node-1".to_vec(), vec![0xAA, 0xBB]);
+        let debug = format!("{sig:?}");
+        assert!(debug.contains("NodeSignature"));
+        assert!(debug.contains("node_id"));
+    }
+
+    // ---- Deterministic CBOR with arrays ----
+
+    #[test]
+    fn deterministic_cbor_array() {
+        let arr = vec![1u32, 2, 3, 4, 5];
+        let cbor1 = to_deterministic_cbor(&arr).unwrap();
+        let cbor2 = to_deterministic_cbor(&arr).unwrap();
+        assert_eq!(cbor1, cbor2);
+    }
+
+    #[test]
+    fn deterministic_cbor_string() {
+        let s = "hello world";
+        let cbor = to_deterministic_cbor(&s).unwrap();
+        assert!(!cbor.is_empty());
+    }
+
+    #[test]
+    fn deterministic_cbor_bool() {
+        let cbor_true = to_deterministic_cbor(&true).unwrap();
+        let cbor_false = to_deterministic_cbor(&false).unwrap();
+        assert_ne!(cbor_true, cbor_false);
+    }
+
+    // ---- Sort node signatures with single element ----
+
+    #[test]
+    fn sort_node_signatures_single() {
+        let mut sigs = vec![NodeSignature::new(b"only".to_vec(), vec![1])];
+        sort_node_signatures(&mut sigs);
+        assert_eq!(sigs[0].node_id, b"only");
+    }
+
+    #[test]
+    fn sort_node_signatures_empty() {
+        let mut sigs: Vec<NodeSignature> = vec![];
+        sort_node_signatures(&mut sigs);
+        assert!(sigs.is_empty());
+    }
+
+    // ---- Verify node signature order edge cases ----
+
+    #[test]
+    fn verify_node_signature_order_empty() {
+        let sigs: Vec<NodeSignature> = vec![];
+        assert!(verify_node_signature_order(&sigs).is_ok());
+    }
+
+    #[test]
+    fn verify_node_signature_order_single() {
+        let sigs = vec![NodeSignature::new(b"only".to_vec(), vec![1])];
+        assert!(verify_node_signature_order(&sigs).is_ok());
+    }
 }

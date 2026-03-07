@@ -447,4 +447,98 @@ mod tests {
         let config_one = TelemetryConfig::new("test").with_sample_rate(1.0);
         assert_eq!(config_one.trace_sample_rate, 1.0);
     }
+
+    #[test]
+    fn test_telemetry_config_new_from_string() {
+        let name = String::from("dynamic-service");
+        let config = TelemetryConfig::new(name);
+        assert_eq!(config.service_name, "dynamic-service");
+    }
+
+    #[test]
+    fn test_telemetry_config_with_log_level_from_string() {
+        let level = String::from("warn");
+        let config = TelemetryConfig::new("test").with_log_level(level);
+        assert_eq!(config.log_level, "warn");
+    }
+
+    #[test]
+    fn test_telemetry_config_with_otlp_from_string() {
+        let endpoint = String::from("http://otel:4317");
+        let config = TelemetryConfig::new("test").with_otlp(endpoint);
+        assert!(config.otlp_enabled);
+        assert_eq!(config.otlp_endpoint, Some("http://otel:4317".to_string()));
+    }
+
+    #[test]
+    fn test_telemetry_config_default_otlp_disabled() {
+        let config = TelemetryConfig::default();
+        assert!(!config.otlp_enabled);
+        assert!(config.otlp_endpoint.is_none());
+    }
+
+    #[test]
+    fn test_telemetry_config_redact_fields_extend() {
+        let config = TelemetryConfig::new("test")
+            .with_redact_fields(vec!["field_a".to_string()])
+            .with_redact_fields(vec!["field_b".to_string()]);
+        assert!(config.redact_fields.contains(&"field_a".to_string()));
+        assert!(config.redact_fields.contains(&"field_b".to_string()));
+        // Original defaults should still be present
+        assert!(config.redact_fields.contains(&"password".to_string()));
+    }
+
+    #[test]
+    fn test_telemetry_config_default_redact_count() {
+        let config = TelemetryConfig::default();
+        assert_eq!(config.redact_fields.len(), 5);
+    }
+
+    #[test]
+    fn test_telemetry_config_clone_independence() {
+        let config = TelemetryConfig::new("original").with_prometheus(8080);
+        let mut cloned = config.clone();
+        cloned.service_name = "modified".to_string();
+        // Original should not be affected
+        assert_eq!(config.service_name, "original");
+    }
+
+    #[test]
+    fn test_telemetry_error_is_std_error() {
+        let err: Box<dyn std::error::Error> =
+            Box::new(TelemetryError::Config("test".to_string()));
+        assert!(err.to_string().contains("Configuration error"));
+    }
+
+    #[test]
+    fn test_telemetry_error_debug_all_variants() {
+        let variants: Vec<TelemetryError> = vec![
+            TelemetryError::LoggingInit("a".to_string()),
+            TelemetryError::MetricsInit("b".to_string()),
+            TelemetryError::TracingInit("c".to_string()),
+            TelemetryError::Config("d".to_string()),
+        ];
+        for v in &variants {
+            let debug = format!("{v:?}");
+            assert!(!debug.is_empty());
+        }
+    }
+
+    #[test]
+    fn test_telemetry_config_empty_service_name() {
+        let config = TelemetryConfig::new("");
+        assert_eq!(config.service_name, "");
+    }
+
+    #[test]
+    fn test_telemetry_config_unicode_service_name() {
+        let config = TelemetryConfig::new("service-日本語");
+        assert_eq!(config.service_name, "service-日本語");
+    }
+
+    #[test]
+    fn test_shutdown_telemetry_no_panic() {
+        // Shutdown should never panic even without init
+        shutdown_telemetry();
+    }
 }

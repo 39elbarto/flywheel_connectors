@@ -4809,4 +4809,1809 @@ deny_ptrace = true
         };
         assert!(section.validate().is_ok());
     }
+
+    // ══════════════════════════════════════════════════════════════════
+    // NEW TESTS: ManifestSchemaVersion extended coverage
+    // ══════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn manifest_schema_version_into_string() {
+        let v = ManifestSchemaVersion { major: 2, minor: 1 };
+        let s: String = v.into();
+        assert_eq!(s, "2.1");
+    }
+
+    #[test]
+    fn manifest_schema_version_hash_consistent() {
+        use std::collections::HashSet;
+        let v1 = ManifestSchemaVersion { major: 2, minor: 1 };
+        let v2 = ManifestSchemaVersion { major: 2, minor: 1 };
+        let v3 = ManifestSchemaVersion { major: 3, minor: 0 };
+        let mut set = HashSet::new();
+        set.insert(v1);
+        set.insert(v2);
+        assert_eq!(set.len(), 1);
+        set.insert(v3);
+        assert_eq!(set.len(), 2);
+    }
+
+    #[test]
+    fn manifest_schema_version_copy_clone() {
+        let v = ManifestSchemaVersion { major: 2, minor: 1 };
+        let cloned = v;
+        assert_eq!(v.major, cloned.major);
+        assert_eq!(v.minor, cloned.minor);
+    }
+
+    #[test]
+    fn manifest_schema_version_zero_zero() {
+        let v = ManifestSchemaVersion::try_from("0.0".to_string()).unwrap();
+        assert_eq!(v.major, 0);
+        assert_eq!(v.minor, 0);
+        assert_eq!(v.to_string(), "0.0");
+    }
+
+    #[test]
+    fn manifest_schema_version_large_values() {
+        let v = ManifestSchemaVersion::try_from("65535.65535".to_string()).unwrap();
+        assert_eq!(v.major, 65535);
+        assert_eq!(v.minor, 65535);
+    }
+
+    #[test]
+    fn manifest_schema_version_overflow_rejected() {
+        let err = ManifestSchemaVersion::try_from("99999.0".to_string()).unwrap_err();
+        assert!(err.to_string().contains("major"));
+    }
+
+    #[test]
+    fn manifest_schema_version_debug_output() {
+        let v = ManifestSchemaVersion { major: 2, minor: 1 };
+        let dbg = format!("{v:?}");
+        assert!(dbg.contains("ManifestSchemaVersion"));
+        assert!(dbg.contains('2'));
+        assert!(dbg.contains('1'));
+    }
+
+    // ══════════════════════════════════════════════════════════════════
+    // NEW TESTS: InterfaceHash extended coverage
+    // ══════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn interface_hash_serde_roundtrip() {
+        let h = InterfaceHash::new_blake3_256(INTERFACE_HASH_DOMAIN, [0xBB; 32]);
+        let json = serde_json::to_string(&h).unwrap();
+        let deserialized: InterfaceHash = serde_json::from_str(&json).unwrap();
+        assert_eq!(h, deserialized);
+    }
+
+    #[test]
+    fn interface_hash_clone_and_eq() {
+        let h = InterfaceHash::new_blake3_256(INTERFACE_HASH_DOMAIN, [0xCC; 32]);
+        let cloned = h;
+        assert_eq!(h, cloned);
+        assert_eq!(h.digest, cloned.digest);
+    }
+
+    #[test]
+    fn interface_hash_hash_trait() {
+        use std::collections::HashSet;
+        let h1 = InterfaceHash::new_blake3_256(INTERFACE_HASH_DOMAIN, [0xDD; 32]);
+        let h2 = InterfaceHash::new_blake3_256(INTERFACE_HASH_DOMAIN, [0xDD; 32]);
+        let h3 = InterfaceHash::new_blake3_256(INTERFACE_HASH_DOMAIN, [0xEE; 32]);
+        let mut set = HashSet::new();
+        set.insert(h1);
+        set.insert(h2);
+        assert_eq!(set.len(), 1);
+        set.insert(h3);
+        assert_eq!(set.len(), 2);
+    }
+
+    #[test]
+    fn interface_hash_bad_domain_rejected() {
+        let hex = "aa".repeat(32);
+        let s = format!("blake3-256:bad.domain:{hex}");
+        let err = InterfaceHash::try_from(s).unwrap_err();
+        assert!(err.to_string().contains("domain"));
+    }
+
+    #[test]
+    fn interface_hash_short_digest_rejected() {
+        let hex = "aa".repeat(16); // only 16 bytes
+        let s = format!("blake3-256:{INTERFACE_HASH_DOMAIN}:{hex}");
+        let err = InterfaceHash::try_from(s).unwrap_err();
+        assert!(err.to_string().contains("32 bytes"));
+    }
+
+    #[test]
+    fn interface_hash_invalid_hex_rejected() {
+        let s = format!("blake3-256:{INTERFACE_HASH_DOMAIN}:{}", "zz".repeat(32));
+        let err = InterfaceHash::try_from(s).unwrap_err();
+        assert!(err.to_string().contains("valid hex"));
+    }
+
+    #[test]
+    fn interface_hash_into_string() {
+        let h = InterfaceHash::new_blake3_256(INTERFACE_HASH_DOMAIN, [0x11; 32]);
+        let s: String = h.into();
+        assert!(s.starts_with("blake3-256:"));
+        assert!(s.contains(&"11".repeat(32)));
+    }
+
+    #[test]
+    fn interface_hash_empty_string_rejected() {
+        let err = InterfaceHash::try_from(String::new()).unwrap_err();
+        assert!(err.to_string().contains("algorithm"));
+    }
+
+    #[test]
+    fn interface_hash_debug_output() {
+        let h = InterfaceHash::new_blake3_256(INTERFACE_HASH_DOMAIN, [0xFF; 32]);
+        let dbg = format!("{h:?}");
+        assert!(dbg.contains("InterfaceHash"));
+    }
+
+    // ══════════════════════════════════════════════════════════════════
+    // NEW TESTS: InterfaceHashAlgorithm
+    // ══════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn interface_hash_algorithm_debug_clone_copy_eq() {
+        let a = InterfaceHashAlgorithm::Blake3_256;
+        let b = a;
+        assert_eq!(a, b);
+        let dbg = format!("{a:?}");
+        assert!(dbg.contains("Blake3_256"));
+    }
+
+    #[test]
+    fn interface_hash_algorithm_hash() {
+        use std::collections::HashSet;
+        let mut set = HashSet::new();
+        set.insert(InterfaceHashAlgorithm::Blake3_256);
+        set.insert(InterfaceHashAlgorithm::Blake3_256);
+        assert_eq!(set.len(), 1);
+    }
+
+    // ══════════════════════════════════════════════════════════════════
+    // NEW TESTS: ProtocolVersion extended
+    // ══════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn protocol_version_eq_hash() {
+        use std::collections::HashSet;
+        let v1 = ProtocolVersion { major: 2, minor: 0 };
+        let v2 = ProtocolVersion { major: 2, minor: 0 };
+        let v3 = ProtocolVersion { major: 3, minor: 1 };
+        assert_eq!(v1, v2);
+        assert_ne!(v1, v3);
+        let mut set = HashSet::new();
+        set.insert(v1);
+        set.insert(v2);
+        assert_eq!(set.len(), 1);
+    }
+
+    #[test]
+    fn protocol_version_copy_clone() {
+        let v = ProtocolVersion { major: 1, minor: 5 };
+        let copied = v;
+        assert_eq!(v.major, copied.major);
+        assert_eq!(v.minor, copied.minor);
+    }
+
+    #[test]
+    fn protocol_version_debug() {
+        let v = ProtocolVersion { major: 2, minor: 0 };
+        let dbg = format!("{v:?}");
+        assert!(dbg.contains("ProtocolVersion"));
+    }
+
+    #[test]
+    fn protocol_version_large_values() {
+        let v = ProtocolVersion::try_from("65535.65535".to_string()).unwrap();
+        assert_eq!(v.major, 65535);
+        assert_eq!(v.minor, 65535);
+        assert_eq!(v.to_string(), "65535.65535");
+    }
+
+    // ══════════════════════════════════════════════════════════════════
+    // NEW TESTS: ProtocolRequirement extended
+    // ══════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn protocol_requirement_clone_eq_hash() {
+        use std::collections::HashSet;
+        let pr1 = ProtocolRequirement::try_from("fcp2-sym/2.0".to_string()).unwrap();
+        let pr2 = pr1.clone();
+        assert_eq!(pr1, pr2);
+        let mut set = HashSet::new();
+        set.insert(pr1);
+        set.insert(pr2);
+        assert_eq!(set.len(), 1);
+    }
+
+    #[test]
+    fn protocol_requirement_into_string() {
+        let pr = ProtocolRequirement::try_from("fcp2-sym/2.0".to_string()).unwrap();
+        let s: String = pr.into();
+        assert_eq!(s, "fcp2-sym/2.0");
+    }
+
+    #[test]
+    fn protocol_requirement_debug() {
+        let pr = ProtocolRequirement::try_from("fcp2-sym/2.0".to_string()).unwrap();
+        let dbg = format!("{pr:?}");
+        assert!(dbg.contains("ProtocolRequirement"));
+    }
+
+    #[test]
+    fn protocol_requirement_non_numeric_version_rejected() {
+        let err = ProtocolRequirement::try_from("fcp2-sym/abc.0".to_string()).unwrap_err();
+        assert!(err.to_string().contains("major"));
+    }
+
+    // ══════════════════════════════════════════════════════════════════
+    // NEW TESTS: FeatureId extended
+    // ══════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn feature_id_clone_eq_hash() {
+        use std::collections::HashSet;
+        let f1 = FeatureId::try_from("fcps.aead".to_string()).unwrap();
+        let f2 = f1.clone();
+        assert_eq!(f1, f2);
+        let mut set = HashSet::new();
+        set.insert(f1);
+        set.insert(f2);
+        assert_eq!(set.len(), 1);
+    }
+
+    #[test]
+    fn feature_id_serde_roundtrip() {
+        let fid = FeatureId::try_from("fcps.aead.xchacha20poly1305".to_string()).unwrap();
+        let json = serde_json::to_string(&fid).unwrap();
+        let deserialized: FeatureId = serde_json::from_str(&json).unwrap();
+        assert_eq!(fid, deserialized);
+    }
+
+    #[test]
+    fn feature_id_debug() {
+        let fid = FeatureId::try_from("fcps.aead".to_string()).unwrap();
+        let dbg = format!("{fid:?}");
+        assert!(dbg.contains("FeatureId"));
+    }
+
+    // ══════════════════════════════════════════════════════════════════
+    // NEW TESTS: ConnectorManifest full roundtrip
+    // ══════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn connector_manifest_clone() {
+        let placeholder = format!("blake3-256:{INTERFACE_HASH_DOMAIN}:{}", "0".repeat(64));
+        let unchecked = ConnectorManifest::parse_str_unchecked(&test_manifest_toml(&placeholder))
+            .expect("unchecked parse");
+        let cloned = unchecked.clone();
+        assert_eq!(unchecked.connector.id.as_str(), cloned.connector.id.as_str());
+        assert_eq!(
+            unchecked.connector.name,
+            cloned.connector.name
+        );
+    }
+
+    #[test]
+    fn connector_manifest_debug() {
+        let placeholder = format!("blake3-256:{INTERFACE_HASH_DOMAIN}:{}", "0".repeat(64));
+        let m = ConnectorManifest::parse_str_unchecked(&test_manifest_toml(&placeholder))
+            .expect("unchecked parse");
+        let dbg = format!("{m:?}");
+        assert!(dbg.contains("ConnectorManifest"));
+        assert!(dbg.contains("fcp.telegram"));
+    }
+
+    #[test]
+    fn connector_manifest_serde_json_roundtrip() {
+        let placeholder = format!("blake3-256:{INTERFACE_HASH_DOMAIN}:{}", "0".repeat(64));
+        let m = ConnectorManifest::parse_str_unchecked(&test_manifest_toml(&placeholder))
+            .expect("unchecked parse");
+        let json = serde_json::to_string(&m).unwrap();
+        let deserialized: ConnectorManifest = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.connector.id.as_str(), "fcp.telegram");
+        assert_eq!(deserialized.connector.name, "Telegram Connector");
+    }
+
+    #[test]
+    fn connector_manifest_toml_roundtrip() {
+        let placeholder = format!("blake3-256:{INTERFACE_HASH_DOMAIN}:{}", "0".repeat(64));
+        let m = ConnectorManifest::parse_str_unchecked(&test_manifest_toml(&placeholder))
+            .expect("unchecked parse");
+        let toml_str = toml::to_string(&m).unwrap();
+        let reparsed: ConnectorManifest = toml::from_str(&toml_str).unwrap();
+        assert_eq!(reparsed.connector.id.as_str(), "fcp.telegram");
+    }
+
+    // ══════════════════════════════════════════════════════════════════
+    // NEW TESTS: ManifestSection validation
+    // ══════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn manifest_section_rejects_wrong_format() {
+        let placeholder = format!("blake3-256:{INTERFACE_HASH_DOMAIN}:{}", "0".repeat(64));
+        let toml = test_manifest_toml(&placeholder)
+            .replace("fcp-connector-manifest", "bad-format");
+        let err = ConnectorManifest::parse_str_unchecked(&toml);
+        // Should parse but then fail validation
+        if let Ok(m) = err {
+            let validation = m.validate();
+            assert!(validation.is_err());
+            assert!(validation.unwrap_err().to_string().contains("format"));
+        }
+    }
+
+    #[test]
+    fn manifest_section_rejects_schema_version_3() {
+        let placeholder = format!("blake3-256:{INTERFACE_HASH_DOMAIN}:{}", "0".repeat(64));
+        let toml = test_manifest_toml(&placeholder)
+            .replace("schema_version = \"2.1\"", "schema_version = \"3.0\"");
+        let m = ConnectorManifest::parse_str_unchecked(&toml).unwrap();
+        let err = m.validate().unwrap_err();
+        assert!(err.to_string().contains("schema"));
+    }
+
+    #[test]
+    fn manifest_section_rejects_zero_max_datagram() {
+        let placeholder = format!("blake3-256:{INTERFACE_HASH_DOMAIN}:{}", "0".repeat(64));
+        let toml = test_manifest_toml(&placeholder)
+            .replace("max_datagram_bytes = 1200", "max_datagram_bytes = 0");
+        let m = ConnectorManifest::parse_str_unchecked(&toml).unwrap();
+        let err = m.validate().unwrap_err();
+        assert!(err.to_string().contains("max_datagram_bytes"));
+    }
+
+    // ══════════════════════════════════════════════════════════════════
+    // NEW TESTS: ConnectorSection validation
+    // ══════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn connector_section_rejects_empty_description() {
+        let placeholder = format!("blake3-256:{INTERFACE_HASH_DOMAIN}:{}", "0".repeat(64));
+        let toml = test_manifest_toml(&placeholder).replace(
+            "description = \"Secure Telegram Bot API integration\"",
+            "description = \"\"",
+        );
+        let m = ConnectorManifest::parse_str_unchecked(&toml).unwrap();
+        let hash = m.compute_interface_hash().unwrap();
+        let with_hash = test_manifest_toml(&hash.to_string()).replace(
+            "description = \"Secure Telegram Bot API integration\"",
+            "description = \"\"",
+        );
+        let err = ConnectorManifest::parse_str(&with_hash).unwrap_err();
+        assert!(
+            matches!(err, ManifestError::Invalid { field, .. } if field == "connector.description")
+        );
+    }
+
+    #[test]
+    fn connector_section_rejects_whitespace_only_name() {
+        let placeholder = format!("blake3-256:{INTERFACE_HASH_DOMAIN}:{}", "0".repeat(64));
+        let toml = test_manifest_toml(&placeholder)
+            .replace("name = \"Telegram Connector\"", "name = \"   \"");
+        let m = ConnectorManifest::parse_str_unchecked(&toml).unwrap();
+        let hash = m.compute_interface_hash().unwrap();
+        let with_hash = test_manifest_toml(&hash.to_string())
+            .replace("name = \"Telegram Connector\"", "name = \"   \"");
+        let err = ConnectorManifest::parse_str(&with_hash).unwrap_err();
+        assert!(
+            matches!(err, ManifestError::Invalid { field, .. } if field == "connector.name")
+        );
+    }
+
+    #[test]
+    fn connector_section_rejects_empty_archetypes() {
+        let placeholder = format!("blake3-256:{INTERFACE_HASH_DOMAIN}:{}", "0".repeat(64));
+        let toml = test_manifest_toml(&placeholder).replace(
+            "archetypes = [\"bidirectional\", \"streaming\"]",
+            "archetypes = []",
+        );
+        let m = ConnectorManifest::parse_str_unchecked(&toml).unwrap();
+        let hash = m.compute_interface_hash().unwrap();
+        let with_hash = test_manifest_toml(&hash.to_string()).replace(
+            "archetypes = [\"bidirectional\", \"streaming\"]",
+            "archetypes = []",
+        );
+        let err = ConnectorManifest::parse_str(&with_hash).unwrap_err();
+        assert!(
+            matches!(err, ManifestError::Invalid { field, .. } if field == "connector.archetypes")
+        );
+    }
+
+    // ══════════════════════════════════════════════════════════════════
+    // NEW TESTS: ZonesSection validation
+    // ══════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn zones_section_home_in_forbidden_rejected() {
+        let placeholder = format!("blake3-256:{INTERFACE_HASH_DOMAIN}:{}", "0".repeat(64));
+        let toml = test_manifest_toml(&placeholder)
+            .replace("forbidden = [\"z:public\"]", "forbidden = [\"z:community\"]");
+        let m = ConnectorManifest::parse_str_unchecked(&toml).unwrap();
+        let hash = m.compute_interface_hash().unwrap();
+        let with_hash = test_manifest_toml(&hash.to_string())
+            .replace("forbidden = [\"z:public\"]", "forbidden = [\"z:community\"]");
+        let err = ConnectorManifest::parse_str(&with_hash).unwrap_err();
+        assert!(err.to_string().contains("home zone"));
+    }
+
+    // ══════════════════════════════════════════════════════════════════
+    // NEW TESTS: CapabilitiesSection validation
+    // ══════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn capabilities_section_duplicate_capability_rejected() {
+        let placeholder = format!("blake3-256:{INTERFACE_HASH_DOMAIN}:{}", "0".repeat(64));
+        let toml = test_manifest_toml(&placeholder).replace(
+            "required = [\"ipc.gateway\", \"network.dns\", \"network.egress\", \"network.tls.sni\"]",
+            "required = [\"ipc.gateway\", \"network.dns\", \"network.egress\", \"network.dns\"]",
+        );
+        let m = ConnectorManifest::parse_str_unchecked(&toml).unwrap();
+        let hash = m.compute_interface_hash().unwrap();
+        let with_hash = test_manifest_toml(&hash.to_string()).replace(
+            "required = [\"ipc.gateway\", \"network.dns\", \"network.egress\", \"network.tls.sni\"]",
+            "required = [\"ipc.gateway\", \"network.dns\", \"network.egress\", \"network.dns\"]",
+        );
+        let err = ConnectorManifest::parse_str(&with_hash).unwrap_err();
+        assert!(err.to_string().contains("duplicate"));
+    }
+
+    #[test]
+    fn capabilities_section_cross_list_duplicate_rejected() {
+        let placeholder = format!("blake3-256:{INTERFACE_HASH_DOMAIN}:{}", "0".repeat(64));
+        // Put ipc.gateway in both required and optional
+        let toml = test_manifest_toml(&placeholder).replace(
+            "optional = [\"media.download\"]",
+            "optional = [\"ipc.gateway\"]",
+        );
+        let m = ConnectorManifest::parse_str_unchecked(&toml).unwrap();
+        let hash = m.compute_interface_hash().unwrap();
+        let with_hash = test_manifest_toml(&hash.to_string()).replace(
+            "optional = [\"media.download\"]",
+            "optional = [\"ipc.gateway\"]",
+        );
+        let err = ConnectorManifest::parse_str(&with_hash).unwrap_err();
+        assert!(err.to_string().contains("duplicate"));
+    }
+
+    // ══════════════════════════════════════════════════════════════════
+    // NEW TESTS: ProvidesSection validation
+    // ══════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn provides_section_rejects_empty_op_description() {
+        let placeholder = format!("blake3-256:{INTERFACE_HASH_DOMAIN}:{}", "0".repeat(64));
+        let toml = test_manifest_toml(&placeholder).replace(
+            "description = \"Send a message to a Telegram chat\"",
+            "description = \"\"",
+        );
+        let m = ConnectorManifest::parse_str_unchecked(&toml).unwrap();
+        let hash = m.compute_interface_hash().unwrap();
+        let with_hash = test_manifest_toml(&hash.to_string()).replace(
+            "description = \"Send a message to a Telegram chat\"",
+            "description = \"\"",
+        );
+        let err = ConnectorManifest::parse_str(&with_hash).unwrap_err();
+        assert!(err.to_string().contains("description"));
+    }
+
+    // ══════════════════════════════════════════════════════════════════
+    // NEW TESTS: SandboxProfile extended
+    // ══════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn sandbox_profile_all_variants_serde() {
+        for (json_str, expected) in [
+            ("\"strict\"", SandboxProfile::Strict),
+            ("\"strict_plus\"", SandboxProfile::StrictPlus),
+            ("\"moderate\"", SandboxProfile::Moderate),
+            ("\"permissive\"", SandboxProfile::Permissive),
+        ] {
+            let parsed: SandboxProfile = serde_json::from_str(json_str).unwrap();
+            assert_eq!(parsed, expected);
+            let serialized = serde_json::to_string(&parsed).unwrap();
+            assert_eq!(serialized, json_str);
+        }
+    }
+
+    #[test]
+    fn sandbox_profile_debug_clone_copy() {
+        let p = SandboxProfile::Moderate;
+        let p2 = p;
+        assert_eq!(p, p2);
+        let dbg = format!("{p:?}");
+        assert!(dbg.contains("Moderate"));
+    }
+
+    #[test]
+    fn sandbox_profile_invalid_variant_rejected() {
+        let result = serde_json::from_str::<SandboxProfile>("\"ultra_strict\"");
+        assert!(result.is_err());
+    }
+
+    // ══════════════════════════════════════════════════════════════════
+    // NEW TESTS: SandboxSection serde roundtrip
+    // ══════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn sandbox_section_serde_roundtrip() {
+        let section = SandboxSection {
+            profile: SandboxProfile::Strict,
+            memory_mb: 512,
+            cpu_percent: 75,
+            wall_clock_timeout_ms: 60_000,
+            fs_readonly_paths: vec!["/usr".into(), "/lib".into()],
+            fs_writable_paths: vec!["$CONNECTOR_STATE".into()],
+            deny_exec: true,
+            deny_ptrace: true,
+        };
+        let json = serde_json::to_string(&section).unwrap();
+        let deserialized: SandboxSection = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.memory_mb, 512);
+        assert_eq!(deserialized.cpu_percent, 75);
+        assert!(deserialized.deny_exec);
+        assert_eq!(deserialized.fs_readonly_paths.len(), 2);
+    }
+
+    #[test]
+    fn sandbox_section_valid() {
+        let section = SandboxSection {
+            profile: SandboxProfile::Permissive,
+            memory_mb: 1024,
+            cpu_percent: 100,
+            wall_clock_timeout_ms: 120_000,
+            fs_readonly_paths: vec![],
+            fs_writable_paths: vec![],
+            deny_exec: false,
+            deny_ptrace: false,
+        };
+        assert!(section.validate().is_ok());
+    }
+
+    #[test]
+    fn sandbox_section_clone_debug() {
+        let section = SandboxSection {
+            profile: SandboxProfile::Strict,
+            memory_mb: 128,
+            cpu_percent: 50,
+            wall_clock_timeout_ms: 30_000,
+            fs_readonly_paths: vec![],
+            fs_writable_paths: vec![],
+            deny_exec: true,
+            deny_ptrace: true,
+        };
+        let cloned = section.clone();
+        assert_eq!(section.memory_mb, cloned.memory_mb);
+        let dbg = format!("{section:?}");
+        assert!(dbg.contains("SandboxSection"));
+    }
+
+    // ══════════════════════════════════════════════════════════════════
+    // NEW TESTS: NetworkConstraints serde roundtrip
+    // ══════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn network_constraints_serde_roundtrip() {
+        let nc = NetworkConstraints {
+            host_allow: vec!["api.example.com".into()],
+            port_allow: vec![443, 8443],
+            ip_allow: vec![],
+            cidr_deny: vec!["10.0.0.0/8".into()],
+            deny_localhost: true,
+            deny_private_ranges: true,
+            deny_tailnet_ranges: true,
+            require_sni: true,
+            spki_pins: vec![],
+            deny_ip_literals: true,
+            require_host_canonicalization: true,
+            dns_max_ips: 16,
+            max_redirects: 5,
+            connect_timeout_ms: 10_000,
+            total_timeout_ms: 60_000,
+            max_response_bytes: 10_485_760,
+        };
+        let json = serde_json::to_string(&nc).unwrap();
+        let deserialized: NetworkConstraints = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.host_allow, vec!["api.example.com"]);
+        assert_eq!(deserialized.port_allow, vec![443, 8443]);
+    }
+
+    #[test]
+    fn network_constraints_clone_debug() {
+        let nc = NetworkConstraints {
+            host_allow: vec!["api.example.com".into()],
+            port_allow: vec![443],
+            ip_allow: vec![],
+            cidr_deny: vec![],
+            deny_localhost: true,
+            deny_private_ranges: true,
+            deny_tailnet_ranges: true,
+            require_sni: true,
+            spki_pins: vec![],
+            deny_ip_literals: true,
+            require_host_canonicalization: false,
+            dns_max_ips: 16,
+            max_redirects: 5,
+            connect_timeout_ms: 10_000,
+            total_timeout_ms: 60_000,
+            max_response_bytes: 10_485_760,
+        };
+        let cloned = nc.clone();
+        assert_eq!(nc.host_allow, cloned.host_allow);
+        let dbg = format!("{nc:?}");
+        assert!(dbg.contains("NetworkConstraints"));
+    }
+
+    #[test]
+    fn network_constraints_valid_with_multiple_hosts() {
+        let nc = NetworkConstraints {
+            host_allow: vec!["api.example.com".into(), "cdn.example.com".into()],
+            port_allow: vec![443, 80],
+            ip_allow: vec![],
+            cidr_deny: vec![],
+            deny_localhost: true,
+            deny_private_ranges: true,
+            deny_tailnet_ranges: true,
+            require_sni: true,
+            spki_pins: vec![],
+            deny_ip_literals: true,
+            require_host_canonicalization: false,
+            dns_max_ips: 16,
+            max_redirects: 5,
+            connect_timeout_ms: 10_000,
+            total_timeout_ms: 60_000,
+            max_response_bytes: 10_485_760,
+        };
+        assert!(nc.validate().is_ok());
+    }
+
+    #[test]
+    fn network_constraints_valid_wildcard_in_full_validation() {
+        let nc = NetworkConstraints {
+            host_allow: vec!["*.example.com".into()],
+            port_allow: vec![443],
+            ip_allow: vec![],
+            cidr_deny: vec![],
+            deny_localhost: true,
+            deny_private_ranges: true,
+            deny_tailnet_ranges: true,
+            require_sni: true,
+            spki_pins: vec![],
+            deny_ip_literals: true,
+            require_host_canonicalization: false,
+            dns_max_ips: 16,
+            max_redirects: 5,
+            connect_timeout_ms: 10_000,
+            total_timeout_ms: 60_000,
+            max_response_bytes: 10_485_760,
+        };
+        assert!(nc.validate().is_ok());
+    }
+
+    #[test]
+    fn network_constraints_with_ip_allow() {
+        let nc = NetworkConstraints {
+            host_allow: vec!["api.example.com".into()],
+            port_allow: vec![443],
+            ip_allow: vec!["93.184.216.34".parse().unwrap()],
+            cidr_deny: vec![],
+            deny_localhost: true,
+            deny_private_ranges: true,
+            deny_tailnet_ranges: true,
+            require_sni: true,
+            spki_pins: vec![],
+            deny_ip_literals: true,
+            require_host_canonicalization: false,
+            dns_max_ips: 16,
+            max_redirects: 5,
+            connect_timeout_ms: 10_000,
+            total_timeout_ms: 60_000,
+            max_response_bytes: 10_485_760,
+        };
+        assert!(nc.validate().is_ok());
+    }
+
+    #[test]
+    fn network_constraints_with_spki_pins() {
+        let nc = NetworkConstraints {
+            host_allow: vec!["api.example.com".into()],
+            port_allow: vec![443],
+            ip_allow: vec![],
+            cidr_deny: vec![],
+            deny_localhost: true,
+            deny_private_ranges: true,
+            deny_tailnet_ranges: true,
+            require_sni: true,
+            spki_pins: vec![Base64Bytes(vec![1, 2, 3, 4])],
+            deny_ip_literals: true,
+            require_host_canonicalization: false,
+            dns_max_ips: 16,
+            max_redirects: 5,
+            connect_timeout_ms: 10_000,
+            total_timeout_ms: 60_000,
+            max_response_bytes: 10_485_760,
+        };
+        assert!(nc.validate().is_ok());
+    }
+
+    // ══════════════════════════════════════════════════════════════════
+    // NEW TESTS: RateLimitPoolSection serde
+    // ══════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn rate_limit_pool_section_serde_roundtrip() {
+        let pool = RateLimitPoolSection {
+            id: "test_pool".into(),
+            description: Some("A test pool".into()),
+            requests: 100,
+            window_ms: 60_000,
+            burst: Some(20),
+            unit: Some("tokens".into()),
+            enforcement: Some("soft".into()),
+            scope: Some("global".into()),
+        };
+        let json = serde_json::to_string(&pool).unwrap();
+        let deserialized: RateLimitPoolSection = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.id, "test_pool");
+        assert_eq!(deserialized.requests, 100);
+        assert_eq!(deserialized.burst, Some(20));
+    }
+
+    #[test]
+    fn rate_limit_pool_section_minimal_serde() {
+        let pool = RateLimitPoolSection {
+            id: "minimal".into(),
+            description: None,
+            requests: 10,
+            window_ms: 1000,
+            burst: None,
+            unit: None,
+            enforcement: None,
+            scope: None,
+        };
+        let json = serde_json::to_string(&pool).unwrap();
+        let deserialized: RateLimitPoolSection = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.id, "minimal");
+        assert!(deserialized.description.is_none());
+        assert!(deserialized.burst.is_none());
+    }
+
+    #[test]
+    fn rate_limit_pool_section_clone_debug() {
+        let pool = RateLimitPoolSection {
+            id: "test".into(),
+            description: None,
+            requests: 10,
+            window_ms: 1000,
+            burst: None,
+            unit: None,
+            enforcement: None,
+            scope: None,
+        };
+        let cloned = pool.clone();
+        assert_eq!(pool.id, cloned.id);
+        let dbg = format!("{pool:?}");
+        assert!(dbg.contains("RateLimitPoolSection"));
+    }
+
+    // ══════════════════════════════════════════════════════════════════
+    // NEW TESTS: RateLimitsSection default unit/enforcement/scope
+    // ══════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn rate_limits_section_default_unit_is_requests() {
+        use fcp_core::RateLimitUnit;
+        let section = RateLimitsSection {
+            pools: vec![RateLimitPoolSection {
+                id: "test".into(),
+                description: None,
+                requests: 10,
+                window_ms: 1000,
+                burst: None,
+                unit: None,
+                enforcement: None,
+                scope: None,
+            }],
+            operation_pools: std::collections::HashMap::default(),
+        };
+        assert_eq!(
+            section.to_declarations().limits[0].config.unit,
+            RateLimitUnit::Requests
+        );
+    }
+
+    #[test]
+    fn rate_limits_section_default_enforcement_is_hard() {
+        use fcp_core::RateLimitEnforcement;
+        let section = RateLimitsSection {
+            pools: vec![RateLimitPoolSection {
+                id: "test".into(),
+                description: None,
+                requests: 10,
+                window_ms: 1000,
+                burst: None,
+                unit: None,
+                enforcement: None,
+                scope: None,
+            }],
+            operation_pools: std::collections::HashMap::default(),
+        };
+        assert_eq!(
+            section.to_declarations().limits[0].enforcement,
+            RateLimitEnforcement::Hard
+        );
+    }
+
+    #[test]
+    fn rate_limits_section_default_scope_is_instance() {
+        use fcp_core::RateLimitScope;
+        let section = RateLimitsSection {
+            pools: vec![RateLimitPoolSection {
+                id: "test".into(),
+                description: None,
+                requests: 10,
+                window_ms: 1000,
+                burst: None,
+                unit: None,
+                enforcement: None,
+                scope: None,
+            }],
+            operation_pools: std::collections::HashMap::default(),
+        };
+        assert_eq!(
+            section.to_declarations().limits[0].scope,
+            RateLimitScope::Instance
+        );
+    }
+
+    #[test]
+    fn rate_limits_section_unknown_unit_defaults_to_requests() {
+        use fcp_core::RateLimitUnit;
+        let section = RateLimitsSection {
+            pools: vec![RateLimitPoolSection {
+                id: "test".into(),
+                description: None,
+                requests: 10,
+                window_ms: 1000,
+                burst: None,
+                unit: Some("widgets".into()),
+                enforcement: None,
+                scope: None,
+            }],
+            operation_pools: std::collections::HashMap::default(),
+        };
+        assert_eq!(
+            section.to_declarations().limits[0].config.unit,
+            RateLimitUnit::Requests
+        );
+    }
+
+    #[test]
+    fn rate_limits_section_unknown_enforcement_defaults_to_hard() {
+        use fcp_core::RateLimitEnforcement;
+        let section = RateLimitsSection {
+            pools: vec![RateLimitPoolSection {
+                id: "test".into(),
+                description: None,
+                requests: 10,
+                window_ms: 1000,
+                burst: None,
+                unit: None,
+                enforcement: Some("unknown".into()),
+                scope: None,
+            }],
+            operation_pools: std::collections::HashMap::default(),
+        };
+        assert_eq!(
+            section.to_declarations().limits[0].enforcement,
+            RateLimitEnforcement::Hard
+        );
+    }
+
+    #[test]
+    fn rate_limits_section_unknown_scope_defaults_to_instance() {
+        use fcp_core::RateLimitScope;
+        let section = RateLimitsSection {
+            pools: vec![RateLimitPoolSection {
+                id: "test".into(),
+                description: None,
+                requests: 10,
+                window_ms: 1000,
+                burst: None,
+                unit: None,
+                enforcement: None,
+                scope: Some("unknown".into()),
+            }],
+            operation_pools: std::collections::HashMap::default(),
+        };
+        assert_eq!(
+            section.to_declarations().limits[0].scope,
+            RateLimitScope::Instance
+        );
+    }
+
+    #[test]
+    fn rate_limits_section_window_duration() {
+        let section = RateLimitsSection {
+            pools: vec![RateLimitPoolSection {
+                id: "test".into(),
+                description: None,
+                requests: 10,
+                window_ms: 5000,
+                burst: None,
+                unit: None,
+                enforcement: None,
+                scope: None,
+            }],
+            operation_pools: std::collections::HashMap::default(),
+        };
+        let decls = section.to_declarations();
+        assert_eq!(
+            decls.limits[0].config.window,
+            std::time::Duration::from_secs(5)
+        );
+    }
+
+    // ══════════════════════════════════════════════════════════════════
+    // NEW TESTS: EventSection clone/debug
+    // ══════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn event_section_clone_debug() {
+        let section = EventSection {
+            description: "Test event".into(),
+            streaming: true,
+            replay: false,
+            topic: Some("topic".into()),
+            requires_ack: true,
+            schema: Some(json!({"type": "object"})),
+        };
+        let cloned = section.clone();
+        assert_eq!(section.description, cloned.description);
+        let dbg = format!("{section:?}");
+        assert!(dbg.contains("EventSection"));
+    }
+
+    // ══════════════════════════════════════════════════════════════════
+    // NEW TESTS: Base64Bytes ordering
+    // ══════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn base64_bytes_ord() {
+        let a = Base64Bytes(vec![1, 2, 3]);
+        let b = Base64Bytes(vec![1, 2, 4]);
+        let c = Base64Bytes(vec![1, 2, 3]);
+        assert!(a < b);
+        assert_eq!(a, c);
+        assert!(b > a);
+    }
+
+    #[test]
+    fn base64_bytes_hash() {
+        use std::collections::HashSet;
+        let a = Base64Bytes(vec![1, 2, 3]);
+        let b = Base64Bytes(vec![1, 2, 3]);
+        let c = Base64Bytes(vec![4, 5, 6]);
+        let mut set = HashSet::new();
+        set.insert(a);
+        set.insert(b);
+        assert_eq!(set.len(), 1);
+        set.insert(c);
+        assert_eq!(set.len(), 2);
+    }
+
+    #[test]
+    fn base64_bytes_large_data() {
+        let data = vec![0xAA; 1024];
+        let b = Base64Bytes(data.clone());
+        assert_eq!(b.as_bytes().len(), 1024);
+        let s: String = b.into();
+        assert!(s.starts_with("base64:"));
+        let roundtrip = Base64Bytes::try_from(s).unwrap();
+        assert_eq!(roundtrip.as_bytes(), &data);
+    }
+
+    // ══════════════════════════════════════════════════════════════════
+    // NEW TESTS: ObjectIdRef extended
+    // ══════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn object_id_ref_copy_clone_hash() {
+        use std::collections::HashSet;
+        let oid = ObjectIdRef::try_from("objectid:".to_string() + &"ff".repeat(32)).unwrap();
+        let copied = oid;
+        assert_eq!(oid, copied);
+        let mut set = HashSet::new();
+        set.insert(oid);
+        set.insert(copied);
+        assert_eq!(set.len(), 1);
+    }
+
+    #[test]
+    fn object_id_ref_debug() {
+        let oid = ObjectIdRef::try_from("objectid:".to_string() + &"ab".repeat(32)).unwrap();
+        let dbg = format!("{oid:?}");
+        assert!(dbg.contains("ObjectIdRef"));
+    }
+
+    #[test]
+    fn object_id_ref_display_format() {
+        let hex = "cc".repeat(32);
+        let oid = ObjectIdRef::try_from(format!("objectid:{hex}")).unwrap();
+        let display = format!("{oid}");
+        assert_eq!(display, format!("objectid:{hex}"));
+    }
+
+    // ══════════════════════════════════════════════════════════════════
+    // NEW TESTS: ConnectorStateModel extended
+    // ══════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn connector_state_model_clone_debug() {
+        let model = ConnectorStateModel::Crdt {
+            crdt_type: ConnectorCrdtType::PnCounter,
+        };
+        let copied = model;
+        assert_eq!(model, copied);
+        let dbg = format!("{model:?}");
+        assert!(dbg.contains("Crdt"));
+        assert!(dbg.contains("PnCounter"));
+    }
+
+    #[test]
+    fn connector_state_model_display_all_crdt_types() {
+        for (crdt_type, expected) in [
+            (ConnectorCrdtType::LwwMap, "crdt(lww_map)"),
+            (ConnectorCrdtType::OrSet, "crdt(or_set)"),
+            (ConnectorCrdtType::GCounter, "crdt(g_counter)"),
+            (ConnectorCrdtType::PnCounter, "crdt(pn_counter)"),
+        ] {
+            let model = ConnectorStateModel::Crdt { crdt_type };
+            assert_eq!(model.to_string(), expected);
+        }
+    }
+
+    // ══════════════════════════════════════════════════════════════════
+    // NEW TESTS: ConnectorCrdtType extended
+    // ══════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn connector_crdt_type_debug_clone_copy_eq_hash() {
+        use std::collections::HashSet;
+        let a = ConnectorCrdtType::LwwMap;
+        let b = a;
+        assert_eq!(a, b);
+        let dbg = format!("{a:?}");
+        assert!(dbg.contains("LwwMap"));
+        let mut set = HashSet::new();
+        set.insert(a);
+        set.insert(b);
+        assert_eq!(set.len(), 1);
+    }
+
+    // ══════════════════════════════════════════════════════════════════
+    // NEW TESTS: ManifestApprovalMode extended
+    // ══════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn manifest_approval_mode_debug_clone_copy() {
+        let mode = ManifestApprovalMode::Interactive;
+        let copied = mode;
+        assert_eq!(mode, copied);
+        let dbg = format!("{mode:?}");
+        assert!(dbg.contains("Interactive"));
+    }
+
+    #[test]
+    fn manifest_approval_mode_all_variants_serde_roundtrip() {
+        for (variant, json_str) in [
+            (ManifestApprovalMode::None, "\"none\""),
+            (ManifestApprovalMode::Policy, "\"policy\""),
+            (ManifestApprovalMode::Interactive, "\"interactive\""),
+            (ManifestApprovalMode::ElevationToken, "\"elevation_token\""),
+        ] {
+            let serialized = serde_json::to_string(&variant).unwrap();
+            assert_eq!(serialized, json_str);
+            let deserialized: ManifestApprovalMode = serde_json::from_str(&serialized).unwrap();
+            assert_eq!(deserialized, variant);
+        }
+    }
+
+    // ══════════════════════════════════════════════════════════════════
+    // NEW TESTS: RateLimit debug/clone
+    // ══════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn rate_limit_debug() {
+        let rl: RateLimit = serde_json::from_str("\"100/min\"").unwrap();
+        let dbg = format!("{rl:?}");
+        assert!(dbg.contains("RateLimit"));
+    }
+
+    #[test]
+    fn rate_limit_clone() {
+        let rl: RateLimit = serde_json::from_str("\"50/sec\"").unwrap();
+        let cloned = rl.clone();
+        assert_eq!(rl.as_inner().max, cloned.as_inner().max);
+        assert_eq!(rl.as_inner().per_ms, cloned.as_inner().per_ms);
+    }
+
+    #[test]
+    fn rate_limit_serialize_roundtrip() {
+        let rl: RateLimit = serde_json::from_str("\"200/day\"").unwrap();
+        let json = serde_json::to_string(&rl).unwrap();
+        // Structured form after deserialization
+        let reparsed: RateLimit = serde_json::from_str(&json).unwrap();
+        assert_eq!(reparsed.as_inner().max, 200);
+        assert_eq!(reparsed.as_inner().per_ms, 86_400_000);
+    }
+
+    #[test]
+    fn rate_limit_shorthand_s_alias() {
+        let rl: RateLimit = serde_json::from_str("\"15/s\"").unwrap();
+        assert_eq!(rl.as_inner().max, 15);
+        assert_eq!(rl.as_inner().per_ms, 1_000);
+    }
+
+    #[test]
+    fn rate_limit_shorthand_m_alias() {
+        let rl: RateLimit = serde_json::from_str("\"30/m\"").unwrap();
+        assert_eq!(rl.as_inner().max, 30);
+        assert_eq!(rl.as_inner().per_ms, 60_000);
+    }
+
+    #[test]
+    fn rate_limit_shorthand_h_alias() {
+        let rl: RateLimit = serde_json::from_str("\"500/h\"").unwrap();
+        assert_eq!(rl.as_inner().max, 500);
+        assert_eq!(rl.as_inner().per_ms, 3_600_000);
+    }
+
+    #[test]
+    fn rate_limit_shorthand_d_alias() {
+        let rl: RateLimit = serde_json::from_str("\"1000/d\"").unwrap();
+        assert_eq!(rl.as_inner().max, 1000);
+        assert_eq!(rl.as_inner().per_ms, 86_400_000);
+    }
+
+    // ══════════════════════════════════════════════════════════════════
+    // NEW TESTS: ConnectorArchetype extended
+    // ══════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn connector_archetype_invalid_variant_rejected() {
+        let result = serde_json::from_str::<ConnectorArchetype>("\"compute\"");
+        assert!(result.is_err());
+    }
+
+    // ══════════════════════════════════════════════════════════════════
+    // NEW TESTS: ConnectorRuntimeFormat extended
+    // ══════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn connector_runtime_format_invalid_variant_rejected() {
+        let result = serde_json::from_str::<ConnectorRuntimeFormat>("\"docker\"");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn connector_runtime_format_serde_roundtrip() {
+        for variant in [ConnectorRuntimeFormat::Native, ConnectorRuntimeFormat::Wasi] {
+            let json = serde_json::to_string(&variant).unwrap();
+            let deserialized: ConnectorRuntimeFormat = serde_json::from_str(&json).unwrap();
+            assert_eq!(deserialized, variant);
+        }
+    }
+
+    // ══════════════════════════════════════════════════════════════════
+    // NEW TESTS: lint_capability_id_no_network_addressing extended
+    // ══════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn lint_allows_single_segment_id() {
+        assert!(lint_capability_id_no_network_addressing("storage", "capabilities.required").is_ok());
+    }
+
+    #[test]
+    fn lint_allows_two_segment_id_no_tld() {
+        assert!(lint_capability_id_no_network_addressing("storage.read", "capabilities.required").is_ok());
+    }
+
+    #[test]
+    fn lint_rejects_url_scheme_ftp() {
+        let err = lint_capability_id_no_network_addressing(
+            "ftp:files.example.com",
+            "capabilities.required",
+        );
+        assert!(err.is_err());
+        assert!(err.unwrap_err().to_string().contains("URL scheme"));
+    }
+
+    #[test]
+    fn lint_rejects_url_scheme_ws() {
+        let err = lint_capability_id_no_network_addressing(
+            "ws:stream.example.com",
+            "capabilities.optional",
+        );
+        assert!(err.is_err());
+        assert!(err.unwrap_err().to_string().contains("URL scheme"));
+    }
+
+    #[test]
+    fn lint_rejects_hostname_tld_gov() {
+        let err = lint_capability_id_no_network_addressing(
+            "api.agency.gov",
+            "capabilities.required",
+        );
+        assert!(err.is_err());
+        assert!(err.unwrap_err().to_string().contains(".gov"));
+    }
+
+    #[test]
+    fn lint_rejects_hostname_tld_mil() {
+        let err = lint_capability_id_no_network_addressing(
+            "api.base.mil",
+            "capabilities.required",
+        );
+        assert!(err.is_err());
+        assert!(err.unwrap_err().to_string().contains(".mil"));
+    }
+
+    #[test]
+    fn lint_rejects_port_65535() {
+        let err = lint_capability_id_no_network_addressing(
+            "service:65535",
+            "capabilities.required",
+        );
+        assert!(err.is_err());
+        assert!(err.unwrap_err().to_string().contains("port number"));
+    }
+
+    #[test]
+    fn lint_allows_port_zero_not_flagged() {
+        // Port 0 is not valid (> 0 check), so it should pass through
+        let result = lint_capability_id_no_network_addressing(
+            "service:00",
+            "capabilities.required",
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn lint_allows_six_digit_after_colon_not_flagged() {
+        // Six digits after colon is not in the 2-5 digit port range
+        let result = lint_capability_id_no_network_addressing(
+            "service:123456",
+            "capabilities.required",
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn lint_ipv4_embedded_in_longer_id() {
+        let err = lint_capability_id_no_network_addressing(
+            "prefix.192.168.1.1.suffix",
+            "capabilities.required",
+        );
+        assert!(err.is_err());
+        assert!(err.unwrap_err().to_string().contains("IPv4"));
+    }
+
+    // ══════════════════════════════════════════════════════════════════
+    // NEW TESTS: SupplyChainAttestationRef serde
+    // ══════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn supply_chain_attestation_ref_serde_roundtrip() {
+        let oid = ObjectIdRef::try_from("objectid:".to_string() + &"dd".repeat(32)).unwrap();
+        let att = SupplyChainAttestationRef {
+            attestation_type: AttestationType::ReproducibleBuild,
+            object_id: oid,
+        };
+        let json = serde_json::to_string(&att).unwrap();
+        let deserialized: SupplyChainAttestationRef = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.attestation_type, AttestationType::ReproducibleBuild);
+        assert_eq!(deserialized.object_id, oid);
+    }
+
+    #[test]
+    fn supply_chain_attestation_ref_clone_debug() {
+        let oid = ObjectIdRef::try_from("objectid:".to_string() + &"ee".repeat(32)).unwrap();
+        let att = SupplyChainAttestationRef {
+            attestation_type: AttestationType::InToto,
+            object_id: oid,
+        };
+        let cloned = att.clone();
+        assert_eq!(att.object_id, cloned.object_id);
+        let dbg = format!("{att:?}");
+        assert!(dbg.contains("SupplyChainAttestationRef"));
+    }
+
+    // ══════════════════════════════════════════════════════════════════
+    // NEW TESTS: SignatureEntry serde
+    // ══════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn signature_entry_serde_roundtrip() {
+        let entry = SignatureEntry {
+            kid: "test-key-1".into(),
+            sig: Base64Bytes(vec![0xDE, 0xAD, 0xBE, 0xEF]),
+        };
+        let json = serde_json::to_string(&entry).unwrap();
+        let deserialized: SignatureEntry = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.kid, "test-key-1");
+        assert_eq!(deserialized.sig.as_bytes(), &[0xDE, 0xAD, 0xBE, 0xEF]);
+    }
+
+    #[test]
+    fn signature_entry_clone_debug() {
+        let entry = SignatureEntry {
+            kid: "key".into(),
+            sig: Base64Bytes(vec![1, 2, 3]),
+        };
+        let cloned = entry.clone();
+        assert_eq!(entry.kid, cloned.kid);
+        let dbg = format!("{entry:?}");
+        assert!(dbg.contains("SignatureEntry"));
+    }
+
+    // ══════════════════════════════════════════════════════════════════
+    // NEW TESTS: SignatureThreshold extended
+    // ══════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn signature_threshold_n_zero_with_zero_sigs_rejected() {
+        let t = SignatureThreshold { k: 0, n: 0 };
+        assert!(t.validate(0).is_err());
+    }
+
+    #[test]
+    fn signature_threshold_try_from_non_numeric_n() {
+        let err = SignatureThreshold::try_from("2-of-abc".to_string()).unwrap_err();
+        assert!(err.to_string().contains("n must be"));
+    }
+
+    #[test]
+    fn signature_threshold_into_string() {
+        let t = SignatureThreshold { k: 3, n: 5 };
+        let s: String = t.into();
+        assert_eq!(s, "3-of-5");
+    }
+
+    // ══════════════════════════════════════════════════════════════════
+    // NEW TESTS: EventCapsSection serde roundtrip
+    // ══════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn event_caps_section_serde_roundtrip() {
+        let ecs = EventCapsSection {
+            streaming: true,
+            replay: true,
+            min_buffer_events: 5000,
+        };
+        let json = serde_json::to_string(&ecs).unwrap();
+        let deserialized: EventCapsSection = serde_json::from_str(&json).unwrap();
+        assert!(deserialized.streaming);
+        assert!(deserialized.replay);
+        assert_eq!(deserialized.min_buffer_events, 5000);
+    }
+
+    #[test]
+    fn event_caps_section_clone_debug() {
+        let ecs = EventCapsSection {
+            streaming: false,
+            replay: true,
+            min_buffer_events: 100,
+        };
+        let cloned = ecs.clone();
+        assert_eq!(ecs.min_buffer_events, cloned.min_buffer_events);
+        let dbg = format!("{ecs:?}");
+        assert!(dbg.contains("EventCapsSection"));
+    }
+
+    // ══════════════════════════════════════════════════════════════════
+    // NEW TESTS: ManifestError debug
+    // ══════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn manifest_error_debug_output() {
+        let err = ManifestError::Invalid {
+            field: "test",
+            message: "msg".into(),
+        };
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("Invalid"));
+    }
+
+    #[test]
+    fn manifest_error_rate_limit_display() {
+        // Create a rate limit error through the RateLimit variant path
+        let err = ManifestError::InterfaceHashMismatch {
+            expected: "expected_hash".into(),
+            found: "found_hash".into(),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("expected_hash"));
+        assert!(msg.contains("found_hash"));
+    }
+
+    // ══════════════════════════════════════════════════════════════════
+    // NEW TESTS: ConnectorSection effective_state_model with CRDT
+    // ══════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn connector_section_singleton_writer_legacy_flag() {
+        // Test the legacy singleton_writer flag without explicit state section
+        let placeholder = format!("blake3-256:{INTERFACE_HASH_DOMAIN}:{}", "0".repeat(64));
+        let toml = test_manifest_toml(&placeholder)
+            .replace(
+                "[connector.state]\nmodel = \"stateless\"\nstate_schema_version = \"1\"",
+                "",
+            )
+            .replace("format = \"native\"", "format = \"native\"\nsingleton_writer = true");
+        let m = ConnectorManifest::parse_str_unchecked(&toml);
+        // This should parse, the legacy flag should work
+        assert!(m.is_ok());
+    }
+
+    #[test]
+    fn state_section_to_model_singleton_writer() {
+        let section: ConnectorStateSection = serde_json::from_value(json!({
+            "model": "singleton_writer",
+            "state_schema_version": "1.0"
+        }))
+        .unwrap();
+        let model = section.to_state_model().unwrap();
+        assert!(model.is_singleton_writer());
+    }
+
+    #[test]
+    fn state_section_crdt_or_set() {
+        let section: ConnectorStateSection = serde_json::from_value(json!({
+            "model": "crdt",
+            "state_schema_version": "1.0",
+            "crdt_type": "or_set"
+        }))
+        .unwrap();
+        let model = section.to_state_model().unwrap();
+        assert_eq!(model.crdt_type(), Some(ConnectorCrdtType::OrSet));
+    }
+
+    #[test]
+    fn state_section_crdt_g_counter() {
+        let section: ConnectorStateSection = serde_json::from_value(json!({
+            "model": "crdt",
+            "state_schema_version": "1.0",
+            "crdt_type": "g_counter"
+        }))
+        .unwrap();
+        let model = section.to_state_model().unwrap();
+        assert_eq!(model.crdt_type(), Some(ConnectorCrdtType::GCounter));
+    }
+
+    #[test]
+    fn state_section_crdt_pn_counter() {
+        let section: ConnectorStateSection = serde_json::from_value(json!({
+            "model": "crdt",
+            "state_schema_version": "1.0",
+            "crdt_type": "pn_counter"
+        }))
+        .unwrap();
+        let model = section.to_state_model().unwrap();
+        assert_eq!(model.crdt_type(), Some(ConnectorCrdtType::PnCounter));
+    }
+
+    #[test]
+    fn state_section_with_migration_hint() {
+        let section: ConnectorStateSection = serde_json::from_value(json!({
+            "model": "singleton_writer",
+            "state_schema_version": "2.0",
+            "migration_hint": "run_migration_v2"
+        }))
+        .unwrap();
+        assert_eq!(section.migration_hint.as_deref(), Some("run_migration_v2"));
+    }
+
+    #[test]
+    fn state_section_with_snapshot_settings() {
+        let section: ConnectorStateSection = serde_json::from_value(json!({
+            "model": "crdt",
+            "state_schema_version": "1.0",
+            "crdt_type": "lww_map",
+            "snapshot_every_updates": 1000,
+            "snapshot_every_bytes": 65536
+        }))
+        .unwrap();
+        assert_eq!(section.snapshot_every_updates, Some(1000));
+        assert_eq!(section.snapshot_every_bytes, Some(65536));
+    }
+
+    // ══════════════════════════════════════════════════════════════════
+    // NEW TESTS: ZonesSection serde
+    // ══════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn zones_section_serde_roundtrip() {
+        let placeholder = format!("blake3-256:{INTERFACE_HASH_DOMAIN}:{}", "0".repeat(64));
+        let m = ConnectorManifest::parse_str_unchecked(&test_manifest_toml(&placeholder)).unwrap();
+        let json = serde_json::to_string(&m.zones).unwrap();
+        let deserialized: ZonesSection = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.home.as_str(), "z:community");
+        assert_eq!(deserialized.forbidden.len(), 1);
+    }
+
+    #[test]
+    fn zones_section_clone_debug() {
+        let placeholder = format!("blake3-256:{INTERFACE_HASH_DOMAIN}:{}", "0".repeat(64));
+        let m = ConnectorManifest::parse_str_unchecked(&test_manifest_toml(&placeholder)).unwrap();
+        let cloned = m.zones.clone();
+        assert_eq!(m.zones.home.as_str(), cloned.home.as_str());
+        let dbg = format!("{:?}", m.zones);
+        assert!(dbg.contains("ZonesSection"));
+    }
+
+    // ══════════════════════════════════════════════════════════════════
+    // NEW TESTS: CapabilitiesSection serde
+    // ══════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn capabilities_section_clone_debug() {
+        let placeholder = format!("blake3-256:{INTERFACE_HASH_DOMAIN}:{}", "0".repeat(64));
+        let m = ConnectorManifest::parse_str_unchecked(&test_manifest_toml(&placeholder)).unwrap();
+        let cloned = m.capabilities.clone();
+        assert_eq!(m.capabilities.required.len(), cloned.required.len());
+        let dbg = format!("{:?}", m.capabilities);
+        assert!(dbg.contains("CapabilitiesSection"));
+    }
+
+    // ══════════════════════════════════════════════════════════════════
+    // NEW TESTS: OperationSection serde
+    // ══════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn operation_section_clone_debug() {
+        let placeholder = format!("blake3-256:{INTERFACE_HASH_DOMAIN}:{}", "0".repeat(64));
+        let m = ConnectorManifest::parse_str_unchecked(&test_manifest_toml(&placeholder)).unwrap();
+        let op = m.provides.operations.values().next().unwrap();
+        let cloned = op.clone();
+        assert_eq!(op.description, cloned.description);
+        let dbg = format!("{op:?}");
+        assert!(dbg.contains("OperationSection"));
+    }
+
+    // ══════════════════════════════════════════════════════════════════
+    // NEW TESTS: ProvidesSection serde
+    // ══════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn provides_section_clone_debug() {
+        let placeholder = format!("blake3-256:{INTERFACE_HASH_DOMAIN}:{}", "0".repeat(64));
+        let m = ConnectorManifest::parse_str_unchecked(&test_manifest_toml(&placeholder)).unwrap();
+        let cloned = m.provides.clone();
+        assert_eq!(m.provides.operations.len(), cloned.operations.len());
+        let dbg = format!("{:?}", m.provides);
+        assert!(dbg.contains("ProvidesSection"));
+    }
+
+    // ══════════════════════════════════════════════════════════════════
+    // NEW TESTS: ConnectorSection clone/debug
+    // ══════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn connector_section_clone_debug() {
+        let placeholder = format!("blake3-256:{INTERFACE_HASH_DOMAIN}:{}", "0".repeat(64));
+        let m = ConnectorManifest::parse_str_unchecked(&test_manifest_toml(&placeholder)).unwrap();
+        let cloned = m.connector.clone();
+        assert_eq!(m.connector.id.as_str(), cloned.id.as_str());
+        let dbg = format!("{:?}", m.connector);
+        assert!(dbg.contains("ConnectorSection"));
+    }
+
+    // ══════════════════════════════════════════════════════════════════
+    // NEW TESTS: ManifestSection clone/debug
+    // ══════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn manifest_section_clone_debug() {
+        let placeholder = format!("blake3-256:{INTERFACE_HASH_DOMAIN}:{}", "0".repeat(64));
+        let m = ConnectorManifest::parse_str_unchecked(&test_manifest_toml(&placeholder)).unwrap();
+        let cloned = m.manifest.clone();
+        assert_eq!(m.manifest.format, cloned.format);
+        let dbg = format!("{:?}", m.manifest);
+        assert!(dbg.contains("ManifestSection"));
+    }
+
+    // ══════════════════════════════════════════════════════════════════
+    // NEW TESTS: parse_rate_limit_shorthand edge cases
+    // ══════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn parse_rate_limit_shorthand_zero_max() {
+        let result = parse_rate_limit_shorthand("0/min");
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().max, 0);
+    }
+
+    #[test]
+    fn parse_rate_limit_shorthand_large_max() {
+        let result = parse_rate_limit_shorthand("999999/sec");
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().max, 999_999);
+    }
+
+    #[test]
+    fn parse_rate_limit_shorthand_no_slash() {
+        let result = parse_rate_limit_shorthand("60min");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_rate_limit_shorthand_unknown_unit() {
+        let result = parse_rate_limit_shorthand("10/week");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_rate_limit_shorthand_non_numeric_max() {
+        let result = parse_rate_limit_shorthand("abc/min");
+        assert!(result.is_err());
+    }
+
+    // ══════════════════════════════════════════════════════════════════
+    // NEW TESTS: host_allow_entry with IPv6
+    // ══════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn host_allow_ipv6_literal_denied() {
+        let err = validate_host_allow_entry("::1", true, false).unwrap_err();
+        assert!(err.to_string().contains("IP literals"));
+    }
+
+    #[test]
+    fn host_allow_ipv6_literal_allowed_when_not_denied() {
+        assert!(validate_host_allow_entry("::1", false, false).is_ok());
+    }
+
+    // ══════════════════════════════════════════════════════════════════
+    // NEW TESTS: RateLimitsSection serde
+    // ══════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn rate_limits_section_serde_roundtrip() {
+        let section = RateLimitsSection {
+            pools: vec![RateLimitPoolSection {
+                id: "global".into(),
+                description: Some("Global limit".into()),
+                requests: 60,
+                window_ms: 60_000,
+                burst: None,
+                unit: None,
+                enforcement: None,
+                scope: None,
+            }],
+            operation_pools: {
+                let mut m = std::collections::HashMap::new();
+                m.insert("op1".into(), vec!["global".into()]);
+                m
+            },
+        };
+        let json = serde_json::to_string(&section).unwrap();
+        let deserialized: RateLimitsSection = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.pools.len(), 1);
+        assert_eq!(deserialized.pools[0].id, "global");
+    }
+
+    #[test]
+    fn rate_limits_section_clone_debug() {
+        let section = RateLimitsSection::default();
+        let cloned = section.clone();
+        assert_eq!(section.pools.len(), cloned.pools.len());
+        let dbg = format!("{section:?}");
+        assert!(dbg.contains("RateLimitsSection"));
+    }
+
+    // ══════════════════════════════════════════════════════════════════
+    // NEW TESTS: SupplyChainSection serde
+    // ══════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn supply_chain_section_serde_roundtrip() {
+        let oid = ObjectIdRef::try_from("objectid:".to_string() + &"aa".repeat(32)).unwrap();
+        let section = SupplyChainSection {
+            attestations: vec![SupplyChainAttestationRef {
+                attestation_type: AttestationType::InToto,
+                object_id: oid,
+            }],
+        };
+        let json = serde_json::to_string(&section).unwrap();
+        let deserialized: SupplyChainSection = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.attestations.len(), 1);
+    }
+
+    #[test]
+    fn supply_chain_section_clone_debug() {
+        let section = SupplyChainSection {
+            attestations: vec![],
+        };
+        let cloned = section.clone();
+        assert_eq!(section.attestations.len(), cloned.attestations.len());
+        let dbg = format!("{section:?}");
+        assert!(dbg.contains("SupplyChainSection"));
+    }
+
+    // ══════════════════════════════════════════════════════════════════
+    // NEW TESTS: SignaturesSection serde
+    // ══════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn signatures_section_serde_roundtrip() {
+        let section = SignaturesSection {
+            publisher_signatures: vec![SignatureEntry {
+                kid: "key1".into(),
+                sig: Base64Bytes(vec![1, 2, 3]),
+            }],
+            publisher_threshold: Some(SignatureThreshold { k: 1, n: 1 }),
+            registry_signature: None,
+            transparency_log_entry: None,
+        };
+        let json = serde_json::to_string(&section).unwrap();
+        let deserialized: SignaturesSection = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.publisher_signatures.len(), 1);
+        assert_eq!(deserialized.publisher_threshold.unwrap().k, 1);
+    }
+
+    #[test]
+    fn signatures_section_clone_debug() {
+        let section = SignaturesSection {
+            publisher_signatures: vec![],
+            publisher_threshold: None,
+            registry_signature: None,
+            transparency_log_entry: None,
+        };
+        let cloned = section.clone();
+        assert_eq!(section.publisher_signatures.len(), cloned.publisher_signatures.len());
+        let dbg = format!("{section:?}");
+        assert!(dbg.contains("SignaturesSection"));
+    }
+
+    // ══════════════════════════════════════════════════════════════════
+    // NEW TESTS: PolicySection clone/debug
+    // ══════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn policy_section_clone_debug() {
+        let policy = PolicySection {
+            require_transparency_log: true,
+            require_attestation_types: vec![AttestationType::CodeReview],
+            min_slsa_level: Some(2),
+            trusted_builders: vec!["builder".into()],
+        };
+        let cloned = policy.clone();
+        assert_eq!(policy.min_slsa_level, cloned.min_slsa_level);
+        let dbg = format!("{policy:?}");
+        assert!(dbg.contains("PolicySection"));
+    }
+
+    // ══════════════════════════════════════════════════════════════════
+    // NEW TESTS: ConnectorStateSection clone/debug
+    // ══════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn connector_state_section_clone_debug() {
+        let section: ConnectorStateSection = serde_json::from_value(json!({
+            "model": "singleton_writer",
+            "state_schema_version": "1.0"
+        }))
+        .unwrap();
+        let cloned = section.clone();
+        assert_eq!(section.state_schema_version, cloned.state_schema_version);
+        let dbg = format!("{section:?}");
+        assert!(dbg.contains("ConnectorStateSection"));
+    }
 }

@@ -212,4 +212,111 @@ mod tests {
         let err = CryptoError::MissingField("issuer".to_string());
         assert_eq!(err.to_string(), "missing required field: issuer");
     }
+
+    // ---- Debug format ----
+
+    #[test]
+    fn error_debug_invalid_key_length() {
+        let err = CryptoError::InvalidKeyLength {
+            expected: 32,
+            actual: 16,
+        };
+        let debug = format!("{err:?}");
+        assert!(debug.contains("InvalidKeyLength"));
+        assert!(debug.contains("32"));
+        assert!(debug.contains("16"));
+    }
+
+    #[test]
+    fn error_debug_signature_verification_failed() {
+        let err = CryptoError::SignatureVerificationFailed;
+        let debug = format!("{err:?}");
+        assert!(debug.contains("SignatureVerificationFailed"));
+    }
+
+    #[test]
+    fn error_debug_hpke_failed() {
+        let err = CryptoError::HpkeFailed("test error".into());
+        let debug = format!("{err:?}");
+        assert!(debug.contains("HpkeFailed"));
+        assert!(debug.contains("test error"));
+    }
+
+    #[test]
+    fn error_debug_token_expired() {
+        let err = CryptoError::TokenExpired;
+        let debug = format!("{err:?}");
+        assert!(debug.contains("TokenExpired"));
+    }
+
+    #[test]
+    fn error_debug_missing_field() {
+        let err = CryptoError::MissingField("payload".into());
+        let debug = format!("{err:?}");
+        assert!(debug.contains("MissingField"));
+        assert!(debug.contains("payload"));
+    }
+
+    // ---- CryptoResult type alias ----
+
+    #[test]
+    fn crypto_result_ok() {
+        let result: CryptoResult<u32> = Ok(42);
+        match result {
+            Ok(v) => assert_eq!(v, 42),
+            Err(e) => panic!("expected Ok(42), got Err({e:?})"),
+        }
+    }
+
+    #[test]
+    fn crypto_result_err() {
+        let result: CryptoResult<u32> = Err(CryptoError::InvalidPublicKey);
+        assert!(result.is_err());
+    }
+
+    // ---- Error trait ----
+
+    #[test]
+    fn error_is_std_error() {
+        let err: Box<dyn std::error::Error> =
+            Box::new(CryptoError::AeadEncryptFailed);
+        assert_eq!(err.to_string(), "AEAD encryption failed");
+    }
+
+    #[test]
+    fn error_display_all_variants_non_empty() {
+        let variants: Vec<CryptoError> = vec![
+            CryptoError::InvalidKeyLength {
+                expected: 1,
+                actual: 2,
+            },
+            CryptoError::InvalidSignatureLength {
+                expected: 3,
+                actual: 4,
+            },
+            CryptoError::SignatureVerificationFailed,
+            CryptoError::InvalidKeyId("x".into()),
+            CryptoError::AeadEncryptFailed,
+            CryptoError::AeadDecryptFailed,
+            CryptoError::HpkeFailed("y".into()),
+            CryptoError::CoseFailed("z".into()),
+            CryptoError::InvalidNonceLength {
+                expected: 5,
+                actual: 6,
+            },
+            CryptoError::KeyDerivationFailed("w".into()),
+            CryptoError::InvalidPublicKey,
+            CryptoError::InvalidSecretKey,
+            CryptoError::SerializationError("s".into()),
+            CryptoError::TokenValidationError("t".into()),
+            CryptoError::TokenExpired,
+            CryptoError::TokenNotYetValid,
+            CryptoError::MissingField("f".into()),
+        ];
+
+        for variant in &variants {
+            let display = variant.to_string();
+            assert!(!display.is_empty(), "empty display for {variant:?}");
+        }
+    }
 }

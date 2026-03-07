@@ -393,4 +393,107 @@ mod tests {
         assert_eq!(response.checks.len(), 4);
         assert!(response.is_healthy());
     }
+
+    #[test]
+    fn test_health_response_json_value() {
+        let response = HealthResponse::healthy("2.0.0", 500)
+            .with_check("db", true, Some("connected"));
+        let val: serde_json::Value = serde_json::to_value(&response).unwrap();
+        assert_eq!(val["status"], "healthy");
+        assert_eq!(val["version"], "2.0.0");
+        assert_eq!(val["uptime_seconds"], 500);
+        assert_eq!(val["checks"][0]["name"], "db");
+        assert_eq!(val["checks"][0]["status"], "pass");
+        assert_eq!(val["checks"][0]["message"], "connected");
+    }
+
+    #[test]
+    fn test_health_response_unhealthy_check_message() {
+        let response = HealthResponse::unhealthy("1.0.0", 0, "boot failure");
+        assert_eq!(response.checks.len(), 1);
+        assert_eq!(
+            response.checks[0].message,
+            Some("boot failure".to_string())
+        );
+        assert_eq!(response.checks[0].name, "main");
+    }
+
+    #[test]
+    fn test_health_response_unhealthy_is_not_healthy() {
+        let response = HealthResponse::unhealthy("1.0.0", 100, "down")
+            .with_check("api", true, None);
+        // status is unhealthy so overall is_healthy is false
+        assert!(!response.is_healthy());
+    }
+
+    #[test]
+    fn test_health_check_no_message_debug() {
+        let check = HealthCheck {
+            name: "api".to_string(),
+            status: "pass".to_string(),
+            message: None,
+        };
+        let debug = format!("{check:?}");
+        assert!(debug.contains("None"));
+    }
+
+    #[test]
+    fn test_health_response_many_checks() {
+        let mut response = HealthResponse::healthy("1.0.0", 100);
+        for i in 0..50 {
+            response = response.with_check(&format!("check_{i}"), true, None);
+        }
+        assert_eq!(response.checks.len(), 50);
+        assert!(response.is_healthy());
+    }
+
+    #[test]
+    fn test_health_response_max_uptime() {
+        let response = HealthResponse::healthy("1.0.0", u64::MAX);
+        assert_eq!(response.uptime_seconds, u64::MAX);
+    }
+
+    #[test]
+    fn test_health_check_clone_independence() {
+        let check = HealthCheck {
+            name: "original".to_string(),
+            status: "pass".to_string(),
+            message: Some("ok".to_string()),
+        };
+        let mut cloned = check.clone();
+        cloned.name = "modified".to_string();
+        assert_eq!(check.name, "original");
+    }
+
+    #[test]
+    fn test_health_response_clone_independence() {
+        let response = HealthResponse::healthy("1.0.0", 100)
+            .with_check("db", true, None);
+        let cloned = response.clone();
+        assert_eq!(response.checks.len(), cloned.checks.len());
+        assert_eq!(response.status, cloned.status);
+    }
+
+    #[test]
+    fn test_health_response_json_array_checks() {
+        let response = HealthResponse::healthy("1.0.0", 100)
+            .with_check("a", true, None)
+            .with_check("b", false, Some("err"));
+        let json = serde_json::to_string(&response).unwrap();
+        let val: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert!(val["checks"].is_array());
+        assert_eq!(val["checks"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn test_prometheus_text_format_is_not_empty() {
+        let text = prometheus_text_format();
+        assert!(text.len() > 5);
+    }
+
+    #[test]
+    fn test_health_response_unicode_version() {
+        let response = HealthResponse::healthy("v1.0-日本語", 100);
+        assert_eq!(response.version, "v1.0-日本語");
+    }
 }

@@ -2028,4 +2028,264 @@ mod tests {
         let err = result.unwrap_err();
         assert!(matches!(err, TraceError::Deserialization(_)));
     }
+
+    // ============ Additional RedactionPolicy tests ============
+
+    #[test]
+    fn test_redaction_policy_none_no_fields() {
+        let policy = RedactionPolicy::none();
+        assert!(policy.redact_fields.is_empty());
+        assert!(policy.redact_prefixes.is_empty());
+        assert!(!policy.hash_redacted);
+    }
+
+    #[test]
+    fn test_redaction_policy_with_field_chaining() {
+        let policy = RedactionPolicy::none()
+            .with_field("secret")
+            .with_field("token")
+            .with_field("key");
+        assert_eq!(policy.redact_fields.len(), 3);
+        assert!(policy.should_redact("secret"));
+        assert!(policy.should_redact("token"));
+        assert!(policy.should_redact("key"));
+    }
+
+    #[test]
+    fn test_redaction_policy_with_prefix_chaining() {
+        let policy = RedactionPolicy::none()
+            .with_prefix("x-secret-")
+            .with_prefix("private-");
+        assert_eq!(policy.redact_prefixes.len(), 2);
+        assert!(policy.should_redact("x-secret-key"));
+        assert!(policy.should_redact("private-data"));
+        assert!(!policy.should_redact("public-data"));
+    }
+
+    #[test]
+    fn test_redaction_policy_with_custom_marker_string() {
+        let policy = RedactionPolicy::none()
+            .with_field("password")
+            .with_marker("***HIDDEN***");
+        assert_eq!(policy.redact_value("secret123"), "***HIDDEN***");
+    }
+
+    #[test]
+    fn test_redaction_policy_hash_redacted() {
+        let policy = RedactionPolicy::none()
+            .with_field("token")
+            .with_hash_redacted(true);
+        let result = policy.redact_value("my-token-value");
+        assert!(result.starts_with("[REDACTED:"));
+        assert!(result.ends_with(']'));
+        // Same input should produce same hash
+        let result2 = policy.redact_value("my-token-value");
+        assert_eq!(result, result2);
+    }
+
+    #[test]
+    fn test_redaction_policy_hash_different_values() {
+        let policy = RedactionPolicy::none().with_hash_redacted(true);
+        let hash1 = policy.redact_value("value_a");
+        let hash2 = policy.redact_value("value_b");
+        assert_ne!(hash1, hash2);
+    }
+
+    #[test]
+    fn test_redaction_policy_case_insensitive_mixed() {
+        let policy = RedactionPolicy::default();
+        assert!(policy.should_redact("password"));
+        assert!(policy.should_redact("PASSWORD"));
+        assert!(policy.should_redact("Password"));
+        assert!(policy.should_redact("pAsSwOrD"));
+    }
+
+    #[test]
+    fn test_redaction_policy_default_all_standard_fields() {
+        let policy = RedactionPolicy::default();
+        let expected = [
+            "password", "api_key", "secret", "token", "authorization",
+            "credential", "private_key", "session_key", "bearer",
+        ];
+        for field in &expected {
+            assert!(policy.should_redact(field), "should redact {field}");
+        }
+    }
+
+    #[test]
+    fn test_redaction_policy_prefix_mixed_case() {
+        let policy = RedactionPolicy::default();
+        assert!(policy.should_redact("X-API-Key"));
+        assert!(policy.should_redact("x-auth-token"));
+        assert!(policy.should_redact("SECRET_VALUE"));
+        assert!(policy.should_redact("X-Api-Something"));
+    }
+
+    // ============ Additional TraceEvent tests ============
+
+    #[test]
+    fn test_trace_event_gossip_timestamp_and_trace_id() {
+        let event = TraceEvent::Gossip(GossipEvent {
+            timestamp: 9999,
+            trace_id: "gossip-trace".to_string(),
+            gossip_type: "announce".to_string(),
+            object_count: 42,
+            peer_node: Some("peer-1".to_string()),
+            success: true,
+        });
+        assert_eq!(event.timestamp(), 9999);
+        assert_eq!(event.trace_id(), "gossip-trace");
+    }
+
+    #[test]
+    fn test_trace_event_lease_timestamp_and_trace_id() {
+        let event = TraceEvent::Lease(LeaseEvent {
+            timestamp: 5555,
+            trace_id: "lease-trace".to_string(),
+            operation: "acquire".to_string(),
+            subject_id: "obj-1".to_string(),
+            purpose: "singleton_writer".to_string(),
+            node_id: "n1".to_string(),
+            success: true,
+            conflict_holder: None,
+        });
+        assert_eq!(event.timestamp(), 5555);
+        assert_eq!(event.trace_id(), "lease-trace");
+    }
+
+    #[test]
+    fn test_trace_event_session_with_redaction() {
+        let policy = RedactionPolicy::none().with_field("session_id");
+        let event = TraceEvent::Session(SessionEvent {
+            timestamp: 1000,
+            trace_id: "sess-trace".to_string(),
+            session_id: "secret-session-123".to_string(),
+            kind: "established".to_string(),
+            peer_node: "peer-2".to_string(),
+            suite: Some("noise-ik".to_string()),
+            failure_reason: None,
+        });
+        let redacted = event.with_redaction(&policy);
+        if let TraceEvent::Session(s) = &redacted {
+            assert_eq!(s.session_id, "[REDACTED]");
+        } else {
+            panic!("Expected Session event");
+        }
+    }
+
+    #[test]
+    fn test_trace_event_policy_timestamp_and_trace_id() {
+        let event = TraceEvent::Policy(PolicyDecision {
+            timestamp: 7777,
+            trace_id: "policy-trace".to_string(),
+            zone_id: "z:work".to_string(),
+            operation: "write".to_string(),
+            connector_id: "conn-1".to_string(),
+            decision: "deny".to_string(),
+            reason_code: "EXPIRED".to_string(),
+            evidence: vec!["ev-1".to_string()],
+        });
+        assert_eq!(event.timestamp(), 7777);
+        assert_eq!(event.trace_id(), "policy-trace");
+    }
+
+    // ============ Additional CapturedTrace tests ============
+
+    #[test]
+    fn test_captured_trace_duration_none_when_not_finished() {
+        let trace = CapturedTrace::new("unfinished");
+        assert!(trace.duration_ms().is_none());
+    }
+
+    #[test]
+    fn test_captured_trace_version_constant() {
+        assert_eq!(TRACE_VERSION, 1);
+        let trace = CapturedTrace::new("ver-check");
+        assert_eq!(trace.version, TRACE_VERSION);
+    }
+
+    // ============ Additional TraceCaptureConfig tests ============
+
+    #[test]
+    #[allow(clippy::float_cmp)]
+    fn test_trace_capture_config_defaults() {
+        let config = TraceCaptureConfig::default();
+        assert!(!config.enabled);
+        assert_eq!(config.max_events, 10_000);
+        assert_eq!(config.max_size_bytes, 10 * 1024 * 1024);
+        assert_eq!(config.sample_rate, 1.0);
+    }
+
+    #[test]
+    fn test_trace_capture_config_builder_chain() {
+        let config = TraceCaptureConfig::new()
+            .enabled()
+            .with_max_events(500)
+            .with_max_size_bytes(1024)
+            .with_sample_rate(0.5);
+        assert!(config.enabled);
+        assert_eq!(config.max_events, 500);
+        assert_eq!(config.max_size_bytes, 1024);
+    }
+
+    #[test]
+    fn test_trace_capture_config_custom_redaction_policy() {
+        let policy = RedactionPolicy::none().with_field("custom");
+        let config = TraceCaptureConfig::new().with_redaction(policy);
+        assert!(config.redaction_policy.should_redact("custom"));
+    }
+
+    // ============ Additional TraceError tests ============
+
+    #[test]
+    fn test_trace_error_display_all_variants() {
+        let variants: Vec<TraceError> = vec![
+            TraceError::Serialization("ser err".to_string()),
+            TraceError::Deserialization("de err".to_string()),
+            TraceError::BufferFull,
+            TraceError::UnsupportedVersion(99),
+            TraceError::Io("io err".to_string()),
+        ];
+        let expected = [
+            "Trace serialization error: ser err",
+            "Trace deserialization error: de err",
+            "Trace capture buffer full",
+            "Unsupported trace version: 99",
+            "Trace IO error: io err",
+        ];
+        for (v, exp) in variants.iter().zip(expected.iter()) {
+            assert_eq!(format!("{v}"), *exp);
+        }
+    }
+
+    #[test]
+    fn test_trace_error_debug_buffer_full() {
+        let err = TraceError::BufferFull;
+        let debug = format!("{err:?}");
+        assert!(debug.contains("BufferFull"));
+    }
+
+    // ============ TraceExportFormat tests ============
+
+    #[test]
+    fn test_trace_export_format_equality() {
+        assert_eq!(TraceExportFormat::Json, TraceExportFormat::Json);
+        assert_eq!(TraceExportFormat::Cbor, TraceExportFormat::Cbor);
+        assert_ne!(TraceExportFormat::Json, TraceExportFormat::Cbor);
+    }
+
+    #[test]
+    fn test_trace_export_format_debug_repr() {
+        let fmt = TraceExportFormat::Json;
+        assert!(format!("{fmt:?}").contains("Json"));
+        let fmt2 = TraceExportFormat::Cbor;
+        assert!(format!("{fmt2:?}").contains("Cbor"));
+    }
+
+    #[test]
+    fn test_trace_export_format_copy_semantics() {
+        let fmt = TraceExportFormat::Json;
+        let copied = fmt;
+        assert_eq!(fmt, copied);
+    }
 }

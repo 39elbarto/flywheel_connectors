@@ -2052,4 +2052,242 @@ mod tests {
             );
         }
     }
+
+    // ============ UsageTelemetryConfig tests ============
+
+    #[test]
+    fn test_usage_config_default_values() {
+        let config = UsageTelemetryConfig::default();
+        assert_eq!(config.retention_secs, 7 * 24 * 60 * 60);
+        assert_eq!(config.sample_rate_bps, 10_000);
+        assert_eq!(config.max_entries, 10_000);
+    }
+
+    #[test]
+    fn test_usage_config_debug() {
+        let config = UsageTelemetryConfig::default();
+        let debug = format!("{config:?}");
+        assert!(debug.contains("UsageTelemetryConfig"));
+        assert!(debug.contains("retention_secs"));
+    }
+
+    #[test]
+    fn test_usage_config_clone() {
+        let config = UsageTelemetryConfig {
+            retention_secs: 3600,
+            sample_rate_bps: 5000,
+            max_entries: 100,
+        };
+        let cloned = config;
+        assert_eq!(config.retention_secs, cloned.retention_secs);
+        assert_eq!(config.sample_rate_bps, cloned.sample_rate_bps);
+        assert_eq!(config.max_entries, cloned.max_entries);
+    }
+
+    #[test]
+    fn test_usage_config_copy() {
+        let config = UsageTelemetryConfig::default();
+        let copied = config;
+        assert_eq!(config.retention_secs, copied.retention_secs);
+    }
+
+    // ============ CapabilitySuggestionKind tests ============
+
+    #[test]
+    fn test_suggestion_kind_debug() {
+        assert!(format!("{:?}", CapabilitySuggestionKind::RemoveUnused).contains("RemoveUnused"));
+        assert!(format!("{:?}", CapabilitySuggestionKind::ReviewRisky).contains("ReviewRisky"));
+        assert!(format!("{:?}", CapabilitySuggestionKind::Keep).contains("Keep"));
+    }
+
+    #[test]
+    fn test_suggestion_kind_eq() {
+        assert_eq!(CapabilitySuggestionKind::Keep, CapabilitySuggestionKind::Keep);
+        assert_ne!(
+            CapabilitySuggestionKind::Keep,
+            CapabilitySuggestionKind::RemoveUnused
+        );
+    }
+
+    #[test]
+    fn test_suggestion_kind_serde_roundtrip() {
+        let kinds = [
+            CapabilitySuggestionKind::RemoveUnused,
+            CapabilitySuggestionKind::ReviewRisky,
+            CapabilitySuggestionKind::Keep,
+        ];
+        for kind in &kinds {
+            let json = serde_json::to_string(kind).unwrap();
+            let parsed: CapabilitySuggestionKind = serde_json::from_str(&json).unwrap();
+            assert_eq!(*kind, parsed);
+        }
+    }
+
+    #[test]
+    fn test_suggestion_kind_serde_values() {
+        let json = serde_json::to_string(&CapabilitySuggestionKind::RemoveUnused).unwrap();
+        assert_eq!(json, "\"remove_unused\"");
+        let json = serde_json::to_string(&CapabilitySuggestionKind::ReviewRisky).unwrap();
+        assert_eq!(json, "\"review_risky\"");
+        let json = serde_json::to_string(&CapabilitySuggestionKind::Keep).unwrap();
+        assert_eq!(json, "\"keep\"");
+    }
+
+    // ============ RecommendationConfig tests ============
+
+    #[test]
+    fn test_recommendation_config_default() {
+        let config = RecommendationConfig::default();
+        assert_eq!(config.unused_after_secs, 30 * 24 * 60 * 60);
+    }
+
+    #[test]
+    fn test_recommendation_config_debug() {
+        let config = RecommendationConfig::default();
+        let debug = format!("{config:?}");
+        assert!(debug.contains("RecommendationConfig"));
+    }
+
+    // ============ ZoneRiskSummary tests ============
+
+    #[test]
+    fn test_zone_risk_summary_serde() {
+        let summary = ZoneRiskSummary {
+            zone_id: "z:work".to_string(),
+            safe: 10,
+            risky: 5,
+            dangerous: 2,
+            critical: 1,
+            forbidden: 0,
+        };
+        let json = serde_json::to_string(&summary).unwrap();
+        let parsed: ZoneRiskSummary = serde_json::from_str(&json).unwrap();
+        assert_eq!(summary, parsed);
+    }
+
+    #[test]
+    fn test_zone_risk_summary_debug() {
+        let summary = ZoneRiskSummary {
+            zone_id: "test".to_string(),
+            safe: 0,
+            risky: 0,
+            dangerous: 0,
+            critical: 0,
+            forbidden: 0,
+        };
+        let debug = format!("{summary:?}");
+        assert!(debug.contains("ZoneRiskSummary"));
+    }
+
+    // ============ CapabilityRecommendationSummary tests ============
+
+    #[test]
+    fn test_recommendation_summary_serde() {
+        let summary = CapabilityRecommendationSummary {
+            total: 10,
+            remove_unused: 3,
+            review_risky: 2,
+            keep: 5,
+        };
+        let json = serde_json::to_string(&summary).unwrap();
+        let parsed: CapabilityRecommendationSummary = serde_json::from_str(&json).unwrap();
+        assert_eq!(summary, parsed);
+    }
+
+    // ============ CapabilityUsageAggregate tests ============
+
+    #[test]
+    fn test_aggregate_serde_roundtrip() {
+        let key = CapabilityUsageKey::new(
+            ZoneId::work(),
+            ConnectorId::from_static("fcp.test:request-response:1"),
+            CapabilityId::from_static("fcp.test.read"),
+        );
+        let aggregate = CapabilityUsageAggregate {
+            key,
+            total: 100,
+            allowed: 80,
+            denied: 15,
+            errors: 5,
+            first_seen: 1000,
+            last_seen: 2000,
+            last_risk_tier: SafetyTier::Risky,
+        };
+        let json = serde_json::to_string(&aggregate).unwrap();
+        let parsed: CapabilityUsageAggregate = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.total, 100);
+        assert_eq!(parsed.allowed, 80);
+        assert_eq!(parsed.denied, 15);
+        assert_eq!(parsed.errors, 5);
+    }
+
+    #[test]
+    fn test_aggregate_clone() {
+        let key = CapabilityUsageKey::new(
+            ZoneId::work(),
+            ConnectorId::from_static("fcp.clone:request-response:1"),
+            CapabilityId::from_static("fcp.clone.read"),
+        );
+        let aggregate = CapabilityUsageAggregate {
+            key,
+            total: 50,
+            allowed: 40,
+            denied: 8,
+            errors: 2,
+            first_seen: 500,
+            last_seen: 1500,
+            last_risk_tier: SafetyTier::Safe,
+        };
+        let cloned = aggregate.clone();
+        assert_eq!(aggregate.total, cloned.total);
+        assert_eq!(aggregate.allowed, cloned.allowed);
+        assert_eq!(aggregate.first_seen, cloned.first_seen);
+    }
+
+    // ============ Store edge case tests ============
+
+    #[test]
+    fn test_store_record_error_outcome() {
+        let store = CapabilityUsageStore::new(UsageTelemetryConfig::default());
+        let event = sample_event(CapabilityUsageOutcome::Error, 100);
+        assert!(store.record(&event));
+        let snapshot = store.snapshot();
+        assert_eq!(snapshot[0].errors, 1);
+        assert_eq!(snapshot[0].allowed, 0);
+        assert_eq!(snapshot[0].denied, 0);
+    }
+
+    #[test]
+    fn test_store_empty_snapshot() {
+        let store = CapabilityUsageStore::new(UsageTelemetryConfig::default());
+        assert!(store.snapshot().is_empty());
+    }
+
+    #[test]
+    fn test_recommendation_report_empty() {
+        let report = recommend_capabilities(&[], 1000, RecommendationConfig::default());
+        assert!(report.recommendations.is_empty());
+        assert!(report.risk_summaries.is_empty());
+        let summary = report.summary();
+        assert_eq!(summary.total, 0);
+        assert_eq!(summary.remove_unused, 0);
+        assert_eq!(summary.review_risky, 0);
+        assert_eq!(summary.keep, 0);
+    }
+
+    #[test]
+    fn test_recommendation_report_to_json() {
+        let report = recommend_capabilities(&[], 1000, RecommendationConfig::default());
+        let json = report.to_json().unwrap();
+        assert!(json.contains("recommendations"));
+        assert!(json.contains("risk_summaries"));
+    }
+
+    #[test]
+    fn test_recommendation_report_to_json_pretty() {
+        let report = recommend_capabilities(&[], 1000, RecommendationConfig::default());
+        let json = report.to_json_pretty().unwrap();
+        // Pretty JSON has newlines
+        assert!(json.contains('\n'));
+    }
 }

@@ -669,4 +669,113 @@ mod tests {
         assert_eq!(redacted["pass word"], "with space");
         assert_eq!(redacted["password"], "[REDACTED]");
     }
+
+    #[test]
+    fn test_redact_max_depth_exceeded() {
+        // Build a deeply nested structure exceeding MAX_REDACTION_DEPTH
+        let mut value = json!({"password": "deep"});
+        for _ in 0..150 {
+            value = json!({"nested": value});
+        }
+        let redacted = redact_sensitive(&value, &["password".to_string()]);
+        let redacted_str = serde_json::to_string(&redacted).unwrap();
+        assert!(redacted_str.contains("[MAX_DEPTH_EXCEEDED]"));
+    }
+
+    #[test]
+    fn test_redact_single_key_object() {
+        let value = json!({"password": "secret"});
+        let redacted = redact_sensitive(&value, &["password".to_string()]);
+        assert_eq!(redacted["password"], "[REDACTED]");
+    }
+
+    #[test]
+    fn test_redact_with_empty_field_list() {
+        let value = json!({"password": "not_redacted"});
+        let redacted = redact_sensitive(&value, &[]);
+        assert_eq!(redacted["password"], "not_redacted");
+    }
+
+    #[test]
+    fn test_redact_null_top_level() {
+        let value = json!(null);
+        let redacted = redact_sensitive(&value, &["password".to_string()]);
+        assert!(redacted.is_null());
+    }
+
+    #[test]
+    fn test_redact_boolean_top_level() {
+        let value = json!(true);
+        let redacted = redact_sensitive(&value, &["password".to_string()]);
+        assert_eq!(redacted, true);
+    }
+
+    #[test]
+    fn test_redact_number_top_level() {
+        let value = json!(42);
+        let redacted = redact_sensitive(&value, &["anything".to_string()]);
+        assert_eq!(redacted, 42);
+    }
+
+    #[test]
+    fn test_redact_large_array_of_objects() {
+        let arr: Vec<serde_json::Value> = (0..100)
+            .map(|i| json!({"id": i, "token": format!("tok_{i}")}))
+            .collect();
+        let value = serde_json::Value::Array(arr);
+        let redacted = redact_sensitive(&value, &["token".to_string()]);
+        let arr = redacted.as_array().unwrap();
+        assert_eq!(arr.len(), 100);
+        for item in arr {
+            assert_eq!(item["token"], "[REDACTED]");
+        }
+    }
+
+    #[test]
+    fn test_redact_preserves_number_types() {
+        let value = json!({
+            "integer": 42,
+            "negative": -7,
+            "float_val": 1.23,
+            "zero": 0
+        });
+        let redacted = redact_sensitive(&value, &["nonexistent".to_string()]);
+        assert_eq!(redacted["integer"], 42);
+        assert_eq!(redacted["negative"], -7);
+        assert_eq!(redacted["zero"], 0);
+    }
+
+    #[test]
+    fn test_redact_empty_string_field_name() {
+        let value = json!({"": "empty_key_value"});
+        let redacted = redact_sensitive(&value, &["password".to_string()]);
+        assert_eq!(redacted[""], "empty_key_value");
+    }
+
+    #[test]
+    fn test_redact_duplicate_fields_list() {
+        let value = json!({"password": "secret"});
+        let redacted = redact_sensitive(
+            &value,
+            &[
+                "password".to_string(),
+                "password".to_string(),
+                "password".to_string(),
+            ],
+        );
+        assert_eq!(redacted["password"], "[REDACTED]");
+    }
+
+    #[test]
+    fn test_redact_nested_array_in_object() {
+        let value = json!({
+            "data": [
+                {"safe": "visible"},
+                {"api_key": "hidden"}
+            ]
+        });
+        let redacted = redact_sensitive(&value, &["api_key".to_string()]);
+        assert_eq!(redacted["data"][0]["safe"], "visible");
+        assert_eq!(redacted["data"][1]["api_key"], "[REDACTED]");
+    }
 }

@@ -1184,4 +1184,146 @@ mod tests {
         let result = open_share(&sealed, &sk, zone_id, node_id, 1_800_000_000u64);
         assert!(result.is_err());
     }
+
+    // ---- Share accessors ----
+
+    #[test]
+    fn share_len_matches_data() {
+        let share = ShamirShare::new(5, vec![10, 20, 30]);
+        assert_eq!(share.len(), 3);
+        assert!(!share.is_empty());
+    }
+
+    #[test]
+    fn share_single_byte_not_empty() {
+        let share = ShamirShare::new(1, vec![42]);
+        assert!(!share.is_empty());
+        assert_eq!(share.len(), 1);
+    }
+
+    // ---- ShamirError display ----
+
+    #[test]
+    fn shamir_error_display_threshold_too_small() {
+        let err = ShamirError::ThresholdTooSmall;
+        assert_eq!(err.to_string(), "threshold must be at least 1");
+    }
+
+    #[test]
+    fn shamir_error_display_threshold_exceeds_total() {
+        let err = ShamirError::ThresholdExceedsTotal {
+            threshold: 10,
+            total: 5,
+        };
+        assert!(err.to_string().contains("10"));
+        assert!(err.to_string().contains('5'));
+    }
+
+    #[test]
+    fn shamir_error_display_too_few_shares() {
+        let err = ShamirError::TooFewShares;
+        assert_eq!(err.to_string(), "total shares must be at least 1");
+    }
+
+    #[test]
+    fn shamir_error_display_too_many_shares() {
+        let err = ShamirError::TooManyShares;
+        assert_eq!(err.to_string(), "total shares cannot exceed 255");
+    }
+
+    #[test]
+    fn shamir_error_display_empty_secret() {
+        let err = ShamirError::EmptySecret;
+        assert_eq!(err.to_string(), "secret cannot be empty");
+    }
+
+    #[test]
+    fn shamir_error_display_duplicate_index() {
+        let err = ShamirError::DuplicateIndex(7);
+        assert!(err.to_string().contains('7'));
+    }
+
+    #[test]
+    fn shamir_error_display_reserved_index() {
+        let err = ShamirError::ReservedIndex;
+        assert_eq!(err.to_string(), "share index 0 is reserved");
+    }
+
+    #[test]
+    fn shamir_error_display_mismatched_lengths() {
+        let err = ShamirError::MismatchedLengths;
+        assert_eq!(err.to_string(), "share lengths must match");
+    }
+
+    #[test]
+    fn shamir_error_display_sealing_failed() {
+        let err = ShamirError::SealingFailed("test".into());
+        assert!(err.to_string().contains("test"));
+    }
+
+    // ---- ZeroizingSecret accessors ----
+
+    #[test]
+    fn zeroizing_secret_len() {
+        let s = ZeroizingSecret(vec![1, 2, 3]);
+        assert_eq!(s.len(), 3);
+        assert!(!s.is_empty());
+    }
+
+    #[test]
+    fn zeroizing_secret_empty() {
+        let s = ZeroizingSecret(vec![]);
+        assert!(s.is_empty());
+        assert_eq!(s.len(), 0);
+    }
+
+    #[test]
+    fn zeroizing_secret_deref() {
+        let s = ZeroizingSecret(vec![10, 20, 30]);
+        let slice: &[u8] = &s;
+        assert_eq!(slice, &[10, 20, 30]);
+    }
+
+    // ---- SealedShamirShare accessors ----
+
+    #[test]
+    fn sealed_share_to_bytes() {
+        use crate::x25519::X25519SecretKey;
+
+        let secret = b"test bytes";
+        let shares = split_secret(secret, 2, 3).unwrap();
+        let sk = X25519SecretKey::generate();
+        let pk = sk.public_key();
+
+        let sealed = seal_share(&shares[0], &pk, b"z:test", b"n:1", 100).unwrap();
+        let bytes = sealed.to_bytes();
+        // First byte is index
+        assert_eq!(bytes[0], shares[0].index());
+        // Remaining bytes are enc + ciphertext
+        assert_eq!(bytes.len(), 1 + sealed.sealed_box().enc.len() + sealed.sealed_box().ciphertext.len());
+    }
+
+    // ---- GF(2^8) sub equals add ----
+
+    #[test]
+    fn gf256_sub_equals_add() {
+        let a = Gf256::new(0xAA);
+        let b = Gf256::new(0x55);
+        assert_eq!(a.sub(b).value(), a.add(b).value());
+    }
+
+    // ---- Poly eval empty ----
+
+    #[test]
+    fn poly_eval_empty() {
+        assert_eq!(poly_eval(&[], Gf256::new(5)).value(), 0);
+    }
+
+    // ---- Share from_bytes only index ----
+
+    #[test]
+    fn share_from_bytes_only_index_fails() {
+        let result = ShamirShare::from_bytes(&[1]);
+        assert!(matches!(result, Err(ShamirError::EmptySecret)));
+    }
 }

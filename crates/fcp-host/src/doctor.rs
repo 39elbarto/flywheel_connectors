@@ -1189,4 +1189,368 @@ mod tests {
         assert_eq!(req.connectors, vec!["a", "b"]);
         assert!(req.self_check);
     }
+
+    // ── DoctorReport clone ──
+
+    #[test]
+    fn doctor_report_clone_preserves_all_fields() {
+        let report = DoctorReport::baseline("z:clone-test");
+        let cloned = report.clone();
+        assert_eq!(report.zone_id, cloned.zone_id);
+        assert_eq!(report.overall_status, cloned.overall_status);
+        assert_eq!(report.schema_version, cloned.schema_version);
+        assert_eq!(report.checkpoint.freshness, cloned.checkpoint.freshness);
+        assert_eq!(
+            report.transport_policy.allow_lan,
+            cloned.transport_policy.allow_lan
+        );
+    }
+
+    // ── DoctorReport debug ──
+
+    #[test]
+    fn doctor_report_debug_output() {
+        let report = DoctorReport::baseline("z:debug");
+        let dbg = format!("{report:?}");
+        assert!(dbg.contains("DoctorReport"));
+        assert!(dbg.contains("z:debug"));
+    }
+
+    // ── OverallStatus debug ──
+
+    #[test]
+    fn overall_status_debug() {
+        let dbg = format!("{:?}", OverallStatus::Ok);
+        assert!(dbg.contains("Ok"));
+        let dbg = format!("{:?}", OverallStatus::Warn);
+        assert!(dbg.contains("Warn"));
+        let dbg = format!("{:?}", OverallStatus::Fail);
+        assert!(dbg.contains("Fail"));
+    }
+
+    // ── FreshnessLevel debug ──
+
+    #[test]
+    fn freshness_level_debug_all_variants() {
+        for level in [
+            FreshnessLevel::Fresh,
+            FreshnessLevel::Stale,
+            FreshnessLevel::TooStale,
+            FreshnessLevel::Missing,
+        ] {
+            let dbg = format!("{level:?}");
+            assert!(!dbg.is_empty());
+        }
+    }
+
+    // ── CheckStatus debug ──
+
+    #[test]
+    fn check_status_debug_all_variants() {
+        for status in [CheckStatus::Ok, CheckStatus::Warn, CheckStatus::Fail] {
+            let dbg = format!("{status:?}");
+            assert!(!dbg.is_empty());
+        }
+    }
+
+    // ── CheckSeverity debug ──
+
+    #[test]
+    fn check_severity_debug_all_variants() {
+        for sev in [
+            CheckSeverity::Info,
+            CheckSeverity::Warning,
+            CheckSeverity::Critical,
+        ] {
+            let dbg = format!("{sev:?}");
+            assert!(!dbg.is_empty());
+        }
+    }
+
+    // ── ConnectorSelfCheck clone ──
+
+    #[test]
+    fn connector_self_check_clone() {
+        let check = ConnectorSelfCheck {
+            connector_id: "test:conn:1.0.0".to_string(),
+            report: SelfCheckReport::ok(),
+        };
+        let cloned = check.clone();
+        assert_eq!(check.connector_id, cloned.connector_id);
+        assert_eq!(check.report.status, cloned.report.status);
+    }
+
+    // ── ConnectorSelfCheck debug ──
+
+    #[test]
+    fn connector_self_check_debug() {
+        let check = ConnectorSelfCheck {
+            connector_id: "debug:conn:1.0.0".to_string(),
+            report: SelfCheckReport::ok(),
+        };
+        let dbg = format!("{check:?}");
+        assert!(dbg.contains("ConnectorSelfCheck"));
+        assert!(dbg.contains("debug:conn:1.0.0"));
+    }
+
+    // ── CheckpointStatus clone and debug ──
+
+    #[test]
+    fn checkpoint_status_clone() {
+        let s = CheckpointStatus {
+            freshness: FreshnessLevel::TooStale,
+        };
+        let cloned = s.clone();
+        assert_eq!(s.freshness, cloned.freshness);
+    }
+
+    #[test]
+    fn checkpoint_status_debug() {
+        let s = CheckpointStatus::default();
+        let dbg = format!("{s:?}");
+        assert!(dbg.contains("CheckpointStatus"));
+    }
+
+    // ── RevocationStatus clone and debug ──
+
+    #[test]
+    fn revocation_status_clone() {
+        let s = RevocationStatus {
+            freshness: FreshnessLevel::Missing,
+        };
+        let cloned = s.clone();
+        assert_eq!(s.freshness, cloned.freshness);
+    }
+
+    #[test]
+    fn revocation_status_debug() {
+        let s = RevocationStatus::default();
+        let dbg = format!("{s:?}");
+        assert!(dbg.contains("RevocationStatus"));
+    }
+
+    // ── AuditStatus clone and debug ──
+
+    #[test]
+    fn audit_status_clone() {
+        let s = AuditStatus {
+            freshness: FreshnessLevel::Stale,
+        };
+        let cloned = s.clone();
+        assert_eq!(s.freshness, cloned.freshness);
+    }
+
+    #[test]
+    fn audit_status_debug() {
+        let s = AuditStatus::default();
+        let dbg = format!("{s:?}");
+        assert!(dbg.contains("AuditStatus"));
+    }
+
+    // ── TransportPolicyStatus clone and debug ──
+
+    #[test]
+    fn transport_policy_status_clone() {
+        let s = TransportPolicyStatus {
+            allow_lan: true,
+            allow_derp: true,
+            allow_funnel: false,
+        };
+        let cloned = s.clone();
+        assert_eq!(s.allow_lan, cloned.allow_lan);
+        assert_eq!(s.allow_derp, cloned.allow_derp);
+        assert_eq!(s.allow_funnel, cloned.allow_funnel);
+    }
+
+    #[test]
+    fn transport_policy_status_debug() {
+        let s = TransportPolicyStatus::default();
+        let dbg = format!("{s:?}");
+        assert!(dbg.contains("TransportPolicyStatus"));
+    }
+
+    // ── StoreCoverageStatus clone and debug ──
+
+    #[test]
+    fn store_coverage_status_clone() {
+        let s = StoreCoverageStatus {
+            store_healthy: true,
+        };
+        let cloned = s.clone();
+        assert_eq!(s.store_healthy, cloned.store_healthy);
+    }
+
+    #[test]
+    fn store_coverage_status_debug() {
+        let s = StoreCoverageStatus::default();
+        let dbg = format!("{s:?}");
+        assert!(dbg.contains("StoreCoverageStatus"));
+    }
+
+    // ── DegradedModeStatus clone and debug ──
+
+    #[test]
+    fn degraded_mode_status_clone() {
+        let s = DegradedModeStatus { is_degraded: true };
+        let cloned = s.clone();
+        assert_eq!(s.is_degraded, cloned.is_degraded);
+    }
+
+    #[test]
+    fn degraded_mode_status_debug() {
+        let s = DegradedModeStatus::default();
+        let dbg = format!("{s:?}");
+        assert!(dbg.contains("DegradedModeStatus"));
+    }
+
+    // ── CheckResult clone and debug ──
+
+    #[test]
+    fn check_result_clone() {
+        let result = CheckResult {
+            name: "clone_test".to_string(),
+            status: CheckStatus::Warn,
+            severity: CheckSeverity::Warning,
+            message: "cloned".to_string(),
+        };
+        let cloned = result.clone();
+        assert_eq!(result.name, cloned.name);
+        assert_eq!(result.status, cloned.status);
+        assert_eq!(result.severity, cloned.severity);
+        assert_eq!(result.message, cloned.message);
+    }
+
+    #[test]
+    fn check_result_debug() {
+        let result = CheckResult {
+            name: "debug_test".to_string(),
+            status: CheckStatus::Fail,
+            severity: CheckSeverity::Critical,
+            message: "debug msg".to_string(),
+        };
+        let dbg = format!("{result:?}");
+        assert!(dbg.contains("CheckResult"));
+        assert!(dbg.contains("debug_test"));
+    }
+
+    // ── DoctorReport with multiple checks ──
+
+    #[test]
+    fn doctor_report_with_checks_serialization() {
+        let mut report = DoctorReport::baseline("z:checks");
+        report.checks.push(CheckResult {
+            name: "disk".to_string(),
+            status: CheckStatus::Warn,
+            severity: CheckSeverity::Warning,
+            message: "low space".to_string(),
+        });
+        report.checks.push(CheckResult {
+            name: "cpu".to_string(),
+            status: CheckStatus::Ok,
+            severity: CheckSeverity::Info,
+            message: "normal".to_string(),
+        });
+        let json = serde_json::to_string(&report).unwrap();
+        assert!(json.contains("disk"));
+        assert!(json.contains("cpu"));
+        assert!(json.contains("WARN"));
+    }
+
+    // ── DoctorReport unicode zone_id ──
+
+    #[test]
+    fn baseline_report_unicode_zone_id() {
+        let report = DoctorReport::baseline("z:\u{00e9}l\u{00e8}ve");
+        assert_eq!(report.zone_id, "z:\u{00e9}l\u{00e8}ve");
+    }
+
+    // ── DoctorRequest unicode ──
+
+    #[test]
+    fn doctor_request_unicode_zone_id() {
+        let json = r#"{"zone_id": "z:\u00e9l\u00e8ve"}"#;
+        let req: DoctorRequest = serde_json::from_str(json).unwrap();
+        assert!(req.zone_id.contains('\u{00e9}'));
+    }
+
+    // ── DoctorRequest many connectors ──
+
+    #[test]
+    fn doctor_request_many_connectors() {
+        let connectors: Vec<String> = (0..100).map(|i| format!("conn{i}")).collect();
+        let req = DoctorRequest {
+            zone_id: "z:bulk".to_string(),
+            connectors,
+            self_check: true,
+        };
+        assert_eq!(req.connectors.len(), 100);
+    }
+
+    // ── overall_status_from_self_checks with many entries ──
+
+    #[test]
+    fn overall_status_many_ok_entries() {
+        let checks: Vec<ConnectorSelfCheck> = (0..50)
+            .map(|i| ConnectorSelfCheck {
+                connector_id: format!("conn_{i}"),
+                report: SelfCheckReport::ok(),
+            })
+            .collect();
+        assert_eq!(overall_status_from_self_checks(&checks), OverallStatus::Ok);
+    }
+
+    #[test]
+    fn overall_status_last_entry_failed() {
+        let mut checks: Vec<ConnectorSelfCheck> = (0..10)
+            .map(|i| ConnectorSelfCheck {
+                connector_id: format!("conn_{i}"),
+                report: SelfCheckReport::ok(),
+            })
+            .collect();
+        checks.push(ConnectorSelfCheck {
+            connector_id: "last".to_string(),
+            report: SelfCheckReport::failed("err", "final failure"),
+        });
+        assert_eq!(
+            overall_status_from_self_checks(&checks),
+            OverallStatus::Fail
+        );
+    }
+
+    // ── DoctorReport transport_policy all true ──
+
+    #[test]
+    fn transport_policy_all_true() {
+        let t = TransportPolicyStatus {
+            allow_lan: true,
+            allow_derp: true,
+            allow_funnel: true,
+        };
+        let json = serde_json::to_value(&t).unwrap();
+        assert_eq!(json["allow_lan"], true);
+        assert_eq!(json["allow_derp"], true);
+        assert_eq!(json["allow_funnel"], true);
+    }
+
+    // ── FreshnessLevel copy semantics ──
+
+    #[test]
+    fn freshness_level_copy_semantics() {
+        let a = FreshnessLevel::TooStale;
+        let b = a;
+        let c = a;
+        assert_eq!(b, c);
+        assert_eq!(a, FreshnessLevel::TooStale);
+    }
+
+    // ── OverallStatus copy semantics ──
+
+    #[test]
+    fn overall_status_copy_semantics() {
+        let a = OverallStatus::Warn;
+        let b = a;
+        let c = a;
+        assert_eq!(b, c);
+        assert_eq!(a, OverallStatus::Warn);
+    }
 }

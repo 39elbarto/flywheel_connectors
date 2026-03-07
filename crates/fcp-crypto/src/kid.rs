@@ -254,4 +254,117 @@ mod tests {
         // Should still be deterministic
         assert_eq!(kid, KeyId::derive_from_public_key(b""));
     }
+
+    // ---- KeyId clone ----
+
+    #[test]
+    fn kid_clone() {
+        let kid = KeyId::from_bytes([1, 2, 3, 4, 5, 6, 7, 8]);
+        let cloned = kid.clone();
+        assert_eq!(kid, cloned);
+        // Use original after clone
+        assert_eq!(kid.to_hex(), cloned.to_hex());
+    }
+
+    // ---- Hex edge cases ----
+
+    #[test]
+    fn kid_from_hex_empty_string() {
+        let err = KeyId::from_hex("").unwrap_err();
+        assert!(matches!(
+            err,
+            CryptoError::InvalidKeyLength {
+                expected: 8,
+                actual: 0
+            }
+        ));
+    }
+
+    #[test]
+    fn kid_from_hex_odd_length() {
+        let err = KeyId::from_hex("012345678abcdef").unwrap_err();
+        // Odd hex string should fail to decode
+        assert!(matches!(err, CryptoError::InvalidKeyId(_)));
+    }
+
+    #[test]
+    fn kid_from_hex_uppercase() {
+        let kid1 = KeyId::from_hex("0123456789abcdef").unwrap();
+        let kid2 = KeyId::from_hex("0123456789ABCDEF").unwrap();
+        assert_eq!(kid1, kid2);
+    }
+
+    // ---- Try from slice edge cases ----
+
+    #[test]
+    fn kid_try_from_slice_too_long() {
+        let result = KeyId::try_from_slice(&[0u8; 16]);
+        assert!(matches!(
+            result,
+            Err(CryptoError::InvalidKeyLength {
+                expected: 8,
+                actual: 16
+            })
+        ));
+    }
+
+    #[test]
+    fn kid_try_from_slice_one_byte() {
+        let result = KeyId::try_from_slice(&[0u8; 1]);
+        assert!(matches!(
+            result,
+            Err(CryptoError::InvalidKeyLength {
+                expected: 8,
+                actual: 1
+            })
+        ));
+    }
+
+    // ---- Derive from large key ----
+
+    #[test]
+    fn kid_derive_from_large_key() {
+        let large_key = vec![0xAB; 1024];
+        let kid = KeyId::derive_from_public_key(&large_key);
+        assert_eq!(kid.as_bytes().len(), KID_SIZE);
+        // Deterministic
+        assert_eq!(kid, KeyId::derive_from_public_key(&large_key));
+    }
+
+    // ---- Constant-time equality ----
+
+    #[test]
+    fn kid_constant_time_eq() {
+        let kid1 = KeyId::from_bytes([1, 2, 3, 4, 5, 6, 7, 8]);
+        let kid2 = KeyId::from_bytes([1, 2, 3, 4, 5, 6, 7, 8]);
+        let kid3 = KeyId::from_bytes([8, 7, 6, 5, 4, 3, 2, 1]);
+
+        assert!(bool::from(kid1.ct_eq(&kid2)));
+        assert!(!bool::from(kid1.ct_eq(&kid3)));
+    }
+
+    // ---- Serde with specific values ----
+
+    #[test]
+    fn kid_serde_all_zeros() {
+        let kid = KeyId::default();
+        let json = serde_json::to_string(&kid).unwrap();
+        let decoded: KeyId = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, kid);
+    }
+
+    #[test]
+    fn kid_serde_all_ones() {
+        let kid = KeyId::from_bytes([0xFF; KID_SIZE]);
+        let json = serde_json::to_string(&kid).unwrap();
+        let decoded: KeyId = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, kid);
+    }
+
+    // ---- KID_SIZE constant ----
+
+    #[test]
+    fn kid_size_constant() {
+        assert_eq!(KID_SIZE, 8);
+    }
 }

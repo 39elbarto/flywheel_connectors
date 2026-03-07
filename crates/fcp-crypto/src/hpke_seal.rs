@@ -148,7 +148,7 @@ impl Fcp2Aad {
 ///
 /// # Arguments
 ///
-/// * `recipient_pk` - Recipient's X25519 public key.
+/// * `recip_pub` - Recipient's X25519 public key.
 /// * `plaintext` - Data to encrypt.
 /// * `aad` - Additional authenticated data (context binding).
 ///
@@ -156,12 +156,12 @@ impl Fcp2Aad {
 ///
 /// Returns an error if HPKE operations fail.
 pub fn hpke_seal(
-    recipient_pk: &X25519PublicKey,
+    recip_pub: &X25519PublicKey,
     plaintext: &[u8],
     aad: &Fcp2Aad,
 ) -> CryptoResult<HpkeSealedBox> {
     let mut rng = rand::rngs::OsRng;
-    hpke_seal_with_rng(recipient_pk, plaintext, aad, &mut rng)
+    hpke_seal_with_rng(recip_pub, plaintext, aad, &mut rng)
 }
 
 /// Seal (encrypt) data to a recipient's public key using HPKE with caller-provided RNG.
@@ -172,12 +172,12 @@ pub fn hpke_seal(
 ///
 /// Returns an error if HPKE operations fail.
 pub fn hpke_seal_with_rng<R: rand::CryptoRng + rand::RngCore>(
-    recipient_pk: &X25519PublicKey,
+    recip_pub: &X25519PublicKey,
     plaintext: &[u8],
     aad: &Fcp2Aad,
     rng: &mut R,
 ) -> CryptoResult<HpkeSealedBox> {
-    let pk = <X25519HkdfSha256 as Kem>::PublicKey::from_bytes(&recipient_pk.to_bytes())
+    let pk = <X25519HkdfSha256 as Kem>::PublicKey::from_bytes(&recip_pub.to_bytes())
         .map_err(|e| CryptoError::HpkeFailed(format!("invalid recipient public key: {e}")))?;
     let (enc, mut sender_ctx) = hpke::setup_sender::<
         ChaCha20Poly1305Aead,
@@ -244,14 +244,14 @@ type ChaCha20Poly1305Aead = hpke::aead::ChaCha20Poly1305;
 ///
 /// Returns an error if sealing fails.
 pub fn seal_zone_key(
-    recipient_pk: &X25519PublicKey,
+    recip_pub: &X25519PublicKey,
     zone_key_material: &[u8],
     zone_id: &[u8],
     recipient_node_id: &[u8],
     issued_at: u64,
 ) -> CryptoResult<HpkeSealedBox> {
     let aad = Fcp2Aad::for_zone_key(zone_id, recipient_node_id, issued_at);
-    hpke_seal(recipient_pk, zone_key_material, &aad)
+    hpke_seal(recip_pub, zone_key_material, &aad)
 }
 
 /// Convenience function: open zone key material.
@@ -544,5 +544,137 @@ mod tests {
         assert_eq!(purpose::OBJECTID_KEY, b"FCP2-OBJECTID-KEY");
         assert_eq!(purpose::OWNER_SHARE, b"FCP2-OWNER-SHARE");
         assert_eq!(purpose::SECRET_SHARE, b"FCP2-SECRET-SHARE");
+    }
+
+    // ---- Sealed box serde roundtrip ----
+
+    #[test]
+    fn hpke_sealed_box_serde_roundtrip() {
+        let recipient_sk = X25519SecretKey::generate();
+        let recip_pub = recipient_sk.public_key();
+        let aad = Fcp2Aad::for_zone_key(b"z:work", b"node-1", 100);
+        let sealed = hpke_seal(&recip_pub, b"serde test", &aad).unwrap();
+
+        let json = serde_json::to_string(&sealed).unwrap();
+        let deserialized: HpkeSealedBox = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(sealed.enc, deserialized.enc);
+        assert_eq!(sealed.ciphertext, deserialized.ciphertext);
+
+        // Should still decrypt
+        let opened = hpke_open(&recipient_sk, &deserialized, &aad).unwrap();
+        assert_eq!(opened, b"serde test");
+    }
+
+    // ---- Sealed box clone ----
+
+    #[test]
+    fn hpke_sealed_box_clone() {
+        let recipient_sk = X25519SecretKey::generate();
+        let recip_pub = recipient_sk.public_key();
+        let aad = Fcp2Aad::for_zone_key(b"z:work", b"node-1", 200);
+        let sealed = hpke_seal(&recip_pub, b"clone test", &aad).unwrap();
+
+        let cloned = sealed.clone();
+        assert_eq!(sealed.enc, cloned.enc);
+        assert_eq!(sealed.ciphertext, cloned.ciphertext);
+    }
+
+    // ---- Sealed box debug ----
+
+    #[test]
+    fn hpke_sealed_box_debug() {
+        let recipient_sk = X25519SecretKey::generate();
+        let recip_pub = recipient_sk.public_key();
+        let aad = Fcp2Aad::for_zone_key(b"z:work", b"node-1", 300);
+        let sealed = hpke_seal(&recip_pub, b"debug", &aad).unwrap();
+
+        let debug = format!("{sealed:?}");
+        assert!(debug.contains("HpkeSealedBox"));
+    }
+
+    // ---- AAD clone ----
+
+    #[test]
+    fn fcp2_aad_clone() {
+        let aad = Fcp2Aad::for_zone_key(b"z:test", b"node-x", 999);
+        let cloned = aad.clone();
+        assert_eq!(aad.encode(), cloned.encode());
+    }
+
+    // ---- AAD debug ----
+
+    #[test]
+    fn fcp2_aad_debug() {
+        let aad = Fcp2Aad::for_zone_key(b"z:test", b"node-x", 999);
+        let debug = format!("{aad:?}");
+        assert!(debug.contains("Fcp2Aad"));
+    }
+
+    // ---- Deterministic sealing with rng ----
+
+    #[test]
+    fn hpke_seal_with_rng_deterministic() {
+        use rand::SeedableRng;
+        use rand_chacha::ChaCha20Rng;
+
+        let recipient_sk = X25519SecretKey::from_bytes([42u8; 32]);
+        let recip_pub = recipient_sk.public_key();
+        let aad = Fcp2Aad::for_zone_key(b"z:det", b"node-det", 12345);
+
+        let mut rng1 = ChaCha20Rng::from_seed([0xAA; 32]);
+        let sealed1 = hpke_seal_with_rng(&recip_pub, b"deterministic", &aad, &mut rng1).unwrap();
+
+        let mut rng2 = ChaCha20Rng::from_seed([0xAA; 32]);
+        let sealed2 = hpke_seal_with_rng(&recip_pub, b"deterministic", &aad, &mut rng2).unwrap();
+
+        assert_eq!(sealed1.enc, sealed2.enc);
+        assert_eq!(sealed1.ciphertext, sealed2.ciphertext);
+    }
+
+    // ---- HPKE constants ----
+
+    #[test]
+    fn hpke_constants() {
+        assert_eq!(HPKE_ENC_SIZE, 32);
+        assert_eq!(HPKE_TAG_SIZE, 16);
+    }
+
+    // ---- From bytes minimum valid size ----
+
+    #[test]
+    fn hpke_sealed_box_from_bytes_minimum_valid() {
+        let min_bytes = vec![0u8; HPKE_ENC_SIZE + HPKE_TAG_SIZE];
+        let result = HpkeSealedBox::from_bytes(&min_bytes);
+        assert!(result.is_ok());
+        let sb = result.unwrap();
+        assert_eq!(sb.enc.len(), HPKE_ENC_SIZE);
+        assert_eq!(sb.ciphertext.len(), HPKE_TAG_SIZE);
+    }
+
+    // ---- AAD for_objectid_key roundtrip ----
+
+    #[test]
+    fn hpke_objectid_key_roundtrip() {
+        let recipient_sk = X25519SecretKey::generate();
+        let recip_pub = recipient_sk.public_key();
+        let aad = Fcp2Aad::for_objectid_key(b"z:oid", b"node-oid", 555);
+
+        let sealed = hpke_seal(&recip_pub, b"objectid secret", &aad).unwrap();
+        let opened = hpke_open(&recipient_sk, &sealed, &aad).unwrap();
+        assert_eq!(opened, b"objectid secret");
+    }
+
+    // ---- AAD for_secret_share roundtrip ----
+
+    #[test]
+    fn hpke_secret_share_roundtrip() {
+        let recipient_sk = X25519SecretKey::generate();
+        let recip_pub = recipient_sk.public_key();
+        let aad = Fcp2Aad::for_secret_share(b"z:share", b"node-share", 777);
+
+        let sealed = hpke_seal(&recip_pub, b"share secret", &aad).unwrap();
+        let opened = hpke_open(&recipient_sk, &sealed, &aad).unwrap();
+        assert_eq!(opened, b"share secret");
     }
 }

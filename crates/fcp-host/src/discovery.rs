@@ -3578,4 +3578,637 @@ mod tests {
         // Only one refresh after multiple invalidations
         assert_eq!(calls.load(Ordering::SeqCst), 2);
     }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // CacheMetadata + CacheValidator sync tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn cache_metadata_eq() {
+        let now = Utc::now();
+        let a = CacheMetadata {
+            etag: "\"abc\"".to_string(),
+            last_modified: now,
+            max_age_seconds: 30,
+            stale_while_revalidate_seconds: Some(15),
+        };
+        let b = a.clone();
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn cache_metadata_debug() {
+        let now = Utc::now();
+        let meta = CacheMetadata {
+            etag: "\"test-etag\"".to_string(),
+            last_modified: now,
+            max_age_seconds: 60,
+            stale_while_revalidate_seconds: None,
+        };
+        let dbg = format!("{meta:?}");
+        assert!(dbg.contains("CacheMetadata"));
+        assert!(dbg.contains("test-etag"));
+    }
+
+    #[test]
+    fn cache_metadata_no_stale_while_revalidate() {
+        let now = Utc::now();
+        let meta = CacheMetadata {
+            etag: "\"e\"".to_string(),
+            last_modified: now,
+            max_age_seconds: 0,
+            stale_while_revalidate_seconds: None,
+        };
+        assert!(meta.stale_while_revalidate_seconds.is_none());
+    }
+
+    #[test]
+    fn cache_validator_default() {
+        let v = CacheValidator::default();
+        assert!(v.if_none_match.is_none());
+        assert!(v.if_modified_since.is_none());
+    }
+
+    #[test]
+    fn cache_validator_eq() {
+        let a = CacheValidator {
+            if_none_match: Some("\"xyz\"".to_string()),
+            if_modified_since: None,
+        };
+        let b = a.clone();
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn cache_validator_debug() {
+        let v = CacheValidator {
+            if_none_match: Some("\"e1\"".to_string()),
+            if_modified_since: None,
+        };
+        let dbg = format!("{v:?}");
+        assert!(dbg.contains("CacheValidator"));
+    }
+
+    #[test]
+    fn cache_validator_matching_etag_is_not_modified() {
+        let now = Utc::now();
+        let meta = CacheMetadata {
+            etag: "\"same\"".to_string(),
+            last_modified: now,
+            max_age_seconds: 30,
+            stale_while_revalidate_seconds: None,
+        };
+        let v = CacheValidator {
+            if_none_match: Some("\"same\"".to_string()),
+            if_modified_since: None,
+        };
+        assert!(v.is_not_modified(&meta));
+    }
+
+    #[test]
+    fn cache_validator_mismatched_etag_is_modified() {
+        let now = Utc::now();
+        let meta = CacheMetadata {
+            etag: "\"aaa\"".to_string(),
+            last_modified: now,
+            max_age_seconds: 30,
+            stale_while_revalidate_seconds: None,
+        };
+        let v = CacheValidator {
+            if_none_match: Some("\"bbb\"".to_string()),
+            if_modified_since: None,
+        };
+        assert!(!v.is_not_modified(&meta));
+    }
+
+    #[test]
+    fn cache_validator_if_modified_since_future_is_not_modified() {
+        let now = Utc::now();
+        let meta = CacheMetadata {
+            etag: "\"x\"".to_string(),
+            last_modified: now,
+            max_age_seconds: 30,
+            stale_while_revalidate_seconds: None,
+        };
+        let v = CacheValidator {
+            if_none_match: None,
+            if_modified_since: Some(now + chrono::Duration::seconds(60)),
+        };
+        assert!(v.is_not_modified(&meta));
+    }
+
+    #[test]
+    fn cache_validator_if_modified_since_past_is_modified() {
+        let now = Utc::now();
+        let meta = CacheMetadata {
+            etag: "\"x\"".to_string(),
+            last_modified: now,
+            max_age_seconds: 30,
+            stale_while_revalidate_seconds: None,
+        };
+        let v = CacheValidator {
+            if_none_match: None,
+            if_modified_since: Some(now - chrono::Duration::seconds(60)),
+        };
+        assert!(!v.is_not_modified(&meta));
+    }
+
+    #[test]
+    fn cache_validator_empty_is_always_modified() {
+        let now = Utc::now();
+        let meta = CacheMetadata {
+            etag: "\"any\"".to_string(),
+            last_modified: now,
+            max_age_seconds: 30,
+            stale_while_revalidate_seconds: None,
+        };
+        let v = CacheValidator::default();
+        assert!(!v.is_not_modified(&meta));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // ResponseMeta tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn response_meta_not_modified() {
+        let meta = ResponseMeta::not_modified();
+        assert_eq!(meta.status, 304);
+        assert_eq!(meta.message.as_deref(), Some("Not Modified"));
+    }
+
+    #[test]
+    fn response_meta_debug() {
+        let meta = ResponseMeta {
+            status: 200,
+            message: Some("OK".into()),
+        };
+        let dbg = format!("{meta:?}");
+        assert!(dbg.contains("ResponseMeta"));
+        assert!(dbg.contains("200"));
+    }
+
+    #[test]
+    fn response_meta_eq() {
+        let a = ResponseMeta {
+            status: 200,
+            message: None,
+        };
+        let b = a.clone();
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn response_meta_serialization_roundtrip() {
+        let meta = ResponseMeta {
+            status: 404,
+            message: Some("Not Found".into()),
+        };
+        let json = serde_json::to_string(&meta).unwrap();
+        let parsed: ResponseMeta = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.status, 404);
+        assert_eq!(parsed.message.as_deref(), Some("Not Found"));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // DiscoveryResponse additional tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn discovery_response_new_defaults() {
+        let resp = DiscoveryResponse::new(vec![], 0);
+        assert!(resp.connectors.is_empty());
+        assert_eq!(resp.registry_version, 0);
+        assert!(resp.supports_streaming);
+        assert!(resp.supports_batching);
+        assert!(resp.cache.is_none());
+        assert!(resp.meta.is_none());
+    }
+
+    #[test]
+    fn discovery_response_not_modified_has_304_meta() {
+        let now = Utc::now();
+        let cache = CacheMetadata {
+            etag: "\"etag\"".to_string(),
+            last_modified: now,
+            max_age_seconds: 30,
+            stale_while_revalidate_seconds: None,
+        };
+        let resp = DiscoveryResponse::not_modified(5, cache);
+        assert!(resp.connectors.is_empty());
+        assert_eq!(resp.registry_version, 5);
+        assert!(resp.cache.is_some());
+        assert_eq!(resp.meta.as_ref().unwrap().status, 304);
+    }
+
+    #[test]
+    fn discovery_response_debug() {
+        let resp = DiscoveryResponse::new(vec![], 99);
+        let dbg = format!("{resp:?}");
+        assert!(dbg.contains("DiscoveryResponse"));
+    }
+
+    #[test]
+    fn discovery_query_result_debug() {
+        let resp = DiscoveryResponse::new(vec![], 1);
+        let result = DiscoveryQueryResult {
+            response: resp,
+            cache_hit: true,
+        };
+        let dbg = format!("{result:?}");
+        assert!(dbg.contains("DiscoveryQueryResult"));
+        assert!(dbg.contains("true"));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // DiscoveryFilter serde edge cases
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn discovery_filter_default_serialization_omits_none() {
+        let filter = DiscoveryFilter::default();
+        let json = serde_json::to_string(&filter).unwrap();
+        // skip_serializing_if means None fields are omitted
+        assert!(!json.contains("category"));
+        assert!(!json.contains("max_risk"));
+        assert!(!json.contains("health"));
+    }
+
+    #[test]
+    fn discovery_filter_clone() {
+        let filter = DiscoveryFilter {
+            category: Some("ai".into()),
+            max_risk: Some(SafetyTier::Risky),
+            health: Some(HealthFilter::Healthy),
+        };
+        let cloned = filter.clone();
+        assert_eq!(filter.category, cloned.category);
+        assert_eq!(filter.max_risk, cloned.max_risk);
+        assert_eq!(filter.health, cloned.health);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // ConnectorSummary edge cases
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn connector_summary_empty_categories() {
+        let summary = make_summary(
+            "test",
+            "empty",
+            "v1",
+            vec![],
+            SafetyTier::Safe,
+            ConnectorHealth::healthy(),
+        );
+        assert!(summary.categories.is_empty());
+        let json = serde_json::to_string(&summary).unwrap();
+        let parsed: ConnectorSummary = serde_json::from_str(&json).unwrap();
+        assert!(parsed.categories.is_empty());
+    }
+
+    #[test]
+    fn connector_summary_debug() {
+        let summary = make_summary(
+            "test",
+            "dbg",
+            "v1",
+            vec!["ai"],
+            SafetyTier::Safe,
+            ConnectorHealth::healthy(),
+        );
+        let dbg = format!("{summary:?}");
+        assert!(dbg.contains("ConnectorSummary"));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // PreflightRequest + PreflightResponse edge cases
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn preflight_response_allowed_has_empty_capabilities() {
+        let resp = PreflightResponse::allowed();
+        assert!(resp.missing_capabilities.is_empty());
+        assert!(resp.rate_limit.is_none());
+        assert!(resp.estimated_cost.is_none());
+        assert!(resp.budget_status.is_none());
+    }
+
+    #[test]
+    fn preflight_response_denied_has_empty_capabilities() {
+        let resp = PreflightResponse::denied("nope");
+        assert!(resp.missing_capabilities.is_empty());
+    }
+
+    #[test]
+    fn preflight_response_clone() {
+        let resp = PreflightResponse::denied("cloned");
+        let cloned = resp.clone();
+        assert_eq!(resp.allowed, cloned.allowed);
+        assert_eq!(resp.reason, cloned.reason);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // IntrospectionResponse edge cases
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn introspection_response_not_modified_has_304() {
+        let summary = make_summary(
+            "test",
+            "nm",
+            "v1",
+            vec![],
+            SafetyTier::Safe,
+            ConnectorHealth::healthy(),
+        );
+        let now = Utc::now();
+        let cache = CacheMetadata {
+            etag: "\"e\"".to_string(),
+            last_modified: now,
+            max_age_seconds: 30,
+            stale_while_revalidate_seconds: None,
+        };
+        let resp = IntrospectionResponse::not_modified(
+            summary,
+            ConnectorArchetype::RequestResponse,
+            cache,
+        );
+        assert!(resp.tools.is_empty());
+        assert_eq!(resp.meta.as_ref().unwrap().status, 304);
+        assert!(resp.cache.is_some());
+        assert_eq!(resp.archetype, ConnectorArchetype::RequestResponse);
+    }
+
+    #[test]
+    fn introspection_response_debug() {
+        let summary = make_summary(
+            "test",
+            "dbgi",
+            "v1",
+            vec![],
+            SafetyTier::Safe,
+            ConnectorHealth::healthy(),
+        );
+        let resp = IntrospectionResponse {
+            connector: summary,
+            tools: vec![],
+            rate_limits: None,
+            archetype: ConnectorArchetype::Webhook,
+            introspection: Introspection {
+                operations: vec![],
+                events: vec![],
+                resource_types: vec![],
+                auth_caps: None,
+                event_caps: None,
+            },
+            cache: None,
+            meta: None,
+        };
+        let dbg = format!("{resp:?}");
+        assert!(dbg.contains("IntrospectionResponse"));
+        assert!(dbg.contains("Webhook"));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // SelfCheckResponse edge cases
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn self_check_response_clone() {
+        let resp = SelfCheckResponse {
+            connector_id: ConnectorId::new("test", "sc", "v1").unwrap(),
+            report: SelfCheckReport::ok(),
+            checked_at: Utc::now(),
+        };
+        let cloned = resp.clone();
+        assert_eq!(resp.connector_id, cloned.connector_id);
+        assert_eq!(resp.report.status, cloned.report.status);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // HostHealthResponse edge cases
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn host_health_response_empty_connectors() {
+        let resp = HostHealthResponse {
+            status: HostHealthStatus::Healthy,
+            connectors: HashMap::new(),
+            uptime_seconds: 0,
+            active_connections: 0,
+            timestamp: Utc::now(),
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        let parsed: HostHealthResponse = serde_json::from_str(&json).unwrap();
+        assert!(parsed.connectors.is_empty());
+        assert_eq!(parsed.uptime_seconds, 0);
+    }
+
+    #[test]
+    fn host_health_status_clone() {
+        let a = HostHealthStatus::Unhealthy;
+        let b = a;
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn host_health_response_clone() {
+        let resp = HostHealthResponse {
+            status: HostHealthStatus::Degraded,
+            connectors: HashMap::new(),
+            uptime_seconds: 100,
+            active_connections: 3,
+            timestamp: Utc::now(),
+        };
+        let cloned = resp.clone();
+        assert_eq!(
+            std::mem::discriminant(&resp.status),
+            std::mem::discriminant(&cloned.status)
+        );
+        assert_eq!(resp.uptime_seconds, cloned.uptime_seconds);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // ToolDescriptor edge cases
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn tool_descriptor_clone() {
+        let tool = ToolDescriptor {
+            name: "clone_test".to_string(),
+            description: "desc".to_string(),
+            input_schema: serde_json::json!({}),
+            output_schema: serde_json::json!({}),
+            capability: CapabilityId::new("cap.clone").expect("capability"),
+            risk_level: RiskLevel::Low,
+            safety_tier: SafetyTier::Safe,
+            idempotency: IdempotencyClass::Strict,
+            approval_mode: None,
+            requires_confirmation: false,
+            idempotent: true,
+            supports_simulate: false,
+            latency_hint: None,
+            rate_limits: vec![],
+            examples: vec![],
+            ai_hints: None,
+        };
+        let cloned = tool.clone();
+        assert_eq!(tool.name, cloned.name);
+        assert_eq!(tool.description, cloned.description);
+        assert_eq!(tool.risk_level, cloned.risk_level);
+    }
+
+    #[test]
+    fn tool_descriptor_debug() {
+        let tool = ToolDescriptor {
+            name: "debug_tool".to_string(),
+            description: "for debug".to_string(),
+            input_schema: serde_json::json!({}),
+            output_schema: serde_json::json!({}),
+            capability: CapabilityId::new("cap.dbg").expect("capability"),
+            risk_level: RiskLevel::High,
+            safety_tier: SafetyTier::Dangerous,
+            idempotency: IdempotencyClass::None,
+            approval_mode: Some(ApprovalMode::Interactive),
+            requires_confirmation: true,
+            idempotent: false,
+            supports_simulate: true,
+            latency_hint: Some(LatencyHint::VerySlow),
+            rate_limits: vec!["pool1".into()],
+            examples: vec![],
+            ai_hints: None,
+        };
+        let dbg = format!("{tool:?}");
+        assert!(dbg.contains("ToolDescriptor"));
+        assert!(dbg.contains("debug_tool"));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // ToolExample edge cases
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn tool_example_clone() {
+        let ex = ToolExample {
+            description: Some("clone".into()),
+            input: serde_json::json!({"x": 1}),
+            output: Some(serde_json::json!({"y": 2})),
+        };
+        let cloned = ex.clone();
+        assert_eq!(ex.description, cloned.description);
+        assert_eq!(ex.input, cloned.input);
+        assert_eq!(ex.output, cloned.output);
+    }
+
+    #[test]
+    fn tool_example_debug() {
+        let ex = ToolExample {
+            description: None,
+            input: serde_json::json!({}),
+            output: None,
+        };
+        let dbg = format!("{ex:?}");
+        assert!(dbg.contains("ToolExample"));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // EstimatedCost + PreflightRateLimit clone
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn estimated_cost_clone() {
+        let cost = EstimatedCost {
+            api_calls: Some(10),
+            tokens: Some(500),
+            cost_cents: Some(25),
+        };
+        let cloned = cost.clone();
+        assert_eq!(cost.api_calls, cloned.api_calls);
+        assert_eq!(cost.tokens, cloned.tokens);
+        assert_eq!(cost.cost_cents, cloned.cost_cents);
+    }
+
+    #[test]
+    fn preflight_rate_limit_clone() {
+        let rl = PreflightRateLimit {
+            limited: true,
+            remaining: 5,
+            reset_at: Some(Utc::now()),
+        };
+        let cloned = rl.clone();
+        assert_eq!(rl.limited, cloned.limited);
+        assert_eq!(rl.remaining, cloned.remaining);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // ConnectorArchetype copy semantics
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn connector_archetype_copy() {
+        let a = ConnectorArchetype::Polling;
+        let b = a;
+        assert_eq!(a, b);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // LatencyHint copy semantics
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn latency_hint_copy() {
+        let a = LatencyHint::Slow;
+        let b = a;
+        assert_eq!(a, b);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // HealthFilter copy semantics
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn health_filter_copy() {
+        let a = HealthFilter::Degraded;
+        let b = a;
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn health_filter_debug() {
+        let dbg = format!("{:?}", HealthFilter::All);
+        assert!(dbg.contains("All"));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // CacheMetadata serialization
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn cache_metadata_serialization_roundtrip() {
+        let now = Utc::now();
+        let meta = CacheMetadata {
+            etag: "\"etag-abc\"".to_string(),
+            last_modified: now,
+            max_age_seconds: 120,
+            stale_while_revalidate_seconds: Some(30),
+        };
+        let json = serde_json::to_string(&meta).unwrap();
+        let parsed: CacheMetadata = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.etag, "\"etag-abc\"");
+        assert_eq!(parsed.max_age_seconds, 120);
+        assert_eq!(parsed.stale_while_revalidate_seconds, Some(30));
+    }
+
+    #[test]
+    fn cache_validator_serialization_roundtrip() {
+        let v = CacheValidator {
+            if_none_match: Some("\"etag-xyz\"".to_string()),
+            if_modified_since: Some(Utc::now()),
+        };
+        let json = serde_json::to_string(&v).unwrap();
+        let parsed: CacheValidator = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.if_none_match.as_deref(), Some("\"etag-xyz\""));
+        assert!(parsed.if_modified_since.is_some());
+    }
 }

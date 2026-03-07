@@ -682,4 +682,65 @@ mod tests {
         assert_eq!(original.trace_flags, extracted.trace_flags);
         // Note: extract doesn't preserve trace_state as it's not in traceparent
     }
+
+    #[test]
+    fn test_trace_context_new_unique_span_ids() {
+        let ctx1 = TraceContext::new();
+        let ctx2 = TraceContext::new();
+        assert_ne!(ctx1.parent_span_id, ctx2.parent_span_id);
+    }
+
+    #[test]
+    fn test_fcp_span_empty_name() {
+        let span = FcpSpan::new("");
+        assert_eq!(span.name, "");
+        assert!(span.attributes.is_empty());
+    }
+
+    #[test]
+    fn test_fcp_span_kind_consumer() {
+        let span = FcpSpan::new("consumer_op").kind(SpanKind::Consumer);
+        assert!(matches!(span.kind, SpanKind::Consumer));
+    }
+
+    #[test]
+    fn test_fcp_span_chained_attributes() {
+        let span = FcpSpan::new("test")
+            .connector_id("c1")
+            .operation("op1")
+            .request_id("r1")
+            .attribute("extra", "val");
+        assert_eq!(span.attributes.len(), 4);
+    }
+
+    #[test]
+    fn test_span_guard_error_then_ok() {
+        let span = FcpSpan::new("test_span");
+        let mut guard = span.start();
+        guard.record_error("first error");
+        guard.set_ok(); // Overriding error status
+    }
+
+    #[test]
+    fn test_span_guard_multiple_attributes() {
+        let span = FcpSpan::new("test_span");
+        let mut guard = span.start();
+        guard.set_attribute("k1", "v1");
+        guard.set_attribute("k2", "v2");
+        guard.set_attribute("k3", "v3");
+    }
+
+    #[test]
+    fn test_child_context_is_sampled() {
+        let mut parent = TraceContext::new();
+        parent.trace_flags = 0x00; // Not sampled
+        let child = parent.child();
+        assert!(!child.is_sampled());
+        assert_eq!(child.trace_flags, 0x00);
+    }
+
+    #[test]
+    fn test_parse_traceparent_empty_string() {
+        assert!(TraceContext::from_traceparent("").is_none());
+    }
 }

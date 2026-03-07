@@ -379,4 +379,153 @@ mod tests {
         let tag = blake3_mac(&key, b"");
         assert!(blake3_mac_verify(&key, b"", &tag).is_ok());
     }
+
+    // ---- MacKey clone ----
+
+    #[test]
+    fn mac_key_clone() {
+        let key = MacKey::from_bytes([0xBB; MAC_KEY_SIZE]);
+        let cloned = key.clone();
+        assert_eq!(key.as_bytes(), cloned.as_bytes());
+        // Use original after clone
+        let tag = blake3_mac(&key, b"test");
+        assert!(blake3_mac_verify(&cloned, b"test", &tag).is_ok());
+    }
+
+    // ---- Large message MAC ----
+
+    #[test]
+    fn mac_large_message() {
+        let key = MacKey::generate();
+        let large = vec![0xCD; 100_000];
+        let tag = blake3_mac(&key, &large);
+        assert!(blake3_mac_verify(&key, &large, &tag).is_ok());
+    }
+
+    #[test]
+    fn mac_full_large_message() {
+        let key = MacKey::generate();
+        let large = vec![0xEF; 50_000];
+        let mac = Blake3Mac::new(&key);
+        let tag = mac.compute_full(&large);
+        assert!(mac.verify_full(&large, &tag).is_ok());
+    }
+
+    // ---- Incremental MAC edge cases ----
+
+    #[test]
+    fn incremental_mac_empty_updates() {
+        let key = MacKey::generate();
+        let message = b"test";
+
+        let one_shot = blake3_mac(&key, message);
+
+        let mut inc = IncrementalMac::new(&key);
+        inc.update(b"");
+        inc.update(message);
+        inc.update(b"");
+        let incremental = inc.finalize();
+
+        assert_eq!(one_shot, incremental);
+    }
+
+    #[test]
+    fn incremental_mac_single_byte_updates() {
+        let key = MacKey::from_bytes([0x11; MAC_KEY_SIZE]);
+        let message = b"abcdef";
+
+        let one_shot = blake3_mac(&key, message);
+
+        let mut inc = IncrementalMac::new(&key);
+        for &byte in message {
+            inc.update(std::slice::from_ref(&byte));
+        }
+        let incremental = inc.finalize();
+
+        assert_eq!(one_shot, incremental);
+    }
+
+    #[test]
+    fn incremental_mac_full_single_byte_updates() {
+        let key = MacKey::from_bytes([0x22; MAC_KEY_SIZE]);
+        let message = b"xyz";
+
+        let one_shot = blake3_mac_full(&key, message);
+
+        let mut inc = IncrementalMac::new(&key);
+        for &byte in message {
+            inc.update(std::slice::from_ref(&byte));
+        }
+        let incremental = inc.finalize_full();
+
+        assert_eq!(one_shot, incremental);
+    }
+
+    // ---- MAC key from_bytes constant ----
+
+    #[test]
+    fn mac_key_from_bytes_const() {
+        let key = MacKey::from_bytes([0xFF; MAC_KEY_SIZE]);
+        assert_eq!(key.as_bytes(), &[0xFF; MAC_KEY_SIZE]);
+    }
+
+    // ---- Different keys produce different MACs ----
+
+    #[test]
+    fn mac_different_keys_different_tags() {
+        let key1 = MacKey::from_bytes([1u8; MAC_KEY_SIZE]);
+        let key2 = MacKey::from_bytes([2u8; MAC_KEY_SIZE]);
+        let message = b"same message";
+
+        let tag1 = blake3_mac(&key1, message);
+        let tag2 = blake3_mac(&key2, message);
+        assert_ne!(tag1, tag2);
+    }
+
+    #[test]
+    fn mac_full_different_keys_different_tags() {
+        let key1 = MacKey::from_bytes([3u8; MAC_KEY_SIZE]);
+        let key2 = MacKey::from_bytes([4u8; MAC_KEY_SIZE]);
+        let message = b"same message";
+
+        let tag1 = blake3_mac_full(&key1, message);
+        let tag2 = blake3_mac_full(&key2, message);
+        assert_ne!(tag1, tag2);
+    }
+
+    // ---- Constants ----
+
+    #[test]
+    fn mac_constants() {
+        assert_eq!(MAC_SIZE, 16);
+        assert_eq!(BLAKE3_MAC_SIZE, 32);
+        assert_eq!(MAC_KEY_SIZE, 32);
+    }
+
+    // ---- Mac key try_from_slice too long ----
+
+    #[test]
+    fn mac_key_try_from_slice_too_long() {
+        let err = MacKey::try_from_slice(&[0; 64]).unwrap_err();
+        assert!(matches!(
+            err,
+            CryptoError::InvalidKeyLength {
+                expected: 32,
+                actual: 64
+            }
+        ));
+    }
+
+    // ---- Truncated vs full: truncated is prefix of full ----
+
+    #[test]
+    fn mac_truncated_is_prefix_of_full() {
+        let key = MacKey::generate();
+        let message = b"prefix test";
+
+        let truncated = blake3_mac(&key, message);
+        let full = blake3_mac_full(&key, message);
+
+        assert_eq!(&full[..MAC_SIZE], &truncated);
+    }
 }

@@ -123,36 +123,39 @@ fn test_symbol_with_source(n: u8, esi: u32, source_node: u64) -> StoredSymbol {
     }
 }
 
-fn emit_source_diversity_log(
-    test_name: &str,
-    zone_id: &ZoneId,
+struct SourceDiversityLogEntry<'a> {
+    test_name: &'a str,
+    zone_id: &'a ZoneId,
     object_id: ObjectId,
     distinct_sources_observed: usize,
     max_concentration_bps_observed: u16,
     min_distinct_sources_required: u8,
     max_concentration_bps_required: u16,
-    repair_actions: &[RepairReasonCode],
-    result: &str,
-) {
-    let repair_actions = repair_actions
+    repair_actions: &'a [RepairReasonCode],
+    result: &'a str,
+}
+
+fn emit_source_diversity_log(entry: &SourceDiversityLogEntry<'_>) {
+    let repair_actions = entry
+        .repair_actions
         .iter()
         .map(ToString::to_string)
         .collect::<Vec<_>>();
     println!(
         "{}",
         serde_json::json!({
-            "test_name": test_name,
+            "test_name": entry.test_name,
             "module": "fcp-store-no-mock",
             "phase": "integration",
             "operation": "source_diversity",
-            "zone_id": zone_id.to_string(),
-            "object_id": object_id.to_string(),
-            "distinct_sources_observed": distinct_sources_observed,
-            "max_concentration_bps_observed": max_concentration_bps_observed,
-            "min_distinct_sources_required": min_distinct_sources_required,
-            "max_concentration_bps_required": max_concentration_bps_required,
+            "zone_id": entry.zone_id.to_string(),
+            "object_id": entry.object_id.to_string(),
+            "distinct_sources_observed": entry.distinct_sources_observed,
+            "max_concentration_bps_observed": entry.max_concentration_bps_observed,
+            "min_distinct_sources_required": entry.min_distinct_sources_required,
+            "max_concentration_bps_required": entry.max_concentration_bps_required,
             "repair_actions": repair_actions,
-            "result": result,
+            "result": entry.result,
         })
     );
 }
@@ -558,21 +561,21 @@ async fn source_diversity_plan_requires_new_source_when_single_node_dominates() 
         .expect("repaired distribution");
     let repaired_evaluation =
         CoverageEvaluation::from_distribution(object_id, &repaired_distribution);
-    emit_source_diversity_log(
-        "source_diversity_plan_requires_new_source_when_single_node_dominates",
-        &test_zone(),
+    emit_source_diversity_log(&SourceDiversityLogEntry {
+        test_name: "source_diversity_plan_requires_new_source_when_single_node_dominates",
+        zone_id: &test_zone(),
         object_id,
-        repaired_evaluation.distinct_nodes,
-        repaired_evaluation.max_node_fraction_bps,
-        policy.min_source_diversity,
-        policy.max_node_fraction_bps,
-        &plan
+        distinct_sources_observed: repaired_evaluation.distinct_nodes,
+        max_concentration_bps_observed: repaired_evaluation.max_node_fraction_bps,
+        min_distinct_sources_required: policy.min_source_diversity,
+        max_concentration_bps_required: policy.max_node_fraction_bps,
+        repair_actions: &plan
             .actions
             .iter()
             .map(|action| action.reason_code)
             .collect::<Vec<_>>(),
-        "repair_planned_then_satisfied",
-    );
+        result: "repair_planned_then_satisfied",
+    });
 }
 
 #[fcp_async_core::runtime::test]
@@ -643,21 +646,21 @@ async fn source_diversity_plan_recovers_after_source_churn() {
         RepairReasonCode::DiversityDeficit
     );
 
-    emit_source_diversity_log(
-        "source_diversity_plan_recovers_after_source_churn",
-        &test_zone(),
+    emit_source_diversity_log(&SourceDiversityLogEntry {
+        test_name: "source_diversity_plan_recovers_after_source_churn",
+        zone_id: &test_zone(),
         object_id,
-        evaluation.distinct_nodes,
-        evaluation.max_node_fraction_bps,
-        policy.min_source_diversity,
-        policy.max_node_fraction_bps,
-        &plan
+        distinct_sources_observed: evaluation.distinct_nodes,
+        max_concentration_bps_observed: evaluation.max_node_fraction_bps,
+        min_distinct_sources_required: policy.min_source_diversity,
+        max_concentration_bps_required: policy.max_node_fraction_bps,
+        repair_actions: &plan
             .actions
             .iter()
             .map(|action| action.reason_code)
             .collect::<Vec<_>>(),
-        "diversity_deficit_detected_after_churn",
-    );
+        result: "diversity_deficit_detected_after_churn",
+    });
 }
 
 #[fcp_async_core::runtime::test]
@@ -711,17 +714,17 @@ async fn source_diversity_duplicate_esi_cannot_spoof_new_source() {
         "spoofed source metadata must not satisfy diversity"
     );
 
-    emit_source_diversity_log(
-        "source_diversity_duplicate_esi_cannot_spoof_new_source",
-        &test_zone(),
+    emit_source_diversity_log(&SourceDiversityLogEntry {
+        test_name: "source_diversity_duplicate_esi_cannot_spoof_new_source",
+        zone_id: &test_zone(),
         object_id,
-        evaluation.distinct_nodes,
-        evaluation.max_node_fraction_bps,
-        policy.min_source_diversity,
-        policy.max_node_fraction_bps,
-        &[],
-        "duplicate_ignored",
-    );
+        distinct_sources_observed: evaluation.distinct_nodes,
+        max_concentration_bps_observed: evaluation.max_node_fraction_bps,
+        min_distinct_sources_required: policy.min_source_diversity,
+        max_concentration_bps_required: policy.max_node_fraction_bps,
+        repair_actions: &[],
+        result: "duplicate_ignored",
+    });
 }
 
 // ── CoverageEvaluation + SymbolDistribution ──

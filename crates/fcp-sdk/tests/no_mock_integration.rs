@@ -22,8 +22,8 @@ use fcp_sdk::streaming::{BufferLimits, EventStreamManager, ReplayError};
 use fcp_sdk::{
     ConnectorId, EventAck, EventCaps, EventData, EventNack, FcpError, HealthState, InstanceId,
     Limits, Principal, RateLimitConfig, RateLimitDeclarations, RateLimitEnforcement, RateLimitPool,
-    RateLimitScope, RateLimitUnit, RequestId, SchemaValidationError, SubscribeRequest, TrustLevel,
-    ZoneId,
+    RateLimitScope, RateLimitUnit, RequestId, SchemaValidationError, SubscribeRequest, ThreadInfo,
+    ThreadKind, TrustLevel, ZoneId,
 };
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
@@ -497,6 +497,46 @@ fn streaming_emit_subscribe_replay_flow() {
 
     let replayed = mgr.replay_from("topic-a", "").unwrap();
     assert_eq!(replayed.len(), 5);
+}
+
+#[test]
+fn streaming_thread_info_survives_sdk_to_client_flow() {
+    let mut mgr = EventStreamManager::new(caps(true, true, 10));
+    let thread = ThreadInfo::new("forum-topic-42", ThreadKind::ForumTopic).with_parent_id("chat-7");
+    let emitted = mgr.emit(
+        "telegram.message.new",
+        sample_event_data().with_thread_info(thread.clone()),
+    );
+
+    let req = SubscribeRequest {
+        r#type: "subscribe".into(),
+        id: RequestId::new("sub-thread-1"),
+        topics: vec!["telegram.message.new".into()],
+        since: None,
+        max_events_per_sec: None,
+        batch_ms: None,
+        window_size: None,
+        capability_token: None,
+    };
+    let outcome = mgr.handle_subscribe(&req).unwrap();
+    assert_eq!(
+        outcome.response.result.confirmed_topics,
+        vec!["telegram.message.new".to_string()]
+    );
+
+    let replayed = mgr.replay_from("telegram.message.new", "").unwrap();
+    assert_eq!(replayed.len(), 1);
+    assert_eq!(replayed[0].seq, emitted.seq);
+    assert_eq!(replayed[0].data.thread_info.as_ref(), Some(&thread));
+
+    let encoded = serde_json::to_value(&replayed[0]).unwrap();
+    let decoded: fcp_sdk::EventEnvelope = serde_json::from_value(encoded).unwrap();
+    assert_eq!(decoded.data.thread_info.as_ref(), Some(&thread));
+
+    let ack = EventAck::new("telegram.message.new", vec![emitted.seq]);
+    let ack_result = mgr.handle_ack(&ack);
+    assert_eq!(ack_result.acked, vec![emitted.seq]);
+    assert!(ack_result.missing.is_empty());
 }
 
 #[test]

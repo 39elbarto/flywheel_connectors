@@ -1887,4 +1887,1298 @@ mod tests {
         assert_eq!(deserialized.auth_scopes.len(), 2);
         assert!(deserialized.methods.contains_key("users.messages.list"));
     }
+
+    // ── Schema normalization edge cases ─────────────────────────────────
+
+    #[test]
+    fn normalize_schema_required_dedup_and_sort() {
+        let doc = r#"{
+            "schemas": {
+                "Foo": {
+                    "type": "object",
+                    "required": ["zebra", "alpha", "alpha", "middle", "zebra"],
+                    "properties": {
+                        "alpha": {"type": "string"},
+                        "middle": {"type": "string"},
+                        "zebra": {"type": "string"}
+                    }
+                }
+            }
+        }"#;
+        let service = DiscoveryServiceId::new("test", "v1").expect("valid");
+        let result = normalize_snapshot_bytes(
+            &service,
+            doc.as_bytes(),
+            DiscoveryEndpointKind::Standard,
+            "https://example.test",
+        )
+        .expect("normalize");
+        let schema = result.snapshot.schemas.get("Foo").expect("schema exists");
+        assert_eq!(schema.required, vec!["alpha", "middle", "zebra"]);
+    }
+
+    #[test]
+    fn normalize_schema_enum_values_dedup_and_sort() {
+        let doc = r#"{
+            "schemas": {
+                "Status": {
+                    "type": "string",
+                    "enum": ["DONE", "ACTIVE", "DONE", "PENDING", "ACTIVE"]
+                }
+            }
+        }"#;
+        let service = DiscoveryServiceId::new("test", "v1").expect("valid");
+        let result = normalize_snapshot_bytes(
+            &service,
+            doc.as_bytes(),
+            DiscoveryEndpointKind::Standard,
+            "https://example.test",
+        )
+        .expect("normalize");
+        let schema = result.snapshot.schemas.get("Status").expect("schema exists");
+        assert_eq!(schema.enum_values, vec!["ACTIVE", "DONE", "PENDING"]);
+    }
+
+    #[test]
+    fn normalize_schema_additional_properties() {
+        let doc = r#"{
+            "schemas": {
+                "Labels": {
+                    "type": "object",
+                    "additionalProperties": {
+                        "type": "string",
+                        "description": "label value"
+                    }
+                }
+            }
+        }"#;
+        let service = DiscoveryServiceId::new("test", "v1").expect("valid");
+        let result = normalize_snapshot_bytes(
+            &service,
+            doc.as_bytes(),
+            DiscoveryEndpointKind::Standard,
+            "https://example.test",
+        )
+        .expect("normalize");
+        let schema = result.snapshot.schemas.get("Labels").expect("schema exists");
+        let ap = schema
+            .additional_properties
+            .as_ref()
+            .expect("additional_properties present");
+        assert_eq!(ap.type_name.as_deref(), Some("string"));
+        assert_eq!(ap.description.as_deref(), Some("label value"));
+    }
+
+    #[test]
+    fn normalize_schema_ref_nodes() {
+        let doc = r#"{
+            "schemas": {
+                "Wrapper": {
+                    "type": "object",
+                    "properties": {
+                        "child": {"$ref": "Inner"}
+                    }
+                },
+                "Inner": {
+                    "type": "object",
+                    "properties": {
+                        "value": {"type": "string"}
+                    }
+                }
+            }
+        }"#;
+        let service = DiscoveryServiceId::new("test", "v1").expect("valid");
+        let result = normalize_snapshot_bytes(
+            &service,
+            doc.as_bytes(),
+            DiscoveryEndpointKind::Standard,
+            "https://example.test",
+        )
+        .expect("normalize");
+        let wrapper = result.snapshot.schemas.get("Wrapper").expect("Wrapper");
+        let child_prop = wrapper.properties.get("child").expect("child prop");
+        assert_eq!(child_prop.ref_name.as_deref(), Some("Inner"));
+    }
+
+    #[test]
+    fn normalize_schema_items_array() {
+        let doc = r#"{
+            "schemas": {
+                "TagList": {
+                    "type": "array",
+                    "items": {
+                        "type": "string",
+                        "format": "byte"
+                    }
+                }
+            }
+        }"#;
+        let service = DiscoveryServiceId::new("test", "v1").expect("valid");
+        let result = normalize_snapshot_bytes(
+            &service,
+            doc.as_bytes(),
+            DiscoveryEndpointKind::Standard,
+            "https://example.test",
+        )
+        .expect("normalize");
+        let schema = result.snapshot.schemas.get("TagList").expect("TagList");
+        assert_eq!(schema.type_name.as_deref(), Some("array"));
+        let items = schema.items.as_ref().expect("items present");
+        assert_eq!(items.type_name.as_deref(), Some("string"));
+        assert_eq!(items.format.as_deref(), Some("byte"));
+    }
+
+    #[test]
+    fn normalize_schema_nested_object_properties() {
+        let doc = r#"{
+            "schemas": {
+                "Outer": {
+                    "type": "object",
+                    "properties": {
+                        "nested": {
+                            "type": "object",
+                            "properties": {
+                                "deep": {"type": "integer", "format": "int32"}
+                            }
+                        }
+                    }
+                }
+            }
+        }"#;
+        let service = DiscoveryServiceId::new("test", "v1").expect("valid");
+        let result = normalize_snapshot_bytes(
+            &service,
+            doc.as_bytes(),
+            DiscoveryEndpointKind::Standard,
+            "https://example.test",
+        )
+        .expect("normalize");
+        let outer = result.snapshot.schemas.get("Outer").expect("Outer");
+        let nested = outer.properties.get("nested").expect("nested prop");
+        assert_eq!(nested.type_name.as_deref(), Some("object"));
+        let deep = nested.properties.get("deep").expect("deep prop");
+        assert_eq!(deep.type_name.as_deref(), Some("integer"));
+        assert_eq!(deep.format.as_deref(), Some("int32"));
+    }
+
+    #[test]
+    fn normalize_schema_required_filters_whitespace_only() {
+        let doc = r#"{
+            "schemas": {
+                "Foo": {
+                    "type": "object",
+                    "required": ["name", "  ", "", "email"],
+                    "properties": {}
+                }
+            }
+        }"#;
+        let service = DiscoveryServiceId::new("test", "v1").expect("valid");
+        let result = normalize_snapshot_bytes(
+            &service,
+            doc.as_bytes(),
+            DiscoveryEndpointKind::Standard,
+            "https://example.test",
+        )
+        .expect("normalize");
+        let schema = result.snapshot.schemas.get("Foo").expect("Foo");
+        assert_eq!(schema.required, vec!["email", "name"]);
+    }
+
+    #[test]
+    fn normalize_schema_enum_filters_whitespace_only() {
+        let doc = r#"{
+            "schemas": {
+                "Color": {
+                    "type": "string",
+                    "enum": ["RED", "  ", "", "BLUE"]
+                }
+            }
+        }"#;
+        let service = DiscoveryServiceId::new("test", "v1").expect("valid");
+        let result = normalize_snapshot_bytes(
+            &service,
+            doc.as_bytes(),
+            DiscoveryEndpointKind::Standard,
+            "https://example.test",
+        )
+        .expect("normalize");
+        let schema = result.snapshot.schemas.get("Color").expect("Color");
+        assert_eq!(schema.enum_values, vec!["BLUE", "RED"]);
+    }
+
+    #[test]
+    fn normalize_schema_depth_just_under_limit() {
+        // Build nesting just under MAX_SCHEMA_DEPTH (64).
+        // normalize_schema_map starts at depth 0, first schema at depth 1,
+        // each items level adds 1. Properties check also adds 1 to depth,
+        // so we need to stay well below the limit.
+        let mut inner = r#"{"type": "string"}"#.to_string();
+        for _ in 0..60 {
+            inner = format!(r#"{{"type": "array", "items": {inner}}}"#);
+        }
+        let doc = format!(r#"{{"schemas": {{"NearLimit": {inner}}}}}"#);
+        let service = DiscoveryServiceId::new("test", "v1").expect("valid");
+        let result = normalize_snapshot_bytes(
+            &service,
+            doc.as_bytes(),
+            DiscoveryEndpointKind::Standard,
+            "https://example.test",
+        );
+        assert!(result.is_ok(), "depth under limit should succeed");
+    }
+
+    // ── Parameter extraction tests ──────────────────────────────────────
+
+    #[test]
+    fn normalize_method_parameters_path_and_query() {
+        let doc = r#"{
+            "resources": {
+                "items": {
+                    "methods": {
+                        "get": {
+                            "id": "test.items.get",
+                            "path": "items/{itemId}",
+                            "httpMethod": "GET",
+                            "parameters": {
+                                "itemId": {
+                                    "type": "string",
+                                    "location": "path",
+                                    "required": true,
+                                    "description": "Item identifier"
+                                },
+                                "fields": {
+                                    "type": "string",
+                                    "location": "query",
+                                    "required": false,
+                                    "description": "Field mask"
+                                },
+                                "tags": {
+                                    "type": "string",
+                                    "location": "query",
+                                    "repeated": true
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }"#;
+        let service = DiscoveryServiceId::new("test", "v1").expect("valid");
+        let result = normalize_snapshot_bytes(
+            &service,
+            doc.as_bytes(),
+            DiscoveryEndpointKind::Standard,
+            "https://example.test",
+        )
+        .expect("normalize");
+        let method = result
+            .snapshot
+            .methods
+            .get("items.get")
+            .expect("method exists");
+        assert_eq!(method.parameters.len(), 3);
+
+        let item_id = method.parameters.get("itemId").expect("itemId param");
+        assert_eq!(item_id.location.as_deref(), Some("path"));
+        assert!(item_id.required);
+        assert!(!item_id.repeated);
+        assert_eq!(item_id.type_name.as_deref(), Some("string"));
+        assert_eq!(item_id.description.as_deref(), Some("Item identifier"));
+
+        let fields = method.parameters.get("fields").expect("fields param");
+        assert_eq!(fields.location.as_deref(), Some("query"));
+        assert!(!fields.required);
+        assert!(!fields.repeated);
+
+        let tags = method.parameters.get("tags").expect("tags param");
+        assert!(tags.repeated);
+    }
+
+    #[test]
+    fn normalize_method_request_and_response_refs() {
+        let doc = r#"{
+            "resources": {
+                "items": {
+                    "methods": {
+                        "create": {
+                            "id": "test.items.create",
+                            "path": "items",
+                            "httpMethod": "POST",
+                            "request": {"$ref": "Item"},
+                            "response": {"$ref": "Item"}
+                        }
+                    }
+                }
+            }
+        }"#;
+        let service = DiscoveryServiceId::new("test", "v1").expect("valid");
+        let result = normalize_snapshot_bytes(
+            &service,
+            doc.as_bytes(),
+            DiscoveryEndpointKind::Standard,
+            "https://example.test",
+        )
+        .expect("normalize");
+        let method = result
+            .snapshot
+            .methods
+            .get("items.create")
+            .expect("method exists");
+        assert_eq!(method.request_ref.as_deref(), Some("Item"));
+        assert_eq!(method.response_ref.as_deref(), Some("Item"));
+    }
+
+    // ── Method scopes extraction ────────────────────────────────────────
+
+    #[test]
+    fn normalize_method_scopes_sorted_and_deduped() {
+        let doc = r#"{
+            "resources": {
+                "items": {
+                    "methods": {
+                        "list": {
+                            "id": "test.items.list",
+                            "path": "items",
+                            "httpMethod": "GET",
+                            "scopes": [
+                                "https://z.example.com/scope",
+                                "https://a.example.com/scope",
+                                "https://z.example.com/scope",
+                                "https://m.example.com/scope"
+                            ]
+                        }
+                    }
+                }
+            }
+        }"#;
+        let service = DiscoveryServiceId::new("test", "v1").expect("valid");
+        let result = normalize_snapshot_bytes(
+            &service,
+            doc.as_bytes(),
+            DiscoveryEndpointKind::Standard,
+            "https://example.test",
+        )
+        .expect("normalize");
+        let method = result
+            .snapshot
+            .methods
+            .get("items.list")
+            .expect("method exists");
+        assert_eq!(
+            method.scopes,
+            vec![
+                "https://a.example.com/scope",
+                "https://m.example.com/scope",
+                "https://z.example.com/scope",
+            ]
+        );
+    }
+
+    #[test]
+    fn normalize_method_defaults_http_method_to_get() {
+        let doc = r#"{
+            "resources": {
+                "items": {
+                    "methods": {
+                        "list": {
+                            "id": "test.items.list",
+                            "path": "items"
+                        }
+                    }
+                }
+            }
+        }"#;
+        let service = DiscoveryServiceId::new("test", "v1").expect("valid");
+        let result = normalize_snapshot_bytes(
+            &service,
+            doc.as_bytes(),
+            DiscoveryEndpointKind::Standard,
+            "https://example.test",
+        )
+        .expect("normalize");
+        let method = result
+            .snapshot
+            .methods
+            .get("items.list")
+            .expect("method exists");
+        assert_eq!(method.http_method, "GET");
+    }
+
+    #[test]
+    fn normalize_method_uppercases_http_method() {
+        let doc = r#"{
+            "resources": {
+                "items": {
+                    "methods": {
+                        "create": {
+                            "id": "test.items.create",
+                            "path": "items",
+                            "httpMethod": "post"
+                        }
+                    }
+                }
+            }
+        }"#;
+        let service = DiscoveryServiceId::new("test", "v1").expect("valid");
+        let result = normalize_snapshot_bytes(
+            &service,
+            doc.as_bytes(),
+            DiscoveryEndpointKind::Standard,
+            "https://example.test",
+        )
+        .expect("normalize");
+        let method = result
+            .snapshot
+            .methods
+            .get("items.create")
+            .expect("method exists");
+        assert_eq!(method.http_method, "POST");
+    }
+
+    #[test]
+    fn normalize_method_generates_id_from_service_when_missing() {
+        let doc = r#"{
+            "resources": {
+                "items": {
+                    "methods": {
+                        "list": {
+                            "path": "items",
+                            "httpMethod": "GET"
+                        }
+                    }
+                }
+            }
+        }"#;
+        let service = DiscoveryServiceId::new("test", "v1").expect("valid");
+        let result = normalize_snapshot_bytes(
+            &service,
+            doc.as_bytes(),
+            DiscoveryEndpointKind::Standard,
+            "https://example.test",
+        )
+        .expect("normalize");
+        let method = result
+            .snapshot
+            .methods
+            .get("items.list")
+            .expect("method exists");
+        assert_eq!(method.id, "test.items.list");
+    }
+
+    // ── Resource hierarchy ──────────────────────────────────────────────
+
+    #[test]
+    fn normalize_deeply_nested_resources() {
+        let doc = r#"{
+            "resources": {
+                "projects": {
+                    "resources": {
+                        "datasets": {
+                            "resources": {
+                                "tables": {
+                                    "methods": {
+                                        "get": {
+                                            "id": "bq.projects.datasets.tables.get",
+                                            "path": "projects/{projectId}/datasets/{datasetId}/tables/{tableId}",
+                                            "httpMethod": "GET"
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }"#;
+        let service = DiscoveryServiceId::new("bq", "v2").expect("valid");
+        let result = normalize_snapshot_bytes(
+            &service,
+            doc.as_bytes(),
+            DiscoveryEndpointKind::Standard,
+            "https://example.test",
+        )
+        .expect("normalize");
+
+        let method = result
+            .snapshot
+            .methods
+            .get("projects.datasets.tables.get")
+            .expect("deep method");
+        assert_eq!(
+            method.resource_path,
+            vec!["projects", "datasets", "tables"]
+        );
+        assert_eq!(method.id, "bq.projects.datasets.tables.get");
+
+        // Verify the hierarchy in resources
+        let projects = result
+            .snapshot
+            .resources
+            .get("projects")
+            .expect("projects resource");
+        let datasets = projects
+            .resources
+            .get("datasets")
+            .expect("datasets resource");
+        let tables = datasets
+            .resources
+            .get("tables")
+            .expect("tables resource");
+        assert!(tables.methods.contains_key("projects.datasets.tables.get"));
+    }
+
+    #[test]
+    fn normalize_resource_with_local_and_nested_methods() {
+        let doc = r#"{
+            "resources": {
+                "users": {
+                    "methods": {
+                        "getProfile": {
+                            "id": "test.users.getProfile",
+                            "path": "users/{userId}/profile",
+                            "httpMethod": "GET"
+                        }
+                    },
+                    "resources": {
+                        "messages": {
+                            "methods": {
+                                "list": {
+                                    "id": "test.users.messages.list",
+                                    "path": "users/{userId}/messages",
+                                    "httpMethod": "GET"
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }"#;
+        let service = DiscoveryServiceId::new("test", "v1").expect("valid");
+        let result = normalize_snapshot_bytes(
+            &service,
+            doc.as_bytes(),
+            DiscoveryEndpointKind::Standard,
+            "https://example.test",
+        )
+        .expect("normalize");
+        assert!(result
+            .snapshot
+            .methods
+            .contains_key("users.getProfile"));
+        assert!(result
+            .snapshot
+            .methods
+            .contains_key("users.messages.list"));
+        let profile = result
+            .snapshot
+            .methods
+            .get("users.getProfile")
+            .expect("getProfile");
+        assert_eq!(profile.resource_path, vec!["users"]);
+        let list = result
+            .snapshot
+            .methods
+            .get("users.messages.list")
+            .expect("list");
+        assert_eq!(list.resource_path, vec!["users", "messages"]);
+    }
+
+    // ── ServiceAliasRegistry insert overwrite ───────────────────────────
+
+    #[test]
+    fn alias_registry_insert_overwrites_existing() {
+        let mut registry = ServiceAliasRegistry::default();
+        let gmail_before = registry.resolve("gmail").expect("resolve gmail");
+        assert_eq!(gmail_before.api_name, "gmail");
+
+        let custom = DiscoveryServiceId::new("custom-gmail", "v2").expect("valid");
+        registry
+            .insert("gmail", custom.clone())
+            .expect("overwrite");
+        let gmail_after = registry.resolve("gmail").expect("resolve gmail");
+        assert_eq!(gmail_after, custom);
+    }
+
+    #[test]
+    fn alias_registry_serde_roundtrip() {
+        let registry = ServiceAliasRegistry::default();
+        let json = serde_json::to_string(&registry).expect("serialize");
+        let deserialized: ServiceAliasRegistry =
+            serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(
+            deserialized.aliases().len(),
+            registry.aliases().len()
+        );
+        for (key, val) in registry.aliases() {
+            let deser_val = deserialized.aliases().get(key).expect("key present");
+            assert_eq!(val, deser_val);
+        }
+    }
+
+    #[test]
+    fn alias_registry_resolve_trims_whitespace() {
+        let registry = ServiceAliasRegistry::default();
+        let resolved = registry.resolve("  gmail  ").expect("resolve trimmed");
+        assert_eq!(resolved.api_name, "gmail");
+    }
+
+    // ── normalize_optional edge cases ───────────────────────────────────
+
+    #[test]
+    fn normalize_optional_whitespace_only_becomes_none() {
+        assert!(normalize_optional(Some("   ".to_string())).is_none());
+        assert!(normalize_optional(Some(String::new())).is_none());
+        assert!(normalize_optional(None).is_none());
+    }
+
+    #[test]
+    fn normalize_optional_trims_whitespace() {
+        assert_eq!(
+            normalize_optional(Some("  hello  ".to_string())),
+            Some("hello".to_string())
+        );
+    }
+
+    // ── snapshot_storage_key edge cases ──────────────────────────────────
+
+    #[test]
+    fn storage_key_different_digests_produce_different_keys() {
+        let service = DiscoveryServiceId::new("gmail", "v1").expect("valid");
+        let key_a = snapshot_storage_key(&service, "digest_aaa");
+        let key_b = snapshot_storage_key(&service, "digest_bbb");
+        assert_ne!(key_a, key_b);
+        assert!(key_a.ends_with("digest_aaa"));
+        assert!(key_b.ends_with("digest_bbb"));
+    }
+
+    #[test]
+    fn storage_key_different_services_produce_different_keys() {
+        let gmail = DiscoveryServiceId::new("gmail", "v1").expect("valid");
+        let drive = DiscoveryServiceId::new("drive", "v3").expect("valid");
+        let key_a = snapshot_storage_key(&gmail, "same_digest");
+        let key_b = snapshot_storage_key(&drive, "same_digest");
+        assert_ne!(key_a, key_b);
+        assert!(key_a.contains("gmail/v1"));
+        assert!(key_b.contains("drive/v3"));
+    }
+
+    // ── normalize_component edge cases ──────────────────────────────────
+
+    #[test]
+    fn normalize_component_allows_dots_dashes_underscores() {
+        let result = normalize_component("test", "my-api_v1.beta");
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), "my-api_v1.beta");
+    }
+
+    #[test]
+    fn normalize_component_rejects_whitespace_only() {
+        let err = normalize_component("test", "   ").unwrap_err();
+        assert!(matches!(err, DiscoveryError::InvalidComponent { .. }));
+    }
+
+    #[test]
+    fn normalize_component_rejects_uppercase_special_chars() {
+        // Uppercase is lowered, but special chars like ! are rejected
+        let err = normalize_component("test", "Hello!").unwrap_err();
+        assert!(matches!(err, DiscoveryError::InvalidComponent { .. }));
+    }
+
+    #[test]
+    fn normalize_component_lowercases_and_trims() {
+        let result = normalize_component("test", "  MyApi  ").expect("valid");
+        assert_eq!(result, "myapi");
+    }
+
+    // ── FetchedDiscoverySnapshot source_digest ──────────────────────────
+
+    #[test]
+    fn normalize_snapshot_bytes_computes_blake3_digest() {
+        let service = DiscoveryServiceId::new("test", "v1").expect("valid");
+        let input = b"{}";
+        let result = normalize_snapshot_bytes(
+            &service,
+            input,
+            DiscoveryEndpointKind::Standard,
+            "https://example.test",
+        )
+        .expect("normalize");
+        let expected_digest = blake3::hash(input).to_hex().to_string();
+        assert_eq!(result.source_digest, expected_digest);
+    }
+
+    #[test]
+    fn normalize_snapshot_bytes_invalid_json() {
+        let service = DiscoveryServiceId::new("test", "v1").expect("valid");
+        let err = normalize_snapshot_bytes(
+            &service,
+            b"not json at all {{{",
+            DiscoveryEndpointKind::Standard,
+            "https://example.test/bad",
+        )
+        .unwrap_err();
+        match err {
+            DiscoveryError::JsonDecode { url, .. } => {
+                assert_eq!(url, "https://example.test/bad");
+            }
+            other => panic!("expected JsonDecode, got {other}"),
+        }
+    }
+
+    // ── Media upload edge cases ─────────────────────────────────────────
+
+    #[test]
+    fn normalize_media_upload_no_protocols() {
+        let doc = r#"{
+            "resources": {
+                "files": {
+                    "methods": {
+                        "create": {
+                            "id": "test.files.create",
+                            "path": "files",
+                            "httpMethod": "POST",
+                            "supportsMediaUpload": true,
+                            "mediaUpload": {
+                                "accept": ["*/*"],
+                                "maxSize": "100MB"
+                            }
+                        }
+                    }
+                }
+            }
+        }"#;
+        let service = DiscoveryServiceId::new("test", "v1").expect("valid");
+        let result = normalize_snapshot_bytes(
+            &service,
+            doc.as_bytes(),
+            DiscoveryEndpointKind::Standard,
+            "https://example.test",
+        )
+        .expect("normalize");
+        let method = result
+            .snapshot
+            .methods
+            .get("files.create")
+            .expect("method exists");
+        assert!(method.supports_media_upload);
+        let upload = method.media_upload.as_ref().expect("upload present");
+        assert_eq!(upload.accept, vec!["*/*"]);
+        assert_eq!(upload.max_size.as_deref(), Some("100MB"));
+        assert!(upload.simple_path.is_none());
+        assert!(upload.resumable_path.is_none());
+    }
+
+    #[test]
+    fn normalize_media_upload_accept_sorted() {
+        let doc = r#"{
+            "resources": {
+                "files": {
+                    "methods": {
+                        "upload": {
+                            "id": "test.files.upload",
+                            "path": "files",
+                            "httpMethod": "POST",
+                            "mediaUpload": {
+                                "accept": ["video/mp4", "application/json", "image/png"]
+                            }
+                        }
+                    }
+                }
+            }
+        }"#;
+        let service = DiscoveryServiceId::new("test", "v1").expect("valid");
+        let result = normalize_snapshot_bytes(
+            &service,
+            doc.as_bytes(),
+            DiscoveryEndpointKind::Standard,
+            "https://example.test",
+        )
+        .expect("normalize");
+        let method = result
+            .snapshot
+            .methods
+            .get("files.upload")
+            .expect("method exists");
+        let upload = method.media_upload.as_ref().expect("upload present");
+        assert_eq!(
+            upload.accept,
+            vec!["application/json", "image/png", "video/mp4"]
+        );
+    }
+
+    #[test]
+    fn normalize_supports_media_download_flag() {
+        let doc = r#"{
+            "resources": {
+                "files": {
+                    "methods": {
+                        "get": {
+                            "id": "test.files.get",
+                            "path": "files/{fileId}",
+                            "httpMethod": "GET",
+                            "supportsMediaDownload": true
+                        }
+                    }
+                }
+            }
+        }"#;
+        let service = DiscoveryServiceId::new("test", "v1").expect("valid");
+        let result = normalize_snapshot_bytes(
+            &service,
+            doc.as_bytes(),
+            DiscoveryEndpointKind::Standard,
+            "https://example.test",
+        )
+        .expect("normalize");
+        let method = result
+            .snapshot
+            .methods
+            .get("files.get")
+            .expect("method exists");
+        assert!(method.supports_media_download);
+        assert!(!method.supports_media_upload);
+    }
+
+    // ── Snapshot metadata fields ────────────────────────────────────────
+
+    #[test]
+    fn normalize_preserves_all_metadata_fields() {
+        let doc = r#"{
+            "name": "testapi",
+            "title": "Test API",
+            "description": "A test API",
+            "revision": "20260307",
+            "rootUrl": "https://testapi.googleapis.com/",
+            "servicePath": "testapi/v1/",
+            "baseUrl": "https://testapi.googleapis.com/testapi/v1/",
+            "batchPath": "batch/testapi"
+        }"#;
+        let service = DiscoveryServiceId::new("testapi", "v1").expect("valid");
+        let result = normalize_snapshot_bytes(
+            &service,
+            doc.as_bytes(),
+            DiscoveryEndpointKind::Alternate,
+            "https://example.test",
+        )
+        .expect("normalize");
+        let snap = &result.snapshot;
+        assert_eq!(snap.name.as_deref(), Some("testapi"));
+        assert_eq!(snap.title.as_deref(), Some("Test API"));
+        assert_eq!(snap.description.as_deref(), Some("A test API"));
+        assert_eq!(snap.revision.as_deref(), Some("20260307"));
+        assert_eq!(
+            snap.root_url.as_deref(),
+            Some("https://testapi.googleapis.com/")
+        );
+        assert_eq!(snap.service_path.as_deref(), Some("testapi/v1/"));
+        assert_eq!(
+            snap.base_url.as_deref(),
+            Some("https://testapi.googleapis.com/testapi/v1/")
+        );
+        assert_eq!(snap.batch_path.as_deref(), Some("batch/testapi"));
+        assert_eq!(result.endpoint, DiscoveryEndpointKind::Alternate);
+    }
+
+    #[test]
+    fn normalize_whitespace_only_metadata_becomes_none() {
+        let doc = r#"{
+            "name": "  ",
+            "title": "",
+            "description": "   \t  ",
+            "revision": "valid"
+        }"#;
+        let service = DiscoveryServiceId::new("test", "v1").expect("valid");
+        let result = normalize_snapshot_bytes(
+            &service,
+            doc.as_bytes(),
+            DiscoveryEndpointKind::Standard,
+            "https://example.test",
+        )
+        .expect("normalize");
+        let snap = &result.snapshot;
+        assert!(snap.name.is_none());
+        assert!(snap.title.is_none());
+        assert!(snap.description.is_none());
+        assert_eq!(snap.revision.as_deref(), Some("valid"));
+    }
+
+    // ── Top-level methods alongside resources ───────────────────────────
+
+    #[test]
+    fn normalize_top_level_and_resource_methods_coexist() {
+        let doc = r#"{
+            "methods": {
+                "globalOp": {
+                    "id": "test.globalOp",
+                    "path": "globalOp",
+                    "httpMethod": "POST"
+                }
+            },
+            "resources": {
+                "items": {
+                    "methods": {
+                        "list": {
+                            "id": "test.items.list",
+                            "path": "items",
+                            "httpMethod": "GET"
+                        }
+                    }
+                }
+            }
+        }"#;
+        let service = DiscoveryServiceId::new("test", "v1").expect("valid");
+        let result = normalize_snapshot_bytes(
+            &service,
+            doc.as_bytes(),
+            DiscoveryEndpointKind::Standard,
+            "https://example.test",
+        )
+        .expect("normalize");
+        assert!(result.snapshot.methods.contains_key("globalOp"));
+        assert!(result.snapshot.methods.contains_key("items.list"));
+        let global = result.snapshot.methods.get("globalOp").expect("globalOp");
+        assert!(global.resource_path.is_empty());
+    }
+
+    // ── DiscoveryFetcher fetch_snapshot with malformed JSON ──────────────
+
+    #[test]
+    fn fetch_snapshot_malformed_json_response() {
+        run_with_tokio_reactor(async {
+            let server = MockServer::start().await;
+            let service = DiscoveryServiceId::new("test", "v1").expect("valid");
+            let standard_base = format!("{}/discovery/v1/apis", server.uri());
+            let alternate_template = format!(
+                "{}/$discovery/rest?api={{api_name}}&version={{api_version}}",
+                server.uri()
+            );
+
+            // Both return 200 but with invalid JSON
+            Mock::given(method("GET"))
+                .and(path("/discovery/v1/apis/test/v1/rest"))
+                .respond_with(
+                    ResponseTemplate::new(200).set_body_string("not valid json"),
+                )
+                .mount(&server)
+                .await;
+            Mock::given(method("GET"))
+                .and(path("/$discovery/rest"))
+                .respond_with(
+                    ResponseTemplate::new(200).set_body_string("{broken"),
+                )
+                .mount(&server)
+                .await;
+
+            let fetcher = DiscoveryFetcher::new()
+                .with_client(mock_http_client())
+                .with_standard_base(standard_base)
+                .with_alternate_template(alternate_template);
+            let err = fetcher
+                .fetch_snapshot(&service)
+                .await
+                .expect_err("expected failure");
+
+            assert!(
+                matches!(err, DiscoveryError::AllEndpointsFailed { .. }),
+                "expected AllEndpointsFailed, got: {err}"
+            );
+        });
+    }
+
+    #[test]
+    fn fetch_snapshot_empty_json_body() {
+        run_with_tokio_reactor(async {
+            let server = MockServer::start().await;
+            let service = DiscoveryServiceId::new("test", "v1").expect("valid");
+            let standard_base = format!("{}/discovery/v1/apis", server.uri());
+            let alternate_template = format!(
+                "{}/$discovery/rest?api={{api_name}}&version={{api_version}}",
+                server.uri()
+            );
+
+            // Standard returns valid empty JSON, alternate shouldn't be called
+            Mock::given(method("GET"))
+                .and(path("/discovery/v1/apis/test/v1/rest"))
+                .respond_with(ResponseTemplate::new(200).set_body_string("{}"))
+                .expect(1)
+                .mount(&server)
+                .await;
+
+            let fetcher = DiscoveryFetcher::new()
+                .with_client(mock_http_client())
+                .with_standard_base(standard_base)
+                .with_alternate_template(alternate_template);
+            let result = fetcher
+                .fetch_snapshot(&service)
+                .await
+                .expect("empty JSON should succeed");
+
+            assert_eq!(result.snapshot.service.identity(), "test:v1");
+            assert!(result.snapshot.methods.is_empty());
+            assert!(result.snapshot.schemas.is_empty());
+            assert_eq!(result.endpoint, DiscoveryEndpointKind::Standard);
+        });
+    }
+
+    // ── DiscoveryServiceId edge cases ───────────────────────────────────
+
+    #[test]
+    fn service_id_with_dots_and_dashes() {
+        let id = DiscoveryServiceId::new("my-api.beta", "v1.1-beta").expect("valid");
+        assert_eq!(id.api_name, "my-api.beta");
+        assert_eq!(id.api_version, "v1.1-beta");
+        assert_eq!(id.identity(), "my-api.beta:v1.1-beta");
+    }
+
+    #[test]
+    fn service_id_parse_explicit_with_multiple_colons_takes_first() {
+        // split_once takes first colon, rest goes to version
+        let err = DiscoveryServiceId::parse_explicit("a:b:c");
+        // "b:c" contains special char ':', which should fail validation
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn service_id_clone_and_eq() {
+        let id1 = DiscoveryServiceId::new("gmail", "v1").expect("valid");
+        let id2 = id1.clone();
+        assert_eq!(id1, id2);
+        assert_eq!(id1.identity(), id2.identity());
+    }
+
+    // ── DiscoveryMethod flatPath vs path ────────────────────────────────
+
+    #[test]
+    fn normalize_method_flat_path_takes_precedence() {
+        let doc = r#"{
+            "resources": {
+                "items": {
+                    "methods": {
+                        "get": {
+                            "id": "test.items.get",
+                            "path": "{+name}",
+                            "flatPath": "v1/items/{itemId}",
+                            "httpMethod": "GET"
+                        }
+                    }
+                }
+            }
+        }"#;
+        let service = DiscoveryServiceId::new("test", "v1").expect("valid");
+        let result = normalize_snapshot_bytes(
+            &service,
+            doc.as_bytes(),
+            DiscoveryEndpointKind::Standard,
+            "https://example.test",
+        )
+        .expect("normalize");
+        let method = result
+            .snapshot
+            .methods
+            .get("items.get")
+            .expect("method exists");
+        assert_eq!(method.path, "{+name}");
+        assert_eq!(method.flat_path.as_deref(), Some("v1/items/{itemId}"));
+        assert_eq!(
+            method.canonical_path, "v1/items/{itemId}",
+            "canonical_path should use flatPath when available"
+        );
+    }
+
+    // ── Scope description preservation ──────────────────────────────────
+
+    #[test]
+    fn normalize_scope_descriptions_preserved() {
+        let doc = r#"{
+            "auth": {
+                "oauth2": {
+                    "scopes": {
+                        "https://example.com/scope.read": {"description": "Read access"},
+                        "https://example.com/scope.write": {}
+                    }
+                }
+            }
+        }"#;
+        let service = DiscoveryServiceId::new("test", "v1").expect("valid");
+        let result = normalize_snapshot_bytes(
+            &service,
+            doc.as_bytes(),
+            DiscoveryEndpointKind::Standard,
+            "https://example.test",
+        )
+        .expect("normalize");
+        assert_eq!(result.snapshot.auth_scopes.len(), 2);
+        let read_scope = result
+            .snapshot
+            .auth_scopes
+            .iter()
+            .find(|s| s.id.contains("read"))
+            .expect("read scope");
+        assert_eq!(read_scope.description.as_deref(), Some("Read access"));
+        let write_scope = result
+            .snapshot
+            .auth_scopes
+            .iter()
+            .find(|s| s.id.contains("write"))
+            .expect("write scope");
+        assert!(write_scope.description.is_none());
+    }
+
+    // ── method_key helper ───────────────────────────────────────────────
+
+    #[test]
+    fn method_key_with_empty_resource_path() {
+        assert_eq!(method_key(&[], "list"), "list");
+    }
+
+    #[test]
+    fn method_key_with_single_resource() {
+        assert_eq!(
+            method_key(&["users".to_string()], "get"),
+            "users.get"
+        );
+    }
+
+    #[test]
+    fn method_key_with_deep_resource_path() {
+        assert_eq!(
+            method_key(
+                &[
+                    "projects".to_string(),
+                    "datasets".to_string(),
+                    "tables".to_string()
+                ],
+                "list"
+            ),
+            "projects.datasets.tables.list"
+        );
+    }
+
+    // ── trim_trailing_slash helper ──────────────────────────────────────
+
+    #[test]
+    fn trim_trailing_slash_removes_single() {
+        assert_eq!(trim_trailing_slash("https://example.com/"), "https://example.com");
+    }
+
+    #[test]
+    fn trim_trailing_slash_removes_multiple() {
+        assert_eq!(trim_trailing_slash("https://example.com///"), "https://example.com");
+    }
+
+    #[test]
+    fn trim_trailing_slash_no_slash() {
+        assert_eq!(trim_trailing_slash("https://example.com"), "https://example.com");
+    }
+
+    // ── is_allowed_component_char ───────────────────────────────────────
+
+    #[test]
+    fn allowed_component_chars() {
+        assert!(is_allowed_component_char('a'));
+        assert!(is_allowed_component_char('z'));
+        assert!(is_allowed_component_char('0'));
+        assert!(is_allowed_component_char('9'));
+        assert!(is_allowed_component_char('-'));
+        assert!(is_allowed_component_char('_'));
+        assert!(is_allowed_component_char('.'));
+        assert!(!is_allowed_component_char('A'));
+        assert!(!is_allowed_component_char('!'));
+        assert!(!is_allowed_component_char(' '));
+        assert!(!is_allowed_component_char(':'));
+        assert!(!is_allowed_component_char('/'));
+    }
+
+    // ── DiscoverySchema serde roundtrip ─────────────────────────────────
+
+    #[test]
+    fn schema_serde_roundtrip() {
+        let schema = DiscoverySchema {
+            type_name: Some("object".to_string()),
+            format: None,
+            description: Some("A test schema".to_string()),
+            required: vec!["id".to_string(), "name".to_string()],
+            enum_values: vec![],
+            properties: {
+                let mut m = BTreeMap::new();
+                m.insert(
+                    "id".to_string(),
+                    DiscoverySchema {
+                        type_name: Some("string".to_string()),
+                        format: None,
+                        description: None,
+                        required: vec![],
+                        enum_values: vec![],
+                        properties: BTreeMap::new(),
+                        items: None,
+                        ref_name: None,
+                        additional_properties: None,
+                    },
+                );
+                m
+            },
+            items: None,
+            ref_name: None,
+            additional_properties: Some(Box::new(DiscoverySchema {
+                type_name: Some("string".to_string()),
+                format: None,
+                description: None,
+                required: vec![],
+                enum_values: vec![],
+                properties: BTreeMap::new(),
+                items: None,
+                ref_name: None,
+                additional_properties: None,
+            })),
+        };
+        let json = serde_json::to_string(&schema).expect("serialize");
+        let deser: DiscoverySchema = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(schema, deser);
+    }
+
+    // ── DiscoveryMethod serde roundtrip ─────────────────────────────────
+
+    #[test]
+    fn method_serde_roundtrip() {
+        let method = DiscoveryMethod {
+            key: "users.list".to_string(),
+            id: "test.users.list".to_string(),
+            http_method: "GET".to_string(),
+            path: "users".to_string(),
+            flat_path: Some("v1/users".to_string()),
+            canonical_path: "v1/users".to_string(),
+            resource_path: vec!["users".to_string()],
+            description: Some("List users".to_string()),
+            scopes: vec!["https://example.com/scope".to_string()],
+            request_ref: None,
+            response_ref: Some("UserList".to_string()),
+            parameters: BTreeMap::new(),
+            supports_media_download: false,
+            supports_media_upload: false,
+            media_upload: None,
+        };
+        let json = serde_json::to_string(&method).expect("serialize");
+        let deser: DiscoveryMethod = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(method, deser);
+    }
+
+    // ── FetchedDiscoverySnapshot serde roundtrip ────────────────────────
+
+    #[test]
+    fn fetched_snapshot_serde_roundtrip() {
+        let service = DiscoveryServiceId::new("test", "v1").expect("valid");
+        let fetched = normalize_snapshot_bytes(
+            &service,
+            GMAIL_FIXTURE.as_bytes(),
+            DiscoveryEndpointKind::Alternate,
+            "https://alt.example.test",
+        )
+        .expect("normalize");
+        let json = serde_json::to_string(&fetched).expect("serialize");
+        let deser: FetchedDiscoverySnapshot =
+            serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(fetched, deser);
+        assert_eq!(deser.endpoint, DiscoveryEndpointKind::Alternate);
+        assert_eq!(deser.source_url, "https://alt.example.test");
+    }
 }

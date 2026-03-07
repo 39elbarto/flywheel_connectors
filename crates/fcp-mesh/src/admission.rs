@@ -2000,4 +2000,689 @@ mod tests {
                 .is_ok()
         );
     }
+
+    // ── AdmissionError Display coverage ──────────────────────────
+
+    #[test]
+    fn admission_error_display_contains_expected_substrings() {
+        let errors: Vec<AdmissionError> = vec![
+            AdmissionError::ByteBudgetExceeded {
+                current: 100,
+                limit: 50,
+                retry_after: Duration::from_secs(30),
+            },
+            AdmissionError::SymbolBudgetExceeded {
+                current: 500,
+                limit: 200,
+                retry_after: Duration::from_secs(10),
+            },
+            AdmissionError::AuthFailureBudgetExceeded {
+                current: 11,
+                limit: 10,
+                retry_after: Duration::from_secs(5),
+            },
+            AdmissionError::DecodeCapacityExceeded {
+                current: 33,
+                limit: 32,
+            },
+            AdmissionError::DecodeCpuBudgetExceeded {
+                current_ms: 6000,
+                limit_ms: 5000,
+                retry_after: Duration::from_secs(20),
+            },
+            AdmissionError::AmplificationViolation {
+                request_symbols: 1,
+                response_symbols: 100,
+                max_factor: 10,
+            },
+            AdmissionError::AuthenticationRequired,
+            AdmissionError::ProofOfNeedRequired,
+            AdmissionError::ObjectQuarantined {
+                object_id: "abc123".to_string(),
+            },
+            AdmissionError::NotReachable {
+                object_id: "def456".to_string(),
+            },
+            AdmissionError::QuarantineQuotaExceeded {
+                current_bytes: 300,
+                limit_bytes: 256,
+            },
+        ];
+
+        for err in &errors {
+            let msg = err.to_string();
+            assert!(!msg.is_empty(), "empty display for {err:?}");
+        }
+
+        assert!(errors[0].to_string().contains("byte budget"));
+        assert!(errors[1].to_string().contains("symbol budget"));
+        assert!(errors[2].to_string().contains("auth failure"));
+        assert!(errors[3].to_string().contains("decode capacity"));
+        assert!(errors[4].to_string().contains("decode CPU"));
+        assert!(errors[5].to_string().contains("amplification"));
+        assert!(errors[6].to_string().contains("authentication"));
+        assert!(errors[7].to_string().contains("proof-of-need"));
+        assert!(errors[8].to_string().contains("abc123"));
+        assert!(errors[9].to_string().contains("def456"));
+        assert!(errors[10].to_string().contains("quarantine quota"));
+    }
+
+    // ── AdmissionError error_code uniqueness ─────────────────────
+
+    #[test]
+    fn admission_error_codes_are_unique() {
+        let errors: Vec<AdmissionError> = vec![
+            AdmissionError::ByteBudgetExceeded {
+                current: 0,
+                limit: 0,
+                retry_after: Duration::ZERO,
+            },
+            AdmissionError::SymbolBudgetExceeded {
+                current: 0,
+                limit: 0,
+                retry_after: Duration::ZERO,
+            },
+            AdmissionError::AuthFailureBudgetExceeded {
+                current: 0,
+                limit: 0,
+                retry_after: Duration::ZERO,
+            },
+            AdmissionError::DecodeCapacityExceeded {
+                current: 0,
+                limit: 0,
+            },
+            AdmissionError::DecodeCpuBudgetExceeded {
+                current_ms: 0,
+                limit_ms: 0,
+                retry_after: Duration::ZERO,
+            },
+            AdmissionError::AmplificationViolation {
+                request_symbols: 0,
+                response_symbols: 0,
+                max_factor: 0,
+            },
+            AdmissionError::AuthenticationRequired,
+            AdmissionError::ProofOfNeedRequired,
+            AdmissionError::ObjectQuarantined {
+                object_id: String::new(),
+            },
+            AdmissionError::NotReachable {
+                object_id: String::new(),
+            },
+            AdmissionError::QuarantineQuotaExceeded {
+                current_bytes: 0,
+                limit_bytes: 0,
+            },
+        ];
+
+        let mut codes: Vec<u32> = errors.iter().map(AdmissionError::error_code).collect();
+        let unique_count = codes.len();
+        codes.sort_unstable();
+        codes.dedup();
+        assert_eq!(codes.len(), unique_count, "error codes must be unique");
+    }
+
+    #[test]
+    fn admission_error_codes_in_6xxx_range() {
+        let errors = [
+            AdmissionError::ByteBudgetExceeded {
+                current: 0,
+                limit: 0,
+                retry_after: Duration::ZERO,
+            },
+            AdmissionError::AuthenticationRequired,
+            AdmissionError::QuarantineQuotaExceeded {
+                current_bytes: 0,
+                limit_bytes: 0,
+            },
+        ];
+        for err in &errors {
+            let code = err.error_code();
+            assert!(
+                (6000..7000).contains(&code),
+                "error code {code} not in 6xxx range"
+            );
+        }
+    }
+
+    // ── AdmissionError is_retryable ──────────────────────────────
+
+    #[test]
+    fn non_retryable_errors() {
+        assert!(!AdmissionError::AmplificationViolation {
+            request_symbols: 1,
+            response_symbols: 100,
+            max_factor: 10,
+        }
+        .is_retryable());
+        assert!(!AdmissionError::AuthenticationRequired.is_retryable());
+        assert!(!AdmissionError::ProofOfNeedRequired.is_retryable());
+        assert!(!AdmissionError::ObjectQuarantined {
+            object_id: "x".to_string(),
+        }
+        .is_retryable());
+        assert!(!AdmissionError::NotReachable {
+            object_id: "x".to_string(),
+        }
+        .is_retryable());
+        assert!(!AdmissionError::QuarantineQuotaExceeded {
+            current_bytes: 0,
+            limit_bytes: 0,
+        }
+        .is_retryable());
+    }
+
+    #[test]
+    fn retryable_errors() {
+        assert!(AdmissionError::ByteBudgetExceeded {
+            current: 0,
+            limit: 0,
+            retry_after: Duration::ZERO,
+        }
+        .is_retryable());
+        assert!(AdmissionError::SymbolBudgetExceeded {
+            current: 0,
+            limit: 0,
+            retry_after: Duration::ZERO,
+        }
+        .is_retryable());
+        assert!(AdmissionError::DecodeCapacityExceeded {
+            current: 0,
+            limit: 0,
+        }
+        .is_retryable());
+    }
+
+    // ── AdmissionError retry_after ───────────────────────────────
+
+    #[test]
+    fn retry_after_none_for_non_retryable() {
+        assert!(AdmissionError::AuthenticationRequired.retry_after().is_none());
+        assert!(AdmissionError::ProofOfNeedRequired.retry_after().is_none());
+        assert!(AdmissionError::AmplificationViolation {
+            request_symbols: 0,
+            response_symbols: 0,
+            max_factor: 0,
+        }
+        .retry_after()
+        .is_none());
+    }
+
+    #[test]
+    fn retry_after_present_for_budget_errors() {
+        let d = Duration::from_secs(42);
+        assert_eq!(
+            AdmissionError::ByteBudgetExceeded {
+                current: 0,
+                limit: 0,
+                retry_after: d,
+            }
+            .retry_after(),
+            Some(d)
+        );
+        assert_eq!(
+            AdmissionError::DecodeCpuBudgetExceeded {
+                current_ms: 0,
+                limit_ms: 0,
+                retry_after: d,
+            }
+            .retry_after(),
+            Some(d)
+        );
+    }
+
+    // ── AdmissionError serde roundtrip ───────────────────────────
+
+    #[test]
+    fn admission_error_byte_budget_serde_roundtrip() {
+        let err = AdmissionError::ByteBudgetExceeded {
+            current: 100,
+            limit: 50,
+            retry_after: Duration::from_millis(30_000),
+        };
+        let json = serde_json::to_string(&err).expect("serialize");
+        let deser: AdmissionError = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(err, deser);
+    }
+
+    #[test]
+    fn admission_error_quarantined_serde_roundtrip() {
+        let err = AdmissionError::ObjectQuarantined {
+            object_id: "abc123".to_string(),
+        };
+        let json = serde_json::to_string(&err).expect("serialize");
+        let deser: AdmissionError = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(err, deser);
+    }
+
+    // ── PeerBudget construction ──────────────────────────────────
+
+    #[test]
+    fn peer_budget_new_stores_all_fields() {
+        let budget = PeerBudget::new(100, 200, 10, 5, 3000);
+        assert_eq!(budget.max_bytes_per_min, 100);
+        assert_eq!(budget.max_symbols_per_min, 200);
+        assert_eq!(budget.max_failed_auth_per_min, 10);
+        assert_eq!(budget.max_inflight_decodes, 5);
+        assert_eq!(budget.max_decode_cpu_ms_per_min, 3000);
+    }
+
+    #[test]
+    fn peer_budget_restrictive_values() {
+        let r = PeerBudget::restrictive();
+        assert_eq!(r.max_bytes_per_min, 1024 * 1024);
+        assert_eq!(r.max_symbols_per_min, 10_000);
+        assert_eq!(r.max_failed_auth_per_min, 10);
+        assert_eq!(r.max_inflight_decodes, 4);
+        assert_eq!(r.max_decode_cpu_ms_per_min, 500);
+    }
+
+    #[test]
+    fn peer_budget_permissive_values() {
+        let p = PeerBudget::permissive();
+        assert_eq!(p.max_bytes_per_min, 512 * 1024 * 1024);
+        assert_eq!(p.max_symbols_per_min, 1_000_000);
+        assert_eq!(p.max_failed_auth_per_min, 1000);
+        assert_eq!(p.max_inflight_decodes, 128);
+        assert_eq!(p.max_decode_cpu_ms_per_min, 60_000);
+    }
+
+    #[test]
+    fn peer_budget_new_serde_roundtrip() {
+        let budget = PeerBudget::new(100, 200, 10, 5, 3000);
+        let json = serde_json::to_string(&budget).expect("serialize");
+        let deser: PeerBudget = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(budget, deser);
+    }
+
+    // ── ObjectAdmissionPolicy ────────────────────────────────────
+
+    #[test]
+    fn object_admission_policy_defaults() {
+        let policy = ObjectAdmissionPolicy::default();
+        assert_eq!(policy.max_quarantine_bytes_per_zone, 256 * 1024 * 1024);
+        assert_eq!(policy.max_quarantine_objects_per_zone, 100_000);
+        assert_eq!(policy.quarantine_ttl_secs, 3600);
+        assert!(policy.require_schema_validation);
+    }
+
+    #[test]
+    fn object_admission_policy_serde_roundtrip() {
+        let policy = ObjectAdmissionPolicy {
+            max_quarantine_bytes_per_zone: 1024,
+            max_quarantine_objects_per_zone: 50,
+            quarantine_ttl_secs: 120,
+            require_schema_validation: false,
+        };
+        let json = serde_json::to_string(&policy).expect("serialize");
+        let deser: ObjectAdmissionPolicy = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(policy, deser);
+    }
+
+    // ── ObjectAdmissionClass ─────────────────────────────────────
+
+    #[test]
+    fn object_admission_class_serde_roundtrip() {
+        let quarantined = ObjectAdmissionClass::Quarantined;
+        let admitted = ObjectAdmissionClass::Admitted;
+
+        let j1 = serde_json::to_string(&quarantined).expect("serialize");
+        let j2 = serde_json::to_string(&admitted).expect("serialize");
+        let d1: ObjectAdmissionClass = serde_json::from_str(&j1).expect("deserialize");
+        let d2: ObjectAdmissionClass = serde_json::from_str(&j2).expect("deserialize");
+
+        assert_eq!(quarantined, d1);
+        assert_eq!(admitted, d2);
+        assert_ne!(j1, j2);
+    }
+
+    #[test]
+    fn object_admission_class_hash() {
+        use std::collections::HashSet;
+        let mut set = HashSet::new();
+        set.insert(ObjectAdmissionClass::Quarantined);
+        set.insert(ObjectAdmissionClass::Quarantined);
+        set.insert(ObjectAdmissionClass::Admitted);
+        assert_eq!(set.len(), 2);
+    }
+
+    // ── AdmissionPolicy presets ──────────────────────────────────
+
+    #[test]
+    fn public_ingress_policy_values() {
+        let p = AdmissionPolicy::public_ingress();
+        assert!(!p.require_authenticated_requests);
+        assert_eq!(p.max_amplification_factor, 2);
+        assert!(p.strict_unauthenticated_limits);
+        assert_eq!(p.per_peer, PeerBudget::restrictive());
+    }
+
+    #[test]
+    fn trusted_mesh_policy_values() {
+        let p = AdmissionPolicy::trusted_mesh();
+        assert!(p.require_authenticated_requests);
+        assert_eq!(p.max_amplification_factor, 100);
+        assert!(!p.strict_unauthenticated_limits);
+        assert_eq!(p.per_peer, PeerBudget::permissive());
+    }
+
+    #[test]
+    fn admission_policy_serde_roundtrip() {
+        let policy = AdmissionPolicy::default();
+        let json = serde_json::to_string(&policy).expect("serialize");
+        let deser: AdmissionPolicy = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(policy, deser);
+    }
+
+    // ── Multiple peers independence ──────────────────────────────
+
+    #[test]
+    fn multiple_peers_tracked_independently() {
+        let policy = AdmissionPolicy {
+            per_peer: PeerBudget {
+                max_bytes_per_min: 100,
+                ..PeerBudget::default()
+            },
+            ..AdmissionPolicy::default()
+        };
+        let mut controller = AdmissionController::new(policy);
+        let peer_a = NodeId::new("peer-a");
+        let peer_b = NodeId::new("peer-b");
+
+        controller.record_bytes(&peer_a, 90, 0);
+        // peer_a is near limit but peer_b is fresh
+        assert!(controller.check_bytes(&peer_a, 20, 0).is_err());
+        assert!(controller.check_bytes(&peer_b, 20, 0).is_ok());
+    }
+
+    // ── gc_stale_peers retains inflight ──────────────────────────
+
+    #[test]
+    fn gc_retains_peers_with_inflight_decodes() {
+        let mut controller = AdmissionController::with_default_policy();
+        let peer = NodeId::new("inflight-peer");
+        controller.try_acquire_decode(&peer, 0).unwrap();
+
+        // Even though window_start is old, inflight_decodes > 0 keeps it
+        controller.gc_stale_peers(200_000, 60_000);
+        assert_eq!(controller.peer_count(), 1);
+    }
+
+    // ── set_policy changes behavior ──────────────────────────────
+
+    #[test]
+    fn set_policy_changes_limits() {
+        let mut controller = AdmissionController::new(AdmissionPolicy {
+            per_peer: PeerBudget {
+                max_bytes_per_min: 100,
+                ..PeerBudget::default()
+            },
+            ..AdmissionPolicy::default()
+        });
+        let peer = test_peer();
+
+        assert!(controller.check_bytes(&peer, 200, 0).is_err());
+
+        controller.set_policy(AdmissionPolicy {
+            per_peer: PeerBudget {
+                max_bytes_per_min: 1000,
+                ..PeerBudget::default()
+            },
+            ..AdmissionPolicy::default()
+        });
+        assert!(controller.check_bytes(&peer, 200, 0).is_ok());
+    }
+
+    // ── get_usage / is_authenticated ─────────────────────────────
+
+    #[test]
+    fn get_usage_unknown_peer_returns_none() {
+        let controller = AdmissionController::with_default_policy();
+        assert!(controller.get_usage(&NodeId::new("unknown")).is_none());
+    }
+
+    #[test]
+    fn get_usage_known_peer_returns_some() {
+        let mut controller = AdmissionController::with_default_policy();
+        let peer = test_peer();
+        controller.record_bytes(&peer, 42, 0);
+        let usage = controller.get_usage(&peer).expect("usage present");
+        assert_eq!(usage.bytes_in_window, 42);
+    }
+
+    #[test]
+    fn set_and_check_authenticated() {
+        let mut controller = AdmissionController::with_default_policy();
+        let peer = test_peer();
+
+        assert!(!controller.is_authenticated(&peer));
+        controller.set_authenticated(&peer, true, 0);
+        assert!(controller.is_authenticated(&peer));
+        controller.set_authenticated(&peer, false, 0);
+        assert!(!controller.is_authenticated(&peer));
+    }
+
+    // ── Decode slot management ───────────────────────────────────
+
+    #[test]
+    fn decode_slot_acquire_and_release() {
+        let policy = AdmissionPolicy {
+            per_peer: PeerBudget {
+                max_inflight_decodes: 2,
+                ..PeerBudget::default()
+            },
+            ..AdmissionPolicy::default()
+        };
+        let mut controller = AdmissionController::new(policy);
+        let peer = test_peer();
+
+        controller.try_acquire_decode(&peer, 0).unwrap();
+        controller.try_acquire_decode(&peer, 0).unwrap();
+        assert!(controller.try_acquire_decode(&peer, 0).is_err());
+
+        controller.release_decode(&peer, 0);
+        controller.try_acquire_decode(&peer, 0).unwrap();
+    }
+
+    #[test]
+    fn release_decode_saturates_at_zero() {
+        let mut controller = AdmissionController::with_default_policy();
+        let peer = test_peer();
+        // Release without acquire — should not underflow
+        controller.release_decode(&peer, 0);
+        let usage = controller.get_usage(&peer).expect("usage");
+        assert_eq!(usage.inflight_decodes, 0);
+    }
+
+    // ── Strict unauthenticated symbol limits ─────────────────────
+
+    #[test]
+    fn strict_unauthenticated_limits_apply_to_symbols() {
+        let policy = AdmissionPolicy {
+            per_peer: PeerBudget {
+                max_symbols_per_min: 1_000_000,
+                ..PeerBudget::default()
+            },
+            require_authenticated_requests: false,
+            strict_unauthenticated_limits: true,
+            ..AdmissionPolicy::default()
+        };
+        let mut controller = AdmissionController::new(policy);
+        let peer = test_peer();
+
+        // Restrictive symbol limit is 10_000, even though policy says 1M
+        assert!(
+            controller
+                .check_admission(&peer, 0, 10_001, false, 0)
+                .is_err()
+        );
+        assert!(
+            controller
+                .check_admission(&peer, 0, 10_000, false, 0)
+                .is_ok()
+        );
+    }
+
+    // ── Window reset for symbols ─────────────────────────────────
+
+    #[test]
+    fn symbol_budget_resets_with_window() {
+        let policy = AdmissionPolicy {
+            per_peer: PeerBudget {
+                max_symbols_per_min: 10,
+                ..PeerBudget::default()
+            },
+            ..AdmissionPolicy::default()
+        };
+        let mut controller = AdmissionController::new(policy);
+        let peer = test_peer();
+
+        controller.record_symbols(&peer, 10, 0);
+        assert!(controller.check_symbols(&peer, 1, 0).is_err());
+        // After window reset
+        assert!(controller.check_symbols(&peer, 1, 60_001).is_ok());
+    }
+
+    // ── Record bytes/symbols saturation ──────────────────────────
+
+    #[test]
+    fn record_bytes_saturates() {
+        let mut controller = AdmissionController::with_default_policy();
+        let peer = test_peer();
+        controller.record_bytes(&peer, u64::MAX, 0);
+        controller.record_bytes(&peer, 1, 0);
+        let usage = controller.get_usage(&peer).expect("usage");
+        assert_eq!(usage.bytes_in_window, u64::MAX);
+    }
+
+    #[test]
+    fn record_symbols_saturates() {
+        let mut controller = AdmissionController::with_default_policy();
+        let peer = test_peer();
+        controller.record_symbols(&peer, u32::MAX, 0);
+        controller.record_symbols(&peer, 1, 0);
+        let usage = controller.get_usage(&peer).expect("usage");
+        assert_eq!(usage.symbols_in_window, u32::MAX);
+    }
+
+    // ── PeerUsage initial state ──────────────────────────────────
+
+    #[test]
+    fn peer_usage_initial_state() {
+        let usage = PeerUsage::new(5000);
+        assert_eq!(usage.bytes_in_window, 0);
+        assert_eq!(usage.symbols_in_window, 0);
+        assert_eq!(usage.failed_auth_in_window, 0);
+        assert_eq!(usage.inflight_decodes, 0);
+        assert_eq!(usage.decode_cpu_ms_in_window, 0);
+        assert_eq!(usage.window_start_ms, 5000);
+        assert!(!usage.is_authenticated);
+    }
+
+    // ── peer_count ───────────────────────────────────────────────
+
+    #[test]
+    fn peer_count_tracks_unique_peers() {
+        let mut controller = AdmissionController::with_default_policy();
+        assert_eq!(controller.peer_count(), 0);
+
+        controller.record_bytes(&NodeId::new("a"), 1, 0);
+        assert_eq!(controller.peer_count(), 1);
+
+        controller.record_bytes(&NodeId::new("b"), 1, 0);
+        assert_eq!(controller.peer_count(), 2);
+
+        // Same peer doesn't increase count
+        controller.record_bytes(&NodeId::new("a"), 1, 0);
+        assert_eq!(controller.peer_count(), 2);
+    }
+
+    // ── Amplification exact boundary ─────────────────────────────
+
+    #[test]
+    fn amplification_exact_boundary() {
+        let controller = AdmissionController::with_default_policy();
+        let peer = test_peer();
+        // Default factor is 10: 5 * 10 = 50
+        assert!(
+            controller
+                .check_amplification(&peer, 5, 50, false, false)
+                .is_ok()
+        );
+        assert!(
+            controller
+                .check_amplification(&peer, 5, 51, false, false)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn amplification_authenticated_with_proof_bypasses() {
+        let controller = AdmissionController::with_default_policy();
+        let peer = test_peer();
+        // Even a huge response is allowed with auth + proof
+        assert!(
+            controller
+                .check_amplification(&peer, 1, 1_000_000, true, true)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn amplification_authenticated_without_proof_still_checked() {
+        let controller = AdmissionController::with_default_policy();
+        let peer = test_peer();
+        assert!(
+            controller
+                .check_amplification(&peer, 1, 100, true, false)
+                .is_err()
+        );
+    }
+
+    // ── Constants sanity ─────────────────────────────────────────
+
+    #[test]
+    fn default_constants_are_reasonable() {
+        assert!(DEFAULT_MAX_BYTES_PER_MIN > 0);
+        assert!(DEFAULT_MAX_SYMBOLS_PER_MIN > 0);
+        assert!(DEFAULT_MAX_FAILED_AUTH_PER_MIN > 0);
+        assert!(DEFAULT_MAX_INFLIGHT_DECODES > 0);
+        assert!(DEFAULT_MAX_DECODE_CPU_MS_PER_MIN > 0);
+        assert!(DEFAULT_AMPLIFICATION_FACTOR > 0);
+        assert!(DEFAULT_MAX_QUARANTINE_BYTES_PER_ZONE > 0);
+        assert!(DEFAULT_MAX_QUARANTINE_OBJECTS_PER_ZONE > 0);
+        assert!(DEFAULT_QUARANTINE_TTL_SECS > 0);
+    }
+
+    // ── with_default_policy constructor ──────────────────────────
+
+    #[test]
+    fn with_default_policy_matches_default() {
+        let a = AdmissionController::with_default_policy();
+        let b = AdmissionController::new(AdmissionPolicy::default());
+        assert_eq!(a.policy().per_peer, b.policy().per_peer);
+        assert_eq!(
+            a.policy().require_authenticated_requests,
+            b.policy().require_authenticated_requests
+        );
+    }
+
+    // ── check_authentication_required ────────────────────────────
+
+    #[test]
+    fn check_auth_required_policy_off() {
+        let controller = AdmissionController::new(AdmissionPolicy {
+            require_authenticated_requests: false,
+            ..AdmissionPolicy::default()
+        });
+        assert!(controller.check_authentication_required(false).is_ok());
+        assert!(controller.check_authentication_required(true).is_ok());
+    }
+
+    #[test]
+    fn check_auth_required_policy_on() {
+        let controller = AdmissionController::with_default_policy();
+        assert!(controller.check_authentication_required(false).is_err());
+        assert!(controller.check_authentication_required(true).is_ok());
+    }
 }

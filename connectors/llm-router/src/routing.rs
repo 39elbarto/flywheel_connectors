@@ -354,4 +354,176 @@ mod tests {
         assert_eq!(estimate_tokens(""), 0);
         assert_eq!(estimate_tokens("a"), 1);
     }
+
+    #[test]
+    fn token_estimation_long_text() {
+        let text = "a".repeat(1000);
+        assert_eq!(estimate_tokens(&text), 250);
+    }
+
+    #[test]
+    fn token_estimation_four_chars() {
+        assert_eq!(estimate_tokens("abcd"), 1);
+    }
+
+    #[test]
+    fn token_estimation_five_chars() {
+        assert_eq!(estimate_tokens("abcde"), 2);
+    }
+
+    #[test]
+    fn estimate_cost_zero_tokens() {
+        let model = test_model("m", 0.001, 0.002, &[]);
+        assert_eq!(estimate_cost(&model, 0, 0), 0.0);
+    }
+
+    #[test]
+    fn estimate_cost_nonzero() {
+        let model = test_model("m", 0.001, 0.002, &[]);
+        let cost = estimate_cost(&model, 100, 50);
+        let expected = 100.0 * 0.001 + 50.0 * 0.002;
+        assert!((cost - expected).abs() < 1e-10);
+    }
+
+    #[test]
+    fn build_candidates_empty_providers() {
+        let candidates = build_candidates(&[], &[], 100, 50);
+        assert!(candidates.is_empty());
+    }
+
+    #[test]
+    fn build_candidates_provider_with_no_models() {
+        let providers = vec![ProviderConfig {
+            name: "empty".into(),
+            base_url: "http://localhost".into(),
+            auth: crate::types::ProviderAuth::ApiKey("key123456789".into()),
+            models: vec![],
+            priority: 1,
+        }];
+        let candidates = build_candidates(&providers, &[], 100, 50);
+        assert!(candidates.is_empty());
+    }
+
+    #[test]
+    fn build_candidates_with_status() {
+        let providers = vec![ProviderConfig {
+            name: "openai".into(),
+            base_url: "http://localhost".into(),
+            auth: crate::types::ProviderAuth::ApiKey("key123456789".into()),
+            models: vec![test_model("gpt-4", 0.001, 0.002, &[])],
+            priority: 1,
+        }];
+        let statuses = vec![("openai".to_string(), ProviderStatus::Degraded, 300_u64)];
+        let candidates = build_candidates(&providers, &statuses, 100, 50);
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].status, ProviderStatus::Degraded);
+        assert_eq!(candidates[0].latency_p50_ms, 300);
+    }
+
+    #[test]
+    fn build_candidates_default_status_when_not_in_statuses() {
+        let providers = vec![ProviderConfig {
+            name: "new-provider".into(),
+            base_url: "http://localhost".into(),
+            auth: crate::types::ProviderAuth::ApiKey("key123456789".into()),
+            models: vec![test_model("m1", 0.001, 0.002, &[])],
+            priority: 5,
+        }];
+        let candidates = build_candidates(&providers, &[], 100, 50);
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].status, ProviderStatus::Healthy);
+        assert_eq!(candidates[0].latency_p50_ms, 100);
+    }
+
+    #[test]
+    fn select_candidate_unavailable_filtered_out() {
+        let candidates = vec![RouteCandidate {
+            provider_name: "dead".into(),
+            model: test_model("m", 0.0001, 0.0001, &[]),
+            status: ProviderStatus::Unavailable,
+            estimated_cost: 0.001,
+            latency_p50_ms: 50,
+            priority: 1,
+        }];
+        let result = select_candidate(&candidates, RoutingStrategy::Cost, &[], None, None, None);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn select_candidate_budget_zero_filters_all_positive_cost() {
+        let candidates = test_candidates();
+        let result = select_candidate(
+            &candidates,
+            RoutingStrategy::Cost,
+            &[],
+            Some(0.0),
+            None,
+            None,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn route_candidate_debug() {
+        let c = RouteCandidate {
+            provider_name: "test".into(),
+            model: test_model("m1", 0.001, 0.002, &[]),
+            status: ProviderStatus::Healthy,
+            estimated_cost: 0.05,
+            latency_p50_ms: 100,
+            priority: 1,
+        };
+        let dbg = format!("{c:?}");
+        assert!(dbg.contains("RouteCandidate"));
+        assert!(dbg.contains("test"));
+    }
+
+    #[test]
+    #[allow(clippy::redundant_clone)]
+    fn route_candidate_clone() {
+        let c = RouteCandidate {
+            provider_name: "cloneable".into(),
+            model: test_model("m", 0.001, 0.002, &[ModelCapability::Code]),
+            status: ProviderStatus::Healthy,
+            estimated_cost: 0.01,
+            latency_p50_ms: 200,
+            priority: 3,
+        };
+        let cloned = c.clone();
+        assert_eq!(cloned.provider_name, "cloneable");
+        assert_eq!(cloned.priority, 3);
+        assert_eq!(cloned.model.capabilities.len(), 1);
+    }
+
+    #[test]
+    fn preferred_provider_with_fallback_strategy() {
+        let candidates = test_candidates();
+        let (idx, reason) = select_candidate(
+            &candidates,
+            RoutingStrategy::Fallback,
+            &[],
+            None,
+            Some("openai"),
+            None,
+        )
+        .unwrap();
+        assert_eq!(candidates[idx].provider_name, "openai");
+        assert!(reason.contains("preferred provider"));
+    }
+
+    #[test]
+    fn preferred_model_with_fallback_strategy() {
+        let candidates = test_candidates();
+        let (idx, reason) = select_candidate(
+            &candidates,
+            RoutingStrategy::Fallback,
+            &[],
+            None,
+            None,
+            Some("gemini-2.0-flash"),
+        )
+        .unwrap();
+        assert_eq!(candidates[idx].model.id, "gemini-2.0-flash");
+        assert!(reason.contains("preferred model"));
+    }
 }

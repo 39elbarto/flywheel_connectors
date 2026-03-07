@@ -875,4 +875,137 @@ mod tests {
         let d = err.retry_after().unwrap();
         assert_eq!(d.as_millis(), u128::from(u64::MAX));
     }
+
+    #[test]
+    fn api_error_no_status_code_display() {
+        let err = NotionError::Api {
+            message: "unknown".into(),
+            status_code: None,
+        };
+        let s = err.to_string();
+        assert!(s.contains("unknown"));
+    }
+
+    #[test]
+    fn validation_display_contains_message() {
+        let err = NotionError::Validation {
+            message: "bad input".into(),
+        };
+        assert!(err.to_string().contains("bad input"));
+    }
+
+    #[test]
+    fn unauthorized_display_contains_text() {
+        let err = NotionError::Unauthorized;
+        assert!(!err.to_string().is_empty());
+    }
+
+    #[test]
+    fn not_found_display_contains_resource() {
+        let err = NotionError::NotFound {
+            resource: "page:abc-123".into(),
+        };
+        assert!(err.to_string().contains("page:abc-123"));
+    }
+
+    #[test]
+    fn rate_limited_display_contains_ms() {
+        let err = NotionError::RateLimited {
+            retry_after_ms: 5000,
+        };
+        let s = err.to_string();
+        assert!(s.contains("5000"));
+    }
+
+    #[test]
+    fn retry_after_zero_is_some() {
+        let err = NotionError::RateLimited {
+            retry_after_ms: 0,
+        };
+        assert_eq!(err.retry_after(), Some(std::time::Duration::from_millis(0)));
+    }
+
+    #[test]
+    fn api_error_status_code_boundary_499() {
+        let err = NotionError::Api {
+            message: "client error".into(),
+            status_code: Some(499),
+        };
+        assert!(!err.is_retryable());
+    }
+
+    #[test]
+    fn api_error_status_code_boundary_500() {
+        let err = NotionError::Api {
+            message: "server".into(),
+            status_code: Some(500),
+        };
+        assert!(err.is_retryable());
+    }
+
+    #[test]
+    fn fcp_error_unauthorized_has_code_2001() {
+        let err = NotionError::Unauthorized;
+        match err.to_fcp_error() {
+            FcpError::Unauthorized { code, .. } => {
+                assert_eq!(code, 2001);
+            }
+            other => panic!("expected Unauthorized, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn fcp_error_validation_has_code_1003() {
+        let err = NotionError::Validation {
+            message: "bad".into(),
+        };
+        match err.to_fcp_error() {
+            FcpError::InvalidRequest { code, .. } => {
+                assert_eq!(code, 1003);
+            }
+            other => panic!("expected InvalidRequest, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn fcp_error_not_found_resource_format() {
+        let err = NotionError::NotFound {
+            resource: "page:abc".into(),
+        };
+        match err.to_fcp_error() {
+            FcpError::ResourceNotFound { resource } => {
+                assert_eq!(resource, "page:abc");
+            }
+            other => panic!("expected ResourceNotFound, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn fcp_error_rate_limited_has_ms() {
+        let err = NotionError::RateLimited {
+            retry_after_ms: 3000,
+        };
+        match err.to_fcp_error() {
+            FcpError::RateLimited {
+                retry_after_ms, ..
+            } => {
+                assert_eq!(retry_after_ms, 3000);
+            }
+            other => panic!("expected RateLimited, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn fcp_error_api_500_is_external_retryable() {
+        let err = NotionError::Api {
+            message: "crash".into(),
+            status_code: Some(500),
+        };
+        match err.to_fcp_error() {
+            FcpError::External { retryable, .. } => {
+                assert!(retryable);
+            }
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
 }

@@ -1512,4 +1512,223 @@ mod tests {
             .expect("compute interface hash");
         assert_eq!(computed, computed2);
     }
+
+    // ── require_str sync tests ──────────────────────────────────────
+
+    #[test]
+    fn require_str_extracts_value() {
+        let input = json!({"video_id": "abc123", "query": "rust"});
+        assert_eq!(require_str(&input, "video_id").unwrap(), "abc123");
+        assert_eq!(require_str(&input, "query").unwrap(), "rust");
+    }
+
+    #[test]
+    fn require_str_missing_field() {
+        let input = json!({"video_id": "abc"});
+        let err = require_str(&input, "query").unwrap_err();
+        match err {
+            FcpError::InvalidRequest { message, .. } => assert!(message.contains("query")),
+            e => panic!("expected InvalidRequest, got {e:?}"),
+        }
+    }
+
+    #[test]
+    fn require_str_non_string_field() {
+        let input = json!({"count": 42});
+        assert!(require_str(&input, "count").is_err());
+    }
+
+    #[test]
+    fn require_str_null_field() {
+        let input = json!({"field": null});
+        assert!(require_str(&input, "field").is_err());
+    }
+
+    #[test]
+    fn require_str_float_value() {
+        let input = json!({"val": 1.23});
+        assert!(require_str(&input, "val").is_err());
+    }
+
+    #[test]
+    fn require_str_object_value() {
+        let input = json!({"val": {"nested": true}});
+        assert!(require_str(&input, "val").is_err());
+    }
+
+    #[test]
+    fn require_str_array_value() {
+        let input = json!({"val": [1, 2, 3]});
+        assert!(require_str(&input, "val").is_err());
+    }
+
+    #[test]
+    fn require_str_boolean_value() {
+        let input = json!({"val": true});
+        assert!(require_str(&input, "val").is_err());
+    }
+
+    #[test]
+    fn require_str_nested_object_value() {
+        let input = json!({"val": {"a": {"b": "c"}}});
+        assert!(require_str(&input, "val").is_err());
+    }
+
+    #[test]
+    fn require_str_empty_string_returns_ok() {
+        let input = json!({"val": ""});
+        assert_eq!(require_str(&input, "val").unwrap(), "");
+    }
+
+    #[test]
+    fn require_str_error_code_is_1003() {
+        let input = json!({});
+        match require_str(&input, "x").unwrap_err() {
+            FcpError::InvalidRequest { code, .. } => assert_eq!(code, 1003),
+            e => panic!("expected InvalidRequest, got {e:?}"),
+        }
+    }
+
+    // ── require_str_array sync tests ────────────────────────────────
+
+    #[test]
+    fn require_str_array_extracts_values() {
+        let input = json!({"parts": ["snippet", "contentDetails"]});
+        let result = require_str_array(&input, "parts").unwrap();
+        assert_eq!(result, vec!["snippet", "contentDetails"]);
+    }
+
+    #[test]
+    fn require_str_array_missing_field() {
+        let input = json!({});
+        assert!(require_str_array(&input, "parts").is_err());
+    }
+
+    #[test]
+    fn require_str_array_empty_array_rejected() {
+        let input = json!({"parts": []});
+        let err = require_str_array(&input, "parts").unwrap_err();
+        match err {
+            FcpError::InvalidRequest { message, .. } => assert!(message.contains("must not be empty")),
+            e => panic!("expected InvalidRequest, got {e:?}"),
+        }
+    }
+
+    #[test]
+    fn require_str_array_non_string_element_rejected() {
+        let input = json!({"parts": ["snippet", 42]});
+        let err = require_str_array(&input, "parts").unwrap_err();
+        match err {
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(message.contains("parts[1]"));
+            }
+            e => panic!("expected InvalidRequest, got {e:?}"),
+        }
+    }
+
+    #[test]
+    fn require_str_array_not_an_array() {
+        let input = json!({"parts": "snippet"});
+        assert!(require_str_array(&input, "parts").is_err());
+    }
+
+    #[test]
+    fn require_str_array_null_value() {
+        let input = json!({"parts": null});
+        assert!(require_str_array(&input, "parts").is_err());
+    }
+
+    // ── DoctorResult / DoctorCheck / DoctorStatus serde ─────────────
+
+    #[test]
+    fn doctor_result_serde_roundtrip() {
+        let r = DoctorResult::from_checks(vec![DoctorCheck {
+            name: "config".into(),
+            status: DoctorStatus::Healthy,
+            message: "ok".into(),
+        }]);
+        let v = serde_json::to_value(&r).unwrap();
+        let r2: DoctorResult = serde_json::from_value(v).unwrap();
+        assert_eq!(r2.checks.len(), 1);
+    }
+
+    #[test]
+    fn doctor_result_debug() {
+        let r = DoctorResult::from_checks(vec![]);
+        let dbg = format!("{r:?}");
+        assert!(dbg.contains("DoctorResult"));
+    }
+
+    #[test]
+    fn doctor_check_serde_roundtrip() {
+        let c = DoctorCheck {
+            name: "auth".into(),
+            status: DoctorStatus::Healthy,
+            message: "valid".into(),
+        };
+        let s = serde_json::to_string(&c).unwrap();
+        let c2: DoctorCheck = serde_json::from_str(&s).unwrap();
+        assert_eq!(c2.name, "auth");
+        assert_eq!(c2.message, "valid");
+    }
+
+    #[test]
+    fn doctor_check_debug() {
+        let c = DoctorCheck {
+            name: "dbgcheck".into(),
+            status: DoctorStatus::Degraded,
+            message: "warn".into(),
+        };
+        let dbg = format!("{c:?}");
+        assert!(dbg.contains("dbgcheck"));
+    }
+
+    #[test]
+    fn doctor_status_serde_all_variants() {
+        for status in [
+            DoctorStatus::Healthy,
+            DoctorStatus::Degraded,
+            DoctorStatus::Unhealthy,
+        ] {
+            let v = serde_json::to_value(&status).unwrap();
+            let back: DoctorStatus = serde_json::from_value(v).unwrap();
+            assert_eq!(back, status);
+        }
+    }
+
+    #[test]
+    fn doctor_status_debug() {
+        let dbg = format!("{:?}", DoctorStatus::Unhealthy);
+        assert!(dbg.contains("Unhealthy"));
+    }
+
+    #[test]
+    fn doctor_status_eq_ne() {
+        assert_eq!(DoctorStatus::Healthy, DoctorStatus::Healthy);
+        assert_ne!(DoctorStatus::Healthy, DoctorStatus::Degraded);
+        assert_ne!(DoctorStatus::Degraded, DoctorStatus::Unhealthy);
+    }
+
+    #[test]
+    fn doctor_result_empty_checks_is_healthy() {
+        let r = DoctorResult::from_checks(vec![]);
+        assert_eq!(r.status, DoctorStatus::Healthy);
+    }
+
+    #[test]
+    fn doctor_result_unhealthy_overrides_degraded() {
+        let r = DoctorResult::from_checks(vec![
+            DoctorCheck {
+                name: "a".into(),
+                status: DoctorStatus::Unhealthy,
+                message: "bad".into(),
+            },
+            DoctorCheck {
+                name: "b".into(),
+                status: DoctorStatus::Degraded,
+                message: "warn".into(),
+            },
+        ]);
+        assert_eq!(r.status, DoctorStatus::Unhealthy);
+    }
 }

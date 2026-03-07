@@ -598,4 +598,142 @@ mod tests {
         let m: BookMetadata = serde_json::from_value(json).unwrap();
         assert_eq!(m.filesize, u64::MAX);
     }
+
+    #[test]
+    fn search_result_long_author() {
+        let long_author = "A".repeat(5000);
+        let json = serde_json::json!({"md5": "x", "title": "T", "author": long_author});
+        let r: SearchResult = serde_json::from_value(json).unwrap();
+        assert_eq!(r.author.len(), 5000);
+    }
+
+    #[test]
+    fn book_metadata_empty_isbn() {
+        let json = serde_json::json!({"md5": "x", "title": "T", "isbn": ""});
+        let m: BookMetadata = serde_json::from_value(json).unwrap();
+        assert_eq!(m.isbn, "");
+    }
+
+    #[test]
+    fn api_error_response_unicode_message() {
+        let json = serde_json::json!({"message": "Ошибка сервера"});
+        let err: ApiErrorResponse = serde_json::from_value(json).unwrap();
+        assert!(err.message.unwrap().contains("Ошибка"));
+    }
+
+    #[test]
+    fn search_result_special_chars_in_title() {
+        let json = serde_json::json!({"md5": "x", "title": "Book <b>Test</b> & \"Quoted\""});
+        let r: SearchResult = serde_json::from_value(json).unwrap();
+        assert!(r.title.contains('&'));
+        assert!(r.title.contains('"'));
+    }
+
+    #[test]
+    fn api_error_response_from_raw_string() {
+        let raw = r#"{"error":"e","message":"m","detail":"d"}"#;
+        let err: ApiErrorResponse = serde_json::from_str(raw).unwrap();
+        assert_eq!(err.error.as_deref(), Some("e"));
+        assert_eq!(err.message.as_deref(), Some("m"));
+        assert_eq!(err.detail.as_deref(), Some("d"));
+    }
+
+    #[test]
+    fn book_metadata_all_defaults_except_required() {
+        let json = serde_json::json!({"md5": "z", "title": "Z"});
+        let m: BookMetadata = serde_json::from_value(json).unwrap();
+        assert_eq!(m.author, "");
+        assert_eq!(m.publisher, "");
+        assert_eq!(m.year, "");
+        assert_eq!(m.language, "");
+        assert_eq!(m.extension, "");
+        assert_eq!(m.filesize, 0);
+        assert_eq!(m.coverurl, "");
+        assert_eq!(m.isbn, "");
+        assert_eq!(m.doi, "");
+        assert_eq!(m.description, "");
+        assert_eq!(m.pages, "");
+        assert_eq!(m.source, "");
+    }
+
+    #[test]
+    fn search_result_with_whitespace_title() {
+        let json = serde_json::json!({"md5": "x", "title": "  spaces  "});
+        let r: SearchResult = serde_json::from_value(json).unwrap();
+        assert_eq!(r.title, "  spaces  ");
+    }
+
+    #[test]
+    fn book_metadata_with_numeric_pages() {
+        let json = serde_json::json!({"md5": "x", "title": "T", "pages": "999"});
+        let m: BookMetadata = serde_json::from_value(json).unwrap();
+        assert_eq!(m.pages, "999");
+    }
+
+    #[test]
+    fn book_metadata_with_long_description() {
+        let long_desc = "A".repeat(10_000);
+        let json = serde_json::json!({"md5": "x", "title": "T", "description": long_desc});
+        let m: BookMetadata = serde_json::from_value(json).unwrap();
+        assert_eq!(m.description.len(), 10_000);
+    }
+
+    #[test]
+    fn api_error_response_with_only_detail() {
+        let json = serde_json::json!({"detail": "something went wrong"});
+        let err: ApiErrorResponse = serde_json::from_value(json).unwrap();
+        assert!(err.error.is_none());
+        assert!(err.message.is_none());
+        assert_eq!(err.detail.as_deref(), Some("something went wrong"));
+    }
+
+    #[test]
+    fn search_result_all_languages() {
+        for lang in ["en", "fr", "de", "ja", "zh", "ru", "ar"] {
+            let json = serde_json::json!({"md5": "x", "title": "T", "language": lang});
+            let r: SearchResult = serde_json::from_value(json).unwrap();
+            assert_eq!(r.language, lang);
+        }
+    }
+
+    #[test]
+    fn search_result_various_extensions() {
+        for ext in ["pdf", "epub", "djvu", "mobi", "azw3", "fb2", "cbz"] {
+            let json = serde_json::json!({"md5": "x", "title": "T", "extension": ext});
+            let r: SearchResult = serde_json::from_value(json).unwrap();
+            assert_eq!(r.extension, ext);
+        }
+    }
+
+    #[test]
+    fn book_metadata_source_values() {
+        for source in ["libgen", "zlib", "scihub", "openlib"] {
+            let json = serde_json::json!({"md5": "x", "title": "T", "source": source});
+            let m: BookMetadata = serde_json::from_value(json).unwrap();
+            assert_eq!(m.source, source);
+        }
+    }
+
+    #[test]
+    fn search_result_numeric_md5() {
+        let json = serde_json::json!({"md5": "1234567890abcdef1234567890abcdef", "title": "T"});
+        let r: SearchResult = serde_json::from_value(json).unwrap();
+        assert_eq!(r.md5.len(), 32);
+    }
+
+    #[test]
+    fn book_metadata_isbn_with_dashes() {
+        let json = serde_json::json!({"md5": "x", "title": "T", "isbn": "978-0-13-468599-1"});
+        let m: BookMetadata = serde_json::from_value(json).unwrap();
+        assert!(m.isbn.contains('-'));
+    }
+
+    #[test]
+    fn api_error_response_debug_shows_fields() {
+        let json = serde_json::json!({"error": "err1", "message": "msg1"});
+        let err: ApiErrorResponse = serde_json::from_value(json).unwrap();
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("err1"));
+        assert!(dbg.contains("msg1"));
+    }
 }

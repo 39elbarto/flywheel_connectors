@@ -861,4 +861,69 @@ mod tests {
         }
         assert!(inner().is_err());
     }
+
+    #[test]
+    fn display_unauthorized_nonempty() {
+        let err = S3Error::Unauthorized;
+        let s = err.to_string();
+        assert!(!s.is_empty());
+    }
+
+    #[test]
+    fn display_not_found_contains_key() {
+        let err = S3Error::NotFound {
+            key: "path/to/file".into(),
+        };
+        let s = err.to_string();
+        assert!(s.contains("path/to/file"));
+    }
+
+    #[test]
+    fn display_bucket_not_found_contains_name() {
+        let err = S3Error::BucketNotFound {
+            bucket: "my-bucket".into(),
+        };
+        let s = err.to_string();
+        assert!(s.contains("my-bucket"));
+    }
+
+    #[test]
+    fn display_rate_limited_contains_ms() {
+        let err = S3Error::RateLimited {
+            retry_after_ms: 5000,
+        };
+        let s = err.to_string();
+        assert!(s.contains("5000"));
+    }
+
+    #[test]
+    fn debug_unauthorized_variant_name() {
+        let dbg = format!("{:?}", S3Error::Unauthorized);
+        assert!(dbg.contains("Unauthorized"));
+    }
+
+    #[test]
+    fn debug_not_found_includes_key() {
+        let err = S3Error::NotFound {
+            key: "test.txt".into(),
+        };
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("NotFound"));
+        assert!(dbg.contains("test.txt"));
+    }
+
+    #[test]
+    fn debug_bucket_not_found_variant() {
+        let err = S3Error::BucketNotFound {
+            bucket: "gone".into(),
+        };
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("BucketNotFound"));
+    }
+
+    #[test]
+    fn s3_result_ok_is_ok() {
+        let r: S3Result<String> = Ok("data".into());
+        assert!(r.is_ok());
+    }
 }

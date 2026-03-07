@@ -941,4 +941,159 @@ mod tests {
         let b: BucketInfo = serde_json::from_value(json).unwrap();
         assert_eq!(b.name, "b");
     }
+
+    // ── ObjectInfo additional ─────────────────────────────────────
+
+    #[test]
+    fn object_info_all_none_optionals() {
+        let json = json!({"key": "test.txt", "size": 0});
+        let obj: ObjectInfo = serde_json::from_value(json).unwrap();
+        assert!(obj.last_modified.is_none());
+        assert!(obj.etag.is_none());
+        assert!(obj.storage_class.is_none());
+    }
+
+    #[test]
+    fn object_info_zero_size() {
+        let json = json!({"key": "empty", "size": 0});
+        let obj: ObjectInfo = serde_json::from_value(json).unwrap();
+        assert_eq!(obj.size, 0);
+    }
+
+    #[test]
+    fn object_info_max_u64_size() {
+        let json = json!({"key": "big", "size": u64::MAX});
+        let obj: ObjectInfo = serde_json::from_value(json).unwrap();
+        assert_eq!(obj.size, u64::MAX);
+    }
+
+    #[test]
+    fn object_info_unicode_key() {
+        let json = json!({"key": "日本語/ファイル.txt", "size": 100});
+        let obj: ObjectInfo = serde_json::from_value(json).unwrap();
+        assert!(obj.key.contains("日本語"));
+    }
+
+    // ── BucketInfo additional ─────────────────────────────────────
+
+    #[test]
+    fn bucket_info_with_creation_date_present() {
+        let json = json!({"name": "my-bucket", "creation_date": "2026-01-01T00:00:00Z"});
+        let b: BucketInfo = serde_json::from_value(json).unwrap();
+        assert_eq!(b.creation_date.as_deref(), Some("2026-01-01T00:00:00Z"));
+    }
+
+    #[test]
+    fn bucket_info_no_creation_date_field() {
+        let json = json!({"name": "no-date"});
+        let b: BucketInfo = serde_json::from_value(json).unwrap();
+        assert!(b.creation_date.is_none());
+    }
+
+    // ── GetObjectResponse additional ──────────────────────────────
+
+    #[test]
+    fn get_object_response_body_and_content_type() {
+        let json = json!({"body": "data", "content_type": "text/plain"});
+        let resp: GetObjectResponse = serde_json::from_value(json).unwrap();
+        assert_eq!(resp.body, "data");
+        assert_eq!(resp.content_type, "text/plain");
+    }
+
+    // ── HeadObjectResponse additional ─────────────────────────────
+
+    #[test]
+    fn head_object_response_with_all_fields() {
+        let json = json!({
+            "content_type": "application/json",
+            "content_length": 1024,
+            "etag": "\"abc123\"",
+            "last_modified": "2026-01-01"
+        });
+        let resp: HeadObjectResponse = serde_json::from_value(json).unwrap();
+        assert_eq!(resp.content_type, "application/json");
+        assert_eq!(resp.content_length, 1024);
+        assert_eq!(resp.etag.as_deref(), Some("\"abc123\""));
+    }
+
+    // ── CreateBucketResponse additional ───────────────────────────
+
+    #[test]
+    fn create_bucket_response_debug_format() {
+        let resp = CreateBucketResponse {
+            bucket: "new-bucket".into(),
+            created: true,
+        };
+        let dbg = format!("{resp:?}");
+        assert!(dbg.contains("CreateBucketResponse"));
+        assert!(dbg.contains("new-bucket"));
+    }
+
+    // ── PutObjectResponse additional ──────────────────────────────
+
+    #[test]
+    fn put_object_response_etag_roundtrip() {
+        let json = json!({"etag": "\"xyz\""});
+        let resp: PutObjectResponse = serde_json::from_value(json).unwrap();
+        assert_eq!(resp.etag, "\"xyz\"");
+    }
+
+    #[test]
+    fn put_object_response_zero_length_etag() {
+        let json = json!({"etag": ""});
+        let resp: PutObjectResponse = serde_json::from_value(json).unwrap();
+        assert!(resp.etag.is_empty());
+    }
+
+    #[test]
+    fn list_objects_response_with_truncated_flag() {
+        let json = json!({
+            "contents": [{"key": "a", "size": 1}],
+            "is_truncated": true
+        });
+        let resp: ListObjectsResponse = serde_json::from_value(json).unwrap();
+        assert!(resp.is_truncated);
+        assert_eq!(resp.contents.len(), 1);
+    }
+
+    #[test]
+    fn list_objects_response_no_contents() {
+        let json = json!({"contents": [], "is_truncated": false});
+        let resp: ListObjectsResponse = serde_json::from_value(json).unwrap();
+        assert!(resp.contents.is_empty());
+        assert!(!resp.is_truncated);
+    }
+
+    #[test]
+    fn delete_bucket_response_false_deleted() {
+        let resp = DeleteBucketResponse {
+            bucket: "still-there".into(),
+            deleted: false,
+        };
+        assert!(!resp.deleted);
+    }
+
+    #[test]
+    fn create_bucket_response_false_created() {
+        let resp = CreateBucketResponse {
+            bucket: "existing".into(),
+            created: false,
+        };
+        assert!(!resp.created);
+    }
+
+    #[test]
+    #[allow(clippy::redundant_clone)]
+    fn object_info_clone_preserves_fields() {
+        let obj = ObjectInfo {
+            key: "test.txt".into(),
+            size: 100,
+            last_modified: Some("2026-01-01".into()),
+            etag: Some("\"abc\"".into()),
+            storage_class: Some("STANDARD".into()),
+        };
+        let cloned = obj.clone();
+        assert_eq!(obj.key, cloned.key);
+        assert_eq!(obj.size, cloned.size);
+    }
 }

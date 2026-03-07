@@ -2305,4 +2305,252 @@ mod tests {
             .expect("compute interface hash");
         assert_eq!(computed, computed2);
     }
+
+    // ── require_str sync tests ──────────────────────────────────────
+
+    #[test]
+    fn require_str_extracts_value() {
+        let input = json!({"url": "https://example.com", "selector": "#main"});
+        assert_eq!(require_str(&input, "url").unwrap(), "https://example.com");
+        assert_eq!(require_str(&input, "selector").unwrap(), "#main");
+    }
+
+    #[test]
+    fn require_str_missing_field() {
+        let input = json!({"url": "https://example.com"});
+        let err = require_str(&input, "selector").unwrap_err();
+        match err {
+            FcpError::InvalidRequest { message, .. } => assert!(message.contains("selector")),
+            e => panic!("expected InvalidRequest, got {e:?}"),
+        }
+    }
+
+    #[test]
+    fn require_str_non_string_field() {
+        let input = json!({"count": 42});
+        assert!(require_str(&input, "count").is_err());
+    }
+
+    #[test]
+    fn require_str_null_field() {
+        let input = json!({"field": null});
+        assert!(require_str(&input, "field").is_err());
+    }
+
+    #[test]
+    fn require_str_float_value() {
+        let input = json!({"val": 1.23});
+        assert!(require_str(&input, "val").is_err());
+    }
+
+    #[test]
+    fn require_str_object_value() {
+        let input = json!({"val": {"nested": true}});
+        assert!(require_str(&input, "val").is_err());
+    }
+
+    #[test]
+    fn require_str_array_value() {
+        let input = json!({"val": [1, 2, 3]});
+        assert!(require_str(&input, "val").is_err());
+    }
+
+    #[test]
+    fn require_str_boolean_value() {
+        let input = json!({"val": true});
+        assert!(require_str(&input, "val").is_err());
+    }
+
+    #[test]
+    fn require_str_nested_object_value() {
+        let input = json!({"val": {"a": {"b": "c"}}});
+        assert!(require_str(&input, "val").is_err());
+    }
+
+    #[test]
+    fn require_str_empty_string_returns_ok() {
+        let input = json!({"val": ""});
+        assert_eq!(require_str(&input, "val").unwrap(), "");
+    }
+
+    #[test]
+    fn require_str_error_code_is_1003() {
+        let input = json!({});
+        match require_str(&input, "x").unwrap_err() {
+            FcpError::InvalidRequest { code, .. } => assert_eq!(code, 1003),
+            e => panic!("expected InvalidRequest, got {e:?}"),
+        }
+    }
+
+    // ── parse_required_u64_field sync tests ─────────────────────────
+
+    #[test]
+    fn parse_required_u64_extracts_value() {
+        let input = json!({"timeout": 5000});
+        assert_eq!(parse_required_u64_field(&input, "timeout").unwrap(), 5000);
+    }
+
+    #[test]
+    fn parse_required_u64_missing_field() {
+        let input = json!({});
+        assert!(parse_required_u64_field(&input, "timeout").is_err());
+    }
+
+    #[test]
+    fn parse_required_u64_string_value() {
+        let input = json!({"timeout": "5000"});
+        assert!(parse_required_u64_field(&input, "timeout").is_err());
+    }
+
+    #[test]
+    fn parse_required_u64_null_value() {
+        let input = json!({"timeout": null});
+        assert!(parse_required_u64_field(&input, "timeout").is_err());
+    }
+
+    // ── requires_execution_approval sync tests ──────────────────────
+
+    #[test]
+    fn requires_execution_approval_js() {
+        assert!(requires_execution_approval("browser.evaluate_js"));
+    }
+
+    #[test]
+    fn requires_execution_approval_fill_form() {
+        assert!(requires_execution_approval("browser.fill_form"));
+    }
+
+    #[test]
+    fn requires_execution_approval_cookies() {
+        assert!(requires_execution_approval("browser.get_cookies"));
+        assert!(requires_execution_approval("browser.set_cookies"));
+    }
+
+    #[test]
+    fn requires_execution_approval_session() {
+        assert!(requires_execution_approval("browser.session.save"));
+        assert!(requires_execution_approval("browser.session.restore"));
+    }
+
+    #[test]
+    fn requires_execution_approval_proxy() {
+        assert!(requires_execution_approval("browser.set_proxy"));
+        assert!(requires_execution_approval("browser.clear_proxy"));
+    }
+
+    #[test]
+    fn does_not_require_execution_approval_navigate() {
+        assert!(!requires_execution_approval("browser.navigate"));
+    }
+
+    #[test]
+    fn does_not_require_execution_approval_screenshot() {
+        assert!(!requires_execution_approval("browser.screenshot"));
+    }
+
+    // ── DoctorResult / DoctorCheck / DoctorStatus serde ─────────────
+
+    #[test]
+    fn doctor_result_serde_roundtrip() {
+        let r = DoctorResult {
+            status: DoctorStatus::Healthy,
+            checks: vec![DoctorCheck {
+                name: "config".into(),
+                status: DoctorStatus::Healthy,
+                message: "ok".into(),
+            }],
+        };
+        let v = serde_json::to_value(&r).unwrap();
+        let r2: DoctorResult = serde_json::from_value(v).unwrap();
+        assert_eq!(r2.checks.len(), 1);
+    }
+
+    #[test]
+    fn doctor_result_debug() {
+        let r = DoctorResult {
+            status: DoctorStatus::Healthy,
+            checks: vec![],
+        };
+        let dbg = format!("{r:?}");
+        assert!(dbg.contains("DoctorResult"));
+    }
+
+    #[test]
+    fn doctor_check_serde_roundtrip() {
+        let c = DoctorCheck {
+            name: "auth".into(),
+            status: DoctorStatus::Healthy,
+            message: "valid".into(),
+        };
+        let s = serde_json::to_string(&c).unwrap();
+        let c2: DoctorCheck = serde_json::from_str(&s).unwrap();
+        assert_eq!(c2.name, "auth");
+        assert_eq!(c2.message, "valid");
+    }
+
+    #[test]
+    fn doctor_check_debug() {
+        let c = DoctorCheck {
+            name: "dbgcheck".into(),
+            status: DoctorStatus::Degraded,
+            message: "warn".into(),
+        };
+        let dbg = format!("{c:?}");
+        assert!(dbg.contains("dbgcheck"));
+    }
+
+    #[test]
+    fn doctor_status_serde_all_variants() {
+        for status in [
+            DoctorStatus::Healthy,
+            DoctorStatus::Degraded,
+            DoctorStatus::Unhealthy,
+        ] {
+            let v = serde_json::to_value(status).unwrap();
+            let back: DoctorStatus = serde_json::from_value(v).unwrap();
+            assert_eq!(back, status);
+        }
+    }
+
+    #[test]
+    fn doctor_status_debug() {
+        let dbg = format!("{:?}", DoctorStatus::Unhealthy);
+        assert!(dbg.contains("Unhealthy"));
+    }
+
+    #[test]
+    fn doctor_status_copy() {
+        let s = DoctorStatus::Degraded;
+        let s2 = s;
+        assert_eq!(s, s2);
+    }
+
+    #[test]
+    fn doctor_status_eq_ne() {
+        assert_eq!(DoctorStatus::Healthy, DoctorStatus::Healthy);
+        assert_ne!(DoctorStatus::Healthy, DoctorStatus::Degraded);
+        assert_ne!(DoctorStatus::Degraded, DoctorStatus::Unhealthy);
+    }
+
+    // ── Sandbox constants tests ─────────────────────────────────────
+
+    #[test]
+    fn sandbox_profile_is_strict() {
+        assert_eq!(BROWSER_SANDBOX_PROFILE, "strict");
+    }
+
+    #[test]
+    fn sandbox_memory_is_1024() {
+        assert_eq!(BROWSER_SANDBOX_MEMORY_MB, 1024);
+    }
+
+    #[test]
+    fn sandbox_deny_exec_is_true() {
+        assert!(BROWSER_SANDBOX_DENY_EXEC);
+    }
+
+    #[test]
+    fn sandbox_deny_ptrace_is_true() {
+        assert!(BROWSER_SANDBOX_DENY_PTRACE);
+    }
 }

@@ -974,4 +974,225 @@ mod tests {
         assert_eq!(usage.errors, 1);
         assert_eq!(usage.total_latency_ms, 5350);
     }
+
+    // ── Additional RoutingStrategy tests ──────────────────────────
+
+    #[test]
+    fn routing_strategy_from_str_opt_case_sensitive() {
+        assert_eq!(RoutingStrategy::from_str_opt("COST"), None);
+        assert_eq!(RoutingStrategy::from_str_opt("Fallback"), None);
+        assert_eq!(RoutingStrategy::from_str_opt("LATENCY"), None);
+        assert_eq!(RoutingStrategy::from_str_opt("Capability"), None);
+    }
+
+    #[test]
+    fn routing_strategy_deserialize_from_json_value() {
+        let v = serde_json::json!("cost");
+        let s: RoutingStrategy = serde_json::from_value(v).unwrap();
+        assert_eq!(s, RoutingStrategy::Cost);
+    }
+
+    #[test]
+    fn routing_strategy_deserialize_invalid_fails() {
+        let v = serde_json::json!("round_robin");
+        assert!(serde_json::from_value::<RoutingStrategy>(v).is_err());
+    }
+
+    // ── Additional ModelCapability tests ──────────────────────────
+
+    #[test]
+    fn model_capability_from_str_opt_case_sensitive() {
+        assert_eq!(ModelCapability::from_str_opt("VISION"), None);
+        assert_eq!(ModelCapability::from_str_opt("Tool_Use"), None);
+        assert_eq!(ModelCapability::from_str_opt("longContext"), None);
+    }
+
+    #[test]
+    fn model_capability_deserialize_invalid_fails() {
+        let v = serde_json::json!("flying");
+        assert!(serde_json::from_value::<ModelCapability>(v).is_err());
+    }
+
+    // ── Additional BudgetEnforcement tests ────────────────────────
+
+    #[test]
+    fn budget_enforcement_deserialize_invalid_fails() {
+        let v = serde_json::json!("strict");
+        assert!(serde_json::from_value::<BudgetEnforcement>(v).is_err());
+    }
+
+    #[test]
+    fn budget_enforcement_eq_and_ne() {
+        assert_eq!(BudgetEnforcement::Hard, BudgetEnforcement::Hard);
+        assert_ne!(BudgetEnforcement::Hard, BudgetEnforcement::Soft);
+        assert_ne!(BudgetEnforcement::Soft, BudgetEnforcement::None);
+    }
+
+    // ── ProviderStatus additional ─────────────────────────────────
+
+    #[test]
+    fn provider_status_deserialize_invalid_fails() {
+        let v = serde_json::json!("offline");
+        assert!(serde_json::from_value::<ProviderStatus>(v).is_err());
+    }
+
+    #[test]
+    fn provider_status_eq_all_combos() {
+        let variants = [
+            ProviderStatus::Healthy,
+            ProviderStatus::Degraded,
+            ProviderStatus::Unavailable,
+        ];
+        for (i, a) in variants.iter().enumerate() {
+            for (j, b) in variants.iter().enumerate() {
+                if i == j {
+                    assert_eq!(a, b);
+                } else {
+                    assert_ne!(a, b);
+                }
+            }
+        }
+    }
+
+    // ── ProviderAuth edge cases ───────────────────────────────────
+
+    #[test]
+    fn provider_auth_api_key_1_char() {
+        let auth = ProviderAuth::ApiKey("x".into());
+        assert_eq!(auth.redacted_label(), "api_key:****");
+    }
+
+    #[test]
+    fn provider_auth_api_key_unicode() {
+        let auth = ProviderAuth::ApiKey("sk-日本語テストキーです".into());
+        let label = auth.redacted_label();
+        assert!(label.starts_with("api_key:"));
+    }
+
+    #[test]
+    fn provider_auth_credential_id_debug() {
+        let auth = ProviderAuth::CredentialId("my-cred-id".into());
+        let dbg = format!("{auth:?}");
+        assert!(dbg.contains("CredentialId"));
+        assert!(dbg.contains("my-cred-id"));
+    }
+
+    // ── ModelInfo additional ───────────────────────────────────────
+
+    #[test]
+    fn model_info_all_capabilities() {
+        let model = ModelInfo {
+            id: "all-caps".into(),
+            capabilities: vec![
+                ModelCapability::Vision,
+                ModelCapability::ToolUse,
+                ModelCapability::LongContext,
+                ModelCapability::Code,
+                ModelCapability::Math,
+                ModelCapability::Streaming,
+            ],
+            context_window: 1_000_000,
+            cost_per_input_token: 0.001,
+            cost_per_output_token: 0.002,
+        };
+        assert_eq!(model.capabilities.len(), 6);
+        let json = serde_json::to_value(&model).unwrap();
+        let caps = json["capabilities"].as_array().unwrap();
+        assert_eq!(caps.len(), 6);
+    }
+
+    #[test]
+    fn model_info_large_context_window() {
+        let model = ModelInfo {
+            id: "huge".into(),
+            capabilities: vec![],
+            context_window: u32::MAX,
+            cost_per_input_token: 0.0,
+            cost_per_output_token: 0.0,
+        };
+        assert_eq!(model.context_window, u32::MAX);
+    }
+
+    // ── RoutingDecision edge cases ────────────────────────────────
+
+    #[test]
+    fn routing_decision_zero_candidates() {
+        let decision = RoutingDecision {
+            strategy_used: "cost".into(),
+            candidates_evaluated: 0,
+            fallback_used: false,
+            reason: "no candidates".into(),
+        };
+        let json = serde_json::to_value(&decision).unwrap();
+        assert_eq!(json["candidates_evaluated"], 0);
+    }
+
+    #[test]
+    fn routing_decision_empty_reason() {
+        let decision = RoutingDecision {
+            strategy_used: "latency".into(),
+            candidates_evaluated: 1,
+            fallback_used: false,
+            reason: String::new(),
+        };
+        let json = serde_json::to_value(&decision).unwrap();
+        assert_eq!(json["reason"], "");
+    }
+
+    // ── BudgetConfig edge cases ───────────────────────────────────
+
+    #[test]
+    fn budget_config_zero_budget() {
+        let config = BudgetConfig {
+            budget_usd: 0.0,
+            enforcement: BudgetEnforcement::Hard,
+            period: "daily".into(),
+        };
+        assert_eq!(config.budget_usd, 0.0);
+    }
+
+    #[test]
+    fn budget_config_negative_budget() {
+        let config = BudgetConfig {
+            budget_usd: -1.0,
+            enforcement: BudgetEnforcement::Soft,
+            period: "monthly".into(),
+        };
+        assert!(config.budget_usd < 0.0);
+    }
+
+    // ── ProviderUsage edge cases ──────────────────────────────────
+
+    #[test]
+    fn provider_usage_large_values() {
+        let usage = ProviderUsage {
+            input_tokens: u64::MAX,
+            output_tokens: u64::MAX,
+            cost_usd: f64::MAX,
+            requests: u64::MAX,
+            errors: u64::MAX,
+            total_latency_ms: u64::MAX,
+        };
+        assert_eq!(usage.input_tokens, u64::MAX);
+        assert_eq!(usage.cost_usd, f64::MAX);
+    }
+
+    // ── ProviderReadiness serialize completeness ──────────────────
+
+    #[test]
+    fn provider_readiness_all_true_serializes_correctly() {
+        let readiness = ProviderReadiness {
+            name: "test".into(),
+            auth_ok: true,
+            auth_mode: "api_key".into(),
+            network_ok: true,
+            models_ok: true,
+            model_count: 10,
+        };
+        let json = serde_json::to_value(&readiness).unwrap();
+        assert_eq!(json["auth_ok"], true);
+        assert_eq!(json["network_ok"], true);
+        assert_eq!(json["models_ok"], true);
+        assert_eq!(json["model_count"], 10);
+    }
 }

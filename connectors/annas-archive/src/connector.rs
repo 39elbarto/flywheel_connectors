@@ -788,4 +788,252 @@ mod tests {
         }
         assert_eq!(c.request_count.load(Ordering::Relaxed), 10);
     }
+
+    // ── require_str additional edge cases ──────────────────────────
+
+    #[test]
+    fn require_str_float_value() {
+        let input = json!({"query": 1.23});
+        assert!(require_str(&input, "query").is_err());
+    }
+
+    #[test]
+    fn require_str_nested_object() {
+        let input = json!({"query": {"a": {"b": "c"}}});
+        assert!(require_str(&input, "query").is_err());
+    }
+
+    #[test]
+    fn require_str_deeply_nested_field() {
+        let input = json!({"level1": {"level2": "deep"}});
+        assert!(require_str(&input, "level1").is_err());
+    }
+
+    #[test]
+    fn require_str_whitespace_value() {
+        let input = json!({"query": "  \t\n  "});
+        assert_eq!(require_str(&input, "query").unwrap(), "  \t\n  ");
+    }
+
+    #[test]
+    fn require_str_unicode_field_name() {
+        let input = json!({"café": "latte"});
+        assert_eq!(require_str(&input, "café").unwrap(), "latte");
+    }
+
+    #[test]
+    fn require_str_long_string_value() {
+        let long_val = "x".repeat(10_000);
+        let input = json!({"query": long_val});
+        assert_eq!(require_str(&input, "query").unwrap(), long_val.as_str());
+    }
+
+    // ── operations_info validation ────────────────────────────────
+
+    #[test]
+    fn operations_info_all_have_summaries() {
+        let ops = operations_info();
+        for op in ops.as_array().unwrap() {
+            let summary = op["summary"].as_str().unwrap();
+            assert!(!summary.is_empty(), "op {:?} has empty summary", op["id"]);
+        }
+    }
+
+    #[test]
+    fn operations_info_all_have_capability() {
+        let ops = operations_info();
+        for op in ops.as_array().unwrap() {
+            let cap = op["capability"].as_str().unwrap();
+            assert!(!cap.is_empty(), "op {:?} has empty capability", op["id"]);
+        }
+    }
+
+    #[test]
+    fn operations_info_ids_start_with_annas_prefix() {
+        let ops = operations_info();
+        for op in ops.as_array().unwrap() {
+            let id = op["id"].as_str().unwrap();
+            assert!(id.starts_with("annas."), "id {id} should start with annas.");
+        }
+    }
+
+    #[test]
+    fn operations_info_capabilities_use_annas_prefix() {
+        let ops = operations_info();
+        for op in ops.as_array().unwrap() {
+            let cap = op["capability"].as_str().unwrap();
+            assert!(
+                cap.starts_with("annas."),
+                "capability {cap} should start with annas."
+            );
+        }
+    }
+
+    #[test]
+    fn operations_info_idempotency_values() {
+        let ops = operations_info();
+        for op in ops.as_array().unwrap() {
+            let idem = op["idempotency"].as_str().unwrap();
+            assert!(
+                ["strict", "idempotent", "non_idempotent"].contains(&idem),
+                "unexpected idempotency: {idem}"
+            );
+        }
+    }
+
+    #[test]
+    fn operations_info_safety_tier_values() {
+        let ops = operations_info();
+        for op in ops.as_array().unwrap() {
+            let tier = op["safety_tier"].as_str().unwrap();
+            assert!(
+                ["safe", "risky", "dangerous"].contains(&tier),
+                "unexpected safety_tier: {tier}"
+            );
+        }
+    }
+
+    #[test]
+    fn operations_info_risk_level_values() {
+        let ops = operations_info();
+        for op in ops.as_array().unwrap() {
+            let risk = op["risk_level"].as_str().unwrap();
+            assert!(
+                ["low", "medium", "high", "critical"].contains(&risk),
+                "unexpected risk_level: {risk}"
+            );
+        }
+    }
+
+    // ── Connector construction edge cases ─────────────────────────
+
+    #[test]
+    fn connector_new_and_default_are_equivalent() {
+        let c1 = AnnasArchiveConnector::new();
+        let c2 = AnnasArchiveConnector::default();
+        assert_eq!(c1.base_url, c2.base_url);
+        assert!(c1.client.is_none());
+        assert!(c2.client.is_none());
+        assert!(c1.session_id.is_none());
+        assert!(c2.session_id.is_none());
+        assert_eq!(
+            c1.request_count.load(Ordering::Relaxed),
+            c2.request_count.load(Ordering::Relaxed)
+        );
+        assert_eq!(
+            c1.error_count.load(Ordering::Relaxed),
+            c2.error_count.load(Ordering::Relaxed)
+        );
+    }
+
+    #[test]
+    fn connector_error_count_independent_of_request_count() {
+        let c = connector();
+        c.request_count.fetch_add(5, Ordering::Relaxed);
+        assert_eq!(c.error_count.load(Ordering::Relaxed), 0);
+        c.error_count.fetch_add(2, Ordering::Relaxed);
+        assert_eq!(c.request_count.load(Ordering::Relaxed), 5);
+        assert_eq!(c.error_count.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn connector_base_url_is_default() {
+        let c = connector();
+        assert!(c.base_url.starts_with("https://"));
+        assert!(!c.base_url.ends_with('/'));
+    }
+
+    // ── require_str error message quality ──────────────────────────
+
+    #[test]
+    fn require_str_error_message_contains_field_name() {
+        let input = json!({});
+        let err = require_str(&input, "my_special_field").unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("my_special_field"),
+            "error should mention field name, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn require_str_error_status_code_400() {
+        let input = json!({});
+        match require_str(&input, "query") {
+            Err(AnnasArchiveError::Api {
+                status_code,
+                message,
+            }) => {
+                assert_eq!(status_code, 400);
+                assert!(message.contains("query"));
+            }
+            other => panic!("expected Api error, got {other:?}"),
+        }
+    }
+
+    // ── Atomic counter stress ─────────────────────────────────────
+
+    #[test]
+    fn request_count_overflow_wraps() {
+        let c = connector();
+        c.request_count.store(u64::MAX - 1, Ordering::Relaxed);
+        c.request_count.fetch_add(1, Ordering::Relaxed);
+        assert_eq!(c.request_count.load(Ordering::Relaxed), u64::MAX);
+    }
+
+    #[test]
+    fn error_count_starts_at_zero() {
+        let c = connector();
+        assert_eq!(c.error_count.load(Ordering::Relaxed), 0);
+    }
+
+    // ── Additional connector field tests ─────────────────────────
+
+    #[test]
+    fn connector_session_id_initially_none() {
+        let c = connector();
+        assert!(c.session_id.is_none());
+    }
+
+    #[test]
+    fn connector_client_initially_none() {
+        let c = connector();
+        assert!(c.client.is_none());
+    }
+
+    #[test]
+    fn connector_default_and_new_equivalent_fields() {
+        let a = AnnasArchiveConnector::new();
+        let b = AnnasArchiveConnector::default();
+        assert_eq!(a.base_url, b.base_url);
+        assert_eq!(
+            a.request_count.load(Ordering::Relaxed),
+            b.request_count.load(Ordering::Relaxed)
+        );
+        assert_eq!(
+            a.error_count.load(Ordering::Relaxed),
+            b.error_count.load(Ordering::Relaxed)
+        );
+    }
+
+    #[test]
+    fn require_str_empty_string_is_valid() {
+        let input = json!({"name": ""});
+        let result = require_str(&input, "name").unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn require_str_null_value_is_error() {
+        let input = json!({"name": null});
+        let result = require_str(&input, "name");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn require_str_bool_value_is_error() {
+        let input = json!({"flag": true});
+        let result = require_str(&input, "flag");
+        assert!(result.is_err());
+    }
 }

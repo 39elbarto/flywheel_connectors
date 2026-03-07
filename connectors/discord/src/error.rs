@@ -834,4 +834,97 @@ mod tests {
             other => panic!("expected External, got {other:?}"),
         }
     }
+
+    // ── Display format additional tests ───────────────────────────
+
+    #[test]
+    fn display_api_with_empty_message() {
+        let err = DiscordError::Api {
+            code: 500,
+            message: String::new(),
+            retry_after: None,
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("500"));
+    }
+
+    #[test]
+    fn display_gateway_with_empty_message() {
+        let err = DiscordError::Gateway(String::new());
+        let msg = err.to_string();
+        assert!(msg.contains("Gateway"));
+    }
+
+    #[test]
+    fn display_rate_limited_fractional() {
+        let err = DiscordError::RateLimited {
+            retry_after: 1.234,
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("1.234"), "got: {msg}");
+    }
+
+    // ── is_retryable edge cases ───────────────────────────────────
+
+    #[test]
+    fn api_500_is_retryable_edge() {
+        let err = DiscordError::Api {
+            code: 500,
+            message: "server error".into(),
+            retry_after: None,
+        };
+        assert!(err.is_retryable());
+    }
+
+    #[test]
+    fn api_502_is_retryable() {
+        let err = DiscordError::Api {
+            code: 502,
+            message: "bad gateway".into(),
+            retry_after: None,
+        };
+        assert!(err.is_retryable());
+    }
+
+    #[test]
+    fn api_400_is_not_retryable() {
+        let err = DiscordError::Api {
+            code: 400,
+            message: "bad request".into(),
+            retry_after: None,
+        };
+        assert!(!err.is_retryable());
+    }
+
+    #[test]
+    fn api_401_is_not_retryable() {
+        let err = DiscordError::Api {
+            code: 401,
+            message: "unauthorized".into(),
+            retry_after: None,
+        };
+        assert!(!err.is_retryable());
+    }
+
+    #[test]
+    fn api_403_is_not_retryable() {
+        let err = DiscordError::Api {
+            code: 403,
+            message: "forbidden".into(),
+            retry_after: None,
+        };
+        assert!(!err.is_retryable());
+    }
+
+    #[test]
+    fn gateway_is_retryable_timeout() {
+        let err = DiscordError::Gateway("timeout".into());
+        assert!(err.is_retryable());
+    }
+
+    #[test]
+    fn rate_limited_is_retryable_small_value() {
+        let err = DiscordError::RateLimited { retry_after: 5.0 };
+        assert!(err.is_retryable());
+    }
 }

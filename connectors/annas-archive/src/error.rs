@@ -521,4 +521,71 @@ mod tests {
         };
         assert!(err.to_string().contains(&long_msg));
     }
+
+    #[test]
+    fn api_error_empty_message_display() {
+        let err = AnnasArchiveError::Api {
+            status_code: 500,
+            message: String::new(),
+        };
+        let s = err.to_string();
+        assert!(s.contains("500"));
+    }
+
+    #[test]
+    fn not_found_empty_resource_display() {
+        let err = AnnasArchiveError::NotFound {
+            resource: String::new(),
+        };
+        let s = err.to_string();
+        assert!(s.contains("Not found:"));
+    }
+
+    #[test]
+    fn service_unavailable_retry_after_5_seconds() {
+        let err = AnnasArchiveError::ServiceUnavailable;
+        let d = err.retry_after().unwrap();
+        assert_eq!(d, Duration::from_secs(5));
+    }
+
+    #[test]
+    fn rate_limited_retry_after_1ms() {
+        let err = AnnasArchiveError::RateLimited { retry_after_ms: 1 };
+        assert_eq!(err.retry_after(), Some(Duration::from_millis(1)));
+    }
+
+    #[test]
+    fn fcp_error_rate_limited_service_field() {
+        let err = AnnasArchiveError::RateLimited {
+            retry_after_ms: 100,
+        };
+        match err.to_fcp_error() {
+            FcpError::External { service, .. } => {
+                assert_eq!(service, "annas-archive");
+            }
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn fcp_error_service_unavailable_message_content() {
+        let err = AnnasArchiveError::ServiceUnavailable;
+        match err.to_fcp_error() {
+            FcpError::External { message, .. } => {
+                assert_eq!(message, "Service unavailable");
+            }
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn from_reqwest_error_via_into() {
+        let client = reqwest::Client::new();
+        let err = client.get("://invalid").build();
+        if let Err(e) = err {
+            let ae: AnnasArchiveError = e.into();
+            assert!(matches!(ae, AnnasArchiveError::Http(_)));
+            assert!(ae.is_retryable());
+        }
+    }
 }

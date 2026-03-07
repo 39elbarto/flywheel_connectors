@@ -728,4 +728,64 @@ mod tests {
         };
         assert!(matches!(err.to_fcp_error(), FcpError::Unauthorized { .. }));
     }
+
+    #[test]
+    fn api_error_403_status_maps_to_unauthorized() {
+        let err = AirtableError::Api {
+            error_type: "FORBIDDEN".into(),
+            message: "no access".into(),
+            status_code: Some(403),
+        };
+        assert!(matches!(err.to_fcp_error(), FcpError::Unauthorized { .. }));
+    }
+
+    #[test]
+    fn api_error_invalid_api_key_maps_to_unauthorized() {
+        let err = AirtableError::Api {
+            error_type: "INVALID_API_KEY".into(),
+            message: "bad key".into(),
+            status_code: Some(401),
+        };
+        assert!(matches!(err.to_fcp_error(), FcpError::Unauthorized { .. }));
+    }
+
+    #[test]
+    fn api_error_authentication_required_maps_to_unauthorized() {
+        let err = AirtableError::Api {
+            error_type: "AUTHENTICATION_REQUIRED".into(),
+            message: "login".into(),
+            status_code: None,
+        };
+        assert!(matches!(err.to_fcp_error(), FcpError::Unauthorized { .. }));
+    }
+
+    #[test]
+    fn unauthorized_display_message() {
+        let err = AirtableError::Unauthorized;
+        assert_eq!(err.to_string(), "Invalid or expired Airtable token");
+    }
+
+    #[test]
+    fn base_not_found_display() {
+        let err = AirtableError::BaseNotFound {
+            base_id: "appXYZ".into(),
+        };
+        assert!(err.to_string().contains("appXYZ"));
+    }
+
+    #[test]
+    fn table_not_found_display() {
+        let err = AirtableError::TableNotFound {
+            table_id: "tblABC".into(),
+        };
+        assert!(err.to_string().contains("tblABC"));
+    }
+
+    #[test]
+    fn record_not_found_display() {
+        let err = AirtableError::RecordNotFound {
+            record_id: "rec123".into(),
+        };
+        assert!(err.to_string().contains("rec123"));
+    }
 }

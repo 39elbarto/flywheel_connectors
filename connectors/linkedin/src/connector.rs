@@ -1092,4 +1092,74 @@ mod tests {
             LinkedInAuth::CredentialId(_) => panic!("expected AccessToken"),
         }
     }
+
+    #[test]
+    fn require_str_integer_value() {
+        let input = json!({"field": 42});
+        assert!(require_str(&input, "field").is_err());
+    }
+
+    #[test]
+    fn require_str_float_value() {
+        let input = json!({"field": 1.23});
+        assert!(require_str(&input, "field").is_err());
+    }
+
+    #[test]
+    fn require_str_nested_deep_object() {
+        let input = json!({"field": {"deep": {"deeper": {"val": 1}}}});
+        assert!(require_str(&input, "field").is_err());
+    }
+
+    #[test]
+    fn require_str_empty_string_is_ok() {
+        let input = json!({"field": ""});
+        assert_eq!(require_str(&input, "field").unwrap(), "");
+    }
+
+    #[test]
+    fn operations_all_have_capabilities() {
+        let ops = operations_info();
+        for op in ops.as_array().unwrap() {
+            let cap = op["capability"].as_str().unwrap();
+            assert!(!cap.is_empty(), "op {:?} has empty capability", op["id"]);
+        }
+    }
+
+    #[test]
+    fn operations_ids_all_start_with_linkedin() {
+        let ops = operations_info();
+        for op in ops.as_array().unwrap() {
+            let id = op["id"].as_str().unwrap();
+            assert!(id.starts_with("linkedin."), "op {id} should start with linkedin.");
+        }
+    }
+
+    #[test]
+    fn doctor_result_debug_format() {
+        let r = DoctorResult::from_checks(vec![]);
+        let dbg = format!("{r:?}");
+        assert!(dbg.contains("DoctorResult"));
+    }
+
+    #[test]
+    fn doctor_check_clone_preserves_fields() {
+        let c = DoctorCheck {
+            name: "conn".into(),
+            passed: false,
+            message: Some("offline".into()),
+            critical: true,
+        };
+        let cloned = c.clone();
+        assert_eq!(c.name, cloned.name);
+        assert_eq!(c.passed, cloned.passed);
+        assert!(cloned.critical);
+    }
+
+    #[test]
+    fn doctor_status_debug_all_variants() {
+        assert_eq!(format!("{:?}", DoctorStatus::Healthy), "Healthy");
+        assert_eq!(format!("{:?}", DoctorStatus::Degraded), "Degraded");
+        assert_eq!(format!("{:?}", DoctorStatus::Unhealthy), "Unhealthy");
+    }
 }

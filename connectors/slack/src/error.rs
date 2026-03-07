@@ -801,4 +801,43 @@ mod tests {
         assert!(!err.is_retryable());
         assert!(err.retry_after().is_none());
     }
+
+    #[test]
+    fn api_error_unicode_error_string() {
+        let err = SlackError::Api {
+            error: "エラー_テスト".into(),
+            code: None,
+            ok: false,
+        };
+        let s = err.to_string();
+        assert!(s.contains("エラー_テスト"));
+    }
+
+    #[test]
+    fn channel_not_found_long_id() {
+        let long_id = "C".to_string() + &"0".repeat(100);
+        let err = SlackError::ChannelNotFound {
+            channel: long_id.clone(),
+        };
+        assert!(err.to_string().contains(&long_id));
+    }
+
+    #[test]
+    fn user_not_found_long_id() {
+        let long_id = "U".to_string() + &"0".repeat(100);
+        let err = SlackError::UserNotFound {
+            user: long_id.clone(),
+        };
+        assert!(err.to_string().contains(&long_id));
+    }
+
+    #[test]
+    fn rate_limited_large_value() {
+        let err = SlackError::RateLimited {
+            retry_after_secs: u64::MAX,
+        };
+        assert!(err.is_retryable());
+        let dur = err.retry_after().unwrap();
+        assert_eq!(dur.as_secs(), u64::MAX);
+    }
 }

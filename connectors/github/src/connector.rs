@@ -1399,7 +1399,8 @@ mod tests {
         assert!(op_ids.contains(&"github.trigger_workflow"));
         assert!(op_ids.contains(&"github.get_file_content"));
         assert!(op_ids.contains(&"github.search_code"));
-        assert_eq!(ops.len(), 12);
+        assert!(op_ids.contains(&"github.process_webhook"));
+        assert_eq!(ops.len(), 13);
     }
 
     #[test]
@@ -1871,7 +1872,7 @@ mod tests {
         let connector = GitHubConnector::new();
         let result = connector.handle_introspect().await.unwrap();
         let ops = result["operations"].as_array().unwrap();
-        assert_eq!(ops.len(), 12, "Expected 12 operations");
+        assert_eq!(ops.len(), 13, "Expected 13 operations");
     }
 
     #[fcp_async_core::runtime::test]
@@ -1986,5 +1987,186 @@ mod tests {
         let result = connector.handle_health().await.unwrap();
         assert_eq!(result["metrics"]["requests_total"], 0);
         assert_eq!(result["metrics"]["requests_error"], 0);
+    }
+
+    // ── require_str sync tests ──────────────────────────────────────
+
+    #[test]
+    fn require_str_extracts_value() {
+        let input = json!({"owner": "octocat", "repo": "hello"});
+        assert_eq!(require_str(&input, "owner").unwrap(), "octocat");
+        assert_eq!(require_str(&input, "repo").unwrap(), "hello");
+    }
+
+    #[test]
+    fn require_str_missing_field() {
+        let input = json!({"owner": "octocat"});
+        let err = require_str(&input, "repo").unwrap_err();
+        match err {
+            FcpError::InvalidRequest { message, .. } => assert!(message.contains("repo")),
+            e => panic!("expected InvalidRequest, got {e:?}"),
+        }
+    }
+
+    #[test]
+    fn require_str_non_string_field() {
+        let input = json!({"count": 42});
+        assert!(require_str(&input, "count").is_err());
+    }
+
+    #[test]
+    fn require_str_null_field() {
+        let input = json!({"field": null});
+        assert!(require_str(&input, "field").is_err());
+    }
+
+    #[test]
+    fn require_str_float_value() {
+        let input = json!({"val": 1.23});
+        assert!(require_str(&input, "val").is_err());
+    }
+
+    #[test]
+    fn require_str_object_value() {
+        let input = json!({"val": {"nested": true}});
+        assert!(require_str(&input, "val").is_err());
+    }
+
+    #[test]
+    fn require_str_array_value() {
+        let input = json!({"val": [1, 2, 3]});
+        assert!(require_str(&input, "val").is_err());
+    }
+
+    #[test]
+    fn require_str_boolean_value() {
+        let input = json!({"val": true});
+        assert!(require_str(&input, "val").is_err());
+    }
+
+    #[test]
+    fn require_str_nested_object_value() {
+        let input = json!({"val": {"a": {"b": "c"}}});
+        assert!(require_str(&input, "val").is_err());
+    }
+
+    #[test]
+    fn require_str_empty_string_returns_ok() {
+        let input = json!({"val": ""});
+        assert_eq!(require_str(&input, "val").unwrap(), "");
+    }
+
+    #[test]
+    fn require_str_error_code_is_1003() {
+        let input = json!({});
+        match require_str(&input, "x").unwrap_err() {
+            FcpError::InvalidRequest { code, .. } => assert_eq!(code, 1003),
+            e => panic!("expected InvalidRequest, got {e:?}"),
+        }
+    }
+
+    // ── require_u32 sync tests ──────────────────────────────────────
+
+    #[test]
+    fn require_u32_extracts_value() {
+        let input = json!({"num": 42});
+        assert_eq!(require_u32(&input, "num").unwrap(), 42);
+    }
+
+    #[test]
+    fn require_u32_missing_field() {
+        let input = json!({});
+        assert!(require_u32(&input, "num").is_err());
+    }
+
+    #[test]
+    fn require_u32_string_value() {
+        let input = json!({"num": "42"});
+        assert!(require_u32(&input, "num").is_err());
+    }
+
+    #[test]
+    fn require_u32_null_value() {
+        let input = json!({"num": null});
+        assert!(require_u32(&input, "num").is_err());
+    }
+
+    // ── DoctorResult / DoctorCheck / DoctorStatus serde ─────────────
+
+    #[test]
+    fn doctor_result_serde_roundtrip() {
+        let r = DoctorResult {
+            status: "healthy".into(),
+            checks: vec![DoctorCheck {
+                name: "config".into(),
+                status: DoctorStatus::Pass,
+                message: "ok".into(),
+            }],
+        };
+        let v = serde_json::to_value(&r).unwrap();
+        let r2: DoctorResult = serde_json::from_value(v).unwrap();
+        assert_eq!(r2.status, "healthy");
+        assert_eq!(r2.checks.len(), 1);
+    }
+
+    #[test]
+    fn doctor_result_debug() {
+        let r = DoctorResult {
+            status: "healthy".into(),
+            checks: vec![],
+        };
+        let dbg = format!("{r:?}");
+        assert!(dbg.contains("DoctorResult"));
+    }
+
+    #[test]
+    fn doctor_check_serde_roundtrip() {
+        let c = DoctorCheck {
+            name: "auth".into(),
+            status: DoctorStatus::Pass,
+            message: "valid".into(),
+        };
+        let s = serde_json::to_string(&c).unwrap();
+        let c2: DoctorCheck = serde_json::from_str(&s).unwrap();
+        assert_eq!(c2.name, "auth");
+        assert_eq!(c2.message, "valid");
+    }
+
+    #[test]
+    fn doctor_check_debug() {
+        let c = DoctorCheck {
+            name: "dbgcheck".into(),
+            status: DoctorStatus::Fail,
+            message: "bad".into(),
+        };
+        let dbg = format!("{c:?}");
+        assert!(dbg.contains("dbgcheck"));
+    }
+
+    #[test]
+    fn doctor_status_serde_all_variants() {
+        for status in [DoctorStatus::Pass, DoctorStatus::Fail, DoctorStatus::Warn] {
+            let v = serde_json::to_value(&status).unwrap();
+            let back: DoctorStatus = serde_json::from_value(v).unwrap();
+            assert_eq!(format!("{back:?}"), format!("{status:?}"));
+        }
+    }
+
+    #[test]
+    fn doctor_status_debug() {
+        let dbg = format!("{:?}", DoctorStatus::Warn);
+        assert!(dbg.contains("Warn"));
+    }
+
+    #[test]
+    fn doctor_status_pass_serializes_as_snake_case() {
+        let v = serde_json::to_value(DoctorStatus::Pass).unwrap();
+        assert_eq!(v, "pass");
+    }
+
+    #[test]
+    fn doctor_status_fail_serializes_as_snake_case() {
+        let v = serde_json::to_value(DoctorStatus::Fail).unwrap();
+        assert_eq!(v, "fail");
     }
 }

@@ -208,4 +208,29 @@ mod tests {
         let client = AnnasArchiveClient::new(Some("https://x.com///")).unwrap();
         assert!(client.base_url.ends_with("//"));
     }
+
+    #[test]
+    fn client_new_unicode_url() {
+        let client = AnnasArchiveClient::new(Some("https://example.com/日本語")).unwrap();
+        assert!(client.base_url.contains("日本語"));
+    }
+
+    #[test]
+    fn client_debug_format_includes_struct_name() {
+        let client = AnnasArchiveClient::new(None).unwrap();
+        let dbg = format!("{client:?}");
+        assert!(dbg.starts_with("AnnasArchiveClient"));
+    }
+
+    #[test]
+    fn client_new_with_path_url() {
+        let client = AnnasArchiveClient::new(Some("https://mirror.example.com/api/v2")).unwrap();
+        assert_eq!(client.base_url, "https://mirror.example.com/api/v2");
+    }
+
+    #[test]
+    fn client_new_trailing_slash_stripped_once() {
+        let client = AnnasArchiveClient::new(Some("https://example.com/path/")).unwrap();
+        assert_eq!(client.base_url, "https://example.com/path");
+    }
 }

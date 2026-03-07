@@ -1466,4 +1466,235 @@ mod tests {
         assert_eq!(back.session_id, "session_xyz");
         assert_eq!(back.seq, 42);
     }
+
+    // ── User additional tests ─────────────────────────────────────
+
+    #[test]
+    fn user_minimal_deser() {
+        let json = json!({"id": "u1", "username": "bot"});
+        let user: User = serde_json::from_value(json).unwrap();
+        assert_eq!(user.id, "u1");
+        assert!(!user.bot);
+        assert!(user.discriminator.is_none());
+        assert!(user.global_name.is_none());
+        assert!(user.avatar.is_none());
+    }
+
+    #[test]
+    fn user_full_roundtrip() {
+        let user = User {
+            id: "123".into(),
+            username: "testuser".into(),
+            discriminator: Some("0001".into()),
+            global_name: Some("Test User".into()),
+            avatar: Some("abc123hash".into()),
+            bot: true,
+        };
+        let json = serde_json::to_string(&user).unwrap();
+        let back: User = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.discriminator.as_deref(), Some("0001"));
+        assert_eq!(back.global_name.as_deref(), Some("Test User"));
+        assert!(back.bot);
+    }
+
+    #[test]
+    fn user_skip_serializing_none() {
+        let user = User {
+            id: "1".into(),
+            username: "u".into(),
+            discriminator: None,
+            global_name: None,
+            avatar: None,
+            bot: false,
+        };
+        let json = serde_json::to_string(&user).unwrap();
+        assert!(!json.contains("discriminator"));
+        assert!(!json.contains("global_name"));
+        assert!(!json.contains("avatar"));
+    }
+
+    // ── Guild tests ───────────────────────────────────────────────
+
+    #[test]
+    fn guild_minimal_deser() {
+        let json = json!({"id": "g1", "name": "Test Guild"});
+        let guild: Guild = serde_json::from_value(json).unwrap();
+        assert_eq!(guild.id, "g1");
+        assert!(guild.icon.is_none());
+        assert!(guild.owner_id.is_none());
+    }
+
+    #[test]
+    fn guild_full_roundtrip() {
+        let guild = Guild {
+            id: "g2".into(),
+            name: "My Server".into(),
+            icon: Some("iconhash".into()),
+            owner_id: Some("u99".into()),
+        };
+        let json = serde_json::to_string(&guild).unwrap();
+        let back: Guild = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.owner_id.as_deref(), Some("u99"));
+    }
+
+    #[test]
+    fn guild_clone_and_debug_no_icon() {
+        let guild = Guild {
+            id: "g3".into(),
+            name: "Clone Guild".into(),
+            icon: None,
+            owner_id: None,
+        };
+        let cloned = guild.clone();
+        assert_eq!(cloned.name, "Clone Guild");
+        let dbg = format!("{guild:?}");
+        assert!(dbg.contains("Clone Guild"));
+    }
+
+    // ── Channel tests ─────────────────────────────────────────────
+
+    #[test]
+    fn channel_minimal_deser() {
+        let json = json!({"id": "c1", "type": 0});
+        let ch: Channel = serde_json::from_value(json).unwrap();
+        assert_eq!(ch.id, "c1");
+        assert_eq!(ch.channel_type, 0);
+        assert!(ch.name.is_none());
+        assert!(ch.topic.is_none());
+    }
+
+    #[test]
+    fn channel_full_roundtrip() {
+        let ch = Channel {
+            id: "c2".into(),
+            channel_type: 2,
+            guild_id: Some("g1".into()),
+            name: Some("voice-chat".into()),
+            topic: Some("Voice channel".into()),
+        };
+        let json = serde_json::to_string(&ch).unwrap();
+        let back: Channel = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.channel_type, 2);
+        assert_eq!(back.topic.as_deref(), Some("Voice channel"));
+    }
+
+    #[test]
+    fn channel_clone_and_debug_text_channel() {
+        let ch = Channel {
+            id: "c3".into(),
+            channel_type: 0,
+            guild_id: None,
+            name: Some("general".into()),
+            topic: None,
+        };
+        let cloned = ch.clone();
+        assert_eq!(cloned.name.as_deref(), Some("general"));
+        let dbg = format!("{ch:?}");
+        assert!(dbg.contains("general"));
+    }
+
+    // ── Embed default test ────────────────────────────────────────
+
+    #[test]
+    fn embed_default_all_none() {
+        let embed = Embed::default();
+        assert!(embed.title.is_none());
+        assert!(embed.description.is_none());
+        assert!(embed.url.is_none());
+        assert!(embed.color.is_none());
+        assert!(embed.fields.is_empty());
+        assert!(embed.footer.is_none());
+        assert!(embed.image.is_none());
+        assert!(embed.thumbnail.is_none());
+        assert!(embed.author.is_none());
+    }
+
+    #[test]
+    fn embed_field_clone_and_debug_inline() {
+        let field = EmbedField {
+            name: "Key".into(),
+            value: "Val".into(),
+            inline: true,
+        };
+        let cloned = field.clone();
+        assert_eq!(cloned.name, "Key");
+        assert!(cloned.inline);
+        let dbg = format!("{field:?}");
+        assert!(dbg.contains("EmbedField"));
+    }
+
+    #[test]
+    fn embed_footer_clone_and_debug_full_text() {
+        let footer = EmbedFooter {
+            text: "Footer text".into(),
+            icon_url: None,
+        };
+        let cloned = footer.clone();
+        assert_eq!(cloned.text, "Footer text");
+        let dbg = format!("{footer:?}");
+        assert!(dbg.contains("EmbedFooter"));
+    }
+
+    #[test]
+    fn gateway_hello_roundtrip() {
+        let hello = GatewayHello {
+            heartbeat_interval: 41250,
+        };
+        let json = serde_json::to_string(&hello).unwrap();
+        let back: GatewayHello = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.heartbeat_interval, 41250);
+    }
+
+    #[test]
+    fn embed_image_clone_and_debug_full_url() {
+        let img = EmbedImage {
+            url: "https://img.example.com/pic.png".into(),
+        };
+        let cloned = img.clone();
+        assert_eq!(cloned.url, "https://img.example.com/pic.png");
+        let dbg = format!("{img:?}");
+        assert!(dbg.contains("EmbedImage"));
+    }
+
+    #[test]
+    fn embed_thumbnail_clone_and_debug_jpg() {
+        let thumb = EmbedThumbnail {
+            url: "https://thumb.example.com/t.jpg".into(),
+        };
+        let cloned = thumb.clone();
+        assert_eq!(cloned.url, "https://thumb.example.com/t.jpg");
+        let dbg = format!("{thumb:?}");
+        assert!(dbg.contains("EmbedThumbnail"));
+    }
+
+    #[test]
+    fn embed_author_clone_and_debug_with_url() {
+        let author = EmbedAuthor {
+            name: "Author Name".into(),
+            url: Some("https://author.com".into()),
+            icon_url: None,
+        };
+        let cloned = author.clone();
+        assert_eq!(cloned.name, "Author Name");
+        let dbg = format!("{author:?}");
+        assert!(dbg.contains("EmbedAuthor"));
+    }
+
+    #[test]
+    fn user_missing_id_fails() {
+        let json = json!({"username": "test"});
+        assert!(serde_json::from_value::<User>(json).is_err());
+    }
+
+    #[test]
+    fn guild_missing_name_fails() {
+        let json = json!({"id": "g1"});
+        assert!(serde_json::from_value::<Guild>(json).is_err());
+    }
+
+    #[test]
+    fn channel_missing_type_fails() {
+        let json = json!({"id": "c1"});
+        assert!(serde_json::from_value::<Channel>(json).is_err());
+    }
 }

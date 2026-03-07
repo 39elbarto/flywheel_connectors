@@ -1010,4 +1010,62 @@ mod tests {
         assert_eq!(client.initial_delay_ms, 0);
         assert_eq!(client.max_delay_ms, 0);
     }
+
+    #[test]
+    fn client_new_empty_token() {
+        let client = AirtableClient::new("").unwrap();
+        assert_eq!(client.base_url, DEFAULT_BASE_URL);
+    }
+
+    #[test]
+    fn client_retry_config_large_values() {
+        let client = AirtableClient::new("tok")
+            .unwrap()
+            .with_retry_config(u32::MAX, u64::MAX, u64::MAX);
+        assert_eq!(client.max_retries, u32::MAX);
+        assert_eq!(client.initial_delay_ms, u64::MAX);
+        assert_eq!(client.max_delay_ms, u64::MAX);
+    }
+
+    #[test]
+    fn auth_token_clone_preserves_secretless() {
+        let auth = AirtableAuth::Token("secret".into());
+        #[allow(clippy::redundant_clone)]
+        let cloned = auth.clone();
+        assert!(!cloned.is_secretless());
+    }
+
+    #[test]
+    fn auth_credential_id_clone_preserves_secretless() {
+        let auth = AirtableAuth::CredentialId(CredentialId::new());
+        #[allow(clippy::redundant_clone)]
+        let cloned = auth.clone();
+        assert!(cloned.is_secretless());
+    }
+
+    #[test]
+    fn default_base_url_starts_with_https() {
+        assert!(DEFAULT_BASE_URL.starts_with("https://"));
+    }
+
+    #[test]
+    fn default_base_url_contains_airtable() {
+        assert!(DEFAULT_BASE_URL.contains("airtable"));
+    }
+
+    #[test]
+    fn client_with_base_url_empty_string() {
+        let client = AirtableClient::new("tok")
+            .unwrap()
+            .with_base_url("");
+        assert_eq!(client.base_url, "");
+    }
+
+    #[test]
+    fn auth_debug_token_contains_redacted() {
+        let auth = AirtableAuth::Token("my-long-secret-token-value".into());
+        let dbg = format!("{auth:?}");
+        assert!(dbg.contains("redacted"));
+        assert!(!dbg.contains("my-long-secret-token-value"));
+    }
 }

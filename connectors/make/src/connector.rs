@@ -1063,7 +1063,7 @@ mod tests {
         let c = MakeConfig::from_params(&json!({"api_token": "  key  "})).unwrap();
         match &c.auth {
             MakeAuth::ApiToken(k) => assert_eq!(k, "key"),
-            _ => panic!("expected ApiToken"),
+            MakeAuth::CredentialId(_) => panic!("expected ApiToken"),
         }
     }
 
@@ -1102,7 +1102,7 @@ mod tests {
         let ops = operations_info();
         for op in ops.as_array().unwrap() {
             let cap = op["capability"].as_str().unwrap();
-            if cap.ends_with(".write") {
+            if cap.as_bytes().ends_with(b".write") {
                 assert_eq!(
                     op["safety_tier"].as_str().unwrap(),
                     "risky",
@@ -1138,5 +1138,200 @@ mod tests {
                 );
             }
         }
+    }
+
+    // ── require_str additional edge cases ────────────────────────────
+
+    #[test]
+    fn require_str_float_value() {
+        let input = json!({"scenario_id": 1.23});
+        assert!(require_str(&input, "scenario_id").is_err());
+    }
+
+    #[test]
+    fn require_str_nested_key_not_found() {
+        let input = json!({"outer": {"inner": "val"}});
+        assert!(require_str(&input, "inner").is_err());
+    }
+
+    #[test]
+    fn require_str_error_message_content() {
+        let input = json!({});
+        match require_str(&input, "team_id").unwrap_err() {
+            MakeError::Api {
+                status_code,
+                message,
+            } => {
+                assert_eq!(status_code, 400);
+                assert!(message.contains("team_id"));
+            }
+            e => panic!("expected Api error, got {e:?}"),
+        }
+    }
+
+    // ── DoctorResult / DoctorCheck / DoctorStatus tests ─────────────
+
+    #[test]
+    fn doctor_status_serde_roundtrip() {
+        let statuses = [
+            DoctorStatus::Healthy,
+            DoctorStatus::Degraded,
+            DoctorStatus::Unhealthy,
+        ];
+        for s in &statuses {
+            let json = serde_json::to_value(s).unwrap();
+            let back: DoctorStatus = serde_json::from_value(json).unwrap();
+            assert_eq!(*s, back);
+        }
+    }
+
+    #[test]
+    fn doctor_status_debug() {
+        assert!(format!("{:?}", DoctorStatus::Healthy).contains("Healthy"));
+        assert!(format!("{:?}", DoctorStatus::Degraded).contains("Degraded"));
+        assert!(format!("{:?}", DoctorStatus::Unhealthy).contains("Unhealthy"));
+    }
+
+    #[test]
+    fn doctor_status_copy() {
+        let s = DoctorStatus::Healthy;
+        let s2 = s;
+        assert_eq!(s, s2);
+    }
+
+    #[test]
+    fn doctor_check_serde_roundtrip() {
+        let check = DoctorCheck {
+            name: "connectivity".into(),
+            passed: true,
+            message: Some("ok".into()),
+            critical: false,
+        };
+        let json = serde_json::to_value(&check).unwrap();
+        assert_eq!(json["name"], "connectivity");
+        assert_eq!(json["passed"], true);
+        let back: DoctorCheck = serde_json::from_value(json).unwrap();
+        assert_eq!(back.message.as_deref(), Some("ok"));
+    }
+
+    #[test]
+    fn doctor_check_debug_clone() {
+        let check = DoctorCheck {
+            name: "auth".into(),
+            passed: false,
+            message: Some("expired".into()),
+            critical: true,
+        };
+        let cloned = check.clone();
+        assert_eq!(check.name, "auth");
+        assert!(cloned.critical);
+        let dbg = format!("{cloned:?}");
+        assert!(dbg.contains("DoctorCheck"));
+    }
+
+    #[test]
+    fn doctor_result_healthy_all_pass() {
+        let r = DoctorResult::from_checks(vec![
+            DoctorCheck {
+                name: "a".into(),
+                passed: true,
+                message: None,
+                critical: true,
+            },
+            DoctorCheck {
+                name: "b".into(),
+                passed: true,
+                message: None,
+                critical: false,
+            },
+        ]);
+        assert_eq!(r.status, DoctorStatus::Healthy);
+    }
+
+    #[test]
+    fn doctor_result_degraded_non_critical_fail() {
+        let r = DoctorResult::from_checks(vec![DoctorCheck {
+            name: "optional".into(),
+            passed: false,
+            message: Some("warning".into()),
+            critical: false,
+        }]);
+        assert_eq!(r.status, DoctorStatus::Degraded);
+    }
+
+    #[test]
+    fn doctor_result_unhealthy_critical_fail() {
+        let r = DoctorResult::from_checks(vec![DoctorCheck {
+            name: "auth".into(),
+            passed: false,
+            message: None,
+            critical: true,
+        }]);
+        assert_eq!(r.status, DoctorStatus::Unhealthy);
+    }
+
+    #[test]
+    fn doctor_result_serde_roundtrip_healthy() {
+        let r = DoctorResult::from_checks(vec![DoctorCheck {
+            name: "cfg".into(),
+            passed: true,
+            message: None,
+            critical: true,
+        }]);
+        let json = serde_json::to_value(&r).unwrap();
+        let back: DoctorResult = serde_json::from_value(json).unwrap();
+        assert_eq!(back.status, DoctorStatus::Healthy);
+    }
+
+    #[test]
+    fn doctor_result_clone_preserves_checks() {
+        let r = DoctorResult::from_checks(vec![DoctorCheck {
+            name: "c".into(),
+            passed: true,
+            message: None,
+            critical: false,
+        }]);
+        let cloned = r.clone();
+        assert_eq!(r.status, cloned.status);
+        assert_eq!(cloned.checks.len(), 1);
+    }
+
+    #[test]
+    fn doctor_result_debug_format() {
+        let r = DoctorResult::from_checks(vec![]);
+        let dbg = format!("{r:?}");
+        assert!(dbg.contains("DoctorResult"));
+    }
+
+    // ── Config tests ────────────────────────────────────────────────
+
+    #[test]
+    fn config_debug_format() {
+        let config = MakeConfig::from_params(&json!({
+            "api_token": "tok"
+        }))
+        .unwrap();
+        let dbg = format!("{config:?}");
+        assert!(dbg.contains("MakeConfig"));
+    }
+
+    #[test]
+    fn config_clone_preserves_url() {
+        let config = MakeConfig::from_params(&json!({
+            "api_token": "tok",
+            "base_url": "https://custom.make.com/api/v2"
+        }))
+        .unwrap();
+        let cloned = config.clone();
+        assert_eq!(config.base_url, cloned.base_url);
+    }
+
+    // ── Connector initial state ─────────────────────────────────────
+
+    #[test]
+    fn connector_initial_counts() {
+        let c = MakeConnector::new();
+        assert_eq!(c.request_count.load(Ordering::Relaxed), 0);
+        assert_eq!(c.error_count.load(Ordering::Relaxed), 0);
     }
 }

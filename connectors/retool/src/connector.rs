@@ -970,4 +970,181 @@ mod tests {
         let r = DoctorResult::from_checks(checks);
         assert_eq!(r.status, DoctorStatus::Degraded);
     }
+
+    // ── require_str additional edge cases ────────────────────────────
+
+    #[test]
+    fn require_str_float_value() {
+        let input = json!({"val": 1.23});
+        assert!(require_str(&input, "val").is_err());
+    }
+
+    #[test]
+    fn require_str_nested_object() {
+        let input = json!({"val": {"a": {"b": "c"}}});
+        assert!(require_str(&input, "val").is_err());
+    }
+
+    #[test]
+    fn require_str_error_contains_field_name() {
+        let input = json!({});
+        let err = require_str(&input, "my_field").unwrap_err();
+        assert!(err.to_string().contains("my_field"));
+    }
+
+    // ── DoctorResult / DoctorCheck additional tests ─────────────────
+
+    #[test]
+    fn doctor_result_deserializes_from_json() {
+        let v = json!({
+            "status": "healthy",
+            "checks": [{
+                "name": "api",
+                "passed": true,
+                "critical": false
+            }]
+        });
+        let r: DoctorResult = serde_json::from_value(v).unwrap();
+        assert_eq!(r.status, DoctorStatus::Healthy);
+        assert_eq!(r.checks.len(), 1);
+    }
+
+    #[test]
+    fn doctor_check_serde_json_roundtrip() {
+        let c = DoctorCheck {
+            name: "round".into(),
+            passed: true,
+            message: Some("msg".into()),
+            critical: false,
+        };
+        let v = serde_json::to_value(&c).unwrap();
+        let c2: DoctorCheck = serde_json::from_value(v).unwrap();
+        assert_eq!(c2.name, "round");
+        assert_eq!(c2.message, Some("msg".into()));
+    }
+
+    #[test]
+    fn doctor_status_serde_roundtrip_degraded() {
+        let v = serde_json::to_value(DoctorStatus::Degraded).unwrap();
+        assert_eq!(v, "degraded");
+        let s: DoctorStatus = serde_json::from_value(v).unwrap();
+        assert_eq!(s, DoctorStatus::Degraded);
+    }
+
+    #[test]
+    fn doctor_status_debug_format() {
+        let dbg = format!("{:?}", DoctorStatus::Unhealthy);
+        assert!(dbg.contains("Unhealthy"));
+    }
+
+    #[test]
+    fn doctor_result_unhealthy_overrides_degraded() {
+        let r = DoctorResult::from_checks(vec![
+            DoctorCheck {
+                name: "crit".into(),
+                passed: false,
+                message: None,
+                critical: true,
+            },
+            DoctorCheck {
+                name: "opt".into(),
+                passed: false,
+                message: None,
+                critical: false,
+            },
+        ]);
+        assert_eq!(r.status, DoctorStatus::Unhealthy);
+    }
+
+    // ── Config additional tests ─────────────────────────────────────
+
+    #[test]
+    fn config_debug_format() {
+        let config = RetoolConfig::from_params(&json!({"api_token": "tok"})).unwrap();
+        let dbg = format!("{config:?}");
+        assert!(dbg.contains("RetoolConfig"));
+    }
+
+    #[test]
+    fn config_clone_preserves_fields() {
+        let config = RetoolConfig::from_params(&json!({"api_token": "tok"})).unwrap();
+        let config2 = config.clone();
+        assert_eq!(config.subdomain, config2.subdomain);
+        assert_eq!(config.base_url, config2.base_url);
+    }
+
+    #[test]
+    fn config_no_subdomain_no_base_url_defaults() {
+        let config = RetoolConfig::from_params(&json!({"api_token": "tok"})).unwrap();
+        assert!(config.subdomain.is_none());
+        assert!(config.base_url.is_none());
+    }
+
+    #[test]
+    fn config_error_code_is_1003_for_missing_token() {
+        let result = RetoolConfig::from_params(&json!({}));
+        match result.unwrap_err() {
+            FcpError::InvalidRequest { code, .. } => assert_eq!(code, 1003),
+            e => panic!("expected InvalidRequest, got {e:?}"),
+        }
+    }
+
+    #[test]
+    fn config_error_message_mentions_api_token() {
+        let result = RetoolConfig::from_params(&json!({}));
+        match result.unwrap_err() {
+            FcpError::InvalidRequest { message, .. } => assert!(message.contains("api_token")),
+            e => panic!("expected InvalidRequest, got {e:?}"),
+        }
+    }
+
+    // ── operations_info additional tests ─────────────────────────────
+
+    #[test]
+    fn operations_all_ids_prefixed_with_retool() {
+        let ops = operations_info();
+        for op in ops.as_array().unwrap() {
+            let id = op["id"].as_str().unwrap();
+            assert!(
+                id.starts_with("retool."),
+                "op id {id} should start with retool."
+            );
+        }
+    }
+
+    #[test]
+    fn operations_all_have_summaries() {
+        let ops = operations_info();
+        for op in ops.as_array().unwrap() {
+            let summary = op["summary"].as_str().unwrap();
+            assert!(!summary.is_empty(), "empty summary for {}", op["id"]);
+        }
+    }
+
+    #[test]
+    fn operations_valid_idempotency_values() {
+        let valid = ["strict", "best_effort", "none"];
+        let ops = operations_info();
+        for op in ops.as_array().unwrap() {
+            let idem = op["idempotency"].as_str().unwrap();
+            assert!(
+                valid.contains(&idem),
+                "invalid idempotency {idem} for {:?}",
+                op["id"]
+            );
+        }
+    }
+
+    #[test]
+    fn doctor_status_serde_all_three_variants() {
+        for status in [
+            DoctorStatus::Healthy,
+            DoctorStatus::Degraded,
+            DoctorStatus::Unhealthy,
+        ] {
+            let v = serde_json::to_value(status).unwrap();
+            let back: DoctorStatus = serde_json::from_value(v).unwrap();
+            assert_eq!(back, status);
+        }
+    }
 }

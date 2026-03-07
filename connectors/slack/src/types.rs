@@ -254,6 +254,7 @@ pub struct DoctorCheck {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     // ---- Message ----
 
@@ -1280,5 +1281,316 @@ mod tests {
         let json = r#"{"next_cursor":""}"#;
         let meta: ResponseMetadata = serde_json::from_str(json).unwrap();
         assert_eq!(meta.next_cursor.as_deref(), Some(""));
+    }
+
+    // ── Message additional tests ──────────────────────────────────
+
+    #[test]
+    fn message_minimal_deser() {
+        let json = r#"{"text":"hi","ts":"1.0"}"#;
+        let msg: Message = serde_json::from_str(json).unwrap();
+        assert_eq!(msg.text, "hi");
+        assert_eq!(msg.ts, "1.0");
+        assert!(msg.user.is_none());
+        assert!(msg.thread_ts.is_none());
+    }
+
+    #[test]
+    fn message_with_all_fields() {
+        let json = r#"{
+            "type":"message",
+            "text":"hello",
+            "ts":"100.001",
+            "user":"U123",
+            "thread_ts":"100.000",
+            "reply_count":5,
+            "reactions":[{"name":"thumbsup","count":2,"users":["U1","U2"]}],
+            "files":[{"id":"F1","name":"test.txt","size":100}]
+        }"#;
+        let msg: Message = serde_json::from_str(json).unwrap();
+        assert_eq!(msg.user.as_deref(), Some("U123"));
+        assert_eq!(msg.thread_ts.as_deref(), Some("100.000"));
+        assert_eq!(msg.reply_count, Some(5));
+        assert_eq!(msg.reactions.as_ref().unwrap().len(), 1);
+        assert_eq!(msg.files.as_ref().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn message_clone_and_debug() {
+        let msg = Message {
+            message_type: "message".into(),
+            text: "test".into(),
+            ts: "1.0".into(),
+            user: Some("U1".into()),
+            thread_ts: None,
+            reply_count: None,
+            reactions: Some(vec![]),
+            files: Some(vec![]),
+            bot_id: None,
+        };
+        let cloned = msg.clone();
+        assert_eq!(cloned.text, "test");
+        let dbg = format!("{msg:?}");
+        assert!(dbg.contains("Message"));
+    }
+
+    // ── Reaction tests ────────────────────────────────────────────
+
+    #[test]
+    fn reaction_roundtrip() {
+        let reaction = Reaction {
+            name: "heart".into(),
+            count: 3,
+            users: vec!["U1".into(), "U2".into(), "U3".into()],
+        };
+        let json = serde_json::to_string(&reaction).unwrap();
+        let back: Reaction = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.name, "heart");
+        assert_eq!(back.count, 3);
+        assert_eq!(back.users.len(), 3);
+    }
+
+    #[test]
+    fn reaction_clone_and_debug() {
+        let reaction = Reaction {
+            name: "smile".into(),
+            count: 1,
+            users: vec!["U1".into()],
+        };
+        let cloned = reaction.clone();
+        assert_eq!(cloned.name, "smile");
+        let dbg = format!("{reaction:?}");
+        assert!(dbg.contains("Reaction"));
+    }
+
+    // ── SlackFile tests ───────────────────────────────────────────
+
+    #[test]
+    fn slack_file_minimal_deser() {
+        let json = r#"{"id":"F1","size":0}"#;
+        let file: SlackFile = serde_json::from_str(json).unwrap();
+        assert_eq!(file.id, "F1");
+        assert!(file.name.is_none());
+        assert!(file.title.is_none());
+    }
+
+    #[test]
+    fn slack_file_clone_and_debug() {
+        let file = SlackFile {
+            id: "F2".into(),
+            name: Some("doc.pdf".into()),
+            title: Some("Doc".into()),
+            mimetype: Some("application/pdf".into()),
+            filetype: Some("pdf".into()),
+            size: 5000,
+            url_private: None,
+            url_private_download: None,
+        };
+        let cloned = file.clone();
+        assert_eq!(cloned.name.as_deref(), Some("doc.pdf"));
+        let dbg = format!("{file:?}");
+        assert!(dbg.contains("SlackFile"));
+    }
+
+    // ── DoctorReport serde roundtrip ──────────────────────────────
+
+    #[test]
+    fn doctor_report_serde_serialize() {
+        let report = DoctorReport {
+            ready: true,
+            checks: vec![DoctorCheck {
+                name: "auth".into(),
+                passed: true,
+                message: "OK".into(),
+            }],
+        };
+        let json = serde_json::to_string(&report).unwrap();
+        let val: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(val["ready"], true);
+        assert_eq!(val["checks"][0]["name"], "auth");
+        assert_eq!(val["checks"][0]["passed"], true);
+    }
+
+    #[test]
+    #[allow(clippy::redundant_clone)]
+    fn doctor_report_clone() {
+        let report = DoctorReport {
+            ready: false,
+            checks: vec![],
+        };
+        let cloned = report.clone();
+        assert!(!cloned.ready);
+        assert!(cloned.checks.is_empty());
+    }
+
+    #[test]
+    fn doctor_report_debug() {
+        let report = DoctorReport {
+            ready: true,
+            checks: vec![],
+        };
+        let dbg = format!("{report:?}");
+        assert!(dbg.contains("DoctorReport"));
+    }
+
+    // ── Channel edge cases ─────────────────────────────────────
+
+    #[test]
+    fn channel_with_topic_and_purpose() {
+        let json = json!({
+            "id": "CFULL",
+            "name": "dev",
+            "is_channel": true,
+            "is_group": false,
+            "is_im": false,
+            "is_archived": true,
+            "is_private": true,
+            "num_members": 42,
+            "topic": {"value": "Development", "creator": "U1", "last_set": 100},
+            "purpose": {"value": "Dev chat", "creator": "U2", "last_set": 200}
+        });
+        let ch: Channel = serde_json::from_value(json).unwrap();
+        assert!(ch.is_channel);
+        assert!(ch.is_archived);
+        assert!(ch.is_private);
+        assert_eq!(ch.num_members, 42);
+        assert_eq!(ch.topic.as_ref().unwrap().value, "Development");
+        assert_eq!(ch.purpose.as_ref().unwrap().value, "Dev chat");
+    }
+
+    #[test]
+    fn channel_unicode_name() {
+        let json = json!({
+            "id": "CUNI",
+            "name": "日本語チャンネル"
+        });
+        let ch: Channel = serde_json::from_value(json).unwrap();
+        assert_eq!(ch.name, "日本語チャンネル");
+    }
+
+    #[test]
+    fn channel_large_num_members() {
+        let json = json!({
+            "id": "CBIG",
+            "name": "bigchan",
+            "num_members": 999_999
+        });
+        let ch: Channel = serde_json::from_value(json).unwrap();
+        assert_eq!(ch.num_members, 999_999);
+    }
+
+    // ── User edge cases ──────────────────────────────────────────
+
+    #[test]
+    fn user_with_full_profile() {
+        let json = json!({
+            "id": "UPROF",
+            "name": "profuser",
+            "real_name": "Profile User",
+            "is_bot": true,
+            "is_admin": true,
+            "deleted": false,
+            "profile": {
+                "display_name": "PU",
+                "email": "pu@example.com",
+                "image_48": "https://img.example.com/48.png",
+                "status_text": "Working",
+                "status_emoji": ":computer:"
+            }
+        });
+        let user: User = serde_json::from_value(json).unwrap();
+        assert!(user.is_bot);
+        assert!(user.is_admin);
+        let profile = user.profile.unwrap();
+        assert_eq!(profile.display_name, "PU");
+        assert_eq!(profile.email.as_deref(), Some("pu@example.com"));
+    }
+
+    #[test]
+    fn user_deleted_flag() {
+        let json = json!({
+            "id": "UDEL",
+            "deleted": true
+        });
+        let user: User = serde_json::from_value(json).unwrap();
+        assert!(user.deleted);
+        assert!(!user.is_bot);
+    }
+
+    // ── TopicPurpose edge cases ──────────────────────────────────
+
+    #[test]
+    fn topic_purpose_unicode_value() {
+        let tp = TopicPurpose {
+            value: "Diskussion auf Deutsch".into(),
+            creator: "U100".into(),
+            last_set: 0,
+        };
+        let json = serde_json::to_value(&tp).unwrap();
+        let back: TopicPurpose = serde_json::from_value(json).unwrap();
+        assert_eq!(back.value, "Diskussion auf Deutsch");
+        assert_eq!(back.last_set, 0);
+    }
+
+    // ── AuthTestInfo edge cases ──────────────────────────────────
+
+    #[test]
+    fn auth_test_info_enterprise_install() {
+        let info = AuthTestInfo {
+            url: "https://ent.slack.com/".into(),
+            team: "Enterprise".into(),
+            user: "admin".into(),
+            team_id: "E123".into(),
+            user_id: "UE1".into(),
+            bot_id: None,
+            is_enterprise_install: true,
+        };
+        let json = serde_json::to_value(&info).unwrap();
+        let back: AuthTestInfo = serde_json::from_value(json).unwrap();
+        assert!(back.is_enterprise_install);
+    }
+
+    // ── OperationReceipt edge cases ──────────────────────────────
+
+    #[test]
+    fn operation_receipt_long_resource() {
+        let long_res = "C".to_string() + &"X".repeat(200);
+        let receipt = OperationReceipt {
+            operation: "slack.upload_file".into(),
+            effect: "file_uploaded".into(),
+            resource: long_res.clone(),
+            timestamp: "2026-03-07T00:00:00Z".into(),
+        };
+        let json = serde_json::to_value(&receipt).unwrap();
+        assert_eq!(json["resource"], long_res);
+    }
+
+    // ── SearchData / SearchMatches tests ─────────────────────────
+
+    #[test]
+    fn search_data_empty_matches_from_json() {
+        let json = json!({
+            "messages": {
+                "total": 0,
+                "matches": []
+            }
+        });
+        let sd: SearchData = serde_json::from_value(json).unwrap();
+        assert_eq!(sd.messages.total, 0);
+        assert!(sd.messages.matches.is_empty());
+    }
+
+    #[test]
+    fn search_matches_with_results() {
+        let json = json!({
+            "total": 2,
+            "matches": [
+                {"type": "message", "text": "hello", "ts": "1.0"},
+                {"type": "message", "text": "world", "ts": "2.0"}
+            ]
+        });
+        let sm: SearchMatches = serde_json::from_value(json).unwrap();
+        assert_eq!(sm.total, 2);
+        assert_eq!(sm.matches.len(), 2);
     }
 }

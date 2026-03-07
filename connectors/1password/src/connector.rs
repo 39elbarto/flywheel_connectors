@@ -997,4 +997,83 @@ mod tests {
         let input = json!({"vault_id": 9.876});
         assert!(require_str(&input, "vault_id").is_err());
     }
+
+    #[test]
+    fn require_str_integer_value() {
+        let input = json!({"vault_id": 42});
+        assert!(require_str(&input, "vault_id").is_err());
+    }
+
+    #[test]
+    fn require_str_nested_deep_object() {
+        let input = json!({"vault_id": {"deep": {"nested": "val"}}});
+        assert!(require_str(&input, "vault_id").is_err());
+    }
+
+    #[test]
+    fn operations_all_have_capabilities() {
+        let ops = operations_info();
+        for op in ops.as_array().unwrap() {
+            let cap = op["capability"].as_str().unwrap();
+            assert!(!cap.is_empty(), "op {:?} has empty capability", op["id"]);
+        }
+    }
+
+    #[test]
+    fn operations_ids_all_start_with_1password() {
+        let ops = operations_info();
+        for op in ops.as_array().unwrap() {
+            let id = op["id"].as_str().unwrap();
+            assert!(id.starts_with("1password."), "op {id} should start with 1password.");
+        }
+    }
+
+    #[test]
+    fn doctor_result_debug_format() {
+        let r = DoctorResult::from_checks(vec![]);
+        let dbg = format!("{r:?}");
+        assert!(dbg.contains("DoctorResult"));
+    }
+
+    #[test]
+    fn doctor_check_clone_preserves_critical() {
+        let c = DoctorCheck {
+            name: "test_check".into(),
+            passed: false,
+            message: Some("failure reason".into()),
+            critical: true,
+        };
+        let cloned = c.clone();
+        assert_eq!(c.name, cloned.name);
+        assert_eq!(c.passed, cloned.passed);
+        assert_eq!(c.message, cloned.message);
+        assert!(cloned.critical);
+    }
+
+    #[test]
+    fn doctor_status_debug_all_variants() {
+        assert_eq!(format!("{:?}", DoctorStatus::Healthy), "Healthy");
+        assert_eq!(format!("{:?}", DoctorStatus::Degraded), "Degraded");
+        assert_eq!(format!("{:?}", DoctorStatus::Unhealthy), "Unhealthy");
+    }
+
+    #[test]
+    fn doctor_status_copy_semantics() {
+        let status = DoctorStatus::Degraded;
+        let copied = status;
+        assert_eq!(status, copied);
+    }
+
+    #[test]
+    fn doctor_check_debug_format() {
+        let c = DoctorCheck {
+            name: "connectivity".into(),
+            passed: false,
+            message: Some("unreachable".into()),
+            critical: true,
+        };
+        let dbg = format!("{c:?}");
+        assert!(dbg.contains("connectivity"));
+        assert!(dbg.contains("unreachable"));
+    }
 }

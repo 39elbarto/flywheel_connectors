@@ -1806,4 +1806,83 @@ mod tests {
             .expect("compute interface hash");
         assert_eq!(computed, computed2);
     }
+
+    // ── Additional require_str edge cases ────────────────────────────
+
+    #[test]
+    fn require_str_float_value() {
+        let input = json!({ "field": 1.23 });
+        assert!(require_str(&input, "field").is_err());
+    }
+
+    #[test]
+    fn require_str_object_value() {
+        let input = json!({ "field": {"nested": "val"} });
+        assert!(require_str(&input, "field").is_err());
+    }
+
+    #[test]
+    fn require_str_array_value() {
+        let input = json!({ "field": ["a", "b"] });
+        assert!(require_str(&input, "field").is_err());
+    }
+
+    #[test]
+    fn require_str_null_value() {
+        let input = json!({ "field": null });
+        assert!(require_str(&input, "field").is_err());
+    }
+
+    #[test]
+    fn require_str_boolean_value() {
+        let input = json!({ "field": true });
+        assert!(require_str(&input, "field").is_err());
+    }
+
+    #[test]
+    fn require_str_nested_object_value() {
+        let input = json!({ "field": {"a": {"b": "c"}} });
+        assert!(require_str(&input, "field").is_err());
+    }
+
+    #[test]
+    fn require_str_empty_string_is_ok() {
+        let input = json!({ "field": "" });
+        assert_eq!(require_str(&input, "field").unwrap(), "");
+    }
+
+    // ── Additional connector tests ──────────────────────────────────
+
+    #[test]
+    fn require_str_whitespace_only_is_ok() {
+        let input = json!({ "field": "   " });
+        assert_eq!(require_str(&input, "field").unwrap(), "   ");
+    }
+
+    #[test]
+    fn require_str_unicode_value() {
+        let input = json!({ "field": "hello \u{1F600}" });
+        assert!(require_str(&input, "field").unwrap().contains('\u{1F600}'));
+    }
+
+    #[test]
+    fn require_str_long_value() {
+        let long_val = "x".repeat(10_000);
+        let input = json!({ "field": long_val });
+        assert_eq!(require_str(&input, "field").unwrap().len(), 10_000);
+    }
+
+    #[test]
+    fn require_str_numeric_string() {
+        let input = json!({ "field": "12345" });
+        assert_eq!(require_str(&input, "field").unwrap(), "12345");
+    }
+
+    #[test]
+    fn require_str_special_chars() {
+        let input = json!({ "field": "hello <world> & \"friends\"" });
+        let val = require_str(&input, "field").unwrap();
+        assert!(val.contains('<'));
+        assert!(val.contains('&'));
+    }
 }

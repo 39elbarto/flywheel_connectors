@@ -96,7 +96,7 @@ pub struct PaginatedResponse {
 // ── Error response ──────────────────────────────────────────────
 
 /// Notion API error response.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ApiErrorResponse {
     pub status: Option<u16>,
     pub code: Option<String>,
@@ -1125,5 +1125,232 @@ mod tests {
         assert!(page.object.is_empty());
         assert_eq!(page.url.as_deref(), Some(""));
         assert_eq!(page.created_time.as_deref(), Some(""));
+    }
+
+    // ── Page missing required fields ──────────────────────────────
+
+    #[test]
+    fn page_missing_id_fails() {
+        let json = json!({"object": "page"});
+        assert!(serde_json::from_value::<Page>(json).is_err());
+    }
+
+    #[test]
+    fn page_missing_object_fails() {
+        let json = json!({"id": "p1"});
+        assert!(serde_json::from_value::<Page>(json).is_err());
+    }
+
+    // ── Database missing fields ───────────────────────────────────
+
+    #[test]
+    fn database_missing_id_fails() {
+        let json = json!({"object": "database"});
+        assert!(serde_json::from_value::<Database>(json).is_err());
+    }
+
+    // ── Block missing fields ──────────────────────────────────────
+
+    #[test]
+    fn block_missing_id_fails() {
+        let json = json!({"object": "block"});
+        assert!(serde_json::from_value::<Block>(json).is_err());
+    }
+
+    // ── Comment missing fields ────────────────────────────────────
+
+    #[test]
+    fn comment_missing_id_fails() {
+        let json = json!({"object": "comment"});
+        assert!(serde_json::from_value::<Comment>(json).is_err());
+    }
+
+    // ── Page clone and debug ──────────────────────────────────────
+
+    #[test]
+    #[allow(clippy::redundant_clone)]
+    fn page_clone_deep() {
+        let page = Page {
+            id: "p-clone".into(),
+            object: "page".into(),
+            archived: true,
+            url: Some("https://notion.so/test".into()),
+            created_time: Some("2026-01-01".into()),
+            last_edited_time: Some("2026-01-02".into()),
+            parent: Some(json!({"type": "workspace"})),
+            properties: Some(json!({"Name": "Test"})),
+        };
+        let cloned = page.clone();
+        assert_eq!(cloned.id, "p-clone");
+        assert!(cloned.archived);
+        assert_eq!(cloned.url.as_deref(), Some("https://notion.so/test"));
+    }
+
+    #[test]
+    fn page_debug_with_all_none_fields() {
+        let page = Page {
+            id: "p-dbg".into(),
+            object: "page".into(),
+            archived: false,
+            url: None,
+            created_time: None,
+            last_edited_time: None,
+            parent: None,
+            properties: None,
+        };
+        let dbg = format!("{page:?}");
+        assert!(dbg.contains("p-dbg"));
+        assert!(dbg.contains("Page"));
+    }
+
+    // ── Database clone and debug ──────────────────────────────────
+
+    #[test]
+    #[allow(clippy::redundant_clone)]
+    fn database_clone_deep() {
+        let db = Database {
+            id: "db-clone".into(),
+            object: "database".into(),
+            title: Some(vec![]),
+            url: Some("https://notion.so/db".into()),
+            created_time: None,
+            last_edited_time: None,
+            properties: None,
+        };
+        let cloned = db.clone();
+        assert_eq!(cloned.id, "db-clone");
+    }
+
+    #[test]
+    fn database_debug_with_all_none_fields() {
+        let db = Database {
+            id: "db-dbg".into(),
+            object: "database".into(),
+            title: None,
+            url: None,
+            created_time: None,
+            last_edited_time: None,
+            properties: None,
+        };
+        let dbg = format!("{db:?}");
+        assert!(dbg.contains("db-dbg"));
+    }
+
+    // ── Block clone and debug ─────────────────────────────────────
+
+    #[test]
+    #[allow(clippy::redundant_clone)]
+    fn block_clone_deep() {
+        let block = Block {
+            id: "blk-clone".into(),
+            object: "block".into(),
+            block_type: Some("heading_1".into()),
+            has_children: Some(false),
+            archived: Some(false),
+            created_time: None,
+            last_edited_time: None,
+            extra: json!({}),
+        };
+        let cloned = block.clone();
+        assert_eq!(cloned.id, "blk-clone");
+        assert_eq!(cloned.block_type.as_deref(), Some("heading_1"));
+    }
+
+    // ── Comment clone and debug ───────────────────────────────────
+
+    #[test]
+    #[allow(clippy::redundant_clone)]
+    fn comment_clone_deep() {
+        let cmt = Comment {
+            id: "cmt-clone".into(),
+            object: "comment".into(),
+            parent: Some(json!({"page_id": "p1"})),
+            discussion_id: Some("disc1".into()),
+            rich_text: Some(vec![]),
+            created_time: Some("2026-01-01".into()),
+        };
+        let cloned = cmt.clone();
+        assert_eq!(cloned.id, "cmt-clone");
+        assert_eq!(cloned.discussion_id.as_deref(), Some("disc1"));
+    }
+
+    // ── PaginatedResponse additional ──────────────────────────────
+
+    #[test]
+    fn paginated_response_empty_results() {
+        let json = json!({
+            "object": "list",
+            "results": [],
+            "has_more": false,
+            "next_cursor": null
+        });
+        let resp: PaginatedResponse = serde_json::from_value(json).unwrap();
+        assert!(resp.results.is_empty());
+        assert!(!resp.has_more);
+        assert!(resp.next_cursor.is_none());
+    }
+
+    #[test]
+    fn paginated_response_with_cursor() {
+        let json = json!({
+            "object": "list",
+            "results": [{"id": "r1"}],
+            "has_more": true,
+            "next_cursor": "cursor_abc_123"
+        });
+        let resp: PaginatedResponse = serde_json::from_value(json).unwrap();
+        assert!(resp.has_more);
+        assert_eq!(resp.next_cursor.as_deref(), Some("cursor_abc_123"));
+    }
+
+    // ── RichText additional ───────────────────────────────────────
+
+    #[test]
+    fn rich_text_full_roundtrip() {
+        let rt = RichText {
+            text_type: Some("text".into()),
+            text: Some(TextContent {
+                content: "Hello world".into(),
+                link: Some(json!({"url": "https://example.com"})),
+            }),
+            plain_text: Some("Hello world".into()),
+            annotations: Some(json!({"bold": true, "italic": false})),
+        };
+        let json = serde_json::to_value(&rt).unwrap();
+        let back: RichText = serde_json::from_value(json).unwrap();
+        assert_eq!(back.plain_text.as_deref(), Some("Hello world"));
+        assert!(back.annotations.is_some());
+    }
+
+    // ── RichText minimal / edge cases ────────────────────────────
+
+    #[test]
+    fn rich_text_all_none_fields() {
+        let rt = RichText {
+            text_type: None,
+            text: None,
+            plain_text: None,
+            annotations: None,
+        };
+        let json = serde_json::to_value(&rt).unwrap();
+        let back: RichText = serde_json::from_value(json).unwrap();
+        assert!(back.text_type.is_none());
+        assert!(back.text.is_none());
+        assert!(back.plain_text.is_none());
+        assert!(back.annotations.is_none());
+    }
+
+    #[test]
+    fn api_error_response_roundtrip() {
+        let err = ApiErrorResponse {
+            status: Some(400),
+            code: Some("validation_error".into()),
+            message: Some("Invalid page ID".into()),
+        };
+        let json = serde_json::to_value(&err).unwrap();
+        let back: ApiErrorResponse = serde_json::from_value(json).unwrap();
+        assert_eq!(back.status, Some(400));
+        assert_eq!(back.code.as_deref(), Some("validation_error"));
+        assert_eq!(back.message.as_deref(), Some("Invalid page ID"));
     }
 }

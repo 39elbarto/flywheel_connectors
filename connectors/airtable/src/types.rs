@@ -829,4 +829,146 @@ mod tests {
             assert_eq!(base.permission_level.as_deref(), Some(level));
         }
     }
+
+    #[test]
+    fn base_missing_id_fails() {
+        let json = json!({"name": "Test"});
+        assert!(serde_json::from_value::<Base>(json).is_err());
+    }
+
+    #[test]
+    fn base_missing_name_fails() {
+        let json = json!({"id": "app1"});
+        assert!(serde_json::from_value::<Base>(json).is_err());
+    }
+
+    #[test]
+    fn record_missing_id_fails() {
+        let json = json!({"fields": {}});
+        assert!(serde_json::from_value::<Record>(json).is_err());
+    }
+
+    #[test]
+    fn record_missing_fields_fails() {
+        let json = json!({"id": "rec1"});
+        assert!(serde_json::from_value::<Record>(json).is_err());
+    }
+
+    #[test]
+    fn table_schema_missing_id_fails() {
+        let json = json!({"name": "T"});
+        assert!(serde_json::from_value::<TableSchema>(json).is_err());
+    }
+
+    #[test]
+    fn field_schema_missing_type_fails() {
+        let json = json!({"id": "f1", "name": "N"});
+        assert!(serde_json::from_value::<FieldSchema>(json).is_err());
+    }
+
+    #[test]
+    fn view_schema_missing_type_fails() {
+        let json = json!({"id": "v1", "name": "V"});
+        assert!(serde_json::from_value::<ViewSchema>(json).is_err());
+    }
+
+    #[test]
+    fn delete_record_response_serialize_roundtrip() {
+        let resp = DeleteRecordResponse {
+            id: "recDEL".into(),
+            deleted: true,
+        };
+        let json = serde_json::to_value(&resp).unwrap();
+        let back: DeleteRecordResponse = serde_json::from_value(json).unwrap();
+        assert_eq!(back.id, "recDEL");
+        assert!(back.deleted);
+    }
+
+    #[test]
+    fn sort_spec_priority_desc_roundtrip() {
+        let spec = SortSpec {
+            field: "Priority".into(),
+            direction: "desc".into(),
+        };
+        let json = serde_json::to_value(&spec).unwrap();
+        let back: SortSpec = serde_json::from_value(json).unwrap();
+        assert_eq!(back.field, "Priority");
+        assert_eq!(back.direction, "desc");
+    }
+
+    #[test]
+    fn record_with_complex_fields() {
+        let json = json!({
+            "id": "recCOMPLEX",
+            "fields": {
+                "Name": "Test",
+                "Score": 99,
+                "Tags": ["a", "b"],
+                "Details": {"nested": true}
+            }
+        });
+        let rec: Record = serde_json::from_value(json).unwrap();
+        assert_eq!(rec.id, "recCOMPLEX");
+        assert_eq!(rec.fields["Score"], 99);
+        assert!(rec.fields["Tags"].is_array());
+        assert!(rec.fields["Details"].is_object());
+    }
+
+    #[test]
+    fn list_bases_response_with_offset() {
+        let json = json!({
+            "bases": [{"id": "app1", "name": "B1"}],
+            "offset": "itr_offset_123"
+        });
+        let resp: ListBasesResponse = serde_json::from_value(json).unwrap();
+        assert_eq!(resp.bases.len(), 1);
+        assert_eq!(resp.offset.as_deref(), Some("itr_offset_123"));
+    }
+
+    #[test]
+    fn list_bases_response_empty() {
+        let json = json!({"bases": []});
+        let resp: ListBasesResponse = serde_json::from_value(json).unwrap();
+        assert!(resp.bases.is_empty());
+        assert!(resp.offset.is_none());
+    }
+
+    #[test]
+    fn base_schema_response_with_tables() {
+        let json = json!({
+            "tables": [
+                {"id": "tbl1", "name": "Tasks", "fields": [], "views": []},
+                {"id": "tbl2", "name": "People", "fields": [], "views": []}
+            ]
+        });
+        let resp: BaseSchemaResponse = serde_json::from_value(json).unwrap();
+        assert_eq!(resp.tables.len(), 2);
+        assert_eq!(resp.tables[1].name, "People");
+    }
+
+    #[test]
+    #[allow(clippy::redundant_clone)]
+    fn base_clone() {
+        let base = Base {
+            id: "app1".into(),
+            name: "My Base".into(),
+            permission_level: Some("owner".into()),
+        };
+        let cloned = base.clone();
+        assert_eq!(cloned.id, "app1");
+        assert_eq!(cloned.name, "My Base");
+        assert_eq!(cloned.permission_level, Some("owner".into()));
+    }
+
+    #[test]
+    fn base_debug() {
+        let base = Base {
+            id: "appDBG".into(),
+            name: "Debug Base".into(),
+            permission_level: None,
+        };
+        let dbg = format!("{base:?}");
+        assert!(dbg.contains("Base"));
+        assert!(dbg.contains("appDBG"));
+    }
 }

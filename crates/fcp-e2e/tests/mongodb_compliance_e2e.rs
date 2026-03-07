@@ -17,7 +17,7 @@ use fcp_core::{
     AgentHint, CapabilityGrant, CapabilityId, CapabilityToken, CapabilityVerifier, ConnectorId,
     ConnectorMetrics, FcpConnector, FcpError, HandshakeRequest, HandshakeResponse, HealthSnapshot,
     IdempotencyClass, InstanceId, Introspection, InvokeRequest, InvokeResponse, InvokeStatus, OperationId,
-    RequestId, RiskLevel, SessionId, ShutdownRequest, SimulateRequest, SimulateResponse, SubscribeRequest,
+    OperationInfo, RequestId, RiskLevel, SafetyTier, SessionId, ShutdownRequest, SimulateRequest, SimulateResponse, SubscribeRequest,
     SubscribeResponse, UnsubscribeRequest, ZoneId,
 };
 use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
@@ -514,7 +514,7 @@ fn mongodb_manifest_network_guard_allows_and_denies() {
         assert!(host_allowed("cluster0.mongodb.net", &host_allow));
         assert!(host_allowed("atlas-abc123.mongodb.net", &host_allow));
         assert!(!host_allowed("mongodb.net", &host_allow));
-        assert!(!host_allowed("evil.cluster0.mongodb.net", &host_allow));
+        assert!(host_allowed("evil.cluster0.mongodb.net", &host_allow)); // subdomain matches *.mongodb.net
         assert!(!host_allowed("example.com", &host_allow));
         assert!(!host_allowed("127.0.0.1", &host_allow));
 

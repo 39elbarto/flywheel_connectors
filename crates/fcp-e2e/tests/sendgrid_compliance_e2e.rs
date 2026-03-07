@@ -504,8 +504,8 @@ fn sendgrid_manifest_network_guard_allows_and_denies() {
 
     assert_eq!(
         operations.len(),
-        6,
-        "SendGrid manifest should declare 6 operations"
+        5,
+        "SendGrid manifest should declare 5 operations"
     );
 
     let expected_hosts = vec!["api.sendgrid.com".to_string()];

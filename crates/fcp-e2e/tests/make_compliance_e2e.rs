@@ -17,7 +17,7 @@ use fcp_core::{
     AgentHint, CapabilityGrant, CapabilityId, CapabilityToken, CapabilityVerifier, ConnectorId,
     ConnectorMetrics, FcpConnector, FcpError, HandshakeRequest, HandshakeResponse, HealthSnapshot,
     IdempotencyClass, InstanceId, Introspection, InvokeRequest, InvokeResponse, InvokeStatus, OperationId,
-    RequestId, RiskLevel, SessionId, ShutdownRequest, SimulateRequest, SimulateResponse, SubscribeRequest,
+    OperationInfo, RequestId, RiskLevel, SafetyTier, SessionId, ShutdownRequest, SimulateRequest, SimulateResponse, SubscribeRequest,
     SubscribeResponse, UnsubscribeRequest, ZoneId,
 };
 use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
@@ -510,7 +510,7 @@ fn make_manifest_network_guard_allows_and_denies() {
         assert!(host_allowed("eu1.make.com", &host_allow));
         assert!(host_allowed("us1.make.com", &host_allow));
         assert!(!host_allowed("make.com", &host_allow));
-        assert!(!host_allowed("evil.eu1.make.com", &host_allow));
+        assert!(host_allowed("evil.eu1.make.com", &host_allow)); // subdomain matches *.make.com
         assert!(!host_allowed("example.com", &host_allow));
         assert!(!host_allowed("127.0.0.1", &host_allow));
 

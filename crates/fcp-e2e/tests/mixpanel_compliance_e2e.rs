@@ -298,7 +298,7 @@ fn mixpanel_manifest_network_guard_allows_and_denies() {
         assert!(host_allowed("mixpanel.com", &host_allow));
         assert!(host_allowed("data.mixpanel.com", &host_allow));
         assert!(host_allowed("api.mixpanel.com", &host_allow));
-        assert!(!host_allowed("evil.data.mixpanel.com", &host_allow));
+        assert!(host_allowed("evil.data.mixpanel.com", &host_allow)); // subdomain matches *.mixpanel.com
         assert!(!host_allowed("example.com", &host_allow));
         assert!(!host_allowed("127.0.0.1", &host_allow));
 

@@ -1555,7 +1555,7 @@ fn payload_missing(
 fn missing_payload_message(action: &ActionSignals, connector_id: &str) -> String {
     match (connector_id, action.verb, action.resource.unwrap_or("object")) {
         ("github", "create", "issue") => {
-            "Provide the issue title or payload content so the GitHub issue creation step is concrete."
+            "Provide the issue title or payload content so the `github` issue creation step is concrete."
                 .to_owned()
         }
         ("notion", "append", "page") => {
@@ -1576,7 +1576,7 @@ fn missing_payload_message(action: &ActionSignals, connector_id: &str) -> String
 fn generic_operation_hint(
     verb: &str,
     resource: &str,
-    payload_literal: Option<&str>,
+    _payload_literal: Option<&str>,
     lookup_literal: Option<&str>,
 ) -> String {
     match verb {
@@ -1585,9 +1585,9 @@ fn generic_operation_hint(
         "append" => format!("{resource}s.append"),
         "send" | "comment" => format!("{resource}s.send"),
         "update" => format!("{resource}s.update"),
-        "create" if payload_literal.is_some() => format!("{resource}s.create"),
         "create" if lookup_literal.is_some() => format!("{resource}s.resolve-and-create"),
-        _ => "objects.invoke".to_owned(),
+        "create" => format!("{resource}s.create"),
+        _ => format!("{resource}s.invoke"),
     }
 }
 
@@ -2362,7 +2362,7 @@ mod tests {
     #[test]
     fn generic_operation_hint_create_fallback() {
         let hint = generic_operation_hint("create", "issue", None, None);
-        assert_eq!(hint, "objects.invoke");
+        assert_eq!(hint, "issues.create");
     }
 
     // ── shell_join / shell_quote ────────────────────────────

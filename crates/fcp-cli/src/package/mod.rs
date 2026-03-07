@@ -136,9 +136,12 @@ fn build_connector(crate_path: &Path, args: &PackageArgs) -> Result<PathBuf> {
         cmd.arg("--release");
     }
 
-    // Add deterministic build flags
+    // Add deterministic build flags.
+    // Use CARGO_ENCODED_RUSTFLAGS (0x1f-separated) instead of RUSTFLAGS so that
+    // build hooks (e.g. rch) do not corrupt the flag string during shell expansion.
     cmd.env("CARGO_INCREMENTAL", "0");
-    cmd.env("RUSTFLAGS", "-C debuginfo=0");
+    cmd.env("CARGO_ENCODED_RUSTFLAGS", "-Cdebuginfo=0");
+    cmd.env_remove("RUSTFLAGS");
     // Keep packaging builds isolated from parent-process target-dir settings.
     cmd.env("CARGO_TARGET_DIR", &target_root);
 
@@ -263,7 +266,14 @@ fn collect_build_metadata(args: &PackageArgs) -> BuildMetadata {
 
     // Collect relevant build environment
     let mut build_env = HashMap::new();
-    for key in ["RUSTFLAGS", "CARGO_INCREMENTAL", "CC", "CXX", "TARGET"] {
+    for key in [
+        "RUSTFLAGS",
+        "CARGO_ENCODED_RUSTFLAGS",
+        "CARGO_INCREMENTAL",
+        "CC",
+        "CXX",
+        "TARGET",
+    ] {
         if let Ok(value) = std::env::var(key) {
             build_env.insert(key.to_string(), value);
         }

@@ -1652,4 +1652,866 @@ mod tests {
         // Custom header should be preserved
         assert_eq!(header_value(&headers, "x-custom"), Some("keep-me"));
     }
+
+    // ── token / access_token conflict tests ─────────────────────────
+
+    #[test]
+    fn access_token_via_token_field() {
+        let params = json!({ "token": "ya29.via-token-field" });
+        let sel = GoogleAuthSelection::from_connector_config(&params).expect("token field works");
+        assert_eq!(sel.source_kind(), GoogleAuthSourceKind::AccessToken);
+    }
+
+    #[test]
+    fn access_token_conflict_when_token_and_access_token_differ() {
+        let params = json!({
+            "token": "ya29.token-a",
+            "access_token": "ya29.token-b"
+        });
+        let err = GoogleAuthSelection::from_connector_config(&params)
+            .expect_err("conflicting tokens should fail");
+        assert!(
+            matches!(err, GoogleAuthError::InvalidConfig { .. }),
+            "unexpected error: {err}"
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains("must match"),
+            "error should mention matching: {msg}"
+        );
+    }
+
+    #[test]
+    fn access_token_token_and_access_token_match_succeeds() {
+        let params = json!({
+            "token": "ya29.same",
+            "access_token": "ya29.same"
+        });
+        let sel =
+            GoogleAuthSelection::from_connector_config(&params).expect("matching tokens should ok");
+        assert_eq!(sel.source_kind(), GoogleAuthSourceKind::AccessToken);
+    }
+
+    // ── validate_token_url tests ─────────────────────────────────────
+
+    #[test]
+    fn validate_token_url_https_is_accepted() {
+        validate_token_url("https://oauth2.googleapis.com/token")
+            .expect("https URL should be accepted");
+    }
+
+    #[test]
+    fn validate_token_url_localhost_http_is_accepted() {
+        validate_token_url("http://localhost:8080/token")
+            .expect("http localhost should be accepted for tests");
+    }
+
+    #[test]
+    fn validate_token_url_127_0_0_1_http_is_accepted() {
+        validate_token_url("http://127.0.0.1:9090/token")
+            .expect("http 127.0.0.1 should be accepted for tests");
+    }
+
+    #[test]
+    fn validate_token_url_ipv6_loopback_http_is_accepted() {
+        validate_token_url("http://[::1]:8080/token")
+            .expect("http [::1] should be accepted for tests");
+    }
+
+    #[test]
+    fn validate_token_url_http_non_local_is_rejected() {
+        let err = validate_token_url("http://evil.example.com/token")
+            .expect_err("http non-local should be rejected");
+        let msg = err.to_string();
+        assert!(msg.contains("https"), "error should mention https: {msg}");
+    }
+
+    #[test]
+    fn validate_token_url_invalid_url_is_rejected() {
+        let err =
+            validate_token_url("not a url at all").expect_err("invalid URL should be rejected");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("invalid"),
+            "error should mention invalid: {msg}"
+        );
+    }
+
+    // ── normalize_scope_list tests ──────────────────────────────────
+
+    #[test]
+    fn normalize_scope_list_deduplicates_and_sorts() {
+        let scopes = vec![
+            "scope.b".to_string(),
+            "scope.a".to_string(),
+            "scope.b".to_string(),
+            "scope.c".to_string(),
+        ];
+        let normalized = normalize_scope_list(scopes);
+        assert_eq!(
+            normalized,
+            vec![
+                "scope.a".to_string(),
+                "scope.b".to_string(),
+                "scope.c".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn normalize_scope_list_trims_whitespace() {
+        let scopes = vec!["  scope.a  ".to_string(), "scope.b".to_string()];
+        let normalized = normalize_scope_list(scopes);
+        assert_eq!(
+            normalized,
+            vec!["scope.a".to_string(), "scope.b".to_string()]
+        );
+    }
+
+    #[test]
+    fn normalize_scope_list_removes_empty() {
+        let scopes = vec![
+            "scope.a".to_string(),
+            "".to_string(),
+            "  ".to_string(),
+            "scope.b".to_string(),
+        ];
+        let normalized = normalize_scope_list(scopes);
+        assert_eq!(
+            normalized,
+            vec!["scope.a".to_string(), "scope.b".to_string()]
+        );
+    }
+
+    #[test]
+    fn normalize_scope_list_empty_input() {
+        let normalized = normalize_scope_list(Vec::new());
+        assert!(normalized.is_empty());
+    }
+
+    // ── missing_scopes tests ────────────────────────────────────────
+
+    #[test]
+    fn missing_scopes_empty_required_returns_empty() {
+        let result = missing_scopes(&[], &["scope.a".to_string()]);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn missing_scopes_all_granted_returns_empty() {
+        let required = vec!["scope.a".to_string(), "scope.b".to_string()];
+        let granted = vec![
+            "scope.a".to_string(),
+            "scope.b".to_string(),
+            "scope.c".to_string(),
+        ];
+        let result = missing_scopes(&required, &granted);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn missing_scopes_partial_grant_returns_missing() {
+        let required = vec![
+            "scope.a".to_string(),
+            "scope.b".to_string(),
+            "scope.c".to_string(),
+        ];
+        let granted = vec!["scope.a".to_string()];
+        let result = missing_scopes(&required, &granted);
+        assert_eq!(result.len(), 2);
+        assert!(result.contains(&"scope.b".to_string()));
+        assert!(result.contains(&"scope.c".to_string()));
+    }
+
+    // ── parse_encrypted_local_credentials_source tests ──────────────
+
+    #[test]
+    fn encrypted_local_credentials_bool_false_returns_none() {
+        let params = json!({ "encrypted_local_credentials": false });
+        let result =
+            parse_encrypted_local_credentials_source(&params).expect("bool false should parse ok");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn encrypted_local_credentials_bool_true_returns_default_profile() {
+        let params = json!({ "encrypted_local_credentials": true });
+        let result =
+            parse_encrypted_local_credentials_source(&params).expect("bool true should parse ok");
+        assert_eq!(result, Some("encrypted_local_credentials".to_string()));
+    }
+
+    #[test]
+    fn encrypted_local_credentials_string_profile() {
+        let params = json!({ "encrypted_local_credentials": "my-profile" });
+        let result =
+            parse_encrypted_local_credentials_source(&params).expect("string should parse ok");
+        assert_eq!(result, Some("my-profile".to_string()));
+    }
+
+    #[test]
+    fn encrypted_local_credentials_empty_string_rejected() {
+        let params = json!({ "encrypted_local_credentials": "  " });
+        let err = parse_encrypted_local_credentials_source(&params)
+            .expect_err("empty string should fail");
+        assert!(
+            matches!(err, GoogleAuthError::InvalidConfig { .. }),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn encrypted_local_credentials_object_with_profile() {
+        let params = json!({ "encrypted_local_credentials": { "profile": "custom" } });
+        let result =
+            parse_encrypted_local_credentials_source(&params).expect("object should parse ok");
+        assert_eq!(result, Some("custom".to_string()));
+    }
+
+    #[test]
+    fn encrypted_local_credentials_object_without_profile_uses_default() {
+        let params = json!({ "encrypted_local_credentials": {} });
+        let result = parse_encrypted_local_credentials_source(&params)
+            .expect("empty object should parse ok");
+        assert_eq!(result, Some("encrypted_local_credentials".to_string()));
+    }
+
+    #[test]
+    fn encrypted_local_credentials_number_rejected() {
+        let params = json!({ "encrypted_local_credentials": 42 });
+        let err = parse_encrypted_local_credentials_source(&params)
+            .expect_err("number should be rejected");
+        assert!(
+            matches!(err, GoogleAuthError::InvalidConfig { .. }),
+            "unexpected error: {err}"
+        );
+    }
+
+    // ── parse_default_credentials_source tests ─────────────────────
+
+    #[test]
+    fn default_credentials_absent_returns_false() {
+        let params = json!({});
+        assert!(!parse_default_credentials_source(&params).expect("should parse ok"));
+    }
+
+    #[test]
+    fn default_credentials_true_returns_true() {
+        let params = json!({ "default_credentials": true });
+        assert!(parse_default_credentials_source(&params).expect("should parse ok"));
+    }
+
+    #[test]
+    fn default_credentials_false_returns_false() {
+        let params = json!({ "default_credentials": false });
+        assert!(!parse_default_credentials_source(&params).expect("should parse ok"));
+    }
+
+    // ── parse_adc_source tests ──────────────────────────────────────
+
+    #[test]
+    fn adc_via_adc_field() {
+        let params = json!({ "adc": true });
+        assert!(parse_adc_source(&params).expect("should parse ok"));
+    }
+
+    #[test]
+    fn adc_via_application_default_credentials_field() {
+        let params = json!({ "application_default_credentials": true });
+        assert!(parse_adc_source(&params).expect("should parse ok"));
+    }
+
+    #[test]
+    fn adc_absent_returns_false() {
+        let params = json!({});
+        assert!(!parse_adc_source(&params).expect("should parse ok"));
+    }
+
+    // ── parse_oauth_refresh_source edge cases ────────────────────────
+
+    #[test]
+    fn oauth_refresh_source_with_custom_token_url() {
+        let params = json!({
+            "oauth_refresh": {
+                "client_id": "cid",
+                "client_secret": "csec",
+                "refresh_token": "rt",
+                "token_url": "https://custom.example.com/token"
+            }
+        });
+        let source = parse_oauth_refresh_source(&params)
+            .expect("should parse ok")
+            .expect("should be Some");
+        assert_eq!(source.token_url, "https://custom.example.com/token");
+    }
+
+    #[test]
+    fn oauth_refresh_source_defaults_token_url() {
+        let params = json!({
+            "oauth_refresh": {
+                "client_id": "cid",
+                "client_secret": "csec",
+                "refresh_token": "rt"
+            }
+        });
+        let source = parse_oauth_refresh_source(&params)
+            .expect("should parse ok")
+            .expect("should be Some");
+        assert_eq!(source.token_url, DEFAULT_GOOGLE_OAUTH_TOKEN_URL);
+    }
+
+    #[test]
+    fn oauth_refresh_source_missing_client_id_fails() {
+        let params = json!({
+            "oauth_refresh": {
+                "client_secret": "csec",
+                "refresh_token": "rt"
+            }
+        });
+        let err = parse_oauth_refresh_source(&params).expect_err("missing client_id should fail");
+        let msg = err.to_string();
+        assert!(msg.contains("client_id"), "got: {msg}");
+    }
+
+    #[test]
+    fn oauth_refresh_source_not_object_fails() {
+        let params = json!({ "oauth_refresh": "not-an-object" });
+        let err = parse_oauth_refresh_source(&params).expect_err("non-object should fail");
+        let msg = err.to_string();
+        assert!(msg.contains("must be an object"), "got: {msg}");
+    }
+
+    // ── parse_required_scopes edge cases ────────────────────────────
+
+    #[test]
+    fn required_scopes_absent_returns_empty() {
+        let params = json!({});
+        let scopes = parse_required_scopes(&params).expect("should parse ok");
+        assert!(scopes.is_empty());
+    }
+
+    #[test]
+    fn required_scopes_non_array_fails() {
+        let params = json!({ "required_scopes": "not-an-array" });
+        let err = parse_required_scopes(&params).expect_err("non-array should fail");
+        let msg = err.to_string();
+        assert!(msg.contains("array"), "got: {msg}");
+    }
+
+    #[test]
+    fn required_scopes_non_string_entry_fails() {
+        let params = json!({ "required_scopes": [42] });
+        let err = parse_required_scopes(&params).expect_err("non-string entry should fail");
+        let msg = err.to_string();
+        assert!(msg.contains("strings"), "got: {msg}");
+    }
+
+    #[test]
+    fn required_scopes_empty_entry_fails() {
+        let params = json!({ "required_scopes": ["scope.a", "  "] });
+        let err = parse_required_scopes(&params).expect_err("empty entry should fail");
+        let msg = err.to_string();
+        assert!(msg.contains("empty"), "got: {msg}");
+    }
+
+    // ── parse_quota_project_id edge cases ────────────────────────────
+
+    #[test]
+    fn quota_project_id_absent_returns_none() {
+        let params = json!({});
+        let result = parse_quota_project_id(&params).expect("should parse ok");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn quota_project_id_empty_fails() {
+        let params = json!({ "quota_project_id": "  " });
+        let err = parse_quota_project_id(&params).expect_err("empty should fail");
+        let msg = err.to_string();
+        assert!(msg.contains("empty"), "got: {msg}");
+    }
+
+    #[test]
+    fn quota_project_id_non_string_fails() {
+        let params = json!({ "quota_project_id": 42 });
+        let err = parse_quota_project_id(&params).expect_err("non-string should fail");
+        let msg = err.to_string();
+        assert!(msg.contains("string"), "got: {msg}");
+    }
+
+    // ── parse_optional_string_field edge cases ───────────────────────
+
+    #[test]
+    fn optional_string_field_absent_returns_none() {
+        let params = json!({});
+        let result = parse_optional_string_field(&params, "missing").expect("should parse ok");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn optional_string_field_non_string_fails() {
+        let params = json!({ "field": 42 });
+        let err =
+            parse_optional_string_field(&params, "field").expect_err("non-string should fail");
+        let msg = err.to_string();
+        assert!(msg.contains("string"), "got: {msg}");
+    }
+
+    #[test]
+    fn optional_string_field_empty_fails() {
+        let params = json!({ "field": "   " });
+        let err = parse_optional_string_field(&params, "field").expect_err("empty should fail");
+        let msg = err.to_string();
+        assert!(msg.contains("empty"), "got: {msg}");
+    }
+
+    #[test]
+    fn optional_string_field_trims_whitespace() {
+        let params = json!({ "field": "  hello  " });
+        let result = parse_optional_string_field(&params, "field")
+            .expect("should parse ok")
+            .expect("should be Some");
+        assert_eq!(result, "hello");
+    }
+
+    // ── parse_optional_bool_field edge cases ─────────────────────────
+
+    #[test]
+    fn optional_bool_field_absent_returns_none() {
+        let params = json!({});
+        let result = parse_optional_bool_field(&params, "missing").expect("should parse ok");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn optional_bool_field_non_bool_fails() {
+        let params = json!({ "field": "not-a-bool" });
+        let err = parse_optional_bool_field(&params, "field").expect_err("non-bool should fail");
+        let msg = err.to_string();
+        assert!(msg.contains("boolean"), "got: {msg}");
+    }
+
+    #[test]
+    fn optional_bool_field_true_returns_some_true() {
+        let params = json!({ "field": true });
+        let result = parse_optional_bool_field(&params, "field").expect("should parse ok");
+        assert_eq!(result, Some(true));
+    }
+
+    // ── is_local_test_host tests ────────────────────────────────────
+
+    #[test]
+    fn is_local_test_host_localhost() {
+        assert!(is_local_test_host("localhost"));
+        assert!(is_local_test_host("Localhost"));
+        assert!(is_local_test_host("LOCALHOST"));
+    }
+
+    #[test]
+    fn is_local_test_host_ipv4() {
+        assert!(is_local_test_host("127.0.0.1"));
+    }
+
+    #[test]
+    fn is_local_test_host_ipv6() {
+        assert!(is_local_test_host("::1"));
+    }
+
+    #[test]
+    fn is_local_test_host_remote() {
+        assert!(!is_local_test_host("example.com"));
+        assert!(!is_local_test_host("192.168.1.1"));
+    }
+
+    // ── upsert_header tests ──────────────────────────────────────────
+
+    #[test]
+    fn upsert_header_inserts_when_absent() {
+        let mut headers = Vec::new();
+        upsert_header(&mut headers, "x-new", "value".to_string());
+        assert_eq!(headers.len(), 1);
+        assert_eq!(header_value(&headers, "x-new"), Some("value"));
+    }
+
+    #[test]
+    fn upsert_header_replaces_existing_case_insensitive() {
+        let mut headers = vec![
+            ("X-Custom".to_string(), "old".to_string()),
+            ("x-other".to_string(), "keep".to_string()),
+        ];
+        upsert_header(&mut headers, "x-custom", "new".to_string());
+        assert_eq!(header_value(&headers, "x-custom"), Some("new"));
+        assert_eq!(header_value(&headers, "x-other"), Some("keep"));
+        // Should not duplicate
+        let count = headers
+            .iter()
+            .filter(|(name, _)| name.eq_ignore_ascii_case("x-custom"))
+            .count();
+        assert_eq!(count, 1);
+    }
+
+    // ── apply_quota_project_header tests ─────────────────────────────
+
+    #[test]
+    fn apply_quota_project_header_none_is_noop() {
+        let mut headers = vec![("x-existing".to_string(), "keep".to_string())];
+        apply_quota_project_header(&mut headers, None);
+        assert_eq!(headers.len(), 1);
+    }
+
+    // ── source_disposition tests ─────────────────────────────────────
+
+    #[test]
+    fn source_disposition_access_token_is_allowed_everywhere() {
+        assert_eq!(
+            source_disposition(
+                GoogleAuthSourceKind::AccessToken,
+                GoogleAuthContext::ConnectorRuntime
+            ),
+            GoogleAuthSourceDisposition::Allowed
+        );
+        assert_eq!(
+            source_disposition(
+                GoogleAuthSourceKind::AccessToken,
+                GoogleAuthContext::ProvisioningSetup
+            ),
+            GoogleAuthSourceDisposition::Allowed
+        );
+    }
+
+    #[test]
+    fn source_disposition_encrypted_local_rejected_everywhere() {
+        assert_eq!(
+            source_disposition(
+                GoogleAuthSourceKind::EncryptedLocalCredentials,
+                GoogleAuthContext::ConnectorRuntime
+            ),
+            GoogleAuthSourceDisposition::Rejected
+        );
+        assert_eq!(
+            source_disposition(
+                GoogleAuthSourceKind::EncryptedLocalCredentials,
+                GoogleAuthContext::ProvisioningSetup
+            ),
+            GoogleAuthSourceDisposition::Rejected
+        );
+    }
+
+    #[test]
+    fn source_disposition_credentials_file_provisioning_only() {
+        assert_eq!(
+            source_disposition(
+                GoogleAuthSourceKind::CredentialsFile,
+                GoogleAuthContext::ConnectorRuntime
+            ),
+            GoogleAuthSourceDisposition::ProvisioningOnly
+        );
+        assert_eq!(
+            source_disposition(
+                GoogleAuthSourceKind::CredentialsFile,
+                GoogleAuthContext::ProvisioningSetup
+            ),
+            GoogleAuthSourceDisposition::Allowed
+        );
+    }
+
+    // ── GoogleAuthSelection quota_project_header tests ───────────────
+
+    #[test]
+    fn auth_selection_quota_project_header_present() {
+        let sel = GoogleAuthSelection {
+            source: GoogleAuthSource::AccessToken {
+                access_token: "ya29.test".to_string(),
+            },
+            required_scopes: Vec::new(),
+            quota_project_id: Some("my-project".to_string()),
+        };
+        let header = sel.quota_project_header().expect("should have header");
+        assert_eq!(header.0, GOOGLE_QUOTA_PROJECT_HEADER);
+        assert_eq!(header.1, "my-project");
+    }
+
+    #[test]
+    fn auth_selection_quota_project_header_absent() {
+        let sel = GoogleAuthSelection {
+            source: GoogleAuthSource::AccessToken {
+                access_token: "ya29.test".to_string(),
+            },
+            required_scopes: Vec::new(),
+            quota_project_id: None,
+        };
+        assert!(sel.quota_project_header().is_none());
+    }
+
+    // ── Materialization of non-materializable sources ────────────────
+
+    #[test]
+    fn materialization_of_credentials_file_fails_at_runtime() {
+        let sel = GoogleAuthSelection {
+            source: GoogleAuthSource::CredentialsFile {
+                path: "/tmp/creds.json".to_string(),
+            },
+            required_scopes: Vec::new(),
+            quota_project_id: None,
+        };
+        let err = block_on_sync(sel.materialize_with(&FailIfCalledExchanger))
+            .expect("runtime for materialization")
+            .expect_err("credentials file should not materialize");
+        assert!(
+            matches!(err, GoogleAuthError::SourceNotAllowed { .. }),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn materialization_of_default_credentials_fails_at_runtime() {
+        let sel = GoogleAuthSelection {
+            source: GoogleAuthSource::DefaultCredentials,
+            required_scopes: Vec::new(),
+            quota_project_id: None,
+        };
+        let err = block_on_sync(sel.materialize_with(&FailIfCalledExchanger))
+            .expect("runtime for materialization")
+            .expect_err("default credentials should not materialize");
+        assert!(
+            matches!(err, GoogleAuthError::SourceNotAllowed { .. }),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn materialization_of_adc_fails_at_runtime() {
+        let sel = GoogleAuthSelection {
+            source: GoogleAuthSource::ApplicationDefaultCredentials,
+            required_scopes: Vec::new(),
+            quota_project_id: None,
+        };
+        let err = block_on_sync(sel.materialize_with(&FailIfCalledExchanger))
+            .expect("runtime for materialization")
+            .expect_err("ADC should not materialize");
+        assert!(
+            matches!(err, GoogleAuthError::SourceNotAllowed { .. }),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn materialization_of_encrypted_local_fails_at_runtime() {
+        let sel = GoogleAuthSelection {
+            source: GoogleAuthSource::EncryptedLocalCredentials {
+                profile: "default".to_string(),
+            },
+            required_scopes: Vec::new(),
+            quota_project_id: None,
+        };
+        let err = block_on_sync(sel.materialize_with(&FailIfCalledExchanger))
+            .expect("runtime for materialization")
+            .expect_err("encrypted local should not materialize");
+        assert!(
+            matches!(err, GoogleAuthError::SourceNotAllowed { .. }),
+            "unexpected error: {err}"
+        );
+    }
+
+    // ── GoogleAuthSource kind mapping ────────────────────────────────
+
+    #[test]
+    fn auth_source_kind_mapping_complete() {
+        let sources = vec![
+            (
+                GoogleAuthSource::AccessToken {
+                    access_token: "tok".to_string(),
+                },
+                GoogleAuthSourceKind::AccessToken,
+            ),
+            (
+                GoogleAuthSource::CredentialId {
+                    credential_id: CredentialId::new(),
+                },
+                GoogleAuthSourceKind::CredentialId,
+            ),
+            (
+                GoogleAuthSource::OAuthRefresh(GoogleOAuthRefreshSource {
+                    client_id: "c".to_string(),
+                    client_secret: "s".to_string(),
+                    refresh_token: "r".to_string(),
+                    token_url: "https://t.com".to_string(),
+                }),
+                GoogleAuthSourceKind::OAuthRefresh,
+            ),
+            (
+                GoogleAuthSource::CredentialsFile {
+                    path: "/p".to_string(),
+                },
+                GoogleAuthSourceKind::CredentialsFile,
+            ),
+            (
+                GoogleAuthSource::EncryptedLocalCredentials {
+                    profile: "p".to_string(),
+                },
+                GoogleAuthSourceKind::EncryptedLocalCredentials,
+            ),
+            (
+                GoogleAuthSource::DefaultCredentials,
+                GoogleAuthSourceKind::DefaultCredentials,
+            ),
+            (
+                GoogleAuthSource::ApplicationDefaultCredentials,
+                GoogleAuthSourceKind::ApplicationDefaultCredentials,
+            ),
+        ];
+        for (source, expected_kind) in sources {
+            assert_eq!(source.kind(), expected_kind, "kind mismatch for {source:?}");
+        }
+    }
+
+    // ── GoogleAuthSourceKind Display tests ────────────────────────────
+
+    #[test]
+    fn source_kind_display_all_variants() {
+        let expected = [
+            (GoogleAuthSourceKind::AccessToken, "access_token"),
+            (GoogleAuthSourceKind::CredentialId, "credential_id"),
+            (GoogleAuthSourceKind::OAuthRefresh, "oauth_refresh"),
+            (GoogleAuthSourceKind::CredentialsFile, "credentials_file"),
+            (
+                GoogleAuthSourceKind::EncryptedLocalCredentials,
+                "encrypted_local_credentials",
+            ),
+            (
+                GoogleAuthSourceKind::DefaultCredentials,
+                "default_credentials",
+            ),
+            (
+                GoogleAuthSourceKind::ApplicationDefaultCredentials,
+                "application_default_credentials",
+            ),
+        ];
+        for (kind, expected_str) in expected {
+            assert_eq!(
+                kind.to_string(),
+                expected_str,
+                "display mismatch for {kind:?}"
+            );
+        }
+    }
+
+    // ── GoogleOAuthRefreshSource tests ────────────────────────────────
+
+    #[test]
+    fn oauth_refresh_source_clone_and_eq() {
+        let a = GoogleOAuthRefreshSource {
+            client_id: "cid".to_string(),
+            client_secret: "csec".to_string(),
+            refresh_token: "rt".to_string(),
+            token_url: "https://example.com/token".to_string(),
+        };
+        let b = a.clone();
+        assert_eq!(a, b);
+    }
+
+    // ── GoogleAuthSelection source_kind helper ──────────────────────
+
+    #[test]
+    fn auth_selection_source_kind_delegates() {
+        let sel = GoogleAuthSelection {
+            source: GoogleAuthSource::AccessToken {
+                access_token: "tok".to_string(),
+            },
+            required_scopes: Vec::new(),
+            quota_project_id: None,
+        };
+        assert_eq!(sel.source_kind(), GoogleAuthSourceKind::AccessToken);
+    }
+
+    // ── Encrypted local rejected at provisioning context too ─────────
+
+    #[test]
+    fn encrypted_local_rejected_at_provisioning() {
+        let params = json!({ "encrypted_local_credentials": true });
+        let err = GoogleAuthSelection::from_config(&params, GoogleAuthContext::ProvisioningSetup)
+            .expect_err("encrypted local should be rejected even at provisioning");
+        assert!(
+            matches!(
+                err,
+                GoogleAuthError::SourceNotAllowed {
+                    auth_source: GoogleAuthSourceKind::EncryptedLocalCredentials,
+                    ..
+                }
+            ),
+            "unexpected error: {err}"
+        );
+    }
+
+    // ── Default credentials at runtime rejected ──────────────────────
+
+    #[test]
+    fn default_credentials_at_runtime_rejected() {
+        let params = json!({ "default_credentials": true });
+        let err = GoogleAuthSelection::from_connector_config(&params)
+            .expect_err("default_credentials at runtime should fail");
+        assert!(
+            matches!(
+                err,
+                GoogleAuthError::SourceNotAllowed {
+                    auth_source: GoogleAuthSourceKind::DefaultCredentials,
+                    ..
+                }
+            ),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn default_credentials_at_provisioning_allowed() {
+        let params = json!({ "default_credentials": true });
+        let sel = GoogleAuthSelection::from_config(&params, GoogleAuthContext::ProvisioningSetup)
+            .expect("default_credentials at provisioning should be allowed");
+        assert_eq!(sel.source_kind(), GoogleAuthSourceKind::DefaultCredentials);
+    }
+
+    // ── ADC at runtime rejected, provisioning allowed ────────────────
+
+    #[test]
+    fn adc_at_runtime_rejected() {
+        let params = json!({ "adc": true });
+        let err = GoogleAuthSelection::from_connector_config(&params)
+            .expect_err("ADC at runtime should fail");
+        assert!(
+            matches!(
+                err,
+                GoogleAuthError::SourceNotAllowed {
+                    auth_source: GoogleAuthSourceKind::ApplicationDefaultCredentials,
+                    ..
+                }
+            ),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn adc_at_provisioning_allowed() {
+        let params = json!({ "application_default_credentials": true });
+        let sel = GoogleAuthSelection::from_config(&params, GoogleAuthContext::ProvisioningSetup)
+            .expect("ADC at provisioning should be allowed");
+        assert_eq!(
+            sel.source_kind(),
+            GoogleAuthSourceKind::ApplicationDefaultCredentials
+        );
+    }
+
+    // ── GoogleAuthError InvalidConfig variant ────────────────────────
+
+    #[test]
+    fn auth_error_invalid_config_display() {
+        let err = GoogleAuthError::InvalidConfig {
+            message: "custom validation message".to_string(),
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("invalid google auth configuration"),
+            "got: {msg}"
+        );
+        assert!(msg.contains("custom validation message"), "got: {msg}");
+    }
 }

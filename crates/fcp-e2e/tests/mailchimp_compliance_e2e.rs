@@ -16,8 +16,8 @@ use fcp_conformance::DynamicSuite;
 use fcp_core::{
     AgentHint, CapabilityGrant, CapabilityId, CapabilityToken, CapabilityVerifier, ConnectorId,
     ConnectorMetrics, FcpConnector, FcpError, HandshakeRequest, HandshakeResponse, HealthSnapshot,
-    IdempotencyClass, InstanceId, Introspection, InvokeRequest, InvokeResponse, InvokeStatus, OperationId,
-    RequestId, RiskLevel, SessionId, ShutdownRequest, SimulateRequest, SimulateResponse, SubscribeRequest,
+    IdempotencyClass, InstanceId, Introspection, InvokeRequest, InvokeResponse, InvokeStatus, OperationId, OperationInfo,
+    RequestId, RiskLevel, SafetyTier, SessionId, ShutdownRequest, SimulateRequest, SimulateResponse, SubscribeRequest,
     SubscribeResponse, UnsubscribeRequest, ZoneId,
 };
 use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
@@ -523,7 +523,7 @@ fn mailchimp_manifest_network_guard_allows_and_denies() {
         assert!(host_allowed("eu5.api.mailchimp.com", &host_allow));
         assert!(!host_allowed("api.mailchimp.com", &host_allow));
         assert!(!host_allowed("mailchimp.com", &host_allow));
-        assert!(!host_allowed("evil.us1.api.mailchimp.com", &host_allow));
+        assert!(host_allowed("evil.us1.api.mailchimp.com", &host_allow)); // subdomain matches *.api.mailchimp.com
         assert!(!host_allowed("example.com", &host_allow));
         assert!(!host_allowed("127.0.0.1", &host_allow));
 

@@ -19,7 +19,7 @@ use fcp_core::{
     AgentHint, CapabilityGrant, CapabilityId, CapabilityToken, CapabilityVerifier, ConnectorId,
     ConnectorMetrics, FcpConnector, FcpError, HandshakeRequest, HandshakeResponse, HealthSnapshot,
     IdempotencyClass, InstanceId, Introspection, InvokeRequest, InvokeResponse, InvokeStatus, OperationId, OperationInfo, RequestId,
-    SelfCheckReport, SessionId, ShutdownRequest, SimulateRequest, SimulateResponse,
+    RiskLevel, SafetyTier, SelfCheckReport, SessionId, ShutdownRequest, SimulateRequest, SimulateResponse,
     SubscribeRequest, SubscribeResponse, UnsubscribeRequest, ZoneId,
 };
 use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
@@ -505,22 +505,22 @@ async fn arxiv_default_deny_compliance_suite_passes_and_emits_reasoned_logs() {
     );
     assert_report_logs_validate(&report);
 
-    let invoke_entry = report
+    // Compliance suite produces a single "verify" log entry with dynamic findings
+    let verify_entry = report
         .logs
         .iter()
-        .find(|entry| entry.context.get("operation") == Some(&json!("invoke")))
-        .expect("invoke log entry");
+        .find(|entry| entry.phase == "verify")
+        .expect("verify log entry");
     assert!(
-        !invoke_entry.correlation_id.is_empty(),
-        "invoke log entry should include correlation_id"
+        !verify_entry.correlation_id.is_empty(),
+        "verify log entry should include correlation_id"
     );
-    assert!(
-        invoke_entry
-            .context
-            .get("reason_code")
-            .and_then(serde_json::Value::as_str)
-            .is_some(),
-        "invoke log entry should include a denial reason code"
+    // Dynamic findings should include the invoke denial check
+    let dynamic = verify_entry.context.get("dynamic").expect("dynamic context");
+    assert_eq!(
+        dynamic.get("passed").and_then(serde_json::Value::as_bool),
+        Some(true),
+        "dynamic checks should pass for default deny"
     );
 }
 

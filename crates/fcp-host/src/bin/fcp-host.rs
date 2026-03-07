@@ -4,12 +4,15 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 #[cfg(unix)]
 use std::path::{Path as FsPath, PathBuf};
+use std::pin::pin;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use asupersync_tokio_compat::hyper_bridge::AsupersyncExecutor;
 use asupersync_tokio_compat::io::TokioIo;
 use axum::{
     Json, Router,
+    body::Body,
     extract::{Path, State},
     http::StatusCode,
     routing::{get, post},
@@ -32,8 +35,13 @@ use fcp_host::{
     PreflightResponse, RequestPriority, ResilienceError, ResilienceLayer, merge_connector_health,
 };
 use fcp_host::{HostError, HostResult};
+use hyper::body::Incoming;
+use hyper_util::{
+    server::conn::auto::Builder as HyperConnectionBuilder, service::TowerToHyperService,
+};
 use serde::Deserialize;
 use serde_json::json;
+use tower::ServiceExt;
 use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
 
 #[derive(Debug, Deserialize)]
@@ -340,65 +348,6 @@ impl Drop for ConnectorProcessRunner {
     }
 }
 
-struct AxumTcpListener {
-    inner: TcpListener,
-}
-
-impl AxumTcpListener {
-    const fn new(inner: TcpListener) -> Self {
-        Self { inner }
-    }
-}
-
-impl axum::serve::Listener for AxumTcpListener {
-    type Io = TokioIo<fcp_async_core::net::TcpStream>;
-    type Addr = SocketAddr;
-
-    async fn accept(&mut self) -> (Self::Io, Self::Addr) {
-        loop {
-            match self.inner.accept().await {
-                Ok((stream, addr)) => return (TokioIo::new(stream), addr),
-                Err(err) => handle_accept_error(err).await,
-            }
-        }
-    }
-
-    fn local_addr(&self) -> std::io::Result<Self::Addr> {
-        self.inner.local_addr()
-    }
-}
-
-#[cfg(unix)]
-struct AxumUnixListener {
-    inner: UnixListener,
-}
-
-#[cfg(unix)]
-impl AxumUnixListener {
-    const fn new(inner: UnixListener) -> Self {
-        Self { inner }
-    }
-}
-
-#[cfg(unix)]
-impl axum::serve::Listener for AxumUnixListener {
-    type Io = TokioIo<fcp_async_core::net::UnixStream>;
-    type Addr = std::os::unix::net::SocketAddr;
-
-    async fn accept(&mut self) -> (Self::Io, Self::Addr) {
-        loop {
-            match self.inner.accept().await {
-                Ok((stream, addr)) => return (TokioIo::new(stream), addr),
-                Err(err) => handle_accept_error(err).await,
-            }
-        }
-    }
-
-    fn local_addr(&self) -> std::io::Result<Self::Addr> {
-        self.inner.local_addr()
-    }
-}
-
 async fn handle_accept_error(err: std::io::Error) {
     if matches!(
         err.kind(),
@@ -411,6 +360,55 @@ async fn handle_accept_error(err: std::io::Error) {
 
     tracing::error!(error = %err, "accept error");
     fcp_async_core::time::sleep(Duration::from_secs(1)).await;
+}
+
+fn hyper_executor() -> AsupersyncExecutor {
+    AsupersyncExecutor::with_spawn_fn(|future| {
+        std::mem::drop(task::spawn(future));
+    })
+}
+
+fn spawn_http_connection<IO>(io: IO, app: Router)
+where
+    IO: hyper::rt::Read + hyper::rt::Write + Unpin + Send + 'static,
+{
+    let tower_service = app.map_request(|request: hyper::Request<Incoming>| request.map(Body::new));
+    let hyper_service = TowerToHyperService::new(tower_service);
+
+    std::mem::drop(task::spawn(async move {
+        let mut builder = HyperConnectionBuilder::new(hyper_executor());
+        builder.http2().enable_connect_protocol();
+
+        let mut connection = pin!(builder.serve_connection_with_upgrades(io, hyper_service));
+        if let Err(err) = connection.as_mut().await {
+            tracing::debug!(error = %err, "failed to serve connection");
+        }
+    }));
+}
+
+async fn serve_tcp(listener: TcpListener, app: Router) -> HostResult<()> {
+    loop {
+        match listener.accept().await {
+            Ok((stream, addr)) => {
+                tracing::debug!(transport = "tcp", remote_addr = %addr, "accepted connection");
+                spawn_http_connection(TokioIo::new(stream), app.clone());
+            }
+            Err(err) => handle_accept_error(err).await,
+        }
+    }
+}
+
+#[cfg(unix)]
+async fn serve_unix(listener: UnixListener, app: Router) -> HostResult<()> {
+    loop {
+        match listener.accept().await {
+            Ok((stream, addr)) => {
+                tracing::debug!(transport = "unix", remote_addr = ?addr, "accepted connection");
+                spawn_http_connection(TokioIo::new(stream), app.clone());
+            }
+            Err(err) => handle_accept_error(err).await,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -606,9 +604,7 @@ async fn async_main() -> HostResult<()> {
                 .await
                 .map_err(|err| HostError::Internal(format!("tcp bind error: {err}")))?;
             tracing::info!(transport = "tcp", %addr, "fcp-host listening");
-            axum::serve(AxumTcpListener::new(listener), app)
-                .await
-                .map_err(|err| HostError::Internal(format!("server error: {err}")))?;
+            serve_tcp(listener, app).await?;
         }
         #[cfg(unix)]
         BindTarget::Unix(path) => {
@@ -621,9 +617,7 @@ async fn async_main() -> HostResult<()> {
                 socket_path = %path.display(),
                 "fcp-host listening"
             );
-            axum::serve(AxumUnixListener::new(listener), app)
-                .await
-                .map_err(|err| HostError::Internal(format!("server error: {err}")))?;
+            serve_unix(listener, app).await?;
         }
     }
 

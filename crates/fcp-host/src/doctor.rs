@@ -6,6 +6,7 @@ use std::time::Duration;
 use chrono::{DateTime, Utc};
 use fcp_async_core::{AsyncError, ExecutionContext};
 use fcp_core::{ConnectorId, SelfCheckReport, SelfCheckStatus, ZoneId};
+use futures_util::future::join_all;
 use serde::{Deserialize, Serialize};
 
 use crate::{ConnectorRegistry, HostError, HostResult};
@@ -257,7 +258,7 @@ where
 
         let mut self_checks = Vec::new();
         if request.self_check {
-            let mut handles = Vec::new();
+            let mut futures = Vec::new();
 
             for connector in request.connectors {
                 let connector_id: ConnectorId = connector.parse().map_err(|err| {
@@ -267,7 +268,7 @@ where
                 let registry = Arc::clone(&self.registry);
                 let timeout = self.self_check_timeout;
 
-                let handle = fcp_async_core::task::spawn(async move {
+                futures.push(async move {
                     let context = ExecutionContext::request_scoped(timeout);
                     let report = match context.run(registry.self_check(&connector_id)).await {
                         Ok(Some(report)) => report,
@@ -293,16 +294,10 @@ where
                         report,
                     })
                 });
-                handles.push(handle);
             }
 
-            for handle in handles {
-                // `fcp_async_core::task::spawn` returns a join handle. We await it,
-                // unwrap any panics (for now, or handle them gracefully), and push the result.
-                let result = handle.await.map_err(|err| {
-                    HostError::Internal(format!("self_check task panicked: {err}"))
-                })??;
-                self_checks.push(result);
+            for result in join_all(futures).await {
+                self_checks.push(result?);
             }
         }
 

@@ -25,6 +25,7 @@ use fcp_host::{
     PreflightResponse,
 };
 use fcp_testkit::LogCapture;
+use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 
 struct AllowAllPolicy;
@@ -338,6 +339,78 @@ async fn host_discovery_with_subprocess_connectors() -> Result<(), Box<dyn std::
 
 type StderrLogs = Arc<StdMutex<Vec<String>>>;
 
+fn test_cx() -> asupersync::Cx {
+    asupersync::Cx::current().unwrap_or_else(asupersync::Cx::for_testing)
+}
+
+fn build_http_client(builder: reqwest::ClientBuilder) -> Result<reqwest::Client, reqwest::Error> {
+    asupersync_tokio_compat::runtime::with_tokio_context_sync(|| builder.build())
+}
+
+async fn http_get_status(
+    client: reqwest::Client,
+    url: String,
+) -> Result<reqwest::StatusCode, Box<dyn std::error::Error>> {
+    let cx = test_cx();
+    let status = asupersync_tokio_compat::runtime::with_tokio_context(&cx, move || async move {
+        client
+            .get(url)
+            .send()
+            .await
+            .map(|response| response.status())
+    })
+    .await
+    .ok_or_else(|| std::io::Error::other("tokio-compat GET status request cancelled"))??;
+    Ok(status)
+}
+
+async fn http_get_json<T>(
+    client: reqwest::Client,
+    url: String,
+) -> Result<T, Box<dyn std::error::Error>>
+where
+    T: DeserializeOwned + Send + 'static,
+{
+    let cx = test_cx();
+    let value = asupersync_tokio_compat::runtime::with_tokio_context(&cx, move || async move {
+        client
+            .get(url)
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<T>()
+            .await
+    })
+    .await
+    .ok_or_else(|| std::io::Error::other("tokio-compat GET JSON request cancelled"))??;
+    Ok(value)
+}
+
+async fn http_post_json<B, T>(
+    client: reqwest::Client,
+    url: String,
+    body: B,
+) -> Result<T, Box<dyn std::error::Error>>
+where
+    B: serde::Serialize + Send + 'static,
+    T: DeserializeOwned + Send + 'static,
+{
+    let cx = test_cx();
+    let value = asupersync_tokio_compat::runtime::with_tokio_context(&cx, move || async move {
+        client
+            .post(url)
+            .json(&body)
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<T>()
+            .await
+    })
+    .await
+    .ok_or_else(|| std::io::Error::other("tokio-compat POST JSON request cancelled"))??;
+    Ok(value)
+}
+
 struct HttpHostProcess {
     child: Child,
     client: reqwest::Client,
@@ -351,21 +424,54 @@ async fn wait_for_host_readiness(
     child: &mut Child,
     client: &reqwest::Client,
     base_url: &str,
+    stderr_logs: &StderrLogs,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    for _ in 0..80 {
+    let mut last_error = None;
+
+    for _ in 0..40 {
         if let Some(status) = child.try_wait()? {
-            return Err(format!("fcp-host exited early with {status}").into());
+            let raw_stderr = stderr_logs
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
+            return Err(
+                format!("fcp-host exited early with {status}; stderr: {raw_stderr:?}").into(),
+            );
         }
 
-        match client.get(format!("{base_url}/rpc/health")).send().await {
-            Ok(response) if response.status().is_success() => return Ok(()),
-            Ok(_) | Err(_) => fcp_async_core::time::sleep(Duration::from_millis(50)).await,
+        match fcp_async_core::time::timeout(
+            Duration::from_millis(250),
+            http_get_status(client.clone(), format!("{base_url}/rpc/health")),
+        )
+        .await
+        {
+            Ok(Ok(status)) if status.is_success() => return Ok(()),
+            Ok(Ok(status)) => {
+                last_error = Some(format!("health returned {status}"));
+                fcp_async_core::time::sleep(Duration::from_millis(50)).await;
+            }
+            Ok(Err(err)) => {
+                last_error = Some(err.to_string());
+                fcp_async_core::time::sleep(Duration::from_millis(50)).await;
+            }
+            Err(_) => {
+                last_error = Some("health request timed out".to_string());
+                fcp_async_core::time::sleep(Duration::from_millis(50)).await;
+            }
         }
     }
 
     let _ = child.kill();
     let _ = child.wait();
-    Err("timed out waiting for fcp-host readiness".into())
+    let raw_stderr = stderr_logs
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    Err(format!(
+        "timed out waiting for fcp-host readiness; last_error: {}; stderr: {raw_stderr:?}",
+        last_error.unwrap_or_else(|| "none".to_string())
+    )
+    .into())
 }
 
 impl HttpHostProcess {
@@ -388,8 +494,8 @@ impl HttpHostProcess {
             .spawn()?;
         let (stderr_logs, stderr_thread) = spawn_stderr_capture(&mut child)?;
 
-        let client = reqwest::Client::new();
-        wait_for_host_readiness(&mut child, &client, &base_url).await?;
+        let client = build_http_client(reqwest::Client::builder().timeout(Duration::from_secs(2)))?;
+        wait_for_host_readiness(&mut child, &client, &base_url, &stderr_logs).await?;
 
         Ok(Self {
             child,
@@ -439,10 +545,12 @@ impl UnixHostProcess {
             .spawn()?;
         let (stderr_logs, stderr_thread) = spawn_stderr_capture(&mut child)?;
 
-        let client = reqwest::Client::builder()
-            .unix_socket(socket_path)
-            .build()?;
-        wait_for_host_readiness(&mut child, &client, &base_url).await?;
+        let client = build_http_client(
+            reqwest::Client::builder()
+                .timeout(Duration::from_secs(2))
+                .unix_socket(socket_path),
+        )?;
+        wait_for_host_readiness(&mut child, &client, &base_url, &stderr_logs).await?;
 
         Ok(Self {
             child,
@@ -541,79 +649,59 @@ async fn assert_discovery_routes(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let url = |path: &str| format!("{base_url}{path}");
 
-    let health = client
-        .get(url("/rpc/health"))
-        .send()
-        .await?
-        .error_for_status()?
-        .json::<HostHealthResponse>()
-        .await?;
+    let health: HostHealthResponse = http_get_json(client.clone(), url("/rpc/health")).await?;
     assert_eq!(health.status, HostHealthStatus::Healthy);
     assert_eq!(health.connectors.len(), 2);
     assert!(health.connectors.contains_key(connector_a_id));
     assert!(health.connectors.contains_key(connector_b_id));
 
-    let discover_all = client
-        .post(url("/rpc/discover"))
-        .json(&json!({}))
-        .send()
-        .await?
-        .error_for_status()?
-        .json::<DiscoveryResponse>()
-        .await?;
+    let discover_all: DiscoveryResponse =
+        http_post_json(client.clone(), url("/rpc/discover"), json!({})).await?;
     assert_eq!(discover_all.connectors.len(), 2);
 
-    let discover_filtered = client
-        .post(url("/rpc/discover"))
-        .json(&json!({ "category": "primary" }))
-        .send()
-        .await?
-        .error_for_status()?
-        .json::<DiscoveryResponse>()
-        .await?;
+    let discover_filtered: DiscoveryResponse = http_post_json(
+        client.clone(),
+        url("/rpc/discover"),
+        json!({ "category": "primary" }),
+    )
+    .await?;
     assert_eq!(discover_filtered.connectors.len(), 1);
     assert_eq!(discover_filtered.connectors[0].id, *connector_a_id);
 
-    let introspection = client
-        .get(url(&format!("/rpc/introspect/{}", connector_a_id.as_str())))
-        .send()
-        .await?
-        .error_for_status()?
-        .json::<IntrospectionResponse>()
-        .await?;
+    let introspection: IntrospectionResponse = http_get_json(
+        client.clone(),
+        url(&format!("/rpc/introspect/{}", connector_a_id.as_str())),
+    )
+    .await?;
     assert_eq!(introspection.connector.id, *connector_a_id);
     assert_eq!(introspection.tools.len(), 1);
     assert_eq!(introspection.tools[0].name, "test.echo");
 
-    let preflight = client
-        .post(url("/rpc/preflight"))
-        .json(&PreflightRequest {
+    let preflight: PreflightResponse = http_post_json(
+        client.clone(),
+        url("/rpc/preflight"),
+        PreflightRequest {
             connector_id: connector_a_id.clone(),
             operation: "test.echo".to_string(),
             params: Some(json!({ "message": "hello" })),
             principal: Some("agent:test".to_string()),
             zone_id: Some(ZoneId::work()),
-        })
-        .send()
-        .await?
-        .error_for_status()?
-        .json::<PreflightResponse>()
-        .await?;
+        },
+    )
+    .await?;
     assert!(preflight.allowed);
     assert!(preflight.reason.is_none());
 
-    let doctor = client
-        .post(url("/doctor"))
-        .json(&json!({
+    let doctor: serde_json::Value = http_post_json(
+        client.clone(),
+        url("/doctor"),
+        json!({
             "zone_id": "z:work",
             "connectors": [connector_b_id.as_str()],
             "self_check": true,
-        }))
-        .send()
-        .await?
-        .error_for_status()?
-        .json::<serde_json::Value>()
-        .await?;
+        }),
+    )
+    .await?;
     assert_eq!(doctor["overall_status"], "OK");
     assert_eq!(
         doctor["connector_self_checks"]

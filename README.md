@@ -495,6 +495,24 @@ ConnectorStateObject {
 
 **Single-Writer Semantics**: Connectors declaring `singleton_writer = true` use execution leases to ensure only one node writes state at a time. Leases are coordinated via HRW (rendezvous hashing) to deterministically select a coordinator from online nodes, with quorum signatures for distributed issuance. This prevents double-polling and cursor conflicts while surviving coordinator failures.
 
+### Agent API Caching
+
+`fcp-host` exposes cache metadata on agent-facing discovery surfaces so clients can avoid refetching unchanged connector metadata:
+
+- `GET /rpc/discover`
+- `GET /rpc/introspect/{connector_id}`
+
+Responses include standard HTTP validators:
+
+- `ETag`
+- `Last-Modified`
+- `Cache-Control`
+- `Vary: If-None-Match, If-Modified-Since`
+
+Clients can revalidate with either transport headers (`If-None-Match`, `If-Modified-Since`) or the JSON-RPC-style `_cache` object carried in the request payload. When the cached view is still valid, the host returns the normal JSON body shape with `meta.status = 304` and refreshed cache metadata instead of switching the HTTP transport status away from `200 OK`. This keeps the agent API JSON-RPC-friendly while still giving agents deterministic cache validation semantics.
+
+`ETag` values are strong validators derived from canonical response content. They change when discovery or introspection content changes and remain stable across repeated reads of unchanged registry state. `Cache-Control` currently advertises both `max-age` and `stale-while-revalidate`, so agents can serve a warm cache immediately while refreshing metadata in the background.
+
 ---
 
 ## Security Model

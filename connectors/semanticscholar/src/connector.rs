@@ -3,7 +3,8 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use fcp_core::{BaseConnector, ConnectorId, FcpError, FcpResult};
+use fcp_core::{BaseConnector, ConnectorId, FcpError, FcpResult, SelfCheckReport};
+use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tracing::{info, instrument};
@@ -12,6 +13,11 @@ use crate::{
     client::{DEFAULT_BASE_URL, SemanticScholarAuth, SemanticScholarClient},
     error::SemanticScholarError,
 };
+
+const MAX_PAPER_SEARCH_LIMIT: i64 = 100;
+const MAX_GRAPH_LIST_LIMIT: i64 = 1000;
+const MAX_RECOMMENDATIONS_LIMIT: i64 = 500;
+const MIN_LIMIT: i64 = 1;
 
 /// Parsed and validated Semantic Scholar connector configuration.
 #[derive(Debug, Clone)]
@@ -39,10 +45,74 @@ impl SemanticScholarConfig {
             .get("base_url")
             .and_then(serde_json::Value::as_str)
             .unwrap_or(DEFAULT_BASE_URL)
+            .trim()
+            .trim_end_matches('/')
             .to_string();
 
         Ok(Self { auth, base_url })
     }
+
+    fn auth_mode(&self) -> &'static str {
+        if self.auth.has_key() {
+            "api_key"
+        } else {
+            "public"
+        }
+    }
+
+    fn rate_limit_profile(&self) -> &'static str {
+        if self.auth.has_key() {
+            "api_key: 1 request/second sustained"
+        } else {
+            "public: 100 requests/5 minutes"
+        }
+    }
+
+    fn provisioning_readiness(&self) -> ProvisioningReadiness {
+        let (network_ok, network_message) = base_url_policy(&self.base_url);
+
+        ProvisioningReadiness {
+            auth_mode: self.auth_mode(),
+            api_key_configured: self.auth.has_key(),
+            network_ok,
+            network_message,
+            rate_limit_profile: self.rate_limit_profile(),
+            base_url: self.base_url.clone(),
+            request_bounds: RequestBounds::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct RequestBounds {
+    paper_search_limit_max: i64,
+    paper_graph_limit_max: i64,
+    paper_recommendations_limit_max: i64,
+    author_papers_limit_max: i64,
+    offset_min: i64,
+}
+
+impl Default for RequestBounds {
+    fn default() -> Self {
+        Self {
+            paper_search_limit_max: MAX_PAPER_SEARCH_LIMIT,
+            paper_graph_limit_max: MAX_GRAPH_LIST_LIMIT,
+            paper_recommendations_limit_max: MAX_RECOMMENDATIONS_LIMIT,
+            author_papers_limit_max: MAX_GRAPH_LIST_LIMIT,
+            offset_min: 0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ProvisioningReadiness {
+    auth_mode: &'static str,
+    api_key_configured: bool,
+    network_ok: bool,
+    network_message: String,
+    rate_limit_profile: &'static str,
+    base_url: String,
+    request_bounds: RequestBounds,
 }
 
 /// Doctor check result.
@@ -82,6 +152,14 @@ impl DoctorResult {
             DoctorStatus::Healthy
         };
         Self { status, checks }
+    }
+
+    fn status_label(&self) -> &'static str {
+        match self.status {
+            DoctorStatus::Healthy => "healthy",
+            DoctorStatus::Degraded => "degraded",
+            DoctorStatus::Unhealthy => "unhealthy",
+        }
     }
 }
 
@@ -124,7 +202,21 @@ impl SemanticScholarConnector {
         params: serde_json::Value,
     ) -> FcpResult<serde_json::Value> {
         let config = SemanticScholarConfig::from_params(&params)?;
-        info!(auth = %config.auth.redacted_label(), base_url = %config.base_url, "Configuring Semantic Scholar connector");
+        let provisioning = config.provisioning_readiness();
+        let status = if provisioning.network_ok {
+            "configured"
+        } else {
+            "configured_with_warnings"
+        };
+        info!(
+            event = "semanticscholar.provisioning.configure",
+            auth = %config.auth.redacted_label(),
+            auth_mode = provisioning.auth_mode,
+            network_ok = provisioning.network_ok,
+            rate_limit_profile = provisioning.rate_limit_profile,
+            base_url = %config.base_url,
+            "Configuring Semantic Scholar connector"
+        );
 
         let client = SemanticScholarClient::new(config.auth.clone(), Some(&config.base_url))
             .map_err(|e| e.to_fcp_error())?;
@@ -132,7 +224,10 @@ impl SemanticScholarConnector {
         self.client = Some(Arc::new(client));
         self.config = Some(config);
         self.base.set_configured(true);
-        Ok(json!({}))
+        Ok(json!({
+            "status": status,
+            "provisioning": provisioning,
+        }))
     }
 
     /// Handle the `handshake` method.
@@ -170,6 +265,10 @@ impl SemanticScholarConnector {
     pub async fn handle_health(&self) -> FcpResult<serde_json::Value> {
         let configured = self.config.is_some();
         let handshaken = self.session_id.is_some();
+        let provisioning = self
+            .config
+            .as_ref()
+            .map(SemanticScholarConfig::provisioning_readiness);
 
         let status = if configured && handshaken {
             "healthy"
@@ -185,70 +284,74 @@ impl SemanticScholarConnector {
             "handshaken": handshaken,
             "requests": self.request_count.load(Ordering::Relaxed),
             "errors": self.error_count.load(Ordering::Relaxed),
+            "provisioning": provisioning,
         }))
     }
 
     /// Handle the `doctor` method.
     pub async fn handle_doctor(&self) -> FcpResult<serde_json::Value> {
-        let mut checks = Vec::new();
-
-        checks.push(DoctorCheck {
-            name: "configuration".into(),
-            passed: self.config.is_some(),
-            message: if self.config.is_none() {
-                Some("Not configured — call configure first".into())
-            } else {
-                None
-            },
-            critical: true,
-        });
-
-        checks.push(DoctorCheck {
-            name: "client_initialized".into(),
-            passed: self.client.is_some(),
-            message: if self.client.is_none() {
-                Some("API client not initialized".into())
-            } else {
-                None
-            },
-            critical: true,
-        });
-
-        let handshaken = self.session_id.is_some();
-        checks.push(DoctorCheck {
-            name: "handshake".into(),
-            passed: handshaken,
-            message: if handshaken {
-                None
-            } else {
-                Some("Handshake not completed".into())
-            },
-            critical: false,
-        });
-
-        let has_key = self.config.as_ref().is_some_and(|c| c.auth.has_key());
-        checks.push(DoctorCheck {
-            name: "api_key".into(),
-            passed: has_key,
-            message: if has_key {
-                None
-            } else {
-                Some("No API key configured — using free tier rate limits".into())
-            },
-            critical: false,
-        });
-
-        let result = DoctorResult::from_checks(checks);
+        let result = self.build_doctor_result();
+        let failed_checks = result.checks.iter().filter(|check| !check.passed).count();
+        info!(
+            event = "semanticscholar.provisioning.doctor",
+            status = result.status_label(),
+            check_count = result.checks.len(),
+            failed_checks,
+            "Semantic Scholar doctor checks completed"
+        );
         Ok(serde_json::to_value(result).unwrap_or_else(|_| json!({"status": "error"})))
     }
 
     /// Handle the `self_check` method.
     pub async fn handle_self_check(&self) -> FcpResult<serde_json::Value> {
-        Ok(json!({
-            "connector_id": "fcp.semanticscholar",
-            "version": "0.1.0",
-            "status": if self.config.is_some() { "ready" } else { "unconfigured" },
-        }))
+        let Some(config) = &self.config else {
+            let mut report =
+                SelfCheckReport::degraded("not_configured", "Connector is not configured");
+            report.details = Some(json!({ "request_bounds": RequestBounds::default() }));
+            return self.serialize_self_check_report(report);
+        };
+
+        let readiness = config.provisioning_readiness();
+        if !readiness.network_ok {
+            let mut report = SelfCheckReport::failed(
+                "network_constraints_invalid",
+                readiness.network_message.clone(),
+            );
+            report.details = Some(json!({ "provisioning": readiness }));
+            return self.serialize_self_check_report(report);
+        }
+
+        let Some(client) = &self.client else {
+            let mut report = SelfCheckReport::failed(
+                "client_missing",
+                "API client not initialized; re-run configure",
+            );
+            report.details = Some(json!({ "provisioning": readiness }));
+            return self.serialize_self_check_report(report);
+        };
+
+        let mut report = match client.health_check().await {
+            Ok(()) => {
+                if config.auth.has_key() {
+                    SelfCheckReport::ok()
+                } else {
+                    SelfCheckReport::degraded(
+                        "public_rate_limits",
+                        "No API key configured; connector is usable but limited to public Semantic Scholar rate limits",
+                    )
+                }
+            }
+            Err(error) => {
+                if error.is_retryable() {
+                    SelfCheckReport::degraded("connectivity_retryable", error.to_string())
+                } else {
+                    SelfCheckReport::failed("connectivity_failed", error.to_string())
+                }
+            }
+        };
+        report.details = Some(json!({ "provisioning": readiness }));
+
+        self.serialize_self_check_report(report)
     }
 
     /// Handle the `introspect` method.
@@ -333,6 +436,7 @@ impl SemanticScholarConnector {
         info!("Semantic Scholar connector shutting down");
         self.client = None;
         self.config = None;
+        self.session_id = None;
         self.base.set_configured(false);
         self.base.set_handshaken(false);
         Ok(json!({}))
@@ -346,9 +450,9 @@ impl SemanticScholarConnector {
         input: &serde_json::Value,
     ) -> Result<serde_json::Value, SemanticScholarError> {
         let query = require_str(input, "query")?;
-        let limit = input.get("limit").and_then(serde_json::Value::as_i64);
-        let offset = input.get("offset").and_then(serde_json::Value::as_i64);
-        let fields = input.get("fields").and_then(serde_json::Value::as_str);
+        let limit = bounded_limit(input, "limit", MAX_PAPER_SEARCH_LIMIT)?;
+        let offset = non_negative_i64_field(input, "offset")?;
+        let fields = optional_string_field(input, "fields")?;
         client.search_papers(query, limit, offset, fields).await
     }
 
@@ -358,7 +462,7 @@ impl SemanticScholarConnector {
         input: &serde_json::Value,
     ) -> Result<serde_json::Value, SemanticScholarError> {
         let paper_id = require_str(input, "paper_id")?;
-        let fields = input.get("fields").and_then(serde_json::Value::as_str);
+        let fields = optional_string_field(input, "fields")?;
         client.get_paper(paper_id, fields).await
     }
 
@@ -368,8 +472,8 @@ impl SemanticScholarConnector {
         input: &serde_json::Value,
     ) -> Result<serde_json::Value, SemanticScholarError> {
         let paper_id = require_str(input, "paper_id")?;
-        let limit = input.get("limit").and_then(serde_json::Value::as_i64);
-        let fields = input.get("fields").and_then(serde_json::Value::as_str);
+        let limit = bounded_limit(input, "limit", MAX_GRAPH_LIST_LIMIT)?;
+        let fields = optional_string_field(input, "fields")?;
         client.get_paper_citations(paper_id, limit, fields).await
     }
 
@@ -379,8 +483,8 @@ impl SemanticScholarConnector {
         input: &serde_json::Value,
     ) -> Result<serde_json::Value, SemanticScholarError> {
         let paper_id = require_str(input, "paper_id")?;
-        let limit = input.get("limit").and_then(serde_json::Value::as_i64);
-        let fields = input.get("fields").and_then(serde_json::Value::as_str);
+        let limit = bounded_limit(input, "limit", MAX_GRAPH_LIST_LIMIT)?;
+        let fields = optional_string_field(input, "fields")?;
         client.get_paper_references(paper_id, limit, fields).await
     }
 
@@ -390,8 +494,8 @@ impl SemanticScholarConnector {
         input: &serde_json::Value,
     ) -> Result<serde_json::Value, SemanticScholarError> {
         let paper_id = require_str(input, "paper_id")?;
-        let limit = input.get("limit").and_then(serde_json::Value::as_i64);
-        let fields = input.get("fields").and_then(serde_json::Value::as_str);
+        let limit = bounded_limit(input, "limit", MAX_RECOMMENDATIONS_LIMIT)?;
+        let fields = optional_string_field(input, "fields")?;
         client
             .get_paper_recommendations(paper_id, limit, fields)
             .await
@@ -403,7 +507,7 @@ impl SemanticScholarConnector {
         input: &serde_json::Value,
     ) -> Result<serde_json::Value, SemanticScholarError> {
         let author_id = require_str(input, "author_id")?;
-        let fields = input.get("fields").and_then(serde_json::Value::as_str);
+        let fields = optional_string_field(input, "fields")?;
         client.get_author(author_id, fields).await
     }
 
@@ -413,9 +517,102 @@ impl SemanticScholarConnector {
         input: &serde_json::Value,
     ) -> Result<serde_json::Value, SemanticScholarError> {
         let author_id = require_str(input, "author_id")?;
-        let limit = input.get("limit").and_then(serde_json::Value::as_i64);
-        let fields = input.get("fields").and_then(serde_json::Value::as_str);
+        let limit = bounded_limit(input, "limit", MAX_GRAPH_LIST_LIMIT)?;
+        let fields = optional_string_field(input, "fields")?;
         client.get_author_papers(author_id, limit, fields).await
+    }
+
+    fn build_doctor_result(&self) -> DoctorResult {
+        let mut checks = Vec::new();
+
+        checks.push(DoctorCheck {
+            name: "configuration".into(),
+            passed: self.config.is_some(),
+            message: Some(if self.config.is_some() {
+                "Configuration loaded".into()
+            } else {
+                "Not configured — call configure first".into()
+            }),
+            critical: true,
+        });
+
+        checks.push(DoctorCheck {
+            name: "client_initialized".into(),
+            passed: self.client.is_some(),
+            message: Some(if self.client.is_some() {
+                "API client initialized".into()
+            } else {
+                "API client not initialized".into()
+            }),
+            critical: true,
+        });
+
+        let Some(config) = &self.config else {
+            return DoctorResult::from_checks(checks);
+        };
+
+        let readiness = config.provisioning_readiness();
+        checks.push(DoctorCheck {
+            name: "network_constraints".into(),
+            passed: readiness.network_ok,
+            message: Some(readiness.network_message),
+            critical: true,
+        });
+
+        checks.push(DoctorCheck {
+            name: "auth_mode".into(),
+            passed: true,
+            message: Some(format!("Auth mode: {}", readiness.auth_mode)),
+            critical: false,
+        });
+
+        let handshaken = self.session_id.is_some();
+        checks.push(DoctorCheck {
+            name: "handshake".into(),
+            passed: handshaken,
+            message: Some(if handshaken {
+                "Handshake completed".into()
+            } else {
+                "Handshake not completed".into()
+            }),
+            critical: false,
+        });
+
+        checks.push(DoctorCheck {
+            name: "api_key".into(),
+            passed: readiness.api_key_configured,
+            message: Some(if readiness.api_key_configured {
+                "API key configured for higher Semantic Scholar throughput".into()
+            } else {
+                "No API key configured — using public tier rate limits".into()
+            }),
+            critical: false,
+        });
+
+        checks.push(DoctorCheck {
+            name: "request_bounds".into(),
+            passed: true,
+            message: Some(format!(
+                "paper.search limit <= {}, citations/references/author.papers limit <= {}, recommendations limit <= {}, offset >= 0",
+                MAX_PAPER_SEARCH_LIMIT, MAX_GRAPH_LIST_LIMIT, MAX_RECOMMENDATIONS_LIMIT
+            )),
+            critical: false,
+        });
+
+        DoctorResult::from_checks(checks)
+    }
+
+    fn serialize_self_check_report(&self, report: SelfCheckReport) -> FcpResult<serde_json::Value> {
+        info!(
+            event = "semanticscholar.provisioning.self_check",
+            status = ?report.status,
+            reason_code = ?report.reason_code,
+            "Semantic Scholar self-check completed"
+        );
+
+        serde_json::to_value(report).map_err(|e| FcpError::Internal {
+            message: format!("Failed to serialize self-check report: {e}"),
+        })
     }
 }
 
@@ -431,6 +628,104 @@ fn require_str<'a>(
             status_code: 400,
             message: format!("Missing required field: {field}"),
         })
+}
+
+fn optional_string_field<'a>(
+    input: &'a serde_json::Value,
+    field: &str,
+) -> Result<Option<&'a str>, SemanticScholarError> {
+    match input.get(field) {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(value) => value.as_str().map(Some).ok_or_else(|| SemanticScholarError::Api {
+            status_code: 400,
+            message: format!("Field {field} must be a string"),
+        }),
+    }
+}
+
+fn optional_i64_field(
+    input: &serde_json::Value,
+    field: &str,
+) -> Result<Option<i64>, SemanticScholarError> {
+    match input.get(field) {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(value) => value.as_i64().map(Some).ok_or_else(|| SemanticScholarError::Api {
+            status_code: 400,
+            message: format!("Field {field} must be an integer"),
+        }),
+    }
+}
+
+fn bounded_limit(
+    input: &serde_json::Value,
+    field: &str,
+    max: i64,
+) -> Result<Option<i64>, SemanticScholarError> {
+    let Some(value) = optional_i64_field(input, field)? else {
+        return Ok(None);
+    };
+
+    if !(MIN_LIMIT..=max).contains(&value) {
+        return Err(SemanticScholarError::Api {
+            status_code: 400,
+            message: format!("Field {field} must be between {MIN_LIMIT} and {max}"),
+        });
+    }
+
+    Ok(Some(value))
+}
+
+fn non_negative_i64_field(
+    input: &serde_json::Value,
+    field: &str,
+) -> Result<Option<i64>, SemanticScholarError> {
+    let Some(value) = optional_i64_field(input, field)? else {
+        return Ok(None);
+    };
+
+    if value < 0 {
+        return Err(SemanticScholarError::Api {
+            status_code: 400,
+            message: format!("Field {field} must be greater than or equal to 0"),
+        });
+    }
+
+    Ok(Some(value))
+}
+
+fn base_url_policy(base_url: &str) -> (bool, String) {
+    let parsed = match Url::parse(base_url) {
+        Ok(parsed) => parsed,
+        Err(error) => {
+            return (false, format!("base_url could not be parsed: {error}"));
+        }
+    };
+
+    let Some(host) = parsed.host_str() else {
+        return (false, "base_url must include a host".into());
+    };
+
+    let local = is_local_test_host(host);
+    let allowed_host = host.eq_ignore_ascii_case("api.semanticscholar.org") || local;
+    let secure_or_local = parsed.scheme() == "https" || local;
+
+    if allowed_host && secure_or_local {
+        (
+            true,
+            format!("Endpoint accepted by policy checks: {base_url}"),
+        )
+    } else {
+        (
+            false,
+            format!(
+                "Endpoint must use https and api.semanticscholar.org (localhost/127.0.0.1/::1 allowed for tests): {base_url}"
+            ),
+        )
+    }
+}
+
+fn is_local_test_host(host: &str) -> bool {
+    matches!(host, "localhost" | "127.0.0.1" | "::1")
 }
 
 /// Build the operations info for introspection.
@@ -586,6 +881,40 @@ mod tests {
         assert!(!config.auth.has_key());
     }
 
+    #[test]
+    fn config_trims_trailing_slash_from_base_url() {
+        let config = SemanticScholarConfig::from_params(&json!({
+            "base_url": "https://api.semanticscholar.org/graph/v1/",
+        }))
+        .unwrap();
+        assert_eq!(config.base_url, "https://api.semanticscholar.org/graph/v1");
+    }
+
+    #[test]
+    fn provisioning_readiness_public_mode() {
+        let config = SemanticScholarConfig::from_params(&json!({})).unwrap();
+        let readiness = config.provisioning_readiness();
+        assert_eq!(readiness.auth_mode, "public");
+        assert!(!readiness.api_key_configured);
+        assert!(readiness.network_ok);
+        assert_eq!(readiness.request_bounds.paper_search_limit_max, 100);
+    }
+
+    #[test]
+    fn provisioning_readiness_api_key_mode() {
+        let config = SemanticScholarConfig::from_params(&json!({
+            "api_key": "test-key",
+        }))
+        .unwrap();
+        let readiness = config.provisioning_readiness();
+        assert_eq!(readiness.auth_mode, "api_key");
+        assert!(readiness.api_key_configured);
+        assert_eq!(
+            readiness.rate_limit_profile,
+            "api_key: 1 request/second sustained"
+        );
+    }
+
     // -- require_str tests --
 
     #[test]
@@ -622,6 +951,50 @@ mod tests {
     fn require_str_boolean_value() {
         let input = json!({"query": true});
         assert!(require_str(&input, "query").is_err());
+    }
+
+    #[test]
+    fn optional_string_field_rejects_non_string() {
+        let input = json!({"fields": 123});
+        assert!(optional_string_field(&input, "fields").is_err());
+    }
+
+    #[test]
+    fn bounded_limit_rejects_zero() {
+        let input = json!({"limit": 0});
+        assert!(bounded_limit(&input, "limit", MAX_PAPER_SEARCH_LIMIT).is_err());
+    }
+
+    #[test]
+    fn bounded_limit_rejects_value_above_max() {
+        let input = json!({"limit": MAX_PAPER_SEARCH_LIMIT + 1});
+        assert!(bounded_limit(&input, "limit", MAX_PAPER_SEARCH_LIMIT).is_err());
+    }
+
+    #[test]
+    fn non_negative_i64_field_rejects_negative_value() {
+        let input = json!({"offset": -1});
+        assert!(non_negative_i64_field(&input, "offset").is_err());
+    }
+
+    #[test]
+    fn base_url_policy_accepts_semantic_scholar_https() {
+        let (ok, message) = base_url_policy("https://api.semanticscholar.org/graph/v1");
+        assert!(ok);
+        assert!(message.contains("accepted"));
+    }
+
+    #[test]
+    fn base_url_policy_accepts_localhost() {
+        let (ok, _) = base_url_policy("http://localhost:8080");
+        assert!(ok);
+    }
+
+    #[test]
+    fn base_url_policy_rejects_http_non_local_host() {
+        let (ok, message) = base_url_policy("http://api.semanticscholar.org/graph/v1");
+        assert!(!ok);
+        assert!(message.contains("must use https"));
     }
 
     // -- operations_info tests --

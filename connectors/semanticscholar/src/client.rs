@@ -166,6 +166,21 @@ impl SemanticScholarClient {
         self.handle_response(resp).await
     }
 
+    /// Run a lightweight connectivity probe against the paper search endpoint.
+    pub async fn health_check(&self) -> SemanticScholarResult<()> {
+        self.get(
+            "/paper/search",
+            Some(&[
+                ("query", "transformers".to_string()),
+                ("fields", "paperId".to_string()),
+                ("limit", "1".to_string()),
+                ("offset", "0".to_string()),
+            ]),
+        )
+        .await
+        .map(|_| ())
+    }
+
     // -- Papers --
 
     /// Search for papers by keyword.

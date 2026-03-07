@@ -2979,4 +2979,1379 @@ mod tests {
             assert_eq!(shape, decoded);
         }
     }
+
+    // ========================================================================
+    // NEW: Float encoding roundtrips
+    // ========================================================================
+
+    #[test]
+    fn roundtrip_f64_positive() {
+        let schema = SchemaId::new("fcp.test", "F64", Version::new(1, 0, 0));
+        let val: f64 = 1.23;
+        let bytes = CanonicalSerializer::serialize(&val, &schema).unwrap();
+        let decoded: f64 = CanonicalSerializer::deserialize(&bytes, &schema).unwrap();
+        assert!((decoded - val).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn roundtrip_f64_negative() {
+        let schema = SchemaId::new("fcp.test", "F64Neg", Version::new(1, 0, 0));
+        let val: f64 = -9.87;
+        let bytes = CanonicalSerializer::serialize(&val, &schema).unwrap();
+        let decoded: f64 = CanonicalSerializer::deserialize(&bytes, &schema).unwrap();
+        assert!((decoded - val).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn roundtrip_f64_zero() {
+        let schema = SchemaId::new("fcp.test", "F64Zero", Version::new(1, 0, 0));
+        let val: f64 = 0.0;
+        let bytes = CanonicalSerializer::serialize(&val, &schema).unwrap();
+        let decoded: f64 = CanonicalSerializer::deserialize(&bytes, &schema).unwrap();
+        assert!((decoded - val).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn roundtrip_f64_max() {
+        let schema = SchemaId::new("fcp.test", "F64Max", Version::new(1, 0, 0));
+        let val: f64 = f64::MAX;
+        let bytes = CanonicalSerializer::serialize(&val, &schema).unwrap();
+        let decoded: f64 = CanonicalSerializer::deserialize(&bytes, &schema).unwrap();
+        assert!((decoded - val).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn roundtrip_f64_min_positive() {
+        let schema = SchemaId::new("fcp.test", "F64MinPos", Version::new(1, 0, 0));
+        let val: f64 = f64::MIN_POSITIVE;
+        let bytes = CanonicalSerializer::serialize(&val, &schema).unwrap();
+        let decoded: f64 = CanonicalSerializer::deserialize(&bytes, &schema).unwrap();
+        assert!((decoded - val).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn roundtrip_f64_infinity() {
+        let schema = SchemaId::new("fcp.test", "F64Inf", Version::new(1, 0, 0));
+        let val: f64 = f64::INFINITY;
+        let bytes = CanonicalSerializer::serialize(&val, &schema).unwrap();
+        let decoded: f64 = CanonicalSerializer::deserialize(&bytes, &schema).unwrap();
+        assert!(decoded.is_infinite() && decoded.is_sign_positive());
+    }
+
+    #[test]
+    fn roundtrip_f64_neg_infinity() {
+        let schema = SchemaId::new("fcp.test", "F64NegInf", Version::new(1, 0, 0));
+        let val: f64 = f64::NEG_INFINITY;
+        let bytes = CanonicalSerializer::serialize(&val, &schema).unwrap();
+        let decoded: f64 = CanonicalSerializer::deserialize(&bytes, &schema).unwrap();
+        assert!(decoded.is_infinite() && decoded.is_sign_negative());
+    }
+
+    #[test]
+    fn roundtrip_f64_nan() {
+        let schema = SchemaId::new("fcp.test", "F64NaN", Version::new(1, 0, 0));
+        let val: f64 = f64::NAN;
+        let bytes = CanonicalSerializer::serialize(&val, &schema).unwrap();
+        let decoded: f64 = CanonicalSerializer::deserialize(&bytes, &schema).unwrap();
+        assert!(decoded.is_nan());
+    }
+
+    #[test]
+    fn roundtrip_f32_value() {
+        let schema = SchemaId::new("fcp.test", "F32", Version::new(1, 0, 0));
+        let val: f32 = 1.23;
+        let bytes = CanonicalSerializer::serialize(&val, &schema).unwrap();
+        let decoded: f32 = CanonicalSerializer::deserialize(&bytes, &schema).unwrap();
+        assert!((decoded - val).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn roundtrip_f64_subnormal() {
+        let schema = SchemaId::new("fcp.test", "F64Sub", Version::new(1, 0, 0));
+        let val: f64 = 5e-324_f64; // smallest positive subnormal
+        let bytes = CanonicalSerializer::serialize(&val, &schema).unwrap();
+        let decoded: f64 = CanonicalSerializer::deserialize(&bytes, &schema).unwrap();
+        assert!((decoded - val).abs() < f64::EPSILON);
+    }
+
+    // ========================================================================
+    // NEW: Unicode and special string roundtrips
+    // ========================================================================
+
+    #[test]
+    fn roundtrip_string_unicode_emoji() {
+        let schema = SchemaId::new("fcp.test", "Str", Version::new(1, 0, 0));
+        let val = "Hello \u{1F600}\u{1F389}\u{1F680}".to_string();
+        let bytes = CanonicalSerializer::serialize(&val, &schema).unwrap();
+        let decoded: String = CanonicalSerializer::deserialize(&bytes, &schema).unwrap();
+        assert_eq!(decoded, val);
+    }
+
+    #[test]
+    fn roundtrip_string_cjk_characters() {
+        let schema = SchemaId::new("fcp.test", "CJK", Version::new(1, 0, 0));
+        let val = "\u{4e16}\u{754c}\u{4f60}\u{597d}".to_string(); // 世界你好
+        let bytes = CanonicalSerializer::serialize(&val, &schema).unwrap();
+        let decoded: String = CanonicalSerializer::deserialize(&bytes, &schema).unwrap();
+        assert_eq!(decoded, val);
+    }
+
+    #[test]
+    fn roundtrip_string_with_newlines_and_tabs() {
+        let schema = SchemaId::new("fcp.test", "Whitespace", Version::new(1, 0, 0));
+        let val = "line1\nline2\ttab\rcarriage".to_string();
+        let bytes = CanonicalSerializer::serialize(&val, &schema).unwrap();
+        let decoded: String = CanonicalSerializer::deserialize(&bytes, &schema).unwrap();
+        assert_eq!(decoded, val);
+    }
+
+    #[test]
+    fn roundtrip_string_with_backslash_and_quotes() {
+        let schema = SchemaId::new("fcp.test", "Escaped", Version::new(1, 0, 0));
+        let val = r#"path\to\"file""#.to_string();
+        let bytes = CanonicalSerializer::serialize(&val, &schema).unwrap();
+        let decoded: String = CanonicalSerializer::deserialize(&bytes, &schema).unwrap();
+        assert_eq!(decoded, val);
+    }
+
+    #[test]
+    fn roundtrip_long_string_256_bytes() {
+        let schema = SchemaId::new("fcp.test", "LongStr", Version::new(1, 0, 0));
+        let val = "x".repeat(256);
+        let bytes = CanonicalSerializer::serialize(&val, &schema).unwrap();
+        let decoded: String = CanonicalSerializer::deserialize(&bytes, &schema).unwrap();
+        assert_eq!(decoded, val);
+    }
+
+    #[test]
+    fn roundtrip_long_string_65536_bytes() {
+        let schema = SchemaId::new("fcp.test", "VeryLong", Version::new(1, 0, 0));
+        let val = "y".repeat(65536);
+        let bytes = CanonicalSerializer::serialize(&val, &schema).unwrap();
+        let decoded: String = CanonicalSerializer::deserialize(&bytes, &schema).unwrap();
+        assert_eq!(decoded, val);
+    }
+
+    // ========================================================================
+    // NEW: Byte array edge cases
+    // ========================================================================
+
+    #[test]
+    fn roundtrip_empty_byte_array() {
+        let schema = SchemaId::new("fcp.test", "EmptyBytes", Version::new(1, 0, 0));
+        let val: Vec<u8> = vec![];
+        let bytes = CanonicalSerializer::serialize(&val, &schema).unwrap();
+        let decoded: Vec<u8> = CanonicalSerializer::deserialize(&bytes, &schema).unwrap();
+        assert_eq!(decoded, val);
+    }
+
+    #[test]
+    fn roundtrip_byte_array_all_zeros() {
+        let schema = SchemaId::new("fcp.test", "ZeroBytes", Version::new(1, 0, 0));
+        let val: Vec<u8> = vec![0; 100];
+        let bytes = CanonicalSerializer::serialize(&val, &schema).unwrap();
+        let decoded: Vec<u8> = CanonicalSerializer::deserialize(&bytes, &schema).unwrap();
+        assert_eq!(decoded, val);
+    }
+
+    #[test]
+    fn roundtrip_byte_array_all_ff() {
+        let schema = SchemaId::new("fcp.test", "FFBytes", Version::new(1, 0, 0));
+        let val: Vec<u8> = vec![0xFF; 100];
+        let bytes = CanonicalSerializer::serialize(&val, &schema).unwrap();
+        let decoded: Vec<u8> = CanonicalSerializer::deserialize(&bytes, &schema).unwrap();
+        assert_eq!(decoded, val);
+    }
+
+    #[test]
+    fn roundtrip_byte_array_single_byte() {
+        let schema = SchemaId::new("fcp.test", "OneByte", Version::new(1, 0, 0));
+        let val: Vec<u8> = vec![0x42];
+        let bytes = CanonicalSerializer::serialize(&val, &schema).unwrap();
+        let decoded: Vec<u8> = CanonicalSerializer::deserialize(&bytes, &schema).unwrap();
+        assert_eq!(decoded, val);
+    }
+
+    // ========================================================================
+    // NEW: Integer boundary roundtrips
+    // ========================================================================
+
+    #[test]
+    fn roundtrip_u8_min_and_max() {
+        let schema = SchemaId::new("fcp.test", "U8Bounds", Version::new(1, 0, 0));
+        for val in [u8::MIN, u8::MAX] {
+            let bytes = CanonicalSerializer::serialize(&val, &schema).unwrap();
+            let decoded: u8 = CanonicalSerializer::deserialize(&bytes, &schema).unwrap();
+            assert_eq!(decoded, val);
+        }
+    }
+
+    #[test]
+    fn roundtrip_u16_min_and_max() {
+        let schema = SchemaId::new("fcp.test", "U16Bounds", Version::new(1, 0, 0));
+        for val in [u16::MIN, u16::MAX] {
+            let bytes = CanonicalSerializer::serialize(&val, &schema).unwrap();
+            let decoded: u16 = CanonicalSerializer::deserialize(&bytes, &schema).unwrap();
+            assert_eq!(decoded, val);
+        }
+    }
+
+    #[test]
+    fn roundtrip_u32_min_and_max() {
+        let schema = SchemaId::new("fcp.test", "U32Bounds", Version::new(1, 0, 0));
+        for val in [u32::MIN, u32::MAX] {
+            let bytes = CanonicalSerializer::serialize(&val, &schema).unwrap();
+            let decoded: u32 = CanonicalSerializer::deserialize(&bytes, &schema).unwrap();
+            assert_eq!(decoded, val);
+        }
+    }
+
+    #[test]
+    fn roundtrip_u64_min_and_max() {
+        let schema = SchemaId::new("fcp.test", "U64Bounds", Version::new(1, 0, 0));
+        for val in [u64::MIN, u64::MAX] {
+            let bytes = CanonicalSerializer::serialize(&val, &schema).unwrap();
+            let decoded: u64 = CanonicalSerializer::deserialize(&bytes, &schema).unwrap();
+            assert_eq!(decoded, val);
+        }
+    }
+
+    #[test]
+    fn roundtrip_i8_min_and_max() {
+        let schema = SchemaId::new("fcp.test", "I8Bounds", Version::new(1, 0, 0));
+        for val in [i8::MIN, i8::MAX] {
+            let bytes = CanonicalSerializer::serialize(&val, &schema).unwrap();
+            let decoded: i8 = CanonicalSerializer::deserialize(&bytes, &schema).unwrap();
+            assert_eq!(decoded, val);
+        }
+    }
+
+    #[test]
+    fn roundtrip_i16_min_and_max() {
+        let schema = SchemaId::new("fcp.test", "I16Bounds", Version::new(1, 0, 0));
+        for val in [i16::MIN, i16::MAX] {
+            let bytes = CanonicalSerializer::serialize(&val, &schema).unwrap();
+            let decoded: i16 = CanonicalSerializer::deserialize(&bytes, &schema).unwrap();
+            assert_eq!(decoded, val);
+        }
+    }
+
+    #[test]
+    fn roundtrip_i32_min_and_max() {
+        let schema = SchemaId::new("fcp.test", "I32Bounds", Version::new(1, 0, 0));
+        for val in [i32::MIN, i32::MAX] {
+            let bytes = CanonicalSerializer::serialize(&val, &schema).unwrap();
+            let decoded: i32 = CanonicalSerializer::deserialize(&bytes, &schema).unwrap();
+            assert_eq!(decoded, val);
+        }
+    }
+
+    #[test]
+    fn roundtrip_i64_min_and_max_canonical() {
+        let schema = SchemaId::new("fcp.test", "I64Bounds", Version::new(1, 0, 0));
+        for val in [i64::MIN, i64::MAX] {
+            let bytes = CanonicalSerializer::serialize(&val, &schema).unwrap();
+            let decoded: i64 = CanonicalSerializer::deserialize(&bytes, &schema).unwrap();
+            assert_eq!(decoded, val);
+        }
+    }
+
+    // ========================================================================
+    // NEW: Complex struct roundtrips
+    // ========================================================================
+
+    #[test]
+    fn roundtrip_struct_with_all_field_types() {
+        #[derive(Debug, PartialEq, Serialize, Deserialize)]
+        struct AllTypes {
+            flag: bool,
+            tiny: u8,
+            small: u16,
+            medium: u32,
+            large: u64,
+            signed_tiny: i8,
+            signed_small: i16,
+            signed_medium: i32,
+            signed_large: i64,
+            ratio: f64,
+            label: String,
+            payload: Vec<u8>,
+            maybe: Option<u32>,
+            items: Vec<String>,
+        }
+
+        let schema = SchemaId::new("fcp.test", "AllTypes", Version::new(1, 0, 0));
+        let val = AllTypes {
+            flag: true,
+            tiny: 200,
+            small: 50000,
+            medium: 3_000_000,
+            large: 10_000_000_000,
+            signed_tiny: -100,
+            signed_small: -30000,
+            signed_medium: -2_000_000,
+            signed_large: -5_000_000_000,
+            ratio: 1.23,
+            label: "all types".to_string(),
+            payload: vec![0xDE, 0xAD, 0xBE, 0xEF],
+            maybe: Some(42),
+            items: vec!["one".to_string(), "two".to_string()],
+        };
+
+        let bytes = CanonicalSerializer::serialize(&val, &schema).unwrap();
+        let decoded: AllTypes = CanonicalSerializer::deserialize(&bytes, &schema).unwrap();
+        assert_eq!(decoded, val);
+    }
+
+    #[test]
+    fn roundtrip_newtype_struct() {
+        #[derive(Debug, PartialEq, Serialize, Deserialize)]
+        struct Wrapper(u64);
+
+        let schema = SchemaId::new("fcp.test", "Wrapper", Version::new(1, 0, 0));
+        let val = Wrapper(999);
+        let bytes = CanonicalSerializer::serialize(&val, &schema).unwrap();
+        let decoded: Wrapper = CanonicalSerializer::deserialize(&bytes, &schema).unwrap();
+        assert_eq!(decoded, val);
+    }
+
+    #[test]
+    fn roundtrip_struct_with_vec_of_vecs() {
+        #[derive(Debug, PartialEq, Serialize, Deserialize)]
+        struct Matrix {
+            rows: Vec<Vec<i32>>,
+        }
+
+        let schema = SchemaId::new("fcp.test", "Matrix", Version::new(1, 0, 0));
+        let val = Matrix {
+            rows: vec![vec![1, 2, 3], vec![4, 5, 6], vec![7, 8, 9]],
+        };
+        let bytes = CanonicalSerializer::serialize(&val, &schema).unwrap();
+        let decoded: Matrix = CanonicalSerializer::deserialize(&bytes, &schema).unwrap();
+        assert_eq!(decoded, val);
+    }
+
+    #[test]
+    fn roundtrip_struct_with_vec_of_options() {
+        #[derive(Debug, PartialEq, Serialize, Deserialize)]
+        struct OptItems {
+            values: Vec<Option<u32>>,
+        }
+
+        let schema = SchemaId::new("fcp.test", "OptItems", Version::new(1, 0, 0));
+        for val in [
+            OptItems { values: vec![] },
+            OptItems {
+                values: vec![None, Some(1), None, Some(2)],
+            },
+            OptItems {
+                values: vec![Some(42)],
+            },
+        ] {
+            let bytes = CanonicalSerializer::serialize(&val, &schema).unwrap();
+            let decoded: OptItems = CanonicalSerializer::deserialize(&bytes, &schema).unwrap();
+            assert_eq!(decoded, val);
+        }
+    }
+
+    // ========================================================================
+    // NEW: Enum variant coverage
+    // ========================================================================
+
+    #[test]
+    fn roundtrip_enum_newtype_variant() {
+        #[derive(Debug, PartialEq, Serialize, Deserialize)]
+        enum Payload {
+            Number(u64),
+            Label(String),
+        }
+
+        let schema = SchemaId::new("fcp.test", "Payload", Version::new(1, 0, 0));
+        let variants = vec![
+            Payload::Number(12345),
+            Payload::Label("test".to_string()),
+        ];
+        for val in variants {
+            let bytes = CanonicalSerializer::serialize(&val, &schema).unwrap();
+            let decoded: Payload = CanonicalSerializer::deserialize(&bytes, &schema).unwrap();
+            assert_eq!(decoded, val);
+        }
+    }
+
+    #[test]
+    fn roundtrip_enum_with_nested_struct() {
+        #[derive(Debug, PartialEq, Serialize, Deserialize)]
+        struct Inner {
+            x: i32,
+            y: i32,
+        }
+
+        #[derive(Debug, PartialEq, Serialize, Deserialize)]
+        enum Event {
+            Click(Inner),
+            Scroll { offset: i32 },
+            Close,
+        }
+
+        let schema = SchemaId::new("fcp.test", "Event", Version::new(1, 0, 0));
+        for val in [
+            Event::Click(Inner { x: 10, y: 20 }),
+            Event::Scroll { offset: -5 },
+            Event::Close,
+        ] {
+            let bytes = CanonicalSerializer::serialize(&val, &schema).unwrap();
+            let decoded: Event = CanonicalSerializer::deserialize(&bytes, &schema).unwrap();
+            assert_eq!(decoded, val);
+        }
+    }
+
+    // ========================================================================
+    // NEW: Map with many entries
+    // ========================================================================
+
+    #[test]
+    fn roundtrip_map_with_100_entries() {
+        let schema = SchemaId::new("fcp.test", "BigMap", Version::new(1, 0, 0));
+        let mut map = HashMap::new();
+        for i in 0..100_u32 {
+            map.insert(format!("key_{i:04}"), i);
+        }
+        let bytes = CanonicalSerializer::serialize(&map, &schema).unwrap();
+        let decoded: HashMap<String, u32> =
+            CanonicalSerializer::deserialize(&bytes, &schema).unwrap();
+        assert_eq!(decoded, map);
+    }
+
+    #[test]
+    fn map_with_100_entries_is_deterministic() {
+        let schema = SchemaId::new("fcp.test", "BigMap2", Version::new(1, 0, 0));
+        let mut map = HashMap::new();
+        for i in 0..100_u32 {
+            map.insert(format!("key_{i:04}"), i);
+        }
+        let bytes1 = CanonicalSerializer::serialize(&map, &schema).unwrap();
+        let bytes2 = CanonicalSerializer::serialize(&map, &schema).unwrap();
+        assert_eq!(bytes1, bytes2);
+    }
+
+    // ========================================================================
+    // NEW: Canonical CBOR encoding specific byte checks
+    // ========================================================================
+
+    #[test]
+    fn to_canonical_cbor_integer_zero_is_one_byte() {
+        let bytes = to_canonical_cbor(&0_u8).unwrap();
+        assert_eq!(bytes, vec![0x00]);
+    }
+
+    #[test]
+    fn to_canonical_cbor_integer_23_is_one_byte() {
+        let bytes = to_canonical_cbor(&23_u8).unwrap();
+        assert_eq!(bytes, vec![0x17]);
+    }
+
+    #[test]
+    fn to_canonical_cbor_integer_24_is_two_bytes() {
+        let bytes = to_canonical_cbor(&24_u8).unwrap();
+        assert_eq!(bytes, vec![0x18, 0x18]);
+    }
+
+    #[test]
+    fn to_canonical_cbor_negative_one_is_one_byte() {
+        let bytes = to_canonical_cbor(&(-1_i8)).unwrap();
+        assert_eq!(bytes, vec![0x20]);
+    }
+
+    #[test]
+    fn to_canonical_cbor_negative_24_is_one_byte() {
+        let bytes = to_canonical_cbor(&(-24_i8)).unwrap();
+        assert_eq!(bytes, vec![0x37]);
+    }
+
+    #[test]
+    fn to_canonical_cbor_string_hello() {
+        let bytes = to_canonical_cbor(&"hello").unwrap();
+        // 0x65 = text string of length 5, then "hello"
+        assert_eq!(bytes[0], 0x65);
+        assert_eq!(&bytes[1..], b"hello");
+    }
+
+    #[test]
+    fn to_canonical_cbor_single_element_array() {
+        let bytes = to_canonical_cbor(&vec![42_u8]).unwrap();
+        // 0x81 = array of length 1, then 0x18 0x2A for 42
+        assert_eq!(bytes[0], 0x81);
+    }
+
+    #[test]
+    fn to_canonical_cbor_byte_string_encoding() {
+        // serde_bytes would encode as byte string, but Vec<u8> encodes as array of ints
+        let val: Vec<u8> = vec![1, 2, 3];
+        let bytes = to_canonical_cbor(&val).unwrap();
+        // Vec<u8> with serde serializes as array of integers
+        assert_eq!(bytes[0], 0x83); // array of 3
+    }
+
+    // ========================================================================
+    // NEW: Error path coverage
+    // ========================================================================
+
+    #[test]
+    fn deserialize_with_corrupted_cbor_body() {
+        let schema = SchemaId::new("fcp.test", "Corrupt", Version::new(1, 0, 0));
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(schema.hash().as_bytes());
+        // Invalid CBOR: indefinite-length map start without break
+        bytes.extend_from_slice(&[0xBF, 0x61, b'a', 0x01]);
+        let result = CanonicalSerializer::deserialize::<HashMap<String, u8>>(&bytes, &schema);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn deserialize_unchecked_with_corrupted_cbor_body() {
+        let schema = SchemaId::new("fcp.test", "Corrupt2", Version::new(1, 0, 0));
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(schema.hash().as_bytes());
+        // Truncated CBOR map
+        bytes.extend_from_slice(&[0xA2, 0x61, b'a']);
+        let result =
+            CanonicalSerializer::deserialize_unchecked::<HashMap<String, u8>>(&bytes, &schema);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn deserialize_type_mismatch_string_as_integer() {
+        let schema = SchemaId::new("fcp.test", "TypeMM", Version::new(1, 0, 0));
+        let bytes = CanonicalSerializer::serialize(&"hello", &schema).unwrap();
+        let result = CanonicalSerializer::deserialize::<u32>(&bytes, &schema);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn deserialize_type_mismatch_integer_as_string() {
+        let schema = SchemaId::new("fcp.test", "TypeMM2", Version::new(1, 0, 0));
+        let bytes = CanonicalSerializer::serialize(&42_u32, &schema).unwrap();
+        let result = CanonicalSerializer::deserialize::<String>(&bytes, &schema);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn deserialize_type_mismatch_array_as_map() {
+        let schema = SchemaId::new("fcp.test", "TypeMM3", Version::new(1, 0, 0));
+        let bytes = CanonicalSerializer::serialize(&vec![1_u32, 2, 3], &schema).unwrap();
+        let result = CanonicalSerializer::deserialize::<HashMap<String, u32>>(&bytes, &schema);
+        assert!(result.is_err());
+    }
+
+    // ========================================================================
+    // NEW: Schema version sensitivity
+    // ========================================================================
+
+    #[test]
+    fn schema_hash_differs_by_minor_version() {
+        let a = SchemaId::new("fcp.core", "Obj", Version::new(1, 0, 0));
+        let b = SchemaId::new("fcp.core", "Obj", Version::new(1, 1, 0));
+        assert_ne!(a.hash(), b.hash());
+    }
+
+    #[test]
+    fn schema_hash_differs_by_patch_version() {
+        let a = SchemaId::new("fcp.core", "Obj", Version::new(1, 0, 0));
+        let b = SchemaId::new("fcp.core", "Obj", Version::new(1, 0, 1));
+        assert_ne!(a.hash(), b.hash());
+    }
+
+    #[test]
+    fn schema_hash_differs_by_prerelease() {
+        let a = SchemaId::new("fcp.core", "Obj", Version::new(1, 0, 0));
+        let b = SchemaId::new(
+            "fcp.core",
+            "Obj",
+            Version::parse("1.0.0-alpha").unwrap(),
+        );
+        assert_ne!(a.hash(), b.hash());
+    }
+
+    // ========================================================================
+    // NEW: Schema ID equality and hashing corner cases
+    // ========================================================================
+
+    #[test]
+    fn schema_id_ne_different_namespace_same_name() {
+        let a = SchemaId::new("ns1", "Name", Version::new(1, 0, 0));
+        let b = SchemaId::new("ns2", "Name", Version::new(1, 0, 0));
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn schema_id_ne_same_namespace_different_name() {
+        let a = SchemaId::new("ns", "NameA", Version::new(1, 0, 0));
+        let b = SchemaId::new("ns", "NameB", Version::new(1, 0, 0));
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn schema_id_eq_identical() {
+        let a = SchemaId::new("ns", "Name", Version::new(1, 2, 3));
+        let b = SchemaId::new("ns", "Name", Version::new(1, 2, 3));
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn schema_id_as_bytes_very_long_namespace() {
+        let long_ns = "a".repeat(1000);
+        let schema = SchemaId::new(long_ns.as_str(), "T", Version::new(0, 0, 1));
+        let bytes = schema.as_bytes();
+        let s = String::from_utf8(bytes).unwrap();
+        assert!(s.starts_with(&long_ns));
+        // Hash should still work
+        assert_eq!(schema.hash().as_bytes().len(), 32);
+    }
+
+    #[test]
+    fn schema_id_as_bytes_very_long_name() {
+        let long_name = "B".repeat(1000);
+        let schema = SchemaId::new("ns", long_name.as_str(), Version::new(0, 0, 1));
+        let bytes = schema.as_bytes();
+        let s = String::from_utf8(bytes).unwrap();
+        assert!(s.contains(&long_name));
+        assert_eq!(schema.hash().as_bytes().len(), 32);
+    }
+
+    // ========================================================================
+    // NEW: SchemaHash serde roundtrips
+    // ========================================================================
+
+    #[test]
+    fn schema_hash_cbor_roundtrip() {
+        let hash = SchemaHash::from_bytes([0x42; 32]);
+        let cbor_bytes = to_canonical_cbor(&hash).unwrap();
+        let decoded: SchemaHash = ciborium::de::from_reader(cbor_bytes.as_slice()).unwrap();
+        assert_eq!(decoded, hash);
+    }
+
+    #[test]
+    fn schema_hash_display_length_always_64() {
+        // Various byte patterns should always yield 64-char hex
+        for byte in [0x00_u8, 0x0F, 0xF0, 0xFF, 0x42, 0xAB] {
+            let hash = SchemaHash::from_bytes([byte; 32]);
+            assert_eq!(hash.to_string().len(), 64);
+        }
+    }
+
+    // ========================================================================
+    // NEW: Canonicalization of arrays with maps
+    // ========================================================================
+
+    #[test]
+    fn canonicalize_array_of_maps() {
+        let mut map1 = HashMap::new();
+        map1.insert("z".to_string(), 1_i32);
+        map1.insert("a".to_string(), 2);
+        let mut map2 = HashMap::new();
+        map2.insert("y".to_string(), 3_i32);
+        map2.insert("b".to_string(), 4);
+
+        let data = vec![map1, map2];
+        let bytes1 = to_canonical_cbor(&data).unwrap();
+        let bytes2 = to_canonical_cbor(&data).unwrap();
+        assert_eq!(bytes1, bytes2);
+
+        // Verify maps inside array are canonicalized
+        let raw: Value = ciborium::de::from_reader(bytes1.as_slice()).unwrap();
+        if let Value::Array(items) = raw {
+            assert_eq!(items.len(), 2);
+            // First map keys should be sorted: "a" before "z"
+            if let Value::Map(entries) = &items[0] {
+                let keys: Vec<&str> = entries
+                    .iter()
+                    .filter_map(|(k, _)| {
+                        if let Value::Text(s) = k {
+                            Some(s.as_str())
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+                assert_eq!(keys, vec!["a", "z"]);
+            } else {
+                panic!("expected map in array");
+            }
+        } else {
+            panic!("expected array");
+        }
+    }
+
+    // ========================================================================
+    // NEW: Serialization produces different bytes for different values
+    // ========================================================================
+
+    #[test]
+    fn different_values_produce_different_bytes() {
+        let schema = SchemaId::new("fcp.test", "Diff", Version::new(1, 0, 0));
+        let bytes_a = CanonicalSerializer::serialize(&1_u32, &schema).unwrap();
+        let bytes_b = CanonicalSerializer::serialize(&2_u32, &schema).unwrap();
+        assert_ne!(bytes_a, bytes_b);
+    }
+
+    #[test]
+    fn different_structs_produce_different_bytes() {
+        #[derive(Debug, PartialEq, Serialize, Deserialize)]
+        struct Item {
+            id: u32,
+        }
+        let schema = SchemaId::new("fcp.test", "Item", Version::new(1, 0, 0));
+        let a = Item { id: 1 };
+        let b = Item { id: 2 };
+        let bytes_a = CanonicalSerializer::serialize(&a, &schema).unwrap();
+        let bytes_b = CanonicalSerializer::serialize(&b, &schema).unwrap();
+        assert_ne!(bytes_a, bytes_b);
+    }
+
+    // ========================================================================
+    // NEW: Canonicalize map values are also canonicalized
+    // ========================================================================
+
+    #[test]
+    fn canonicalize_map_values_containing_maps() {
+        let mut inner = Value::Map(vec![
+            (Value::Text("z".into()), Value::Integer(2.into())),
+            (Value::Text("a".into()), Value::Integer(1.into())),
+        ]);
+        let mut outer = Value::Map(vec![(
+            Value::Text("key".into()),
+            inner.clone(),
+        )]);
+        canonicalize_value_in_place(&mut outer, 0).unwrap();
+
+        // Verify inner map is also sorted
+        if let Value::Map(outer_entries) = &outer {
+            if let Value::Map(inner_entries) = &outer_entries[0].1 {
+                let keys: Vec<&str> = inner_entries
+                    .iter()
+                    .filter_map(|(k, _)| {
+                        if let Value::Text(s) = k {
+                            Some(s.as_str())
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+                assert_eq!(keys, vec!["a", "z"]);
+            } else {
+                panic!("expected inner map");
+            }
+        } else {
+            panic!("expected outer map");
+        }
+        // Suppress unused variable warning
+        canonicalize_value_in_place(&mut inner, 0).unwrap();
+    }
+
+    // ========================================================================
+    // NEW: Canonicalize primitives are no-ops
+    // ========================================================================
+
+    #[test]
+    fn canonicalize_integer_is_noop() {
+        let mut v = Value::Integer(42.into());
+        let before_bytes = {
+            let mut b = Vec::new();
+            ciborium::ser::into_writer(&v, &mut b).unwrap();
+            b
+        };
+        canonicalize_value_in_place(&mut v, 0).unwrap();
+        let after_bytes = {
+            let mut b = Vec::new();
+            ciborium::ser::into_writer(&v, &mut b).unwrap();
+            b
+        };
+        assert_eq!(before_bytes, after_bytes);
+    }
+
+    #[test]
+    fn canonicalize_text_is_noop() {
+        let mut v = Value::Text("hello".into());
+        canonicalize_value_in_place(&mut v, 0).unwrap();
+        assert_eq!(v, Value::Text("hello".into()));
+    }
+
+    #[test]
+    fn canonicalize_bytes_is_noop() {
+        let mut v = Value::Bytes(vec![1, 2, 3]);
+        canonicalize_value_in_place(&mut v, 0).unwrap();
+        assert_eq!(v, Value::Bytes(vec![1, 2, 3]));
+    }
+
+    #[test]
+    fn canonicalize_bool_is_noop() {
+        let mut v = Value::Bool(true);
+        canonicalize_value_in_place(&mut v, 0).unwrap();
+        assert_eq!(v, Value::Bool(true));
+    }
+
+    #[test]
+    fn canonicalize_null_is_noop() {
+        let mut v = Value::Null;
+        canonicalize_value_in_place(&mut v, 0).unwrap();
+        assert_eq!(v, Value::Null);
+    }
+
+    // ========================================================================
+    // NEW: Canonicalize empty array and empty map
+    // ========================================================================
+
+    #[test]
+    fn canonicalize_empty_array() {
+        let mut v = Value::Array(vec![]);
+        canonicalize_value_in_place(&mut v, 0).unwrap();
+        assert_eq!(v, Value::Array(vec![]));
+    }
+
+    #[test]
+    fn canonicalize_empty_map() {
+        let mut v = Value::Map(vec![]);
+        canonicalize_value_in_place(&mut v, 0).unwrap();
+        assert_eq!(v, Value::Map(vec![]));
+    }
+
+    // ========================================================================
+    // NEW: Tuple and fixed-size array roundtrips
+    // ========================================================================
+
+    #[test]
+    fn roundtrip_tuple_of_primitives() {
+        let schema = SchemaId::new("fcp.test", "Tuple", Version::new(1, 0, 0));
+        let val: (u32, String, bool) = (42, "hello".to_string(), true);
+        let bytes = CanonicalSerializer::serialize(&val, &schema).unwrap();
+        let decoded: (u32, String, bool) =
+            CanonicalSerializer::deserialize(&bytes, &schema).unwrap();
+        assert_eq!(decoded, val);
+    }
+
+    #[test]
+    fn roundtrip_fixed_array() {
+        let schema = SchemaId::new("fcp.test", "FixedArr", Version::new(1, 0, 0));
+        let val: [u32; 5] = [10, 20, 30, 40, 50];
+        let bytes = CanonicalSerializer::serialize(&val, &schema).unwrap();
+        let decoded: [u32; 5] = CanonicalSerializer::deserialize(&bytes, &schema).unwrap();
+        assert_eq!(decoded, val);
+    }
+
+    #[test]
+    fn roundtrip_empty_tuple_struct() {
+        #[derive(Debug, PartialEq, Serialize, Deserialize)]
+        struct Unit;
+
+        let schema = SchemaId::new("fcp.test", "UnitStruct", Version::new(1, 0, 0));
+        let val = Unit;
+        let bytes = CanonicalSerializer::serialize(&val, &schema).unwrap();
+        let decoded: Unit = CanonicalSerializer::deserialize(&bytes, &schema).unwrap();
+        assert_eq!(decoded, val);
+    }
+
+    // ========================================================================
+    // NEW: Map key types — bool keys
+    // ========================================================================
+
+    #[test]
+    fn canonicalize_map_with_bool_keys() {
+        let mut entries = vec![
+            (Value::Bool(true), Value::Integer(1.into())),
+            (Value::Bool(false), Value::Integer(2.into())),
+        ];
+        canonicalize_map(&mut entries, 0).unwrap();
+        // false = 0xF4, true = 0xF5; same length so lex order: false < true
+        assert_eq!(entries[0].0, Value::Bool(false));
+        assert_eq!(entries[1].0, Value::Bool(true));
+    }
+
+    // ========================================================================
+    // NEW: Map with null values
+    // ========================================================================
+
+    #[test]
+    fn canonicalize_map_with_null_values() {
+        let mut entries = vec![
+            (Value::Text("b".into()), Value::Null),
+            (Value::Text("a".into()), Value::Null),
+        ];
+        canonicalize_map(&mut entries, 0).unwrap();
+        let keys: Vec<&str> = entries
+            .iter()
+            .filter_map(|(k, _)| {
+                if let Value::Text(s) = k {
+                    Some(s.as_str())
+                } else {
+                    None
+                }
+            })
+            .collect();
+        assert_eq!(keys, vec!["a", "b"]);
+    }
+
+    // ========================================================================
+    // NEW: Single-entry map with various key types
+    // ========================================================================
+
+    #[test]
+    fn canonicalize_single_entry_map_text_key() {
+        let mut entries = vec![(
+            Value::Text("only".into()),
+            Value::Integer(1.into()),
+        )];
+        canonicalize_map(&mut entries, 0).unwrap();
+        assert_eq!(entries.len(), 1);
+    }
+
+    #[test]
+    fn canonicalize_single_entry_map_integer_key() {
+        let mut entries = vec![(Value::Integer(42.into()), Value::Bool(true))];
+        canonicalize_map(&mut entries, 0).unwrap();
+        assert_eq!(entries.len(), 1);
+    }
+
+    // ========================================================================
+    // NEW: Depth limit with maps
+    // ========================================================================
+
+    #[test]
+    fn canonicalize_nested_maps_at_depth_limit() {
+        // Build nested maps to test depth tracking
+        let mut v = Value::Map(vec![(
+            Value::Text("leaf".into()),
+            Value::Integer(1.into()),
+        )]);
+        for i in 0..10 {
+            v = Value::Map(vec![(
+                Value::Text(format!("level_{i}")),
+                v,
+            )]);
+        }
+        // 11 levels of nesting, well within MAX_CANONICALIZATION_DEPTH
+        canonicalize_value_in_place(&mut v, 0).unwrap();
+    }
+
+    // ========================================================================
+    // NEW: Tag with various inner types
+    // ========================================================================
+
+    #[test]
+    fn canonicalize_tag_with_array() {
+        let mut v = Value::Tag(
+            99,
+            Box::new(Value::Array(vec![
+                Value::Integer(3.into()),
+                Value::Integer(1.into()),
+            ])),
+        );
+        canonicalize_value_in_place(&mut v, 0).unwrap();
+        // Arrays don't get sorted, only maps do
+        if let Value::Tag(99, inner) = &v {
+            if let Value::Array(items) = inner.as_ref() {
+                assert_eq!(items.len(), 2);
+            } else {
+                panic!("expected array inside tag");
+            }
+        } else {
+            panic!("expected tag");
+        }
+    }
+
+    #[test]
+    fn canonicalize_tag_with_integer() {
+        let mut v = Value::Tag(100, Box::new(Value::Integer(42.into())));
+        canonicalize_value_in_place(&mut v, 0).unwrap();
+        if let Value::Tag(100, inner) = &v {
+            assert_eq!(*inner.as_ref(), Value::Integer(42.into()));
+        } else {
+            panic!("expected tag");
+        }
+    }
+
+    // ========================================================================
+    // NEW: Roundtrip BTreeMap vs HashMap consistency
+    // ========================================================================
+
+    #[test]
+    fn btreemap_and_hashmap_produce_same_canonical_bytes() {
+        use std::collections::BTreeMap;
+
+        let schema = SchemaId::new("fcp.test", "MapConsist", Version::new(1, 0, 0));
+
+        let mut hm = HashMap::new();
+        hm.insert("z".to_string(), 1_i32);
+        hm.insert("a".to_string(), 2);
+        hm.insert("m".to_string(), 3);
+
+        let mut bm = BTreeMap::new();
+        bm.insert("z".to_string(), 1_i32);
+        bm.insert("a".to_string(), 2);
+        bm.insert("m".to_string(), 3);
+
+        let hm_bytes = CanonicalSerializer::serialize(&hm, &schema).unwrap();
+        let bm_bytes = CanonicalSerializer::serialize(&bm, &schema).unwrap();
+        assert_eq!(hm_bytes, bm_bytes);
+    }
+
+    // ========================================================================
+    // NEW: Roundtrip bool
+    // ========================================================================
+
+    #[test]
+    fn roundtrip_bool_true_and_false() {
+        let schema = SchemaId::new("fcp.test", "Bool2", Version::new(1, 0, 0));
+        for val in [true, false] {
+            let bytes = CanonicalSerializer::serialize(&val, &schema).unwrap();
+            let decoded: bool = CanonicalSerializer::deserialize(&bytes, &schema).unwrap();
+            assert_eq!(decoded, val);
+        }
+    }
+
+    // ========================================================================
+    // NEW: Roundtrip with HashMap<String, Vec<u32>>
+    // ========================================================================
+
+    #[test]
+    fn roundtrip_map_of_string_to_vec() {
+        let schema = SchemaId::new("fcp.test", "MapVec", Version::new(1, 0, 0));
+        let mut map = HashMap::new();
+        map.insert("primes".to_string(), vec![2_u32, 3, 5, 7, 11]);
+        map.insert("empty".to_string(), vec![]);
+        map.insert("single".to_string(), vec![42]);
+
+        let bytes = CanonicalSerializer::serialize(&map, &schema).unwrap();
+        let decoded: HashMap<String, Vec<u32>> =
+            CanonicalSerializer::deserialize(&bytes, &schema).unwrap();
+        assert_eq!(decoded, map);
+    }
+
+    // ========================================================================
+    // NEW: Non-canonical encoding rejection — non-minimal map
+    // ========================================================================
+
+    #[test]
+    fn deserialize_rejects_non_minimal_map_length() {
+        let schema = SchemaId::new("fcp.test", "MapLen", Version::new(1, 0, 0));
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(schema.hash().as_bytes());
+        // Map with 1 entry, but encoded with 2-byte length prefix (0xB8 0x01) instead of 0xA1
+        bytes.extend_from_slice(&[0xB8, 0x01, 0x61, b'a', 0x01]);
+        let result = CanonicalSerializer::deserialize::<HashMap<String, u8>>(&bytes, &schema);
+        assert!(result.is_err());
+    }
+
+    // ========================================================================
+    // NEW: Non-canonical encoding rejection — non-minimal array
+    // ========================================================================
+
+    #[test]
+    fn deserialize_rejects_non_minimal_array_length() {
+        let schema = SchemaId::new("fcp.test", "ArrLen", Version::new(1, 0, 0));
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(schema.hash().as_bytes());
+        // Array with 1 element, encoded with 2-byte length (0x98 0x01) instead of 0x81
+        bytes.extend_from_slice(&[0x98, 0x01, 0x01]);
+        let result = CanonicalSerializer::deserialize::<Vec<u8>>(&bytes, &schema);
+        assert!(result.is_err());
+    }
+
+    // ========================================================================
+    // NEW: to_canonical_cbor with tuples
+    // ========================================================================
+
+    #[test]
+    fn to_canonical_cbor_tuple() {
+        let val: (u32, u32) = (1, 2);
+        let bytes = to_canonical_cbor(&val).unwrap();
+        // Should encode as a 2-element array
+        assert_eq!(bytes[0], 0x82); // array of 2
+    }
+
+    #[test]
+    fn to_canonical_cbor_triple_tuple() {
+        let val: (bool, String, u32) = (true, "hi".to_string(), 7);
+        let bytes = to_canonical_cbor(&val).unwrap();
+        assert_eq!(bytes[0], 0x83); // array of 3
+    }
+
+    // ========================================================================
+    // NEW: Schema hash in HashMap key
+    // ========================================================================
+
+    #[test]
+    fn schema_hash_as_hashmap_key() {
+        let h1 = SchemaHash::from_bytes([0x01; 32]);
+        let h2 = SchemaHash::from_bytes([0x02; 32]);
+        let mut map = HashMap::new();
+        map.insert(h1, "first");
+        map.insert(h2, "second");
+        assert_eq!(map[&h1], "first");
+        assert_eq!(map[&h2], "second");
+    }
+
+    // ========================================================================
+    // NEW: Verify schema hash is content-dependent
+    // ========================================================================
+
+    #[test]
+    fn schema_hash_changes_with_any_character_change() {
+        let base = SchemaId::new("fcp.core", "Token", Version::new(1, 0, 0));
+        // Change one character in namespace
+        let modified = SchemaId::new("fcp.cors", "Token", Version::new(1, 0, 0));
+        assert_ne!(base.hash(), modified.hash());
+    }
+
+    // ========================================================================
+    // NEW: Roundtrip with deeply nested Vec
+    // ========================================================================
+
+    #[test]
+    fn roundtrip_vec_of_vec_of_vec() {
+        let schema = SchemaId::new("fcp.test", "DeepVec", Version::new(1, 0, 0));
+        let val: Vec<Vec<Vec<u8>>> = vec![
+            vec![vec![1, 2], vec![3, 4]],
+            vec![vec![5, 6], vec![7, 8]],
+        ];
+        let bytes = CanonicalSerializer::serialize(&val, &schema).unwrap();
+        let decoded: Vec<Vec<Vec<u8>>> =
+            CanonicalSerializer::deserialize(&bytes, &schema).unwrap();
+        assert_eq!(decoded, val);
+    }
+
+    // ========================================================================
+    // NEW: Verify SCHEMA_HASH_DOMAIN_SEPARATOR value
+    // ========================================================================
+
+    #[test]
+    fn domain_separator_is_expected_value() {
+        assert_eq!(SCHEMA_HASH_DOMAIN_SEPARATOR, b"FCP2-SCHEMA-V1");
+        assert_eq!(SCHEMA_HASH_DOMAIN_SEPARATOR.len(), 14);
+    }
+
+    // ========================================================================
+    // NEW: Canonicalize map with many same-length keys
+    // ========================================================================
+
+    #[test]
+    fn canonicalize_map_same_length_keys_sorted_lexicographically() {
+        let mut entries = vec![
+            (Value::Text("dd".into()), Value::Integer(4.into())),
+            (Value::Text("bb".into()), Value::Integer(2.into())),
+            (Value::Text("cc".into()), Value::Integer(3.into())),
+            (Value::Text("aa".into()), Value::Integer(1.into())),
+        ];
+        canonicalize_map(&mut entries, 0).unwrap();
+        let keys: Vec<&str> = entries
+            .iter()
+            .filter_map(|(k, _)| {
+                if let Value::Text(s) = k {
+                    Some(s.as_str())
+                } else {
+                    None
+                }
+            })
+            .collect();
+        assert_eq!(keys, vec!["aa", "bb", "cc", "dd"]);
+    }
+
+    // ========================================================================
+    // NEW: Roundtrip HashMap<u32, String>
+    // ========================================================================
+
+    #[test]
+    fn roundtrip_map_u32_to_string() {
+        use std::collections::BTreeMap;
+        let schema = SchemaId::new("fcp.test", "U32Map", Version::new(1, 0, 0));
+        let mut map = BTreeMap::new();
+        map.insert(1_u32, "one".to_string());
+        map.insert(2, "two".to_string());
+        map.insert(1000, "thousand".to_string());
+
+        let bytes = CanonicalSerializer::serialize(&map, &schema).unwrap();
+        let decoded: BTreeMap<u32, String> =
+            CanonicalSerializer::deserialize(&bytes, &schema).unwrap();
+        assert_eq!(decoded, map);
+    }
+
+    // ========================================================================
+    // NEW: Verify CBOR encoding of various values
+    // ========================================================================
+
+    #[test]
+    fn to_canonical_cbor_u32_max() {
+        let bytes = to_canonical_cbor(&u32::MAX).unwrap();
+        // u32::MAX = 4294967295 = 0x1A FFFFFFFF (5 bytes)
+        assert_eq!(bytes.len(), 5);
+        assert_eq!(bytes[0], 0x1A);
+    }
+
+    #[test]
+    fn to_canonical_cbor_u64_max() {
+        let bytes = to_canonical_cbor(&u64::MAX).unwrap();
+        // u64::MAX = 0x1B FFFFFFFFFFFFFFFF (9 bytes)
+        assert_eq!(bytes.len(), 9);
+        assert_eq!(bytes[0], 0x1B);
+    }
+
+    // ========================================================================
+    // NEW: SchemaId with impl Into<String> construction variants
+    // ========================================================================
+
+    #[test]
+    fn schema_id_new_with_string_types() {
+        let from_str = SchemaId::new("ns", "name", Version::new(1, 0, 0));
+        let from_string =
+            SchemaId::new("ns".to_string(), "name".to_string(), Version::new(1, 0, 0));
+        assert_eq!(from_str, from_string);
+        assert_eq!(from_str.hash(), from_string.hash());
+    }
+
+    // ========================================================================
+    // NEW: Multiple serializations of same value same schema
+    // ========================================================================
+
+    #[test]
+    fn serialize_100_times_always_identical() {
+        let schema = SchemaId::new("fcp.test", "Stability", Version::new(1, 0, 0));
+        let val = "deterministic";
+        let first = CanonicalSerializer::serialize(&val, &schema).unwrap();
+        for _ in 0..100 {
+            let bytes = CanonicalSerializer::serialize(&val, &schema).unwrap();
+            assert_eq!(bytes, first);
+        }
+    }
+
+    // ========================================================================
+    // NEW: Deserialize unchecked roundtrip
+    // ========================================================================
+
+    #[test]
+    fn deserialize_unchecked_roundtrip_struct() {
+        #[derive(Debug, PartialEq, Serialize, Deserialize)]
+        struct Msg {
+            id: u64,
+            body: String,
+        }
+
+        let schema = SchemaId::new("fcp.test", "Msg", Version::new(1, 0, 0));
+        let val = Msg {
+            id: 999,
+            body: "unchecked roundtrip".to_string(),
+        };
+        let bytes = CanonicalSerializer::serialize(&val, &schema).unwrap();
+        let decoded: Msg =
+            CanonicalSerializer::deserialize_unchecked(&bytes, &schema).unwrap();
+        assert_eq!(decoded, val);
+    }
+
+    // ========================================================================
+    // NEW: Canonical CBOR with f64 special values
+    // ========================================================================
+
+    #[test]
+    fn to_canonical_cbor_f64_positive_infinity() {
+        let bytes = to_canonical_cbor(&f64::INFINITY).unwrap();
+        let val: Value = ciborium::de::from_reader(bytes.as_slice()).unwrap();
+        if let Value::Float(f) = val {
+            assert!(f.is_infinite() && f.is_sign_positive());
+        } else {
+            panic!("expected float");
+        }
+    }
+
+    #[test]
+    fn to_canonical_cbor_f64_negative_infinity() {
+        let bytes = to_canonical_cbor(&f64::NEG_INFINITY).unwrap();
+        let val: Value = ciborium::de::from_reader(bytes.as_slice()).unwrap();
+        if let Value::Float(f) = val {
+            assert!(f.is_infinite() && f.is_sign_negative());
+        } else {
+            panic!("expected float");
+        }
+    }
+
+    #[test]
+    fn to_canonical_cbor_f64_nan() {
+        let bytes = to_canonical_cbor(&f64::NAN).unwrap();
+        let val: Value = ciborium::de::from_reader(bytes.as_slice()).unwrap();
+        if let Value::Float(f) = val {
+            assert!(f.is_nan());
+        } else {
+            panic!("expected float");
+        }
+    }
+
+    // ========================================================================
+    // NEW: Additional coverage tests
+    // ========================================================================
+
+    #[test]
+    fn roundtrip_vec_of_booleans() {
+        let schema = SchemaId::new("fcp.test", "BoolVec", Version::new(1, 0, 0));
+        let val = vec![true, false, true, true, false];
+        let bytes = CanonicalSerializer::serialize(&val, &schema).unwrap();
+        let decoded: Vec<bool> = CanonicalSerializer::deserialize(&bytes, &schema).unwrap();
+        assert_eq!(decoded, val);
+    }
+
+    #[test]
+    fn roundtrip_vec_of_option_strings() {
+        let schema = SchemaId::new("fcp.test", "OptStrVec", Version::new(1, 0, 0));
+        let val: Vec<Option<String>> = vec![
+            Some("present".to_string()),
+            None,
+            Some("also present".to_string()),
+            None,
+        ];
+        let bytes = CanonicalSerializer::serialize(&val, &schema).unwrap();
+        let decoded: Vec<Option<String>> =
+            CanonicalSerializer::deserialize(&bytes, &schema).unwrap();
+        assert_eq!(decoded, val);
+    }
+
+    #[test]
+    fn schema_id_with_max_version_components() {
+        let schema = SchemaId::new("ns", "T", Version::new(999, 999, 999));
+        let canonical = String::from_utf8(schema.as_bytes()).unwrap();
+        assert_eq!(canonical, "ns:T@999.999.999");
+        assert_eq!(schema.hash().as_bytes().len(), 32);
+    }
+
+    #[test]
+    fn to_canonical_cbor_array_of_23_elements() {
+        // Array with 23 elements should have 1-byte header (0x97)
+        let val: Vec<u8> = (0..23).collect();
+        let bytes = to_canonical_cbor(&val).unwrap();
+        assert_eq!(bytes[0], 0x97); // major type 4 (array), additional 23
+    }
+
+    #[test]
+    fn to_canonical_cbor_array_of_24_elements() {
+        // Array with 24 elements should have 2-byte header (0x98 0x18)
+        let val: Vec<u8> = (0..24).collect();
+        let bytes = to_canonical_cbor(&val).unwrap();
+        assert_eq!(bytes[0], 0x98); // major type 4 (array), additional 24
+        assert_eq!(bytes[1], 24);
+    }
+
+    #[test]
+    fn roundtrip_struct_with_string_and_bytes() {
+        #[derive(Debug, PartialEq, Serialize, Deserialize)]
+        struct MixedData {
+            label: String,
+            payload: Vec<u8>,
+            count: u64,
+        }
+
+        let schema = SchemaId::new("fcp.test", "MixedData", Version::new(1, 0, 0));
+        let val = MixedData {
+            label: "test-payload".to_string(),
+            payload: vec![0x00, 0x01, 0x02, 0xFF],
+            count: 42,
+        };
+        let bytes = CanonicalSerializer::serialize(&val, &schema).unwrap();
+        let decoded: MixedData = CanonicalSerializer::deserialize(&bytes, &schema).unwrap();
+        assert_eq!(decoded, val);
+    }
 }

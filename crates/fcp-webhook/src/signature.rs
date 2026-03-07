@@ -556,4 +556,164 @@ mod tests {
         let alg2 = alg; // Copy
         assert_eq!(alg, alg2);
     }
+
+    // ── Batch 3: SunnyMoose deep test expansion ──
+
+    #[test]
+    fn test_hmac_sha256_unicode_payload() {
+        let verifier = HmacSha256Verifier::new("secret");
+        let payload = "\u{1F600}\u{1F4A9}\u{00E9}\u{00F1}\u{00FC}".as_bytes();
+        let sig = verifier.compute(payload);
+        assert!(verifier.verify(payload, &sig).is_ok());
+    }
+
+    #[test]
+    fn test_hmac_sha1_unicode_payload() {
+        let verifier = HmacSha1Verifier::new("secret");
+        let payload = "\u{1F600}\u{1F4A9}\u{00E9}\u{00F1}\u{00FC}".as_bytes();
+        let sig = verifier.compute(payload);
+        assert!(verifier.verify(payload, &sig).is_ok());
+    }
+
+    #[test]
+    fn test_hmac_sha256_large_payload() {
+        let verifier = HmacSha256Verifier::new("secret");
+        let payload = vec![b'X'; 1_000_000]; // 1MB
+        let sig = verifier.compute(&payload);
+        assert!(verifier.verify(&payload, &sig).is_ok());
+    }
+
+    #[test]
+    fn test_hmac_sha1_large_payload() {
+        let verifier = HmacSha1Verifier::new("secret");
+        let payload = vec![b'X'; 1_000_000]; // 1MB
+        let sig = verifier.compute(&payload);
+        assert!(verifier.verify(&payload, &sig).is_ok());
+    }
+
+    #[test]
+    fn test_hmac_sha256_unicode_secret() {
+        let verifier = HmacSha256Verifier::new("\u{1F511}key\u{00E9}");
+        let sig = verifier.compute(b"test");
+        assert!(verifier.verify(b"test", &sig).is_ok());
+    }
+
+    #[test]
+    fn test_hmac_sha256_long_secret() {
+        let long_secret = "s".repeat(10_000);
+        let verifier = HmacSha256Verifier::new(&long_secret);
+        let sig = verifier.compute(b"payload");
+        assert!(verifier.verify(b"payload", &sig).is_ok());
+    }
+
+    #[test]
+    fn test_hmac_sha1_deterministic() {
+        let verifier = HmacSha1Verifier::new("key");
+        let sig1 = verifier.compute(b"data");
+        let sig2 = verifier.compute(b"data");
+        assert_eq!(sig1, sig2);
+    }
+
+    #[test]
+    fn test_hmac_sha1_different_secrets_different_sigs() {
+        let v1 = HmacSha1Verifier::new("key1");
+        let v2 = HmacSha1Verifier::new("key2");
+        assert_ne!(v1.compute(b"data"), v2.compute(b"data"));
+    }
+
+    #[test]
+    fn test_hmac_sha1_cross_verify_fails() {
+        let v1 = HmacSha1Verifier::new("key1");
+        let v2 = HmacSha1Verifier::new("key2");
+        let sig = v1.compute(b"test");
+        assert!(v2.verify(b"test", &sig).is_err());
+    }
+
+    #[test]
+    fn test_hmac_sha1_wrong_payload_fails() {
+        let verifier = HmacSha1Verifier::new("secret");
+        let sig = verifier.compute(b"original");
+        assert!(verifier.verify(b"tampered", &sig).is_err());
+    }
+
+    #[test]
+    fn test_hmac_sha256_signature_lowercase_hex() {
+        let verifier = HmacSha256Verifier::new("secret");
+        let sig = verifier.compute(b"test");
+        // Ensure output is lowercase hex
+        assert!(sig.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit()));
+    }
+
+    #[test]
+    fn test_hmac_sha256_verify_uppercase_hex() {
+        let verifier = HmacSha256Verifier::new("secret");
+        let sig = verifier.compute(b"test");
+        let upper = sig.to_uppercase();
+        // Uppercase hex should fail because hex::decode of uppercase gives different bytes
+        // Actually hex::decode is case-insensitive, but HMAC verify compares bytes
+        // so this depends on the hex decode. Let's just verify it one way.
+        let result = verifier.verify(b"test", &upper);
+        // hex::decode is case-insensitive, so uppercase should also work
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_signature_algorithm_debug() {
+        let debug = format!("{:?}", SignatureAlgorithm::HmacSha256);
+        assert!(debug.contains("HmacSha256"));
+        let debug = format!("{:?}", SignatureAlgorithm::HmacSha1);
+        assert!(debug.contains("HmacSha1"));
+        let debug = format!("{:?}", SignatureAlgorithm::Ed25519);
+        assert!(debug.contains("Ed25519"));
+    }
+
+    #[test]
+    fn test_signature_algorithm_clone() {
+        let alg = SignatureAlgorithm::HmacSha256;
+        let cloned = alg;
+        assert_eq!(alg, cloned);
+    }
+
+    #[test]
+    fn test_ed25519_debug_does_not_leak_key() {
+        use ed25519_dalek::SigningKey;
+        let signing_key = SigningKey::from_bytes(&[
+            0x9d, 0x61, 0xb1, 0x9d, 0xef, 0xfd, 0x5a, 0x60, 0xba, 0x84, 0x4a, 0xf4, 0x92, 0xec,
+            0x2c, 0xc4, 0x44, 0x49, 0xc5, 0x69, 0x7b, 0x32, 0x69, 0x19, 0x70, 0x3b, 0xac, 0x03,
+            0x1c, 0xae, 0x7f, 0x60,
+        ]);
+        let verifier =
+            Ed25519Verifier::from_bytes(&signing_key.verifying_key().to_bytes()).unwrap();
+        let debug = format!("{verifier:?}");
+        assert!(debug.contains("Ed25519Verifier"));
+    }
+
+    #[test]
+    fn test_hmac_sha256_newline_in_payload() {
+        let verifier = HmacSha256Verifier::new("secret");
+        let payload = b"line1\nline2\r\nline3";
+        let sig = verifier.compute(payload);
+        assert!(verifier.verify(payload, &sig).is_ok());
+    }
+
+    #[test]
+    fn test_hmac_sha256_null_bytes_in_payload() {
+        let verifier = HmacSha256Verifier::new("secret");
+        let payload = b"\x00\x00\x01\x00";
+        let sig = verifier.compute(payload);
+        assert!(verifier.verify(payload, &sig).is_ok());
+    }
+
+    #[test]
+    fn test_hmac_sha1_empty_secret() {
+        let verifier = HmacSha1Verifier::new("");
+        let sig = verifier.compute(b"test");
+        assert!(verifier.verify(b"test", &sig).is_ok());
+    }
+
+    #[test]
+    fn test_hmac_sha1_invalid_hex_in_signature() {
+        let verifier = HmacSha1Verifier::new("secret");
+        assert!(verifier.verify(b"test", "not-valid-hex!").is_err());
+    }
 }

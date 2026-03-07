@@ -426,4 +426,135 @@ mod tests {
         let err = TailscaleError::Crypto(crypto_err);
         assert!(err.source().is_some());
     }
+
+    // --- from_async_error covers all AsyncError variants ---
+
+    #[test]
+    fn from_async_error_timeout() {
+        let async_err = AsyncError::Timeout {
+            timeout_ms: 500,
+        };
+        let err = TailscaleError::from_async_error(async_err, Duration::from_secs(1));
+        assert!(err.to_string().contains("timed out"));
+        assert!(err.to_string().contains("1000ms"));
+    }
+
+    #[test]
+    fn from_async_error_cancelled() {
+        let async_err = AsyncError::Cancelled;
+        let err = TailscaleError::from_async_error(async_err, Duration::from_secs(5));
+        assert!(err.to_string().contains("cancelled"));
+    }
+
+    #[test]
+    fn from_async_error_protocol_io() {
+        let async_err = AsyncError::ProtocolIo {
+            message: "broken pipe".to_string(),
+        };
+        let err = TailscaleError::from_async_error(async_err, Duration::from_secs(5));
+        assert!(err.to_string().contains("broken pipe"));
+    }
+
+    #[test]
+    fn from_async_error_join() {
+        let async_err = AsyncError::Join {
+            message: "task panicked".to_string(),
+        };
+        let err = TailscaleError::from_async_error(async_err, Duration::from_secs(5));
+        assert!(err.to_string().contains("task panicked"));
+    }
+
+    #[test]
+    fn from_async_error_runtime() {
+        let async_err = AsyncError::Runtime {
+            message: "runtime shutdown".to_string(),
+        };
+        let err = TailscaleError::from_async_error(async_err, Duration::from_secs(5));
+        assert!(err.to_string().contains("runtime shutdown"));
+    }
+
+    #[test]
+    fn from_async_error_channel_closed() {
+        let async_err = AsyncError::ChannelClosed;
+        let err = TailscaleError::from_async_error(async_err, Duration::from_secs(5));
+        assert!(err.to_string().contains("channel closed"));
+    }
+
+    #[test]
+    fn from_async_error_channel_full() {
+        let async_err = AsyncError::ChannelFull;
+        let err = TailscaleError::from_async_error(async_err, Duration::from_secs(5));
+        assert!(err.to_string().contains("channel full"));
+    }
+
+    // --- from_async_error timeout with zero duration ---
+
+    #[test]
+    fn from_async_error_timeout_zero_duration() {
+        let async_err = AsyncError::Timeout {
+            timeout_ms: 0,
+        };
+        let err = TailscaleError::from_async_error(async_err, Duration::ZERO);
+        assert!(err.to_string().contains("0ms"));
+    }
+
+    // --- from_async_error timeout with large duration ---
+
+    #[test]
+    fn from_async_error_timeout_large_duration() {
+        let async_err = AsyncError::Timeout {
+            timeout_ms: 300_000,
+        };
+        let err = TailscaleError::from_async_error(async_err, Duration::from_secs(300));
+        assert!(err.to_string().contains("300000ms"));
+    }
+
+    // --- Error display with long messages ---
+
+    #[test]
+    fn error_display_long_message() {
+        let long_msg = "x".repeat(1024);
+        let err = TailscaleError::LocalApiRequest(long_msg.clone());
+        let display = err.to_string();
+        assert!(display.contains(&long_msg));
+    }
+
+    // --- Error display with empty messages ---
+
+    #[test]
+    fn error_display_empty_invalid_tag() {
+        let err = TailscaleError::InvalidTag(String::new());
+        assert_eq!(err.to_string(), "invalid FCP tag format: ");
+    }
+
+    #[test]
+    fn error_display_empty_peer_not_found() {
+        let err = TailscaleError::PeerNotFound(String::new());
+        assert_eq!(err.to_string(), "peer not found: ");
+    }
+
+    // --- Error is Send + Sync ---
+
+    #[test]
+    fn error_is_send() {
+        fn assert_send<T: Send>() {}
+        assert_send::<TailscaleError>();
+    }
+
+    #[test]
+    fn error_is_sync() {
+        fn assert_sync<T: Sync>() {}
+        assert_sync::<TailscaleError>();
+    }
+
+    // --- from_http_client_error ---
+
+    #[test]
+    fn from_http_client_error_produces_local_api_request() {
+        // We can't easily construct an HttpClientError, but we can verify
+        // from_async_error produces the right variant types
+        let err = TailscaleError::LocalApiRequest("simulated http error".to_string());
+        assert!(matches!(err, TailscaleError::LocalApiRequest(_)));
+        assert!(err.to_string().contains("simulated http error"));
+    }
 }

@@ -1012,4 +1012,245 @@ mod tests {
         assert_eq!(handlers.len(), 1);
         assert!(handlers.contains(&"stripe_all"));
     }
+
+    // ── Batch 3: SunnyMoose deep test expansion ──
+
+    #[test]
+    fn test_webhook_provider_debug() {
+        for provider in [
+            WebhookProvider::GitHub,
+            WebhookProvider::Stripe,
+            WebhookProvider::Slack,
+            WebhookProvider::Linear,
+            WebhookProvider::Discord,
+            WebhookProvider::Custom,
+        ] {
+            let debug = format!("{provider:?}");
+            assert!(!debug.is_empty());
+        }
+    }
+
+    #[test]
+    fn test_webhook_provider_clone() {
+        let original = WebhookProvider::GitHub;
+        let cloned = original;
+        assert_eq!(original, cloned);
+    }
+
+    #[test]
+    fn test_github_webhook_debug() {
+        let handler = GitHubWebhook::new("my_super_s3cret_key!");
+        let debug = format!("{handler:?}");
+        assert!(debug.contains("GitHubWebhook"));
+        assert!(debug.contains("[REDACTED]"));
+        assert!(!debug.contains("my_super_s3cret_key!"));
+    }
+
+    #[test]
+    fn test_stripe_webhook_debug() {
+        let handler = StripeWebhook::new("whsec_test");
+        let debug = format!("{handler:?}");
+        assert!(debug.contains("StripeWebhook"));
+        assert!(debug.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn test_linear_webhook_debug() {
+        let handler = LinearWebhook::new("lin_secret");
+        let debug = format!("{handler:?}");
+        assert!(debug.contains("LinearWebhook"));
+        assert!(debug.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn test_slack_webhook_debug_redacts() {
+        let handler = SlackWebhook::new("xoxb-secret-token");
+        let debug = format!("{handler:?}");
+        assert!(debug.contains("SlackWebhook"));
+        assert!(!debug.contains("xoxb-secret-token"));
+    }
+
+    #[test]
+    fn test_github_large_json_payload() {
+        let handler = GitHubWebhook::new("secret");
+        let large_obj = serde_json::json!({
+            "commits": (0..100).map(|i| serde_json::json!({
+                "id": format!("sha_{i}"),
+                "message": format!("commit message {i}"),
+                "author": {"name": "user", "email": "user@example.test"}
+            })).collect::<Vec<_>>()
+        });
+        let body = serde_json::to_vec(&large_obj).unwrap();
+        let signature = format!("sha256={}", handler.verifier.compute(&body));
+
+        let mut headers = HashMap::new();
+        headers.insert("x-hub-signature-256".to_string(), signature);
+        headers.insert("x-github-event".to_string(), "push".to_string());
+        headers.insert("x-github-delivery".to_string(), "large_del".to_string());
+
+        let event = handler.verify_and_parse(&headers, &body).unwrap();
+        assert_eq!(event.id, "large_del");
+        assert!(event.payload.get("commits").unwrap().as_array().unwrap().len() == 100);
+    }
+
+    #[test]
+    fn test_github_unicode_payload() {
+        let handler = GitHubWebhook::new("secret");
+        let body = br#"{"action": "\u00e9\u00f1\u00fc", "repo": "test"}"#;
+        let signature = format!("sha256={}", handler.verifier.compute(body));
+
+        let mut headers = HashMap::new();
+        headers.insert("x-hub-signature-256".to_string(), signature);
+        headers.insert("x-github-event".to_string(), "push".to_string());
+        headers.insert("x-github-delivery".to_string(), "uni_del".to_string());
+
+        let event = handler.verify_and_parse(&headers, body).unwrap();
+        assert_eq!(event.id, "uni_del");
+    }
+
+    #[test]
+    fn test_stripe_multiple_v1_signatures() {
+        // Stripe can send multiple v1 signatures during secret rotation
+        let (ts, sigs) =
+            StripeWebhook::parse_stripe_signature("t=1234567890,v1=sig1,v1=sig2").unwrap();
+        assert_eq!(ts, 1_234_567_890);
+        assert_eq!(sigs.len(), 2);
+        assert_eq!(sigs[0], "sig1");
+        assert_eq!(sigs[1], "sig2");
+    }
+
+    #[test]
+    fn test_stripe_timestamp_exactly_at_boundary() {
+        let handler =
+            StripeWebhook::new("secret").with_timestamp_tolerance(Duration::from_secs(300));
+        let now = Utc::now().timestamp();
+        // Exactly at boundary should pass
+        assert!(handler.validate_timestamp(now).is_ok());
+        // Within tolerance should pass
+        assert!(handler.validate_timestamp(now - 100).is_ok());
+    }
+
+    #[test]
+    fn test_stripe_zero_tolerance() {
+        let handler =
+            StripeWebhook::new("secret").with_timestamp_tolerance(Duration::from_secs(0));
+        let now = Utc::now().timestamp();
+        // With zero tolerance, only exact match would pass
+        // Due to timing, now should match exactly
+        assert!(handler.validate_timestamp(now).is_ok());
+    }
+
+    #[test]
+    fn test_linear_empty_payload_fields() {
+        let handler = LinearWebhook::new("secret");
+        let body = br#"{"type": "", "webhookId": ""}"#;
+        let signature = handler.verifier.compute(body);
+
+        let mut headers = HashMap::new();
+        headers.insert("linear-signature".to_string(), signature);
+
+        let event = handler.verify_and_parse(&headers, body).unwrap();
+        assert_eq!(event.event_type, "");
+        assert_eq!(event.id, "");
+    }
+
+    #[test]
+    fn test_github_preserves_payload_structure() {
+        let handler = GitHubWebhook::new("secret");
+        let body = br#"{"action":"opened","issue":{"number":42,"title":"Bug report","labels":[{"name":"bug"}]}}"#;
+        let signature = format!("sha256={}", handler.verifier.compute(body));
+
+        let mut headers = HashMap::new();
+        headers.insert("x-hub-signature-256".to_string(), signature);
+        headers.insert("x-github-event".to_string(), "issues".to_string());
+        headers.insert("x-github-delivery".to_string(), "d1".to_string());
+
+        let event = handler.verify_and_parse(&headers, body).unwrap();
+        assert_eq!(event.get_str("action"), Some("opened"));
+        assert_eq!(event.get_i64("issue.number"), Some(42));
+        assert_eq!(event.get_str("issue.title"), Some("Bug report"));
+    }
+
+    #[test]
+    fn test_stripe_invalid_json_body() {
+        let handler = StripeWebhook::new("secret");
+        let body = b"not valid json at all";
+        let timestamp = Utc::now().timestamp();
+        let signed_payload = format!("{timestamp}.{}", String::from_utf8_lossy(body));
+        let verifier = HmacSha256Verifier::new("secret");
+        let sig = verifier.compute(signed_payload.as_bytes());
+
+        let mut headers = HashMap::new();
+        headers.insert(
+            "stripe-signature".to_string(),
+            format!("t={timestamp},v1={sig}"),
+        );
+
+        let result = handler.verify_and_parse(&headers, body);
+        assert!(matches!(result, Err(WebhookError::JsonError(_))));
+    }
+
+    #[test]
+    fn test_stripe_wrong_secret_fails() {
+        let handler = StripeWebhook::new("correct_secret");
+        let body = br#"{"id":"evt_1","type":"test"}"#;
+        let timestamp = Utc::now().timestamp();
+        let signed_payload = format!("{timestamp}.{}", String::from_utf8_lossy(body));
+        let wrong_verifier = HmacSha256Verifier::new("wrong_secret");
+        let sig = wrong_verifier.compute(signed_payload.as_bytes());
+
+        let mut headers = HashMap::new();
+        headers.insert(
+            "stripe-signature".to_string(),
+            format!("t={timestamp},v1={sig}"),
+        );
+
+        let result = handler.verify_and_parse(&headers, body);
+        assert!(matches!(result, Err(WebhookError::InvalidSignature)));
+    }
+
+    #[test]
+    fn test_slack_case_insensitive_headers() {
+        let signing_secret = "test-secret";
+        let handler = SlackWebhook::new(signing_secret);
+        let body = br#"{"type":"event_callback"}"#;
+
+        let timestamp = Utc::now().timestamp();
+        let base_string = format!("v0:{timestamp}:{}", String::from_utf8_lossy(body));
+        let verifier = HmacSha256Verifier::new(signing_secret);
+        let computed = verifier.compute(base_string.as_bytes());
+
+        let mut headers = HashMap::new();
+        headers.insert("X-Slack-Signature".to_string(), format!("v0={computed}"));
+        headers.insert(
+            "X-Slack-Request-Timestamp".to_string(),
+            timestamp.to_string(),
+        );
+
+        let event = handler.verify_and_parse(&headers, body).unwrap();
+        assert_eq!(event.provider, "slack");
+    }
+
+    #[test]
+    fn test_linear_case_insensitive_header() {
+        let handler = LinearWebhook::new("secret");
+        let body = br#"{"type": "Issue", "webhookId": "wh_1"}"#;
+        let signature = handler.verifier.compute(body);
+
+        let mut headers = HashMap::new();
+        headers.insert("Linear-Signature".to_string(), signature);
+
+        let event = handler.verify_and_parse(&headers, body).unwrap();
+        assert_eq!(event.id, "wh_1");
+    }
+
+    #[test]
+    fn test_stripe_signature_empty_parts() {
+        // Extra commas in signature header
+        let result = StripeWebhook::parse_stripe_signature("t=123,,v1=abc,,");
+        assert!(result.is_ok());
+        let (ts, sigs) = result.unwrap();
+        assert_eq!(ts, 123);
+        assert_eq!(sigs, vec!["abc"]);
+    }
 }

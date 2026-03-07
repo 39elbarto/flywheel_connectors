@@ -712,4 +712,292 @@ mod tests {
         let set: BTreeSet<String> = tags.iter().map(|t| t.as_str().to_string()).collect();
         assert_eq!(set.len(), 3);
     }
+
+    // --- TailscaleTag: Display for non-fcp and fcp ---
+
+    #[test]
+    fn test_tag_display_non_fcp() {
+        let tag = TailscaleTag::new("tag:webserver").unwrap();
+        assert_eq!(format!("{tag}"), "tag:webserver");
+    }
+
+    #[test]
+    fn test_tag_display_fcp_community() {
+        let tag = TailscaleTag::fcp_tag("community");
+        assert_eq!(format!("{tag}"), "tag:fcp-community");
+    }
+
+    // --- TailscaleTag new: rejects various invalid prefixes ---
+
+    #[test]
+    fn test_tag_new_rejects_plain_word() {
+        assert!(TailscaleTag::new("hello").is_err());
+    }
+
+    #[test]
+    fn test_tag_new_rejects_partial_prefix() {
+        assert!(TailscaleTag::new("ta:foo").is_err());
+    }
+
+    #[test]
+    fn test_tag_new_rejects_uppercase_tag() {
+        assert!(TailscaleTag::new("TAG:server").is_err());
+    }
+
+    #[test]
+    fn test_tag_new_rejects_colon_only() {
+        assert!(TailscaleTag::new(":").is_err());
+    }
+
+    #[test]
+    fn test_tag_new_accepts_tag_with_special_chars() {
+        // tag: prefix is satisfied; the rest can be anything per the constructor
+        let tag = TailscaleTag::new("tag:special_chars-123!").unwrap();
+        assert_eq!(tag.as_str(), "tag:special_chars-123!");
+    }
+
+    // --- TailscaleTag fcp_tag with various suffixes ---
+
+    #[test]
+    fn test_fcp_tag_empty_suffix() {
+        let tag = TailscaleTag::fcp_tag("");
+        assert_eq!(tag.as_str(), "tag:fcp-");
+        assert!(tag.is_fcp_tag());
+        assert_eq!(tag.fcp_suffix(), Some(""));
+    }
+
+    #[test]
+    fn test_fcp_tag_long_suffix() {
+        let long_suffix = "a".repeat(256);
+        let tag = TailscaleTag::fcp_tag(&long_suffix);
+        assert!(tag.is_fcp_tag());
+        assert_eq!(tag.fcp_suffix(), Some(long_suffix.as_str()));
+    }
+
+    #[test]
+    fn test_fcp_tag_numeric_suffix() {
+        let tag = TailscaleTag::fcp_tag("12345");
+        assert_eq!(tag.as_str(), "tag:fcp-12345");
+        assert!(tag.is_fcp_tag());
+    }
+
+    // --- TailscaleTag: serde with unicode ---
+
+    #[test]
+    fn test_tag_serde_roundtrip_unicode() {
+        let tag = TailscaleTag::new("tag:café").unwrap();
+        let json = serde_json::to_string(&tag).unwrap();
+        let decoded: TailscaleTag = serde_json::from_str(&json).unwrap();
+        assert_eq!(tag, decoded);
+    }
+
+    // --- TailscaleTag equality and inequality ---
+
+    #[test]
+    fn test_tag_not_equal_different_tags() {
+        let tag1 = TailscaleTag::fcp_tag("work");
+        let tag2 = TailscaleTag::fcp_tag("private");
+        assert_ne!(tag1, tag2);
+    }
+
+    #[test]
+    fn test_tag_equal_same_tag() {
+        let tag1 = TailscaleTag::new("tag:fcp-work").unwrap();
+        let tag2 = TailscaleTag::fcp_tag("work");
+        assert_eq!(tag1, tag2);
+    }
+
+    // --- ZoneTagMapping: zone_to_tag edge cases ---
+
+    #[test]
+    fn test_zone_to_tag_empty_suffix() {
+        // "z:" has an empty suffix but zone_to_tag still produces a tag
+        let tag = ZoneTagMapping::zone_to_tag("z:").unwrap();
+        assert_eq!(tag.as_str(), "tag:fcp-");
+    }
+
+    #[test]
+    fn test_zone_to_tag_rejects_no_prefix() {
+        assert!(ZoneTagMapping::zone_to_tag("work").is_err());
+    }
+
+    #[test]
+    fn test_zone_to_tag_rejects_empty_string() {
+        assert!(ZoneTagMapping::zone_to_tag("").is_err());
+    }
+
+    #[test]
+    fn test_zone_to_tag_with_uppercase_suffix() {
+        // zone_to_tag doesn't validate suffix format, only prefix
+        let tag = ZoneTagMapping::zone_to_tag("z:UPPER").unwrap();
+        assert_eq!(tag.as_str(), "tag:fcp-UPPER");
+    }
+
+    // --- ZoneTagMapping: tag_to_zone edge cases ---
+
+    #[test]
+    fn test_tag_to_zone_with_empty_fcp_suffix() {
+        let tag = TailscaleTag::new("tag:fcp-").unwrap();
+        let zone = ZoneTagMapping::tag_to_zone(&tag);
+        assert_eq!(zone, Some("z:".to_string()));
+    }
+
+    #[test]
+    fn test_tag_to_zone_with_hyphenated_suffix() {
+        let tag = TailscaleTag::fcp_tag("my-custom-zone");
+        let zone = ZoneTagMapping::tag_to_zone(&tag).unwrap();
+        assert_eq!(zone, "z:my-custom-zone");
+    }
+
+    // --- ZoneTagMapping: try_tag_to_zone error contains tag name ---
+
+    #[test]
+    fn test_try_tag_to_zone_error_contains_tag() {
+        let tag = TailscaleTag::new("tag:server").unwrap();
+        let err = ZoneTagMapping::try_tag_to_zone(&tag).unwrap_err();
+        assert!(err.to_string().contains("tag:server"));
+    }
+
+    // --- ZoneTagMapping: is_valid_zone_id more edge cases ---
+
+    #[test]
+    fn test_valid_zone_id_single_digit() {
+        assert!(ZoneTagMapping::is_valid_zone_id("z:0"));
+    }
+
+    #[test]
+    fn test_valid_zone_id_all_digits() {
+        assert!(ZoneTagMapping::is_valid_zone_id("z:9876543210"));
+    }
+
+    #[test]
+    fn test_invalid_zone_id_hyphen_only() {
+        assert!(!ZoneTagMapping::is_valid_zone_id("z:-"));
+    }
+
+    #[test]
+    fn test_invalid_zone_id_double_colon() {
+        assert!(!ZoneTagMapping::is_valid_zone_id("z::work"));
+    }
+
+    #[test]
+    fn test_invalid_zone_id_with_at_sign() {
+        assert!(!ZoneTagMapping::is_valid_zone_id("z:user@zone"));
+    }
+
+    #[test]
+    fn test_invalid_zone_id_with_slash() {
+        assert!(!ZoneTagMapping::is_valid_zone_id("z:my/zone"));
+    }
+
+    // --- ZoneTagMapping: standard zones roundtrip fully ---
+
+    #[test]
+    fn test_standard_zones_all_valid_and_roundtrippable() {
+        for zone in ZoneTagMapping::standard_zones() {
+            assert!(ZoneTagMapping::is_valid_zone_id(zone));
+            let tag = ZoneTagMapping::zone_to_tag(zone).unwrap();
+            assert!(tag.is_fcp_tag());
+            let recovered = ZoneTagMapping::tag_to_zone(&tag).unwrap();
+            assert_eq!(&recovered, zone);
+            let validated = ZoneTagMapping::validate_zone_id(zone).unwrap();
+            assert_eq!(validated, *zone);
+        }
+    }
+
+    // --- ZoneAclGenerator: all_zone_rules produces correct structure ---
+
+    #[test]
+    fn test_all_zone_rules_structure() {
+        let acl = ZoneAclGenerator::new(5000, 5001);
+        let rules = acl.all_zone_rules().unwrap();
+        assert_eq!(rules.len(), 5);
+        for rule in &rules {
+            assert_eq!(rule.action, "accept");
+            assert_eq!(rule.src.len(), 1);
+            assert_eq!(rule.dst.len(), 2);
+            // Each dst should contain ":5000" or ":5001"
+            assert!(rule.dst[0].contains(":5000"));
+            assert!(rule.dst[1].contains(":5001"));
+        }
+    }
+
+    // --- ZoneAclRule serde with custom action ---
+
+    #[test]
+    fn test_zone_acl_rule_from_json_custom_fields() {
+        let json = r#"{
+            "action": "deny",
+            "src": ["tag:fcp-owner", "tag:fcp-private"],
+            "dst": ["tag:fcp-work:8080", "tag:fcp-work:8443"]
+        }"#;
+        let rule: ZoneAclRule = serde_json::from_str(json).unwrap();
+        assert_eq!(rule.action, "deny");
+        assert_eq!(rule.src.len(), 2);
+        assert_eq!(rule.dst.len(), 2);
+    }
+
+    // --- ZoneAclRule: empty src/dst ---
+
+    #[test]
+    fn test_zone_acl_rule_empty_src_dst() {
+        let rule = ZoneAclRule {
+            action: "accept".to_string(),
+            src: vec![],
+            dst: vec![],
+        };
+        let json = serde_json::to_string(&rule).unwrap();
+        let decoded: ZoneAclRule = serde_json::from_str(&json).unwrap();
+        assert!(decoded.src.is_empty());
+        assert!(decoded.dst.is_empty());
+    }
+
+    // --- ZoneAclGenerator with port 1 ---
+
+    #[test]
+    fn test_zone_acl_generator_port_one() {
+        let acl3 = ZoneAclGenerator::new(1, 1);
+        let rule = acl3.zone_access_rule("z:work").unwrap();
+        assert!(rule.dst.contains(&"tag:fcp-work:1".to_string()));
+    }
+
+    // --- ZoneAclGenerator: same port for symbol and control ---
+
+    #[test]
+    fn test_zone_acl_generator_same_ports() {
+        let acl2 = ZoneAclGenerator::new(9999, 9999);
+        let rule = acl2.zone_access_rule("z:owner").unwrap();
+        assert_eq!(rule.dst.len(), 2);
+        assert_eq!(rule.dst[0], "tag:fcp-owner:9999");
+        assert_eq!(rule.dst[1], "tag:fcp-owner:9999");
+    }
+
+    // --- ZONE_PREFIX constant ---
+
+    #[test]
+    fn test_zone_prefix_constant() {
+        assert_eq!(ZoneTagMapping::ZONE_PREFIX, "z:");
+    }
+
+    // --- FCP_TAG_PREFIX from crate root ---
+
+    #[test]
+    fn test_fcp_tag_prefix_constant() {
+        assert_eq!(crate::FCP_TAG_PREFIX, "tag:fcp-");
+    }
+
+    // --- TailscaleTag: Hash with different tags in HashSet ---
+
+    #[test]
+    fn test_tag_hash_different_tags() {
+        use std::collections::HashSet;
+        let tag1 = TailscaleTag::fcp_tag("owner");
+        let tag2 = TailscaleTag::fcp_tag("private");
+        let tag3 = TailscaleTag::new("tag:server").unwrap();
+        let mut set = HashSet::new();
+        set.insert(tag1);
+        set.insert(tag2);
+        set.insert(tag3);
+        assert_eq!(set.len(), 3);
+    }
 }

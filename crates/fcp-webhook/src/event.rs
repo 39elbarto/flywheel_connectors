@@ -815,4 +815,210 @@ mod tests {
         assert!(sub.matches(&WebhookEvent::new("e1", "push", "github")));
         assert!(sub.matches(&WebhookEvent::new("e1", "push", "stripe")));
     }
+
+    // ── Batch 3: SunnyMoose deep test expansion ──
+
+    #[test]
+    fn test_event_clone() {
+        let original = WebhookEvent::new("e1", "push", "github")
+            .with_payload(serde_json::json!({"key": "value"}))
+            .with_default_webhook_taint();
+        let cloned = original.clone();
+        assert_eq!(original.id, cloned.id);
+        assert_eq!(original.event_type, cloned.event_type);
+        assert_eq!(original.provider, cloned.provider);
+        assert_eq!(original.payload, cloned.payload);
+    }
+
+    #[test]
+    fn test_event_debug() {
+        let event = WebhookEvent::new("evt_dbg", "push", "github");
+        let debug = format!("{event:?}");
+        assert!(debug.contains("WebhookEvent"));
+        assert!(debug.contains("evt_dbg"));
+        assert!(debug.contains("push"));
+        assert!(debug.contains("github"));
+    }
+
+    #[test]
+    fn test_event_metadata_debug() {
+        let meta = EventMetadata::default();
+        let debug = format!("{meta:?}");
+        assert!(debug.contains("EventMetadata"));
+    }
+
+    #[test]
+    fn test_event_metadata_clone() {
+        let original = EventMetadata {
+            attempt: 5,
+            status: DeliveryStatus::Failed,
+            last_error: Some("timeout".into()),
+            source_ip: Some("10.0.0.1".into()),
+            ..EventMetadata::default()
+        };
+        let cloned = original.clone();
+        assert_eq!(original.attempt, cloned.attempt);
+        assert_eq!(original.status, cloned.status);
+        assert_eq!(original.last_error, cloned.last_error);
+        assert_eq!(original.source_ip, cloned.source_ip);
+    }
+
+    #[test]
+    fn test_delivery_status_debug() {
+        let debug = format!("{:?}", DeliveryStatus::Pending);
+        assert!(debug.contains("Pending"));
+        let debug = format!("{:?}", DeliveryStatus::DeadLettered);
+        assert!(debug.contains("DeadLettered"));
+    }
+
+    #[test]
+    fn test_delivery_status_copy() {
+        let status = DeliveryStatus::Delivered;
+        let copied = status;
+        assert_eq!(status, copied);
+    }
+
+    #[test]
+    fn test_event_subscription_debug() {
+        let sub = EventSubscription::for_types(vec!["push".into()]).with_provider("github");
+        let debug = format!("{sub:?}");
+        assert!(debug.contains("EventSubscription"));
+        assert!(debug.contains("push"));
+        assert!(debug.contains("github"));
+    }
+
+    #[test]
+    fn test_event_subscription_clone() {
+        let original = EventSubscription::for_types(vec!["push".into()]).with_provider("github");
+        let cloned = original.clone();
+        assert_eq!(original.event_types, cloned.event_types);
+        assert_eq!(original.provider, cloned.provider);
+    }
+
+    #[test]
+    fn test_event_unicode_fields() {
+        let event = WebhookEvent::new("evt_\u{00E9}", "push_\u{00F1}", "provider_\u{00FC}");
+        assert_eq!(event.id, "evt_\u{00E9}");
+        assert_eq!(event.event_type, "push_\u{00F1}");
+        assert_eq!(event.provider, "provider_\u{00FC}");
+    }
+
+    #[test]
+    fn test_event_empty_strings() {
+        let event = WebhookEvent::new("", "", "");
+        assert_eq!(event.id, "");
+        assert_eq!(event.event_type, "");
+        assert_eq!(event.provider, "");
+    }
+
+    #[test]
+    fn test_event_with_payload_null_explicitly() {
+        let event = WebhookEvent::new("e1", "push", "github")
+            .with_payload(serde_json::Value::Null);
+        assert!(event.payload.is_null());
+    }
+
+    #[test]
+    fn test_event_serde_with_headers() {
+        let mut headers = HashMap::new();
+        headers.insert("Content-Type".into(), "application/json".into());
+        headers.insert("X-Custom".into(), "value".into());
+        let event = WebhookEvent::new("e1", "push", "github").with_headers(headers);
+        let json = serde_json::to_string(&event).unwrap();
+        let roundtrip: WebhookEvent = serde_json::from_str(&json).unwrap();
+        assert_eq!(roundtrip.headers.len(), 2);
+        assert_eq!(roundtrip.header("content-type"), Some("application/json"));
+    }
+
+    #[test]
+    fn test_event_serde_with_metadata_custom() {
+        let mut custom = HashMap::new();
+        custom.insert("retry_count".into(), serde_json::json!(3));
+        custom.insert("origin".into(), serde_json::json!("us-east-1"));
+        let event = WebhookEvent {
+            metadata: EventMetadata {
+                custom,
+                ..EventMetadata::default()
+            },
+            ..WebhookEvent::new("e1", "push", "github")
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        let roundtrip: WebhookEvent = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            roundtrip.metadata.custom.get("retry_count"),
+            Some(&serde_json::json!(3))
+        );
+        assert_eq!(
+            roundtrip.metadata.custom.get("origin"),
+            Some(&serde_json::json!("us-east-1"))
+        );
+    }
+
+    #[test]
+    fn test_event_matches_type_star_at_start() {
+        // "*foo" is not a valid glob-like pattern in this impl — it's treated as exact match
+        let event = WebhookEvent::new("e1", "*foo", "github");
+        assert!(event.matches_type("*foo"));
+        assert!(event.matches_type("*")); // global wildcard always matches
+    }
+
+    #[test]
+    fn test_event_get_with_numeric_string_key() {
+        let event = WebhookEvent::new("e1", "push", "github")
+            .with_payload(serde_json::json!({"0": "zero", "1": "one"}));
+        assert_eq!(event.get_str("0"), Some("zero"));
+        assert_eq!(event.get_str("1"), Some("one"));
+    }
+
+    #[test]
+    fn test_subscription_matches_first_of_many_types() {
+        let sub = EventSubscription::for_types(vec![
+            "push".into(),
+            "release".into(),
+        ]);
+        let event = WebhookEvent::new("e1", "push", "github");
+        assert!(sub.matches(&event));
+    }
+
+    #[test]
+    fn test_subscription_matches_last_of_many_types() {
+        let sub = EventSubscription::for_types(vec![
+            "issue".into(),
+            "release".into(),
+            "push".into(),
+        ]);
+        let event = WebhookEvent::new("e1", "push", "github");
+        assert!(sub.matches(&event));
+    }
+
+    #[test]
+    fn test_event_header_empty_value() {
+        let mut headers = HashMap::new();
+        headers.insert("X-Empty".into(), String::new());
+        let event = WebhookEvent::new("e1", "push", "github").with_headers(headers);
+        assert_eq!(event.header("x-empty"), Some(""));
+    }
+
+    #[test]
+    fn test_event_metadata_all_fields_set() {
+        let now = Utc::now();
+        let meta = EventMetadata {
+            attempt: 10,
+            first_attempt_at: Some(now),
+            last_attempt_at: Some(now),
+            next_retry_at: Some(now),
+            status: DeliveryStatus::Delivered,
+            last_error: None,
+            source_ip: Some("192.168.1.1".into()),
+            taint_flags: TaintFlags::default(),
+            custom: HashMap::new(),
+        };
+        let json = serde_json::to_string(&meta).unwrap();
+        let rt: EventMetadata = serde_json::from_str(&json).unwrap();
+        assert_eq!(rt.attempt, 10);
+        assert_eq!(rt.status, DeliveryStatus::Delivered);
+        assert!(rt.first_attempt_at.is_some());
+        assert!(rt.last_attempt_at.is_some());
+        assert!(rt.next_retry_at.is_some());
+    }
 }

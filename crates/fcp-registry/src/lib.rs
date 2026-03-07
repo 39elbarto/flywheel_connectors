@@ -7172,4 +7172,1177 @@ trusted_builders = ["trusted-ci"]
             },
         );
     }
+
+    // ══════════════════════════════════════════════════════════════════════
+    // NEW: Expanded test suite for 310+ target
+    // ══════════════════════════════════════════════════════════════════════
+
+    // ── ConnectorTarget serde edge cases ─────────────────────────────
+
+    #[test]
+    fn connector_target_serde_unicode_os() {
+        let t = ConnectorTarget {
+            os: "\u{1F600}-os".to_string(),
+            arch: "amd64".to_string(),
+        };
+        let json = serde_json::to_string(&t).unwrap();
+        let parsed: ConnectorTarget = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.os, "\u{1F600}-os");
+        assert_eq!(parsed.arch, "amd64");
+    }
+
+    #[test]
+    fn connector_target_serde_unicode_arch() {
+        let t = ConnectorTarget {
+            os: "linux".to_string(),
+            arch: "\u{00E9}special".to_string(),
+        };
+        let json = serde_json::to_string(&t).unwrap();
+        let parsed: ConnectorTarget = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.arch, "\u{00E9}special");
+    }
+
+    #[test]
+    fn connector_target_serde_very_long_values() {
+        let long_os = "x".repeat(10_000);
+        let long_arch = "y".repeat(10_000);
+        let t = ConnectorTarget {
+            os: long_os.clone(),
+            arch: long_arch.clone(),
+        };
+        let json = serde_json::to_string(&t).unwrap();
+        let parsed: ConnectorTarget = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.os.len(), 10_000);
+        assert_eq!(parsed.arch.len(), 10_000);
+    }
+
+    #[test]
+    fn connector_target_as_string_with_hyphen_in_name() {
+        let t = ConnectorTarget {
+            os: "my-os".to_string(),
+            arch: "my-arch".to_string(),
+        };
+        assert_eq!(t.as_string(), "my-os-my-arch");
+    }
+
+    #[test]
+    fn connector_target_clone_independence() {
+        let t1 = ConnectorTarget {
+            os: "linux".to_string(),
+            arch: "amd64".to_string(),
+        };
+        let t2 = t1.clone();
+        // Use original after clone
+        assert_eq!(t1.os, "linux");
+        assert_eq!(t2.os, "linux");
+        assert_eq!(t1, t2);
+    }
+
+    #[test]
+    fn connector_target_debug_contains_fields() {
+        let t = ConnectorTarget {
+            os: "darwin".to_string(),
+            arch: "arm64".to_string(),
+        };
+        let debug = format!("{t:?}");
+        assert!(debug.contains("darwin"));
+        assert!(debug.contains("arm64"));
+    }
+
+    #[test]
+    fn connector_target_ne_same_os_different_arch() {
+        let t1 = ConnectorTarget {
+            os: "linux".to_string(),
+            arch: "amd64".to_string(),
+        };
+        let t2 = ConnectorTarget {
+            os: "linux".to_string(),
+            arch: "arm64".to_string(),
+        };
+        assert_ne!(t1, t2);
+    }
+
+    #[test]
+    fn connector_target_ne_different_os_same_arch() {
+        let t1 = ConnectorTarget {
+            os: "linux".to_string(),
+            arch: "amd64".to_string(),
+        };
+        let t2 = ConnectorTarget {
+            os: "darwin".to_string(),
+            arch: "amd64".to_string(),
+        };
+        assert_ne!(t1, t2);
+    }
+
+    // ── RegistryTrustPolicy edge cases ──────────────────────────────
+
+    #[test]
+    fn registry_trust_policy_clone_independence() {
+        let key = Ed25519SigningKey::generate().verifying_key();
+        let mut policy = RegistryTrustPolicy::default();
+        policy.publisher_keys.insert("k1".to_string(), key);
+        policy.require_registry_signature = true;
+        let cloned = policy.clone();
+        // Use original after clone
+        assert_eq!(policy.publisher_keys.len(), 1);
+        assert!(policy.require_registry_signature);
+        assert_eq!(cloned.publisher_keys.len(), 1);
+        assert!(cloned.require_registry_signature);
+    }
+
+    #[test]
+    fn registry_trust_policy_multiple_publisher_keys() {
+        let k1 = Ed25519SigningKey::generate().verifying_key();
+        let k2 = Ed25519SigningKey::generate().verifying_key();
+        let k3 = Ed25519SigningKey::generate().verifying_key();
+        let mut policy = RegistryTrustPolicy::default();
+        policy.publisher_keys.insert("k1".to_string(), k1);
+        policy.publisher_keys.insert("k2".to_string(), k2);
+        policy.publisher_keys.insert("k3".to_string(), k3);
+        assert_eq!(policy.publisher_keys.len(), 3);
+    }
+
+    #[test]
+    fn registry_trust_policy_multiple_registry_keys() {
+        let k1 = Ed25519SigningKey::generate().verifying_key();
+        let k2 = Ed25519SigningKey::generate().verifying_key();
+        let mut policy = RegistryTrustPolicy::default();
+        policy.registry_keys.insert("r1".to_string(), k1);
+        policy.registry_keys.insert("r2".to_string(), k2);
+        assert_eq!(policy.registry_keys.len(), 2);
+    }
+
+    // ── SupplyChainEvidence edge cases ──────────────────────────────
+
+    #[test]
+    fn supply_chain_evidence_clone_independence() {
+        let evidence = SupplyChainEvidence {
+            transparency_log_present: true,
+            attestations: vec![AttestationEvidence {
+                attestation_type: AttestationType::InToto,
+                slsa_level: Some(3),
+                builder_id: Some("ci".to_string()),
+            }],
+        };
+        let cloned = evidence.clone();
+        assert!(evidence.transparency_log_present);
+        assert_eq!(evidence.attestations.len(), 1);
+        assert_eq!(cloned.attestations.len(), 1);
+    }
+
+    #[test]
+    fn supply_chain_evidence_debug_format() {
+        let evidence = SupplyChainEvidence {
+            transparency_log_present: true,
+            attestations: vec![],
+        };
+        let debug = format!("{evidence:?}");
+        assert!(debug.contains("SupplyChainEvidence"));
+        assert!(debug.contains("true"));
+    }
+
+    #[test]
+    fn supply_chain_evidence_many_attestations() {
+        let attestations: Vec<AttestationEvidence> = (0..50)
+            .map(|i| AttestationEvidence {
+                attestation_type: AttestationType::InToto,
+                slsa_level: Some(i as u8),
+                builder_id: Some(format!("builder-{i}")),
+            })
+            .collect();
+        let evidence = SupplyChainEvidence {
+            transparency_log_present: false,
+            attestations,
+        };
+        assert_eq!(evidence.attestations.len(), 50);
+    }
+
+    // ── AttestationEvidence edge cases ──────────────────────────────
+
+    #[test]
+    fn attestation_evidence_all_types() {
+        let types = [
+            AttestationType::InToto,
+            AttestationType::ReproducibleBuild,
+            AttestationType::CodeReview,
+        ];
+        for at in &types {
+            let ev = AttestationEvidence {
+                attestation_type: *at,
+                slsa_level: None,
+                builder_id: None,
+            };
+            let cloned = ev.clone();
+            assert_eq!(cloned.attestation_type, ev.attestation_type);
+        }
+    }
+
+    #[test]
+    fn attestation_evidence_max_slsa_level() {
+        let ev = AttestationEvidence {
+            attestation_type: AttestationType::InToto,
+            slsa_level: Some(255),
+            builder_id: None,
+        };
+        assert_eq!(ev.slsa_level, Some(255));
+    }
+
+    #[test]
+    fn attestation_evidence_empty_builder_id() {
+        let ev = AttestationEvidence {
+            attestation_type: AttestationType::CodeReview,
+            slsa_level: Some(1),
+            builder_id: Some(String::new()),
+        };
+        assert_eq!(ev.builder_id, Some(String::new()));
+    }
+
+    // ── InclusionProof edge cases ───────────────────────────────────
+
+    #[test]
+    fn inclusion_proof_empty_hashes() {
+        let proof = InclusionProof {
+            root_hash: "sha256:root".to_string(),
+            tree_size: 0,
+            hashes: vec![],
+            leaf_index: 0,
+        };
+        let json = serde_json::to_string(&proof).unwrap();
+        let parsed: InclusionProof = serde_json::from_str(&json).unwrap();
+        assert!(parsed.hashes.is_empty());
+        assert_eq!(parsed.tree_size, 0);
+    }
+
+    #[test]
+    fn inclusion_proof_many_hashes() {
+        let hashes: Vec<String> = (0..100).map(|i| format!("sha256:hash{i}")).collect();
+        let proof = InclusionProof {
+            root_hash: "sha256:root".to_string(),
+            tree_size: 1_000_000,
+            hashes,
+            leaf_index: 999_999,
+        };
+        let json = serde_json::to_string(&proof).unwrap();
+        let parsed: InclusionProof = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.hashes.len(), 100);
+        assert_eq!(parsed.leaf_index, 999_999);
+    }
+
+    #[test]
+    fn inclusion_proof_clone_independence() {
+        let proof = InclusionProof {
+            root_hash: "sha256:r".to_string(),
+            tree_size: 42,
+            hashes: vec!["sha256:h1".to_string()],
+            leaf_index: 7,
+        };
+        let cloned = proof.clone();
+        assert_eq!(proof.tree_size, 42);
+        assert_eq!(cloned.tree_size, 42);
+        assert_eq!(proof.hashes.len(), cloned.hashes.len());
+    }
+
+    // ── TransparencyLogEntry edge cases ─────────────────────────────
+
+    #[test]
+    fn transparency_log_entry_clone_independence() {
+        let entry = TransparencyLogEntry {
+            log_index: 100,
+            entry_hash: "sha256:entry".to_string(),
+            inclusion_proof: InclusionProof {
+                root_hash: "sha256:root".to_string(),
+                tree_size: 500,
+                hashes: vec!["sha256:h1".to_string()],
+                leaf_index: 100,
+            },
+            signed_entry_timestamp: vec![0xDE, 0xAD],
+            log_id: "rekor".to_string(),
+        };
+        let cloned = entry.clone();
+        assert_eq!(entry.log_index, 100);
+        assert_eq!(cloned.log_index, 100);
+        assert_eq!(entry.log_id, cloned.log_id);
+    }
+
+    #[test]
+    fn transparency_log_entry_empty_timestamp() {
+        let entry = TransparencyLogEntry {
+            log_index: 0,
+            entry_hash: String::new(),
+            inclusion_proof: InclusionProof {
+                root_hash: String::new(),
+                tree_size: 0,
+                hashes: vec![],
+                leaf_index: 0,
+            },
+            signed_entry_timestamp: vec![],
+            log_id: String::new(),
+        };
+        let json = serde_json::to_string(&entry).unwrap();
+        let parsed: TransparencyLogEntry = serde_json::from_str(&json).unwrap();
+        assert!(parsed.signed_entry_timestamp.is_empty());
+        assert!(parsed.log_id.is_empty());
+    }
+
+    #[test]
+    fn transparency_log_entry_large_log_index() {
+        let entry = TransparencyLogEntry {
+            log_index: u64::MAX,
+            entry_hash: "sha256:max".to_string(),
+            inclusion_proof: InclusionProof {
+                root_hash: "r".to_string(),
+                tree_size: u64::MAX,
+                hashes: vec![],
+                leaf_index: u64::MAX,
+            },
+            signed_entry_timestamp: vec![],
+            log_id: "log".to_string(),
+        };
+        let json = serde_json::to_string(&entry).unwrap();
+        let parsed: TransparencyLogEntry = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.log_index, u64::MAX);
+    }
+
+    // ── TufRootMetadata edge cases ──────────────────────────────────
+
+    #[test]
+    fn tuf_root_metadata_clone_independence() {
+        let root = TufRootMetadata {
+            version: 42,
+            root_hash: "sha256:root".to_string(),
+            expires: 1_000_000,
+            key_ids: vec!["k1".to_string(), "k2".to_string()],
+            threshold: 2,
+        };
+        let cloned = root.clone();
+        assert_eq!(root.version, 42);
+        assert_eq!(cloned.version, 42);
+        assert_eq!(root.key_ids.len(), cloned.key_ids.len());
+    }
+
+    #[test]
+    fn tuf_root_metadata_empty_key_ids() {
+        let root = TufRootMetadata {
+            version: 1,
+            root_hash: "sha256:r".to_string(),
+            expires: 0,
+            key_ids: vec![],
+            threshold: 0,
+        };
+        let json = serde_json::to_string(&root).unwrap();
+        let parsed: TufRootMetadata = serde_json::from_str(&json).unwrap();
+        assert!(parsed.key_ids.is_empty());
+        assert_eq!(parsed.threshold, 0);
+    }
+
+    #[test]
+    fn tuf_root_metadata_max_version() {
+        let root = TufRootMetadata {
+            version: u32::MAX,
+            root_hash: "sha256:max".to_string(),
+            expires: u64::MAX,
+            key_ids: vec!["k".to_string()],
+            threshold: 255,
+        };
+        let json = serde_json::to_string(&root).unwrap();
+        let parsed: TufRootMetadata = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.version, u32::MAX);
+        assert_eq!(parsed.threshold, 255);
+    }
+
+    #[test]
+    fn tuf_root_metadata_debug_format() {
+        let root = TufRootMetadata {
+            version: 7,
+            root_hash: "sha256:debug".to_string(),
+            expires: 999,
+            key_ids: vec!["k1".to_string()],
+            threshold: 1,
+        };
+        let debug = format!("{root:?}");
+        assert!(debug.contains("TufRootMetadata"));
+        assert!(debug.contains("sha256:debug"));
+    }
+
+    // ── TufTargetInfo edge cases ────────────────────────────────────
+
+    #[test]
+    fn tuf_target_info_clone_independence() {
+        let target = TufTargetInfo {
+            target_path: "connectors/fcp.test".to_string(),
+            hash: "sha256:abc".to_string(),
+            length: 1024,
+            delegations: vec!["root".to_string()],
+        };
+        let cloned = target.clone();
+        assert_eq!(target.target_path, "connectors/fcp.test");
+        assert_eq!(cloned.target_path, "connectors/fcp.test");
+    }
+
+    #[test]
+    fn tuf_target_info_empty_delegations() {
+        let target = TufTargetInfo {
+            target_path: "p".to_string(),
+            hash: "h".to_string(),
+            length: 0,
+            delegations: vec![],
+        };
+        let json = serde_json::to_string(&target).unwrap();
+        let parsed: TufTargetInfo = serde_json::from_str(&json).unwrap();
+        assert!(parsed.delegations.is_empty());
+        assert_eq!(parsed.length, 0);
+    }
+
+    #[test]
+    fn tuf_target_info_debug_format() {
+        let target = TufTargetInfo {
+            target_path: "path/to/target".to_string(),
+            hash: "sha256:hash".to_string(),
+            length: 4096,
+            delegations: vec!["d1".to_string()],
+        };
+        let debug = format!("{target:?}");
+        assert!(debug.contains("TufTargetInfo"));
+        assert!(debug.contains("path/to/target"));
+    }
+
+    // ── SigstoreBundle edge cases ───────────────────────────────────
+
+    #[test]
+    fn sigstore_bundle_clone_independence() {
+        let bundle = SigstoreBundle {
+            signature: "sig".to_string(),
+            certificate: "cert".to_string(),
+            rekor_entry: None,
+            identity: "id".to_string(),
+            issuer: "iss".to_string(),
+        };
+        let cloned = bundle.clone();
+        assert_eq!(bundle.signature, "sig");
+        assert_eq!(cloned.signature, "sig");
+    }
+
+    #[test]
+    fn sigstore_bundle_with_rekor_entry_serde() {
+        let bundle = SigstoreBundle {
+            signature: "sig-value".to_string(),
+            certificate: "cert-value".to_string(),
+            rekor_entry: Some(TransparencyLogEntry {
+                log_index: 777,
+                entry_hash: "sha256:e".to_string(),
+                inclusion_proof: InclusionProof {
+                    root_hash: "sha256:r".to_string(),
+                    tree_size: 1000,
+                    hashes: vec!["sha256:h1".to_string(), "sha256:h2".to_string()],
+                    leaf_index: 777,
+                },
+                signed_entry_timestamp: vec![1, 2, 3],
+                log_id: "rekor-prod".to_string(),
+            }),
+            identity: "github-actions".to_string(),
+            issuer: "https://token.actions.githubusercontent.com".to_string(),
+        };
+        let json = serde_json::to_string(&bundle).unwrap();
+        let parsed: SigstoreBundle = serde_json::from_str(&json).unwrap();
+        assert!(parsed.rekor_entry.is_some());
+        let entry = parsed.rekor_entry.unwrap();
+        assert_eq!(entry.log_index, 777);
+        assert_eq!(entry.inclusion_proof.hashes.len(), 2);
+    }
+
+    #[test]
+    fn sigstore_bundle_empty_strings() {
+        let bundle = SigstoreBundle {
+            signature: String::new(),
+            certificate: String::new(),
+            rekor_entry: None,
+            identity: String::new(),
+            issuer: String::new(),
+        };
+        let json = serde_json::to_string(&bundle).unwrap();
+        let parsed: SigstoreBundle = serde_json::from_str(&json).unwrap();
+        assert!(parsed.signature.is_empty());
+        assert!(parsed.identity.is_empty());
+    }
+
+    #[test]
+    fn sigstore_bundle_debug_format() {
+        let bundle = SigstoreBundle {
+            signature: "sig".to_string(),
+            certificate: "cert".to_string(),
+            rekor_entry: None,
+            identity: "id".to_string(),
+            issuer: "iss".to_string(),
+        };
+        let debug = format!("{bundle:?}");
+        assert!(debug.contains("SigstoreBundle"));
+    }
+
+    // ── TransparencyVerificationResult edge cases ───────────────────
+
+    #[test]
+    fn transparency_verification_result_clone_independence() {
+        let result = TransparencyVerificationResult {
+            verified: true,
+            log_index: Some(42),
+            logged_at: Some(1_000_000),
+        };
+        let cloned = result.clone();
+        assert!(result.verified);
+        assert_eq!(result.log_index, Some(42));
+        assert_eq!(cloned.log_index, Some(42));
+    }
+
+    #[test]
+    fn transparency_verification_result_all_none() {
+        let result = TransparencyVerificationResult {
+            verified: false,
+            log_index: None,
+            logged_at: None,
+        };
+        let debug = format!("{result:?}");
+        assert!(debug.contains("TransparencyVerificationResult"));
+        assert!(!result.verified);
+    }
+
+    // ── TufVerificationResult edge cases ────────────────────────────
+
+    #[test]
+    fn tuf_verification_result_clone_with_target() {
+        let result = TufVerificationResult {
+            verified: true,
+            root_version: 10,
+            target: Some(TufTargetInfo {
+                target_path: "p".to_string(),
+                hash: "h".to_string(),
+                length: 512,
+                delegations: vec!["d".to_string()],
+            }),
+        };
+        let cloned = result.clone();
+        assert_eq!(result.root_version, 10);
+        assert!(result.target.is_some());
+        assert_eq!(cloned.root_version, 10);
+        assert_eq!(cloned.target.as_ref().unwrap().length, 512);
+    }
+
+    #[test]
+    fn tuf_verification_result_without_target() {
+        let result = TufVerificationResult {
+            verified: false,
+            root_version: 0,
+            target: None,
+        };
+        let debug = format!("{result:?}");
+        assert!(debug.contains("TufVerificationResult"));
+        assert!(!result.verified);
+    }
+
+    // ── SigstoreVerificationResult edge cases ───────────────────────
+
+    #[test]
+    fn sigstore_verification_result_clone_all_some() {
+        let result = SigstoreVerificationResult {
+            verified: true,
+            identity: Some("github-actions".to_string()),
+            issuer: Some("https://github.com".to_string()),
+            rekor_log_index: Some(12345),
+        };
+        let cloned = result.clone();
+        assert_eq!(result.identity, Some("github-actions".to_string()));
+        assert_eq!(cloned.rekor_log_index, Some(12345));
+    }
+
+    #[test]
+    fn sigstore_verification_result_clone_all_none() {
+        let result = SigstoreVerificationResult {
+            verified: false,
+            identity: None,
+            issuer: None,
+            rekor_log_index: None,
+        };
+        let cloned = result.clone();
+        assert!(!result.verified);
+        assert!(cloned.identity.is_none());
+    }
+
+    // ── SupplyChainVerificationConfig edge cases ────────────────────
+
+    #[test]
+    fn supply_chain_verification_config_clone_independence() {
+        let config = SupplyChainVerificationConfig {
+            tuf_pinned_root: Some(TufRootMetadata {
+                version: 1,
+                root_hash: "sha256:r".to_string(),
+                expires: u64::MAX,
+                key_ids: vec!["k".to_string()],
+                threshold: 1,
+            }),
+            trusted_sigstore_identities: vec!["id".to_string()],
+            trusted_sigstore_issuers: vec!["iss".to_string()],
+            require_transparency: true,
+            require_tuf: false,
+            require_sigstore: true,
+        };
+        let cloned = config.clone();
+        assert!(config.require_transparency);
+        assert!(config.require_sigstore);
+        assert!(!config.require_tuf);
+        assert_eq!(cloned.trusted_sigstore_identities.len(), 1);
+    }
+
+    #[test]
+    fn supply_chain_verification_config_all_false() {
+        let config = SupplyChainVerificationConfig {
+            tuf_pinned_root: None,
+            trusted_sigstore_identities: vec![],
+            trusted_sigstore_issuers: vec![],
+            require_transparency: false,
+            require_tuf: false,
+            require_sigstore: false,
+        };
+        assert!(!config.require_transparency);
+        assert!(!config.require_tuf);
+        assert!(!config.require_sigstore);
+        assert!(config.tuf_pinned_root.is_none());
+    }
+
+    // ── ConnectorBundle edge cases ──────────────────────────────────
+
+    #[test]
+    fn connector_bundle_clone_large_binary() {
+        let bundle = ConnectorBundle {
+            manifest_toml: "toml".to_string(),
+            binary: vec![0xABu8; 100_000],
+            target: ConnectorTarget {
+                os: "linux".to_string(),
+                arch: "amd64".to_string(),
+            },
+        };
+        let cloned = bundle.clone();
+        assert_eq!(bundle.binary.len(), 100_000);
+        assert_eq!(cloned.binary.len(), 100_000);
+    }
+
+    #[test]
+    fn connector_bundle_empty_binary() {
+        let bundle = ConnectorBundle {
+            manifest_toml: String::new(),
+            binary: vec![],
+            target: ConnectorTarget {
+                os: String::new(),
+                arch: String::new(),
+            },
+        };
+        assert!(bundle.binary.is_empty());
+        assert!(bundle.manifest_toml.is_empty());
+    }
+
+    #[test]
+    fn connector_bundle_debug_format() {
+        let bundle = ConnectorBundle {
+            manifest_toml: "manifest".to_string(),
+            binary: vec![1, 2, 3],
+            target: test_target(),
+        };
+        let debug = format!("{bundle:?}");
+        assert!(debug.contains("ConnectorBundle"));
+        assert!(debug.contains("manifest"));
+    }
+
+    // ── VerifiedConnectorBundle edge cases ──────────────────────────
+
+    #[test]
+    fn verified_bundle_clone_independence() {
+        let manifest = minimal_manifest();
+        let verified = VerifiedConnectorBundle {
+            manifest,
+            manifest_hash: "sha256:m".to_string(),
+            binary_hash: "sha256:b".to_string(),
+            target: test_target(),
+        };
+        let cloned = verified.clone();
+        assert_eq!(verified.manifest_hash, "sha256:m");
+        assert_eq!(cloned.manifest_hash, "sha256:m");
+        assert_eq!(verified.target, cloned.target);
+    }
+
+    #[test]
+    fn verified_bundle_report_empty_outcome() {
+        let manifest = minimal_manifest();
+        let verified = VerifiedConnectorBundle {
+            manifest,
+            manifest_hash: "sha256:m".to_string(),
+            binary_hash: "sha256:b".to_string(),
+            target: test_target(),
+        };
+        let report = verified.report("");
+        assert!(report.outcome.is_empty());
+    }
+
+    #[test]
+    fn verified_bundle_report_unicode_outcome() {
+        let manifest = minimal_manifest();
+        let verified = VerifiedConnectorBundle {
+            manifest,
+            manifest_hash: "sha256:m".to_string(),
+            binary_hash: "sha256:b".to_string(),
+            target: test_target(),
+        };
+        let report = verified.report("\u{2705} passed");
+        assert_eq!(report.outcome, "\u{2705} passed");
+    }
+
+    #[test]
+    fn verified_bundle_rate_limits_none() {
+        let manifest = minimal_manifest();
+        let verified = VerifiedConnectorBundle {
+            manifest,
+            manifest_hash: "sha256:m".to_string(),
+            binary_hash: "sha256:b".to_string(),
+            target: test_target(),
+        };
+        assert!(verified.rate_limit_declarations().is_none());
+    }
+
+    // ── MirrorResult edge cases ─────────────────────────────────────
+
+    #[test]
+    fn mirror_result_clone_independence() {
+        let result = MirrorResult {
+            manifest_object_id: ObjectId::from_bytes([1u8; 32]),
+            binary_object_id: ObjectId::from_bytes([2u8; 32]),
+            manifest_hash: "sha256:m".to_string(),
+            binary_hash: "sha256:b".to_string(),
+        };
+        let cloned = result.clone();
+        assert_eq!(result.manifest_hash, "sha256:m");
+        assert_eq!(cloned.manifest_hash, "sha256:m");
+        assert_ne!(result.manifest_object_id, result.binary_object_id);
+    }
+
+    #[test]
+    fn mirror_result_debug_format() {
+        let result = MirrorResult {
+            manifest_object_id: ObjectId::from_bytes([3u8; 32]),
+            binary_object_id: ObjectId::from_bytes([4u8; 32]),
+            manifest_hash: "sha256:mh".to_string(),
+            binary_hash: "sha256:bh".to_string(),
+        };
+        let debug = format!("{result:?}");
+        assert!(debug.contains("MirrorResult"));
+        assert!(debug.contains("sha256:mh"));
+    }
+
+    // ── RegistryVerificationReport edge cases ───────────────────────
+
+    #[test]
+    fn registry_verification_report_serde_empty_fields() {
+        let report = RegistryVerificationReport {
+            connector_id: String::new(),
+            manifest_hash: String::new(),
+            binary_hash: String::new(),
+            target: ConnectorTarget {
+                os: String::new(),
+                arch: String::new(),
+            },
+            verified_at: 0,
+            outcome: String::new(),
+        };
+        let json = serde_json::to_string(&report).unwrap();
+        let parsed: RegistryVerificationReport = serde_json::from_str(&json).unwrap();
+        assert!(parsed.connector_id.is_empty());
+        assert_eq!(parsed.verified_at, 0);
+    }
+
+    #[test]
+    fn registry_verification_report_serde_max_timestamp() {
+        let report = RegistryVerificationReport {
+            connector_id: "fcp.test".to_string(),
+            manifest_hash: "sha256:m".to_string(),
+            binary_hash: "sha256:b".to_string(),
+            target: test_target(),
+            verified_at: u64::MAX,
+            outcome: "pass".to_string(),
+        };
+        let json = serde_json::to_string(&report).unwrap();
+        let parsed: RegistryVerificationReport = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.verified_at, u64::MAX);
+    }
+
+    #[test]
+    fn registry_verification_report_clone_independence() {
+        let report = RegistryVerificationReport {
+            connector_id: "fcp.test".to_string(),
+            manifest_hash: "sha256:m".to_string(),
+            binary_hash: "sha256:b".to_string(),
+            target: test_target(),
+            verified_at: 42,
+            outcome: "pass".to_string(),
+        };
+        let cloned = report.clone();
+        assert_eq!(report.connector_id, "fcp.test");
+        assert_eq!(cloned.connector_id, "fcp.test");
+    }
+
+    // ── hash_bytes edge cases ───────────────────────────────────────
+
+    #[test]
+    fn hash_bytes_single_byte() {
+        let h = hash_bytes(&[0x42]);
+        assert!(h.starts_with("sha256:"));
+        assert_eq!(h.len(), 7 + 64);
+    }
+
+    #[test]
+    fn hash_bytes_all_zeros() {
+        let h = hash_bytes(&[0u8; 1024]);
+        assert!(h.starts_with("sha256:"));
+        let h2 = hash_bytes(&[0u8; 1024]);
+        assert_eq!(h, h2);
+    }
+
+    #[test]
+    fn hash_bytes_all_ones() {
+        let h = hash_bytes(&[0xFF; 1024]);
+        assert!(h.starts_with("sha256:"));
+        // Different from all zeros
+        let h_zeros = hash_bytes(&[0u8; 1024]);
+        assert_ne!(h, h_zeros);
+    }
+
+    #[test]
+    fn hash_bytes_known_value() {
+        // SHA256 of empty string is well-known
+        let h = hash_bytes(b"");
+        assert_eq!(
+            h,
+            "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+    }
+
+    // ── signature_message edge cases ────────────────────────────────
+
+    #[test]
+    fn signature_message_uses_u64_length_prefix() {
+        let msg = signature_message(b"abc", "def");
+        // First 8 bytes are u64 LE length of signing_bytes
+        let len = u64::from_le_bytes(msg[0..8].try_into().unwrap());
+        assert_eq!(len, 3);
+    }
+
+    #[test]
+    fn signature_message_binary_hash_length_prefix() {
+        let signing_bytes = b"test";
+        let binary_hash = "sha256:hash123";
+        let msg = signature_message(signing_bytes, binary_hash);
+        // After signing_bytes, hash length prefix
+        let hash_offset = 8 + signing_bytes.len();
+        let hash_len = u64::from_le_bytes(msg[hash_offset..hash_offset + 8].try_into().unwrap());
+        assert_eq!(hash_len as usize, binary_hash.len());
+    }
+
+    #[test]
+    fn signature_message_large_signing_bytes() {
+        let large = vec![0xABu8; 100_000];
+        let msg = signature_message(&large, "sha256:h");
+        assert_eq!(msg.len(), 8 + 100_000 + 8 + 8);
+    }
+
+    #[test]
+    fn signature_message_no_overlap_ambiguity() {
+        // "ab" + "cde" should differ from "abc" + "de"
+        let m1 = signature_message(b"ab", "cde");
+        let m2 = signature_message(b"abc", "de");
+        assert_ne!(m1, m2);
+    }
+
+    // ── attestation_label coverage ──────────────────────────────────
+
+    #[test]
+    fn attestation_label_in_toto() {
+        assert_eq!(attestation_label(AttestationType::InToto), "in-toto");
+    }
+
+    #[test]
+    fn attestation_label_reproducible_build() {
+        assert_eq!(
+            attestation_label(AttestationType::ReproducibleBuild),
+            "reproducible-build"
+        );
+    }
+
+    #[test]
+    fn attestation_label_code_review() {
+        assert_eq!(
+            attestation_label(AttestationType::CodeReview),
+            "code-review"
+        );
+    }
+
+    // ── RegistryError display field interpolation ───────────────────
+
+    #[test]
+    fn registry_error_unknown_kid_contains_kid() {
+        let err = RegistryError::UnknownKid {
+            kid: "special-key-123".to_string(),
+        };
+        assert!(err.to_string().contains("special-key-123"));
+    }
+
+    #[test]
+    fn registry_error_signature_invalid_contains_kid() {
+        let err = RegistryError::SignatureInvalid {
+            kid: "bad-key-456".to_string(),
+        };
+        assert!(err.to_string().contains("bad-key-456"));
+    }
+
+    #[test]
+    fn registry_error_publisher_threshold_contains_values() {
+        let err = RegistryError::PublisherThresholdUnmet {
+            required: 5,
+            valid: 2,
+        };
+        let msg = err.to_string();
+        assert!(msg.contains('5'));
+        assert!(msg.contains('2'));
+    }
+
+    #[test]
+    fn registry_error_target_mismatch_contains_both() {
+        let err = RegistryError::TargetMismatch {
+            expected: "linux-amd64".to_string(),
+            found: "darwin-arm64".to_string(),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("linux-amd64"));
+        assert!(msg.contains("darwin-arm64"));
+    }
+
+    #[test]
+    fn registry_error_capability_ceiling_contains_cap() {
+        let err = RegistryError::CapabilityCeilingViolation {
+            capability: "network.raw".to_string(),
+        };
+        assert!(err.to_string().contains("network.raw"));
+    }
+
+    #[test]
+    fn registry_error_required_attestation_contains_type() {
+        let err = RegistryError::RequiredAttestationMissing {
+            attestation: "reproducible-build".to_string(),
+        };
+        assert!(err.to_string().contains("reproducible-build"));
+    }
+
+    #[test]
+    fn registry_error_slsa_insufficient_contains_level() {
+        let err = RegistryError::SlsaLevelInsufficient { required: 4 };
+        assert!(err.to_string().contains('4'));
+    }
+
+    #[test]
+    fn registry_error_untrusted_builder_contains_name() {
+        let err = RegistryError::UntrustedBuilder {
+            builder: "malicious-ci".to_string(),
+        };
+        assert!(err.to_string().contains("malicious-ci"));
+    }
+
+    // ── SupplyChainVerificationError display field interpolation ────
+
+    #[test]
+    fn sc_error_tuf_root_mismatch_contains_hashes() {
+        let err = SupplyChainVerificationError::TufRootMismatch {
+            expected: "sha256:expected".to_string(),
+            actual: "sha256:actual".to_string(),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("sha256:expected"));
+        assert!(msg.contains("sha256:actual"));
+    }
+
+    #[test]
+    fn sc_error_tuf_target_not_found_contains_target() {
+        let err = SupplyChainVerificationError::TufTargetNotFound {
+            target: "connectors/fcp.test".to_string(),
+        };
+        assert!(err.to_string().contains("connectors/fcp.test"));
+    }
+
+    #[test]
+    fn sc_error_tuf_rollback_contains_versions() {
+        let err = SupplyChainVerificationError::TufRollback {
+            current: 10,
+            got: 5,
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("10"));
+        assert!(msg.contains('5'));
+    }
+
+    #[test]
+    fn sc_error_sigstore_identity_mismatch_contains_both() {
+        let err = SupplyChainVerificationError::SigstoreIdentityMismatch {
+            expected: "expected-id".to_string(),
+            actual: "actual-id".to_string(),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("expected-id"));
+        assert!(msg.contains("actual-id"));
+    }
+
+    #[test]
+    fn sc_error_sigstore_issuer_untrusted_contains_issuer() {
+        let err = SupplyChainVerificationError::SigstoreIssuerUntrusted {
+            issuer: "https://evil-issuer.com".to_string(),
+        };
+        assert!(err.to_string().contains("https://evil-issuer.com"));
+    }
+
+    #[test]
+    fn sc_error_network_contains_message() {
+        let err = SupplyChainVerificationError::Network("connection refused".to_string());
+        assert!(err.to_string().contains("connection refused"));
+    }
+
+    // ── SupplyChainVerificationError Debug field interpolation ──────
+
+    #[test]
+    fn sc_error_debug_tuf_root_mismatch() {
+        let err = SupplyChainVerificationError::TufRootMismatch {
+            expected: "e".to_string(),
+            actual: "a".to_string(),
+        };
+        let debug = format!("{err:?}");
+        assert!(debug.contains("TufRootMismatch"));
+    }
+
+    #[test]
+    fn sc_error_debug_network() {
+        let err = SupplyChainVerificationError::Network("timeout".to_string());
+        let debug = format!("{err:?}");
+        assert!(debug.contains("Network"));
+        assert!(debug.contains("timeout"));
+    }
+
+    #[test]
+    fn sc_error_debug_not_configured() {
+        let err = SupplyChainVerificationError::NotConfigured;
+        let debug = format!("{err:?}");
+        assert!(debug.contains("NotConfigured"));
+    }
+
+    // ── RegistryVerifier construction ───────────────────────────────
+
+    #[test]
+    fn registry_verifier_const_new() {
+        let trust = RegistryTrustPolicy::default();
+        let verifier = RegistryVerifier::new(trust);
+        let debug = format!("{verifier:?}");
+        assert!(debug.contains("RegistryVerifier"));
+    }
+
+    // ── enforce_supply_chain_policy: empty attestation requirement ──
+
+    #[test]
+    fn enforce_supply_chain_empty_attestation_types_passes() {
+        let mut manifest = minimal_manifest();
+        manifest.policy = Some(fcp_manifest::PolicySection {
+            require_transparency_log: false,
+            require_attestation_types: vec![],
+            min_slsa_level: None,
+            trusted_builders: vec![],
+        });
+        enforce_supply_chain_policy(&manifest, None).expect("empty attestation types passes");
+    }
+
+    // ── enforce_capability_ceiling: multiple caps ───────────────────
+
+    #[test]
+    fn enforce_capability_ceiling_exact_match() {
+        let manifest = minimal_manifest();
+        // Collect all capabilities from the manifest
+        let mut caps: HashSet<CapabilityId> = HashSet::new();
+        caps.extend(manifest.capabilities.required.iter().cloned());
+        caps.extend(manifest.capabilities.optional.iter().cloned());
+        for op in manifest.provides.operations.values() {
+            caps.insert(op.capability.clone());
+        }
+        let ceiling: Vec<CapabilityId> = caps.into_iter().collect();
+        let policy = test_zone_policy(ceiling);
+        enforce_capability_ceiling(Some(&policy), &manifest)
+            .expect("exact match should pass");
+    }
+
+    // ── ConnectorManifestObject / ConnectorBinaryObject serde ───────
+
+    #[test]
+    fn connector_manifest_object_serde_roundtrip() {
+        let obj = ConnectorManifestObject {
+            manifest_toml: "toml content".to_string(),
+            manifest_hash: "sha256:m".to_string(),
+        };
+        let json = serde_json::to_string(&obj).unwrap();
+        let parsed: ConnectorManifestObject = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.manifest_toml, "toml content");
+        assert_eq!(parsed.manifest_hash, "sha256:m");
+    }
+
+    #[test]
+    fn connector_binary_object_serde_roundtrip() {
+        let obj = ConnectorBinaryObject {
+            target: ConnectorTarget {
+                os: "linux".to_string(),
+                arch: "amd64".to_string(),
+            },
+            binary_hash: "sha256:b".to_string(),
+            binary: vec![1, 2, 3, 4, 5],
+        };
+        let json = serde_json::to_string(&obj).unwrap();
+        let parsed: ConnectorBinaryObject = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.binary, vec![1, 2, 3, 4, 5]);
+        assert_eq!(parsed.target.os, "linux");
+    }
+
+    #[test]
+    fn connector_manifest_object_debug_clone() {
+        let obj = ConnectorManifestObject {
+            manifest_toml: "t".to_string(),
+            manifest_hash: "h".to_string(),
+        };
+        let debug = format!("{obj:?}");
+        assert!(debug.contains("ConnectorManifestObject"));
+        let cloned = obj.clone();
+        assert_eq!(cloned.manifest_toml, obj.manifest_toml);
+    }
+
+    #[test]
+    fn connector_binary_object_debug_clone() {
+        let obj = ConnectorBinaryObject {
+            target: test_target(),
+            binary_hash: "sha256:b".to_string(),
+            binary: vec![],
+        };
+        let debug = format!("{obj:?}");
+        assert!(debug.contains("ConnectorBinaryObject"));
+        let cloned = obj.clone();
+        assert_eq!(cloned.binary_hash, obj.binary_hash);
+    }
+
+    // ── MANIFEST_SIGNATURE_CONTEXT details ──────────────────────────
+
+    #[test]
+    fn manifest_signature_context_is_utf8() {
+        let s = std::str::from_utf8(MANIFEST_SIGNATURE_CONTEXT);
+        assert!(s.is_ok());
+        assert_eq!(s.unwrap(), "fcp.registry.manifest.v1");
+    }
+
+    #[test]
+    fn manifest_signature_context_length() {
+        assert_eq!(MANIFEST_SIGNATURE_CONTEXT.len(), 24);
+    }
 }

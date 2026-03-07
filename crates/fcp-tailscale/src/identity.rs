@@ -1215,4 +1215,358 @@ mod tests {
         assert_eq!(fcp_tags[1].as_str(), "tag:fcp-owner");
         assert_eq!(fcp_tags[2].as_str(), "tag:fcp-work");
     }
+
+    // --- NodeId: special characters ---
+
+    #[test]
+    fn test_node_id_with_special_chars() {
+        let id = NodeId::new("node/path:special@chars");
+        assert_eq!(id.as_str(), "node/path:special@chars");
+        assert_eq!(id.to_string(), "node/path:special@chars");
+    }
+
+    #[test]
+    fn test_node_id_with_whitespace() {
+        let id = NodeId::new("node with spaces");
+        assert_eq!(id.as_str(), "node with spaces");
+    }
+
+    #[test]
+    fn test_node_id_with_newline() {
+        let id = NodeId::new("node\nnewline");
+        assert!(id.as_str().contains('\n'));
+    }
+
+    // --- NodeId: serde with special chars ---
+
+    #[test]
+    fn test_node_id_serde_roundtrip_unicode() {
+        let id = NodeId::new("nöde-日本語");
+        let json = serde_json::to_string(&id).unwrap();
+        let decoded: NodeId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, decoded);
+    }
+
+    #[test]
+    fn test_node_id_serde_json_contains_string() {
+        let id = NodeId::new("test-id");
+        let json = serde_json::to_string(&id).unwrap();
+        assert_eq!(json, "\"test-id\"");
+    }
+
+    // --- NodeId: inequality ---
+
+    #[test]
+    fn test_node_id_case_sensitive() {
+        let id1 = NodeId::new("Node");
+        let id2 = NodeId::new("node");
+        assert_ne!(id1, id2);
+    }
+
+    // --- NodeKeys: serde stability ---
+
+    #[test]
+    fn test_node_keys_serde_json_has_expected_fields() {
+        let (_, keys) = create_test_keys();
+        let json = serde_json::to_string(&keys).unwrap();
+        assert!(json.contains("signing_key"));
+        assert!(json.contains("encryption_key"));
+        assert!(json.contains("issuance_key"));
+    }
+
+    // --- MeshIdentity: hostname edge cases ---
+
+    #[test]
+    fn test_mesh_identity_empty_hostname() {
+        let (owner_key, node_keys) = create_test_keys();
+        let identity = MeshIdentity::new(
+            NodeId::new("n"),
+            String::new(),
+            vec![],
+            vec![],
+            owner_key.verifying_key(),
+            node_keys,
+        );
+        assert_eq!(identity.hostname, "");
+    }
+
+    #[test]
+    fn test_mesh_identity_long_hostname() {
+        let (owner_key, node_keys) = create_test_keys();
+        let long_hostname = "h".repeat(512);
+        let identity = MeshIdentity::new(
+            NodeId::new("n"),
+            long_hostname.clone(),
+            vec![],
+            vec![],
+            owner_key.verifying_key(),
+            node_keys,
+        );
+        assert_eq!(identity.hostname, long_hostname);
+    }
+
+    // --- MeshIdentity: many IPs ---
+
+    #[test]
+    fn test_mesh_identity_many_ips() {
+        let (owner_key, node_keys) = create_test_keys();
+        let ips: Vec<IpAddr> = (1..=20)
+            .map(|i| format!("100.64.0.{i}").parse().unwrap())
+            .collect();
+        let identity = MeshIdentity::new(
+            NodeId::new("many-ips"),
+            "host".to_string(),
+            ips.clone(),
+            vec![],
+            owner_key.verifying_key(),
+            node_keys,
+        );
+        assert_eq!(identity.ips.len(), 20);
+        assert_eq!(identity.ips, ips);
+    }
+
+    // --- MeshIdentity: many tags ---
+
+    #[test]
+    fn test_mesh_identity_many_tags() {
+        let (owner_key, node_keys) = create_test_keys();
+        let tags: Vec<TailscaleTag> = (0..10)
+            .map(|i| TailscaleTag::fcp_tag(&format!("zone{i}")))
+            .collect();
+        let identity = MeshIdentity::new(
+            NodeId::new("many-tags"),
+            "host".to_string(),
+            vec![],
+            tags,
+            owner_key.verifying_key(),
+            node_keys,
+        );
+        assert_eq!(identity.tags.len(), 10);
+        assert_eq!(identity.fcp_tags().len(), 10);
+    }
+
+    // --- MeshIdentity: serde with no IPs or tags ---
+
+    #[test]
+    fn test_mesh_identity_serde_roundtrip_empty_collections() {
+        let (owner_key, node_keys) = create_test_keys();
+        let identity = MeshIdentity::new(
+            NodeId::new("empty-collections"),
+            "host".to_string(),
+            vec![],
+            vec![],
+            owner_key.verifying_key(),
+            node_keys,
+        );
+        let json = serde_json::to_string(&identity).unwrap();
+        let decoded: MeshIdentity = serde_json::from_str(&json).unwrap();
+        assert!(decoded.ips.is_empty());
+        assert!(decoded.tags.is_empty());
+        assert!(decoded.attestation.is_none());
+    }
+
+    // --- Attestation: many tags ---
+
+    #[test]
+    fn test_attestation_many_tags() {
+        let (owner_key, node_keys) = create_test_keys();
+        let node_id = NodeId::new("many-tags-attest");
+        let tags: Vec<TailscaleTag> = (0..20)
+            .map(|i| TailscaleTag::fcp_tag(&format!("zone{i}")))
+            .collect();
+        let attestation =
+            NodeKeyAttestation::sign(&owner_key, &node_id, &node_keys, &tags, 24).unwrap();
+        attestation
+            .verify(&owner_key.verifying_key(), &node_id, &node_keys, &tags)
+            .unwrap();
+    }
+
+    // --- Attestation: serde preserves issued_at and expires_at ---
+
+    #[test]
+    fn test_attestation_serde_preserves_timestamps() {
+        let (owner_key, node_keys) = create_test_keys();
+        let node_id = NodeId::new("ts-attest");
+        let attestation =
+            NodeKeyAttestation::sign(&owner_key, &node_id, &node_keys, &[], 48).unwrap();
+        let json = serde_json::to_string(&attestation).unwrap();
+        let decoded: NodeKeyAttestation = serde_json::from_str(&json).unwrap();
+
+        // Timestamps should survive roundtrip
+        assert_eq!(decoded.issued_at, attestation.issued_at);
+        assert_eq!(decoded.expires_at, attestation.expires_at);
+        assert_eq!(decoded.signer_kid, attestation.signer_kid);
+    }
+
+    // --- Attestation: different validity hours produce different expiry ---
+
+    #[test]
+    fn test_attestation_different_validity_hours() {
+        let (owner_key, node_keys) = create_test_keys();
+        let node_id = NodeId::new("diff-validity");
+        let a1 = NodeKeyAttestation::sign(&owner_key, &node_id, &node_keys, &[], 1).unwrap();
+        let a2 = NodeKeyAttestation::sign(&owner_key, &node_id, &node_keys, &[], 100).unwrap();
+
+        let r1 = a1.remaining_validity();
+        let r2 = a2.remaining_validity();
+        assert!(r2.num_hours() > r1.num_hours());
+    }
+
+    // --- Attestation: is_expired matches remaining_validity sign ---
+
+    #[test]
+    fn test_attestation_is_expired_consistent_with_remaining() {
+        let (owner_key, node_keys) = create_test_keys();
+        let node_id = NodeId::new("consistency");
+        let attestation =
+            NodeKeyAttestation::sign(&owner_key, &node_id, &node_keys, &[], 24).unwrap();
+
+        // Not expired → remaining validity should be positive
+        assert!(!attestation.is_expired());
+        assert!(attestation.remaining_validity().num_seconds() > 0);
+    }
+
+    // --- MeshIdentity: is_attestation_valid false when no attestation ---
+
+    #[test]
+    fn test_mesh_identity_is_attestation_valid_without_attestation() {
+        let (owner_key, node_keys) = create_test_keys();
+        let identity = MeshIdentity::new(
+            NodeId::new("no-attest"),
+            "host".to_string(),
+            vec![],
+            vec![],
+            owner_key.verifying_key(),
+            node_keys,
+        );
+        assert!(!identity.is_attestation_valid());
+    }
+
+    // --- MeshIdentity: JSON roundtrip preserves tag order ---
+
+    #[test]
+    fn test_mesh_identity_serde_preserves_tag_order() {
+        let (owner_key, node_keys) = create_test_keys();
+        let tags = vec![
+            TailscaleTag::fcp_tag("work"),
+            TailscaleTag::fcp_tag("private"),
+            TailscaleTag::fcp_tag("owner"),
+        ];
+        let identity = MeshIdentity::new(
+            NodeId::new("order"),
+            "host".to_string(),
+            vec![],
+            tags.clone(),
+            owner_key.verifying_key(),
+            node_keys,
+        );
+        let json = serde_json::to_string(&identity).unwrap();
+        let decoded: MeshIdentity = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.tags, tags);
+    }
+
+    // --- MeshIdentity serde JSON field names ---
+
+    #[test]
+    fn test_mesh_identity_serde_field_names() {
+        let (owner_key, node_keys) = create_test_keys();
+        let identity = MeshIdentity::new(
+            NodeId::new("fields"),
+            "host".to_string(),
+            vec![],
+            vec![],
+            owner_key.verifying_key(),
+            node_keys,
+        );
+        let json = serde_json::to_string(&identity).unwrap();
+        assert!(json.contains("node_id"));
+        assert!(json.contains("hostname"));
+        assert!(json.contains("ips"));
+        assert!(json.contains("tags"));
+        assert!(json.contains("owner_pubkey"));
+        assert!(json.contains("node_keys"));
+    }
+
+    // --- NodeId: Hash consistency across clone ---
+
+    #[test]
+    fn test_node_id_hash_consistent_across_clone() {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        let id = NodeId::new("hash-test");
+        let cloned = id.clone();
+
+        let mut h1 = DefaultHasher::new();
+        id.hash(&mut h1);
+        let hash1 = h1.finish();
+
+        let mut h2 = DefaultHasher::new();
+        cloned.hash(&mut h2);
+        let hash2 = h2.finish();
+
+        assert_eq!(hash1, hash2);
+    }
+
+    // --- MeshIdentity: mixed IPv4 and IPv6 ---
+
+    #[test]
+    fn test_mesh_identity_mixed_ipv4_ipv6() {
+        let (owner_key, node_keys) = create_test_keys();
+        let ips: Vec<IpAddr> = vec![
+            "100.64.0.1".parse().unwrap(),
+            "fd7a:115c:a1e0::1".parse().unwrap(),
+        ];
+        let identity = MeshIdentity::new(
+            NodeId::new("mixed-ip"),
+            "host".to_string(),
+            ips,
+            vec![],
+            owner_key.verifying_key(),
+            node_keys,
+        );
+        assert!(identity.ips[0].is_ipv4());
+        assert!(identity.ips[1].is_ipv6());
+    }
+
+    // --- Attestation: verify with reordered tags fails ---
+
+    #[test]
+    fn test_attestation_reordered_tags_fails() {
+        let (owner_key, node_keys) = create_test_keys();
+        let node_id = NodeId::new("reorder");
+        let tags = vec![
+            TailscaleTag::fcp_tag("work"),
+            TailscaleTag::fcp_tag("private"),
+        ];
+        let attestation =
+            NodeKeyAttestation::sign(&owner_key, &node_id, &node_keys, &tags, 24).unwrap();
+
+        // Reversed order
+        let reversed_tags = vec![
+            TailscaleTag::fcp_tag("private"),
+            TailscaleTag::fcp_tag("work"),
+        ];
+        let result = attestation.verify(
+            &owner_key.verifying_key(),
+            &node_id,
+            &node_keys,
+            &reversed_tags,
+        );
+        assert!(result.is_err());
+    }
+
+    // --- Attestation: single tag works ---
+
+    #[test]
+    fn test_attestation_single_tag() {
+        let (owner_key, node_keys) = create_test_keys();
+        let node_id = NodeId::new("single-tag");
+        let tags = vec![TailscaleTag::fcp_tag("owner")];
+        let attestation =
+            NodeKeyAttestation::sign(&owner_key, &node_id, &node_keys, &tags, 24).unwrap();
+        attestation
+            .verify(&owner_key.verifying_key(), &node_id, &node_keys, &tags)
+            .unwrap();
+    }
 }

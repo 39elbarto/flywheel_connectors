@@ -228,4 +228,127 @@ mod tests {
         let display = e.to_string();
         assert!(display.starts_with("Hex decoding error:"));
     }
+
+    // ── Batch 3: SunnyMoose deep test expansion ──
+
+    #[test]
+    fn timestamp_validation_zero_tolerance() {
+        let e = WebhookError::TimestampValidation {
+            reason: "zero tolerance".into(),
+            timestamp: Some(100),
+            current_time: 100,
+            tolerance: Duration::from_secs(0),
+        };
+        assert_eq!(e.to_string(), "Timestamp validation failed: zero tolerance");
+    }
+
+    #[test]
+    fn timestamp_validation_large_time_values() {
+        let e = WebhookError::TimestampValidation {
+            reason: "far future".into(),
+            timestamp: Some(i64::MAX),
+            current_time: i64::MAX,
+            tolerance: Duration::from_secs(u64::MAX),
+        };
+        let display = e.to_string();
+        assert!(display.contains("far future"));
+    }
+
+    #[test]
+    fn missing_signature_empty_header_name() {
+        let e = WebhookError::MissingSignature(String::new());
+        assert_eq!(e.to_string(), "Missing signature header: ");
+    }
+
+    #[test]
+    fn missing_signature_unicode_header_name() {
+        let e = WebhookError::MissingSignature("X-Sig-\u{1F512}".into());
+        let display = e.to_string();
+        assert!(display.contains('\u{1F512}'));
+    }
+
+    #[test]
+    fn replay_detected_unicode_event_id() {
+        let e = WebhookError::ReplayDetected {
+            event_id: "evt_\u{00E9}\u{00F1}".into(),
+        };
+        let display = e.to_string();
+        assert!(display.contains("evt_\u{00E9}\u{00F1}"));
+    }
+
+    #[test]
+    fn invalid_payload_unicode_message() {
+        let e = WebhookError::InvalidPayload("l\u{00E4}nge ung\u{00FC}ltig".into());
+        let display = e.to_string();
+        assert!(display.contains("ung\u{00FC}ltig"));
+    }
+
+    #[test]
+    fn provider_not_configured_empty() {
+        let e = WebhookError::ProviderNotConfigured(String::new());
+        assert_eq!(e.to_string(), "Provider not configured: ");
+    }
+
+    #[test]
+    fn ip_not_allowed_ipv6() {
+        let e = WebhookError::IpNotAllowed("::1".into());
+        assert_eq!(e.to_string(), "IP address not in allowlist: ::1");
+    }
+
+    #[test]
+    fn delivery_failed_empty_message() {
+        let e = WebhookError::DeliveryFailed(String::new());
+        assert_eq!(e.to_string(), "Webhook delivery failed: ");
+    }
+
+    #[test]
+    fn unsupported_event_type_long_name() {
+        let long_type = "a".repeat(1000);
+        let e = WebhookError::UnsupportedEventType(long_type.clone());
+        let display = e.to_string();
+        assert!(display.contains(&long_type));
+    }
+
+    #[test]
+    fn error_source_json_error() {
+        use std::error::Error;
+        let json_err: Result<serde_json::Value, _> = serde_json::from_str("{bad}");
+        let e: WebhookError = json_err.unwrap_err().into();
+        // JsonError variant should have a source
+        assert!(e.source().is_some());
+    }
+
+    #[test]
+    fn error_source_hex_error() {
+        use std::error::Error;
+        let hex_err = hex::decode("zz").unwrap_err();
+        let e: WebhookError = hex_err.into();
+        assert!(e.source().is_some());
+    }
+
+    #[test]
+    fn error_source_none_for_simple_variants() {
+        use std::error::Error;
+        assert!(WebhookError::InvalidSignature.source().is_none());
+        assert!(
+            WebhookError::MissingSignature("X".into())
+                .source()
+                .is_none()
+        );
+        assert!(
+            WebhookError::InvalidPayload("X".into())
+                .source()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn payload_too_large_max_values() {
+        let e = WebhookError::PayloadTooLarge {
+            size: usize::MAX,
+            limit: usize::MAX - 1,
+        };
+        let display = e.to_string();
+        assert!(display.contains("bytes exceeds limit of"));
+    }
 }

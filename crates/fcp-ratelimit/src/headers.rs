@@ -791,4 +791,133 @@ mod tests {
         let debug = format!("{headers:?}");
         assert!(debug.contains("RateLimitHeaders"));
     }
+
+    // ── Header priority (x-ratelimit > x-rate-limit > ratelimit) ─────
+
+    #[test]
+    fn parse_standard_priority_x_ratelimit_wins() {
+        let mut headers = HashMap::new();
+        headers.insert("x-ratelimit-limit".to_string(), "100".to_string());
+        headers.insert("x-rate-limit-limit".to_string(), "200".to_string());
+        headers.insert("ratelimit-limit".to_string(), "300".to_string());
+
+        let parsed = RateLimitHeaders::parse(&headers);
+        assert_eq!(parsed.limit, Some(100));
+    }
+
+    #[test]
+    fn parse_standard_fallback_to_ratelimit_prefix() {
+        let mut headers = HashMap::new();
+        headers.insert("ratelimit-remaining".to_string(), "42".to_string());
+
+        let parsed = RateLimitHeaders::parse(&headers);
+        assert_eq!(parsed.remaining, Some(42));
+    }
+
+    // ── suggested_wait edge cases ────────────────────────────────────
+
+    #[test]
+    fn suggested_wait_prefers_retry_after_over_reset() {
+        let mut headers = RateLimitHeaders::new();
+        headers.retry_after = Some(Duration::from_secs(5));
+        headers.reset_seconds = Some(60);
+        assert_eq!(headers.suggested_wait(), Some(Duration::from_secs(5)));
+    }
+
+    #[test]
+    fn suggested_wait_falls_back_to_reset_seconds() {
+        let mut headers = RateLimitHeaders::new();
+        headers.reset_seconds = Some(30);
+        assert_eq!(headers.suggested_wait(), Some(Duration::from_secs(30)));
+    }
+
+    // ── is_limited combinations ──────────────────────────────────────
+
+    #[test]
+    fn is_limited_true_with_retry_after_and_nonzero_remaining() {
+        let mut headers = RateLimitHeaders::new();
+        headers.remaining = Some(5);
+        headers.retry_after = Some(Duration::from_secs(10));
+        // retry_after alone makes it limited
+        assert!(headers.is_limited());
+    }
+
+    // ── parse_duration_string: minute suffix ─────────────────────────
+
+    #[test]
+    fn parse_duration_string_minutes() {
+        assert_eq!(parse_duration_string("1m"), Some(Duration::from_secs(60)));
+        assert_eq!(parse_duration_string("10m"), Some(Duration::from_secs(600)));
+    }
+
+    #[test]
+    fn parse_duration_string_fractional_seconds() {
+        let d = parse_duration_string("0.5s").unwrap();
+        assert_eq!(d, Duration::from_secs_f64(0.5));
+    }
+
+    // ── Twitter reset in past ────────────────────────────────────────
+
+    #[test]
+    fn parse_twitter_reset_in_past() {
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let reset_at = now_secs.saturating_sub(50);
+
+        let mut headers = HashMap::new();
+        headers.insert("x-rate-limit-reset".to_string(), reset_at.to_string());
+
+        let parsed = RateLimitHeaders::parse_twitter(&headers);
+        assert_eq!(parsed.reset_seconds, Some(0));
+    }
+
+    // ── OpenAI with seconds duration string ──────────────────────────
+
+    #[test]
+    fn parse_openai_reset_requests_seconds_string() {
+        let mut headers = HashMap::new();
+        headers.insert("x-ratelimit-reset-requests".to_string(), "6s".to_string());
+
+        let parsed = RateLimitHeaders::parse_openai(&headers);
+        assert_eq!(parsed.reset_seconds, Some(6));
+    }
+
+    // ── Stripe with standard headers ─────────────────────────────────
+
+    #[test]
+    fn parse_stripe_includes_standard_fields() {
+        let mut headers = HashMap::new();
+        headers.insert("x-ratelimit-limit".to_string(), "100".to_string());
+        headers.insert("x-ratelimit-remaining".to_string(), "0".to_string());
+        headers.insert("retry-after".to_string(), "30".to_string());
+
+        let parsed = RateLimitHeaders::parse_stripe(&headers);
+        assert_eq!(parsed.limit, Some(100));
+        assert_eq!(parsed.remaining, Some(0));
+        assert_eq!(parsed.retry_after, Some(Duration::from_secs(30)));
+        assert!(parsed.is_limited());
+    }
+
+    // ── Provider enum exhaustive ─────────────────────────────────────
+
+    #[test]
+    fn provider_all_variants_different() {
+        let variants = [
+            Provider::Standard,
+            Provider::GitHub,
+            Provider::Twitter,
+            Provider::Stripe,
+            Provider::OpenAI,
+            Provider::Anthropic,
+        ];
+        for (i, a) in variants.iter().enumerate() {
+            for (j, b) in variants.iter().enumerate() {
+                if i != j {
+                    assert_ne!(a, b);
+                }
+            }
+        }
+    }
 }

@@ -582,4 +582,126 @@ mod tests {
 
         assert!(limiter.try_acquire().await);
     }
+
+    // ── Zero capacity ──────────────────────────────────────────────────
+
+    #[fcp_async_core::runtime::test]
+    async fn zero_capacity_rejects_all() {
+        let limiter = TokenBucket::new(0, Duration::from_secs(1));
+        assert!(!limiter.try_acquire().await);
+        assert_eq!(limiter.remaining(), 0);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn zero_capacity_state() {
+        let limiter = TokenBucket::new(0, Duration::from_secs(1));
+        let state = limiter.state();
+        assert_eq!(state.limit, 0);
+        assert_eq!(state.remaining, 0);
+        assert!(state.is_limited);
+    }
+
+    // ── from_config edge cases ─────────────────────────────────────────
+
+    #[fcp_async_core::runtime::test]
+    async fn from_config_one_per_second_smooth_rate() {
+        let config = RateLimitConfig::one_per_second();
+        let limiter = TokenBucket::from_config(&config);
+        assert_eq!(limiter.capacity, 1);
+        assert_eq!(limiter.refill_amount, 1);
+        assert_eq!(limiter.refill_interval, Duration::from_secs(1));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn from_config_thousand_per_minute_smooth_rate() {
+        // 1000/60s → 1 token per 60ms
+        let config = RateLimitConfig::thousand_per_minute();
+        let limiter = TokenBucket::from_config(&config);
+        assert_eq!(limiter.capacity, 1000);
+        assert_eq!(limiter.refill_amount, 1);
+        assert_eq!(limiter.refill_interval, Duration::from_millis(60));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn from_config_burst_overrides_capacity() {
+        let config = RateLimitConfig::new(10, Duration::from_secs(1)).with_burst(50);
+        let limiter = TokenBucket::from_config(&config);
+        assert_eq!(limiter.capacity, 50);
+        // Initial tokens should match burst capacity
+        assert_eq!(limiter.remaining(), 50);
+    }
+
+    // ── Refill behavior ────────────────────────────────────────────────
+
+    #[fcp_async_core::runtime::test]
+    async fn refill_does_not_exceed_capacity() {
+        let limiter = TokenBucket::new(5, Duration::from_millis(50));
+        // Start full, consume none, wait for multiple refill periods
+        sleep(Duration::from_millis(200)).await;
+        // Remaining should still be capped at capacity
+        assert_eq!(limiter.remaining(), 5);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn partial_refill_after_consume() {
+        // Use from_config for smooth rate: 3 per 90ms → 1 token per 30ms
+        let config = RateLimitConfig::new(3, Duration::from_millis(90));
+        let limiter = TokenBucket::from_config(&config);
+        // Consume all
+        assert!(limiter.try_acquire().await);
+        assert!(limiter.try_acquire().await);
+        assert!(limiter.try_acquire().await);
+        assert!(!limiter.try_acquire().await);
+
+        // Wait for ~1.5 refill periods (45ms, period is 30ms)
+        sleep(Duration::from_millis(45)).await;
+
+        // Should have at least 1 token back
+        assert!(limiter.try_acquire().await);
+    }
+
+    // ── try_acquire_n additional ───────────────────────────────────────
+
+    #[fcp_async_core::runtime::test]
+    async fn try_acquire_n_partial_capacity() {
+        let limiter = TokenBucket::new(10, Duration::from_secs(60));
+        // Consume 7, leaving 3
+        assert!(limiter.try_acquire_n(7).await);
+        assert_eq!(limiter.remaining(), 3);
+        // Can't take 4 from 3
+        assert!(!limiter.try_acquire_n(4).await);
+        assert_eq!(limiter.remaining(), 3); // Unchanged
+        // Can take exactly 3
+        assert!(limiter.try_acquire_n(3).await);
+        assert_eq!(limiter.remaining(), 0);
+    }
+
+    // ── with_burst edge cases ──────────────────────────────────────────
+
+    #[fcp_async_core::runtime::test]
+    async fn with_burst_lower_than_rate() {
+        // burst < requests_per_window is valid: bucket starts with burst tokens
+        let limiter = TokenBucket::with_burst(100, Duration::from_secs(1), 5);
+        assert_eq!(limiter.capacity, 5);
+        assert_eq!(limiter.refill_amount, 100);
+        assert_eq!(limiter.remaining(), 5);
+    }
+
+    // ── State consistency ──────────────────────────────────────────────
+
+    #[fcp_async_core::runtime::test]
+    async fn state_limit_matches_capacity() {
+        let limiter = TokenBucket::new(42, Duration::from_secs(1));
+        assert_eq!(limiter.state().limit, 42);
+
+        let limiter_burst = TokenBucket::with_burst(10, Duration::from_secs(1), 99);
+        assert_eq!(limiter_burst.state().limit, 99);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn remaining_matches_state_remaining() {
+        let limiter = TokenBucket::new(10, Duration::from_secs(60));
+        limiter.try_acquire_n(3).await;
+        assert_eq!(limiter.remaining(), limiter.state().remaining);
+    }
 }

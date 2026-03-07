@@ -957,4 +957,113 @@ mod tests {
         let cfg = config_from_core(&core).unwrap();
         assert_eq!(cfg.requests_per_window, 10);
     }
+
+    // ── compute_token_cost edge cases ──────────────────────────────────
+
+    #[test]
+    fn compute_token_cost_one_byte_per_token() {
+        let cost = compute_token_cost(0, 100, 1, 0).unwrap();
+        assert_eq!(cost.bytes_tokens, 100);
+    }
+
+    #[test]
+    fn compute_token_cost_bytes_larger_than_u32_max() {
+        // bytes = u64::MAX / 2, bytes_per_token = 1 → bytes_tokens overflows u32
+        let err = compute_token_cost(0, u64::MAX / 2, 1, 0).unwrap_err();
+        assert!(err.to_string().contains("bytes too large"));
+    }
+
+    // ── utilization_bps edge cases ─────────────────────────────────────
+
+    #[test]
+    fn utilization_bps_one_remaining() {
+        let bps = utilization_bps(100, 1);
+        assert_eq!(bps, 9_900);
+    }
+
+    #[test]
+    fn utilization_bps_small_limit() {
+        assert_eq!(utilization_bps(1, 0), 10_000);
+        assert_eq!(utilization_bps(1, 1), 0);
+    }
+
+    // ── EnforcementOutcome as_rate_limited_error ───────────────────────
+
+    #[test]
+    fn enforcement_outcome_rejected_no_violation_uses_backpressure_retry() {
+        let out = EnforcementOutcome {
+            allowed: false,
+            state: RateLimitState {
+                limit: 10,
+                remaining: 0,
+                reset_after: Duration::from_secs(5),
+                is_limited: true,
+            },
+            backpressure: fcp_core::BackpressureSignal {
+                level: fcp_core::BackpressureLevel::HardLimit,
+                utilization_bps: 10_000,
+                retry_after_ms: Some(5_000),
+            },
+            violation: None,
+        };
+        let err = out.as_rate_limited_error().unwrap();
+        if let fcp_core::FcpError::RateLimited { retry_after_ms, .. } = err {
+            assert_eq!(retry_after_ms, 5_000);
+        } else {
+            panic!("expected RateLimited");
+        }
+    }
+
+    #[test]
+    fn enforcement_outcome_rejected_no_retry_info() {
+        let out = EnforcementOutcome {
+            allowed: false,
+            state: RateLimitState {
+                limit: 10,
+                remaining: 0,
+                reset_after: Duration::ZERO,
+                is_limited: true,
+            },
+            backpressure: fcp_core::BackpressureSignal {
+                level: fcp_core::BackpressureLevel::HardLimit,
+                utilization_bps: 10_000,
+                retry_after_ms: None,
+            },
+            violation: None,
+        };
+        let err = out.as_rate_limited_error().unwrap();
+        if let fcp_core::FcpError::RateLimited { retry_after_ms, .. } = err {
+            assert_eq!(retry_after_ms, 0);
+        } else {
+            panic!("expected RateLimited");
+        }
+    }
+
+    // ── config_from_core: burst of zero ────────────────────────────────
+
+    #[test]
+    fn config_from_core_burst_zero_adds_no_burst() {
+        let core = fcp_core::RateLimit {
+            max: 10,
+            per_ms: 1000,
+            burst: Some(0),
+            scope: None,
+            pool_name: None,
+        };
+        let cfg = config_from_core(&core).unwrap();
+        // burst=0 → capacity = max + 0 = 10
+        assert_eq!(cfg.burst_size, Some(10));
+    }
+
+    // ── ConcurrencyLimiter: in_flight after full exhaust ───────────────
+
+    #[test]
+    fn concurrency_limiter_in_flight_at_max() {
+        let limiter = ConcurrencyLimiter::new(2).unwrap();
+        let _p1 = limiter.try_acquire().unwrap();
+        let _p2 = limiter.try_acquire().unwrap();
+        assert_eq!(limiter.in_flight(), 2);
+        assert!(limiter.try_acquire().is_none());
+        assert_eq!(limiter.in_flight(), 2); // Still 2
+    }
 }

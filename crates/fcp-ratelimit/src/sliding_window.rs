@@ -629,4 +629,125 @@ mod tests {
         assert!(limiter.try_acquire_n(1).await);
         assert!(!limiter.try_acquire_n(2).await);
     }
+
+    // ── SlidingWindow: edge cases ─────────────────────────────────────
+
+    #[fcp_async_core::runtime::test]
+    async fn sliding_window_zero_limit_rejects_all() {
+        let limiter = SlidingWindow::new(0, Duration::from_secs(1));
+        assert!(!limiter.try_acquire().await);
+        assert_eq!(limiter.remaining(), 0);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn sliding_window_single_permit() {
+        let limiter = SlidingWindow::new(1, Duration::from_millis(50));
+        assert!(limiter.try_acquire().await);
+        assert!(!limiter.try_acquire().await);
+        sleep(Duration::from_millis(60)).await;
+        assert!(limiter.try_acquire().await);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn sliding_window_state_reset_after_bounded() {
+        let limiter = SlidingWindow::new(5, Duration::from_secs(60));
+        let state = limiter.state();
+        // When empty, reset_after should be the full window (no oldest timestamp)
+        assert_eq!(state.reset_after, Duration::from_secs(60));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn sliding_window_state_reset_after_decreases() {
+        let limiter = SlidingWindow::new(2, Duration::from_millis(200));
+        limiter.try_acquire().await;
+        sleep(Duration::from_millis(50)).await;
+        let state = limiter.state();
+        // reset_after should be less than window (some time has elapsed)
+        assert!(state.reset_after < Duration::from_millis(200));
+        assert!(state.reset_after > Duration::ZERO);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn sliding_window_partial_expiry() {
+        // With 3 permits and 100ms window: acquire 3, wait 60ms, acquire 1 more
+        // The first request should not yet be expired after 60ms
+        let limiter = SlidingWindow::new(3, Duration::from_millis(100));
+        limiter.try_acquire().await;
+        sleep(Duration::from_millis(20)).await;
+        limiter.try_acquire().await;
+        sleep(Duration::from_millis(20)).await;
+        limiter.try_acquire().await;
+        assert!(!limiter.try_acquire().await);
+
+        // Wait enough for the first request to expire, but not the others
+        sleep(Duration::from_millis(65)).await;
+        assert!(limiter.try_acquire().await);
+        // The second and third are still within window
+        assert!(!limiter.try_acquire().await);
+    }
+
+    // ── FixedWindow: edge cases ───────────────────────────────────────
+
+    #[fcp_async_core::runtime::test]
+    async fn fixed_window_zero_limit_rejects_all() {
+        let limiter = FixedWindow::new(0, Duration::from_secs(1));
+        assert!(!limiter.try_acquire().await);
+        assert_eq!(limiter.remaining(), 0);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn fixed_window_single_permit() {
+        let limiter = FixedWindow::new(1, Duration::from_millis(50));
+        assert!(limiter.try_acquire().await);
+        assert!(!limiter.try_acquire().await);
+        sleep(Duration::from_millis(60)).await;
+        assert!(limiter.try_acquire().await);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn fixed_window_multiple_resets() {
+        let limiter = FixedWindow::new(2, Duration::from_millis(50));
+        // First window
+        assert!(limiter.try_acquire().await);
+        assert!(limiter.try_acquire().await);
+        assert!(!limiter.try_acquire().await);
+
+        sleep(Duration::from_millis(60)).await;
+
+        // Second window
+        assert!(limiter.try_acquire().await);
+        assert!(limiter.try_acquire().await);
+        assert!(!limiter.try_acquire().await);
+
+        sleep(Duration::from_millis(60)).await;
+
+        // Third window
+        assert!(limiter.try_acquire().await);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn fixed_window_state_reset_after_within_window() {
+        let limiter = FixedWindow::new(5, Duration::from_secs(60));
+        limiter.try_acquire().await;
+        let state = limiter.state();
+        assert!(state.reset_after <= Duration::from_secs(60));
+        assert!(state.reset_after > Duration::ZERO);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn fixed_window_wait_time_positive_when_exhausted() {
+        let limiter = FixedWindow::new(1, Duration::from_millis(100));
+        limiter.try_acquire().await;
+        let wait = limiter.wait_time().await;
+        assert!(wait > Duration::ZERO);
+        assert!(wait <= Duration::from_millis(100));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn fixed_window_acquire_waits_for_reset() {
+        let limiter = FixedWindow::new(1, Duration::from_millis(50));
+        limiter.try_acquire().await;
+        let waited = limiter.acquire(Duration::from_secs(1)).await.unwrap();
+        assert!(waited >= Duration::from_millis(30));
+    }
 }

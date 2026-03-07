@@ -659,4 +659,136 @@ mod tests {
         assert!(pacer.try_acquire_n(1).await);
         assert!(!pacer.try_acquire_n(2).await);
     }
+
+    // ── LeakyBucket edge cases ───────────────────────────────────────
+
+    #[fcp_async_core::runtime::test]
+    async fn leaky_bucket_from_window_zero_duration() {
+        let limiter = LeakyBucket::from_window(10, Duration::ZERO);
+        assert_eq!(limiter.capacity, 10);
+        assert!((limiter.leak_rate - f64::MAX).abs() < f64::EPSILON);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn leaky_bucket_zero_capacity() {
+        let limiter = LeakyBucket::new(0, 10.0);
+        assert!(!limiter.try_acquire().await);
+        assert_eq!(limiter.remaining(), 0);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn leaky_bucket_zero_leak_rate() {
+        let limiter = LeakyBucket::new(2, 0.0);
+        assert!(limiter.try_acquire().await);
+        assert!(limiter.try_acquire().await);
+        assert!(!limiter.try_acquire().await);
+        // With zero leak rate, time_until_room should be MAX
+        let wait = limiter.wait_time().await;
+        assert_eq!(wait, Duration::MAX);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn leaky_bucket_state_is_limited_uses_guard_band() {
+        // Fill to capacity → is_limited should be true due to LEVEL_GUARD
+        let limiter = LeakyBucket::new(3, 0.001);
+        limiter.try_acquire().await;
+        limiter.try_acquire().await;
+        limiter.try_acquire().await;
+        let state = limiter.state();
+        assert!(state.is_limited);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn leaky_bucket_try_acquire_n_zero_permits() {
+        let limiter = LeakyBucket::new(3, 0.001);
+        // Zero permits should fill to exactly 0, which is within capacity
+        // The level stays at 0, so next try_acquire works
+        limiter.try_acquire_n(0).await;
+        assert_eq!(limiter.remaining(), 3);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn leaky_bucket_try_acquire_n_exceeds_capacity() {
+        let limiter = LeakyBucket::new(3, 0.001);
+        assert!(!limiter.try_acquire_n(4).await);
+        assert_eq!(limiter.remaining(), 3); // Nothing consumed
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn leaky_bucket_try_acquire_n_exact_capacity() {
+        let limiter = LeakyBucket::new(5, 0.001);
+        assert!(limiter.try_acquire_n(5).await);
+        assert_eq!(limiter.remaining(), 0);
+        assert!(!limiter.try_acquire_n(1).await);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn leaky_bucket_time_until_room_zero_capacity() {
+        let limiter = LeakyBucket::new(0, 10.0);
+        let wait = limiter.wait_time().await;
+        assert_eq!(wait, Duration::MAX);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn leaky_bucket_remaining_after_partial_leak() {
+        // High leak rate so leak is fast
+        let limiter = LeakyBucket::new(10, 1000.0);
+        for _ in 0..10 {
+            limiter.try_acquire().await;
+        }
+        sleep(Duration::from_millis(10)).await;
+        // Should have recovered some capacity
+        assert!(limiter.remaining() > 0);
+    }
+
+    // ── SmoothPacer edge cases ───────────────────────────────────────
+
+    #[fcp_async_core::runtime::test]
+    async fn smooth_pacer_from_rate_zero() {
+        let pacer = SmoothPacer::from_rate(0.0);
+        assert_eq!(pacer.min_interval, Duration::MAX);
+        // First request should succeed (no previous request)
+        assert!(pacer.try_acquire().await);
+        // Second immediately fails
+        assert!(!pacer.try_acquire().await);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn smooth_pacer_from_rate_negative() {
+        let pacer = SmoothPacer::from_rate(-5.0);
+        assert_eq!(pacer.min_interval, Duration::MAX);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn smooth_pacer_state_limit_always_one() {
+        let pacer = SmoothPacer::new(Duration::from_millis(100));
+        let state = pacer.state();
+        assert_eq!(state.limit, 1);
+
+        pacer.try_acquire().await;
+        let state = pacer.state();
+        assert_eq!(state.limit, 1);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn smooth_pacer_wait_time_decreases_over_time() {
+        let pacer = SmoothPacer::new(Duration::from_millis(100));
+        pacer.try_acquire().await;
+
+        let wait1 = pacer.wait_time().await;
+        sleep(Duration::from_millis(30)).await;
+        let wait2 = pacer.wait_time().await;
+        assert!(wait2 < wait1);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn smooth_pacer_remaining_binary() {
+        // SmoothPacer only ever has 0 or 1 remaining
+        let pacer = SmoothPacer::new(Duration::from_millis(50));
+        assert_eq!(pacer.remaining(), 1);
+        pacer.try_acquire().await;
+        assert_eq!(pacer.remaining(), 0);
+        sleep(Duration::from_millis(60)).await;
+        assert_eq!(pacer.remaining(), 1);
+    }
 }

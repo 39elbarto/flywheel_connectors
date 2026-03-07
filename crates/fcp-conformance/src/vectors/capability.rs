@@ -411,4 +411,196 @@ mod tests {
             "holder_node must survive round-trip"
         );
     }
+
+    // ── Verify error path tests ──────────────────────────────
+
+    #[test]
+    fn verify_invalid_signing_key_hex() {
+        let mut v = CapabilityTokenGoldenVector::vector_1_basic_capability();
+        v.signing_key = "not_hex_at_all".to_string();
+        assert!(v.verify().is_err());
+    }
+
+    #[test]
+    fn verify_wrong_signing_key_length() {
+        let mut v = CapabilityTokenGoldenVector::vector_1_basic_capability();
+        v.signing_key = "aabb".to_string(); // 2 bytes, not 32
+        assert!(v.verify().is_err());
+    }
+
+    #[test]
+    fn verify_wrong_public_key() {
+        let mut v = CapabilityTokenGoldenVector::vector_1_basic_capability();
+        v.expected_public_key = "ff".repeat(32);
+        assert!(v.verify().is_err(), "wrong public key should fail");
+    }
+
+    #[test]
+    fn verify_wrong_kid() {
+        let mut v = CapabilityTokenGoldenVector::vector_1_basic_capability();
+        v.expected_kid = "0000000000000000".to_string();
+        assert!(v.verify().is_err(), "wrong kid should fail");
+    }
+
+    #[test]
+    fn verify_tampered_claims_cbor() {
+        let mut v = CapabilityTokenGoldenVector::vector_1_basic_capability();
+        v.expected_claims_cbor = "a0".to_string(); // empty map instead of real claims
+        assert!(v.verify().is_err(), "tampered claims should fail");
+    }
+
+    #[test]
+    fn verify_tampered_token_cbor() {
+        let mut v = CapabilityTokenGoldenVector::vector_1_basic_capability();
+        let mut token = v.expected_token_cbor.clone();
+        let len = token.len();
+        token.replace_range(len - 4..len, "ffff");
+        v.expected_token_cbor = token;
+        assert!(v.verify().is_err(), "tampered token should fail");
+    }
+
+    #[test]
+    fn verify_invalid_checkpoint_hex() {
+        let mut v = CapabilityTokenGoldenVector::vector_2_with_holder_and_checkpoint();
+        v.checkpoint_id = Some("not_hex!".to_string());
+        assert!(v.verify().is_err());
+    }
+
+    #[test]
+    fn verify_empty_expected_fields_still_works() {
+        let mut v = CapabilityTokenGoldenVector::vector_1_basic_capability();
+        v.expected_claims_cbor = String::new();
+        v.expected_token_cbor = String::new();
+        v.expected_kid = String::new();
+        // Should still sign-and-verify without crashing
+        v.verify().expect("empty expected fields should still pass sign/verify");
+    }
+
+    // ── Cross-vector consistency tests ───────────────────────
+
+    #[test]
+    fn all_vectors_have_unique_signing_keys() {
+        let vectors = CapabilityTokenGoldenVector::load_all();
+        let keys: std::collections::HashSet<&str> = vectors.iter().map(|v| v.signing_key.as_str()).collect();
+        assert_eq!(keys.len(), vectors.len(), "all vectors should use different signing keys");
+    }
+
+    #[test]
+    fn all_vectors_have_unique_public_keys() {
+        let vectors = CapabilityTokenGoldenVector::load_all();
+        let pks: std::collections::HashSet<&str> = vectors.iter().map(|v| v.expected_public_key.as_str()).collect();
+        assert_eq!(pks.len(), vectors.len(), "all vectors should have different public keys");
+    }
+
+    #[test]
+    fn all_vectors_have_unique_kids() {
+        let vectors = CapabilityTokenGoldenVector::load_all();
+        let kids: std::collections::HashSet<&str> = vectors.iter().map(|v| v.expected_kid.as_str()).collect();
+        assert_eq!(kids.len(), vectors.len(), "all vectors should have different KIDs");
+    }
+
+    #[test]
+    fn all_vectors_have_unique_capability_ids() {
+        let vectors = CapabilityTokenGoldenVector::load_all();
+        let cap_ids: std::collections::HashSet<&str> = vectors.iter().map(|v| v.capability_id.as_str()).collect();
+        assert_eq!(cap_ids.len(), vectors.len());
+    }
+
+    #[test]
+    fn all_vectors_have_unique_token_cbor() {
+        let vectors = CapabilityTokenGoldenVector::load_all();
+        let tokens: std::collections::HashSet<&str> = vectors.iter().map(|v| v.expected_token_cbor.as_str()).collect();
+        assert_eq!(tokens.len(), vectors.len());
+    }
+
+    #[test]
+    fn vector_2_has_holder_and_checkpoint() {
+        let v = CapabilityTokenGoldenVector::vector_2_with_holder_and_checkpoint();
+        assert!(v.holder_node.is_some());
+        assert!(v.checkpoint_id.is_some());
+        assert!(v.checkpoint_seq.is_some());
+    }
+
+    #[test]
+    fn vector_1_has_no_holder_or_checkpoint() {
+        let v = CapabilityTokenGoldenVector::vector_1_basic_capability();
+        assert!(v.holder_node.is_none());
+        assert!(v.checkpoint_id.is_none());
+        assert!(v.checkpoint_seq.is_none());
+    }
+
+    #[test]
+    fn vector_3_has_multiple_operations() {
+        let v = CapabilityTokenGoldenVector::vector_3_multi_operation();
+        assert!(v.operations.len() > 1, "vector 3 should have multiple ops");
+    }
+
+    #[test]
+    fn all_vectors_have_valid_timestamps() {
+        for v in CapabilityTokenGoldenVector::load_all() {
+            assert!(v.not_before < v.expires, "not_before should be before expires");
+            assert!(v.not_before > 0);
+            assert!(v.expires > 0);
+        }
+    }
+
+    #[test]
+    fn capability_ids_start_with_cap() {
+        for v in CapabilityTokenGoldenVector::load_all() {
+            assert!(v.capability_id.starts_with("cap:"), "cap_id should start with cap:");
+        }
+    }
+
+    #[test]
+    fn zone_ids_start_with_z() {
+        for v in CapabilityTokenGoldenVector::load_all() {
+            assert!(v.zone_id.starts_with("z:"), "zone_id should start with z:");
+        }
+    }
+
+    #[test]
+    fn principal_ids_start_with_agent() {
+        for v in CapabilityTokenGoldenVector::load_all() {
+            assert!(v.principal_id.starts_with("agent:"), "principal should start with agent:");
+        }
+    }
+
+    #[test]
+    fn signing_keys_are_32_bytes() {
+        for v in CapabilityTokenGoldenVector::load_all() {
+            assert_eq!(v.signing_key.len(), 64, "signing key should be 64 hex chars (32 bytes)");
+        }
+    }
+
+    #[test]
+    fn golden_vector_serde_roundtrip() {
+        let v = CapabilityTokenGoldenVector::vector_1_basic_capability();
+        let json = serde_json::to_string(&v).unwrap();
+        let parsed: CapabilityTokenGoldenVector = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.capability_id, v.capability_id);
+        parsed.verify().expect("deserialized vector should verify");
+    }
+
+    #[test]
+    fn issuer_and_capability_roundtrip_through_token() {
+        use fcp_crypto::cose::{CoseToken, CwtClaims};
+        use fcp_crypto::ed25519::Ed25519SigningKey;
+
+        let sk = Ed25519SigningKey::from_bytes(&[0x03u8; 32]).unwrap();
+        let pk = sk.verifying_key();
+
+        let claims = CwtClaims::new()
+            .issuer("node:ci-runner")
+            .capability_id("cap:github.manage")
+            .zone_id("z:public");
+
+        let token = CoseToken::sign(&sk, &claims).unwrap();
+        let cbor = token.to_cbor().unwrap();
+        let parsed = CoseToken::from_cbor(&cbor).unwrap();
+        let verified = parsed.verify(&pk).unwrap();
+
+        assert_eq!(verified.get_issuer(), Some("node:ci-runner"));
+        assert_eq!(verified.get_capability_id(), Some("cap:github.manage"));
+        assert_eq!(verified.get_zone_id(), Some("z:public"));
+    }
 }

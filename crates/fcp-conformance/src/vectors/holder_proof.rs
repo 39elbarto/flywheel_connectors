@@ -349,4 +349,159 @@ mod tests {
         assert!(bytes.starts_with(b"FCP2-HOLDER-PROOF-V1"));
         assert!(bytes.len() > 20); // Domain length is 20
     }
+
+    // ── Serde roundtrip tests ───────────────────────────────
+
+    #[test]
+    fn holder_proof_vector_serde_roundtrip() {
+        let v = HolderProofGoldenVector::vector_1_basic_holder_proof();
+        let json = serde_json::to_string(&v).unwrap();
+        let parsed: HolderProofGoldenVector = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.description, v.description);
+        assert_eq!(parsed.holder_signing_key, v.holder_signing_key);
+        assert_eq!(parsed.expected_signature, v.expected_signature);
+        parsed.verify().expect("deserialized vector should verify");
+    }
+
+    #[test]
+    fn holder_proof_all_vectors_serde_roundtrip() {
+        for v in HolderProofGoldenVector::load_all() {
+            let json = serde_json::to_string(&v).unwrap();
+            let parsed: HolderProofGoldenVector = serde_json::from_str(&json).unwrap();
+            parsed.verify().unwrap_or_else(|e| {
+                panic!("deserialized '{}' failed: {e}", v.description);
+            });
+        }
+    }
+
+    // ── Clone and Debug tests ───────────────────────────────
+
+    #[test]
+    fn holder_proof_vector_clone() {
+        let v = HolderProofGoldenVector::vector_2_uuid_request_id();
+        let cloned = v.clone();
+        assert_eq!(v.request_id, cloned.request_id);
+        assert_eq!(v.operation_id, cloned.operation_id);
+        assert_eq!(v.expected_signature, cloned.expected_signature);
+        cloned.verify().expect("cloned vector should verify");
+    }
+
+    #[test]
+    fn holder_proof_vector_debug() {
+        let v = HolderProofGoldenVector::vector_1_basic_holder_proof();
+        let debug = format!("{v:?}");
+        assert!(debug.contains("Basic holder proof"));
+        assert!(debug.contains("req_001"));
+    }
+
+    // ── Tampered field verification tests ───────────────────
+
+    #[test]
+    fn verify_fails_with_tampered_signing_key() {
+        let mut v = HolderProofGoldenVector::vector_1_basic_holder_proof();
+        v.holder_signing_key = "ff".repeat(32);
+        assert!(v.verify().is_err(), "wrong signing key should fail");
+    }
+
+    #[test]
+    fn verify_fails_with_tampered_request_id() {
+        let mut v = HolderProofGoldenVector::vector_1_basic_holder_proof();
+        v.request_id = "req_999".into();
+        assert!(v.verify().is_err(), "wrong request_id should fail");
+    }
+
+    #[test]
+    fn verify_fails_with_tampered_operation_id() {
+        let mut v = HolderProofGoldenVector::vector_1_basic_holder_proof();
+        v.operation_id = "slack.post_message".into();
+        assert!(v.verify().is_err(), "wrong operation_id should fail");
+    }
+
+    #[test]
+    fn verify_fails_with_tampered_jti() {
+        let mut v = HolderProofGoldenVector::vector_1_basic_holder_proof();
+        v.token_jti = "cafebabe".into();
+        assert!(v.verify().is_err(), "wrong JTI should fail");
+    }
+
+    #[test]
+    fn verify_fails_with_invalid_signing_key_hex() {
+        let mut v = HolderProofGoldenVector::vector_1_basic_holder_proof();
+        v.holder_signing_key = "not_valid_hex".into();
+        assert!(v.verify().is_err(), "invalid hex should fail");
+    }
+
+    #[test]
+    fn verify_fails_with_short_signing_key() {
+        let mut v = HolderProofGoldenVector::vector_1_basic_holder_proof();
+        v.holder_signing_key = "aabb".into();
+        assert!(v.verify().is_err(), "short signing key should fail");
+    }
+
+    #[test]
+    fn verify_fails_with_invalid_jti_hex() {
+        let mut v = HolderProofGoldenVector::vector_1_basic_holder_proof();
+        v.token_jti = "zzzz".into();
+        assert!(v.verify().is_err(), "invalid JTI hex should fail");
+    }
+
+    // ── Cross-vector uniqueness tests ───────────────────────
+
+    #[test]
+    fn all_vectors_have_unique_signing_keys() {
+        let vectors = HolderProofGoldenVector::load_all();
+        let keys: std::collections::HashSet<&str> = vectors.iter().map(|v| v.holder_signing_key.as_str()).collect();
+        assert_eq!(keys.len(), vectors.len(), "all signing keys must be unique");
+    }
+
+    #[test]
+    fn all_vectors_have_unique_signatures() {
+        let vectors = HolderProofGoldenVector::load_all();
+        let sigs: std::collections::HashSet<&str> = vectors.iter().map(|v| v.expected_signature.as_str()).collect();
+        assert_eq!(sigs.len(), vectors.len(), "all signatures must be unique");
+    }
+
+    #[test]
+    fn all_vectors_have_unique_signable_bytes() {
+        let vectors = HolderProofGoldenVector::load_all();
+        let bytes: std::collections::HashSet<&str> = vectors.iter().map(|v| v.expected_signable_bytes.as_str()).collect();
+        assert_eq!(bytes.len(), vectors.len(), "all signable bytes must be unique");
+    }
+
+    // ── Field validation tests ──────────────────────────────
+
+    #[test]
+    fn all_vectors_have_valid_hex_fields() {
+        for v in HolderProofGoldenVector::load_all() {
+            assert!(hex::decode(&v.holder_signing_key).is_ok(), "signing key hex");
+            assert!(hex::decode(&v.expected_holder_pk).is_ok(), "pk hex");
+            assert!(hex::decode(&v.token_jti).is_ok(), "jti hex");
+            assert!(hex::decode(&v.expected_signable_bytes).is_ok(), "signable bytes hex");
+            assert!(hex::decode(&v.expected_signature).is_ok(), "signature hex");
+        }
+    }
+
+    #[test]
+    fn all_vectors_signing_key_is_32_bytes() {
+        for v in HolderProofGoldenVector::load_all() {
+            let bytes = hex::decode(&v.holder_signing_key).unwrap();
+            assert_eq!(bytes.len(), 32, "signing key for '{}' must be 32 bytes", v.description);
+        }
+    }
+
+    #[test]
+    fn all_vectors_signature_is_64_bytes() {
+        for v in HolderProofGoldenVector::load_all() {
+            let bytes = hex::decode(&v.expected_signature).unwrap();
+            assert_eq!(bytes.len(), 64, "signature for '{}' must be 64 bytes", v.description);
+        }
+    }
+
+    #[test]
+    fn all_vectors_pk_is_32_bytes() {
+        for v in HolderProofGoldenVector::load_all() {
+            let bytes = hex::decode(&v.expected_holder_pk).unwrap();
+            assert_eq!(bytes.len(), 32, "pk for '{}' must be 32 bytes", v.description);
+        }
+    }
 }

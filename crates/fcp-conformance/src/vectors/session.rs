@@ -438,4 +438,166 @@ mod tests {
             "Different session IDs must produce different keys"
         );
     }
+
+    // ── Verify error path tests ──────────────────────────────
+
+    #[test]
+    fn verify_invalid_initiator_sk_hex() {
+        let mut v = SessionGoldenVector::vector_1_basic_handshake();
+        v.initiator_ephemeral_sk = "not_hex!".to_string();
+        assert!(v.verify().is_err());
+    }
+
+    #[test]
+    fn verify_wrong_initiator_sk_length() {
+        let mut v = SessionGoldenVector::vector_1_basic_handshake();
+        v.initiator_ephemeral_sk = "aabb".to_string();
+        assert!(v.verify().is_err());
+    }
+
+    #[test]
+    fn verify_invalid_responder_sk_hex() {
+        let mut v = SessionGoldenVector::vector_1_basic_handshake();
+        v.responder_ephemeral_sk = "zzzz".to_string();
+        assert!(v.verify().is_err());
+    }
+
+    #[test]
+    fn verify_wrong_public_key() {
+        let mut v = SessionGoldenVector::vector_1_basic_handshake();
+        v.initiator_ephemeral_pk = "ff".repeat(32);
+        assert!(v.verify().is_err(), "wrong public key should fail");
+    }
+
+    #[test]
+    fn verify_wrong_shared_secret() {
+        let mut v = SessionGoldenVector::vector_1_basic_handshake();
+        v.expected_shared_secret = "00".repeat(32);
+        assert!(v.verify().is_err(), "wrong shared secret should fail");
+    }
+
+    #[test]
+    fn verify_wrong_derived_k_mac_i2r() {
+        let mut v = SessionGoldenVector::vector_1_basic_handshake();
+        v.expected_keys.k_mac_i2r = "ff".repeat(32);
+        assert!(v.verify().is_err(), "wrong k_mac_i2r should fail");
+    }
+
+    #[test]
+    fn verify_wrong_derived_k_mac_r2i() {
+        let mut v = SessionGoldenVector::vector_1_basic_handshake();
+        v.expected_keys.k_mac_r2i = "ff".repeat(32);
+        assert!(v.verify().is_err(), "wrong k_mac_r2i should fail");
+    }
+
+    #[test]
+    fn verify_wrong_derived_k_ctx() {
+        let mut v = SessionGoldenVector::vector_1_basic_handshake();
+        v.expected_keys.k_ctx = "ff".repeat(32);
+        assert!(v.verify().is_err(), "wrong k_ctx should fail");
+    }
+
+    #[test]
+    fn verify_invalid_session_id_hex() {
+        let mut v = SessionGoldenVector::vector_1_basic_handshake();
+        v.session_id = "not_hex!".to_string();
+        assert!(v.verify().is_err());
+    }
+
+    #[test]
+    fn verify_invalid_hello_nonce_hex() {
+        let mut v = SessionGoldenVector::vector_1_basic_handshake();
+        v.hello_nonce = "xyz".to_string();
+        assert!(v.verify().is_err());
+    }
+
+    #[test]
+    fn verify_invalid_ack_nonce_hex() {
+        let mut v = SessionGoldenVector::vector_1_basic_handshake();
+        v.ack_nonce = "xyz".to_string();
+        assert!(v.verify().is_err());
+    }
+
+    // ── Cross-vector consistency tests ───────────────────────
+
+    #[test]
+    fn all_vectors_have_descriptions() {
+        for v in SessionGoldenVector::load_all() {
+            assert!(!v.description.is_empty());
+        }
+    }
+
+    #[test]
+    fn all_vectors_have_32_byte_keys() {
+        for v in SessionGoldenVector::load_all() {
+            assert_eq!(v.expected_shared_secret.len(), 64);
+            assert_eq!(v.expected_keys.k_mac_i2r.len(), 64);
+            assert_eq!(v.expected_keys.k_mac_r2i.len(), 64);
+            assert_eq!(v.expected_keys.k_ctx.len(), 64);
+        }
+    }
+
+    #[test]
+    fn all_vectors_have_16_byte_nonces() {
+        for v in SessionGoldenVector::load_all() {
+            assert_eq!(v.hello_nonce.len(), 32);
+            assert_eq!(v.ack_nonce.len(), 32);
+            assert_eq!(v.session_id.len(), 32);
+        }
+    }
+
+    #[test]
+    fn vector_1_and_3_share_keys_but_differ_in_nonces() {
+        let v1 = SessionGoldenVector::vector_1_basic_handshake();
+        let v3 = SessionGoldenVector::vector_3_different_nonces();
+
+        assert_eq!(v1.initiator_ephemeral_sk, v3.initiator_ephemeral_sk);
+        assert_eq!(v1.responder_ephemeral_sk, v3.responder_ephemeral_sk);
+        assert_ne!(v1.hello_nonce, v3.hello_nonce);
+        assert_ne!(v1.ack_nonce, v3.ack_nonce);
+        // Different nonces → different derived keys
+        assert_ne!(v1.expected_keys, v3.expected_keys);
+    }
+
+    #[test]
+    fn vector_2_uses_rfc7748_shared_secret() {
+        let v = SessionGoldenVector::vector_2_rfc7748_keys();
+        // Well-known RFC 7748 Section 6.1 shared secret
+        assert_eq!(
+            v.expected_shared_secret,
+            "4a5d9d5ba4ce2de1728e3bf480350f25e07e21c947d19e3376f09b3c1e161742"
+        );
+    }
+
+    #[test]
+    fn all_vectors_have_distinct_derived_keys() {
+        let vectors = SessionGoldenVector::load_all();
+        for v in &vectors {
+            assert_ne!(v.expected_keys.k_mac_i2r, v.expected_keys.k_mac_r2i);
+            assert_ne!(v.expected_keys.k_mac_i2r, v.expected_keys.k_ctx);
+            assert_ne!(v.expected_keys.k_mac_r2i, v.expected_keys.k_ctx);
+        }
+    }
+
+    #[test]
+    fn session_vector_serde_roundtrip() {
+        let v = SessionGoldenVector::vector_1_basic_handshake();
+        let json = serde_json::to_string(&v).unwrap();
+        let parsed: SessionGoldenVector = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.expected_shared_secret, v.expected_shared_secret);
+        assert_eq!(parsed.expected_keys, v.expected_keys);
+        parsed.verify().expect("deserialized vector should verify");
+    }
+
+    #[test]
+    fn derived_keys_serde_roundtrip() {
+        let keys = SessionDerivedKeys {
+            k_mac_i2r: "aa".repeat(32),
+            k_mac_r2i: "bb".repeat(32),
+            k_ctx: "cc".repeat(32),
+        };
+        let json = serde_json::to_string(&keys).unwrap();
+        let parsed: SessionDerivedKeys = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, keys);
+    }
 }

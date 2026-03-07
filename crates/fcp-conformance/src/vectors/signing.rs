@@ -394,4 +394,144 @@ mod tests {
         v.verify()
             .expect("Identity sort vector verification failed");
     }
+
+    // ── Signing bytes verify error paths ─────────────────────
+
+    #[test]
+    fn verify_tampered_schema_hash() {
+        let mut v = SigningBytesGoldenVector::vector_1_zone_checkpoint_schema();
+        v.expected_schema_hash = "ff".repeat(8);
+        assert!(v.verify().is_err(), "tampered schema hash should fail");
+    }
+
+    #[test]
+    fn verify_tampered_signing_bytes() {
+        let mut v = SigningBytesGoldenVector::vector_1_zone_checkpoint_schema();
+        v.expected_signing_bytes = "00".repeat(30);
+        assert!(v.verify().is_err(), "tampered signing bytes should fail");
+    }
+
+    #[test]
+    fn verify_invalid_cbor_hex() {
+        let mut v = SigningBytesGoldenVector::vector_1_zone_checkpoint_schema();
+        v.unsigned_cbor = "not_hex!".to_string();
+        assert!(v.verify().is_err());
+    }
+
+    #[test]
+    fn verify_empty_cbor_payload() {
+        // RevocationHead uses empty map (a0), test that empty-ish payloads work
+        let v = SigningBytesGoldenVector::vector_3_revocation_head_schema();
+        assert_eq!(v.unsigned_cbor, "a0");
+        v.verify().expect("empty map payload should verify");
+    }
+
+    // ── Signing bytes structure tests ────────────────────────
+
+    #[test]
+    fn signing_bytes_start_with_domain_separator() {
+        for v in SigningBytesGoldenVector::load_all() {
+            let bytes = hex::decode(&v.expected_signing_bytes).unwrap();
+            assert_eq!(&bytes[..12], b"FCP2-SIGN-V1", "should start with domain separator");
+        }
+    }
+
+    #[test]
+    fn signing_bytes_contain_schema_hash_at_offset_12() {
+        for v in SigningBytesGoldenVector::load_all() {
+            let bytes = hex::decode(&v.expected_signing_bytes).unwrap();
+            let hash_bytes = hex::decode(&v.expected_schema_hash).unwrap();
+            assert_eq!(&bytes[12..20], hash_bytes.as_slice(), "schema hash at offset 12");
+        }
+    }
+
+    #[test]
+    fn signing_bytes_end_with_cbor() {
+        for v in SigningBytesGoldenVector::load_all() {
+            let bytes = hex::decode(&v.expected_signing_bytes).unwrap();
+            let cbor = hex::decode(&v.unsigned_cbor).unwrap();
+            assert_eq!(&bytes[20..], cbor.as_slice(), "cbor should be at end of signing bytes");
+        }
+    }
+
+    #[test]
+    fn different_cbor_produces_different_signing_bytes() {
+        let v1 = SigningBytesGoldenVector::vector_1_zone_checkpoint_schema();
+        let v2 = SigningBytesGoldenVector::vector_2_audit_head_schema();
+        // Different schema IDs + different payloads
+        assert_ne!(v1.expected_signing_bytes, v2.expected_signing_bytes);
+    }
+
+    #[test]
+    fn schema_hash_is_8_bytes() {
+        for v in SigningBytesGoldenVector::load_all() {
+            let hash_bytes = hex::decode(&v.expected_schema_hash).unwrap();
+            assert_eq!(hash_bytes.len(), 8, "schema hash should be 8 bytes (truncated BLAKE3)");
+        }
+    }
+
+    // ── Quorum sort verify error paths ───────────────────────
+
+    #[test]
+    fn quorum_sort_verify_invalid_hex() {
+        let mut v = QuorumSortGoldenVector::vector_1_basic_sort();
+        v.unsorted_node_ids[0] = "not_hex!".to_string();
+        assert!(v.verify().is_err());
+    }
+
+    #[test]
+    fn quorum_sort_verify_wrong_order() {
+        let mut v = QuorumSortGoldenVector::vector_1_basic_sort();
+        v.expected_sorted_indices = vec![0, 1, 2]; // wrong order
+        assert!(v.verify().is_err());
+    }
+
+    // ── Cross-schema tests ───────────────────────────────────
+
+    #[test]
+    fn all_signing_vectors_have_different_schema_ids() {
+        let vectors = SigningBytesGoldenVector::load_all();
+        let ids: std::collections::HashSet<&str> = vectors.iter().map(|v| v.schema_id.as_str()).collect();
+        assert_eq!(ids.len(), vectors.len());
+    }
+
+    #[test]
+    fn all_signing_vectors_have_descriptions() {
+        for v in SigningBytesGoldenVector::load_all() {
+            assert!(!v.description.is_empty());
+        }
+    }
+
+    #[test]
+    fn all_quorum_vectors_have_descriptions() {
+        for v in QuorumSortGoldenVector::load_all() {
+            assert!(!v.description.is_empty());
+        }
+    }
+
+    #[test]
+    fn signing_vector_serde_roundtrip() {
+        let v = SigningBytesGoldenVector::vector_1_zone_checkpoint_schema();
+        let json = serde_json::to_string(&v).unwrap();
+        let parsed: SigningBytesGoldenVector = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.schema_id, v.schema_id);
+        parsed.verify().expect("deserialized vector should verify");
+    }
+
+    #[test]
+    fn quorum_sort_serde_roundtrip() {
+        let v = QuorumSortGoldenVector::vector_1_basic_sort();
+        let json = serde_json::to_string(&v).unwrap();
+        let parsed: QuorumSortGoldenVector = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.expected_sorted_indices, v.expected_sorted_indices);
+        parsed.verify().expect("deserialized vector should verify");
+    }
+
+    #[test]
+    fn binary_sort_is_lexicographic() {
+        let v = QuorumSortGoldenVector::vector_3_binary_node_ids();
+        // 00.. < aa.. < ff..
+        assert_eq!(v.expected_sorted_indices, vec![1, 2, 0]);
+        v.verify().expect("binary sort should verify");
+    }
 }

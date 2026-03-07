@@ -1102,6 +1102,364 @@ mod tests {
         assert!(contains_normal, "Should extract `bd-normal`");
     }
 
+    // ── ValidationReport tests ────────────────────────────────
+
+    #[test]
+    fn validation_report_is_valid_true_when_no_errors() {
+        let report = ValidationReport {
+            total_entries: 5,
+            unique_beads: 3,
+            missing_beads: vec![],
+            errors: vec![],
+            warnings: vec![ValidationWarning {
+                section: "s".into(),
+                line_number: Some(1),
+                warning_type: "w".into(),
+                message: "msg".into(),
+            }],
+            entries: None,
+        };
+        assert!(report.is_valid(), "warnings alone should not invalidate");
+    }
+
+    #[test]
+    fn validation_report_is_valid_false_when_errors() {
+        let report = ValidationReport {
+            total_entries: 1,
+            unique_beads: 1,
+            missing_beads: vec!["bd-x".into()],
+            errors: vec![ValidationError {
+                section: "s".into(),
+                line_number: Some(1),
+                error_type: "missing_bead".into(),
+                value: "bd-x".into(),
+                message: "not found".into(),
+            }],
+            warnings: vec![],
+            entries: None,
+        };
+        assert!(!report.is_valid());
+    }
+
+    #[test]
+    fn validation_report_serde_roundtrip() {
+        let report = ValidationReport {
+            total_entries: 2,
+            unique_beads: 4,
+            missing_beads: vec!["bd-a".into(), "bd-b".into()],
+            errors: vec![ValidationError {
+                section: "§1".into(),
+                line_number: Some(10),
+                error_type: "missing_bead".into(),
+                value: "bd-a".into(),
+                message: "Bead ID `bd-a` not found".into(),
+            }],
+            warnings: vec![],
+            entries: None,
+        };
+        let json = serde_json::to_string(&report).unwrap();
+        let parsed: ValidationReport = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.total_entries, 2);
+        assert_eq!(parsed.missing_beads.len(), 2);
+        assert_eq!(parsed.errors.len(), 1);
+    }
+
+    #[test]
+    fn validation_report_entries_skipped_when_none() {
+        let report = ValidationReport {
+            total_entries: 0,
+            unique_beads: 0,
+            missing_beads: vec![],
+            errors: vec![],
+            warnings: vec![],
+            entries: None,
+        };
+        let json = serde_json::to_string(&report).unwrap();
+        assert!(!json.contains("\"entries\""), "None entries should be skipped");
+    }
+
+    // ── ValidationError / ValidationWarning serde tests ─────
+
+    #[test]
+    fn validation_error_serde_roundtrip() {
+        let err = ValidationError {
+            section: "§5".into(),
+            line_number: None,
+            error_type: "missing_bead".into(),
+            value: "flywheel_connectors-abc".into(),
+            message: "not found".into(),
+        };
+        let json = serde_json::to_string(&err).unwrap();
+        let parsed: ValidationError = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.section, "§5");
+        assert!(parsed.line_number.is_none());
+        assert_eq!(parsed.value, "flywheel_connectors-abc");
+    }
+
+    #[test]
+    fn validation_warning_serde_roundtrip() {
+        let w = ValidationWarning {
+            section: "§3".into(),
+            line_number: Some(42),
+            warning_type: "duplicate_section".into(),
+            message: "appeared before".into(),
+        };
+        let json = serde_json::to_string(&w).unwrap();
+        let parsed: ValidationWarning = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.line_number, Some(42));
+        assert_eq!(parsed.warning_type, "duplicate_section");
+    }
+
+    // ── RequirementEntry serde tests ────────────────────────
+
+    #[test]
+    fn requirement_entry_serde_roundtrip() {
+        let entry = RequirementEntry {
+            section: "§1: Intro".into(),
+            line_number: 5,
+            owners: vec!["bd-own1".into()],
+            tests: vec!["bd-tst1".into(), "bd-tst2".into()],
+            notes: Some("Important note".into()),
+        };
+        let json = serde_json::to_string(&entry).unwrap();
+        let parsed: RequirementEntry = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.section, "§1: Intro");
+        assert_eq!(parsed.owners.len(), 1);
+        assert_eq!(parsed.tests.len(), 2);
+        assert_eq!(parsed.notes, Some("Important note".into()));
+    }
+
+    #[test]
+    fn requirement_entry_clone() {
+        let entry = RequirementEntry {
+            section: "s".into(),
+            line_number: 1,
+            owners: vec!["bd-x".into()],
+            tests: vec![],
+            notes: None,
+        };
+        let cloned = entry.clone();
+        assert_eq!(entry.section, cloned.section);
+        assert_eq!(entry.owners, cloned.owners);
+    }
+
+    // ── load_beads_from_jsonl tests ─────────────────────────
+
+    #[test]
+    fn load_beads_from_jsonl_basic() {
+        let dir = std::env::temp_dir().join(format!("fcp_reqcheck_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("beads.jsonl");
+
+        let content = r#"{"id": "bd-abc", "title": "test1"}
+{"id": "flywheel_connectors-xyz", "title": "test2"}
+{"id": "bd-def", "title": "test3"}
+"#;
+        std::fs::write(&path, content).unwrap();
+
+        let beads = load_beads_from_jsonl(&path).unwrap();
+        assert_eq!(beads.len(), 3);
+        assert!(beads.contains("bd-abc"));
+        assert!(beads.contains("flywheel_connectors-xyz"));
+        assert!(beads.contains("bd-def"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn load_beads_from_jsonl_skips_empty_lines() {
+        let dir = std::env::temp_dir().join(format!("fcp_reqcheck_empty_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("beads_empty.jsonl");
+
+        let content = r#"{"id": "bd-a"}
+
+{"id": "bd-b"}
+
+{"id": "bd-c"}
+"#;
+        std::fs::write(&path, content).unwrap();
+
+        let beads = load_beads_from_jsonl(&path).unwrap();
+        assert_eq!(beads.len(), 3);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn load_beads_from_jsonl_skips_entries_without_id() {
+        let dir = std::env::temp_dir().join(format!("fcp_reqcheck_noid_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("beads_noid.jsonl");
+
+        let content = r#"{"id": "bd-valid"}
+{"title": "no id field"}
+{"id": "bd-also-valid"}
+"#;
+        std::fs::write(&path, content).unwrap();
+
+        let beads = load_beads_from_jsonl(&path).unwrap();
+        assert_eq!(beads.len(), 2);
+        assert!(beads.contains("bd-valid"));
+        assert!(beads.contains("bd-also-valid"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn load_beads_from_jsonl_nonexistent_file() {
+        let result = load_beads_from_jsonl("/nonexistent/path/beads.jsonl");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn load_beads_from_jsonl_malformed_json_skipped() {
+        let dir = std::env::temp_dir().join(format!("fcp_reqcheck_mal_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("beads_malformed.jsonl");
+
+        let content = r#"{"id": "bd-ok"}
+not valid json at all
+{"id": "bd-also-ok"}
+"#;
+        std::fs::write(&path, content).unwrap();
+
+        let beads = load_beads_from_jsonl(&path).unwrap();
+        assert_eq!(beads.len(), 2, "malformed lines should be skipped");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── extract_bead_ids edge cases ─────────────────────────
+
+    #[test]
+    fn extract_bead_ids_unclosed_backtick() {
+        let text = "`bd-unclosed";
+        let ids = extract_bead_ids(text);
+        assert!(ids.is_empty(), "unclosed backtick should not extract");
+    }
+
+    #[test]
+    fn extract_bead_ids_empty_backticks() {
+        let text = "`` and `bd-real`";
+        let ids = extract_bead_ids(text);
+        assert!(ids.contains(&"bd-real".to_string()));
+    }
+
+    #[test]
+    fn extract_bead_ids_only_whitespace_inside() {
+        let text = "` ` and `bd-ok`";
+        let ids = extract_bead_ids(text);
+        assert!(ids.contains(&"bd-ok".to_string()));
+        assert!(!ids.contains(&" ".to_string()));
+    }
+
+    // ── is_bead_id edge cases ───────────────────────────────
+
+    #[test]
+    fn is_bead_id_with_underscores_in_suffix() {
+        assert!(is_bead_id("flywheel_connectors-some_thing"));
+    }
+
+    #[test]
+    fn is_bead_id_only_hyphen() {
+        assert!(!is_bead_id("-"));
+        // "bd-" has empty suffix which passes the all() vacuously
+        assert!(is_bead_id("bd-"));
+    }
+
+    #[test]
+    fn is_bead_id_special_chars_rejected() {
+        assert!(!is_bead_id("bd-abc!def"));
+        assert!(!is_bead_id("bd-abc def"));
+        assert!(!is_bead_id("bd-abc/def"));
+    }
+
+    // ── all_bead_ids tracking ───────────────────────────────
+
+    #[test]
+    fn all_bead_ids_tracks_across_sections() {
+        let content = r"
+## §1: First
+
+| Aspect | Details |
+|--------|---------|
+| **Owners** | `bd-first` |
+
+---
+
+## §2: Second
+
+| Aspect | Details |
+|--------|---------|
+| **Tests** | `bd-second` |
+
+---
+";
+        let mut parser = RequirementsIndexParser::new();
+        parser.parse_reader(content.as_bytes()).unwrap();
+
+        let all_ids = parser.all_bead_ids();
+        assert_eq!(all_ids.len(), 2);
+        assert!(all_ids.contains("bd-first"));
+        assert!(all_ids.contains("bd-second"));
+    }
+
+    #[test]
+    fn all_bead_ids_deduplicates() {
+        let content = r"
+## §1: Dup
+
+| Aspect | Details |
+|--------|---------|
+| **Owners** | `bd-same` |
+| **Tests** | `bd-same` |
+
+---
+";
+        let mut parser = RequirementsIndexParser::new();
+        parser.parse_reader(content.as_bytes()).unwrap();
+        assert_eq!(parser.all_bead_ids().len(), 1);
+    }
+
+    // ── parse_file error test ───────────────────────────────
+
+    #[test]
+    fn parse_file_nonexistent() {
+        let mut parser = RequirementsIndexParser::new();
+        let result = parser.parse_file("/nonexistent/file.md");
+        assert!(result.is_err());
+    }
+
+    // ── validate edge cases ─────────────────────────────────
+
+    #[test]
+    fn validate_empty_parser() {
+        let parser = RequirementsIndexParser::new();
+        let known = HashSet::new();
+        let report = parser.validate(&known);
+        assert!(report.is_valid());
+        assert_eq!(report.total_entries, 0);
+        assert_eq!(report.unique_beads, 0);
+    }
+
+    #[test]
+    fn validate_missing_beads_sorted() {
+        let content = r"
+## §1: Sort
+
+| Aspect | Details |
+|--------|---------|
+| **Owners** | `bd-zzz`, `bd-aaa`, `bd-mmm` |
+
+---
+";
+        let mut parser = RequirementsIndexParser::new();
+        parser.parse_reader(content.as_bytes()).unwrap();
+        let report = parser.validate(&HashSet::new());
+        assert_eq!(report.missing_beads, vec!["bd-aaa", "bd-mmm", "bd-zzz"]);
+    }
+
     #[test]
     fn parse_large_table_performance() {
         let capture = LogCapture::new();

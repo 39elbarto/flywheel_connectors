@@ -237,4 +237,168 @@ mod tests {
             vector.verify().expect("object id should match");
         }
     }
+
+    // ── CanonicalPayloadGoldenVector field tests ─────────────
+
+    #[test]
+    fn canonical_vector_has_valid_hex_fields() {
+        for v in CanonicalPayloadGoldenVector::load_all() {
+            assert!(hex::decode(&v.expected_schema_hash).is_ok(), "schema hash should be valid hex");
+            assert!(hex::decode(&v.expected_cbor).is_ok(), "cbor should be valid hex");
+        }
+    }
+
+    #[test]
+    fn canonical_vector_schema_hash_is_32_bytes() {
+        for v in CanonicalPayloadGoldenVector::load_all() {
+            let bytes = hex::decode(&v.expected_schema_hash).unwrap();
+            assert_eq!(bytes.len(), 32, "schema hash should be 32 bytes");
+        }
+    }
+
+    #[test]
+    fn canonical_vector_description_not_empty() {
+        for v in CanonicalPayloadGoldenVector::load_all() {
+            assert!(!v.description.is_empty());
+        }
+    }
+
+    #[test]
+    fn canonical_vector_schema_namespace_prefixed() {
+        for v in CanonicalPayloadGoldenVector::load_all() {
+            assert!(v.schema_namespace.starts_with("fcp."), "namespace should start with fcp.");
+        }
+    }
+
+    #[test]
+    fn canonical_vector_schema_name_not_empty() {
+        for v in CanonicalPayloadGoldenVector::load_all() {
+            assert!(!v.schema_name.is_empty());
+        }
+    }
+
+    #[test]
+    fn canonical_vector_verify_bad_schema_hash() {
+        let mut v = CanonicalPayloadGoldenVector::load_all().remove(0);
+        v.expected_schema_hash = "ff".repeat(32);
+        assert!(v.verify().is_err(), "tampered schema hash should fail");
+    }
+
+    #[test]
+    fn canonical_vector_verify_bad_cbor() {
+        let mut v = CanonicalPayloadGoldenVector::load_all().remove(0);
+        v.expected_cbor = "deadbeef".to_string();
+        assert!(v.verify().is_err(), "tampered cbor should fail");
+    }
+
+    #[test]
+    fn canonical_vector_verify_invalid_hex() {
+        let mut v = CanonicalPayloadGoldenVector::load_all().remove(0);
+        v.expected_schema_hash = "not_valid_hex".to_string();
+        assert!(v.verify().is_err(), "invalid hex should fail");
+    }
+
+    #[test]
+    fn canonical_vector_verify_invalid_cbor_hex() {
+        let mut v = CanonicalPayloadGoldenVector::load_all().remove(0);
+        v.expected_cbor = "zzzz".to_string();
+        assert!(v.verify().is_err(), "invalid cbor hex should fail");
+    }
+
+    #[test]
+    fn canonical_vector_serde_roundtrip() {
+        let v = CanonicalPayloadGoldenVector::load_all().remove(0);
+        let json = serde_json::to_string(&v).unwrap();
+        let parsed: CanonicalPayloadGoldenVector = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.description, v.description);
+        assert_eq!(parsed.expected_cbor, v.expected_cbor);
+        parsed.verify().expect("deserialized vector should verify");
+    }
+
+    // ── ObjectIdGoldenVector field tests ─────────────────────
+
+    #[test]
+    fn object_id_vector_key_is_32_bytes() {
+        for v in ObjectIdGoldenVector::load_all() {
+            let bytes = hex::decode(&v.key).unwrap();
+            assert_eq!(bytes.len(), 32, "key should be 32 bytes");
+        }
+    }
+
+    #[test]
+    fn object_id_vector_expected_id_is_32_bytes() {
+        for v in ObjectIdGoldenVector::load_all() {
+            assert_eq!(v.expected_object_id.len(), 64, "object_id should be 64 hex chars");
+        }
+    }
+
+    #[test]
+    fn object_id_vector_zone_id_valid() {
+        for v in ObjectIdGoldenVector::load_all() {
+            assert!(v.zone_id.starts_with("z:"), "zone_id should start with z:");
+        }
+    }
+
+    #[test]
+    fn object_id_verify_bad_key() {
+        let mut v = ObjectIdGoldenVector::load_all().remove(0);
+        v.key = "ff".repeat(32);
+        assert!(v.verify().is_err(), "wrong key should produce wrong object_id");
+    }
+
+    #[test]
+    fn object_id_verify_bad_content() {
+        let mut v = ObjectIdGoldenVector::load_all().remove(0);
+        v.content = "ff".to_string();
+        assert!(v.verify().is_err(), "different content should fail");
+    }
+
+    #[test]
+    fn object_id_verify_invalid_key_hex() {
+        let mut v = ObjectIdGoldenVector::load_all().remove(0);
+        v.key = "not_hex".to_string();
+        assert!(v.verify().is_err(), "invalid key hex should fail");
+    }
+
+    #[test]
+    fn object_id_verify_wrong_key_length() {
+        let mut v = ObjectIdGoldenVector::load_all().remove(0);
+        v.key = "aabb".to_string(); // 2 bytes, not 32
+        assert!(v.verify().is_err(), "wrong key length should fail");
+    }
+
+    #[test]
+    fn object_id_verify_invalid_zone() {
+        let mut v = ObjectIdGoldenVector::load_all().remove(0);
+        v.zone_id = "invalid-zone".to_string();
+        assert!(v.verify().is_err(), "invalid zone_id should fail");
+    }
+
+    #[test]
+    fn object_id_serde_roundtrip() {
+        let v = ObjectIdGoldenVector::load_all().remove(0);
+        let json = serde_json::to_string(&v).unwrap();
+        let parsed: ObjectIdGoldenVector = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.expected_object_id, v.expected_object_id);
+        parsed.verify().expect("deserialized vector should verify");
+    }
+
+    #[test]
+    fn object_id_different_zones_different_ids() {
+        use fcp_cbor::SchemaId;
+        use fcp_core::{ObjectId, ObjectIdKey, ZoneId};
+        use semver::Version;
+
+        let schema = SchemaId::new("fcp.core", "CapabilityObject", Version::new(1, 0, 0));
+        let key = ObjectIdKey::from_bytes([0u8; 32]);
+        let content = b"hello";
+
+        let zone_a: ZoneId = "z:work".parse().unwrap();
+        let zone_b: ZoneId = "z:private".parse().unwrap();
+
+        let id_a = ObjectId::new(content, &zone_a, &schema, &key);
+        let id_b = ObjectId::new(content, &zone_b, &schema, &key);
+
+        assert_ne!(id_a.to_string(), id_b.to_string(), "different zones must produce different IDs");
+    }
 }

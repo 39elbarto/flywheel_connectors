@@ -365,4 +365,211 @@ mod tests {
             "different directions should produce different ciphertext"
         );
     }
+
+    // ── Verify error path tests ──────────────────────────────
+
+    #[test]
+    fn verify_invalid_session_id_hex() {
+        let mut v = vector_1_minimal_frame();
+        v.session_id = "not_valid_hex".to_string();
+        assert!(v.verify().is_err());
+    }
+
+    #[test]
+    fn verify_wrong_session_id_length() {
+        let mut v = vector_1_minimal_frame();
+        v.session_id = "aabb".to_string(); // 2 bytes, not 16
+        assert!(v.verify().is_err());
+    }
+
+    #[test]
+    fn verify_invalid_key_hex() {
+        let mut v = vector_1_minimal_frame();
+        v.key = "zzzz".to_string();
+        assert!(v.verify().is_err());
+    }
+
+    #[test]
+    fn verify_wrong_key_length() {
+        let mut v = vector_1_minimal_frame();
+        v.key = "aa".repeat(16); // 16 bytes, not 32
+        assert!(v.verify().is_err());
+    }
+
+    #[test]
+    fn verify_invalid_direction() {
+        let mut v = vector_1_minimal_frame();
+        v.direction = "unknown".to_string();
+        assert!(v.verify().is_err());
+    }
+
+    #[test]
+    fn verify_invalid_plaintext_hex() {
+        let mut v = vector_1_minimal_frame();
+        v.plaintext = "not_hex!".to_string();
+        assert!(v.verify().is_err());
+    }
+
+    #[test]
+    fn verify_tampered_expected_header() {
+        let mut v = vector_1_minimal_frame();
+        // Flip a byte in the expected header
+        let mut header = v.expected_header.clone();
+        header.replace_range(0..2, "00");
+        v.expected_header = header;
+        assert!(v.verify().is_err(), "tampered header should fail");
+    }
+
+    #[test]
+    fn verify_tampered_expected_frame() {
+        let mut v = vector_1_minimal_frame();
+        // Keep header correct but corrupt the frame
+        let mut frame = v.expected_frame.clone();
+        let len = frame.len();
+        frame.replace_range(len - 4..len, "ffff");
+        v.expected_frame = frame;
+        assert!(v.verify().is_err(), "tampered frame should fail");
+    }
+
+    #[test]
+    fn verify_invalid_expected_header_hex() {
+        let mut v = vector_1_minimal_frame();
+        v.expected_header = "not_hex_at_all_!!!".to_string();
+        assert!(v.verify().is_err());
+    }
+
+    #[test]
+    fn verify_invalid_expected_frame_hex() {
+        let mut v = vector_1_minimal_frame();
+        v.expected_frame = "zzzzzz".to_string();
+        assert!(v.verify().is_err());
+    }
+
+    // ── Cross-vector tests ───────────────────────────────────
+
+    #[test]
+    fn different_vectors_produce_different_frames() {
+        let v1 = vector_1_minimal_frame();
+        let v2 = vector_2_responder_direction();
+        assert_ne!(v1.expected_frame, v2.expected_frame);
+    }
+
+    #[test]
+    fn all_vectors_have_fcpc_magic() {
+        for v in FcpcGoldenVector::load_all() {
+            assert!(v.expected_header.starts_with("46435043"), "header should start with FCPC magic");
+        }
+    }
+
+    #[test]
+    fn all_vectors_have_version_1() {
+        for v in FcpcGoldenVector::load_all() {
+            // Version is at bytes 4-5 = chars 8-11
+            assert_eq!(&v.expected_header[8..12], "0100", "version should be 1 LE");
+        }
+    }
+
+    #[test]
+    fn wrong_key_fails_decryption() {
+        let session_id = MeshSessionId([0xAA; 16]);
+        let correct_key = [0x11; 32];
+        let wrong_key = [0x99; 32];
+        let direction = SessionDirection::InitiatorToResponder;
+
+        let frame = FcpcFrame::seal(
+            session_id,
+            1,
+            direction,
+            FcpcFrameFlags::ENCRYPTED,
+            b"secret",
+            &correct_key,
+        )
+        .unwrap();
+
+        let encoded = frame.encode();
+        let decoded = FcpcFrame::decode(&encoded).unwrap();
+        assert!(decoded.open(direction, &wrong_key).is_err(), "wrong key should fail decryption");
+    }
+
+    #[test]
+    fn wrong_direction_fails_decryption() {
+        let session_id = MeshSessionId([0xAA; 16]);
+        let key = [0x11; 32];
+
+        let frame = FcpcFrame::seal(
+            session_id,
+            1,
+            SessionDirection::InitiatorToResponder,
+            FcpcFrameFlags::ENCRYPTED,
+            b"secret",
+            &key,
+        )
+        .unwrap();
+
+        let encoded = frame.encode();
+        let decoded = FcpcFrame::decode(&encoded).unwrap();
+        assert!(
+            decoded.open(SessionDirection::ResponderToInitiator, &key).is_err(),
+            "wrong direction should fail decryption"
+        );
+    }
+
+    #[test]
+    fn seq_affects_ciphertext() {
+        let session_id = MeshSessionId([0xDD; 16]);
+        let key = [0x44; 32];
+        let plaintext = b"same";
+        let direction = SessionDirection::InitiatorToResponder;
+
+        let frame1 = FcpcFrame::seal(session_id, 1, direction, FcpcFrameFlags::ENCRYPTED, plaintext, &key).unwrap();
+        let frame2 = FcpcFrame::seal(session_id, 2, direction, FcpcFrameFlags::ENCRYPTED, plaintext, &key).unwrap();
+
+        assert_ne!(frame1.ciphertext, frame2.ciphertext, "different seq should produce different ciphertext");
+    }
+
+    #[test]
+    fn session_id_affects_authentication() {
+        let key = [0x55; 32];
+        let plaintext = b"same";
+        let direction = SessionDirection::InitiatorToResponder;
+
+        let frame1 = FcpcFrame::seal(MeshSessionId([0xAA; 16]), 1, direction, FcpcFrameFlags::ENCRYPTED, plaintext, &key).unwrap();
+        let frame2 = FcpcFrame::seal(MeshSessionId([0xBB; 16]), 1, direction, FcpcFrameFlags::ENCRYPTED, plaintext, &key).unwrap();
+
+        // Session ID is in AAD so tags differ even if ciphertext is the same
+        assert_ne!(frame1.tag, frame2.tag, "different session_id should produce different tags");
+    }
+
+    #[test]
+    fn empty_plaintext_roundtrip() {
+        let session_id = MeshSessionId([0xEE; 16]);
+        let key = [0x66; 32];
+        let direction = SessionDirection::InitiatorToResponder;
+
+        let frame = FcpcFrame::seal(session_id, 0, direction, FcpcFrameFlags::ENCRYPTED, b"", &key).unwrap();
+        let encoded = frame.encode();
+        let decoded = FcpcFrame::decode(&encoded).unwrap();
+        let opened = decoded.open(direction, &key).unwrap();
+        assert!(opened.is_empty());
+    }
+
+    #[test]
+    fn golden_vector_serde_roundtrip() {
+        let v = vector_1_minimal_frame();
+        let json = serde_json::to_string(&v).unwrap();
+        let parsed: FcpcGoldenVector = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.description, v.description);
+        assert_eq!(parsed.expected_frame, v.expected_frame);
+        parsed.verify().expect("deserialized vector should verify");
+    }
+
+    #[test]
+    fn frame_header_length_is_36() {
+        assert_eq!(FCPC_HEADER_LEN, 36);
+    }
+
+    #[test]
+    fn tag_length_is_16() {
+        assert_eq!(FCPC_TAG_LEN, 16);
+    }
 }

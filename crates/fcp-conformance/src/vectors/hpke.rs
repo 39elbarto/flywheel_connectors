@@ -380,4 +380,235 @@ mod tests {
             );
         }
     }
+
+    // ── Serde roundtrip tests ───────────────────────────────
+
+    #[test]
+    fn hpke_vector_serde_roundtrip() {
+        let v = HpkeSealedBoxGoldenVector::vector_1_zone_key_seal();
+        let json = serde_json::to_string(&v).unwrap();
+        let parsed: HpkeSealedBoxGoldenVector = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.description, v.description);
+        assert_eq!(parsed.expected_enc, v.expected_enc);
+        assert_eq!(parsed.expected_ciphertext, v.expected_ciphertext);
+        parsed.verify().expect("deserialized vector should verify");
+    }
+
+    #[test]
+    fn hpke_all_vectors_serde_roundtrip() {
+        for v in HpkeSealedBoxGoldenVector::load_all() {
+            let json = serde_json::to_string(&v).unwrap();
+            let parsed: HpkeSealedBoxGoldenVector = serde_json::from_str(&json).unwrap();
+            parsed.verify().unwrap_or_else(|e| {
+                panic!("deserialized '{}' failed: {e}", v.description);
+            });
+        }
+    }
+
+    // ── Clone and Debug tests ───────────────────────────────
+
+    #[test]
+    fn hpke_vector_clone() {
+        let v = HpkeSealedBoxGoldenVector::vector_2_objectid_key_seal();
+        let cloned = v.clone();
+        assert_eq!(v.recipient_sk, cloned.recipient_sk);
+        assert_eq!(v.expected_ciphertext, cloned.expected_ciphertext);
+        cloned.verify().expect("cloned vector should verify");
+    }
+
+    #[test]
+    fn hpke_vector_debug() {
+        let v = HpkeSealedBoxGoldenVector::vector_1_zone_key_seal();
+        let debug = format!("{v:?}");
+        assert!(debug.contains("Zone key seal"));
+    }
+
+    // ── Tampered field verification tests ───────────────────
+
+    #[test]
+    fn verify_fails_with_tampered_recipient_sk() {
+        let mut v = HpkeSealedBoxGoldenVector::vector_1_zone_key_seal();
+        v.recipient_sk = "ff".repeat(32);
+        assert!(v.verify().is_err(), "wrong recipient_sk should fail");
+    }
+
+    #[test]
+    fn verify_fails_with_tampered_rng_seed() {
+        let mut v = HpkeSealedBoxGoldenVector::vector_1_zone_key_seal();
+        v.rng_seed = "bb".repeat(32);
+        assert!(v.verify().is_err(), "wrong rng_seed should produce different enc");
+    }
+
+    #[test]
+    fn verify_fails_with_tampered_plaintext() {
+        let mut v = HpkeSealedBoxGoldenVector::vector_1_zone_key_seal();
+        v.plaintext = "00".repeat(32);
+        assert!(v.verify().is_err(), "wrong plaintext should fail");
+    }
+
+    #[test]
+    fn verify_fails_with_tampered_zone_id() {
+        let mut v = HpkeSealedBoxGoldenVector::vector_1_zone_key_seal();
+        v.zone_id = hex::encode(b"z:private");
+        assert!(v.verify().is_err(), "wrong zone_id should change AAD and fail");
+    }
+
+    #[test]
+    fn verify_fails_with_tampered_purpose() {
+        let mut v = HpkeSealedBoxGoldenVector::vector_1_zone_key_seal();
+        v.purpose = "FCP2-OBJECTID-KEY".into();
+        assert!(v.verify().is_err(), "wrong purpose should change AAD and fail");
+    }
+
+    #[test]
+    fn verify_fails_with_tampered_issued_at() {
+        let mut v = HpkeSealedBoxGoldenVector::vector_1_zone_key_seal();
+        v.issued_at = 999_999_999;
+        assert!(v.verify().is_err(), "wrong issued_at should change AAD and fail");
+    }
+
+    #[test]
+    fn verify_fails_with_tampered_node_id() {
+        let mut v = HpkeSealedBoxGoldenVector::vector_1_zone_key_seal();
+        v.recipient_node_id = hex::encode(b"node:other.mesh.ts.net");
+        assert!(v.verify().is_err(), "wrong node_id should change AAD and fail");
+    }
+
+    #[test]
+    fn verify_fails_with_invalid_sk_hex() {
+        let mut v = HpkeSealedBoxGoldenVector::vector_1_zone_key_seal();
+        v.recipient_sk = "not_hex".into();
+        assert!(v.verify().is_err(), "invalid hex should fail");
+    }
+
+    #[test]
+    fn verify_fails_with_invalid_rng_seed_hex() {
+        let mut v = HpkeSealedBoxGoldenVector::vector_1_zone_key_seal();
+        v.rng_seed = "zzzz".into();
+        assert!(v.verify().is_err(), "invalid rng hex should fail");
+    }
+
+    #[test]
+    fn verify_fails_with_short_rng_seed() {
+        let mut v = HpkeSealedBoxGoldenVector::vector_1_zone_key_seal();
+        v.rng_seed = "aabb".into();
+        assert!(v.verify().is_err(), "short rng seed should fail");
+    }
+
+    // ── Cross-vector uniqueness tests ───────────────────────
+
+    #[test]
+    fn all_vectors_have_unique_recipient_keys() {
+        let vectors = HpkeSealedBoxGoldenVector::load_all();
+        let keys: std::collections::HashSet<&str> = vectors.iter().map(|v| v.recipient_sk.as_str()).collect();
+        assert_eq!(keys.len(), vectors.len(), "all recipient keys must be unique");
+    }
+
+    #[test]
+    fn all_vectors_have_unique_rng_seeds() {
+        let vectors = HpkeSealedBoxGoldenVector::load_all();
+        let seeds: std::collections::HashSet<&str> = vectors.iter().map(|v| v.rng_seed.as_str()).collect();
+        assert_eq!(seeds.len(), vectors.len(), "all rng seeds must be unique");
+    }
+
+    #[test]
+    fn all_vectors_have_unique_purposes() {
+        let vectors = HpkeSealedBoxGoldenVector::load_all();
+        let purposes: std::collections::HashSet<&str> = vectors.iter().map(|v| v.purpose.as_str()).collect();
+        assert_eq!(purposes.len(), vectors.len(), "all purposes must be unique");
+    }
+
+    #[test]
+    fn all_vectors_have_unique_enc() {
+        let vectors = HpkeSealedBoxGoldenVector::load_all();
+        let encs: std::collections::HashSet<&str> = vectors.iter().map(|v| v.expected_enc.as_str()).collect();
+        assert_eq!(encs.len(), vectors.len(), "all enc values must be unique");
+    }
+
+    // ── Field validation tests ──────────────────────────────
+
+    #[test]
+    fn all_vectors_have_valid_hex_fields() {
+        for v in HpkeSealedBoxGoldenVector::load_all() {
+            assert!(hex::decode(&v.recipient_sk).is_ok(), "recipient_sk hex");
+            assert!(hex::decode(&v.expected_recipient_pk).is_ok(), "pk hex");
+            assert!(hex::decode(&v.rng_seed).is_ok(), "rng_seed hex");
+            assert!(hex::decode(&v.plaintext).is_ok(), "plaintext hex");
+            assert!(hex::decode(&v.zone_id).is_ok(), "zone_id hex");
+            assert!(hex::decode(&v.recipient_node_id).is_ok(), "node_id hex");
+            assert!(hex::decode(&v.expected_aad_cbor).is_ok(), "aad_cbor hex");
+            assert!(hex::decode(&v.expected_enc).is_ok(), "enc hex");
+            assert!(hex::decode(&v.expected_ciphertext).is_ok(), "ciphertext hex");
+        }
+    }
+
+    #[test]
+    fn all_vectors_sk_is_32_bytes() {
+        for v in HpkeSealedBoxGoldenVector::load_all() {
+            let bytes = hex::decode(&v.recipient_sk).unwrap();
+            assert_eq!(bytes.len(), 32, "sk for '{}' must be 32 bytes", v.description);
+        }
+    }
+
+    #[test]
+    fn all_vectors_pk_is_32_bytes() {
+        for v in HpkeSealedBoxGoldenVector::load_all() {
+            let bytes = hex::decode(&v.expected_recipient_pk).unwrap();
+            assert_eq!(bytes.len(), 32, "pk for '{}' must be 32 bytes", v.description);
+        }
+    }
+
+    #[test]
+    fn all_vectors_enc_is_32_bytes() {
+        for v in HpkeSealedBoxGoldenVector::load_all() {
+            let bytes = hex::decode(&v.expected_enc).unwrap();
+            assert_eq!(bytes.len(), 32, "enc for '{}' must be 32 bytes", v.description);
+        }
+    }
+
+    #[test]
+    fn all_vectors_rng_seed_is_32_bytes() {
+        for v in HpkeSealedBoxGoldenVector::load_all() {
+            let bytes = hex::decode(&v.rng_seed).unwrap();
+            assert_eq!(bytes.len(), 32, "rng seed for '{}' must be 32 bytes", v.description);
+        }
+    }
+
+    // ── AAD binding correctness test ────────────────────────
+
+    #[test]
+    fn aad_recipient_node_binding() {
+        use fcp_crypto::hpke_seal::{Fcp2Aad, hpke_open, hpke_seal};
+        use fcp_crypto::x25519::X25519SecretKey;
+
+        let sk = X25519SecretKey::from_bytes([0x10; 32]);
+        let pk = sk.public_key();
+
+        let aad_a = Fcp2Aad::for_zone_key(b"z:work", b"node:laptop", 1_700_000_000);
+        let aad_b = Fcp2Aad::for_zone_key(b"z:work", b"node:server", 1_700_000_000);
+
+        let sealed = hpke_seal(&pk, b"key_material", &aad_a).unwrap();
+        assert!(
+            hpke_open(&sk, &sealed, &aad_b).is_err(),
+            "wrong recipient_node_id must cause decryption failure"
+        );
+    }
+
+    #[test]
+    fn aad_timestamp_binding() {
+        use fcp_crypto::hpke_seal::{Fcp2Aad, hpke_open, hpke_seal};
+        use fcp_crypto::x25519::X25519SecretKey;
+
+        let sk = X25519SecretKey::from_bytes([0x10; 32]);
+        let pk = sk.public_key();
+
+        let aad_t1 = Fcp2Aad::for_zone_key(b"z:work", b"node:a", 1_700_000_000);
+        let aad_t2 = Fcp2Aad::for_zone_key(b"z:work", b"node:a", 1_700_000_001);
+
+        let sealed = hpke_seal(&pk, b"data", &aad_t1).unwrap();
+        assert!(
+            hpke_open(&sk, &sealed, &aad_t2).is_err(),
+            "wrong issued_at must cause decryption failure"
+        );
+    }
 }

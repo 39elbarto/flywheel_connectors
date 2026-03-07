@@ -527,4 +527,200 @@ mod tests {
             1
         );
     }
+
+    // ── Verify error path tests ──────────────────────────────
+
+    #[test]
+    fn verify_invalid_object_id_hex() {
+        let mut v = vector_1_minimal_frame();
+        v.object_id = "not_hex!".to_string();
+        assert!(v.verify().is_err());
+    }
+
+    #[test]
+    fn verify_wrong_object_id_length() {
+        let mut v = vector_1_minimal_frame();
+        v.object_id = "aabb".to_string(); // 2 bytes, not 32
+        assert!(v.verify().is_err());
+    }
+
+    #[test]
+    fn verify_invalid_zone_key_id_hex() {
+        let mut v = vector_1_minimal_frame();
+        v.zone_key_id = "zzzz".to_string();
+        assert!(v.verify().is_err());
+    }
+
+    #[test]
+    fn verify_wrong_zone_key_id_length() {
+        let mut v = vector_1_minimal_frame();
+        v.zone_key_id = "aa".to_string(); // 1 byte, not 8
+        assert!(v.verify().is_err());
+    }
+
+    #[test]
+    fn verify_invalid_zone_id_hash_hex() {
+        let mut v = vector_1_minimal_frame();
+        v.zone_id_hash = "xyz".to_string();
+        assert!(v.verify().is_err());
+    }
+
+    #[test]
+    fn verify_wrong_zone_id_hash_length() {
+        let mut v = vector_1_minimal_frame();
+        v.zone_id_hash = "aa".repeat(16); // 16 bytes, not 32
+        assert!(v.verify().is_err());
+    }
+
+    #[test]
+    fn verify_tampered_header() {
+        let mut v = vector_1_minimal_frame();
+        let mut hdr = v.expected_header.clone();
+        hdr.replace_range(0..4, "0000"); // corrupt magic
+        v.expected_header = hdr;
+        assert!(v.verify().is_err());
+    }
+
+    #[test]
+    fn verify_tampered_frame() {
+        let mut v = vector_1_minimal_frame();
+        let mut frame = v.expected_frame.clone();
+        let len = frame.len();
+        frame.replace_range(len - 4..len, "ffff");
+        v.expected_frame = frame;
+        assert!(v.verify().is_err());
+    }
+
+    #[test]
+    fn verify_invalid_symbol_data_hex() {
+        let mut v = vector_1_minimal_frame();
+        v.symbols[0].data = "not_hex!".to_string();
+        assert!(v.verify().is_err());
+    }
+
+    #[test]
+    fn verify_wrong_symbol_data_length() {
+        let mut v = vector_1_minimal_frame();
+        v.symbols[0].data = "aa".to_string(); // 1 byte, not symbol_size
+        assert!(v.verify().is_err());
+    }
+
+    #[test]
+    fn verify_invalid_auth_tag_hex() {
+        let mut v = vector_1_minimal_frame();
+        v.symbols[0].auth_tag = "zzzz".to_string();
+        assert!(v.verify().is_err());
+    }
+
+    #[test]
+    fn verify_wrong_auth_tag_length() {
+        let mut v = vector_1_minimal_frame();
+        v.symbols[0].auth_tag = "aa".to_string(); // 1 byte, not 16
+        assert!(v.verify().is_err());
+    }
+
+    #[test]
+    fn verify_tampered_symbol_record() {
+        let mut v = vector_1_minimal_frame();
+        let mut enc = v.symbols[0].expected_encoded.clone();
+        enc.replace_range(0..4, "ffff");
+        v.symbols[0].expected_encoded = enc;
+        assert!(v.verify().is_err());
+    }
+
+    // ── Cross-vector tests ───────────────────────────────────
+
+    #[test]
+    fn all_vectors_have_fcps_magic() {
+        for v in FcpsGoldenVector::load_all() {
+            assert!(v.expected_header.starts_with("46435053"), "header should start with FCPS magic");
+        }
+    }
+
+    #[test]
+    fn all_vectors_have_version_1() {
+        for v in FcpsGoldenVector::load_all() {
+            assert_eq!(&v.expected_header[8..12], "0100", "version should be 1 LE");
+        }
+    }
+
+    #[test]
+    fn different_vectors_produce_different_frames() {
+        let v1 = vector_1_minimal_frame();
+        let v2 = vector_2_two_symbols();
+        let v3 = vector_3_flags_variation();
+        assert_ne!(v1.expected_frame, v2.expected_frame);
+        assert_ne!(v1.expected_frame, v3.expected_frame);
+        assert_ne!(v2.expected_frame, v3.expected_frame);
+    }
+
+    #[test]
+    fn vector_2_has_two_symbols() {
+        let v = vector_2_two_symbols();
+        assert_eq!(v.symbols.len(), 2);
+        assert_ne!(v.symbols[0].esi, v.symbols[1].esi, "symbols should have different ESIs");
+        assert_eq!(v.symbols[0].k, v.symbols[1].k, "symbols in same frame should have same K");
+    }
+
+    #[test]
+    fn vector_3_uses_edge_case_values() {
+        let v = vector_3_flags_variation();
+        assert_eq!(v.epoch_id, u64::MAX);
+        assert_eq!(v.sender_instance_id, u64::MAX);
+        assert_eq!(v.frame_seq, 0);
+        assert_eq!(v.symbols[0].esi, u32::MAX);
+        assert_eq!(v.symbols[0].k, u16::MAX);
+    }
+
+    #[test]
+    fn header_length_is_114_bytes() {
+        for v in FcpsGoldenVector::load_all() {
+            let header_bytes = hex::decode(&v.expected_header).unwrap();
+            assert_eq!(header_bytes.len(), 114, "FCPS header should be 114 bytes");
+        }
+    }
+
+    #[test]
+    fn symbol_record_sizes_consistent() {
+        for v in FcpsGoldenVector::load_all() {
+            let expected_record_size = 4 + 2 + v.symbol_size as usize + 16;
+            for (i, sym) in v.symbols.iter().enumerate() {
+                let enc = hex::decode(&sym.expected_encoded).unwrap();
+                assert_eq!(
+                    enc.len(), expected_record_size,
+                    "symbol[{i}] record should be {expected_record_size} bytes"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn golden_vector_serde_roundtrip() {
+        let v = vector_1_minimal_frame();
+        let json = serde_json::to_string(&v).unwrap();
+        let parsed: FcpsGoldenVector = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.description, v.description);
+        assert_eq!(parsed.expected_frame, v.expected_frame);
+        parsed.verify().expect("deserialized vector should verify");
+    }
+
+    #[test]
+    fn total_payload_len_matches_symbols() {
+        for v in FcpsGoldenVector::load_all() {
+            let record_size = 4 + 2 + v.symbol_size as usize + 16;
+            let expected_len = v.symbols.len() * record_size;
+            let header_bytes = hex::decode(&v.expected_header).unwrap();
+            let encoded_len = u32::from_le_bytes(header_bytes[12..16].try_into().unwrap()) as usize;
+            assert_eq!(encoded_len, expected_len, "total_payload_len mismatch for: {}", v.description);
+        }
+    }
+
+    #[test]
+    fn symbol_count_in_header_matches_vector() {
+        for v in FcpsGoldenVector::load_all() {
+            let header_bytes = hex::decode(&v.expected_header).unwrap();
+            let count = u32::from_le_bytes(header_bytes[8..12].try_into().unwrap()) as usize;
+            assert_eq!(count, v.symbols.len(), "symbol count mismatch for: {}", v.description);
+        }
+    }
 }

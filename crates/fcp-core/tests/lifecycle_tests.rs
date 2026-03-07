@@ -63,10 +63,12 @@ impl TestContext {
             "module": self.module,
             "phase": phase,
             "correlation_id": self.correlation_id,
-            "connector_id": self.connector_id.to_string(),
-            "version": self.version.to_string(),
             "result": "pass",
             "duration_ms": duration_ms,
+            "context": {
+                "connector_id": self.connector_id.to_string(),
+                "version": self.version.to_string()
+            },
             "assertions": {
                 "passed": self.assertions_passed,
                 "failed": self.assertions_failed
@@ -130,16 +132,25 @@ impl TestContext {
             "module": self.module,
             "phase": "verify",
             "correlation_id": self.correlation_id,
-            "connector_id": self.connector_id.to_string(),
-            "version": self.version.to_string(),
             "result": result,
             "duration_ms": duration_ms,
+            "context": {
+                "connector_id": self.connector_id.to_string(),
+                "version": self.version.to_string()
+            },
             "assertions": {
                 "passed": self.assertions_passed,
                 "failed": self.assertions_failed
             }
         });
         self.capture.push_value(&entry).expect("final log entry");
+        if let Err(error) = self.capture.validate_jsonl() {
+            panic!(
+                "expected lifecycle test JSONL to match the E2E schema for {}: {error}\n{}",
+                self.test_name,
+                self.capture.jsonl()
+            );
+        }
     }
 }
 

@@ -158,6 +158,13 @@ impl E2ETestContext {
             }
         });
         self.capture.push_value(&entry).expect("final log entry");
+        if let Err(error) = self.capture.validate_jsonl() {
+            panic!(
+                "expected lifecycle E2E JSONL to match the schema for {}: {error}\n{}",
+                self.test_name,
+                self.capture.jsonl()
+            );
+        }
     }
 }
 

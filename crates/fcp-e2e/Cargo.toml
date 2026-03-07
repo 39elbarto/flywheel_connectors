@@ -36,6 +36,7 @@ vectordb = []
 llm_router = []
 twilio = []
 cron = []
+semanticscholar = []
 
 [dependencies]
 fcp-core = { workspace = true }
@@ -78,6 +79,7 @@ fcp-vectordb = { path = "../../connectors/vectordb" }
 fcp-llm-router = { path = "../../connectors/llm-router", features = ["testing"] }
 fcp-twilio = { path = "../../connectors/twilio" }
 fcp-cron = { path = "../../connectors/cron" }
+fcp-semanticscholar = { path = "../../connectors/semanticscholar" }
 pretty_assertions = { workspace = true }
 reqwest = { workspace = true }
 fcp-manifest = { workspace = true }

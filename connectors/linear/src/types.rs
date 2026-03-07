@@ -584,15 +584,9 @@ fn derive_sync_idempotency_key(
         .map(|snapshot| snapshot.issue_id.as_str())
         .or_else(|| bead.and_then(|snapshot| snapshot.linear_issue_id.as_deref()))
         .unwrap_or("none");
-    let linear_identifier = linear
-        .map(|snapshot| snapshot.identifier.as_str())
-        .unwrap_or("none");
-    let bead_updated_at = bead
-        .map(|snapshot| snapshot.updated_at.as_str())
-        .unwrap_or("none");
-    let linear_updated_at = linear
-        .map(|snapshot| snapshot.updated_at.as_str())
-        .unwrap_or("none");
+    let linear_identifier = linear.map_or("none", |snapshot| snapshot.identifier.as_str());
+    let bead_updated_at = bead.map_or("none", |snapshot| snapshot.updated_at.as_str());
+    let linear_updated_at = linear.map_or("none", |snapshot| snapshot.updated_at.as_str());
 
     let fingerprint = format!(
         "{}|{}|{}|{}|{}|{}|{}|{}|{}|{}",

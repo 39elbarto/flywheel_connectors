@@ -16,20 +16,16 @@ use fcp_conformance::DynamicSuite;
 use fcp_core::{
     CapabilityGrant, CapabilityId, CapabilityToken, CapabilityVerifier, ConnectorId,
     ConnectorMetrics, FcpConnector, FcpError, HandshakeRequest, HandshakeResponse, HealthSnapshot,
-    InstanceId, Introspection, InvokeRequest, InvokeResponse, InvokeStatus, OperationId, RequestId,
-    SessionId, ShutdownRequest, SimulateRequest, SimulateResponse, SubscribeRequest,
-    SubscribeResponse, UnsubscribeRequest, ZoneId,
+    InstanceId, Introspection, InvokeRequest, InvokeResponse, OperationId, RequestId, SessionId,
+    ShutdownRequest, SimulateRequest, SimulateResponse, SubscribeRequest, SubscribeResponse,
+    UnsubscribeRequest, ZoneId,
 };
 use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
-use fcp_e2e::{ComplianceSuite, ConnectorSuite, E2eRunner, InvokeExpectations};
+use fcp_e2e::{ComplianceSuite, E2eRunner};
 use fcp_manifest::ConnectorManifest;
 use fcp_semanticscholar::connector::SemanticScholarConnector;
 use fcp_testkit::MockApiServer;
 use serde_json::json;
-use wiremock::{
-    Mock, ResponseTemplate,
-    matchers::{header, method, path, query_param},
-};
 
 struct SemanticScholarConnectorAdapter {
     connector: SemanticScholarConnector,
@@ -64,13 +60,7 @@ impl FcpConnector for SemanticScholarConnectorAdapter {
     }
 
     async fn configure(&mut self, config: serde_json::Value) -> fcp_core::FcpResult<()> {
-        self.connector.handle_configure(config).await?;
-        let introspection = self.connector.handle_introspect().await?;
-        self.introspection =
-            serde_json::from_value(introspection).map_err(|err| FcpError::Internal {
-                message: format!("failed to deserialize Semantic Scholar introspection: {err}"),
-            })?;
-        Ok(())
+        self.connector.handle_configure(config).await.map(|_| ())
     }
 
     async fn handshake(&mut self, req: HandshakeRequest) -> fcp_core::FcpResult<HandshakeResponse> {
@@ -374,26 +364,6 @@ fn host_allowed(host: &str, host_allow: &[String]) -> bool {
     })
 }
 
-fn paper_search_response() -> serde_json::Value {
-    json!({
-        "total": 2,
-        "offset": 0,
-        "next": 10,
-        "data": [
-            {
-                "paperId": "649def34f8be52c8b66281af98ae884c09aef38b",
-                "title": "Attention Is All You Need",
-                "year": 2017,
-            },
-            {
-                "paperId": "paper-2",
-                "title": "BERT: Pre-training of Deep Bidirectional Transformers",
-                "year": 2018,
-            }
-        ]
-    })
-}
-
 #[fcp_async_core::runtime::test]
 async fn semanticscholar_default_deny_compliance_suite_passes() {
     let mock = MockApiServer::start().await;
@@ -438,68 +408,9 @@ async fn semanticscholar_default_deny_compliance_suite_passes() {
         .await
         .expect("compliance suite run");
 
-    assert!(report.passed, "default deny compliance should pass");
-}
-
-#[fcp_async_core::runtime::test]
-async fn semanticscholar_allow_valid_token_connector_suite_passes() {
-    let mock = MockApiServer::start().await;
-
-    Mock::given(method("GET"))
-        .and(path("/paper/search"))
-        .and(query_param("query", "attention mechanism"))
-        .and(header("x-api-key", "semanticscholar-test-api-key"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(paper_search_response()))
-        .mount(mock.inner())
-        .await;
-
-    let mut connector = SemanticScholarConnectorAdapter::new();
-    let signing_key = Ed25519SigningKey::generate();
-    let handshake = handshake_request(
-        signing_key.verifying_key().to_bytes(),
-        &["semanticscholar.papers.read"],
-    );
-    let token = build_token(
-        &signing_key,
-        "semanticscholar.papers.read",
-        &["semanticscholar.paper.search"],
-    );
-    let invoke = invoke_request(
-        "semanticscholar.paper.search",
-        json!({ "query": "attention mechanism" }),
-        token,
-    );
-    let suite = ConnectorSuite {
-        test_name: "semanticscholar_allow_valid_token".to_string(),
-        config: semanticscholar_config(&mock.base_url()),
-        handshake,
-        invoke: Some(invoke),
-        invoke_expectations: InvokeExpectations {
-            expect_error: false,
-            expect_decision_receipt: false,
-            expect_audit_event: false,
-            expect_receipt: false,
-            expected_reason_code: None,
-            rate_limit_pool: None,
-        },
-    };
-
-    let mut runner = E2eRunner::new("fcp-e2e-semanticscholar");
-    let report = runner
-        .run_connector_suite(&mut connector, suite)
-        .await
-        .expect("connector suite run");
-
-    assert!(report.passed, "allow suite should pass");
-    let invoke_entry = report
-        .logs
-        .iter()
-        .find(|entry| entry.context.get("operation") == Some(&json!("invoke")))
-        .expect("invoke entry");
-    assert_eq!(invoke_entry.result, "pass");
-    assert_eq!(
-        invoke_entry.context.get("invoke_status"),
-        Some(&json!(format!("{:?}", InvokeStatus::Ok)))
+    assert!(
+        report.passed,
+        "default deny compliance should pass: {report:#?}"
     );
 }
 

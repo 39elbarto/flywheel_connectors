@@ -31,6 +31,7 @@ jira = []
 microsoft365 = []
 figma = []
 airtable = []
+arxiv = []
 zendesk = []
 vectordb = []
 llm_router = []
@@ -74,6 +75,7 @@ fcp-jira = { path = "../../connectors/jira" }
 fcp-microsoft365 = { path = "../../connectors/microsoft365" }
 fcp-figma = { path = "../../connectors/figma" }
 fcp-airtable = { path = "../../connectors/airtable" }
+fcp-arxiv = { path = "../../connectors/arxiv" }
 fcp-zendesk = { path = "../../connectors/zendesk" }
 fcp-vectordb = { path = "../../connectors/vectordb" }
 fcp-llm-router = { path = "../../connectors/llm-router", features = ["testing"] }

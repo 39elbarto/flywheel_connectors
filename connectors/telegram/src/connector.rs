@@ -1830,13 +1830,27 @@ fn update_to_event(
     connector_id: &ConnectorId,
     instance_id: &InstanceId,
 ) -> Option<EventEnvelope> {
-    let (topic, payload) = match &update.kind {
-        UpdateKind::Message(msg) => ("telegram.message.new", message_to_json(msg)),
-        UpdateKind::EditedMessage(msg) => ("telegram.message.edited", message_to_json(msg)),
-        UpdateKind::ChannelPost(msg) => ("telegram.channel_post.new", message_to_json(msg)),
-        UpdateKind::EditedChannelPost(msg) => {
-            ("telegram.channel_post.edited", message_to_json(msg))
-        }
+    let (topic, payload, thread_info) = match &update.kind {
+        UpdateKind::Message(msg) => (
+            "telegram.message.new",
+            message_to_json(msg),
+            message_thread_info(msg),
+        ),
+        UpdateKind::EditedMessage(msg) => (
+            "telegram.message.edited",
+            message_to_json(msg),
+            message_thread_info(msg),
+        ),
+        UpdateKind::ChannelPost(msg) => (
+            "telegram.channel_post.new",
+            message_to_json(msg),
+            message_thread_info(msg),
+        ),
+        UpdateKind::EditedChannelPost(msg) => (
+            "telegram.channel_post.edited",
+            message_to_json(msg),
+            message_thread_info(msg),
+        ),
         UpdateKind::CallbackQuery(cb) => (
             "telegram.callback_query",
             json!({
@@ -1845,6 +1859,7 @@ fn update_to_event(
                 "data": cb.data,
                 "chat_instance": cb.chat_instance
             }),
+            None,
         ),
         UpdateKind::Unknown => return None,
     };
@@ -1873,12 +1888,18 @@ fn update_to_event(
         payload,
         correlation_id: None,
         resource_uris: vec![],
-        thread_info: None,
+        thread_info,
     };
 
     // update_id is always positive per Telegram API, but use saturating conversion for safety
     let seq = u64::try_from(update.update_id).unwrap_or(0);
     Some(EventEnvelope::new(topic, event_data).with_seq(seq))
+}
+
+fn message_thread_info(msg: &Message) -> Option<ThreadInfo> {
+    msg.message_thread_id.map(|thread_id| {
+        ThreadInfo::from_telegram_message_thread(thread_id, msg.chat.id.to_string())
+    })
 }
 
 /// Convert a Message to JSON.
@@ -2395,6 +2416,54 @@ mod tests {
                 .expect("callback event")
                 .topic,
             "telegram.callback_query"
+        );
+    }
+
+    #[test]
+    fn test_update_to_event_sets_thread_info_for_forum_topics() {
+        let update = Update {
+            update_id: 52,
+            kind: UpdateKind::Message(Message {
+                message_id: 7,
+                from: Some(User {
+                    id: 10,
+                    is_bot: false,
+                    first_name: "Forum".into(),
+                    last_name: None,
+                    username: Some("forum_user".into()),
+                    language_code: None,
+                }),
+                chat: Chat {
+                    id: -100123,
+                    chat_type: "supergroup".into(),
+                    title: Some("Forum".into()),
+                    username: None,
+                    first_name: None,
+                    last_name: None,
+                },
+                date: 1_700_000_000,
+                text: Some("topic message".into()),
+                caption: None,
+                photo: None,
+                document: None,
+                audio: None,
+                video: None,
+                voice: None,
+                reply_to_message: None,
+                message_thread_id: Some(77),
+            }),
+        };
+
+        let event = update_to_event(
+            &update,
+            &ConnectorId::from_static("telegram"),
+            &InstanceId::new(),
+        )
+        .expect("event");
+
+        assert_eq!(
+            event.data.thread_info,
+            Some(ThreadInfo::from_telegram_message_thread(77, "-100123"))
         );
     }
 

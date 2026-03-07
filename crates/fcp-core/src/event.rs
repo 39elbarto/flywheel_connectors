@@ -130,6 +130,56 @@ impl ThreadInfo {
         self.parent_id = Some(parent_id.into());
         self
     }
+
+    /// Normalize a Telegram forum topic identifier.
+    #[must_use]
+    pub fn from_telegram_message_thread(
+        message_thread_id: i64,
+        chat_id: impl Into<String>,
+    ) -> Self {
+        Self::new(message_thread_id.to_string(), ThreadKind::ForumTopic).with_parent_id(chat_id)
+    }
+
+    /// Normalize a Slack thread rooted at `thread_ts`.
+    ///
+    /// Slack commonly exposes only the root message timestamp (`thread_ts`).
+    /// When no distinct parent message identifier is available, reuse
+    /// `thread_ts` as the parent marker.
+    #[must_use]
+    pub fn from_slack_thread(
+        thread_ts: impl Into<String>,
+        parent_message_ts: Option<String>,
+    ) -> Self {
+        let thread_id = thread_ts.into();
+        let parent_id = parent_message_ts.unwrap_or_else(|| thread_id.clone());
+        Self::new(thread_id, ThreadKind::Reply).with_parent_id(parent_id)
+    }
+
+    /// Normalize a Discord thread channel identifier.
+    #[must_use]
+    pub fn from_discord_thread(
+        channel_id: impl Into<String>,
+        parent_channel_id: Option<String>,
+    ) -> Self {
+        let info = Self::new(channel_id, ThreadKind::Channel);
+        match parent_channel_id {
+            Some(parent_channel_id) => info.with_parent_id(parent_channel_id),
+            None => info,
+        }
+    }
+
+    /// Normalize a Discord channel payload when it represents a thread channel.
+    #[must_use]
+    pub fn from_discord_channel(
+        channel_id: impl Into<String>,
+        channel_type: i32,
+        parent_channel_id: Option<String>,
+    ) -> Option<Self> {
+        match channel_type {
+            10..=12 => Some(Self::from_discord_thread(channel_id, parent_channel_id)),
+            _ => None,
+        }
+    }
 }
 
 /// Event data payload.
@@ -750,6 +800,51 @@ mod tests {
     fn thread_info_with_parent_id() {
         let info = ThreadInfo::new("tid-2", ThreadKind::ForumTopic).with_parent_id("parent-99");
         assert_eq!(info.parent_id, Some("parent-99".to_string()));
+    }
+
+    #[test]
+    fn thread_info_from_telegram_message_thread() {
+        let info = ThreadInfo::from_telegram_message_thread(42, "chat-9");
+        assert_eq!(info.thread_id, "42");
+        assert_eq!(info.parent_id, Some("chat-9".to_string()));
+        assert_eq!(info.kind, ThreadKind::ForumTopic);
+    }
+
+    #[test]
+    fn thread_info_from_slack_thread_uses_thread_ts_as_parent_by_default() {
+        let info = ThreadInfo::from_slack_thread("1700000000.000100", None);
+        assert_eq!(info.thread_id, "1700000000.000100");
+        assert_eq!(info.parent_id, Some("1700000000.000100".to_string()));
+        assert_eq!(info.kind, ThreadKind::Reply);
+    }
+
+    #[test]
+    fn thread_info_from_slack_thread_respects_explicit_parent() {
+        let info =
+            ThreadInfo::from_slack_thread("1700000000.000100", Some("1700000000.000001".into()));
+        assert_eq!(info.thread_id, "1700000000.000100");
+        assert_eq!(info.parent_id, Some("1700000000.000001".to_string()));
+        assert_eq!(info.kind, ThreadKind::Reply);
+    }
+
+    #[test]
+    fn thread_info_from_discord_thread() {
+        let info = ThreadInfo::from_discord_thread("thread-1", Some("channel-1".into()));
+        assert_eq!(info.thread_id, "thread-1");
+        assert_eq!(info.parent_id, Some("channel-1".to_string()));
+        assert_eq!(info.kind, ThreadKind::Channel);
+    }
+
+    #[test]
+    fn thread_info_from_discord_channel_filters_non_thread_channels() {
+        assert!(ThreadInfo::from_discord_channel("channel-1", 0, Some("parent".into())).is_none());
+        assert_eq!(
+            ThreadInfo::from_discord_channel("thread-1", 11, Some("parent".into())),
+            Some(ThreadInfo::from_discord_thread(
+                "thread-1",
+                Some("parent".into())
+            ))
+        );
     }
 
     #[test]

@@ -15,7 +15,7 @@ use fcp_core::{
     EventCaps, EventData, EventEnvelope, EventInfo, FcpError, FcpResult, HandshakeRequest,
     HandshakeResponse, IdempotencyClass, InstanceId, Introspection, OperationId, OperationInfo,
     Principal, RiskLevel, SafetyTier, SelfCheckReport, SessionId, SimulateRequest,
-    SimulateResponse, TrustLevel, ZoneId,
+    SimulateResponse, ThreadInfo, TrustLevel, ZoneId,
 };
 use fcp_sdk::{
     Limits,
@@ -1927,7 +1927,7 @@ fn gateway_event_to_fcp(
     connector_id: &ConnectorId,
     instance_id: &InstanceId,
 ) -> Option<EventEnvelope> {
-    let (topic, payload, principal_info) = match &event.event {
+    let (topic, payload, principal_info, thread_info) = match &event.event {
         GatewayEvent::Ready(ready) => {
             let payload = json!({
                 "session_id": ready.session_id,
@@ -1937,6 +1937,7 @@ fn gateway_event_to_fcp(
                 "discord.ready",
                 payload,
                 ("bot".into(), ready.user.id.clone()),
+                None,
             )
         }
         GatewayEvent::Resumed => {
@@ -1946,6 +1947,7 @@ fn gateway_event_to_fcp(
                 "discord.resumed",
                 payload,
                 ("system".into(), "gateway".into()),
+                None,
             )
         }
         GatewayEvent::MessageCreate(data) => {
@@ -1962,6 +1964,7 @@ fn gateway_event_to_fcp(
                 "discord.message",
                 data.clone(),
                 (author_name.unwrap_or("unknown").into(), author_id.into()),
+                None,
             )
         }
         GatewayEvent::MessageUpdate(data) => {
@@ -1974,12 +1977,14 @@ fn gateway_event_to_fcp(
                 "discord.message_update",
                 data.clone(),
                 ("unknown".into(), author_id.into()),
+                None,
             )
         }
         GatewayEvent::MessageDelete(data) => (
             "discord.message_delete",
             data.clone(),
             ("unknown".into(), "unknown".into()),
+            None,
         ),
         GatewayEvent::GuildCreate(data) => {
             let guild_id = data.get("id").and_then(|v| v.as_str()).unwrap_or("unknown");
@@ -1987,6 +1992,7 @@ fn gateway_event_to_fcp(
                 "discord.guild_create",
                 data.clone(),
                 ("system".into(), guild_id.into()),
+                None,
             )
         }
         GatewayEvent::GuildUpdate(data) => {
@@ -1995,17 +2001,20 @@ fn gateway_event_to_fcp(
                 "discord.guild_update",
                 data.clone(),
                 ("system".into(), guild_id.into()),
+                None,
             )
         }
         GatewayEvent::ChannelCreate(data) => (
             "discord.channel_create",
             data.clone(),
             ("system".into(), "unknown".into()),
+            discord_thread_info(data),
         ),
         GatewayEvent::ChannelUpdate(data) => (
             "discord.channel_update",
             data.clone(),
             ("system".into(), "unknown".into()),
+            discord_thread_info(data),
         ),
         GatewayEvent::TypingStart(data) => {
             let user_id = data
@@ -2016,6 +2025,7 @@ fn gateway_event_to_fcp(
                 "discord.typing",
                 data.clone(),
                 ("unknown".into(), user_id.into()),
+                None,
             )
         }
         GatewayEvent::Unknown { event_name, data } => {
@@ -2057,12 +2067,30 @@ fn gateway_event_to_fcp(
         principal,
         payload,
     );
+    let event_data = if let Some(thread_info) = thread_info {
+        event_data.with_thread_info(thread_info)
+    } else {
+        event_data
+    };
 
     let mut envelope = EventEnvelope::new(topic, event_data);
     if let Some(seq) = event.seq {
         envelope = envelope.with_seq(seq).with_cursor_seq(seq);
     }
     Some(envelope)
+}
+
+fn discord_thread_info(payload: &serde_json::Value) -> Option<ThreadInfo> {
+    let channel_id = payload.get("id").and_then(|v| v.as_str())?;
+    let channel_type = payload
+        .get("type")
+        .and_then(|v| v.as_i64())
+        .and_then(|kind| i32::try_from(kind).ok())?;
+    let parent_channel_id = payload
+        .get("parent_id")
+        .and_then(|v| v.as_str())
+        .map(str::to_owned);
+    ThreadInfo::from_discord_channel(channel_id, channel_type, parent_channel_id)
 }
 
 #[cfg(test)]
@@ -2511,6 +2539,34 @@ mod tests {
         assert_eq!(envelope.data.zone_id, ZoneId::community());
         assert_eq!(envelope.data.principal.id, "user-1");
         assert_eq!(envelope.data.principal.display.as_deref(), Some("alice"));
+        assert!(envelope.data.thread_info.is_none());
+    }
+
+    #[test]
+    fn test_gateway_event_to_fcp_channel_create_sets_thread_info_for_thread_channels() {
+        let connector_id = ConnectorId::from_static("discord");
+        let instance_id = InstanceId::new();
+        let payload = json!({
+            "id": "thread-1",
+            "type": 11,
+            "parent_id": "channel-1",
+            "name": "feature-thread"
+        });
+
+        let event = GatewayEventFrame {
+            seq: Some(91),
+            event: GatewayEvent::ChannelCreate(payload),
+        };
+        let envelope =
+            gateway_event_to_fcp(&event, &connector_id, &instance_id).expect("event envelope");
+
+        assert_eq!(
+            envelope.data.thread_info,
+            Some(ThreadInfo::from_discord_thread(
+                "thread-1",
+                Some("channel-1".into())
+            ))
+        );
     }
 
     // ─── Schema completeness tests ─────────────────────────────────────

@@ -14,7 +14,7 @@ use fcp_core::{
     ConnectorId, EventCaps, EventData, EventEnvelope, EventInfo, FcpError, FcpResult,
     HandshakeRequest, HandshakeResponse, IdempotencyClass, Introspection, ObjectId, OperationId,
     OperationInfo, Principal, RiskLevel, SafetyTier, SessionId, SimulateRequest, SimulateResponse,
-    TrustLevel, ZoneId,
+    ThreadInfo, TrustLevel, ZoneId,
 };
 use fcp_streaming::{WsClient, WsConnection, WsMessage};
 use serde::Deserialize;
@@ -1296,10 +1296,36 @@ fn socket_frame_to_event(
         payload.clone(),
     )
     .with_resource_uris(resource_uris);
+    let event_data = if let Some(thread_info) = socket_payload_thread_info(payload) {
+        event_data.with_thread_info(thread_info)
+    } else {
+        event_data
+    };
 
     EventEnvelope::new(topic, event_data)
         .with_seq(seq)
         .with_cursor(cursor)
+}
+
+fn socket_payload_thread_info(payload: &Value) -> Option<ThreadInfo> {
+    let event = payload.get("event")?;
+    let thread_ts = event
+        .get("thread_ts")
+        .and_then(Value::as_str)
+        .or_else(|| {
+            event
+                .get("message")
+                .and_then(|message| message.get("thread_ts"))
+                .and_then(Value::as_str)
+        })
+        .or_else(|| {
+            event
+                .get("previous_message")
+                .and_then(|message| message.get("thread_ts"))
+                .and_then(Value::as_str)
+        })?;
+
+    Some(ThreadInfo::from_slack_thread(thread_ts, None))
 }
 
 fn socket_payload_principal(payload: &Value) -> Principal {
@@ -2389,6 +2415,36 @@ mod tests {
         let principal = socket_payload_principal(&payload);
         assert_eq!(principal.kind, "slack_actor");
         assert_eq!(principal.id, "unknown");
+    }
+
+    #[test]
+    fn test_socket_frame_to_event_sets_thread_info_from_thread_ts() {
+        let connector_id = ConnectorId::from_static("slack");
+        let instance_id = fcp_core::InstanceId::new();
+        let payload = json!({
+            "event": {
+                "type": "message",
+                "user": "U12345",
+                "channel": "C12345",
+                "thread_ts": "1700000000.000100",
+                "text": "reply"
+            },
+            "team_id": "T12345"
+        });
+
+        let event = socket_frame_to_event(
+            "events_api",
+            Some("env-1"),
+            &payload,
+            &connector_id,
+            &instance_id,
+            9,
+        );
+
+        assert_eq!(
+            event.data.thread_info,
+            Some(ThreadInfo::from_slack_thread("1700000000.000100", None))
+        );
     }
 
     // ── Shutdown test ────────────────────────────────────────────

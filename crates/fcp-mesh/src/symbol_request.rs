@@ -1777,8 +1777,14 @@ mod tests {
     fn handler_with_default_policy_matches_defaults() {
         let handler = SymbolRequestHandler::with_default_policy();
         let policy = handler.policy();
-        assert_eq!(policy.max_unauthenticated_response, DEFAULT_RESPONSE_LIMIT_UNAUTHENTICATED);
-        assert_eq!(policy.max_authenticated_response, DEFAULT_RESPONSE_LIMIT_AUTHENTICATED);
+        assert_eq!(
+            policy.max_unauthenticated_response,
+            DEFAULT_RESPONSE_LIMIT_UNAUTHENTICATED
+        );
+        assert_eq!(
+            policy.max_authenticated_response,
+            DEFAULT_RESPONSE_LIMIT_AUTHENTICATED
+        );
         assert!(policy.allow_unauthenticated);
     }
 

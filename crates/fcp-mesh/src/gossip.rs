@@ -2649,7 +2649,10 @@ mod tests {
         let encoded = iblt.encode();
         // Decode with limit of 3 should fail
         let err = IbltPlaceholder::decode_with_limits(&encoded, 3, 4096).unwrap_err();
-        assert!(matches!(err, IbltDecodeError::TooManyChanges { decoded: 5, max: 3 }));
+        assert!(matches!(
+            err,
+            IbltDecodeError::TooManyChanges { decoded: 5, max: 3 }
+        ));
     }
 
     #[test]
@@ -2663,7 +2666,11 @@ mod tests {
             "iblt_invalid_encoding"
         );
         assert_eq!(
-            IbltDecodeError::TooManyChanges { decoded: 10, max: 5 }.reason_code(),
+            IbltDecodeError::TooManyChanges {
+                decoded: 10,
+                max: 5
+            }
+            .reason_code(),
             "iblt_change_limit_exceeded"
         );
     }
@@ -2832,8 +2839,12 @@ mod tests {
         let config = GossipConfig::default();
         let s1 = GossipState::new(ZoneId::work(), &config);
         let s2 = GossipState::new(ZoneId::private(), &config);
-        let b1 = s1.create_summary(test_node("n"), test_epoch()).signing_bytes();
-        let b2 = s2.create_summary(test_node("n"), test_epoch()).signing_bytes();
+        let b1 = s1
+            .create_summary(test_node("n"), test_epoch())
+            .signing_bytes();
+        let b2 = s2
+            .create_summary(test_node("n"), test_epoch())
+            .signing_bytes();
         assert_ne!(b1, b2);
     }
 
@@ -2902,7 +2913,12 @@ mod tests {
         let epoch = test_epoch();
 
         // Add objects and create a summary from a "peer"
-        gossip.announce_object(&zone, &test_object_id("o1"), ObjectAdmissionClass::Admitted, 100);
+        gossip.announce_object(
+            &zone,
+            &test_object_id("o1"),
+            ObjectAdmissionClass::Admitted,
+            100,
+        );
         let summary = gossip.create_summary(&zone, epoch).unwrap();
 
         // Simulate receiving it as if from a peer

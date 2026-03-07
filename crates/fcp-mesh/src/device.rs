@@ -29,9 +29,9 @@
 //! assert_eq!(profile.cpu_cores, 8);
 //! ```
 
-use fcp_core::{CapabilityGrant, ConnectorId, ObjectId};
 #[cfg(test)]
 use fcp_core::CapabilityId;
+use fcp_core::{CapabilityGrant, ConnectorId, ObjectId};
 use fcp_tailscale::NodeId;
 use serde::{Deserialize, Serialize};
 
@@ -1734,79 +1734,117 @@ mod tests {
 
     #[test]
     fn builder_cpu_cores() {
-        let p = DeviceProfile::builder(NodeId::new("b1")).cpu_cores(32).timestamp(0).build();
+        let p = DeviceProfile::builder(NodeId::new("b1"))
+            .cpu_cores(32)
+            .timestamp(0)
+            .build();
         assert_eq!(p.cpu_cores, 32);
     }
 
     #[test]
     fn builder_cpu_arch() {
-        let p = DeviceProfile::builder(NodeId::new("b2")).cpu_arch(CpuArch::Aarch64).timestamp(0).build();
+        let p = DeviceProfile::builder(NodeId::new("b2"))
+            .cpu_arch(CpuArch::Aarch64)
+            .timestamp(0)
+            .build();
         assert_eq!(p.cpu_arch, CpuArch::Aarch64);
     }
 
     #[test]
     fn builder_memory_mb() {
-        let p = DeviceProfile::builder(NodeId::new("b3")).memory_mb(65536).timestamp(0).build();
+        let p = DeviceProfile::builder(NodeId::new("b3"))
+            .memory_mb(65536)
+            .timestamp(0)
+            .build();
         assert_eq!(p.memory_mb, 65536);
     }
 
     #[test]
     fn builder_local_storage_mb() {
-        let p = DeviceProfile::builder(NodeId::new("b4")).local_storage_mb(500_000).timestamp(0).build();
+        let p = DeviceProfile::builder(NodeId::new("b4"))
+            .local_storage_mb(500_000)
+            .timestamp(0)
+            .build();
         assert_eq!(p.local_storage_mb, 500_000);
     }
 
     #[test]
     fn builder_symbol_store_quota_mb() {
-        let p = DeviceProfile::builder(NodeId::new("b5")).symbol_store_quota_mb(4096).timestamp(0).build();
+        let p = DeviceProfile::builder(NodeId::new("b5"))
+            .symbol_store_quota_mb(4096)
+            .timestamp(0)
+            .build();
         assert_eq!(p.symbol_store_quota_mb, 4096);
     }
 
     #[test]
     fn builder_power_source() {
-        let p = DeviceProfile::builder(NodeId::new("b6")).power_source(PowerSource::Solar).timestamp(0).build();
+        let p = DeviceProfile::builder(NodeId::new("b6"))
+            .power_source(PowerSource::Solar)
+            .timestamp(0)
+            .build();
         assert_eq!(p.power_source, PowerSource::Solar);
     }
 
     #[test]
     fn builder_battery_percent() {
-        let p = DeviceProfile::builder(NodeId::new("b7")).battery_percent(75).timestamp(0).build();
+        let p = DeviceProfile::builder(NodeId::new("b7"))
+            .battery_percent(75)
+            .timestamp(0)
+            .build();
         assert_eq!(p.battery_percent, Some(75));
     }
 
     #[test]
     fn builder_bandwidth_estimate_kbps() {
-        let p = DeviceProfile::builder(NodeId::new("b8")).bandwidth_estimate_kbps(100_000).timestamp(0).build();
+        let p = DeviceProfile::builder(NodeId::new("b8"))
+            .bandwidth_estimate_kbps(100_000)
+            .timestamp(0)
+            .build();
         assert_eq!(p.bandwidth_estimate_kbps, 100_000);
     }
 
     #[test]
     fn builder_latency_class() {
-        let p = DeviceProfile::builder(NodeId::new("b9")).latency_class(LatencyClass::Local).timestamp(0).build();
+        let p = DeviceProfile::builder(NodeId::new("b9"))
+            .latency_class(LatencyClass::Local)
+            .timestamp(0)
+            .build();
         assert_eq!(p.latency_class, LatencyClass::Local);
     }
 
     #[test]
     fn builder_metered() {
-        let p = DeviceProfile::builder(NodeId::new("b10")).metered(true).timestamp(0).build();
+        let p = DeviceProfile::builder(NodeId::new("b10"))
+            .metered(true)
+            .timestamp(0)
+            .build();
         assert!(p.metered);
     }
 
     #[test]
     fn builder_availability() {
-        let p = DeviceProfile::builder(NodeId::new("b11")).availability(AvailabilityProfile::AlwaysOn).timestamp(0).build();
+        let p = DeviceProfile::builder(NodeId::new("b11"))
+            .availability(AvailabilityProfile::AlwaysOn)
+            .timestamp(0)
+            .build();
         assert_eq!(p.availability, AvailabilityProfile::AlwaysOn);
     }
 
     #[test]
     fn builder_next_expected_downtime() {
-        let p = DeviceProfile::builder(NodeId::new("b12")).next_expected_downtime(999_999).timestamp(0).build();
+        let p = DeviceProfile::builder(NodeId::new("b12"))
+            .next_expected_downtime(999_999)
+            .timestamp(0)
+            .build();
         assert_eq!(p.next_expected_downtime, Some(999_999));
     }
 
     #[test]
     fn builder_timestamp() {
-        let p = DeviceProfile::builder(NodeId::new("b13")).timestamp(42).build();
+        let p = DeviceProfile::builder(NodeId::new("b13"))
+            .timestamp(42)
+            .build();
         assert_eq!(p.timestamp, 42);
     }
 
@@ -1817,14 +1855,22 @@ mod tests {
             "1.0.0",
             ObjectId::from_bytes([0xAA; 32]),
         );
-        let p = DeviceProfile::builder(NodeId::new("b14")).add_connector(c).timestamp(0).build();
+        let p = DeviceProfile::builder(NodeId::new("b14"))
+            .add_connector(c)
+            .timestamp(0)
+            .build();
         assert_eq!(p.connectors.len(), 1);
-        assert_eq!(p.connectors[0].connector_id, ConnectorId::from_static("test:connector:1.0.0"));
+        assert_eq!(
+            p.connectors[0].connector_id,
+            ConnectorId::from_static("test:connector:1.0.0")
+        );
     }
 
     #[test]
     fn builder_defaults() {
-        let p = DeviceProfile::builder(NodeId::new("defaults")).timestamp(0).build();
+        let p = DeviceProfile::builder(NodeId::new("defaults"))
+            .timestamp(0)
+            .build();
         assert_eq!(p.cpu_cores, 1);
         assert_eq!(p.memory_mb, 1024);
         assert!(p.gpu.is_none());
@@ -1842,8 +1888,8 @@ mod tests {
 
     #[test]
     fn builder_full_chain() {
-        let gpu = GpuProfile::new(GpuVendor::Nvidia, "RTX 5090", 32768)
-            .with_compute_capability("10.0");
+        let gpu =
+            GpuProfile::new(GpuVendor::Nvidia, "RTX 5090", 32768).with_compute_capability("10.0");
         let tpu = TpuProfile::new(TpuVendor::Google, "v5e", 8, 16384);
         let connector = InstalledConnector::new(
             ConnectorId::from_static("fcp:discord:2.0.0"),
@@ -1874,7 +1920,10 @@ mod tests {
         assert!(p.has_gpu());
         assert!(p.has_tpu());
         assert_eq!(p.connectors.len(), 1);
-        assert_eq!(p.gpu.as_ref().unwrap().compute_capability.as_deref(), Some("10.0"));
+        assert_eq!(
+            p.gpu.as_ref().unwrap().compute_capability.as_deref(),
+            Some("10.0")
+        );
     }
 
     // ── DeviceProfile query method tests ─────────────────────
@@ -1890,7 +1939,9 @@ mod tests {
 
     #[test]
     fn has_gpu_false_when_not_set() {
-        let p = DeviceProfile::builder(NodeId::new("nogpu")).timestamp(0).build();
+        let p = DeviceProfile::builder(NodeId::new("nogpu"))
+            .timestamp(0)
+            .build();
         assert!(!p.has_gpu());
     }
 
@@ -1905,7 +1956,9 @@ mod tests {
 
     #[test]
     fn has_tpu_false_when_not_set() {
-        let p = DeviceProfile::builder(NodeId::new("notpu")).timestamp(0).build();
+        let p = DeviceProfile::builder(NodeId::new("notpu"))
+            .timestamp(0)
+            .build();
         assert!(!p.has_tpu());
     }
 
@@ -1922,7 +1975,9 @@ mod tests {
 
     #[test]
     fn has_connector_returns_false_when_missing() {
-        let p = DeviceProfile::builder(NodeId::new("hc2")).timestamp(0).build();
+        let p = DeviceProfile::builder(NodeId::new("hc2"))
+            .timestamp(0)
+            .build();
         assert!(!p.has_connector(&ConnectorId::from_static("fcp:missing:1.0.0")));
     }
 
@@ -1940,8 +1995,13 @@ mod tests {
 
     #[test]
     fn get_connector_returns_none_when_missing() {
-        let p = DeviceProfile::builder(NodeId::new("gc2")).timestamp(0).build();
-        assert!(p.get_connector(&ConnectorId::from_static("fcp:nope:1.0.0")).is_none());
+        let p = DeviceProfile::builder(NodeId::new("gc2"))
+            .timestamp(0)
+            .build();
+        assert!(
+            p.get_connector(&ConnectorId::from_static("fcp:nope:1.0.0"))
+                .is_none()
+        );
     }
 
     #[test]
@@ -1987,7 +2047,9 @@ mod tests {
 
     #[test]
     fn fitness_ineligible_no_gpu() {
-        let p = DeviceProfile::builder(NodeId::new("f1")).timestamp(0).build();
+        let p = DeviceProfile::builder(NodeId::new("f1"))
+            .timestamp(0)
+            .build();
         let ctx = FitnessContext::new().with_requires_gpu(true);
         let score = p.compute_fitness(&ctx);
         assert!(!score.eligible);
@@ -1996,7 +2058,9 @@ mod tests {
 
     #[test]
     fn fitness_ineligible_no_tpu() {
-        let p = DeviceProfile::builder(NodeId::new("f2")).timestamp(0).build();
+        let p = DeviceProfile::builder(NodeId::new("f2"))
+            .timestamp(0)
+            .build();
         let ctx = FitnessContext::new().with_requires_tpu(true);
         let score = p.compute_fitness(&ctx);
         assert!(!score.eligible);
@@ -2004,7 +2068,10 @@ mod tests {
 
     #[test]
     fn fitness_ineligible_low_memory() {
-        let p = DeviceProfile::builder(NodeId::new("f3")).memory_mb(512).timestamp(0).build();
+        let p = DeviceProfile::builder(NodeId::new("f3"))
+            .memory_mb(512)
+            .timestamp(0)
+            .build();
         let ctx = FitnessContext::new().with_min_memory_mb(1024);
         let score = p.compute_fitness(&ctx);
         assert!(!score.eligible);
@@ -2012,15 +2079,20 @@ mod tests {
 
     #[test]
     fn fitness_ineligible_missing_connector() {
-        let p = DeviceProfile::builder(NodeId::new("f4")).timestamp(0).build();
-        let ctx = FitnessContext::new().with_required_connector(ConnectorId::from_static("fcp:missing:1.0.0"));
+        let p = DeviceProfile::builder(NodeId::new("f4"))
+            .timestamp(0)
+            .build();
+        let ctx = FitnessContext::new()
+            .with_required_connector(ConnectorId::from_static("fcp:missing:1.0.0"));
         let score = p.compute_fitness(&ctx);
         assert!(!score.eligible);
     }
 
     #[test]
     fn fitness_eligible_basic() {
-        let p = DeviceProfile::builder(NodeId::new("f5")).timestamp(0).build();
+        let p = DeviceProfile::builder(NodeId::new("f5"))
+            .timestamp(0)
+            .build();
         let ctx = FitnessContext::new();
         let score = p.compute_fitness(&ctx);
         assert!(score.eligible);
@@ -2036,7 +2108,10 @@ mod tests {
             .build();
         let without_symbols = p.compute_fitness(&FitnessContext::new());
         let with_symbols = p.compute_fitness(&FitnessContext::new().with_symbols_present(true));
-        assert!(with_symbols.score > without_symbols.score, "symbols present should give bonus");
+        assert!(
+            with_symbols.score > without_symbols.score,
+            "symbols present should give bonus"
+        );
     }
 
     #[test]
@@ -2117,8 +2192,14 @@ mod tests {
 
     #[test]
     fn fitness_score_ordering() {
-        let low = FitnessScore { score: 50.0, eligible: true };
-        let high = FitnessScore { score: 100.0, eligible: true };
+        let low = FitnessScore {
+            score: 50.0,
+            eligible: true,
+        };
+        let high = FitnessScore {
+            score: 100.0,
+            eligible: true,
+        };
         assert!(high > low);
     }
 
@@ -2135,8 +2216,7 @@ mod tests {
 
     #[test]
     fn gpu_profile_with_compute_capability() {
-        let gpu = GpuProfile::new(GpuVendor::Nvidia, "H100", 80000)
-            .with_compute_capability("9.0");
+        let gpu = GpuProfile::new(GpuVendor::Nvidia, "H100", 80000).with_compute_capability("9.0");
         assert_eq!(gpu.compute_capability.as_deref(), Some("9.0"));
     }
 
@@ -2168,14 +2248,21 @@ mod tests {
     #[test]
     fn installed_connector_with_capabilities() {
         let caps = vec![
-            CapabilityGrant { capability: CapabilityId::from_static("cap:read"), operation: None },
-            CapabilityGrant { capability: CapabilityId::from_static("cap:write"), operation: None },
+            CapabilityGrant {
+                capability: CapabilityId::from_static("cap:read"),
+                operation: None,
+            },
+            CapabilityGrant {
+                capability: CapabilityId::from_static("cap:write"),
+                operation: None,
+            },
         ];
         let c = InstalledConnector::new(
             ConnectorId::from_static("fcp:test:1.0.0"),
             "1.0.0",
             ObjectId::from_bytes([0; 32]),
-        ).with_capabilities(caps);
+        )
+        .with_capabilities(caps);
         assert_eq!(c.capabilities.len(), 2);
     }
 
@@ -2217,8 +2304,12 @@ mod tests {
 
     #[test]
     fn fitness_context_with_required_connector() {
-        let ctx = FitnessContext::new().with_required_connector(ConnectorId::from_static("fcp:slack:1.0.0"));
-        assert_eq!(ctx.required_connector, Some(ConnectorId::from_static("fcp:slack:1.0.0")));
+        let ctx = FitnessContext::new()
+            .with_required_connector(ConnectorId::from_static("fcp:slack:1.0.0"));
+        assert_eq!(
+            ctx.required_connector,
+            Some(ConnectorId::from_static("fcp:slack:1.0.0"))
+        );
     }
 
     // ── Enum default tests ───────────────────────────────────
@@ -2230,7 +2321,10 @@ mod tests {
 
     #[test]
     fn availability_default_is_best_effort() {
-        assert_eq!(AvailabilityProfile::default(), AvailabilityProfile::BestEffort);
+        assert_eq!(
+            AvailabilityProfile::default(),
+            AvailabilityProfile::BestEffort
+        );
     }
 
     #[test]

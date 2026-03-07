@@ -2149,63 +2149,83 @@ mod tests {
 
     #[test]
     fn non_retryable_errors() {
-        assert!(!AdmissionError::AmplificationViolation {
-            request_symbols: 1,
-            response_symbols: 100,
-            max_factor: 10,
-        }
-        .is_retryable());
+        assert!(
+            !AdmissionError::AmplificationViolation {
+                request_symbols: 1,
+                response_symbols: 100,
+                max_factor: 10,
+            }
+            .is_retryable()
+        );
         assert!(!AdmissionError::AuthenticationRequired.is_retryable());
         assert!(!AdmissionError::ProofOfNeedRequired.is_retryable());
-        assert!(!AdmissionError::ObjectQuarantined {
-            object_id: "x".to_string(),
-        }
-        .is_retryable());
-        assert!(!AdmissionError::NotReachable {
-            object_id: "x".to_string(),
-        }
-        .is_retryable());
-        assert!(!AdmissionError::QuarantineQuotaExceeded {
-            current_bytes: 0,
-            limit_bytes: 0,
-        }
-        .is_retryable());
+        assert!(
+            !AdmissionError::ObjectQuarantined {
+                object_id: "x".to_string(),
+            }
+            .is_retryable()
+        );
+        assert!(
+            !AdmissionError::NotReachable {
+                object_id: "x".to_string(),
+            }
+            .is_retryable()
+        );
+        assert!(
+            !AdmissionError::QuarantineQuotaExceeded {
+                current_bytes: 0,
+                limit_bytes: 0,
+            }
+            .is_retryable()
+        );
     }
 
     #[test]
     fn retryable_errors() {
-        assert!(AdmissionError::ByteBudgetExceeded {
-            current: 0,
-            limit: 0,
-            retry_after: Duration::ZERO,
-        }
-        .is_retryable());
-        assert!(AdmissionError::SymbolBudgetExceeded {
-            current: 0,
-            limit: 0,
-            retry_after: Duration::ZERO,
-        }
-        .is_retryable());
-        assert!(AdmissionError::DecodeCapacityExceeded {
-            current: 0,
-            limit: 0,
-        }
-        .is_retryable());
+        assert!(
+            AdmissionError::ByteBudgetExceeded {
+                current: 0,
+                limit: 0,
+                retry_after: Duration::ZERO,
+            }
+            .is_retryable()
+        );
+        assert!(
+            AdmissionError::SymbolBudgetExceeded {
+                current: 0,
+                limit: 0,
+                retry_after: Duration::ZERO,
+            }
+            .is_retryable()
+        );
+        assert!(
+            AdmissionError::DecodeCapacityExceeded {
+                current: 0,
+                limit: 0,
+            }
+            .is_retryable()
+        );
     }
 
     // ── AdmissionError retry_after ───────────────────────────────
 
     #[test]
     fn retry_after_none_for_non_retryable() {
-        assert!(AdmissionError::AuthenticationRequired.retry_after().is_none());
+        assert!(
+            AdmissionError::AuthenticationRequired
+                .retry_after()
+                .is_none()
+        );
         assert!(AdmissionError::ProofOfNeedRequired.retry_after().is_none());
-        assert!(AdmissionError::AmplificationViolation {
-            request_symbols: 0,
-            response_symbols: 0,
-            max_factor: 0,
-        }
-        .retry_after()
-        .is_none());
+        assert!(
+            AdmissionError::AmplificationViolation {
+                request_symbols: 0,
+                response_symbols: 0,
+                max_factor: 0,
+            }
+            .retry_after()
+            .is_none()
+        );
     }
 
     #[test]
@@ -2238,7 +2258,7 @@ mod tests {
         let err = AdmissionError::ByteBudgetExceeded {
             current: 100,
             limit: 50,
-            retry_after: Duration::from_millis(30_000),
+            retry_after: Duration::from_secs(30),
         };
         let json = serde_json::to_string(&err).expect("serialize");
         let deser: AdmissionError = serde_json::from_str(&json).expect("deserialize");
@@ -2643,15 +2663,17 @@ mod tests {
 
     #[test]
     fn default_constants_are_reasonable() {
-        assert!(DEFAULT_MAX_BYTES_PER_MIN > 0);
-        assert!(DEFAULT_MAX_SYMBOLS_PER_MIN > 0);
-        assert!(DEFAULT_MAX_FAILED_AUTH_PER_MIN > 0);
-        assert!(DEFAULT_MAX_INFLIGHT_DECODES > 0);
-        assert!(DEFAULT_MAX_DECODE_CPU_MS_PER_MIN > 0);
-        assert!(DEFAULT_AMPLIFICATION_FACTOR > 0);
-        assert!(DEFAULT_MAX_QUARANTINE_BYTES_PER_ZONE > 0);
-        assert!(DEFAULT_MAX_QUARANTINE_OBJECTS_PER_ZONE > 0);
-        assert!(DEFAULT_QUARANTINE_TTL_SECS > 0);
+        const {
+            assert!(DEFAULT_MAX_BYTES_PER_MIN > 0);
+            assert!(DEFAULT_MAX_SYMBOLS_PER_MIN > 0);
+            assert!(DEFAULT_MAX_FAILED_AUTH_PER_MIN > 0);
+            assert!(DEFAULT_MAX_INFLIGHT_DECODES > 0);
+            assert!(DEFAULT_MAX_DECODE_CPU_MS_PER_MIN > 0);
+            assert!(DEFAULT_AMPLIFICATION_FACTOR > 0);
+            assert!(DEFAULT_MAX_QUARANTINE_BYTES_PER_ZONE > 0);
+            assert!(DEFAULT_MAX_QUARANTINE_OBJECTS_PER_ZONE > 0);
+            assert!(DEFAULT_QUARANTINE_TTL_SECS > 0);
+        }
     }
 
     // ── with_default_policy constructor ──────────────────────────

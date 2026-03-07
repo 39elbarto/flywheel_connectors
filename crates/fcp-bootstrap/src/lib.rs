@@ -97,7 +97,8 @@ pub mod workflow;
 // Re-export commonly used types at crate root
 pub use ceremony::{
     CeremonyAbortResult, CeremonyCheckpoint, CeremonyId, CeremonyPhase, CeremonyResumeError,
-    ParticipantId, ThresholdCeremony, ThresholdConfig,
+    EncryptedShare, FrostCommitment, ParticipantId, ThresholdCeremony, ThresholdConfig,
+    ThresholdSignatureArtifact,
 };
 pub use cold_recovery::{ColdRecovery, ColdRecoveryError, ColdRecoveryWarning};
 pub use error::{BootstrapError, BootstrapResult};

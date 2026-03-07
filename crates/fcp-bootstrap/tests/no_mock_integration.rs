@@ -44,7 +44,9 @@ use fcp_bootstrap::{
     TimeValidationResult,
     TokenDetector,
 };
-use fcp_crypto::Ed25519SigningKey;
+use fcp_crypto::{Ed25519Signature, Ed25519SigningKey};
+use rand_chacha::ChaCha20Rng;
+use rand_core::SeedableRng;
 
 // ============================================================================
 // 1. Recovery phrase → keypair → genesis pipeline
@@ -309,6 +311,221 @@ fn ceremony_transcript_records_events() {
 
     assert!(!ceremony.transcript.joins.is_empty());
     assert!(!ceremony.transcript.phases.is_empty());
+}
+
+#[test]
+fn ceremony_threshold_signature_supports_partial_availability() {
+    let mut ceremony = ThresholdCeremony::new(2, 3);
+    let mut split_rng = ChaCha20Rng::seed_from_u64(7331);
+    for index in 1..=3 {
+        ceremony
+            .add_participant(ParticipantId {
+                index,
+                name: format!("device-{index}"),
+                public_key: [u8::try_from(index).unwrap(); 32],
+            })
+            .unwrap();
+    }
+    for index in 1..=3 {
+        ceremony
+            .add_commitment(fcp_bootstrap::FrostCommitment {
+                participant_index: index,
+                commitment: vec![u8::try_from(index).unwrap(); 32],
+                proof: vec![0xAA; 64],
+            })
+            .unwrap();
+    }
+    for index in 1..=3 {
+        ceremony
+            .add_shares_with_rng(
+                index,
+                vec![fcp_bootstrap::EncryptedShare {
+                    from_index: index,
+                    to_index: index,
+                    ciphertext: vec![u8::try_from(index).unwrap(); 32],
+                }],
+                &mut split_rng,
+            )
+            .unwrap();
+    }
+
+    let mut rng = ChaCha20Rng::seed_from_u64(1337);
+    let artifact = ceremony
+        .sign_with_participants_and_rng(
+            &[1, 2],
+            b"FCP2-THRESHOLD-OWNER",
+            b"integration-threshold-owner",
+            &mut rng,
+        )
+        .unwrap();
+
+    ceremony
+        .verify_signature_artifact(
+            &artifact,
+            b"FCP2-THRESHOLD-OWNER",
+            b"integration-threshold-owner",
+        )
+        .unwrap();
+}
+
+#[test]
+fn ceremony_threshold_signature_rejects_tampered_participants() {
+    let mut ceremony = ThresholdCeremony::new(2, 3);
+    let mut split_rng = ChaCha20Rng::seed_from_u64(9001);
+    for index in 1..=3 {
+        ceremony
+            .add_participant(ParticipantId {
+                index,
+                name: format!("device-{index}"),
+                public_key: [u8::try_from(index).unwrap(); 32],
+            })
+            .unwrap();
+    }
+    for index in 1..=3 {
+        ceremony
+            .add_commitment(fcp_bootstrap::FrostCommitment {
+                participant_index: index,
+                commitment: vec![u8::try_from(index).unwrap(); 32],
+                proof: vec![0xAC; 64],
+            })
+            .unwrap();
+    }
+    for index in 1..=3 {
+        ceremony
+            .add_shares_with_rng(
+                index,
+                vec![fcp_bootstrap::EncryptedShare {
+                    from_index: index,
+                    to_index: index,
+                    ciphertext: vec![u8::try_from(index).unwrap(); 32],
+                }],
+                &mut split_rng,
+            )
+            .unwrap();
+    }
+
+    let mut signing_rng = ChaCha20Rng::seed_from_u64(9002);
+    let mut artifact = ceremony
+        .sign_with_participants_and_rng(
+            &[1, 2],
+            b"FCP2-THRESHOLD-OWNER",
+            b"tampered-participants",
+            &mut signing_rng,
+        )
+        .unwrap();
+    artifact.participants = vec![1, 3];
+
+    let error = ceremony
+        .verify_signature_artifact(&artifact, b"FCP2-THRESHOLD-OWNER", b"tampered-participants")
+        .unwrap_err();
+    assert!(error.contains("signature transcript does not match"));
+}
+
+#[test]
+fn ceremony_threshold_signature_rejects_replayed_context() {
+    let mut ceremony = ThresholdCeremony::new(2, 3);
+    let mut split_rng = ChaCha20Rng::seed_from_u64(9051);
+    for index in 1..=3 {
+        ceremony
+            .add_participant(ParticipantId {
+                index,
+                name: format!("device-{index}"),
+                public_key: [u8::try_from(index).unwrap(); 32],
+            })
+            .unwrap();
+    }
+    for index in 1..=3 {
+        ceremony
+            .add_commitment(fcp_bootstrap::FrostCommitment {
+                participant_index: index,
+                commitment: vec![u8::try_from(index).unwrap(); 32],
+                proof: vec![0xAE; 64],
+            })
+            .unwrap();
+    }
+    for index in 1..=3 {
+        ceremony
+            .add_shares_with_rng(
+                index,
+                vec![fcp_bootstrap::EncryptedShare {
+                    from_index: index,
+                    to_index: index,
+                    ciphertext: vec![u8::try_from(index).unwrap(); 32],
+                }],
+                &mut split_rng,
+            )
+            .unwrap();
+    }
+
+    let mut signing_rng = ChaCha20Rng::seed_from_u64(9052);
+    let artifact = ceremony
+        .sign_with_participants_and_rng(
+            &[1, 3],
+            b"FCP2-THRESHOLD-OWNER",
+            b"original-context",
+            &mut signing_rng,
+        )
+        .unwrap();
+
+    let error = ceremony
+        .verify_signature_artifact(&artifact, b"FCP2-THRESHOLD-OWNER", b"replayed-context")
+        .unwrap_err();
+    assert!(error.contains("signature transcript does not match"));
+}
+
+#[test]
+fn ceremony_threshold_signature_rejects_tampered_signature() {
+    let mut ceremony = ThresholdCeremony::new(2, 3);
+    let mut split_rng = ChaCha20Rng::seed_from_u64(9101);
+    for index in 1..=3 {
+        ceremony
+            .add_participant(ParticipantId {
+                index,
+                name: format!("device-{index}"),
+                public_key: [u8::try_from(index).unwrap(); 32],
+            })
+            .unwrap();
+    }
+    for index in 1..=3 {
+        ceremony
+            .add_commitment(fcp_bootstrap::FrostCommitment {
+                participant_index: index,
+                commitment: vec![u8::try_from(index).unwrap(); 32],
+                proof: vec![0xAD; 64],
+            })
+            .unwrap();
+    }
+    for index in 1..=3 {
+        ceremony
+            .add_shares_with_rng(
+                index,
+                vec![fcp_bootstrap::EncryptedShare {
+                    from_index: index,
+                    to_index: index,
+                    ciphertext: vec![u8::try_from(index).unwrap(); 32],
+                }],
+                &mut split_rng,
+            )
+            .unwrap();
+    }
+
+    let mut signing_rng = ChaCha20Rng::seed_from_u64(9102);
+    let mut artifact = ceremony
+        .sign_with_participants_and_rng(
+            &[2, 3],
+            b"FCP2-THRESHOLD-OWNER",
+            b"tampered-signature",
+            &mut signing_rng,
+        )
+        .unwrap();
+    let mut signature_bytes = artifact.signature.to_bytes();
+    signature_bytes[0] ^= 0x01;
+    artifact.signature = Ed25519Signature::from_bytes(&signature_bytes);
+
+    let error = ceremony
+        .verify_signature_artifact(&artifact, b"FCP2-THRESHOLD-OWNER", b"tampered-signature")
+        .unwrap_err();
+    assert!(error.contains("Ed25519 verification failed"));
 }
 
 // ============================================================================
@@ -598,6 +815,7 @@ fn cold_recovery_warning_display() {
 fn ceremony_checkpoint_json_roundtrip() {
     let checkpoint = CeremonyCheckpoint {
         ceremony_id: CeremonyId::generate(2, 3),
+        participants: vec![],
         phase: CeremonyPhase::Gathering {
             joined: vec![],
             target: 3,

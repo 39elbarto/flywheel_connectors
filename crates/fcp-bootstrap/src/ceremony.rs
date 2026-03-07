@@ -4,8 +4,12 @@
 //! owner key management.
 
 use chrono::{DateTime, Duration, Utc};
+use fcp_crypto::{Ed25519Signature, Ed25519VerifyingKey};
+use frost_ed25519 as frost;
+use rand_core::{CryptoRng, RngCore};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
+use std::time::Instant;
 use thiserror::Error;
 
 /// Unique identifier for a ceremony.
@@ -194,6 +198,9 @@ pub struct CeremonyCheckpoint {
     /// Ceremony ID.
     pub ceremony_id: CeremonyId,
 
+    /// Known participants for this ceremony.
+    pub participants: Vec<ParticipantId>,
+
     /// Current phase.
     pub phase: CeremonyPhase,
 
@@ -240,7 +247,6 @@ pub enum CeremonyResumeError {
 }
 
 /// A threshold key ceremony.
-#[derive(Debug)]
 pub struct ThresholdCeremony {
     /// Configuration for this ceremony.
     pub config: ThresholdConfig,
@@ -256,6 +262,44 @@ pub struct ThresholdCeremony {
 
     /// Phase deadline.
     phase_deadline: DateTime<Utc>,
+
+    /// Known participants, preserved across phase transitions and checkpoints.
+    participants: Vec<ParticipantId>,
+
+    /// Generated threshold key material, available once the ceremony completes.
+    key_material: Option<ThresholdKeyMaterial>,
+}
+
+struct ThresholdKeyMaterial {
+    public_key_package: frost::keys::PublicKeyPackage,
+    key_packages: HashMap<u32, frost::keys::KeyPackage>,
+}
+
+/// Result of a threshold signing session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ThresholdSignatureArtifact {
+    /// Participants that contributed shares.
+    pub participants: Vec<u32>,
+
+    /// Domain-separated transcript that was actually signed.
+    pub transcript: [u8; 32],
+
+    /// Aggregate threshold signature.
+    pub signature: Ed25519Signature,
+}
+
+impl std::fmt::Debug for ThresholdCeremony {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ThresholdCeremony")
+            .field("config", &self.config)
+            .field("ceremony_id", &self.ceremony_id)
+            .field("phase", &self.phase)
+            .field("transcript", &self.transcript)
+            .field("phase_deadline", &self.phase_deadline)
+            .field("participant_count", &self.participants.len())
+            .field("has_key_material", &self.key_material.is_some())
+            .finish()
+    }
 }
 
 /// Transcript recording ceremony events for audit.
@@ -332,6 +376,8 @@ impl ThresholdCeremony {
                 ..Default::default()
             },
             phase_deadline: now + config.phase_timeout,
+            participants: Vec::new(),
+            key_material: None,
             config,
             ceremony_id,
         }
@@ -357,9 +403,81 @@ impl ThresholdCeremony {
                 ..Default::default()
             },
             phase_deadline: now + config.phase_timeout,
+            participants: Vec::new(),
+            key_material: None,
             config,
             ceremony_id,
         }
+    }
+
+    fn sorted_participants(&self) -> Vec<ParticipantId> {
+        let mut participants = self.participants.clone();
+        participants.sort_by_key(|participant| participant.index);
+        participants
+    }
+
+    fn key_material(&self) -> Result<&ThresholdKeyMaterial, String> {
+        self.key_material.as_ref().ok_or_else(|| {
+            "threshold key material is not available until the ceremony completes".to_string()
+        })
+    }
+
+    fn signing_transcript(participants: &[u32], context: &[u8], message: &[u8]) -> [u8; 32] {
+        let mut hasher = blake3::Hasher::new();
+        let participant_count =
+            u32::try_from(participants.len()).expect("participant count should fit in u32");
+        hasher.update(b"fcp-bootstrap-threshold-signature");
+        hasher.update(&participant_count.to_le_bytes());
+        for participant in participants {
+            hasher.update(&participant.to_le_bytes());
+        }
+        hasher.update(&(context.len() as u64).to_le_bytes());
+        hasher.update(context);
+        hasher.update(&(message.len() as u64).to_le_bytes());
+        hasher.update(message);
+        *hasher.finalize().as_bytes()
+    }
+
+    fn threshold_signing_error_code(error: &str) -> &'static str {
+        if error.contains("requires at least") {
+            "FCP-6002"
+        } else if error.contains("unknown participant") {
+            "FCP-6001"
+        } else {
+            "FCP-9001"
+        }
+    }
+
+    fn verifying_key_bytes(verifying_key: &frost::VerifyingKey) -> Result<[u8; 32], String> {
+        let bytes = verifying_key
+            .serialize()
+            .map_err(|error| format!("failed to serialize FROST verifying key: {error}"))?;
+        if bytes.len() != 32 {
+            return Err(format!(
+                "unexpected FROST verifying key length: expected 32, got {}",
+                bytes.len()
+            ));
+        }
+
+        let mut out = [0u8; 32];
+        out.copy_from_slice(&bytes);
+        Ok(out)
+    }
+
+    fn signature_bytes(signature: &frost::Signature) -> Result<[u8; 64], String> {
+        let bytes = signature
+            .serialize()
+            .map_err(|error| format!("failed to serialize FROST signature: {error}"))?;
+        if bytes.len() != 64 {
+            return Err(format!(
+                "unexpected FROST signature length: expected 64, got {}",
+                bytes.len()
+            ));
+        }
+
+        let mut out = [0u8; 64];
+        out.copy_from_slice(&bytes);
+        Ok(out)
     }
 
     /// Add a participant to the ceremony.
@@ -383,6 +501,7 @@ impl ThresholdCeremony {
                 joined_at: Utc::now(),
             });
 
+            self.participants.push(participant.clone());
             joined.push(participant);
 
             // Transition to Round1 if all participants have joined
@@ -478,6 +597,26 @@ impl ThresholdCeremony {
         from_index: u32,
         shares: Vec<EncryptedShare>,
     ) -> Result<(), String> {
+        let mut rng = rand::rngs::OsRng;
+        self.add_shares_with_rng(from_index, shares, &mut rng)
+    }
+
+    /// Add shares from a participant using a caller-supplied RNG for
+    /// deterministic simulations.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the ceremony is not in the Round 2 phase or the
+    /// participant already submitted shares.
+    pub fn add_shares_with_rng<R>(
+        &mut self,
+        from_index: u32,
+        shares: Vec<EncryptedShare>,
+        rng: &mut R,
+    ) -> Result<(), String>
+    where
+        R: CryptoRng + RngCore,
+    {
         if let CeremonyPhase::Round2Shares { shares: all_shares } = &mut self.phase {
             if all_shares.contains_key(&from_index) {
                 return Err(format!(
@@ -513,7 +652,7 @@ impl ThresholdCeremony {
 
             // Transition to Complete if all shares received
             if all_shares.len() == self.config.total as usize {
-                self.complete_ceremony();
+                self.complete_ceremony_with_rng(rng)?;
             }
 
             Ok(())
@@ -522,26 +661,238 @@ impl ThresholdCeremony {
         }
     }
 
-    /// Complete the ceremony (placeholder — actual FROST aggregation would go here).
-    ///
-    /// # Safety
-    ///
-    /// The returned group public key is a **placeholder zero key** and MUST NOT
-    /// be used for real cryptographic operations. Replace this with actual FROST
-    /// share aggregation before production use.
-    fn complete_ceremony(&mut self) {
-        let now = Utc::now();
-        // TODO(FROST): Replace with actual share aggregation to derive group key.
-        // The zero placeholder is intentionally invalid so any downstream
-        // Ed25519 verification using it will fail.
-        let group_public_key = [0u8; 32]; // Placeholder — not a valid Ed25519 point
+    fn complete_ceremony_with_rng<R>(&mut self, rng: &mut R) -> Result<(), String>
+    where
+        R: CryptoRng + RngCore,
+    {
+        let participants = self.sorted_participants();
+        if participants.len() != self.config.total as usize {
+            return Err(format!(
+                "ceremony has {} participants but expected {}",
+                participants.len(),
+                self.config.total
+            ));
+        }
 
+        let (secret_shares, public_key_package) = frost::keys::generate_with_dealer(
+            self.config.total.try_into().map_err(|_| {
+                format!(
+                    "participant count {} does not fit in u16",
+                    self.config.total
+                )
+            })?,
+            self.config
+                .threshold
+                .try_into()
+                .map_err(|_| format!("threshold {} does not fit in u16", self.config.threshold))?,
+            frost::keys::IdentifierList::Default,
+            rng,
+        )
+        .map_err(|error| format!("failed to generate FROST dealer shares: {error}"))?;
+
+        if secret_shares.len() != participants.len() {
+            return Err(format!(
+                "dealer produced {} secret shares for {} participants",
+                secret_shares.len(),
+                participants.len()
+            ));
+        }
+
+        let mut key_packages = HashMap::new();
+        for ((_, secret_share), participant) in secret_shares.into_iter().zip(participants.iter()) {
+            let key_package = frost::keys::KeyPackage::try_from(secret_share).map_err(|error| {
+                format!("failed to convert secret share to key package: {error}")
+            })?;
+            key_packages.insert(participant.index, key_package);
+        }
+
+        let group_public_key = Self::verifying_key_bytes(public_key_package.verifying_key())?;
+        let now = Utc::now();
+        self.key_material = Some(ThresholdKeyMaterial {
+            public_key_package,
+            key_packages,
+        });
         self.phase = CeremonyPhase::Complete { group_public_key };
         self.transcript.phases.push(PhaseRecord {
             phase: "Complete".to_string(),
             entered_at: now,
             reason: None,
         });
+        Ok(())
+    }
+
+    /// Return the aggregate owner verifying key once the ceremony completes.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the ceremony is not complete or the public key is invalid.
+    pub fn owner_verifying_key(&self) -> Result<Ed25519VerifyingKey, String> {
+        let CeremonyPhase::Complete { group_public_key } = self.phase else {
+            return Err(
+                "owner verifying key is not available until the ceremony completes".to_string(),
+            );
+        };
+
+        Ed25519VerifyingKey::from_bytes(&group_public_key)
+            .map_err(|error| format!("invalid threshold owner public key: {error}"))
+    }
+
+    /// Produce a threshold signature for a domain-separated transcript.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the ceremony is not complete, an unknown participant
+    /// is selected, or fewer than `threshold` participants are provided.
+    pub fn sign_with_participants_and_rng<R>(
+        &self,
+        participants: &[u32],
+        context: &[u8],
+        message: &[u8],
+        rng: &mut R,
+    ) -> Result<ThresholdSignatureArtifact, String>
+    where
+        R: CryptoRng + RngCore,
+    {
+        let mut unique_participants = participants.to_vec();
+        unique_participants.sort_unstable();
+        unique_participants.dedup();
+        let participants_present = unique_participants.len() as u64;
+        let started_at = Instant::now();
+        let result = (|| {
+            if unique_participants.len() < self.config.threshold as usize {
+                return Err(format!(
+                    "threshold signing requires at least {} participants, got {}",
+                    self.config.threshold,
+                    unique_participants.len()
+                ));
+            }
+
+            let key_material = self.key_material()?;
+            let transcript = Self::signing_transcript(&unique_participants, context, message);
+            let mut nonces = HashMap::new();
+            let mut signing_commitments = BTreeMap::new();
+
+            for participant_index in &unique_participants {
+                let key_package = key_material
+                    .key_packages
+                    .get(participant_index)
+                    .ok_or_else(|| format!("unknown participant index: {participant_index}"))?;
+                let (signing_nonces, commitments) =
+                    frost::round1::commit(key_package.signing_share(), rng);
+                nonces.insert(*participant_index, signing_nonces);
+                signing_commitments.insert(*key_package.identifier(), commitments);
+            }
+
+            let signing_package = frost::SigningPackage::new(signing_commitments, &transcript);
+            let mut signature_shares = BTreeMap::new();
+
+            for participant_index in &unique_participants {
+                let key_package = key_material
+                    .key_packages
+                    .get(participant_index)
+                    .ok_or_else(|| format!("unknown participant index: {participant_index}"))?;
+                let signing_nonces = nonces.remove(participant_index).ok_or_else(|| {
+                    format!("missing signing nonces for participant {participant_index}")
+                })?;
+                let signature_share =
+                    frost::round2::sign(&signing_package, &signing_nonces, key_package).map_err(
+                        |error| {
+                            format!(
+                                "failed to produce signature share for participant {participant_index}: {error}"
+                            )
+                        },
+                    )?;
+                signature_shares.insert(*key_package.identifier(), signature_share);
+            }
+
+            let signature = frost::aggregate(
+                &signing_package,
+                &signature_shares,
+                &key_material.public_key_package,
+            )
+            .map_err(|error| format!("failed to aggregate threshold signature: {error}"))?;
+
+            key_material
+                .public_key_package
+                .verifying_key()
+                .verify(&transcript, &signature)
+                .map_err(|error| format!("FROST verification failed: {error}"))?;
+
+            let owner_key = self.owner_verifying_key()?;
+            let signature = Ed25519Signature::from_bytes(&Self::signature_bytes(&signature)?);
+            owner_key
+                .verify(&transcript, &signature)
+                .map_err(|error| format!("Ed25519 verification failed: {error}"))?;
+
+            Ok(ThresholdSignatureArtifact {
+                participants: unique_participants,
+                transcript,
+                signature,
+            })
+        })();
+
+        let duration_ms = u64::try_from(started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
+        match &result {
+            Ok(_) => tracing::info!(
+                threshold_t = self.config.threshold,
+                threshold_n = self.config.total,
+                participants_present,
+                result = "ok",
+                duration_ms,
+                "threshold owner signing completed"
+            ),
+            Err(error) => tracing::warn!(
+                threshold_t = self.config.threshold,
+                threshold_n = self.config.total,
+                participants_present,
+                result = "error",
+                duration_ms,
+                fcp_error_code = Self::threshold_signing_error_code(error),
+                error = %error,
+                "threshold owner signing failed"
+            ),
+        }
+
+        result
+    }
+
+    /// Produce a threshold signature using OS randomness for nonce generation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the ceremony is not complete or the participant set
+    /// is invalid.
+    pub fn sign_with_participants(
+        &self,
+        participants: &[u32],
+        context: &[u8],
+        message: &[u8],
+    ) -> Result<ThresholdSignatureArtifact, String> {
+        let mut rng = rand::rngs::OsRng;
+        self.sign_with_participants_and_rng(participants, context, message, &mut rng)
+    }
+
+    /// Verify a previously produced threshold signature artifact.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the transcript does not match the supplied context
+    /// and message or if signature verification fails.
+    pub fn verify_signature_artifact(
+        &self,
+        artifact: &ThresholdSignatureArtifact,
+        context: &[u8],
+        message: &[u8],
+    ) -> Result<(), String> {
+        let expected_transcript =
+            Self::signing_transcript(&artifact.participants, context, message);
+        if artifact.transcript != expected_transcript {
+            return Err("signature transcript does not match context/message".to_string());
+        }
+
+        self.owner_verifying_key()?
+            .verify(&artifact.transcript, &artifact.signature)
+            .map_err(|error| format!("Ed25519 verification failed: {error}"))
     }
 
     /// Abort the ceremony with a reason.
@@ -600,6 +951,7 @@ impl ThresholdCeremony {
 
         CeremonyCheckpoint {
             ceremony_id: self.ceremony_id.clone(),
+            participants: self.participants.clone(),
             phase: self.phase.clone(),
             commitments,
             shares,
@@ -638,6 +990,7 @@ impl ThresholdCeremony {
         Ok(Self {
             config,
             ceremony_id: checkpoint.ceremony_id,
+            participants: checkpoint.participants,
             phase: checkpoint.phase,
             transcript: CeremonyTranscript {
                 phases: vec![PhaseRecord {
@@ -648,6 +1001,7 @@ impl ThresholdCeremony {
                 ..Default::default()
             },
             phase_deadline: checkpoint.phase_deadline,
+            key_material: None,
         })
     }
 
@@ -661,6 +1015,8 @@ impl ThresholdCeremony {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rand_chacha::ChaCha20Rng;
+    use rand_core::SeedableRng;
 
     fn test_participant(index: u32) -> ParticipantId {
         let index_u8 = u8::try_from(index).expect("participant index must fit in u8");
@@ -755,6 +1111,7 @@ mod tests {
             .expect("shares from participant 2");
 
         assert!(matches!(ceremony.phase, CeremonyPhase::Complete { .. }));
+        assert!(ceremony.owner_verifying_key().is_ok());
     }
 
     #[test]
@@ -1007,6 +1364,57 @@ mod tests {
         ceremony.add_shares(3, test_shares(3, 1)).unwrap();
         assert!(matches!(ceremony.phase, CeremonyPhase::Complete { .. }));
         assert!(ceremony.phase.is_terminal());
+        assert!(ceremony.owner_verifying_key().is_ok());
+    }
+
+    #[test]
+    fn threshold_signature_verifies_under_owner_key() {
+        let mut ceremony = ThresholdCeremony::new(2, 3);
+        ceremony.add_participant(test_participant(1)).unwrap();
+        ceremony.add_participant(test_participant(2)).unwrap();
+        ceremony.add_participant(test_participant(3)).unwrap();
+        ceremony.add_commitment(test_commitment(1)).unwrap();
+        ceremony.add_commitment(test_commitment(2)).unwrap();
+        ceremony.add_commitment(test_commitment(3)).unwrap();
+        ceremony.add_shares(1, test_shares(1, 2)).unwrap();
+        ceremony.add_shares(2, test_shares(2, 1)).unwrap();
+        ceremony.add_shares(3, test_shares(3, 1)).unwrap();
+
+        let mut rng = ChaCha20Rng::seed_from_u64(42);
+        let artifact = ceremony
+            .sign_with_participants_and_rng(
+                &[1, 3],
+                b"FCP2-THRESHOLD-OWNER",
+                b"bootstrap-owner",
+                &mut rng,
+            )
+            .expect("threshold signature");
+
+        ceremony
+            .verify_signature_artifact(&artifact, b"FCP2-THRESHOLD-OWNER", b"bootstrap-owner")
+            .expect("artifact verification");
+    }
+
+    #[test]
+    fn threshold_signature_rejects_insufficient_participants() {
+        let mut ceremony = ThresholdCeremony::new(2, 2);
+        ceremony.add_participant(test_participant(1)).unwrap();
+        ceremony.add_participant(test_participant(2)).unwrap();
+        ceremony.add_commitment(test_commitment(1)).unwrap();
+        ceremony.add_commitment(test_commitment(2)).unwrap();
+        ceremony.add_shares(1, test_shares(1, 2)).unwrap();
+        ceremony.add_shares(2, test_shares(2, 1)).unwrap();
+
+        let mut rng = ChaCha20Rng::seed_from_u64(7);
+        let error = ceremony
+            .sign_with_participants_and_rng(
+                &[1],
+                b"FCP2-THRESHOLD-OWNER",
+                b"bootstrap-owner",
+                &mut rng,
+            )
+            .expect_err("threshold should reject insufficient participants");
+        assert!(error.contains("requires at least"));
     }
 
     // ---- Abort scenarios ----

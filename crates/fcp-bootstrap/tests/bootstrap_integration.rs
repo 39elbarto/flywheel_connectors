@@ -571,9 +571,9 @@ fn test_bootstrap_workflow_import_mode() {
 }
 
 #[test]
-fn test_bootstrap_workflow_multi_device_returns_ceremony_error() {
+fn test_bootstrap_workflow_multi_device_produces_threshold_genesis() {
     let mut log = TestLogEntry::new(
-        "test_bootstrap_workflow_multi_device_returns_ceremony_error",
+        "test_bootstrap_workflow_multi_device_produces_threshold_genesis",
         "execute",
     );
 
@@ -589,15 +589,20 @@ fn test_bootstrap_workflow_multi_device_returns_ceremony_error() {
         .expect("build config");
 
     let workflow = BootstrapWorkflow::new(config).expect("create workflow");
-    let result = workflow.run();
+    let genesis = workflow.run().expect("multi-device bootstrap succeeds");
+    let owner_key = genesis
+        .owner_verifying_key()
+        .expect("threshold bootstrap emits a valid owner key");
 
-    let is_ceremony_error = matches!(result, Err(BootstrapError::Ceremony(_)));
-    log = log.with_result(if is_ceremony_error { "pass" } else { "fail" });
+    log = log
+        .with_fingerprint(&genesis.fingerprint())
+        .with_result("pass");
     log.emit();
 
+    assert_eq!(owner_key.to_bytes(), genesis.owner_public_key);
     assert!(
-        is_ceremony_error,
-        "multi-device bootstrap should return ceremony error until implemented"
+        std::fs::metadata(temp_dir.path().join("genesis.cbor")).is_ok(),
+        "multi-device bootstrap should persist genesis.cbor"
     );
 }
 

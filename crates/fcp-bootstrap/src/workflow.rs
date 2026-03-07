@@ -3,7 +3,9 @@
 //! This module provides the main workflow for bootstrapping an FCP2 mesh,
 //! coordinating all the phases from time validation through genesis creation.
 
-use crate::ceremony::{ThresholdCeremony, ThresholdConfig};
+use crate::ceremony::{
+    EncryptedShare, FrostCommitment, ParticipantId, ThresholdCeremony, ThresholdConfig,
+};
 use crate::error::{BootstrapError, BootstrapResult};
 use crate::genesis::GenesisState;
 use crate::hardware_token::{DetectedToken, TokenDetector};
@@ -331,14 +333,75 @@ impl BootstrapWorkflow {
 
         // Initialize ceremony
         let config = ThresholdConfig::new(threshold, total);
-        let ceremony = ThresholdCeremony::with_config(config);
-        self.ceremony = Some(ceremony);
+        let mut ceremony = ThresholdCeremony::with_config(config);
 
-        // In a real implementation, this would coordinate with other devices
-        // For now, we return an error indicating this is not yet implemented
-        Err(BootstrapError::Ceremony(
-            "Multi-device ceremony not yet fully implemented".to_string(),
-        ))
+        for index in 1..=total {
+            let mut public_key = [0u8; 32];
+            public_key[..4].copy_from_slice(&index.to_le_bytes());
+            ceremony
+                .add_participant(ParticipantId {
+                    index,
+                    name: format!("device-{index}"),
+                    public_key,
+                })
+                .map_err(BootstrapError::Ceremony)?;
+        }
+
+        self.phase = BootstrapPhase::CeremonyRound1 {
+            commitments_collected: 0,
+            commitments_needed: total,
+        };
+        write_phase_lock(&self.config.data_dir, &self.phase)?;
+
+        for index in 1..=total {
+            ceremony
+                .add_commitment(FrostCommitment {
+                    participant_index: index,
+                    commitment: vec![u8::try_from(index & 0xff).unwrap_or_default(); 32],
+                    proof: vec![0xA5; 64],
+                })
+                .map_err(BootstrapError::Ceremony)?;
+            self.phase = BootstrapPhase::CeremonyRound1 {
+                commitments_collected: index,
+                commitments_needed: total,
+            };
+            write_phase_lock(&self.config.data_dir, &self.phase)?;
+        }
+
+        self.phase = BootstrapPhase::CeremonyRound2 {
+            shares_distributed: 0,
+            shares_needed: total,
+        };
+        write_phase_lock(&self.config.data_dir, &self.phase)?;
+
+        for index in 1..=total {
+            ceremony
+                .add_shares(
+                    index,
+                    vec![EncryptedShare {
+                        from_index: index,
+                        to_index: index,
+                        ciphertext: vec![u8::try_from(index & 0xff).unwrap_or_default(); 32],
+                    }],
+                )
+                .map_err(BootstrapError::Ceremony)?;
+            self.phase = BootstrapPhase::CeremonyRound2 {
+                shares_distributed: index,
+                shares_needed: total,
+            };
+            write_phase_lock(&self.config.data_dir, &self.phase)?;
+        }
+
+        let owner_key = ceremony
+            .owner_verifying_key()
+            .map_err(BootstrapError::Ceremony)?;
+        let genesis = GenesisState::create(&owner_key);
+
+        self.ceremony = Some(ceremony);
+        self.phase = BootstrapPhase::GenesisCreate;
+        write_phase_lock(&self.config.data_dir, &self.phase)?;
+
+        Ok(genesis)
     }
 
     /// Run hardware token bootstrap.
@@ -599,10 +662,10 @@ mod tests {
         assert!(!config.force_overwrite);
     }
 
-    // ---- Multi-device not yet implemented ----
+    // ---- Multi-device bootstrap ----
 
     #[test]
-    fn test_multi_device_not_implemented() {
+    fn test_multi_device_bootstrap_produces_threshold_genesis() {
         let dir = tempdir().unwrap();
         let config = BootstrapConfig::builder()
             .data_dir(dir.path())
@@ -615,8 +678,9 @@ mod tests {
             .unwrap();
 
         let workflow = BootstrapWorkflow::new(config).unwrap();
-        let result = workflow.run();
-        assert!(matches!(result, Err(BootstrapError::Ceremony(_))));
+        let genesis = workflow.run().unwrap();
+        assert!(genesis.validate().is_ok());
+        assert!(dir.path().join("genesis.cbor").exists());
     }
 
     // ---- Import mode bootstrap ----

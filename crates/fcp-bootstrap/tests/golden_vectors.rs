@@ -3,7 +3,11 @@
 //! These tests verify that bootstrap outputs match expected golden vectors,
 //! ensuring determinism and backwards compatibility.
 
-use fcp_bootstrap::{GenesisState, RecoveryPhrase};
+use fcp_bootstrap::{
+    EncryptedShare, FrostCommitment, GenesisState, ParticipantId, RecoveryPhrase, ThresholdCeremony,
+};
+use rand_chacha::ChaCha20Rng;
+use rand_core::SeedableRng;
 
 /// Well-known test mnemonic (DO NOT USE FOR REAL KEYS).
 const TEST_MNEMONIC: &str = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon art";
@@ -13,6 +17,13 @@ const EXPECTED_FINGERPRINT: &str = include_str!("vectors/expected_fingerprint.tx
 
 /// Expected genesis CBOR for the test mnemonic.
 const EXPECTED_GENESIS_CBOR: &[u8] = include_bytes!("vectors/genesis.cbor");
+
+/// Expected threshold owner key for the seeded FROST ceremony below.
+const EXPECTED_THRESHOLD_OWNER_KEY: &str =
+    "99e234bf90ee0d62e120bd6d484b67800bc0fa9492c54d56aecf9013929287e3";
+
+/// Expected threshold owner signature for the seeded FROST ceremony below.
+const EXPECTED_THRESHOLD_OWNER_SIGNATURE: &str = "495b6ed3859750720b65e1391c7ab122c196ee719f9ddccadc9a88e021ae04cd4503454d4a4a3757a500c6e79ec7178ba6ebd3f7aa055f5a4dbb6a0e7c550b0c";
 
 #[test]
 fn test_recovery_phrase_deterministic_keypair() {
@@ -160,5 +171,74 @@ fn test_key_material_is_not_logged() {
     assert!(
         keypair_debug.contains("public_key"),
         "OwnerKeypair debug should show public_key"
+    );
+}
+
+#[test]
+fn test_threshold_owner_signature_matches_golden_vector() {
+    let mut ceremony = ThresholdCeremony::new(2, 3);
+    let mut split_rng = ChaCha20Rng::seed_from_u64(20_260_307);
+    for index in 1..=3 {
+        ceremony
+            .add_participant(ParticipantId {
+                index,
+                name: format!("device-{index}"),
+                public_key: [u8::try_from(index).unwrap(); 32],
+            })
+            .unwrap();
+    }
+    for index in 1..=3 {
+        ceremony
+            .add_commitment(FrostCommitment {
+                participant_index: index,
+                commitment: vec![u8::try_from(index).unwrap(); 32],
+                proof: vec![0xBB; 64],
+            })
+            .unwrap();
+    }
+    for index in 1..=3 {
+        ceremony
+            .add_shares_with_rng(
+                index,
+                vec![EncryptedShare {
+                    from_index: index,
+                    to_index: index,
+                    ciphertext: vec![u8::try_from(index).unwrap(); 32],
+                }],
+                &mut split_rng,
+            )
+            .unwrap();
+    }
+
+    let mut rng = ChaCha20Rng::seed_from_u64(20_260_307);
+    let artifact = ceremony
+        .sign_with_participants_and_rng(
+            &[1, 3],
+            b"FCP2-THRESHOLD-OWNER",
+            b"golden-vector-threshold-owner",
+            &mut rng,
+        )
+        .unwrap();
+    let owner_key = ceremony.owner_verifying_key().unwrap();
+
+    assert_eq!(
+        hex::encode(owner_key.to_bytes()),
+        EXPECTED_THRESHOLD_OWNER_KEY,
+        "threshold owner key changed unexpectedly"
+    );
+    assert_eq!(
+        hex::encode(artifact.signature.to_bytes()),
+        EXPECTED_THRESHOLD_OWNER_SIGNATURE,
+        "threshold owner signature changed unexpectedly"
+    );
+
+    assert!(
+        ceremony
+            .verify_signature_artifact(
+                &artifact,
+                b"FCP2-THRESHOLD-OWNER",
+                b"golden-vector-threshold-owner",
+            )
+            .is_ok()
     );
 }

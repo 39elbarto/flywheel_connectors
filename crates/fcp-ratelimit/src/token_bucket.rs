@@ -704,4 +704,153 @@ mod tests {
         limiter.try_acquire_n(3).await;
         assert_eq!(limiter.remaining(), limiter.state().remaining);
     }
+
+    // ── Sync-only tests ──────────────────────────────────────────────────
+
+    #[test]
+    fn new_sets_capacity_and_tokens() {
+        let limiter = TokenBucket::new(42, Duration::from_secs(10));
+        assert_eq!(limiter.capacity, 42);
+        assert_eq!(limiter.remaining(), 42);
+    }
+
+    #[test]
+    fn new_with_zero_window_clamps_interval() {
+        let limiter = TokenBucket::new(10, Duration::ZERO);
+        assert_eq!(limiter.refill_interval, Duration::from_nanos(1));
+        assert_eq!(limiter.capacity, 10);
+    }
+
+    #[test]
+    fn new_preserves_window_as_refill_interval() {
+        let limiter = TokenBucket::new(5, Duration::from_secs(30));
+        assert_eq!(limiter.refill_interval, Duration::from_secs(30));
+        assert_eq!(limiter.refill_amount, 5);
+    }
+
+    #[test]
+    fn with_burst_sets_correct_fields() {
+        let limiter = TokenBucket::with_burst(10, Duration::from_secs(1), 50);
+        assert_eq!(limiter.capacity, 50);
+        assert_eq!(limiter.refill_amount, 10);
+        assert_eq!(limiter.refill_interval, Duration::from_secs(1));
+        assert_eq!(limiter.remaining(), 50);
+    }
+
+    #[test]
+    fn with_burst_zero_window_clamps_interval() {
+        let limiter = TokenBucket::with_burst(5, Duration::ZERO, 10);
+        assert_eq!(limiter.refill_interval, Duration::from_nanos(1));
+    }
+
+    #[test]
+    fn from_config_default_uses_sixty_per_minute() {
+        let config = RateLimitConfig::default();
+        let limiter = TokenBucket::from_config(&config);
+        assert_eq!(limiter.capacity, 60);
+        assert_eq!(limiter.remaining(), 60);
+    }
+
+    #[test]
+    fn from_config_zero_requests_yields_zero_capacity() {
+        let config = RateLimitConfig::new(0, Duration::from_secs(60));
+        let limiter = TokenBucket::from_config(&config);
+        assert_eq!(limiter.capacity, 0);
+        assert_eq!(limiter.refill_amount, 0);
+    }
+
+    #[test]
+    fn from_config_burst_overrides_capacity_sync() {
+        let config = RateLimitConfig::new(100, Duration::from_secs(1)).with_burst(200);
+        let limiter = TokenBucket::from_config(&config);
+        assert_eq!(limiter.capacity, 200);
+        assert_eq!(limiter.remaining(), 200);
+    }
+
+    #[test]
+    fn from_config_smooth_rate_calculation() {
+        // 60 per minute -> 1 token per second
+        let config = RateLimitConfig::new(60, Duration::from_secs(60));
+        let limiter = TokenBucket::from_config(&config);
+        assert_eq!(limiter.refill_amount, 1);
+        assert_eq!(limiter.refill_interval, Duration::from_secs(1));
+    }
+
+    #[test]
+    fn from_config_ten_per_second_smooth_rate() {
+        let config = RateLimitConfig::ten_per_second();
+        let limiter = TokenBucket::from_config(&config);
+        assert_eq!(limiter.refill_amount, 1);
+        // 1_000_000_000 / 10 = 100_000_000 ns = 100ms
+        assert_eq!(limiter.refill_interval, Duration::from_millis(100));
+    }
+
+    #[test]
+    fn try_consume_zero_always_succeeds() {
+        let limiter = TokenBucket::new(5, Duration::from_secs(60));
+        assert!(limiter.try_consume(0));
+        assert_eq!(limiter.remaining(), 5);
+    }
+
+    #[test]
+    fn try_consume_exceeding_capacity_fails() {
+        let limiter = TokenBucket::new(5, Duration::from_secs(60));
+        assert!(!limiter.try_consume(6));
+        assert_eq!(limiter.remaining(), 5);
+    }
+
+    #[test]
+    fn try_consume_exact_capacity() {
+        let limiter = TokenBucket::new(5, Duration::from_secs(60));
+        assert!(limiter.try_consume(5));
+        assert_eq!(limiter.remaining(), 0);
+    }
+
+    #[test]
+    fn try_consume_sequential_depletion() {
+        let limiter = TokenBucket::new(3, Duration::from_secs(60));
+        assert!(limiter.try_consume(1));
+        assert_eq!(limiter.remaining(), 2);
+        assert!(limiter.try_consume(1));
+        assert_eq!(limiter.remaining(), 1);
+        assert!(limiter.try_consume(1));
+        assert_eq!(limiter.remaining(), 0);
+        assert!(!limiter.try_consume(1));
+    }
+
+    #[test]
+    fn state_fresh_limiter() {
+        let limiter = TokenBucket::new(10, Duration::from_secs(60));
+        let state = limiter.state();
+        assert_eq!(state.limit, 10);
+        assert_eq!(state.remaining, 10);
+        assert!(!state.is_limited);
+    }
+
+    #[test]
+    fn state_exhausted_limiter() {
+        let limiter = TokenBucket::new(2, Duration::from_secs(60));
+        limiter.try_consume(2);
+        let state = limiter.state();
+        assert_eq!(state.remaining, 0);
+        assert!(state.is_limited);
+    }
+
+    #[test]
+    fn remaining_reflects_consumption() {
+        let limiter = TokenBucket::new(10, Duration::from_secs(60));
+        assert_eq!(limiter.remaining(), 10);
+        limiter.try_consume(3);
+        assert_eq!(limiter.remaining(), 7);
+        limiter.try_consume(7);
+        assert_eq!(limiter.remaining(), 0);
+    }
+
+    #[test]
+    fn time_until_token_returns_bounded_value() {
+        let limiter = TokenBucket::new(5, Duration::from_secs(1));
+        let wait = limiter.time_until_token();
+        // Should be within the refill interval
+        assert!(wait <= Duration::from_secs(1));
+    }
 }

@@ -920,4 +920,158 @@ mod tests {
             }
         }
     }
+
+    // ── Additional header tests ─────────────────────────────────────────
+
+    #[test]
+    fn rate_limit_headers_new_is_default() {
+        let a = RateLimitHeaders::new();
+        let b = RateLimitHeaders::default();
+        assert_eq!(a.limit, b.limit);
+        assert_eq!(a.remaining, b.remaining);
+        assert_eq!(a.reset_seconds, b.reset_seconds);
+        assert_eq!(a.retry_after, b.retry_after);
+    }
+
+    #[test]
+    fn rate_limit_headers_manual_construction() {
+        let mut headers = RateLimitHeaders::new();
+        headers.limit = Some(500);
+        headers.remaining = Some(250);
+        headers.reset_seconds = Some(120);
+        headers.retry_after = Some(Duration::from_secs(10));
+        headers.reset_at = Some(1_704_067_200);
+
+        assert_eq!(headers.limit, Some(500));
+        assert_eq!(headers.remaining, Some(250));
+        assert_eq!(headers.reset_seconds, Some(120));
+        assert_eq!(headers.retry_after, Some(Duration::from_secs(10)));
+        assert_eq!(headers.reset_at, Some(1_704_067_200));
+    }
+
+    #[test]
+    fn rate_limit_headers_clone_preserves_provider_info() {
+        let mut headers = RateLimitHeaders::new();
+        headers.provider_info.insert("key".to_string(), "value".to_string());
+        let cloned = headers.clone();
+        assert_eq!(cloned.provider_info.get("key"), Some(&"value".to_string()));
+    }
+
+    #[test]
+    fn is_limited_false_with_none_remaining() {
+        let headers = RateLimitHeaders::new();
+        // Both remaining=None and retry_after=None -> not limited
+        assert!(!headers.is_limited());
+    }
+
+    #[test]
+    fn suggested_wait_zero_retry_after() {
+        let mut headers = RateLimitHeaders::new();
+        headers.retry_after = Some(Duration::ZERO);
+        assert_eq!(headers.suggested_wait(), Some(Duration::ZERO));
+    }
+
+    #[test]
+    fn suggested_wait_zero_reset_seconds() {
+        let mut headers = RateLimitHeaders::new();
+        headers.reset_seconds = Some(0);
+        assert_eq!(headers.suggested_wait(), Some(Duration::ZERO));
+    }
+
+    #[test]
+    fn parse_duration_string_hours_large() {
+        assert_eq!(
+            parse_duration_string("48h"),
+            Some(Duration::from_secs(48 * 3600))
+        );
+    }
+
+    #[test]
+    fn parse_duration_string_ms_large() {
+        assert_eq!(
+            parse_duration_string("60000ms"),
+            Some(Duration::from_secs(60))
+        );
+    }
+
+    #[test]
+    fn parse_duration_string_seconds_integer() {
+        assert_eq!(
+            parse_duration_string("10s"),
+            Some(Duration::from_secs_f64(10.0))
+        );
+    }
+
+    #[test]
+    fn parse_standard_only_remaining() {
+        let mut headers = HashMap::new();
+        headers.insert("x-ratelimit-remaining".to_string(), "42".to_string());
+        let parsed = RateLimitHeaders::parse(&headers);
+        assert_eq!(parsed.remaining, Some(42));
+        assert!(parsed.limit.is_none());
+    }
+
+    #[test]
+    fn parse_standard_only_reset() {
+        let mut headers = HashMap::new();
+        headers.insert("x-ratelimit-reset".to_string(), "300".to_string());
+        let parsed = RateLimitHeaders::parse(&headers);
+        assert_eq!(parsed.reset_seconds, Some(300));
+        assert!(parsed.limit.is_none());
+    }
+
+    #[test]
+    fn provider_copy() {
+        let p = Provider::Standard;
+        let p2 = p;
+        assert_eq!(p, p2);
+    }
+
+    #[test]
+    fn provider_debug_all_variants() {
+        assert!(format!("{:?}", Provider::Standard).contains("Standard"));
+        assert!(format!("{:?}", Provider::GitHub).contains("GitHub"));
+        assert!(format!("{:?}", Provider::Twitter).contains("Twitter"));
+        assert!(format!("{:?}", Provider::Stripe).contains("Stripe"));
+        assert!(format!("{:?}", Provider::OpenAI).contains("OpenAI"));
+        assert!(format!("{:?}", Provider::Anthropic).contains("Anthropic"));
+    }
+
+    #[test]
+    fn parse_github_without_used_or_resource() {
+        let mut headers = HashMap::new();
+        headers.insert("x-ratelimit-limit".to_string(), "5000".to_string());
+        let parsed = RateLimitHeaders::parse_github(&headers);
+        assert_eq!(parsed.limit, Some(5000));
+        assert!(!parsed.provider_info.contains_key("used"));
+        assert!(!parsed.provider_info.contains_key("resource"));
+    }
+
+    #[test]
+    fn parse_anthropic_only_token_limits() {
+        let mut headers = HashMap::new();
+        headers.insert("anthropic-ratelimit-tokens-limit".to_string(), "50000".to_string());
+        headers.insert("anthropic-ratelimit-tokens-remaining".to_string(), "49000".to_string());
+        let parsed = RateLimitHeaders::parse_anthropic(&headers);
+        assert!(parsed.limit.is_none()); // No request limit header
+        assert_eq!(parsed.provider_info.get("limit_tokens"), Some(&"50000".to_string()));
+        assert_eq!(parsed.provider_info.get("remaining_tokens"), Some(&"49000".to_string()));
+    }
+
+    #[test]
+    fn parse_openai_no_headers() {
+        let headers = HashMap::new();
+        let parsed = RateLimitHeaders::parse_openai(&headers);
+        assert!(parsed.limit.is_none());
+        assert!(parsed.remaining.is_none());
+        assert!(parsed.provider_info.is_empty());
+    }
+
+    #[test]
+    fn parse_stripe_empty() {
+        let headers = HashMap::new();
+        let parsed = RateLimitHeaders::parse_stripe(&headers);
+        assert!(parsed.limit.is_none());
+        assert!(parsed.provider_info.is_empty());
+    }
 }

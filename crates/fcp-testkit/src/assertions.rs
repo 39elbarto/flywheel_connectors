@@ -579,6 +579,134 @@ mod tests {
         assert_json_has(&json, "a.b.c");
     }
 
+    // ---- Additional JSON assertions ----
+
+    #[test]
+    fn test_assert_json_has_single_field() {
+        let json = serde_json::json!({"name": "test"});
+        assert_json_has(&json, "name");
+    }
+
+    #[test]
+    #[should_panic(expected = "Missing field")]
+    fn test_assert_json_has_deeply_nested_missing() {
+        let json = serde_json::json!({"a": {"b": {}}});
+        assert_json_has(&json, "a.b.c");
+    }
+
+    #[test]
+    fn test_assert_json_eq_null_values() {
+        let a = serde_json::json!(null);
+        let b = serde_json::json!(null);
+        assert_json_eq(&a, &b);
+    }
+
+    #[test]
+    fn test_assert_json_eq_arrays() {
+        let a = serde_json::json!([1, 2, 3]);
+        let b = serde_json::json!([1, 2, 3]);
+        assert_json_eq(&a, &b);
+    }
+
+    #[test]
+    fn test_assert_json_eq_nested_objects() {
+        let a = serde_json::json!({"x": {"y": {"z": true}}});
+        let b = serde_json::json!({"x": {"y": {"z": true}}});
+        assert_json_eq(&a, &b);
+    }
+
+    #[test]
+    fn test_assert_json_array_len_one() {
+        let json = serde_json::json!([42]);
+        assert_json_array_len(&json, 1);
+    }
+
+    #[test]
+    fn test_assert_json_string_contains_exact_match() {
+        let val = serde_json::json!("exact");
+        assert_json_string_contains(&val, "exact");
+    }
+
+    #[test]
+    fn test_assert_json_string_contains_substring() {
+        let val = serde_json::json!("prefix-middle-suffix");
+        assert_json_string_contains(&val, "middle");
+    }
+
+    #[test]
+    #[should_panic(expected = "Expected JSON string")]
+    fn test_assert_json_string_contains_not_string() {
+        let val = serde_json::json!(42);
+        assert_json_string_contains(&val, "anything");
+    }
+
+    // ---- Additional result assertions ----
+
+    #[test]
+    fn test_assert_ok_with_string_value() {
+        let result: FcpResult<String> = Ok("success".to_string());
+        assert_ok(&result);
+    }
+
+    #[test]
+    fn test_assert_err_with_invalid_request() {
+        let result: FcpResult<()> = Err(FcpError::InvalidRequest {
+            code: 400,
+            message: "bad input".to_string(),
+        });
+        assert_err(&result);
+    }
+
+    #[test]
+    fn test_assert_error_type_invalid_request() {
+        let result: FcpResult<()> = Err(FcpError::InvalidRequest {
+            code: 400,
+            message: "bad".to_string(),
+        });
+        assert_error_type(&result, "InvalidRequest");
+    }
+
+    // ---- Additional health assertions ----
+
+    #[test]
+    #[should_panic(expected = "Expected Error")]
+    fn test_assert_unhealthy_fails_on_degraded() {
+        assert_unhealthy(&degraded_snapshot("slow"));
+    }
+
+    #[test]
+    #[should_panic(expected = "Expected Degraded")]
+    fn test_assert_degraded_fails_on_error() {
+        assert_degraded(&error_snapshot("down"));
+    }
+
+    // ---- Additional InvokeResponse assertions ----
+
+    #[test]
+    fn test_assert_result_field_eq_string() {
+        let response = test_response(Some(serde_json::json!({"name": "test"})));
+        assert_result_field_eq(&response, "name", &serde_json::json!("test"));
+    }
+
+    #[test]
+    fn test_assert_result_field_eq_missing_field_is_null() {
+        let response = test_response(Some(serde_json::json!({"a": 1})));
+        assert_result_field_eq(&response, "b", &serde_json::Value::Null);
+    }
+
+    #[test]
+    fn test_assert_has_result_with_object() {
+        let response = test_response(Some(serde_json::json!({"items": [1, 2, 3]})));
+        assert_has_result(&response);
+    }
+
+    #[test]
+    fn test_assert_result_has_field_nested_not_required() {
+        // assert_result_has_field only checks top-level fields
+        let response = test_response(Some(serde_json::json!({"outer": {"inner": 1}})));
+        assert_result_has_field(&response, "outer");
+    }
+
     // ---- Timing assertions ----
 
     #[fcp_async_core::runtime::test]

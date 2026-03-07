@@ -910,4 +910,211 @@ mod tests {
         assert!((backoff.multiplier - 1.5).abs() < f64::EPSILON);
         assert_eq!(backoff.jitter, Some(0.3));
     }
+
+    // ── Additional ExponentialBackoff tests ──────────────────────────────
+
+    #[test]
+    fn exponential_backoff_no_jitter_deterministic() {
+        let mut b1 = ExponentialBackoff::new(Duration::from_millis(100), Duration::from_secs(10))
+            .with_jitter(None);
+        let mut b2 = ExponentialBackoff::new(Duration::from_millis(100), Duration::from_secs(10))
+            .with_jitter(None);
+        for attempt in 0..8 {
+            assert_eq!(b1.next_backoff(attempt), b2.next_backoff(attempt));
+        }
+    }
+
+    #[test]
+    fn exponential_backoff_multiplier_one_stays_constant() {
+        let mut backoff = ExponentialBackoff::new(Duration::from_secs(2), Duration::from_secs(60))
+            .with_multiplier(1.0)
+            .with_jitter(None);
+        for attempt in 0..10 {
+            assert_eq!(backoff.next_backoff(attempt), Duration::from_secs(2));
+        }
+    }
+
+    #[test]
+    fn exponential_backoff_initial_equals_max() {
+        let mut backoff = ExponentialBackoff::new(Duration::from_secs(5), Duration::from_secs(5))
+            .with_jitter(None);
+        assert_eq!(backoff.next_backoff(0), Duration::from_secs(5));
+        assert_eq!(backoff.next_backoff(10), Duration::from_secs(5));
+    }
+
+    #[test]
+    fn exponential_backoff_initial_greater_than_max() {
+        let mut backoff = ExponentialBackoff::new(Duration::from_secs(10), Duration::from_secs(5))
+            .with_jitter(None);
+        // Initial exceeds max, but we only cap the computed value; at attempt=0 it's 10s but capped to 5s
+        assert_eq!(backoff.next_backoff(0), Duration::from_secs(5));
+    }
+
+    #[test]
+    fn exponential_backoff_jitter_none_vs_some() {
+        let backoff_none = ExponentialBackoff::default().with_jitter(None);
+        let backoff_some = ExponentialBackoff::default().with_jitter(Some(0.5));
+        assert!(backoff_none.jitter.is_none());
+        assert_eq!(backoff_some.jitter, Some(0.5));
+    }
+
+    // ── Additional DecorrelatedJitter tests ─────────────────────────────
+
+    #[test]
+    fn decorrelated_jitter_initial_previous_equals_base() {
+        let backoff = DecorrelatedJitter::new(Duration::from_secs(2), Duration::from_secs(30));
+        assert_eq!(backoff.previous, backoff.base);
+    }
+
+    #[test]
+    fn decorrelated_jitter_max_less_than_base_stays_at_base() {
+        // If max < base, next_backoff should clamp to max
+        let mut backoff = DecorrelatedJitter::new(Duration::from_secs(10), Duration::from_secs(5));
+        let d = backoff.next_backoff(0);
+        assert!(d <= Duration::from_secs(10));
+    }
+
+    #[test]
+    fn decorrelated_jitter_many_iterations_bounded() {
+        let mut backoff =
+            DecorrelatedJitter::new(Duration::from_millis(100), Duration::from_secs(10));
+        for i in 0..100 {
+            let d = backoff.next_backoff(i);
+            assert!(d >= Duration::from_millis(100));
+            assert!(d <= Duration::from_secs(10));
+        }
+    }
+
+    // ── Additional LinearBackoff tests ──────────────────────────────────
+
+    #[test]
+    fn linear_backoff_initial_zero() {
+        let mut backoff = LinearBackoff::new(Duration::ZERO, Duration::from_secs(1), Duration::from_secs(10));
+        assert_eq!(backoff.next_backoff(0), Duration::ZERO);
+        assert_eq!(backoff.next_backoff(1), Duration::from_secs(1));
+        assert_eq!(backoff.next_backoff(5), Duration::from_secs(5));
+    }
+
+    #[test]
+    fn linear_backoff_all_zero() {
+        let mut backoff = LinearBackoff::new(Duration::ZERO, Duration::ZERO, Duration::ZERO);
+        assert_eq!(backoff.next_backoff(0), Duration::ZERO);
+        assert_eq!(backoff.next_backoff(100), Duration::ZERO);
+    }
+
+    #[test]
+    fn linear_backoff_debug_contains_fields() {
+        let backoff = LinearBackoff::new(
+            Duration::from_secs(1),
+            Duration::from_millis(500),
+            Duration::from_secs(30),
+        );
+        let dbg = format!("{backoff:?}");
+        assert!(dbg.contains("initial"));
+        assert!(dbg.contains("increment"));
+        assert!(dbg.contains("max"));
+    }
+
+    // ── Additional ConstantBackoff tests ────────────────────────────────
+
+    #[test]
+    fn constant_backoff_large_delay() {
+        let mut backoff = ConstantBackoff::new(Duration::from_secs(3600));
+        assert_eq!(backoff.next_backoff(0), Duration::from_secs(3600));
+        assert_eq!(backoff.next_backoff(99), Duration::from_secs(3600));
+    }
+
+    #[test]
+    fn constant_backoff_debug_contains_delay() {
+        let backoff = ConstantBackoff::new(Duration::from_millis(250));
+        let dbg = format!("{backoff:?}");
+        assert!(dbg.contains("delay"));
+    }
+
+    // ── Additional NoBackoff tests ──────────────────────────────────────
+
+    #[test]
+    fn no_backoff_reset_is_no_op() {
+        let mut backoff = NoBackoff;
+        backoff.reset();
+        assert_eq!(backoff.next_backoff(0), Duration::ZERO);
+    }
+
+    #[test]
+    fn no_backoff_default_trait() {
+        let backoff = NoBackoff;
+        let dbg = format!("{backoff:?}");
+        assert!(dbg.contains("NoBackoff"));
+    }
+
+    // ── Additional RetryConfig tests ────────────────────────────────────
+
+    #[test]
+    fn retry_config_with_decorrelated_jitter() {
+        let mut config = RetryConfig::new(
+            5,
+            DecorrelatedJitter::new(Duration::from_secs(1), Duration::from_secs(30)),
+        );
+        for attempt in 0..5 {
+            let d = config.next_backoff(attempt);
+            assert!(d >= Duration::from_secs(1));
+            assert!(d <= Duration::from_secs(30));
+        }
+    }
+
+    #[test]
+    fn retry_config_with_constant_backoff() {
+        let mut config = RetryConfig::new(3, ConstantBackoff::new(Duration::from_millis(500)));
+        for attempt in 0..3 {
+            assert_eq!(config.next_backoff(attempt), Duration::from_millis(500));
+        }
+    }
+
+    #[test]
+    fn retry_config_clone_preserves_max_total_time() {
+        let config = RetryConfig::new(10, NoBackoff)
+            .with_max_total_time(Duration::from_secs(120));
+        let cloned = config.clone();
+        assert_eq!(cloned.max_total_time, Some(Duration::from_secs(120)));
+        assert_eq!(cloned.max_retries, 10);
+        // Original is still valid after clone
+        assert_eq!(config.max_retries, 10);
+    }
+
+    #[test]
+    fn retry_config_debug_contains_max_total_time() {
+        let config = RetryConfig::new(3, NoBackoff)
+            .with_max_total_time(Duration::from_secs(60));
+        let dbg = format!("{config:?}");
+        assert!(dbg.contains("max_total_time"));
+    }
+
+    #[test]
+    fn retry_config_default_no_max_total_time() {
+        let config = RetryConfig::default();
+        assert!(config.max_total_time.is_none());
+    }
+
+    #[test]
+    fn retry_config_zero_retries() {
+        let config = RetryConfig::new(0, NoBackoff);
+        assert_eq!(config.max_retries, 0);
+    }
+
+    #[test]
+    fn retry_config_reset_with_decorrelated_jitter() {
+        let mut config = RetryConfig::new(
+            3,
+            DecorrelatedJitter::new(Duration::from_secs(1), Duration::from_secs(10)),
+        );
+        // Run some iterations
+        for i in 0..5 {
+            config.next_backoff(i);
+        }
+        config.reset();
+        // After reset, the decorrelated jitter should return to base behavior
+        let d = config.next_backoff(0);
+        assert!(d >= Duration::from_secs(1));
+        assert!(d <= Duration::from_secs(10));
+    }
 }

@@ -372,4 +372,165 @@ mod tests {
         assert_eq!(v["user"], "admin");
         assert_eq!(v["password"], "secret");
     }
+
+    // ---- Additional connector fixture tests ----
+
+    #[test]
+    fn test_connector_id_contains_archetype() {
+        let id = test_connector_id();
+        assert!(id.as_str().contains("test"));
+    }
+
+    #[test]
+    fn connector_id_different_versions_differ() {
+        let v1 = connector_id("conn", "api", "1.0.0");
+        let v2 = connector_id("conn", "api", "2.0.0");
+        assert_ne!(v1.as_str(), v2.as_str());
+    }
+
+    #[test]
+    fn connector_id_different_archetypes_differ() {
+        let a = connector_id("conn", "api", "1.0.0");
+        let b = connector_id("conn", "storage", "1.0.0");
+        assert_ne!(a.as_str(), b.as_str());
+    }
+
+    #[test]
+    fn connector_id_different_names_differ() {
+        let a = connector_id("alpha", "api", "1.0.0");
+        let b = connector_id("beta", "api", "1.0.0");
+        assert_ne!(a.as_str(), b.as_str());
+    }
+
+    // ---- Additional health fixture tests ----
+
+    #[test]
+    fn healthy_snapshot_is_healthy() {
+        let snap = healthy_snapshot();
+        assert!(snap.is_healthy());
+    }
+
+    #[test]
+    fn unhealthy_snapshot_preserves_message() {
+        let snap = unhealthy_snapshot("connection refused");
+        let debug = format!("{:?}", snap.status);
+        assert!(debug.contains("connection refused"));
+    }
+
+    #[test]
+    fn degraded_snapshot_preserves_reason() {
+        let snap = degraded_snapshot("high latency");
+        let debug = format!("{:?}", snap.status);
+        assert!(debug.contains("high latency"));
+    }
+
+    // ---- Additional JSON fixture tests ----
+
+    #[test]
+    fn json_success_is_object() {
+        let v = json::success();
+        assert!(v.is_object());
+    }
+
+    #[test]
+    fn json_error_has_two_fields_in_error() {
+        let v = json::error("E001", "Something broke");
+        let err_obj = v["error"].as_object().unwrap();
+        assert_eq!(err_obj.len(), 2);
+    }
+
+    #[test]
+    fn json_paginated_single_page() {
+        let items = vec!["a", "b"];
+        let v = json::paginated(&items, 2, 0);
+        assert_eq!(v["has_more"], false);
+        assert_eq!(v["total"], 2);
+    }
+
+    #[test]
+    fn json_paginated_empty_items() {
+        let items: Vec<i32> = vec![];
+        let v = json::paginated(&items, 0, 0);
+        assert_eq!(v["items"].as_array().unwrap().len(), 0);
+        assert_eq!(v["has_more"], false);
+    }
+
+    #[test]
+    fn json_rate_limited_has_message() {
+        let v = json::rate_limited(60);
+        assert_eq!(v["error"]["message"], "Too many requests");
+    }
+
+    #[test]
+    fn json_auth_error_has_message() {
+        let v = json::auth_error();
+        assert_eq!(v["error"]["message"], "Invalid or expired token");
+    }
+
+    #[test]
+    fn json_not_found_with_different_resources() {
+        let v1 = json::not_found("Account");
+        let v2 = json::not_found("Project");
+        assert!(v1["error"]["message"].as_str().unwrap().contains("Account"));
+        assert!(v2["error"]["message"].as_str().unwrap().contains("Project"));
+    }
+
+    #[test]
+    fn json_error_serde_roundtrip() {
+        let v = json::error("TIMEOUT", "Request timed out");
+        let serialized = serde_json::to_string(&v).unwrap();
+        let deserialized: serde_json::Value = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(v, deserialized);
+    }
+
+    #[test]
+    fn json_paginated_serde_roundtrip() {
+        let items = vec![10, 20, 30];
+        let v = json::paginated(&items, 100, 2);
+        let serialized = serde_json::to_string(&v).unwrap();
+        let deserialized: serde_json::Value = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(v, deserialized);
+    }
+
+    // ---- Additional config fixture tests ----
+
+    #[test]
+    fn config_api_key_is_object() {
+        let v = config::api_key("test");
+        assert!(v.is_object());
+        assert_eq!(v.as_object().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn config_oauth_has_two_fields() {
+        let v = config::oauth("cid", "csec");
+        assert_eq!(v.as_object().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn config_oauth_with_tokens_has_four_fields() {
+        let v = config::oauth_with_tokens("c", "s", "a", "r");
+        assert_eq!(v.as_object().unwrap().len(), 4);
+    }
+
+    #[test]
+    fn config_database_has_five_fields() {
+        let v = config::database("h", 1234, "db", "u", "p");
+        assert_eq!(v.as_object().unwrap().len(), 5);
+    }
+
+    #[test]
+    fn config_bot_token_serde_roundtrip() {
+        let v = config::bot_token("xoxb-test");
+        let s = serde_json::to_string(&v).unwrap();
+        let d: serde_json::Value = serde_json::from_str(&s).unwrap();
+        assert_eq!(v, d);
+    }
+
+    #[test]
+    fn config_database_port_is_number() {
+        let v = config::database("localhost", 3306, "mydb", "root", "pw");
+        assert!(v["port"].is_number());
+        assert_eq!(v["port"].as_u64().unwrap(), 3306);
+    }
 }

@@ -602,4 +602,115 @@ mod tests {
         // Clone shares the same Arc buffer
         assert_eq!(capture.jsonl(), cloned.jsonl());
     }
+
+    // ---- Additional TracingCapture tests ----
+
+    #[test]
+    fn tracing_capture_default_is_empty() {
+        let capture = super::TracingCapture::default();
+        assert!(capture.events().is_empty());
+        assert!(!capture.has_errors());
+        assert!(!capture.has_warnings());
+    }
+
+    #[test]
+    fn tracing_capture_contains_false_on_empty() {
+        let capture = super::TracingCapture::new();
+        assert!(!capture.contains("missing"));
+        assert!(!capture.contains(""));
+    }
+
+    #[test]
+    fn tracing_capture_clear_is_idempotent() {
+        let capture = super::TracingCapture::new();
+        capture.clear();
+        capture.clear();
+        assert!(capture.events().is_empty());
+    }
+
+    // ---- Additional CapturedEvent tests ----
+
+    #[test]
+    fn captured_event_clone_preserves_all_fields() {
+        let event = super::CapturedEvent {
+            level: "WARN".to_string(),
+            message: "warning msg".to_string(),
+            target: "my_target".to_string(),
+        };
+        let cloned = event.clone();
+        assert_eq!(event.level, cloned.level);
+        assert_eq!(event.message, cloned.message);
+        assert_eq!(event.target, cloned.target);
+    }
+
+    #[test]
+    fn captured_event_debug_contains_all_fields() {
+        let event = super::CapturedEvent {
+            level: "DEBUG".to_string(),
+            message: "a debug message".to_string(),
+            target: "some::target".to_string(),
+        };
+        let dbg = format!("{event:?}");
+        assert!(dbg.contains("DEBUG"));
+        assert!(dbg.contains("a debug message"));
+        assert!(dbg.contains("some::target"));
+    }
+
+    // ---- Additional LogCapture tests ----
+
+    #[test]
+    fn log_capture_push_value_produces_valid_json_line() {
+        let capture = LogCapture::new();
+        let val = json!({"key": "value", "num": 42});
+        capture.push_value(&val).unwrap();
+        let jsonl = capture.jsonl();
+        let parsed: serde_json::Value = serde_json::from_str(jsonl.trim()).unwrap();
+        assert_eq!(parsed["key"], "value");
+        assert_eq!(parsed["num"], 42);
+    }
+
+    #[test]
+    fn log_capture_multiple_push_values() {
+        let capture = LogCapture::new();
+        for i in 0..5 {
+            let val = json!({"index": i});
+            capture.push_value(&val).unwrap();
+        }
+        let jsonl = capture.jsonl();
+        assert_eq!(jsonl.lines().count(), 5);
+    }
+
+    #[test]
+    fn log_capture_clear_then_push() {
+        let capture = LogCapture::new();
+        capture.push_line("first");
+        capture.clear();
+        assert!(capture.jsonl().is_empty());
+        capture.push_line("second");
+        assert_eq!(capture.jsonl().lines().count(), 1);
+        assert!(capture.jsonl().contains("second"));
+    }
+
+    #[test]
+    fn log_capture_debug_format() {
+        let capture = LogCapture::new();
+        let dbg = format!("{capture:?}");
+        assert!(dbg.contains("LogCapture"));
+    }
+
+    #[test]
+    fn log_capture_validate_empty_is_ok() {
+        let capture = LogCapture::new();
+        assert!(capture.validate_jsonl().is_ok());
+    }
+
+    #[test]
+    fn log_capture_push_line_does_not_double_newline() {
+        let capture = LogCapture::new();
+        capture.push_line("line1");
+        capture.push_line("line2");
+        let raw = capture.jsonl();
+        // Should not have double newlines
+        assert!(!raw.contains("\n\n"));
+    }
 }

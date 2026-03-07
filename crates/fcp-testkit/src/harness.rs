@@ -729,4 +729,157 @@ mod tests {
         let last = harness.last_operation().unwrap();
         assert_eq!(last.input, Some(config));
     }
+
+    // ---- Additional RecordedOperation tests ----
+
+    #[test]
+    fn recorded_operation_with_no_input() {
+        let op = RecordedOperation {
+            operation: "health_check".to_string(),
+            input: None,
+            result: Ok(serde_json::json!({"status": "ready"})),
+            duration_ms: 10,
+            timestamp: chrono::Utc::now(),
+        };
+        assert!(op.input.is_none());
+        assert!(op.result.is_ok());
+    }
+
+    #[test]
+    fn recorded_operation_error_message_preserved() {
+        let op = RecordedOperation {
+            operation: "configure".to_string(),
+            input: Some(serde_json::json!({})),
+            result: Err("invalid config".to_string()),
+            duration_ms: 1,
+            timestamp: chrono::Utc::now(),
+        };
+        assert_eq!(op.result.unwrap_err(), "invalid config");
+    }
+
+    #[test]
+    fn recorded_operation_zero_duration() {
+        let op = RecordedOperation {
+            operation: "fast_op".to_string(),
+            input: None,
+            result: Ok(serde_json::json!(null)),
+            duration_ms: 0,
+            timestamp: chrono::Utc::now(),
+        };
+        assert_eq!(op.duration_ms, 0);
+    }
+
+    #[test]
+    fn recorded_operation_clone_preserves_timestamp() {
+        let now = chrono::Utc::now();
+        let op = RecordedOperation {
+            operation: "timed_op".to_string(),
+            input: None,
+            result: Ok(serde_json::json!({})),
+            duration_ms: 25,
+            timestamp: now,
+        };
+        let cloned = op.clone();
+        assert_eq!(op.timestamp, cloned.timestamp);
+    }
+
+    // ---- Additional HarnessStats tests ----
+
+    #[test]
+    fn harness_stats_all_successes() {
+        let stats = HarnessStats {
+            total_operations: 10,
+            successes: 10,
+            failures: 0,
+            total_duration_ms: 200,
+            avg_duration_ms: 20,
+            max_duration_ms: 45,
+        };
+        assert_eq!(stats.failures, 0);
+        assert_eq!(stats.successes, stats.total_operations);
+    }
+
+    #[test]
+    fn harness_stats_debug_contains_field_names() {
+        let stats = HarnessStats {
+            total_operations: 1,
+            successes: 1,
+            failures: 0,
+            total_duration_ms: 5,
+            avg_duration_ms: 5,
+            max_duration_ms: 5,
+        };
+        let dbg = format!("{stats:?}");
+        assert!(dbg.contains("total_operations"));
+        assert!(dbg.contains("successes"));
+        assert!(dbg.contains("failures"));
+    }
+
+    #[test]
+    fn harness_stats_clone_preserves_all_fields() {
+        let stats = HarnessStats {
+            total_operations: 7,
+            successes: 4,
+            failures: 3,
+            total_duration_ms: 700,
+            avg_duration_ms: 100,
+            max_duration_ms: 250,
+        };
+        let cloned = stats.clone();
+        assert_eq!(stats.total_operations, cloned.total_operations);
+        assert_eq!(stats.successes, cloned.successes);
+        assert_eq!(stats.failures, cloned.failures);
+        assert_eq!(stats.total_duration_ms, cloned.total_duration_ms);
+        assert_eq!(stats.avg_duration_ms, cloned.avg_duration_ms);
+        assert_eq!(stats.max_duration_ms, cloned.max_duration_ms);
+    }
+
+    // ---- Additional ConnectorTestHarness tests ----
+
+    #[test]
+    fn harness_new_has_empty_stats() {
+        let harness = ConnectorTestHarness::new(StubConnector::ok());
+        let stats = harness.stats();
+        assert_eq!(stats.total_operations, 0);
+        assert_eq!(stats.total_duration_ms, 0);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn harness_multiple_operations_tracked() {
+        let mut harness = ConnectorTestHarness::new(StubConnector::ok());
+        harness.configure_default().await.unwrap();
+        harness.health().await;
+        let _ = harness.introspect();
+
+        assert_eq!(harness.operations().len(), 3);
+        assert_eq!(harness.operations()[0].operation, "configure");
+        assert_eq!(harness.operations()[1].operation, "health");
+        assert_eq!(harness.operations()[2].operation, "introspect");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn harness_stats_after_configure_and_health() {
+        let mut harness = ConnectorTestHarness::new(StubConnector::ok());
+        harness.configure_default().await.unwrap();
+        harness.health().await;
+
+        let stats = harness.stats();
+        assert_eq!(stats.total_operations, 2);
+        assert_eq!(stats.successes, 2);
+        assert_eq!(stats.failures, 0);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn harness_clear_then_re_record() {
+        let mut harness = ConnectorTestHarness::new(StubConnector::ok());
+        harness.configure_default().await.unwrap();
+        assert_eq!(harness.operations().len(), 1);
+
+        harness.clear_operations();
+        assert!(harness.operations().is_empty());
+
+        harness.health().await;
+        assert_eq!(harness.operations().len(), 1);
+        assert_eq!(harness.operations()[0].operation, "health");
+    }
 }

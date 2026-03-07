@@ -256,4 +256,117 @@ mod tests {
         cancel_handle.await.expect("cancellation task join");
         assert!(matches!(result, Err(AsyncError::Cancelled)));
     }
+
+    // ---- Additional AsyncTestContext tests ----
+
+    #[test]
+    fn context_debug_format() {
+        let ctx = AsyncTestContext::new("run-1", "scene-1");
+        let dbg = format!("{ctx:?}");
+        assert!(dbg.contains("AsyncTestContext"));
+        assert!(dbg.contains("run-1"));
+        assert!(dbg.contains("scene-1"));
+    }
+
+    #[test]
+    fn context_clone() {
+        let ctx = AsyncTestContext::new("run-c", "scene-c");
+        let cloned = ctx.clone();
+        assert_eq!(ctx.run_id(), cloned.run_id());
+        assert_eq!(ctx.scenario_id(), cloned.scenario_id());
+        assert_eq!(ctx.correlation_id(), cloned.correlation_id());
+    }
+
+    #[test]
+    fn context_eq() {
+        let a = AsyncTestContext::new("run-eq", "scene-eq");
+        let b = AsyncTestContext::new("run-eq", "scene-eq");
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn context_ne_different_run() {
+        let a = AsyncTestContext::new("run-1", "scene");
+        let b = AsyncTestContext::new("run-2", "scene");
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn context_ne_different_scenario() {
+        let a = AsyncTestContext::new("run", "scene-1");
+        let b = AsyncTestContext::new("run", "scene-2");
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn context_log_fields_has_all_keys() {
+        let ctx = AsyncTestContext::new("r", "s");
+        let fields = ctx.as_log_fields();
+        assert!(fields.get("harness_version").is_some());
+        assert!(fields.get("run_id").is_some());
+        assert!(fields.get("scenario_id").is_some());
+        assert!(fields.get("correlation_id").is_some());
+    }
+
+    #[test]
+    fn deterministic_correlation_id_is_uuid_format() {
+        let id = deterministic_correlation_id("run", "scenario");
+        // UUID format: 8-4-4-4-12 hex chars
+        assert_eq!(id.len(), 36);
+        assert_eq!(id.chars().filter(|c| *c == '-').count(), 4);
+    }
+
+    #[test]
+    fn deterministic_correlation_id_different_inputs_different_ids() {
+        let id1 = deterministic_correlation_id("a", "b");
+        let id2 = deterministic_correlation_id("c", "d");
+        let id3 = deterministic_correlation_id("a", "c");
+        assert_ne!(id1, id2);
+        assert_ne!(id1, id3);
+        assert_ne!(id2, id3);
+    }
+
+    #[test]
+    fn deterministic_correlation_id_empty_inputs() {
+        let id = deterministic_correlation_id("", "");
+        assert_eq!(id.len(), 36);
+    }
+
+    #[test]
+    fn deterministic_correlation_id_long_inputs() {
+        let run = "a".repeat(1000);
+        let scenario = "b".repeat(1000);
+        let id = deterministic_correlation_id(&run, &scenario);
+        assert_eq!(id.len(), 36);
+    }
+
+    #[test]
+    fn for_scenario_produces_non_empty_run_id() {
+        let ctx = AsyncTestContext::for_scenario("test");
+        assert!(!ctx.run_id().is_empty());
+        // Run ID should contain a timestamp-like pattern
+        assert!(ctx.run_id().contains('T'));
+    }
+
+    #[test]
+    fn harness_version_is_non_empty() {
+        assert!(!ASUPERSYNC_HARNESS_VERSION.is_empty());
+        assert!(ASUPERSYNC_HARNESS_VERSION.contains("asupersync"));
+    }
+
+    #[test]
+    fn shutdown_channel_false_initial() {
+        let (_tx, rx) = shutdown_channel(false);
+        assert!(!*rx.borrow());
+    }
+
+    #[test]
+    fn shutdown_channel_multiple_updates() {
+        let (tx, rx) = shutdown_channel(false);
+        assert!(!*rx.borrow());
+        tx.send(true).unwrap();
+        assert!(*rx.borrow());
+        tx.send(false).unwrap();
+        assert!(!*rx.borrow());
+    }
 }

@@ -48,3 +48,33 @@ pub const MAX_RECONNECT_DELAY: Duration = Duration::from_secs(60);
 
 /// Default buffer size for streams.
 pub const DEFAULT_BUFFER_SIZE: usize = 8192;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_reconnect_delay_value() {
+        assert_eq!(DEFAULT_RECONNECT_DELAY, std::time::Duration::from_secs(1));
+    }
+
+    #[test]
+    fn max_reconnect_delay_value() {
+        assert_eq!(MAX_RECONNECT_DELAY, std::time::Duration::from_secs(60));
+    }
+
+    #[test]
+    fn default_buffer_size_value() {
+        assert_eq!(DEFAULT_BUFFER_SIZE, 8192);
+    }
+
+    #[test]
+    fn max_greater_than_default_delay() {
+        assert!(MAX_RECONNECT_DELAY > DEFAULT_RECONNECT_DELAY);
+    }
+
+    #[test]
+    fn buffer_size_is_power_of_two() {
+        assert!(DEFAULT_BUFFER_SIZE.is_power_of_two());
+    }
+}

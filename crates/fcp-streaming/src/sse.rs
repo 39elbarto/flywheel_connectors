@@ -1022,4 +1022,212 @@ mod tests {
         assert!(event.is_event(""));
         assert!(!event.is_event("message"));
     }
+
+    // ── SseEvent: unicode content ───────────────────────────────────────
+
+    #[test]
+    fn test_sse_event_unicode_data() {
+        let event = SseEvent::new("\u{1F600}\u{1F4A9}\u{2764}\u{FE0F}");
+        assert_eq!(event.data, "\u{1F600}\u{1F4A9}\u{2764}\u{FE0F}");
+    }
+
+    #[test]
+    fn test_sse_event_unicode_event_type() {
+        let event = SseEvent::new("data").with_event("\u{00C9}v\u{00E9}nement");
+        assert!(event.is_event("\u{00C9}v\u{00E9}nement"));
+    }
+
+    #[test]
+    fn test_sse_event_unicode_id() {
+        let event = SseEvent::new("data").with_id("\u{00FC}ber-42");
+        assert_eq!(event.id, Some("\u{00FC}ber-42".to_string()));
+    }
+
+    // ── SseEvent: large data ────────────────────────────────────────────
+
+    #[test]
+    fn test_sse_event_large_data() {
+        let big = "x".repeat(100_000);
+        let event = SseEvent::new(big);
+        assert_eq!(event.data.len(), 100_000);
+    }
+
+    #[test]
+    fn test_sse_event_empty_data() {
+        let event = SseEvent::new("");
+        assert_eq!(event.data, "");
+    }
+
+    // ── SseEvent: json edge cases ───────────────────────────────────────
+
+    #[test]
+    fn test_sse_event_json_nested_object() {
+        let event = SseEvent::new(r#"{"a":{"b":{"c":1}}}"#);
+        let val: serde_json::Value = event.json().unwrap();
+        assert_eq!(val["a"]["b"]["c"], 1);
+    }
+
+    #[test]
+    fn test_sse_event_json_number() {
+        let event = SseEvent::new("42");
+        let val: i64 = event.json().unwrap();
+        assert_eq!(val, 42);
+    }
+
+    #[test]
+    fn test_sse_event_json_string() {
+        let event = SseEvent::new(r#""hello""#);
+        let val: String = event.json().unwrap();
+        assert_eq!(val, "hello");
+    }
+
+    #[test]
+    fn test_sse_event_json_bool() {
+        let event = SseEvent::new("false");
+        let val: bool = event.json().unwrap();
+        assert!(!val);
+    }
+
+    #[test]
+    fn test_sse_event_json_null() {
+        let event = SseEvent::new("null");
+        let val: serde_json::Value = event.json().unwrap();
+        assert!(val.is_null());
+    }
+
+    // ── SseParser: data overflow protection ─────────────────────────────
+
+    #[test]
+    fn test_parse_data_exceeds_10mb_ignored() {
+        use std::fmt::Write;
+        let mut parser = SseParser::new();
+        // Push enough data lines to exceed the 10MB limit
+        let big_line = "a".repeat(1_000_000);
+        let mut input = String::new();
+        for _ in 0..11 {
+            let _ = writeln!(input, "data: {big_line}");
+        }
+        input.push('\n');
+        let events = parser.parse(&Bytes::from(input));
+        // Event dispatches, but not all data lines were accepted
+        assert_eq!(events.len(), 1);
+        assert!(events[0].data.len() <= 10 * 1024 * 1024);
+    }
+
+    // ── SseParser: multiple sequential parses ───────────────────────────
+
+    #[test]
+    fn test_parse_multiple_independent_events() {
+        let mut parser = SseParser::new();
+        for i in 0..5 {
+            let data = Bytes::from(format!("data: event{i}\n\n"));
+            let events = parser.parse(&data);
+            assert_eq!(events.len(), 1);
+            assert_eq!(events[0].data, format!("event{i}"));
+        }
+    }
+
+    #[test]
+    fn test_parse_interleaved_events_and_comments() {
+        let mut parser = SseParser::new();
+        let data = Bytes::from(
+            ": heartbeat\ndata: a\n\n: another heartbeat\ndata: b\n\n",
+        );
+        let events = parser.parse(&data);
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].data, "a");
+        assert_eq!(events[1].data, "b");
+    }
+
+    #[test]
+    fn test_parse_event_with_all_fields() {
+        let mut parser = SseParser::new();
+        let data = Bytes::from("event: update\nid: 99\nretry: 3000\ndata: payload\n\n");
+        let events = parser.parse(&data);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].event, Some("update".to_string()));
+        assert_eq!(events[0].id, Some("99".to_string()));
+        assert_eq!(events[0].retry, Some(3000));
+        assert_eq!(events[0].data, "payload");
+    }
+
+    // ── SseParser: field edge cases ─────────────────────────────────────
+
+    #[test]
+    fn test_parse_retry_zero() {
+        let mut parser = SseParser::new();
+        let data = Bytes::from("retry: 0\ndata: test\n\n");
+        let events = parser.parse(&data);
+        assert_eq!(events[0].retry, Some(0));
+    }
+
+    #[test]
+    fn test_parse_retry_large_value() {
+        let mut parser = SseParser::new();
+        let data = Bytes::from("retry: 999999999\ndata: test\n\n");
+        let events = parser.parse(&data);
+        assert_eq!(events[0].retry, Some(999_999_999));
+    }
+
+    #[test]
+    fn test_parse_data_with_spaces() {
+        let mut parser = SseParser::new();
+        let data = Bytes::from("data:  leading space\n\n");
+        let events = parser.parse(&data);
+        // Per spec, one leading space is stripped after colon
+        assert_eq!(events[0].data, " leading space");
+    }
+
+    #[test]
+    fn test_parse_multiple_empty_lines() {
+        let mut parser = SseParser::new();
+        // Two empty lines after data field = dispatch + empty dispatch (no event)
+        let data = Bytes::from("data: hello\n\n\n");
+        let events = parser.parse(&data);
+        assert_eq!(events.len(), 1);
+    }
+
+    // ── SseConfig: builder edge cases ───────────────────────────────────
+
+    #[test]
+    fn test_sse_config_zero_buffer() {
+        let config = SseConfig::new().with_max_buffer_size(0);
+        assert_eq!(config.max_buffer_size, 0);
+    }
+
+    #[test]
+    fn test_sse_config_large_buffer() {
+        let config = SseConfig::new().with_max_buffer_size(usize::MAX);
+        assert_eq!(config.max_buffer_size, usize::MAX);
+    }
+
+    #[test]
+    fn test_sse_config_zero_reconnect_delay() {
+        let config = SseConfig::new().with_reconnect_delay(Duration::ZERO);
+        assert_eq!(config.reconnect_delay, Duration::ZERO);
+    }
+
+    #[test]
+    fn test_sse_config_header_overwrite() {
+        let config = SseConfig::new()
+            .with_header("Key", "val1")
+            .with_header("Key", "val2");
+        assert_eq!(config.headers.get("Key"), Some(&"val2".to_string()));
+        assert_eq!(config.headers.len(), 1);
+    }
+
+    #[test]
+    fn test_sse_config_auto_reconnect_toggle() {
+        let config = SseConfig::new()
+            .with_auto_reconnect(true)
+            .with_auto_reconnect(false)
+            .with_auto_reconnect(true);
+        assert!(config.auto_reconnect);
+    }
+
+    #[test]
+    fn test_sse_config_max_reconnect_zero() {
+        let config = SseConfig::new().with_max_reconnect_attempts(0);
+        assert_eq!(config.max_reconnect_attempts, Some(0));
+    }
 }

@@ -791,4 +791,157 @@ mod tests {
         sleep(Duration::from_millis(60)).await;
         assert_eq!(pacer.remaining(), 1);
     }
+
+    // ── Sync-only LeakyBucket tests ──────────────────────────────────
+
+    #[test]
+    fn leaky_bucket_new_sets_fields() {
+        let limiter = LeakyBucket::new(10, 5.0);
+        assert_eq!(limiter.capacity, 10);
+        assert!((limiter.leak_rate - 5.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn leaky_bucket_new_zero_capacity() {
+        let limiter = LeakyBucket::new(0, 10.0);
+        assert_eq!(limiter.capacity, 0);
+        assert_eq!(limiter.remaining(), 0);
+    }
+
+    #[test]
+    fn leaky_bucket_new_zero_leak_rate() {
+        let limiter = LeakyBucket::new(5, 0.0);
+        assert_eq!(limiter.capacity, 5);
+        assert!((limiter.leak_rate - 0.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn leaky_bucket_from_window_normal() {
+        // 100 req / 10 sec = 10.0 per second
+        let limiter = LeakyBucket::from_window(100, Duration::from_secs(10));
+        assert_eq!(limiter.capacity, 100);
+        assert!((limiter.leak_rate - 10.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn leaky_bucket_from_window_one_per_second() {
+        let limiter = LeakyBucket::from_window(1, Duration::from_secs(1));
+        assert_eq!(limiter.capacity, 1);
+        assert!((limiter.leak_rate - 1.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn leaky_bucket_from_window_zero_duration_uses_max_rate() {
+        let limiter = LeakyBucket::from_window(10, Duration::ZERO);
+        assert!((limiter.leak_rate - f64::MAX).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn leaky_bucket_initial_level_is_zero() {
+        let limiter = LeakyBucket::new(10, 1.0);
+        assert!((*limiter.level.lock()).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn leaky_bucket_remaining_starts_at_capacity() {
+        let limiter = LeakyBucket::new(50, 1.0);
+        assert_eq!(limiter.remaining(), 50);
+    }
+
+    #[test]
+    fn leaky_bucket_state_fresh() {
+        let limiter = LeakyBucket::new(20, 10.0);
+        let state = limiter.state();
+        assert_eq!(state.limit, 20);
+        assert_eq!(state.remaining, 20);
+        assert!(!state.is_limited);
+        assert_eq!(state.reset_after, Duration::ZERO);
+    }
+
+    #[test]
+    fn leaky_bucket_time_until_room_empty_bucket() {
+        let limiter = LeakyBucket::new(5, 1.0);
+        assert_eq!(limiter.time_until_room(), Duration::ZERO);
+    }
+
+    #[test]
+    fn leaky_bucket_time_until_room_zero_capacity_sync() {
+        let limiter = LeakyBucket::new(0, 10.0);
+        assert_eq!(limiter.time_until_room(), Duration::MAX);
+    }
+
+    #[test]
+    fn leaky_bucket_time_until_room_zero_leak_rate_full() {
+        let limiter = LeakyBucket::new(2, 0.0);
+        // Manually set level to capacity
+        *limiter.level.lock() = 2.0;
+        assert_eq!(limiter.time_until_room(), Duration::MAX);
+    }
+
+    #[test]
+    fn leaky_bucket_level_guard_constant() {
+        assert!((LEVEL_GUARD - 0.5).abs() < f64::EPSILON);
+    }
+
+    // ── Sync-only SmoothPacer tests ──────────────────────────────────
+
+    #[test]
+    fn smooth_pacer_new_sets_interval() {
+        let pacer = SmoothPacer::new(Duration::from_millis(250));
+        assert_eq!(pacer.min_interval, Duration::from_millis(250));
+    }
+
+    #[test]
+    fn smooth_pacer_new_zero_interval() {
+        let pacer = SmoothPacer::new(Duration::ZERO);
+        assert_eq!(pacer.min_interval, Duration::ZERO);
+    }
+
+    #[test]
+    fn smooth_pacer_from_rate_one() {
+        // 1 req/sec -> 1s interval
+        let pacer = SmoothPacer::from_rate(1.0);
+        assert_eq!(pacer.min_interval, Duration::from_secs(1));
+    }
+
+    #[test]
+    fn smooth_pacer_from_rate_ten() {
+        // 10 req/sec -> 100ms interval
+        let pacer = SmoothPacer::from_rate(10.0);
+        assert_eq!(pacer.min_interval, Duration::from_millis(100));
+    }
+
+    #[test]
+    fn smooth_pacer_from_rate_zero_uses_max() {
+        let pacer = SmoothPacer::from_rate(0.0);
+        assert_eq!(pacer.min_interval, Duration::MAX);
+    }
+
+    #[test]
+    fn smooth_pacer_from_rate_negative_uses_max() {
+        let pacer = SmoothPacer::from_rate(-1.23);
+        assert_eq!(pacer.min_interval, Duration::MAX);
+    }
+
+    #[test]
+    fn smooth_pacer_remaining_fresh() {
+        let pacer = SmoothPacer::new(Duration::from_millis(100));
+        assert_eq!(pacer.remaining(), 1);
+    }
+
+    #[test]
+    fn smooth_pacer_state_fresh() {
+        let pacer = SmoothPacer::new(Duration::from_millis(100));
+        let state = pacer.state();
+        assert_eq!(state.limit, 1);
+        assert_eq!(state.remaining, 1);
+        assert!(!state.is_limited);
+        assert_eq!(state.reset_after, Duration::ZERO);
+    }
+
+    #[test]
+    fn smooth_pacer_last_request_initially_none() {
+        let pacer = SmoothPacer::new(Duration::from_millis(100));
+        assert!(pacer.last_request.lock().is_none());
+    }
 }

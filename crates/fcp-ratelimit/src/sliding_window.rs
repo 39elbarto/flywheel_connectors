@@ -750,4 +750,110 @@ mod tests {
         let waited = limiter.acquire(Duration::from_secs(1)).await.unwrap();
         assert!(waited >= Duration::from_millis(30));
     }
+
+    // ── Sync-only SlidingWindow tests ─────────────────────────────────
+
+    #[test]
+    fn sliding_window_new_sets_fields() {
+        let limiter = SlidingWindow::new(42, Duration::from_secs(30));
+        assert_eq!(limiter.limit, 42);
+        assert_eq!(limiter.window, Duration::from_secs(30));
+    }
+
+    #[test]
+    fn sliding_window_new_zero_limit() {
+        let limiter = SlidingWindow::new(0, Duration::from_secs(1));
+        assert_eq!(limiter.limit, 0);
+        assert_eq!(limiter.remaining(), 0);
+    }
+
+    #[test]
+    fn sliding_window_remaining_fresh() {
+        let limiter = SlidingWindow::new(100, Duration::from_secs(60));
+        assert_eq!(limiter.remaining(), 100);
+    }
+
+    #[test]
+    fn sliding_window_remaining_is_calculate_remaining() {
+        let limiter = SlidingWindow::new(10, Duration::from_secs(60));
+        // calculate_remaining and remaining should match
+        assert_eq!(limiter.remaining(), limiter.calculate_remaining());
+    }
+
+    #[test]
+    fn sliding_window_state_fresh() {
+        let limiter = SlidingWindow::new(5, Duration::from_secs(60));
+        let state = limiter.state();
+        assert_eq!(state.limit, 5);
+        assert_eq!(state.remaining, 5);
+        assert!(!state.is_limited);
+        // When empty, reset_after equals the window duration
+        assert_eq!(state.reset_after, Duration::from_secs(60));
+    }
+
+    #[test]
+    fn sliding_window_large_limit() {
+        let limiter = SlidingWindow::new(100_000, Duration::from_secs(3600));
+        assert_eq!(limiter.limit, 100_000);
+        assert_eq!(limiter.remaining(), 100_000);
+    }
+
+    #[test]
+    fn sliding_window_very_short_window() {
+        let limiter = SlidingWindow::new(5, Duration::from_nanos(1));
+        assert_eq!(limiter.window, Duration::from_nanos(1));
+        assert_eq!(limiter.remaining(), 5);
+    }
+
+    // ── Sync-only FixedWindow tests ───────────────────────────────────
+
+    #[test]
+    fn fixed_window_new_sets_fields() {
+        let limiter = FixedWindow::new(50, Duration::from_secs(10));
+        assert_eq!(limiter.limit, 50);
+        assert_eq!(limiter.window, Duration::from_secs(10));
+    }
+
+    #[test]
+    fn fixed_window_new_zero_limit() {
+        let limiter = FixedWindow::new(0, Duration::from_secs(1));
+        assert_eq!(limiter.limit, 0);
+        assert_eq!(limiter.remaining(), 0);
+    }
+
+    #[test]
+    fn fixed_window_remaining_fresh() {
+        let limiter = FixedWindow::new(100, Duration::from_secs(60));
+        assert_eq!(limiter.remaining(), 100);
+    }
+
+    #[test]
+    fn fixed_window_state_fresh() {
+        let limiter = FixedWindow::new(25, Duration::from_secs(30));
+        let state = limiter.state();
+        assert_eq!(state.limit, 25);
+        assert_eq!(state.remaining, 25);
+        assert!(!state.is_limited);
+    }
+
+    #[test]
+    fn fixed_window_large_limit() {
+        let limiter = FixedWindow::new(1_000_000, Duration::from_secs(86400));
+        assert_eq!(limiter.limit, 1_000_000);
+        assert_eq!(limiter.remaining(), 1_000_000);
+    }
+
+    #[test]
+    fn fixed_window_very_short_window() {
+        let limiter = FixedWindow::new(10, Duration::from_nanos(1));
+        assert_eq!(limiter.window, Duration::from_nanos(1));
+    }
+
+    #[test]
+    fn fixed_window_state_reset_after_non_negative() {
+        let limiter = FixedWindow::new(5, Duration::from_secs(60));
+        let state = limiter.state();
+        // reset_after should be between 0 and window
+        assert!(state.reset_after <= Duration::from_secs(60));
+    }
 }

@@ -889,4 +889,251 @@ mod tests {
         session.restore().unwrap();
         assert!(session.restore_called());
     }
+
+    // ---- Additional FakePollingApi tests ----
+
+    #[test]
+    fn fake_polling_api_reset() {
+        let api = FakePollingApi::always_success(2);
+        api.poll(None);
+        api.poll(None);
+        assert_eq!(api.poll_count(), 2);
+        api.reset();
+        assert_eq!(api.poll_count(), 0);
+    }
+
+    #[test]
+    fn fake_polling_api_empty_updates() {
+        let api = FakePollingApi::always_success(0);
+        let result = api.poll(None);
+        assert!(matches!(result, PollResult::Success(items) if items.is_empty()));
+    }
+
+    #[test]
+    fn fake_polling_api_update_ids_increment() {
+        let api = FakePollingApi::always_success(3);
+        if let PollResult::Success(updates) = api.poll(None) {
+            assert_eq!(updates.len(), 3);
+            assert_eq!(updates[0].id, 1);
+            assert_eq!(updates[1].id, 2);
+            assert_eq!(updates[2].id, 3);
+        } else {
+            panic!("expected success");
+        }
+    }
+
+    #[test]
+    fn fake_polling_api_update_payload_format() {
+        let api = FakePollingApi::always_success(1);
+        if let PollResult::Success(updates) = api.poll(None) {
+            assert!(updates[0].payload.starts_with("update-"));
+        } else {
+            panic!("expected success");
+        }
+    }
+
+    #[test]
+    fn fake_polling_api_network_error() {
+        let api = FakePollingApi::fail_after(0, FakePollingError::NetworkError);
+        let result = api.poll(None);
+        assert!(matches!(result, PollResult::RecoverableError { .. }));
+    }
+
+    #[test]
+    fn fake_polling_api_config_default() {
+        let config = FakePollingApiConfig::default();
+        assert_eq!(config.updates_per_poll, 2);
+        assert!(config.success_count_before_error.is_none());
+        assert!(config.inject_error.is_none());
+        assert!(config.rate_limit_retry_after_ms.is_none());
+    }
+
+    #[test]
+    fn fake_polling_api_config_debug() {
+        let config = FakePollingApiConfig::default();
+        let dbg = format!("{config:?}");
+        assert!(dbg.contains("FakePollingApiConfig"));
+    }
+
+    #[test]
+    fn fake_polling_api_config_clone() {
+        let config = FakePollingApiConfig {
+            updates_per_poll: 5,
+            success_count_before_error: Some(10),
+            inject_error: Some(FakePollingError::Timeout),
+            rate_limit_retry_after_ms: Some(3000),
+        };
+        let cloned = config.clone();
+        assert_eq!(config.updates_per_poll, cloned.updates_per_poll);
+        assert_eq!(config.success_count_before_error, cloned.success_count_before_error);
+    }
+
+    #[test]
+    fn fake_polling_api_debug() {
+        let api = FakePollingApi::always_success(1);
+        let dbg = format!("{api:?}");
+        assert!(dbg.contains("FakePollingApi"));
+    }
+
+    // ---- Additional FakeUpdate tests ----
+
+    #[test]
+    fn fake_update_debug() {
+        let update = FakeUpdate {
+            id: 42,
+            payload: "test-payload".to_string(),
+        };
+        let dbg = format!("{update:?}");
+        assert!(dbg.contains("FakeUpdate"));
+        assert!(dbg.contains("42"));
+    }
+
+    #[test]
+    fn fake_update_clone() {
+        let update = FakeUpdate {
+            id: 7,
+            payload: "data".to_string(),
+        };
+        let cloned = update.clone();
+        assert_eq!(update.id, cloned.id);
+        assert_eq!(update.payload, cloned.payload);
+    }
+
+    // ---- Additional FakePollingError tests ----
+
+    #[test]
+    fn fake_polling_error_debug() {
+        let err = FakePollingError::Timeout;
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("Timeout"));
+
+        let err2 = FakePollingError::RateLimited;
+        assert!(format!("{err2:?}").contains("RateLimited"));
+
+        let err3 = FakePollingError::AuthFailed;
+        assert!(format!("{err3:?}").contains("AuthFailed"));
+
+        let err4 = FakePollingError::NetworkError;
+        assert!(format!("{err4:?}").contains("NetworkError"));
+    }
+
+    #[test]
+    fn fake_polling_error_clone() {
+        let err = FakePollingError::Timeout;
+        let cloned = err.clone();
+        let dbg_orig = format!("{err:?}");
+        let dbg_clone = format!("{cloned:?}");
+        assert_eq!(dbg_orig, dbg_clone);
+    }
+
+    // ---- Additional FakeStreamEvent tests ----
+
+    #[test]
+    fn fake_stream_event_debug() {
+        let event = FakeStreamEvent {
+            seq: 1,
+            event_type: "message".to_string(),
+            payload: serde_json::json!({"text": "hi"}),
+        };
+        let dbg = format!("{event:?}");
+        assert!(dbg.contains("FakeStreamEvent"));
+        assert!(dbg.contains("message"));
+    }
+
+    #[test]
+    fn fake_stream_event_clone() {
+        let event = FakeStreamEvent {
+            seq: 5,
+            event_type: "update".to_string(),
+            payload: serde_json::json!({"v": 99}),
+        };
+        let cloned = event.clone();
+        assert_eq!(event.seq, cloned.seq);
+        assert_eq!(event.event_type, cloned.event_type);
+        assert_eq!(event.payload, cloned.payload);
+    }
+
+    // ---- Additional FakeStreamingSession tests ----
+
+    #[test]
+    fn fake_streaming_session_default() {
+        let session = FakeStreamingSession::default();
+        assert!(session.resume_token().is_none());
+        assert_eq!(session.sequence(), 0);
+        assert_eq!(session.event_count(), 0);
+    }
+
+    #[test]
+    fn fake_streaming_session_heartbeat_tracking() {
+        let mut session = FakeStreamingSession::new();
+        let now = std::time::Instant::now();
+
+        assert!(session.last_heartbeat_sent().is_none());
+        assert!(session.last_heartbeat_ack().is_none());
+
+        session.record_heartbeat_sent(now);
+        assert!(session.last_heartbeat_sent().is_some());
+
+        session.record_heartbeat_ack(now);
+        assert!(session.last_heartbeat_ack().is_some());
+    }
+
+    #[test]
+    fn fake_streaming_session_sequence_tracking() {
+        let mut session = FakeStreamingSession::new();
+        assert_eq!(session.sequence(), 0);
+        session.set_sequence(10);
+        assert_eq!(session.sequence(), 10);
+    }
+
+    #[test]
+    fn fake_streaming_session_multiple_events() {
+        let mut session = FakeStreamingSession::new();
+        for i in 0..5 {
+            session.add_event(FakeStreamEvent {
+                seq: i,
+                event_type: "msg".to_string(),
+                payload: serde_json::json!({"seq": i}),
+            });
+        }
+        assert_eq!(session.event_count(), 5);
+        assert_eq!(session.sequence(), 5);
+    }
+
+    #[test]
+    fn fake_streaming_session_heartbeat_seq_and_ack_seq() {
+        let session = FakeStreamingSession::new();
+        // Initially both should be 0
+        assert_eq!(session.heartbeat_seq(), 0);
+        assert_eq!(session.ack_seq(), 0);
+    }
+
+    // ---- Additional FakePollingConnector tests ----
+
+    #[test]
+    fn fake_polling_connector_initial_state() {
+        let api = FakePollingApi::always_success(2);
+        let connector = FakePollingConnector::new(api);
+        assert_eq!(connector.processed_count(), 0);
+        assert_eq!(connector.api().poll_count(), 0);
+    }
+
+    #[test]
+    fn fake_polling_connector_with_poll_interval() {
+        let api = FakePollingApi::always_success(1);
+        let connector = FakePollingConnector::new(api).with_poll_interval_ms(50);
+        // Just verify it builds without panic
+        assert_eq!(connector.processed_count(), 0);
+    }
+
+    #[test]
+    fn fake_polling_connector_with_config() {
+        let api = FakePollingApi::always_success(1);
+        let config = SupervisorConfig::default()
+            .with_base_backoff_ms(100)
+            .with_max_backoff_ms(1000)
+            .with_max_consecutive_failures(5);
+        let connector = FakePollingConnector::new(api).with_config(config);
+        assert_eq!(connector.processed_count(), 0);
+    }
 }

@@ -331,4 +331,172 @@ mod tests {
         let e = StreamError::InvalidState(String::new());
         assert_eq!(e.to_string(), "Invalid state: ");
     }
+
+    // ── Send + Sync trait bounds ──
+
+    #[test]
+    fn stream_error_is_send() {
+        fn assert_send<T: Send>() {}
+        assert_send::<StreamError>();
+    }
+
+    #[test]
+    fn stream_error_is_sync() {
+        fn assert_sync<T: Sync>() {}
+        assert_sync::<StreamError>();
+    }
+
+    // ── Unicode content in error messages ──
+
+    #[test]
+    fn connection_failed_unicode() {
+        let e = StreamError::ConnectionFailed("verbindung fehlgeschlagen \u{1F4A5}".into());
+        let display = e.to_string();
+        assert!(display.contains('\u{1F4A5}'));
+    }
+
+    #[test]
+    fn parse_error_unicode() {
+        let e = StreamError::ParseError("\u{00E9}\u{00E8}\u{00EA}".into());
+        assert!(e.to_string().contains('\u{00E9}'));
+    }
+
+    #[test]
+    fn connection_closed_unicode_reason() {
+        let e = StreamError::ConnectionClosed {
+            reason: "\u{1F44B} goodbye".into(),
+            code: Some(1000),
+        };
+        assert!(e.to_string().contains('\u{1F44B}'));
+    }
+
+    #[test]
+    fn http_error_unicode_message() {
+        let e = StreamError::HttpError {
+            status: 500,
+            message: "\u{26A0} internal".into(),
+        };
+        assert!(e.to_string().contains('\u{26A0}'));
+    }
+
+    #[test]
+    fn invalid_state_unicode() {
+        let e = StreamError::InvalidState("\u{2620} danger".into());
+        assert!(e.to_string().contains('\u{2620}'));
+    }
+
+    #[test]
+    fn websocket_error_unicode() {
+        let e = StreamError::WebSocketError("\u{1F310} network".into());
+        assert!(e.to_string().contains('\u{1F310}'));
+    }
+
+    #[test]
+    fn sse_error_unicode() {
+        let e = StreamError::SseError("\u{1F4E1} stream".into());
+        assert!(e.to_string().contains('\u{1F4E1}'));
+    }
+
+    // ── Large content ──
+
+    #[test]
+    fn connection_failed_long_message() {
+        let long_msg = "x".repeat(10_000);
+        let e = StreamError::ConnectionFailed(long_msg.clone());
+        assert_eq!(e.to_string(), format!("Connection failed: {long_msg}"));
+    }
+
+    #[test]
+    fn parse_error_long_message() {
+        let long_msg = "y".repeat(5_000);
+        let e = StreamError::ParseError(long_msg.clone());
+        assert_eq!(e.to_string(), format!("Parse error: {long_msg}"));
+    }
+
+    // ── Boundary values ──
+
+    #[test]
+    fn http_error_max_status() {
+        let e = StreamError::HttpError {
+            status: u16::MAX,
+            message: "max".into(),
+        };
+        assert!(e.to_string().contains("65535"));
+    }
+
+    #[test]
+    fn buffer_overflow_zero_values() {
+        let e = StreamError::BufferOverflow {
+            size: 0,
+            limit: 0,
+        };
+        assert_eq!(
+            e.to_string(),
+            "Buffer overflow: 0 bytes exceeds limit of 0"
+        );
+    }
+
+    #[test]
+    fn buffer_overflow_max_values() {
+        let e = StreamError::BufferOverflow {
+            size: usize::MAX,
+            limit: usize::MAX,
+        };
+        let display = e.to_string();
+        assert!(display.contains(&usize::MAX.to_string()));
+    }
+
+    #[test]
+    fn reconnect_limit_max_attempts() {
+        let e = StreamError::ReconnectLimitExceeded {
+            attempts: u32::MAX,
+        };
+        assert!(e.to_string().contains(&u32::MAX.to_string()));
+    }
+
+    #[test]
+    fn timeout_max_duration() {
+        let e = StreamError::Timeout(Duration::from_secs(u64::MAX / 2));
+        let display = e.to_string();
+        assert!(display.contains("Timeout"));
+    }
+
+    #[test]
+    fn connection_closed_max_code() {
+        let e = StreamError::ConnectionClosed {
+            reason: "max".into(),
+            code: Some(u16::MAX),
+        };
+        let debug = format!("{e:?}");
+        assert!(debug.contains("65535"));
+    }
+
+    // ── io error variants ──
+
+    #[test]
+    fn io_error_different_kinds() {
+        let kinds = [
+            std::io::ErrorKind::ConnectionRefused,
+            std::io::ErrorKind::ConnectionReset,
+            std::io::ErrorKind::PermissionDenied,
+            std::io::ErrorKind::AddrInUse,
+        ];
+        for kind in kinds {
+            let io_err = std::io::Error::new(kind, "test");
+            let stream_err: StreamError = io_err.into();
+            assert!(matches!(stream_err, StreamError::IoError(_)));
+        }
+    }
+
+    // ── StreamResult type alias ──
+
+    #[test]
+    fn stream_result_type_alias_works() {
+        // Verify StreamResult is a proper Result alias
+        let ok_val: StreamResult<i32> = std::result::Result::Ok(42);
+        let err_val: StreamResult<i32> =
+            std::result::Result::Err(StreamError::ParseError("bad".into()));
+        assert!(ok_val.is_ok());
+        assert!(err_val.is_err());
+    }
 }

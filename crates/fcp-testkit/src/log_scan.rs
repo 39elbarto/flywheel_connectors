@@ -577,4 +577,188 @@ mod tests {
             );
         }
     }
+
+    // ---- Additional scanner tests ----
+
+    #[test]
+    fn scan_finding_debug_format() {
+        let finding = super::ScanFinding {
+            line: 5,
+            rule_id: "TEST_RULE".into(),
+            severity: ScanSeverity::Warn,
+            message: "test message".into(),
+            snippet: "test-snippet".into(),
+            json_path: None,
+        };
+        let dbg = format!("{finding:?}");
+        assert!(dbg.contains("ScanFinding"));
+        assert!(dbg.contains("TEST_RULE"));
+        assert!(dbg.contains("Warn"));
+    }
+
+    #[test]
+    fn scan_finding_without_json_path() {
+        let finding = super::ScanFinding {
+            line: 1,
+            rule_id: "R".into(),
+            severity: ScanSeverity::Error,
+            message: "m".into(),
+            snippet: "s".into(),
+            json_path: None,
+        };
+        let cloned = finding.clone();
+        assert!(cloned.json_path.is_none());
+        assert_eq!(finding.line, cloned.line);
+    }
+
+    #[test]
+    fn scan_severity_clone() {
+        let s = ScanSeverity::Error;
+        let c = s;
+        assert_eq!(s, c);
+    }
+
+    #[test]
+    fn scan_severity_copy() {
+        let a = ScanSeverity::Warn;
+        let b = a;
+        // both are still valid
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn allowlist_default_is_empty() {
+        let al = super::LogScanAllowlist::default();
+        let dbg = format!("{al:?}");
+        assert!(dbg.contains("LogScanAllowlist"));
+    }
+
+    #[test]
+    fn allowlist_clone() {
+        let mut al = super::LogScanAllowlist::new();
+        al.allow_rule_id("TEST");
+        al.allow_line(42);
+        al.allow_substring("safe");
+        al.allow_path_substring("$.ok");
+        let cloned = al.clone();
+        let dbg = format!("{cloned:?}");
+        assert!(dbg.contains("LogScanAllowlist"));
+    }
+
+    #[test]
+    fn scanner_clone() {
+        let scanner = LogRedactionScanner::new();
+        let cloned = scanner.clone();
+        // Both should produce same results
+        let input = r#"{"email":"user@example.com"}"#;
+        assert_eq!(scanner.scan_jsonl(input).len(), cloned.scan_jsonl(input).len());
+    }
+
+    #[test]
+    fn scanner_debug() {
+        let scanner = LogRedactionScanner::new();
+        let dbg = format!("{scanner:?}");
+        assert!(dbg.contains("LogRedactionScanner"));
+    }
+
+    #[test]
+    fn multiple_findings_on_single_line() {
+        let scanner = LogRedactionScanner::new();
+        let input = r#"{"a":"user@one.com","b":"admin@two.com"}"#;
+        let findings = scanner.scan_jsonl(input);
+        let email_count = findings.iter().filter(|f| f.rule_id == "EMAIL").count();
+        assert_eq!(email_count, 2);
+    }
+
+    #[test]
+    fn aws_access_key_akia_detected() {
+        let scanner = LogRedactionScanner::new();
+        let input = r#"{"key":"AKIA1234567890ABCDEF"}"#;
+        let findings = scanner.scan_jsonl(input);
+        assert!(findings.iter().any(|f| f.rule_id == "AWS_ACCESS_KEY_ID"));
+    }
+
+    #[test]
+    fn aws_access_key_asia_detected() {
+        let scanner = LogRedactionScanner::new();
+        let input = r#"{"key":"ASIA1234567890ABCDEF"}"#;
+        let findings = scanner.scan_jsonl(input);
+        assert!(findings.iter().any(|f| f.rule_id == "AWS_ACCESS_KEY_ID"));
+    }
+
+    #[test]
+    fn anthropic_api_key_detected() {
+        let scanner = LogRedactionScanner::new();
+        let input = r#"{"key":"sk-ant-abcdefghijklmnopqrstuvwxyz"}"#;
+        let findings = scanner.scan_jsonl(input);
+        assert!(findings.iter().any(|f| f.rule_id == "ANTHROPIC_API_KEY"));
+    }
+
+    #[test]
+    fn bearer_token_case_insensitive() {
+        let scanner = LogRedactionScanner::new();
+        let input = "Bearer abcdefghijklmnopqrstuvwxyz012345";
+        let findings = scanner.scan_jsonl(input);
+        assert!(findings.iter().any(|f| f.rule_id == "BEARER_TOKEN"));
+
+        let input2 = "BEARER abcdefghijklmnopqrstuvwxyz012345";
+        let findings2 = scanner.scan_jsonl(input2);
+        assert!(findings2.iter().any(|f| f.rule_id == "BEARER_TOKEN"));
+    }
+
+    #[test]
+    fn whitespace_only_lines_skipped() {
+        let scanner = LogRedactionScanner::new();
+        let input = "   \n\n  \n";
+        let findings = scanner.scan_jsonl(input);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn scan_finding_line_numbers_correct() {
+        let scanner = LogRedactionScanner::new();
+        let input = r#"{"safe":"ok"}
+{"safe":"still ok"}
+{"email":"leak@test.com"}
+{"safe":"also ok"}"#;
+        let findings = scanner.scan_jsonl(input);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].line, 3);
+    }
+
+    #[test]
+    fn scan_json_with_numeric_values_no_false_positives() {
+        let scanner = LogRedactionScanner::new();
+        let input = r#"{"count":12345,"amount":1.23,"flag":true}"#;
+        let findings = scanner.scan_jsonl(input);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn allowlist_path_substring_partial_match() {
+        let mut allowlist = super::LogScanAllowlist::new();
+        allowlist.allow_path_substring("safe");
+        let scanner = LogRedactionScanner::with_allowlist(allowlist);
+        let input = r#"{"safe_field":"user@example.com"}"#;
+        let findings = scanner.scan_jsonl(input);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn scan_json_array_at_top_level() {
+        let scanner = LogRedactionScanner::new();
+        let input = r#"{"list":["user@one.com","no-secret","admin@two.com"]}"#;
+        let findings = scanner.scan_jsonl(input);
+        let email_count = findings.iter().filter(|f| f.rule_id == "EMAIL").count();
+        assert_eq!(email_count, 2);
+    }
+
+    #[test]
+    fn scan_finding_snippet_contains_match() {
+        let scanner = LogRedactionScanner::new();
+        let input = r#"{"email":"admin@example.com"}"#;
+        let findings = scanner.scan_jsonl(input);
+        assert_eq!(findings.len(), 1);
+        assert!(findings[0].snippet.contains("admin@example.com"));
+    }
 }

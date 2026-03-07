@@ -1222,4 +1222,311 @@ mod tests {
         let cloned = client.clone();
         assert_eq!(client.url(), cloned.url());
     }
+
+    // ── WsMessage: unicode text ─────────────────────────────────────────
+
+    #[test]
+    fn ws_message_text_unicode() {
+        let msg = WsMessage::text("\u{1F600}\u{1F4A9}\u{2764}\u{FE0F}");
+        assert!(msg.is_text());
+        assert_eq!(msg.as_text(), Some("\u{1F600}\u{1F4A9}\u{2764}\u{FE0F}"));
+    }
+
+    #[test]
+    fn ws_message_text_cjk_characters() {
+        let msg = WsMessage::text("\u{4F60}\u{597D}\u{4E16}\u{754C}");
+        assert_eq!(msg.as_text().unwrap().chars().count(), 4);
+    }
+
+    #[test]
+    fn ws_message_text_long() {
+        let long_text = "a".repeat(100_000);
+        let msg = WsMessage::text(long_text.clone());
+        assert_eq!(msg.as_text(), Some(long_text.as_str()));
+    }
+
+    #[test]
+    fn ws_message_binary_large() {
+        let data = vec![0xAB_u8; 65_536];
+        let msg = WsMessage::binary(data.clone());
+        assert_eq!(msg.as_binary(), Some(data.as_slice()));
+    }
+
+    // ── WsMessage: json with various types ──────────────────────────────
+
+    #[test]
+    fn ws_message_json_text_number() {
+        let msg = WsMessage::text("42");
+        let val: i64 = msg.json().unwrap();
+        assert_eq!(val, 42);
+    }
+
+    #[test]
+    fn ws_message_json_text_string() {
+        let msg = WsMessage::text(r#""hello""#);
+        let val: String = msg.json().unwrap();
+        assert_eq!(val, "hello");
+    }
+
+    #[test]
+    fn ws_message_json_text_bool() {
+        let msg = WsMessage::text("true");
+        let val: bool = msg.json().unwrap();
+        assert!(val);
+    }
+
+    #[test]
+    fn ws_message_json_text_null() {
+        let msg = WsMessage::text("null");
+        let val: serde_json::Value = msg.json().unwrap();
+        assert!(val.is_null());
+    }
+
+    #[test]
+    fn ws_message_json_text_array() {
+        let msg = WsMessage::text("[1,2,3]");
+        let val: Vec<i32> = msg.json().unwrap();
+        assert_eq!(val, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn ws_message_json_binary_invalid() {
+        let msg = WsMessage::binary(b"not json{".to_vec());
+        assert!(msg.json::<serde_json::Value>().is_err());
+    }
+
+    #[test]
+    fn ws_message_json_close_with_frame_rejects() {
+        let msg = WsMessage::Close(Some(WsCloseFrame::normal()));
+        assert!(msg.json::<serde_json::Value>().is_err());
+    }
+
+    // ── WsMessage: clone variants ───────────────────────────────────────
+
+    #[test]
+    fn ws_message_clone_binary() {
+        let msg = WsMessage::binary(vec![1, 2, 3]);
+        let cloned = msg.clone();
+        assert_eq!(msg, cloned);
+    }
+
+    #[test]
+    fn ws_message_clone_ping() {
+        let msg = WsMessage::Ping(vec![9, 8, 7]);
+        let cloned = msg.clone();
+        assert_eq!(msg, cloned);
+    }
+
+    #[test]
+    fn ws_message_clone_pong() {
+        let msg = WsMessage::Pong(vec![5, 6]);
+        let cloned = msg.clone();
+        assert_eq!(msg, cloned);
+    }
+
+    #[test]
+    fn ws_message_clone_close_none() {
+        let msg = WsMessage::Close(None);
+        let cloned = msg.clone();
+        assert_eq!(msg, cloned);
+    }
+
+    #[test]
+    fn ws_message_clone_close_with_frame() {
+        let msg = WsMessage::Close(Some(WsCloseFrame::new(1002, "protocol error")));
+        let cloned = msg.clone();
+        assert_eq!(msg, cloned);
+    }
+
+    // ── WsMessage: debug variants ───────────────────────────────────────
+
+    #[test]
+    fn ws_message_debug_binary() {
+        let msg = WsMessage::binary(vec![1, 2]);
+        let dbg = format!("{msg:?}");
+        assert!(dbg.contains("Binary"));
+    }
+
+    #[test]
+    fn ws_message_debug_ping() {
+        let msg = WsMessage::Ping(vec![]);
+        let dbg = format!("{msg:?}");
+        assert!(dbg.contains("Ping"));
+    }
+
+    #[test]
+    fn ws_message_debug_pong() {
+        let msg = WsMessage::Pong(vec![]);
+        let dbg = format!("{msg:?}");
+        assert!(dbg.contains("Pong"));
+    }
+
+    #[test]
+    fn ws_message_debug_close() {
+        let msg = WsMessage::Close(Some(WsCloseFrame::normal()));
+        let dbg = format!("{msg:?}");
+        assert!(dbg.contains("Close"));
+    }
+
+    // ── WsCloseFrame: additional tests ──────────────────────────────────
+
+    #[test]
+    fn ws_close_frame_unicode_reason() {
+        let frame = WsCloseFrame::new(1000, "\u{1F44B} bye");
+        assert_eq!(frame.reason, "\u{1F44B} bye");
+    }
+
+    #[test]
+    fn ws_close_frame_max_code() {
+        let frame = WsCloseFrame::new(u16::MAX, "max code");
+        assert_eq!(frame.code, u16::MAX);
+    }
+
+    #[test]
+    fn ws_close_frame_zero_code() {
+        let frame = WsCloseFrame::new(0, "zero");
+        assert_eq!(frame.code, 0);
+    }
+
+    #[test]
+    fn ws_close_frame_long_reason() {
+        let long_reason = "r".repeat(10_000);
+        let frame = WsCloseFrame::new(1000, long_reason.clone());
+        assert_eq!(frame.reason, long_reason);
+    }
+
+    #[test]
+    fn ws_close_frame_equality_different_code() {
+        let a = WsCloseFrame::new(1000, "same");
+        let b = WsCloseFrame::new(1001, "same");
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn ws_close_frame_equality_different_reason() {
+        let a = WsCloseFrame::new(1000, "reason a");
+        let b = WsCloseFrame::new(1000, "reason b");
+        assert_ne!(a, b);
+    }
+
+    // ── WsConfig: additional builder tests ──────────────────────────────
+
+    #[test]
+    fn ws_config_connect_timeout_zero() {
+        let config = WsConfig::new().with_connect_timeout(Duration::ZERO);
+        assert_eq!(config.connect_timeout, Duration::ZERO);
+    }
+
+    #[test]
+    fn ws_config_max_message_size_zero() {
+        let config = WsConfig::new().with_max_message_size(0);
+        assert_eq!(config.max_message_size, 0);
+    }
+
+    #[test]
+    fn ws_config_max_message_size_large() {
+        let config = WsConfig::new().with_max_message_size(usize::MAX);
+        assert_eq!(config.max_message_size, usize::MAX);
+    }
+
+    #[test]
+    fn ws_config_header_overwrite() {
+        let config = WsConfig::new()
+            .with_header("Key", "val1")
+            .with_header("Key", "val2");
+        assert_eq!(config.headers.get("Key"), Some(&"val2".to_string()));
+        assert_eq!(config.headers.len(), 1);
+    }
+
+    #[test]
+    fn ws_config_auto_reconnect_toggle() {
+        let config = WsConfig::new()
+            .with_auto_reconnect(false)
+            .with_auto_reconnect(true);
+        assert!(config.auto_reconnect);
+    }
+
+    // ── WsClient: additional tests ──────────────────────────────────────
+
+    #[test]
+    fn ws_client_new_default_config() {
+        let client = WsClient::new("ws://localhost:8080");
+        assert_eq!(client.config().connect_timeout, Duration::from_secs(30));
+        assert!(client.config().auto_reconnect);
+    }
+
+    #[test]
+    fn ws_client_with_config_custom() {
+        let config = WsConfig::new()
+            .with_auto_reconnect(false)
+            .with_max_message_size(512);
+        let client = WsClient::with_config("ws://example.com/ws", config);
+        assert!(!client.config().auto_reconnect);
+        assert_eq!(client.config().max_message_size, 512);
+    }
+
+    #[test]
+    fn ws_client_url_with_path() {
+        let client = WsClient::new("ws://localhost:8080/api/v1/stream");
+        assert_eq!(client.url(), "ws://localhost:8080/api/v1/stream");
+    }
+
+    #[test]
+    fn ws_client_wss_url() {
+        let client = WsClient::new("wss://secure.example.com/ws");
+        assert_eq!(client.url(), "wss://secure.example.com/ws");
+    }
+
+    // ── Roundtrip edge cases ────────────────────────────────────────────
+
+    #[test]
+    fn ws_message_roundtrip_empty_text() {
+        let original = WsMessage::text("");
+        let message: Message = original.clone().into();
+        let roundtrip: WsMessage = message.into();
+        assert_eq!(roundtrip, original);
+    }
+
+    #[test]
+    fn ws_message_roundtrip_empty_binary() {
+        let original = WsMessage::binary(vec![]);
+        let message: Message = original.clone().into();
+        let roundtrip: WsMessage = message.into();
+        assert_eq!(roundtrip, original);
+    }
+
+    #[test]
+    fn ws_message_roundtrip_empty_ping() {
+        let original = WsMessage::Ping(vec![]);
+        let message: Message = original.clone().into();
+        let roundtrip: WsMessage = message.into();
+        assert_eq!(roundtrip, original);
+    }
+
+    #[test]
+    fn ws_message_roundtrip_empty_pong() {
+        let original = WsMessage::Pong(vec![]);
+        let message: Message = original.clone().into();
+        let roundtrip: WsMessage = message.into();
+        assert_eq!(roundtrip, original);
+    }
+
+    // ── socket_addr edge cases ──────────────────────────────────────────
+
+    #[test]
+    fn socket_addr_ipv6_full() {
+        let url = WsUrl {
+            host: "2001:db8::1".to_string(),
+            port: 443,
+            path: "/ws".to_string(),
+            tls: true,
+        };
+        assert_eq!(socket_addr(&url), "[2001:db8::1]:443");
+    }
+
+    #[test]
+    fn socket_addr_default_port() {
+        let url = WsUrl::parse("ws://example.com/ws").unwrap();
+        assert_eq!(socket_addr(&url), "example.com:80");
+    }
 }

@@ -14,9 +14,13 @@ use axum::{
     Json, Router,
     body::Body,
     extract::{Path, State},
-    http::StatusCode,
+    http::{
+        HeaderMap, HeaderValue, StatusCode,
+        header::{CACHE_CONTROL, ETAG, IF_MODIFIED_SINCE, IF_NONE_MATCH, LAST_MODIFIED, VARY},
+    },
     routing::{get, post},
 };
+use chrono::{DateTime, Utc};
 use fcp_async_core::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use fcp_async_core::net::TcpListener;
 #[cfg(unix)]
@@ -29,11 +33,11 @@ use fcp_core::{
     SelfCheckReport,
 };
 use fcp_host::{
-    BudgetPolicyEngine, CacheValidator, ConnectorArchetype, ConnectorRegistry, ConnectorSummary,
-    DiscoveryEndpoint, DiscoveryFilter, DiscoveryResponse, DoctorReport, DoctorRequest,
-    DoctorService, HostHealthResponse, HostHealthStatus, IntrospectionResponse, PreflightRequest,
-    PreflightResponse, RequestPriority, ResilienceError, ResilienceLayer, SafetyTierExt,
-    merge_connector_health,
+    BudgetPolicyEngine, CacheMetadata, CacheValidator, ConnectorArchetype, ConnectorRegistry,
+    ConnectorSummary, DiscoveryEndpoint, DiscoveryFilter, DiscoveryResponse, DoctorReport,
+    DoctorRequest, DoctorService, HostHealthResponse, HostHealthStatus, IntrospectionResponse,
+    PreflightRequest, PreflightResponse, RequestPriority, ResilienceError, ResilienceLayer,
+    SafetyTierExt, merge_connector_health,
 };
 use fcp_host::{HostError, HostResult};
 use hyper::body::Incoming;
@@ -453,6 +457,88 @@ impl DiscoverPayload {
     }
 }
 
+fn parse_http_datetime(value: &str) -> Option<DateTime<Utc>> {
+    chrono::DateTime::parse_from_rfc2822(value)
+        .ok()
+        .map(|parsed| parsed.with_timezone(&Utc))
+}
+
+fn format_http_datetime(value: &DateTime<Utc>) -> String {
+    value.format("%a, %d %b %Y %H:%M:%S GMT").to_string()
+}
+
+fn cache_validator_from_headers(headers: &HeaderMap) -> Option<CacheValidator> {
+    let if_none_match = headers
+        .get(IF_NONE_MATCH)
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned);
+    let if_modified_since = headers
+        .get(IF_MODIFIED_SINCE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(parse_http_datetime);
+
+    if if_none_match.is_none() && if_modified_since.is_none() {
+        None
+    } else {
+        Some(CacheValidator {
+            if_none_match,
+            if_modified_since,
+        })
+    }
+}
+
+fn merge_cache_validator(
+    request_validator: Option<CacheValidator>,
+    headers: &HeaderMap,
+) -> Option<CacheValidator> {
+    let header_validator = cache_validator_from_headers(headers);
+    match (request_validator, header_validator) {
+        (Some(mut request), Some(header)) => {
+            if request.if_none_match.is_none() {
+                request.if_none_match = header.if_none_match;
+            }
+            if request.if_modified_since.is_none() {
+                request.if_modified_since = header.if_modified_since;
+            }
+            Some(request)
+        }
+        (Some(request), None) => Some(request),
+        (None, Some(header)) => Some(header),
+        (None, None) => None,
+    }
+}
+
+fn cache_headers(cache: Option<&CacheMetadata>) -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    let Some(cache) = cache else {
+        return headers;
+    };
+
+    if let Ok(value) = HeaderValue::from_str(&cache.etag) {
+        headers.insert(ETAG, value);
+    }
+    if let Ok(value) = HeaderValue::from_str(&format_http_datetime(&cache.last_modified)) {
+        headers.insert(LAST_MODIFIED, value);
+    }
+
+    let mut cache_control = format!("max-age={}", cache.max_age_seconds);
+    if let Some(stale_while_revalidate_seconds) = cache.stale_while_revalidate_seconds {
+        cache_control.push_str(&format!(
+            ", stale-while-revalidate={stale_while_revalidate_seconds}"
+        ));
+    }
+    if let Ok(value) = HeaderValue::from_str(&cache_control) {
+        headers.insert(CACHE_CONTROL, value);
+    }
+    headers.insert(
+        VARY,
+        HeaderValue::from_static("If-None-Match, If-Modified-Since"),
+    );
+    headers
+}
+
 #[derive(Debug)]
 enum BindTarget {
     Tcp(SocketAddr),
@@ -694,9 +780,11 @@ async fn doctor_handler(
 
 async fn discover_handler(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Json(payload): Json<DiscoverPayload>,
-) -> Json<DiscoveryResponse> {
-    let (filter, cache_validator) = payload.into_parts();
+) -> (HeaderMap, Json<DiscoveryResponse>) {
+    let (filter, request_validator) = payload.into_parts();
+    let cache_validator = merge_cache_validator(request_validator, &headers);
     let started_at = Instant::now();
     tracing::debug!(
         event = "discover_request",
@@ -717,21 +805,28 @@ async fn discover_handler(
         duration_ms = started_at.elapsed().as_millis() as u64,
         "discovery request complete"
     );
-    Json(response)
+    let response_headers = cache_headers(response.cache.as_ref());
+    (response_headers, Json(response))
 }
 
 async fn introspect_handler(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Path(connector_id): Path<String>,
-) -> Result<Json<IntrospectionResponse>, (StatusCode, String)> {
+) -> Result<(HeaderMap, Json<IntrospectionResponse>), (StatusCode, String)> {
     let connector_id = parse_connector_id(&connector_id)?;
+    let cache_validator = cache_validator_from_headers(&headers);
     let started_at = Instant::now();
     tracing::debug!(
         event = "introspect_request",
         connector_id = %connector_id,
         "processing introspection request"
     );
-    match state.discovery.introspect(&connector_id).await {
+    match state
+        .discovery
+        .introspect_with_cache(&connector_id, cache_validator)
+        .await
+    {
         Ok(response) => {
             tracing::debug!(
                 event = "introspect_response",
@@ -740,7 +835,8 @@ async fn introspect_handler(
                 duration_ms = started_at.elapsed().as_millis() as u64,
                 "introspection request complete"
             );
-            Ok(Json(response))
+            let response_headers = cache_headers(response.cache.as_ref());
+            Ok((response_headers, Json(response)))
         }
         Err(err) => {
             tracing::warn!(
@@ -883,6 +979,7 @@ fn map_host_error(err: HostError) -> (StatusCode, String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::TimeZone;
     use fcp_core::OperationId;
 
     fn compiled_test_connector_binary() -> std::path::PathBuf {
@@ -1372,6 +1469,73 @@ mod tests {
         assert!(config.config.is_some());
         assert_eq!(config.categories, vec!["utility", "test"]);
         assert_eq!(config.version.as_deref(), Some("2.3.4"));
+    }
+
+    #[test]
+    fn cache_validator_from_headers_reads_http_validators() {
+        let mut headers = HeaderMap::new();
+        headers.insert(IF_NONE_MATCH, HeaderValue::from_static("\"etag-123\""));
+        headers.insert(
+            IF_MODIFIED_SINCE,
+            HeaderValue::from_static("Sat, 07 Mar 2026 15:00:00 GMT"),
+        );
+
+        let validator = cache_validator_from_headers(&headers).expect("validator from headers");
+        assert_eq!(validator.if_none_match.as_deref(), Some("\"etag-123\""));
+        assert_eq!(
+            validator.if_modified_since,
+            Some(Utc.with_ymd_and_hms(2026, 3, 7, 15, 0, 0).unwrap())
+        );
+    }
+
+    #[test]
+    fn merge_cache_validator_prefers_payload_and_fills_missing_header_fields() {
+        let mut headers = HeaderMap::new();
+        headers.insert(IF_NONE_MATCH, HeaderValue::from_static("\"etag-header\""));
+        headers.insert(
+            IF_MODIFIED_SINCE,
+            HeaderValue::from_static("Sat, 07 Mar 2026 15:00:00 GMT"),
+        );
+
+        let merged = merge_cache_validator(
+            Some(CacheValidator {
+                if_none_match: Some("\"etag-body\"".to_string()),
+                if_modified_since: None,
+            }),
+            &headers,
+        )
+        .expect("merged validator");
+
+        assert_eq!(merged.if_none_match.as_deref(), Some("\"etag-body\""));
+        assert_eq!(
+            merged.if_modified_since,
+            Some(Utc.with_ymd_and_hms(2026, 3, 7, 15, 0, 0).unwrap())
+        );
+    }
+
+    #[test]
+    fn cache_headers_emit_http_cache_metadata() {
+        let cache = CacheMetadata {
+            etag: "\"etag-123\"".to_string(),
+            last_modified: Utc.with_ymd_and_hms(2026, 3, 7, 15, 0, 0).unwrap(),
+            max_age_seconds: 300,
+            stale_while_revalidate_seconds: Some(60),
+        };
+
+        let headers = cache_headers(Some(&cache));
+        assert_eq!(headers.get(ETAG).unwrap(), "\"etag-123\"");
+        assert_eq!(
+            headers.get(LAST_MODIFIED).unwrap(),
+            "Sat, 07 Mar 2026 15:00:00 GMT"
+        );
+        assert_eq!(
+            headers.get(CACHE_CONTROL).unwrap(),
+            "max-age=300, stale-while-revalidate=60"
+        );
+        assert_eq!(
+            headers.get(VARY).unwrap(),
+            "If-None-Match, If-Modified-Since"
+        );
     }
 
     #[test]

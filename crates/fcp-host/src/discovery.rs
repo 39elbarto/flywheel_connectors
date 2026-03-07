@@ -849,10 +849,12 @@ where
         connector_id: &ConnectorId,
         validator: Option<CacheValidator>,
     ) -> HostResult<IntrospectionResponse> {
-        let summary = self
-            .registry
-            .get(connector_id)
-            .await
+        let cache_result = self.cache.get_or_refresh(&*self.registry).await;
+        let summary = cache_result
+            .connectors
+            .iter()
+            .find(|summary| &summary.id == connector_id)
+            .cloned()
             .ok_or_else(|| HostError::ConnectorNotFound(connector_id.to_string()))?;
 
         let introspection = self
@@ -868,7 +870,6 @@ where
             .unwrap_or(ConnectorArchetype::RequestResponse);
 
         let rate_limits = self.registry.get_rate_limits(connector_id).await;
-        let cache_result = self.cache.get_or_refresh(&*self.registry).await;
 
         // Convert operations to tool descriptors
         let tools: Vec<ToolDescriptor> = introspection
@@ -1535,6 +1536,74 @@ mod tests {
         }
     }
 
+    struct VolatileGetRegistry {
+        summary: ConnectorSummary,
+        list_calls: Arc<AtomicUsize>,
+        get_calls: Arc<AtomicUsize>,
+    }
+
+    impl VolatileGetRegistry {
+        fn new(
+            summary: ConnectorSummary,
+            list_calls: Arc<AtomicUsize>,
+            get_calls: Arc<AtomicUsize>,
+        ) -> Self {
+            Self {
+                summary,
+                list_calls,
+                get_calls,
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ConnectorRegistry for VolatileGetRegistry {
+        async fn list(&self) -> Vec<ConnectorSummary> {
+            self.list_calls.fetch_add(1, Ordering::SeqCst);
+            vec![self.summary.clone()]
+        }
+
+        async fn get(&self, id: &ConnectorId) -> Option<ConnectorSummary> {
+            if &self.summary.id != id {
+                return None;
+            }
+
+            let mut summary = self.summary.clone();
+            let offset_millis = i64::try_from(self.get_calls.fetch_add(1, Ordering::SeqCst))
+                .unwrap_or(i64::MAX.saturating_sub(1));
+            summary.last_health_check = summary.last_health_check.map(|timestamp| {
+                timestamp + chrono::Duration::milliseconds(offset_millis.saturating_add(1))
+            });
+            Some(summary)
+        }
+
+        async fn get_introspection(&self, id: &ConnectorId) -> Option<Introspection> {
+            (&self.summary.id == id).then_some(Introspection {
+                operations: vec![],
+                events: vec![],
+                resource_types: vec![],
+                auth_caps: None,
+                event_caps: None,
+            })
+        }
+
+        async fn get_archetype(&self, _id: &ConnectorId) -> Option<ConnectorArchetype> {
+            None
+        }
+
+        async fn get_rate_limits(&self, _id: &ConnectorId) -> Option<RateLimitDeclarations> {
+            None
+        }
+
+        async fn self_check(&self, id: &ConnectorId) -> Option<SelfCheckReport> {
+            (&self.summary.id == id).then_some(SelfCheckReport::ok())
+        }
+
+        fn version(&self) -> u64 {
+            1
+        }
+    }
+
     struct AllowPolicy;
 
     #[async_trait::async_trait]
@@ -1930,6 +1999,56 @@ mod tests {
 
         assert!(second.tools.is_empty());
         assert_eq!(second.meta.as_ref().map(|meta| meta.status), Some(304));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn introspection_with_cache_ignores_volatile_get_summary_fields() {
+        let list_calls = Arc::new(AtomicUsize::new(0));
+        let get_calls = Arc::new(AtomicUsize::new(0));
+        let summary = make_summary(
+            "cache-introspect-volatile",
+            "test",
+            "v1",
+            vec!["test"],
+            SafetyTier::Safe,
+            ConnectorHealth::healthy(),
+        );
+        let registry = VolatileGetRegistry::new(
+            summary.clone(),
+            Arc::clone(&list_calls),
+            Arc::clone(&get_calls),
+        );
+        let endpoint = DiscoveryEndpoint::with_cache_ttl(
+            Arc::new(registry),
+            Arc::new(AllowPolicy),
+            Duration::from_secs(30),
+        );
+
+        let first = endpoint
+            .introspect_with_cache(&summary.id, None)
+            .await
+            .expect("introspection should succeed");
+        let etag = first
+            .cache
+            .as_ref()
+            .expect("cache metadata should be present")
+            .etag
+            .clone();
+
+        let second = endpoint
+            .introspect_with_cache(
+                &summary.id,
+                Some(CacheValidator {
+                    if_none_match: Some(etag),
+                    if_modified_since: None,
+                }),
+            )
+            .await
+            .expect("conditional introspection should succeed");
+
+        assert_eq!(second.meta.as_ref().map(|meta| meta.status), Some(304));
+        assert_eq!(list_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(get_calls.load(Ordering::SeqCst), 0);
     }
 
     #[fcp_async_core::runtime::test]

@@ -25,6 +25,7 @@ use fcp_host::{
     PreflightResponse,
 };
 use fcp_testkit::LogCapture;
+use reqwest::header::{CACHE_CONTROL, ETAG, HeaderMap, HeaderValue, IF_NONE_MATCH, LAST_MODIFIED};
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 
@@ -371,19 +372,7 @@ async fn http_get_json<T>(
 where
     T: DeserializeOwned + Send + 'static,
 {
-    let cx = test_cx();
-    let value = asupersync_tokio_compat::runtime::with_tokio_context(&cx, move || async move {
-        client
-            .get(url)
-            .send()
-            .await?
-            .error_for_status()?
-            .json::<T>()
-            .await
-    })
-    .await
-    .ok_or_else(|| std::io::Error::other("tokio-compat GET JSON request cancelled"))??;
-    Ok(value)
+    Ok(http_get_json_response(client, url, None).await?.body)
 }
 
 async fn http_post_json<B, T>(
@@ -395,20 +384,105 @@ where
     B: serde::Serialize + Send + 'static,
     T: DeserializeOwned + Send + 'static,
 {
+    Ok(http_post_json_response(client, url, body, None).await?.body)
+}
+
+struct HttpJsonResponse<T> {
+    status: reqwest::StatusCode,
+    headers: HeaderMap,
+    body: T,
+}
+
+async fn http_get_json_response<T>(
+    client: reqwest::Client,
+    url: String,
+    headers: Option<HeaderMap>,
+) -> Result<HttpJsonResponse<T>, Box<dyn std::error::Error>>
+where
+    T: DeserializeOwned + Send + 'static,
+{
     let cx = test_cx();
-    let value = asupersync_tokio_compat::runtime::with_tokio_context(&cx, move || async move {
-        client
-            .post(url)
-            .json(&body)
-            .send()
-            .await?
-            .error_for_status()?
-            .json::<T>()
-            .await
+    let response = asupersync_tokio_compat::runtime::with_tokio_context(&cx, move || async move {
+        let mut request = client.get(url);
+        if let Some(headers) = headers {
+            request = request.headers(headers);
+        }
+        let response = request.send().await?.error_for_status()?;
+        let status = response.status();
+        let headers = response.headers().clone();
+        let body = response.json::<T>().await?;
+        Ok::<_, reqwest::Error>(HttpJsonResponse {
+            status,
+            headers,
+            body,
+        })
+    })
+    .await
+    .ok_or_else(|| std::io::Error::other("tokio-compat GET JSON request cancelled"))??;
+    Ok(response)
+}
+
+async fn http_post_json_response<B, T>(
+    client: reqwest::Client,
+    url: String,
+    body: B,
+    headers: Option<HeaderMap>,
+) -> Result<HttpJsonResponse<T>, Box<dyn std::error::Error>>
+where
+    B: serde::Serialize + Send + 'static,
+    T: DeserializeOwned + Send + 'static,
+{
+    let cx = test_cx();
+    let response = asupersync_tokio_compat::runtime::with_tokio_context(&cx, move || async move {
+        let mut request = client.post(url).json(&body);
+        if let Some(headers) = headers {
+            request = request.headers(headers);
+        }
+        let response = request.send().await?.error_for_status()?;
+        let status = response.status();
+        let headers = response.headers().clone();
+        let body = response.json::<T>().await?;
+        Ok::<_, reqwest::Error>(HttpJsonResponse {
+            status,
+            headers,
+            body,
+        })
     })
     .await
     .ok_or_else(|| std::io::Error::other("tokio-compat POST JSON request cancelled"))??;
-    Ok(value)
+    Ok(response)
+}
+
+fn assert_cache_headers(
+    headers: &HeaderMap,
+    cache: &fcp_host::CacheMetadata,
+) -> Result<(), Box<dyn std::error::Error>> {
+    assert_eq!(
+        headers.get(ETAG).and_then(|value| value.to_str().ok()),
+        Some(cache.etag.as_str())
+    );
+
+    let cache_control = headers
+        .get(CACHE_CONTROL)
+        .and_then(|value| value.to_str().ok())
+        .expect("cache-control header should be present");
+    let mut expected_cache_control = format!("max-age={}", cache.max_age_seconds);
+    if let Some(stale) = cache.stale_while_revalidate_seconds {
+        expected_cache_control.push_str(&format!(", stale-while-revalidate={stale}"));
+    }
+    assert_eq!(cache_control, expected_cache_control);
+
+    let last_modified = headers
+        .get(LAST_MODIFIED)
+        .and_then(|value| value.to_str().ok())
+        .expect("last-modified header should be present");
+    let parsed_last_modified = chrono::DateTime::parse_from_rfc2822(last_modified)?;
+    assert_eq!(
+        parsed_last_modified.timestamp(),
+        cache.last_modified.timestamp()
+    );
+
+    Ok(())
 }
 
 struct HttpHostProcess {
@@ -655,8 +729,16 @@ async fn assert_discovery_routes(
     assert!(health.connectors.contains_key(connector_a_id));
     assert!(health.connectors.contains_key(connector_b_id));
 
-    let discover_all: DiscoveryResponse =
-        http_post_json(client.clone(), url("/rpc/discover"), json!({})).await?;
+    let discover_all = http_post_json_response::<_, DiscoveryResponse>(
+        client.clone(),
+        url("/rpc/discover"),
+        json!({}),
+        None,
+    )
+    .await?;
+    assert_eq!(discover_all.status, reqwest::StatusCode::OK);
+    let discover_all_headers = discover_all.headers.clone();
+    let discover_all = discover_all.body;
     assert_eq!(discover_all.connectors.len(), 2);
     let discover_all_cache = discover_all
         .cache
@@ -664,6 +746,7 @@ async fn assert_discovery_routes(
         .expect("discover response should expose cache metadata");
     assert!(!discover_all_cache.etag.is_empty());
     assert!(discover_all.meta.is_none());
+    assert_cache_headers(&discover_all_headers, discover_all_cache)?;
     assert!(
         discover_all
             .connectors
@@ -683,18 +766,23 @@ async fn assert_discovery_routes(
             .all(|connector| connector.health.is_healthy())
     );
 
-    let discover_filtered: DiscoveryResponse = http_post_json(
+    let discover_filtered = http_post_json_response::<_, DiscoveryResponse>(
         client.clone(),
         url("/rpc/discover"),
         json!({ "category": "primary" }),
+        None,
     )
     .await?;
+    assert_eq!(discover_filtered.status, reqwest::StatusCode::OK);
+    let discover_filtered_headers = discover_filtered.headers.clone();
+    let discover_filtered = discover_filtered.body;
     assert_eq!(discover_filtered.connectors.len(), 1);
     let discover_filtered_cache = discover_filtered
         .cache
         .as_ref()
         .expect("filtered discover response should expose cache metadata");
     assert_ne!(discover_all_cache.etag, discover_filtered_cache.etag);
+    assert_cache_headers(&discover_filtered_headers, discover_filtered_cache)?;
     assert_eq!(discover_filtered.connectors[0].id, *connector_a_id);
     assert_eq!(discover_filtered.connectors[0].tool_count, 1);
     assert!(matches!(
@@ -703,14 +791,21 @@ async fn assert_discovery_routes(
     ));
     assert!(discover_filtered.connectors[0].health.is_healthy());
 
-    let discover_not_modified: DiscoveryResponse = http_post_json(
+    let mut discover_not_modified_headers = HeaderMap::new();
+    discover_not_modified_headers.insert(
+        IF_NONE_MATCH,
+        HeaderValue::from_str(&discover_all_cache.etag)?,
+    );
+    let discover_not_modified = http_post_json_response::<_, DiscoveryResponse>(
         client.clone(),
         url("/rpc/discover"),
-        json!({
-            "_cache": { "if_none_match": discover_all_cache.etag }
-        }),
+        json!({}),
+        Some(discover_not_modified_headers),
     )
     .await?;
+    assert_eq!(discover_not_modified.status, reqwest::StatusCode::OK);
+    let discover_not_modified_response_headers = discover_not_modified.headers.clone();
+    let discover_not_modified = discover_not_modified.body;
     assert!(discover_not_modified.connectors.is_empty());
     assert_eq!(
         discover_not_modified.meta.as_ref().map(|meta| meta.status),
@@ -723,12 +818,23 @@ async fn assert_discovery_routes(
             .map(|cache| cache.etag.as_str()),
         Some(discover_all_cache.etag.as_str())
     );
+    assert_cache_headers(
+        &discover_not_modified_response_headers,
+        discover_not_modified
+            .cache
+            .as_ref()
+            .expect("not-modified discover should still expose cache metadata"),
+    )?;
 
-    let introspection: IntrospectionResponse = http_get_json(
+    let introspection = http_get_json_response::<IntrospectionResponse>(
         client.clone(),
         url(&format!("/rpc/introspect/{}", connector_a_id.as_str())),
+        None,
     )
     .await?;
+    assert_eq!(introspection.status, reqwest::StatusCode::OK);
+    let introspection_headers = introspection.headers.clone();
+    let introspection = introspection.body;
     assert_eq!(introspection.connector.id, *connector_a_id);
     assert_eq!(introspection.connector.tool_count, 1);
     assert!(matches!(
@@ -738,6 +844,47 @@ async fn assert_discovery_routes(
     assert!(introspection.connector.health.is_healthy());
     assert_eq!(introspection.tools.len(), 1);
     assert_eq!(introspection.tools[0].name, "test.echo");
+    assert_cache_headers(
+        &introspection_headers,
+        introspection
+            .cache
+            .as_ref()
+            .expect("introspection should expose cache metadata"),
+    )?;
+
+    let introspection_cache = introspection
+        .cache
+        .as_ref()
+        .expect("introspection cache metadata");
+    let mut introspect_not_modified_headers = HeaderMap::new();
+    introspect_not_modified_headers.insert(
+        IF_NONE_MATCH,
+        HeaderValue::from_str(&introspection_cache.etag)?,
+    );
+    let introspect_not_modified = http_get_json_response::<IntrospectionResponse>(
+        client.clone(),
+        url(&format!("/rpc/introspect/{}", connector_a_id.as_str())),
+        Some(introspect_not_modified_headers),
+    )
+    .await?;
+    assert_eq!(introspect_not_modified.status, reqwest::StatusCode::OK);
+    let introspect_not_modified_headers = introspect_not_modified.headers.clone();
+    let introspect_not_modified = introspect_not_modified.body;
+    assert_eq!(
+        introspect_not_modified
+            .meta
+            .as_ref()
+            .map(|meta| meta.status),
+        Some(304)
+    );
+    assert!(introspect_not_modified.tools.is_empty());
+    assert_cache_headers(
+        &introspect_not_modified_headers,
+        introspect_not_modified
+            .cache
+            .as_ref()
+            .expect("not-modified introspection should expose cache metadata"),
+    )?;
 
     let preflight: PreflightResponse = http_post_json(
         client.clone(),

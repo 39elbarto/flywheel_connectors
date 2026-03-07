@@ -4045,6 +4045,45 @@ mod gossip_integration {
         );
     }
 
+    /// Test: Malformed gossip summaries are rejected without creating peer state.
+    #[test]
+    fn test_invalid_iblt_gossip_summary_rejected() {
+        const TEST_NAME: &str = "invalid_iblt_gossip_summary_rejected";
+        const CATEGORY: &str = "gossip";
+        emit_test_start(TEST_NAME, CATEGORY);
+
+        let zone_id = ZoneId::work();
+        let mut gossip = MeshGossip::with_defaults(TailscaleNodeId::new("node-local"));
+
+        let invalid_summary = GossipSummary {
+            from: TailscaleNodeId::new("node-invalid"),
+            zone_id: zone_id.clone(),
+            epoch_id: EpochId::new("epoch-invalid"),
+            object_filter_digest: [9u8; 32],
+            symbol_filter_digest: [8u8; 32],
+            object_count: 1,
+            symbol_count: 1,
+            iblt: b"not-json".to_vec(),
+            timestamp: 100,
+            signature: None,
+        };
+
+        gossip.handle_summary(invalid_summary.clone(), 120);
+
+        assert_eq!(gossip.peer_count(), 0);
+
+        emit_test_pass(
+            TEST_NAME,
+            CATEGORY,
+            serde_json::json!({
+                "zone": zone_id.as_str(),
+                "peer_count": gossip.peer_count(),
+                "iblt_bytes": invalid_summary.iblt.len(),
+                "rejected_reason": "iblt_invalid_encoding",
+            }),
+        );
+    }
+
     /// Test: `MeshGossip` drops over-config requests.
     #[test]
     fn test_gossip_request_rejects_over_config_bounds() {
@@ -4130,6 +4169,76 @@ mod gossip_integration {
                 "peer_count_node_b": node_b.peer_count(),
                 "peer_count_node_c": node_c.peer_count(),
                 "objects_reconciled": response.have_objects.len(),
+            }),
+        );
+    }
+
+    /// Test: Compact summaries reduce bytes versus an explicit object/symbol listing baseline.
+    #[test]
+    fn test_gossip_summary_bandwidth_reduction_vs_explicit_baseline() {
+        const TEST_NAME: &str = "gossip_summary_bandwidth_reduction_vs_explicit_baseline";
+        const CATEGORY: &str = "gossip";
+        emit_test_start(TEST_NAME, CATEGORY);
+
+        let zone_id = ZoneId::work();
+        let epoch = EpochId::new("epoch-bandwidth");
+        let config = GossipConfig {
+            reconciliation_batch_size: 1,
+            ..GossipConfig::default()
+        };
+        let mut gossip = MeshGossip::new(TailscaleNodeId::new("node-bandwidth"), config);
+        let now = 1_000u64;
+
+        let mut explicit_objects = Vec::new();
+        let mut explicit_symbols = Vec::new();
+
+        for object_index in 0..96 {
+            let object_id = test_object_id(&format!("bandwidth-{object_index:03}"));
+            explicit_objects.push(object_id);
+            gossip.announce_object(&zone_id, &object_id, ObjectAdmissionClass::Admitted, now);
+
+            for esi in 0..4 {
+                explicit_symbols.push(serde_json::json!({
+                    "object_id": object_id,
+                    "esi": esi,
+                }));
+                gossip.announce_symbol(
+                    &zone_id,
+                    &object_id,
+                    esi,
+                    ObjectAdmissionClass::Admitted,
+                    now,
+                );
+            }
+        }
+
+        let summary = gossip
+            .create_summary(&zone_id, epoch)
+            .expect("summary should exist");
+        let summary_bytes = serde_json::to_vec(&summary)
+            .expect("summary should serialize")
+            .len();
+        let baseline_bytes = serde_json::to_vec(&serde_json::json!({
+            "zone_id": zone_id,
+            "objects": explicit_objects,
+            "symbols": explicit_symbols,
+        }))
+        .expect("baseline should serialize")
+        .len();
+
+        assert!(
+            summary_bytes < baseline_bytes,
+            "compact summary should be smaller than explicit baseline (summary={summary_bytes}, baseline={baseline_bytes})"
+        );
+
+        emit_test_pass(
+            TEST_NAME,
+            CATEGORY,
+            serde_json::json!({
+                "zone": zone_id.as_str(),
+                "summary_bytes": summary_bytes,
+                "baseline_bytes": baseline_bytes,
+                "bandwidth_reduction_bytes": baseline_bytes - summary_bytes,
             }),
         );
     }

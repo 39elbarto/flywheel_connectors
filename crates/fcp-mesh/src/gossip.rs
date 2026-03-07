@@ -17,6 +17,7 @@
 //! implementation uses simpler set-based structures that can be upgraded to XOR/IBLT later.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
@@ -39,6 +40,9 @@ pub const DEFAULT_SUMMARY_TTL_SECS: u64 = 300;
 
 /// Default reconciliation batch size (bounded work).
 pub const DEFAULT_RECONCILIATION_BATCH_SIZE: usize = 1000;
+
+/// Minimum byte budget for encoded IBLT placeholders.
+pub const MIN_IBLT_BYTES_BUDGET: usize = 512;
 
 /// Maximum object IDs in a single gossip request (anti-amplification).
 pub const MAX_OBJECT_IDS_PER_REQUEST: usize = 100;
@@ -178,6 +182,28 @@ pub struct IbltPlaceholder {
     change_seq: u64,
 }
 
+/// Errors when decoding a placeholder IBLT sketch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IbltDecodeError {
+    /// Encoded sketch exceeded the configured byte budget.
+    TooLarge { len: usize, max: usize },
+    /// Encoded sketch could not be parsed.
+    InvalidEncoding,
+    /// Encoded sketch decoded more changes than allowed.
+    TooManyChanges { decoded: usize, max: usize },
+}
+
+impl IbltDecodeError {
+    #[must_use]
+    pub const fn reason_code(&self) -> &'static str {
+        match self {
+            Self::TooLarge { .. } => "iblt_bytes_exceeded",
+            Self::InvalidEncoding => "iblt_invalid_encoding",
+            Self::TooManyChanges { .. } => "iblt_change_limit_exceeded",
+        }
+    }
+}
+
 impl IbltPlaceholder {
     /// Create a new IBLT placeholder with default capacity.
     #[must_use]
@@ -221,11 +247,54 @@ impl IbltPlaceholder {
         self.change_seq
     }
 
+    /// Get the number of change cells encoded in this placeholder sketch.
+    #[must_use]
+    pub fn entry_count(&self) -> usize {
+        self.recent_changes.len()
+    }
+
     /// Encode IBLT state for wire transmission.
     #[must_use]
     pub fn encode(&self) -> Vec<u8> {
         // Simplified encoding: just serialize recent changes
-        serde_json::to_vec(&self.recent_changes).unwrap_or_default()
+        serde_json::to_vec(&self.recent_changes).unwrap_or_else(|_| b"[]".to_vec())
+    }
+
+    /// Decode IBLT state from a wire payload using explicit bounds.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the payload exceeds byte/change budgets or is malformed.
+    pub fn decode_with_limits(
+        bytes: &[u8],
+        max_changes: usize,
+        max_bytes: usize,
+    ) -> Result<Self, IbltDecodeError> {
+        if bytes.len() > max_bytes {
+            return Err(IbltDecodeError::TooLarge {
+                len: bytes.len(),
+                max: max_bytes,
+            });
+        }
+
+        if bytes.is_empty() {
+            return Ok(Self::with_max_changes(max_changes));
+        }
+
+        let recent_changes: VecDeque<(ObjectId, Option<u32>)> =
+            serde_json::from_slice(bytes).map_err(|_| IbltDecodeError::InvalidEncoding)?;
+        if recent_changes.len() > max_changes {
+            return Err(IbltDecodeError::TooManyChanges {
+                decoded: recent_changes.len(),
+                max: max_changes,
+            });
+        }
+
+        Ok(Self {
+            change_seq: u64::try_from(recent_changes.len()).unwrap_or(u64::MAX),
+            recent_changes,
+            max_changes,
+        })
     }
 
     /// Clear all tracked changes.
@@ -792,6 +861,23 @@ impl Default for GossipConfig {
     }
 }
 
+impl GossipConfig {
+    /// Derived byte budget for encoded IBLT payloads.
+    ///
+    /// This keeps placeholder sketches explicitly bounded without needing a
+    /// second independently tuned knob while the implementation is still in a
+    /// baseline/upgradeable state.
+    #[must_use]
+    pub const fn max_iblt_bytes(&self) -> usize {
+        let derived = self.reconciliation_batch_size.saturating_mul(48);
+        if derived < MIN_IBLT_BYTES_BUDGET {
+            MIN_IBLT_BYTES_BUDGET
+        } else {
+            derived
+        }
+    }
+}
+
 impl MeshGossip {
     /// Create a new gossip controller.
     #[must_use]
@@ -906,28 +992,63 @@ impl MeshGossip {
     pub fn create_summary(&self, zone_id: &ZoneId, epoch_id: EpochId) -> Option<GossipSummary> {
         self.zone_states.get(zone_id).map(|state| {
             let epoch_label = epoch_id.as_str().to_string();
+            let iblt_cells = state.iblt_state.entry_count();
             let mut summary = state.create_summary(self.local_node.clone(), epoch_id);
+            let max_iblt_bytes = self.config.max_iblt_bytes();
+            let mut fallback_reason = "none";
             summary.object_count = summary
                 .object_count
                 .min(u32::try_from(self.config.max_objects_per_summary).unwrap_or(u32::MAX));
             summary.symbol_count = summary
                 .symbol_count
                 .min(u32::try_from(self.config.max_symbols_per_summary).unwrap_or(u32::MAX));
-            if tracing::enabled!(tracing::Level::DEBUG) {
+            if summary.iblt.len() > max_iblt_bytes {
+                summary.iblt = b"[]".to_vec();
+                fallback_reason = "iblt_bytes_exceeded";
+            }
+            if tracing::enabled!(tracing::Level::DEBUG) || fallback_reason != "none" {
                 let object_digest = hex::encode(summary.object_filter_digest);
                 let symbol_digest = hex::encode(summary.symbol_filter_digest);
-                debug!(
-                    component = "mesh.gossip",
-                    event = "summary_created",
-                    node_id = %self.local_node.as_str(),
-                    zone_id = %zone_id,
-                    epoch_id = %epoch_label,
-                    object_count = summary.object_count,
-                    symbol_count = summary.symbol_count,
-                    reconciliation_batch_size = self.config.reconciliation_batch_size,
-                    object_digest = %object_digest,
-                    symbol_digest = %symbol_digest
-                );
+                let summary_bytes =
+                    serde_json::to_vec(&summary).map_or(0usize, |bytes| bytes.len());
+                let summary_bytes = u64::try_from(summary_bytes).unwrap_or(u64::MAX);
+                let iblt_bytes = u64::try_from(summary.iblt.len()).unwrap_or(u64::MAX);
+                let iblt_cells = u64::try_from(iblt_cells).unwrap_or(u64::MAX);
+                if fallback_reason == "none" {
+                    debug!(
+                        component = "mesh.gossip",
+                        event = "summary_created",
+                        node_id = %self.local_node.as_str(),
+                        zone_id = %zone_id,
+                        epoch_id = %epoch_label,
+                        object_count = summary.object_count,
+                        symbol_count = summary.symbol_count,
+                        reconciliation_batch_size = self.config.reconciliation_batch_size,
+                        summary_bytes,
+                        iblt_bytes,
+                        iblt_cells,
+                        fallback_reason,
+                        object_digest = %object_digest,
+                        symbol_digest = %symbol_digest
+                    );
+                } else {
+                    info!(
+                        component = "mesh.gossip",
+                        event = "summary_created",
+                        node_id = %self.local_node.as_str(),
+                        zone_id = %zone_id,
+                        epoch_id = %epoch_label,
+                        object_count = summary.object_count,
+                        symbol_count = summary.symbol_count,
+                        reconciliation_batch_size = self.config.reconciliation_batch_size,
+                        summary_bytes,
+                        iblt_bytes,
+                        iblt_cells,
+                        fallback_reason,
+                        object_digest = %object_digest,
+                        symbol_digest = %symbol_digest
+                    );
+                }
             }
             summary
         })
@@ -971,6 +1092,37 @@ impl MeshGossip {
         let peer_id = summary.from.clone();
         let object_count = summary.object_count;
         let symbol_count = summary.symbol_count;
+        let iblt_bytes = summary.iblt.len();
+        let max_iblt_bytes = self.config.max_iblt_bytes();
+        let decode_start = Instant::now();
+        let iblt_cells = match IbltPlaceholder::decode_with_limits(
+            &summary.iblt,
+            self.config.reconciliation_batch_size,
+            max_iblt_bytes,
+        ) {
+            Ok(decoded) => decoded.entry_count(),
+            Err(error) => {
+                let decode_ms =
+                    u64::try_from(decode_start.elapsed().as_millis()).unwrap_or(u64::MAX);
+                warn!(
+                    component = "mesh.gossip",
+                    event = "summary_rejected",
+                    reason = error.reason_code(),
+                    peer_id = %summary.from.as_str(),
+                    zone_id = %summary.zone_id,
+                    object_count,
+                    symbol_count,
+                    iblt_bytes,
+                    max_iblt_bytes,
+                    decode_ms
+                );
+                return;
+            }
+        };
+        let decode_ms = u64::try_from(decode_start.elapsed().as_millis()).unwrap_or(u64::MAX);
+        let summary_bytes = serde_json::to_vec(&summary).map_or(0usize, |bytes| bytes.len());
+        let summary_bytes = u64::try_from(summary_bytes).unwrap_or(u64::MAX);
+        let iblt_cells = u64::try_from(iblt_cells).unwrap_or(u64::MAX);
 
         // Update peer state
         let peer_state = self
@@ -984,6 +1136,10 @@ impl MeshGossip {
             peer_id = %peer_id.as_str(),
             object_count,
             symbol_count,
+            summary_bytes,
+            iblt_bytes,
+            iblt_cells,
+            decode_ms,
             accepted = true
         );
     }
@@ -1221,6 +1377,7 @@ fn symbol_key(object_id: &ObjectId, esi: u32) -> Vec<u8> {
 mod tests {
     use super::*;
     use crate::admission::ObjectAdmissionClass;
+    use serde::Serialize;
 
     fn test_zone() -> ZoneId {
         ZoneId::work()
@@ -1313,6 +1470,49 @@ mod tests {
         // Should only keep last 3
         assert_eq!(iblt.recent_changes().len(), 3);
         assert_eq!(iblt.change_seq(), 5);
+    }
+
+    #[test]
+    fn iblt_encode_empty_is_json_array() {
+        let iblt = IbltPlaceholder::new();
+        assert_eq!(iblt.encode(), b"[]".to_vec());
+    }
+
+    #[test]
+    fn iblt_decode_rejects_oversized_payload() {
+        let err = IbltPlaceholder::decode_with_limits(
+            &vec![b'x'; MIN_IBLT_BYTES_BUDGET + 1],
+            8,
+            MIN_IBLT_BYTES_BUDGET,
+        )
+        .expect_err("oversized payload should fail");
+        assert_eq!(
+            err,
+            IbltDecodeError::TooLarge {
+                len: MIN_IBLT_BYTES_BUDGET + 1,
+                max: MIN_IBLT_BYTES_BUDGET,
+            }
+        );
+    }
+
+    #[test]
+    fn iblt_decode_rejects_invalid_encoding() {
+        let err = IbltPlaceholder::decode_with_limits(b"not-json", 8, MIN_IBLT_BYTES_BUDGET)
+            .expect_err("malformed payload should fail");
+        assert_eq!(err, IbltDecodeError::InvalidEncoding);
+    }
+
+    #[test]
+    fn iblt_decode_rejects_change_limit_exceeded() {
+        let mut iblt = IbltPlaceholder::with_max_changes(4);
+        let obj_id = test_object_id("obj-many");
+        for esi in 0..3 {
+            iblt.note_local_change(&obj_id, Some(esi));
+        }
+
+        let err = IbltPlaceholder::decode_with_limits(&iblt.encode(), 2, MIN_IBLT_BYTES_BUDGET)
+            .expect_err("decoded changes should respect configured limit");
+        assert_eq!(err, IbltDecodeError::TooManyChanges { decoded: 3, max: 2 });
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -1536,6 +1736,31 @@ mod tests {
     }
 
     #[test]
+    fn mesh_gossip_create_summary_falls_back_when_iblt_exceeds_budget() {
+        let config = GossipConfig {
+            reconciliation_batch_size: 64,
+            ..GossipConfig::default()
+        };
+        let mut gossip = MeshGossip::new(test_node("local"), config);
+        let obj_id = test_object_id("obj-summary-budget");
+
+        for esi in 0..512 {
+            gossip.announce_symbol(
+                &test_zone(),
+                &obj_id,
+                esi,
+                ObjectAdmissionClass::Admitted,
+                1_000,
+            );
+        }
+
+        let summary = gossip
+            .create_summary(&test_zone(), test_epoch())
+            .expect("summary should exist");
+        assert_eq!(summary.iblt, b"[]".to_vec());
+    }
+
+    #[test]
     fn mesh_gossip_handle_summary_updates_peer() {
         let mut gossip = MeshGossip::with_defaults(test_node("local"));
 
@@ -1650,6 +1875,52 @@ mod tests {
         };
 
         gossip.handle_summary(summary, 1000);
+        assert_eq!(gossip.peer_count(), 0);
+    }
+
+    #[test]
+    fn mesh_gossip_rejects_summary_with_oversized_iblt() {
+        let config = GossipConfig {
+            reconciliation_batch_size: 1,
+            ..GossipConfig::default()
+        };
+        let mut gossip = MeshGossip::new(test_node("local"), config.clone());
+
+        let summary = GossipSummary {
+            from: test_node("peer-1"),
+            zone_id: test_zone(),
+            epoch_id: test_epoch(),
+            object_filter_digest: [0; 32],
+            symbol_filter_digest: [0; 32],
+            object_count: 1,
+            symbol_count: 1,
+            iblt: vec![0u8; config.max_iblt_bytes() + 1],
+            timestamp: 1_000,
+            signature: None,
+        };
+
+        gossip.handle_summary(summary, 1_000);
+        assert_eq!(gossip.peer_count(), 0);
+    }
+
+    #[test]
+    fn mesh_gossip_rejects_summary_with_invalid_iblt() {
+        let mut gossip = MeshGossip::with_defaults(test_node("local"));
+
+        let summary = GossipSummary {
+            from: test_node("peer-1"),
+            zone_id: test_zone(),
+            epoch_id: test_epoch(),
+            object_filter_digest: [0; 32],
+            symbol_filter_digest: [0; 32],
+            object_count: 1,
+            symbol_count: 1,
+            iblt: b"not-json".to_vec(),
+            timestamp: 1_000,
+            signature: None,
+        };
+
+        gossip.handle_summary(summary, 1_000);
         assert_eq!(gossip.peer_count(), 0);
     }
 
@@ -2043,6 +2314,60 @@ mod tests {
         assert_eq!(
             config.reconciliation_batch_size,
             DEFAULT_RECONCILIATION_BATCH_SIZE
+        );
+        assert!(
+            config.max_iblt_bytes() >= MIN_IBLT_BYTES_BUDGET,
+            "IBLT byte budget should be explicitly bounded"
+        );
+    }
+
+    #[derive(Serialize)]
+    struct NaiveAvailabilitySummary {
+        objects: Vec<ObjectId>,
+        symbols: Vec<(ObjectId, u32)>,
+    }
+
+    #[test]
+    fn optimized_summary_is_smaller_than_naive_baseline() {
+        let config = GossipConfig {
+            reconciliation_batch_size: 1,
+            ..GossipConfig::default()
+        };
+        let mut gossip = MeshGossip::new(test_node("local"), config);
+        let mut objects = Vec::new();
+        let mut symbols = Vec::new();
+
+        for object_index in 0..96 {
+            let object_id = test_object_id(&format!("naive-{object_index}"));
+            objects.push(object_id);
+            gossip.announce_object(
+                &test_zone(),
+                &object_id,
+                ObjectAdmissionClass::Admitted,
+                1_000,
+            );
+            for esi in 0..4 {
+                symbols.push((object_id, esi));
+                gossip.announce_symbol(
+                    &test_zone(),
+                    &object_id,
+                    esi,
+                    ObjectAdmissionClass::Admitted,
+                    1_000,
+                );
+            }
+        }
+
+        let summary = gossip
+            .create_summary(&test_zone(), test_epoch())
+            .expect("summary should exist");
+        let optimized_bytes = serde_json::to_vec(&summary).expect("summary should serialize");
+        let baseline_bytes = serde_json::to_vec(&NaiveAvailabilitySummary { objects, symbols })
+            .expect("baseline should serialize");
+
+        assert!(
+            optimized_bytes.len() < baseline_bytes.len(),
+            "optimized summary should be smaller than explicit baseline"
         );
     }
 

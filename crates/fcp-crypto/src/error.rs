@@ -14,6 +14,15 @@ pub enum CryptoError {
         actual: usize,
     },
 
+    /// Invalid signature length.
+    #[error("invalid signature length: expected {expected}, got {actual}")]
+    InvalidSignatureLength {
+        /// Expected signature length in bytes.
+        expected: usize,
+        /// Actual signature length provided.
+        actual: usize,
+    },
+
     /// Invalid signature.
     #[error("signature verification failed")]
     SignatureVerificationFailed,
@@ -94,6 +103,15 @@ mod tests {
             actual: 16,
         };
         assert_eq!(err.to_string(), "invalid key length: expected 32, got 16");
+    }
+
+    #[test]
+    fn error_display_invalid_signature_length() {
+        let err = CryptoError::InvalidSignatureLength {
+            expected: 64,
+            actual: 32,
+        };
+        assert_eq!(err.to_string(), "invalid signature length: expected 64, got 32");
     }
 
     #[test]

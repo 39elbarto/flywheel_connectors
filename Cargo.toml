@@ -111,6 +111,7 @@ members = [
     "connectors/annas-archive",
     "connectors/make",
     "connectors/bigquery",
+    "connectors/whisper",
 ]
 
 # Default to the FCP2 platform core crates (connectors are explicitly targeted).

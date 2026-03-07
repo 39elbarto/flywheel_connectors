@@ -471,10 +471,14 @@ async fn duckdb_allow_valid_token_connector_suite_passes() {
         config: duckdb_config(&mock.base_url()),
         handshake,
         invoke: Some(invoke),
-        invoke_expectations: Some(InvokeExpectations {
+        invoke_expectations: InvokeExpectations {
             expect_error: false,
-            require_capability_denial: false,
-        }),
+            expect_decision_receipt: false,
+            expect_audit_event: false,
+            expect_receipt: false,
+            expected_reason_code: None,
+            rate_limit_pool: None,
+        },
     };
 
     let mut runner = E2eRunner::new("fcp-e2e-duckdb-happy");
@@ -484,10 +488,14 @@ async fn duckdb_allow_valid_token_connector_suite_passes() {
         .expect("connector suite run");
 
     assert!(report.passed, "allow valid token should pass: {report:#?}");
-    let invoke_entry = report.logs.iter().find(|e| e.step == "invoke").expect("invoke log entry");
+    let invoke_entry = report.logs.iter()
+        .find(|e| e.context.get("operation") == Some(&json!("invoke")))
+        .expect("invoke log entry");
     assert_eq!(invoke_entry.result, "pass", "invoke should pass: {invoke_entry:#?}");
-    let invoke_status = invoke_entry.invoke_status.as_ref().expect("invoke_status present");
-    assert_eq!(*invoke_status, InvokeStatus::Ok, "invoke status should be Ok");
+    assert_eq!(
+        invoke_entry.context.get("invoke_status"),
+        Some(&json!(format!("{:?}", InvokeStatus::Ok)))
+    );
 }
 
 #[test]

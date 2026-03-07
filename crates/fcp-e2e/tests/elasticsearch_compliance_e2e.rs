@@ -118,7 +118,33 @@ impl FcpConnector for ElasticsearchConnectorAdapter {
         self.connector.handle_shutdown(json!({})).await.map(|_| ())
     }
 
-    fn introspect(&self) -> Introspection { self.introspection.clone() }
+    fn introspect(&self) -> Introspection {
+        Introspection {
+            operations: vec![OperationInfo {
+                id: OperationId::from_static("elasticsearch.search"),
+                summary: "Search documents".to_string(),
+                description: None,
+                input_schema: json!({"type": "object"}),
+                output_schema: json!({"type": "object"}),
+                capability: CapabilityId::from_static("elasticsearch.search.read"),
+                risk_level: RiskLevel::Low,
+                safety_tier: SafetyTier::Safe,
+                idempotency: IdempotencyClass::Strict,
+                ai_hints: AgentHint {
+                    when_to_use: "Search Elasticsearch documents.".to_string(),
+                    common_mistakes: Vec::new(),
+                    examples: Vec::new(),
+                    related: Vec::new(),
+                },
+                rate_limit: None,
+                requires_approval: None,
+            }],
+            events: Vec::new(),
+            resource_types: Vec::new(),
+            auth_caps: None,
+            event_caps: None,
+        }
+    }
 
     async fn invoke(&self, req: InvokeRequest) -> fcp_core::FcpResult<InvokeResponse> {
         let verifier = self.verifier.as_ref().ok_or(FcpError::Internal {
@@ -313,19 +339,27 @@ async fn elasticsearch_allow_valid_token_connector_suite_passes() {
         config: elasticsearch_config(&mock.base_url()),
         handshake,
         invoke: Some(invoke),
-        invoke_expectations: Some(InvokeExpectations {
+        invoke_expectations: InvokeExpectations {
             expect_error: false,
-            require_capability_denial: false,
-        }),
+            expect_decision_receipt: false,
+            expect_audit_event: false,
+            expect_receipt: false,
+            expected_reason_code: None,
+            rate_limit_pool: None,
+        },
     };
 
     let mut runner = E2eRunner::new("fcp-e2e-elasticsearch-happy");
     let report = runner.run_connector_suite(&mut connector, suite).await.expect("connector suite run");
     assert!(report.passed, "allow valid token should pass: {report:#?}");
-    let invoke_entry = report.logs.iter().find(|e| e.step == "invoke").expect("invoke log entry");
+    let invoke_entry = report.logs.iter()
+        .find(|e| e.context.get("operation") == Some(&json!("invoke")))
+        .expect("invoke log entry");
     assert_eq!(invoke_entry.result, "pass", "invoke should pass: {invoke_entry:#?}");
-    let invoke_status = invoke_entry.invoke_status.as_ref().expect("invoke_status present");
-    assert_eq!(*invoke_status, InvokeStatus::Ok, "invoke status should be Ok");
+    assert_eq!(
+        invoke_entry.context.get("invoke_status"),
+        Some(&json!(format!("{:?}", InvokeStatus::Ok)))
+    );
 }
 
 #[test]

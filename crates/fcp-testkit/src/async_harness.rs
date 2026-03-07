@@ -167,6 +167,34 @@ mod tests {
         assert_eq!(fields["correlation_id"], context.correlation_id());
     }
 
+    #[test]
+    fn for_scenario_preserves_scenario_and_derives_correlation() {
+        let context = AsyncTestContext::for_scenario("scenario-xyz");
+
+        assert_eq!(context.scenario_id(), "scenario-xyz");
+        assert!(!context.run_id().is_empty());
+        assert_eq!(
+            context.correlation_id(),
+            deterministic_correlation_id(context.run_id(), context.scenario_id())
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn request_context_runs_future_within_budget() {
+        let context = request_context(Duration::from_millis(50));
+
+        let result = context.run(async { 7_u8 }).await;
+
+        assert_eq!(result, Ok(7_u8));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn run_with_timeout_returns_value_before_deadline() {
+        let result = run_with_timeout(Duration::from_millis(50), async { "done" }).await;
+
+        assert_eq!(result, Ok("done"));
+    }
+
     #[fcp_async_core::runtime::test]
     async fn run_with_timeout_times_out() {
         let result = run_with_timeout(Duration::from_millis(5), async {
@@ -183,6 +211,34 @@ mod tests {
         let (sender, mut receiver) = bounded_queue("test-queue", 4);
         sender.send(7_u8).await.expect("send to bounded queue");
         assert_eq!(receiver.recv().await, Some(7_u8));
+    }
+
+    #[test]
+    fn shutdown_channel_preserves_initial_state_and_updates() {
+        let (sender, receiver) = shutdown_channel(true);
+
+        assert!(*receiver.borrow());
+        sender.send(false).expect("update shutdown signal");
+        assert!(!*receiver.borrow());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn sleep_or_shutdown_completes_when_sleep_wins() {
+        let (_sender, mut receiver) = shutdown_channel(false);
+
+        let result = sleep_or_shutdown(Duration::from_millis(1), &mut receiver).await;
+
+        assert_eq!(result, Ok(()));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn sleep_or_shutdown_returns_cancelled_when_shutdown_is_signaled() {
+        let (sender, mut receiver) = shutdown_channel(false);
+        sender.send(true).expect("signal shutdown");
+
+        let result = sleep_or_shutdown(Duration::from_secs(1), &mut receiver).await;
+
+        assert!(matches!(result, Err(AsyncError::Cancelled)));
     }
 
     #[fcp_async_core::runtime::test]

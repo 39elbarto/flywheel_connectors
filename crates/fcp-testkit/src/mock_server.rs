@@ -376,4 +376,328 @@ mod tests {
 
         assert_eq!(response.status(), 500);
     }
+
+    // ── MockApiServer: base_url and address ────────────────────────────
+
+    #[fcp_async_core::runtime::test]
+    async fn mock_server_base_url_starts_with_http() {
+        let mock = MockApiServer::start().await;
+        assert!(mock.base_url().starts_with("http://"));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn mock_server_address_has_port() {
+        let mock = MockApiServer::start().await;
+        assert!(mock.address().port() > 0);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn mock_server_inner_ref() {
+        let mock = MockApiServer::start().await;
+        let _inner = mock.inner();
+    }
+
+    // ── MockApiServer: expect_json (any method) ────────────────────────
+
+    #[fcp_async_core::runtime::test]
+    async fn mock_server_expect_json_any_method() {
+        let mock = MockApiServer::start().await;
+        mock.expect_json("/api/any", serde_json::json!({"any": true}))
+            .await;
+
+        let client = reqwest::Client::new();
+
+        // GET works
+        let resp = client
+            .get(format!("{}/api/any", mock.base_url()))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+
+        // POST also works
+        let resp = client
+            .post(format!("{}/api/any", mock.base_url()))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+    }
+
+    // ── MockApiServer: expect_with_header ──────────────────────────────
+
+    #[fcp_async_core::runtime::test]
+    async fn mock_server_expect_with_header() {
+        let mock = MockApiServer::start().await;
+        mock.expect_with_header(
+            "/api/auth",
+            "Authorization",
+            "Bearer test-token",
+            serde_json::json!({"authenticated": true}),
+        )
+        .await;
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .get(format!("{}/api/auth", mock.base_url()))
+            .header("Authorization", "Bearer test-token")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(body["authenticated"], true);
+    }
+
+    // ── MockApiServer: expect_with_query ───────────────────────────────
+
+    #[fcp_async_core::runtime::test]
+    async fn mock_server_expect_with_query() {
+        let mock = MockApiServer::start().await;
+        mock.expect_with_query(
+            "/api/search",
+            "q",
+            "test",
+            serde_json::json!({"results": []}),
+        )
+        .await;
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .get(format!("{}/api/search?q=test", mock.base_url()))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+    }
+
+    // ── MockApiServer: expect_post_with_body ───────────────────────────
+
+    #[fcp_async_core::runtime::test]
+    async fn mock_server_expect_post_with_body() {
+        let mock = MockApiServer::start().await;
+        let expected_body = serde_json::json!({"name": "test"});
+        mock.expect_post_with_body(
+            "/api/create",
+            expected_body.clone(),
+            serde_json::json!({"id": "456"}),
+        )
+        .await;
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(format!("{}/api/create", mock.base_url()))
+            .json(&expected_body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(body["id"], "456");
+    }
+
+    // ── MockApiServer: OAuth helpers ───────────────────────────────────
+
+    #[fcp_async_core::runtime::test]
+    async fn mock_server_oauth_token() {
+        let mock = MockApiServer::start().await;
+        mock.expect_oauth_token("/oauth/token", "test-access-token", 3600)
+            .await;
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(format!("{}/oauth/token", mock.base_url()))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(body["access_token"], "test-access-token");
+        assert_eq!(body["token_type"], "Bearer");
+        assert_eq!(body["expires_in"], 3600);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn mock_server_oauth_refresh() {
+        let mock = MockApiServer::start().await;
+        mock.expect_oauth_refresh("/oauth/token", "new-access", "new-refresh", 7200)
+            .await;
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(format!("{}/oauth/token", mock.base_url()))
+            .send()
+            .await
+            .unwrap();
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(body["access_token"], "new-access");
+        assert_eq!(body["refresh_token"], "new-refresh");
+        assert_eq!(body["expires_in"], 7200);
+    }
+
+    // ── MockApiServer: verification ────────────────────────────────────
+
+    #[fcp_async_core::runtime::test]
+    async fn mock_server_assert_no_requests() {
+        let mock = MockApiServer::start().await;
+        mock.assert_no_requests().await;
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn mock_server_assert_request_count() {
+        let mock = MockApiServer::start().await;
+        mock.expect_get("/api/count", serde_json::json!({})).await;
+
+        let client = reqwest::Client::new();
+        client
+            .get(format!("{}/api/count", mock.base_url()))
+            .send()
+            .await
+            .unwrap();
+        client
+            .get(format!("{}/api/count", mock.base_url()))
+            .send()
+            .await
+            .unwrap();
+
+        mock.assert_request_count(2).await;
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn mock_server_received_requests() {
+        let mock = MockApiServer::start().await;
+        mock.expect_get("/api/log", serde_json::json!({})).await;
+
+        let client = reqwest::Client::new();
+        client
+            .get(format!("{}/api/log", mock.base_url()))
+            .send()
+            .await
+            .unwrap();
+
+        let requests = mock.received_requests().await;
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].url.path(), "/api/log");
+    }
+
+    // ── MockApiServer: reset ───────────────────────────────────────────
+
+    #[fcp_async_core::runtime::test]
+    async fn mock_server_reset_clears_mocks() {
+        let mock = MockApiServer::start().await;
+        mock.expect_get("/api/test", serde_json::json!({})).await;
+        mock.reset().await;
+
+        // After reset, the mock should no longer respond to this path
+        let client = reqwest::Client::new();
+        let resp = client
+            .get(format!("{}/api/test", mock.base_url()))
+            .send()
+            .await
+            .unwrap();
+        // wiremock returns 404 for unmounted paths
+        assert_eq!(resp.status(), 404);
+    }
+
+    // ── MockApiServer: error status codes ──────────────────────────────
+
+    #[fcp_async_core::runtime::test]
+    async fn mock_server_error_401() {
+        let mock = MockApiServer::start().await;
+        mock.expect_error(
+            "/api/unauth",
+            401,
+            serde_json::json!({"error": "Unauthorized"}),
+        )
+        .await;
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .get(format!("{}/api/unauth", mock.base_url()))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 401);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn mock_server_error_429() {
+        let mock = MockApiServer::start().await;
+        mock.expect_error(
+            "/api/ratelimit",
+            429,
+            serde_json::json!({"error": "Too Many Requests"}),
+        )
+        .await;
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .get(format!("{}/api/ratelimit", mock.base_url()))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 429);
+    }
+
+    // ── MockScenarioBuilder ────────────────────────────────────────────
+
+    #[fcp_async_core::runtime::test]
+    async fn scenario_builder_empty() {
+        let server = MockScenarioBuilder::new().await.build().await;
+        server.assert_no_requests().await;
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn scenario_builder_with_mock() {
+        let server = MockScenarioBuilder::new()
+            .await
+            .with_mock(
+                Mock::given(method("GET"))
+                    .and(path("/api/scenario"))
+                    .respond_with(
+                        ResponseTemplate::new(200).set_body_json(serde_json::json!({"ok": true})),
+                    ),
+            )
+            .build()
+            .await;
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .get(format!("{}/api/scenario", server.base_url()))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+    }
+
+    // ── RecordedRequest ────────────────────────────────────────────────
+
+    #[test]
+    fn recorded_request_debug() {
+        let req = RecordedRequest {
+            method: "GET".to_string(),
+            path: "/api/test".to_string(),
+            query: Some("key=value".to_string()),
+            body: None,
+            headers: vec![("Content-Type".to_string(), "application/json".to_string())],
+        };
+        let dbg = format!("{req:?}");
+        assert!(dbg.contains("RecordedRequest"));
+        assert!(dbg.contains("GET"));
+    }
+
+    #[test]
+    fn recorded_request_clone() {
+        let req = RecordedRequest {
+            method: "POST".to_string(),
+            path: "/api/create".to_string(),
+            query: None,
+            body: Some(r#"{"name":"test"}"#.to_string()),
+            headers: vec![],
+        };
+        let cloned = req.clone();
+        assert_eq!(req.method, cloned.method);
+        assert_eq!(req.path, cloned.path);
+        assert_eq!(req.body, cloned.body);
+    }
 }

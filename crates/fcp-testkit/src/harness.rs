@@ -315,3 +315,418 @@ pub struct HarnessStats {
     /// Maximum duration in milliseconds
     pub max_duration_ms: u64,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::panic::catch_unwind;
+
+    // ── RecordedOperation ──────────────────────────────────────────────
+
+    #[test]
+    fn recorded_operation_success() {
+        let op = RecordedOperation {
+            operation: "test_op".to_string(),
+            input: Some(serde_json::json!({"key": "value"})),
+            result: Ok(serde_json::json!({"status": "ok"})),
+            duration_ms: 42,
+            timestamp: chrono::Utc::now(),
+        };
+        assert!(op.result.is_ok());
+        assert_eq!(op.operation, "test_op");
+        assert_eq!(op.duration_ms, 42);
+    }
+
+    #[test]
+    fn recorded_operation_failure() {
+        let op = RecordedOperation {
+            operation: "failing_op".to_string(),
+            input: None,
+            result: Err("something went wrong".to_string()),
+            duration_ms: 100,
+            timestamp: chrono::Utc::now(),
+        };
+        assert!(op.result.is_err());
+        assert_eq!(op.result.unwrap_err(), "something went wrong");
+    }
+
+    #[test]
+    fn recorded_operation_debug() {
+        let op = RecordedOperation {
+            operation: "debug_op".to_string(),
+            input: None,
+            result: Ok(serde_json::json!(null)),
+            duration_ms: 0,
+            timestamp: chrono::Utc::now(),
+        };
+        let dbg = format!("{op:?}");
+        assert!(dbg.contains("RecordedOperation"));
+        assert!(dbg.contains("debug_op"));
+    }
+
+    #[test]
+    fn recorded_operation_clone() {
+        let op = RecordedOperation {
+            operation: "clone_op".to_string(),
+            input: Some(serde_json::json!(42)),
+            result: Ok(serde_json::json!("done")),
+            duration_ms: 5,
+            timestamp: chrono::Utc::now(),
+        };
+        let cloned = op.clone();
+        assert_eq!(op.operation, cloned.operation);
+        assert_eq!(op.duration_ms, cloned.duration_ms);
+    }
+
+    // ── HarnessStats ───────────────────────────────────────────────────
+
+    #[test]
+    fn harness_stats_debug() {
+        let stats = HarnessStats {
+            total_operations: 10,
+            successes: 8,
+            failures: 2,
+            total_duration_ms: 500,
+            avg_duration_ms: 50,
+            max_duration_ms: 100,
+        };
+        let dbg = format!("{stats:?}");
+        assert!(dbg.contains("HarnessStats"));
+        assert!(dbg.contains("10"));
+    }
+
+    #[test]
+    fn harness_stats_clone() {
+        let stats = HarnessStats {
+            total_operations: 5,
+            successes: 5,
+            failures: 0,
+            total_duration_ms: 100,
+            avg_duration_ms: 20,
+            max_duration_ms: 30,
+        };
+        let cloned = stats.clone();
+        assert_eq!(stats.total_operations, cloned.total_operations);
+        assert_eq!(stats.successes, cloned.successes);
+        assert_eq!(stats.failures, cloned.failures);
+    }
+
+    #[test]
+    fn harness_stats_all_failures() {
+        let stats = HarnessStats {
+            total_operations: 3,
+            successes: 0,
+            failures: 3,
+            total_duration_ms: 300,
+            avg_duration_ms: 100,
+            max_duration_ms: 150,
+        };
+        assert_eq!(stats.successes, 0);
+        assert_eq!(stats.failures, 3);
+    }
+
+    #[test]
+    fn harness_stats_zero_operations() {
+        let stats = HarnessStats {
+            total_operations: 0,
+            successes: 0,
+            failures: 0,
+            total_duration_ms: 0,
+            avg_duration_ms: 0,
+            max_duration_ms: 0,
+        };
+        assert_eq!(stats.total_operations, 0);
+        assert_eq!(stats.avg_duration_ms, 0);
+    }
+
+    // ── ConnectorTestHarness (state machine, no real connector) ────────
+
+    // Minimal mock connector for testing the harness itself
+    struct StubConnector {
+        configure_should_fail: bool,
+    }
+
+    impl StubConnector {
+        fn ok() -> Self {
+            Self {
+                configure_should_fail: false,
+            }
+        }
+
+        fn failing() -> Self {
+            Self {
+                configure_should_fail: true,
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl FcpConnector for StubConnector {
+        fn id(&self) -> &fcp_core::ConnectorId {
+            static ID: std::sync::LazyLock<fcp_core::ConnectorId> =
+                std::sync::LazyLock::new(|| {
+                    fcp_core::ConnectorId::from_static("stub:connector:v1")
+                });
+            &ID
+        }
+
+        async fn configure(&mut self, _config: serde_json::Value) -> FcpResult<()> {
+            if self.configure_should_fail {
+                Err(fcp_core::FcpError::InvalidRequest {
+                    code: 1001,
+                    message: "stub failure".to_string(),
+                })
+            } else {
+                Ok(())
+            }
+        }
+
+        async fn handshake(
+            &mut self,
+            _req: fcp_core::HandshakeRequest,
+        ) -> FcpResult<fcp_core::HandshakeResponse> {
+            Ok(fcp_core::HandshakeResponse {
+                status: "accepted".to_string(),
+                capabilities_granted: vec![],
+                session_id: fcp_core::SessionId::new(),
+                manifest_hash: String::new(),
+                nonce: _req.nonce,
+                event_caps: None,
+                auth_caps: None,
+                op_catalog_hash: None,
+            })
+        }
+
+        async fn health(&self) -> HealthSnapshot {
+            HealthSnapshot::ready()
+        }
+
+        fn metrics(&self) -> fcp_core::ConnectorMetrics {
+            fcp_core::ConnectorMetrics::default()
+        }
+
+        async fn shutdown(&mut self, _req: fcp_core::ShutdownRequest) -> FcpResult<()> {
+            Ok(())
+        }
+
+        fn introspect(&self) -> fcp_core::Introspection {
+            fcp_core::Introspection {
+                operations: vec![],
+                events: vec![],
+                resource_types: vec![],
+                auth_caps: None,
+                event_caps: None,
+            }
+        }
+
+        async fn invoke(
+            &self,
+            _req: fcp_core::InvokeRequest,
+        ) -> FcpResult<fcp_core::InvokeResponse> {
+            Err(fcp_core::FcpError::OperationNotGranted {
+                operation: "stub".to_string(),
+            })
+        }
+
+        async fn subscribe(
+            &self,
+            _req: fcp_core::SubscribeRequest,
+        ) -> FcpResult<fcp_core::SubscribeResponse> {
+            Ok(fcp_core::SubscribeResponse {
+                r#type: "response".to_string(),
+                id: fcp_core::RequestId::new("sub-stub"),
+                result: fcp_core::SubscribeResult {
+                    confirmed_topics: vec![],
+                    cursors: std::collections::HashMap::new(),
+                    replay_supported: false,
+                    buffer: None,
+                },
+            })
+        }
+
+        async fn unsubscribe(&self, _req: fcp_core::UnsubscribeRequest) -> FcpResult<()> {
+            Ok(())
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn harness_initial_state() {
+        let harness = ConnectorTestHarness::new(StubConnector::ok());
+        assert!(!harness.is_configured());
+        assert!(!harness.is_handshaken());
+        assert!(harness.operations().is_empty());
+        assert!(harness.last_operation().is_none());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn harness_configure_success() {
+        let mut harness = ConnectorTestHarness::new(StubConnector::ok());
+        let result = harness.configure(serde_json::json!({"key": "val"})).await;
+        assert!(result.is_ok());
+        assert!(harness.is_configured());
+        assert_eq!(harness.operations().len(), 1);
+        harness.assert_last_success();
+        harness.assert_operation_count(1);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn harness_configure_failure() {
+        let mut harness = ConnectorTestHarness::new(StubConnector::failing());
+        let result = harness.configure(serde_json::json!({})).await;
+        assert!(result.is_err());
+        assert!(!harness.is_configured());
+        harness.assert_last_failure();
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn harness_configure_default() {
+        let mut harness = ConnectorTestHarness::new(StubConnector::ok());
+        harness.configure_default().await.unwrap();
+        assert!(harness.is_configured());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn harness_health() {
+        let mut harness = ConnectorTestHarness::new(StubConnector::ok());
+        let health = harness.health().await;
+        assert!(health.is_ready());
+        assert_eq!(harness.operations().len(), 1);
+        assert_eq!(harness.operations()[0].operation, "health");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn harness_introspect() {
+        let mut harness = ConnectorTestHarness::new(StubConnector::ok());
+        let _intro = harness.introspect();
+        assert_eq!(harness.operations().len(), 1);
+        assert_eq!(harness.operations()[0].operation, "introspect");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn harness_connector_ref() {
+        let harness = ConnectorTestHarness::new(StubConnector::ok());
+        let _c = harness.connector();
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn harness_connector_mut_ref() {
+        let mut harness = ConnectorTestHarness::new(StubConnector::ok());
+        let _c = harness.connector_mut();
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn harness_clear_operations() {
+        let mut harness = ConnectorTestHarness::new(StubConnector::ok());
+        harness.configure_default().await.unwrap();
+        harness.health().await;
+        assert_eq!(harness.operations().len(), 2);
+        harness.clear_operations();
+        assert!(harness.operations().is_empty());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn harness_stats_empty() {
+        let harness = ConnectorTestHarness::new(StubConnector::ok());
+        let stats = harness.stats();
+        assert_eq!(stats.total_operations, 0);
+        assert_eq!(stats.successes, 0);
+        assert_eq!(stats.failures, 0);
+        assert_eq!(stats.avg_duration_ms, 0);
+        assert_eq!(stats.max_duration_ms, 0);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn harness_stats_mixed() {
+        let mut harness = ConnectorTestHarness::new(StubConnector::ok());
+        harness.configure_default().await.unwrap();
+        harness.health().await;
+
+        // Manually push a failure
+        harness.operations.push(RecordedOperation {
+            operation: "manual_fail".to_string(),
+            input: None,
+            result: Err("oops".to_string()),
+            duration_ms: 50,
+            timestamp: chrono::Utc::now(),
+        });
+
+        let stats = harness.stats();
+        assert_eq!(stats.total_operations, 3);
+        assert_eq!(stats.successes, 2);
+        assert_eq!(stats.failures, 1);
+        assert!(stats.max_duration_ms >= 50);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn harness_assert_all_under_duration() {
+        let mut harness = ConnectorTestHarness::new(StubConnector::ok());
+        harness.configure_default().await.unwrap();
+        harness.health().await;
+        // All fast operations should be under 5000ms
+        harness.assert_all_under_duration(5000);
+    }
+
+    #[test]
+    fn harness_assert_last_success_panics_without_operations() {
+        let harness = ConnectorTestHarness::new(StubConnector::ok());
+
+        let panic = catch_unwind(|| harness.assert_last_success());
+
+        assert!(panic.is_err());
+    }
+
+    #[test]
+    fn harness_assert_last_failure_panics_without_operations() {
+        let harness = ConnectorTestHarness::new(StubConnector::ok());
+
+        let panic = catch_unwind(|| harness.assert_last_failure());
+
+        assert!(panic.is_err());
+    }
+
+    #[test]
+    fn harness_assert_operation_count_panics_on_mismatch() {
+        let harness = ConnectorTestHarness::new(StubConnector::ok());
+
+        let panic = catch_unwind(|| harness.assert_operation_count(1));
+
+        assert!(panic.is_err());
+    }
+
+    #[test]
+    fn harness_assert_all_under_duration_panics_when_limit_is_exceeded() {
+        let mut harness = ConnectorTestHarness::new(StubConnector::ok());
+        harness.operations.push(RecordedOperation {
+            operation: "slow".to_string(),
+            input: None,
+            result: Ok(serde_json::json!({})),
+            duration_ms: 15,
+            timestamp: chrono::Utc::now(),
+        });
+
+        let panic = catch_unwind(|| harness.assert_all_under_duration(10));
+
+        assert!(panic.is_err());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn harness_assert_ready() {
+        let mut harness = ConnectorTestHarness::new(StubConnector::ok());
+        harness.assert_ready().await;
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn harness_assert_healthy() {
+        let mut harness = ConnectorTestHarness::new(StubConnector::ok());
+        harness.assert_healthy().await;
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn harness_last_operation_records_input() {
+        let mut harness = ConnectorTestHarness::new(StubConnector::ok());
+        let config = serde_json::json!({"port": 8080});
+        harness.configure(config.clone()).await.unwrap();
+        let last = harness.last_operation().unwrap();
+        assert_eq!(last.input, Some(config));
+    }
+}

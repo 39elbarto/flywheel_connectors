@@ -178,6 +178,13 @@ pub use formatting::{
 /// Retry policy helpers.
 pub use retry::{RetryDecision, RetryPolicy};
 
+/// Streaming utilities for replay, acknowledgements, and per-key sequential processing.
+pub use streaming::{
+    AckResult, BufferLimits, EventStreamManager, NackResult, ReplayError, SequentialEnqueueError,
+    SequentialEnqueueOutcome, SequentialEvent, SequentialEventProcessor,
+    SequentialEventProcessorConfig, SequentialOverflowPolicy, SubscribeOutcome,
+};
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Schema validation helpers
 // ─────────────────────────────────────────────────────────────────────────────

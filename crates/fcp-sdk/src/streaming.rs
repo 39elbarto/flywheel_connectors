@@ -5,6 +5,7 @@
 //! transport or storage backend.
 
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::time::{Duration, Instant};
 
 use fcp_core::{
     EventAck, EventCaps, EventData, EventEnvelope, EventNack, ReplayBufferInfo, RequestId,
@@ -219,6 +220,367 @@ impl TopicState {
     }
 }
 
+/// Slow-consumer policy for bounded sequential event queues.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SequentialOverflowPolicy {
+    /// Reject the newly enqueued item once a bound is reached.
+    RejectNewest,
+    /// Drop the oldest queued item to make room for the new one.
+    DropOldest,
+}
+
+/// Configuration for [`SequentialEventProcessor`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SequentialEventProcessorConfig {
+    /// Maximum queued items allowed per stream key (active work is not counted).
+    pub max_queue_per_key: usize,
+    /// Maximum queued items allowed across all stream keys.
+    pub max_total_queued: usize,
+    /// Overflow strategy to apply when a queue bound is reached.
+    pub overflow_policy: SequentialOverflowPolicy,
+    /// Optional timeout for queued items waiting behind a slow consumer.
+    pub item_timeout: Option<Duration>,
+}
+
+impl Default for SequentialEventProcessorConfig {
+    fn default() -> Self {
+        Self {
+            max_queue_per_key: 32,
+            max_total_queued: 256,
+            overflow_policy: SequentialOverflowPolicy::RejectNewest,
+            item_timeout: None,
+        }
+    }
+}
+
+/// Item returned by [`SequentialEventProcessor::next_ready`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SequentialEvent<T> {
+    /// Stream key used to isolate ordering.
+    pub stream_key: String,
+    /// Connector-defined payload.
+    pub item: T,
+}
+
+/// Result of a successful [`SequentialEventProcessor::enqueue`] call.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SequentialEnqueueOutcome<T> {
+    /// Item displaced by a drop policy, if any.
+    pub dropped: Option<SequentialEvent<T>>,
+}
+
+impl<T> SequentialEnqueueOutcome<T> {
+    #[must_use]
+    const fn accepted() -> Self {
+        Self { dropped: None }
+    }
+}
+
+/// Errors returned when a sequential queue refuses a new item.
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum SequentialEnqueueError<T> {
+    /// The queue refused the new item once a bound was reached.
+    #[error("sequential queue is full for stream key '{stream_key}'")]
+    QueueFull {
+        /// Stream key that hit its queue bound.
+        stream_key: String,
+        /// Item that could not be queued.
+        item: T,
+    },
+}
+
+#[derive(Debug)]
+struct QueuedSequentialEvent<T> {
+    item: T,
+    enqueued_at: Instant,
+    ticket: u64,
+}
+
+#[derive(Debug)]
+struct SequentialKeyState<T> {
+    active: bool,
+    queued: VecDeque<QueuedSequentialEvent<T>>,
+}
+
+impl<T> Default for SequentialKeyState<T> {
+    fn default() -> Self {
+        Self {
+            active: false,
+            queued: VecDeque::new(),
+        }
+    }
+}
+
+/// In-memory helper that guarantees sequential processing within a stream key
+/// while round-robining fairly across independent keys.
+///
+/// Connectors enqueue work under a key such as a chat ID, thread ID, or channel
+/// ID, call [`next_ready`](Self::next_ready) to obtain the next runnable item,
+/// and then call [`finish_key`](Self::finish_key) once processing for that key
+/// completes.
+#[derive(Debug)]
+pub struct SequentialEventProcessor<T> {
+    config: SequentialEventProcessorConfig,
+    keys: HashMap<String, SequentialKeyState<T>>,
+    ready: VecDeque<String>,
+    total_queued: usize,
+    next_ticket: u64,
+}
+
+impl<T> SequentialEventProcessor<T> {
+    /// Create a new sequential processor.
+    #[must_use]
+    pub fn new(config: SequentialEventProcessorConfig) -> Self {
+        Self {
+            config,
+            keys: HashMap::new(),
+            ready: VecDeque::new(),
+            total_queued: 0,
+            next_ticket: 0,
+        }
+    }
+
+    /// Return the processor configuration.
+    #[must_use]
+    pub const fn config(&self) -> &SequentialEventProcessorConfig {
+        &self.config
+    }
+
+    /// Return the number of queued items waiting behind currently running work.
+    #[must_use]
+    pub const fn queue_depth(&self) -> usize {
+        self.total_queued
+    }
+
+    /// Return the queued depth for a single stream key.
+    #[must_use]
+    pub fn queue_depth_for(&self, stream_key: &str) -> usize {
+        self.keys
+            .get(stream_key)
+            .map_or(0, |state| state.queued.len())
+    }
+
+    /// Return the number of keys with active in-flight work.
+    #[must_use]
+    pub fn active_keys(&self) -> usize {
+        self.keys.values().filter(|state| state.active).count()
+    }
+
+    /// Return `true` when no queued or active work remains.
+    #[must_use]
+    pub fn is_idle(&self) -> bool {
+        self.total_queued == 0 && self.active_keys() == 0
+    }
+
+    /// Enqueue a new item under `stream_key`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SequentialEnqueueError::QueueFull`] when the configured bounds
+    /// are reached and the processor is configured to reject new items.
+    pub fn enqueue(
+        &mut self,
+        stream_key: impl Into<String>,
+        item: T,
+    ) -> Result<SequentialEnqueueOutcome<T>, SequentialEnqueueError<T>> {
+        self.prune_expired();
+
+        let stream_key = stream_key.into();
+        if self.config.max_queue_per_key == 0 || self.config.max_total_queued == 0 {
+            return Err(SequentialEnqueueError::QueueFull { stream_key, item });
+        }
+
+        let mut outcome = SequentialEnqueueOutcome::accepted();
+
+        if self.queue_depth_for(&stream_key) >= self.config.max_queue_per_key {
+            match self.config.overflow_policy {
+                SequentialOverflowPolicy::RejectNewest => {
+                    return Err(SequentialEnqueueError::QueueFull { stream_key, item });
+                }
+                SequentialOverflowPolicy::DropOldest => {
+                    outcome.dropped = self.drop_oldest_for_key(&stream_key);
+                }
+            }
+        }
+
+        if self.total_queued >= self.config.max_total_queued {
+            match self.config.overflow_policy {
+                SequentialOverflowPolicy::RejectNewest => {
+                    return Err(SequentialEnqueueError::QueueFull { stream_key, item });
+                }
+                SequentialOverflowPolicy::DropOldest => {
+                    if outcome.dropped.is_none() {
+                        outcome.dropped = self.drop_oldest_globally();
+                    }
+                }
+            }
+        }
+
+        let was_idle = {
+            let state = self.keys.entry(stream_key.clone()).or_default();
+            let idle = !state.active && state.queued.is_empty();
+            state.queued.push_back(QueuedSequentialEvent {
+                item,
+                enqueued_at: Instant::now(),
+                ticket: self.next_ticket,
+            });
+            idle
+        };
+
+        self.next_ticket = self.next_ticket.saturating_add(1);
+        self.total_queued = self.total_queued.saturating_add(1);
+        if was_idle {
+            self.ready.push_back(stream_key);
+        }
+
+        Ok(outcome)
+    }
+
+    /// Return the next ready item while ensuring only one item per key may be
+    /// in-flight at a time.
+    #[must_use]
+    pub fn next_ready(&mut self) -> Option<SequentialEvent<T>> {
+        self.prune_expired();
+        self.compact_ready();
+
+        while let Some(stream_key) = self.ready.pop_front() {
+            let Some(state) = self.keys.get_mut(&stream_key) else {
+                continue;
+            };
+            if state.active {
+                continue;
+            }
+
+            let Some(queued) = state.queued.pop_front() else {
+                continue;
+            };
+
+            state.active = true;
+            self.total_queued = self.total_queued.saturating_sub(1);
+            return Some(SequentialEvent {
+                stream_key,
+                item: queued.item,
+            });
+        }
+
+        None
+    }
+
+    /// Mark the active item for `stream_key` as complete.
+    ///
+    /// Returns `true` when more queued work for the same key became runnable.
+    pub fn finish_key(&mut self, stream_key: &str) -> bool {
+        let has_more = {
+            let Some(state) = self.keys.get_mut(stream_key) else {
+                return false;
+            };
+            if !state.active {
+                return false;
+            }
+
+            state.active = false;
+            !state.queued.is_empty()
+        };
+
+        if has_more {
+            self.ready.push_back(stream_key.to_string());
+        } else {
+            self.keys.remove(stream_key);
+        }
+
+        has_more
+    }
+
+    fn drop_oldest_for_key(&mut self, stream_key: &str) -> Option<SequentialEvent<T>> {
+        let state = self.keys.get_mut(stream_key)?;
+        let dropped = state.queued.pop_front().map(|queued| SequentialEvent {
+            stream_key: stream_key.to_string(),
+            item: queued.item,
+        });
+        if dropped.is_some() {
+            self.total_queued = self.total_queued.saturating_sub(1);
+        }
+        let should_remove = dropped.is_some() && state.queued.is_empty() && !state.active;
+
+        if should_remove {
+            self.keys.remove(stream_key);
+            self.compact_ready();
+        }
+
+        dropped
+    }
+
+    fn drop_oldest_globally(&mut self) -> Option<SequentialEvent<T>> {
+        let oldest_key = self
+            .keys
+            .iter()
+            .filter_map(|(stream_key, state)| {
+                state
+                    .queued
+                    .front()
+                    .map(|queued| (stream_key.clone(), queued.ticket))
+            })
+            .min_by_key(|(_, ticket)| *ticket)
+            .map(|(stream_key, _)| stream_key)?;
+
+        self.drop_oldest_for_key(&oldest_key)
+    }
+
+    fn prune_expired(&mut self) {
+        let Some(timeout) = self.config.item_timeout else {
+            return;
+        };
+
+        let now = Instant::now();
+        let keys: Vec<String> = self.keys.keys().cloned().collect();
+        for stream_key in keys {
+            let should_remove = if let Some(state) = self.keys.get_mut(&stream_key) {
+                while let Some(front) = state.queued.front() {
+                    if now.duration_since(front.enqueued_at) < timeout {
+                        break;
+                    }
+
+                    let _ = state.queued.pop_front();
+                    self.total_queued = self.total_queued.saturating_sub(1);
+                }
+                state.queued.is_empty() && !state.active
+            } else {
+                false
+            };
+
+            if should_remove {
+                self.keys.remove(&stream_key);
+            }
+        }
+
+        self.compact_ready();
+    }
+
+    fn compact_ready(&mut self) {
+        let mut seen = HashSet::new();
+        let mut compacted = VecDeque::new();
+        while let Some(stream_key) = self.ready.pop_front() {
+            if !seen.insert(stream_key.clone()) {
+                continue;
+            }
+            if self
+                .keys
+                .get(&stream_key)
+                .is_some_and(|state| !state.active && !state.queued.is_empty())
+            {
+                compacted.push_back(stream_key);
+            }
+        }
+        self.ready = compacted;
+    }
+}
+
+impl<T> Default for SequentialEventProcessor<T> {
+    fn default() -> Self {
+        Self::new(SequentialEventProcessorConfig::default())
+    }
+}
+
 /// In-memory manager for streaming event topics.
 #[derive(Debug, Default)]
 pub struct EventStreamManager {
@@ -399,6 +761,8 @@ impl EventStreamManager {
 
 #[cfg(test)]
 mod tests {
+    use std::thread;
+
     use super::*;
     use fcp_core::{ConnectorId, InstanceId, Principal, TrustLevel, ZoneId};
     use serde_json::json;
@@ -425,6 +789,174 @@ mod tests {
             min_buffer_events,
             requires_ack,
         }
+    }
+
+    #[test]
+    fn sequential_processor_preserves_order_within_key() {
+        let mut processor = SequentialEventProcessor::new(SequentialEventProcessorConfig {
+            max_queue_per_key: 4,
+            max_total_queued: 8,
+            overflow_policy: SequentialOverflowPolicy::RejectNewest,
+            item_timeout: None,
+        });
+
+        processor.enqueue("chat-1", 1_u8).unwrap();
+        processor.enqueue("chat-1", 2_u8).unwrap();
+        processor.enqueue("chat-1", 3_u8).unwrap();
+
+        let first = processor.next_ready().unwrap();
+        assert_eq!(first.stream_key, "chat-1");
+        assert_eq!(first.item, 1);
+        assert!(processor.next_ready().is_none());
+
+        assert!(processor.finish_key("chat-1"));
+        let second = processor.next_ready().unwrap();
+        assert_eq!(second.item, 2);
+        assert!(processor.finish_key("chat-1"));
+
+        let third = processor.next_ready().unwrap();
+        assert_eq!(third.item, 3);
+        assert!(!processor.finish_key("chat-1"));
+        assert!(processor.is_idle());
+    }
+
+    #[test]
+    fn sequential_processor_round_robins_across_keys() {
+        let mut processor = SequentialEventProcessor::new(SequentialEventProcessorConfig {
+            max_queue_per_key: 4,
+            max_total_queued: 8,
+            overflow_policy: SequentialOverflowPolicy::RejectNewest,
+            item_timeout: None,
+        });
+
+        processor.enqueue("alpha", "a1").unwrap();
+        processor.enqueue("alpha", "a2").unwrap();
+        processor.enqueue("beta", "b1").unwrap();
+        processor.enqueue("beta", "b2").unwrap();
+
+        let first = processor.next_ready().unwrap();
+        assert_eq!(first.stream_key, "alpha");
+        assert_eq!(first.item, "a1");
+        assert!(processor.finish_key("alpha"));
+
+        let second = processor.next_ready().unwrap();
+        assert_eq!(second.stream_key, "beta");
+        assert_eq!(second.item, "b1");
+        assert!(processor.finish_key("beta"));
+
+        let third = processor.next_ready().unwrap();
+        assert_eq!(third.stream_key, "alpha");
+        assert_eq!(third.item, "a2");
+        assert!(!processor.finish_key("alpha"));
+
+        let fourth = processor.next_ready().unwrap();
+        assert_eq!(fourth.stream_key, "beta");
+        assert_eq!(fourth.item, "b2");
+        assert!(!processor.finish_key("beta"));
+    }
+
+    #[test]
+    fn sequential_processor_rejects_when_key_queue_is_full() {
+        let mut processor = SequentialEventProcessor::new(SequentialEventProcessorConfig {
+            max_queue_per_key: 2,
+            max_total_queued: 8,
+            overflow_policy: SequentialOverflowPolicy::RejectNewest,
+            item_timeout: None,
+        });
+
+        processor.enqueue("chat-1", 1_u8).unwrap();
+        processor.enqueue("chat-1", 2_u8).unwrap();
+
+        let error = processor.enqueue("chat-1", 3_u8).unwrap_err();
+        assert_eq!(
+            error,
+            SequentialEnqueueError::QueueFull {
+                stream_key: "chat-1".to_string(),
+                item: 3,
+            }
+        );
+        assert_eq!(processor.queue_depth_for("chat-1"), 2);
+    }
+
+    #[test]
+    fn sequential_processor_drops_oldest_when_configured() {
+        let mut processor = SequentialEventProcessor::new(SequentialEventProcessorConfig {
+            max_queue_per_key: 2,
+            max_total_queued: 8,
+            overflow_policy: SequentialOverflowPolicy::DropOldest,
+            item_timeout: None,
+        });
+
+        processor.enqueue("chat-1", "a1").unwrap();
+        processor.enqueue("chat-1", "a2").unwrap();
+        let outcome = processor.enqueue("chat-1", "a3").unwrap();
+
+        assert_eq!(
+            outcome.dropped,
+            Some(SequentialEvent {
+                stream_key: "chat-1".to_string(),
+                item: "a1",
+            })
+        );
+
+        let first = processor.next_ready().unwrap();
+        assert_eq!(first.item, "a2");
+        assert!(processor.finish_key("chat-1"));
+
+        let second = processor.next_ready().unwrap();
+        assert_eq!(second.item, "a3");
+        assert!(!processor.finish_key("chat-1"));
+    }
+
+    #[test]
+    fn sequential_processor_drops_global_oldest_when_total_cap_is_hit() {
+        let mut processor = SequentialEventProcessor::new(SequentialEventProcessorConfig {
+            max_queue_per_key: 4,
+            max_total_queued: 2,
+            overflow_policy: SequentialOverflowPolicy::DropOldest,
+            item_timeout: None,
+        });
+
+        processor.enqueue("alpha", "a1").unwrap();
+        processor.enqueue("beta", "b1").unwrap();
+        let outcome = processor.enqueue("gamma", "g1").unwrap();
+
+        assert_eq!(
+            outcome.dropped,
+            Some(SequentialEvent {
+                stream_key: "alpha".to_string(),
+                item: "a1",
+            })
+        );
+
+        let first = processor.next_ready().unwrap();
+        assert_eq!(first.stream_key, "beta");
+        assert_eq!(first.item, "b1");
+        assert!(!processor.finish_key("beta"));
+
+        let second = processor.next_ready().unwrap();
+        assert_eq!(second.stream_key, "gamma");
+        assert_eq!(second.item, "g1");
+        assert!(!processor.finish_key("gamma"));
+    }
+
+    #[test]
+    fn sequential_processor_expires_items_waiting_too_long() {
+        let mut processor = SequentialEventProcessor::new(SequentialEventProcessorConfig {
+            max_queue_per_key: 4,
+            max_total_queued: 8,
+            overflow_policy: SequentialOverflowPolicy::RejectNewest,
+            item_timeout: Some(Duration::from_millis(1)),
+        });
+
+        processor.enqueue("chat-1", 1_u8).unwrap();
+        thread::sleep(Duration::from_millis(5));
+        processor.enqueue("chat-1", 2_u8).unwrap();
+
+        let next = processor.next_ready().unwrap();
+        assert_eq!(next.item, 2);
+        assert!(!processor.finish_key("chat-1"));
+        assert!(processor.next_ready().is_none());
     }
 
     #[test]

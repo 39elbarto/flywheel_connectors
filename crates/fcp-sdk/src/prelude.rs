@@ -65,7 +65,9 @@ pub use crate::{
 
 // Streaming helpers
 pub use crate::streaming::{
-    AckResult, BufferLimits, EventStreamManager, NackResult, ReplayError, SubscribeOutcome,
+    AckResult, BufferLimits, EventStreamManager, NackResult, ReplayError, SequentialEnqueueError,
+    SequentialEnqueueOutcome, SequentialEvent, SequentialEventProcessor,
+    SequentialEventProcessorConfig, SequentialOverflowPolicy, SubscribeOutcome,
 };
 
 // Runtime supervision helpers

@@ -5,7 +5,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::{self, Read};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use base64::Engine;
@@ -398,22 +398,209 @@ struct BundleApplyPlan {
     state_path: String,
 }
 
-fn run_bundle_apply(args: &BundleApplyArgs) -> Result<()> {
-    if !args.plan {
-        anyhow::bail!("bundle apply requires --plan (execution is not supported yet)");
+const POLICY_BUNDLE_STATE_FORMAT: &str = "fcp-policy-bundle-state";
+const POLICY_BUNDLE_STATE_SCHEMA_VERSION: &str = "1.0.0";
+const POLICY_BUNDLE_EVENT_APPLIED: &str = "policy.bundle.applied";
+const POLICY_BUNDLE_EVENT_ROLLED_BACK: &str = "policy.bundle.rolled_back";
+const POLICY_BUNDLE_AUDIT_ACTOR: &str = "fcp-cli";
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PolicyBundleState {
+    format: String,
+    schema_version: String,
+    zone_id: ZoneId,
+    current: PolicyBundleStateSnapshot,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    previous: Option<PolicyBundleStateSnapshot>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    audit_events: Vec<PolicyBundleAuditEvent>,
+}
+
+impl PolicyBundleState {
+    fn new(bundle: PolicyBundle, applied_at: DateTime<Utc>) -> Self {
+        Self {
+            format: POLICY_BUNDLE_STATE_FORMAT.to_string(),
+            schema_version: POLICY_BUNDLE_STATE_SCHEMA_VERSION.to_string(),
+            zone_id: bundle.zone_id.clone(),
+            current: PolicyBundleStateSnapshot { bundle, applied_at },
+            previous: None,
+            audit_events: Vec::new(),
+        }
     }
 
+    fn validate(&self) -> Result<()> {
+        if self.format != POLICY_BUNDLE_STATE_FORMAT {
+            anyhow::bail!(
+                "state format must be '{POLICY_BUNDLE_STATE_FORMAT}', got '{}'",
+                self.format
+            );
+        }
+        if self.schema_version != POLICY_BUNDLE_STATE_SCHEMA_VERSION {
+            anyhow::bail!(
+                "state schema_version must be '{POLICY_BUNDLE_STATE_SCHEMA_VERSION}', got '{}'",
+                self.schema_version
+            );
+        }
+        self.current.validate_for_zone(&self.zone_id, "current")?;
+        if let Some(previous) = &self.previous {
+            previous.validate_for_zone(&self.zone_id, "previous")?;
+        }
+        for event in &self.audit_events {
+            if event.zone_id != self.zone_id.to_string() {
+                anyhow::bail!(
+                    "audit event zone '{}' does not match state zone '{}'",
+                    event.zone_id,
+                    self.zone_id
+                );
+            }
+        }
+        Ok(())
+    }
+
+    fn next_audit_seq(&self) -> u64 {
+        self.audit_events.last().map_or(1, |event| event.seq + 1)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PolicyBundleStateSnapshot {
+    bundle: PolicyBundle,
+    applied_at: DateTime<Utc>,
+}
+
+impl PolicyBundleStateSnapshot {
+    fn validate_for_zone(&self, zone_id: &ZoneId, label: &str) -> Result<()> {
+        self.bundle
+            .validate()
+            .map_err(|err| anyhow::anyhow!("invalid {label} bundle in state: {err}"))?;
+        if &self.bundle.zone_id != zone_id {
+            anyhow::bail!(
+                "{label} bundle zone '{}' does not match state zone '{}'",
+                self.bundle.zone_id,
+                zone_id
+            );
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PolicyBundleAuditEvent {
+    seq: u64,
+    event_type: String,
+    actor: String,
+    zone_id: String,
+    bundle_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    previous_bundle_id: Option<String>,
+    occurred_at: u64,
+    occurred_at_iso: String,
+    audit_event_id: String,
+}
+
+#[derive(Debug, Serialize)]
+struct BundleApplyResult {
+    result_type: String,
+    zone_id: String,
+    bundle_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    replaced_bundle_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    declared_previous_bundle_id: Option<String>,
+    state_path: String,
+    changed: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    audit_event: Option<PolicyBundleAuditEvent>,
+}
+
+fn run_bundle_apply(args: &BundleApplyArgs) -> Result<()> {
     let bundle = load_policy_bundle(&args.bundle)?;
+    let existing_state = load_bundle_state_optional(&args.state)?;
+    if let Some(state) = &existing_state {
+        validate_bundle_state_zone(state, &bundle.zone_id, &args.state)?;
+    }
+
+    let replaced_bundle_id = existing_state
+        .as_ref()
+        .map(|state| state.current.bundle.bundle_id.clone());
+    let declared_previous_bundle_id = bundle.previous_bundle.clone();
+    let changed = existing_state.as_ref().is_none_or(|state| {
+        state.current.bundle.bundle_id != bundle.bundle_id
+            || state.current.bundle.bundle_hash != bundle.bundle_hash
+    });
+
+    if changed {
+        validate_apply_transition(existing_state.as_ref(), &bundle)?;
+    }
+
     let zone_id = bundle.zone_id.to_string();
-    let bundle_id = bundle.bundle_id;
+    let bundle_id = bundle.bundle_id.clone();
     let plan = BundleApplyPlan {
         plan_type: "bundle_apply".to_string(),
         zone_id,
-        bundle_id,
+        bundle_id: bundle_id.clone(),
         state_path: args.state.display().to_string(),
     };
 
-    output_json_or_human(&plan, args.json)
+    if args.plan {
+        return output_json_or_human(&plan, args.json);
+    }
+
+    if !changed {
+        let result = BundleApplyResult {
+            result_type: "bundle_apply".to_string(),
+            zone_id: bundle.zone_id.to_string(),
+            bundle_id,
+            replaced_bundle_id,
+            declared_previous_bundle_id,
+            state_path: args.state.display().to_string(),
+            changed: false,
+            audit_event: None,
+        };
+        return output_json_or_human(&result, args.json);
+    }
+
+    let applied_at = Utc::now();
+    let audit_event = build_bundle_audit_event(
+        POLICY_BUNDLE_EVENT_APPLIED,
+        &bundle.zone_id,
+        &bundle.bundle_id,
+        replaced_bundle_id.as_deref(),
+        existing_state
+            .as_ref()
+            .map_or(1, PolicyBundleState::next_audit_seq),
+        applied_at,
+    )?;
+
+    let mut new_state = PolicyBundleState::new(bundle, applied_at);
+    if let Some(existing_state) = existing_state {
+        new_state.previous = Some(existing_state.current);
+        new_state.audit_events = existing_state.audit_events;
+    }
+    new_state.audit_events.push(audit_event.clone());
+    write_bundle_state(&args.state, &new_state)?;
+
+    tracing::info!(
+        event = POLICY_BUNDLE_EVENT_APPLIED,
+        zone_id = %new_state.zone_id,
+        bundle_id = %new_state.current.bundle.bundle_id,
+        previous_bundle_id = ?replaced_bundle_id,
+        state_path = %args.state.display(),
+        "applied policy bundle state transition"
+    );
+
+    let result = BundleApplyResult {
+        result_type: "bundle_apply".to_string(),
+        zone_id: new_state.zone_id.to_string(),
+        bundle_id: new_state.current.bundle.bundle_id.clone(),
+        replaced_bundle_id,
+        declared_previous_bundle_id,
+        state_path: args.state.display().to_string(),
+        changed: true,
+        audit_event: Some(audit_event),
+    };
+
+    output_json_or_human(&result, args.json)
 }
 
 #[derive(Debug, Serialize)]
@@ -424,22 +611,99 @@ struct BundleRollbackPlan {
     state_path: String,
 }
 
+#[derive(Debug, Serialize)]
+struct BundleRollbackResult {
+    result_type: String,
+    zone_id: String,
+    target_bundle_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    replaced_bundle_id: Option<String>,
+    state_path: String,
+    changed: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    audit_event: Option<PolicyBundleAuditEvent>,
+}
+
 fn run_bundle_rollback(args: &BundleRollbackArgs) -> Result<()> {
-    if !args.plan {
-        anyhow::bail!("bundle rollback requires --plan (execution is not supported yet)");
+    let target_bundle = load_policy_bundle(&args.to)?;
+    let Some(existing_state) = load_bundle_state_optional(&args.state)? else {
+        anyhow::bail!(
+            "bundle rollback requires an existing state file at {}",
+            args.state.display()
+        );
+    };
+    validate_bundle_state_zone(&existing_state, &target_bundle.zone_id, &args.state)?;
+
+    let replaced_bundle_id = Some(existing_state.current.bundle.bundle_id.clone());
+    let changed = existing_state.current.bundle.bundle_id != target_bundle.bundle_id
+        || existing_state.current.bundle.bundle_hash != target_bundle.bundle_hash;
+
+    if changed {
+        validate_rollback_transition(&existing_state, &target_bundle)?;
     }
 
-    let bundle = load_policy_bundle(&args.to)?;
-    let zone_id = bundle.zone_id.to_string();
-    let target_bundle_id = bundle.bundle_id;
+    let zone_id = target_bundle.zone_id.to_string();
+    let target_bundle_id = target_bundle.bundle_id.clone();
     let plan = BundleRollbackPlan {
         plan_type: "bundle_rollback".to_string(),
         zone_id,
-        target_bundle_id,
+        target_bundle_id: target_bundle_id.clone(),
         state_path: args.state.display().to_string(),
     };
 
-    output_json_or_human(&plan, args.json)
+    if args.plan {
+        return output_json_or_human(&plan, args.json);
+    }
+
+    if !changed {
+        let result = BundleRollbackResult {
+            result_type: "bundle_rollback".to_string(),
+            zone_id: target_bundle.zone_id.to_string(),
+            target_bundle_id,
+            replaced_bundle_id,
+            state_path: args.state.display().to_string(),
+            changed: false,
+            audit_event: None,
+        };
+        return output_json_or_human(&result, args.json);
+    }
+
+    let occurred_at = Utc::now();
+    let audit_event = build_bundle_audit_event(
+        POLICY_BUNDLE_EVENT_ROLLED_BACK,
+        &target_bundle.zone_id,
+        &target_bundle.bundle_id,
+        replaced_bundle_id.as_deref(),
+        existing_state.next_audit_seq(),
+        occurred_at,
+    )?;
+
+    let mut new_state = PolicyBundleState::new(target_bundle, occurred_at);
+    new_state.previous = Some(existing_state.current);
+    new_state.audit_events = existing_state.audit_events;
+    new_state.audit_events.push(audit_event.clone());
+    write_bundle_state(&args.state, &new_state)?;
+
+    tracing::info!(
+        event = POLICY_BUNDLE_EVENT_ROLLED_BACK,
+        zone_id = %new_state.zone_id,
+        bundle_id = %new_state.current.bundle.bundle_id,
+        replaced_bundle_id = ?replaced_bundle_id,
+        state_path = %args.state.display(),
+        "rolled back policy bundle state transition"
+    );
+
+    let result = BundleRollbackResult {
+        result_type: "bundle_rollback".to_string(),
+        zone_id: new_state.zone_id.to_string(),
+        target_bundle_id: new_state.current.bundle.bundle_id.clone(),
+        replaced_bundle_id,
+        state_path: args.state.display().to_string(),
+        changed: true,
+        audit_event: Some(audit_event),
+    };
+
+    output_json_or_human(&result, args.json)
 }
 
 fn load_policy_bundle(path: &PathBuf) -> Result<PolicyBundle> {
@@ -537,6 +801,126 @@ fn write_bundle_output(bundle: &PolicyBundle, out: Option<&PathBuf>) -> Result<(
 
     println!("{json}");
     Ok(())
+}
+
+fn load_bundle_state_optional(path: &Path) -> Result<Option<PolicyBundleState>> {
+    let raw = match fs::read_to_string(path) {
+        Ok(raw) => raw,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => {
+            return Err(err)
+                .with_context(|| format!("failed to read policy bundle state {}", path.display()));
+        }
+    };
+
+    let state: PolicyBundleState = serde_json::from_str(&raw)
+        .with_context(|| format!("failed to parse policy bundle state {}", path.display()))?;
+    state.validate()?;
+    Ok(Some(state))
+}
+
+fn write_bundle_state(path: &Path, state: &PolicyBundleState) -> Result<()> {
+    state.validate()?;
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent).with_context(|| {
+                format!(
+                    "failed to create policy bundle state directory {}",
+                    parent.display()
+                )
+            })?;
+        }
+    }
+    let json = serde_json::to_string_pretty(state)?;
+    fs::write(path, json)
+        .with_context(|| format!("failed to write policy bundle state {}", path.display()))
+}
+
+fn validate_bundle_state_zone(
+    state: &PolicyBundleState,
+    zone_id: &ZoneId,
+    path: &Path,
+) -> Result<()> {
+    if &state.zone_id != zone_id {
+        anyhow::bail!(
+            "state file {} is for zone '{}' but bundle targets zone '{}'",
+            path.display(),
+            state.zone_id,
+            zone_id
+        );
+    }
+    Ok(())
+}
+
+fn validate_apply_transition(
+    state: Option<&PolicyBundleState>,
+    bundle: &PolicyBundle,
+) -> Result<()> {
+    let Some(state) = state else {
+        return Ok(());
+    };
+
+    if bundle.previous_bundle.as_deref() == Some(state.current.bundle.bundle_id.as_str()) {
+        return Ok(());
+    }
+
+    anyhow::bail!(
+        "bundle '{}' declares previous_bundle {:?}, but current state is '{}'",
+        bundle.bundle_id,
+        bundle.previous_bundle,
+        state.current.bundle.bundle_id
+    )
+}
+
+fn validate_rollback_transition(
+    state: &PolicyBundleState,
+    target_bundle: &PolicyBundle,
+) -> Result<()> {
+    let expected_previous = state.current.bundle.previous_bundle.as_deref();
+    if expected_previous == Some(target_bundle.bundle_id.as_str()) {
+        return Ok(());
+    }
+
+    anyhow::bail!(
+        "rollback target '{}' does not match current bundle '{}' previous_bundle {:?}",
+        target_bundle.bundle_id,
+        state.current.bundle.bundle_id,
+        state.current.bundle.previous_bundle
+    )
+}
+
+fn build_bundle_audit_event(
+    event_type: &str,
+    zone_id: &ZoneId,
+    bundle_id: &str,
+    previous_bundle_id: Option<&str>,
+    seq: u64,
+    occurred_at: DateTime<Utc>,
+) -> Result<PolicyBundleAuditEvent> {
+    let occurred_at_secs = u64::try_from(occurred_at.timestamp()).unwrap_or(0);
+    let canonical = serde_json::json!({
+        "seq": seq,
+        "event_type": event_type,
+        "actor": POLICY_BUNDLE_AUDIT_ACTOR,
+        "zone_id": zone_id.to_string(),
+        "bundle_id": bundle_id,
+        "previous_bundle_id": previous_bundle_id,
+        "occurred_at": occurred_at_secs,
+    });
+    let audit_event_id =
+        ObjectId::from_unscoped_bytes(&fcp_cbor::to_canonical_cbor(&canonical)?).to_string();
+
+    Ok(PolicyBundleAuditEvent {
+        seq,
+        event_type: event_type.to_string(),
+        actor: POLICY_BUNDLE_AUDIT_ACTOR.to_string(),
+        zone_id: zone_id.to_string(),
+        bundle_id: bundle_id.to_string(),
+        previous_bundle_id: previous_bundle_id.map(ToString::to_string),
+        occurred_at: occurred_at_secs,
+        occurred_at_iso: occurred_at.format("%Y-%m-%dT%H:%M:%SZ").to_string(),
+        audit_event_id,
+    })
 }
 
 fn resolve_bundle_objects(
@@ -1122,6 +1506,8 @@ fn output_error(err: &PolicySimulationError, json: bool) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::TempDir;
+
     use fcp_core::PolicyPattern;
 
     #[test]
@@ -1169,6 +1555,64 @@ mod tests {
         };
 
         default_zone_policy(&invoke)
+    }
+
+    fn signed_fields() -> Vec<String> {
+        POLICY_BUNDLE_SIGNED_FIELDS
+            .iter()
+            .map(|field| (*field).to_string())
+            .collect()
+    }
+
+    fn test_policy_ref() -> PolicyBundlePolicyRef {
+        PolicyBundlePolicyRef {
+            object_id: "obj-zone-policy".to_string(),
+            schema_id: "fcp.core:ZonePolicy@1.0.0".to_string(),
+            object_hash: format!("blake3-256:{}", "a".repeat(64)),
+        }
+    }
+
+    fn test_bundle(
+        bundle_id: &str,
+        zone_id: ZoneId,
+        policy_seq: u64,
+        previous_bundle: Option<&str>,
+    ) -> PolicyBundle {
+        let created_at = DateTime::parse_from_rfc3339("2026-03-01T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let policies = vec![test_policy_ref()];
+        let bundle_hash = compute_policy_bundle_hash(
+            bundle_id,
+            &zone_id,
+            policy_seq,
+            Some(created_at),
+            previous_bundle,
+            &policies,
+        )
+        .unwrap();
+
+        let mut builder = PolicyBundle::builder(bundle_id, zone_id, policy_seq)
+            .created_at(created_at)
+            .bundle_hash(bundle_hash)
+            .policies(policies)
+            .signature(PolicyBundleSignature::new(
+                "kid-1",
+                "signature",
+                signed_fields(),
+            ));
+
+        if let Some(previous_bundle) = previous_bundle {
+            builder = builder.previous_bundle(previous_bundle);
+        }
+
+        builder.build().unwrap()
+    }
+
+    fn write_bundle_file(dir: &TempDir, filename: &str, bundle: &PolicyBundle) -> PathBuf {
+        let path = dir.path().join(filename);
+        fs::write(&path, serde_json::to_string_pretty(bundle).unwrap()).unwrap();
+        path
     }
 
     #[test]
@@ -1612,6 +2056,145 @@ mod tests {
         let json = serde_json::to_string(&plan).unwrap();
         assert!(json.contains("\"plan_type\":\"bundle_rollback\""));
         assert!(json.contains("\"target_bundle_id\":\"bundle-prev\""));
+    }
+
+    #[test]
+    fn bundle_apply_writes_state_and_audit_event() {
+        let temp_dir = TempDir::new().unwrap();
+        let bundle = test_bundle("bundle-a", ZoneId::work(), 1, None);
+        let bundle_path = write_bundle_file(&temp_dir, "bundle-a.json", &bundle);
+        let state_path = temp_dir.path().join("state.json");
+
+        run_bundle_apply(&BundleApplyArgs {
+            bundle: bundle_path,
+            state: state_path.clone(),
+            plan: false,
+            json: true,
+        })
+        .unwrap();
+
+        let state = load_bundle_state_optional(&state_path).unwrap().unwrap();
+        assert_eq!(state.current.bundle.bundle_id, "bundle-a");
+        assert!(state.previous.is_none());
+        assert_eq!(state.audit_events.len(), 1);
+        assert_eq!(
+            state.audit_events[0].event_type,
+            POLICY_BUNDLE_EVENT_APPLIED
+        );
+    }
+
+    #[test]
+    fn bundle_apply_rejects_chain_mismatch() {
+        let temp_dir = TempDir::new().unwrap();
+        let bundle_a = test_bundle("bundle-a", ZoneId::work(), 1, None);
+        let bundle_a_path = write_bundle_file(&temp_dir, "bundle-a.json", &bundle_a);
+        let state_path = temp_dir.path().join("state.json");
+
+        run_bundle_apply(&BundleApplyArgs {
+            bundle: bundle_a_path,
+            state: state_path.clone(),
+            plan: false,
+            json: true,
+        })
+        .unwrap();
+
+        let bundle_c = test_bundle("bundle-c", ZoneId::work(), 3, Some("bundle-x"));
+        let bundle_c_path = write_bundle_file(&temp_dir, "bundle-c.json", &bundle_c);
+
+        let err = run_bundle_apply(&BundleApplyArgs {
+            bundle: bundle_c_path,
+            state: state_path,
+            plan: false,
+            json: true,
+        })
+        .unwrap_err();
+
+        assert!(err.to_string().contains("declares previous_bundle"));
+    }
+
+    #[test]
+    fn bundle_rollback_writes_state_and_audit_event() {
+        let temp_dir = TempDir::new().unwrap();
+        let bundle_a = test_bundle("bundle-a", ZoneId::work(), 1, None);
+        let bundle_b = test_bundle("bundle-b", ZoneId::work(), 2, Some("bundle-a"));
+        let bundle_a_path = write_bundle_file(&temp_dir, "bundle-a.json", &bundle_a);
+        let bundle_b_path = write_bundle_file(&temp_dir, "bundle-b.json", &bundle_b);
+        let state_path = temp_dir.path().join("state.json");
+
+        run_bundle_apply(&BundleApplyArgs {
+            bundle: bundle_a_path.clone(),
+            state: state_path.clone(),
+            plan: false,
+            json: true,
+        })
+        .unwrap();
+        run_bundle_apply(&BundleApplyArgs {
+            bundle: bundle_b_path,
+            state: state_path.clone(),
+            plan: false,
+            json: true,
+        })
+        .unwrap();
+
+        run_bundle_rollback(&BundleRollbackArgs {
+            to: bundle_a_path,
+            state: state_path.clone(),
+            plan: false,
+            json: true,
+        })
+        .unwrap();
+
+        let state = load_bundle_state_optional(&state_path).unwrap().unwrap();
+        assert_eq!(state.current.bundle.bundle_id, "bundle-a");
+        assert_eq!(
+            state
+                .previous
+                .as_ref()
+                .map(|snapshot| snapshot.bundle.bundle_id.as_str()),
+            Some("bundle-b")
+        );
+        assert_eq!(state.audit_events.len(), 3);
+        assert_eq!(
+            state.audit_events.last().unwrap().event_type,
+            POLICY_BUNDLE_EVENT_ROLLED_BACK
+        );
+    }
+
+    #[test]
+    fn bundle_rollback_rejects_non_previous_target() {
+        let temp_dir = TempDir::new().unwrap();
+        let bundle_a = test_bundle("bundle-a", ZoneId::work(), 1, None);
+        let bundle_b = test_bundle("bundle-b", ZoneId::work(), 2, Some("bundle-a"));
+        let bundle_c = test_bundle("bundle-c", ZoneId::work(), 3, Some("bundle-b"));
+        let bundle_a_path = write_bundle_file(&temp_dir, "bundle-a.json", &bundle_a);
+        let bundle_b_path = write_bundle_file(&temp_dir, "bundle-b.json", &bundle_b);
+        let bundle_c_path = write_bundle_file(&temp_dir, "bundle-c.json", &bundle_c);
+        let state_path = temp_dir.path().join("state.json");
+
+        run_bundle_apply(&BundleApplyArgs {
+            bundle: bundle_a_path,
+            state: state_path.clone(),
+            plan: false,
+            json: true,
+        })
+        .unwrap();
+        run_bundle_apply(&BundleApplyArgs {
+            bundle: bundle_b_path,
+            state: state_path.clone(),
+            plan: false,
+            json: true,
+        })
+        .unwrap();
+
+        let err = run_bundle_rollback(&BundleRollbackArgs {
+            to: bundle_c_path,
+            state: state_path,
+            plan: false,
+            json: true,
+        })
+        .unwrap_err();
+
+        assert!(err.to_string().contains("does not match current bundle"));
     }
 
     // ---- RollbackPlan serde ----

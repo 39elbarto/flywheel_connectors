@@ -658,6 +658,24 @@ async fn assert_discovery_routes(
     let discover_all: DiscoveryResponse =
         http_post_json(client.clone(), url("/rpc/discover"), json!({})).await?;
     assert_eq!(discover_all.connectors.len(), 2);
+    assert!(
+        discover_all
+            .connectors
+            .iter()
+            .all(|connector| connector.tool_count == 1)
+    );
+    assert!(
+        discover_all
+            .connectors
+            .iter()
+            .all(|connector| { matches!(connector.max_safety_tier, fcp_core::SafetyTier::Safe) })
+    );
+    assert!(
+        discover_all
+            .connectors
+            .iter()
+            .all(|connector| connector.health.is_healthy())
+    );
 
     let discover_filtered: DiscoveryResponse = http_post_json(
         client.clone(),
@@ -667,6 +685,12 @@ async fn assert_discovery_routes(
     .await?;
     assert_eq!(discover_filtered.connectors.len(), 1);
     assert_eq!(discover_filtered.connectors[0].id, *connector_a_id);
+    assert_eq!(discover_filtered.connectors[0].tool_count, 1);
+    assert!(matches!(
+        discover_filtered.connectors[0].max_safety_tier,
+        fcp_core::SafetyTier::Safe
+    ));
+    assert!(discover_filtered.connectors[0].health.is_healthy());
 
     let introspection: IntrospectionResponse = http_get_json(
         client.clone(),
@@ -674,6 +698,12 @@ async fn assert_discovery_routes(
     )
     .await?;
     assert_eq!(introspection.connector.id, *connector_a_id);
+    assert_eq!(introspection.connector.tool_count, 1);
+    assert!(matches!(
+        introspection.connector.max_safety_tier,
+        fcp_core::SafetyTier::Safe
+    ));
+    assert!(introspection.connector.health.is_healthy());
     assert_eq!(introspection.tools.len(), 1);
     assert_eq!(introspection.tools[0].name, "test.echo");
 
@@ -792,6 +822,13 @@ async fn fcp_host_binary_emits_structured_endpoint_logs() -> Result<(), Box<dyn 
         entry.get("event").and_then(Value::as_str) == Some("discover_response")
             && entry.get("connector_count").and_then(Value::as_u64) == Some(2)
             && entry.get("registry_version").and_then(Value::as_u64) == Some(1)
+            && entry.get("cache_hit").and_then(Value::as_bool) == Some(false)
+    }));
+    assert!(logs.iter().any(|entry| {
+        entry.get("event").and_then(Value::as_str) == Some("discover_response")
+            && entry.get("connector_count").and_then(Value::as_u64) == Some(1)
+            && entry.get("registry_version").and_then(Value::as_u64) == Some(1)
+            && entry.get("cache_hit").and_then(Value::as_bool) == Some(true)
     }));
     assert!(logs.iter().any(|entry| {
         entry.get("event").and_then(Value::as_str) == Some("introspect_response")

@@ -171,6 +171,15 @@ impl DiscoveryResponse {
     }
 }
 
+/// Discovery response plus cache metadata for callers that emit observability.
+#[derive(Debug, Clone)]
+pub struct DiscoveryQueryResult {
+    /// Serialized discovery payload returned to clients.
+    pub response: DiscoveryResponse,
+    /// Whether connector summaries came from the in-memory cache.
+    pub cache_hit: bool,
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Introspection Types
 // ─────────────────────────────────────────────────────────────────────────────
@@ -626,14 +635,29 @@ where
 
     /// List all connectors (filtered).
     pub async fn discover(&self, filter: Option<DiscoveryFilter>) -> DiscoveryResponse {
-        let connectors = self.cache.get_or_refresh(&*self.registry).await;
+        self.discover_with_metadata(filter).await.response
+    }
 
+    /// List all connectors (filtered) plus cache metadata for callers that
+    /// need to emit cache-aware logs or metrics.
+    pub async fn discover_with_metadata(
+        &self,
+        filter: Option<DiscoveryFilter>,
+    ) -> DiscoveryQueryResult {
+        let cache_result = self.cache.get_or_refresh(&*self.registry).await;
         let filtered = match filter {
-            Some(f) => connectors.into_iter().filter(|c| f.matches(c)).collect(),
-            None => connectors,
+            Some(f) => cache_result
+                .connectors
+                .into_iter()
+                .filter(|c| f.matches(c))
+                .collect(),
+            None => cache_result.connectors,
         };
 
-        DiscoveryResponse::new(filtered, self.registry.version())
+        DiscoveryQueryResult {
+            response: DiscoveryResponse::new(filtered, cache_result.registry_version),
+            cache_hit: cache_result.cache_hit,
+        }
     }
 
     /// Introspect a single connector.
@@ -726,7 +750,14 @@ pub struct DiscoveryCache {
 
 struct CachedDiscovery {
     connectors: Vec<ConnectorSummary>,
+    registry_version: u64,
     cached_at: Instant,
+}
+
+struct DiscoveryCacheResult {
+    connectors: Vec<ConnectorSummary>,
+    registry_version: u64,
+    cache_hit: bool,
 }
 
 impl DiscoveryCache {
@@ -740,30 +771,40 @@ impl DiscoveryCache {
     }
 
     /// Get cached connectors or refresh from registry.
-    pub async fn get_or_refresh<R: ConnectorRegistry>(
-        &self,
-        registry: &R,
-    ) -> Vec<ConnectorSummary> {
+    async fn get_or_refresh<R: ConnectorRegistry>(&self, registry: &R) -> DiscoveryCacheResult {
+        let registry_version = registry.version();
+
         // Try to read from cache
         {
             let read = self.cache.read().await;
             if let Some(ref cached) = *read
+                && cached.registry_version == registry_version
                 && cached.cached_at.elapsed() < self.ttl
             {
-                return cached.connectors.clone();
+                return DiscoveryCacheResult {
+                    connectors: cached.connectors.clone(),
+                    registry_version: cached.registry_version,
+                    cache_hit: true,
+                };
             }
         }
 
         // Cache miss or expired - refresh
         let connectors = registry.list().await;
+        let refreshed_version = registry.version();
 
         let mut write = self.cache.write().await;
         *write = Some(CachedDiscovery {
             connectors: connectors.clone(),
+            registry_version: refreshed_version,
             cached_at: Instant::now(),
         });
 
-        connectors
+        DiscoveryCacheResult {
+            connectors,
+            registry_version: refreshed_version,
+            cache_hit: false,
+        }
     }
 
     /// Invalidate the cache.
@@ -782,7 +823,7 @@ mod tests {
     use super::*;
     use fcp_core::SelfCheckStatus;
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
     // Test SafetyTier extension
     #[test]
@@ -1160,6 +1201,78 @@ mod tests {
         }
     }
 
+    struct MutableRegistry {
+        connectors: RwLock<Vec<ConnectorSummary>>,
+        list_calls: Arc<AtomicUsize>,
+        version: AtomicU64,
+    }
+
+    impl MutableRegistry {
+        fn new(
+            connectors: Vec<ConnectorSummary>,
+            version: u64,
+            list_calls: Arc<AtomicUsize>,
+        ) -> Self {
+            Self {
+                connectors: RwLock::new(connectors),
+                list_calls,
+                version: AtomicU64::new(version),
+            }
+        }
+
+        async fn replace(&self, connectors: Vec<ConnectorSummary>, version: u64) {
+            *self.connectors.write().await = connectors;
+            self.version.store(version, Ordering::SeqCst);
+        }
+
+        async fn find(&self, id: &ConnectorId) -> Option<ConnectorSummary> {
+            self.connectors
+                .read()
+                .await
+                .iter()
+                .find(|connector| &connector.id == id)
+                .cloned()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ConnectorRegistry for MutableRegistry {
+        async fn list(&self) -> Vec<ConnectorSummary> {
+            self.list_calls.fetch_add(1, Ordering::SeqCst);
+            self.connectors.read().await.clone()
+        }
+
+        async fn get(&self, id: &ConnectorId) -> Option<ConnectorSummary> {
+            self.find(id).await
+        }
+
+        async fn get_introspection(&self, id: &ConnectorId) -> Option<Introspection> {
+            self.find(id).await.map(|_| Introspection {
+                operations: vec![],
+                events: vec![],
+                resource_types: vec![],
+                auth_caps: None,
+                event_caps: None,
+            })
+        }
+
+        async fn get_archetype(&self, _id: &ConnectorId) -> Option<ConnectorArchetype> {
+            None
+        }
+
+        async fn get_rate_limits(&self, _id: &ConnectorId) -> Option<RateLimitDeclarations> {
+            None
+        }
+
+        async fn self_check(&self, id: &ConnectorId) -> Option<SelfCheckReport> {
+            self.find(id).await.map(|_| SelfCheckReport::ok())
+        }
+
+        fn version(&self) -> u64 {
+            self.version.load(Ordering::SeqCst)
+        }
+    }
+
     struct AllowPolicy;
 
     #[async_trait::async_trait]
@@ -1193,9 +1306,11 @@ mod tests {
         #[allow(clippy::duration_suboptimal_units)]
         let cache = DiscoveryCache::new(Duration::from_secs(60));
 
-        let _ = cache.get_or_refresh(&registry).await;
-        let _ = cache.get_or_refresh(&registry).await;
+        let first = cache.get_or_refresh(&registry).await;
+        let second = cache.get_or_refresh(&registry).await;
 
+        assert!(!first.cache_hit);
+        assert!(second.cache_hit);
         assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 
@@ -1213,9 +1328,54 @@ mod tests {
         let registry = CountingRegistry::new(vec![summary], Arc::clone(&calls));
         let cache = DiscoveryCache::new(Duration::from_millis(0));
 
-        let _ = cache.get_or_refresh(&registry).await;
-        let _ = cache.get_or_refresh(&registry).await;
+        let first = cache.get_or_refresh(&registry).await;
+        let second = cache.get_or_refresh(&registry).await;
 
+        assert!(!first.cache_hit);
+        assert!(!second.cache_hit);
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn discovery_cache_refreshes_when_registry_version_changes() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let primary = make_summary(
+            "versioned",
+            "test",
+            "v1",
+            vec!["test"],
+            SafetyTier::Safe,
+            ConnectorHealth::healthy(),
+        );
+        let secondary = make_summary(
+            "versioned-extra",
+            "test",
+            "v1",
+            vec!["test"],
+            SafetyTier::Risky,
+            ConnectorHealth::healthy(),
+        );
+        let registry = MutableRegistry::new(vec![primary.clone()], 1, Arc::clone(&calls));
+        #[allow(clippy::duration_suboptimal_units)]
+        let cache = DiscoveryCache::new(Duration::from_secs(60));
+
+        let first = cache.get_or_refresh(&registry).await;
+        assert_eq!(first.connectors.len(), 1);
+        assert_eq!(first.registry_version, 1);
+        assert!(!first.cache_hit);
+
+        registry.replace(vec![primary, secondary.clone()], 2).await;
+
+        let second = cache.get_or_refresh(&registry).await;
+        assert_eq!(second.connectors.len(), 2);
+        assert_eq!(second.registry_version, 2);
+        assert!(!second.cache_hit);
+        assert!(
+            second
+                .connectors
+                .iter()
+                .any(|connector| connector.id == secondary.id)
+        );
         assert_eq!(calls.load(Ordering::SeqCst), 2);
     }
 
@@ -1245,6 +1405,41 @@ mod tests {
         endpoint.invalidate_cache().await;
         let _ = endpoint.discover(None).await;
         assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn discovery_endpoint_reports_cache_hit_metadata() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let summary = make_summary(
+            "cache-meta",
+            "test",
+            "v1",
+            vec!["test"],
+            SafetyTier::Safe,
+            ConnectorHealth::healthy(),
+        );
+        let registry = CountingRegistry::new(vec![summary], Arc::clone(&calls));
+        #[allow(clippy::duration_suboptimal_units)]
+        let endpoint = DiscoveryEndpoint::with_cache_ttl(
+            Arc::new(registry),
+            Arc::new(AllowPolicy),
+            Duration::from_secs(60),
+        );
+
+        let first = endpoint.discover_with_metadata(None).await;
+        let second = endpoint
+            .discover_with_metadata(Some(DiscoveryFilter {
+                category: Some("test".to_string()),
+                ..Default::default()
+            }))
+            .await;
+
+        assert!(!first.cache_hit);
+        assert!(second.cache_hit);
+        assert_eq!(first.response.registry_version, 1);
+        assert_eq!(second.response.registry_version, 1);
+        assert_eq!(second.response.connectors.len(), 1);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 
     #[fcp_async_core::runtime::test]
@@ -2428,9 +2623,11 @@ mod tests {
         let cache = DiscoveryCache::new(Duration::from_secs(60));
 
         let result = cache.get_or_refresh(&registry).await;
-        assert_eq!(result.len(), 1);
-        assert_eq!(result[0].id, summary.id);
-        assert_eq!(result[0].max_safety_tier, SafetyTier::Risky);
+        assert_eq!(result.connectors.len(), 1);
+        assert_eq!(result.connectors[0].id, summary.id);
+        assert_eq!(result.connectors[0].max_safety_tier, SafetyTier::Risky);
+        assert_eq!(result.registry_version, 1);
+        assert!(!result.cache_hit);
     }
 
     #[fcp_async_core::runtime::test]
@@ -2441,7 +2638,9 @@ mod tests {
         let cache = DiscoveryCache::new(Duration::from_secs(60));
 
         let result = cache.get_or_refresh(&registry).await;
-        assert!(result.is_empty());
+        assert!(result.connectors.is_empty());
+        assert_eq!(result.registry_version, 1);
+        assert!(!result.cache_hit);
         assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 

@@ -3818,6 +3818,158 @@ mod tests {
         assert!(std::error::Error::source(&err).is_none());
     }
 
+    // ─────────────────────────────────────────────────────────────────────
+    // Semaphore: owned permit methods
+    // ─────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn semaphore_try_acquire_owned_succeeds() {
+        let sem = Arc::new(super::sync::Semaphore::new(2));
+        let permit = Arc::clone(&sem)
+            .try_acquire_owned()
+            .expect("should have permits");
+        assert_eq!(sem.available_permits(), 1);
+        drop(permit);
+        assert_eq!(sem.available_permits(), 2);
+    }
+
+    #[test]
+    fn semaphore_try_acquire_owned_fails_when_empty() {
+        let sem = Arc::new(super::sync::Semaphore::new(0));
+        let err = Arc::clone(&sem)
+            .try_acquire_owned()
+            .expect_err("no permits");
+        assert_eq!(err.to_string(), "no permits available");
+    }
+
+    #[runtime::test]
+    async fn semaphore_acquire_owned_async() {
+        let sem = Arc::new(super::sync::Semaphore::new(1));
+        let permit = Arc::clone(&sem)
+            .acquire_owned()
+            .await
+            .expect("should acquire");
+        assert_eq!(sem.available_permits(), 0);
+        drop(permit);
+        assert_eq!(sem.available_permits(), 1);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // mpsc: Sender::closed() and Receiver accessors
+    // ─────────────────────────────────────────────────────────────────────
+
+    #[runtime::test]
+    async fn mpsc_sender_closed_returns_when_receiver_dropped() {
+        let (tx, rx) = channel::mpsc::channel::<u32>(4);
+        let tx_clone = tx.clone();
+
+        let handle = task::spawn(async move {
+            tx_clone.closed().await;
+        });
+
+        // Drop receiver to close the channel
+        drop(rx);
+
+        let result = time::timeout(Duration::from_secs(2), handle).await;
+        assert!(result.is_ok());
+    }
+
+    #[runtime::test]
+    async fn mpsc_sender_len_increases_on_send() {
+        let (tx, _rx) = channel::mpsc::channel::<u32>(8);
+        assert_eq!(tx.len(), 0);
+        assert!(tx.is_empty());
+
+        tx.send(1).await.unwrap();
+        tx.send(2).await.unwrap();
+        assert_eq!(tx.len(), 2);
+        assert!(!tx.is_empty());
+    }
+
+    #[runtime::test]
+    async fn mpsc_sender_is_closed_after_receiver_close() {
+        let (tx, mut rx) = channel::mpsc::channel::<u32>(4);
+        assert!(!tx.is_closed());
+        rx.close();
+        assert!(tx.is_closed());
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // JoinError: panic path
+    // ─────────────────────────────────────────────────────────────────────
+
+    #[runtime::test]
+    async fn join_error_panic_detected() {
+        let handle = task::spawn(async {
+            panic!("deliberate test panic");
+        });
+        let err = handle.await.expect_err("should capture panic");
+        assert!(err.is_panic());
+        assert!(!err.is_cancelled());
+        let msg = err.to_string();
+        assert!(msg.contains("deliberate test panic"));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // watch: borrow_and_update marks as seen
+    // ─────────────────────────────────────────────────────────────────────
+
+    #[runtime::test]
+    async fn watch_borrow_and_update_clears_changed_flag() {
+        let (tx, mut rx) = channel::watch::channel(0_u32);
+        tx.send(42).unwrap();
+        assert!(rx.has_changed());
+        let _ = rx.borrow_and_update();
+        assert!(!rx.has_changed());
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // oneshot: sender debug
+    // ─────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn oneshot_sender_debug() {
+        let (tx, _rx) = channel::oneshot::channel::<u32>();
+        let dbg = format!("{tx:?}");
+        assert!(dbg.contains("Sender"));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // acquire_error display
+    // ─────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn try_acquire_error_debug_format() {
+        let sem = super::sync::Semaphore::new(0);
+        match sem.try_acquire() {
+            Err(err) => {
+                let dbg = format!("{err:?}");
+                assert!(dbg.contains("TryAcquireError"));
+            }
+            Ok(_) => panic!("should have no permits"),
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // context: request_scoped has deadline
+    // ─────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn request_context_has_deadline() {
+        let ctx = ExecutionContext::request_scoped(Duration::from_secs(10));
+        assert!(ctx.deadline().is_some());
+        assert!(ctx.remaining_budget().is_some());
+        assert_eq!(ctx.scope(), ContextScope::Request);
+    }
+
+    #[test]
+    fn background_context_no_deadline_sync() {
+        let ctx = ExecutionContext::background();
+        assert!(ctx.deadline().is_none());
+        assert!(ctx.remaining_budget().is_none());
+        assert_eq!(ctx.scope(), ContextScope::Background);
+    }
+
     #[test]
     fn async_error_eq_with_messages() {
         let a = AsyncError::ProtocolIo {

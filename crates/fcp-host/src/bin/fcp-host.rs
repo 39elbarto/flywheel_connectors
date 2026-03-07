@@ -32,7 +32,8 @@ use fcp_host::{
     BudgetPolicyEngine, ConnectorArchetype, ConnectorRegistry, ConnectorSummary, DiscoveryEndpoint,
     DiscoveryFilter, DiscoveryResponse, DoctorReport, DoctorRequest, DoctorService,
     HostHealthResponse, HostHealthStatus, IntrospectionResponse, PreflightRequest,
-    PreflightResponse, RequestPriority, ResilienceError, ResilienceLayer, merge_connector_health,
+    PreflightResponse, RequestPriority, ResilienceError, ResilienceLayer, SafetyTierExt,
+    merge_connector_health,
 };
 use fcp_host::{HostError, HostResult};
 use hyper::body::Incoming;
@@ -168,8 +169,17 @@ impl SubprocessConnector {
             .map_err(|err| HostError::RegistryError(format!("self_check parse error: {err}")))
     }
 
-    async fn summary_with_health(&self) -> ConnectorSummary {
+    async fn summary_snapshot(&self) -> ConnectorSummary {
         let mut summary = self.summary.clone();
+        if let Ok(introspection) = self.introspect().await {
+            summary.tool_count = introspection.operations.len() as u32;
+            summary.max_safety_tier = introspection
+                .operations
+                .iter()
+                .map(|operation| operation.safety_tier)
+                .max_by_key(|tier| tier.level())
+                .unwrap_or(SafetyTier::Safe);
+        }
         match self.health().await {
             Ok(snapshot) => {
                 summary.health = merge_connector_health(
@@ -218,15 +228,14 @@ impl ConnectorRegistry for SubprocessRegistry {
     async fn list(&self) -> Vec<ConnectorSummary> {
         let mut results = Vec::new();
         for connector in self.connectors.values() {
-            results.push(connector.summary_with_health().await);
+            results.push(connector.summary_snapshot().await);
         }
         results
     }
 
     async fn get(&self, id: &ConnectorId) -> Option<ConnectorSummary> {
-        self.connectors
-            .get(id)
-            .map(|connector| connector.summary.clone())
+        let connector = self.connectors.get(id)?;
+        Some(connector.summary_snapshot().await)
     }
 
     async fn get_introspection(&self, id: &ConnectorId) -> Option<Introspection> {
@@ -668,11 +677,14 @@ async fn discover_handler(
         filter = ?filter,
         "processing discovery request"
     );
-    let response = state.discovery.discover(filter).await;
+    let result = state.discovery.discover_with_metadata(filter).await;
+    let cache_hit = result.cache_hit;
+    let response = result.response;
     tracing::debug!(
         event = "discover_response",
         connector_count = response.connectors.len(),
         registry_version = response.registry_version,
+        cache_hit,
         duration_ms = started_at.elapsed().as_millis() as u64,
         "discovery request complete"
     );

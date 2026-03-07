@@ -3,6 +3,7 @@
 //! Implements bounded, convergent repair from `FCP_Specification_V2.md`.
 
 use std::collections::HashMap;
+use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -87,6 +88,168 @@ pub struct RepairStats {
     pub queue_depth: usize,
     /// Repairs blocked by rate limit.
     pub rate_limited: u64,
+}
+
+/// Stable reason code for why a repair action was planned or deferred.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RepairReasonCode {
+    /// Coverage or availability is below the policy SLO target.
+    #[serde(rename = "repair.policy_slo_deficit")]
+    PolicySloDeficit,
+    /// Coverage is reconstructable but violates source-diversity policy.
+    #[serde(rename = "repair.diversity_deficit")]
+    DiversityDeficit,
+    /// Object is hot and should be pre-staged beyond the base policy floor.
+    #[serde(rename = "repair.hot_object_pre_stage")]
+    HotObjectPreStage,
+    /// Repair was deferred because the planner is power constrained.
+    #[serde(rename = "repair.deferred_power_budget")]
+    DeferredPowerBudget,
+}
+
+impl RepairReasonCode {
+    /// Return the stable wire-format string for this reason.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::PolicySloDeficit => "repair.policy_slo_deficit",
+            Self::DiversityDeficit => "repair.diversity_deficit",
+            Self::HotObjectPreStage => "repair.hot_object_pre_stage",
+            Self::DeferredPowerBudget => "repair.deferred_power_budget",
+        }
+    }
+}
+
+impl fmt::Display for RepairReasonCode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Per-cycle repair planning budget.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RepairCycleBudget {
+    /// Maximum actions that may be planned in a cycle.
+    pub max_repairs: usize,
+    /// Maximum estimated bytes that may be spent in a cycle.
+    pub max_bytes: u64,
+    /// Maximum estimated decode CPU budget in milliseconds.
+    pub max_decode_ms: u32,
+}
+
+impl Default for RepairCycleBudget {
+    fn default() -> Self {
+        Self {
+            max_repairs: usize::MAX,
+            max_bytes: u64::MAX,
+            max_decode_ms: u32::MAX,
+        }
+    }
+}
+
+/// Budget usage consumed by the selected repair actions in a cycle.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RepairCycleUsage {
+    /// Number of selected repair actions.
+    pub repairs: usize,
+    /// Estimated bytes consumed by selected actions.
+    pub bytes: u64,
+    /// Estimated decode milliseconds consumed by selected actions.
+    pub decode_ms: u32,
+}
+
+impl RepairCycleUsage {
+    fn can_fit(&self, budget: &RepairCycleBudget, action: &RepairPlanAction) -> bool {
+        self.repairs < budget.max_repairs
+            && self.bytes.saturating_add(action.estimated_bytes) <= budget.max_bytes
+            && self.decode_ms.saturating_add(action.estimated_decode_ms) <= budget.max_decode_ms
+    }
+
+    fn record(&mut self, action: &RepairPlanAction) {
+        self.repairs += 1;
+        self.bytes = self.bytes.saturating_add(action.estimated_bytes);
+        self.decode_ms = self.decode_ms.saturating_add(action.estimated_decode_ms);
+    }
+}
+
+/// Summary of the strictest policy targets encountered in a planning cycle.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RepairPolicyTargets {
+    /// Maximum target coverage requirement across tracked objects.
+    pub target_coverage_bps: u32,
+    /// Maximum minimum source-diversity requirement across tracked objects.
+    pub min_source_diversity: u8,
+}
+
+/// Additional knobs that influence a single deterministic repair planning cycle.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RepairPlanningOptions {
+    /// Monotonic cycle identifier for logs and comparisons.
+    pub cycle_id: u64,
+    /// Hard budget limits for the cycle.
+    pub budget: RepairCycleBudget,
+    /// Objects that should be pre-staged more aggressively than the base policy.
+    #[serde(default)]
+    pub hot_objects: Vec<ObjectId>,
+    /// Coverage target for hot-object pre-staging.
+    pub hot_object_min_coverage_bps: u32,
+    /// Whether the planner should defer non-critical work due to power constraints.
+    pub power_saver: bool,
+    /// Extra cost multiplier, in basis points, for DERP-only or otherwise expensive links.
+    pub derp_penalty_bps: u32,
+}
+
+impl Default for RepairPlanningOptions {
+    fn default() -> Self {
+        Self {
+            cycle_id: 0,
+            budget: RepairCycleBudget::default(),
+            hot_objects: Vec::new(),
+            hot_object_min_coverage_bps: 10_000,
+            power_saver: false,
+            derp_penalty_bps: 0,
+        }
+    }
+}
+
+/// A single explainable repair action selected by the planner.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RepairPlanAction {
+    /// Object to repair.
+    pub object_id: ObjectId,
+    /// Stable reason code explaining why this action was chosen.
+    pub reason_code: RepairReasonCode,
+    /// Deterministic priority used for ordering.
+    pub priority: u32,
+    /// Estimated number of symbols to fetch or pre-stage.
+    pub estimated_symbols: u32,
+    /// Estimated bytes consumed by the action.
+    pub estimated_bytes: u64,
+    /// Estimated decode CPU budget consumed by the action.
+    pub estimated_decode_ms: u32,
+}
+
+/// Deterministic plan output for a single zone repair cycle.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RepairPlan {
+    /// Zone that was planned.
+    pub zone_id: ZoneId,
+    /// Cycle identifier that produced this plan.
+    pub cycle_id: u64,
+    /// Summary of the strictest policy targets seen in the cycle.
+    pub policy_targets: RepairPolicyTargets,
+    /// Number of objects evaluated in the zone.
+    pub object_count_tracked: usize,
+    /// Number of objects that were below target or selected for pre-staging.
+    pub object_count_below_target: usize,
+    /// Planner budget limits for the cycle.
+    pub budget: RepairCycleBudget,
+    /// Budget actually consumed by `actions`.
+    pub budget_used: RepairCycleUsage,
+    /// Selected repair actions.
+    pub actions: Vec<RepairPlanAction>,
+    /// Deferred actions that were explainably skipped.
+    pub deferred: Vec<RepairPlanAction>,
 }
 
 /// Rate limiter for repairs.
@@ -339,6 +502,196 @@ impl RepairController {
         }
     }
 
+    fn plan_reason_code(
+        &self,
+        coverage: &CoverageEvaluation,
+        policy: &ObjectPlacementPolicy,
+        is_hot_object: bool,
+        options: &RepairPlanningOptions,
+    ) -> Option<RepairReasonCode> {
+        if !coverage.is_available {
+            return Some(RepairReasonCode::PolicySloDeficit);
+        }
+
+        if coverage.diversity_deficit(policy.min_source_diversity) > 0 {
+            return Some(RepairReasonCode::DiversityDeficit);
+        }
+
+        if coverage.coverage_deficit_bps(policy.target_coverage_bps) >= self.config.min_deficit_bps
+        {
+            return Some(RepairReasonCode::PolicySloDeficit);
+        }
+
+        if is_hot_object && coverage.coverage_bps < options.hot_object_min_coverage_bps {
+            return Some(RepairReasonCode::HotObjectPreStage);
+        }
+
+        None
+    }
+
+    fn calculate_plan_priority(
+        &self,
+        coverage: &CoverageEvaluation,
+        policy: &ObjectPlacementPolicy,
+        reason_code: RepairReasonCode,
+        options: &RepairPlanningOptions,
+    ) -> u32 {
+        match reason_code {
+            RepairReasonCode::HotObjectPreStage => {
+                400 + coverage.coverage_deficit_bps(options.hot_object_min_coverage_bps) / 100
+            }
+            RepairReasonCode::PolicySloDeficit | RepairReasonCode::DiversityDeficit => {
+                self.calculate_priority(coverage, policy)
+            }
+            RepairReasonCode::DeferredPowerBudget => 0,
+        }
+    }
+
+    fn estimate_plan_action(
+        &self,
+        object_id: ObjectId,
+        coverage: &CoverageEvaluation,
+        policy: &ObjectPlacementPolicy,
+        object_meta: &crate::symbol_store::ObjectSymbolMeta,
+        reason_code: RepairReasonCode,
+        options: &RepairPlanningOptions,
+    ) -> RepairPlanAction {
+        let coverage_symbols = coverage.symbols_needed(policy.target_coverage_bps);
+        let diversity_symbols = u32::from(coverage.diversity_deficit(policy.min_source_diversity));
+        let hot_symbols = if matches!(reason_code, RepairReasonCode::HotObjectPreStage) {
+            coverage
+                .symbols_needed(options.hot_object_min_coverage_bps)
+                .max(1)
+        } else {
+            0
+        };
+        let max_symbols_per_repair = self.config.max_symbols_per_repair.max(1);
+        let estimated_symbols = coverage_symbols
+            .max(diversity_symbols)
+            .max(hot_symbols)
+            .max(1)
+            .min(max_symbols_per_repair);
+        let base_bytes = u64::from(estimated_symbols) * u64::from(object_meta.oti.symbol_size);
+        let derp_multiplier = u64::from(10_000u32.saturating_add(options.derp_penalty_bps));
+        let estimated_bytes = base_bytes.saturating_mul(derp_multiplier) / 10_000;
+        let estimated_decode_ms = estimated_symbols
+            .saturating_mul(2)
+            .saturating_add(object_meta.source_symbols / 8)
+            .max(1);
+
+        RepairPlanAction {
+            object_id,
+            reason_code,
+            priority: self.calculate_plan_priority(coverage, policy, reason_code, options),
+            estimated_symbols,
+            estimated_bytes,
+            estimated_decode_ms,
+        }
+    }
+
+    /// Build a deterministic, explainable repair plan for one zone evaluation cycle.
+    pub async fn plan_zone(
+        &self,
+        zone_id: &ZoneId,
+        symbol_store: &dyn SymbolStore,
+        policies: &HashMap<ObjectId, ObjectPlacementPolicy>,
+        options: &RepairPlanningOptions,
+    ) -> RepairPlan {
+        let mut object_ids = symbol_store.list_zone(zone_id).await;
+        object_ids.sort();
+
+        let mut policy_targets = RepairPolicyTargets::default();
+        let mut object_count_tracked = 0usize;
+        let mut object_count_below_target = 0usize;
+        let mut candidates = Vec::new();
+
+        for object_id in object_ids {
+            let Some(policy) = policies.get(&object_id).cloned() else {
+                continue;
+            };
+            let Some(dist) = symbol_store.get_distribution(&object_id).await else {
+                continue;
+            };
+            let Ok(object_meta) = symbol_store.get_object_meta(&object_id).await else {
+                continue;
+            };
+
+            object_count_tracked += 1;
+            policy_targets.target_coverage_bps = policy_targets
+                .target_coverage_bps
+                .max(policy.target_coverage_bps);
+            policy_targets.min_source_diversity = policy_targets
+                .min_source_diversity
+                .max(policy.min_source_diversity);
+
+            let coverage = CoverageEvaluation::from_distribution(object_id, &dist);
+            let is_hot_object = options
+                .hot_objects
+                .iter()
+                .any(|candidate| candidate == &object_id);
+            let Some(reason_code) =
+                self.plan_reason_code(&coverage, &policy, is_hot_object, options)
+            else {
+                continue;
+            };
+
+            object_count_below_target += 1;
+            candidates.push(self.estimate_plan_action(
+                object_id,
+                &coverage,
+                &policy,
+                &object_meta,
+                reason_code,
+                options,
+            ));
+        }
+
+        candidates.sort_by(|left, right| {
+            right
+                .priority
+                .cmp(&left.priority)
+                .then_with(|| left.estimated_bytes.cmp(&right.estimated_bytes))
+                .then_with(|| left.estimated_decode_ms.cmp(&right.estimated_decode_ms))
+                .then_with(|| left.object_id.cmp(&right.object_id))
+        });
+
+        let mut plan = RepairPlan {
+            zone_id: zone_id.clone(),
+            cycle_id: options.cycle_id,
+            policy_targets,
+            object_count_tracked,
+            object_count_below_target,
+            budget: options.budget,
+            budget_used: RepairCycleUsage::default(),
+            actions: Vec::new(),
+            deferred: Vec::new(),
+        };
+
+        for action in candidates {
+            let should_defer_for_power = options.power_saver
+                && matches!(action.reason_code, RepairReasonCode::PolicySloDeficit)
+                && action.priority < 1000;
+
+            if should_defer_for_power {
+                let mut deferred = action;
+                deferred.reason_code = RepairReasonCode::DeferredPowerBudget;
+                plan.deferred.push(deferred);
+                continue;
+            }
+
+            if plan.budget_used.can_fit(&options.budget, &action) {
+                plan.budget_used.record(&action);
+                plan.actions.push(action);
+            } else if options.power_saver {
+                let mut deferred = action;
+                deferred.reason_code = RepairReasonCode::DeferredPowerBudget;
+                plan.deferred.push(deferred);
+            }
+        }
+
+        plan
+    }
+
     /// Evaluate all objects in a zone and queue repairs as needed.
     pub async fn evaluate_zone(
         &self,
@@ -581,6 +934,57 @@ mod tests {
             excluded_devices: vec![],
             target_coverage_bps: 10000, // 100%
             min_source_diversity: 0,
+        }
+    }
+
+    fn test_zone_id() -> ZoneId {
+        "z:planner".parse().unwrap()
+    }
+
+    fn planner_options(cycle_id: u64) -> RepairPlanningOptions {
+        RepairPlanningOptions {
+            cycle_id,
+            ..Default::default()
+        }
+    }
+
+    async fn seed_planner_object(
+        store: &MemorySymbolStore,
+        object_id: ObjectId,
+        source_symbols: u32,
+        total_symbols: u32,
+        symbol_size: u16,
+        source_nodes: &[u64],
+    ) {
+        let zone_id = test_zone_id();
+        let meta = ObjectSymbolMeta {
+            object_id,
+            zone_id: zone_id.clone(),
+            oti: ObjectTransmissionInfo {
+                transfer_length: u64::from(source_symbols) * u64::from(symbol_size),
+                symbol_size,
+                source_blocks: 1,
+                sub_blocks: 1,
+                alignment: 8,
+            },
+            source_symbols,
+            first_symbol_at: 1_000_000,
+        };
+        store.put_object_meta(meta).await.unwrap();
+
+        for esi in 0..total_symbols {
+            let source_node = source_nodes[(esi as usize) % source_nodes.len()];
+            let symbol = StoredSymbol {
+                meta: SymbolMeta {
+                    object_id,
+                    esi,
+                    zone_id: zone_id.clone(),
+                    source_node: Some(source_node),
+                    stored_at: 1_000_000 + u64::from(esi),
+                },
+                data: Bytes::from(vec![0_u8; usize::from(symbol_size)]),
+            };
+            store.put_symbol(symbol).await.unwrap();
         }
     }
 
@@ -2715,5 +3119,212 @@ mod tests {
         assert_eq!(stats.repairs_attempted, 1);
         assert_eq!(stats.repairs_succeeded, 1);
         assert_eq!(stats.symbols_added, 5);
+    }
+
+    #[test]
+    fn planner_reason_codes_cover_policy_diversity_and_hot_paths() {
+        run_store_test(
+            "planner_reason_codes_cover_policy_diversity_and_hot_paths",
+            "verify",
+            "repair_plan",
+            6,
+            || async {
+                let store = MemorySymbolStore::new(MemorySymbolStoreConfig {
+                    max_bytes: 1024 * 1024,
+                    local_node_id: 1,
+                });
+                let controller = RepairController::new(RepairControllerConfig {
+                    min_deficit_bps: 100,
+                    max_symbols_per_repair: 8,
+                    ..Default::default()
+                });
+                let zone_id = test_zone_id();
+
+                let slo_object = ObjectId::from_bytes([0x11; 32]);
+                let diversity_object = ObjectId::from_bytes([0x22; 32]);
+                let hot_object = ObjectId::from_bytes([0x33; 32]);
+
+                seed_planner_object(&store, slo_object, 10, 5, 64, &[1]).await;
+                seed_planner_object(&store, diversity_object, 4, 4, 64, &[1]).await;
+                seed_planner_object(&store, hot_object, 20, 19, 64, &[1, 2, 3]).await;
+
+                let mut policies = HashMap::new();
+                policies.insert(slo_object, test_policy());
+                let mut diversity_policy = test_policy();
+                diversity_policy.min_source_diversity = 2;
+                policies.insert(diversity_object, diversity_policy);
+                let mut hot_policy = test_policy();
+                hot_policy.target_coverage_bps = 9_000;
+                policies.insert(hot_object, hot_policy);
+
+                let mut options = planner_options(7);
+                options.hot_objects = vec![hot_object];
+
+                let plan = controller
+                    .plan_zone(&zone_id, &store, &policies, &options)
+                    .await;
+                assert_eq!(plan.object_count_tracked, 3);
+                assert_eq!(plan.object_count_below_target, 3);
+                assert_eq!(plan.actions.len(), 3);
+                assert_eq!(
+                    plan.actions[0].reason_code,
+                    RepairReasonCode::PolicySloDeficit
+                );
+                assert_eq!(
+                    plan.actions[1].reason_code,
+                    RepairReasonCode::HotObjectPreStage
+                );
+                assert_eq!(
+                    plan.actions[2].reason_code,
+                    RepairReasonCode::DiversityDeficit
+                );
+
+                StoreLogData {
+                    symbol_count: Some(plan.object_count_tracked as u32),
+                    details: Some(json!({
+                        "cycle_id": plan.cycle_id,
+                        "reason_codes": plan.actions.iter().map(|action| action.reason_code.as_str()).collect::<Vec<_>>(),
+                        "budget_used": {
+                            "repairs": plan.budget_used.repairs,
+                            "bytes": plan.budget_used.bytes,
+                            "decode_ms": plan.budget_used.decode_ms
+                        }
+                    })),
+                    ..StoreLogData::default()
+                }
+            },
+        );
+    }
+
+    #[test]
+    fn planner_is_deterministic_and_tie_breaks_by_cost_then_object_id() {
+        run_store_test(
+            "planner_is_deterministic_and_tie_breaks_by_cost_then_object_id",
+            "verify",
+            "repair_plan",
+            5,
+            || async {
+                let store = MemorySymbolStore::new(MemorySymbolStoreConfig {
+                    max_bytes: 1024 * 1024,
+                    local_node_id: 1,
+                });
+                let controller = RepairController::new(RepairControllerConfig {
+                    min_deficit_bps: 100,
+                    max_symbols_per_repair: 4,
+                    ..Default::default()
+                });
+                let zone_id = test_zone_id();
+
+                let cheap_object = ObjectId::from_bytes([0x41; 32]);
+                let expensive_object = ObjectId::from_bytes([0x42; 32]);
+
+                seed_planner_object(&store, expensive_object, 4, 3, 256, &[1]).await;
+                seed_planner_object(&store, cheap_object, 4, 3, 64, &[1]).await;
+
+                let mut policies = HashMap::new();
+                policies.insert(expensive_object, test_policy());
+                policies.insert(cheap_object, test_policy());
+
+                let mut options = planner_options(8);
+                options.derp_penalty_bps = 5_000;
+                let first_plan = controller
+                    .plan_zone(&zone_id, &store, &policies, &options)
+                    .await;
+                let second_plan = controller
+                    .plan_zone(&zone_id, &store, &policies, &options)
+                    .await;
+
+                assert_eq!(first_plan, second_plan);
+                assert_eq!(first_plan.actions.len(), 2);
+                assert_eq!(first_plan.actions[0].object_id, cheap_object);
+                assert!(
+                    first_plan.actions[0].estimated_bytes < first_plan.actions[1].estimated_bytes
+                );
+
+                StoreLogData {
+                    symbol_count: Some(first_plan.actions.len() as u32),
+                    details: Some(json!({
+                        "ordered_objects": first_plan.actions.iter().map(|action| action.object_id.to_string()).collect::<Vec<_>>(),
+                        "estimated_bytes": first_plan.actions.iter().map(|action| action.estimated_bytes).collect::<Vec<_>>()
+                    })),
+                    ..StoreLogData::default()
+                }
+            },
+        );
+    }
+
+    #[test]
+    fn planner_enforces_budgets_and_defers_noncritical_work_when_power_limited() {
+        run_store_test(
+            "planner_enforces_budgets_and_defers_noncritical_work_when_power_limited",
+            "verify",
+            "repair_plan",
+            6,
+            || async {
+                let store = MemorySymbolStore::new(MemorySymbolStoreConfig {
+                    max_bytes: 1024 * 1024,
+                    local_node_id: 1,
+                });
+                let controller = RepairController::new(RepairControllerConfig {
+                    min_deficit_bps: 100,
+                    max_symbols_per_repair: 8,
+                    ..Default::default()
+                });
+                let zone_id = test_zone_id();
+
+                let unavailable_object = ObjectId::from_bytes([0x51; 32]);
+                let degraded_object = ObjectId::from_bytes([0x52; 32]);
+
+                seed_planner_object(&store, unavailable_object, 8, 3, 64, &[1]).await;
+                seed_planner_object(&store, degraded_object, 10, 9, 64, &[1, 2]).await;
+
+                let mut policies = HashMap::new();
+                policies.insert(unavailable_object, test_policy());
+                policies.insert(degraded_object, test_policy());
+
+                let mut options = planner_options(9);
+                options.power_saver = true;
+                options.budget = RepairCycleBudget {
+                    max_repairs: 1,
+                    max_bytes: 1_024,
+                    max_decode_ms: 32,
+                };
+
+                let plan = controller
+                    .plan_zone(&zone_id, &store, &policies, &options)
+                    .await;
+                assert_eq!(plan.actions.len(), 1);
+                assert_eq!(plan.actions[0].object_id, unavailable_object);
+                assert_eq!(
+                    plan.actions[0].reason_code,
+                    RepairReasonCode::PolicySloDeficit
+                );
+                assert_eq!(plan.deferred.len(), 1);
+                assert_eq!(plan.deferred[0].object_id, degraded_object);
+                assert_eq!(
+                    plan.deferred[0].reason_code,
+                    RepairReasonCode::DeferredPowerBudget
+                );
+
+                StoreLogData {
+                    symbol_count: Some((plan.actions.len() + plan.deferred.len()) as u32),
+                    details: Some(json!({
+                        "selected": plan.actions.iter().map(|action| action.object_id.to_string()).collect::<Vec<_>>(),
+                        "deferred": plan.deferred.iter().map(|action| action.object_id.to_string()).collect::<Vec<_>>(),
+                        "budget": {
+                            "max_repairs": plan.budget.max_repairs,
+                            "max_bytes": plan.budget.max_bytes,
+                            "max_decode_ms": plan.budget.max_decode_ms
+                        },
+                        "budget_used": {
+                            "repairs": plan.budget_used.repairs,
+                            "bytes": plan.budget_used.bytes,
+                            "decode_ms": plan.budget_used.decode_ms
+                        }
+                    })),
+                    ..StoreLogData::default()
+                }
+            },
+        );
     }
 }

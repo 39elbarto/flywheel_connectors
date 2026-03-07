@@ -972,8 +972,7 @@ mod tests {
 
     #[test]
     fn test_config_public_client_defaults() {
-        let config =
-            OAuth2Config::public_client("pub", "https://a.com/auth", "https://a.com/tok");
+        let config = OAuth2Config::public_client("pub", "https://a.com/auth", "https://a.com/tok");
         assert_eq!(config.client_id, "pub");
         assert!(config.client_secret.is_none());
         assert!(config.use_pkce);
@@ -1331,6 +1330,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::clone_on_copy)]
     fn test_auth_style_clone_copy() {
         let style = AuthStyle::Basic;
         let copied = style;
@@ -1420,10 +1420,7 @@ mod tests {
             )
             .with_scopes(vec!["default.scope".into()]);
             let client = OAuth2Client::new(config).unwrap();
-            let tokens = client
-                .client_credentials(&["extra.scope"])
-                .await
-                .unwrap();
+            let tokens = client.client_credentials(&["extra.scope"]).await.unwrap();
             assert_eq!(tokens.access_token(), "tok");
         });
     }
@@ -1434,9 +1431,7 @@ mod tests {
             let server = MockServer::start().await;
             Mock::given(method("POST"))
                 .and(path("/token"))
-                .respond_with(
-                    ResponseTemplate::new(500).set_body_string("Internal Server Error"),
-                )
+                .respond_with(ResponseTemplate::new(500).set_body_string("Internal Server Error"))
                 .mount(&server)
                 .await;
 
@@ -1459,7 +1454,9 @@ mod tests {
             let server = MockServer::start().await;
             Mock::given(method("POST"))
                 .and(path("/token"))
-                .and(body_string_contains("audience=https%3A%2F%2Fapi.example.com"))
+                .and(body_string_contains(
+                    "audience=https%3A%2F%2Fapi.example.com",
+                ))
                 .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                     "access_token": "tok-extra",
                     "token_type": "Bearer",
@@ -1488,7 +1485,9 @@ mod tests {
             Mock::given(method("POST"))
                 .and(path("/token"))
                 .and(body_string_contains("grant_type=refresh_token"))
-                .and(body_string_contains("audience=https%3A%2F%2Fapi.example.com"))
+                .and(body_string_contains(
+                    "audience=https%3A%2F%2Fapi.example.com",
+                ))
                 .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                     "access_token": "refreshed-tok",
                     "token_type": "Bearer",

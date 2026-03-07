@@ -1228,7 +1228,11 @@ mod tests {
         assert!(a.starts_with("[REDACTED:"));
         assert!(a.ends_with(']'));
         // Hash portion is 8 hex chars
-        let inner = a.strip_prefix("[REDACTED:").unwrap().strip_suffix(']').unwrap();
+        let inner = a
+            .strip_prefix("[REDACTED:")
+            .unwrap()
+            .strip_suffix(']')
+            .unwrap();
         assert_eq!(inner.len(), 8);
     }
 
@@ -1385,7 +1389,7 @@ mod tests {
             decision: "deferred".to_string(),
             reason: Some("capacity".to_string()),
         };
-        let event = TraceEvent::Routing(rd.clone());
+        let event = TraceEvent::Routing(rd);
         let policy = RedactionPolicy::default().with_field("session_id");
         let redacted = event.with_redaction(&policy);
         // Routing doesn't redact anything — should be identical
@@ -1489,6 +1493,7 @@ mod tests {
     // ====================================================================
 
     #[test]
+    #[allow(clippy::cast_possible_truncation)]
     fn test_captured_trace_multiple_events() {
         let mut trace = CapturedTrace::new("multi-event");
         for i in 0..10 {
@@ -1646,7 +1651,9 @@ mod tests {
         });
 
         // Should succeed even when disabled (silently drops)
-        capture.record(event).expect("disabled capture should succeed");
+        capture
+            .record(event)
+            .expect("disabled capture should succeed");
         assert!(capture.snapshot().is_empty());
     }
 
@@ -1747,7 +1754,7 @@ mod tests {
                 reason_code: "OK".to_string(),
                 evidence: vec!["evidence-data-padding".to_string()],
             });
-            if let Err(TraceError::BufferFull) = capture.record(event) {
+            if matches!(capture.record(event), Err(TraceError::BufferFull)) {
                 hit_buffer_full = true;
                 break;
             }
@@ -1757,9 +1764,7 @@ mod tests {
 
     #[test]
     fn test_trace_capture_sampling_full_rate() {
-        let config = TraceCaptureConfig::new()
-            .enabled()
-            .with_sample_rate(1.0);
+        let config = TraceCaptureConfig::new().enabled().with_sample_rate(1.0);
         let mut capture = TraceCapture::new("full-rate", config);
 
         for i in 0..20 {
@@ -1826,6 +1831,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::clone_on_copy)]
     fn test_trace_export_format_clone_and_copy() {
         let fmt = TraceExportFormat::Json;
         let copied = fmt;

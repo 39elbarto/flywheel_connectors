@@ -12,7 +12,7 @@ use fcp_async_core::sync::RwLock;
 use fcp_core::{
     AgentHint, BaseConnector, CapabilityGrant, CapabilityId, CapabilityToken, CapabilityVerifier,
     ConnectorId, EventCaps, EventData, EventEnvelope, EventInfo, FcpError, FcpResult,
-    HandshakeRequest, HandshakeResponse, IdempotencyClass, Introspection, OperationId,
+    HandshakeRequest, HandshakeResponse, IdempotencyClass, Introspection, ObjectId, OperationId,
     OperationInfo, Principal, RiskLevel, SafetyTier, SessionId, SimulateRequest, SimulateResponse,
     TrustLevel, ZoneId,
 };
@@ -383,33 +383,45 @@ impl SlackConnector {
                 ),
                 op_info(
                     "slack.upload_file",
-                    "Upload a file to Slack channels",
+                    "Upload host-resolved object content to Slack channels",
                     json!({
                         "type": "object",
-                        "required": ["channels", "content"],
+                        "required": ["channels", "content_object_id", "resolved_content"],
                         "properties": {
                             "channels": { "type": "string", "description": "Comma-separated channel IDs" },
-                            "content": { "type": "string", "description": "File content" },
+                            "content_object_id": { "type": "string", "description": "Source mesh object reference (hex ObjectId)" },
+                            "resolved_content": { "type": "string", "description": "Host-materialized content bytes for content_object_id" },
                             "filename": { "type": "string", "description": "Filename to display" }
                         }
                     }),
-                    json!({ "type": "object", "properties": { "file": { "type": "object" } } }),
-                    "slack.write",
+                    json!({
+                        "type": "object",
+                        "required": ["file", "file_object_id", "source_object_id"],
+                        "properties": {
+                            "file": { "type": "object" },
+                            "file_object_id": { "type": "string" },
+                            "source_object_id": { "type": "string" }
+                        }
+                    }),
+                    "slack.files.write",
                     RiskLevel::Medium,
                     SafetyTier::Risky,
                     IdempotencyClass::None,
                     AgentHint {
-                        when_to_use: "Upload file content to one or more Slack channels.".into(),
-                        common_mistakes: vec!["Forgetting to specify channels".into()],
+                        when_to_use: "Upload content referenced by a mesh object to one or more Slack channels.".into(),
+                        common_mistakes: vec![
+                            "Forgetting to pass content_object_id".into(),
+                            "Not providing host-resolved content for the object reference".into(),
+                        ],
                         examples: vec![
-                            r#"{"channels": "C01234567", "content": "log data here", "filename": "output.log"}"#.into(),
+                            r#"{"channels":"C01234567","content_object_id":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","resolved_content":"log data here","filename":"output.log"}"#.into(),
                         ],
                         related: vec![CapabilityId::from_static("slack.download_file")],
                     },
                 ),
                 op_info(
                     "slack.download_file",
-                    "Get file info and download URL",
+                    "Fetch Slack file metadata and emit a content object reference",
                     json!({
                         "type": "object",
                         "required": ["file_id"],
@@ -417,13 +429,20 @@ impl SlackConnector {
                             "file_id": { "type": "string", "description": "Slack file ID" }
                         }
                     }),
-                    json!({ "type": "object", "properties": { "file": { "type": "object" } } }),
-                    "slack.read",
+                    json!({
+                        "type": "object",
+                        "required": ["file", "content_object_id"],
+                        "properties": {
+                            "file": { "type": "object" },
+                            "content_object_id": { "type": "string" }
+                        }
+                    }),
+                    "slack.files.read",
                     RiskLevel::Low,
                     SafetyTier::Safe,
                     IdempotencyClass::Strict,
                     AgentHint {
-                        when_to_use: "Retrieve info about a file including its download URL.".into(),
+                        when_to_use: "Get sanitized Slack file metadata plus a deterministic content object reference.".into(),
                         common_mistakes: vec![],
                         examples: vec![
                             r#"{"file_id": "F01234567"}"#.into(),
@@ -786,10 +805,12 @@ impl SlackConnector {
             code: 1003,
             message: "Invalid operation ID format".into(),
         })?;
-        let cap_id: CapabilityId = operation.parse().map_err(|_| FcpError::InvalidRequest {
-            code: 1003,
-            message: "Invalid capability ID format".into(),
-        })?;
+        let cap_id: CapabilityId = required_capability_for_operation(operation)
+            .parse()
+            .map_err(|_| FcpError::InvalidRequest {
+                code: 1003,
+                message: "Invalid capability ID format".into(),
+            })?;
 
         if let Some(verifier) = &self.verifier {
             verifier.verify(&token, &cap_id, &op_id, &[])?;
@@ -923,22 +944,30 @@ impl SlackConnector {
     async fn invoke_upload_file(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
         let channels = require_str(&input, "channels")?;
-        let content = require_str(&input, "content")?;
+        let source_object_id = require_object_id_str(&input, "content_object_id")?;
+        let content = require_str(&input, "resolved_content")?;
         let filename = input.get("filename").and_then(|v| v.as_str());
 
         let file = client
             .upload_file(channels, content, filename)
             .await
             .map_err(|e: SlackError| e.to_fcp_error())?;
+        let file_object_id = derive_slack_file_object_id("upload", &file.id, source_object_id);
+        let redacted_file = redact_file_urls(file);
 
         let receipt = OperationReceipt {
             operation: "slack.upload_file".into(),
             effect: "file_uploaded".into(),
-            resource: format!("file:{id}", id = file.id),
+            resource: format!("file_object:{file_object_id}"),
             timestamp: String::new(),
         };
 
-        Ok(json!({ "file": file, "receipt": receipt }))
+        Ok(json!({
+            "file": redacted_file,
+            "file_object_id": file_object_id.to_string(),
+            "source_object_id": source_object_id,
+            "receipt": receipt
+        }))
     }
 
     async fn invoke_download_file(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
@@ -949,8 +978,13 @@ impl SlackConnector {
             .get_file_info(file_id)
             .await
             .map_err(|e: SlackError| e.to_fcp_error())?;
+        let content_object_id = derive_slack_file_object_id("download", &file.id, "slack");
+        let redacted_file = redact_file_urls(file);
 
-        Ok(json!({ "file": file }))
+        Ok(json!({
+            "file": redacted_file,
+            "content_object_id": content_object_id.to_string()
+        }))
     }
 
     async fn invoke_add_reaction(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
@@ -1315,6 +1349,14 @@ fn socket_payload_principal(payload: &Value) -> Principal {
     }
 }
 
+fn required_capability_for_operation(operation: &str) -> &str {
+    match operation {
+        "slack.upload_file" => "slack.files.write",
+        "slack.download_file" => "slack.files.read",
+        _ => operation,
+    }
+}
+
 fn require_str<'a>(input: &'a serde_json::Value, field: &str) -> FcpResult<&'a str> {
     input
         .get(field)
@@ -1323,6 +1365,28 @@ fn require_str<'a>(input: &'a serde_json::Value, field: &str) -> FcpResult<&'a s
             code: 1003,
             message: format!("Missing required field: {field}"),
         })
+}
+
+fn require_object_id_str<'a>(input: &'a serde_json::Value, field: &str) -> FcpResult<&'a str> {
+    let object_id = require_str(input, field)?;
+    if object_id.len() != 64 || !object_id.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("Field `{field}` must be a 64-char hex ObjectId"),
+        });
+    }
+    Ok(object_id)
+}
+
+fn derive_slack_file_object_id(namespace: &str, file_id: &str, seed: &str) -> ObjectId {
+    let material = format!("slack:{namespace}:{file_id}:{seed}");
+    ObjectId::from_unscoped_bytes(material.as_bytes())
+}
+
+fn redact_file_urls(mut file: crate::types::SlackFile) -> crate::types::SlackFile {
+    file.url_private = None;
+    file.url_private_download = None;
+    file
 }
 
 #[allow(clippy::fn_params_excessive_bools)]
@@ -1834,7 +1898,6 @@ mod tests {
             "slack.search_messages",
             "slack.list_channels",
             "slack.get_user_info",
-            "slack.download_file",
         ];
 
         for op in ops {
@@ -1857,7 +1920,6 @@ mod tests {
         let write_ops = [
             "slack.post_message",
             "slack.reply_thread",
-            "slack.upload_file",
             "slack.add_reaction",
             "slack.set_channel_topic",
         ];
@@ -1872,6 +1934,30 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_file_ops_use_file_capabilities() {
+        let connector = SlackConnector::new();
+        let result = connector.handle_introspect().await.unwrap();
+        let ops = result["operations"].as_array().unwrap();
+
+        let upload = ops.iter().find(|o| o["id"] == "slack.upload_file").unwrap();
+        assert_eq!(
+            upload["capability"].as_str().unwrap(),
+            "slack.files.write",
+            "slack.upload_file should use slack.files.write capability"
+        );
+
+        let download = ops
+            .iter()
+            .find(|o| o["id"] == "slack.download_file")
+            .unwrap();
+        assert_eq!(
+            download["capability"].as_str().unwrap(),
+            "slack.files.read",
+            "slack.download_file should use slack.files.read capability"
+        );
     }
 
     // ── Safety tier tests ────────────────────────────────────────
@@ -2078,7 +2164,10 @@ mod tests {
             ("slack.get_channel_history", &["channel"]),
             ("slack.search_messages", &["query"]),
             ("slack.get_user_info", &["user"]),
-            ("slack.upload_file", &["channels", "content"]),
+            (
+                "slack.upload_file",
+                &["channels", "content_object_id", "resolved_content"],
+            ),
             ("slack.download_file", &["file_id"]),
             ("slack.add_reaction", &["channel", "timestamp", "name"]),
             ("slack.set_channel_topic", &["channel", "topic"]),

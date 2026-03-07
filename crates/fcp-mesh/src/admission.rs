@@ -1696,4 +1696,308 @@ mod tests {
         // Window was reset, so bytes should be just 1
         assert_eq!(usage.bytes_in_window, 1);
     }
+
+    // ── Constants validation ────────────────────────────────────
+
+    #[test]
+    fn constants_are_sensible() {
+        assert_eq!(DEFAULT_MAX_BYTES_PER_MIN, 64 * 1024 * 1024);
+        assert_eq!(DEFAULT_MAX_SYMBOLS_PER_MIN, 200_000);
+        assert_eq!(DEFAULT_MAX_FAILED_AUTH_PER_MIN, 100);
+        assert_eq!(DEFAULT_MAX_INFLIGHT_DECODES, 32);
+        assert_eq!(DEFAULT_MAX_DECODE_CPU_MS_PER_MIN, 5_000);
+        assert_eq!(DEFAULT_AMPLIFICATION_FACTOR, 10);
+        assert_eq!(DEFAULT_MAX_QUARANTINE_BYTES_PER_ZONE, 256 * 1024 * 1024);
+        assert_eq!(DEFAULT_MAX_QUARANTINE_OBJECTS_PER_ZONE, 100_000);
+        assert_eq!(DEFAULT_QUARANTINE_TTL_SECS, 3600);
+    }
+
+    // ── AdmissionError trait impls ─────────────────────────────
+
+    #[test]
+    fn admission_error_is_std_error() {
+        let err: Box<dyn std::error::Error> = Box::new(AdmissionError::AuthenticationRequired);
+        assert!(err.to_string().contains("authentication required"));
+    }
+
+    #[test]
+    fn admission_error_clone_and_debug() {
+        let err = AdmissionError::ProofOfNeedRequired;
+        let cloned = err.clone();
+        assert_eq!(err, cloned);
+        let s = format!("{err:?}");
+        assert!(s.contains("ProofOfNeedRequired"));
+    }
+
+    #[test]
+    fn admission_error_serde_all_variants() {
+        let errors = vec![
+            AdmissionError::SymbolBudgetExceeded {
+                current: 500,
+                limit: 200,
+                retry_after: Duration::from_millis(1500),
+            },
+            AdmissionError::AuthFailureBudgetExceeded {
+                current: 11,
+                limit: 10,
+                retry_after: Duration::from_secs(55),
+            },
+            AdmissionError::DecodeCapacityExceeded {
+                current: 33,
+                limit: 32,
+            },
+            AdmissionError::DecodeCpuBudgetExceeded {
+                current_ms: 6000,
+                limit_ms: 5000,
+                retry_after: Duration::from_secs(40),
+            },
+            AdmissionError::AmplificationViolation {
+                request_symbols: 5,
+                response_symbols: 100,
+                max_factor: 10,
+            },
+            AdmissionError::AuthenticationRequired,
+            AdmissionError::ProofOfNeedRequired,
+            AdmissionError::ObjectQuarantined {
+                object_id: "obj-abc".into(),
+            },
+            AdmissionError::NotReachable {
+                object_id: "obj-def".into(),
+            },
+            AdmissionError::QuarantineQuotaExceeded {
+                current_bytes: 300,
+                limit_bytes: 256,
+            },
+        ];
+        for err in &errors {
+            let json = serde_json::to_string(err).unwrap();
+            let deserialized: AdmissionError = serde_json::from_str(&json).unwrap();
+            assert_eq!(*err, deserialized, "Failed roundtrip for {err:?}");
+        }
+    }
+
+    // ── Multi-peer tracking ────────────────────────────────────
+
+    #[test]
+    fn multiple_peers_tracked_independently() {
+        let mut controller = AdmissionController::with_default_policy();
+        let peer_a = NodeId::new("peer-a");
+        let peer_b = NodeId::new("peer-b");
+
+        controller.record_bytes(&peer_a, 1000, 0);
+        controller.record_bytes(&peer_b, 2000, 0);
+
+        assert_eq!(controller.get_usage(&peer_a).unwrap().bytes_in_window, 1000);
+        assert_eq!(controller.get_usage(&peer_b).unwrap().bytes_in_window, 2000);
+        assert_eq!(controller.peer_count(), 2);
+    }
+
+    // ── PeerBudget ordering ────────────────────────────────────
+
+    #[test]
+    fn peer_budget_restrictive_less_than_permissive() {
+        let r = PeerBudget::restrictive();
+        let p = PeerBudget::permissive();
+        assert!(r.max_bytes_per_min < p.max_bytes_per_min);
+        assert!(r.max_symbols_per_min < p.max_symbols_per_min);
+        assert!(r.max_failed_auth_per_min < p.max_failed_auth_per_min);
+        assert!(r.max_inflight_decodes < p.max_inflight_decodes);
+        assert!(r.max_decode_cpu_ms_per_min < p.max_decode_cpu_ms_per_min);
+    }
+
+    // ── Window edge cases ──────────────────────────────────────
+
+    #[test]
+    fn peer_usage_time_until_window_reset() {
+        let usage = PeerUsage::new(10_000);
+        let remaining = usage.time_until_window_reset(10_000);
+        assert_eq!(remaining, Duration::from_secs(60));
+
+        let remaining_later = usage.time_until_window_reset(40_000);
+        assert_eq!(remaining_later, Duration::from_secs(30));
+    }
+
+    #[test]
+    fn window_does_not_reset_within_60_seconds() {
+        let policy = AdmissionPolicy {
+            per_peer: PeerBudget {
+                max_bytes_per_min: 1000,
+                ..PeerBudget::default()
+            },
+            ..AdmissionPolicy::default()
+        };
+        let mut controller = AdmissionController::new(policy);
+        let peer = test_peer();
+
+        controller.record_bytes(&peer, 999, 0);
+        // At 59_999ms, window is NOT reset
+        assert!(controller.check_bytes(&peer, 100, 59_999).is_err());
+        // At 60_000ms, window IS reset
+        assert!(controller.check_bytes(&peer, 100, 60_000).is_ok());
+    }
+
+    // ── Combined admission edge cases ──────────────────────────
+
+    #[test]
+    fn combined_admission_fails_bytes_after_auth_ok() {
+        let policy = AdmissionPolicy {
+            per_peer: PeerBudget {
+                max_bytes_per_min: 100,
+                ..PeerBudget::default()
+            },
+            require_authenticated_requests: true,
+            ..AdmissionPolicy::default()
+        };
+        let mut controller = AdmissionController::new(policy);
+        let peer = test_peer();
+
+        // Auth passes but bytes fail
+        let result = controller.check_admission(&peer, 200, 1, true, 0);
+        assert!(matches!(
+            result,
+            Err(AdmissionError::ByteBudgetExceeded { .. })
+        ));
+    }
+
+    #[test]
+    fn combined_admission_fails_symbols_after_auth_and_bytes_ok() {
+        let policy = AdmissionPolicy {
+            per_peer: PeerBudget {
+                max_bytes_per_min: 10_000,
+                max_symbols_per_min: 50,
+                ..PeerBudget::default()
+            },
+            require_authenticated_requests: true,
+            ..AdmissionPolicy::default()
+        };
+        let mut controller = AdmissionController::new(policy);
+        let peer = test_peer();
+
+        let result = controller.check_admission(&peer, 100, 100, true, 0);
+        assert!(matches!(
+            result,
+            Err(AdmissionError::SymbolBudgetExceeded { .. })
+        ));
+    }
+
+    // ── GC edge cases ──────────────────────────────────────────
+
+    #[test]
+    fn gc_removes_all_stale_peers() {
+        let mut controller = AdmissionController::with_default_policy();
+        controller.record_bytes(&NodeId::new("old-1"), 10, 0);
+        controller.record_bytes(&NodeId::new("old-2"), 10, 0);
+        assert_eq!(controller.peer_count(), 2);
+
+        controller.gc_stale_peers(200_000, 60_000);
+        assert_eq!(controller.peer_count(), 0);
+    }
+
+    #[test]
+    fn gc_keeps_recent_peers() {
+        let mut controller = AdmissionController::with_default_policy();
+        controller.record_bytes(&NodeId::new("recent"), 10, 100_000);
+        controller.gc_stale_peers(100_000, 60_000);
+        assert_eq!(controller.peer_count(), 1);
+    }
+
+    // ── Amplification edge cases ───────────────────────────────
+
+    #[test]
+    fn amplification_zero_request_symbols() {
+        let controller = AdmissionController::with_default_policy();
+        let peer = test_peer();
+        // 0 request symbols * 10 factor = 0, so any response > 0 fails
+        assert!(matches!(
+            controller.check_amplification(&peer, 0, 1, false, false),
+            Err(AdmissionError::AmplificationViolation { .. })
+        ));
+        // 0 response is always ok
+        assert!(
+            controller
+                .check_amplification(&peer, 0, 0, false, false)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn amplification_with_public_ingress_policy() {
+        let controller = AdmissionController::new(AdmissionPolicy::public_ingress());
+        let peer = test_peer();
+        // Public ingress has factor=2
+        assert!(
+            controller
+                .check_amplification(&peer, 10, 20, false, false)
+                .is_ok()
+        );
+        assert!(matches!(
+            controller.check_amplification(&peer, 10, 21, false, false),
+            Err(AdmissionError::AmplificationViolation { .. })
+        ));
+    }
+
+    // ── Decode CPU window reset ────────────────────────────────
+
+    #[test]
+    fn decode_cpu_resets_with_window() {
+        let policy = AdmissionPolicy {
+            per_peer: PeerBudget {
+                max_decode_cpu_ms_per_min: 100,
+                ..PeerBudget::default()
+            },
+            ..AdmissionPolicy::default()
+        };
+        let mut controller = AdmissionController::new(policy);
+        let peer = test_peer();
+
+        controller.record_decode_cpu(&peer, 99, 0).unwrap();
+        assert!(controller.record_decode_cpu(&peer, 10, 0).is_err());
+        // After window reset
+        assert!(controller.record_decode_cpu(&peer, 10, 60_001).is_ok());
+    }
+
+    // ── Auth failure window reset ──────────────────────────────
+
+    #[test]
+    fn auth_failure_resets_with_window() {
+        let policy = AdmissionPolicy {
+            per_peer: PeerBudget {
+                max_failed_auth_per_min: 2,
+                ..PeerBudget::default()
+            },
+            ..AdmissionPolicy::default()
+        };
+        let mut controller = AdmissionController::new(policy);
+        let peer = test_peer();
+
+        controller.record_auth_failure(&peer, 0).unwrap();
+        controller.record_auth_failure(&peer, 0).unwrap();
+        assert!(controller.record_auth_failure(&peer, 0).is_err());
+        // After window reset
+        assert!(controller.record_auth_failure(&peer, 60_001).is_ok());
+    }
+
+    // ── Strict vs non-strict unauthenticated limits ────────────
+
+    #[test]
+    fn non_strict_unauthenticated_uses_full_budget() {
+        let policy = AdmissionPolicy {
+            per_peer: PeerBudget {
+                max_bytes_per_min: 10 * 1024 * 1024,
+                ..PeerBudget::default()
+            },
+            require_authenticated_requests: false,
+            strict_unauthenticated_limits: false,
+            ..AdmissionPolicy::default()
+        };
+        let mut controller = AdmissionController::new(policy);
+        let peer = test_peer();
+
+        // Without strict limits, unauthenticated gets full budget
+        assert!(
+            controller
+                .check_admission(&peer, 2 * 1024 * 1024, 1, false, 0)
+                .is_ok()
+        );
+    }
 }

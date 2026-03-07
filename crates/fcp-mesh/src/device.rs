@@ -30,6 +30,8 @@
 //! ```
 
 use fcp_core::{CapabilityGrant, ConnectorId, ObjectId};
+#[cfg(test)]
+use fcp_core::CapabilityId;
 use fcp_tailscale::NodeId;
 use serde::{Deserialize, Serialize};
 
@@ -1726,5 +1728,525 @@ mod tests {
             json.contains("\"scheduled\""),
             "AvailabilityProfile should serialize as snake_case"
         );
+    }
+
+    // ── Builder chain tests ──────────────────────────────────
+
+    #[test]
+    fn builder_cpu_cores() {
+        let p = DeviceProfile::builder(NodeId::new("b1")).cpu_cores(32).timestamp(0).build();
+        assert_eq!(p.cpu_cores, 32);
+    }
+
+    #[test]
+    fn builder_cpu_arch() {
+        let p = DeviceProfile::builder(NodeId::new("b2")).cpu_arch(CpuArch::Aarch64).timestamp(0).build();
+        assert_eq!(p.cpu_arch, CpuArch::Aarch64);
+    }
+
+    #[test]
+    fn builder_memory_mb() {
+        let p = DeviceProfile::builder(NodeId::new("b3")).memory_mb(65536).timestamp(0).build();
+        assert_eq!(p.memory_mb, 65536);
+    }
+
+    #[test]
+    fn builder_local_storage_mb() {
+        let p = DeviceProfile::builder(NodeId::new("b4")).local_storage_mb(500_000).timestamp(0).build();
+        assert_eq!(p.local_storage_mb, 500_000);
+    }
+
+    #[test]
+    fn builder_symbol_store_quota_mb() {
+        let p = DeviceProfile::builder(NodeId::new("b5")).symbol_store_quota_mb(4096).timestamp(0).build();
+        assert_eq!(p.symbol_store_quota_mb, 4096);
+    }
+
+    #[test]
+    fn builder_power_source() {
+        let p = DeviceProfile::builder(NodeId::new("b6")).power_source(PowerSource::Solar).timestamp(0).build();
+        assert_eq!(p.power_source, PowerSource::Solar);
+    }
+
+    #[test]
+    fn builder_battery_percent() {
+        let p = DeviceProfile::builder(NodeId::new("b7")).battery_percent(75).timestamp(0).build();
+        assert_eq!(p.battery_percent, Some(75));
+    }
+
+    #[test]
+    fn builder_bandwidth_estimate_kbps() {
+        let p = DeviceProfile::builder(NodeId::new("b8")).bandwidth_estimate_kbps(100_000).timestamp(0).build();
+        assert_eq!(p.bandwidth_estimate_kbps, 100_000);
+    }
+
+    #[test]
+    fn builder_latency_class() {
+        let p = DeviceProfile::builder(NodeId::new("b9")).latency_class(LatencyClass::Local).timestamp(0).build();
+        assert_eq!(p.latency_class, LatencyClass::Local);
+    }
+
+    #[test]
+    fn builder_metered() {
+        let p = DeviceProfile::builder(NodeId::new("b10")).metered(true).timestamp(0).build();
+        assert!(p.metered);
+    }
+
+    #[test]
+    fn builder_availability() {
+        let p = DeviceProfile::builder(NodeId::new("b11")).availability(AvailabilityProfile::AlwaysOn).timestamp(0).build();
+        assert_eq!(p.availability, AvailabilityProfile::AlwaysOn);
+    }
+
+    #[test]
+    fn builder_next_expected_downtime() {
+        let p = DeviceProfile::builder(NodeId::new("b12")).next_expected_downtime(999_999).timestamp(0).build();
+        assert_eq!(p.next_expected_downtime, Some(999_999));
+    }
+
+    #[test]
+    fn builder_timestamp() {
+        let p = DeviceProfile::builder(NodeId::new("b13")).timestamp(42).build();
+        assert_eq!(p.timestamp, 42);
+    }
+
+    #[test]
+    fn builder_add_connector() {
+        let c = InstalledConnector::new(
+            ConnectorId::from_static("test:connector:1.0.0"),
+            "1.0.0",
+            ObjectId::from_bytes([0xAA; 32]),
+        );
+        let p = DeviceProfile::builder(NodeId::new("b14")).add_connector(c).timestamp(0).build();
+        assert_eq!(p.connectors.len(), 1);
+        assert_eq!(p.connectors[0].connector_id, ConnectorId::from_static("test:connector:1.0.0"));
+    }
+
+    #[test]
+    fn builder_defaults() {
+        let p = DeviceProfile::builder(NodeId::new("defaults")).timestamp(0).build();
+        assert_eq!(p.cpu_cores, 1);
+        assert_eq!(p.memory_mb, 1024);
+        assert!(p.gpu.is_none());
+        assert!(p.tpu.is_none());
+        assert_eq!(p.local_storage_mb, 0);
+        assert_eq!(p.symbol_store_quota_mb, 0);
+        assert_eq!(p.power_source, PowerSource::Unknown);
+        assert!(p.battery_percent.is_none());
+        assert_eq!(p.bandwidth_estimate_kbps, 1000);
+        assert!(!p.metered);
+        assert!(p.next_expected_downtime.is_none());
+        assert!(p.connectors.is_empty());
+        assert_eq!(p.profile_version, DEVICE_PROFILE_VERSION);
+    }
+
+    #[test]
+    fn builder_full_chain() {
+        let gpu = GpuProfile::new(GpuVendor::Nvidia, "RTX 5090", 32768)
+            .with_compute_capability("10.0");
+        let tpu = TpuProfile::new(TpuVendor::Google, "v5e", 8, 16384);
+        let connector = InstalledConnector::new(
+            ConnectorId::from_static("fcp:discord:2.0.0"),
+            "2.0.0",
+            ObjectId::from_bytes([0xBB; 32]),
+        );
+
+        let p = DeviceProfile::builder(NodeId::new("full"))
+            .cpu_cores(64)
+            .cpu_arch(CpuArch::X86_64)
+            .memory_mb(131_072)
+            .gpu(gpu)
+            .tpu(tpu)
+            .local_storage_mb(2_000_000)
+            .symbol_store_quota_mb(8192)
+            .power_source(PowerSource::Mains)
+            .battery_percent(100)
+            .bandwidth_estimate_kbps(1_000_000)
+            .latency_class(LatencyClass::Lan)
+            .metered(false)
+            .availability(AvailabilityProfile::AlwaysOn)
+            .next_expected_downtime(9_999_999)
+            .timestamp(12345)
+            .add_connector(connector)
+            .build();
+
+        assert_eq!(p.cpu_cores, 64);
+        assert!(p.has_gpu());
+        assert!(p.has_tpu());
+        assert_eq!(p.connectors.len(), 1);
+        assert_eq!(p.gpu.as_ref().unwrap().compute_capability.as_deref(), Some("10.0"));
+    }
+
+    // ── DeviceProfile query method tests ─────────────────────
+
+    #[test]
+    fn has_gpu_true_when_set() {
+        let p = DeviceProfile::builder(NodeId::new("gpu"))
+            .gpu(GpuProfile::new(GpuVendor::Apple, "M3 Max", 48000))
+            .timestamp(0)
+            .build();
+        assert!(p.has_gpu());
+    }
+
+    #[test]
+    fn has_gpu_false_when_not_set() {
+        let p = DeviceProfile::builder(NodeId::new("nogpu")).timestamp(0).build();
+        assert!(!p.has_gpu());
+    }
+
+    #[test]
+    fn has_tpu_true_when_set() {
+        let p = DeviceProfile::builder(NodeId::new("tpu"))
+            .tpu(TpuProfile::new(TpuVendor::Google, "v4", 4, 8192))
+            .timestamp(0)
+            .build();
+        assert!(p.has_tpu());
+    }
+
+    #[test]
+    fn has_tpu_false_when_not_set() {
+        let p = DeviceProfile::builder(NodeId::new("notpu")).timestamp(0).build();
+        assert!(!p.has_tpu());
+    }
+
+    #[test]
+    fn has_connector_finds_installed() {
+        let cid = ConnectorId::from_static("fcp:slack:1.0.0");
+        let c = InstalledConnector::new(cid.clone(), "1.0.0", ObjectId::from_bytes([0; 32]));
+        let p = DeviceProfile::builder(NodeId::new("hc"))
+            .add_connector(c)
+            .timestamp(0)
+            .build();
+        assert!(p.has_connector(&cid));
+    }
+
+    #[test]
+    fn has_connector_returns_false_when_missing() {
+        let p = DeviceProfile::builder(NodeId::new("hc2")).timestamp(0).build();
+        assert!(!p.has_connector(&ConnectorId::from_static("fcp:missing:1.0.0")));
+    }
+
+    #[test]
+    fn get_connector_returns_some() {
+        let cid = ConnectorId::from_static("fcp:github:1.0.0");
+        let c = InstalledConnector::new(cid.clone(), "3.2.1", ObjectId::from_bytes([0x11; 32]));
+        let p = DeviceProfile::builder(NodeId::new("gc"))
+            .add_connector(c)
+            .timestamp(0)
+            .build();
+        let found = p.get_connector(&cid).unwrap();
+        assert_eq!(found.version, "3.2.1");
+    }
+
+    #[test]
+    fn get_connector_returns_none_when_missing() {
+        let p = DeviceProfile::builder(NodeId::new("gc2")).timestamp(0).build();
+        assert!(p.get_connector(&ConnectorId::from_static("fcp:nope:1.0.0")).is_none());
+    }
+
+    #[test]
+    fn is_low_battery_true() {
+        let p = DeviceProfile::builder(NodeId::new("lb"))
+            .power_source(PowerSource::Battery)
+            .battery_percent(15)
+            .timestamp(0)
+            .build();
+        assert!(p.is_low_battery());
+    }
+
+    #[test]
+    fn is_low_battery_false_when_mains() {
+        let p = DeviceProfile::builder(NodeId::new("lb2"))
+            .power_source(PowerSource::Mains)
+            .battery_percent(10)
+            .timestamp(0)
+            .build();
+        assert!(!p.is_low_battery());
+    }
+
+    #[test]
+    fn is_low_battery_false_when_above_threshold() {
+        let p = DeviceProfile::builder(NodeId::new("lb3"))
+            .power_source(PowerSource::Battery)
+            .battery_percent(50)
+            .timestamp(0)
+            .build();
+        assert!(!p.is_low_battery());
+    }
+
+    #[test]
+    fn is_low_battery_false_when_no_battery_percent() {
+        let p = DeviceProfile::builder(NodeId::new("lb4"))
+            .power_source(PowerSource::Battery)
+            .timestamp(0)
+            .build();
+        assert!(!p.is_low_battery());
+    }
+
+    // ── FitnessScore computation tests ───────────────────────
+
+    #[test]
+    fn fitness_ineligible_no_gpu() {
+        let p = DeviceProfile::builder(NodeId::new("f1")).timestamp(0).build();
+        let ctx = FitnessContext::new().with_requires_gpu(true);
+        let score = p.compute_fitness(&ctx);
+        assert!(!score.eligible);
+        assert!(score.score.abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn fitness_ineligible_no_tpu() {
+        let p = DeviceProfile::builder(NodeId::new("f2")).timestamp(0).build();
+        let ctx = FitnessContext::new().with_requires_tpu(true);
+        let score = p.compute_fitness(&ctx);
+        assert!(!score.eligible);
+    }
+
+    #[test]
+    fn fitness_ineligible_low_memory() {
+        let p = DeviceProfile::builder(NodeId::new("f3")).memory_mb(512).timestamp(0).build();
+        let ctx = FitnessContext::new().with_min_memory_mb(1024);
+        let score = p.compute_fitness(&ctx);
+        assert!(!score.eligible);
+    }
+
+    #[test]
+    fn fitness_ineligible_missing_connector() {
+        let p = DeviceProfile::builder(NodeId::new("f4")).timestamp(0).build();
+        let ctx = FitnessContext::new().with_required_connector(ConnectorId::from_static("fcp:missing:1.0.0"));
+        let score = p.compute_fitness(&ctx);
+        assert!(!score.eligible);
+    }
+
+    #[test]
+    fn fitness_eligible_basic() {
+        let p = DeviceProfile::builder(NodeId::new("f5")).timestamp(0).build();
+        let ctx = FitnessContext::new();
+        let score = p.compute_fitness(&ctx);
+        assert!(score.eligible);
+        assert!(score.score > 0.0);
+    }
+
+    #[test]
+    fn fitness_locality_bonus() {
+        let p = DeviceProfile::builder(NodeId::new("f6"))
+            .latency_class(LatencyClass::Local)
+            .availability(AvailabilityProfile::AlwaysOn)
+            .timestamp(0)
+            .build();
+        let without_symbols = p.compute_fitness(&FitnessContext::new());
+        let with_symbols = p.compute_fitness(&FitnessContext::new().with_symbols_present(true));
+        assert!(with_symbols.score > without_symbols.score, "symbols present should give bonus");
+    }
+
+    #[test]
+    fn fitness_derp_penalty() {
+        let base = DeviceProfile::builder(NodeId::new("f7"))
+            .latency_class(LatencyClass::Lan)
+            .availability(AvailabilityProfile::AlwaysOn)
+            .timestamp(0)
+            .build();
+        let derp = DeviceProfile::builder(NodeId::new("f7d"))
+            .latency_class(LatencyClass::Derp)
+            .availability(AvailabilityProfile::AlwaysOn)
+            .timestamp(0)
+            .build();
+        let ctx = FitnessContext::new();
+        assert!(base.compute_fitness(&ctx).score > derp.compute_fitness(&ctx).score);
+    }
+
+    #[test]
+    fn fitness_low_battery_penalty() {
+        let full = DeviceProfile::builder(NodeId::new("f8"))
+            .power_source(PowerSource::Mains)
+            .availability(AvailabilityProfile::AlwaysOn)
+            .latency_class(LatencyClass::Local)
+            .timestamp(0)
+            .build();
+        let low = DeviceProfile::builder(NodeId::new("f8l"))
+            .power_source(PowerSource::Battery)
+            .battery_percent(5)
+            .availability(AvailabilityProfile::AlwaysOn)
+            .latency_class(LatencyClass::Local)
+            .timestamp(0)
+            .build();
+        let ctx = FitnessContext::new();
+        assert!(full.compute_fitness(&ctx).score > low.compute_fitness(&ctx).score);
+    }
+
+    #[test]
+    fn fitness_metered_penalty() {
+        let unmetered = DeviceProfile::builder(NodeId::new("f9"))
+            .metered(false)
+            .latency_class(LatencyClass::Local)
+            .availability(AvailabilityProfile::AlwaysOn)
+            .timestamp(0)
+            .build();
+        let metered = DeviceProfile::builder(NodeId::new("f9m"))
+            .metered(true)
+            .latency_class(LatencyClass::Local)
+            .availability(AvailabilityProfile::AlwaysOn)
+            .timestamp(0)
+            .build();
+        let ctx = FitnessContext::new();
+        assert!(unmetered.compute_fitness(&ctx).score > metered.compute_fitness(&ctx).score);
+    }
+
+    #[test]
+    fn fitness_always_on_better_than_best_effort() {
+        let always = DeviceProfile::builder(NodeId::new("f10"))
+            .availability(AvailabilityProfile::AlwaysOn)
+            .latency_class(LatencyClass::Local)
+            .timestamp(0)
+            .build();
+        let best_effort = DeviceProfile::builder(NodeId::new("f10b"))
+            .availability(AvailabilityProfile::BestEffort)
+            .latency_class(LatencyClass::Local)
+            .timestamp(0)
+            .build();
+        let ctx = FitnessContext::new();
+        assert!(always.compute_fitness(&ctx).score > best_effort.compute_fitness(&ctx).score);
+    }
+
+    #[test]
+    fn fitness_ineligible_score_is_zero() {
+        let ineligible = FitnessScore::ineligible();
+        assert!(!ineligible.eligible);
+        assert!(ineligible.score.abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn fitness_score_ordering() {
+        let low = FitnessScore { score: 50.0, eligible: true };
+        let high = FitnessScore { score: 100.0, eligible: true };
+        assert!(high > low);
+    }
+
+    // ── GpuProfile tests ────────────────────────────────────
+
+    #[test]
+    fn gpu_profile_new() {
+        let gpu = GpuProfile::new(GpuVendor::Nvidia, "RTX 4090", 24576);
+        assert_eq!(gpu.vendor, GpuVendor::Nvidia);
+        assert_eq!(gpu.model, "RTX 4090");
+        assert_eq!(gpu.vram_mb, 24576);
+        assert!(gpu.compute_capability.is_none());
+    }
+
+    #[test]
+    fn gpu_profile_with_compute_capability() {
+        let gpu = GpuProfile::new(GpuVendor::Nvidia, "H100", 80000)
+            .with_compute_capability("9.0");
+        assert_eq!(gpu.compute_capability.as_deref(), Some("9.0"));
+    }
+
+    // ── TpuProfile tests ────────────────────────────────────
+
+    #[test]
+    fn tpu_profile_new() {
+        let tpu = TpuProfile::new(TpuVendor::Google, "v5p", 16, 98304);
+        assert_eq!(tpu.vendor, TpuVendor::Google);
+        assert_eq!(tpu.model, "v5p");
+        assert_eq!(tpu.cores, 16);
+        assert_eq!(tpu.hbm_mb, 98304);
+    }
+
+    // ── InstalledConnector tests ─────────────────────────────
+
+    #[test]
+    fn installed_connector_new() {
+        let c = InstalledConnector::new(
+            ConnectorId::from_static("fcp:test:1.0.0"),
+            "1.2.3",
+            ObjectId::from_bytes([0x55; 32]),
+        );
+        assert_eq!(c.connector_id, ConnectorId::from_static("fcp:test:1.0.0"));
+        assert_eq!(c.version, "1.2.3");
+        assert!(c.capabilities.is_empty());
+    }
+
+    #[test]
+    fn installed_connector_with_capabilities() {
+        let caps = vec![
+            CapabilityGrant { capability: CapabilityId::from_static("cap:read"), operation: None },
+            CapabilityGrant { capability: CapabilityId::from_static("cap:write"), operation: None },
+        ];
+        let c = InstalledConnector::new(
+            ConnectorId::from_static("fcp:test:1.0.0"),
+            "1.0.0",
+            ObjectId::from_bytes([0; 32]),
+        ).with_capabilities(caps);
+        assert_eq!(c.capabilities.len(), 2);
+    }
+
+    // ── FitnessContext builder tests ─────────────────────────
+
+    #[test]
+    fn fitness_context_default() {
+        let ctx = FitnessContext::new();
+        assert!(!ctx.symbols_present);
+        assert!(!ctx.requires_gpu);
+        assert!(!ctx.requires_tpu);
+        assert!(ctx.min_memory_mb.is_none());
+        assert!(ctx.required_connector.is_none());
+    }
+
+    #[test]
+    fn fitness_context_with_symbols_present() {
+        let ctx = FitnessContext::new().with_symbols_present(true);
+        assert!(ctx.symbols_present);
+    }
+
+    #[test]
+    fn fitness_context_with_requires_gpu() {
+        let ctx = FitnessContext::new().with_requires_gpu(true);
+        assert!(ctx.requires_gpu);
+    }
+
+    #[test]
+    fn fitness_context_with_requires_tpu() {
+        let ctx = FitnessContext::new().with_requires_tpu(true);
+        assert!(ctx.requires_tpu);
+    }
+
+    #[test]
+    fn fitness_context_with_min_memory() {
+        let ctx = FitnessContext::new().with_min_memory_mb(8192);
+        assert_eq!(ctx.min_memory_mb, Some(8192));
+    }
+
+    #[test]
+    fn fitness_context_with_required_connector() {
+        let ctx = FitnessContext::new().with_required_connector(ConnectorId::from_static("fcp:slack:1.0.0"));
+        assert_eq!(ctx.required_connector, Some(ConnectorId::from_static("fcp:slack:1.0.0")));
+    }
+
+    // ── Enum default tests ───────────────────────────────────
+
+    #[test]
+    fn power_source_default_is_unknown() {
+        assert_eq!(PowerSource::default(), PowerSource::Unknown);
+    }
+
+    #[test]
+    fn availability_default_is_best_effort() {
+        assert_eq!(AvailabilityProfile::default(), AvailabilityProfile::BestEffort);
+    }
+
+    #[test]
+    fn latency_class_default_is_internet() {
+        assert_eq!(LatencyClass::default(), LatencyClass::Internet);
+    }
+
+    // ── Constant tests ───────────────────────────────────────
+
+    #[test]
+    fn device_profile_version_is_1() {
+        assert_eq!(DEVICE_PROFILE_VERSION, 1);
+    }
+
+    #[test]
+    fn default_refresh_interval() {
+        assert_eq!(DEFAULT_REFRESH_INTERVAL_SECS, 300);
     }
 }

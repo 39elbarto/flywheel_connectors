@@ -2570,4 +2570,535 @@ mod tests {
         assert_eq!(iblt.change_seq(), 0);
         assert!(iblt.recent_changes().is_empty());
     }
+
+    // ── XorFilterPlaceholder additional tests ──────────────────
+
+    #[test]
+    fn xor_filter_multiple_inserts() {
+        let mut filter = XorFilterPlaceholder::new();
+        filter.insert(b"item-1");
+        filter.insert(b"item-2");
+        filter.insert(b"item-3");
+        assert_eq!(filter.len(), 3);
+        assert!(filter.may_contain(b"item-1"));
+        assert!(filter.may_contain(b"item-2"));
+        assert!(filter.may_contain(b"item-3"));
+    }
+
+    #[test]
+    fn xor_filter_digest_differs_by_seed() {
+        let mut f1 = XorFilterPlaceholder::with_seed(1);
+        let mut f2 = XorFilterPlaceholder::with_seed(2);
+        f1.insert(b"same-item");
+        f2.insert(b"same-item");
+        assert_ne!(f1.digest(), f2.digest());
+    }
+
+    #[test]
+    fn xor_filter_empty_digest_deterministic() {
+        let d1 = XorFilterPlaceholder::new().digest();
+        let d2 = XorFilterPlaceholder::new().digest();
+        assert_eq!(d1, d2);
+    }
+
+    #[test]
+    fn xor_filter_serde_roundtrip() {
+        let mut filter = XorFilterPlaceholder::with_seed(99);
+        filter.insert(b"serde-test");
+        let json = serde_json::to_string(&filter).unwrap();
+        let deserialized: XorFilterPlaceholder = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.len(), 1);
+        assert!(deserialized.may_contain(b"serde-test"));
+    }
+
+    // ── IbltPlaceholder additional tests ───────────────────────
+
+    #[test]
+    fn iblt_zero_max_changes_still_increments_seq() {
+        let mut iblt = IbltPlaceholder::with_max_changes(0);
+        let obj = test_object_id("o");
+        iblt.note_local_change(&obj, None);
+        iblt.note_local_change(&obj, Some(1));
+        assert_eq!(iblt.change_seq(), 2);
+        assert!(iblt.recent_changes().is_empty());
+    }
+
+    #[test]
+    fn iblt_encode_decode_roundtrip() {
+        let mut iblt = IbltPlaceholder::with_max_changes(10);
+        let obj = test_object_id("rt");
+        iblt.note_local_change(&obj, None);
+        iblt.note_local_change(&obj, Some(42));
+        let encoded = iblt.encode();
+        let decoded = IbltPlaceholder::decode_with_limits(&encoded, 10, 4096).unwrap();
+        assert_eq!(decoded.recent_changes().len(), 2);
+    }
+
+    #[test]
+    fn iblt_decode_empty_bytes_returns_empty() {
+        let decoded = IbltPlaceholder::decode_with_limits(&[], 10, 4096).unwrap();
+        assert!(decoded.recent_changes().is_empty());
+    }
+
+    #[test]
+    fn iblt_decode_too_many_changes() {
+        let mut iblt = IbltPlaceholder::with_max_changes(100);
+        for i in 0..5 {
+            iblt.note_local_change(&test_object_id(&format!("o{i}")), None);
+        }
+        let encoded = iblt.encode();
+        // Decode with limit of 3 should fail
+        let err = IbltPlaceholder::decode_with_limits(&encoded, 3, 4096).unwrap_err();
+        assert!(matches!(err, IbltDecodeError::TooManyChanges { decoded: 5, max: 3 }));
+    }
+
+    #[test]
+    fn iblt_decode_error_reason_codes() {
+        assert_eq!(
+            IbltDecodeError::TooLarge { len: 10, max: 5 }.reason_code(),
+            "iblt_bytes_exceeded"
+        );
+        assert_eq!(
+            IbltDecodeError::InvalidEncoding.reason_code(),
+            "iblt_invalid_encoding"
+        );
+        assert_eq!(
+            IbltDecodeError::TooManyChanges { decoded: 10, max: 5 }.reason_code(),
+            "iblt_change_limit_exceeded"
+        );
+    }
+
+    #[test]
+    fn iblt_clear() {
+        let mut iblt = IbltPlaceholder::new();
+        iblt.note_local_change(&test_object_id("c"), None);
+        assert!(!iblt.recent_changes().is_empty());
+        iblt.clear();
+        assert!(iblt.recent_changes().is_empty());
+    }
+
+    #[test]
+    fn iblt_entry_count() {
+        let mut iblt = IbltPlaceholder::with_max_changes(5);
+        assert_eq!(iblt.entry_count(), 0);
+        iblt.note_local_change(&test_object_id("e"), Some(1));
+        assert_eq!(iblt.entry_count(), 1);
+    }
+
+    // ── GossipState additional tests ───────────────────────────
+
+    #[test]
+    fn gossip_state_announce_object_idempotent() {
+        let config = GossipConfig::default();
+        let mut state = GossipState::new(test_zone(), &config);
+        let obj = test_object_id("idem");
+        state.announce_object(&obj, 100);
+        state.announce_object(&obj, 200);
+        // Object counted once despite double announce
+        assert_eq!(state.object_count(), 1);
+    }
+
+    #[test]
+    fn gossip_state_announce_symbol_auto_announces_object() {
+        let config = GossipConfig::default();
+        let mut state = GossipState::new(test_zone(), &config);
+        let obj = test_object_id("auto");
+        state.announce_symbol(&obj, 0, 100);
+        assert!(state.has_object(&obj));
+        assert!(state.has_symbol(&obj, 0));
+    }
+
+    #[test]
+    fn gossip_state_announce_symbol_idempotent() {
+        let config = GossipConfig::default();
+        let mut state = GossipState::new(test_zone(), &config);
+        let obj = test_object_id("si");
+        state.announce_symbol(&obj, 5, 100);
+        state.announce_symbol(&obj, 5, 200);
+        assert_eq!(state.symbol_count(), 1);
+    }
+
+    #[test]
+    fn gossip_state_remove_object_clears_symbols() {
+        let config = GossipConfig::default();
+        let mut state = GossipState::new(test_zone(), &config);
+        let obj = test_object_id("rm");
+        state.announce_object(&obj, 100);
+        state.announce_symbol(&obj, 0, 100);
+        assert_eq!(state.object_count(), 1);
+        assert_eq!(state.symbol_count(), 1);
+
+        state.remove_object(&obj, 200);
+        assert_eq!(state.object_count(), 0);
+        assert_eq!(state.symbol_count(), 0);
+        assert!(!state.has_object(&obj));
+    }
+
+    #[test]
+    fn gossip_state_may_have_vs_has() {
+        let config = GossipConfig::default();
+        let mut state = GossipState::new(test_zone(), &config);
+        let obj = test_object_id("mh");
+        state.announce_object(&obj, 100);
+
+        // Both should agree for inserted items
+        assert!(state.has_object(&obj));
+        assert!(state.may_have_object(&obj));
+
+        // For non-inserted: has is definitive, may_have can false-positive
+        let other = test_object_id("other");
+        assert!(!state.has_object(&other));
+    }
+
+    #[test]
+    fn gossip_state_multiple_symbols_per_object() {
+        let config = GossipConfig::default();
+        let mut state = GossipState::new(test_zone(), &config);
+        let obj = test_object_id("multi");
+        state.announce_symbol(&obj, 0, 100);
+        state.announce_symbol(&obj, 1, 100);
+        state.announce_symbol(&obj, 2, 100);
+        assert_eq!(state.symbol_count(), 3);
+        let syms = state.symbols_for_object(&obj).unwrap();
+        assert_eq!(syms.len(), 3);
+        assert!(syms.contains(&0));
+        assert!(syms.contains(&1));
+        assert!(syms.contains(&2));
+    }
+
+    #[test]
+    fn gossip_state_create_summary_fields() {
+        let config = GossipConfig::default();
+        let mut state = GossipState::new(test_zone(), &config);
+        state.announce_object(&test_object_id("s1"), 100);
+        state.announce_symbol(&test_object_id("s1"), 0, 100);
+
+        let summary = state.create_summary(test_node("me"), test_epoch());
+        assert_eq!(summary.zone_id, test_zone());
+        assert_eq!(summary.object_count, 1);
+        assert_eq!(summary.symbol_count, 1);
+        assert_eq!(summary.timestamp, 100);
+        assert!(summary.signature.is_none());
+    }
+
+    // ── GossipSummary additional tests ─────────────────────────
+
+    #[test]
+    fn gossip_summary_differs_from_same() {
+        let config = GossipConfig::default();
+        let mut state = GossipState::new(test_zone(), &config);
+        state.announce_object(&test_object_id("d1"), 100);
+        let s1 = state.create_summary(test_node("n1"), test_epoch());
+        let s2 = state.create_summary(test_node("n1"), test_epoch());
+        assert!(!s1.differs_from(&s2));
+    }
+
+    #[test]
+    fn gossip_summary_differs_from_different() {
+        let config = GossipConfig::default();
+        let mut s1_state = GossipState::new(test_zone(), &config);
+        s1_state.announce_object(&test_object_id("a"), 100);
+        let s1 = s1_state.create_summary(test_node("n1"), test_epoch());
+
+        let mut s2_state = GossipState::new(test_zone(), &config);
+        s2_state.announce_object(&test_object_id("b"), 100);
+        let s2 = s2_state.create_summary(test_node("n2"), test_epoch());
+
+        assert!(s1.differs_from(&s2));
+    }
+
+    #[test]
+    fn gossip_summary_is_stale() {
+        let config = GossipConfig::default();
+        let state = GossipState::new(test_zone(), &config);
+        let summary = state.create_summary(test_node("n"), test_epoch());
+        // timestamp=0, now=0, ttl=300 → not stale
+        assert!(!summary.is_stale(0, 300));
+        // now=301 → stale
+        assert!(summary.is_stale(301, 300));
+    }
+
+    #[test]
+    fn gossip_summary_signing_bytes_includes_domain_separator() {
+        let config = GossipConfig::default();
+        let state = GossipState::new(test_zone(), &config);
+        let summary = state.create_summary(test_node("sig"), test_epoch());
+        let bytes = summary.signing_bytes();
+        assert!(bytes.starts_with(b"FCP2-GOSSIP-SUMMARY-V1"));
+    }
+
+    #[test]
+    fn gossip_summary_signing_bytes_differ_by_zone() {
+        let config = GossipConfig::default();
+        let s1 = GossipState::new(ZoneId::work(), &config);
+        let s2 = GossipState::new(ZoneId::private(), &config);
+        let b1 = s1.create_summary(test_node("n"), test_epoch()).signing_bytes();
+        let b2 = s2.create_summary(test_node("n"), test_epoch()).signing_bytes();
+        assert_ne!(b1, b2);
+    }
+
+    // ── GossipConfig tests ─────────────────────────────────────
+
+    #[test]
+    fn gossip_config_max_iblt_bytes_derived() {
+        let config = GossipConfig::default();
+        let expected = DEFAULT_RECONCILIATION_BATCH_SIZE * 48;
+        assert_eq!(config.max_iblt_bytes(), expected);
+    }
+
+    #[test]
+    fn gossip_config_max_iblt_bytes_min_budget() {
+        let config = GossipConfig {
+            reconciliation_batch_size: 1,
+            ..GossipConfig::default()
+        };
+        // 1 * 48 = 48 < MIN_IBLT_BYTES_BUDGET(512), so uses min
+        assert_eq!(config.max_iblt_bytes(), MIN_IBLT_BYTES_BUDGET);
+    }
+
+    // ── GossipRequest additional tests ─────────────────────────
+
+    #[test]
+    fn gossip_request_for_objects_bounds_at_max() {
+        let many_ids: Vec<ObjectId> = (0..200)
+            .map(|i| test_object_id(&format!("obj-{i}")))
+            .collect();
+        let req = GossipRequest::for_objects(test_node("n"), test_zone(), many_ids, 0);
+        assert_eq!(req.object_ids.len(), MAX_OBJECT_IDS_PER_REQUEST);
+        assert!(req.symbols.is_empty());
+        assert!(req.is_valid());
+    }
+
+    #[test]
+    fn gossip_request_for_symbols_bounds_at_max() {
+        let many_syms: Vec<(ObjectId, u32)> = (0..200)
+            .map(|i| (test_object_id(&format!("s-{i}")), i))
+            .collect();
+        let req = GossipRequest::for_symbols(test_node("n"), test_zone(), many_syms, 0);
+        assert_eq!(req.symbols.len(), MAX_OBJECT_IDS_PER_REQUEST);
+        assert!(req.object_ids.is_empty());
+        assert!(req.is_valid());
+    }
+
+    #[test]
+    fn gossip_request_is_valid_rejects_oversized() {
+        let req = GossipRequest {
+            from: test_node("n"),
+            zone_id: test_zone(),
+            object_ids: (0..101).map(|i| test_object_id(&format!("o{i}"))).collect(),
+            symbols: Vec::new(),
+            timestamp: 0,
+            signature: None,
+        };
+        assert!(!req.is_valid());
+    }
+
+    // ── MeshGossip additional tests ────────────────────────────
+
+    #[test]
+    fn mesh_gossip_prune_stale_peers() {
+        let mut gossip = MeshGossip::with_defaults(test_node("local"));
+        let zone = test_zone();
+        let epoch = test_epoch();
+
+        // Add objects and create a summary from a "peer"
+        gossip.announce_object(&zone, &test_object_id("o1"), ObjectAdmissionClass::Admitted, 100);
+        let summary = gossip.create_summary(&zone, epoch).unwrap();
+
+        // Simulate receiving it as if from a peer
+        let mut peer_summary = summary;
+        peer_summary.from = test_node("peer-1");
+        peer_summary.timestamp = 100;
+        gossip.handle_summary(peer_summary, 100);
+        assert_eq!(gossip.peer_count(), 1);
+
+        // Not stale yet (ttl=300)
+        assert_eq!(gossip.prune_stale_peers(399), 0);
+        assert_eq!(gossip.peer_count(), 1);
+
+        // Now stale
+        assert_eq!(gossip.prune_stale_peers(401), 1);
+        assert_eq!(gossip.peer_count(), 0);
+    }
+
+    #[test]
+    fn mesh_gossip_has_object_unknown_zone() {
+        let gossip = MeshGossip::with_defaults(test_node("local"));
+        assert!(!gossip.has_object(&test_zone(), &test_object_id("x")));
+    }
+
+    #[test]
+    fn mesh_gossip_has_symbol_checks_zone() {
+        let mut gossip = MeshGossip::with_defaults(test_node("local"));
+        let zone = test_zone();
+        let obj = test_object_id("sym-zone");
+        gossip.announce_symbol(&zone, &obj, 7, ObjectAdmissionClass::Admitted, 100);
+        assert!(gossip.has_symbol(&zone, &obj, 7));
+        assert!(!gossip.has_symbol(&zone, &obj, 8));
+    }
+
+    #[test]
+    fn mesh_gossip_quarantined_symbol_not_announced() {
+        let mut gossip = MeshGossip::with_defaults(test_node("local"));
+        let zone = test_zone();
+        let obj = test_object_id("q-sym");
+        let result = gossip.announce_symbol(&zone, &obj, 0, ObjectAdmissionClass::Quarantined, 100);
+        assert!(!result);
+        assert!(!gossip.has_symbol(&zone, &obj, 0));
+    }
+
+    #[test]
+    fn mesh_gossip_create_summary_returns_none_for_missing_zone() {
+        let gossip = MeshGossip::with_defaults(test_node("local"));
+        assert!(gossip.create_summary(&test_zone(), test_epoch()).is_none());
+    }
+
+    #[test]
+    fn mesh_gossip_debug() {
+        let gossip = MeshGossip::with_defaults(test_node("local"));
+        let s = format!("{gossip:?}");
+        assert!(s.contains("MeshGossip"));
+    }
+
+    // ── PeerGossipState additional tests ───────────────────────
+
+    #[test]
+    fn peer_gossip_state_record_failure_saturates() {
+        let mut state = PeerGossipState::new(test_node("sat"));
+        for _ in 0..10 {
+            state.record_failure();
+        }
+        assert_eq!(state.failed_attempts(), 10);
+    }
+
+    #[test]
+    fn peer_gossip_state_update_resets_failures() {
+        let mut state = PeerGossipState::new(test_node("reset"));
+        state.record_failure();
+        state.record_failure();
+        assert_eq!(state.failed_attempts(), 2);
+
+        let config = GossipConfig::default();
+        let gs = GossipState::new(test_zone(), &config);
+        let summary = gs.create_summary(test_node("p"), test_epoch());
+        state.update_from_summary(summary, 100);
+        assert_eq!(state.failed_attempts(), 0);
+    }
+
+    #[test]
+    fn peer_gossip_state_debug_clone() {
+        let state = PeerGossipState::new(test_node("dc"));
+        let cloned = state.clone();
+        assert_eq!(cloned.peer_id(), state.peer_id());
+        let s = format!("{state:?}");
+        assert!(s.contains("PeerGossipState"));
+    }
+
+    // ── GossipResponse / ReconcileRequest / ReconcileResponse ──
+
+    #[test]
+    fn gossip_response_serde_roundtrip() {
+        let resp = GossipResponse {
+            from: test_node("a"),
+            to: test_node("b"),
+            zone_id: test_zone(),
+            have_objects: vec![test_object_id("o1")],
+            have_symbols: vec![(test_object_id("o1"), 42)],
+            timestamp: 999,
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        let deserialized: GossipResponse = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.timestamp, 999);
+        assert_eq!(deserialized.have_objects.len(), 1);
+    }
+
+    #[test]
+    fn reconcile_request_serde_roundtrip() {
+        let req = ReconcileRequest {
+            from: test_node("r"),
+            zone_id: test_zone(),
+            iblt: b"[]".to_vec(),
+            object_filter_digest: [0xAA; 32],
+            symbol_filter_digest: [0xBB; 32],
+            timestamp: 42,
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        let deserialized: ReconcileRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.timestamp, 42);
+    }
+
+    #[test]
+    fn reconcile_response_serde_roundtrip() {
+        let resp = ReconcileResponse {
+            from: test_node("rr"),
+            zone_id: test_zone(),
+            peer_missing_objects: vec![test_object_id("m1")],
+            we_missing_objects: vec![test_object_id("m2")],
+            timestamp: 77,
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        let deserialized: ReconcileResponse = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.peer_missing_objects.len(), 1);
+        assert_eq!(deserialized.we_missing_objects.len(), 1);
+    }
+
+    // ── GossipMessage all variants ─────────────────────────────
+
+    #[test]
+    fn gossip_message_summary_variant_serde() {
+        let config = GossipConfig::default();
+        let state = GossipState::new(test_zone(), &config);
+        let summary = state.create_summary(test_node("sv"), test_epoch());
+        let msg = GossipMessage::Summary(summary);
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("\"type\":\"summary\""));
+        let _: GossipMessage = serde_json::from_str(&json).unwrap();
+    }
+
+    #[test]
+    fn gossip_message_request_variant_serde() {
+        let req = GossipRequest::for_objects(test_node("rq"), test_zone(), vec![], 0);
+        let msg = GossipMessage::Request(req);
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("\"type\":\"request\""));
+    }
+
+    #[test]
+    fn gossip_message_reconcile_variants_serde() {
+        let req_msg = GossipMessage::ReconcileRequest(ReconcileRequest {
+            from: test_node("rc"),
+            zone_id: test_zone(),
+            iblt: vec![],
+            object_filter_digest: [0; 32],
+            symbol_filter_digest: [0; 32],
+            timestamp: 0,
+        });
+        let json = serde_json::to_string(&req_msg).unwrap();
+        assert!(json.contains("\"type\":\"reconcile_request\""));
+
+        let resp_msg = GossipMessage::ReconcileResponse(ReconcileResponse {
+            from: test_node("rc"),
+            zone_id: test_zone(),
+            peer_missing_objects: vec![],
+            we_missing_objects: vec![],
+            timestamp: 0,
+        });
+        let json = serde_json::to_string(&resp_msg).unwrap();
+        assert!(json.contains("\"type\":\"reconcile_response\""));
+    }
+
+    // ── GossipStats ────────────────────────────────────────────
+
+    #[test]
+    fn gossip_stats_fields() {
+        let stats = GossipStats {
+            object_count: 10,
+            symbol_count: 50,
+            last_updated: 12345,
+        };
+        let cloned = stats.clone();
+        assert_eq!(stats.object_count, 10);
+        assert_eq!(stats.symbol_count, 50);
+        assert_eq!(cloned.last_updated, 12345);
+    }
 }

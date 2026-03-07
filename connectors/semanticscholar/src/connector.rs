@@ -636,10 +636,13 @@ fn optional_string_field<'a>(
 ) -> Result<Option<&'a str>, SemanticScholarError> {
     match input.get(field) {
         None | Some(serde_json::Value::Null) => Ok(None),
-        Some(value) => value.as_str().map(Some).ok_or_else(|| SemanticScholarError::Api {
-            status_code: 400,
-            message: format!("Field {field} must be a string"),
-        }),
+        Some(value) => value
+            .as_str()
+            .map(Some)
+            .ok_or_else(|| SemanticScholarError::Api {
+                status_code: 400,
+                message: format!("Field {field} must be a string"),
+            }),
     }
 }
 
@@ -649,10 +652,13 @@ fn optional_i64_field(
 ) -> Result<Option<i64>, SemanticScholarError> {
     match input.get(field) {
         None | Some(serde_json::Value::Null) => Ok(None),
-        Some(value) => value.as_i64().map(Some).ok_or_else(|| SemanticScholarError::Api {
-            status_code: 400,
-            message: format!("Field {field} must be an integer"),
-        }),
+        Some(value) => value
+            .as_i64()
+            .map(Some)
+            .ok_or_else(|| SemanticScholarError::Api {
+                status_code: 400,
+                message: format!("Field {field} must be an integer"),
+            }),
     }
 }
 

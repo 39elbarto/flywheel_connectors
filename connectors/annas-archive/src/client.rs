@@ -206,7 +206,7 @@ mod tests {
     #[test]
     fn client_new_multiple_trailing_slashes() {
         let client = AnnasArchiveClient::new(Some("https://x.com///")).unwrap();
-        assert!(client.base_url.ends_with("//"));
+        assert!(!client.base_url.ends_with('/'));
     }
 
     #[test]

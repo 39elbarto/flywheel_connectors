@@ -101,8 +101,11 @@ impl ProviderAuth {
     pub fn redacted_label(&self) -> String {
         match self {
             Self::ApiKey(key) => {
-                if key.len() > 8 {
-                    format!("api_key:{}...{}", &key[..4], &key[key.len() - 4..])
+                let chars: Vec<char> = key.chars().collect();
+                if chars.len() > 8 {
+                    let prefix: String = chars[..4].iter().collect();
+                    let suffix: String = chars[chars.len() - 4..].iter().collect();
+                    format!("api_key:{prefix}...{suffix}")
                 } else {
                     "api_key:****".into()
                 }

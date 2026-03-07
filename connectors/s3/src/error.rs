@@ -25,7 +25,7 @@ pub enum S3Error {
     },
 
     /// Rate limited
-    #[error("Rate limited")]
+    #[error("Rate limited (retry after {retry_after_ms}ms)")]
     RateLimited { retry_after_ms: u64 },
 
     /// Unauthorized (invalid credentials)

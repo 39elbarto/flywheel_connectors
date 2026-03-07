@@ -357,7 +357,7 @@ mod tests {
             Some("https://x.com///"),
         )
         .unwrap();
-        assert!(client.base_url.ends_with("//"));
+        assert!(!client.base_url.ends_with('/'));
     }
 
     #[test]

@@ -195,7 +195,7 @@ impl MakeConnector {
     /// Handle the `health` method.
     pub async fn handle_health(&self) -> FcpResult<serde_json::Value> {
         let configured = self.config.is_some();
-        let handshaken = self.session_id.is_some();
+        let handshaken = self.base.handshaken.load(Ordering::Acquire);
 
         let status = if configured && handshaken {
             "healthy"
@@ -240,7 +240,7 @@ impl MakeConnector {
             critical: true,
         });
 
-        let handshaken = self.session_id.is_some();
+        let handshaken = self.base.handshaken.load(Ordering::Acquire);
         checks.push(DoctorCheck {
             name: "handshake".into(),
             passed: handshaken,

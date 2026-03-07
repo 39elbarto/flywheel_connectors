@@ -331,7 +331,6 @@ mod tests {
         let client =
             MakeClient::new(MakeAuth::ApiToken("tok".into()), Some("https://x.com///"))
                 .unwrap();
-        // Only trims one trailing slash
-        assert!(client.base_url.ends_with("//"));
+        assert!(!client.base_url.ends_with('/'));
     }
 }

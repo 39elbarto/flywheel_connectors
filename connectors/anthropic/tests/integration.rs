@@ -2440,15 +2440,18 @@ async fn client_token_counter_accumulation() {
 /// Simulate returns allowed for all operations.
 #[fcp_async_core::test]
 async fn simulate_returns_allowed() {
-    let connector = AnthropicConnector::new();
+    let mut connector = AnthropicConnector::new();
+    let signing_key = setup_handshake(&mut connector, &["anthropic.message"]).await;
+    let token = generate_valid_token(&signing_key, "anthropic.message");
+
     let result = connector
         .handle_simulate(json!({
             "type": "simulate",
             "id": "sim_001",
             "connector_id": "anthropic",
             "operation": "anthropic.message",
-            "zone_id": "z:test",
-            "capability_token": "tok_test",
+            "zone_id": "z:work",
+            "capability_token": token,
             "input": {
                 "messages": [{"role": "user", "content": "test"}]
             }
@@ -2567,7 +2570,7 @@ async fn stream_tool_use_via_connector_invoke() {
             json!({
                 "type": "content_block_delta",
                 "index": 0,
-                "delta": {"type": "input_json_delta", "partial_json": "{\"query\": \"test\"}"}
+                "delta": {"type": "input_json_delta", "partial_json": "{\"query\": \"test\""}
             }),
         ),
         (

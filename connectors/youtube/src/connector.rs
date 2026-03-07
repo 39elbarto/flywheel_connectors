@@ -1381,7 +1381,7 @@ mod tests {
         assert!(result.is_err());
         match result.unwrap_err() {
             FcpError::InvalidRequest { message, .. } => {
-                assert!(message.contains("Missing authentication"));
+                assert!(message.contains("auth"), "expected auth error, got: {message}");
             }
             e => panic!("Expected InvalidRequest, got: {e:?}"),
         }

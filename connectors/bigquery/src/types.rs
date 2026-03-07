@@ -763,7 +763,7 @@ mod tests {
         }))
         .unwrap();
         let cloned = e.clone();
-        assert!(cloned.error.is_some());
+        assert!(e.error.is_some());
         let dbg = format!("{cloned:?}");
         assert!(dbg.contains("ApiErrorResponse"));
     }

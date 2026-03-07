@@ -916,7 +916,7 @@ mod tests {
 
     #[test]
     fn require_str_float_value() {
-        let input = json!({"f": 3.14});
+        let input = json!({"f": 3.15});
         assert!(require_str(&input, "f").is_err());
     }
 

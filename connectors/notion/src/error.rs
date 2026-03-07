@@ -19,7 +19,7 @@ pub enum NotionError {
         status_code: Option<u16>,
     },
 
-    #[error("Rate limited")]
+    #[error("Rate limited (retry after {retry_after_ms}ms)")]
     RateLimited { retry_after_ms: u64 },
 
     #[error("Unauthorized")]
@@ -155,7 +155,7 @@ mod tests {
         let err = NotionError::RateLimited {
             retry_after_ms: 1000,
         };
-        assert_eq!(err.to_string(), "Rate limited");
+        assert_eq!(err.to_string(), "Rate limited (retry after 1000ms)");
     }
 
     #[test]

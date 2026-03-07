@@ -509,7 +509,7 @@ fn operations_info() -> serde_json::Value {
             "id": "datadog.events.create",
             "summary": "Post an event",
             "capability": "datadog.events.write",
-            "risk_level": "low",
+            "risk_level": "medium",
             "safety_tier": "safe",
             "idempotency": "none",
         },

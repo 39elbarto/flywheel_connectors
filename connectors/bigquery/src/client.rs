@@ -353,7 +353,7 @@ mod tests {
             access_token: "tok".into(),
         };
         let client = BigQueryClient::new(auth, None, Some("https://x.com///")).unwrap();
-        assert!(client.base_url.ends_with("//"));
+        assert!(!client.base_url.ends_with('/'));
     }
 
     #[test]

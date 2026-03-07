@@ -300,6 +300,12 @@ name = "asupersync-tokio-compat"
 version = "0.1.0"
 dependencies = [
  "asupersync",
+ "bytes",
+ "http",
+ "http-body",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
  "pin-project-lite",
  "tokio",
  "tokio-util",
@@ -2504,6 +2510,7 @@ dependencies = [
  "fcp-async-core",
  "fcp-core",
  "fcp-crypto",
+ "fcp-google-discovery",
  "fcp-manifest",
  "fcp-testkit",
  "futures-util",
@@ -2538,6 +2545,7 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.18",
+ "tokio",
  "tracing",
  "tracing-subscriber",
  "uuid",
@@ -2627,6 +2635,7 @@ dependencies = [
 name = "fcp-host"
 version = "0.1.0"
 dependencies = [
+ "asupersync",
  "asupersync-tokio-compat",
  "async-trait",
  "axum",
@@ -2637,12 +2646,16 @@ dependencies = [
  "fcp-e2e",
  "fcp-sandbox",
  "fcp-testkit",
+ "futures-util",
+ "hyper",
+ "hyper-util",
  "reqwest 0.13.2",
  "semver",
  "serde",
  "serde_json",
  "tempfile",
  "thiserror 2.0.18",
+ "tower",
  "tracing",
  "tracing-subscriber",
 ]

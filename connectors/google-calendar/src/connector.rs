@@ -163,8 +163,9 @@ fn resolve_calendar_required_scopes(params: &serde_json::Value) -> FcpResult<Vec
         })
 }
 
+#[allow(clippy::needless_pass_by_value)] // required by map_err(fn) signature
 fn map_auth_error(error: GoogleAuthError) -> FcpError {
-    match error {
+    match &error {
         GoogleAuthError::ExactlyOneSourceRequired { count: 0 } => FcpError::InvalidRequest {
             code: 1003,
             message: "Missing authentication: supply one Google auth source".into(),
@@ -177,6 +178,19 @@ fn map_auth_error(error: GoogleAuthError) -> FcpError {
             code: 1003,
             message: format!("Invalid Google auth configuration: {error}"),
         },
+    }
+}
+
+fn self_check_report_from_result(result: Result<(), GoogleCalendarError>) -> SelfCheckReport {
+    match result {
+        Ok(()) => SelfCheckReport::ok(),
+        Err(err) => {
+            if err.is_retryable() {
+                SelfCheckReport::degraded("self_check_retryable", err.to_string())
+            } else {
+                SelfCheckReport::failed("self_check_failed", err.to_string())
+            }
+        }
     }
 }
 
@@ -510,16 +524,7 @@ impl GoogleCalendarConnector {
             }
         }
 
-        let report = match client.health_check().await {
-            Ok(()) => SelfCheckReport::ok(),
-            Err(err) => {
-                if err.is_retryable() {
-                    SelfCheckReport::degraded("self_check_retryable", err.to_string())
-                } else {
-                    SelfCheckReport::failed("self_check_failed", err.to_string())
-                }
-            }
-        };
+        let report = self_check_report_from_result(client.health_check().await);
 
         serde_json::to_value(report).map_err(|e| FcpError::Internal {
             message: format!("Failed to serialize self-check report: {e}"),
@@ -1697,23 +1702,27 @@ mod tests {
         assert_eq!(result["reason_code"], "credential_injection_required");
     }
 
-    #[fcp_async_core::runtime::test]
-    async fn test_self_check_connection_failure() {
-        let mut connector = GoogleCalendarConnector::new();
-        connector
-            .handle_configure(json!({
-                "token": "tok",
-                "base_url": "http://127.0.0.1:1"
-            }))
-            .await
-            .unwrap();
-        let result = connector.handle_self_check().await.unwrap();
-        // Connection refused → Http error is retryable → degraded
-        assert!(
-            result["status"] == "failed" || result["status"] == "degraded",
-            "Expected failed or degraded, got: {}",
-            result["status"]
-        );
+    #[test]
+    fn test_retryable_self_check_error_maps_to_degraded() {
+        let report = serde_json::to_value(self_check_report_from_result(Err(
+            GoogleCalendarError::Api {
+                code: 503,
+                message: "backend unavailable".into(),
+            },
+        )))
+        .unwrap();
+        assert_eq!(report["status"], "degraded");
+        assert_eq!(report["reason_code"], "self_check_retryable");
+    }
+
+    #[test]
+    fn test_non_retryable_self_check_error_maps_to_failed() {
+        let report = serde_json::to_value(self_check_report_from_result(Err(
+            GoogleCalendarError::Unauthorized,
+        )))
+        .unwrap();
+        assert_eq!(report["status"], "failed");
+        assert_eq!(report["reason_code"], "self_check_failed");
     }
 
     // ── Schema completeness tests ────────────────────────────────

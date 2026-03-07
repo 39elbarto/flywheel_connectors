@@ -123,12 +123,14 @@ pub fn parse_atom_entries(xml: &str) -> Vec<ArxivPaper> {
             let arxiv_id = extract_arxiv_id(id_url.trim());
             let title = extract_tag(entry, "title")
                 .unwrap_or_default()
-                .trim()
-                .replace('\n', " ");
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ");
             let summary = extract_tag(entry, "summary")
                 .unwrap_or_default()
-                .trim()
-                .replace('\n', " ");
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ");
             let published = extract_tag(entry, "published")
                 .unwrap_or_default()
                 .trim()

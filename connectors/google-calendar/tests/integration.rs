@@ -72,7 +72,7 @@ fn event_json(id: &str, summary: &str) -> serde_json::Value {
 
 // ── Error taxonomy ──────────────────────────────────────────────────
 
-#[fcp_async_core::runtime::test]
+#[tokio::test(flavor = "current_thread")]
 async fn error_http_maps_to_external() {
     let err = GoogleCalendarError::Http(
         reqwest::Client::new()
@@ -86,7 +86,7 @@ async fn error_http_maps_to_external() {
     assert!(err.is_retryable());
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test(flavor = "current_thread")]
 async fn error_json_maps_to_internal() {
     let bad: Result<serde_json::Value, _> = serde_json::from_str("not json");
     let err = GoogleCalendarError::Json(bad.unwrap_err());
@@ -95,7 +95,7 @@ async fn error_json_maps_to_internal() {
     assert!(!err.is_retryable());
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test(flavor = "current_thread")]
 async fn error_api_auth_maps_to_unauthorized() {
     let err = GoogleCalendarError::Api {
         code: 401,
@@ -105,7 +105,7 @@ async fn error_api_auth_maps_to_unauthorized() {
     assert!(matches!(fcp, FcpError::Unauthorized { .. }));
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test(flavor = "current_thread")]
 async fn error_api_not_found_maps_to_resource_not_found() {
     let err = GoogleCalendarError::Api {
         code: 404,
@@ -115,7 +115,7 @@ async fn error_api_not_found_maps_to_resource_not_found() {
     assert!(matches!(fcp, FcpError::ResourceNotFound { .. }));
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test(flavor = "current_thread")]
 async fn error_api_rate_limited_maps_to_fcp() {
     let err = GoogleCalendarError::Api {
         code: 429,
@@ -126,7 +126,7 @@ async fn error_api_rate_limited_maps_to_fcp() {
     assert!(err.is_retryable());
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test(flavor = "current_thread")]
 async fn error_api_server_error_is_retryable() {
     for code in [500, 502, 503] {
         let err = GoogleCalendarError::Api {
@@ -137,7 +137,7 @@ async fn error_api_server_error_is_retryable() {
     }
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test(flavor = "current_thread")]
 async fn error_rate_limited_maps_to_fcp_rate_limited() {
     let err = GoogleCalendarError::RateLimited {
         retry_after_secs: 30,
@@ -154,7 +154,7 @@ async fn error_rate_limited_maps_to_fcp_rate_limited() {
     assert_eq!(err.retry_after(), Some(Duration::from_secs(30)));
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test(flavor = "current_thread")]
 async fn error_unauthorized_maps_to_fcp_unauthorized() {
     let err = GoogleCalendarError::Unauthorized;
     let fcp = err.to_fcp_error();
@@ -162,7 +162,7 @@ async fn error_unauthorized_maps_to_fcp_unauthorized() {
     assert!(!err.is_retryable());
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test(flavor = "current_thread")]
 async fn error_not_found_variants_map_to_resource_not_found() {
     let event_err = GoogleCalendarError::EventNotFound {
         event_id: "evt123".into(),
@@ -181,14 +181,14 @@ async fn error_not_found_variants_map_to_resource_not_found() {
 
 // ── Redaction ───────────────────────────────────────────────────────
 
-#[fcp_async_core::runtime::test]
+#[tokio::test(flavor = "current_thread")]
 async fn error_display_does_not_leak_token() {
     let err = GoogleCalendarError::Unauthorized;
     let msg = err.to_string();
     assert!(!msg.contains("ya29.test-oauth-token"));
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test(flavor = "current_thread")]
 async fn api_error_display_does_not_leak_token() {
     let err = GoogleCalendarError::Api {
         code: 401,
@@ -200,7 +200,7 @@ async fn api_error_display_does_not_leak_token() {
 
 // ── Client operations ───────────────────────────────────────────────
 
-#[fcp_async_core::runtime::test]
+#[tokio::test(flavor = "current_thread")]
 async fn client_list_calendars() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -222,7 +222,7 @@ async fn client_list_calendars() {
     assert_eq!(result.items.len(), 2);
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test(flavor = "current_thread")]
 async fn client_get_event() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -241,7 +241,7 @@ async fn client_get_event() {
     assert_eq!(event.id.as_deref(), Some("evt001"));
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test(flavor = "current_thread")]
 async fn client_list_events() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -267,7 +267,7 @@ async fn client_list_events() {
     assert_eq!(result.items.len(), 2);
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test(flavor = "current_thread")]
 async fn client_create_event() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -287,7 +287,7 @@ async fn client_create_event() {
     assert_eq!(created.id.as_deref(), Some("evtNEW"));
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test(flavor = "current_thread")]
 async fn client_delete_event() {
     let server = MockServer::start().await;
     Mock::given(method("DELETE"))
@@ -303,7 +303,7 @@ async fn client_delete_event() {
     client.delete_event("primary", "evtDEL").await.unwrap();
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test(flavor = "current_thread")]
 async fn client_quick_add() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -322,7 +322,7 @@ async fn client_quick_add() {
     assert_eq!(event.id.as_deref(), Some("evtQA"));
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test(flavor = "current_thread")]
 async fn client_unauthorized() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -344,7 +344,7 @@ async fn client_unauthorized() {
     ));
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test(flavor = "current_thread")]
 async fn client_rate_limited_no_retry() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -367,7 +367,7 @@ async fn client_rate_limited_no_retry() {
 
 // ── Connector-level invoke ──────────────────────────────────────────
 
-#[fcp_async_core::runtime::test]
+#[tokio::test(flavor = "current_thread")]
 async fn invoke_list_calendars_through_connector() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -397,7 +397,7 @@ async fn invoke_list_calendars_through_connector() {
     assert!(result["calendars"].as_array().is_some());
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test(flavor = "current_thread")]
 async fn invoke_get_event_through_connector() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -428,7 +428,7 @@ async fn invoke_get_event_through_connector() {
     assert_eq!(result["event"]["id"], "evt001");
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test(flavor = "current_thread")]
 async fn invoke_delete_event_through_connector() {
     let server = MockServer::start().await;
     Mock::given(method("DELETE"))
@@ -459,7 +459,7 @@ async fn invoke_delete_event_through_connector() {
     assert_eq!(result["status"], "deleted");
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test(flavor = "current_thread")]
 async fn invoke_wrong_capability_rejected() {
     let mut connector = GoogleCalendarConnector::new();
     let signing_key = Ed25519SigningKey::generate();
@@ -482,7 +482,7 @@ async fn invoke_wrong_capability_rejected() {
     assert!(result.is_err());
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test(flavor = "current_thread")]
 async fn invoke_unknown_operation_rejected() {
     let mut connector = GoogleCalendarConnector::new();
     let signing_key = Ed25519SigningKey::generate();
@@ -506,7 +506,7 @@ async fn invoke_unknown_operation_rejected() {
     ));
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test(flavor = "current_thread")]
 async fn invoke_missing_required_field_rejected() {
     let server = MockServer::start().await;
 
@@ -537,7 +537,7 @@ async fn invoke_missing_required_field_rejected() {
 
 // ── FreeBusy client ─────────────────────────────────────────────
 
-#[fcp_async_core::runtime::test]
+#[tokio::test(flavor = "current_thread")]
 async fn client_freebusy() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -574,7 +574,7 @@ async fn client_freebusy() {
 
 // ── FreeBusy connector-level ────────────────────────────────────
 
-#[fcp_async_core::runtime::test]
+#[tokio::test(flavor = "current_thread")]
 async fn invoke_freebusy_through_connector() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -614,7 +614,7 @@ async fn invoke_freebusy_through_connector() {
     assert!(result["calendars"].is_object());
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test(flavor = "current_thread")]
 async fn invoke_freebusy_missing_fields() {
     let server = MockServer::start().await;
 
@@ -644,7 +644,7 @@ async fn invoke_freebusy_missing_fields() {
 
 // ── Event instances client ──────────────────────────────────────
 
-#[fcp_async_core::runtime::test]
+#[tokio::test(flavor = "current_thread")]
 async fn client_list_event_instances() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -671,7 +671,7 @@ async fn client_list_event_instances() {
 
 // ── Event instances connector-level ─────────────────────────────
 
-#[fcp_async_core::runtime::test]
+#[tokio::test(flavor = "current_thread")]
 async fn invoke_list_event_instances_through_connector() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -708,7 +708,7 @@ async fn invoke_list_event_instances_through_connector() {
 
 // ── Get calendar client ─────────────────────────────────────────
 
-#[fcp_async_core::runtime::test]
+#[tokio::test(flavor = "current_thread")]
 async fn client_get_calendar() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -731,7 +731,7 @@ async fn client_get_calendar() {
     assert_eq!(result["summary"], "My Calendar");
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test(flavor = "current_thread")]
 async fn client_get_calendar_unauthorized() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -756,7 +756,7 @@ async fn client_get_calendar_unauthorized() {
 
 // ── Get calendar connector-level ────────────────────────────────
 
-#[fcp_async_core::runtime::test]
+#[tokio::test(flavor = "current_thread")]
 async fn invoke_get_calendar_through_connector() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -789,7 +789,7 @@ async fn invoke_get_calendar_through_connector() {
     assert_eq!(result["calendar"]["id"], "primary");
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test(flavor = "current_thread")]
 async fn invoke_get_calendar_missing_field() {
     let server = MockServer::start().await;
 
@@ -819,7 +819,7 @@ async fn invoke_get_calendar_missing_field() {
 
 // ── Quick-add connector-level ───────────────────────────────────
 
-#[fcp_async_core::runtime::test]
+#[tokio::test(flavor = "current_thread")]
 async fn invoke_quick_add_through_connector() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -854,7 +854,7 @@ async fn invoke_quick_add_through_connector() {
 
 // ── Risk level verification ─────────────────────────────────────
 
-#[fcp_async_core::runtime::test]
+#[tokio::test(flavor = "current_thread")]
 async fn introspect_risk_levels() {
     let connector = GoogleCalendarConnector::new();
     let result = connector.handle_introspect().await.unwrap();
@@ -886,7 +886,7 @@ async fn introspect_risk_levels() {
 
 // ── Sync events client ──────────────────────────────────────────
 
-#[fcp_async_core::runtime::test]
+#[tokio::test(flavor = "current_thread")]
 async fn client_sync_events_initial() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -917,7 +917,7 @@ async fn client_sync_events_initial() {
     assert!(result.next_page_token.is_none());
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test(flavor = "current_thread")]
 async fn client_sync_events_incremental() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -964,7 +964,7 @@ async fn client_sync_events_incremental() {
 
 // ── Sync events connector-level ─────────────────────────────────
 
-#[fcp_async_core::runtime::test]
+#[tokio::test(flavor = "current_thread")]
 async fn invoke_sync_events_initial_through_connector() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -996,7 +996,7 @@ async fn invoke_sync_events_initial_through_connector() {
     assert_eq!(result["next_sync_token"], "sync-token-abc");
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test(flavor = "current_thread")]
 async fn invoke_sync_events_incremental_through_connector() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -1031,7 +1031,7 @@ async fn invoke_sync_events_incremental_through_connector() {
     assert_eq!(result["next_sync_token"], "sync-token-def");
 }
 
-#[fcp_async_core::runtime::test]
+#[tokio::test(flavor = "current_thread")]
 async fn invoke_sync_events_missing_calendar_id() {
     let server = MockServer::start().await;
 

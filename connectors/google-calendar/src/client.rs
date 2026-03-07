@@ -35,7 +35,7 @@ pub(crate) fn google_auth_redacted_label(auth: &GoogleMaterializedAuth) -> Strin
 
 /// Whether the provided auth mode requires egress proxy credential injection.
 #[must_use]
-pub(crate) fn google_auth_is_secretless(auth: &GoogleMaterializedAuth) -> bool {
+pub(crate) const fn google_auth_is_secretless(auth: &GoogleMaterializedAuth) -> bool {
     auth.credential_id().is_some()
 }
 

@@ -15,6 +15,7 @@
 
 mod batch;
 mod budget;
+mod cancellation;
 mod discovery;
 mod doctor;
 mod error;
@@ -24,6 +25,7 @@ mod supply_chain;
 
 pub use batch::*;
 pub use budget::*;
+pub use cancellation::*;
 pub use discovery::*;
 pub use doctor::*;
 pub use error::*;

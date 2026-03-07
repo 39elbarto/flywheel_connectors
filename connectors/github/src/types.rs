@@ -1507,7 +1507,10 @@ mod tests {
             (WebhookEventType::Issues, "\"issues\""),
             (WebhookEventType::IssueComment, "\"issue_comment\""),
             (WebhookEventType::PullRequest, "\"pull_request\""),
-            (WebhookEventType::PullRequestReview, "\"pull_request_review\""),
+            (
+                WebhookEventType::PullRequestReview,
+                "\"pull_request_review\"",
+            ),
             (WebhookEventType::Push, "\"push\""),
             (WebhookEventType::WorkflowRun, "\"workflow_run\""),
             (WebhookEventType::Create, "\"create\""),
@@ -1604,7 +1607,10 @@ mod tests {
         });
         let payload: WebhookPayload = serde_json::from_value(json).unwrap();
         assert_eq!(payload.event_type, WebhookEventType::PullRequest);
-        assert_eq!(payload.repository.as_ref().unwrap().full_name, "octocat/hello");
+        assert_eq!(
+            payload.repository.as_ref().unwrap().full_name,
+            "octocat/hello"
+        );
         assert_eq!(payload.sender.as_ref().unwrap().login, "octocat");
     }
 

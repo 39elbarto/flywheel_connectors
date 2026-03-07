@@ -1014,9 +1014,11 @@ impl LinearConnector {
         })?;
 
         let payload: WebhookPayload =
-            serde_json::from_value(payload_value.clone()).map_err(|e| FcpError::InvalidRequest {
-                code: 1003,
-                message: format!("Invalid webhook payload: {e}"),
+            serde_json::from_value(payload_value.clone()).map_err(|e| {
+                FcpError::InvalidRequest {
+                    code: 1003,
+                    message: format!("Invalid webhook payload: {e}"),
+                }
             })?;
 
         let topic = payload.resource_type.to_topic(payload.action);
@@ -1260,7 +1262,10 @@ mod tests {
         // Verify event descriptors are present
         let events = result["events"].as_array().unwrap();
         assert_eq!(events.len(), 12);
-        let topics: Vec<&str> = events.iter().map(|e| e["topic"].as_str().unwrap()).collect();
+        let topics: Vec<&str> = events
+            .iter()
+            .map(|e| e["topic"].as_str().unwrap())
+            .collect();
         assert!(topics.contains(&"linear.issue.create"));
         assert!(topics.contains(&"linear.issue.update"));
         assert!(topics.contains(&"linear.issue.remove"));

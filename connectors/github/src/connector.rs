@@ -1068,9 +1068,11 @@ impl GitHubConnector {
         })?;
 
         let payload: WebhookPayload =
-            serde_json::from_value(payload_value.clone()).map_err(|e| FcpError::InvalidRequest {
-                code: 1003,
-                message: format!("Invalid webhook payload: {e}"),
+            serde_json::from_value(payload_value.clone()).map_err(|e| {
+                FcpError::InvalidRequest {
+                    code: 1003,
+                    message: format!("Invalid webhook payload: {e}"),
+                }
             })?;
 
         // Extract action from payload data if present

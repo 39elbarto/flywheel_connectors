@@ -1,6 +1,10 @@
 //! Linear GraphQL API types.
 
+use std::cmp::Ordering;
+
+use chrono::{DateTime, FixedOffset};
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 // ── GraphQL request/response ────────────────────────────────────
 
@@ -254,10 +258,480 @@ impl WebhookResourceType {
     }
 }
 
+// ── Beads ↔ Linear sync planning ───────────────────────────────
+
+/// Conflict resolution policy for Beads ↔ Linear sync planning.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SyncConflictPolicy {
+    /// Update the older side using the newer side's differing fields.
+    PreferFreshest,
+    /// Beads wins for any differing field.
+    PreferBead,
+    /// Linear wins for any differing field.
+    PreferLinear,
+    /// Never auto-resolve; surface every differing field as a conflict.
+    Manual,
+}
+
+impl SyncConflictPolicy {
+    /// Stable machine-friendly name used in sync audit artifacts.
+    #[must_use]
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::PreferFreshest => "prefer_freshest",
+            Self::PreferBead => "prefer_bead",
+            Self::PreferLinear => "prefer_linear",
+            Self::Manual => "manual",
+        }
+    }
+}
+
+/// Field-level sync surface between a Bead and a Linear issue.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SyncField {
+    Title,
+    Description,
+    Status,
+    Priority,
+}
+
+impl SyncField {
+    /// Stable machine-friendly name used in audit artifacts.
+    #[must_use]
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Title => "title",
+            Self::Description => "description",
+            Self::Status => "status",
+            Self::Priority => "priority",
+        }
+    }
+}
+
+/// High-level action implied by a deterministic sync plan.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SyncOperationKind {
+    Noop,
+    CreateLinear,
+    UpdateLinear,
+    CreateBead,
+    UpdateBead,
+    Conflict,
+}
+
+impl SyncOperationKind {
+    /// Stable machine-friendly name used in idempotency keys and receipts.
+    #[must_use]
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Noop => "noop",
+            Self::CreateLinear => "create_linear",
+            Self::UpdateLinear => "update_linear",
+            Self::CreateBead => "create_bead",
+            Self::UpdateBead => "update_bead",
+            Self::Conflict => "conflict",
+        }
+    }
+}
+
+/// Execution state for a sync receipt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SyncExecutionStatus {
+    Noop,
+    Planned,
+    Applied,
+    Conflicted,
+}
+
+/// Minimal Beads-side snapshot used for deterministic sync planning.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BeadSyncSnapshot {
+    pub bead_id: String,
+    pub linear_issue_id: Option<String>,
+    pub title: String,
+    pub description: Option<String>,
+    pub status: Option<String>,
+    pub priority: Option<u8>,
+    pub updated_at: String,
+}
+
+/// Minimal Linear-side snapshot used for deterministic sync planning.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LinearSyncSnapshot {
+    pub issue_id: String,
+    pub identifier: String,
+    pub bead_id: Option<String>,
+    pub title: String,
+    pub description: Option<String>,
+    pub status: Option<String>,
+    pub priority: Option<u8>,
+    pub updated_at: String,
+}
+
+/// Explicit field-level conflict emitted by the sync planner.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SyncConflict {
+    pub field: SyncField,
+    pub bead_updated_at: String,
+    pub linear_updated_at: String,
+}
+
+/// Side-effect-free sync plan to be wrapped by intent/receipt machinery later.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct SyncPlan {
+    pub create_linear: bool,
+    pub create_bead: bool,
+    pub update_linear_fields: Vec<SyncField>,
+    pub update_bead_fields: Vec<SyncField>,
+    pub conflicts: Vec<SyncConflict>,
+}
+
+impl SyncPlan {
+    /// True when no create/update/conflict work is needed.
+    #[must_use]
+    pub fn is_noop(&self) -> bool {
+        !self.create_linear
+            && !self.create_bead
+            && self.update_linear_fields.is_empty()
+            && self.update_bead_fields.is_empty()
+            && self.conflicts.is_empty()
+    }
+
+    /// Collapse the plan into a single high-level sync operation kind.
+    #[must_use]
+    pub fn operation(&self) -> SyncOperationKind {
+        if !self.conflicts.is_empty() {
+            SyncOperationKind::Conflict
+        } else if self.create_linear {
+            SyncOperationKind::CreateLinear
+        } else if self.create_bead {
+            SyncOperationKind::CreateBead
+        } else if !self.update_linear_fields.is_empty() {
+            SyncOperationKind::UpdateLinear
+        } else if !self.update_bead_fields.is_empty() {
+            SyncOperationKind::UpdateBead
+        } else {
+            SyncOperationKind::Noop
+        }
+    }
+
+    /// Return the fields the plan would touch or flag.
+    #[must_use]
+    pub fn affected_fields(&self) -> Vec<SyncField> {
+        if !self.update_linear_fields.is_empty() {
+            self.update_linear_fields.clone()
+        } else if !self.update_bead_fields.is_empty() {
+            self.update_bead_fields.clone()
+        } else if !self.conflicts.is_empty() {
+            self.conflicts
+                .iter()
+                .map(|conflict| conflict.field)
+                .collect()
+        } else {
+            Vec::new()
+        }
+    }
+}
+
+/// Side-effect-free operation intent for Beads ↔ Linear sync orchestration.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SyncOperationIntent {
+    pub operation: SyncOperationKind,
+    pub policy: SyncConflictPolicy,
+    pub bead_id: Option<String>,
+    pub linear_issue_id: Option<String>,
+    pub linear_identifier: Option<String>,
+    pub idempotency_key: String,
+    pub planned_at: String,
+    pub plan: SyncPlan,
+}
+
+impl SyncOperationIntent {
+    /// Construct a deterministic intent envelope from the current snapshots.
+    #[must_use]
+    pub fn from_snapshots(
+        bead: Option<&BeadSyncSnapshot>,
+        linear: Option<&LinearSyncSnapshot>,
+        policy: SyncConflictPolicy,
+        planned_at: impl Into<String>,
+    ) -> Self {
+        let plan = plan_bead_linear_sync(bead, linear, policy);
+        let operation = plan.operation();
+        let bead_id = bead
+            .map(|snapshot| snapshot.bead_id.clone())
+            .or_else(|| linear.and_then(|snapshot| snapshot.bead_id.clone()));
+        let linear_issue_id = linear
+            .map(|snapshot| snapshot.issue_id.clone())
+            .or_else(|| bead.and_then(|snapshot| snapshot.linear_issue_id.clone()));
+        let linear_identifier = linear.map(|snapshot| snapshot.identifier.clone());
+        let idempotency_key = derive_sync_idempotency_key(bead, linear, policy, &plan);
+
+        Self {
+            operation,
+            policy,
+            bead_id,
+            linear_issue_id,
+            linear_identifier,
+            idempotency_key,
+            planned_at: planned_at.into(),
+            plan,
+        }
+    }
+}
+
+/// Auditable receipt derived from a sync intent once a controller decides what happened.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SyncOperationReceipt {
+    pub operation: SyncOperationKind,
+    pub status: SyncExecutionStatus,
+    pub bead_id: Option<String>,
+    pub linear_issue_id: Option<String>,
+    pub linear_identifier: Option<String>,
+    pub idempotency_key: String,
+    pub updated_fields: Vec<SyncField>,
+    pub conflicts: Vec<SyncConflict>,
+    pub executed_at: String,
+}
+
+impl SyncOperationReceipt {
+    /// Derive an auditable receipt from an intent and the controller's execution outcome.
+    #[must_use]
+    pub fn from_intent(
+        intent: &SyncOperationIntent,
+        executed_at: impl Into<String>,
+        applied: bool,
+    ) -> Self {
+        let status = if intent.plan.is_noop() {
+            SyncExecutionStatus::Noop
+        } else if !intent.plan.conflicts.is_empty() {
+            SyncExecutionStatus::Conflicted
+        } else if applied {
+            SyncExecutionStatus::Applied
+        } else {
+            SyncExecutionStatus::Planned
+        };
+
+        Self {
+            operation: intent.operation,
+            status,
+            bead_id: intent.bead_id.clone(),
+            linear_issue_id: intent.linear_issue_id.clone(),
+            linear_identifier: intent.linear_identifier.clone(),
+            idempotency_key: intent.idempotency_key.clone(),
+            updated_fields: intent.plan.affected_fields(),
+            conflicts: intent.plan.conflicts.clone(),
+            executed_at: executed_at.into(),
+        }
+    }
+}
+
+fn normalize_optional_text(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+}
+
+fn join_sync_fields(fields: &[SyncField]) -> String {
+    if fields.is_empty() {
+        "none".to_string()
+    } else {
+        fields
+            .iter()
+            .map(SyncField::as_str)
+            .collect::<Vec<_>>()
+            .join(",")
+    }
+}
+
+fn join_conflict_fields(conflicts: &[SyncConflict]) -> String {
+    if conflicts.is_empty() {
+        "none".to_string()
+    } else {
+        conflicts
+            .iter()
+            .map(|conflict| conflict.field.as_str())
+            .collect::<Vec<_>>()
+            .join(",")
+    }
+}
+
+fn compare_sync_timestamps(left: &str, right: &str) -> Ordering {
+    match (
+        DateTime::<FixedOffset>::parse_from_rfc3339(left),
+        DateTime::<FixedOffset>::parse_from_rfc3339(right),
+    ) {
+        (Ok(left), Ok(right)) => left.cmp(&right),
+        _ => left.cmp(right),
+    }
+}
+
+fn derive_sync_idempotency_key(
+    bead: Option<&BeadSyncSnapshot>,
+    linear: Option<&LinearSyncSnapshot>,
+    policy: SyncConflictPolicy,
+    plan: &SyncPlan,
+) -> String {
+    let bead_id = bead
+        .map(|snapshot| snapshot.bead_id.as_str())
+        .or_else(|| linear.and_then(|snapshot| snapshot.bead_id.as_deref()))
+        .unwrap_or("none");
+    let linear_issue_id = linear
+        .map(|snapshot| snapshot.issue_id.as_str())
+        .or_else(|| bead.and_then(|snapshot| snapshot.linear_issue_id.as_deref()))
+        .unwrap_or("none");
+    let linear_identifier = linear
+        .map(|snapshot| snapshot.identifier.as_str())
+        .unwrap_or("none");
+    let bead_updated_at = bead
+        .map(|snapshot| snapshot.updated_at.as_str())
+        .unwrap_or("none");
+    let linear_updated_at = linear
+        .map(|snapshot| snapshot.updated_at.as_str())
+        .unwrap_or("none");
+
+    let fingerprint = format!(
+        "{}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
+        plan.operation().as_str(),
+        policy.as_str(),
+        bead_id,
+        linear_issue_id,
+        linear_identifier,
+        bead_updated_at,
+        linear_updated_at,
+        join_sync_fields(&plan.update_linear_fields),
+        join_sync_fields(&plan.update_bead_fields),
+        join_conflict_fields(&plan.conflicts)
+    );
+    let intent_uuid = Uuid::new_v5(&Uuid::NAMESPACE_OID, fingerprint.as_bytes());
+    format!(
+        "fcp2:linear-sync:{}:{intent_uuid}",
+        plan.operation().as_str()
+    )
+}
+
+/// Build a deterministic sync plan between a Bead and a Linear issue snapshot.
+#[must_use]
+pub fn plan_bead_linear_sync(
+    bead: Option<&BeadSyncSnapshot>,
+    linear: Option<&LinearSyncSnapshot>,
+    policy: SyncConflictPolicy,
+) -> SyncPlan {
+    match (bead, linear) {
+        (Some(_), None) => SyncPlan {
+            create_linear: true,
+            ..SyncPlan::default()
+        },
+        (None, Some(_)) => SyncPlan {
+            create_bead: true,
+            ..SyncPlan::default()
+        },
+        (None, None) => SyncPlan::default(),
+        (Some(bead), Some(linear)) => {
+            let mut differing_fields = Vec::new();
+
+            if bead.title.trim() != linear.title.trim() {
+                differing_fields.push(SyncField::Title);
+            }
+            if normalize_optional_text(bead.description.as_deref())
+                != normalize_optional_text(linear.description.as_deref())
+            {
+                differing_fields.push(SyncField::Description);
+            }
+            if normalize_optional_text(bead.status.as_deref())
+                != normalize_optional_text(linear.status.as_deref())
+            {
+                differing_fields.push(SyncField::Status);
+            }
+            if bead.priority != linear.priority {
+                differing_fields.push(SyncField::Priority);
+            }
+
+            if differing_fields.is_empty() {
+                return SyncPlan::default();
+            }
+
+            match policy {
+                SyncConflictPolicy::PreferBead => SyncPlan {
+                    update_linear_fields: differing_fields,
+                    ..SyncPlan::default()
+                },
+                SyncConflictPolicy::PreferLinear => SyncPlan {
+                    update_bead_fields: differing_fields,
+                    ..SyncPlan::default()
+                },
+                SyncConflictPolicy::Manual => SyncPlan {
+                    conflicts: differing_fields
+                        .into_iter()
+                        .map(|field| SyncConflict {
+                            field,
+                            bead_updated_at: bead.updated_at.clone(),
+                            linear_updated_at: linear.updated_at.clone(),
+                        })
+                        .collect(),
+                    ..SyncPlan::default()
+                },
+                SyncConflictPolicy::PreferFreshest => {
+                    match compare_sync_timestamps(&bead.updated_at, &linear.updated_at) {
+                        Ordering::Greater => SyncPlan {
+                            update_linear_fields: differing_fields,
+                            ..SyncPlan::default()
+                        },
+                        Ordering::Less => SyncPlan {
+                            update_bead_fields: differing_fields,
+                            ..SyncPlan::default()
+                        },
+                        Ordering::Equal => SyncPlan {
+                            conflicts: differing_fields
+                                .into_iter()
+                                .map(|field| SyncConflict {
+                                    field,
+                                    bead_updated_at: bead.updated_at.clone(),
+                                    linear_updated_at: linear.updated_at.clone(),
+                                })
+                                .collect(),
+                            ..SyncPlan::default()
+                        },
+                    }
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    fn sample_bead_snapshot() -> BeadSyncSnapshot {
+        BeadSyncSnapshot {
+            bead_id: "br-123".to_string(),
+            linear_issue_id: Some("lin-1".to_string()),
+            title: "Sync title".to_string(),
+            description: Some("Sync description".to_string()),
+            status: Some("open".to_string()),
+            priority: Some(1),
+            updated_at: "2026-03-07T07:00:00+00:00".to_string(),
+        }
+    }
+
+    fn sample_linear_snapshot() -> LinearSyncSnapshot {
+        LinearSyncSnapshot {
+            issue_id: "lin-1".to_string(),
+            identifier: "LIN-123".to_string(),
+            bead_id: Some("br-123".to_string()),
+            title: "Sync title".to_string(),
+            description: Some("Sync description".to_string()),
+            status: Some("open".to_string()),
+            priority: Some(1),
+            updated_at: "2026-03-07T06:00:00+00:00".to_string(),
+        }
+    }
 
     // ════════════════════════════════════════════════════════════════
     // GraphQL types
@@ -272,6 +746,215 @@ mod tests {
         let json = serde_json::to_string(&req).unwrap();
         assert!(json.contains("viewer"));
         assert!(json.contains("\"first\":10"));
+    }
+
+    #[test]
+    fn sync_plan_creates_linear_when_missing() {
+        let bead = sample_bead_snapshot();
+        let plan = plan_bead_linear_sync(Some(&bead), None, SyncConflictPolicy::PreferFreshest);
+
+        assert!(plan.create_linear);
+        assert!(!plan.create_bead);
+        assert!(plan.update_linear_fields.is_empty());
+        assert!(plan.conflicts.is_empty());
+    }
+
+    #[test]
+    fn sync_plan_updates_linear_when_bead_is_fresher() {
+        let bead = BeadSyncSnapshot {
+            title: "New bead title".to_string(),
+            ..sample_bead_snapshot()
+        };
+        let linear = sample_linear_snapshot();
+
+        let plan = plan_bead_linear_sync(
+            Some(&bead),
+            Some(&linear),
+            SyncConflictPolicy::PreferFreshest,
+        );
+
+        assert_eq!(plan.update_linear_fields, vec![SyncField::Title]);
+        assert!(plan.update_bead_fields.is_empty());
+        assert!(plan.conflicts.is_empty());
+    }
+
+    #[test]
+    fn sync_plan_updates_bead_when_linear_is_fresher() {
+        let bead = sample_bead_snapshot();
+        let linear = LinearSyncSnapshot {
+            status: Some("done".to_string()),
+            updated_at: "2026-03-07T08:00:00+00:00".to_string(),
+            ..sample_linear_snapshot()
+        };
+
+        let plan = plan_bead_linear_sync(
+            Some(&bead),
+            Some(&linear),
+            SyncConflictPolicy::PreferFreshest,
+        );
+
+        assert_eq!(plan.update_bead_fields, vec![SyncField::Status]);
+        assert!(plan.update_linear_fields.is_empty());
+        assert!(plan.conflicts.is_empty());
+    }
+
+    #[test]
+    fn sync_plan_conflicts_when_timestamps_tie() {
+        let bead = BeadSyncSnapshot {
+            title: "Bead title".to_string(),
+            updated_at: "2026-03-07T07:00:00+00:00".to_string(),
+            ..sample_bead_snapshot()
+        };
+        let linear = LinearSyncSnapshot {
+            title: "Linear title".to_string(),
+            updated_at: "2026-03-07T07:00:00+00:00".to_string(),
+            ..sample_linear_snapshot()
+        };
+
+        let plan = plan_bead_linear_sync(
+            Some(&bead),
+            Some(&linear),
+            SyncConflictPolicy::PreferFreshest,
+        );
+
+        assert!(plan.update_linear_fields.is_empty());
+        assert!(plan.update_bead_fields.is_empty());
+        assert_eq!(plan.conflicts.len(), 1);
+        assert_eq!(plan.conflicts[0].field, SyncField::Title);
+    }
+
+    #[test]
+    fn sync_plan_manual_policy_never_auto_resolves() {
+        let bead = BeadSyncSnapshot {
+            priority: Some(0),
+            ..sample_bead_snapshot()
+        };
+        let linear = LinearSyncSnapshot {
+            priority: Some(2),
+            updated_at: "2026-03-07T09:00:00+00:00".to_string(),
+            ..sample_linear_snapshot()
+        };
+
+        let plan = plan_bead_linear_sync(Some(&bead), Some(&linear), SyncConflictPolicy::Manual);
+
+        assert!(plan.update_linear_fields.is_empty());
+        assert!(plan.update_bead_fields.is_empty());
+        assert_eq!(plan.conflicts.len(), 1);
+        assert_eq!(plan.conflicts[0].field, SyncField::Priority);
+    }
+
+    #[test]
+    fn sync_plan_operation_classification_is_stable() {
+        let bead = sample_bead_snapshot();
+        let linear = sample_linear_snapshot();
+
+        assert_eq!(
+            plan_bead_linear_sync(Some(&bead), None, SyncConflictPolicy::PreferFreshest)
+                .operation(),
+            SyncOperationKind::CreateLinear
+        );
+        assert_eq!(
+            plan_bead_linear_sync(None, Some(&linear), SyncConflictPolicy::PreferFreshest)
+                .operation(),
+            SyncOperationKind::CreateBead
+        );
+        assert_eq!(SyncPlan::default().operation(), SyncOperationKind::Noop);
+    }
+
+    #[test]
+    fn sync_operation_intent_derives_stable_idempotency_key() {
+        let bead = BeadSyncSnapshot {
+            title: "Retitle bead".to_string(),
+            ..sample_bead_snapshot()
+        };
+        let linear = sample_linear_snapshot();
+
+        let first = SyncOperationIntent::from_snapshots(
+            Some(&bead),
+            Some(&linear),
+            SyncConflictPolicy::PreferFreshest,
+            "2026-03-07T10:00:00+00:00",
+        );
+        let second = SyncOperationIntent::from_snapshots(
+            Some(&bead),
+            Some(&linear),
+            SyncConflictPolicy::PreferFreshest,
+            "2026-03-07T11:00:00+00:00",
+        );
+
+        assert_eq!(first.operation, SyncOperationKind::UpdateLinear);
+        assert_eq!(first.idempotency_key, second.idempotency_key);
+        assert!(
+            first
+                .idempotency_key
+                .starts_with("fcp2:linear-sync:update_linear:")
+        );
+    }
+
+    #[test]
+    fn sync_operation_intent_uses_bead_metadata_when_linear_missing() {
+        let bead = sample_bead_snapshot();
+
+        let intent = SyncOperationIntent::from_snapshots(
+            Some(&bead),
+            None,
+            SyncConflictPolicy::PreferBead,
+            "2026-03-07T10:00:00+00:00",
+        );
+
+        assert_eq!(intent.operation, SyncOperationKind::CreateLinear);
+        assert_eq!(intent.bead_id.as_deref(), Some("br-123"));
+        assert_eq!(intent.linear_issue_id.as_deref(), Some("lin-1"));
+        assert!(intent.linear_identifier.is_none());
+    }
+
+    #[test]
+    fn sync_operation_receipt_marks_conflicts_as_conflicted() {
+        let bead = BeadSyncSnapshot {
+            title: "Bead title".to_string(),
+            updated_at: "2026-03-07T07:00:00+00:00".to_string(),
+            ..sample_bead_snapshot()
+        };
+        let linear = LinearSyncSnapshot {
+            title: "Linear title".to_string(),
+            updated_at: "2026-03-07T07:00:00+00:00".to_string(),
+            ..sample_linear_snapshot()
+        };
+        let intent = SyncOperationIntent::from_snapshots(
+            Some(&bead),
+            Some(&linear),
+            SyncConflictPolicy::PreferFreshest,
+            "2026-03-07T10:00:00+00:00",
+        );
+
+        let receipt =
+            SyncOperationReceipt::from_intent(&intent, "2026-03-07T10:05:00+00:00", false);
+
+        assert_eq!(receipt.status, SyncExecutionStatus::Conflicted);
+        assert_eq!(receipt.updated_fields, vec![SyncField::Title]);
+        assert_eq!(receipt.conflicts.len(), 1);
+    }
+
+    #[test]
+    fn sync_operation_receipt_marks_updates_as_applied() {
+        let bead = BeadSyncSnapshot {
+            status: Some("blocked".to_string()),
+            ..sample_bead_snapshot()
+        };
+        let linear = sample_linear_snapshot();
+        let intent = SyncOperationIntent::from_snapshots(
+            Some(&bead),
+            Some(&linear),
+            SyncConflictPolicy::PreferBead,
+            "2026-03-07T10:00:00+00:00",
+        );
+
+        let receipt = SyncOperationReceipt::from_intent(&intent, "2026-03-07T10:05:00+00:00", true);
+
+        assert_eq!(receipt.operation, SyncOperationKind::UpdateLinear);
+        assert_eq!(receipt.status, SyncExecutionStatus::Applied);
+        assert_eq!(receipt.updated_fields, vec![SyncField::Status]);
+        assert!(receipt.conflicts.is_empty());
     }
 
     #[test]

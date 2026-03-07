@@ -21,15 +21,19 @@
 
 pub mod types;
 
+use std::path::PathBuf;
+use std::time::Duration;
+
 use anyhow::{Context as _, Result};
 use clap::{Args, Subcommand};
 
+use crate::context::types::ContextConfig;
 use fcp_core::{
-    AgentHint, ApprovalMode, CapabilityId, ConnectorHealth, HashAlgorithm,
-    IdempotencyClass, RateLimitConfig, RateLimitDeclarations, RateLimitEnforcement, RateLimitPool,
-    RateLimitScope, RateLimitUnit, RiskLevel, SafetyTier, SoftwareBillOfMaterials,
-    SupplyChainAttestation, SupplyChainVerificationPolicy, VerificationDecision,
-    VerificationPipeline,
+    AgentHint, ApprovalMode, CapabilityId, ConnectorHealth, HashAlgorithm, IdempotencyClass,
+    LifecycleRecord, LifecycleState, LifecycleStatus, RateLimitConfig, RateLimitDeclarations,
+    RateLimitEnforcement, RateLimitPool, RateLimitScope, RateLimitUnit, RiskLevel, RolloutPolicy,
+    SafetyTier, SoftwareBillOfMaterials, SupplyChainAttestation, SupplyChainVerificationPolicy,
+    VerificationDecision, VerificationPipeline,
 };
 use types::{
     AuthCapsDescriptor, ConnectorHealthDisplay, ConnectorInfo, ConnectorIntrospection,
@@ -37,6 +41,7 @@ use types::{
     EventDescriptor, EventSummary, OperationDescriptor, OperationSummary, RateLimitDescriptor,
     ResourceTypeDescriptor, SandboxInfo, ZoneConnectors,
 };
+use url::Url;
 
 /// Arguments for the `fcp connector` command.
 #[derive(Args, Debug)]
@@ -1274,8 +1279,10 @@ fn run_verify(args: &VerifyArgs) -> Result<()> {
         Some(path) => {
             let content = std::fs::read_to_string(path)
                 .with_context(|| format!("failed to read attestation file: {path}"))?;
-            Some(serde_json::from_str(&content)
-                .with_context(|| format!("invalid attestation JSON in {path}"))?)
+            Some(
+                serde_json::from_str(&content)
+                    .with_context(|| format!("invalid attestation JSON in {path}"))?,
+            )
         }
         None => None,
     };
@@ -1284,8 +1291,10 @@ fn run_verify(args: &VerifyArgs) -> Result<()> {
         Some(path) => {
             let content = std::fs::read_to_string(path)
                 .with_context(|| format!("failed to read SBOM file: {path}"))?;
-            Some(serde_json::from_str(&content)
-                .with_context(|| format!("invalid SBOM JSON in {path}"))?)
+            Some(
+                serde_json::from_str(&content)
+                    .with_context(|| format!("invalid SBOM JSON in {path}"))?,
+            )
         }
         None => None,
     };
@@ -1293,11 +1302,7 @@ fn run_verify(args: &VerifyArgs) -> Result<()> {
     let artifact_digest = args.digest.clone().unwrap_or_default();
 
     let pipeline = VerificationPipeline::new(policy.clone());
-    let evidence = pipeline.verify(
-        &artifact_digest,
-        attestation.as_ref(),
-        sbom.as_ref(),
-    );
+    let evidence = pipeline.verify(&artifact_digest, attestation.as_ref(), sbom.as_ref());
 
     let evidence_digest = evidence
         .content_hash(HashAlgorithm::Blake3_256)
@@ -1357,6 +1362,322 @@ fn run_verify(args: &VerifyArgs) -> Result<()> {
 
 // ── Lifecycle: pin/unpin/rollout/rollback ─────────────────────
 
+#[derive(Debug, Clone)]
+enum HostEndpoint {
+    Http(Url),
+    #[cfg(unix)]
+    Unix {
+        socket_path: PathBuf,
+        base_url: Url,
+    },
+}
+
+impl HostEndpoint {
+    fn discover() -> Result<Self> {
+        if let Ok(endpoint) = std::env::var("FCP_HOST_ENDPOINT")
+            && !endpoint.trim().is_empty()
+        {
+            return Self::from_raw(&endpoint);
+        }
+        if let Ok(endpoint) = std::env::var("FCP_HOST_BIND")
+            && !endpoint.trim().is_empty()
+        {
+            return Self::from_raw(&endpoint);
+        }
+
+        let config = ContextConfig::load_or_default().context("failed to load FCP contexts")?;
+        if let Some(context) = config.contexts.get(&config.current_context)
+            && !context.endpoint.trim().is_empty()
+        {
+            return Self::from_raw(&context.endpoint);
+        }
+
+        Self::from_raw("http://127.0.0.1:9090")
+    }
+
+    fn from_raw(raw: &str) -> Result<Self> {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            anyhow::bail!("FCP host endpoint cannot be empty");
+        }
+
+        if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
+            let url = Url::parse(trimmed)
+                .map_err(|err| anyhow::anyhow!("invalid FCP host endpoint '{trimmed}': {err}"))?;
+            return Ok(Self::Http(url));
+        }
+
+        #[cfg(unix)]
+        if let Some(path) = trimmed.strip_prefix("unix://") {
+            if path.trim().is_empty() {
+                anyhow::bail!("unix FCP host endpoint cannot be empty");
+            }
+            return Ok(Self::Unix {
+                socket_path: PathBuf::from(path),
+                base_url: Url::parse("http://localhost")
+                    .expect("static unix-socket base URL must parse"),
+            });
+        }
+
+        #[cfg(unix)]
+        if trimmed.starts_with('/') {
+            return Ok(Self::Unix {
+                socket_path: PathBuf::from(trimmed),
+                base_url: Url::parse("http://localhost")
+                    .expect("static unix-socket base URL must parse"),
+            });
+        }
+
+        #[cfg(not(unix))]
+        if trimmed.starts_with("unix://") || trimmed.starts_with('/') {
+            anyhow::bail!("unix socket host endpoints are not supported on this platform");
+        }
+
+        let target = trimmed.strip_prefix("tcp://").unwrap_or(trimmed);
+        let url = Url::parse(&format!("http://{target}"))
+            .map_err(|err| anyhow::anyhow!("invalid FCP host endpoint '{trimmed}': {err}"))?;
+        Ok(Self::Http(url))
+    }
+
+    fn build_url(&self, path: &str) -> Url {
+        let normalized_path = path.trim_start_matches('/');
+        let mut url = match self {
+            Self::Http(base_url) => base_url.clone(),
+            #[cfg(unix)]
+            Self::Unix { base_url, .. } => base_url.clone(),
+        };
+        let base_path = url.path().trim_end_matches('/');
+        let full_path = if base_path.is_empty() || base_path == "/" {
+            format!("/{normalized_path}")
+        } else {
+            format!("{base_path}/{normalized_path}")
+        };
+        url.set_path(&full_path);
+        url.set_query(None);
+        url.set_fragment(None);
+        url
+    }
+
+    fn build_client(&self) -> Result<reqwest::blocking::Client> {
+        let builder = reqwest::blocking::Client::builder().timeout(Duration::from_secs(15));
+        #[cfg(unix)]
+        let builder = match self {
+            Self::Http(_) => builder,
+            Self::Unix { socket_path, .. } => builder.unix_socket(socket_path.clone()),
+        };
+        builder
+            .build()
+            .map_err(|err| anyhow::anyhow!("failed to build FCP host client: {err}"))
+    }
+
+    fn display(&self) -> String {
+        match self {
+            Self::Http(url) => url.to_string(),
+            #[cfg(unix)]
+            Self::Unix { socket_path, .. } => format!("unix://{}", socket_path.display()),
+        }
+    }
+}
+
+trait RolloutHostClient {
+    fn pin(&self, connector_id: &str, version: &semver::Version) -> Result<HostPinState>;
+    fn unpin(&self, connector_id: &str) -> Result<HostPinState>;
+    fn pin_status(&self, connector_id: &str) -> Result<HostPinState>;
+    fn rollout_status(&self, connector_id: &str) -> Result<Option<HostRolloutStatus>>;
+    fn schedule(&self, request: &HostRolloutScheduleRequest) -> Result<HostRolloutOutcome>;
+    fn rollback(
+        &self,
+        connector_id: &str,
+        to_version: &semver::Version,
+    ) -> Result<HostRollbackResponse>;
+}
+
+struct HttpRolloutHostClient {
+    endpoint: HostEndpoint,
+}
+
+impl HttpRolloutHostClient {
+    fn discover() -> Result<Self> {
+        Ok(Self {
+            endpoint: HostEndpoint::discover()?,
+        })
+    }
+
+    fn send_json<B, R>(&self, method: &reqwest::Method, path: &str, body: Option<&B>) -> Result<R>
+    where
+        B: serde::Serialize + ?Sized,
+        R: serde::de::DeserializeOwned,
+    {
+        let client = self.endpoint.build_client()?;
+        let url = self.endpoint.build_url(path);
+        let mut request = client.request(method.clone(), url.clone());
+        if let Some(payload) = body {
+            request = request.json(payload);
+        }
+
+        let response = request.send().map_err(|err| {
+            anyhow::anyhow!(
+                "failed to contact FCP host at {} for {method} {url}: {err}",
+                self.endpoint.display()
+            )
+        })?;
+        if !response.status().is_success() {
+            return Err(http_status_error(response, &format!("{method} {url}")));
+        }
+        response.json().map_err(|err| {
+            anyhow::anyhow!("failed to decode FCP host response for {method} {url}: {err}")
+        })
+    }
+
+    fn get_optional_json<R>(&self, path: &str) -> Result<Option<R>>
+    where
+        R: serde::de::DeserializeOwned,
+    {
+        let client = self.endpoint.build_client()?;
+        let url = self.endpoint.build_url(path);
+        let response = client.get(url.clone()).send().map_err(|err| {
+            anyhow::anyhow!(
+                "failed to contact FCP host at {} for GET {url}: {err}",
+                self.endpoint.display()
+            )
+        })?;
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        if !response.status().is_success() {
+            return Err(http_status_error(response, &format!("GET {url}")));
+        }
+        response.json().map(Some).map_err(|err| {
+            anyhow::anyhow!("failed to decode FCP host response for GET {url}: {err}")
+        })
+    }
+}
+
+impl RolloutHostClient for HttpRolloutHostClient {
+    fn pin(&self, connector_id: &str, version: &semver::Version) -> Result<HostPinState> {
+        self.send_json(
+            &reqwest::Method::PUT,
+            &format!("rpc/rollout/pin/{connector_id}"),
+            Some(&HostPinRequest {
+                version: version.clone(),
+            }),
+        )
+    }
+
+    fn unpin(&self, connector_id: &str) -> Result<HostPinState> {
+        self.send_json::<(), HostPinState>(
+            &reqwest::Method::DELETE,
+            &format!("rpc/rollout/pin/{connector_id}"),
+            None,
+        )
+    }
+
+    fn pin_status(&self, connector_id: &str) -> Result<HostPinState> {
+        self.send_json::<(), HostPinState>(
+            &reqwest::Method::GET,
+            &format!("rpc/rollout/pin/{connector_id}"),
+            None,
+        )
+    }
+
+    fn rollout_status(&self, connector_id: &str) -> Result<Option<HostRolloutStatus>> {
+        self.get_optional_json(&format!("rpc/rollout/{connector_id}"))
+    }
+
+    fn schedule(&self, request: &HostRolloutScheduleRequest) -> Result<HostRolloutOutcome> {
+        self.send_json(
+            &reqwest::Method::POST,
+            "rpc/rollout/schedule",
+            Some(request),
+        )
+    }
+
+    fn rollback(
+        &self,
+        connector_id: &str,
+        to_version: &semver::Version,
+    ) -> Result<HostRollbackResponse> {
+        self.send_json(
+            &reqwest::Method::POST,
+            "rpc/rollout/rollback",
+            Some(&HostRollbackRequest {
+                connector_id: connector_id.to_string(),
+                to_version: to_version.clone(),
+            }),
+        )
+    }
+}
+
+fn http_status_error(response: reqwest::blocking::Response, context: &str) -> anyhow::Error {
+    let status = response.status();
+    let body = response.text().unwrap_or_default();
+    let detail = if body.trim().is_empty() {
+        "<empty response body>"
+    } else {
+        body.trim()
+    };
+    anyhow::anyhow!("{context} failed with HTTP {status}: {detail}")
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct HostPinRequest {
+    version: semver::Version,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+struct HostPinState {
+    connector_id: String,
+    pinned: bool,
+    #[serde(default)]
+    version: Option<semver::Version>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct HostRolloutScheduleRequest {
+    connector_id: String,
+    version: semver::Version,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    previous_version: Option<semver::Version>,
+    policy: RolloutPolicy,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+struct HostRolloutAuditEvent {
+    reason_code: String,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+struct HostRolloutOutcome {
+    record: LifecycleRecord,
+    decision: String,
+    audit_event: HostRolloutAuditEvent,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+struct HostRolloutStatus {
+    #[serde(flatten)]
+    status: LifecycleStatus,
+    pinned: bool,
+    #[serde(default)]
+    pinned_version: Option<semver::Version>,
+    canary_percent: u8,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct HostRollbackRequest {
+    connector_id: String,
+    to_version: semver::Version,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+struct HostRollbackResponse {
+    connector_id: String,
+    state: LifecycleState,
+    from_version: semver::Version,
+    to_version: semver::Version,
+    message: String,
+}
+
 /// JSON output for pin/unpin operations.
 #[derive(Debug, serde::Serialize)]
 struct PinOutput {
@@ -1387,55 +1708,113 @@ struct RollbackOutput {
     message: String,
 }
 
+const fn rollout_health_label(status: &LifecycleStatus) -> &'static str {
+    if status.crash_loop_detected || status.auto_rollback_pending {
+        "unhealthy"
+    } else if status.health.samples == 0 {
+        "unknown"
+    } else if status.health.success_rate >= 95 {
+        "healthy"
+    } else if status.health.success_rate >= 80 {
+        "degraded"
+    } else {
+        "unhealthy"
+    }
+}
+
+fn print_pin_output(output: &PinOutput, json: bool) -> Result<()> {
+    if json {
+        println!("{}", serde_json::to_string_pretty(output)?);
+    } else if let Some(version) = &output.version {
+        if output.action == "pin" {
+            println!("Pinned {} to v{version}", output.connector_id);
+            println!("  Auto-upgrade is now disabled for this connector.");
+            println!(
+                "  Use `fcp connector unpin {}` to re-enable.",
+                output.connector_id
+            );
+        } else {
+            println!("Unpinned {}", output.connector_id);
+            println!("  Auto-upgrade is now re-enabled.");
+        }
+    } else {
+        println!("Unpinned {}", output.connector_id);
+        println!("  Auto-upgrade is now re-enabled.");
+    }
+    Ok(())
+}
+
+fn print_rollout_status_output(output: &RolloutStatusOutput, json: bool) -> Result<()> {
+    if json {
+        println!("{}", serde_json::to_string_pretty(output)?);
+    } else {
+        println!("Rollout status for {}", output.connector_id);
+        println!("  State:   {}", output.state);
+        println!("  Version: v{}", output.version);
+        println!("  Health:  {}", output.health);
+        println!("  Pinned:  {}", if output.pinned { "yes" } else { "no" });
+        if output.canary_percent > 0 {
+            println!("  Canary:  {}%", output.canary_percent);
+        }
+    }
+    Ok(())
+}
+
+fn print_rollback_output(output: &RollbackOutput, json: bool) -> Result<()> {
+    if json {
+        println!("{}", serde_json::to_string_pretty(output)?);
+    } else {
+        println!(
+            "Rolled back {} to v{}",
+            output.connector_id, output.to_version
+        );
+        println!("  Previous version will be deactivated.");
+        println!(
+            "  Use `fcp connector rollout status {}` to verify.",
+            output.connector_id
+        );
+    }
+    Ok(())
+}
+
 fn run_pin(args: &PinArgs) -> Result<()> {
-    // TODO: connect to host and execute pin via rollout controller.
+    let client = HttpRolloutHostClient::discover()?;
+    let output = run_pin_with_client(args, &client)?;
+    print_pin_output(&output, args.json)
+}
+
+fn run_pin_with_client<C: RolloutHostClient>(args: &PinArgs, client: &C) -> Result<PinOutput> {
     let version = semver::Version::parse(&args.version)
         .map_err(|e| anyhow::anyhow!("invalid semver version '{}': {e}", args.version))?;
-
-    let output = PinOutput {
-        connector_id: args.connector_id.clone(),
+    let state = client.pin(&args.connector_id, &version)?;
+    Ok(PinOutput {
+        connector_id: state.connector_id,
         action: "pin".to_string(),
         version: Some(version.to_string()),
         message: format!(
             "Connector {} pinned to version {version}. Auto-upgrade disabled.",
             args.connector_id
         ),
-    };
-
-    if args.json {
-        println!("{}", serde_json::to_string_pretty(&output)?);
-    } else {
-        println!(
-            "Pinned {} to v{version}",
-            args.connector_id
-        );
-        println!("  Auto-upgrade is now disabled for this connector.");
-        println!("  Use `fcp connector unpin {}` to re-enable.", args.connector_id);
-    }
-
-    Ok(())
+    })
 }
 
 fn run_unpin(args: &UnpinArgs) -> Result<()> {
-    // TODO: connect to host and execute unpin via rollout controller.
-    let output = PinOutput {
-        connector_id: args.connector_id.clone(),
+    let client = HttpRolloutHostClient::discover()?;
+    let output = run_unpin_with_client(args, &client)?;
+    print_pin_output(&output, args.json)
+}
+
+fn run_unpin_with_client<C: RolloutHostClient>(args: &UnpinArgs, client: &C) -> Result<PinOutput> {
+    let state = client.unpin(&args.connector_id)?;
+    Ok(PinOutput {
+        connector_id: state.connector_id,
         action: "unpin".to_string(),
         version: None,
         message: format!(
             "Connector {} unpinned. Auto-upgrade re-enabled.",
             args.connector_id
         ),
-    };
-
-    if args.json {
-        println!("{}", serde_json::to_string_pretty(&output)?);
-    } else {
-        println!("Unpinned {}", args.connector_id);
-        println!("  Auto-upgrade is now re-enabled.");
-    }
-
-    Ok(())
+    })
 }
 
 fn run_rollout(args: &RolloutArgs) -> Result<()> {
@@ -1446,97 +1825,260 @@ fn run_rollout(args: &RolloutArgs) -> Result<()> {
 }
 
 fn run_rollout_set(args: &RolloutSetArgs) -> Result<()> {
+    let client = HttpRolloutHostClient::discover()?;
+    let output = run_rollout_set_with_client(args, &client)?;
+    print_rollout_status_output(&output, args.json)
+}
+
+fn run_rollout_set_with_client<C: RolloutHostClient>(
+    args: &RolloutSetArgs,
+    client: &C,
+) -> Result<RolloutStatusOutput> {
     if args.canary > 100 {
         anyhow::bail!("canary percentage must be 0-100, got {}", args.canary);
     }
-
-    // TODO: connect to host and configure canary via rollout controller.
+    let pin_state = client.pin_status(&args.connector_id)?;
+    let version = pin_state.version.clone().ok_or_else(|| {
+        anyhow::anyhow!(
+            "no pinned version configured for {}. Run `fcp connector pin {} --version <version>` first",
+            args.connector_id,
+            args.connector_id
+        )
+    })?;
+    let previous_version = client
+        .rollout_status(&args.connector_id)?
+        .map(|status| status.status.version);
+    let policy = RolloutPolicy::builder().canary_percent(args.canary).build();
+    policy.validate()?;
+    let outcome = client.schedule(&HostRolloutScheduleRequest {
+        connector_id: args.connector_id.clone(),
+        version,
+        previous_version,
+        policy,
+    })?;
     let output = RolloutStatusOutput {
         connector_id: args.connector_id.clone(),
-        state: "canary".to_string(),
-        version: "pending".to_string(),
+        state: outcome.record.state.to_string(),
+        version: outcome.record.version.to_string(),
         canary_percent: args.canary,
-        pinned: false,
+        pinned: pin_state.pinned,
         health: "unknown".to_string(),
         message: format!(
-            "Canary set to {}% for {}.",
-            args.canary, args.connector_id
+            "Canary set to {}% for {} (reason: {}).",
+            args.canary, args.connector_id, outcome.audit_event.reason_code
         ),
     };
-
-    if args.json {
-        println!("{}", serde_json::to_string_pretty(&output)?);
-    } else {
-        println!(
-            "Rollout canary set to {}% for {}",
-            args.canary, args.connector_id
-        );
-        println!("  Use `fcp connector rollout status {}` to monitor.", args.connector_id);
-    }
-
-    Ok(())
+    let _ = &outcome.decision;
+    Ok(output)
 }
 
 fn run_rollout_status(args: &RolloutStatusArgs) -> Result<()> {
-    // TODO: connect to host and query rollout status.
-    let output = RolloutStatusOutput {
-        connector_id: args.connector_id.clone(),
-        state: "production".to_string(),
-        version: "1.0.0".to_string(),
-        canary_percent: 0,
-        pinned: false,
-        health: "healthy".to_string(),
-        message: format!("Connector {} is in production (v1.0.0).", args.connector_id),
-    };
+    let client = HttpRolloutHostClient::discover()?;
+    let output = run_rollout_status_with_client(args, &client)?;
+    print_rollout_status_output(&output, args.json)
+}
 
-    if args.json {
-        println!("{}", serde_json::to_string_pretty(&output)?);
-    } else {
-        println!("Rollout status for {}", args.connector_id);
-        println!("  State:   {}", output.state);
-        println!("  Version: v{}", output.version);
-        println!("  Health:  {}", output.health);
-        println!("  Pinned:  {}", if output.pinned { "yes" } else { "no" });
-        if output.canary_percent > 0 {
-            println!("  Canary:  {}%", output.canary_percent);
-        }
+fn run_rollout_status_with_client<C: RolloutHostClient>(
+    args: &RolloutStatusArgs,
+    client: &C,
+) -> Result<RolloutStatusOutput> {
+    let pin_state = client.pin_status(&args.connector_id)?;
+    if let Some(status) = client.rollout_status(&args.connector_id)? {
+        return Ok(RolloutStatusOutput {
+            connector_id: status.status.connector_id.to_string(),
+            state: status.status.state.to_string(),
+            version: status.status.version.to_string(),
+            canary_percent: status.canary_percent,
+            pinned: status.pinned || status.pinned_version.is_some(),
+            health: rollout_health_label(&status.status).to_string(),
+            message: format!(
+                "Connector {} is in {} (v{}).",
+                args.connector_id, status.status.state, status.status.version
+            ),
+        });
     }
 
-    Ok(())
+    if let Some(version) = pin_state.version {
+        return Ok(RolloutStatusOutput {
+            connector_id: pin_state.connector_id,
+            state: "pinned".to_string(),
+            version: version.to_string(),
+            canary_percent: 0,
+            pinned: true,
+            health: "unknown".to_string(),
+            message: format!(
+                "Connector {} is pinned to v{} with no active rollout.",
+                args.connector_id, version
+            ),
+        });
+    }
+
+    anyhow::bail!("no rollout state found for {}", args.connector_id)
 }
 
 fn run_rollback(args: &RollbackArgs) -> Result<()> {
+    let client = HttpRolloutHostClient::discover()?;
+    let output = run_rollback_with_client(args, &client)?;
+    print_rollback_output(&output, args.json)
+}
+
+fn run_rollback_with_client<C: RolloutHostClient>(
+    args: &RollbackArgs,
+    client: &C,
+) -> Result<RollbackOutput> {
     let to_version = semver::Version::parse(&args.to)
         .map_err(|e| anyhow::anyhow!("invalid semver version '{}': {e}", args.to))?;
-
-    // TODO: connect to host and execute rollback via rollout controller.
-    let output = RollbackOutput {
-        connector_id: args.connector_id.clone(),
-        from_version: "current".to_string(),
-        to_version: to_version.to_string(),
-        message: format!(
-            "Connector {} rolled back to v{to_version}.",
-            args.connector_id
-        ),
-    };
-
-    if args.json {
-        println!("{}", serde_json::to_string_pretty(&output)?);
-    } else {
-        println!(
-            "Rolled back {} to v{to_version}",
-            args.connector_id
-        );
-        println!("  Previous version will be deactivated.");
-        println!("  Use `fcp connector rollout status {}` to verify.", args.connector_id);
-    }
-
-    Ok(())
+    let response = client.rollback(&args.connector_id, &to_version)?;
+    let _ = response.state;
+    Ok(RollbackOutput {
+        connector_id: response.connector_id,
+        from_version: response.from_version.to_string(),
+        to_version: response.to_version.to_string(),
+        message: response.message,
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::RefCell;
+
+    fn test_connector_id() -> String {
+        "fcp.discord:messaging:v1".to_string()
+    }
+
+    fn test_version(major: u64, minor: u64, patch: u64) -> semver::Version {
+        semver::Version::new(major, minor, patch)
+    }
+
+    fn test_lifecycle_status(state: LifecycleState, version: semver::Version) -> LifecycleStatus {
+        let health = fcp_core::HealthMetrics {
+            samples: 5,
+            success_rate: 100,
+            ..Default::default()
+        };
+        LifecycleStatus {
+            connector_id: test_connector_id().parse().expect("valid connector id"),
+            state,
+            version,
+            health,
+            auto_promote_pending: false,
+            auto_rollback_pending: false,
+            canary_expires_in_secs: None,
+            crash_loop_detected: false,
+            rollback_target_version: Some(test_version(1, 0, 0)),
+        }
+    }
+
+    fn test_rollout_outcome(
+        decision: &str,
+        state: LifecycleState,
+        version: semver::Version,
+        reason_code: &str,
+    ) -> HostRolloutOutcome {
+        let mut record = LifecycleRecord::new(
+            test_connector_id().parse().expect("valid connector id"),
+            version,
+        );
+        record.state = state;
+        record.previous_version = Some(test_version(1, 0, 0));
+        HostRolloutOutcome {
+            record,
+            decision: decision.to_string(),
+            audit_event: HostRolloutAuditEvent {
+                reason_code: reason_code.to_string(),
+            },
+        }
+    }
+
+    struct FakeRolloutHostClient {
+        pin_state: HostPinState,
+        rollout_status: Option<HostRolloutStatus>,
+        schedule_outcome: HostRolloutOutcome,
+        rollback_response: HostRollbackResponse,
+        scheduled_requests: RefCell<Vec<HostRolloutScheduleRequest>>,
+        rollback_requests: RefCell<Vec<(String, semver::Version)>>,
+    }
+
+    impl FakeRolloutHostClient {
+        fn new() -> Self {
+            let connector_id = test_connector_id();
+            let pinned_version = test_version(1, 2, 3);
+            Self {
+                pin_state: HostPinState {
+                    connector_id: connector_id.clone(),
+                    pinned: true,
+                    version: Some(pinned_version.clone()),
+                },
+                rollout_status: Some(HostRolloutStatus {
+                    status: test_lifecycle_status(
+                        LifecycleState::Production,
+                        test_version(1, 2, 2),
+                    ),
+                    pinned: true,
+                    pinned_version: Some(pinned_version.clone()),
+                    canary_percent: 0,
+                }),
+                schedule_outcome: test_rollout_outcome(
+                    "scheduled",
+                    LifecycleState::Canary,
+                    pinned_version,
+                    "canary_scheduled",
+                ),
+                rollback_response: HostRollbackResponse {
+                    connector_id,
+                    state: LifecycleState::RolledBack,
+                    from_version: test_version(1, 2, 3),
+                    to_version: test_version(1, 0, 0),
+                    message: "connector rolled back to v1.0.0 and pinned".to_string(),
+                },
+                scheduled_requests: RefCell::new(Vec::new()),
+                rollback_requests: RefCell::new(Vec::new()),
+            }
+        }
+    }
+
+    impl RolloutHostClient for FakeRolloutHostClient {
+        fn pin(&self, connector_id: &str, version: &semver::Version) -> Result<HostPinState> {
+            Ok(HostPinState {
+                connector_id: connector_id.to_string(),
+                pinned: true,
+                version: Some(version.clone()),
+            })
+        }
+
+        fn unpin(&self, connector_id: &str) -> Result<HostPinState> {
+            Ok(HostPinState {
+                connector_id: connector_id.to_string(),
+                pinned: false,
+                version: None,
+            })
+        }
+
+        fn pin_status(&self, _connector_id: &str) -> Result<HostPinState> {
+            Ok(self.pin_state.clone())
+        }
+
+        fn rollout_status(&self, _connector_id: &str) -> Result<Option<HostRolloutStatus>> {
+            Ok(self.rollout_status.clone())
+        }
+
+        fn schedule(&self, request: &HostRolloutScheduleRequest) -> Result<HostRolloutOutcome> {
+            self.scheduled_requests.borrow_mut().push(request.clone());
+            Ok(self.schedule_outcome.clone())
+        }
+
+        fn rollback(
+            &self,
+            connector_id: &str,
+            to_version: &semver::Version,
+        ) -> Result<HostRollbackResponse> {
+            self.rollback_requests
+                .borrow_mut()
+                .push((connector_id.to_string(), to_version.clone()));
+            Ok(self.rollback_response.clone())
+        }
+    }
 
     #[test]
     fn list_all_connectors() {
@@ -1848,148 +2390,210 @@ mod tests {
 
     #[test]
     fn pin_valid_semver() {
+        let client = FakeRolloutHostClient::new();
         let args = PinArgs {
-            connector_id: "fcp.discord:messaging:v1".to_string(),
+            connector_id: test_connector_id(),
             version: "1.2.3".to_string(),
             json: true,
         };
-        run_pin(&args).unwrap();
+        let output = run_pin_with_client(&args, &client).unwrap();
+        assert_eq!(output.version.as_deref(), Some("1.2.3"));
     }
 
     #[test]
     fn pin_invalid_semver_fails() {
+        let client = FakeRolloutHostClient::new();
         let args = PinArgs {
-            connector_id: "fcp.discord:messaging:v1".to_string(),
+            connector_id: test_connector_id(),
             version: "not-a-version".to_string(),
             json: true,
         };
-        assert!(run_pin(&args).is_err());
+        assert!(run_pin_with_client(&args, &client).is_err());
     }
 
     #[test]
     fn pin_prerelease_version() {
+        let client = FakeRolloutHostClient::new();
         let args = PinArgs {
-            connector_id: "fcp.discord:messaging:v1".to_string(),
+            connector_id: test_connector_id(),
             version: "1.0.0-beta.1".to_string(),
             json: true,
         };
-        run_pin(&args).unwrap();
+        let output = run_pin_with_client(&args, &client).unwrap();
+        assert_eq!(output.version.as_deref(), Some("1.0.0-beta.1"));
     }
 
     #[test]
     fn pin_human_output() {
+        let client = FakeRolloutHostClient::new();
         let args = PinArgs {
             connector_id: "fcp.test:utility:v1".to_string(),
             version: "2.0.0".to_string(),
             json: false,
         };
-        run_pin(&args).unwrap();
+        let output = run_pin_with_client(&args, &client).unwrap();
+        print_pin_output(&output, false).unwrap();
     }
 
     #[test]
     fn unpin_produces_output() {
+        let client = FakeRolloutHostClient::new();
         let args = UnpinArgs {
-            connector_id: "fcp.discord:messaging:v1".to_string(),
+            connector_id: test_connector_id(),
             json: true,
         };
-        run_unpin(&args).unwrap();
+        let output = run_unpin_with_client(&args, &client).unwrap();
+        assert!(!output.message.is_empty());
     }
 
     #[test]
     fn unpin_human_output() {
+        let client = FakeRolloutHostClient::new();
         let args = UnpinArgs {
             connector_id: "fcp.test:utility:v1".to_string(),
             json: false,
         };
-        run_unpin(&args).unwrap();
+        let output = run_unpin_with_client(&args, &client).unwrap();
+        print_pin_output(&output, false).unwrap();
     }
 
     #[test]
     fn rollout_set_valid() {
+        let client = FakeRolloutHostClient::new();
         let args = RolloutSetArgs {
-            connector_id: "fcp.discord:messaging:v1".to_string(),
+            connector_id: test_connector_id(),
             canary: 25,
             json: true,
         };
-        run_rollout_set(&args).unwrap();
+        let output = run_rollout_set_with_client(&args, &client).unwrap();
+        assert_eq!(output.state, "canary");
+        assert_eq!(output.version, "1.2.3");
+        let scheduled = client.scheduled_requests.borrow();
+        assert_eq!(scheduled.len(), 1);
+        assert_eq!(scheduled[0].version, test_version(1, 2, 3));
+        assert_eq!(scheduled[0].previous_version, Some(test_version(1, 2, 2)));
+        assert_eq!(scheduled[0].policy.canary_percent, 25);
     }
 
     #[test]
     fn rollout_set_zero_percent() {
+        let client = FakeRolloutHostClient::new();
         let args = RolloutSetArgs {
-            connector_id: "fcp.discord:messaging:v1".to_string(),
+            connector_id: test_connector_id(),
             canary: 0,
             json: true,
         };
-        run_rollout_set(&args).unwrap();
+        let output = run_rollout_set_with_client(&args, &client).unwrap();
+        assert_eq!(output.canary_percent, 0);
     }
 
     #[test]
     fn rollout_set_hundred_percent() {
+        let client = FakeRolloutHostClient::new();
         let args = RolloutSetArgs {
-            connector_id: "fcp.discord:messaging:v1".to_string(),
+            connector_id: test_connector_id(),
             canary: 100,
             json: true,
         };
-        run_rollout_set(&args).unwrap();
+        let output = run_rollout_set_with_client(&args, &client).unwrap();
+        assert_eq!(output.canary_percent, 100);
     }
 
     #[test]
     fn rollout_set_human_output() {
+        let client = FakeRolloutHostClient::new();
         let args = RolloutSetArgs {
             connector_id: "fcp.test:utility:v1".to_string(),
             canary: 50,
             json: false,
         };
-        run_rollout_set(&args).unwrap();
+        let output = run_rollout_set_with_client(&args, &client).unwrap();
+        print_rollout_status_output(&output, false).unwrap();
+    }
+
+    #[test]
+    fn rollout_set_requires_pin_target() {
+        let mut client = FakeRolloutHostClient::new();
+        client.pin_state.version = None;
+        client.pin_state.pinned = false;
+        let args = RolloutSetArgs {
+            connector_id: test_connector_id(),
+            canary: 10,
+            json: true,
+        };
+        assert!(run_rollout_set_with_client(&args, &client).is_err());
     }
 
     #[test]
     fn rollout_status_json() {
+        let client = FakeRolloutHostClient::new();
         let args = RolloutStatusArgs {
-            connector_id: "fcp.discord:messaging:v1".to_string(),
+            connector_id: test_connector_id(),
             json: true,
         };
-        run_rollout_status(&args).unwrap();
+        let output = run_rollout_status_with_client(&args, &client).unwrap();
+        assert_eq!(output.state, "production");
+        assert_eq!(output.health, "healthy");
     }
 
     #[test]
     fn rollout_status_human() {
+        let client = FakeRolloutHostClient::new();
         let args = RolloutStatusArgs {
             connector_id: "fcp.test:utility:v1".to_string(),
             json: false,
         };
-        run_rollout_status(&args).unwrap();
+        let output = run_rollout_status_with_client(&args, &client).unwrap();
+        print_rollout_status_output(&output, false).unwrap();
+    }
+
+    #[test]
+    fn rollout_status_uses_pin_when_no_rollout_state() {
+        let mut client = FakeRolloutHostClient::new();
+        client.rollout_status = None;
+        let args = RolloutStatusArgs {
+            connector_id: test_connector_id(),
+            json: true,
+        };
+        let output = run_rollout_status_with_client(&args, &client).unwrap();
+        assert_eq!(output.state, "pinned");
+        assert_eq!(output.version, "1.2.3");
     }
 
     #[test]
     fn rollback_valid_version() {
+        let client = FakeRolloutHostClient::new();
         let args = RollbackArgs {
-            connector_id: "fcp.discord:messaging:v1".to_string(),
+            connector_id: test_connector_id(),
             to: "1.0.0".to_string(),
             json: true,
         };
-        run_rollback(&args).unwrap();
+        let output = run_rollback_with_client(&args, &client).unwrap();
+        assert_eq!(output.from_version, "1.2.3");
+        assert_eq!(output.to_version, "1.0.0");
     }
 
     #[test]
     fn rollback_invalid_version_fails() {
+        let client = FakeRolloutHostClient::new();
         let args = RollbackArgs {
-            connector_id: "fcp.discord:messaging:v1".to_string(),
+            connector_id: test_connector_id(),
             to: "bad".to_string(),
             json: true,
         };
-        assert!(run_rollback(&args).is_err());
+        assert!(run_rollback_with_client(&args, &client).is_err());
     }
 
     #[test]
     fn rollback_human_output() {
+        let client = FakeRolloutHostClient::new();
         let args = RollbackArgs {
             connector_id: "fcp.test:utility:v1".to_string(),
             to: "0.9.0".to_string(),
             json: false,
         };
-        run_rollback(&args).unwrap();
+        let output = run_rollback_with_client(&args, &client).unwrap();
+        print_rollback_output(&output, false).unwrap();
     }
 
     #[test]

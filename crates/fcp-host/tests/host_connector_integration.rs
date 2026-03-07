@@ -658,6 +658,12 @@ async fn assert_discovery_routes(
     let discover_all: DiscoveryResponse =
         http_post_json(client.clone(), url("/rpc/discover"), json!({})).await?;
     assert_eq!(discover_all.connectors.len(), 2);
+    let discover_all_cache = discover_all
+        .cache
+        .as_ref()
+        .expect("discover response should expose cache metadata");
+    assert!(!discover_all_cache.etag.is_empty());
+    assert!(discover_all.meta.is_none());
     assert!(
         discover_all
             .connectors
@@ -684,6 +690,11 @@ async fn assert_discovery_routes(
     )
     .await?;
     assert_eq!(discover_filtered.connectors.len(), 1);
+    let discover_filtered_cache = discover_filtered
+        .cache
+        .as_ref()
+        .expect("filtered discover response should expose cache metadata");
+    assert_ne!(discover_all_cache.etag, discover_filtered_cache.etag);
     assert_eq!(discover_filtered.connectors[0].id, *connector_a_id);
     assert_eq!(discover_filtered.connectors[0].tool_count, 1);
     assert!(matches!(
@@ -691,6 +702,27 @@ async fn assert_discovery_routes(
         fcp_core::SafetyTier::Safe
     ));
     assert!(discover_filtered.connectors[0].health.is_healthy());
+
+    let discover_not_modified: DiscoveryResponse = http_post_json(
+        client.clone(),
+        url("/rpc/discover"),
+        json!({
+            "_cache": { "if_none_match": discover_all_cache.etag }
+        }),
+    )
+    .await?;
+    assert!(discover_not_modified.connectors.is_empty());
+    assert_eq!(
+        discover_not_modified.meta.as_ref().map(|meta| meta.status),
+        Some(304)
+    );
+    assert_eq!(
+        discover_not_modified
+            .cache
+            .as_ref()
+            .map(|cache| cache.etag.as_str()),
+        Some(discover_all_cache.etag.as_str())
+    );
 
     let introspection: IntrospectionResponse = http_get_json(
         client.clone(),

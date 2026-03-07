@@ -29,9 +29,9 @@ use fcp_core::{
     SelfCheckReport,
 };
 use fcp_host::{
-    BudgetPolicyEngine, ConnectorArchetype, ConnectorRegistry, ConnectorSummary, DiscoveryEndpoint,
-    DiscoveryFilter, DiscoveryResponse, DoctorReport, DoctorRequest, DoctorService,
-    HostHealthResponse, HostHealthStatus, IntrospectionResponse, PreflightRequest,
+    BudgetPolicyEngine, CacheValidator, ConnectorArchetype, ConnectorRegistry, ConnectorSummary,
+    DiscoveryEndpoint, DiscoveryFilter, DiscoveryResponse, DoctorReport, DoctorRequest,
+    DoctorService, HostHealthResponse, HostHealthStatus, IntrospectionResponse, PreflightRequest,
     PreflightResponse, RequestPriority, ResilienceError, ResilienceLayer, SafetyTierExt,
     merge_connector_health,
 };
@@ -428,6 +428,31 @@ struct AppState {
     started_at: Instant,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DiscoveryRequestBody {
+    #[serde(default)]
+    filter: Option<DiscoveryFilter>,
+    #[serde(rename = "_cache", default)]
+    cache: Option<CacheValidator>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum DiscoverPayload {
+    Request(DiscoveryRequestBody),
+    Filter(Option<DiscoveryFilter>),
+}
+
+impl DiscoverPayload {
+    fn into_parts(self) -> (Option<DiscoveryFilter>, Option<CacheValidator>) {
+        match self {
+            Self::Request(request) => (request.filter, request.cache),
+            Self::Filter(filter) => (filter, None),
+        }
+    }
+}
+
 #[derive(Debug)]
 enum BindTarget {
     Tcp(SocketAddr),
@@ -669,15 +694,19 @@ async fn doctor_handler(
 
 async fn discover_handler(
     State(state): State<Arc<AppState>>,
-    Json(filter): Json<Option<DiscoveryFilter>>,
+    Json(payload): Json<DiscoverPayload>,
 ) -> Json<DiscoveryResponse> {
+    let (filter, cache_validator) = payload.into_parts();
     let started_at = Instant::now();
     tracing::debug!(
         event = "discover_request",
         filter = ?filter,
         "processing discovery request"
     );
-    let result = state.discovery.discover_with_metadata(filter).await;
+    let result = state
+        .discovery
+        .discover_query(filter, cache_validator)
+        .await;
     let cache_hit = result.cache_hit;
     let response = result.response;
     tracing::debug!(

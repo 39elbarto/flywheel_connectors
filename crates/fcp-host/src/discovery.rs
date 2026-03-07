@@ -101,6 +101,84 @@ impl DiscoveryFilter {
     }
 }
 
+/// Agent-visible cache metadata for discovery and introspection responses.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CacheMetadata {
+    /// Strong `ETag` for content comparison.
+    pub etag: String,
+
+    /// Last modification timestamp for the cached content.
+    pub last_modified: DateTime<Utc>,
+
+    /// Seconds before the client should revalidate.
+    pub max_age_seconds: u32,
+
+    /// Optional stale-while-revalidate budget.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stale_while_revalidate_seconds: Option<u32>,
+}
+
+impl CacheMetadata {
+    fn strong<T: Serialize>(
+        payload: &T,
+        last_modified: DateTime<Utc>,
+        max_age_seconds: u32,
+        stale_while_revalidate_seconds: Option<u32>,
+    ) -> Self {
+        let bytes = serde_json::to_vec(payload).expect("cache metadata payload should serialize");
+        let etag = format!("\"{}\"", blake3::hash(&bytes).to_hex());
+        Self {
+            etag,
+            last_modified,
+            max_age_seconds,
+            stale_while_revalidate_seconds,
+        }
+    }
+}
+
+/// Conditional cache validators supplied by the caller.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CacheValidator {
+    /// Strong `ETag` from a prior response.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub if_none_match: Option<String>,
+
+    /// Previously observed modification timestamp.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub if_modified_since: Option<DateTime<Utc>>,
+}
+
+impl CacheValidator {
+    fn is_not_modified(&self, cache: &CacheMetadata) -> bool {
+        if let Some(ref etag) = self.if_none_match {
+            return etag == &cache.etag;
+        }
+
+        self.if_modified_since
+            .is_some_and(|timestamp| cache.last_modified <= timestamp)
+    }
+}
+
+/// Lightweight response metadata for cache validation results.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResponseMeta {
+    /// Application-level status code for the payload.
+    pub status: u16,
+
+    /// Optional human-readable status message.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
+impl ResponseMeta {
+    fn not_modified() -> Self {
+        Self {
+            status: 304,
+            message: Some("Not Modified".to_string()),
+        }
+    }
+}
+
 /// Summary information about a connector.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConnectorSummary {
@@ -155,6 +233,14 @@ pub struct DiscoveryResponse {
 
     /// Server timestamp.
     pub timestamp: DateTime<Utc>,
+
+    /// Optional cache metadata for agent-side validation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache: Option<CacheMetadata>,
+
+    /// Optional response status metadata.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub meta: Option<ResponseMeta>,
 }
 
 impl DiscoveryResponse {
@@ -167,7 +253,28 @@ impl DiscoveryResponse {
             supports_streaming: true,
             supports_batching: true,
             timestamp: Utc::now(),
+            cache: None,
+            meta: None,
         }
+    }
+
+    #[must_use]
+    fn with_cache_metadata(mut self, cache: CacheMetadata) -> Self {
+        self.cache = Some(cache);
+        self
+    }
+
+    #[must_use]
+    fn with_response_meta(mut self, meta: ResponseMeta) -> Self {
+        self.meta = Some(meta);
+        self
+    }
+
+    #[must_use]
+    fn not_modified(registry_version: u64, cache: CacheMetadata) -> Self {
+        Self::new(Vec::new(), registry_version)
+            .with_cache_metadata(cache)
+            .with_response_meta(ResponseMeta::not_modified())
     }
 }
 
@@ -218,6 +325,39 @@ pub struct IntrospectionResponse {
 
     /// Full introspection data.
     pub introspection: Introspection,
+
+    /// Optional cache metadata for agent-side validation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache: Option<CacheMetadata>,
+
+    /// Optional response status metadata.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub meta: Option<ResponseMeta>,
+}
+
+impl IntrospectionResponse {
+    #[must_use]
+    fn not_modified(
+        connector: ConnectorSummary,
+        archetype: ConnectorArchetype,
+        cache: CacheMetadata,
+    ) -> Self {
+        Self {
+            connector,
+            tools: Vec::new(),
+            rate_limits: None,
+            archetype,
+            introspection: Introspection {
+                operations: Vec::new(),
+                events: Vec::new(),
+                resource_types: Vec::new(),
+                auth_caps: None,
+                event_caps: None,
+            },
+            cache: Some(cache),
+            meta: Some(ResponseMeta::not_modified()),
+        }
+    }
 }
 
 /// Response from a connector self-check.
@@ -644,6 +784,15 @@ where
         &self,
         filter: Option<DiscoveryFilter>,
     ) -> DiscoveryQueryResult {
+        self.discover_query(filter, None).await
+    }
+
+    /// List all connectors (filtered) with optional conditional cache validation.
+    pub async fn discover_query(
+        &self,
+        filter: Option<DiscoveryFilter>,
+        validator: Option<CacheValidator>,
+    ) -> DiscoveryQueryResult {
         let cache_result = self.cache.get_or_refresh(&*self.registry).await;
         let filtered = match filter {
             Some(f) => cache_result
@@ -654,8 +803,24 @@ where
             None => cache_result.connectors,
         };
 
+        let cache = self.discovery_cache_metadata(
+            &filtered,
+            cache_result.registry_version,
+            cache_result.last_modified,
+        );
+
+        let response = if validator
+            .as_ref()
+            .is_some_and(|validator| validator.is_not_modified(&cache))
+        {
+            DiscoveryResponse::not_modified(cache_result.registry_version, cache)
+        } else {
+            DiscoveryResponse::new(filtered, cache_result.registry_version)
+                .with_cache_metadata(cache)
+        };
+
         DiscoveryQueryResult {
-            response: DiscoveryResponse::new(filtered, cache_result.registry_version),
+            response,
             cache_hit: cache_result.cache_hit,
         }
     }
@@ -669,6 +834,20 @@ where
     pub async fn introspect(
         &self,
         connector_id: &ConnectorId,
+    ) -> HostResult<IntrospectionResponse> {
+        self.introspect_with_cache(connector_id, None).await
+    }
+
+    /// Introspect a single connector with optional conditional cache validation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`HostError::ConnectorNotFound`] if the connector or its
+    /// introspection data is missing from the registry.
+    pub async fn introspect_with_cache(
+        &self,
+        connector_id: &ConnectorId,
+        validator: Option<CacheValidator>,
     ) -> HostResult<IntrospectionResponse> {
         let summary = self
             .registry
@@ -689,6 +868,7 @@ where
             .unwrap_or(ConnectorArchetype::RequestResponse);
 
         let rate_limits = self.registry.get_rate_limits(connector_id).await;
+        let cache_result = self.cache.get_or_refresh(&*self.registry).await;
 
         // Convert operations to tool descriptors
         let tools: Vec<ToolDescriptor> = introspection
@@ -696,6 +876,23 @@ where
             .iter()
             .map(|op| ToolDescriptor::from_operation(op, rate_limits.as_ref()))
             .collect();
+        let cache = self.introspection_cache_metadata(
+            &summary,
+            &introspection,
+            archetype,
+            rate_limits.as_ref(),
+            &tools,
+            cache_result.last_modified,
+        );
+
+        if validator
+            .as_ref()
+            .is_some_and(|validator| validator.is_not_modified(&cache))
+        {
+            return Ok(IntrospectionResponse::not_modified(
+                summary, archetype, cache,
+            ));
+        }
 
         Ok(IntrospectionResponse {
             connector: summary,
@@ -703,6 +900,8 @@ where
             rate_limits,
             archetype,
             introspection,
+            cache: Some(cache),
+            meta: None,
         })
     }
 
@@ -734,6 +933,33 @@ where
     pub async fn invalidate_cache(&self) {
         self.cache.invalidate().await;
     }
+
+    fn discovery_cache_metadata(
+        &self,
+        connectors: &[ConnectorSummary],
+        registry_version: u64,
+        last_modified: DateTime<Utc>,
+    ) -> CacheMetadata {
+        let mut sorted = connectors.to_vec();
+        sorted.sort_by(|left, right| left.id.as_str().cmp(right.id.as_str()));
+        self.cache
+            .cache_metadata(&(registry_version, sorted), last_modified)
+    }
+
+    fn introspection_cache_metadata(
+        &self,
+        connector: &ConnectorSummary,
+        introspection: &Introspection,
+        archetype: ConnectorArchetype,
+        rate_limits: Option<&RateLimitDeclarations>,
+        tools: &[ToolDescriptor],
+        last_modified: DateTime<Utc>,
+    ) -> CacheMetadata {
+        self.cache.cache_metadata(
+            &(connector, introspection, archetype, rate_limits, tools),
+            last_modified,
+        )
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -752,12 +978,14 @@ struct CachedDiscovery {
     connectors: Vec<ConnectorSummary>,
     registry_version: u64,
     cached_at: Instant,
+    last_modified: DateTime<Utc>,
 }
 
 struct DiscoveryCacheResult {
     connectors: Vec<ConnectorSummary>,
     registry_version: u64,
     cache_hit: bool,
+    last_modified: DateTime<Utc>,
 }
 
 impl DiscoveryCache {
@@ -768,6 +996,27 @@ impl DiscoveryCache {
             cache: RwLock::new(None),
             ttl,
         }
+    }
+
+    fn cache_metadata<T: Serialize>(
+        &self,
+        payload: &T,
+        last_modified: DateTime<Utc>,
+    ) -> CacheMetadata {
+        let max_age_seconds = u32::try_from(self.ttl.as_secs().min(u64::from(u32::MAX)))
+            .expect("ttl seconds are clamped to u32::MAX");
+        let stale_while_revalidate_seconds = if max_age_seconds == 0 {
+            None
+        } else {
+            Some(max_age_seconds.min(60))
+        };
+
+        CacheMetadata::strong(
+            payload,
+            last_modified,
+            max_age_seconds,
+            stale_while_revalidate_seconds,
+        )
     }
 
     /// Get cached connectors or refresh from registry.
@@ -785,6 +1034,7 @@ impl DiscoveryCache {
                     connectors: cached.connectors.clone(),
                     registry_version: cached.registry_version,
                     cache_hit: true,
+                    last_modified: cached.last_modified,
                 };
             }
         }
@@ -794,16 +1044,28 @@ impl DiscoveryCache {
         let refreshed_version = registry.version();
 
         let mut write = self.cache.write().await;
+        let last_modified = if write
+            .as_ref()
+            .is_some_and(|cached| cached.registry_version == refreshed_version)
+        {
+            write
+                .as_ref()
+                .map_or_else(Utc::now, |cached| cached.last_modified)
+        } else {
+            Utc::now()
+        };
         *write = Some(CachedDiscovery {
             connectors: connectors.clone(),
             registry_version: refreshed_version,
             cached_at: Instant::now(),
+            last_modified,
         });
 
         DiscoveryCacheResult {
             connectors,
             registry_version: refreshed_version,
             cache_hit: false,
+            last_modified,
         }
     }
 
@@ -1440,6 +1702,234 @@ mod tests {
         assert_eq!(second.response.registry_version, 1);
         assert_eq!(second.response.connectors.len(), 1);
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn cache_validator_prefers_etag_when_present() {
+        let now = Utc::now();
+        let cache = CacheMetadata {
+            etag: "\"etag-1\"".to_string(),
+            last_modified: now,
+            max_age_seconds: 30,
+            stale_while_revalidate_seconds: Some(30),
+        };
+
+        let validator = CacheValidator {
+            if_none_match: Some("\"etag-2\"".to_string()),
+            if_modified_since: Some(now + chrono::Duration::seconds(1)),
+        };
+
+        assert!(!validator.is_not_modified(&cache));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn discovery_endpoint_returns_cache_metadata() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let summary = make_summary(
+            "cache-response",
+            "test",
+            "v1",
+            vec!["test"],
+            SafetyTier::Safe,
+            ConnectorHealth::healthy(),
+        );
+        let registry = CountingRegistry::new(vec![summary], Arc::clone(&calls));
+        let endpoint = DiscoveryEndpoint::with_cache_ttl(
+            Arc::new(registry),
+            Arc::new(AllowPolicy),
+            Duration::from_secs(45),
+        );
+
+        let response = endpoint.discover(None).await;
+        let cache = response
+            .cache
+            .expect("discovery response should include cache metadata");
+
+        assert!(cache.etag.starts_with('"'));
+        assert!(cache.etag.ends_with('"'));
+        assert_eq!(cache.max_age_seconds, 45);
+        assert_eq!(cache.stale_while_revalidate_seconds, Some(45));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn discovery_query_returns_not_modified_for_matching_etag() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let summary = make_summary(
+            "cache-304",
+            "test",
+            "v1",
+            vec!["test"],
+            SafetyTier::Safe,
+            ConnectorHealth::healthy(),
+        );
+        let registry = CountingRegistry::new(vec![summary], Arc::clone(&calls));
+        let endpoint = DiscoveryEndpoint::with_cache_ttl(
+            Arc::new(registry),
+            Arc::new(AllowPolicy),
+            Duration::from_secs(30),
+        );
+
+        let first = endpoint.discover_query(None, None).await;
+        let etag = first
+            .response
+            .cache
+            .as_ref()
+            .expect("cache metadata should be present")
+            .etag
+            .clone();
+
+        let second = endpoint
+            .discover_query(
+                None,
+                Some(CacheValidator {
+                    if_none_match: Some(etag),
+                    if_modified_since: None,
+                }),
+            )
+            .await;
+
+        assert_eq!(second.response.connectors.len(), 0);
+        assert_eq!(
+            second.response.meta.as_ref().map(|meta| meta.status),
+            Some(304)
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn discovery_query_returns_not_modified_for_if_modified_since() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let summary = make_summary(
+            "cache-time",
+            "test",
+            "v1",
+            vec!["test"],
+            SafetyTier::Safe,
+            ConnectorHealth::healthy(),
+        );
+        let registry = CountingRegistry::new(vec![summary], Arc::clone(&calls));
+        let endpoint = DiscoveryEndpoint::with_cache_ttl(
+            Arc::new(registry),
+            Arc::new(AllowPolicy),
+            Duration::from_secs(30),
+        );
+
+        let first = endpoint.discover_query(None, None).await;
+        let last_modified = first
+            .response
+            .cache
+            .as_ref()
+            .expect("cache metadata should be present")
+            .last_modified;
+
+        let second = endpoint
+            .discover_query(
+                None,
+                Some(CacheValidator {
+                    if_none_match: None,
+                    if_modified_since: Some(last_modified + chrono::Duration::seconds(1)),
+                }),
+            )
+            .await;
+
+        assert_eq!(
+            second.response.meta.as_ref().map(|meta| meta.status),
+            Some(304)
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn discovery_query_returns_fresh_response_for_stale_etag() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let primary = make_summary(
+            "cache-stale",
+            "test",
+            "v1",
+            vec!["test"],
+            SafetyTier::Safe,
+            ConnectorHealth::healthy(),
+        );
+        let secondary = make_summary(
+            "cache-stale-extra",
+            "test",
+            "v1",
+            vec!["test"],
+            SafetyTier::Risky,
+            ConnectorHealth::healthy(),
+        );
+        let registry = Arc::new(MutableRegistry::new(
+            vec![primary.clone()],
+            1,
+            Arc::clone(&calls),
+        ));
+        let endpoint = DiscoveryEndpoint::with_cache_ttl(
+            Arc::clone(&registry),
+            Arc::new(AllowPolicy),
+            Duration::from_secs(30),
+        );
+
+        let first = endpoint.discover_query(None, None).await;
+        let etag = first
+            .response
+            .cache
+            .as_ref()
+            .expect("cache metadata should be present")
+            .etag
+            .clone();
+
+        registry.replace(vec![primary, secondary], 2).await;
+
+        let second = endpoint
+            .discover_query(
+                None,
+                Some(CacheValidator {
+                    if_none_match: Some(etag),
+                    if_modified_since: None,
+                }),
+            )
+            .await;
+
+        assert_eq!(second.response.connectors.len(), 2);
+        assert!(second.response.meta.is_none());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn introspection_with_cache_returns_not_modified_for_matching_etag() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let summary = make_summary(
+            "cache-introspect",
+            "test",
+            "v1",
+            vec!["test"],
+            SafetyTier::Safe,
+            ConnectorHealth::healthy(),
+        );
+        let registry = CountingRegistry::new(vec![summary.clone()], Arc::clone(&calls));
+        let endpoint = DiscoveryEndpoint::new(Arc::new(registry), Arc::new(AllowPolicy));
+
+        let first = endpoint
+            .introspect_with_cache(&summary.id, None)
+            .await
+            .expect("introspection should succeed");
+        let etag = first
+            .cache
+            .as_ref()
+            .expect("cache metadata should be present")
+            .etag
+            .clone();
+
+        let second = endpoint
+            .introspect_with_cache(
+                &summary.id,
+                Some(CacheValidator {
+                    if_none_match: Some(etag),
+                    if_modified_since: None,
+                }),
+            )
+            .await
+            .expect("conditional introspection should succeed");
+
+        assert!(second.tools.is_empty());
+        assert_eq!(second.meta.as_ref().map(|meta| meta.status), Some(304));
     }
 
     #[fcp_async_core::runtime::test]
@@ -2248,6 +2738,8 @@ mod tests {
                 auth_caps: None,
                 event_caps: None,
             },
+            cache: None,
+            meta: None,
         };
         let json = serde_json::to_string(&resp).unwrap();
         let parsed: IntrospectionResponse = serde_json::from_str(&json).unwrap();

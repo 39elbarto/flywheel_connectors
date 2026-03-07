@@ -14,14 +14,19 @@
 use chrono::{Duration as ChronoDuration, Utc};
 use fcp_conformance::DynamicSuite;
 use fcp_core::{
-    CapabilityGrant, CapabilityId, CapabilityToken, CapabilityVerifier, ConnectorId,
+    AgentHint, CapabilityGrant, CapabilityId, CapabilityToken, CapabilityVerifier, ConnectorId,
     ConnectorMetrics, FcpConnector, FcpError, HandshakeRequest, HandshakeResponse, HealthSnapshot,
-    InstanceId, Introspection, InvokeRequest, InvokeResponse, OperationId, RequestId, SessionId,
+    IdempotencyClass, InstanceId, Introspection, InvokeRequest, InvokeResponse, OperationId, OperationInfo, RequestId, RiskLevel, SafetyTier, SessionId,
     ShutdownRequest, SimulateRequest, SimulateResponse, SubscribeRequest, SubscribeResponse,
     UnsubscribeRequest, ZoneId,
 };
 use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
-use fcp_e2e::{ComplianceSuite, E2eRunner};
+use fcp_core::InvokeStatus;
+use fcp_e2e::{ComplianceSuite, ConnectorSuite, E2eRunner, InvokeExpectations};
+use wiremock::{
+    Mock, ResponseTemplate,
+    matchers::{method, path_regex},
+};
 use fcp_gitlab::connector::GitLabConnector;
 use fcp_manifest::ConnectorManifest;
 use fcp_testkit::MockApiServer;
@@ -32,7 +37,6 @@ struct GitLabConnectorAdapter {
     id: ConnectorId,
     instance_id: InstanceId,
     verifier: Option<CapabilityVerifier>,
-    introspection: Introspection,
 }
 
 impl GitLabConnectorAdapter {
@@ -42,13 +46,7 @@ impl GitLabConnectorAdapter {
             id: ConnectorId::from_static("gitlab"),
             instance_id: InstanceId::new(),
             verifier: None,
-            introspection: Introspection {
-                operations: vec![],
-                events: vec![],
-                resource_types: vec![],
-                auth_caps: None,
-                event_caps: None,
-            },
+
         }
     }
 }
@@ -296,25 +294,41 @@ async fn gitlab_default_deny_compliance_suite_passes() {
 }
 
 #[fcp_async_core::runtime::test]
-async fn gitlab_happy_path_compliance_suite_passes() {
+async fn gitlab_allow_valid_token_connector_suite_passes() {
     let mock = MockApiServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path_regex(r"^/projects.*"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+            {"id": 1, "name": "my-project", "path_with_namespace": "user/my-project"}
+        ])))
+        .mount(mock.inner())
+        .await;
+
     let mut connector = GitLabConnectorAdapter::new();
     let signing_key = Ed25519SigningKey::generate();
     let handshake = handshake_request(signing_key.verifying_key().to_bytes(), &["gitlab.projects.read"]);
     let token = build_token(&signing_key, "gitlab.projects.read", &["gitlab.projects.list"]);
     let invoke = invoke_request("gitlab.projects.list", json!({}), token);
 
-    let dynamic = DynamicSuite {
+    let suite = ConnectorSuite {
+        test_name: "gitlab_allow_valid_token".to_string(),
         config: gitlab_config(&mock.base_url()),
-        handshake, invoke: Some(invoke), expect_invoke_error: false,
-        simulate: None, expect_simulate_would_succeed: None,
-        require_simulate_denial_details: false, require_capability_denial: false,
-        require_decision_receipt: false,
+        handshake,
+        invoke: Some(invoke),
+        invoke_expectations: Some(InvokeExpectations {
+            expect_error: false,
+            require_capability_denial: false,
+        }),
     };
-    let suite = ComplianceSuite::new("gitlab_happy_path", gitlab_manifest_with_hash(), dynamic);
+
     let mut runner = E2eRunner::new("fcp-e2e-gitlab-happy");
-    let report = runner.run_compliance_suite(&mut connector, suite).await.expect("compliance suite run");
-    assert!(report.passed, "happy path compliance should pass: {report:#?}");
+    let report = runner.run_connector_suite(&mut connector, suite).await.expect("connector suite run");
+    assert!(report.passed, "allow valid token should pass: {report:#?}");
+    let invoke_entry = report.logs.iter().find(|e| e.step == "invoke").expect("invoke log entry");
+    assert_eq!(invoke_entry.result, "pass", "invoke should pass: {invoke_entry:#?}");
+    let invoke_status = invoke_entry.invoke_status.as_ref().expect("invoke_status present");
+    assert_eq!(*invoke_status, InvokeStatus::Ok, "invoke status should be Ok");
 }
 
 #[test]

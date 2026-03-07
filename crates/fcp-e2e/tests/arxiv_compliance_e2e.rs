@@ -16,9 +16,9 @@ use chrono::{Duration as ChronoDuration, Utc};
 use fcp_arxiv::connector::ArxivConnector;
 use fcp_conformance::DynamicSuite;
 use fcp_core::{
-    CapabilityGrant, CapabilityId, CapabilityToken, CapabilityVerifier, ConnectorId,
+    AgentHint, CapabilityGrant, CapabilityId, CapabilityToken, CapabilityVerifier, ConnectorId,
     ConnectorMetrics, FcpConnector, FcpError, HandshakeRequest, HandshakeResponse, HealthSnapshot,
-    InstanceId, Introspection, InvokeRequest, InvokeResponse, InvokeStatus, OperationId, RequestId,
+    IdempotencyClass, InstanceId, Introspection, InvokeRequest, InvokeResponse, InvokeStatus, OperationId, OperationInfo, RequestId,
     SelfCheckReport, SessionId, ShutdownRequest, SimulateRequest, SimulateResponse,
     SubscribeRequest, SubscribeResponse, UnsubscribeRequest, ZoneId,
 };
@@ -38,7 +38,6 @@ struct ArxivConnectorAdapter {
     id: ConnectorId,
     instance_id: InstanceId,
     verifier: Option<CapabilityVerifier>,
-    introspection: Introspection,
 }
 
 impl ArxivConnectorAdapter {
@@ -48,13 +47,7 @@ impl ArxivConnectorAdapter {
             id: ConnectorId::from_static("arxiv"),
             instance_id: InstanceId::new(),
             verifier: None,
-            introspection: Introspection {
-                operations: vec![],
-                events: vec![],
-                resource_types: vec![],
-                auth_caps: None,
-                event_caps: None,
-            },
+
         }
     }
 }
@@ -137,7 +130,31 @@ impl FcpConnector for ArxivConnectorAdapter {
     }
 
     fn introspect(&self) -> Introspection {
-        self.introspection.clone()
+        Introspection {
+            operations: vec![OperationInfo {
+                id: OperationId::from_static("arxiv-monitor-suite"),
+                summary: "arxiv-monitor-suite".to_string(),
+                description: None,
+                input_schema: json!({"type": "object"}),
+                output_schema: json!({"type": "object"}),
+                capability: CapabilityId::from_static("z:work"),
+                risk_level: RiskLevel::Low,
+                safety_tier: SafetyTier::Safe,
+                idempotency: IdempotencyClass::Strict,
+                ai_hints: AgentHint {
+                    when_to_use: String::new(),
+                    common_mistakes: Vec::new(),
+                    examples: Vec::new(),
+                    related: Vec::new(),
+                },
+                rate_limit: None,
+                requires_approval: None,
+            }],
+            events: vec![],
+            resource_types: vec![],
+            auth_caps: None,
+            event_caps: None,
+        }
     }
 
     async fn invoke(&self, req: InvokeRequest) -> fcp_core::FcpResult<InvokeResponse> {

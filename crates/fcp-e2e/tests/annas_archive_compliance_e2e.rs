@@ -14,25 +14,28 @@
 use chrono::{Duration as ChronoDuration, Utc};
 use fcp_conformance::DynamicSuite;
 use fcp_core::{
-    CapabilityGrant, CapabilityId, CapabilityToken, CapabilityVerifier, ConnectorId,
+    AgentHint, CapabilityGrant, CapabilityId, CapabilityToken, CapabilityVerifier, ConnectorId,
     ConnectorMetrics, FcpConnector, FcpError, HandshakeRequest, HandshakeResponse, HealthSnapshot,
-    InstanceId, Introspection, InvokeRequest, InvokeResponse, OperationId, RequestId, SessionId,
-    ShutdownRequest, SimulateRequest, SimulateResponse, SubscribeRequest, SubscribeResponse,
-    UnsubscribeRequest, ZoneId,
+    IdempotencyClass, InstanceId, Introspection, InvokeRequest, InvokeResponse, InvokeStatus, OperationId, OperationInfo, RequestId,
+    SessionId, ShutdownRequest, SimulateRequest, SimulateResponse, SubscribeRequest,
+    SubscribeResponse, UnsubscribeRequest, ZoneId,
 };
 use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
-use fcp_e2e::{ComplianceSuite, E2eRunner};
+use fcp_e2e::{ComplianceSuite, ConnectorSuite, E2eRunner, InvokeExpectations};
 use fcp_manifest::ConnectorManifest;
 use fcp_annas_archive::connector::AnnasArchiveConnector;
 use fcp_testkit::MockApiServer;
 use serde_json::json;
+use wiremock::{
+    Mock, ResponseTemplate,
+    matchers::{method, path_regex},
+};
 
 struct AnnasArchiveConnectorAdapter {
     connector: AnnasArchiveConnector,
     id: ConnectorId,
     instance_id: InstanceId,
     verifier: Option<CapabilityVerifier>,
-    introspection: Introspection,
 }
 
 impl AnnasArchiveConnectorAdapter {
@@ -42,13 +45,7 @@ impl AnnasArchiveConnectorAdapter {
             id: ConnectorId::from_static("annas-archive"),
             instance_id: InstanceId::new(),
             verifier: None,
-            introspection: Introspection {
-                operations: vec![],
-                events: vec![],
-                resource_types: vec![],
-                auth_caps: None,
-                event_caps: None,
-            },
+
         }
     }
 }
@@ -131,7 +128,31 @@ impl FcpConnector for AnnasArchiveConnectorAdapter {
     }
 
     fn introspect(&self) -> Introspection {
-        self.introspection.clone()
+        Introspection {
+            operations: vec![OperationInfo {
+                id: OperationId::from_static("annas.search"),
+                summary: "annas.search".to_string(),
+                description: None,
+                input_schema: json!({"type": "object"}),
+                output_schema: json!({"type": "object"}),
+                capability: CapabilityId::from_static("annas.search"),
+                risk_level: RiskLevel::Low,
+                safety_tier: SafetyTier::Safe,
+                idempotency: IdempotencyClass::Strict,
+                ai_hints: AgentHint {
+                    when_to_use: String::new(),
+                    common_mistakes: Vec::new(),
+                    examples: Vec::new(),
+                    related: Vec::new(),
+                },
+                rate_limit: None,
+                requires_approval: None,
+            }],
+            events: vec![],
+            resource_types: vec![],
+            auth_caps: None,
+            event_caps: None,
+        }
     }
 
     async fn invoke(&self, req: InvokeRequest) -> fcp_core::FcpResult<InvokeResponse> {
@@ -413,6 +434,15 @@ async fn annas_archive_default_deny_compliance_suite_passes() {
 async fn annas_archive_happy_path_compliance_suite_passes() {
     let mock = MockApiServer::start().await;
 
+    // Mount mock for GET /search?q=... (search)
+    Mock::given(method("GET"))
+        .and(path_regex(r"^/search.*"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({ "results": [] })),
+        )
+        .mount(mock.inner())
+        .await;
+
     let mut connector = AnnasArchiveConnectorAdapter::new();
     let signing_key = Ed25519SigningKey::generate();
     let handshake = handshake_request(
@@ -430,32 +460,38 @@ async fn annas_archive_happy_path_compliance_suite_passes() {
         token,
     );
 
-    let dynamic = DynamicSuite {
+    let suite = ConnectorSuite {
+        test_name: "annas_archive_happy_path".to_string(),
         config: annas_archive_config(&mock.base_url()),
         handshake,
         invoke: Some(invoke),
-        expect_invoke_error: false,
-        simulate: None,
-        expect_simulate_would_succeed: None,
-        require_simulate_denial_details: false,
-        require_capability_denial: false,
-        require_decision_receipt: false,
+        invoke_expectations: InvokeExpectations {
+            expect_error: false,
+            expect_decision_receipt: false,
+            expect_audit_event: false,
+            expect_receipt: false,
+            expected_reason_code: None,
+            rate_limit_pool: None,
+        },
     };
-    let suite = ComplianceSuite::new(
-        "annas_archive_happy_path",
-        annas_archive_manifest_with_hash(),
-        dynamic,
-    );
 
-    let mut runner = E2eRunner::new("fcp-e2e-annas-archive");
+    let mut runner = E2eRunner::new("fcp-e2e-annas-archive-happy");
     let report = runner
-        .run_compliance_suite(&mut connector, suite)
+        .run_connector_suite(&mut connector, suite)
         .await
-        .expect("compliance suite run");
+        .expect("connector suite run");
 
-    // The invoke may fail due to the mock server not being fully wired,
-    // but the compliance harness itself should run without panicking.
-    let _ = report;
+    assert!(report.passed, "happy path should pass: {report:#?}");
+    let invoke_entry = report
+        .logs
+        .iter()
+        .find(|entry| entry.context.get("operation") == Some(&json!("invoke")))
+        .expect("invoke entry");
+    assert_eq!(invoke_entry.result, "pass");
+    assert_eq!(
+        invoke_entry.context.get("invoke_status"),
+        Some(&json!(format!("{:?}", InvokeStatus::Ok)))
+    );
 }
 
 #[test]

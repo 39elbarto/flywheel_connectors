@@ -14,14 +14,15 @@
 use chrono::{Duration as ChronoDuration, Utc};
 use fcp_conformance::DynamicSuite;
 use fcp_core::{
-    CapabilityGrant, CapabilityId, CapabilityToken, CapabilityVerifier, ConnectorId,
+    AgentHint, CapabilityGrant, CapabilityId, CapabilityToken, CapabilityVerifier, ConnectorId,
     ConnectorMetrics, FcpConnector, FcpError, HandshakeRequest, HandshakeResponse, HealthSnapshot,
-    InstanceId, Introspection, InvokeRequest, InvokeResponse, OperationId, RequestId, SessionId,
+    IdempotencyClass, InstanceId, Introspection, InvokeRequest, InvokeResponse, OperationId, OperationInfo, RequestId, RiskLevel, SafetyTier, SessionId,
     ShutdownRequest, SimulateRequest, SimulateResponse, SubscribeRequest, SubscribeResponse,
     UnsubscribeRequest, ZoneId,
 };
 use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
-use fcp_e2e::{ComplianceSuite, E2eRunner};
+use fcp_core::InvokeStatus;
+use fcp_e2e::{ComplianceSuite, ConnectorSuite, E2eRunner, InvokeExpectations};
 use fcp_manifest::ConnectorManifest;
 use fcp_webhook_receiver::connector::WebhookReceiverConnector;
 use serde_json::json;
@@ -33,7 +34,6 @@ struct WebhookReceiverConnectorAdapter {
     id: ConnectorId,
     instance_id: InstanceId,
     verifier: Option<CapabilityVerifier>,
-    introspection: Introspection,
 }
 
 impl WebhookReceiverConnectorAdapter {
@@ -43,13 +43,7 @@ impl WebhookReceiverConnectorAdapter {
             id: ConnectorId::from_static("webhook-receiver"),
             instance_id: InstanceId::new(),
             verifier: None,
-            introspection: Introspection {
-                operations: vec![],
-                events: vec![],
-                resource_types: vec![],
-                auth_caps: None,
-                event_caps: None,
-            },
+
         }
     }
 }
@@ -146,7 +140,31 @@ impl FcpConnector for WebhookReceiverConnectorAdapter {
     }
 
     fn introspect(&self) -> Introspection {
-        self.introspection.clone()
+        Introspection {
+            operations: vec![OperationInfo {
+                id: OperationId::from_static("webhook.endpoints.list"),
+                summary: "webhook.endpoints.list".to_string(),
+                description: None,
+                input_schema: json!({"type": "object"}),
+                output_schema: json!({"type": "object"}),
+                capability: CapabilityId::from_static("webhook.endpoints.read"),
+                risk_level: RiskLevel::Low,
+                safety_tier: SafetyTier::Safe,
+                idempotency: IdempotencyClass::Strict,
+                ai_hints: AgentHint {
+                    when_to_use: String::new(),
+                    common_mistakes: Vec::new(),
+                    examples: Vec::new(),
+                    related: Vec::new(),
+                },
+                rate_limit: None,
+                requires_approval: None,
+            }],
+            events: vec![],
+            resource_types: vec![],
+            auth_caps: None,
+            event_caps: None,
+        }
     }
 
     async fn invoke(&self, req: InvokeRequest) -> fcp_core::FcpResult<InvokeResponse> {
@@ -426,7 +444,7 @@ async fn webhook_receiver_default_deny_compliance_suite_passes() {
 }
 
 #[fcp_async_core::runtime::test]
-async fn webhook_receiver_happy_path_compliance_suite_passes() {
+async fn webhook_receiver_allow_valid_token_connector_suite_passes() {
     let mut connector = WebhookReceiverConnectorAdapter::new();
     let signing_key = Ed25519SigningKey::generate();
     let handshake = handshake_request(
@@ -443,31 +461,38 @@ async fn webhook_receiver_happy_path_compliance_suite_passes() {
         json!({}),
         token,
     );
-
-    let dynamic = DynamicSuite {
+    let suite = ConnectorSuite {
+        test_name: "webhook_receiver_allow_valid_token".to_string(),
         config: webhook_receiver_config(),
         handshake,
         invoke: Some(invoke),
-        expect_invoke_error: false,
-        simulate: None,
-        expect_simulate_would_succeed: None,
-        require_simulate_denial_details: false,
-        require_capability_denial: false,
-        require_decision_receipt: false,
+        invoke_expectations: InvokeExpectations {
+            expect_error: false,
+            expect_decision_receipt: false,
+            expect_audit_event: false,
+            expect_receipt: false,
+            expected_reason_code: None,
+            rate_limit_pool: None,
+        },
     };
-    let suite = ComplianceSuite::new(
-        "webhook_receiver_happy_path",
-        webhook_receiver_manifest_with_hash(),
-        dynamic,
-    );
 
     let mut runner = E2eRunner::new("fcp-e2e-webhook-receiver");
     let report = runner
-        .run_compliance_suite(&mut connector, suite)
+        .run_connector_suite(&mut connector, suite)
         .await
-        .expect("compliance suite run");
+        .expect("connector suite run");
 
-    let _ = report;
+    assert!(report.passed, "allow suite should pass: {report:#?}");
+    let invoke_entry = report
+        .logs
+        .iter()
+        .find(|entry| entry.context.get("operation") == Some(&json!("invoke")))
+        .expect("invoke entry");
+    assert_eq!(invoke_entry.result, "pass");
+    assert_eq!(
+        invoke_entry.context.get("invoke_status"),
+        Some(&json!(format!("{:?}", InvokeStatus::Ok)))
+    );
 }
 
 #[test]

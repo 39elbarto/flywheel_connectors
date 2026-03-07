@@ -14,15 +14,20 @@
 use chrono::{Duration as ChronoDuration, Utc};
 use fcp_conformance::DynamicSuite;
 use fcp_core::{
-    CapabilityGrant, CapabilityId, CapabilityToken, CapabilityVerifier, ConnectorId,
+    AgentHint, CapabilityGrant, CapabilityId, CapabilityToken, CapabilityVerifier, ConnectorId,
     ConnectorMetrics, FcpConnector, FcpError, HandshakeRequest, HandshakeResponse, HealthSnapshot,
-    InstanceId, Introspection, InvokeRequest, InvokeResponse, OperationId, RequestId, SessionId,
+    IdempotencyClass, InstanceId, Introspection, InvokeRequest, InvokeResponse, OperationId, OperationInfo, RequestId, RiskLevel, SafetyTier, SessionId,
     ShutdownRequest, SimulateRequest, SimulateResponse, SubscribeRequest, SubscribeResponse,
     UnsubscribeRequest, ZoneId,
 };
 use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
 use fcp_duckdb::connector::DuckDbConnector;
-use fcp_e2e::{ComplianceSuite, E2eRunner};
+use fcp_core::InvokeStatus;
+use fcp_e2e::{ComplianceSuite, ConnectorSuite, E2eRunner, InvokeExpectations};
+use wiremock::{
+    Mock, ResponseTemplate,
+    matchers::{method, path_regex},
+};
 use fcp_manifest::ConnectorManifest;
 use fcp_testkit::MockApiServer;
 use serde_json::json;
@@ -32,7 +37,6 @@ struct DuckDbConnectorAdapter {
     id: ConnectorId,
     instance_id: InstanceId,
     verifier: Option<CapabilityVerifier>,
-    introspection: Introspection,
 }
 
 impl DuckDbConnectorAdapter {
@@ -42,13 +46,7 @@ impl DuckDbConnectorAdapter {
             id: ConnectorId::from_static("duckdb"),
             instance_id: InstanceId::new(),
             verifier: None,
-            introspection: Introspection {
-                operations: vec![],
-                events: vec![],
-                resource_types: vec![],
-                auth_caps: None,
-                event_caps: None,
-            },
+
         }
     }
 }
@@ -131,7 +129,31 @@ impl FcpConnector for DuckDbConnectorAdapter {
     }
 
     fn introspect(&self) -> Introspection {
-        self.introspection.clone()
+        Introspection {
+            operations: vec![OperationInfo {
+                id: OperationId::from_static("duckdb.databases.list"),
+                summary: "duckdb.databases.list".to_string(),
+                description: None,
+                input_schema: json!({"type": "object"}),
+                output_schema: json!({"type": "object"}),
+                capability: CapabilityId::from_static("duckdb.read"),
+                risk_level: RiskLevel::Low,
+                safety_tier: SafetyTier::Safe,
+                idempotency: IdempotencyClass::Strict,
+                ai_hints: AgentHint {
+                    when_to_use: String::new(),
+                    common_mistakes: Vec::new(),
+                    examples: Vec::new(),
+                    related: Vec::new(),
+                },
+                rate_limit: None,
+                requires_approval: None,
+            }],
+            events: vec![],
+            resource_types: vec![],
+            auth_caps: None,
+            event_caps: None,
+        }
     }
 
     async fn invoke(&self, req: InvokeRequest) -> fcp_core::FcpResult<InvokeResponse> {
@@ -416,8 +438,16 @@ async fn duckdb_default_deny_compliance_suite_passes() {
 }
 
 #[fcp_async_core::runtime::test]
-async fn duckdb_happy_path_compliance_suite_passes() {
+async fn duckdb_allow_valid_token_connector_suite_passes() {
     let mock = MockApiServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path_regex(r"^/databases.*"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "databases": [{"name": "analytics", "size_mb": 42}]
+        })))
+        .mount(mock.inner())
+        .await;
 
     let mut connector = DuckDbConnectorAdapter::new();
     let signing_key = Ed25519SigningKey::generate();
@@ -436,33 +466,28 @@ async fn duckdb_happy_path_compliance_suite_passes() {
         token,
     );
 
-    let dynamic = DynamicSuite {
+    let suite = ConnectorSuite {
+        test_name: "duckdb_allow_valid_token".to_string(),
         config: duckdb_config(&mock.base_url()),
         handshake,
         invoke: Some(invoke),
-        expect_invoke_error: false,
-        simulate: None,
-        expect_simulate_would_succeed: None,
-        require_simulate_denial_details: false,
-        require_capability_denial: false,
-        require_decision_receipt: false,
+        invoke_expectations: Some(InvokeExpectations {
+            expect_error: false,
+            require_capability_denial: false,
+        }),
     };
-    let suite = ComplianceSuite::new(
-        "duckdb_happy_path",
-        duckdb_manifest_with_hash(),
-        dynamic,
-    );
 
     let mut runner = E2eRunner::new("fcp-e2e-duckdb-happy");
     let report = runner
-        .run_compliance_suite(&mut connector, suite)
+        .run_connector_suite(&mut connector, suite)
         .await
-        .expect("compliance suite run");
+        .expect("connector suite run");
 
-    assert!(
-        report.passed,
-        "happy path compliance should pass: {report:#?}"
-    );
+    assert!(report.passed, "allow valid token should pass: {report:#?}");
+    let invoke_entry = report.logs.iter().find(|e| e.step == "invoke").expect("invoke log entry");
+    assert_eq!(invoke_entry.result, "pass", "invoke should pass: {invoke_entry:#?}");
+    let invoke_status = invoke_entry.invoke_status.as_ref().expect("invoke_status present");
+    assert_eq!(*invoke_status, InvokeStatus::Ok, "invoke status should be Ok");
 }
 
 #[test]

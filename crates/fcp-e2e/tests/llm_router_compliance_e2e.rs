@@ -92,8 +92,31 @@ impl FcpConnector for LlmRouterConnectorAdapter {
     }
 
     fn introspect(&self) -> Introspection {
-        let value = self.connector.handle_introspect();
-        serde_json::from_value(value).unwrap_or_else(|_| Introspection { operations: vec![] })
+        Introspection {
+            operations: vec![OperationInfo {
+                id: OperationId::from_static("llm-router.route"),
+                summary: "llm-router.route".to_string(),
+                description: None,
+                input_schema: json!({"type": "object"}),
+                output_schema: json!({"type": "object"}),
+                capability: CapabilityId::from_static("llm-router.route"),
+                risk_level: RiskLevel::Low,
+                safety_tier: SafetyTier::Safe,
+                idempotency: IdempotencyClass::Strict,
+                ai_hints: AgentHint {
+                    when_to_use: String::new(),
+                    common_mistakes: Vec::new(),
+                    examples: Vec::new(),
+                    related: Vec::new(),
+                },
+                rate_limit: None,
+                requires_approval: None,
+            }],
+            events: vec![],
+            resource_types: vec![],
+            auth_caps: None,
+            event_caps: None,
+        }
     }
 
     async fn invoke(&self, req: InvokeRequest) -> fcp_core::FcpResult<InvokeResponse> {

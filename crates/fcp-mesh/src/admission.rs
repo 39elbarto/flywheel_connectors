@@ -2298,7 +2298,7 @@ mod tests {
     // ── ObjectAdmissionPolicy ────────────────────────────────────
 
     #[test]
-    fn object_admission_policy_defaults() {
+    fn object_admission_policy_default_field_values() {
         let policy = ObjectAdmissionPolicy::default();
         assert_eq!(policy.max_quarantine_bytes_per_zone, 256 * 1024 * 1024);
         assert_eq!(policy.max_quarantine_objects_per_zone, 100_000);
@@ -2307,7 +2307,7 @@ mod tests {
     }
 
     #[test]
-    fn object_admission_policy_serde_roundtrip() {
+    fn object_admission_policy_custom_serde_roundtrip() {
         let policy = ObjectAdmissionPolicy {
             max_quarantine_bytes_per_zone: 1024,
             max_quarantine_objects_per_zone: 50,
@@ -2322,7 +2322,7 @@ mod tests {
     // ── ObjectAdmissionClass ─────────────────────────────────────
 
     #[test]
-    fn object_admission_class_serde_roundtrip() {
+    fn object_admission_class_both_variants_serde_roundtrip() {
         let quarantined = ObjectAdmissionClass::Quarantined;
         let admitted = ObjectAdmissionClass::Admitted;
 
@@ -2367,7 +2367,7 @@ mod tests {
     }
 
     #[test]
-    fn admission_policy_serde_roundtrip() {
+    fn admission_policy_default_serde_roundtrip() {
         let policy = AdmissionPolicy::default();
         let json = serde_json::to_string(&policy).expect("serialize");
         let deser: AdmissionPolicy = serde_json::from_str(&json).expect("deserialize");
@@ -2377,7 +2377,7 @@ mod tests {
     // ── Multiple peers independence ──────────────────────────────
 
     #[test]
-    fn multiple_peers_tracked_independently() {
+    fn multiple_peers_byte_budgets_independent() {
         let policy = AdmissionPolicy {
             per_peer: PeerBudget {
                 max_bytes_per_min: 100,
@@ -2485,7 +2485,7 @@ mod tests {
     }
 
     #[test]
-    fn release_decode_saturates_at_zero() {
+    fn release_decode_without_acquire_stays_at_zero() {
         let mut controller = AdmissionController::with_default_policy();
         let peer = test_peer();
         // Release without acquire — should not underflow
@@ -2497,7 +2497,7 @@ mod tests {
     // ── Strict unauthenticated symbol limits ─────────────────────
 
     #[test]
-    fn strict_unauthenticated_limits_apply_to_symbols() {
+    fn strict_unauthenticated_caps_symbols_at_restrictive_limit() {
         let policy = AdmissionPolicy {
             per_peer: PeerBudget {
                 max_symbols_per_min: 1_000_000,

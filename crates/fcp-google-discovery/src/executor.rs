@@ -160,6 +160,41 @@ pub struct GoogleApiError {
     pub access_not_configured_hint: bool,
 }
 
+impl GoogleApiError {
+    /// Whether this API error is retryable (429 or 5xx).
+    #[must_use]
+    pub const fn is_retryable(&self) -> bool {
+        matches!(self.status_code, 429 | 500..=599)
+    }
+
+    /// Convert this Google API error into an [`fcp_core::FcpError`].
+    ///
+    /// The `service` parameter identifies the connector for diagnostics
+    /// (e.g. `"google-ai"`, `"bigquery"`).
+    #[must_use]
+    pub fn to_fcp_error(&self, service: &str) -> fcp_core::FcpError {
+        if self.status_code == 401 || self.status_code == 403 {
+            fcp_core::FcpError::Unauthorized {
+                code: 2001,
+                message: self.message.clone(),
+            }
+        } else if self.status_code == 429 {
+            fcp_core::FcpError::RateLimited {
+                retry_after_ms: 60_000,
+                violation: None,
+            }
+        } else {
+            fcp_core::FcpError::External {
+                service: service.into(),
+                message: self.message.clone(),
+                status_code: Some(self.status_code),
+                retryable: self.is_retryable(),
+                retry_after: None,
+            }
+        }
+    }
+}
+
 /// Request parameters for one generic Google REST invocation.
 #[derive(Debug)]
 pub struct GoogleExecuteRequest<'a> {
@@ -1092,7 +1127,13 @@ struct GoogleErrorDetail {
     domain: Option<String>,
 }
 
-fn parse_google_api_error(status: StatusCode, body: &[u8]) -> GoogleApiError {
+/// Parse a Google API error response body into a normalized [`GoogleApiError`].
+///
+/// Handles the standard `{ "error": { "code": N, "message": "...", ... } }`
+/// envelope used by all Google REST APIs, falling back to a plain HTTP-status
+/// message when the body is not valid JSON or does not match the envelope shape.
+#[must_use]
+pub fn parse_google_api_error(status: StatusCode, body: &[u8]) -> GoogleApiError {
     let fallback_message = String::from_utf8_lossy(body).trim().to_string();
 
     if let Ok(envelope) = serde_json::from_slice::<GoogleErrorEnvelope>(body)
@@ -1528,6 +1569,218 @@ mod tests {
         let bytes = serde_json::to_vec(&body).expect("serialize");
         let parsed = parse_google_api_error(StatusCode::FORBIDDEN, &bytes);
         assert!(parsed.access_not_configured_hint);
+    }
+
+    // ── GoogleApiError::is_retryable ─────────────────────────────────
+
+    #[test]
+    fn api_error_is_retryable_429() {
+        let error = GoogleApiError {
+            status_code: 429,
+            message: "rate limited".to_string(),
+            status: None,
+            reason: None,
+            domain: None,
+            access_not_configured_hint: false,
+        };
+        assert!(error.is_retryable());
+    }
+
+    #[test]
+    fn api_error_is_retryable_500() {
+        let error = GoogleApiError {
+            status_code: 500,
+            message: "internal".to_string(),
+            status: None,
+            reason: None,
+            domain: None,
+            access_not_configured_hint: false,
+        };
+        assert!(error.is_retryable());
+    }
+
+    #[test]
+    fn api_error_is_retryable_503() {
+        let error = GoogleApiError {
+            status_code: 503,
+            message: "unavailable".to_string(),
+            status: None,
+            reason: None,
+            domain: None,
+            access_not_configured_hint: false,
+        };
+        assert!(error.is_retryable());
+    }
+
+    #[test]
+    fn api_error_not_retryable_400() {
+        let error = GoogleApiError {
+            status_code: 400,
+            message: "bad request".to_string(),
+            status: None,
+            reason: None,
+            domain: None,
+            access_not_configured_hint: false,
+        };
+        assert!(!error.is_retryable());
+    }
+
+    #[test]
+    fn api_error_not_retryable_401() {
+        let error = GoogleApiError {
+            status_code: 401,
+            message: "unauthorized".to_string(),
+            status: None,
+            reason: None,
+            domain: None,
+            access_not_configured_hint: false,
+        };
+        assert!(!error.is_retryable());
+    }
+
+    #[test]
+    fn api_error_not_retryable_404() {
+        let error = GoogleApiError {
+            status_code: 404,
+            message: "not found".to_string(),
+            status: None,
+            reason: None,
+            domain: None,
+            access_not_configured_hint: false,
+        };
+        assert!(!error.is_retryable());
+    }
+
+    // ── GoogleApiError::to_fcp_error ─────────────────────────────────
+
+    #[test]
+    fn api_error_to_fcp_error_401_unauthorized() {
+        let error = GoogleApiError {
+            status_code: 401,
+            message: "bad key".to_string(),
+            status: None,
+            reason: None,
+            domain: None,
+            access_not_configured_hint: false,
+        };
+        match error.to_fcp_error("google-ai") {
+            fcp_core::FcpError::Unauthorized { code, message } => {
+                assert_eq!(code, 2001);
+                assert_eq!(message, "bad key");
+            }
+            other => panic!("expected Unauthorized, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn api_error_to_fcp_error_403_unauthorized() {
+        let error = GoogleApiError {
+            status_code: 403,
+            message: "forbidden".to_string(),
+            status: Some("PERMISSION_DENIED".to_string()),
+            reason: None,
+            domain: None,
+            access_not_configured_hint: false,
+        };
+        match error.to_fcp_error("bigquery") {
+            fcp_core::FcpError::Unauthorized { code, message } => {
+                assert_eq!(code, 2001);
+                assert_eq!(message, "forbidden");
+            }
+            other => panic!("expected Unauthorized, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn api_error_to_fcp_error_429_rate_limited() {
+        let error = GoogleApiError {
+            status_code: 429,
+            message: "rate limited".to_string(),
+            status: None,
+            reason: None,
+            domain: None,
+            access_not_configured_hint: false,
+        };
+        match error.to_fcp_error("google-ai") {
+            fcp_core::FcpError::RateLimited {
+                retry_after_ms,
+                violation,
+            } => {
+                assert_eq!(retry_after_ms, 60_000);
+                assert!(violation.is_none());
+            }
+            other => panic!("expected RateLimited, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn api_error_to_fcp_error_500_retryable_external() {
+        let error = GoogleApiError {
+            status_code: 500,
+            message: "internal".to_string(),
+            status: None,
+            reason: None,
+            domain: None,
+            access_not_configured_hint: false,
+        };
+        match error.to_fcp_error("bigquery") {
+            fcp_core::FcpError::External {
+                service,
+                message,
+                status_code,
+                retryable,
+                ..
+            } => {
+                assert_eq!(service, "bigquery");
+                assert_eq!(message, "internal");
+                assert_eq!(status_code, Some(500));
+                assert!(retryable);
+            }
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn api_error_to_fcp_error_400_not_retryable() {
+        let error = GoogleApiError {
+            status_code: 400,
+            message: "bad request".to_string(),
+            status: None,
+            reason: None,
+            domain: None,
+            access_not_configured_hint: false,
+        };
+        match error.to_fcp_error("google-calendar") {
+            fcp_core::FcpError::External {
+                service,
+                retryable,
+                status_code,
+                ..
+            } => {
+                assert_eq!(service, "google-calendar");
+                assert!(!retryable);
+                assert_eq!(status_code, Some(400));
+            }
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn api_error_to_fcp_error_preserves_service_name() {
+        let error = GoogleApiError {
+            status_code: 502,
+            message: "bad gateway".to_string(),
+            status: None,
+            reason: None,
+            domain: None,
+            access_not_configured_hint: false,
+        };
+        match error.to_fcp_error("my-custom-service") {
+            fcp_core::FcpError::External { service, .. } => {
+                assert_eq!(service, "my-custom-service");
+            }
+            other => panic!("expected External, got {other:?}"),
+        }
     }
 
     // ── GoogleExecuteRequest ──────────────────────────────────────────

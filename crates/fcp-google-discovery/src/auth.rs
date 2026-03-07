@@ -1773,7 +1773,7 @@ mod tests {
     fn normalize_scope_list_removes_empty() {
         let scopes = vec![
             "scope.a".to_string(),
-            "".to_string(),
+            String::new(),
             "  ".to_string(),
             "scope.b".to_string(),
         ];

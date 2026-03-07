@@ -823,7 +823,9 @@ mod tests {
                 assert!(auto_browser);
                 assert_eq!(callback_port, DEFAULT_CALLBACK_PORT);
             }
-            other => panic!("expected AuthorizationCodePkce, got {other:?}"),
+            GoogleProvisioningAuthFlow::DeviceCode { .. } => {
+                panic!("expected AuthorizationCodePkce, got DeviceCode")
+            }
         }
     }
 
@@ -1250,13 +1252,12 @@ mod tests {
 
     #[test]
     fn estimated_duration_workspace_events_is_longer() {
-        assert_eq!(
-            estimated_duration_ms("workspace_events"),
-            WORKSPACE_EVENTS_ESTIMATED_DURATION_MS
-        );
+        let ws_duration = estimated_duration_ms("workspace_events");
+        let default_duration = estimated_duration_ms("gmail");
+        assert_eq!(ws_duration, WORKSPACE_EVENTS_ESTIMATED_DURATION_MS);
         assert!(
-            WORKSPACE_EVENTS_ESTIMATED_DURATION_MS > DEFAULT_ESTIMATED_DURATION_MS,
-            "workspace events should have longer duration estimate"
+            ws_duration > default_duration,
+            "workspace events ({ws_duration}) should have longer duration than default ({default_duration})"
         );
     }
 

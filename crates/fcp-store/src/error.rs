@@ -361,4 +361,162 @@ mod tests {
         let err: GcError = inner.into();
         assert!(err.source().is_some());
     }
+
+    // --- Additional debug format tests ---
+
+    #[test]
+    fn object_store_already_exists_debug() {
+        let err = ObjectStoreError::AlreadyExists(test_id());
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("AlreadyExists"));
+    }
+
+    #[test]
+    fn object_store_quota_exceeded_debug() {
+        let err = ObjectStoreError::QuotaExceeded {
+            used: 100,
+            max: 200,
+        };
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("QuotaExceeded"));
+        assert!(dbg.contains("100"));
+    }
+
+    #[test]
+    fn object_store_invalid_object_debug() {
+        let err = ObjectStoreError::InvalidObject {
+            reason: "bad".into(),
+        };
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("InvalidObject"));
+    }
+
+    #[test]
+    fn object_store_serialization_debug() {
+        let err = ObjectStoreError::Serialization("json fail".into());
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("Serialization"));
+    }
+
+    #[test]
+    fn object_store_io_debug() {
+        let err = ObjectStoreError::Io("timeout".into());
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("Io"));
+    }
+
+    #[test]
+    fn symbol_store_not_found_debug() {
+        let err = SymbolStoreError::NotFound {
+            object_id: test_id(),
+            esi: 99,
+        };
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("NotFound"));
+        assert!(dbg.contains("99"));
+    }
+
+    #[test]
+    fn symbol_store_quota_exceeded_debug() {
+        let err = SymbolStoreError::QuotaExceeded {
+            used: 500,
+            max: 1000,
+        };
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("QuotaExceeded"));
+    }
+
+    #[test]
+    fn quarantine_quota_exceeded_debug() {
+        let err = QuarantineError::QuotaExceeded {
+            used: 1024,
+            max: 2048,
+        };
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("QuotaExceeded"));
+    }
+
+    #[test]
+    fn quarantine_promotion_denied_debug() {
+        let err = QuarantineError::PromotionDenied {
+            reason: "nope".into(),
+        };
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("PromotionDenied"));
+    }
+
+    #[test]
+    fn quarantine_schema_validation_debug() {
+        let err = QuarantineError::SchemaValidationFailed {
+            reason: "missing".into(),
+        };
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("SchemaValidationFailed"));
+    }
+
+    #[test]
+    fn repair_rate_limit_debug() {
+        let err = RepairError::RateLimitExceeded;
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("RateLimitExceeded"));
+    }
+
+    #[test]
+    fn repair_insufficient_coverage_debug() {
+        let err = RepairError::InsufficientCoverage;
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("InsufficientCoverage"));
+    }
+
+    #[test]
+    fn repair_decode_debug() {
+        let err = RepairError::Decode("corrupt".into());
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("Decode"));
+    }
+
+    #[test]
+    fn gc_in_progress_debug() {
+        let err = GcError::InProgress;
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("InProgress"));
+    }
+
+    #[test]
+    fn gc_invalid_root_debug() {
+        let err = GcError::InvalidRoot(test_id());
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("InvalidRoot"));
+    }
+
+    // --- Source chain exhaustive tests ---
+
+    #[test]
+    fn gc_error_no_source_for_in_progress() {
+        use std::error::Error;
+        let err = GcError::InProgress;
+        assert!(err.source().is_none());
+    }
+
+    #[test]
+    fn gc_error_source_from_symbol_store() {
+        use std::error::Error;
+        let inner = SymbolStoreError::ObjectNotFound(test_id());
+        let err: GcError = inner.into();
+        assert!(err.source().is_some());
+    }
+
+    #[test]
+    fn repair_error_no_source_for_insufficient_coverage() {
+        use std::error::Error;
+        let err = RepairError::InsufficientCoverage;
+        assert!(err.source().is_none());
+    }
+
+    #[test]
+    fn repair_error_no_source_for_decode() {
+        use std::error::Error;
+        let err = RepairError::Decode("bad data".into());
+        assert!(err.source().is_none());
+    }
 }

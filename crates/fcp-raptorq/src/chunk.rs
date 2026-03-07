@@ -563,4 +563,113 @@ mod tests {
         let result = manifest.reconstruct(&chunks);
         assert!(matches!(result, Err(ChunkError::LengthMismatch { .. })));
     }
+
+    // ── Additional chunk tests ────────────────────────────────────────────
+
+    #[test]
+    fn raw_chunk_content_id_changes_with_length() {
+        let c1 = RawChunk::new(vec![1, 2, 3]);
+        let c2 = RawChunk::new(vec![1, 2, 3, 4]);
+        assert_ne!(c1.content_id(), c2.content_id());
+    }
+
+    #[test]
+    fn raw_chunk_content_id_empty_is_deterministic() {
+        let c1 = RawChunk::new(vec![]);
+        let c2 = RawChunk::new(vec![]);
+        assert_eq!(c1.content_id(), c2.content_id());
+    }
+
+    #[test]
+    fn manifest_from_payload_two_byte_chunks() {
+        let payload = vec![10, 20, 30, 40, 50];
+        let (manifest, chunks) = ChunkedObjectManifest::from_payload(&payload, 2);
+        assert_eq!(manifest.total_len, 5);
+        assert_eq!(manifest.chunk_size, 2);
+        assert_eq!(manifest.chunk_count(), 3);
+        assert_eq!(chunks.len(), 3);
+        assert_eq!(chunks[0].bytes, vec![10, 20]);
+        assert_eq!(chunks[1].bytes, vec![30, 40]);
+        assert_eq!(chunks[2].bytes, vec![50]);
+    }
+
+    #[test]
+    fn manifest_chunk_size_at_out_of_bounds() {
+        let payload = vec![1u8; 100];
+        let (manifest, _) = ChunkedObjectManifest::from_payload(&payload, 50);
+        assert_eq!(manifest.chunk_count(), 2);
+        let err = manifest.chunk_size_at(2).unwrap_err();
+        assert!(matches!(
+            err,
+            ChunkError::InvalidChunkIndex { index: 2, count: 2 }
+        ));
+    }
+
+    #[test]
+    fn manifest_chunk_size_at_single_chunk() {
+        let payload = vec![42u8; 30];
+        let (manifest, _) = ChunkedObjectManifest::from_payload(&payload, 100);
+        assert_eq!(manifest.chunk_count(), 1);
+        assert_eq!(manifest.chunk_size_at(0).unwrap(), 30);
+    }
+
+    #[test]
+    fn manifest_reconstruct_unchecked_success() {
+        let payload: Vec<u8> = (0..500_u32).map(|i| (i % 256) as u8).collect();
+        let (manifest, chunks) = ChunkedObjectManifest::from_payload(&payload, 100);
+        let reconstructed = manifest.reconstruct_unchecked(&chunks).unwrap();
+        assert_eq!(reconstructed, payload);
+    }
+
+    #[test]
+    fn manifest_verify_hash_correct() {
+        let payload = vec![7u8; 5000];
+        let (manifest, _) = ChunkedObjectManifest::from_payload(&payload, 1000);
+        assert!(manifest.verify_hash(&payload));
+    }
+
+    #[test]
+    fn manifest_verify_hash_wrong_length() {
+        let payload = vec![7u8; 5000];
+        let (manifest, _) = ChunkedObjectManifest::from_payload(&payload, 1000);
+        assert!(!manifest.verify_hash(&vec![7u8; 4999]));
+    }
+
+    #[test]
+    fn manifest_debug_format() {
+        let payload = vec![1u8; 100];
+        let (manifest, _) = ChunkedObjectManifest::from_payload(&payload, 50);
+        let debug = format!("{manifest:?}");
+        assert!(debug.contains("ChunkedObjectManifest"));
+        assert!(debug.contains("total_len"));
+    }
+
+    #[test]
+    fn manifest_clone() {
+        let payload = vec![1u8; 200];
+        let (manifest, _) = ChunkedObjectManifest::from_payload(&payload, 100);
+        let cloned = manifest.clone();
+        assert_eq!(cloned.total_len, manifest.total_len);
+        assert_eq!(cloned.chunk_size, manifest.chunk_size);
+        assert_eq!(cloned.chunks.len(), manifest.chunks.len());
+        assert_eq!(cloned.payload_hash, manifest.payload_hash);
+    }
+
+    #[test]
+    fn manifest_serde_preserves_hash() {
+        let payload = vec![42u8; 300];
+        let (manifest, _) = ChunkedObjectManifest::from_payload(&payload, 100);
+        let json = serde_json::to_string(&manifest).unwrap();
+        let deserialized: ChunkedObjectManifest = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.payload_hash, manifest.payload_hash);
+        assert!(deserialized.verify_hash(&payload));
+    }
+
+    #[test]
+    fn raw_chunk_serde_empty() {
+        let chunk = RawChunk::new(vec![]);
+        let json = serde_json::to_string(&chunk).unwrap();
+        let deserialized: RawChunk = serde_json::from_str(&json).unwrap();
+        assert!(deserialized.is_empty());
+    }
 }

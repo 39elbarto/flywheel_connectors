@@ -1609,4 +1609,291 @@ mod tests {
         let store = runtime.create_store();
         assert!(store.is_ok());
     }
+
+    // ── New tests: WasiError display all variants ──
+
+    #[test]
+    fn test_wasi_error_display_engine_creation() {
+        let e = WasiError::EngineCreation("bad config".into());
+        assert!(e.to_string().contains("bad config"));
+    }
+
+    #[test]
+    fn test_wasi_error_display_component_load() {
+        let e = WasiError::ComponentLoad("invalid wasm".into());
+        assert!(e.to_string().contains("invalid wasm"));
+    }
+
+    #[test]
+    fn test_wasi_error_display_instantiation() {
+        let e = WasiError::Instantiation("missing import".into());
+        assert!(e.to_string().contains("missing import"));
+    }
+
+    #[test]
+    fn test_wasi_error_display_execution() {
+        let e = WasiError::Execution("trap".into());
+        assert!(e.to_string().contains("trap"));
+    }
+
+    #[test]
+    fn test_wasi_error_display_resource_limit() {
+        let e = WasiError::ResourceLimit("memory exceeded".into());
+        assert!(e.to_string().contains("memory exceeded"));
+    }
+
+    #[test]
+    fn test_wasi_error_display_fs_access_denied() {
+        let e = WasiError::FsAccessDenied {
+            path: "/etc/shadow".into(),
+            reason: "not in allowed list".into(),
+        };
+        let msg = e.to_string();
+        assert!(msg.contains("/etc/shadow"));
+        assert!(msg.contains("not in allowed list"));
+    }
+
+    #[test]
+    fn test_wasi_error_display_network_access_denied() {
+        let e = WasiError::NetworkAccessDenied("no policy".into());
+        assert!(e.to_string().contains("no policy"));
+    }
+
+    #[test]
+    fn test_wasi_error_display_clock_access_denied() {
+        let e = WasiError::ClockAccessDenied;
+        assert!(e.to_string().contains("clock"));
+    }
+
+    #[test]
+    fn test_wasi_error_display_entropy_access_denied() {
+        let e = WasiError::EntropyAccessDenied;
+        assert!(e.to_string().contains("entropy"));
+    }
+
+    #[test]
+    fn test_wasi_error_display_invalid_component() {
+        let e = WasiError::InvalidComponent("not wasm".into());
+        assert!(e.to_string().contains("not wasm"));
+    }
+
+    #[test]
+    fn test_wasi_error_display_manifest_extraction() {
+        let e = WasiError::ManifestExtraction("no section".into());
+        assert!(e.to_string().contains("no section"));
+    }
+
+    // ── New tests: DeterministicRng ──
+
+    #[test]
+    fn test_deterministic_rng_different_seeds_produce_different_sequences() {
+        let mut rng1 = DeterministicRng::new(1);
+        let mut rng2 = DeterministicRng::new(2);
+        let bytes1: Vec<u8> = (0..16).map(|_| rng1.next_byte()).collect();
+        let bytes2: Vec<u8> = (0..16).map(|_| rng2.next_byte()).collect();
+        assert_ne!(bytes1, bytes2);
+    }
+
+    #[test]
+    fn test_deterministic_rng_same_seed_same_u64() {
+        let mut rng1 = DeterministicRng::new(42);
+        let mut rng2 = DeterministicRng::new(42);
+        for _ in 0..100 {
+            assert_eq!(rng1.next_u64(), rng2.next_u64());
+        }
+    }
+
+    #[test]
+    fn test_deterministic_rng_never_returns_zero_state() {
+        // xorshift should never reach zero state from a non-zero seed
+        let mut rng = DeterministicRng::new(1);
+        for _ in 0..1000 {
+            let val = rng.next_u64();
+            assert_ne!(val, 0, "xorshift64 should never produce zero");
+        }
+    }
+
+    #[test]
+    fn test_deterministic_rng_debug() {
+        let rng = DeterministicRng::new(42);
+        let debug = format!("{rng:?}");
+        assert!(debug.contains("DeterministicRng"));
+    }
+
+    // ── New tests: WasiConfig edge cases ──
+
+    #[test]
+    fn test_cpu_percent_to_fuel_50() {
+        assert_eq!(WasiConfig::cpu_percent_to_fuel(50), 5_000_000_000);
+    }
+
+    #[test]
+    fn test_cpu_percent_to_fuel_100() {
+        assert_eq!(WasiConfig::cpu_percent_to_fuel(100), 1_000_000_000_000);
+    }
+
+    #[test]
+    fn test_cpu_percent_to_fuel_99() {
+        assert_eq!(WasiConfig::cpu_percent_to_fuel(99), 9_900_000_000);
+    }
+
+    #[test]
+    fn test_wasi_config_clone() {
+        let original = WasiConfig::default()
+            .with_deterministic_mode(1_000_000, 99)
+            .with_args(vec!["--test".into()])
+            .with_inherit_stdio(true, true);
+        let cloned = original.clone();
+        assert_eq!(original.memory_limit_bytes, cloned.memory_limit_bytes);
+        assert_eq!(original.deterministic_mode, cloned.deterministic_mode);
+        assert_eq!(original.deterministic_timestamp, cloned.deterministic_timestamp);
+        assert_eq!(original.deterministic_seed, cloned.deterministic_seed);
+        assert_eq!(original.args, cloned.args);
+        assert_eq!(original.inherit_stdout, cloned.inherit_stdout);
+        assert_eq!(original.inherit_stderr, cloned.inherit_stderr);
+    }
+
+    #[test]
+    fn test_wasi_config_debug() {
+        let config = WasiConfig::default();
+        let debug = format!("{config:?}");
+        assert!(debug.contains("WasiConfig"));
+    }
+
+    // ── New tests: NetworkCapabilityGate ──
+
+    #[test]
+    fn test_network_gate_debug() {
+        let gate = NetworkCapabilityGate::new(None, false);
+        let debug = format!("{gate:?}");
+        assert!(debug.contains("NetworkCapabilityGate"));
+    }
+
+    #[test]
+    fn test_network_gate_blocked_direct_no_constraints_http() {
+        let gate = NetworkCapabilityGate::new(None, true);
+        let result = gate.check_http("https://example.com/", "GET");
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("blocked"));
+    }
+
+    #[test]
+    fn test_network_gate_blocked_direct_no_constraints_tcp() {
+        let gate = NetworkCapabilityGate::new(None, true);
+        let result = gate.check_tcp("example.com", 443, true);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("blocked"));
+    }
+
+    // ── New tests: FsCapabilityGate ──
+
+    #[test]
+    fn test_fs_capability_gate_debug() {
+        let gate = FsCapabilityGate::new(vec![PathBuf::from("/usr")], vec![PathBuf::from("/tmp")]);
+        let debug = format!("{gate:?}");
+        assert!(debug.contains("FsCapabilityGate"));
+    }
+
+    #[test]
+    fn test_fs_capability_gate_read_in_writable_path() {
+        // Writable paths also grant read
+        let gate = FsCapabilityGate::new(vec![], vec![PathBuf::from("/tmp")]);
+        let result = gate.check_access(Path::new("/tmp"), false);
+        assert!(result.is_ok());
+    }
+
+    // ── New tests: ExecutionResult ──
+
+    #[test]
+    fn test_execution_result_no_fuel() {
+        let result = ExecutionResult {
+            exit_code: 1,
+            stdout: None,
+            stderr: Some(Bytes::from_static(b"error")),
+            duration: Duration::from_secs(5),
+            fuel_consumed: None,
+        };
+        assert_eq!(result.exit_code, 1);
+        assert!(result.stdout.is_none());
+        assert!(result.stderr.is_some());
+        assert!(result.fuel_consumed.is_none());
+    }
+
+    #[test]
+    fn test_execution_result_debug_fields() {
+        let result = ExecutionResult {
+            exit_code: 0,
+            stdout: None,
+            stderr: None,
+            duration: Duration::from_millis(100),
+            fuel_consumed: None,
+        };
+        let debug = format!("{result:?}");
+        assert!(debug.contains("exit_code"));
+        assert!(debug.contains("duration"));
+    }
+
+    // ── New tests: LEB128 edge cases ──
+
+    #[test]
+    fn test_leb128_zero() {
+        assert_eq!(read_leb128(&[0x00]), Some((0, 1)));
+    }
+
+    #[test]
+    fn test_leb128_one() {
+        assert_eq!(read_leb128(&[0x01]), Some((1, 1)));
+    }
+
+    #[test]
+    fn test_leb128_128() {
+        // 128 = 0x80 0x01
+        assert_eq!(read_leb128(&[0x80, 0x01]), Some((128, 2)));
+    }
+
+    #[test]
+    fn test_leb128_large_value() {
+        // 624485 = 0xE5 0x8E 0x26
+        assert_eq!(read_leb128(&[0xE5, 0x8E, 0x26]), Some((624_485, 3)));
+    }
+
+    // ── New tests: extract_custom_section ──
+
+    #[test]
+    fn test_extract_custom_section_multiple_custom_sections() {
+        let mut wasm = Vec::new();
+        wasm.extend_from_slice(b"\0asm\x01\0\0\0");
+
+        // First custom section: "other"
+        let name1 = b"other";
+        let payload1 = b"data1";
+        let content_len1 = 1 + name1.len() + payload1.len();
+        wasm.push(0); // custom section id
+        wasm.push(content_len1 as u8);
+        wasm.push(name1.len() as u8);
+        wasm.extend_from_slice(name1);
+        wasm.extend_from_slice(payload1);
+
+        // Second custom section: "fcp-manifest"
+        let name2 = b"fcp-manifest";
+        let payload2 = b"manifest-data";
+        let content_len2 = 1 + name2.len() + payload2.len();
+        wasm.push(0);
+        wasm.push(content_len2 as u8);
+        wasm.push(name2.len() as u8);
+        wasm.extend_from_slice(name2);
+        wasm.extend_from_slice(payload2);
+
+        let result = extract_custom_section(&wasm, "fcp-manifest");
+        assert_eq!(result, Some(payload2.to_vec()));
+    }
+
+    #[test]
+    fn test_extract_custom_section_exact_8_bytes() {
+        // Exactly WASM magic + version, no sections
+        let wasm = b"\0asm\x01\0\0\0";
+        assert!(extract_custom_section(wasm, "test").is_none());
+    }
 }

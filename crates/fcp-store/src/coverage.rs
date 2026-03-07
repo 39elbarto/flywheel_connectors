@@ -1503,4 +1503,303 @@ mod tests {
             },
         );
     }
+
+    // --- SymbolDistribution additional tests ---
+
+    #[test]
+    fn symbol_distribution_default_empty() {
+        let dist = SymbolDistribution::default();
+        assert_eq!(dist.source_symbols, 0);
+        assert_eq!(dist.total_symbols, 0);
+        assert!(dist.nodes.is_empty());
+        assert_eq!(dist.distinct_nodes(), 0);
+        assert_eq!(dist.max_node_symbols(), 0);
+    }
+
+    #[test]
+    fn symbol_distribution_clone_preserves_fields() {
+        let mut dist = SymbolDistribution::new(8);
+        dist.add_symbol(1, 100);
+        dist.add_symbol(2, 200);
+        let cloned = dist.clone();
+        assert_eq!(dist.source_symbols, cloned.source_symbols);
+        assert_eq!(dist.total_symbols, cloned.total_symbols);
+        assert_eq!(dist.distinct_nodes(), cloned.distinct_nodes());
+    }
+
+    #[test]
+    fn symbol_distribution_debug_format() {
+        let dist = SymbolDistribution::new(5);
+        let dbg = format!("{dist:?}");
+        assert!(dbg.contains("SymbolDistribution"));
+        assert!(dbg.contains("source_symbols"));
+    }
+
+    #[test]
+    fn symbol_distribution_remove_nonexistent_node() {
+        let mut dist = SymbolDistribution::new(10);
+        dist.add_symbol(1, 100);
+        // Removing from a node that doesn't exist should be a no-op
+        dist.remove_symbol(99, 100);
+        assert_eq!(dist.total_symbols, 1);
+        assert_eq!(dist.distinct_nodes(), 1);
+    }
+
+    #[test]
+    fn symbol_distribution_remove_last_symbol_removes_node() {
+        let mut dist = SymbolDistribution::new(10);
+        dist.add_symbol(1, 100);
+        dist.add_symbol(2, 100);
+        assert_eq!(dist.distinct_nodes(), 2);
+
+        dist.remove_symbol(1, 100);
+        assert_eq!(dist.distinct_nodes(), 1);
+        assert!(!dist.nodes.contains_key(&1));
+    }
+
+    #[test]
+    fn symbol_distribution_saturating_sub_on_remove() {
+        let mut dist = SymbolDistribution::new(10);
+        dist.add_symbol(1, 100);
+        // Remove more bytes than added — should saturate to 0
+        dist.remove_symbol(1, 999);
+        assert_eq!(dist.total_symbols, 0);
+        assert_eq!(dist.distinct_nodes(), 0);
+    }
+
+    #[test]
+    fn symbol_distribution_max_node_symbols_multiple_nodes() {
+        let mut dist = SymbolDistribution::new(20);
+        for _ in 0..5 {
+            dist.add_symbol(1, 50);
+        }
+        for _ in 0..8 {
+            dist.add_symbol(2, 50);
+        }
+        for _ in 0..3 {
+            dist.add_symbol(3, 50);
+        }
+        assert_eq!(dist.max_node_symbols(), 8);
+    }
+
+    // --- CoverageEvaluation additional tests ---
+
+    #[test]
+    fn coverage_evaluation_debug_format() {
+        let dist = SymbolDistribution::new(10);
+        let eval = CoverageEvaluation::from_distribution(test_object_id(), &dist);
+        let dbg = format!("{eval:?}");
+        assert!(dbg.contains("CoverageEvaluation"));
+        assert!(dbg.contains("coverage_bps"));
+    }
+
+    #[test]
+    fn coverage_evaluation_clone_preserves_fields() {
+        let mut dist = SymbolDistribution::new(10);
+        for _ in 0..6 {
+            dist.add_symbol(1, 100);
+        }
+        let eval = CoverageEvaluation::from_distribution(test_object_id(), &dist);
+        let cloned = eval.clone();
+        assert_eq!(eval.coverage_bps, cloned.coverage_bps);
+        assert_eq!(eval.distinct_nodes, cloned.distinct_nodes);
+        assert_eq!(eval.is_available, cloned.is_available);
+    }
+
+    #[test]
+    fn coverage_evaluation_serde_json_roundtrip() {
+        let mut dist = SymbolDistribution::new(10);
+        for _ in 0..10 {
+            dist.add_symbol(1, 100);
+        }
+        let eval = CoverageEvaluation::from_distribution(test_object_id(), &dist);
+        let json = serde_json::to_string(&eval).unwrap();
+        let rt: CoverageEvaluation = serde_json::from_str(&json).unwrap();
+        assert_eq!(rt.coverage_bps, eval.coverage_bps);
+        assert_eq!(rt.distinct_nodes, eval.distinct_nodes);
+        assert_eq!(rt.is_available, eval.is_available);
+        assert_eq!(rt.total_symbols, eval.total_symbols);
+        assert_eq!(rt.source_symbols, eval.source_symbols);
+    }
+
+    #[test]
+    fn coverage_evaluation_zero_source_symbols() {
+        let dist = SymbolDistribution::new(0);
+        let eval = CoverageEvaluation::from_distribution(test_object_id(), &dist);
+        assert_eq!(eval.coverage_bps, 0);
+        assert!(eval.is_available); // 0 >= 0
+    }
+
+    #[test]
+    fn coverage_deficit_bps_at_target() {
+        let mut dist = SymbolDistribution::new(10);
+        for _ in 0..10 {
+            dist.add_symbol(1, 100);
+        }
+        let eval = CoverageEvaluation::from_distribution(test_object_id(), &dist);
+        assert_eq!(eval.coverage_deficit_bps(10_000), 0);
+    }
+
+    #[test]
+    fn coverage_deficit_bps_below_target() {
+        let mut dist = SymbolDistribution::new(10);
+        for _ in 0..5 {
+            dist.add_symbol(1, 100);
+        }
+        let eval = CoverageEvaluation::from_distribution(test_object_id(), &dist);
+        assert_eq!(eval.coverage_deficit_bps(10_000), 5_000);
+    }
+
+    #[test]
+    fn symbols_needed_zero_source_symbols() {
+        let dist = SymbolDistribution::new(0);
+        let eval = CoverageEvaluation::from_distribution(test_object_id(), &dist);
+        assert_eq!(eval.symbols_needed(10_000), 0);
+    }
+
+    #[test]
+    fn symbols_needed_already_met() {
+        let mut dist = SymbolDistribution::new(10);
+        for _ in 0..10 {
+            dist.add_symbol(1, 100);
+        }
+        let eval = CoverageEvaluation::from_distribution(test_object_id(), &dist);
+        assert_eq!(eval.symbols_needed(10_000), 0);
+    }
+
+    // --- CoverageHealth tests ---
+
+    #[test]
+    fn coverage_health_debug() {
+        let h = CoverageHealth::Healthy;
+        let dbg = format!("{h:?}");
+        assert!(dbg.contains("Healthy"));
+    }
+
+    #[test]
+    fn coverage_health_clone_and_eq() {
+        let h1 = CoverageHealth::Degraded;
+        let h2 = h1;
+        assert_eq!(h1, h2);
+    }
+
+    #[test]
+    fn coverage_health_serde_all_variants() {
+        for variant in [
+            CoverageHealth::Healthy,
+            CoverageHealth::Degraded,
+            CoverageHealth::Unavailable,
+        ] {
+            let json = serde_json::to_string(&variant).unwrap();
+            let rt: CoverageHealth = serde_json::from_str(&json).unwrap();
+            assert_eq!(rt, variant);
+        }
+    }
+
+    #[test]
+    fn concentration_repair_symbols_zero_total() {
+        let dist = SymbolDistribution::new(10);
+        let eval = CoverageEvaluation::from_distribution(test_object_id(), &dist);
+        assert_eq!(eval.concentration_repair_symbols_needed(5000), 0);
+    }
+
+    #[test]
+    fn concentration_repair_symbols_zero_max_concentration() {
+        let mut dist = SymbolDistribution::new(10);
+        for _ in 0..10 {
+            dist.add_symbol(1, 100);
+        }
+        let eval = CoverageEvaluation::from_distribution(test_object_id(), &dist);
+        assert_eq!(eval.concentration_repair_symbols_needed(0), 0);
+    }
+
+    #[test]
+    fn concentration_repair_symbols_already_ok() {
+        let mut dist = SymbolDistribution::new(10);
+        for _ in 0..5 {
+            dist.add_symbol(1, 100);
+        }
+        for _ in 0..5 {
+            dist.add_symbol(2, 100);
+        }
+        let eval = CoverageEvaluation::from_distribution(test_object_id(), &dist);
+        // max_node_fraction_bps = 5000, within limit
+        assert_eq!(eval.concentration_repair_symbols_needed(5000), 0);
+    }
+
+    #[test]
+    fn diversity_bps_zero_requirement() {
+        let dist = SymbolDistribution::new(10);
+        let eval = CoverageEvaluation::from_distribution(test_object_id(), &dist);
+        assert_eq!(eval.diversity_bps(0), 10_000);
+    }
+
+    #[test]
+    fn diversity_bps_above_requirement() {
+        let mut dist = SymbolDistribution::new(10);
+        for _ in 0..5 {
+            dist.add_symbol(1, 100);
+        }
+        for _ in 0..5 {
+            dist.add_symbol(2, 100);
+        }
+        let eval = CoverageEvaluation::from_distribution(test_object_id(), &dist);
+        assert_eq!(eval.diversity_bps(2), 10_000);
+    }
+
+    #[test]
+    fn diversity_bps_below_requirement() {
+        let mut dist = SymbolDistribution::new(10);
+        for _ in 0..10 {
+            dist.add_symbol(1, 100);
+        }
+        let eval = CoverageEvaluation::from_distribution(test_object_id(), &dist);
+        // 1 node, need 4 → 1*10000/4 = 2500
+        assert_eq!(eval.diversity_bps(4), 2_500);
+    }
+
+    #[test]
+    fn diversity_deficit_zero_requirement() {
+        let dist = SymbolDistribution::new(10);
+        let eval = CoverageEvaluation::from_distribution(test_object_id(), &dist);
+        assert_eq!(eval.diversity_deficit(0), 0);
+    }
+
+    #[test]
+    fn diversity_deficit_met() {
+        let mut dist = SymbolDistribution::new(10);
+        for _ in 0..5 {
+            dist.add_symbol(1, 100);
+        }
+        for _ in 0..5 {
+            dist.add_symbol(2, 100);
+        }
+        let eval = CoverageEvaluation::from_distribution(test_object_id(), &dist);
+        assert_eq!(eval.diversity_deficit(2), 0);
+    }
+
+    #[test]
+    fn diversity_deficit_not_met() {
+        let mut dist = SymbolDistribution::new(10);
+        for _ in 0..10 {
+            dist.add_symbol(1, 100);
+        }
+        let eval = CoverageEvaluation::from_distribution(test_object_id(), &dist);
+        assert_eq!(eval.diversity_deficit(3), 2);
+    }
+
+    #[test]
+    fn meets_diversity_for_reconstruction_not_available() {
+        let dist = SymbolDistribution::new(10);
+        let eval = CoverageEvaluation::from_distribution(test_object_id(), &dist);
+        let policy = fcp_core::ObjectPlacementPolicy {
+            min_nodes: 1,
+            max_node_fraction_bps: 10_000,
+            preferred_devices: vec![],
+            excluded_devices: vec![],
+            target_coverage_bps: 10_000,
+            min_source_diversity: 0,
+        };
+        assert!(!eval.meets_diversity_for_reconstruction(&policy));
+    }
 }

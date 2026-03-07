@@ -1418,4 +1418,104 @@ mod tests {
             }
         });
     }
+
+    // --- GcResult tests ---
+
+    #[test]
+    fn gc_result_serde_json_roundtrip() {
+        let result = GcResult {
+            live: 10,
+            evicted: 3,
+            expired_leases: 1,
+            pinned: 2,
+        };
+        let json = serde_json::to_string(&result).unwrap();
+        let rt: GcResult = serde_json::from_str(&json).unwrap();
+        assert_eq!(rt.live, 10);
+        assert_eq!(rt.evicted, 3);
+        assert_eq!(rt.expired_leases, 1);
+        assert_eq!(rt.pinned, 2);
+    }
+
+    #[test]
+    fn gc_result_clone_preserves_fields() {
+        let result = GcResult {
+            live: 5,
+            evicted: 2,
+            expired_leases: 0,
+            pinned: 1,
+        };
+        let cloned = result.clone();
+        assert_eq!(result.live, cloned.live);
+        assert_eq!(result.evicted, cloned.evicted);
+    }
+
+    // --- GcConfig tests ---
+
+    #[test]
+    fn gc_config_default_values() {
+        let config = GcConfig::default();
+        assert_eq!(config.max_evictions_per_run, 10_000);
+        assert!(config.enforce_lease_expiry);
+    }
+
+    #[test]
+    fn gc_config_serde_all_fields() {
+        let config = GcConfig {
+            max_evictions_per_run: 500,
+            enforce_lease_expiry: false,
+        };
+        let json = serde_json::to_string(&config).unwrap();
+        let rt: GcConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(rt.max_evictions_per_run, 500);
+        assert!(!rt.enforce_lease_expiry);
+    }
+
+    // --- GcRoots tests ---
+
+    #[test]
+    fn gc_roots_default() {
+        let roots = GcRoots::default();
+        assert!(roots.zone_checkpoint.is_none());
+        assert!(roots.pinned.is_empty());
+        assert!(roots.all_roots().is_empty());
+    }
+
+    #[test]
+    fn gc_roots_remove_pin() {
+        let mut roots = GcRoots::new();
+        let id = ObjectId::from_bytes([1; 32]);
+        roots.add_pin(id);
+        assert!(roots.is_root(&id));
+        roots.remove_pin(&id);
+        assert!(!roots.is_root(&id));
+    }
+
+    #[test]
+    fn gc_roots_is_root_checkpoint_only() {
+        let mut roots = GcRoots::new();
+        let cp = ObjectId::from_bytes([10; 32]);
+        roots.set_checkpoint(cp);
+        assert!(roots.is_root(&cp));
+        assert!(!roots.is_root(&ObjectId::from_bytes([11; 32])));
+    }
+
+    #[test]
+    fn gc_roots_is_root_pin_only() {
+        let mut roots = GcRoots::new();
+        let pin = ObjectId::from_bytes([20; 32]);
+        roots.add_pin(pin);
+        assert!(roots.is_root(&pin));
+        assert!(!roots.is_root(&ObjectId::from_bytes([21; 32])));
+    }
+
+    #[test]
+    fn gc_roots_all_roots_deduplicates_checkpoint_and_pin() {
+        let mut roots = GcRoots::new();
+        let id = ObjectId::from_bytes([5; 32]);
+        roots.set_checkpoint(id);
+        roots.add_pin(id);
+        let all = roots.all_roots();
+        assert_eq!(all.len(), 1);
+    }
 }

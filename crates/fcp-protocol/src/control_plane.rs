@@ -334,4 +334,289 @@ mod tests {
         assert_eq!(deserialized.body, body);
         assert_eq!(deserialized.schema().namespace, "fcp.invoke");
     }
+
+    // ── Batch 4: SunnyMoose deep-coverage expansion ──
+
+    #[test]
+    fn retention_secret_is_required() {
+        let schema = test_schema("fcp.secret", "AccessLog");
+        assert_eq!(
+            retention_for_schema(&schema),
+            ControlPlaneRetention::Required
+        );
+    }
+
+    #[test]
+    fn retention_revoke_is_required() {
+        let schema = test_schema("fcp.revoke", "TokenRevocation");
+        assert_eq!(
+            retention_for_schema(&schema),
+            ControlPlaneRetention::Required
+        );
+    }
+
+    #[test]
+    fn retention_grant_is_required() {
+        let schema = test_schema("fcp.grant", "CapGrant");
+        assert_eq!(
+            retention_for_schema(&schema),
+            ControlPlaneRetention::Required
+        );
+    }
+
+    #[test]
+    fn retention_membership_is_required() {
+        let schema = test_schema("fcp.membership", "Join");
+        assert_eq!(
+            retention_for_schema(&schema),
+            ControlPlaneRetention::Required
+        );
+    }
+
+    #[test]
+    fn retention_configure_is_ephemeral() {
+        let schema = test_schema("fcp.configure", "SetParam");
+        assert_eq!(
+            retention_for_schema(&schema),
+            ControlPlaneRetention::Ephemeral
+        );
+    }
+
+    #[test]
+    fn retention_ping_is_ephemeral() {
+        let schema = test_schema("fcp.ping", "Ping");
+        assert_eq!(
+            retention_for_schema(&schema),
+            ControlPlaneRetention::Ephemeral
+        );
+    }
+
+    #[test]
+    fn retention_heartbeat_is_ephemeral() {
+        let schema = test_schema("fcp.heartbeat", "Beat");
+        assert_eq!(
+            retention_for_schema(&schema),
+            ControlPlaneRetention::Ephemeral
+        );
+    }
+
+    #[test]
+    fn retention_debug_clone_copy_eq_hash() {
+        let r = ControlPlaneRetention::Required;
+        let cloned = r;
+        assert_eq!(r, cloned);
+        let dbg = format!("{r:?}");
+        assert!(dbg.contains("Required"));
+
+        let e = ControlPlaneRetention::Ephemeral;
+        assert_ne!(r, e);
+        let dbg_e = format!("{e:?}");
+        assert!(dbg_e.contains("Ephemeral"));
+    }
+
+    #[test]
+    fn retention_hash_in_hashset() {
+        use std::collections::HashSet;
+        let mut set = HashSet::new();
+        set.insert(ControlPlaneRetention::Required);
+        set.insert(ControlPlaneRetention::Ephemeral);
+        set.insert(ControlPlaneRetention::Required); // duplicate
+        assert_eq!(set.len(), 2);
+    }
+
+    #[test]
+    fn retention_serde_roundtrip() {
+        let r = ControlPlaneRetention::Required;
+        let json = serde_json::to_string(&r).expect("serialize");
+        let back: ControlPlaneRetention = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back, r);
+
+        let e = ControlPlaneRetention::Ephemeral;
+        let json = serde_json::to_string(&e).expect("serialize");
+        let back: ControlPlaneRetention = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back, e);
+    }
+
+    #[test]
+    fn requires_storage_for_all_required_schemas() {
+        let schemas = [
+            "fcp.invoke",
+            "fcp.receipt",
+            "fcp.approval",
+            "fcp.secret",
+            "fcp.revoke",
+            "fcp.audit",
+            "fcp.grant",
+            "fcp.membership",
+        ];
+        for ns in schemas {
+            let schema = test_schema(ns, "Test");
+            assert!(requires_storage(&schema), "schema {ns} should require storage");
+        }
+    }
+
+    #[test]
+    fn requires_storage_false_for_all_ephemeral_schemas() {
+        let schemas = [
+            "fcp.health",
+            "fcp.handshake",
+            "fcp.status",
+            "fcp.introspect",
+            "fcp.configure",
+            "fcp.simulate",
+            "fcp.ping",
+            "fcp.heartbeat",
+        ];
+        for ns in schemas {
+            let schema = test_schema(ns, "Test");
+            assert!(!requires_storage(&schema), "schema {ns} should be ephemeral");
+        }
+    }
+
+    #[test]
+    fn control_plane_object_debug_clone() {
+        let header = ObjectHeader {
+            schema: test_schema("fcp.invoke", "Request"),
+            zone_id: ZoneId::work(),
+            created_at: 1_700_000_000,
+            provenance: Provenance::new(ZoneId::work()),
+            refs: vec![],
+            foreign_refs: vec![],
+            ttl_secs: None,
+            placement: None,
+        };
+        let obj = ControlPlaneObject::new(header, vec![1, 2, 3]);
+        let cloned = obj.clone();
+        assert_eq!(cloned.body, obj.body);
+        let dbg = format!("{obj:?}");
+        assert!(dbg.contains("ControlPlaneObject"));
+    }
+
+    #[test]
+    fn control_plane_object_schema_accessor() {
+        let header = ObjectHeader {
+            schema: test_schema("fcp.audit", "Head"),
+            zone_id: ZoneId::work(),
+            created_at: 0,
+            provenance: Provenance::new(ZoneId::work()),
+            refs: vec![],
+            foreign_refs: vec![],
+            ttl_secs: None,
+            placement: None,
+        };
+        let obj = ControlPlaneObject::new(header, vec![]);
+        assert_eq!(obj.schema().namespace, "fcp.audit");
+        assert_eq!(obj.schema().name, "Head");
+    }
+
+    #[test]
+    fn control_plane_object_empty_body() {
+        let header = ObjectHeader {
+            schema: test_schema("fcp.health", "Empty"),
+            zone_id: ZoneId::work(),
+            created_at: 0,
+            provenance: Provenance::new(ZoneId::work()),
+            refs: vec![],
+            foreign_refs: vec![],
+            ttl_secs: None,
+            placement: None,
+        };
+        let obj = ControlPlaneObject::new(header, vec![]);
+        assert!(obj.body.is_empty());
+        assert_eq!(obj.retention(), ControlPlaneRetention::Ephemeral);
+    }
+
+    #[test]
+    fn control_plane_object_large_body() {
+        let header = ObjectHeader {
+            schema: test_schema("fcp.invoke", "BigPayload"),
+            zone_id: ZoneId::work(),
+            created_at: 0,
+            provenance: Provenance::new(ZoneId::work()),
+            refs: vec![],
+            foreign_refs: vec![],
+            ttl_secs: None,
+            placement: None,
+        };
+        let body = vec![0xAB; 8192];
+        let obj = ControlPlaneObject::new(header, body);
+        assert_eq!(obj.body.len(), 8192);
+        assert_eq!(obj.retention(), ControlPlaneRetention::Required);
+    }
+
+    #[test]
+    fn control_plane_object_derive_id_deterministic() {
+        let header = ObjectHeader {
+            schema: test_schema("fcp.receipt", "Exec"),
+            zone_id: ZoneId::work(),
+            created_at: 1_700_000_000,
+            provenance: Provenance::new(ZoneId::work()),
+            refs: vec![],
+            foreign_refs: vec![],
+            ttl_secs: None,
+            placement: None,
+        };
+        let body = b"determinism check".to_vec();
+        let key = ObjectIdKey::from_bytes([0x42; 32]);
+        let obj = ControlPlaneObject::new(header, body);
+        let id1 = obj.derive_id(&key).expect("derive 1");
+        let id2 = obj.derive_id(&key).expect("derive 2");
+        assert_eq!(id1, id2);
+    }
+
+    #[test]
+    fn control_plane_object_derive_id_differs_with_different_key() {
+        let header = ObjectHeader {
+            schema: test_schema("fcp.receipt", "Exec"),
+            zone_id: ZoneId::work(),
+            created_at: 1_700_000_000,
+            provenance: Provenance::new(ZoneId::work()),
+            refs: vec![],
+            foreign_refs: vec![],
+            ttl_secs: None,
+            placement: None,
+        };
+        let body = b"key diff".to_vec();
+        let key_a = ObjectIdKey::from_bytes([0x11; 32]);
+        let key_b = ObjectIdKey::from_bytes([0x22; 32]);
+        let obj = ControlPlaneObject::new(header, body);
+        let id_a = obj.derive_id(&key_a).expect("derive a");
+        let id_b = obj.derive_id(&key_b).expect("derive b");
+        assert_ne!(id_a, id_b);
+    }
+
+    #[test]
+    fn control_plane_object_derive_id_differs_with_different_body() {
+        let header = ObjectHeader {
+            schema: test_schema("fcp.invoke", "Req"),
+            zone_id: ZoneId::work(),
+            created_at: 1_700_000_000,
+            provenance: Provenance::new(ZoneId::work()),
+            refs: vec![],
+            foreign_refs: vec![],
+            ttl_secs: None,
+            placement: None,
+        };
+        let key = ObjectIdKey::from_bytes([0x33; 32]);
+        let obj_a = ControlPlaneObject::new(header.clone(), vec![1, 2, 3]);
+        let obj_b = ControlPlaneObject::new(header, vec![4, 5, 6]);
+        let id_a = obj_a.derive_id(&key).expect("derive a");
+        let id_b = obj_b.derive_id(&key).expect("derive b");
+        assert_ne!(id_a, id_b);
+    }
+
+    #[test]
+    fn retention_subnamespace_matching() {
+        // fcp.invoke.sub should still match "fcp.invoke" prefix
+        let schema = test_schema("fcp.invoke.sub", "Sub");
+        assert_eq!(
+            retention_for_schema(&schema),
+            ControlPlaneRetention::Required
+        );
+        let schema = test_schema("fcp.health.sub", "Sub");
+        assert_eq!(
+            retention_for_schema(&schema),
+            ControlPlaneRetention::Ephemeral
+        );
+    }
 }

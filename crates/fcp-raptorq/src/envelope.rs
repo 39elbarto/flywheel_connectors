@@ -997,4 +997,204 @@ mod tests {
         );
         assert!(matches!(result, Err(SymbolEnvelopeError::DecryptFailed)));
     }
+
+    // ── Additional envelope tests ─────────────────────────────────────────
+
+    #[test]
+    fn nonce12_max_values() {
+        let nonce = derive_nonce12(u64::MAX, u32::MAX);
+        assert_eq!(&nonce[0..8], &u64::MAX.to_le_bytes());
+        assert_eq!(&nonce[8..12], &u32::MAX.to_le_bytes());
+    }
+
+    #[test]
+    fn nonce24_max_values() {
+        let nonce = derive_nonce24(u64::MAX, u64::MAX, u32::MAX);
+        assert_eq!(&nonce[0..8], &u64::MAX.to_le_bytes());
+        assert_eq!(&nonce[8..16], &u64::MAX.to_le_bytes());
+        assert_eq!(&nonce[16..20], &u32::MAX.to_le_bytes());
+        assert_eq!(&nonce[20..24], &0u32.to_le_bytes());
+    }
+
+    #[test]
+    fn nonce12_deterministic() {
+        let n1 = derive_nonce12(42, 7);
+        let n2 = derive_nonce12(42, 7);
+        assert_eq!(n1, n2);
+    }
+
+    #[test]
+    fn nonce24_deterministic() {
+        let n1 = derive_nonce24(100, 42, 7);
+        let n2 = derive_nonce24(100, 42, 7);
+        assert_eq!(n1, n2);
+    }
+
+    #[test]
+    fn aad_changes_with_object_id() {
+        let e1 = test_envelope();
+        let mut e2 = test_envelope();
+        e2.object_id = ObjectId::from_bytes([0x22; 32]);
+        assert_ne!(build_symbol_aad(&e1), build_symbol_aad(&e2));
+    }
+
+    #[test]
+    fn aad_changes_with_zone_key_id() {
+        let e1 = test_envelope();
+        let mut e2 = test_envelope();
+        e2.zone_key_id = ZoneKeyId::from_bytes([0x44; 8]);
+        assert_ne!(build_symbol_aad(&e1), build_symbol_aad(&e2));
+    }
+
+    #[test]
+    fn aad_same_envelope_same_aad() {
+        let envelope = test_envelope();
+        let a1 = build_symbol_aad(&envelope);
+        let a2 = build_symbol_aad(&envelope);
+        assert_eq!(a1, a2);
+    }
+
+    #[test]
+    fn envelope_clone_preserves_all_fields() {
+        let zone_key = ZoneKey::from_bytes([0xEE; 32]);
+        let base = test_envelope();
+        let encrypted = SymbolEnvelope::encrypt(
+            base.object_id,
+            base.esi,
+            base.k,
+            b"clone test data",
+            base.zone_id.clone(),
+            base.zone_key_id,
+            base.epoch_id,
+            base.source_id.clone(),
+            base.sender_instance_id,
+            base.frame_seq,
+            &zone_key,
+            ZoneKeyAlgorithm::ChaCha20Poly1305,
+        )
+        .unwrap();
+
+        let cloned = encrypted.clone();
+        assert_eq!(cloned.object_id, encrypted.object_id);
+        assert_eq!(cloned.esi, encrypted.esi);
+        assert_eq!(cloned.k, encrypted.k);
+        assert_eq!(cloned.data, encrypted.data);
+        assert_eq!(cloned.zone_key_id, encrypted.zone_key_id);
+        assert_eq!(cloned.epoch_id, encrypted.epoch_id);
+        assert_eq!(cloned.sender_instance_id, encrypted.sender_instance_id);
+        assert_eq!(cloned.frame_seq, encrypted.frame_seq);
+        assert_eq!(cloned.auth_tag, encrypted.auth_tag);
+    }
+
+    #[test]
+    fn sender_subkey_with_empty_node_id() {
+        let zone_key = ZoneKey::from_bytes([0xAA; 32]);
+        let zone_key_id = ZoneKeyId::from_bytes([0x33; 8]);
+        let node_id = NodeId::new("");
+
+        let k1 = derive_sender_subkey(&zone_key, &zone_key_id, &node_id, 1);
+        let k2 = derive_sender_subkey(&zone_key, &zone_key_id, &node_id, 1);
+        assert_eq!(k1.as_bytes(), k2.as_bytes());
+    }
+
+    #[test]
+    fn sender_subkey_zero_instance_id() {
+        let zone_key = ZoneKey::from_bytes([0xAA; 32]);
+        let zone_key_id = ZoneKeyId::from_bytes([0x33; 8]);
+        let node_id = NodeId::new("node-test");
+
+        let k = derive_sender_subkey(&zone_key, &zone_key_id, &node_id, 0);
+        assert!(!k.as_bytes().iter().all(|&b| b == 0));
+    }
+
+    #[test]
+    fn sender_subkey_max_instance_id() {
+        let zone_key = ZoneKey::from_bytes([0xAA; 32]);
+        let zone_key_id = ZoneKeyId::from_bytes([0x33; 8]);
+        let node_id = NodeId::new("node-test");
+
+        let k = derive_sender_subkey(&zone_key, &zone_key_id, &node_id, u64::MAX);
+        assert!(!k.as_bytes().iter().all(|&b| b == 0));
+    }
+
+    #[test]
+    fn envelope_error_debug_format() {
+        let e = SymbolEnvelopeError::EncryptFailed;
+        let debug = format!("{e:?}");
+        assert!(debug.contains("EncryptFailed"));
+
+        let e = SymbolEnvelopeError::DecryptFailed;
+        let debug = format!("{e:?}");
+        assert!(debug.contains("DecryptFailed"));
+    }
+
+    #[test]
+    fn tampered_k_causes_decrypt_failure() {
+        let zone_key = ZoneKey::from_bytes([0xAA; 32]);
+        let base = test_envelope();
+        let mut encrypted = SymbolEnvelope::encrypt(
+            base.object_id,
+            base.esi,
+            base.k,
+            b"k tamper test",
+            base.zone_id.clone(),
+            base.zone_key_id,
+            base.epoch_id,
+            base.source_id.clone(),
+            base.sender_instance_id,
+            base.frame_seq,
+            &zone_key,
+            ZoneKeyAlgorithm::ChaCha20Poly1305,
+        )
+        .unwrap();
+
+        encrypted.k = 999; // tamper with AAD-bound field
+        let result = encrypted.decrypt(
+            &zone_key,
+            ZoneKeyAlgorithm::ChaCha20Poly1305,
+            encrypted.zone_key_id,
+        );
+        assert!(matches!(result, Err(SymbolEnvelopeError::DecryptFailed)));
+    }
+
+    #[test]
+    fn different_frame_seq_produces_different_ciphertext() {
+        let zone_key = ZoneKey::from_bytes([0xAA; 32]);
+        let base = test_envelope();
+        let plaintext = b"frame seq test";
+
+        let enc1 = SymbolEnvelope::encrypt(
+            base.object_id,
+            base.esi,
+            base.k,
+            plaintext,
+            base.zone_id.clone(),
+            base.zone_key_id,
+            base.epoch_id,
+            base.source_id.clone(),
+            base.sender_instance_id,
+            1, // frame_seq = 1
+            &zone_key,
+            ZoneKeyAlgorithm::ChaCha20Poly1305,
+        )
+        .unwrap();
+
+        let enc2 = SymbolEnvelope::encrypt(
+            base.object_id,
+            base.esi,
+            base.k,
+            plaintext,
+            base.zone_id.clone(),
+            base.zone_key_id,
+            base.epoch_id,
+            base.source_id.clone(),
+            base.sender_instance_id,
+            2, // frame_seq = 2
+            &zone_key,
+            ZoneKeyAlgorithm::ChaCha20Poly1305,
+        )
+        .unwrap();
+
+        assert_ne!(enc1.data, enc2.data);
+    }
 }

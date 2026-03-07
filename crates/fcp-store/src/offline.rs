@@ -2564,4 +2564,148 @@ mod tests {
             },
         );
     }
+
+    // --- OfflineAccess additional tests ---
+
+    #[test]
+    fn offline_access_set_local_symbols() {
+        let id = ObjectId::from_bytes([1; 32]);
+        let mut access = OfflineAccess::new(id, 10, 20, 64);
+        assert_eq!(access.local_symbols, 0);
+        access.set_local_symbols(7);
+        assert_eq!(access.local_symbols, 7);
+        assert!(!access.can_access());
+        access.set_local_symbols(10);
+        assert!(access.can_access());
+    }
+
+    #[test]
+    fn offline_access_add_remove_saturating() {
+        let id = ObjectId::from_bytes([2; 32]);
+        let mut access = OfflineAccess::new(id, 10, 20, 64);
+        access.add_symbols(5);
+        assert_eq!(access.local_symbols, 5);
+        access.remove_symbols(100); // Should saturate to 0
+        assert_eq!(access.local_symbols, 0);
+    }
+
+    #[test]
+    fn offline_access_coverage_k_zero() {
+        let id = ObjectId::from_bytes([3; 32]);
+        let access = OfflineAccess::new(id, 0, 0, 64);
+        assert_eq!(access.coverage_bps(), 0);
+        assert!(access.coverage() < f64::EPSILON);
+    }
+
+    #[test]
+    fn offline_access_bytes_needed_zero_when_full() {
+        let id = ObjectId::from_bytes([4; 32]);
+        let mut access = OfflineAccess::new(id, 10, 20, 64);
+        access.set_local_symbols(10);
+        assert_eq!(access.bytes_needed(), 0);
+    }
+
+    #[test]
+    fn offline_access_debug() {
+        let access = OfflineAccess::new(ObjectId::from_bytes([5; 32]), 10, 20, 64);
+        let dbg = format!("{access:?}");
+        assert!(dbg.contains("OfflineAccess"));
+    }
+
+    #[test]
+    fn offline_access_clone_preserves_fields() {
+        let id = ObjectId::from_bytes([6; 32]);
+        let access = OfflineAccess::new(id, 10, 20, 64);
+        let cloned = access.clone();
+        assert_eq!(access.k, cloned.k);
+        assert_eq!(access.n, cloned.n);
+    }
+
+    // --- OfflineStatus additional tests ---
+
+    #[test]
+    fn offline_status_debug() {
+        let s = OfflineStatus::Available;
+        let dbg = format!("{s:?}");
+        assert!(dbg.contains("Available"));
+    }
+
+    #[test]
+    fn offline_status_clone_copy_eq() {
+        let a = OfflineStatus::Partial;
+        let b = a;
+        assert_eq!(a, b);
+    }
+
+    // --- OfflineSummary tests ---
+
+    #[test]
+    fn offline_summary_serde_json_roundtrip() {
+        let summary = OfflineSummary {
+            total_objects: 10,
+            available_objects: 5,
+            partial_objects: 3,
+            not_cached_objects: 2,
+            readiness_bps: 5000,
+            bytes_needed: 1024,
+        };
+        let json = serde_json::to_string(&summary).unwrap();
+        let rt: OfflineSummary = serde_json::from_str(&json).unwrap();
+        assert_eq!(rt.total_objects, 10);
+        assert_eq!(rt.available_objects, 5);
+        assert_eq!(rt.readiness_bps, 5000);
+    }
+
+    #[test]
+    fn offline_summary_debug() {
+        let summary = OfflineSummary {
+            total_objects: 0,
+            available_objects: 0,
+            partial_objects: 0,
+            not_cached_objects: 0,
+            readiness_bps: 0,
+            bytes_needed: 0,
+        };
+        let dbg = format!("{summary:?}");
+        assert!(dbg.contains("OfflineSummary"));
+    }
+
+    #[test]
+    fn offline_summary_clone_preserves_fields() {
+        let summary = OfflineSummary {
+            total_objects: 3,
+            available_objects: 1,
+            partial_objects: 1,
+            not_cached_objects: 1,
+            readiness_bps: 3333,
+            bytes_needed: 512,
+        };
+        let cloned = summary.clone();
+        assert_eq!(summary.total_objects, cloned.total_objects);
+    }
+
+    // --- AccessPatternTracker tests ---
+
+    #[test]
+    fn access_pattern_tracker_default() {
+        let tracker = AccessPatternTracker::default();
+        assert_eq!(tracker.tracked_count(), 0);
+    }
+
+    #[test]
+    fn access_pattern_tracker_debug() {
+        let tracker = AccessPatternTracker::new();
+        let dbg = format!("{tracker:?}");
+        assert!(dbg.contains("AccessPatternTracker"));
+    }
+
+    #[test]
+    fn access_pattern_tracker_clear_removes_all() {
+        let mut tracker = AccessPatternTracker::new();
+        let id = ObjectId::from_bytes([1; 32]);
+        tracker.record_access(id);
+        assert_eq!(tracker.tracked_count(), 1);
+        tracker.clear();
+        assert_eq!(tracker.tracked_count(), 0);
+    }
 }

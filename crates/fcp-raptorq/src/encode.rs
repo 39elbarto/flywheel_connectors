@@ -742,4 +742,149 @@ mod tests {
             );
         }
     }
+
+    // ── Additional encoding tests ─────────────────────────────────────────
+
+    #[test]
+    fn encoding_decision_direct_empty_has_oti() {
+        let config = test_config();
+        let decision = EncodingDecision::for_payload(&[], &config).unwrap();
+        if let EncodingDecision::Direct {
+            symbols,
+            transmission_info,
+        } = decision
+        {
+            assert!(symbols.is_empty());
+            assert_eq!(transmission_info.transfer_length(), 0);
+            assert_eq!(transmission_info.symbol_size(), 64);
+            assert_eq!(transmission_info.source_blocks(), 1);
+            assert_eq!(transmission_info.sub_blocks(), 1);
+            assert_eq!(transmission_info.symbol_alignment(), 8);
+        } else {
+            panic!("expected Direct decision for empty payload");
+        }
+    }
+
+    #[test]
+    fn encoding_decision_chunked_has_correct_chunk_count() {
+        let config = test_config(); // chunk_size = 256, threshold = 1024
+        let payload = vec![42u8; 3000];
+        let decision = EncodingDecision::for_payload(&payload, &config).unwrap();
+        if let EncodingDecision::Chunked { manifest, chunks } = decision {
+            // 3000 / 256 = 11.71 -> 12 chunks
+            assert_eq!(manifest.chunk_count(), 12);
+            assert_eq!(chunks.len(), 12);
+        } else {
+            panic!("expected Chunked decision");
+        }
+    }
+
+    #[test]
+    fn encoding_decision_at_max_object_size() {
+        let config = RaptorQConfig {
+            symbol_size: 64,
+            repair_ratio_bps: 500,
+            max_object_size: 2048,
+            decode_timeout: std::time::Duration::from_secs(30),
+            max_chunk_threshold: 4096, // above max_object_size
+            chunk_size: 256,
+        };
+        let payload = vec![42u8; 2048];
+        let decision = EncodingDecision::for_payload(&payload, &config).unwrap();
+        assert!(decision.is_direct());
+    }
+
+    #[test]
+    fn encoding_decision_over_max_object_size() {
+        let config = RaptorQConfig {
+            symbol_size: 64,
+            repair_ratio_bps: 500,
+            max_object_size: 2048,
+            decode_timeout: std::time::Duration::from_secs(30),
+            max_chunk_threshold: 4096,
+            chunk_size: 256,
+        };
+        let payload = vec![42u8; 2049];
+        let result = EncodingDecision::for_payload(&payload, &config);
+        assert!(matches!(result, Err(EncodeError::PayloadTooLarge { .. })));
+    }
+
+    #[test]
+    fn encoder_encode_all_esis_are_valid() {
+        let config = test_config();
+        let payload = vec![42u8; 640]; // 10 source symbols
+        let encoder = RaptorQEncoder::new(&payload, &config).unwrap();
+        let all = encoder.encode_all();
+
+        // Source ESIs are 0..K
+        let k = encoder.source_symbols();
+        for (esi, _) in &all[..k as usize] {
+            assert!(*esi < k, "source ESI {esi} should be < K={k}");
+        }
+    }
+
+    #[test]
+    fn encoder_symbol_sizes_are_consistent() {
+        let config = test_config();
+        let payload = vec![42u8; 512];
+        let encoder = RaptorQEncoder::new(&payload, &config).unwrap();
+        let all = encoder.encode_all();
+
+        for (esi, data) in &all {
+            assert_eq!(
+                data.len(),
+                usize::from(encoder.symbol_size()),
+                "symbol {esi} has wrong size"
+            );
+        }
+    }
+
+    #[test]
+    fn encoding_decision_clone_direct() {
+        let config = test_config();
+        let decision = EncodingDecision::for_payload(&[42u8; 100], &config).unwrap();
+        let cloned = decision.clone();
+        assert!(decision.is_direct());
+        assert!(cloned.is_direct());
+    }
+
+    #[test]
+    fn encoding_decision_clone_chunked() {
+        let config = test_config();
+        let decision = EncodingDecision::for_payload(&[42u8; 2048], &config).unwrap();
+        let cloned = decision.clone();
+        assert!(decision.is_chunked());
+        assert!(cloned.is_chunked());
+    }
+
+    #[test]
+    fn encoder_two_symbol_payload() {
+        let config = test_config(); // symbol_size = 64
+        let payload = vec![0xAB; 128]; // exactly 2 symbols
+        let encoder = RaptorQEncoder::new(&payload, &config).unwrap();
+        assert_eq!(encoder.source_symbols(), 2);
+        assert_eq!(encoder.payload_len(), 128);
+
+        let source = encoder.encode_source();
+        assert_eq!(source.len(), 2);
+        assert_eq!(source[0].0, 0);
+        assert_eq!(source[1].0, 1);
+    }
+
+    #[test]
+    fn encoder_three_symbol_boundary() {
+        let config = test_config(); // symbol_size = 64
+        let payload = vec![0xCD; 129]; // 3 symbols (ceil 129/64)
+        let encoder = RaptorQEncoder::new(&payload, &config).unwrap();
+        assert_eq!(encoder.source_symbols(), 3);
+
+        let source = encoder.encode_source();
+        assert_eq!(source.len(), 3);
+        // Last symbol should be zero-padded
+        // 129 - 128 = 1 real byte in last symbol
+        assert_eq!(source[2].1[0], 0xCD);
+        for &byte in &source[2].1[1..] {
+            assert_eq!(byte, 0, "expected zero padding");
+        }
+    }
 }

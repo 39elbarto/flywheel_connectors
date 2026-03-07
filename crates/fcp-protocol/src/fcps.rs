@@ -2553,4 +2553,370 @@ mod tests {
         request.validate_hint_bounds().expect("no hint ok");
         request.validate_bounds(true).expect("authenticated ok");
     }
+
+    // ── Batch 4: SunnyMoose deep-coverage expansion ──
+
+    #[test]
+    fn header_encode_decode_preserves_object_id() {
+        let header = FcpsFrameHeader {
+            version: FCPS_VERSION,
+            flags: FrameFlags::default(),
+            symbol_count: 0,
+            total_payload_len: 0,
+            object_id: ObjectId::from_bytes([0xAB; 32]),
+            symbol_size: 128,
+            zone_key_id: ZoneKeyId::from_bytes([0xCD; 8]),
+            zone_id_hash: ZoneIdHash::from_bytes([0xEF; 32]),
+            epoch_id: 0xDEAD_BEEF,
+            sender_instance_id: 0xCAFE_BABE,
+            frame_seq: 42,
+        };
+        let decoded = FcpsFrameHeader::decode(&header.encode()).expect("decode");
+        assert_eq!(decoded.object_id, header.object_id);
+        assert_eq!(decoded.zone_key_id, header.zone_key_id);
+        assert_eq!(decoded.zone_id_hash, header.zone_id_hash);
+    }
+
+    #[test]
+    fn frame_encode_decode_with_different_symbol_sizes() {
+        for sym_size in [16u16, 32, 128, 256, 512, 1024] {
+            let record_overhead = SYMBOL_RECORD_OVERHEAD + sym_size as usize;
+            let header = FcpsFrameHeader {
+                version: FCPS_VERSION,
+                flags: FrameFlags::default(),
+                symbol_count: 1,
+                total_payload_len: u32::try_from(record_overhead).unwrap(),
+                object_id: ObjectId::from_bytes([0x11; 32]),
+                symbol_size: sym_size,
+                zone_key_id: ZoneKeyId::from_bytes([0x22; 8]),
+                zone_id_hash: ZoneIdHash::from_bytes([0x33; 32]),
+                epoch_id: 1,
+                sender_instance_id: 1,
+                frame_seq: 1,
+            };
+            let symbols = vec![test_symbol(0, sym_size)];
+            let frame = FcpsFrame { header, symbols };
+            let encoded = frame.encode();
+            let decoded = FcpsFrame::decode(&encoded, 100_000).expect("decode");
+            assert_eq!(decoded.symbols.len(), 1);
+            assert_eq!(decoded.symbols[0].data.len(), sym_size as usize);
+        }
+    }
+
+    #[test]
+    fn symbol_record_esi_zero_roundtrip() {
+        let record = SymbolRecord {
+            esi: 0,
+            k: 0,
+            data: vec![0; 8],
+            auth_tag: [0; 16],
+        };
+        let encoded = record.encode();
+        let decoded = SymbolRecord::decode(&encoded, 8).expect("decode");
+        assert_eq!(decoded.esi, 0);
+        assert_eq!(decoded.k, 0);
+    }
+
+    #[test]
+    fn symbol_record_clone_eq() {
+        let record = test_symbol(42, 64);
+        let cloned = record.clone();
+        assert_eq!(record, cloned);
+    }
+
+    #[test]
+    fn frame_flags_debug_format() {
+        let flags = FrameFlags::ENCRYPTED | FrameFlags::RAPTORQ;
+        let dbg = format!("{flags:?}");
+        assert!(dbg.contains("ENCRYPTED"));
+        assert!(dbg.contains("RAPTORQ"));
+    }
+
+    #[test]
+    fn frame_header_debug_format() {
+        let header = test_header();
+        let dbg = format!("{header:?}");
+        assert!(dbg.contains("FcpsFrameHeader"));
+    }
+
+    #[test]
+    fn symbol_record_debug_format() {
+        let record = test_symbol(5, 64);
+        let dbg = format!("{record:?}");
+        assert!(dbg.contains("SymbolRecord"));
+    }
+
+    #[test]
+    fn frame_debug_format() {
+        let header = test_header();
+        let symbols = vec![test_symbol(0, 64), test_symbol(1, 64)];
+        let frame = FcpsFrame { header, symbols };
+        let dbg = format!("{frame:?}");
+        assert!(dbg.contains("FcpsFrame"));
+    }
+
+    #[test]
+    fn signed_frame_debug_format() {
+        let signing_key = Ed25519SigningKey::generate();
+        let header = test_header();
+        let symbols = vec![test_symbol(0, 64), test_symbol(1, 64)];
+        let frame = FcpsFrame { header, symbols };
+        let signed = SignedFcpsFrame::new(
+            frame,
+            TailscaleNodeId::new("dbg-node"),
+            1000,
+            &signing_key,
+        );
+        let dbg = format!("{signed:?}");
+        assert!(dbg.contains("SignedFcpsFrame"));
+    }
+
+    #[test]
+    fn decode_status_complete_flag_in_transcript() {
+        let zone_id: ZoneId = "z:comp".parse().unwrap();
+        let status_true = DecodeStatus {
+            header: make_test_object_header(),
+            object_id: ObjectId::from_bytes([0; 32]),
+            zone_id: zone_id.clone(),
+            zone_key_id: ZoneKeyId::from_bytes([0; 8]),
+            epoch_id: 1,
+            received_unique: 10,
+            needed: 10,
+            complete: true,
+            missing_hint: None,
+            signature: Ed25519Signature::from_bytes(&[0; 64]),
+        };
+        let status_false = DecodeStatus {
+            header: make_test_object_header(),
+            object_id: ObjectId::from_bytes([0; 32]),
+            zone_id,
+            zone_key_id: ZoneKeyId::from_bytes([0; 8]),
+            epoch_id: 1,
+            received_unique: 10,
+            needed: 10,
+            complete: false,
+            missing_hint: None,
+            signature: Ed25519Signature::from_bytes(&[0; 64]),
+        };
+        assert_ne!(
+            status_true.transcript_bytes(),
+            status_false.transcript_bytes()
+        );
+    }
+
+    #[test]
+    fn symbol_ack_different_reasons_different_transcripts() {
+        let zone_id: ZoneId = "z:ack-diff".parse().unwrap();
+        let ack_complete = SymbolAck::new(
+            make_test_object_header(),
+            ObjectId::from_bytes([0; 32]),
+            zone_id.clone(),
+            ZoneKeyId::from_bytes([0; 8]),
+            1,
+            SymbolAckReason::Complete,
+            100,
+        );
+        let ack_cancelled = SymbolAck::new(
+            make_test_object_header(),
+            ObjectId::from_bytes([0; 32]),
+            zone_id,
+            ZoneKeyId::from_bytes([0; 8]),
+            1,
+            SymbolAckReason::Cancelled,
+            100,
+        );
+        assert_ne!(
+            ack_complete.transcript_bytes(),
+            ack_cancelled.transcript_bytes()
+        );
+    }
+
+    #[test]
+    fn symbol_ack_different_final_count_different_transcripts() {
+        let zone_id: ZoneId = "z:ack-cnt".parse().unwrap();
+        let ack_a = SymbolAck::new(
+            make_test_object_header(),
+            ObjectId::from_bytes([0; 32]),
+            zone_id.clone(),
+            ZoneKeyId::from_bytes([0; 8]),
+            1,
+            SymbolAckReason::Complete,
+            100,
+        );
+        let ack_b = SymbolAck::new(
+            make_test_object_header(),
+            ObjectId::from_bytes([0; 32]),
+            zone_id,
+            ZoneKeyId::from_bytes([0; 8]),
+            1,
+            SymbolAckReason::Complete,
+            200,
+        );
+        assert_ne!(ack_a.transcript_bytes(), ack_b.transcript_bytes());
+    }
+
+    #[test]
+    fn symbol_request_transcript_deterministic() {
+        let zone_id: ZoneId = "z:req-det".parse().unwrap();
+        let request = SymbolRequest::new(
+            make_test_object_header(),
+            ObjectId::from_bytes([0x55; 32]),
+            zone_id,
+            ZoneKeyId::from_bytes([0x66; 8]),
+            42,
+            100,
+            50,
+        )
+        .with_missing_hint(vec![1, 2, 3]);
+        assert_eq!(request.transcript_bytes(), request.transcript_bytes());
+    }
+
+    #[test]
+    fn symbol_request_different_max_symbols_different_transcripts() {
+        let zone_id: ZoneId = "z:req-max".parse().unwrap();
+        let a = SymbolRequest::new(
+            make_test_object_header(),
+            ObjectId::from_bytes([0; 32]),
+            zone_id.clone(),
+            ZoneKeyId::from_bytes([0; 8]),
+            1,
+            10,
+            0,
+        );
+        let b = SymbolRequest::new(
+            make_test_object_header(),
+            ObjectId::from_bytes([0; 32]),
+            zone_id,
+            ZoneKeyId::from_bytes([0; 8]),
+            1,
+            20,
+            0,
+        );
+        assert_ne!(a.transcript_bytes(), b.transcript_bytes());
+    }
+
+    #[test]
+    fn symbol_ack_reason_copy_clone() {
+        let reason = SymbolAckReason::Duplicate;
+        let copy = reason;
+        let cloned = reason;
+        assert_eq!(copy, cloned);
+        assert_eq!(copy, SymbolAckReason::Duplicate);
+    }
+
+    #[test]
+    fn decode_status_serde_roundtrip() {
+        let signing_key = Ed25519SigningKey::generate();
+        let zone_id: ZoneId = "z:serde".parse().unwrap();
+        let mut status = DecodeStatus {
+            header: make_test_object_header(),
+            object_id: ObjectId::from_bytes([0x11; 32]),
+            zone_id,
+            zone_key_id: ZoneKeyId::from_bytes([0x22; 8]),
+            epoch_id: 42,
+            received_unique: 100,
+            needed: 200,
+            complete: false,
+            missing_hint: Some(vec![5, 10]),
+            signature: Ed25519Signature::from_bytes(&[0; 64]),
+        };
+        status.sign(&signing_key);
+
+        let json = serde_json::to_string(&status).expect("serialize");
+        let back: DecodeStatus = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back.epoch_id, 42);
+        assert_eq!(back.received_unique, 100);
+        assert_eq!(back.needed, 200);
+        assert!(!back.complete);
+        assert_eq!(back.missing_hint, Some(vec![5, 10]));
+    }
+
+    #[test]
+    fn symbol_ack_serde_roundtrip() {
+        let signing_key = Ed25519SigningKey::generate();
+        let zone_id: ZoneId = "z:ack-serde".parse().unwrap();
+        let mut ack = SymbolAck::new(
+            make_test_object_header(),
+            ObjectId::from_bytes([0x33; 32]),
+            zone_id,
+            ZoneKeyId::from_bytes([0x44; 8]),
+            99,
+            SymbolAckReason::BudgetExceeded,
+            300,
+        );
+        ack.sign(&signing_key);
+
+        let json = serde_json::to_string(&ack).expect("serialize");
+        let back: SymbolAck = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back.epoch_id, 99);
+        assert_eq!(back.reason, SymbolAckReason::BudgetExceeded);
+        assert_eq!(back.final_symbol_count, 300);
+    }
+
+    #[test]
+    fn symbol_request_serde_roundtrip() {
+        let signing_key = Ed25519SigningKey::generate();
+        let zone_id: ZoneId = "z:req-serde".parse().unwrap();
+        let mut request = SymbolRequest::new(
+            make_test_object_header(),
+            ObjectId::from_bytes([0x55; 32]),
+            zone_id,
+            ZoneKeyId::from_bytes([0x66; 8]),
+            77,
+            50,
+            25,
+        )
+        .with_missing_hint(vec![1, 2, 3]);
+        request.sign(&signing_key);
+
+        let json = serde_json::to_string(&request).expect("serialize");
+        let back: SymbolRequest = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back.epoch_id, 77);
+        assert_eq!(back.max_symbols, 50);
+        assert_eq!(back.current_symbols, 25);
+        assert_eq!(back.missing_hint, Some(vec![1, 2, 3]));
+    }
+
+    #[test]
+    fn frame_error_debug_all_variants() {
+        let variants: Vec<FrameError> = vec![
+            FrameError::TooShort { len: 0, min: 114 },
+            FrameError::ExceedsMtu {
+                len: 2000,
+                max: 1200,
+            },
+            FrameError::InvalidMagic { got: [0; 4] },
+            FrameError::UnsupportedVersion { version: 99 },
+            FrameError::LengthMismatch {
+                claimed: 100,
+                computed: 200,
+            },
+            FrameError::FrameSizeMismatch,
+            FrameError::SymbolCountOverflow,
+            FrameError::InvalidSymbolSize,
+            FrameError::InvalidUtf8,
+        ];
+        for err in &variants {
+            let dbg = format!("{err:?}");
+            assert!(!dbg.is_empty());
+        }
+    }
+
+    #[test]
+    fn signed_frame_clone() {
+        let signing_key = Ed25519SigningKey::generate();
+        let header = test_header();
+        let symbols = vec![test_symbol(0, 64), test_symbol(1, 64)];
+        let frame = FcpsFrame { header, symbols };
+        let signed = SignedFcpsFrame::new(
+            frame,
+            TailscaleNodeId::new("clone-test"),
+            1000,
+            &signing_key,
+        );
+        let cloned = signed.clone();
+        assert_eq!(cloned.timestamp, signed.timestamp);
+        assert_eq!(cloned.source_id.as_str(), signed.source_id.as_str());
+        assert_eq!(cloned.frame.symbols.len(), signed.frame.symbols.len());
+    }
 }

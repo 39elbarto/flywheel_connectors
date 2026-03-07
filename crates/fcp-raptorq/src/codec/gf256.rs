@@ -1064,4 +1064,111 @@ mod tests {
             }
         }
     }
+
+    // ── Additional GF(256) tests ──────────────────────────────────────────
+
+    #[test]
+    fn gf256_new_and_raw_roundtrip() {
+        for val in [0u8, 1, 127, 128, 255] {
+            let elem = Gf256::new(val);
+            assert_eq!(elem.raw(), val);
+        }
+    }
+
+    #[test]
+    fn gf256_is_zero() {
+        assert!(Gf256::ZERO.is_zero());
+        assert!(!Gf256::ONE.is_zero());
+        assert!(!Gf256::ALPHA.is_zero());
+        assert!(!Gf256(255).is_zero());
+    }
+
+    #[test]
+    fn gf256_sub_is_same_as_add() {
+        for a in (0u8..=255).step_by(7) {
+            for b in (0u8..=255).step_by(11) {
+                let fa = Gf256(a);
+                let fb = Gf256(b);
+                assert_eq!(fa.sub(fb), fa.add(fb));
+                assert_eq!(fa - fb, fa + fb);
+            }
+        }
+    }
+
+    #[test]
+    fn gf256_pow_zero_base() {
+        assert_eq!(Gf256::ZERO.pow(0), Gf256::ONE);
+        assert_eq!(Gf256::ZERO.pow(1), Gf256::ZERO);
+        assert_eq!(Gf256::ZERO.pow(255), Gf256::ZERO);
+    }
+
+    #[test]
+    fn gf256_pow_one_base() {
+        for exp in [0u8, 1, 10, 100, 255] {
+            assert_eq!(Gf256::ONE.pow(exp), Gf256::ONE);
+        }
+    }
+
+    #[test]
+    fn gf256_alpha_is_two() {
+        assert_eq!(Gf256::ALPHA.raw(), 2);
+    }
+
+    #[test]
+    fn add_assign_works() {
+        let mut a = Gf256(0xF0);
+        a += Gf256(0x0F);
+        assert_eq!(a, Gf256(0xFF));
+    }
+
+    #[test]
+    fn mul_assign_works() {
+        let mut a = Gf256(3);
+        let b = Gf256(7);
+        let expected = Gf256(3).mul_field(Gf256(7));
+        a *= b;
+        assert_eq!(a, expected);
+    }
+
+    #[test]
+    fn add_slice_empty() {
+        let mut dst: Vec<u8> = vec![];
+        let src: Vec<u8> = vec![];
+        gf256_add_slice(&mut dst, &src);
+        assert!(dst.is_empty());
+    }
+
+    #[test]
+    fn mul_slice_empty() {
+        let mut dst: Vec<u8> = vec![];
+        gf256_mul_slice(&mut dst, Gf256(42));
+        assert!(dst.is_empty());
+    }
+
+    #[test]
+    fn addmul_slice_by_one_is_add() {
+        let src = vec![10u8, 20, 30, 40, 50];
+        let mut dst_addmul = vec![1u8, 2, 3, 4, 5];
+        let mut dst_add = dst_addmul.clone();
+        gf256_addmul_slice(&mut dst_addmul, &src, Gf256::ONE);
+        gf256_add_slice(&mut dst_add, &src);
+        assert_eq!(dst_addmul, dst_add);
+    }
+
+    #[test]
+    fn addmul_slice_by_zero_is_noop() {
+        let src = vec![10u8, 20, 30];
+        let original = vec![1u8, 2, 3];
+        let mut dst = original.clone();
+        gf256_addmul_slice(&mut dst, &src, Gf256::ZERO);
+        assert_eq!(dst, original);
+    }
+
+    #[test]
+    fn add_slice_self_xor_is_zero() {
+        let data = vec![42u8, 100, 255, 0, 1];
+        let mut dst = data.clone();
+        gf256_add_slice(&mut dst, &data);
+        assert_eq!(dst, vec![0u8; 5]);
+    }
 }

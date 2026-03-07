@@ -2257,4 +2257,199 @@ mod tests {
             }
         });
     }
+
+    // --- ObjectTransmissionInfo tests ---
+
+    #[test]
+    fn oti_debug() {
+        let oti = ObjectTransmissionInfo {
+            transfer_length: 1024,
+            symbol_size: 64,
+            source_blocks: 1,
+            sub_blocks: 1,
+            alignment: 8,
+        };
+        let dbg = format!("{oti:?}");
+        assert!(dbg.contains("ObjectTransmissionInfo"));
+        assert!(dbg.contains("1024"));
+    }
+
+    #[test]
+    fn oti_clone_and_copy() {
+        let oti = ObjectTransmissionInfo {
+            transfer_length: 2048,
+            symbol_size: 128,
+            source_blocks: 2,
+            sub_blocks: 1,
+            alignment: 4,
+        };
+        let copied = oti;
+        assert_eq!(oti, copied);
+    }
+
+    #[test]
+    fn oti_eq() {
+        let a = ObjectTransmissionInfo {
+            transfer_length: 512,
+            symbol_size: 32,
+            source_blocks: 1,
+            sub_blocks: 1,
+            alignment: 8,
+        };
+        let b = ObjectTransmissionInfo {
+            transfer_length: 512,
+            symbol_size: 32,
+            source_blocks: 1,
+            sub_blocks: 1,
+            alignment: 8,
+        };
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn oti_ne() {
+        let a = ObjectTransmissionInfo {
+            transfer_length: 512,
+            symbol_size: 32,
+            source_blocks: 1,
+            sub_blocks: 1,
+            alignment: 8,
+        };
+        let b = ObjectTransmissionInfo {
+            transfer_length: 1024,
+            symbol_size: 32,
+            source_blocks: 1,
+            sub_blocks: 1,
+            alignment: 8,
+        };
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn oti_serde_json_roundtrip() {
+        let oti = ObjectTransmissionInfo {
+            transfer_length: 4096,
+            symbol_size: 256,
+            source_blocks: 4,
+            sub_blocks: 2,
+            alignment: 16,
+        };
+        let json = serde_json::to_string(&oti).unwrap();
+        let rt: ObjectTransmissionInfo = serde_json::from_str(&json).unwrap();
+        assert_eq!(rt, oti);
+    }
+
+    // --- SymbolMeta tests ---
+
+    #[test]
+    fn symbol_meta_debug() {
+        let meta = SymbolMeta {
+            object_id: test_object_id(),
+            esi: 42,
+            zone_id: test_zone(),
+            source_node: Some(7),
+            stored_at: 999,
+        };
+        let dbg = format!("{meta:?}");
+        assert!(dbg.contains("SymbolMeta"));
+        assert!(dbg.contains("42"));
+    }
+
+    #[test]
+    fn symbol_meta_clone() {
+        let meta = SymbolMeta {
+            object_id: test_object_id(),
+            esi: 10,
+            zone_id: test_zone(),
+            source_node: None,
+            stored_at: 500,
+        };
+        let cloned = meta.clone();
+        assert_eq!(meta.esi, cloned.esi);
+        assert_eq!(meta.stored_at, cloned.stored_at);
+    }
+
+    #[test]
+    fn symbol_meta_serde_json_roundtrip() {
+        let meta = SymbolMeta {
+            object_id: test_object_id(),
+            esi: 99,
+            zone_id: test_zone(),
+            source_node: Some(42),
+            stored_at: 123_456,
+        };
+        let json = serde_json::to_string(&meta).unwrap();
+        let rt: SymbolMeta = serde_json::from_str(&json).unwrap();
+        assert_eq!(rt.esi, 99);
+        assert_eq!(rt.source_node, Some(42));
+        assert_eq!(rt.stored_at, 123_456);
+    }
+
+    // --- ObjectSymbolMeta tests ---
+
+    #[test]
+    fn object_symbol_meta_debug() {
+        let meta = test_object_meta();
+        let dbg = format!("{meta:?}");
+        assert!(dbg.contains("ObjectSymbolMeta"));
+    }
+
+    #[test]
+    fn object_symbol_meta_clone() {
+        let meta = test_object_meta();
+        let cloned = meta.clone();
+        assert_eq!(meta.object_id, cloned.object_id);
+        assert_eq!(meta.source_symbols, cloned.source_symbols);
+    }
+
+    #[test]
+    fn object_symbol_meta_eq() {
+        let a = test_object_meta();
+        let b = test_object_meta();
+        assert_eq!(a, b);
+    }
+
+    // --- MemorySymbolStoreConfig tests ---
+
+    #[test]
+    fn memory_symbol_store_config_default() {
+        let config = MemorySymbolStoreConfig::default();
+        assert_eq!(config.max_bytes, 512 * 1024 * 1024);
+        assert_eq!(config.local_node_id, 0);
+    }
+
+    #[test]
+    fn memory_symbol_store_config_debug() {
+        let config = MemorySymbolStoreConfig::default();
+        let dbg = format!("{config:?}");
+        assert!(dbg.contains("MemorySymbolStoreConfig"));
+    }
+
+    #[test]
+    fn memory_symbol_store_config_clone() {
+        let config = MemorySymbolStoreConfig {
+            max_bytes: 1024,
+            local_node_id: 42,
+        };
+        let cloned = config.clone();
+        assert_eq!(config.max_bytes, cloned.max_bytes);
+        assert_eq!(config.local_node_id, cloned.local_node_id);
+    }
+
+    // --- StoredSymbol tests ---
+
+    #[test]
+    fn stored_symbol_debug() {
+        let sym = test_symbol(5);
+        let dbg = format!("{sym:?}");
+        assert!(dbg.contains("StoredSymbol"));
+    }
+
+    #[test]
+    fn stored_symbol_clone() {
+        let sym = test_symbol(3);
+        let cloned = sym.clone();
+        assert_eq!(sym.meta.esi, cloned.meta.esi);
+        assert_eq!(sym.data.len(), cloned.data.len());
+    }
 }

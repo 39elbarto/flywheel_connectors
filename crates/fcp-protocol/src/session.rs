@@ -2578,4 +2578,305 @@ mod tests {
             assert_eq!(decoded.timestamp, 1_700_000_000);
         });
     }
+
+    // ── Batch 4: SunnyMoose deep-coverage expansion ──
+
+    #[test]
+    fn session_constants_values() {
+        assert_eq!(SESSION_ID_SIZE, 16);
+        assert_eq!(SESSION_NONCE_SIZE, 16);
+        assert_eq!(SESSION_COOKIE_SIZE, 32);
+        assert_eq!(SESSION_MAC_SIZE, 16);
+        assert_eq!(FCPS_DATAGRAM_HEADER_LEN, 40);
+        assert_eq!(DEFAULT_MAX_DATAGRAM_BYTES, 1200);
+        assert_eq!(MAX_HANDSHAKE_BYTES, 16 * 1024);
+    }
+
+    #[test]
+    fn session_direction_debug_clone_eq() {
+        let dir = SessionDirection::InitiatorToResponder;
+        let cloned = dir;
+        assert_eq!(dir, cloned);
+        let dbg = format!("{dir:?}");
+        assert!(dbg.contains("InitiatorToResponder"));
+
+        let dir2 = SessionDirection::ResponderToInitiator;
+        assert_ne!(dir, dir2);
+    }
+
+    #[test]
+    fn session_crypto_suite_debug_format() {
+        let s1 = SessionCryptoSuite::Suite1;
+        let dbg = format!("{s1:?}");
+        assert!(dbg.contains("Suite1"));
+    }
+
+    #[test]
+    fn session_crypto_suite_clone_copy_eq_hash() {
+        use std::collections::HashSet;
+        let s = SessionCryptoSuite::Suite2;
+        let copy = s;
+        assert_eq!(s, copy);
+
+        let mut set = HashSet::new();
+        set.insert(SessionCryptoSuite::Suite1);
+        set.insert(SessionCryptoSuite::Suite2);
+        set.insert(SessionCryptoSuite::Suite1);
+        assert_eq!(set.len(), 2);
+    }
+
+    #[test]
+    fn mesh_session_id_hash_in_set() {
+        use std::collections::HashSet;
+        let id1 = MeshSessionId([0xAA; 16]);
+        let id2 = MeshSessionId([0xBB; 16]);
+        let mut set = HashSet::new();
+        set.insert(id1);
+        set.insert(id2);
+        set.insert(id1);
+        assert_eq!(set.len(), 2);
+    }
+
+    #[test]
+    fn session_nonce_hash_in_set() {
+        use std::collections::HashSet;
+        let n1 = SessionNonce([0x11; 16]);
+        let n2 = SessionNonce([0x22; 16]);
+        let mut set = HashSet::new();
+        set.insert(n1);
+        set.insert(n2);
+        set.insert(n1);
+        assert_eq!(set.len(), 2);
+    }
+
+    #[test]
+    fn session_cookie_hash_in_set() {
+        use std::collections::HashSet;
+        let c1 = SessionCookie([0xAA; 32]);
+        let c2 = SessionCookie([0xBB; 32]);
+        let mut set = HashSet::new();
+        set.insert(c1);
+        set.insert(c2);
+        set.insert(c1);
+        assert_eq!(set.len(), 2);
+    }
+
+    #[test]
+    fn replay_window_clone() {
+        let mut window = ReplayWindow::new(128);
+        assert!(window.check_and_update(5));
+        assert!(window.check_and_update(10));
+        let cloned = window.clone();
+        assert_eq!(cloned.highest_seq(), 10);
+    }
+
+    #[test]
+    fn session_replay_policy_clone_eq() {
+        let policy = SessionReplayPolicy::default();
+        let cloned = policy;
+        assert_eq!(policy, cloned);
+    }
+
+    #[test]
+    fn time_policy_clone_eq() {
+        let policy = TimePolicy::default();
+        let cloned = policy;
+        assert_eq!(policy, cloned);
+    }
+
+    #[test]
+    fn session_keys_clone_eq() {
+        let keys = SessionKeys {
+            k_mac_i2r: [0x11; 32],
+            k_mac_r2i: [0x22; 32],
+            k_ctx: [0x33; 32],
+        };
+        let cloned = keys;
+        assert_eq!(keys, cloned);
+    }
+
+    #[test]
+    fn session_keys_debug() {
+        let keys = SessionKeys {
+            k_mac_i2r: [0; 32],
+            k_mac_r2i: [0; 32],
+            k_ctx: [0; 32],
+        };
+        let dbg = format!("{keys:?}");
+        assert!(dbg.contains("SessionKeys"));
+    }
+
+    #[test]
+    fn datagram_clone_eq() {
+        let dg = FcpsDatagram {
+            session_id: MeshSessionId([0x11; 16]),
+            seq: 42,
+            mac: [0x22; SESSION_MAC_SIZE],
+            frame_bytes: vec![0x33, 0x44],
+        };
+        let cloned = dg.clone();
+        assert_eq!(dg, cloned);
+    }
+
+    #[test]
+    fn datagram_debug_format() {
+        let dg = FcpsDatagram {
+            session_id: MeshSessionId([0; 16]),
+            seq: 0,
+            mac: [0; SESSION_MAC_SIZE],
+            frame_bytes: vec![],
+        };
+        let dbg = format!("{dg:?}");
+        assert!(dbg.contains("FcpsDatagram"));
+    }
+
+    #[test]
+    fn session_mac_suite1_roundtrip() {
+        let session_id = MeshSessionId([0x11; 16]);
+        let key = [0x22; 32];
+        let frame = b"suite1 mac test";
+        let mac = compute_session_mac(
+            SessionCryptoSuite::Suite1,
+            &key,
+            &session_id,
+            SessionDirection::InitiatorToResponder,
+            1,
+            frame,
+        )
+        .expect("mac");
+        verify_session_mac(
+            SessionCryptoSuite::Suite1,
+            &key,
+            &session_id,
+            SessionDirection::InitiatorToResponder,
+            1,
+            frame,
+            &mac,
+        )
+        .expect("verify");
+    }
+
+    #[test]
+    fn session_mac_suite2_roundtrip() {
+        let session_id = MeshSessionId([0x33; 16]);
+        let key = [0x44; 32];
+        let frame = b"suite2 mac test";
+        let mac = compute_session_mac(
+            SessionCryptoSuite::Suite2,
+            &key,
+            &session_id,
+            SessionDirection::ResponderToInitiator,
+            99,
+            frame,
+        )
+        .expect("mac");
+        verify_session_mac(
+            SessionCryptoSuite::Suite2,
+            &key,
+            &session_id,
+            SessionDirection::ResponderToInitiator,
+            99,
+            frame,
+            &mac,
+        )
+        .expect("verify");
+    }
+
+    #[test]
+    fn session_error_attestation_verify_failed_display() {
+        let err = SessionError::AttestationVerifyFailed {
+            reason: "test reason".to_string(),
+        };
+        let display = err.to_string();
+        assert!(display.contains("test reason"));
+    }
+
+    #[test]
+    fn session_error_attestation_node_mismatch_display() {
+        let err = SessionError::AttestationNodeMismatch;
+        let display = err.to_string();
+        assert!(display.contains("node id"));
+    }
+
+    #[test]
+    fn session_error_attestation_expired_display() {
+        let err = SessionError::AttestationExpired;
+        let display = err.to_string();
+        assert!(display.contains("expired"));
+    }
+
+    #[test]
+    fn session_error_no_mutual_suite_display() {
+        let err = SessionError::NoMutualSuite;
+        let display = err.to_string();
+        assert!(display.contains("mutual"));
+    }
+
+    #[test]
+    fn session_error_invalid_cookie_length_display() {
+        let err = SessionError::InvalidCookieLength { len: 10 };
+        let display = err.to_string();
+        assert!(display.contains("10"));
+    }
+
+    #[test]
+    fn hello_retry_debug_clone() {
+        let retry = MeshSessionHelloRetry {
+            from: TailscaleNodeId::new("node-a"),
+            to: TailscaleNodeId::new("node-b"),
+            cookie: SessionCookie([0; 32]),
+            timestamp: 0,
+        };
+        let cloned = retry.clone();
+        assert_eq!(cloned.from.as_str(), "node-a");
+        let dbg = format!("{retry:?}");
+        assert!(dbg.contains("MeshSessionHelloRetry"));
+    }
+
+    #[test]
+    fn transport_limits_serde_roundtrip() {
+        let limits = TransportLimits {
+            max_datagram_bytes: 1400,
+        };
+        let json = serde_json::to_string(&limits).expect("serialize");
+        let back: TransportLimits = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back.max_datagram_bytes, 1400);
+    }
+
+    #[test]
+    fn transport_limits_effective_max_u16_max() {
+        let limits = TransportLimits {
+            max_datagram_bytes: u16::MAX,
+        };
+        assert_eq!(limits.effective_max(), u16::MAX);
+    }
+
+    #[test]
+    fn transport_limits_effective_max_one() {
+        let limits = TransportLimits {
+            max_datagram_bytes: 1,
+        };
+        assert_eq!(limits.effective_max(), 1);
+    }
+
+    #[test]
+    fn replay_window_debug_format() {
+        let window = ReplayWindow::new(64);
+        let dbg = format!("{window:?}");
+        assert!(dbg.contains("ReplayWindow"));
+    }
+
+    #[test]
+    fn replay_window_accepts_consecutive_then_rejects_all_replays() {
+        let mut window = ReplayWindow::new(128);
+        for seq in 1..=10u64 {
+            assert!(window.check_and_update(seq), "seq {seq} should be accepted");
+        }
+        for seq in 1..=10u64 {
+            assert!(
+                !window.check_and_update(seq),
+                "replay of seq {seq} should be rejected"
+            );
+        }
+    }
 }

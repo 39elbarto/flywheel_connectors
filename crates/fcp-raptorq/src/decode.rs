@@ -1199,4 +1199,201 @@ mod tests {
         // Should create decoder with k = 1024 / max(0,1) = 1024
         assert_eq!(decoder.expected_k(), 1024);
     }
+
+    // ── Additional decode tests ───────────────────────────────────────────
+
+    #[test]
+    fn decoder_needed_for_small_k() {
+        let config = test_config();
+        let decoder = RaptorQDecoder::with_expected_symbols(1, 64, 64, &config);
+        // ceil(1 * 1.002) = 2, but max(2,1) = 2
+        assert!(decoder.needed() >= 1);
+    }
+
+    #[test]
+    fn decoder_needed_for_large_k() {
+        let config = test_config();
+        let decoder = RaptorQDecoder::with_expected_symbols(10000, 640_000, 64, &config);
+        // ceil(10000 * 1.002) = 10020
+        assert_eq!(decoder.needed(), 10020);
+    }
+
+    #[test]
+    fn decoder_likely_complete_starts_false() {
+        let config = test_config();
+        let decoder = RaptorQDecoder::with_expected_symbols(10, 640, 64, &config);
+        assert!(!decoder.likely_complete());
+    }
+
+    #[test]
+    fn decoder_time_remaining_with_long_timeout() {
+        let config = RaptorQConfig {
+            decode_timeout: Duration::from_secs(3600),
+            ..test_config()
+        };
+        let decoder = RaptorQDecoder::with_expected_symbols(10, 640, 64, &config);
+        let remaining = decoder.time_remaining();
+        assert!(remaining > Duration::from_secs(3599));
+    }
+
+    #[test]
+    fn decoder_is_not_timed_out_initially() {
+        let config = test_config();
+        let decoder = RaptorQDecoder::with_expected_symbols(10, 640, 64, &config);
+        assert!(!decoder.is_timed_out());
+    }
+
+    #[test]
+    fn decoder_add_symbol_returns_none_when_insufficient() {
+        let config = test_config();
+        let oti = ObjectTransmissionInformation::new(640, 64, 1, 1, 8);
+        let mut decoder = RaptorQDecoder::new(oti, &config);
+
+        // Add one symbol when K=10 needed
+        let result = decoder.add_symbol(0, vec![0u8; 64]).unwrap();
+        assert!(result.is_none());
+        assert_eq!(decoder.received_count(), 1);
+    }
+
+    #[test]
+    fn decoder_add_symbol_duplicate_no_count_increase() {
+        let config = test_config();
+        let oti = ObjectTransmissionInformation::new(640, 64, 1, 1, 8);
+        let mut decoder = RaptorQDecoder::new(oti, &config);
+
+        decoder.add_symbol(0, vec![1u8; 64]).unwrap();
+        decoder.add_symbol(0, vec![2u8; 64]).unwrap(); // duplicate ESI
+        decoder.add_symbol(1, vec![3u8; 64]).unwrap();
+
+        assert_eq!(decoder.received_count(), 2);
+    }
+
+    #[test]
+    fn admission_controller_default_max_concurrent() {
+        let controller = DecodeAdmissionController::default();
+        assert_eq!(controller.max_concurrent(), 16);
+    }
+
+    #[test]
+    fn admission_controller_custom_limits_fields() {
+        let controller = DecodeAdmissionController::with_limits(
+            8,
+            2 * 1024 * 1024,
+            Duration::from_secs(60),
+            20000,
+        );
+        assert_eq!(controller.max_concurrent(), 8);
+        assert_eq!(controller.active_count(), 0);
+        assert!(controller.has_capacity());
+    }
+
+    #[test]
+    fn admission_controller_try_acquire_all_slots() {
+        let controller = DecodeAdmissionController::with_limits(
+            3,
+            1024 * 1024,
+            Duration::from_secs(30),
+            10000,
+        );
+
+        let _p1 = controller.try_acquire().unwrap();
+        let _p2 = controller.try_acquire().unwrap();
+        let _p3 = controller.try_acquire().unwrap();
+
+        assert!(!controller.has_capacity());
+        assert!(controller.try_acquire().is_none());
+    }
+
+    #[test]
+    fn admission_controller_acquire_error_message() {
+        let controller = DecodeAdmissionController::with_limits(
+            2,
+            1024 * 1024,
+            Duration::from_secs(30),
+            10000,
+        );
+
+        let _p1 = controller.acquire().unwrap();
+        let _p2 = controller.acquire().unwrap();
+
+        let result = controller.acquire();
+        assert!(result.is_err());
+        let err = result.err().unwrap();
+        match err {
+            DecodeError::AdmissionDenied { reason } => {
+                assert!(reason.contains('2'));
+                assert!(reason.contains("exceeded"));
+            }
+            other => panic!("expected AdmissionDenied, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn permit_buffer_multiple_symbols() {
+        let controller = DecodeAdmissionController::with_limits(
+            1,
+            10_000,
+            Duration::from_secs(30),
+            100,
+        );
+        let mut permit = controller.try_acquire().unwrap();
+
+        for i in 0..10 {
+            permit.try_buffer_symbol(100).unwrap();
+            assert_eq!(permit.symbols_buffered(), i + 1);
+            assert_eq!(permit.memory_used(), (i as usize + 1) * 100);
+        }
+    }
+
+    #[test]
+    fn permit_memory_overflow_protection() {
+        let controller = DecodeAdmissionController::with_limits(
+            1,
+            usize::MAX, // very large limit
+            Duration::from_secs(30),
+            u32::MAX,
+        );
+        let mut permit = controller.try_acquire().unwrap();
+
+        // Adding usize::MAX should trigger overflow protection
+        permit.try_buffer_symbol(100).unwrap();
+        let result = permit.try_buffer_symbol(usize::MAX);
+        assert!(matches!(
+            result,
+            Err(DecodeError::MemoryLimitExceeded { .. })
+        ));
+    }
+
+    #[test]
+    fn controller_clone_shares_active_counter() {
+        let controller = DecodeAdmissionController::with_limits(
+            4,
+            1024 * 1024,
+            Duration::from_secs(30),
+            10000,
+        );
+        let cloned = controller.clone();
+
+        let _p = controller.try_acquire().unwrap();
+        assert_eq!(controller.active_count(), 1);
+        assert_eq!(cloned.active_count(), 1);
+    }
+
+    #[test]
+    fn decoder_roundtrip_with_source_only() {
+        let config = test_config();
+        let payload = vec![42u8; 64]; // 1 symbol
+        let encoder = RaptorQEncoder::new(&payload, &config).unwrap();
+        let source = encoder.encode_source();
+        let oti = encoder.transmission_info();
+
+        let mut decoder = RaptorQDecoder::new(oti, &config);
+        for (esi, data) in source {
+            if let Ok(Some(decoded)) = decoder.add_symbol(esi, data) {
+                assert_eq!(decoded, payload);
+                return;
+            }
+        }
+        panic!("Failed to decode with source symbols only");
+    }
 }

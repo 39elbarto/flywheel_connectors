@@ -682,4 +682,235 @@ mod tests {
         let err = DecodeError::Timeout;
         assert!(err.source().is_none());
     }
+
+    // ── Additional error coverage ─────────────────────────────────────────
+
+    #[test]
+    fn chunk_error_missing_chunks_with_large_values() {
+        let err = ChunkError::MissingChunks {
+            expected: usize::MAX,
+            got: usize::MAX - 1,
+        };
+        let msg = err.to_string();
+        assert!(msg.contains(&usize::MAX.to_string()));
+        assert!(msg.contains(&(usize::MAX - 1).to_string()));
+    }
+
+    #[test]
+    fn chunk_error_invalid_chunk_index_zero_count() {
+        let err = ChunkError::InvalidChunkIndex { index: 0, count: 0 };
+        assert_eq!(
+            err.to_string(),
+            "invalid chunk index 0: manifest has 0 chunks"
+        );
+    }
+
+    #[test]
+    fn encode_error_payload_too_large_boundary() {
+        let err = EncodeError::PayloadTooLarge {
+            size: usize::MAX,
+            max: usize::MAX - 1,
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("payload too large"));
+        assert!(msg.contains(&usize::MAX.to_string()));
+    }
+
+    #[test]
+    fn decode_error_admission_denied_empty_reason() {
+        let err = DecodeError::AdmissionDenied {
+            reason: String::new(),
+        };
+        assert_eq!(err.to_string(), "decode admission denied: ");
+    }
+
+    #[test]
+    fn decode_error_invalid_symbol_empty_reason() {
+        let err = DecodeError::InvalidSymbol {
+            reason: String::new(),
+        };
+        assert_eq!(err.to_string(), "invalid symbol: ");
+    }
+
+    #[test]
+    fn decode_error_invalid_transmission_info_empty_reason() {
+        let err = DecodeError::InvalidTransmissionInfo {
+            reason: String::new(),
+        };
+        assert_eq!(err.to_string(), "invalid transmission info: ");
+    }
+
+    #[test]
+    fn decode_error_runtime_empty_reason() {
+        let err = DecodeError::Runtime {
+            reason: String::new(),
+        };
+        assert_eq!(err.to_string(), "decode runtime failure: ");
+    }
+
+    #[test]
+    fn chunk_error_ne_same_variant_different_fields() {
+        let a = ChunkError::LengthMismatch {
+            expected: 100,
+            got: 50,
+        };
+        let b = ChunkError::LengthMismatch {
+            expected: 100,
+            got: 51,
+        };
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn chunk_error_ne_invalid_chunk_index_different_fields() {
+        let a = ChunkError::InvalidChunkIndex { index: 1, count: 5 };
+        let b = ChunkError::InvalidChunkIndex { index: 2, count: 5 };
+        assert_ne!(a, b);
+
+        let c = ChunkError::InvalidChunkIndex { index: 1, count: 6 };
+        assert_ne!(a, c);
+    }
+
+    #[test]
+    fn encode_error_payload_too_large_different_fields() {
+        let a = EncodeError::PayloadTooLarge {
+            size: 100,
+            max: 50,
+        };
+        let b = EncodeError::PayloadTooLarge {
+            size: 200,
+            max: 50,
+        };
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn decode_error_insufficient_symbols_different_fields() {
+        let a = DecodeError::InsufficientSymbols {
+            received: 10,
+            needed: 20,
+        };
+        let b = DecodeError::InsufficientSymbols {
+            received: 11,
+            needed: 20,
+        };
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn decode_error_symbol_buffer_exceeded_different_fields() {
+        let a = DecodeError::SymbolBufferExceeded {
+            buffered: 100,
+            limit: 50,
+        };
+        let b = DecodeError::SymbolBufferExceeded {
+            buffered: 101,
+            limit: 50,
+        };
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn decode_error_memory_limit_different_fields() {
+        let a = DecodeError::MemoryLimitExceeded {
+            used: 1000,
+            limit: 500,
+        };
+        let b = DecodeError::MemoryLimitExceeded {
+            used: 1001,
+            limit: 500,
+        };
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn all_errors_source_is_none() {
+        use std::error::Error;
+
+        let chunk_variants: Vec<ChunkError> = vec![
+            ChunkError::MissingChunks {
+                expected: 1,
+                got: 0,
+            },
+            ChunkError::LengthMismatch {
+                expected: 1,
+                got: 0,
+            },
+            ChunkError::HashMismatch,
+            ChunkError::InvalidChunkIndex { index: 0, count: 0 },
+        ];
+        for v in &chunk_variants {
+            assert!(v.source().is_none(), "ChunkError should have no source");
+        }
+
+        let encode_variants: Vec<EncodeError> = vec![
+            EncodeError::PayloadTooLarge { size: 1, max: 0 },
+            EncodeError::EmptyPayload,
+        ];
+        for v in &encode_variants {
+            assert!(v.source().is_none(), "EncodeError should have no source");
+        }
+
+        let decode_variants: Vec<DecodeError> = vec![
+            DecodeError::Timeout,
+            DecodeError::Cancelled,
+            DecodeError::InsufficientSymbols {
+                received: 0,
+                needed: 1,
+            },
+            DecodeError::AdmissionDenied {
+                reason: "x".into(),
+            },
+            DecodeError::SymbolBufferExceeded {
+                buffered: 1,
+                limit: 0,
+            },
+            DecodeError::MemoryLimitExceeded { used: 1, limit: 0 },
+            DecodeError::InvalidSymbol {
+                reason: "x".into(),
+            },
+            DecodeError::InvalidTransmissionInfo {
+                reason: "x".into(),
+            },
+            DecodeError::Runtime {
+                reason: "x".into(),
+            },
+        ];
+        for v in &decode_variants {
+            assert!(v.source().is_none(), "DecodeError should have no source");
+        }
+    }
+
+    #[test]
+    fn chunk_error_debug_field_values() {
+        let err = ChunkError::MissingChunks {
+            expected: 42,
+            got: 7,
+        };
+        let debug = format!("{err:?}");
+        assert!(debug.contains("42"));
+        assert!(debug.contains('7'));
+    }
+
+    #[test]
+    fn encode_error_debug_field_values() {
+        let err = EncodeError::PayloadTooLarge {
+            size: 999,
+            max: 111,
+        };
+        let debug = format!("{err:?}");
+        assert!(debug.contains("999"));
+        assert!(debug.contains("111"));
+    }
+
+    #[test]
+    fn decode_error_debug_field_values() {
+        let err = DecodeError::InsufficientSymbols {
+            received: 55,
+            needed: 77,
+        };
+        let debug = format!("{err:?}");
+        assert!(debug.contains("55"));
+        assert!(debug.contains("77"));
+    }
 }

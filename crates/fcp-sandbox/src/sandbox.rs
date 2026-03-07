@@ -667,4 +667,230 @@ mod tests {
         assert_eq!(roundtrip.macos_entitlements.len(), 1);
         assert!(roundtrip.windows_low_integrity);
     }
+
+    // ── New tests: CompiledPolicy clone + debug ──
+
+    #[test]
+    fn test_compiled_policy_clone() {
+        let section = test_sandbox_section();
+        let state_dir = Some(PathBuf::from("/tmp/clone-test"));
+        let original = CompiledPolicy::from_manifest(&section, state_dir).unwrap();
+        let cloned = original.clone();
+        assert_eq!(original.profile, cloned.profile);
+        assert_eq!(original.memory_limit_bytes, cloned.memory_limit_bytes);
+        assert_eq!(original.cpu_percent, cloned.cpu_percent);
+        assert_eq!(original.wall_clock_timeout, cloned.wall_clock_timeout);
+        assert_eq!(original.readonly_paths, cloned.readonly_paths);
+        assert_eq!(original.writable_paths, cloned.writable_paths);
+        assert_eq!(original.deny_exec, cloned.deny_exec);
+        assert_eq!(original.deny_ptrace, cloned.deny_ptrace);
+        assert_eq!(original.block_direct_network, cloned.block_direct_network);
+        assert_eq!(original.state_dir, cloned.state_dir);
+    }
+
+    #[test]
+    fn test_compiled_policy_debug() {
+        let section = test_sandbox_section();
+        let policy = CompiledPolicy::from_manifest(&section, None).unwrap();
+        let debug = format!("{policy:?}");
+        assert!(debug.contains("CompiledPolicy"));
+        assert!(debug.contains("Strict"));
+    }
+
+    #[test]
+    fn test_platform_flags_clone() {
+        let original = PlatformFlags {
+            linux_use_landlock: true,
+            linux_use_userns: true,
+            macos_entitlements: vec!["ent1".into(), "ent2".into()],
+            windows_low_integrity: true,
+        };
+        let cloned = original.clone();
+        assert_eq!(original.linux_use_landlock, cloned.linux_use_landlock);
+        assert_eq!(original.linux_use_userns, cloned.linux_use_userns);
+        assert_eq!(original.macos_entitlements, cloned.macos_entitlements);
+        assert_eq!(original.windows_low_integrity, cloned.windows_low_integrity);
+    }
+
+    #[test]
+    fn test_platform_flags_debug() {
+        let flags = PlatformFlags::default();
+        let debug = format!("{flags:?}");
+        assert!(debug.contains("PlatformFlags"));
+    }
+
+    #[test]
+    fn test_compiled_policy_no_state_dir() {
+        let section = test_sandbox_section();
+        let policy = CompiledPolicy::from_manifest(&section, None).unwrap();
+        assert!(policy.state_dir.is_none());
+        // $CONNECTOR_STATE paths should be skipped when state_dir is None
+        assert!(!policy
+            .writable_paths
+            .iter()
+            .any(|p| p.display().to_string().contains("CONNECTOR_STATE")));
+    }
+
+    #[test]
+    fn test_compiled_policy_memory_conversion() {
+        let mut section = test_sandbox_section();
+        section.memory_mb = 1024;
+        let policy = CompiledPolicy::from_manifest(&section, None).unwrap();
+        assert_eq!(policy.memory_limit_bytes, 1024 * 1024 * 1024);
+    }
+
+    #[test]
+    fn test_compiled_policy_wall_clock_conversion() {
+        let mut section = test_sandbox_section();
+        section.wall_clock_timeout_ms = 60_000;
+        let policy = CompiledPolicy::from_manifest(&section, None).unwrap();
+        assert_eq!(policy.wall_clock_timeout, Duration::from_secs(60));
+    }
+
+    #[test]
+    fn test_compiled_policy_zero_memory() {
+        let mut section = test_sandbox_section();
+        section.memory_mb = 0;
+        let policy = CompiledPolicy::from_manifest(&section, None).unwrap();
+        assert_eq!(policy.memory_limit_bytes, 0);
+    }
+
+    #[test]
+    fn test_compiled_policy_max_cpu() {
+        let mut section = test_sandbox_section();
+        section.cpu_percent = 100;
+        let policy = CompiledPolicy::from_manifest(&section, None).unwrap();
+        assert_eq!(policy.cpu_percent, 100);
+    }
+
+    #[test]
+    fn test_compiled_policy_min_cpu() {
+        let mut section = test_sandbox_section();
+        section.cpu_percent = 1;
+        let policy = CompiledPolicy::from_manifest(&section, None).unwrap();
+        assert_eq!(policy.cpu_percent, 1);
+    }
+
+    #[test]
+    fn test_expand_path_no_state_dir_prefix() {
+        // A path that starts with $CONNECTOR_STATE/ but state_dir is None
+        assert_eq!(expand_path("$CONNECTOR_STATE/data", None), None);
+    }
+
+    #[test]
+    fn test_expand_path_regular_path_no_state_dir() {
+        // Regular paths don't need state_dir
+        assert_eq!(expand_path("/etc/config", None), Some(PathBuf::from("/etc/config")));
+    }
+
+    #[test]
+    fn test_expand_path_nested_subpath() {
+        let state_dir = PathBuf::from("/data");
+        assert_eq!(
+            expand_path("$CONNECTOR_STATE/a/b/c/d", Some(&state_dir)),
+            Some(PathBuf::from("/data/a/b/c/d"))
+        );
+    }
+
+    #[test]
+    fn test_noop_sandbox_debug() {
+        let sandbox = NoOpSandbox;
+        let debug = format!("{sandbox:?}");
+        assert!(debug.contains("NoOpSandbox"));
+    }
+
+    #[test]
+    fn test_noop_sandbox_apply_to_command() {
+        let sandbox = NoOpSandbox;
+        let section = test_sandbox_section();
+        let policy = CompiledPolicy::from_manifest(&section, None).unwrap();
+        let mut cmd = std::process::Command::new("echo");
+        assert!(sandbox.apply_to_command(&mut cmd, &policy).is_ok());
+    }
+
+    #[test]
+    fn test_compiled_policy_serde_with_platform_flags() {
+        let section = test_sandbox_section();
+        let flags = PlatformFlags {
+            linux_use_landlock: true,
+            linux_use_userns: false,
+            macos_entitlements: vec!["com.apple.security.app-sandbox".into()],
+            windows_low_integrity: true,
+        };
+        let policy = CompiledPolicy::from_manifest(&section, None)
+            .unwrap()
+            .with_platform_flags(flags);
+        let json = serde_json::to_string(&policy).unwrap();
+        let roundtrip: CompiledPolicy = serde_json::from_str(&json).unwrap();
+        assert!(roundtrip.platform_flags.linux_use_landlock);
+        assert!(!roundtrip.platform_flags.linux_use_userns);
+        assert_eq!(roundtrip.platform_flags.macos_entitlements.len(), 1);
+        assert!(roundtrip.platform_flags.windows_low_integrity);
+    }
+
+    #[test]
+    fn test_platform_flags_serde_defaults_omitted() {
+        // Default flags deserialized from empty JSON object
+        let json = "{}";
+        let flags: PlatformFlags = serde_json::from_str(json).unwrap();
+        assert!(flags.is_empty());
+    }
+
+    #[test]
+    fn test_compiled_policy_multiple_readonly_paths() {
+        let mut section = test_sandbox_section();
+        section.fs_readonly_paths = vec![
+            "/usr".into(),
+            "/lib".into(),
+            "/opt".into(),
+            "/etc".into(),
+        ];
+        let policy = CompiledPolicy::from_manifest(&section, None).unwrap();
+        assert_eq!(policy.readonly_paths.len(), 4);
+    }
+
+    #[test]
+    fn test_compiled_policy_multiple_writable_paths_with_state() {
+        let mut section = test_sandbox_section();
+        section.fs_writable_paths = vec![
+            "$CONNECTOR_STATE".into(),
+            "$CONNECTOR_STATE/cache".into(),
+            "/tmp/scratch".into(),
+        ];
+        let state_dir = Some(PathBuf::from("/var/state"));
+        let policy = CompiledPolicy::from_manifest(&section, state_dir).unwrap();
+        assert!(policy.writable_paths.contains(&PathBuf::from("/var/state")));
+        assert!(policy.writable_paths.contains(&PathBuf::from("/var/state/cache")));
+        assert!(policy.writable_paths.contains(&PathBuf::from("/tmp/scratch")));
+    }
+
+    #[test]
+    fn test_sandbox_error_debug() {
+        let e = SandboxError::Timeout;
+        let debug = format!("{e:?}");
+        assert!(debug.contains("Timeout"));
+    }
+
+    #[test]
+    fn test_sandbox_error_io_from() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "no access");
+        let sandbox_err = SandboxError::from(io_err);
+        assert!(sandbox_err.to_string().contains("no access"));
+    }
+
+    #[test]
+    fn test_compiled_policy_strict_plus_blocks_network() {
+        let mut section = test_sandbox_section();
+        section.profile = SandboxProfile::StrictPlus;
+        let policy = CompiledPolicy::from_manifest(&section, None).unwrap();
+        assert!(policy.block_direct_network);
+    }
+
+    #[test]
+    fn test_compiled_policy_moderate_blocks_network() {
+        let mut section = test_sandbox_section();
+        section.profile = SandboxProfile::Moderate;
+        let policy = CompiledPolicy::from_manifest(&section, None).unwrap();
+        assert!(policy.block_direct_network);
+    }
 }

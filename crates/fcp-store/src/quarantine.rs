@@ -1703,4 +1703,194 @@ mod tests {
             }
         });
     }
+
+    // --- ObjectAdmissionClass serde tests ---
+
+    #[test]
+    fn admission_class_serde_quarantined() {
+        let json = serde_json::to_string(&ObjectAdmissionClass::Quarantined).unwrap();
+        let rt: ObjectAdmissionClass = serde_json::from_str(&json).unwrap();
+        assert_eq!(rt, ObjectAdmissionClass::Quarantined);
+    }
+
+    #[test]
+    fn admission_class_serde_admitted() {
+        let json = serde_json::to_string(&ObjectAdmissionClass::Admitted).unwrap();
+        let rt: ObjectAdmissionClass = serde_json::from_str(&json).unwrap();
+        assert_eq!(rt, ObjectAdmissionClass::Admitted);
+    }
+
+    #[test]
+    fn admission_class_debug() {
+        let dbg = format!("{:?}", ObjectAdmissionClass::Quarantined);
+        assert!(dbg.contains("Quarantined"));
+    }
+
+    #[test]
+    fn admission_class_clone_and_copy() {
+        let a = ObjectAdmissionClass::Admitted;
+        let b = a;
+        assert_eq!(a, b);
+    }
+
+    // --- PromotionReason serde tests ---
+
+    #[test]
+    fn promotion_reason_serde_reachable() {
+        let reason = PromotionReason::ReachableFromCheckpoint {
+            checkpoint_id: ObjectId::from_bytes([5; 32]),
+        };
+        let json = serde_json::to_string(&reason).unwrap();
+        let rt: PromotionReason = serde_json::from_str(&json).unwrap();
+        assert_eq!(rt, reason);
+    }
+
+    #[test]
+    fn promotion_reason_serde_peer_request() {
+        let reason = PromotionReason::AuthenticatedPeerRequest {
+            peer_id: 42,
+            request_token: vec![1, 2, 3],
+        };
+        let json = serde_json::to_string(&reason).unwrap();
+        let rt: PromotionReason = serde_json::from_str(&json).unwrap();
+        assert_eq!(rt, reason);
+    }
+
+    #[test]
+    fn promotion_reason_serde_local_pin() {
+        let reason = PromotionReason::LocalPin {
+            reason: "test pin".into(),
+        };
+        let json = serde_json::to_string(&reason).unwrap();
+        let rt: PromotionReason = serde_json::from_str(&json).unwrap();
+        assert_eq!(rt, reason);
+    }
+
+    #[test]
+    fn promotion_reason_debug() {
+        let reason = PromotionReason::LocalPin {
+            reason: "testing".into(),
+        };
+        let dbg = format!("{reason:?}");
+        assert!(dbg.contains("LocalPin"));
+    }
+
+    #[test]
+    fn promotion_reason_clone_preserves_fields() {
+        let reason = PromotionReason::AuthenticatedPeerRequest {
+            peer_id: 10,
+            request_token: vec![9, 8, 7],
+        };
+        let cloned = reason.clone();
+        assert_eq!(reason, cloned);
+    }
+
+    // --- ObjectAdmissionPolicy tests ---
+
+    #[test]
+    fn admission_policy_default() {
+        let policy = ObjectAdmissionPolicy::default();
+        assert_eq!(policy.max_quarantine_bytes_per_zone, 256 * 1024 * 1024);
+        assert_eq!(policy.max_quarantine_objects_per_zone, 100_000);
+        assert_eq!(policy.quarantine_ttl_secs, 3600);
+        assert!(policy.require_schema_validation);
+    }
+
+    #[test]
+    fn admission_policy_serde_roundtrip() {
+        let policy = ObjectAdmissionPolicy {
+            max_quarantine_bytes_per_zone: 1024,
+            max_quarantine_objects_per_zone: 50,
+            quarantine_ttl_secs: 120,
+            require_schema_validation: false,
+        };
+        let json = serde_json::to_string(&policy).unwrap();
+        let rt: ObjectAdmissionPolicy = serde_json::from_str(&json).unwrap();
+        assert_eq!(rt.max_quarantine_bytes_per_zone, 1024);
+        assert_eq!(rt.max_quarantine_objects_per_zone, 50);
+        assert_eq!(rt.quarantine_ttl_secs, 120);
+        assert!(!rt.require_schema_validation);
+    }
+
+    #[test]
+    fn admission_policy_debug() {
+        let policy = ObjectAdmissionPolicy::default();
+        let dbg = format!("{policy:?}");
+        assert!(dbg.contains("ObjectAdmissionPolicy"));
+    }
+
+    // --- QuarantineStats tests ---
+
+    #[test]
+    fn quarantine_stats_serde_json_roundtrip() {
+        let stats = QuarantineStats {
+            object_count: 10,
+            used_bytes: 5000,
+            max_bytes: 10_000,
+            max_objects: 100,
+        };
+        let json = serde_json::to_string(&stats).unwrap();
+        let rt: QuarantineStats = serde_json::from_str(&json).unwrap();
+        assert_eq!(rt.object_count, 10);
+        assert_eq!(rt.used_bytes, 5000);
+    }
+
+    #[test]
+    fn quarantine_stats_debug_format() {
+        let stats = QuarantineStats {
+            object_count: 0,
+            used_bytes: 0,
+            max_bytes: 1000,
+            max_objects: 10,
+        };
+        let dbg = format!("{stats:?}");
+        assert!(dbg.contains("QuarantineStats"));
+    }
+
+    #[test]
+    fn quarantine_stats_clone_preserves_fields() {
+        let stats = QuarantineStats {
+            object_count: 5,
+            used_bytes: 2500,
+            max_bytes: 5000,
+            max_objects: 50,
+        };
+        let cloned = stats.clone();
+        assert_eq!(stats.object_count, cloned.object_count);
+        assert_eq!(stats.used_bytes, cloned.used_bytes);
+    }
+
+    #[test]
+    fn quarantine_stats_near_capacity_bytes() {
+        let stats = QuarantineStats {
+            object_count: 1,
+            used_bytes: 90,
+            max_bytes: 100,
+            max_objects: 1000,
+        };
+        assert!(stats.is_near_capacity(90));
+        assert!(!stats.is_near_capacity(95));
+    }
+
+    #[test]
+    fn quarantine_stats_near_capacity_objects() {
+        let stats = QuarantineStats {
+            object_count: 95,
+            used_bytes: 10,
+            max_bytes: 100_000,
+            max_objects: 100,
+        };
+        assert!(stats.is_near_capacity(90));
+    }
+
+    #[test]
+    fn quarantine_stats_not_near_capacity() {
+        let stats = QuarantineStats {
+            object_count: 1,
+            used_bytes: 10,
+            max_bytes: 100_000,
+            max_objects: 100,
+        };
+        assert!(!stats.is_near_capacity(90));
+    }
 }

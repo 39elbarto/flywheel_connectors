@@ -80,7 +80,8 @@ mod tests {
                 {"Id": "001xx1", "Name": "Acme"},
                 {"Id": "001xx2", "Name": "Globex"}
             ]
-        })).unwrap();
+        }))
+        .unwrap();
         assert_eq!(s.total_size, Some(2));
         assert!(s.done.unwrap());
         assert_eq!(s.records.len(), 2);
@@ -94,7 +95,8 @@ mod tests {
             "done": false,
             "records": [],
             "nextRecordsUrl": "/services/data/v59.0/query/01g..."
-        })).unwrap();
+        }))
+        .unwrap();
         assert!(!s.done.unwrap());
         assert!(s.next_records_url.is_some());
     }
@@ -110,7 +112,8 @@ mod tests {
     fn sobject_roundtrip() {
         let obj: SObject = serde_json::from_value(json!({
             "Id": "001xx1", "Name": "Test", "Industry": "Tech"
-        })).unwrap();
+        }))
+        .unwrap();
         assert_eq!(obj.fields["Id"], "001xx1");
     }
 
@@ -127,7 +130,8 @@ mod tests {
     fn api_error_response_single_message() {
         let e: ApiErrorResponse = serde_json::from_value(json!({
             "message": "Session expired or invalid"
-        })).unwrap();
+        }))
+        .unwrap();
         assert_eq!(e.message.as_deref(), Some("Session expired or invalid"));
         assert!(e.errors.is_empty());
     }
@@ -143,7 +147,8 @@ mod tests {
     fn mutation_response_success() {
         let m: MutationResponse = serde_json::from_value(json!({
             "id": "003xx000004TmiQ", "success": true, "errors": []
-        })).unwrap();
+        }))
+        .unwrap();
         assert_eq!(m.id.as_deref(), Some("003xx000004TmiQ"));
         assert!(m.success.unwrap());
     }
@@ -152,7 +157,8 @@ mod tests {
     fn mutation_response_failure() {
         let m: MutationResponse = serde_json::from_value(json!({
             "id": null, "success": false, "errors": [{"message": "required"}]
-        })).unwrap();
+        }))
+        .unwrap();
         assert!(m.id.is_none());
         assert!(!m.success.unwrap());
     }
@@ -161,7 +167,8 @@ mod tests {
     fn lead_convert_result() {
         let r: LeadConvertResult = serde_json::from_value(json!({
             "accountId": "001xx1", "contactId": "003xx1", "opportunityId": "006xx1"
-        })).unwrap();
+        }))
+        .unwrap();
         assert_eq!(r.account_id.as_deref(), Some("001xx1"));
         assert_eq!(r.contact_id.as_deref(), Some("003xx1"));
         assert_eq!(r.opportunity_id.as_deref(), Some("006xx1"));
@@ -173,7 +180,8 @@ mod tests {
             "reportMetadata": {"id": "00Oxx1"},
             "factMap": {"T!T": {"rows": []}},
             "hasDetailedData": true
-        })).unwrap();
+        }))
+        .unwrap();
         assert!(r.report_metadata.is_some());
         assert!(r.fact_map.is_some());
         assert!(r.has_detailed_data.unwrap());
@@ -187,7 +195,8 @@ mod tests {
             "totalSize": 1,
             "done": true,
             "records": [{"Id": "001"}]
-        })).unwrap();
+        }))
+        .unwrap();
         let cloned = s.clone();
         assert_eq!(s.total_size, Some(1));
         assert_eq!(cloned.records.len(), 1);
@@ -238,7 +247,9 @@ mod tests {
 
     #[test]
     fn sobject_flatten_roundtrip() {
-        let obj = SObject { fields: json!({"Id": "001", "Type": "Account"}) };
+        let obj = SObject {
+            fields: json!({"Id": "001", "Type": "Account"}),
+        };
         let v = serde_json::to_value(&obj).unwrap();
         assert_eq!(v["Id"], "001");
         assert_eq!(v["Type"], "Account");
@@ -257,7 +268,8 @@ mod tests {
             "message": "test",
             "errorCode": "INVALID",
             "fields": ["a"]
-        })).unwrap();
+        }))
+        .unwrap();
         let dbg = format!("{item:?}");
         assert!(dbg.contains("ApiErrorItem"));
     }
@@ -267,7 +279,8 @@ mod tests {
         let item: ApiErrorItem = serde_json::from_value(json!({
             "message": "err",
             "errorCode": "CODE"
-        })).unwrap();
+        }))
+        .unwrap();
         let cloned = item.clone();
         assert_eq!(item.message.as_deref(), Some("err"));
         assert_eq!(cloned.error_code.as_deref(), Some("CODE"));
@@ -315,7 +328,8 @@ mod tests {
             "id": "003xx1",
             "success": true,
             "errors": []
-        })).unwrap();
+        }))
+        .unwrap();
         let cloned = m.clone();
         assert_eq!(m.id.as_deref(), Some("003xx1"));
         assert!(cloned.success.unwrap());
@@ -356,7 +370,8 @@ mod tests {
             "accountId": "001",
             "contactId": "003",
             "opportunityId": "006"
-        })).unwrap();
+        }))
+        .unwrap();
         let cloned = r.clone();
         assert_eq!(r.account_id.as_deref(), Some("001"));
         assert_eq!(cloned.contact_id.as_deref(), Some("003"));
@@ -394,7 +409,8 @@ mod tests {
     fn report_result_clone() {
         let r: ReportResult = serde_json::from_value(json!({
             "hasDetailedData": false
-        })).unwrap();
+        }))
+        .unwrap();
         let cloned = r.clone();
         assert!(r.report_metadata.is_none());
         assert_eq!(cloned.has_detailed_data, Some(false));

@@ -35,10 +35,12 @@ impl GitLabConfig {
                     code: 1003,
                     message: "credential_id must be a string".into(),
                 })?;
-                Some(CredentialId::parse(raw).map_err(|_| FcpError::InvalidRequest {
-                    code: 1003,
-                    message: "credential_id must be a valid UUID".into(),
-                })?)
+                Some(
+                    CredentialId::parse(raw).map_err(|_| FcpError::InvalidRequest {
+                        code: 1003,
+                        message: "credential_id must be a valid UUID".into(),
+                    })?,
+                )
             }
             None => None,
         };
@@ -78,7 +80,11 @@ struct DoctorResult {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
-enum DoctorStatus { Healthy, Degraded, Unhealthy }
+enum DoctorStatus {
+    Healthy,
+    Degraded,
+    Unhealthy,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct DoctorCheck {
@@ -128,11 +134,16 @@ impl GitLabConnector {
 }
 
 impl Default for GitLabConnector {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl GitLabConnector {
-    pub async fn handle_configure(&mut self, params: serde_json::Value) -> FcpResult<serde_json::Value> {
+    pub async fn handle_configure(
+        &mut self,
+        params: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
         let config = GitLabConfig::from_params(&params)?;
         info!(auth = %config.auth.redacted_label(), base_url = %config.base_url, "Configuring GitLab connector");
         let client = GitLabClient::new(config.auth.clone(), Some(&config.base_url))
@@ -143,11 +154,20 @@ impl GitLabConnector {
         Ok(json!({}))
     }
 
-    pub async fn handle_handshake(&mut self, params: serde_json::Value) -> FcpResult<serde_json::Value> {
+    pub async fn handle_handshake(
+        &mut self,
+        params: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
         if self.config.is_none() {
-            return Err(FcpError::InvalidRequest { code: 1004, message: "Connector not configured".into() });
+            return Err(FcpError::InvalidRequest {
+                code: 1004,
+                message: "Connector not configured".into(),
+            });
         }
-        self.session_id = params.get("session_id").and_then(|v| v.as_str()).map(str::to_string);
+        self.session_id = params
+            .get("session_id")
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
         self.base.set_handshaken(true);
         Ok(json!({
             "protocol_version": "2.0",
@@ -160,35 +180,81 @@ impl GitLabConnector {
     pub async fn handle_health(&self) -> FcpResult<serde_json::Value> {
         let configured = self.config.is_some();
         let handshaken = self.session_id.is_some();
-        let status = if configured && handshaken { "healthy" } else if configured { "degraded" } else { "unconfigured" };
-        Ok(json!({ "status": status, "configured": configured, "handshaken": handshaken, "requests": self.request_count.load(Ordering::Relaxed), "errors": self.error_count.load(Ordering::Relaxed) }))
+        let status = if configured && handshaken {
+            "healthy"
+        } else if configured {
+            "degraded"
+        } else {
+            "unconfigured"
+        };
+        Ok(
+            json!({ "status": status, "configured": configured, "handshaken": handshaken, "requests": self.request_count.load(Ordering::Relaxed), "errors": self.error_count.load(Ordering::Relaxed) }),
+        )
     }
 
     pub async fn handle_doctor(&self) -> FcpResult<serde_json::Value> {
         let mut checks = Vec::new();
-        checks.push(DoctorCheck { name: "configuration".into(), passed: self.config.is_some(), message: if self.config.is_none() { Some("Not configured".into()) } else { None }, critical: true });
-        checks.push(DoctorCheck { name: "client_initialized".into(), passed: self.client.is_some(), message: if self.client.is_none() { Some("API client not initialized".into()) } else { None }, critical: true });
+        checks.push(DoctorCheck {
+            name: "configuration".into(),
+            passed: self.config.is_some(),
+            message: if self.config.is_none() {
+                Some("Not configured".into())
+            } else {
+                None
+            },
+            critical: true,
+        });
+        checks.push(DoctorCheck {
+            name: "client_initialized".into(),
+            passed: self.client.is_some(),
+            message: if self.client.is_none() {
+                Some("API client not initialized".into())
+            } else {
+                None
+            },
+            critical: true,
+        });
         let handshaken = self.session_id.is_some();
-        checks.push(DoctorCheck { name: "handshake".into(), passed: handshaken, message: if handshaken { None } else { Some("Handshake not completed".into()) }, critical: false });
+        checks.push(DoctorCheck {
+            name: "handshake".into(),
+            passed: handshaken,
+            message: if handshaken {
+                None
+            } else {
+                Some("Handshake not completed".into())
+            },
+            critical: false,
+        });
         let result = DoctorResult::from_checks(checks);
         Ok(serde_json::to_value(result).unwrap_or(json!({"status": "error"})))
     }
 
     pub async fn handle_self_check(&self) -> FcpResult<serde_json::Value> {
-        Ok(json!({ "connector_id": "fcp.gitlab", "version": "0.1.0", "status": if self.config.is_some() { "ready" } else { "unconfigured" } }))
+        Ok(
+            json!({ "connector_id": "fcp.gitlab", "version": "0.1.0", "status": if self.config.is_some() { "ready" } else { "unconfigured" } }),
+        )
     }
 
     pub async fn handle_introspect(&self) -> FcpResult<serde_json::Value> {
-        Ok(json!({ "connector_id": "fcp.gitlab", "version": "0.1.0", "operations": operations_info() }))
+        Ok(
+            json!({ "connector_id": "fcp.gitlab", "version": "0.1.0", "operations": operations_info() }),
+        )
     }
 
     #[instrument(skip(self, params))]
     pub async fn handle_invoke(&self, params: serde_json::Value) -> FcpResult<serde_json::Value> {
         self.base.check_ready()?;
-        let operation = params.get("operation_id").and_then(|v| v.as_str()).ok_or(FcpError::InvalidRequest { code: 1003, message: "Missing operation_id".into() })?;
+        let operation = params.get("operation_id").and_then(|v| v.as_str()).ok_or(
+            FcpError::InvalidRequest {
+                code: 1003,
+                message: "Missing operation_id".into(),
+            },
+        )?;
         let input = params.get("input").cloned().unwrap_or(json!({}));
         self.request_count.fetch_add(1, Ordering::Relaxed);
-        let client = self.client.as_ref().ok_or(FcpError::Internal { message: "Client not initialized".into() })?;
+        let client = self.client.as_ref().ok_or(FcpError::Internal {
+            message: "Client not initialized".into(),
+        })?;
 
         let result = match operation {
             "gitlab.projects.list" => self.invoke_projects_list(client, &input).await,
@@ -196,19 +262,38 @@ impl GitLabConnector {
             "gitlab.issues.create" => self.invoke_issues_create(client, &input).await,
             "gitlab.merge_requests.list" => self.invoke_merge_requests_list(client, &input).await,
             "gitlab.pipelines.list" => self.invoke_pipelines_list(client, &input).await,
-            _ => return Err(FcpError::InvalidRequest { code: 1002, message: format!("Unknown operation: {operation}") }),
+            _ => {
+                return Err(FcpError::InvalidRequest {
+                    code: 1002,
+                    message: format!("Unknown operation: {operation}"),
+                });
+            }
         };
 
-        result.map_err(|e| { self.error_count.fetch_add(1, Ordering::Relaxed); e.to_fcp_error() })
+        result.map_err(|e| {
+            self.error_count.fetch_add(1, Ordering::Relaxed);
+            e.to_fcp_error()
+        })
     }
 
     pub async fn handle_simulate(&self, params: serde_json::Value) -> FcpResult<serde_json::Value> {
-        let operation = params.get("operation_id").and_then(|v| v.as_str()).unwrap_or("");
-        let allowed = operations_info().as_array().is_some_and(|ops| ops.iter().any(|o| o.get("id").and_then(|v| v.as_str()) == Some(operation)));
-        Ok(json!({ "allowed": allowed, "reason": if allowed { "Operation supported" } else { "Unknown operation" } }))
+        let operation = params
+            .get("operation_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let allowed = operations_info().as_array().is_some_and(|ops| {
+            ops.iter()
+                .any(|o| o.get("id").and_then(|v| v.as_str()) == Some(operation))
+        });
+        Ok(
+            json!({ "allowed": allowed, "reason": if allowed { "Operation supported" } else { "Unknown operation" } }),
+        )
     }
 
-    pub async fn handle_shutdown(&mut self, _params: serde_json::Value) -> FcpResult<serde_json::Value> {
+    pub async fn handle_shutdown(
+        &mut self,
+        _params: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
         info!("GitLab connector shutting down");
         self.client = None;
         self.config = None;
@@ -219,19 +304,31 @@ impl GitLabConnector {
 
     // ── Operations ────────────────────────────────────────────────────
 
-    async fn invoke_projects_list(&self, client: &GitLabClient, input: &serde_json::Value) -> Result<serde_json::Value, GitLabError> {
+    async fn invoke_projects_list(
+        &self,
+        client: &GitLabClient,
+        input: &serde_json::Value,
+    ) -> Result<serde_json::Value, GitLabError> {
         let per_page = input.get("per_page").and_then(|v| v.as_i64());
         let data = client.list_projects(per_page).await?;
         Ok(json!({ "projects": data }))
     }
 
-    async fn invoke_issues_list(&self, client: &GitLabClient, input: &serde_json::Value) -> Result<serde_json::Value, GitLabError> {
+    async fn invoke_issues_list(
+        &self,
+        client: &GitLabClient,
+        input: &serde_json::Value,
+    ) -> Result<serde_json::Value, GitLabError> {
         let project_id = require_str(input, "project_id")?;
         let data = client.list_issues(project_id).await?;
         Ok(json!({ "issues": data }))
     }
 
-    async fn invoke_issues_create(&self, client: &GitLabClient, input: &serde_json::Value) -> Result<serde_json::Value, GitLabError> {
+    async fn invoke_issues_create(
+        &self,
+        client: &GitLabClient,
+        input: &serde_json::Value,
+    ) -> Result<serde_json::Value, GitLabError> {
         let project_id = require_str(input, "project_id")?;
         let title = require_str(input, "title")?;
         let mut body = json!({ "title": title });
@@ -241,13 +338,21 @@ impl GitLabConnector {
         client.create_issue(project_id, &body).await
     }
 
-    async fn invoke_merge_requests_list(&self, client: &GitLabClient, input: &serde_json::Value) -> Result<serde_json::Value, GitLabError> {
+    async fn invoke_merge_requests_list(
+        &self,
+        client: &GitLabClient,
+        input: &serde_json::Value,
+    ) -> Result<serde_json::Value, GitLabError> {
         let project_id = require_str(input, "project_id")?;
         let data = client.list_merge_requests(project_id).await?;
         Ok(json!({ "merge_requests": data }))
     }
 
-    async fn invoke_pipelines_list(&self, client: &GitLabClient, input: &serde_json::Value) -> Result<serde_json::Value, GitLabError> {
+    async fn invoke_pipelines_list(
+        &self,
+        client: &GitLabClient,
+        input: &serde_json::Value,
+    ) -> Result<serde_json::Value, GitLabError> {
         let project_id = require_str(input, "project_id")?;
         let data = client.list_pipelines(project_id).await?;
         Ok(json!({ "pipelines": data }))
@@ -255,10 +360,13 @@ impl GitLabConnector {
 }
 
 fn require_str<'a>(input: &'a serde_json::Value, field: &str) -> Result<&'a str, GitLabError> {
-    input.get(field).and_then(|v| v.as_str()).ok_or_else(|| GitLabError::Api {
-        status_code: 400,
-        message: format!("Missing required field: {field}"),
-    })
+    input
+        .get(field)
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| GitLabError::Api {
+            status_code: 400,
+            message: format!("Missing required field: {field}"),
+        })
 }
 
 fn operations_info() -> serde_json::Value {
@@ -286,13 +394,18 @@ mod tests {
 
     #[test]
     fn config_from_credential_id() {
-        let config = GitLabConfig::from_params(&json!({ "credential_id": "550e8400-e29b-41d4-a716-446655440000" })).unwrap();
+        let config = GitLabConfig::from_params(
+            &json!({ "credential_id": "550e8400-e29b-41d4-a716-446655440000" }),
+        )
+        .unwrap();
         assert!(config.auth.is_secretless());
     }
 
     #[test]
     fn config_rejects_both() {
-        let result = GitLabConfig::from_params(&json!({ "private_token": "tok", "credential_id": "550e8400-e29b-41d4-a716-446655440000" }));
+        let result = GitLabConfig::from_params(
+            &json!({ "private_token": "tok", "credential_id": "550e8400-e29b-41d4-a716-446655440000" }),
+        );
         assert!(result.is_err());
         match result.unwrap_err() {
             FcpError::InvalidRequest { message, .. } => {
@@ -326,7 +439,8 @@ mod tests {
 
     #[test]
     fn config_trims_token() {
-        let config = GitLabConfig::from_params(&json!({ "private_token": "  glpat-test  " })).unwrap();
+        let config =
+            GitLabConfig::from_params(&json!({ "private_token": "  glpat-test  " })).unwrap();
         match &config.auth {
             GitLabAuth::PrivateToken(t) => assert_eq!(t, "glpat-test"),
             GitLabAuth::CredentialId(_) => panic!("expected PrivateToken"),
@@ -338,7 +452,8 @@ mod tests {
         let config = GitLabConfig::from_params(&json!({
             "private_token": "glpat-test",
             "base_url": "https://gitlab.example.com/api/v4"
-        })).unwrap();
+        }))
+        .unwrap();
         assert_eq!(config.base_url, "https://gitlab.example.com/api/v4");
     }
 
@@ -377,8 +492,18 @@ mod tests {
     #[test]
     fn doctor_result_healthy() {
         let r = DoctorResult::from_checks(vec![
-            DoctorCheck { name: "a".into(), passed: true, message: None, critical: true },
-            DoctorCheck { name: "b".into(), passed: true, message: None, critical: false },
+            DoctorCheck {
+                name: "a".into(),
+                passed: true,
+                message: None,
+                critical: true,
+            },
+            DoctorCheck {
+                name: "b".into(),
+                passed: true,
+                message: None,
+                critical: false,
+            },
         ]);
         assert_eq!(r.status, DoctorStatus::Healthy);
     }
@@ -386,25 +511,48 @@ mod tests {
     #[test]
     fn doctor_result_degraded_non_critical_fails() {
         let r = DoctorResult::from_checks(vec![
-            DoctorCheck { name: "a".into(), passed: true, message: None, critical: true },
-            DoctorCheck { name: "b".into(), passed: false, message: Some("warn".into()), critical: false },
+            DoctorCheck {
+                name: "a".into(),
+                passed: true,
+                message: None,
+                critical: true,
+            },
+            DoctorCheck {
+                name: "b".into(),
+                passed: false,
+                message: Some("warn".into()),
+                critical: false,
+            },
         ]);
         assert_eq!(r.status, DoctorStatus::Degraded);
     }
 
     #[test]
     fn doctor_result_unhealthy_critical_fails() {
-        let r = DoctorResult::from_checks(vec![
-            DoctorCheck { name: "a".into(), passed: false, message: Some("down".into()), critical: true },
-        ]);
+        let r = DoctorResult::from_checks(vec![DoctorCheck {
+            name: "a".into(),
+            passed: false,
+            message: Some("down".into()),
+            critical: true,
+        }]);
         assert_eq!(r.status, DoctorStatus::Unhealthy);
     }
 
     #[test]
     fn doctor_result_unhealthy_overrides_degraded() {
         let r = DoctorResult::from_checks(vec![
-            DoctorCheck { name: "a".into(), passed: false, message: None, critical: true },
-            DoctorCheck { name: "b".into(), passed: false, message: None, critical: false },
+            DoctorCheck {
+                name: "a".into(),
+                passed: false,
+                message: None,
+                critical: true,
+            },
+            DoctorCheck {
+                name: "b".into(),
+                passed: false,
+                message: None,
+                critical: false,
+            },
         ]);
         assert_eq!(r.status, DoctorStatus::Unhealthy);
     }
@@ -417,9 +565,12 @@ mod tests {
 
     #[test]
     fn doctor_result_serializes() {
-        let r = DoctorResult::from_checks(vec![
-            DoctorCheck { name: "config".into(), passed: true, message: None, critical: true },
-        ]);
+        let r = DoctorResult::from_checks(vec![DoctorCheck {
+            name: "config".into(),
+            passed: true,
+            message: None,
+            critical: true,
+        }]);
         let v = serde_json::to_value(&r).unwrap();
         assert_eq!(v["status"], "healthy");
         assert!(v["checks"][0]["message"].is_null());
@@ -438,7 +589,10 @@ mod tests {
         let input = json!({});
         let err = require_str(&input, "project_id").unwrap_err();
         match err {
-            GitLabError::Api { status_code, message } => {
+            GitLabError::Api {
+                status_code,
+                message,
+            } => {
                 assert_eq!(status_code, 400);
                 assert!(message.contains("project_id"));
             }
@@ -468,7 +622,12 @@ mod tests {
     #[test]
     fn operations_ids_are_unique() {
         let ops = operations_info();
-        let ids: Vec<&str> = ops.as_array().unwrap().iter().filter_map(|o| o["id"].as_str()).collect();
+        let ids: Vec<&str> = ops
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|o| o["id"].as_str())
+            .collect();
         let mut unique = ids.clone();
         unique.sort_unstable();
         unique.dedup();
@@ -481,18 +640,34 @@ mod tests {
         for op in ops.as_array().unwrap() {
             let cap = op["capability"].as_str().unwrap();
             if cap.to_ascii_lowercase().ends_with(".read") {
-                assert_eq!(op["safety_tier"].as_str().unwrap(), "safe", "read op {} should be safe", op["id"]);
+                assert_eq!(
+                    op["safety_tier"].as_str().unwrap(),
+                    "safe",
+                    "read op {} should be safe",
+                    op["id"]
+                );
             }
         }
     }
 
     #[test]
     fn all_operations_have_required_fields() {
-        let required = ["id", "summary", "capability", "risk_level", "safety_tier", "idempotency"];
+        let required = [
+            "id",
+            "summary",
+            "capability",
+            "risk_level",
+            "safety_tier",
+            "idempotency",
+        ];
         let ops = operations_info();
         for op in ops.as_array().unwrap() {
             for field in &required {
-                assert!(op.get(field).is_some(), "op {:?} missing field {field}", op["id"]);
+                assert!(
+                    op.get(field).is_some(),
+                    "op {:?} missing field {field}",
+                    op["id"]
+                );
             }
         }
     }
@@ -503,7 +678,11 @@ mod tests {
         let ops = operations_info();
         for op in ops.as_array().unwrap() {
             let level = op["risk_level"].as_str().unwrap();
-            assert!(valid.contains(&level), "invalid risk_level {level} for {:?}", op["id"]);
+            assert!(
+                valid.contains(&level),
+                "invalid risk_level {level} for {:?}",
+                op["id"]
+            );
         }
     }
 
@@ -513,14 +692,23 @@ mod tests {
         let ops = operations_info();
         for op in ops.as_array().unwrap() {
             let tier = op["safety_tier"].as_str().unwrap();
-            assert!(valid.contains(&tier), "invalid safety_tier {tier} for {:?}", op["id"]);
+            assert!(
+                valid.contains(&tier),
+                "invalid safety_tier {tier} for {:?}",
+                op["id"]
+            );
         }
     }
 
     #[test]
     fn operations_contain_expected_ids() {
         let ops = operations_info();
-        let ids: Vec<&str> = ops.as_array().unwrap().iter().filter_map(|o| o["id"].as_str()).collect();
+        let ids: Vec<&str> = ops
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|o| o["id"].as_str())
+            .collect();
         let expected = [
             "gitlab.projects.list",
             "gitlab.issues.list",

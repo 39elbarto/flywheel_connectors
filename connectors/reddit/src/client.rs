@@ -102,7 +102,11 @@ impl RedditClient {
         }
     }
 
-    async fn handle_error(&self, status: StatusCode, resp: Response) -> RedditResult<serde_json::Value> {
+    async fn handle_error(
+        &self,
+        status: StatusCode,
+        resp: Response,
+    ) -> RedditResult<serde_json::Value> {
         let retry_after = resp
             .headers()
             .get("retry-after")
@@ -122,7 +126,10 @@ impl RedditClient {
             429 => Err(RedditError::RateLimited {
                 retry_after_ms: retry_after.unwrap_or(60) * 1000,
             }),
-            code => Err(RedditError::Api { status_code: code, message: detail }),
+            code => Err(RedditError::Api {
+                status_code: code,
+                message: detail,
+            }),
         }
     }
 
@@ -143,7 +150,11 @@ impl RedditClient {
     }
 
     #[instrument(skip(self, body), fields(url))]
-    async fn post_form(&self, path: &str, body: &[(&str, &str)]) -> RedditResult<serde_json::Value> {
+    async fn post_form(
+        &self,
+        path: &str,
+        body: &[(&str, &str)],
+    ) -> RedditResult<serde_json::Value> {
         let url = format!("{}{path}", self.base_url);
         debug!(url = %url, "POST form request");
         let encoded: String = body
@@ -165,10 +176,9 @@ impl RedditClient {
 
     /// Search posts.
     pub async fn search_posts(&self, params: &SearchParams<'_>) -> RedditResult<serde_json::Value> {
-        let base = params.subreddit.map_or_else(
-            || "/search".to_string(),
-            |sr| format!("/r/{sr}/search"),
-        );
+        let base = params
+            .subreddit
+            .map_or_else(|| "/search".to_string(), |sr| format!("/r/{sr}/search"));
         let mut q = vec![
             ("q".to_string(), params.query.to_string()),
             ("restrict_sr".to_string(), "on".to_string()),
@@ -205,7 +215,11 @@ impl RedditClient {
         if let Some(a) = after {
             q.push(("after", a.to_string()));
         }
-        self.get(&format!("/r/{subreddit}/new"), if q.is_empty() { None } else { Some(&q) }).await
+        self.get(
+            &format!("/r/{subreddit}/new"),
+            if q.is_empty() { None } else { Some(&q) },
+        )
+        .await
     }
 
     // -- Post thread --
@@ -225,13 +239,20 @@ impl RedditClient {
         if let Some(l) = comment_limit {
             q.push(("limit", l.to_string()));
         }
-        self.get(&format!("/comments/{post_id}"), if q.is_empty() { None } else { Some(&q) }).await
+        self.get(
+            &format!("/comments/{post_id}"),
+            if q.is_empty() { None } else { Some(&q) },
+        )
+        .await
     }
 
     // -- Create post --
 
     /// Submit a new post.
-    pub async fn create_post(&self, params: &CreatePostParams<'_>) -> RedditResult<serde_json::Value> {
+    pub async fn create_post(
+        &self,
+        params: &CreatePostParams<'_>,
+    ) -> RedditResult<serde_json::Value> {
         let mut form = vec![
             ("sr", params.subreddit),
             ("kind", params.kind),
@@ -263,11 +284,15 @@ impl RedditClient {
         parent_fullname: &str,
         text: &str,
     ) -> RedditResult<serde_json::Value> {
-        self.post_form("/api/comment", &[
-            ("thing_id", parent_fullname),
-            ("text", text),
-            ("api_type", "json"),
-        ]).await
+        self.post_form(
+            "/api/comment",
+            &[
+                ("thing_id", parent_fullname),
+                ("text", text),
+                ("api_type", "json"),
+            ],
+        )
+        .await
     }
 
     // -- Send message --
@@ -279,12 +304,16 @@ impl RedditClient {
         subject: &str,
         message: &str,
     ) -> RedditResult<serde_json::Value> {
-        self.post_form("/api/compose", &[
-            ("to", recipient),
-            ("subject", subject),
-            ("text", message),
-            ("api_type", "json"),
-        ]).await
+        self.post_form(
+            "/api/compose",
+            &[
+                ("to", recipient),
+                ("subject", subject),
+                ("text", message),
+                ("api_type", "json"),
+            ],
+        )
+        .await
     }
 
     // -- Mod remove --
@@ -296,10 +325,8 @@ impl RedditClient {
         spam: bool,
     ) -> RedditResult<serde_json::Value> {
         let spam_s = spam.to_string();
-        self.post_form("/api/remove", &[
-            ("id", thing_fullname),
-            ("spam", &spam_s),
-        ]).await
+        self.post_form("/api/remove", &[("id", thing_fullname), ("spam", &spam_s)])
+            .await
     }
 
     // -- Download media --
@@ -310,7 +337,9 @@ impl RedditClient {
         url: &str,
         max_bytes: Option<i64>,
     ) -> RedditResult<serde_json::Value> {
-        let resp = self.client.get(url)
+        let resp = self
+            .client
+            .get(url)
             .timeout(Duration::from_secs(90))
             .send()
             .await?;
@@ -475,7 +504,8 @@ mod tests {
 
     #[test]
     fn client_debug_redacts_bearer() {
-        let client = RedditClient::new(RedditAuth::BearerToken("super-secret".into()), None).unwrap();
+        let client =
+            RedditClient::new(RedditAuth::BearerToken("super-secret".into()), None).unwrap();
         let dbg = format!("{client:?}");
         assert!(!dbg.contains("super-secret"));
         assert!(dbg.contains("redacted"));
@@ -584,5 +614,4 @@ mod tests {
     fn default_base_url_value() {
         assert_eq!(DEFAULT_BASE_URL, "https://oauth.reddit.com");
     }
-
 }

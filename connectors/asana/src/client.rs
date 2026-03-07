@@ -399,8 +399,7 @@ mod tests {
 
     #[test]
     fn client_debug_contains_base_url() {
-        let client =
-            AsanaClient::new(AsanaAuth::PersonalAccessToken("tok".into()), None).unwrap();
+        let client = AsanaClient::new(AsanaAuth::PersonalAccessToken("tok".into()), None).unwrap();
         let dbg = format!("{client:?}");
         assert!(dbg.contains("AsanaClient"));
         assert!(dbg.contains(DEFAULT_BASE_URL));
@@ -446,11 +445,7 @@ mod tests {
 
     #[test]
     fn client_with_credential_id_auth() {
-        let client = AsanaClient::new(
-            AsanaAuth::CredentialId(CredentialId::new()),
-            None,
-        )
-        .unwrap();
+        let client = AsanaClient::new(AsanaAuth::CredentialId(CredentialId::new()), None).unwrap();
         let dbg = format!("{client:?}");
         assert!(dbg.contains("CredentialId"));
     }

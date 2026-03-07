@@ -1249,7 +1249,10 @@ mod tests {
         };
         let json = serde_json::to_value(&acc).unwrap();
         assert!(json.get("type").is_some(), "Should use 'type' key in JSON");
-        assert!(json.get("account_type").is_none(), "Should NOT use 'account_type' key");
+        assert!(
+            json.get("account_type").is_none(),
+            "Should NOT use 'account_type' key"
+        );
     }
 
     #[test]

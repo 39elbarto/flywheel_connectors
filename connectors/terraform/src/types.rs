@@ -729,8 +729,7 @@ mod tests {
 
     #[test]
     fn configuration_version_minimal() {
-        let cv: ConfigurationVersion =
-            serde_json::from_value(json!({"id": "cv-x"})).unwrap();
+        let cv: ConfigurationVersion = serde_json::from_value(json!({"id": "cv-x"})).unwrap();
         assert_eq!(cv.id, "cv-x");
         assert!(cv.status.is_none());
         assert!(cv.upload_url.is_none());

@@ -126,7 +126,9 @@ impl HomeAssistantConnector {
     /// Create a new `Home Assistant` connector.
     pub fn new() -> Self {
         Self {
-            base: Arc::new(BaseConnector::new(ConnectorId::from_static("homeassistant"))),
+            base: Arc::new(BaseConnector::new(ConnectorId::from_static(
+                "homeassistant",
+            ))),
             config: None,
             client: None,
             session_id: None,
@@ -506,9 +508,7 @@ impl HomeAssistantConnector {
             body["skip_condition"] = json!(true);
         }
 
-        let data = client
-            .call_service("automation", "trigger", &body)
-            .await?;
+        let data = client.call_service("automation", "trigger", &body).await?;
         Ok(json!({ "result": data }))
     }
 
@@ -606,7 +606,10 @@ impl HomeAssistantConnector {
 }
 
 /// Extract a required string field from input.
-fn require_str<'a>(input: &'a serde_json::Value, field: &str) -> Result<&'a str, HomeAssistantError> {
+fn require_str<'a>(
+    input: &'a serde_json::Value,
+    field: &str,
+) -> Result<&'a str, HomeAssistantError> {
     input
         .get(field)
         .and_then(serde_json::Value::as_str)
@@ -1000,13 +1003,21 @@ mod tests {
         let ops = operations_info();
         for op in ops.as_array().unwrap() {
             let v = op["idempotency"].as_str().unwrap();
-            assert!(valid.contains(&v), "invalid idempotency: {v} on {}", op["id"]);
+            assert!(
+                valid.contains(&v),
+                "invalid idempotency: {v} on {}",
+                op["id"]
+            );
         }
     }
 
     #[test]
     fn operations_capabilities_valid() {
-        let valid = ["homeassistant.read", "homeassistant.write", "homeassistant.control"];
+        let valid = [
+            "homeassistant.read",
+            "homeassistant.write",
+            "homeassistant.control",
+        ];
         let ops = operations_info();
         for op in ops.as_array().unwrap() {
             let cap = op["capability"].as_str().unwrap();
@@ -1323,8 +1334,7 @@ mod tests {
 
     #[test]
     fn config_default_base_url() {
-        let config =
-            HomeAssistantConfig::from_params(&json!({"access_token": "tok"})).unwrap();
+        let config = HomeAssistantConfig::from_params(&json!({"access_token": "tok"})).unwrap();
         assert_eq!(config.base_url, DEFAULT_BASE_URL);
     }
 }

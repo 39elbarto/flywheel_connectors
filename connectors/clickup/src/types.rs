@@ -185,7 +185,10 @@ mod tests {
             status: None,
             priority: None,
             url: None,
-            list: Some(TaskList { id: Some("l1".into()), name: Some("List A".into()) }),
+            list: Some(TaskList {
+                id: Some("l1".into()),
+                name: Some("List A".into()),
+            }),
         };
         let v = serde_json::to_value(&t).unwrap();
         assert_eq!(v["id"], "t1");
@@ -539,6 +542,9 @@ mod tests {
             "url": "https://app.clickup.com/t/task_abc123",
         }))
         .unwrap();
-        assert_eq!(t.url.as_deref(), Some("https://app.clickup.com/t/task_abc123"));
+        assert_eq!(
+            t.url.as_deref(),
+            Some("https://app.clickup.com/t/task_abc123")
+        );
     }
 }

@@ -385,9 +385,7 @@ impl SnowflakeConnector {
         input: &serde_json::Value,
     ) -> Result<serde_json::Value, SnowflakeError> {
         let statement = require_str(input, "statement")?;
-        let warehouse = input
-            .get("warehouse")
-            .and_then(serde_json::Value::as_str);
+        let warehouse = input.get("warehouse").and_then(serde_json::Value::as_str);
         let database = input.get("database").and_then(serde_json::Value::as_str);
         let schema = input.get("schema").and_then(serde_json::Value::as_str);
 
@@ -419,9 +417,7 @@ impl SnowflakeConnector {
         input: &serde_json::Value,
     ) -> Result<serde_json::Value, SnowflakeError> {
         let statement = require_str(input, "statement")?;
-        let warehouse = input
-            .get("warehouse")
-            .and_then(serde_json::Value::as_str);
+        let warehouse = input.get("warehouse").and_then(serde_json::Value::as_str);
         let database = input.get("database").and_then(serde_json::Value::as_str);
         let schema = input.get("schema").and_then(serde_json::Value::as_str);
 

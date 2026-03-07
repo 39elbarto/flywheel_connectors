@@ -102,7 +102,11 @@ impl IntercomClient {
         }
     }
 
-    async fn handle_error(&self, status: StatusCode, resp: Response) -> IntercomResult<serde_json::Value> {
+    async fn handle_error(
+        &self,
+        status: StatusCode,
+        resp: Response,
+    ) -> IntercomResult<serde_json::Value> {
         let retry_after = resp
             .headers()
             .get("retry-after")
@@ -122,7 +126,10 @@ impl IntercomClient {
             429 => Err(IntercomError::RateLimited {
                 retry_after_ms: retry_after.unwrap_or(60) * 1000,
             }),
-            code => Err(IntercomError::Api { status_code: code, message: detail }),
+            code => Err(IntercomError::Api {
+                status_code: code,
+                message: detail,
+            }),
         }
     }
 
@@ -134,7 +141,8 @@ impl IntercomClient {
     ) -> IntercomResult<serde_json::Value> {
         let url = format!("{}{path}", self.base_url);
         debug!(url = %url, "GET request");
-        let mut req = self.add_auth(self.client.get(&url))
+        let mut req = self
+            .add_auth(self.client.get(&url))
             .header("Accept", "application/json");
         if let Some(q) = query {
             req = req.query(q);
@@ -144,10 +152,15 @@ impl IntercomClient {
     }
 
     #[instrument(skip(self, body), fields(url))]
-    async fn post(&self, path: &str, body: &serde_json::Value) -> IntercomResult<serde_json::Value> {
+    async fn post(
+        &self,
+        path: &str,
+        body: &serde_json::Value,
+    ) -> IntercomResult<serde_json::Value> {
         let url = format!("{}{path}", self.base_url);
         debug!(url = %url, "POST request");
-        let req = self.add_auth(self.client.post(&url))
+        let req = self
+            .add_auth(self.client.post(&url))
             .header("Accept", "application/json")
             .json(body);
         let resp = req.send().await?;
@@ -158,7 +171,8 @@ impl IntercomClient {
     async fn delete(&self, path: &str) -> IntercomResult<serde_json::Value> {
         let url = format!("{}{path}", self.base_url);
         debug!(url = %url, "DELETE request");
-        let req = self.add_auth(self.client.delete(&url))
+        let req = self
+            .add_auth(self.client.delete(&url))
             .header("Accept", "application/json");
         let resp = req.send().await?;
         self.handle_response(resp).await
@@ -179,7 +193,8 @@ impl IntercomClient {
         if let Some(s) = starting_after {
             q.push(("starting_after", s.to_string()));
         }
-        self.get("/contacts", if q.is_empty() { None } else { Some(&q) }).await
+        self.get("/contacts", if q.is_empty() { None } else { Some(&q) })
+            .await
     }
 
     /// Create a contact.
@@ -191,10 +206,7 @@ impl IntercomClient {
     }
 
     /// Delete a contact.
-    pub async fn delete_contact(
-        &self,
-        contact_id: &str,
-    ) -> IntercomResult<serde_json::Value> {
+    pub async fn delete_contact(&self, contact_id: &str) -> IntercomResult<serde_json::Value> {
         self.delete(&format!("/contacts/{contact_id}")).await
     }
 
@@ -213,7 +225,8 @@ impl IntercomClient {
         if let Some(s) = starting_after {
             q.push(("starting_after", s.to_string()));
         }
-        self.get("/conversations", if q.is_empty() { None } else { Some(&q) }).await
+        self.get("/conversations", if q.is_empty() { None } else { Some(&q) })
+            .await
     }
 
     /// Reply to a conversation.
@@ -222,7 +235,8 @@ impl IntercomClient {
         conversation_id: &str,
         body: &serde_json::Value,
     ) -> IntercomResult<serde_json::Value> {
-        self.post(&format!("/conversations/{conversation_id}/reply"), body).await
+        self.post(&format!("/conversations/{conversation_id}/reply"), body)
+            .await
     }
 
     // -- Tags --
@@ -337,11 +351,7 @@ mod tests {
 
     #[test]
     fn client_debug_shows_struct() {
-        let client = IntercomClient::new(
-            IntercomAuth::BearerToken("tok".into()),
-            None,
-        )
-        .unwrap();
+        let client = IntercomClient::new(IntercomAuth::BearerToken("tok".into()), None).unwrap();
         let dbg = format!("{client:?}");
         assert!(dbg.contains("IntercomClient"));
         assert!(dbg.contains("auth"));
@@ -350,11 +360,8 @@ mod tests {
 
     #[test]
     fn client_debug_redacts_auth() {
-        let client = IntercomClient::new(
-            IntercomAuth::BearerToken("my-secret".into()),
-            None,
-        )
-        .unwrap();
+        let client =
+            IntercomClient::new(IntercomAuth::BearerToken("my-secret".into()), None).unwrap();
         let dbg = format!("{client:?}");
         assert!(!dbg.contains("my-secret"));
         assert!(dbg.contains("redacted"));
@@ -367,13 +374,9 @@ mod tests {
 
     #[test]
     fn client_with_credential_id_auth() {
-        let client = IntercomClient::new(
-            IntercomAuth::CredentialId(CredentialId::new()),
-            None,
-        )
-        .unwrap();
+        let client =
+            IntercomClient::new(IntercomAuth::CredentialId(CredentialId::new()), None).unwrap();
         let dbg = format!("{client:?}");
         assert!(dbg.contains("CredentialId"));
     }
-
 }

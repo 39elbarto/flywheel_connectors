@@ -42,9 +42,70 @@ async fn lifecycle_configure() {
     let mut c = CronConnector::new();
     let result = c.handle_configure(json!({})).await;
     assert!(result.is_ok());
+    let configured = result.unwrap();
+    assert_eq!(configured["status"], "configured");
+    assert_eq!(configured["state_store"]["backend"], "memory");
+    assert_eq!(configured["state_store"]["persist_to_disk"], false);
+    assert_eq!(configured["clock"]["source"], "system_utc");
+    assert_eq!(configured["clock"]["timezone"], "UTC");
     let h = c.handle_health().await.unwrap();
     assert_eq!(h["status"], "degraded"); // configured but not handshaken
     assert_eq!(h["configured"], true);
+}
+
+#[fcp_async_core::runtime::test]
+async fn lifecycle_configure_with_custom_policy() {
+    let mut c = CronConnector::new();
+    let configured = c
+        .handle_configure(json!({
+            "state_store": {
+                "backend": "memory",
+                "max_schedules": 123,
+                "max_executions": 456,
+                "persist_to_disk": false
+            },
+            "clock": {
+                "source": "system_utc",
+                "timezone": "utc",
+                "max_clock_skew_seconds": 120
+            }
+        }))
+        .await
+        .unwrap();
+
+    assert_eq!(configured["state_store"]["max_schedules"], 123);
+    assert_eq!(configured["state_store"]["max_executions"], 456);
+    assert_eq!(configured["clock"]["timezone"], "UTC");
+    assert_eq!(configured["clock"]["max_clock_skew_seconds"], 120);
+}
+
+#[fcp_async_core::runtime::test]
+async fn lifecycle_configure_rejects_disk_persistence() {
+    let mut c = CronConnector::new();
+    let result = c
+        .handle_configure(json!({
+            "state_store": {
+                "backend": "memory",
+                "persist_to_disk": true
+            }
+        }))
+        .await;
+    assert!(result.is_err());
+}
+
+#[fcp_async_core::runtime::test]
+async fn lifecycle_configure_rejects_non_utc_timezone() {
+    let mut c = CronConnector::new();
+    let result = c
+        .handle_configure(json!({
+            "clock": {
+                "source": "system_utc",
+                "timezone": "America/New_York",
+                "max_clock_skew_seconds": 30
+            }
+        }))
+        .await;
+    assert!(result.is_err());
 }
 
 #[fcp_async_core::runtime::test]
@@ -90,6 +151,9 @@ async fn lifecycle_doctor_healthy() {
     let c = setup_connector().await;
     let doc = c.handle_doctor().await.unwrap();
     assert_eq!(doc["status"], "healthy");
+    let checks = doc["checks"].as_array().unwrap();
+    assert!(checks.iter().any(|c| c["name"] == "state_store"));
+    assert!(checks.iter().any(|c| c["name"] == "clock_policy"));
 }
 
 #[fcp_async_core::runtime::test]
@@ -186,7 +250,12 @@ async fn invoke_create_schedule() {
         }))
         .await
         .unwrap();
-    assert!(result["schedule_id"].as_str().unwrap().starts_with("sched_"));
+    assert!(
+        result["schedule_id"]
+            .as_str()
+            .unwrap()
+            .starts_with("sched_")
+    );
     assert_eq!(c.schedule_count(), 1);
 }
 
@@ -435,7 +504,12 @@ async fn invoke_trigger() {
         }))
         .await
         .unwrap();
-    assert!(result["execution_id"].as_str().unwrap().starts_with("exec_"));
+    assert!(
+        result["execution_id"]
+            .as_str()
+            .unwrap()
+            .starts_with("exec_")
+    );
     assert_eq!(c.execution_count(), 1);
 }
 

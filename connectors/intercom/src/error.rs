@@ -71,7 +71,10 @@ impl IntercomError {
             Self::Json(e) => FcpError::Internal {
                 message: format!("JSON error: {e}"),
             },
-            Self::Api { status_code, message } => FcpError::External {
+            Self::Api {
+                status_code,
+                message,
+            } => FcpError::External {
                 service: "intercom".into(),
                 message: message.clone(),
                 status_code: Some(*status_code),
@@ -116,22 +119,45 @@ mod tests {
 
     #[test]
     fn rate_limited_is_retryable() {
-        assert!(IntercomError::RateLimited { retry_after_ms: 5000 }.is_retryable());
+        assert!(
+            IntercomError::RateLimited {
+                retry_after_ms: 5000
+            }
+            .is_retryable()
+        );
     }
 
     #[test]
     fn api_500_is_retryable() {
-        assert!(IntercomError::Api { status_code: 500, message: "err".into() }.is_retryable());
+        assert!(
+            IntercomError::Api {
+                status_code: 500,
+                message: "err".into()
+            }
+            .is_retryable()
+        );
     }
 
     #[test]
     fn api_503_is_retryable() {
-        assert!(IntercomError::Api { status_code: 503, message: "unavailable".into() }.is_retryable());
+        assert!(
+            IntercomError::Api {
+                status_code: 503,
+                message: "unavailable".into()
+            }
+            .is_retryable()
+        );
     }
 
     #[test]
     fn api_429_is_retryable() {
-        assert!(IntercomError::Api { status_code: 429, message: "too many".into() }.is_retryable());
+        assert!(
+            IntercomError::Api {
+                status_code: 429,
+                message: "too many".into()
+            }
+            .is_retryable()
+        );
     }
 
     #[test]
@@ -146,17 +172,30 @@ mod tests {
 
     #[test]
     fn not_found_not_retryable() {
-        assert!(!IntercomError::NotFound { resource: "contact".into() }.is_retryable());
+        assert!(
+            !IntercomError::NotFound {
+                resource: "contact".into()
+            }
+            .is_retryable()
+        );
     }
 
     #[test]
     fn api_400_not_retryable() {
-        assert!(!IntercomError::Api { status_code: 400, message: "bad request".into() }.is_retryable());
+        assert!(
+            !IntercomError::Api {
+                status_code: 400,
+                message: "bad request".into()
+            }
+            .is_retryable()
+        );
     }
 
     #[test]
     fn retry_after_for_rate_limited() {
-        let err = IntercomError::RateLimited { retry_after_ms: 30_000 };
+        let err = IntercomError::RateLimited {
+            retry_after_ms: 30_000,
+        };
         assert_eq!(err.retry_after(), Some(Duration::from_secs(30)));
     }
 
@@ -172,18 +211,36 @@ mod tests {
 
     #[test]
     fn retry_after_none_for_api_error() {
-        assert_eq!(IntercomError::Api { status_code: 500, message: "err".into() }.retry_after(), None);
+        assert_eq!(
+            IntercomError::Api {
+                status_code: 500,
+                message: "err".into()
+            }
+            .retry_after(),
+            None
+        );
     }
 
     #[test]
     fn retry_after_none_for_not_found() {
-        assert_eq!(IntercomError::NotFound { resource: "x".into() }.retry_after(), None);
+        assert_eq!(
+            IntercomError::NotFound {
+                resource: "x".into()
+            }
+            .retry_after(),
+            None
+        );
     }
 
     #[test]
     fn unauthorized_to_fcp_error() {
         match IntercomError::Unauthorized.to_fcp_error() {
-            FcpError::External { service, status_code, retryable, .. } => {
+            FcpError::External {
+                service,
+                status_code,
+                retryable,
+                ..
+            } => {
                 assert_eq!(service, "intercom");
                 assert_eq!(status_code, Some(401));
                 assert!(!retryable);
@@ -195,7 +252,12 @@ mod tests {
     #[test]
     fn forbidden_to_fcp_error() {
         match IntercomError::Forbidden.to_fcp_error() {
-            FcpError::External { service, status_code, retryable, .. } => {
+            FcpError::External {
+                service,
+                status_code,
+                retryable,
+                ..
+            } => {
                 assert_eq!(service, "intercom");
                 assert_eq!(status_code, Some(403));
                 assert!(!retryable);
@@ -206,8 +268,17 @@ mod tests {
 
     #[test]
     fn not_found_to_fcp_error() {
-        match (IntercomError::NotFound { resource: "t_abc".into() }).to_fcp_error() {
-            FcpError::External { status_code, message, retryable, .. } => {
+        match (IntercomError::NotFound {
+            resource: "t_abc".into(),
+        })
+        .to_fcp_error()
+        {
+            FcpError::External {
+                status_code,
+                message,
+                retryable,
+                ..
+            } => {
                 assert_eq!(status_code, Some(404));
                 assert!(message.contains("t_abc"));
                 assert!(!retryable);
@@ -218,8 +289,17 @@ mod tests {
 
     #[test]
     fn rate_limited_to_fcp_error() {
-        match (IntercomError::RateLimited { retry_after_ms: 60_000 }).to_fcp_error() {
-            FcpError::External { status_code, retryable, retry_after, .. } => {
+        match (IntercomError::RateLimited {
+            retry_after_ms: 60_000,
+        })
+        .to_fcp_error()
+        {
+            FcpError::External {
+                status_code,
+                retryable,
+                retry_after,
+                ..
+            } => {
                 assert_eq!(status_code, Some(429));
                 assert!(retryable);
                 assert_eq!(retry_after, Some(Duration::from_secs(60)));
@@ -230,8 +310,19 @@ mod tests {
 
     #[test]
     fn api_error_to_fcp_error() {
-        match (IntercomError::Api { status_code: 503, message: "unavailable".into() }).to_fcp_error() {
-            FcpError::External { service, status_code, retryable, message, .. } => {
+        match (IntercomError::Api {
+            status_code: 503,
+            message: "unavailable".into(),
+        })
+        .to_fcp_error()
+        {
+            FcpError::External {
+                service,
+                status_code,
+                retryable,
+                message,
+                ..
+            } => {
                 assert_eq!(service, "intercom");
                 assert_eq!(status_code, Some(503));
                 assert!(retryable);
@@ -252,8 +343,17 @@ mod tests {
 
     #[test]
     fn api_error_non_retryable_to_fcp_error() {
-        match (IntercomError::Api { status_code: 400, message: "bad".into() }).to_fcp_error() {
-            FcpError::External { status_code, retryable, .. } => {
+        match (IntercomError::Api {
+            status_code: 400,
+            message: "bad".into(),
+        })
+        .to_fcp_error()
+        {
+            FcpError::External {
+                status_code,
+                retryable,
+                ..
+            } => {
                 assert_eq!(status_code, Some(400));
                 assert!(!retryable);
             }
@@ -263,40 +363,70 @@ mod tests {
 
     #[test]
     fn error_display_unauthorized() {
-        assert_eq!(IntercomError::Unauthorized.to_string(), "Authentication failed: invalid or expired access token");
+        assert_eq!(
+            IntercomError::Unauthorized.to_string(),
+            "Authentication failed: invalid or expired access token"
+        );
     }
 
     #[test]
     fn error_display_forbidden() {
-        assert_eq!(IntercomError::Forbidden.to_string(), "Forbidden: insufficient permissions");
+        assert_eq!(
+            IntercomError::Forbidden.to_string(),
+            "Forbidden: insufficient permissions"
+        );
     }
 
     #[test]
     fn error_display_not_found() {
-        assert_eq!(IntercomError::NotFound { resource: "conversation".into() }.to_string(), "Not found: conversation");
+        assert_eq!(
+            IntercomError::NotFound {
+                resource: "conversation".into()
+            }
+            .to_string(),
+            "Not found: conversation"
+        );
     }
 
     #[test]
     fn error_display_rate_limited() {
-        assert_eq!(IntercomError::RateLimited { retry_after_ms: 2000 }.to_string(), "Rate limited, retry after 2000ms");
+        assert_eq!(
+            IntercomError::RateLimited {
+                retry_after_ms: 2000
+            }
+            .to_string(),
+            "Rate limited, retry after 2000ms"
+        );
     }
 
     #[test]
     fn error_display_api() {
-        assert_eq!(IntercomError::Api { status_code: 500, message: "Internal".into() }.to_string(), "Intercom API error (500): Internal");
+        assert_eq!(
+            IntercomError::Api {
+                status_code: 500,
+                message: "Internal".into()
+            }
+            .to_string(),
+            "Intercom API error (500): Internal"
+        );
     }
 
     // ── Additional Display tests ────────────────────────────────────
 
     #[test]
     fn error_display_api_with_empty_message() {
-        let err = IntercomError::Api { status_code: 422, message: String::new() };
+        let err = IntercomError::Api {
+            status_code: 422,
+            message: String::new(),
+        };
         assert_eq!(err.to_string(), "Intercom API error (422): ");
     }
 
     #[test]
     fn error_display_not_found_empty_resource() {
-        let err = IntercomError::NotFound { resource: String::new() };
+        let err = IntercomError::NotFound {
+            resource: String::new(),
+        };
         assert_eq!(err.to_string(), "Not found: ");
     }
 
@@ -308,7 +438,9 @@ mod tests {
 
     #[test]
     fn error_display_rate_limited_large_value() {
-        let err = IntercomError::RateLimited { retry_after_ms: 3_600_000 };
+        let err = IntercomError::RateLimited {
+            retry_after_ms: 3_600_000,
+        };
         assert_eq!(err.to_string(), "Rate limited, retry after 3600000ms");
     }
 
@@ -316,27 +448,57 @@ mod tests {
 
     #[test]
     fn api_502_is_retryable() {
-        assert!(IntercomError::Api { status_code: 502, message: "Bad Gateway".into() }.is_retryable());
+        assert!(
+            IntercomError::Api {
+                status_code: 502,
+                message: "Bad Gateway".into()
+            }
+            .is_retryable()
+        );
     }
 
     #[test]
     fn api_504_is_retryable() {
-        assert!(IntercomError::Api { status_code: 504, message: "Gateway Timeout".into() }.is_retryable());
+        assert!(
+            IntercomError::Api {
+                status_code: 504,
+                message: "Gateway Timeout".into()
+            }
+            .is_retryable()
+        );
     }
 
     #[test]
     fn api_599_is_retryable() {
-        assert!(IntercomError::Api { status_code: 599, message: "custom".into() }.is_retryable());
+        assert!(
+            IntercomError::Api {
+                status_code: 599,
+                message: "custom".into()
+            }
+            .is_retryable()
+        );
     }
 
     #[test]
     fn api_409_not_retryable() {
-        assert!(!IntercomError::Api { status_code: 409, message: "conflict".into() }.is_retryable());
+        assert!(
+            !IntercomError::Api {
+                status_code: 409,
+                message: "conflict".into()
+            }
+            .is_retryable()
+        );
     }
 
     #[test]
     fn api_422_not_retryable() {
-        assert!(!IntercomError::Api { status_code: 422, message: "unprocessable".into() }.is_retryable());
+        assert!(
+            !IntercomError::Api {
+                status_code: 422,
+                message: "unprocessable".into()
+            }
+            .is_retryable()
+        );
     }
 
     #[test]
@@ -369,8 +531,18 @@ mod tests {
 
     #[test]
     fn api_error_502_to_fcp_retryable() {
-        match (IntercomError::Api { status_code: 502, message: "gw".into() }).to_fcp_error() {
-            FcpError::External { status_code, retryable, retry_after, .. } => {
+        match (IntercomError::Api {
+            status_code: 502,
+            message: "gw".into(),
+        })
+        .to_fcp_error()
+        {
+            FcpError::External {
+                status_code,
+                retryable,
+                retry_after,
+                ..
+            } => {
                 assert_eq!(status_code, Some(502));
                 assert!(retryable);
                 assert!(retry_after.is_none());
@@ -382,7 +554,11 @@ mod tests {
     #[test]
     fn rate_limited_zero_to_fcp_error() {
         match (IntercomError::RateLimited { retry_after_ms: 0 }).to_fcp_error() {
-            FcpError::External { retry_after, retryable, .. } => {
+            FcpError::External {
+                retry_after,
+                retryable,
+                ..
+            } => {
                 assert!(retryable);
                 assert_eq!(retry_after, Some(Duration::from_millis(0)));
             }
@@ -392,7 +568,11 @@ mod tests {
 
     #[test]
     fn not_found_to_fcp_error_service_name() {
-        match (IntercomError::NotFound { resource: "thing".into() }).to_fcp_error() {
+        match (IntercomError::NotFound {
+            resource: "thing".into(),
+        })
+        .to_fcp_error()
+        {
             FcpError::External { service, .. } => {
                 assert_eq!(service, "intercom");
             }
@@ -403,7 +583,11 @@ mod tests {
     #[test]
     fn unauthorized_fcp_error_message() {
         match IntercomError::Unauthorized.to_fcp_error() {
-            FcpError::External { message, retry_after, .. } => {
+            FcpError::External {
+                message,
+                retry_after,
+                ..
+            } => {
                 assert_eq!(message, "Authentication failed");
                 assert!(retry_after.is_none());
             }
@@ -437,21 +621,37 @@ mod tests {
 
     #[test]
     fn error_debug_rate_limited() {
-        let dbg = format!("{:?}", IntercomError::RateLimited { retry_after_ms: 5000 });
+        let dbg = format!(
+            "{:?}",
+            IntercomError::RateLimited {
+                retry_after_ms: 5000
+            }
+        );
         assert!(dbg.contains("RateLimited"));
         assert!(dbg.contains("5000"));
     }
 
     #[test]
     fn error_debug_not_found() {
-        let dbg = format!("{:?}", IntercomError::NotFound { resource: "contact-99".into() });
+        let dbg = format!(
+            "{:?}",
+            IntercomError::NotFound {
+                resource: "contact-99".into()
+            }
+        );
         assert!(dbg.contains("NotFound"));
         assert!(dbg.contains("contact-99"));
     }
 
     #[test]
     fn error_debug_api() {
-        let dbg = format!("{:?}", IntercomError::Api { status_code: 418, message: "teapot".into() });
+        let dbg = format!(
+            "{:?}",
+            IntercomError::Api {
+                status_code: 418,
+                message: "teapot".into()
+            }
+        );
         assert!(dbg.contains("Api"));
         assert!(dbg.contains("418"));
         assert!(dbg.contains("teapot"));

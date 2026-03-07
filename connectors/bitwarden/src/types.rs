@@ -409,10 +409,7 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(e.error, Some("invalid_grant".into()));
-        assert_eq!(
-            e.error_description,
-            Some("Invalid credentials".into())
-        );
+        assert_eq!(e.error_description, Some("Invalid credentials".into()));
     }
 
     #[test]

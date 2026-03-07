@@ -188,12 +188,8 @@ fn is_localhost_checks() {
 #[test]
 fn is_private_range_checks() {
     assert!(is_private_range(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))));
-    assert!(is_private_range(IpAddr::V4(Ipv4Addr::new(
-        192, 168, 1, 1
-    ))));
-    assert!(is_private_range(IpAddr::V4(Ipv4Addr::new(
-        172, 16, 0, 1
-    ))));
+    assert!(is_private_range(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1))));
+    assert!(is_private_range(IpAddr::V4(Ipv4Addr::new(172, 16, 0, 1))));
     assert!(!is_private_range(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))));
 }
 
@@ -205,15 +201,11 @@ fn is_link_local_checks() {
 
 #[test]
 fn is_tailnet_range_checks() {
-    assert!(is_tailnet_range(IpAddr::V4(Ipv4Addr::new(
-        100, 64, 0, 1
-    ))));
+    assert!(is_tailnet_range(IpAddr::V4(Ipv4Addr::new(100, 64, 0, 1))));
     assert!(is_tailnet_range(IpAddr::V4(Ipv4Addr::new(
         100, 127, 255, 254
     ))));
-    assert!(!is_tailnet_range(IpAddr::V4(Ipv4Addr::new(
-        100, 128, 0, 1
-    ))));
+    assert!(!is_tailnet_range(IpAddr::V4(Ipv4Addr::new(100, 128, 0, 1))));
 }
 
 #[test]
@@ -436,18 +428,22 @@ fn egress_denies_tcp_to_wrong_host() {
 #[test]
 fn noop_credential_injector_allows_nothing() {
     let injector = NoOpCredentialInjector;
-    assert!(!injector
-        .is_authorized("cred-1", "op.read", &["cred-1".to_string()])
-        .unwrap());
+    assert!(
+        !injector
+            .is_authorized("cred-1", "op.read", &["cred-1".to_string()])
+            .unwrap()
+    );
 }
 
 #[test]
 fn noop_credential_injector_host_allowed_uses_default() {
     let injector = NoOpCredentialInjector;
     // Default trait impl returns Ok(true) — NoOp doesn't override it
-    assert!(injector
-        .is_host_allowed("cred-1", "api.example.com")
-        .unwrap());
+    assert!(
+        injector
+            .is_host_allowed("cred-1", "api.example.com")
+            .unwrap()
+    );
 }
 
 #[test]
@@ -541,10 +537,12 @@ fn compiled_policy_state_dir_expansion() {
     let policy = CompiledPolicy::from_manifest(&section, state_dir).unwrap();
 
     // $CONNECTOR_STATE should be expanded in writable paths
-    assert!(policy
-        .writable_paths
-        .iter()
-        .any(|p| p == Path::new("/var/lib/fcp/my-connector")));
+    assert!(
+        policy
+            .writable_paths
+            .iter()
+            .any(|p| p == Path::new("/var/lib/fcp/my-connector"))
+    );
 }
 
 #[test]
@@ -677,13 +675,9 @@ fn wasi_config_deterministic_mode() {
 
 #[test]
 fn wasi_config_env_and_args() {
-    let env = std::collections::HashMap::from([
-        ("KEY".to_string(), "value".to_string()),
-    ]);
+    let env = std::collections::HashMap::from([("KEY".to_string(), "value".to_string())]);
     let args = vec!["--flag".to_string(), "arg1".to_string()];
-    let config = WasiConfig::default()
-        .with_env(env)
-        .with_args(args);
+    let config = WasiConfig::default().with_env(env).with_args(args);
 
     assert_eq!(config.env_vars.len(), 1);
     assert_eq!(config.args.len(), 2);
@@ -710,21 +704,14 @@ fn wasi_config_network_constraints() {
 #[test]
 fn fs_gate_allows_read_in_readonly_path() {
     // Use /etc which exists on all platforms
-    let gate = FsCapabilityGate::new(
-        vec![PathBuf::from("/etc")],
-        vec![],
-    );
+    let gate = FsCapabilityGate::new(vec![PathBuf::from("/etc")], vec![]);
     // /etc/hosts exists on macOS and Linux
-    gate.check_access(Path::new("/etc/hosts"), false)
-        .unwrap();
+    gate.check_access(Path::new("/etc/hosts"), false).unwrap();
 }
 
 #[test]
 fn fs_gate_denies_write_to_readonly_path() {
-    let gate = FsCapabilityGate::new(
-        vec![PathBuf::from("/etc")],
-        vec![],
-    );
+    let gate = FsCapabilityGate::new(vec![PathBuf::from("/etc")], vec![]);
     let err = gate
         .check_access(Path::new("/etc/hosts"), true)
         .unwrap_err();
@@ -733,20 +720,14 @@ fn fs_gate_denies_write_to_readonly_path() {
 
 #[test]
 fn fs_gate_allows_write_to_writable_path() {
-    let gate = FsCapabilityGate::new(
-        vec![],
-        vec![PathBuf::from("/tmp")],
-    );
+    let gate = FsCapabilityGate::new(vec![], vec![PathBuf::from("/tmp")]);
     gate.check_access(Path::new("/tmp/data.json"), true)
         .unwrap();
 }
 
 #[test]
 fn fs_gate_denies_access_outside_any_path() {
-    let gate = FsCapabilityGate::new(
-        vec![PathBuf::from("/etc")],
-        vec![PathBuf::from("/tmp")],
-    );
+    let gate = FsCapabilityGate::new(vec![PathBuf::from("/etc")], vec![PathBuf::from("/tmp")]);
     let err = gate
         .check_access(Path::new("/var/log/system.log"), false)
         .unwrap_err();
@@ -944,16 +925,20 @@ fn wasi_config_from_policy_creates_correct_paths() {
     let config = WasiConfig::from_policy(&policy).unwrap();
 
     // Check that readonly paths from policy are in config
-    assert!(config
-        .readonly_paths
-        .iter()
-        .any(|p| p == Path::new("/etc/ssl/certs")));
+    assert!(
+        config
+            .readonly_paths
+            .iter()
+            .any(|p| p == Path::new("/etc/ssl/certs"))
+    );
 
     // Check writable paths include expanded state dir
-    assert!(config
-        .writable_paths
-        .iter()
-        .any(|p| p == Path::new("/tmp/connector")));
+    assert!(
+        config
+            .writable_paths
+            .iter()
+            .any(|p| p == Path::new("/tmp/connector"))
+    );
 }
 
 // ============================================================================

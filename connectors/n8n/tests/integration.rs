@@ -132,7 +132,10 @@ async fn lifecycle_handshake_response() {
     }))
     .await
     .unwrap();
-    let h = c.handle_handshake(json!({"session_id": "sess-1"})).await.unwrap();
+    let h = c
+        .handle_handshake(json!({"session_id": "sess-1"}))
+        .await
+        .unwrap();
     assert_eq!(h["protocol_version"], "2.0");
     assert_eq!(h["connector_id"], "fcp.n8n");
     assert_eq!(h["connector_version"], "0.1.0");
@@ -421,8 +424,7 @@ async fn error_401_unauthorized() {
     Mock::given(method("GET"))
         .and(path("/workflows"))
         .respond_with(
-            ResponseTemplate::new(401)
-                .set_body_json(json!({"message": "Invalid API key"})),
+            ResponseTemplate::new(401).set_body_json(json!({"message": "Invalid API key"})),
         )
         .mount(&server)
         .await;
@@ -467,8 +469,7 @@ async fn error_404_not_found() {
     Mock::given(method("GET"))
         .and(path("/workflows/99999"))
         .respond_with(
-            ResponseTemplate::new(404)
-                .set_body_json(json!({"message": "Workflow not found"})),
+            ResponseTemplate::new(404).set_body_json(json!({"message": "Workflow not found"})),
         )
         .mount(&server)
         .await;

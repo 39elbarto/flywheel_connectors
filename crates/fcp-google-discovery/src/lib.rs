@@ -22,6 +22,7 @@ pub mod auth;
 pub mod executor;
 pub mod generator;
 pub mod policy;
+pub mod provisioning;
 
 /// Default Google Discovery endpoint base for standard service lookups.
 pub const DEFAULT_STANDARD_DISCOVERY_BASE: &str = "https://www.googleapis.com/discovery/v1/apis";
@@ -1045,6 +1046,11 @@ struct RawSchema {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{method, path, query_param},
+    };
 
     const GMAIL_FIXTURE: &str = r#"
 {
@@ -1140,6 +1146,25 @@ mod tests {
   }
 }
 "#;
+
+    fn mock_http_client() -> reqwest::Client {
+        reqwest::Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_secs(5))
+            .build()
+            .expect("build test client")
+    }
+
+    fn run_with_tokio_reactor<F, T>(future: F) -> T
+    where
+        F: std::future::Future<Output = T>,
+    {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build tokio test runtime")
+            .block_on(future)
+    }
 
     #[test]
     fn alias_registry_supports_tiny_curated_map() {
@@ -1243,5 +1268,623 @@ mod tests {
         )
         .expect("second normalize");
         assert_eq!(first, second);
+    }
+
+    // ── DiscoveryServiceId tests ────────────────────────────────────────
+
+    #[test]
+    fn service_id_new_valid() {
+        let id = DiscoveryServiceId::new("gmail", "v1").expect("valid id");
+        assert_eq!(id.api_name, "gmail");
+        assert_eq!(id.api_version, "v1");
+    }
+
+    #[test]
+    fn service_id_new_rejects_empty_api_name() {
+        let err = DiscoveryServiceId::new("", "v1").unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("api_name"),
+            "expected api_name in error: {msg}"
+        );
+    }
+
+    #[test]
+    fn service_id_new_rejects_empty_api_version() {
+        let err = DiscoveryServiceId::new("gmail", "").unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("api_version"),
+            "expected api_version in error: {msg}"
+        );
+    }
+
+    #[test]
+    fn service_id_new_rejects_special_chars() {
+        let err = DiscoveryServiceId::new("gm!@#ail", "v1").unwrap_err();
+        assert!(matches!(err, DiscoveryError::InvalidComponent { .. }));
+
+        let err2 = DiscoveryServiceId::new("gmail", "v1$%^").unwrap_err();
+        assert!(matches!(err2, DiscoveryError::InvalidComponent { .. }));
+    }
+
+    #[test]
+    fn service_id_new_normalizes_to_lowercase() {
+        let id = DiscoveryServiceId::new("Gmail", "V1").expect("valid id");
+        assert_eq!(id.api_name, "gmail");
+        assert_eq!(id.api_version, "v1");
+    }
+
+    #[test]
+    fn service_id_parse_explicit_valid() {
+        let id = DiscoveryServiceId::parse_explicit("gmail:v1").expect("valid selector");
+        assert_eq!(id.api_name, "gmail");
+        assert_eq!(id.api_version, "v1");
+    }
+
+    #[test]
+    fn service_id_parse_explicit_no_colon() {
+        let err = DiscoveryServiceId::parse_explicit("gmailv1").unwrap_err();
+        assert!(matches!(err, DiscoveryError::InvalidServiceSelector { .. }));
+    }
+
+    #[test]
+    fn service_id_parse_explicit_trims_whitespace() {
+        let id = DiscoveryServiceId::parse_explicit("  gmail:v1  ").expect("valid selector");
+        assert_eq!(id.api_name, "gmail");
+        assert_eq!(id.api_version, "v1");
+    }
+
+    #[test]
+    fn service_id_identity_format() {
+        let id = DiscoveryServiceId::new("calendar", "v3").expect("valid id");
+        assert_eq!(id.identity(), "calendar:v3");
+    }
+
+    #[test]
+    fn service_id_display_format() {
+        let id = DiscoveryServiceId::new("drive", "v3").expect("valid id");
+        let display = format!("{id}");
+        assert_eq!(display, id.identity());
+        assert_eq!(display, "drive:v3");
+    }
+
+    #[test]
+    fn service_id_serde_roundtrip() {
+        let id = DiscoveryServiceId::new("sheets", "v4").expect("valid id");
+        let json = serde_json::to_string(&id).expect("serialize");
+        let deserialized: DiscoveryServiceId = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(id, deserialized);
+    }
+
+    #[test]
+    fn service_id_ordering() {
+        let a = DiscoveryServiceId::new("alpha", "v1").expect("valid");
+        let b = DiscoveryServiceId::new("beta", "v1").expect("valid");
+        let c = DiscoveryServiceId::new("alpha", "v2").expect("valid");
+        assert!(a < b, "alpha < beta");
+        assert!(a < c, "alpha:v1 < alpha:v2");
+        assert!(c < b, "alpha:v2 < beta:v1");
+    }
+
+    #[test]
+    fn service_id_hash_consistent() {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        let id1 = DiscoveryServiceId::new("gmail", "v1").expect("valid");
+        let id2 = DiscoveryServiceId::new("gmail", "v1").expect("valid");
+
+        let mut h1 = DefaultHasher::new();
+        id1.hash(&mut h1);
+        let mut h2 = DefaultHasher::new();
+        id2.hash(&mut h2);
+        assert_eq!(h1.finish(), h2.finish());
+    }
+
+    // ── ServiceAliasRegistry tests ──────────────────────────────────────
+
+    #[test]
+    fn alias_registry_default_has_all_google_services() {
+        let registry = ServiceAliasRegistry::default();
+        let aliases = registry.aliases();
+        let expected = [
+            "gmail",
+            "calendar",
+            "gcal",
+            "youtube",
+            "bigquery",
+            "drive",
+            "docs",
+            "sheets",
+            "google-ai",
+            "generativelanguage",
+        ];
+        for alias in &expected {
+            assert!(
+                aliases.contains_key(*alias),
+                "missing default alias: {alias}"
+            );
+        }
+        assert_eq!(aliases.len(), expected.len());
+    }
+
+    #[test]
+    fn alias_registry_resolve_empty_string_fails() {
+        let registry = ServiceAliasRegistry::default();
+        let err = registry.resolve("").unwrap_err();
+        assert!(matches!(err, DiscoveryError::InvalidServiceSelector { .. }));
+    }
+
+    #[test]
+    fn alias_registry_resolve_unknown_alias_fails() {
+        let registry = ServiceAliasRegistry::default();
+        let err = registry.resolve("nonexistent-service").unwrap_err();
+        assert!(matches!(err, DiscoveryError::UnknownServiceAlias { .. }));
+    }
+
+    #[test]
+    fn alias_registry_insert_and_resolve() {
+        let mut registry = ServiceAliasRegistry::default();
+        let service = DiscoveryServiceId::new("customapi", "v2").expect("valid");
+        registry
+            .insert("myalias", service.clone())
+            .expect("insert alias");
+        let resolved = registry.resolve("myalias").expect("resolve");
+        assert_eq!(resolved, service);
+    }
+
+    #[test]
+    fn alias_registry_insert_rejects_invalid_alias() {
+        let mut registry = ServiceAliasRegistry::default();
+        let service = DiscoveryServiceId::new("customapi", "v1").expect("valid");
+        let err = registry.insert("bad!alias", service).unwrap_err();
+        assert!(matches!(err, DiscoveryError::InvalidComponent { .. }));
+    }
+
+    // ── DiscoveryFetcher tests ──────────────────────────────────────────
+
+    #[test]
+    fn fetcher_with_custom_standard_base() {
+        let service = DiscoveryServiceId::new("gmail", "v1").expect("valid");
+        let fetcher =
+            DiscoveryFetcher::new().with_standard_base("https://custom.example.com/discovery");
+        let urls = fetcher.candidate_urls(&service);
+        assert_eq!(
+            urls[0],
+            "https://custom.example.com/discovery/gmail/v1/rest"
+        );
+    }
+
+    #[test]
+    fn fetcher_with_custom_alternate_template() {
+        let service = DiscoveryServiceId::new("gmail", "v1").expect("valid");
+        let fetcher = DiscoveryFetcher::new()
+            .with_alternate_template("https://alt.example.com/{api_name}?v={api_version}");
+        let urls = fetcher.candidate_urls(&service);
+        assert_eq!(urls[1], "https://alt.example.com/gmail?v=v1");
+    }
+
+    #[test]
+    fn fetcher_candidate_urls_trim_trailing_slash() {
+        let service = DiscoveryServiceId::new("gmail", "v1").expect("valid");
+        let fetcher = DiscoveryFetcher::new().with_standard_base("https://example.com/api/");
+        let urls = fetcher.candidate_urls(&service);
+        assert!(
+            !urls[0].contains("//gmail"),
+            "trailing slash should be trimmed: {}",
+            urls[0]
+        );
+        assert_eq!(urls[0], "https://example.com/api/gmail/v1/rest");
+    }
+
+    #[test]
+    fn fetch_snapshot_uses_standard_endpoint_when_available() {
+        run_with_tokio_reactor(async {
+            let server = MockServer::start().await;
+            let service = DiscoveryServiceId::new("gmail", "v1").expect("valid");
+            let standard_base = format!("{}/discovery/v1/apis", server.uri());
+            let alternate_template = format!(
+                "{}/$discovery/rest?api={{api_name}}&version={{api_version}}",
+                server.uri()
+            );
+
+            Mock::given(method("GET"))
+                .and(path("/discovery/v1/apis/gmail/v1/rest"))
+                .respond_with(ResponseTemplate::new(200).set_body_string(GMAIL_FIXTURE))
+                .expect(1)
+                .mount(&server)
+                .await;
+            Mock::given(method("GET"))
+                .and(path("/$discovery/rest"))
+                .and(query_param("api", "gmail"))
+                .and(query_param("version", "v1"))
+                .respond_with(ResponseTemplate::new(500))
+                .expect(0)
+                .mount(&server)
+                .await;
+
+            let fetcher = DiscoveryFetcher::new()
+                .with_client(mock_http_client())
+                .with_standard_base(standard_base.clone())
+                .with_alternate_template(alternate_template);
+            let snapshot = fetcher
+                .fetch_snapshot(&service)
+                .await
+                .expect("fetch snapshot");
+
+            assert_eq!(snapshot.endpoint, DiscoveryEndpointKind::Standard);
+            assert_eq!(
+                snapshot.source_url,
+                format!("{standard_base}/gmail/v1/rest")
+            );
+            assert_eq!(
+                snapshot.source_digest,
+                blake3::hash(GMAIL_FIXTURE.as_bytes()).to_hex().to_string()
+            );
+            assert!(
+                snapshot
+                    .snapshot
+                    .methods
+                    .contains_key("users.messages.list")
+            );
+        });
+    }
+
+    #[test]
+    fn fetch_snapshot_falls_back_to_alternate_endpoint() {
+        run_with_tokio_reactor(async {
+            let server = MockServer::start().await;
+            let service = DiscoveryServiceId::new("gmail", "v1").expect("valid");
+            let standard_base = format!("{}/discovery/v1/apis", server.uri());
+            let alternate_template = format!(
+                "{}/$discovery/rest?api={{api_name}}&version={{api_version}}",
+                server.uri()
+            );
+            let expected_alternate =
+                format!("{}/$discovery/rest?api=gmail&version=v1", server.uri());
+
+            Mock::given(method("GET"))
+                .and(path("/discovery/v1/apis/gmail/v1/rest"))
+                .respond_with(ResponseTemplate::new(404))
+                .expect(1)
+                .mount(&server)
+                .await;
+            Mock::given(method("GET"))
+                .and(path("/$discovery/rest"))
+                .and(query_param("api", "gmail"))
+                .and(query_param("version", "v1"))
+                .respond_with(ResponseTemplate::new(200).set_body_string(GMAIL_FIXTURE))
+                .expect(1)
+                .mount(&server)
+                .await;
+
+            let fetcher = DiscoveryFetcher::new()
+                .with_client(mock_http_client())
+                .with_standard_base(standard_base)
+                .with_alternate_template(alternate_template);
+            let snapshot = fetcher
+                .fetch_snapshot(&service)
+                .await
+                .expect("fetch snapshot");
+
+            assert_eq!(snapshot.endpoint, DiscoveryEndpointKind::Alternate);
+            assert_eq!(snapshot.source_url, expected_alternate);
+            assert_eq!(snapshot.snapshot.service.identity(), "gmail:v1");
+        });
+    }
+
+    #[test]
+    fn fetch_snapshot_returns_both_endpoint_errors_when_all_fail() {
+        run_with_tokio_reactor(async {
+            let server = MockServer::start().await;
+            let service = DiscoveryServiceId::new("gmail", "v1").expect("valid");
+            let standard_base = format!("{}/discovery/v1/apis", server.uri());
+            let alternate_template = format!(
+                "{}/$discovery/rest?api={{api_name}}&version={{api_version}}",
+                server.uri()
+            );
+
+            Mock::given(method("GET"))
+                .and(path("/discovery/v1/apis/gmail/v1/rest"))
+                .respond_with(ResponseTemplate::new(502))
+                .expect(1)
+                .mount(&server)
+                .await;
+            Mock::given(method("GET"))
+                .and(path("/$discovery/rest"))
+                .and(query_param("api", "gmail"))
+                .and(query_param("version", "v1"))
+                .respond_with(ResponseTemplate::new(503))
+                .expect(1)
+                .mount(&server)
+                .await;
+
+            let fetcher = DiscoveryFetcher::new()
+                .with_client(mock_http_client())
+                .with_standard_base(standard_base)
+                .with_alternate_template(alternate_template);
+            let err = fetcher
+                .fetch_snapshot(&service)
+                .await
+                .expect_err("expected both endpoints to fail");
+
+            match err {
+                DiscoveryError::AllEndpointsFailed {
+                    service,
+                    standard,
+                    alternate,
+                } => {
+                    assert_eq!(service, "gmail:v1");
+                    assert!(
+                        standard.contains("502"),
+                        "expected standard endpoint status in error, got: {standard}"
+                    );
+                    assert!(
+                        alternate.contains("503"),
+                        "expected alternate endpoint status in error, got: {alternate}"
+                    );
+                }
+                other => panic!("expected AllEndpointsFailed, got {other}"),
+            }
+        });
+    }
+
+    // ── normalize_snapshot_bytes tests ───────────────────────────────────
+
+    #[test]
+    fn normalize_empty_document() {
+        let service = DiscoveryServiceId::new("empty", "v1").expect("valid");
+        let result = normalize_snapshot_bytes(
+            &service,
+            b"{}",
+            DiscoveryEndpointKind::Standard,
+            "https://example.test/empty",
+        )
+        .expect("normalize empty doc");
+        assert_eq!(result.snapshot.service.identity(), "empty:v1");
+        assert!(result.snapshot.methods.is_empty());
+        assert!(result.snapshot.schemas.is_empty());
+        assert!(result.snapshot.auth_scopes.is_empty());
+    }
+
+    #[test]
+    fn normalize_preserves_media_upload_metadata() {
+        let doc = r#"{
+            "resources": {
+                "files": {
+                    "methods": {
+                        "create": {
+                            "id": "drive.files.create",
+                            "path": "files",
+                            "httpMethod": "POST",
+                            "supportsMediaUpload": true,
+                            "mediaUpload": {
+                                "accept": ["image/png", "application/pdf"],
+                                "maxSize": "5GB",
+                                "protocols": {
+                                    "simple": {"path": "/upload/simple"},
+                                    "resumable": {"path": "/upload/resumable"}
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }"#;
+        let service = DiscoveryServiceId::new("drive", "v3").expect("valid");
+        let result = normalize_snapshot_bytes(
+            &service,
+            doc.as_bytes(),
+            DiscoveryEndpointKind::Standard,
+            "https://example.test/drive",
+        )
+        .expect("normalize media upload doc");
+
+        let method = result
+            .snapshot
+            .methods
+            .get("files.create")
+            .expect("method exists");
+        assert!(method.supports_media_upload);
+        let upload = method.media_upload.as_ref().expect("media_upload present");
+        assert_eq!(upload.accept, vec!["application/pdf", "image/png"]);
+        assert_eq!(upload.max_size.as_deref(), Some("5GB"));
+        assert_eq!(upload.simple_path.as_deref(), Some("/upload/simple"));
+        assert_eq!(upload.resumable_path.as_deref(), Some("/upload/resumable"));
+    }
+
+    #[test]
+    fn normalize_deduplicates_and_sorts_scopes() {
+        let doc = r#"{
+            "auth": {
+                "oauth2": {
+                    "scopes": {
+                        "https://z-scope.example.com": {"description": "Z scope"},
+                        "https://a-scope.example.com": {"description": "A scope"},
+                        "https://m-scope.example.com": {"description": "M scope"}
+                    }
+                }
+            }
+        }"#;
+        let service = DiscoveryServiceId::new("test", "v1").expect("valid");
+        let result = normalize_snapshot_bytes(
+            &service,
+            doc.as_bytes(),
+            DiscoveryEndpointKind::Standard,
+            "https://example.test",
+        )
+        .expect("normalize scopes doc");
+
+        let scope_ids: Vec<&str> = result
+            .snapshot
+            .auth_scopes
+            .iter()
+            .map(|s| s.id.as_str())
+            .collect();
+        assert_eq!(
+            scope_ids,
+            vec![
+                "https://a-scope.example.com",
+                "https://m-scope.example.com",
+                "https://z-scope.example.com",
+            ]
+        );
+    }
+
+    #[test]
+    fn normalize_handles_missing_flat_path() {
+        let doc = r#"{
+            "resources": {
+                "items": {
+                    "methods": {
+                        "get": {
+                            "id": "test.items.get",
+                            "path": "items/{itemId}",
+                            "httpMethod": "GET"
+                        }
+                    }
+                }
+            }
+        }"#;
+        let service = DiscoveryServiceId::new("test", "v1").expect("valid");
+        let result = normalize_snapshot_bytes(
+            &service,
+            doc.as_bytes(),
+            DiscoveryEndpointKind::Standard,
+            "https://example.test",
+        )
+        .expect("normalize missing flat_path doc");
+
+        let method = result
+            .snapshot
+            .methods
+            .get("items.get")
+            .expect("method exists");
+        assert!(method.flat_path.is_none());
+        assert_eq!(
+            method.canonical_path, "items/{itemId}",
+            "canonical_path should fall back to path"
+        );
+    }
+
+    #[test]
+    fn normalize_schema_depth_limit() {
+        // Build a deeply nested schema that exceeds MAX_SCHEMA_DEPTH (64).
+        // Use `items` nesting (arrays) which adds only 1 JSON nesting level per
+        // schema level, staying under serde_json's recursion limit while
+        // exceeding our own MAX_SCHEMA_DEPTH of 64.
+        let mut inner = r#"{"type": "string"}"#.to_string();
+        for _ in 0..66 {
+            inner = format!(r#"{{"type": "array", "items": {inner}}}"#);
+        }
+        let doc = format!(r#"{{"schemas": {{"Deep": {inner}}}}}"#);
+
+        let service = DiscoveryServiceId::new("test", "v1").expect("valid");
+        let err = normalize_snapshot_bytes(
+            &service,
+            doc.as_bytes(),
+            DiscoveryEndpointKind::Standard,
+            "https://example.test/deep",
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, DiscoveryError::SchemaDepthExceeded { .. }),
+            "expected SchemaDepthExceeded, got: {err}"
+        );
+    }
+
+    // ── snapshot_storage_key tests ──────────────────────────────────────
+
+    #[test]
+    fn storage_key_trims_components() {
+        let service = DiscoveryServiceId::new("gmail", "v1").expect("valid");
+        let key = snapshot_storage_key(&service, "  abc123  ");
+        assert_eq!(key, "google-discovery/gmail/v1/abc123");
+    }
+
+    // ── DiscoveryError tests ────────────────────────────────────────────
+
+    #[test]
+    fn discovery_error_display_all_variants() {
+        let invalid_comp = DiscoveryError::InvalidComponent {
+            field: "api_name",
+            value: "bad!".to_string(),
+        };
+        assert!(invalid_comp.to_string().contains("api_name"));
+        assert!(invalid_comp.to_string().contains("bad!"));
+
+        let invalid_sel = DiscoveryError::InvalidServiceSelector {
+            selector: "noseparator".to_string(),
+        };
+        assert!(invalid_sel.to_string().contains("noseparator"));
+
+        let unknown_alias = DiscoveryError::UnknownServiceAlias {
+            alias: "foo".to_string(),
+        };
+        assert!(unknown_alias.to_string().contains("foo"));
+
+        let http_status = DiscoveryError::HttpStatus {
+            url: "https://example.com".to_string(),
+            status: StatusCode::NOT_FOUND,
+        };
+        let status_msg = http_status.to_string();
+        assert!(status_msg.contains("example.com"));
+        assert!(status_msg.contains("404"));
+
+        let all_failed = DiscoveryError::AllEndpointsFailed {
+            service: "gmail:v1".to_string(),
+            standard: "timeout".to_string(),
+            alternate: "refused".to_string(),
+        };
+        let all_msg = all_failed.to_string();
+        assert!(all_msg.contains("gmail:v1"));
+        assert!(all_msg.contains("timeout"));
+        assert!(all_msg.contains("refused"));
+
+        let depth = DiscoveryError::SchemaDepthExceeded { max_depth: 64 };
+        assert!(depth.to_string().contains("64"));
+    }
+
+    // ── DiscoveryEndpointKind tests ─────────────────────────────────────
+
+    #[test]
+    fn endpoint_kind_serde_roundtrip() {
+        let standard = DiscoveryEndpointKind::Standard;
+        let alternate = DiscoveryEndpointKind::Alternate;
+
+        let json_std = serde_json::to_string(&standard).expect("serialize standard");
+        let json_alt = serde_json::to_string(&alternate).expect("serialize alternate");
+
+        let deser_std: DiscoveryEndpointKind =
+            serde_json::from_str(&json_std).expect("deserialize standard");
+        let deser_alt: DiscoveryEndpointKind =
+            serde_json::from_str(&json_alt).expect("deserialize alternate");
+
+        assert_eq!(standard, deser_std);
+        assert_eq!(alternate, deser_alt);
+        assert_ne!(json_std, json_alt);
+    }
+
+    // ── DiscoverySnapshot tests ─────────────────────────────────────────
+
+    #[test]
+    fn snapshot_serde_roundtrip() {
+        let service = DiscoveryServiceId::new("gmail", "v1").expect("valid id");
+        let fetched = normalize_snapshot_bytes(
+            &service,
+            GMAIL_FIXTURE.as_bytes(),
+            DiscoveryEndpointKind::Standard,
+            "https://example.test",
+        )
+        .expect("normalize");
+
+        let json = serde_json::to_string(&fetched.snapshot).expect("serialize snapshot");
+        let deserialized: DiscoverySnapshot =
+            serde_json::from_str(&json).expect("deserialize snapshot");
+        assert_eq!(fetched.snapshot, deserialized);
+        assert_eq!(deserialized.service.identity(), "gmail:v1");
+        assert_eq!(deserialized.auth_scopes.len(), 2);
+        assert!(deserialized.methods.contains_key("users.messages.list"));
     }
 }

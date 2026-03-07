@@ -1095,9 +1095,7 @@ mod tests {
 
     #[test]
     fn upsert_response_clone_preserves_fields() {
-        let original = UpsertResponse {
-            upserted_count: 42,
-        };
+        let original = UpsertResponse { upserted_count: 42 };
         let cloned = original.clone();
         assert_eq!(original.upserted_count, cloned.upserted_count);
         assert_eq!(cloned.upserted_count, 42);
@@ -1134,10 +1132,7 @@ mod tests {
         let cloned = original.clone();
         drop(original);
         assert_eq!(cloned.status, Some(400));
-        assert_eq!(
-            cloned.error.unwrap().code.as_deref(),
-            Some("INVALID")
-        );
+        assert_eq!(cloned.error.unwrap().code.as_deref(), Some("INVALID"));
     }
 
     #[test]

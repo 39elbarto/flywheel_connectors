@@ -87,9 +87,7 @@ impl TerraformClient {
             TerraformAuth::BearerToken(token) => {
                 req.header("Authorization", format!("Bearer {token}"))
             }
-            TerraformAuth::CredentialId(id) => {
-                req.header("X-FCP-Credential-Id", id.to_string())
-            }
+            TerraformAuth::CredentialId(id) => req.header("X-FCP-Credential-Id", id.to_string()),
         }
     }
 
@@ -124,11 +122,8 @@ impl TerraformClient {
             .ok()
             .and_then(|e| e.errors)
             .and_then(|errs| {
-                errs.first().and_then(|e| {
-                    e.detail
-                        .clone()
-                        .or_else(|| e.title.clone())
-                })
+                errs.first()
+                    .and_then(|e| e.detail.clone().or_else(|| e.title.clone()))
             })
             .unwrap_or_else(|| {
                 if body.is_empty() {
@@ -146,7 +141,10 @@ impl TerraformClient {
             429 => Err(TerraformError::RateLimited {
                 retry_after_ms: retry_after.unwrap_or(30) * 1000,
             }),
-            code => Err(TerraformError::Api { status_code: code, message: detail }),
+            code => Err(TerraformError::Api {
+                status_code: code,
+                message: detail,
+            }),
         }
     }
 
@@ -182,19 +180,13 @@ impl TerraformClient {
     // -- Workspaces --
 
     /// List workspaces in an organization.
-    pub async fn list_workspaces(
-        &self,
-        org_name: &str,
-    ) -> TerraformResult<serde_json::Value> {
+    pub async fn list_workspaces(&self, org_name: &str) -> TerraformResult<serde_json::Value> {
         self.get(&format!("/organizations/{org_name}/workspaces"))
             .await
     }
 
     /// Get a workspace by ID.
-    pub async fn get_workspace(
-        &self,
-        workspace_id: &str,
-    ) -> TerraformResult<serde_json::Value> {
+    pub async fn get_workspace(&self, workspace_id: &str) -> TerraformResult<serde_json::Value> {
         self.get(&format!("/workspaces/{workspace_id}")).await
     }
 
@@ -213,10 +205,7 @@ impl TerraformClient {
     // -- Runs --
 
     /// Create a run in a workspace.
-    pub async fn create_run(
-        &self,
-        body: &serde_json::Value,
-    ) -> TerraformResult<serde_json::Value> {
+    pub async fn create_run(&self, body: &serde_json::Value) -> TerraformResult<serde_json::Value> {
         self.post("/runs", body).await
     }
 
@@ -252,10 +241,7 @@ impl TerraformClient {
     }
 
     /// List runs in a workspace.
-    pub async fn list_runs(
-        &self,
-        workspace_id: &str,
-    ) -> TerraformResult<serde_json::Value> {
+    pub async fn list_runs(&self, workspace_id: &str) -> TerraformResult<serde_json::Value> {
         self.get(&format!("/workspaces/{workspace_id}/runs")).await
     }
 
@@ -267,10 +253,7 @@ impl TerraformClient {
     }
 
     /// Get plan JSON output (structured plan output).
-    pub async fn get_plan_json_output(
-        &self,
-        plan_id: &str,
-    ) -> TerraformResult<serde_json::Value> {
+    pub async fn get_plan_json_output(&self, plan_id: &str) -> TerraformResult<serde_json::Value> {
         self.get(&format!("/plans/{plan_id}/json-output")).await
     }
 
@@ -281,10 +264,8 @@ impl TerraformClient {
         &self,
         workspace_id: &str,
     ) -> TerraformResult<serde_json::Value> {
-        self.get(&format!(
-            "/workspaces/{workspace_id}/current-state-version"
-        ))
-        .await
+        self.get(&format!("/workspaces/{workspace_id}/current-state-version"))
+            .await
     }
 
     /// List state version outputs.
@@ -292,10 +273,8 @@ impl TerraformClient {
         &self,
         state_version_id: &str,
     ) -> TerraformResult<serde_json::Value> {
-        self.get(&format!(
-            "/state-versions/{state_version_id}/outputs"
-        ))
-        .await
+        self.get(&format!("/state-versions/{state_version_id}/outputs"))
+            .await
     }
 
     // -- Configuration Versions --
@@ -318,10 +297,8 @@ impl TerraformClient {
         &self,
         state_version_id: &str,
     ) -> TerraformResult<serde_json::Value> {
-        self.get(&format!(
-            "/state-versions/{state_version_id}/resources"
-        ))
-        .await
+        self.get(&format!("/state-versions/{state_version_id}/resources"))
+            .await
     }
 }
 
@@ -360,8 +337,7 @@ mod tests {
 
     #[test]
     fn client_new_default_url() {
-        let client =
-            TerraformClient::new(TerraformAuth::BearerToken("tok".into()), None).unwrap();
+        let client = TerraformClient::new(TerraformAuth::BearerToken("tok".into()), None).unwrap();
         assert_eq!(client.base_url, DEFAULT_BASE_URL);
     }
 
@@ -424,8 +400,7 @@ mod tests {
 
     #[test]
     fn client_debug_contains_base_url() {
-        let client =
-            TerraformClient::new(TerraformAuth::BearerToken("tok".into()), None).unwrap();
+        let client = TerraformClient::new(TerraformAuth::BearerToken("tok".into()), None).unwrap();
         let dbg = format!("{client:?}");
         assert!(dbg.contains("TerraformClient"));
         assert!(dbg.contains("base_url"));
@@ -444,8 +419,7 @@ mod tests {
     #[test]
     fn client_new_with_credential_id() {
         let cred = CredentialId::new();
-        let client =
-            TerraformClient::new(TerraformAuth::CredentialId(cred), None).unwrap();
+        let client = TerraformClient::new(TerraformAuth::CredentialId(cred), None).unwrap();
         assert_eq!(client.base_url, DEFAULT_BASE_URL);
     }
 

@@ -63,7 +63,9 @@ fn main() {
 
         let resp = match result {
             Ok(val) => json!({"jsonrpc":"2.0","id":id,"result":val}),
-            Err(e) => json!({"jsonrpc":"2.0","id":id,"error":{"code":-32000,"message":e.to_string()}}),
+            Err(e) => {
+                json!({"jsonrpc":"2.0","id":id,"error":{"code":-32000,"message":e.to_string()}})
+            }
         };
         let _ = writeln!(stdout.lock(), "{resp}");
     }

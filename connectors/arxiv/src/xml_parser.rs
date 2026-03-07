@@ -105,17 +105,12 @@ pub fn extract_categories(xml: &str) -> Vec<String> {
 /// Extract the arXiv ID from an entry's `<id>` tag.
 /// The ID URL looks like `http://arxiv.org/abs/2301.08745v2`.
 pub fn extract_arxiv_id(id_url: &str) -> String {
-    id_url
-        .rsplit('/')
-        .next()
-        .unwrap_or(id_url)
-        .to_string()
+    id_url.rsplit('/').next().unwrap_or(id_url).to_string()
 }
 
 /// Extract the `<opensearch:totalResults>` value.
 pub fn extract_total_results(xml: &str) -> Option<i64> {
-    extract_tag(xml, "opensearch:totalResults")
-        .and_then(|s| s.trim().parse().ok())
+    extract_tag(xml, "opensearch:totalResults").and_then(|s| s.trim().parse().ok())
 }
 
 /// Parse Atom XML feed into a vector of `ArxivPaper` structs.
@@ -171,8 +166,7 @@ pub fn parse_atom_entries(xml: &str) -> Vec<ArxivPaper> {
                 .map(str::to_string);
             let doi = extract_tag(entry, "arxiv:doi").map(|s| s.trim().to_string());
             let comment = extract_tag(entry, "arxiv:comment").map(|s| s.trim().to_string());
-            let journal_ref =
-                extract_tag(entry, "arxiv:journal_ref").map(|s| s.trim().to_string());
+            let journal_ref = extract_tag(entry, "arxiv:journal_ref").map(|s| s.trim().to_string());
 
             papers.push(ArxivPaper {
                 arxiv_id,
@@ -274,7 +268,8 @@ mod tests {
 
     #[test]
     fn extract_primary_category_present() {
-        let xml = r#"<arxiv:primary_category term="cs.AI" scheme="http://arxiv.org/schemas/atom"/>"#;
+        let xml =
+            r#"<arxiv:primary_category term="cs.AI" scheme="http://arxiv.org/schemas/atom"/>"#;
         assert_eq!(extract_primary_category(xml), Some("cs.AI".into()));
     }
 
@@ -372,7 +367,8 @@ mod tests {
 
     #[test]
     fn extract_link_href_alternate() {
-        let xml = r#"<link href="http://arxiv.org/abs/1706.03762v7" rel="alternate" type="text/html"/>"#;
+        let xml =
+            r#"<link href="http://arxiv.org/abs/1706.03762v7" rel="alternate" type="text/html"/>"#;
         assert_eq!(
             extract_link_href(xml, Some("alternate")),
             Some("http://arxiv.org/abs/1706.03762v7")
@@ -399,10 +395,7 @@ mod tests {
     #[test]
     fn extract_journal_ref() {
         let xml = r"<arxiv:journal_ref>Nature 2023</arxiv:journal_ref>";
-        assert_eq!(
-            extract_tag(xml, "arxiv:journal_ref"),
-            Some("Nature 2023")
-        );
+        assert_eq!(extract_tag(xml, "arxiv:journal_ref"), Some("Nature 2023"));
     }
 
     #[test]

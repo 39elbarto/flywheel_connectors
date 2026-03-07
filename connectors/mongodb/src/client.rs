@@ -326,8 +326,7 @@ mod tests {
     #[test]
     fn client_new_with_credential_id() {
         let cred = CredentialId::new();
-        let client =
-            MongoDbClient::new(MongoDbAuth::CredentialId(cred), None).unwrap();
+        let client = MongoDbClient::new(MongoDbAuth::CredentialId(cred), None).unwrap();
         assert_eq!(client.base_url, DEFAULT_BASE_URL);
     }
 

@@ -117,7 +117,11 @@ impl SalesforceClient {
         }
     }
 
-    async fn handle_error(&self, status: StatusCode, resp: Response) -> SalesforceResult<serde_json::Value> {
+    async fn handle_error(
+        &self,
+        status: StatusCode,
+        resp: Response,
+    ) -> SalesforceResult<serde_json::Value> {
         let retry_after = resp
             .headers()
             .get("retry-after")
@@ -134,9 +138,8 @@ impl SalesforceClient {
                 serde_json::from_str::<ApiErrorResponse>(&body)
                     .ok()
                     .and_then(|e| {
-                        e.message.or_else(|| {
-                            e.errors.first().and_then(|i| i.message.clone())
-                        })
+                        e.message
+                            .or_else(|| e.errors.first().and_then(|i| i.message.clone()))
                     })
             })
             .unwrap_or_else(|| body.clone());
@@ -148,7 +151,10 @@ impl SalesforceClient {
             429 => Err(SalesforceError::RateLimited {
                 retry_after_ms: retry_after.unwrap_or(60) * 1000,
             }),
-            code => Err(SalesforceError::Api { status_code: code, message: detail }),
+            code => Err(SalesforceError::Api {
+                status_code: code,
+                message: detail,
+            }),
         }
     }
 
@@ -164,7 +170,11 @@ impl SalesforceClient {
 
     /// POST request to the `Salesforce` API.
     #[instrument(skip(self, body), fields(url))]
-    pub async fn post(&self, path: &str, body: &serde_json::Value) -> SalesforceResult<serde_json::Value> {
+    pub async fn post(
+        &self,
+        path: &str,
+        body: &serde_json::Value,
+    ) -> SalesforceResult<serde_json::Value> {
         let url = format!("{}{API_PATH}{path}", self.base_url);
         debug!(url = %url, "POST request");
         let req = self.add_auth(self.client.post(&url).json(body));
@@ -185,13 +195,22 @@ impl SalesforceClient {
     // -- Accounts --
 
     /// Get a single account by ID.
-    pub async fn get_account(&self, account_id: &str, fields: Option<&[String]>) -> SalesforceResult<serde_json::Value> {
+    pub async fn get_account(
+        &self,
+        account_id: &str,
+        fields: Option<&[String]>,
+    ) -> SalesforceResult<serde_json::Value> {
         let qs = fields.map_or_else(String::new, |f| format!("?fields={}", f.join(",")));
-        self.get(&format!("/sobjects/Account/{account_id}{qs}")).await
+        self.get(&format!("/sobjects/Account/{account_id}{qs}"))
+            .await
     }
 
     /// Query accounts via SOQL.
-    pub async fn list_accounts(&self, fields: Option<&[String]>, limit: Option<i64>) -> SalesforceResult<serde_json::Value> {
+    pub async fn list_accounts(
+        &self,
+        fields: Option<&[String]>,
+        limit: Option<i64>,
+    ) -> SalesforceResult<serde_json::Value> {
         let cols = fields.map_or_else(|| "Id, Name, Industry".to_string(), |f| f.join(", "));
         let mut query = format!("SELECT {cols} FROM Account");
         if let Some(l) = limit {
@@ -203,8 +222,16 @@ impl SalesforceClient {
     // -- Contacts --
 
     /// Query contacts via SOQL.
-    pub async fn list_contacts(&self, fields: Option<&[String]>, limit: Option<i64>, account_id: Option<&str>) -> SalesforceResult<serde_json::Value> {
-        let cols = fields.map_or_else(|| "Id, FirstName, LastName, Email".to_string(), |f| f.join(", "));
+    pub async fn list_contacts(
+        &self,
+        fields: Option<&[String]>,
+        limit: Option<i64>,
+        account_id: Option<&str>,
+    ) -> SalesforceResult<serde_json::Value> {
+        let cols = fields.map_or_else(
+            || "Id, FirstName, LastName, Email".to_string(),
+            |f| f.join(", "),
+        );
         let mut query = format!("SELECT {cols} FROM Contact");
         if let Some(aid) = account_id {
             let _ = write!(query, " WHERE AccountId = '{aid}'");
@@ -216,20 +243,32 @@ impl SalesforceClient {
     }
 
     /// Create a contact.
-    pub async fn create_contact(&self, body: &serde_json::Value) -> SalesforceResult<serde_json::Value> {
+    pub async fn create_contact(
+        &self,
+        body: &serde_json::Value,
+    ) -> SalesforceResult<serde_json::Value> {
         self.post("/sobjects/Contact", body).await
     }
 
     /// Delete a contact.
     pub async fn delete_contact(&self, contact_id: &str) -> SalesforceResult<serde_json::Value> {
-        self.delete(&format!("/sobjects/Contact/{contact_id}")).await
+        self.delete(&format!("/sobjects/Contact/{contact_id}"))
+            .await
     }
 
     // -- Leads --
 
     /// Query leads via SOQL.
-    pub async fn list_leads(&self, fields: Option<&[String]>, limit: Option<i64>, status: Option<&str>) -> SalesforceResult<serde_json::Value> {
-        let cols = fields.map_or_else(|| "Id, FirstName, LastName, Company, Status".to_string(), |f| f.join(", "));
+    pub async fn list_leads(
+        &self,
+        fields: Option<&[String]>,
+        limit: Option<i64>,
+        status: Option<&str>,
+    ) -> SalesforceResult<serde_json::Value> {
+        let cols = fields.map_or_else(
+            || "Id, FirstName, LastName, Company, Status".to_string(),
+            |f| f.join(", "),
+        );
         let mut query = format!("SELECT {cols} FROM Lead");
         if let Some(s) = status {
             let _ = write!(query, " WHERE Status = '{s}'");
@@ -241,15 +280,26 @@ impl SalesforceClient {
     }
 
     /// Convert a lead via the actions endpoint.
-    pub async fn convert_lead(&self, body: &serde_json::Value) -> SalesforceResult<serde_json::Value> {
+    pub async fn convert_lead(
+        &self,
+        body: &serde_json::Value,
+    ) -> SalesforceResult<serde_json::Value> {
         self.post("/actions/standard/convertLead", body).await
     }
 
     // -- Opportunities --
 
     /// Query opportunities via SOQL.
-    pub async fn list_opportunities(&self, fields: Option<&[String]>, limit: Option<i64>, stage: Option<&str>) -> SalesforceResult<serde_json::Value> {
-        let cols = fields.map_or_else(|| "Id, Name, StageName, Amount, CloseDate".to_string(), |f| f.join(", "));
+    pub async fn list_opportunities(
+        &self,
+        fields: Option<&[String]>,
+        limit: Option<i64>,
+        stage: Option<&str>,
+    ) -> SalesforceResult<serde_json::Value> {
+        let cols = fields.map_or_else(
+            || "Id, Name, StageName, Amount, CloseDate".to_string(),
+            |f| f.join(", "),
+        );
         let mut query = format!("SELECT {cols} FROM Opportunity");
         if let Some(s) = stage {
             let _ = write!(query, " WHERE StageName = '{s}'");
@@ -261,15 +311,26 @@ impl SalesforceClient {
     }
 
     /// Create an opportunity.
-    pub async fn create_opportunity(&self, body: &serde_json::Value) -> SalesforceResult<serde_json::Value> {
+    pub async fn create_opportunity(
+        &self,
+        body: &serde_json::Value,
+    ) -> SalesforceResult<serde_json::Value> {
         self.post("/sobjects/Opportunity", body).await
     }
 
     // -- Cases --
 
     /// Query cases via SOQL.
-    pub async fn list_cases(&self, fields: Option<&[String]>, limit: Option<i64>, status: Option<&str>) -> SalesforceResult<serde_json::Value> {
-        let cols = fields.map_or_else(|| "Id, Subject, Status, Priority".to_string(), |f| f.join(", "));
+    pub async fn list_cases(
+        &self,
+        fields: Option<&[String]>,
+        limit: Option<i64>,
+        status: Option<&str>,
+    ) -> SalesforceResult<serde_json::Value> {
+        let cols = fields.map_or_else(
+            || "Id, Subject, Status, Priority".to_string(),
+            |f| f.join(", "),
+        );
         let mut query = format!("SELECT {cols} FROM Case");
         if let Some(s) = status {
             let _ = write!(query, " WHERE Status = '{s}'");
@@ -281,7 +342,10 @@ impl SalesforceClient {
     }
 
     /// Create a case.
-    pub async fn create_case(&self, body: &serde_json::Value) -> SalesforceResult<serde_json::Value> {
+    pub async fn create_case(
+        &self,
+        body: &serde_json::Value,
+    ) -> SalesforceResult<serde_json::Value> {
         self.post("/sobjects/Case", body).await
     }
 
@@ -296,9 +360,18 @@ impl SalesforceClient {
     // -- Reports --
 
     /// Get a report by ID.
-    pub async fn get_report(&self, report_id: &str, include_details: bool) -> SalesforceResult<serde_json::Value> {
-        let qs = if include_details { "?includeDetails=true" } else { "" };
-        self.get(&format!("/analytics/reports/{report_id}{qs}")).await
+    pub async fn get_report(
+        &self,
+        report_id: &str,
+        include_details: bool,
+    ) -> SalesforceResult<serde_json::Value> {
+        let qs = if include_details {
+            "?includeDetails=true"
+        } else {
+            ""
+        };
+        self.get(&format!("/analytics/reports/{report_id}{qs}"))
+            .await
     }
 }
 
@@ -352,7 +425,10 @@ mod tests {
 
     #[test]
     fn urlencoding_basic() {
-        assert_eq!(urlencoding_encode("SELECT Id FROM Account"), "SELECT+Id+FROM+Account");
+        assert_eq!(
+            urlencoding_encode("SELECT Id FROM Account"),
+            "SELECT+Id+FROM+Account"
+        );
     }
 
     #[test]
@@ -366,11 +442,8 @@ mod tests {
 
     #[test]
     fn client_new_default_url() {
-        let client = SalesforceClient::new(
-            SalesforceAuth::AccessToken("tok".into()),
-            None,
-        )
-        .unwrap();
+        let client =
+            SalesforceClient::new(SalesforceAuth::AccessToken("tok".into()), None).unwrap();
         assert_eq!(client.base_url, DEFAULT_BASE_URL);
     }
 
@@ -423,11 +496,7 @@ mod tests {
     fn client_debug_shows_credential_id() {
         let cred = CredentialId::new();
         let cred_str = cred.to_string();
-        let client = SalesforceClient::new(
-            SalesforceAuth::CredentialId(cred),
-            None,
-        )
-        .unwrap();
+        let client = SalesforceClient::new(SalesforceAuth::CredentialId(cred), None).unwrap();
         let dbg = format!("{client:?}");
         assert!(dbg.contains(&cred_str));
     }

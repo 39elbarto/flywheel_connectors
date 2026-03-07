@@ -337,8 +337,7 @@ async fn error_401() {
     Mock::given(method("GET"))
         .and(path("/dashboard"))
         .respond_with(
-            ResponseTemplate::new(401)
-                .set_body_json(json!({"message": "Unauthenticated"})),
+            ResponseTemplate::new(401).set_body_json(json!({"message": "Unauthenticated"})),
         )
         .mount(&server)
         .await;
@@ -359,10 +358,7 @@ async fn error_403() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/dashboard"))
-        .respond_with(
-            ResponseTemplate::new(403)
-                .set_body_json(json!({"message": "Forbidden"})),
-        )
+        .respond_with(ResponseTemplate::new(403).set_body_json(json!({"message": "Forbidden"})))
         .mount(&server)
         .await;
 
@@ -383,8 +379,7 @@ async fn error_404() {
     Mock::given(method("POST"))
         .and(path_regex("/card/.*/query"))
         .respond_with(
-            ResponseTemplate::new(404)
-                .set_body_json(json!({"message": "Card not found"})),
+            ResponseTemplate::new(404).set_body_json(json!({"message": "Card not found"})),
         )
         .mount(&server)
         .await;
@@ -430,8 +425,7 @@ async fn error_500() {
     Mock::given(method("GET"))
         .and(path("/dashboard"))
         .respond_with(
-            ResponseTemplate::new(500)
-                .set_body_json(json!({"message": "Internal server error"})),
+            ResponseTemplate::new(500).set_body_json(json!({"message": "Internal server error"})),
         )
         .mount(&server)
         .await;
@@ -567,8 +561,7 @@ async fn counters_error_increment() {
     Mock::given(method("GET"))
         .and(path("/dashboard"))
         .respond_with(
-            ResponseTemplate::new(500)
-                .set_body_json(json!({"message": "Internal error"})),
+            ResponseTemplate::new(500).set_body_json(json!({"message": "Internal error"})),
         )
         .mount(&server)
         .await;

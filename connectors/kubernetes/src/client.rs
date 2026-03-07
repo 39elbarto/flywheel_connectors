@@ -88,9 +88,7 @@ impl KubernetesClient {
             KubernetesAuth::BearerToken(token) => {
                 req.header("Authorization", format!("Bearer {token}"))
             }
-            KubernetesAuth::CredentialId(id) => {
-                req.header("X-FCP-Credential-Id", id.to_string())
-            }
+            KubernetesAuth::CredentialId(id) => req.header("X-FCP-Credential-Id", id.to_string()),
         }
     }
 
@@ -135,7 +133,10 @@ impl KubernetesClient {
                 429 => Err(KubernetesError::RateLimited {
                     retry_after_ms: retry_after.unwrap_or(60) * 1000,
                 }),
-                code => Err(KubernetesError::Api { status_code: code, message: detail }),
+                code => Err(KubernetesError::Api {
+                    status_code: code,
+                    message: detail,
+                }),
             }
         }
     }
@@ -171,7 +172,10 @@ impl KubernetesClient {
             429 => Err(KubernetesError::RateLimited {
                 retry_after_ms: retry_after.unwrap_or(60) * 1000,
             }),
-            code => Err(KubernetesError::Api { status_code: code, message: detail }),
+            code => Err(KubernetesError::Api {
+                status_code: code,
+                message: detail,
+            }),
         }
     }
 
@@ -407,10 +411,8 @@ impl KubernetesClient {
         namespace: &str,
         name: &str,
     ) -> KubernetesResult<serde_json::Value> {
-        self.get(&format!(
-            "/api/v1/namespaces/{namespace}/configmaps/{name}"
-        ))
-        .await
+        self.get(&format!("/api/v1/namespaces/{namespace}/configmaps/{name}"))
+            .await
     }
 
     /// Update a `ConfigMap`.
@@ -577,7 +579,10 @@ mod tests {
     #[test]
     fn epoch_timestamp_is_numeric() {
         let ts = epoch_timestamp();
-        assert!(ts.parse::<u64>().is_ok(), "timestamp should be numeric: {ts}");
+        assert!(
+            ts.parse::<u64>().is_ok(),
+            "timestamp should be numeric: {ts}"
+        );
     }
 
     #[test]

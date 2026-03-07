@@ -29,7 +29,10 @@ async fn client_search_success() {
         .await;
 
     let client = AnnasArchiveClient::new(Some(&server.uri())).unwrap();
-    let result = client.search("machine learning", None, None, None).await.unwrap();
+    let result = client
+        .search("machine learning", None, None, None)
+        .await
+        .unwrap();
     assert!(result["results"].is_array());
     assert_eq!(result["results"][0]["md5"], "abc123");
 }
@@ -443,7 +446,10 @@ fn manifest_network_constraints_present() {
             .unwrap_or_else(|| panic!("{name} missing network_constraints"));
         let hosts = nc["host_allow"].as_array().unwrap();
         assert!(!hosts.is_empty(), "{name} has empty host_allow");
-        assert!(nc["deny_localhost"].as_bool().unwrap(), "{name} must deny localhost");
+        assert!(
+            nc["deny_localhost"].as_bool().unwrap(),
+            "{name} must deny localhost"
+        );
     }
 }
 
@@ -453,8 +459,16 @@ fn manifest_all_ops_safe() {
     let parsed: toml::Value = toml::from_str(&manifest_str).unwrap();
     let ops = parsed["provides"]["operations"].as_table().unwrap();
     for (name, op) in ops {
-        assert_eq!(op["safety_tier"].as_str().unwrap(), "safe", "{name} should be safe");
-        assert_eq!(op["risk_level"].as_str().unwrap(), "low", "{name} should be low risk");
+        assert_eq!(
+            op["safety_tier"].as_str().unwrap(),
+            "safe",
+            "{name} should be safe"
+        );
+        assert_eq!(
+            op["risk_level"].as_str().unwrap(),
+            "low",
+            "{name} should be low risk"
+        );
     }
 }
 

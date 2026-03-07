@@ -76,15 +76,16 @@ impl TailscaleError {
     #[must_use]
     pub fn from_async_error(error: AsyncError, timeout: Duration) -> Self {
         match error {
-            AsyncError::Timeout { .. } => Self::LocalApiRequest(format!(
-                "request timed out after {}ms",
-                timeout.as_millis()
-            )),
+            AsyncError::Timeout { .. } => {
+                Self::LocalApiRequest(format!("request timed out after {}ms", timeout.as_millis()))
+            }
             AsyncError::Cancelled => Self::LocalApiRequest("request cancelled".to_string()),
             AsyncError::ProtocolIo { message }
             | AsyncError::Join { message }
             | AsyncError::Runtime { message } => Self::LocalApiRequest(message),
-            AsyncError::ChannelClosed => Self::LocalApiRequest("request channel closed".to_string()),
+            AsyncError::ChannelClosed => {
+                Self::LocalApiRequest("request channel closed".to_string())
+            }
             AsyncError::ChannelFull => Self::LocalApiRequest("request channel full".to_string()),
         }
     }

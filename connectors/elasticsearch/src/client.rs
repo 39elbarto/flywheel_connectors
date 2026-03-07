@@ -175,11 +175,7 @@ impl ElasticsearchClient {
     }
 
     #[instrument(skip(self, body), fields(url))]
-    async fn post_ndjson(
-        &self,
-        path: &str,
-        body: &str,
-    ) -> ElasticsearchResult<serde_json::Value> {
+    async fn post_ndjson(&self, path: &str, body: &str) -> ElasticsearchResult<serde_json::Value> {
         let url = format!("{}{path}", self.base_url);
         debug!(url = %url, "POST NDJSON request");
 
@@ -413,11 +409,7 @@ mod tests {
 
     #[test]
     fn client_debug_shows_struct() {
-        let client = ElasticsearchClient::new(
-            ElasticsearchAuth::ApiKey("k".into()),
-            None,
-        )
-        .unwrap();
+        let client = ElasticsearchClient::new(ElasticsearchAuth::ApiKey("k".into()), None).unwrap();
         let dbg = format!("{client:?}");
         assert!(dbg.contains("ElasticsearchClient"));
         assert!(dbg.contains("auth"));
@@ -426,11 +418,9 @@ mod tests {
 
     #[test]
     fn client_debug_redacts_auth() {
-        let client = ElasticsearchClient::new(
-            ElasticsearchAuth::ApiKey("my-secret-key".into()),
-            None,
-        )
-        .unwrap();
+        let client =
+            ElasticsearchClient::new(ElasticsearchAuth::ApiKey("my-secret-key".into()), None)
+                .unwrap();
         let dbg = format!("{client:?}");
         assert!(!dbg.contains("my-secret-key"));
         assert!(dbg.contains("redacted"));
@@ -443,11 +433,9 @@ mod tests {
 
     #[test]
     fn client_with_credential_id_auth() {
-        let client = ElasticsearchClient::new(
-            ElasticsearchAuth::CredentialId(CredentialId::new()),
-            None,
-        )
-        .unwrap();
+        let client =
+            ElasticsearchClient::new(ElasticsearchAuth::CredentialId(CredentialId::new()), None)
+                .unwrap();
         let dbg = format!("{client:?}");
         assert!(dbg.contains("CredentialId"));
     }

@@ -254,7 +254,8 @@ mod tests {
         let e: EventRow = serde_json::from_value(json!({
             "event": "$pageview",
             "distinct_id": "user1"
-        })).unwrap();
+        }))
+        .unwrap();
         let cloned = e.clone();
         assert_eq!(e.event, Some("$pageview".into()));
         assert_eq!(cloned.distinct_id, Some("user1".into()));
@@ -285,7 +286,8 @@ mod tests {
         let e: EventRow = serde_json::from_value(json!({
             "event": "test",
             "properties": null
-        })).unwrap();
+        }))
+        .unwrap();
         assert!(e.properties.is_none());
     }
 
@@ -294,7 +296,8 @@ mod tests {
         let i: Insight = serde_json::from_value(json!({
             "id": 10,
             "name": "Test"
-        })).unwrap();
+        }))
+        .unwrap();
         let cloned = i.clone();
         assert_eq!(i.id, Some(10));
         assert_eq!(cloned.name, Some("Test".into()));
@@ -329,7 +332,8 @@ mod tests {
         let f: FeatureFlag = serde_json::from_value(json!({
             "id": 5,
             "key": "beta"
-        })).unwrap();
+        }))
+        .unwrap();
         let cloned = f.clone();
         assert_eq!(f.id, Some(5));
         assert_eq!(cloned.key, Some("beta".into()));
@@ -346,7 +350,8 @@ mod tests {
     fn feature_flag_rollout_zero() {
         let f: FeatureFlag = serde_json::from_value(json!({
             "rollout_percentage": 0.0
-        })).unwrap();
+        }))
+        .unwrap();
         assert_eq!(f.rollout_percentage, Some(0.0));
     }
 
@@ -354,7 +359,8 @@ mod tests {
     fn feature_flag_rollout_hundred() {
         let f: FeatureFlag = serde_json::from_value(json!({
             "rollout_percentage": 100.0
-        })).unwrap();
+        }))
+        .unwrap();
         assert_eq!(f.rollout_percentage, Some(100.0));
     }
 
@@ -363,7 +369,8 @@ mod tests {
         let e: ApiErrorResponse = serde_json::from_value(json!({
             "detail": "err",
             "type": "validation_error"
-        })).unwrap();
+        }))
+        .unwrap();
         let cloned = e.clone();
         assert_eq!(e.detail, Some("err".into()));
         assert_eq!(cloned.error_type, Some("validation_error".into()));
@@ -381,7 +388,8 @@ mod tests {
         let e: ApiErrorResponse = serde_json::from_value(json!({
             "attr": "email",
             "detail": "Invalid email"
-        })).unwrap();
+        }))
+        .unwrap();
         assert_eq!(e.attr, Some("email".into()));
     }
 
@@ -390,7 +398,8 @@ mod tests {
         let e: ApiErrorResponse = serde_json::from_value(json!({
             "code": "permission_denied",
             "detail": "You do not have permission"
-        })).unwrap();
+        }))
+        .unwrap();
         assert_eq!(e.code, Some("permission_denied".into()));
     }
 

@@ -20,6 +20,12 @@ use crate::types::{Execution, Schedule, validate_cron_expression};
 const DEFAULT_EXECUTION_LIMIT: u64 = 50;
 /// Maximum number of executions returned.
 const MAX_EXECUTION_LIMIT: u64 = 100;
+/// Upper bound for configured schedule capacity.
+const MAX_CONFIGURED_SCHEDULES: usize = 100_000;
+/// Upper bound for configured execution history capacity.
+const MAX_CONFIGURED_EXECUTIONS: usize = 1_000_000;
+/// Maximum accepted clock skew tolerance (seconds).
+const MAX_CLOCK_SKEW_SECONDS: u32 = 300;
 
 /// Doctor check result.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -61,6 +67,147 @@ impl DoctorResult {
     }
 }
 
+/// Cron state store backend.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum StateStoreBackend {
+    Memory,
+}
+
+impl StateStoreBackend {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Memory => "memory",
+        }
+    }
+}
+
+/// State storage policy configured at provisioning time.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct StateStorePolicy {
+    backend: StateStoreBackend,
+    max_schedules: usize,
+    max_executions: usize,
+    persist_to_disk: bool,
+}
+
+impl Default for StateStorePolicy {
+    fn default() -> Self {
+        Self {
+            backend: StateStoreBackend::Memory,
+            max_schedules: 10_000,
+            max_executions: 100_000,
+            persist_to_disk: false,
+        }
+    }
+}
+
+/// Clock source for cron scheduling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum ClockSource {
+    SystemUtc,
+}
+
+impl ClockSource {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::SystemUtc => "system_utc",
+        }
+    }
+}
+
+/// Clock policy configured at provisioning time.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct ClockPolicy {
+    source: ClockSource,
+    timezone: String,
+    max_clock_skew_seconds: u32,
+}
+
+impl Default for ClockPolicy {
+    fn default() -> Self {
+        Self {
+            source: ClockSource::SystemUtc,
+            timezone: "UTC".to_string(),
+            max_clock_skew_seconds: 30,
+        }
+    }
+}
+
+/// Typed provisioning policy for deterministic cron setup.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default, deny_unknown_fields)]
+struct ProvisioningPolicy {
+    state_store: StateStorePolicy,
+    clock: ClockPolicy,
+}
+
+impl ProvisioningPolicy {
+    fn normalize(mut self) -> Self {
+        self.clock.timezone = self.clock.timezone.trim().to_ascii_uppercase();
+        self
+    }
+
+    fn validate(&self) -> FcpResult<()> {
+        if self.state_store.persist_to_disk {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: "persist_to_disk must be false for fcp.cron (in-memory only)".into(),
+            });
+        }
+
+        if self.state_store.max_schedules == 0
+            || self.state_store.max_schedules > MAX_CONFIGURED_SCHEDULES
+        {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: format!(
+                    "state_store.max_schedules must be in 1..={MAX_CONFIGURED_SCHEDULES}"
+                ),
+            });
+        }
+
+        if self.state_store.max_executions == 0
+            || self.state_store.max_executions > MAX_CONFIGURED_EXECUTIONS
+        {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: format!(
+                    "state_store.max_executions must be in 1..={MAX_CONFIGURED_EXECUTIONS}"
+                ),
+            });
+        }
+
+        if self.clock.source != ClockSource::SystemUtc {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: "clock.source must be system_utc".into(),
+            });
+        }
+
+        if self.clock.timezone != "UTC" {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: "clock.timezone must be UTC".into(),
+            });
+        }
+
+        if self.clock.max_clock_skew_seconds > MAX_CLOCK_SKEW_SECONDS {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: format!(
+                    "clock.max_clock_skew_seconds must be <= {MAX_CLOCK_SKEW_SECONDS}"
+                ),
+            });
+        }
+
+        Ok(())
+    }
+}
+
 /// FCP Cron Connector.
 ///
 /// Manages cron schedules and execution history entirely in memory.
@@ -68,6 +215,7 @@ pub struct CronConnector {
     base: Arc<BaseConnector>,
     configured: bool,
     session_id: Option<String>,
+    provisioning: ProvisioningPolicy,
     schedules: Vec<Schedule>,
     executions: Vec<Execution>,
     request_count: AtomicU64,
@@ -81,6 +229,7 @@ impl CronConnector {
             base: Arc::new(BaseConnector::new(ConnectorId::from_static("cron"))),
             configured: false,
             session_id: None,
+            provisioning: ProvisioningPolicy::default(),
             schedules: Vec::new(),
             executions: Vec::new(),
             request_count: AtomicU64::new(0),
@@ -99,15 +248,37 @@ impl CronConnector {
     /// Handle the `configure` method.
     ///
     /// The cron connector requires no external credentials. Configuration
-    /// simply marks the connector as ready.
+    /// validates local state-store and clock policy, then marks the connector as ready.
     pub async fn handle_configure(
         &mut self,
-        _params: serde_json::Value,
+        params: serde_json::Value,
     ) -> FcpResult<serde_json::Value> {
+        let provisioning: ProvisioningPolicy =
+            serde_json::from_value(params).map_err(|e| FcpError::InvalidRequest {
+                code: 1003,
+                message: format!("Invalid configure params: {e}"),
+            })?;
+        let provisioning = provisioning.normalize();
+        provisioning.validate()?;
+
         info!("Configuring Cron connector (local meta-connector, no external auth)");
+        self.provisioning = provisioning;
         self.configured = true;
         self.base.set_configured(true);
-        Ok(json!({}))
+        Ok(json!({
+            "status": "configured",
+            "state_store": {
+                "backend": self.provisioning.state_store.backend.as_str(),
+                "max_schedules": self.provisioning.state_store.max_schedules,
+                "max_executions": self.provisioning.state_store.max_executions,
+                "persist_to_disk": self.provisioning.state_store.persist_to_disk,
+            },
+            "clock": {
+                "source": self.provisioning.clock.source.as_str(),
+                "timezone": self.provisioning.clock.timezone.as_str(),
+                "max_clock_skew_seconds": self.provisioning.clock.max_clock_skew_seconds,
+            }
+        }))
     }
 
     /// Handle the `handshake` method.
@@ -192,15 +363,46 @@ impl CronConnector {
             critical: false,
         });
 
+        let state_store_ok = self.configured
+            && self.provisioning.state_store.backend == StateStoreBackend::Memory
+            && !self.provisioning.state_store.persist_to_disk;
         checks.push(DoctorCheck {
             name: "state_store".into(),
-            passed: true,
-            message: Some(format!(
-                "{} schedules, {} executions in memory",
-                self.schedules.len(),
-                self.executions.len()
-            )),
-            critical: false,
+            passed: state_store_ok,
+            message: if self.configured {
+                Some(format!(
+                    "backend={}, max_schedules={}, max_executions={}, persist_to_disk={}, current=({} schedules, {} executions)",
+                    self.provisioning.state_store.backend.as_str(),
+                    self.provisioning.state_store.max_schedules,
+                    self.provisioning.state_store.max_executions,
+                    self.provisioning.state_store.persist_to_disk,
+                    self.schedules.len(),
+                    self.executions.len()
+                ))
+            } else {
+                Some("State store policy unavailable until configured".into())
+            },
+            critical: true,
+        });
+
+        let clock_policy_ok = self.configured
+            && self.provisioning.clock.source == ClockSource::SystemUtc
+            && self.provisioning.clock.timezone == "UTC"
+            && self.provisioning.clock.max_clock_skew_seconds <= MAX_CLOCK_SKEW_SECONDS;
+        checks.push(DoctorCheck {
+            name: "clock_policy".into(),
+            passed: clock_policy_ok,
+            message: if self.configured {
+                Some(format!(
+                    "source={}, timezone={}, max_clock_skew_seconds={}",
+                    self.provisioning.clock.source.as_str(),
+                    self.provisioning.clock.timezone,
+                    self.provisioning.clock.max_clock_skew_seconds
+                ))
+            } else {
+                Some("Clock policy unavailable until configured".into())
+            },
+            critical: true,
         });
 
         let result = DoctorResult::from_checks(checks);
@@ -266,10 +468,7 @@ impl CronConnector {
     }
 
     /// Handle the `simulate` method.
-    pub async fn handle_simulate(
-        &self,
-        params: serde_json::Value,
-    ) -> FcpResult<serde_json::Value> {
+    pub async fn handle_simulate(&self, params: serde_json::Value) -> FcpResult<serde_json::Value> {
         let operation = params
             .get("operation_id")
             .and_then(serde_json::Value::as_str)
@@ -435,9 +634,7 @@ impl CronConnector {
         &self,
         input: &serde_json::Value,
     ) -> Result<serde_json::Value, CronError> {
-        let schedule_id_filter = input
-            .get("schedule_id")
-            .and_then(serde_json::Value::as_str);
+        let schedule_id_filter = input.get("schedule_id").and_then(serde_json::Value::as_str);
 
         let limit = input
             .get("limit")
@@ -448,10 +645,7 @@ impl CronConnector {
         let executions: Vec<serde_json::Value> = self
             .executions
             .iter()
-            .filter(|e| {
-                schedule_id_filter
-                    .is_none_or(|filter| e.schedule_id == filter)
-            })
+            .filter(|e| schedule_id_filter.is_none_or(|filter| e.schedule_id == filter))
             .rev() // most recent first
             .take(limit as usize)
             .map(|e| serde_json::to_value(e).unwrap_or(serde_json::Value::Null))
@@ -541,6 +735,56 @@ mod tests {
         let c = CronConnector::default();
         assert!(!c.configured);
         assert!(c.session_id.is_none());
+    }
+
+    #[test]
+    fn connector_default_provisioning_policy() {
+        let c = CronConnector::new();
+        assert_eq!(
+            c.provisioning.state_store.backend,
+            StateStoreBackend::Memory
+        );
+        assert_eq!(c.provisioning.clock.source, ClockSource::SystemUtc);
+        assert_eq!(c.provisioning.clock.timezone, "UTC");
+        assert!(!c.provisioning.state_store.persist_to_disk);
+    }
+
+    #[test]
+    fn provisioning_policy_normalizes_timezone() {
+        let policy = ProvisioningPolicy {
+            state_store: StateStorePolicy::default(),
+            clock: ClockPolicy {
+                source: ClockSource::SystemUtc,
+                timezone: " utc ".into(),
+                max_clock_skew_seconds: 10,
+            },
+        }
+        .normalize();
+        assert_eq!(policy.clock.timezone, "UTC");
+    }
+
+    #[test]
+    fn provisioning_policy_rejects_disk_persistence() {
+        let policy = ProvisioningPolicy {
+            state_store: StateStorePolicy {
+                persist_to_disk: true,
+                ..StateStorePolicy::default()
+            },
+            clock: ClockPolicy::default(),
+        };
+        assert!(policy.validate().is_err());
+    }
+
+    #[test]
+    fn provisioning_policy_rejects_non_utc_timezone() {
+        let policy = ProvisioningPolicy {
+            state_store: StateStorePolicy::default(),
+            clock: ClockPolicy {
+                timezone: "America/New_York".into(),
+                ..ClockPolicy::default()
+            },
+        };
+        assert!(policy.validate().is_err());
     }
 
     // -- Operations info --
@@ -762,7 +1006,12 @@ mod tests {
                 "target_operation": "slack.channels.list"
             }))
             .unwrap();
-        assert!(result["schedule_id"].as_str().unwrap().starts_with("sched_"));
+        assert!(
+            result["schedule_id"]
+                .as_str()
+                .unwrap()
+                .starts_with("sched_")
+        );
         assert_eq!(c.schedules.len(), 1);
         assert_eq!(c.schedules[0].name, "hourly-sync");
         assert_eq!(c.schedules[0].expression, "0 * * * *");
@@ -964,7 +1213,12 @@ mod tests {
         let result = c
             .invoke_trigger(&json!({ "schedule_id": sched_id }))
             .unwrap();
-        assert!(result["execution_id"].as_str().unwrap().starts_with("exec_"));
+        assert!(
+            result["execution_id"]
+                .as_str()
+                .unwrap()
+                .starts_with("exec_")
+        );
         assert_eq!(c.executions.len(), 1);
         assert_eq!(c.executions[0].schedule_id, sched_id);
         assert_eq!(c.executions[0].status, "triggered");
@@ -1071,9 +1325,7 @@ mod tests {
                 .unwrap();
         }
 
-        let result = c
-            .invoke_executions_list(&json!({ "limit": 3 }))
-            .unwrap();
+        let result = c.invoke_executions_list(&json!({ "limit": 3 })).unwrap();
         assert_eq!(result["executions"].as_array().unwrap().len(), 3);
     }
 
@@ -1096,9 +1348,7 @@ mod tests {
                 .unwrap();
         }
 
-        let result = c
-            .invoke_executions_list(&json!({ "limit": 200 }))
-            .unwrap();
+        let result = c.invoke_executions_list(&json!({ "limit": 200 })).unwrap();
         // Only 5 exist, so 5 returned (limit capped at 100 but only 5 available)
         assert_eq!(result["executions"].as_array().unwrap().len(), 5);
     }
@@ -1295,9 +1545,18 @@ mod tests {
 
     #[test]
     fn doctor_status_serializes_to_lowercase() {
-        assert_eq!(serde_json::to_value(DoctorStatus::Healthy).unwrap(), "healthy");
-        assert_eq!(serde_json::to_value(DoctorStatus::Degraded).unwrap(), "degraded");
-        assert_eq!(serde_json::to_value(DoctorStatus::Unhealthy).unwrap(), "unhealthy");
+        assert_eq!(
+            serde_json::to_value(DoctorStatus::Healthy).unwrap(),
+            "healthy"
+        );
+        assert_eq!(
+            serde_json::to_value(DoctorStatus::Degraded).unwrap(),
+            "degraded"
+        );
+        assert_eq!(
+            serde_json::to_value(DoctorStatus::Unhealthy).unwrap(),
+            "unhealthy"
+        );
     }
 
     #[test]

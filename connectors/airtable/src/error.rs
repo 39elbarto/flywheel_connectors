@@ -597,9 +597,7 @@ mod tests {
             retry_after_secs: 0,
         };
         match err.to_fcp_error() {
-            FcpError::RateLimited {
-                retry_after_ms, ..
-            } => {
+            FcpError::RateLimited { retry_after_ms, .. } => {
                 assert_eq!(retry_after_ms, 0);
             }
             other => panic!("Expected RateLimited, got: {other:?}"),
@@ -662,14 +660,8 @@ mod tests {
         };
         match err.to_fcp_error() {
             FcpError::External { message, .. } => {
-                assert!(
-                    message.contains("INVALID_PERMISSIONS"),
-                    "got: {message}"
-                );
-                assert!(
-                    message.contains("insufficient access"),
-                    "got: {message}"
-                );
+                assert!(message.contains("INVALID_PERMISSIONS"), "got: {message}");
+                assert!(message.contains("insufficient access"), "got: {message}");
             }
             other => panic!("Expected External, got: {other:?}"),
         }

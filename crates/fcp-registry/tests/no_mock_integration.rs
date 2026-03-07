@@ -12,9 +12,9 @@ use fcp_core::{
 use fcp_crypto::ed25519::Ed25519SigningKey;
 use fcp_manifest::{AttestationType, Base64Bytes, ConnectorManifest};
 use fcp_registry::{
-    AttestationEvidence, ConnectorBundle, ConnectorTarget, RegistryError,
-    RegistryTrustPolicy, RegistryVerificationReport, RegistryVerifier,
-    SupplyChainEvidence, SupplyChainVerificationConfig, SupplyChainVerificationError,
+    AttestationEvidence, ConnectorBundle, ConnectorTarget, RegistryError, RegistryTrustPolicy,
+    RegistryVerificationReport, RegistryVerifier, SupplyChainEvidence,
+    SupplyChainVerificationConfig, SupplyChainVerificationError,
 };
 use fcp_store::{MemoryObjectStore, MemoryObjectStoreConfig, ObjectStore};
 use semver::Version;
@@ -114,9 +114,7 @@ fn signed_bundle(kid: &str) -> (ConnectorBundle, RegistryTrustPolicy) {
     };
 
     let mut trust = RegistryTrustPolicy::default();
-    trust
-        .publisher_keys
-        .insert(kid.to_string(), verifying_key);
+    trust.publisher_keys.insert(kid.to_string(), verifying_key);
 
     (bundle, trust)
 }
@@ -160,7 +158,10 @@ fn verify_bundle_valid_publisher_signature() {
     let verifier = RegistryVerifier::new(trust);
 
     let result = verifier.verify_bundle(&bundle, None, None, None);
-    assert!(result.is_ok(), "valid publisher sig should pass: {result:?}");
+    assert!(
+        result.is_ok(),
+        "valid publisher sig should pass: {result:?}"
+    );
 
     let verified = result.unwrap();
     assert_eq!(verified.manifest.connector.id.to_string(), "fcp.minimal");
@@ -336,10 +337,7 @@ fn verify_bundle_target_match_passes() {
 
     let verifier = RegistryVerifier::new(trust);
     let result = verifier.verify_bundle(&bundle, None, None, Some(&expected));
-    assert!(
-        result.is_ok(),
-        "matching target should pass: {result:?}"
-    );
+    assert!(result.is_ok(), "matching target should pass: {result:?}");
 }
 
 #[test]
@@ -390,10 +388,7 @@ fn verify_bundle_empty_capability_ceiling_passes() {
 
     let verifier = RegistryVerifier::new(trust);
     let result = verifier.verify_bundle(&bundle, Some(&policy), None, None);
-    assert!(
-        result.is_ok(),
-        "empty ceiling should pass: {result:?}"
-    );
+    assert!(result.is_ok(), "empty ceiling should pass: {result:?}");
 }
 
 #[test]
@@ -401,10 +396,7 @@ fn verify_bundle_no_zone_policy_passes() {
     let (bundle, trust) = signed_bundle("pub1");
     let verifier = RegistryVerifier::new(trust);
     let result = verifier.verify_bundle(&bundle, None, None, None);
-    assert!(
-        result.is_ok(),
-        "no zone policy should pass: {result:?}"
-    );
+    assert!(result.is_ok(), "no zone policy should pass: {result:?}");
 }
 
 // ── verify_bundle: supply chain policy enforcement ──
@@ -589,7 +581,8 @@ fn manifest_signing_bytes_excludes_signatures() {
     let manifest_without_sig = ConnectorManifest::parse_str(&unsigned).expect("parse");
 
     let bytes_with = fcp_registry::manifest_signing_bytes(&manifest_with_sig).expect("with");
-    let bytes_without = fcp_registry::manifest_signing_bytes(&manifest_without_sig).expect("without");
+    let bytes_without =
+        fcp_registry::manifest_signing_bytes(&manifest_without_sig).expect("without");
 
     assert_eq!(
         bytes_with, bytes_without,
@@ -707,8 +700,14 @@ async fn mirror_bundle_stores_two_objects() {
     assert_ne!(result.manifest_object_id, result.binary_object_id);
 
     // Objects should be retrievable from store
-    let _manifest_obj = store.get(&result.manifest_object_id).await.expect("manifest should be in store");
-    let _binary_obj = store.get(&result.binary_object_id).await.expect("binary should be in store");
+    let _manifest_obj = store
+        .get(&result.manifest_object_id)
+        .await
+        .expect("manifest should be in store");
+    let _binary_obj = store
+        .get(&result.binary_object_id)
+        .await
+        .expect("binary should be in store");
 }
 
 #[fcp_async_core::runtime::test]
@@ -834,10 +833,7 @@ async fn full_pipeline_denied_by_ceiling_never_mirrors() {
 #[test]
 fn registry_error_display_missing_signatures() {
     let err = RegistryError::MissingSignatures;
-    assert_eq!(
-        err.to_string(),
-        "signature section missing from manifest"
-    );
+    assert_eq!(err.to_string(), "signature section missing from manifest");
 }
 
 #[test]
@@ -946,7 +942,10 @@ sig = "{}"
 
     let verifier = RegistryVerifier::new(trust);
     let result = verifier.verify_bundle(&bundle, None, None, None);
-    assert!(result.is_ok(), "2-of-3 with 2 valid sigs should pass: {result:?}");
+    assert!(
+        result.is_ok(),
+        "2-of-3 with 2 valid sigs should pass: {result:?}"
+    );
 }
 
 // ── NoOp verifiers ──
@@ -965,7 +964,7 @@ async fn noop_transparency_verifier_returns_verified() {
 
 #[fcp_async_core::runtime::test]
 async fn noop_tuf_verifier_returns_verified() {
-    use fcp_registry::{NoOpTufVerifier, TufVerifier, TufRootMetadata};
+    use fcp_registry::{NoOpTufVerifier, TufRootMetadata, TufVerifier};
 
     let verifier = NoOpTufVerifier;
     let root = TufRootMetadata {
@@ -985,7 +984,7 @@ async fn noop_tuf_verifier_returns_verified() {
 
 #[fcp_async_core::runtime::test]
 async fn noop_sigstore_verifier_returns_verified() {
-    use fcp_registry::{NoOpSigstoreVerifier, SigstoreVerifier, SigstoreBundle};
+    use fcp_registry::{NoOpSigstoreVerifier, SigstoreBundle, SigstoreVerifier};
 
     let verifier = NoOpSigstoreVerifier;
     let bundle = SigstoreBundle {
@@ -1006,7 +1005,9 @@ async fn noop_sigstore_verifier_returns_verified() {
 
 #[fcp_async_core::runtime::test]
 async fn mock_transparency_verifier_accepts_valid_entry() {
-    use fcp_registry::{MockTransparencyVerifier, TransparencyLogVerifier, TransparencyLogEntry, InclusionProof};
+    use fcp_registry::{
+        InclusionProof, MockTransparencyVerifier, TransparencyLogEntry, TransparencyLogVerifier,
+    };
 
     let verifier = MockTransparencyVerifier::new();
     let entry = TransparencyLogEntry {
@@ -1041,7 +1042,7 @@ async fn mock_transparency_verifier_rejects_unknown_entry() {
 
 #[fcp_async_core::runtime::test]
 async fn mock_tuf_verifier_accepts_valid_target() {
-    use fcp_registry::{MockTufVerifier, TufVerifier, TufRootMetadata, TufTargetInfo};
+    use fcp_registry::{MockTufVerifier, TufRootMetadata, TufTargetInfo, TufVerifier};
 
     let root = TufRootMetadata {
         version: 5,
@@ -1070,7 +1071,7 @@ async fn mock_tuf_verifier_accepts_valid_target() {
 
 #[fcp_async_core::runtime::test]
 async fn mock_tuf_verifier_rejects_unknown_target() {
-    use fcp_registry::{MockTufVerifier, TufVerifier, TufRootMetadata};
+    use fcp_registry::{MockTufVerifier, TufRootMetadata, TufVerifier};
 
     let root = TufRootMetadata {
         version: 1,
@@ -1086,7 +1087,9 @@ async fn mock_tuf_verifier_rejects_unknown_target() {
 
 #[fcp_async_core::runtime::test]
 async fn mock_sigstore_verifier_accepts_valid_bundle() {
-    use fcp_registry::{MockSigstoreVerifier, SigstoreVerifier, SigstoreBundle, SigstoreVerificationResult};
+    use fcp_registry::{
+        MockSigstoreVerifier, SigstoreBundle, SigstoreVerificationResult, SigstoreVerifier,
+    };
 
     let verifier = MockSigstoreVerifier::new();
     verifier.add_valid_bundle(
@@ -1116,7 +1119,7 @@ async fn mock_sigstore_verifier_accepts_valid_bundle() {
 
 #[fcp_async_core::runtime::test]
 async fn mock_sigstore_verifier_rejects_unknown_artifact() {
-    use fcp_registry::{MockSigstoreVerifier, SigstoreVerifier, SigstoreBundle};
+    use fcp_registry::{MockSigstoreVerifier, SigstoreBundle, SigstoreVerifier};
 
     let verifier = MockSigstoreVerifier::new();
     let bundle = SigstoreBundle {
@@ -1166,10 +1169,7 @@ fn supply_chain_error_display_all_variants() {
             "fcp.test",
         ),
         (
-            SupplyChainVerificationError::TufRollback {
-                current: 5,
-                got: 3,
-            },
+            SupplyChainVerificationError::TufRollback { current: 5, got: 3 },
             "rollback",
         ),
         (SupplyChainVerificationError::TufFreeze, "freeze"),
@@ -1483,11 +1483,7 @@ require_transparency_log = true
     let manifest_toml = unsigned_manifest_toml(&policy_section);
     let sig = sign_manifest(&manifest_toml, &signing_key, &binary_hash);
 
-    let manifest_with_sigs = format!(
-        "{}\n{}",
-        manifest_toml,
-        publisher_sig_toml(&kid, &sig)
-    );
+    let manifest_with_sigs = format!("{}\n{}", manifest_toml, publisher_sig_toml(&kid, &sig));
 
     let bundle = ConnectorBundle {
         manifest_toml: manifest_with_sigs,
@@ -1531,11 +1527,7 @@ require_attestation_types = ["in-toto"]
     let manifest_toml = unsigned_manifest_toml(&policy_section);
     let sig = sign_manifest(&manifest_toml, &signing_key, &binary_hash);
 
-    let manifest_with_sigs = format!(
-        "{}\n{}",
-        manifest_toml,
-        publisher_sig_toml(&kid, &sig)
-    );
+    let manifest_with_sigs = format!("{}\n{}", manifest_toml, publisher_sig_toml(&kid, &sig));
 
     let bundle = ConnectorBundle {
         manifest_toml: manifest_with_sigs,
@@ -1579,11 +1571,7 @@ require_attestation_types = ["in-toto"]
     let manifest_toml = unsigned_manifest_toml(&policy_section);
     let sig = sign_manifest(&manifest_toml, &signing_key, &binary_hash);
 
-    let manifest_with_sigs = format!(
-        "{}\n{}",
-        manifest_toml,
-        publisher_sig_toml(&kid, &sig)
-    );
+    let manifest_with_sigs = format!("{}\n{}", manifest_toml, publisher_sig_toml(&kid, &sig));
 
     let bundle = ConnectorBundle {
         manifest_toml: manifest_with_sigs,

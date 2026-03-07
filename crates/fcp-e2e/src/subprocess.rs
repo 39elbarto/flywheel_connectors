@@ -129,6 +129,18 @@ impl ConnectorProcessRunner {
         let mut buffer = self.stderr_lines.lock().await;
         std::mem::take(&mut *buffer)
     }
+
+    pub async fn stderr_lines(&self) -> Vec<String> {
+        let lines = self.stderr_lines.lock().await;
+        lines.clone()
+    }
+}
+
+impl Drop for ConnectorProcessRunner {
+    fn drop(&mut self) {
+        // Prevent zombie processes from accumulating during test runs
+        let _ = self.child.start_kill();
+    }
 }
 
 #[cfg(test)]

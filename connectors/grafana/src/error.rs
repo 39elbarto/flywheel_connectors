@@ -125,22 +125,45 @@ mod tests {
 
     #[test]
     fn rate_limited_is_retryable() {
-        assert!(GrafanaError::RateLimited { retry_after_ms: 5000 }.is_retryable());
+        assert!(
+            GrafanaError::RateLimited {
+                retry_after_ms: 5000
+            }
+            .is_retryable()
+        );
     }
 
     #[test]
     fn api_500_is_retryable() {
-        assert!(GrafanaError::Api { status_code: 500, message: "err".into() }.is_retryable());
+        assert!(
+            GrafanaError::Api {
+                status_code: 500,
+                message: "err".into()
+            }
+            .is_retryable()
+        );
     }
 
     #[test]
     fn api_503_is_retryable() {
-        assert!(GrafanaError::Api { status_code: 503, message: "unavailable".into() }.is_retryable());
+        assert!(
+            GrafanaError::Api {
+                status_code: 503,
+                message: "unavailable".into()
+            }
+            .is_retryable()
+        );
     }
 
     #[test]
     fn api_429_is_retryable() {
-        assert!(GrafanaError::Api { status_code: 429, message: "too many".into() }.is_retryable());
+        assert!(
+            GrafanaError::Api {
+                status_code: 429,
+                message: "too many".into()
+            }
+            .is_retryable()
+        );
     }
 
     #[test]
@@ -155,24 +178,43 @@ mod tests {
 
     #[test]
     fn not_found_not_retryable() {
-        assert!(!GrafanaError::NotFound { resource: "dash".into() }.is_retryable());
+        assert!(
+            !GrafanaError::NotFound {
+                resource: "dash".into()
+            }
+            .is_retryable()
+        );
     }
 
     #[test]
     fn api_400_not_retryable() {
-        assert!(!GrafanaError::Api { status_code: 400, message: "bad".into() }.is_retryable());
+        assert!(
+            !GrafanaError::Api {
+                status_code: 400,
+                message: "bad".into()
+            }
+            .is_retryable()
+        );
     }
 
     #[test]
     fn api_404_not_retryable() {
-        assert!(!GrafanaError::Api { status_code: 404, message: "not found".into() }.is_retryable());
+        assert!(
+            !GrafanaError::Api {
+                status_code: 404,
+                message: "not found".into()
+            }
+            .is_retryable()
+        );
     }
 
     // ── retry_after ──────────────────────────────────────────────────
 
     #[test]
     fn retry_after_for_rate_limited() {
-        let err = GrafanaError::RateLimited { retry_after_ms: 30_000 };
+        let err = GrafanaError::RateLimited {
+            retry_after_ms: 30_000,
+        };
         assert_eq!(err.retry_after(), Some(Duration::from_secs(30)));
     }
 
@@ -188,12 +230,25 @@ mod tests {
 
     #[test]
     fn retry_after_none_for_api_error() {
-        assert_eq!(GrafanaError::Api { status_code: 500, message: "err".into() }.retry_after(), None);
+        assert_eq!(
+            GrafanaError::Api {
+                status_code: 500,
+                message: "err".into()
+            }
+            .retry_after(),
+            None
+        );
     }
 
     #[test]
     fn retry_after_none_for_not_found() {
-        assert_eq!(GrafanaError::NotFound { resource: "x".into() }.retry_after(), None);
+        assert_eq!(
+            GrafanaError::NotFound {
+                resource: "x".into()
+            }
+            .retry_after(),
+            None
+        );
     }
 
     // ── to_fcp_error ─────────────────────────────────────────────────
@@ -201,7 +256,12 @@ mod tests {
     #[test]
     fn unauthorized_to_fcp_error() {
         match GrafanaError::Unauthorized.to_fcp_error() {
-            FcpError::External { service, status_code, retryable, .. } => {
+            FcpError::External {
+                service,
+                status_code,
+                retryable,
+                ..
+            } => {
                 assert_eq!(service, "grafana");
                 assert_eq!(status_code, Some(401));
                 assert!(!retryable);
@@ -213,7 +273,12 @@ mod tests {
     #[test]
     fn forbidden_to_fcp_error() {
         match GrafanaError::Forbidden.to_fcp_error() {
-            FcpError::External { service, status_code, retryable, .. } => {
+            FcpError::External {
+                service,
+                status_code,
+                retryable,
+                ..
+            } => {
                 assert_eq!(service, "grafana");
                 assert_eq!(status_code, Some(403));
                 assert!(!retryable);
@@ -224,8 +289,17 @@ mod tests {
 
     #[test]
     fn not_found_to_fcp_error() {
-        match (GrafanaError::NotFound { resource: "dashboard".into() }).to_fcp_error() {
-            FcpError::External { status_code, message, retryable, .. } => {
+        match (GrafanaError::NotFound {
+            resource: "dashboard".into(),
+        })
+        .to_fcp_error()
+        {
+            FcpError::External {
+                status_code,
+                message,
+                retryable,
+                ..
+            } => {
                 assert_eq!(status_code, Some(404));
                 assert!(message.contains("dashboard"));
                 assert!(!retryable);
@@ -236,8 +310,17 @@ mod tests {
 
     #[test]
     fn rate_limited_to_fcp_error() {
-        match (GrafanaError::RateLimited { retry_after_ms: 60_000 }).to_fcp_error() {
-            FcpError::External { status_code, retryable, retry_after, .. } => {
+        match (GrafanaError::RateLimited {
+            retry_after_ms: 60_000,
+        })
+        .to_fcp_error()
+        {
+            FcpError::External {
+                status_code,
+                retryable,
+                retry_after,
+                ..
+            } => {
                 assert_eq!(status_code, Some(429));
                 assert!(retryable);
                 assert_eq!(retry_after, Some(Duration::from_secs(60)));
@@ -248,8 +331,19 @@ mod tests {
 
     #[test]
     fn api_error_to_fcp_error() {
-        match (GrafanaError::Api { status_code: 503, message: "unavailable".into() }).to_fcp_error() {
-            FcpError::External { service, status_code, retryable, message, .. } => {
+        match (GrafanaError::Api {
+            status_code: 503,
+            message: "unavailable".into(),
+        })
+        .to_fcp_error()
+        {
+            FcpError::External {
+                service,
+                status_code,
+                retryable,
+                message,
+                ..
+            } => {
                 assert_eq!(service, "grafana");
                 assert_eq!(status_code, Some(503));
                 assert!(retryable);
@@ -261,8 +355,17 @@ mod tests {
 
     #[test]
     fn api_error_non_retryable_to_fcp_error() {
-        match (GrafanaError::Api { status_code: 400, message: "bad request".into() }).to_fcp_error() {
-            FcpError::External { status_code, retryable, .. } => {
+        match (GrafanaError::Api {
+            status_code: 400,
+            message: "bad request".into(),
+        })
+        .to_fcp_error()
+        {
+            FcpError::External {
+                status_code,
+                retryable,
+                ..
+            } => {
                 assert_eq!(status_code, Some(400));
                 assert!(!retryable);
             }
@@ -283,44 +386,87 @@ mod tests {
 
     #[test]
     fn error_display_unauthorized() {
-        assert_eq!(GrafanaError::Unauthorized.to_string(), "Authentication failed: invalid API key or token");
+        assert_eq!(
+            GrafanaError::Unauthorized.to_string(),
+            "Authentication failed: invalid API key or token"
+        );
     }
 
     #[test]
     fn error_display_forbidden() {
-        assert_eq!(GrafanaError::Forbidden.to_string(), "Forbidden: insufficient permissions");
+        assert_eq!(
+            GrafanaError::Forbidden.to_string(),
+            "Forbidden: insufficient permissions"
+        );
     }
 
     #[test]
     fn error_display_not_found() {
-        assert_eq!(GrafanaError::NotFound { resource: "dashboard".into() }.to_string(), "Not found: dashboard");
+        assert_eq!(
+            GrafanaError::NotFound {
+                resource: "dashboard".into()
+            }
+            .to_string(),
+            "Not found: dashboard"
+        );
     }
 
     #[test]
     fn error_display_rate_limited() {
-        assert_eq!(GrafanaError::RateLimited { retry_after_ms: 1000 }.to_string(), "Rate limited, retry after 1000ms");
+        assert_eq!(
+            GrafanaError::RateLimited {
+                retry_after_ms: 1000
+            }
+            .to_string(),
+            "Rate limited, retry after 1000ms"
+        );
     }
 
     #[test]
     fn error_display_api() {
-        assert_eq!(GrafanaError::Api { status_code: 500, message: "Internal".into() }.to_string(), "Grafana API error (500): Internal");
+        assert_eq!(
+            GrafanaError::Api {
+                status_code: 500,
+                message: "Internal".into()
+            }
+            .to_string(),
+            "Grafana API error (500): Internal"
+        );
     }
 
     // ── Additional edge cases ───────────────────────────────────
 
     #[test]
     fn api_502_is_retryable() {
-        assert!(GrafanaError::Api { status_code: 502, message: "bad gateway".into() }.is_retryable());
+        assert!(
+            GrafanaError::Api {
+                status_code: 502,
+                message: "bad gateway".into()
+            }
+            .is_retryable()
+        );
     }
 
     #[test]
     fn api_599_is_retryable() {
-        assert!(GrafanaError::Api { status_code: 599, message: "custom".into() }.is_retryable());
+        assert!(
+            GrafanaError::Api {
+                status_code: 599,
+                message: "custom".into()
+            }
+            .is_retryable()
+        );
     }
 
     #[test]
     fn api_499_not_retryable() {
-        assert!(!GrafanaError::Api { status_code: 499, message: "client err".into() }.is_retryable());
+        assert!(
+            !GrafanaError::Api {
+                status_code: 499,
+                message: "client err".into()
+            }
+            .is_retryable()
+        );
     }
 
     #[test]
@@ -346,20 +492,27 @@ mod tests {
 
     #[test]
     fn rate_limited_large_value() {
-        let err = GrafanaError::RateLimited { retry_after_ms: 3_600_000 };
+        let err = GrafanaError::RateLimited {
+            retry_after_ms: 3_600_000,
+        };
         assert_eq!(err.retry_after(), Some(Duration::from_secs(3600)));
     }
 
     #[test]
     fn not_found_empty_resource() {
-        let err = GrafanaError::NotFound { resource: String::new() };
+        let err = GrafanaError::NotFound {
+            resource: String::new(),
+        };
         assert_eq!(err.to_string(), "Not found: ");
         assert!(!err.is_retryable());
     }
 
     #[test]
     fn api_error_empty_message() {
-        let err = GrafanaError::Api { status_code: 500, message: String::new() };
+        let err = GrafanaError::Api {
+            status_code: 500,
+            message: String::new(),
+        };
         assert_eq!(err.to_string(), "Grafana API error (500): ");
         assert!(err.is_retryable());
     }
@@ -373,7 +526,10 @@ mod tests {
 
     #[test]
     fn api_error_debug_shows_fields() {
-        let err = GrafanaError::Api { status_code: 422, message: "unprocessable".into() };
+        let err = GrafanaError::Api {
+            status_code: 422,
+            message: "unprocessable".into(),
+        };
         let dbg = format!("{err:?}");
         assert!(dbg.contains("422"));
         assert!(dbg.contains("unprocessable"));
@@ -389,9 +545,15 @@ mod tests {
 
     #[test]
     fn not_found_to_fcp_error_message_content() {
-        let err = GrafanaError::NotFound { resource: "my-special-dashboard".into() };
+        let err = GrafanaError::NotFound {
+            resource: "my-special-dashboard".into(),
+        };
         match err.to_fcp_error() {
-            FcpError::External { message, retry_after, .. } => {
+            FcpError::External {
+                message,
+                retry_after,
+                ..
+            } => {
                 assert!(message.contains("my-special-dashboard"));
                 assert_eq!(retry_after, None);
             }
@@ -401,7 +563,9 @@ mod tests {
 
     #[test]
     fn rate_limited_to_fcp_error_has_retry_after() {
-        let err = GrafanaError::RateLimited { retry_after_ms: 5000 };
+        let err = GrafanaError::RateLimited {
+            retry_after_ms: 5000,
+        };
         match err.to_fcp_error() {
             FcpError::External { retry_after, .. } => {
                 assert_eq!(retry_after, Some(Duration::from_secs(5)));
@@ -412,7 +576,10 @@ mod tests {
 
     #[test]
     fn api_error_to_fcp_error_no_retry_after() {
-        let err = GrafanaError::Api { status_code: 500, message: "err".into() };
+        let err = GrafanaError::Api {
+            status_code: 500,
+            message: "err".into(),
+        };
         match err.to_fcp_error() {
             FcpError::External { retry_after, .. } => {
                 assert_eq!(retry_after, None);

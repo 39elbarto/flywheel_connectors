@@ -633,8 +633,7 @@ async fn error_401() {
     Mock::given(method("POST"))
         .and(path("/mcp"))
         .respond_with(
-            ResponseTemplate::new(401)
-                .set_body_json(json!({"message": "Invalid API key"})),
+            ResponseTemplate::new(401).set_body_json(json!({"message": "Invalid API key"})),
         )
         .mount(&server)
         .await;
@@ -655,10 +654,7 @@ async fn error_403() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/mcp"))
-        .respond_with(
-            ResponseTemplate::new(403)
-                .set_body_json(json!({"message": "Forbidden"})),
-        )
+        .respond_with(ResponseTemplate::new(403).set_body_json(json!({"message": "Forbidden"})))
         .mount(&server)
         .await;
 
@@ -678,10 +674,7 @@ async fn error_404() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/mcp"))
-        .respond_with(
-            ResponseTemplate::new(404)
-                .set_body_json(json!({"message": "Not found"})),
-        )
+        .respond_with(ResponseTemplate::new(404).set_body_json(json!({"message": "Not found"})))
         .mount(&server)
         .await;
 
@@ -726,8 +719,7 @@ async fn error_500() {
     Mock::given(method("POST"))
         .and(path("/mcp"))
         .respond_with(
-            ResponseTemplate::new(500)
-                .set_body_json(json!({"message": "Internal server error"})),
+            ResponseTemplate::new(500).set_body_json(json!({"message": "Internal server error"})),
         )
         .mount(&server)
         .await;
@@ -870,8 +862,7 @@ async fn counters_error_increment() {
     Mock::given(method("POST"))
         .and(path("/mcp"))
         .respond_with(
-            ResponseTemplate::new(500)
-                .set_body_json(json!({"message": "Internal error"})),
+            ResponseTemplate::new(500).set_body_json(json!({"message": "Internal error"})),
         )
         .mount(&server)
         .await;

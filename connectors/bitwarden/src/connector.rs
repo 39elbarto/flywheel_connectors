@@ -9,7 +9,7 @@ use serde_json::json;
 use tracing::{info, instrument};
 
 use crate::{
-    client::{DEFAULT_BASE_URL, BitwardenAuth, BitwardenClient},
+    client::{BitwardenAuth, BitwardenClient, DEFAULT_BASE_URL},
     error::BitwardenError,
 };
 

@@ -1606,7 +1606,8 @@ mod tests {
             "domain": "mycompany",
             "email": "user@example.com",
             "api_token": "secret"
-        })).unwrap();
+        }))
+        .unwrap();
         assert!(!cfg.auth.is_secretless());
         assert!(cfg.base_url.is_none());
     }
@@ -1616,7 +1617,8 @@ mod tests {
         let cfg = JiraConfig::from_params(&json!({
             "domain": "mycompany",
             "credential_id": "550e8400-e29b-41d4-a716-446655440000"
-        })).unwrap();
+        }))
+        .unwrap();
         assert!(cfg.auth.is_secretless());
     }
 
@@ -1628,9 +1630,13 @@ mod tests {
             "api_token": "t",
             "base_url": "https://jira.example.com",
             "agile_url": "https://jira.example.com/agile"
-        })).unwrap();
+        }))
+        .unwrap();
         assert_eq!(cfg.base_url.as_deref(), Some("https://jira.example.com"));
-        assert_eq!(cfg.agile_url.as_deref(), Some("https://jira.example.com/agile"));
+        assert_eq!(
+            cfg.agile_url.as_deref(),
+            Some("https://jira.example.com/agile")
+        );
     }
 
     #[test]

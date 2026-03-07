@@ -306,9 +306,7 @@ impl GrafanaConnector {
             "grafana.datasources.query" => self.invoke_datasources_query(client, &input).await,
             "grafana.alerts.list" => self.invoke_alerts_list(client, &input).await,
             "grafana.alerts.create" => self.invoke_alerts_create(client, &input).await,
-            "grafana.annotations.create" => {
-                self.invoke_annotations_create(client, &input).await
-            }
+            "grafana.annotations.create" => self.invoke_annotations_create(client, &input).await,
             _ => {
                 return Err(FcpError::InvalidRequest {
                     code: 1002,
@@ -362,10 +360,11 @@ impl GrafanaConnector {
         input: &serde_json::Value,
     ) -> Result<serde_json::Value, GrafanaError> {
         let query = input.get("query").and_then(|v| v.as_str());
-        let tag: Option<Vec<String>> = input
-            .get("tag")
-            .and_then(|v| v.as_array())
-            .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect());
+        let tag: Option<Vec<String>> = input.get("tag").and_then(|v| v.as_array()).map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        });
         let limit = input.get("limit").and_then(|v| v.as_i64());
         let data = client
             .search_dashboards(query, tag.as_deref(), limit)
@@ -795,7 +794,11 @@ mod tests {
 
     #[test]
     fn doctor_status_serde_roundtrip() {
-        for status in [DoctorStatus::Healthy, DoctorStatus::Degraded, DoctorStatus::Unhealthy] {
+        for status in [
+            DoctorStatus::Healthy,
+            DoctorStatus::Degraded,
+            DoctorStatus::Unhealthy,
+        ] {
             let s = serde_json::to_string(&status).unwrap();
             let back: DoctorStatus = serde_json::from_str(&s).unwrap();
             assert_eq!(back, status);
@@ -815,7 +818,10 @@ mod tests {
         let input = json!({});
         let err = require_str(&input, "uid").unwrap_err();
         match err {
-            GrafanaError::Api { status_code, message } => {
+            GrafanaError::Api {
+                status_code,
+                message,
+            } => {
                 assert_eq!(status_code, 400);
                 assert!(message.contains("uid"));
             }
@@ -847,12 +853,30 @@ mod tests {
     fn operations_info_required_fields() {
         let ops = operations_info();
         for op in ops.as_array().unwrap() {
-            assert!(op.get("id").and_then(|v| v.as_str()).is_some(), "op missing id");
-            assert!(op.get("summary").and_then(|v| v.as_str()).is_some(), "op missing summary");
-            assert!(op.get("capability").and_then(|v| v.as_str()).is_some(), "op missing capability");
-            assert!(op.get("risk_level").and_then(|v| v.as_str()).is_some(), "op missing risk_level");
-            assert!(op.get("safety_tier").and_then(|v| v.as_str()).is_some(), "op missing safety_tier");
-            assert!(op.get("idempotency").and_then(|v| v.as_str()).is_some(), "op missing idempotency");
+            assert!(
+                op.get("id").and_then(|v| v.as_str()).is_some(),
+                "op missing id"
+            );
+            assert!(
+                op.get("summary").and_then(|v| v.as_str()).is_some(),
+                "op missing summary"
+            );
+            assert!(
+                op.get("capability").and_then(|v| v.as_str()).is_some(),
+                "op missing capability"
+            );
+            assert!(
+                op.get("risk_level").and_then(|v| v.as_str()).is_some(),
+                "op missing risk_level"
+            );
+            assert!(
+                op.get("safety_tier").and_then(|v| v.as_str()).is_some(),
+                "op missing safety_tier"
+            );
+            assert!(
+                op.get("idempotency").and_then(|v| v.as_str()).is_some(),
+                "op missing idempotency"
+            );
         }
     }
 
@@ -888,7 +912,11 @@ mod tests {
             let cap = op["capability"].as_str().unwrap();
             let tier = op["safety_tier"].as_str().unwrap();
             if cap.to_ascii_lowercase().ends_with(".read") {
-                assert_eq!(tier, "safe", "read op {} should be safe, got {tier}", op["id"]);
+                assert_eq!(
+                    tier, "safe",
+                    "read op {} should be safe, got {tier}",
+                    op["id"]
+                );
             }
         }
     }
@@ -955,7 +983,10 @@ mod tests {
             critical: false,
         };
         let v = serde_json::to_value(&check).unwrap();
-        assert!(v.get("message").is_none(), "message should be skipped when None");
+        assert!(
+            v.get("message").is_none(),
+            "message should be skipped when None"
+        );
     }
 
     #[test]
@@ -987,9 +1018,18 @@ mod tests {
 
     #[test]
     fn doctor_status_values_serialize_lowercase() {
-        assert_eq!(serde_json::to_value(DoctorStatus::Healthy).unwrap(), "healthy");
-        assert_eq!(serde_json::to_value(DoctorStatus::Degraded).unwrap(), "degraded");
-        assert_eq!(serde_json::to_value(DoctorStatus::Unhealthy).unwrap(), "unhealthy");
+        assert_eq!(
+            serde_json::to_value(DoctorStatus::Healthy).unwrap(),
+            "healthy"
+        );
+        assert_eq!(
+            serde_json::to_value(DoctorStatus::Degraded).unwrap(),
+            "degraded"
+        );
+        assert_eq!(
+            serde_json::to_value(DoctorStatus::Unhealthy).unwrap(),
+            "unhealthy"
+        );
     }
 
     #[test]
@@ -1009,8 +1049,18 @@ mod tests {
     #[test]
     fn doctor_result_multiple_critical_failures() {
         let result = DoctorResult::from_checks(vec![
-            DoctorCheck { name: "a".into(), passed: false, message: None, critical: true },
-            DoctorCheck { name: "b".into(), passed: false, message: None, critical: true },
+            DoctorCheck {
+                name: "a".into(),
+                passed: false,
+                message: None,
+                critical: true,
+            },
+            DoctorCheck {
+                name: "b".into(),
+                passed: false,
+                message: None,
+                critical: true,
+            },
         ]);
         assert_eq!(result.status, DoctorStatus::Unhealthy);
     }
@@ -1018,8 +1068,18 @@ mod tests {
     #[test]
     fn doctor_result_mixed_critical_and_noncritical_failures() {
         let result = DoctorResult::from_checks(vec![
-            DoctorCheck { name: "a".into(), passed: false, message: None, critical: true },
-            DoctorCheck { name: "b".into(), passed: false, message: None, critical: false },
+            DoctorCheck {
+                name: "a".into(),
+                passed: false,
+                message: None,
+                critical: true,
+            },
+            DoctorCheck {
+                name: "b".into(),
+                passed: false,
+                message: None,
+                critical: false,
+            },
         ]);
         // critical failure takes precedence
         assert_eq!(result.status, DoctorStatus::Unhealthy);
@@ -1044,7 +1104,11 @@ mod tests {
         let ops = operations_info();
         for op in ops.as_array().unwrap() {
             let idemp = op["idempotency"].as_str().unwrap();
-            assert!(valid.contains(&idemp), "invalid idempotency: {idemp} for op {}", op["id"]);
+            assert!(
+                valid.contains(&idemp),
+                "invalid idempotency: {idemp} for op {}",
+                op["id"]
+            );
         }
     }
 

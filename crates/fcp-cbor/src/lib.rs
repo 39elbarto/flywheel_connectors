@@ -2064,7 +2064,13 @@ mod tests {
                 // Keys should be sorted: "a" (len 1) before "bb" (len 2).
                 let keys: Vec<&str> = entries
                     .iter()
-                    .filter_map(|(k, _)| if let Value::Text(s) = k { Some(s.as_str()) } else { None })
+                    .filter_map(|(k, _)| {
+                        if let Value::Text(s) = k {
+                            Some(s.as_str())
+                        } else {
+                            None
+                        }
+                    })
                     .collect();
                 assert_eq!(keys, vec!["a", "bb"]);
             } else {
@@ -2360,7 +2366,13 @@ mod tests {
                 if let Value::Map(entries) = inner_box.as_ref() {
                     let keys: Vec<&str> = entries
                         .iter()
-                        .filter_map(|(k, _)| if let Value::Text(s) = k { Some(s.as_str()) } else { None })
+                        .filter_map(|(k, _)| {
+                            if let Value::Text(s) = k {
+                                Some(s.as_str())
+                            } else {
+                                None
+                            }
+                        })
                         .collect();
                     assert_eq!(keys, vec!["x", "y"]);
                 } else {
@@ -2428,7 +2440,13 @@ mod tests {
         canonicalize_map(&mut entries, 0).unwrap();
         let keys: Vec<&str> = entries
             .iter()
-            .filter_map(|(k, _)| if let Value::Text(s) = k { Some(s.as_str()) } else { None })
+            .filter_map(|(k, _)| {
+                if let Value::Text(s) = k {
+                    Some(s.as_str())
+                } else {
+                    None
+                }
+            })
             .collect();
         assert_eq!(keys, vec!["a", "ab"]);
     }
@@ -2443,7 +2461,13 @@ mod tests {
         canonicalize_map(&mut entries, 0).unwrap();
         let keys: Vec<Vec<u8>> = entries
             .iter()
-            .filter_map(|(k, _)| if let Value::Bytes(b) = k { Some(b.clone()) } else { None })
+            .filter_map(|(k, _)| {
+                if let Value::Bytes(b) = k {
+                    Some(b.clone())
+                } else {
+                    None
+                }
+            })
             .collect();
         assert_eq!(keys, vec![vec![0xAA], vec![0xAA, 0xBB]]);
     }
@@ -2457,7 +2481,13 @@ mod tests {
         canonicalize_map(&mut entries, 0).unwrap();
         let keys: Vec<Vec<u8>> = entries
             .iter()
-            .filter_map(|(k, _)| if let Value::Bytes(b) = k { Some(b.clone()) } else { None })
+            .filter_map(|(k, _)| {
+                if let Value::Bytes(b) = k {
+                    Some(b.clone())
+                } else {
+                    None
+                }
+            })
             .collect();
         assert_eq!(keys, vec![vec![], vec![0x01]]);
     }
@@ -2520,7 +2550,13 @@ mod tests {
         if let Value::Map(entries) = &v {
             let keys: Vec<&str> = entries
                 .iter()
-                .filter_map(|(k, _)| if let Value::Text(s) = k { Some(s.as_str()) } else { None })
+                .filter_map(|(k, _)| {
+                    if let Value::Text(s) = k {
+                        Some(s.as_str())
+                    } else {
+                        None
+                    }
+                })
                 .collect();
             assert_eq!(keys, vec!["a", "b"]);
         }

@@ -2826,9 +2826,7 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn introspect_missing_connector_returns_error() {
-        let registry = RegistryNoIntrospection {
-            connectors: vec![],
-        };
+        let registry = RegistryNoIntrospection { connectors: vec![] };
         let endpoint = DiscoveryEndpoint::new(Arc::new(registry), Arc::new(AllowPolicy));
         let missing_id = ConnectorId::new("test", "missing", "v1").unwrap();
         let result = endpoint.introspect(&missing_id).await;

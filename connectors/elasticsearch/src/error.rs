@@ -207,12 +207,25 @@ mod tests {
 
     #[test]
     fn retry_after_none_for_api_error() {
-        assert_eq!(ElasticsearchError::Api { status_code: 500, message: "err".into() }.retry_after(), None);
+        assert_eq!(
+            ElasticsearchError::Api {
+                status_code: 500,
+                message: "err".into()
+            }
+            .retry_after(),
+            None
+        );
     }
 
     #[test]
     fn retry_after_none_for_not_found() {
-        assert_eq!(ElasticsearchError::NotFound { resource: "idx".into() }.retry_after(), None);
+        assert_eq!(
+            ElasticsearchError::NotFound {
+                resource: "idx".into()
+            }
+            .retry_after(),
+            None
+        );
     }
 
     // ── to_fcp_error ─────────────────────────────────────────────────
@@ -330,8 +343,17 @@ mod tests {
 
     #[test]
     fn api_error_non_retryable_to_fcp_error() {
-        match (ElasticsearchError::Api { status_code: 400, message: "bad".into() }).to_fcp_error() {
-            FcpError::External { status_code, retryable, .. } => {
+        match (ElasticsearchError::Api {
+            status_code: 400,
+            message: "bad".into(),
+        })
+        .to_fcp_error()
+        {
+            FcpError::External {
+                status_code,
+                retryable,
+                ..
+            } => {
                 assert_eq!(status_code, Some(400));
                 assert!(!retryable);
             }
@@ -343,40 +365,70 @@ mod tests {
 
     #[test]
     fn error_display_unauthorized() {
-        assert_eq!(ElasticsearchError::Unauthorized.to_string(), "Authentication failed: invalid or expired API key");
+        assert_eq!(
+            ElasticsearchError::Unauthorized.to_string(),
+            "Authentication failed: invalid or expired API key"
+        );
     }
 
     #[test]
     fn error_display_forbidden() {
-        assert_eq!(ElasticsearchError::Forbidden.to_string(), "Forbidden: insufficient permissions");
+        assert_eq!(
+            ElasticsearchError::Forbidden.to_string(),
+            "Forbidden: insufficient permissions"
+        );
     }
 
     #[test]
     fn error_display_not_found() {
-        assert_eq!(ElasticsearchError::NotFound { resource: "my-index".into() }.to_string(), "Not found: my-index");
+        assert_eq!(
+            ElasticsearchError::NotFound {
+                resource: "my-index".into()
+            }
+            .to_string(),
+            "Not found: my-index"
+        );
     }
 
     #[test]
     fn error_display_rate_limited() {
-        assert_eq!(ElasticsearchError::RateLimited { retry_after_ms: 1000 }.to_string(), "Rate limited, retry after 1000ms");
+        assert_eq!(
+            ElasticsearchError::RateLimited {
+                retry_after_ms: 1000
+            }
+            .to_string(),
+            "Rate limited, retry after 1000ms"
+        );
     }
 
     #[test]
     fn error_display_api() {
-        assert_eq!(ElasticsearchError::Api { status_code: 500, message: "Internal".into() }.to_string(), "Elasticsearch API error (500): Internal");
+        assert_eq!(
+            ElasticsearchError::Api {
+                status_code: 500,
+                message: "Internal".into()
+            }
+            .to_string(),
+            "Elasticsearch API error (500): Internal"
+        );
     }
 
     // ── Additional Display tests ────────────────────────────────────
 
     #[test]
     fn error_display_api_empty_message() {
-        let err = ElasticsearchError::Api { status_code: 422, message: String::new() };
+        let err = ElasticsearchError::Api {
+            status_code: 422,
+            message: String::new(),
+        };
         assert_eq!(err.to_string(), "Elasticsearch API error (422): ");
     }
 
     #[test]
     fn error_display_not_found_empty_resource() {
-        let err = ElasticsearchError::NotFound { resource: String::new() };
+        let err = ElasticsearchError::NotFound {
+            resource: String::new(),
+        };
         assert_eq!(err.to_string(), "Not found: ");
     }
 
@@ -388,7 +440,9 @@ mod tests {
 
     #[test]
     fn error_display_rate_limited_large_value() {
-        let err = ElasticsearchError::RateLimited { retry_after_ms: 3_600_000 };
+        let err = ElasticsearchError::RateLimited {
+            retry_after_ms: 3_600_000,
+        };
         assert_eq!(err.to_string(), "Rate limited, retry after 3600000ms");
     }
 
@@ -396,27 +450,57 @@ mod tests {
 
     #[test]
     fn api_502_is_retryable() {
-        assert!(ElasticsearchError::Api { status_code: 502, message: "Bad Gateway".into() }.is_retryable());
+        assert!(
+            ElasticsearchError::Api {
+                status_code: 502,
+                message: "Bad Gateway".into()
+            }
+            .is_retryable()
+        );
     }
 
     #[test]
     fn api_504_is_retryable() {
-        assert!(ElasticsearchError::Api { status_code: 504, message: "Gateway Timeout".into() }.is_retryable());
+        assert!(
+            ElasticsearchError::Api {
+                status_code: 504,
+                message: "Gateway Timeout".into()
+            }
+            .is_retryable()
+        );
     }
 
     #[test]
     fn api_599_is_retryable() {
-        assert!(ElasticsearchError::Api { status_code: 599, message: "custom".into() }.is_retryable());
+        assert!(
+            ElasticsearchError::Api {
+                status_code: 599,
+                message: "custom".into()
+            }
+            .is_retryable()
+        );
     }
 
     #[test]
     fn api_409_not_retryable() {
-        assert!(!ElasticsearchError::Api { status_code: 409, message: "conflict".into() }.is_retryable());
+        assert!(
+            !ElasticsearchError::Api {
+                status_code: 409,
+                message: "conflict".into()
+            }
+            .is_retryable()
+        );
     }
 
     #[test]
     fn api_422_not_retryable() {
-        assert!(!ElasticsearchError::Api { status_code: 422, message: "unprocessable".into() }.is_retryable());
+        assert!(
+            !ElasticsearchError::Api {
+                status_code: 422,
+                message: "unprocessable".into()
+            }
+            .is_retryable()
+        );
     }
 
     #[test]
@@ -442,15 +526,28 @@ mod tests {
     #[test]
     fn retry_after_none_for_json_error() {
         let bad: Result<serde_json::Value, _> = serde_json::from_str("{bad");
-        assert_eq!(ElasticsearchError::Json(bad.unwrap_err()).retry_after(), None);
+        assert_eq!(
+            ElasticsearchError::Json(bad.unwrap_err()).retry_after(),
+            None
+        );
     }
 
     // ── Additional to_fcp_error tests ───────────────────────────────
 
     #[test]
     fn api_error_504_to_fcp_retryable() {
-        match (ElasticsearchError::Api { status_code: 504, message: "timeout".into() }).to_fcp_error() {
-            FcpError::External { status_code, retryable, retry_after, .. } => {
+        match (ElasticsearchError::Api {
+            status_code: 504,
+            message: "timeout".into(),
+        })
+        .to_fcp_error()
+        {
+            FcpError::External {
+                status_code,
+                retryable,
+                retry_after,
+                ..
+            } => {
                 assert_eq!(status_code, Some(504));
                 assert!(retryable);
                 assert!(retry_after.is_none());
@@ -462,7 +559,11 @@ mod tests {
     #[test]
     fn rate_limited_zero_to_fcp_error() {
         match (ElasticsearchError::RateLimited { retry_after_ms: 0 }).to_fcp_error() {
-            FcpError::External { retry_after, retryable, .. } => {
+            FcpError::External {
+                retry_after,
+                retryable,
+                ..
+            } => {
                 assert!(retryable);
                 assert_eq!(retry_after, Some(Duration::from_millis(0)));
             }
@@ -472,7 +573,11 @@ mod tests {
 
     #[test]
     fn not_found_to_fcp_error_service_name() {
-        match (ElasticsearchError::NotFound { resource: "idx".into() }).to_fcp_error() {
+        match (ElasticsearchError::NotFound {
+            resource: "idx".into(),
+        })
+        .to_fcp_error()
+        {
             FcpError::External { service, .. } => {
                 assert_eq!(service, "elasticsearch");
             }
@@ -483,7 +588,11 @@ mod tests {
     #[test]
     fn unauthorized_fcp_error_message() {
         match ElasticsearchError::Unauthorized.to_fcp_error() {
-            FcpError::External { message, retry_after, .. } => {
+            FcpError::External {
+                message,
+                retry_after,
+                ..
+            } => {
                 assert_eq!(message, "Authentication failed");
                 assert!(retry_after.is_none());
             }
@@ -517,21 +626,37 @@ mod tests {
 
     #[test]
     fn error_debug_rate_limited() {
-        let dbg = format!("{:?}", ElasticsearchError::RateLimited { retry_after_ms: 5000 });
+        let dbg = format!(
+            "{:?}",
+            ElasticsearchError::RateLimited {
+                retry_after_ms: 5000
+            }
+        );
         assert!(dbg.contains("RateLimited"));
         assert!(dbg.contains("5000"));
     }
 
     #[test]
     fn error_debug_not_found() {
-        let dbg = format!("{:?}", ElasticsearchError::NotFound { resource: "my-idx".into() });
+        let dbg = format!(
+            "{:?}",
+            ElasticsearchError::NotFound {
+                resource: "my-idx".into()
+            }
+        );
         assert!(dbg.contains("NotFound"));
         assert!(dbg.contains("my-idx"));
     }
 
     #[test]
     fn error_debug_api() {
-        let dbg = format!("{:?}", ElasticsearchError::Api { status_code: 418, message: "teapot".into() });
+        let dbg = format!(
+            "{:?}",
+            ElasticsearchError::Api {
+                status_code: 418,
+                message: "teapot".into()
+            }
+        );
         assert!(dbg.contains("Api"));
         assert!(dbg.contains("418"));
         assert!(dbg.contains("teapot"));

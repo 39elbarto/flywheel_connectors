@@ -237,8 +237,7 @@ mod tests {
 
     #[test]
     fn metric_submit_response() {
-        let r: MetricSubmitResponse =
-            serde_json::from_value(json!({"status": "ok"})).unwrap();
+        let r: MetricSubmitResponse = serde_json::from_value(json!({"status": "ok"})).unwrap();
         assert_eq!(r.status.as_deref(), Some("ok"));
     }
 
@@ -490,7 +489,9 @@ mod tests {
 
     #[test]
     fn metric_submit_response_roundtrip() {
-        let r = MetricSubmitResponse { status: Some("ok".into()) };
+        let r = MetricSubmitResponse {
+            status: Some("ok".into()),
+        };
         let v = serde_json::to_value(&r).unwrap();
         let back: MetricSubmitResponse = serde_json::from_value(v).unwrap();
         assert_eq!(back.status.as_deref(), Some("ok"));

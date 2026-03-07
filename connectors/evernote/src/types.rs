@@ -387,14 +387,19 @@ mod tests {
 
     #[test]
     fn notebook_list_clone() {
-        let nl = NotebookList { notebooks: vec![json!({"id": "nb1"})] };
+        let nl = NotebookList {
+            notebooks: vec![json!({"id": "nb1"})],
+        };
         let cloned = NotebookList::clone(&nl);
         assert_eq!(cloned.notebooks.len(), 1);
     }
 
     #[test]
     fn note_list_clone() {
-        let nl = NoteList { notes: vec![], total_count: Some(5) };
+        let nl = NoteList {
+            notes: vec![],
+            total_count: Some(5),
+        };
         let cloned = NoteList::clone(&nl);
         assert_eq!(cloned.total_count, Some(5));
     }
@@ -422,7 +427,10 @@ mod tests {
 
     #[test]
     fn pagination_params_clone() {
-        let p = PaginationParams { offset: Some(10), limit: Some(25) };
+        let p = PaginationParams {
+            offset: Some(10),
+            limit: Some(25),
+        };
         let cloned = PaginationParams::clone(&p);
         assert_eq!(cloned.offset, Some(10));
         assert_eq!(cloned.limit, Some(25));

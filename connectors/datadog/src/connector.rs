@@ -64,8 +64,7 @@ impl DatadogConfig {
                     message: "Both api_key and app_key are required".into(),
                 });
             }
-            (Some(_) | None, Some(_), Some(_))
-            | (Some(_), None, Some(_)) => {
+            (Some(_) | None, Some(_), Some(_)) | (Some(_), None, Some(_)) => {
                 return Err(FcpError::InvalidRequest {
                     code: 1003,
                     message: "Provide either api_key+app_key or credential_id, not both".into(),
@@ -83,8 +82,10 @@ impl DatadogConfig {
         let base_url = if let Some(url) = params.get("base_url").and_then(|v| v.as_str()) {
             url.to_string()
         } else if let Some(region_str) = params.get("region").and_then(|v| v.as_str()) {
-            DatadogRegion::parse_region(region_str)
-                .map_or_else(|| DEFAULT_BASE_URL.to_string(), |r| r.api_base_url().to_string())
+            DatadogRegion::parse_region(region_str).map_or_else(
+                || DEFAULT_BASE_URL.to_string(),
+                |r| r.api_base_url().to_string(),
+            )
         } else {
             DEFAULT_BASE_URL.to_string()
         };
@@ -394,7 +395,9 @@ impl DatadogConnector {
         let priority = input.get("priority").and_then(|v| v.as_str());
         let sources = input.get("sources").and_then(|v| v.as_str());
         let tags = input.get("tags").and_then(|v| v.as_str());
-        let data = client.list_events(start, end, priority, sources, tags).await?;
+        let data = client
+            .list_events(start, end, priority, sources, tags)
+            .await?;
         Ok(json!({ "events": data.get("events").cloned().unwrap_or(json!([])) }))
     }
 
@@ -650,11 +653,13 @@ mod tests {
 
     #[test]
     fn config_rejects_both_auth_methods() {
-        assert!(DatadogConfig::from_params(&json!({
-            "api_key": "k", "app_key": "a",
-            "credential_id": "550e8400-e29b-41d4-a716-446655440000",
-        }))
-        .is_err());
+        assert!(
+            DatadogConfig::from_params(&json!({
+                "api_key": "k", "app_key": "a",
+                "credential_id": "550e8400-e29b-41d4-a716-446655440000",
+            }))
+            .is_err()
+        );
     }
 
     #[test]
@@ -664,9 +669,7 @@ mod tests {
 
     #[test]
     fn config_rejects_whitespace_api_key() {
-        assert!(
-            DatadogConfig::from_params(&json!({"api_key": "   ", "app_key": "a"})).is_err()
-        );
+        assert!(DatadogConfig::from_params(&json!({"api_key": "   ", "app_key": "a"})).is_err());
     }
 
     #[test]
@@ -732,7 +735,12 @@ mod tests {
     #[test]
     fn operations_ids_unique() {
         let ops = operations_info();
-        let ids: Vec<&str> = ops.as_array().unwrap().iter().filter_map(|o| o["id"].as_str()).collect();
+        let ids: Vec<&str> = ops
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|o| o["id"].as_str())
+            .collect();
         let mut uniq = ids.clone();
         uniq.sort_unstable();
         uniq.dedup();
@@ -762,34 +770,53 @@ mod tests {
 
     #[test]
     fn doctor_healthy() {
-        let r = DoctorResult::from_checks(vec![
-            DoctorCheck { name: "a".into(), passed: true, message: None, critical: true },
-        ]);
+        let r = DoctorResult::from_checks(vec![DoctorCheck {
+            name: "a".into(),
+            passed: true,
+            message: None,
+            critical: true,
+        }]);
         assert_eq!(r.status, DoctorStatus::Healthy);
     }
 
     #[test]
     fn doctor_degraded() {
         let r = DoctorResult::from_checks(vec![
-            DoctorCheck { name: "a".into(), passed: true, message: None, critical: true },
-            DoctorCheck { name: "b".into(), passed: false, message: Some("w".into()), critical: false },
+            DoctorCheck {
+                name: "a".into(),
+                passed: true,
+                message: None,
+                critical: true,
+            },
+            DoctorCheck {
+                name: "b".into(),
+                passed: false,
+                message: Some("w".into()),
+                critical: false,
+            },
         ]);
         assert_eq!(r.status, DoctorStatus::Degraded);
     }
 
     #[test]
     fn doctor_unhealthy() {
-        let r = DoctorResult::from_checks(vec![
-            DoctorCheck { name: "a".into(), passed: false, message: None, critical: true },
-        ]);
+        let r = DoctorResult::from_checks(vec![DoctorCheck {
+            name: "a".into(),
+            passed: false,
+            message: None,
+            critical: true,
+        }]);
         assert_eq!(r.status, DoctorStatus::Unhealthy);
     }
 
     #[test]
     fn doctor_serializes() {
-        let r = DoctorResult::from_checks(vec![
-            DoctorCheck { name: "t".into(), passed: true, message: None, critical: false },
-        ]);
+        let r = DoctorResult::from_checks(vec![DoctorCheck {
+            name: "t".into(),
+            passed: true,
+            message: None,
+            critical: false,
+        }]);
         let v = serde_json::to_value(&r).unwrap();
         assert_eq!(v["status"], "healthy");
         assert!(v["checks"][0]["message"].is_null());
@@ -871,8 +898,18 @@ mod tests {
     #[test]
     fn doctor_result_roundtrip() {
         let r = DoctorResult::from_checks(vec![
-            DoctorCheck { name: "c1".into(), passed: true, message: None, critical: true },
-            DoctorCheck { name: "c2".into(), passed: false, message: Some("warn".into()), critical: false },
+            DoctorCheck {
+                name: "c1".into(),
+                passed: true,
+                message: None,
+                critical: true,
+            },
+            DoctorCheck {
+                name: "c2".into(),
+                passed: false,
+                message: Some("warn".into()),
+                critical: false,
+            },
         ]);
         let v = serde_json::to_value(&r).unwrap();
         assert_eq!(v["status"], "degraded");
@@ -907,7 +944,12 @@ mod tests {
     #[test]
     fn operations_contain_expected_ids() {
         let ops = operations_info();
-        let ids: Vec<&str> = ops.as_array().unwrap().iter().filter_map(|o| o["id"].as_str()).collect();
+        let ids: Vec<&str> = ops
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|o| o["id"].as_str())
+            .collect();
         assert!(ids.contains(&"datadog.events.create"));
         assert!(ids.contains(&"datadog.events.list"));
         assert!(ids.contains(&"datadog.logs.search"));
@@ -921,7 +963,11 @@ mod tests {
     #[test]
     fn operations_all_have_idempotency() {
         for op in operations_info().as_array().unwrap() {
-            assert!(op.get("idempotency").is_some(), "op {:?} missing idempotency", op["id"]);
+            assert!(
+                op.get("idempotency").is_some(),
+                "op {:?} missing idempotency",
+                op["id"]
+            );
         }
     }
 
@@ -938,7 +984,10 @@ mod tests {
     fn operations_delete_is_dangerous() {
         for op in operations_info().as_array().unwrap() {
             if op["id"].as_str().unwrap().contains("delete") {
-                assert_eq!(op["safety_tier"], "dangerous", "delete ops should be dangerous");
+                assert_eq!(
+                    op["safety_tier"], "dangerous",
+                    "delete ops should be dangerous"
+                );
                 assert_eq!(op["risk_level"], "high", "delete ops should be high risk");
             }
         }
@@ -990,8 +1039,18 @@ mod tests {
     #[test]
     fn doctor_multiple_critical_failures() {
         let r = DoctorResult::from_checks(vec![
-            DoctorCheck { name: "a".into(), passed: false, message: None, critical: true },
-            DoctorCheck { name: "b".into(), passed: false, message: None, critical: true },
+            DoctorCheck {
+                name: "a".into(),
+                passed: false,
+                message: None,
+                critical: true,
+            },
+            DoctorCheck {
+                name: "b".into(),
+                passed: false,
+                message: None,
+                critical: true,
+            },
         ]);
         assert_eq!(r.status, DoctorStatus::Unhealthy);
     }

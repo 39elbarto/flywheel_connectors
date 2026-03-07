@@ -1416,10 +1416,22 @@ mod tests {
 
         for op in ops {
             let id = op["id"].as_str().unwrap();
-            assert!(op["capability"].as_str().is_some(), "Op {id} missing capability");
-            assert!(op["risk_level"].as_str().is_some(), "Op {id} missing risk_level");
-            assert!(op["safety_tier"].as_str().is_some(), "Op {id} missing safety_tier");
-            assert!(op["idempotency"].as_str().is_some(), "Op {id} missing idempotency");
+            assert!(
+                op["capability"].as_str().is_some(),
+                "Op {id} missing capability"
+            );
+            assert!(
+                op["risk_level"].as_str().is_some(),
+                "Op {id} missing risk_level"
+            );
+            assert!(
+                op["safety_tier"].as_str().is_some(),
+                "Op {id} missing safety_tier"
+            );
+            assert!(
+                op["idempotency"].as_str().is_some(),
+                "Op {id} missing idempotency"
+            );
         }
     }
 
@@ -1433,7 +1445,10 @@ mod tests {
         for op in ops {
             let id = op["id"].as_str().unwrap();
             let risk = op["risk_level"].as_str().unwrap();
-            assert!(valid_risk.contains(&risk), "Op {id} has invalid risk_level: {risk}");
+            assert!(
+                valid_risk.contains(&risk),
+                "Op {id} has invalid risk_level: {risk}"
+            );
         }
     }
 
@@ -1443,14 +1458,22 @@ mod tests {
         let result = connector.handle_introspect().await.unwrap();
         let ops = result["operations"].as_array().unwrap();
 
-        let read_ops = ["github.get_issue", "github.get_pull_request", "github.get_repo",
-                        "github.get_file_content", "github.search_issues", "github.search_repos",
-                        "github.search_code", "github.list_workflows"];
+        let read_ops = [
+            "github.get_issue",
+            "github.get_pull_request",
+            "github.get_repo",
+            "github.get_file_content",
+            "github.search_issues",
+            "github.search_repos",
+            "github.search_code",
+            "github.list_workflows",
+        ];
         for op in ops {
             let id = op["id"].as_str().unwrap();
             if read_ops.contains(&id) {
                 assert_eq!(
-                    op["safety_tier"].as_str().unwrap(), "safe",
+                    op["safety_tier"].as_str().unwrap(),
+                    "safe",
                     "Read op {id} should be safe"
                 );
             }
@@ -1638,7 +1661,10 @@ mod tests {
         let ops = result["operations"].as_array().unwrap();
         for op in ops {
             let id = op["id"].as_str().unwrap();
-            assert!(!id.contains("delete"), "GitHub should not have delete ops: {id}");
+            assert!(
+                !id.contains("delete"),
+                "GitHub should not have delete ops: {id}"
+            );
         }
     }
 
@@ -1647,14 +1673,20 @@ mod tests {
         let connector = GitHubConnector::new();
         let result = connector.handle_introspect().await.unwrap();
         let ops = result["operations"].as_array().unwrap();
-        let write_ops = ["github.create_issue", "github.create_pull_request",
-                         "github.merge_pull_request", "github.trigger_workflow"];
+        let write_ops = [
+            "github.create_issue",
+            "github.create_pull_request",
+            "github.merge_pull_request",
+            "github.trigger_workflow",
+        ];
         for op in ops {
             let id = op["id"].as_str().unwrap();
             if write_ops.contains(&id) {
                 let risk = op["risk_level"].as_str().unwrap();
-                assert!(risk == "medium" || risk == "high",
-                    "Write op {id} should be medium or high risk, got {risk}");
+                assert!(
+                    risk == "medium" || risk == "high",
+                    "Write op {id} should be medium or high risk, got {risk}"
+                );
             }
         }
     }
@@ -1687,7 +1719,10 @@ mod tests {
         let connector = GitHubConnector::new();
         let result = connector.handle_introspect().await.unwrap();
         let ops = result["operations"].as_array().unwrap();
-        let op = ops.iter().find(|o| o["id"] == "github.search_code").unwrap();
+        let op = ops
+            .iter()
+            .find(|o| o["id"] == "github.search_code")
+            .unwrap();
         let required = op["input_schema"]["required"].as_array().unwrap();
         assert!(required.iter().any(|v| v == "query"));
     }
@@ -1697,7 +1732,10 @@ mod tests {
         let connector = GitHubConnector::new();
         let result = connector.handle_introspect().await.unwrap();
         let ops = result["operations"].as_array().unwrap();
-        let op = ops.iter().find(|o| o["id"] == "github.get_file_content").unwrap();
+        let op = ops
+            .iter()
+            .find(|o| o["id"] == "github.get_file_content")
+            .unwrap();
         let required = op["input_schema"]["required"].as_array().unwrap();
         assert!(required.iter().any(|v| v == "owner"));
         assert!(required.iter().any(|v| v == "repo"));
@@ -1709,7 +1747,10 @@ mod tests {
         let connector = GitHubConnector::new();
         let result = connector.handle_introspect().await.unwrap();
         let ops = result["operations"].as_array().unwrap();
-        let op = ops.iter().find(|o| o["id"] == "github.merge_pull_request").unwrap();
+        let op = ops
+            .iter()
+            .find(|o| o["id"] == "github.merge_pull_request")
+            .unwrap();
         let required = op["input_schema"]["required"].as_array().unwrap();
         assert!(required.iter().any(|v| v == "owner"));
         assert!(required.iter().any(|v| v == "repo"));

@@ -263,7 +263,10 @@ impl McpBridgeConnector {
                 message: "Missing operation_id".into(),
             })?;
 
-        let input = params.get("input").cloned().unwrap_or(serde_json::Value::Null);
+        let input = params
+            .get("input")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
 
         self.request_count.fetch_add(1, Ordering::Relaxed);
 

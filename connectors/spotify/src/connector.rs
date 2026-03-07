@@ -9,7 +9,7 @@ use serde_json::json;
 use tracing::{info, instrument};
 
 use crate::{
-    client::{SpotifyAuth, SpotifyClient, DEFAULT_BASE_URL},
+    client::{DEFAULT_BASE_URL, SpotifyAuth, SpotifyClient},
     error::SpotifyError,
 };
 
@@ -301,13 +301,9 @@ impl SpotifyConnector {
             "spotify.artists.get" => self.invoke_artists_get(client, &input).await,
             "spotify.playlists.get" => self.invoke_playlists_get(client, &input).await,
             "spotify.playlists.list" => self.invoke_playlists_list(client).await,
-            "spotify.player.recently_played" => {
-                self.invoke_recently_played(client, &input).await
-            }
+            "spotify.player.recently_played" => self.invoke_recently_played(client, &input).await,
             "spotify.top_items" => self.invoke_top_items(client, &input).await,
-            "spotify.recommendations.get" => {
-                self.invoke_recommendations(client, &input).await
-            }
+            "spotify.recommendations.get" => self.invoke_recommendations(client, &input).await,
             _ => {
                 return Err(FcpError::InvalidRequest {
                     code: 1002,

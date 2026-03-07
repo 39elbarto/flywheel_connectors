@@ -927,7 +927,6 @@ mod tests {
         assert_eq!(cloned.base_url, "http://localhost:3000/api");
     }
 
-
     #[test]
     fn doctor_check_serializes_message_when_some() {
         let check = DoctorCheck {

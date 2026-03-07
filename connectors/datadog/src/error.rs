@@ -207,12 +207,25 @@ mod tests {
 
     #[test]
     fn retry_after_none_for_api_error() {
-        assert_eq!(DatadogError::Api { status_code: 500, message: "err".into() }.retry_after(), None);
+        assert_eq!(
+            DatadogError::Api {
+                status_code: 500,
+                message: "err".into()
+            }
+            .retry_after(),
+            None
+        );
     }
 
     #[test]
     fn retry_after_none_for_not_found() {
-        assert_eq!(DatadogError::NotFound { resource: "x".into() }.retry_after(), None);
+        assert_eq!(
+            DatadogError::NotFound {
+                resource: "x".into()
+            }
+            .retry_after(),
+            None
+        );
     }
 
     // -- to_fcp_error --
@@ -330,8 +343,17 @@ mod tests {
 
     #[test]
     fn api_error_non_retryable_to_fcp_error() {
-        match (DatadogError::Api { status_code: 400, message: "bad".into() }).to_fcp_error() {
-            FcpError::External { status_code, retryable, .. } => {
+        match (DatadogError::Api {
+            status_code: 400,
+            message: "bad".into(),
+        })
+        .to_fcp_error()
+        {
+            FcpError::External {
+                status_code,
+                retryable,
+                ..
+            } => {
                 assert_eq!(status_code, Some(400));
                 assert!(!retryable);
             }
@@ -343,40 +365,71 @@ mod tests {
 
     #[test]
     fn error_display_unauthorized() {
-        assert_eq!(DatadogError::Unauthorized.to_string(), "Authentication failed: invalid API key");
+        assert_eq!(
+            DatadogError::Unauthorized.to_string(),
+            "Authentication failed: invalid API key"
+        );
     }
 
     #[test]
     fn error_display_forbidden() {
-        assert_eq!(DatadogError::Forbidden.to_string(), "Forbidden: insufficient permissions");
+        assert_eq!(
+            DatadogError::Forbidden.to_string(),
+            "Forbidden: insufficient permissions"
+        );
     }
 
     #[test]
     fn error_display_not_found() {
-        assert_eq!(DatadogError::NotFound { resource: "monitor".into() }.to_string(), "Not found: monitor");
+        assert_eq!(
+            DatadogError::NotFound {
+                resource: "monitor".into()
+            }
+            .to_string(),
+            "Not found: monitor"
+        );
     }
 
     #[test]
     fn error_display_rate_limited() {
-        assert_eq!(DatadogError::RateLimited { retry_after_ms: 1000 }.to_string(), "Rate limited, retry after 1000ms");
+        assert_eq!(
+            DatadogError::RateLimited {
+                retry_after_ms: 1000
+            }
+            .to_string(),
+            "Rate limited, retry after 1000ms"
+        );
     }
 
     #[test]
     fn error_display_api() {
-        assert_eq!(DatadogError::Api { status_code: 500, message: "Internal".into() }.to_string(), "Datadog API error (500): Internal");
+        assert_eq!(
+            DatadogError::Api {
+                status_code: 500,
+                message: "Internal".into()
+            }
+            .to_string(),
+            "Datadog API error (500): Internal"
+        );
     }
 
     // ── Additional retryable / boundary cases ─────────────────────
 
     #[test]
     fn api_599_is_retryable() {
-        let err = DatadogError::Api { status_code: 599, message: "edge".into() };
+        let err = DatadogError::Api {
+            status_code: 599,
+            message: "edge".into(),
+        };
         assert!(err.is_retryable());
     }
 
     #[test]
     fn api_499_not_retryable() {
-        let err = DatadogError::Api { status_code: 499, message: "not server".into() };
+        let err = DatadogError::Api {
+            status_code: 499,
+            message: "not server".into(),
+        };
         assert!(!err.is_retryable());
     }
 
@@ -403,7 +456,9 @@ mod tests {
 
     #[test]
     fn rate_limited_large_ms() {
-        let err = DatadogError::RateLimited { retry_after_ms: 3_600_000 };
+        let err = DatadogError::RateLimited {
+            retry_after_ms: 3_600_000,
+        };
         assert_eq!(err.retry_after(), Some(Duration::from_secs(3600)));
     }
 
@@ -411,13 +466,18 @@ mod tests {
 
     #[test]
     fn error_display_not_found_empty_resource() {
-        let err = DatadogError::NotFound { resource: String::new() };
+        let err = DatadogError::NotFound {
+            resource: String::new(),
+        };
         assert_eq!(err.to_string(), "Not found: ");
     }
 
     #[test]
     fn error_display_api_empty_message() {
-        let err = DatadogError::Api { status_code: 502, message: String::new() };
+        let err = DatadogError::Api {
+            status_code: 502,
+            message: String::new(),
+        };
         assert_eq!(err.to_string(), "Datadog API error (502): ");
     }
 
@@ -428,9 +488,16 @@ mod tests {
         let errors: Vec<DatadogError> = vec![
             DatadogError::Unauthorized,
             DatadogError::Forbidden,
-            DatadogError::NotFound { resource: "x".into() },
-            DatadogError::RateLimited { retry_after_ms: 1000 },
-            DatadogError::Api { status_code: 500, message: "err".into() },
+            DatadogError::NotFound {
+                resource: "x".into(),
+            },
+            DatadogError::RateLimited {
+                retry_after_ms: 1000,
+            },
+            DatadogError::Api {
+                status_code: 500,
+                message: "err".into(),
+            },
         ];
         for err in &errors {
             let fcp = err.to_fcp_error();
@@ -442,7 +509,9 @@ mod tests {
 
     #[test]
     fn rate_limited_fcp_error_retry_after_matches() {
-        let err = DatadogError::RateLimited { retry_after_ms: 45_000 };
+        let err = DatadogError::RateLimited {
+            retry_after_ms: 45_000,
+        };
         match err.to_fcp_error() {
             FcpError::External { retry_after, .. } => {
                 assert_eq!(retry_after, Some(Duration::from_secs(45)));
@@ -455,7 +524,10 @@ mod tests {
 
     #[test]
     fn error_debug_format() {
-        let err = DatadogError::Api { status_code: 503, message: "retry".into() };
+        let err = DatadogError::Api {
+            status_code: 503,
+            message: "retry".into(),
+        };
         let dbg = format!("{err:?}");
         assert!(dbg.contains("Api"));
         assert!(dbg.contains("503"));
@@ -469,7 +541,12 @@ mod tests {
 
     #[test]
     fn error_debug_rate_limited() {
-        let dbg = format!("{:?}", DatadogError::RateLimited { retry_after_ms: 100 });
+        let dbg = format!(
+            "{:?}",
+            DatadogError::RateLimited {
+                retry_after_ms: 100
+            }
+        );
         assert!(dbg.contains("RateLimited"));
         assert!(dbg.contains("100"));
     }

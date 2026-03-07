@@ -4,19 +4,21 @@
 //! Uses `MemoryObjectStore` and `MemorySymbolStore` for real storage operations
 //! without external dependencies.
 
+use std::collections::HashMap;
+
 use bytes::Bytes;
 use fcp_core::{
     ObjectHeader, ObjectId, ObjectPlacementPolicy, Provenance, RetentionClass, StorageMeta,
     StoredObject, ZoneId,
 };
 use fcp_store::{
-    AccessPatternTracker, CoverageEvaluation, CoverageHealth, GarbageCollector, GcConfig,
-    GcResult, GcRoots, MemoryObjectStore, MemoryObjectStoreConfig, MemorySymbolStore,
+    AccessPatternTracker, CoverageEvaluation, CoverageHealth, GarbageCollector, GcConfig, GcResult,
+    GcRoots, MemoryObjectStore, MemoryObjectStoreConfig, MemorySymbolStore,
     MemorySymbolStoreConfig, ObjectAdmissionPolicy, ObjectStore, ObjectStoreError,
     ObjectSymbolMeta, ObjectTransmissionInfo, OfflineAccess, OfflineCapability, OfflineStatus,
     PromotionReason, QuarantineError, QuarantineStore, QuarantinedObject, RepairController,
-    RepairControllerConfig, RepairRequest, RepairResult, StoredSymbol, SymbolDistribution,
-    SymbolMeta, SymbolStore,
+    RepairControllerConfig, RepairPlanningOptions, RepairReasonCode, RepairRequest, RepairResult,
+    StoredSymbol, SymbolDistribution, SymbolMeta, SymbolStore,
 };
 
 // ── helpers ──
@@ -103,6 +105,56 @@ fn test_object_meta(n: u8) -> ObjectSymbolMeta {
         source_symbols: 10,
         first_symbol_at: 1000,
     }
+}
+
+fn test_symbol_with_source(n: u8, esi: u32, source_node: u64) -> StoredSymbol {
+    StoredSymbol {
+        meta: SymbolMeta {
+            object_id: test_object_id(n),
+            esi,
+            zone_id: test_zone(),
+            source_node: Some(source_node),
+            stored_at: 1000 + u64::from(esi),
+        },
+        data: Bytes::from(vec![
+            u8::try_from(esi % 251).expect("test esi fits in u8");
+            128
+        ]),
+    }
+}
+
+fn emit_source_diversity_log(
+    test_name: &str,
+    zone_id: &ZoneId,
+    object_id: ObjectId,
+    distinct_sources_observed: usize,
+    max_concentration_bps_observed: u16,
+    min_distinct_sources_required: u8,
+    max_concentration_bps_required: u16,
+    repair_actions: &[RepairReasonCode],
+    result: &str,
+) {
+    let repair_actions = repair_actions
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    println!(
+        "{}",
+        serde_json::json!({
+            "test_name": test_name,
+            "module": "fcp-store-no-mock",
+            "phase": "integration",
+            "operation": "source_diversity",
+            "zone_id": zone_id.to_string(),
+            "object_id": object_id.to_string(),
+            "distinct_sources_observed": distinct_sources_observed,
+            "max_concentration_bps_observed": max_concentration_bps_observed,
+            "min_distinct_sources_required": min_distinct_sources_required,
+            "max_concentration_bps_required": max_concentration_bps_required,
+            "repair_actions": repair_actions,
+            "result": result,
+        })
+    );
 }
 
 #[allow(clippy::missing_const_for_fn)]
@@ -434,6 +486,244 @@ async fn symbol_store_storage_used_and_quota() {
     assert!(store.storage_used().await > 0);
 }
 
+#[fcp_async_core::runtime::test]
+async fn source_diversity_plan_requires_new_source_when_single_node_dominates() {
+    let store = MemorySymbolStore::new(MemorySymbolStoreConfig::default());
+    let object_n = 7;
+    let object_id = test_object_id(object_n);
+
+    let mut meta = test_object_meta(object_n);
+    meta.source_symbols = 4;
+    store.put_object_meta(meta).await.expect("put meta");
+
+    for esi in 0..4 {
+        store
+            .put_symbol(test_symbol_with_source(object_n, esi, 10))
+            .await
+            .expect("put single-source symbol");
+    }
+
+    let policy = ObjectPlacementPolicy {
+        min_nodes: 1,
+        max_node_fraction_bps: 10_000,
+        preferred_devices: vec![],
+        excluded_devices: vec![],
+        target_coverage_bps: 10_000,
+        min_source_diversity: 2,
+    };
+
+    assert!(
+        !store.can_reconstruct_with_policy(&object_id, &policy).await,
+        "single-source coverage should fail diversity-gated reconstruction"
+    );
+
+    let distribution = store
+        .get_distribution(&object_id)
+        .await
+        .expect("distribution");
+    let evaluation = CoverageEvaluation::from_distribution(object_id, &distribution);
+    assert!(evaluation.is_available, "coverage should already satisfy K");
+    assert_eq!(evaluation.distinct_nodes, 1);
+    assert_eq!(evaluation.diversity_deficit(policy.min_source_diversity), 1);
+
+    let controller = RepairController::new(RepairControllerConfig::default());
+    let policies = HashMap::from([(object_id, policy.clone())]);
+    let plan = controller
+        .plan_zone(
+            &test_zone(),
+            &store,
+            &policies,
+            &RepairPlanningOptions::default(),
+        )
+        .await;
+    assert_eq!(plan.actions.len(), 1, "one repair action should be planned");
+    assert_eq!(plan.actions[0].object_id, object_id);
+    assert_eq!(
+        plan.actions[0].reason_code,
+        RepairReasonCode::DiversityDeficit
+    );
+
+    store
+        .put_symbol(test_symbol_with_source(object_n, 4, 11))
+        .await
+        .expect("put second-source symbol");
+    assert!(
+        store.can_reconstruct_with_policy(&object_id, &policy).await,
+        "fresh ESI from a second source should satisfy diversity"
+    );
+
+    let repaired_distribution = store
+        .get_distribution(&object_id)
+        .await
+        .expect("repaired distribution");
+    let repaired_evaluation =
+        CoverageEvaluation::from_distribution(object_id, &repaired_distribution);
+    emit_source_diversity_log(
+        "source_diversity_plan_requires_new_source_when_single_node_dominates",
+        &test_zone(),
+        object_id,
+        repaired_evaluation.distinct_nodes,
+        repaired_evaluation.max_node_fraction_bps,
+        policy.min_source_diversity,
+        policy.max_node_fraction_bps,
+        &plan
+            .actions
+            .iter()
+            .map(|action| action.reason_code)
+            .collect::<Vec<_>>(),
+        "repair_planned_then_satisfied",
+    );
+}
+
+#[fcp_async_core::runtime::test]
+async fn source_diversity_plan_recovers_after_source_churn() {
+    let store = MemorySymbolStore::new(MemorySymbolStoreConfig::default());
+    let object_n = 8;
+    let object_id = test_object_id(object_n);
+
+    let mut meta = test_object_meta(object_n);
+    meta.source_symbols = 4;
+    store.put_object_meta(meta).await.expect("put meta");
+
+    for (esi, source_node) in [(0, 20), (1, 20), (2, 21), (3, 22), (4, 20)] {
+        store
+            .put_symbol(test_symbol_with_source(object_n, esi, source_node))
+            .await
+            .expect("put churn seed symbol");
+    }
+
+    let policy = ObjectPlacementPolicy {
+        min_nodes: 1,
+        max_node_fraction_bps: 10_000,
+        preferred_devices: vec![],
+        excluded_devices: vec![],
+        target_coverage_bps: 10_000,
+        min_source_diversity: 3,
+    };
+
+    assert!(
+        store.can_reconstruct_with_policy(&object_id, &policy).await,
+        "initial three-source placement should satisfy diversity"
+    );
+
+    store
+        .delete_symbol(&object_id, 3)
+        .await
+        .expect("remove churned source");
+
+    let distribution = store
+        .get_distribution(&object_id)
+        .await
+        .expect("distribution after churn");
+    let evaluation = CoverageEvaluation::from_distribution(object_id, &distribution);
+    assert!(
+        evaluation.is_available,
+        "coverage should remain reconstructable"
+    );
+    assert_eq!(evaluation.distinct_nodes, 2);
+    assert_eq!(evaluation.diversity_deficit(policy.min_source_diversity), 1);
+
+    let controller = RepairController::new(RepairControllerConfig::default());
+    let policies = HashMap::from([(object_id, policy.clone())]);
+    let plan = controller
+        .plan_zone(
+            &test_zone(),
+            &store,
+            &policies,
+            &RepairPlanningOptions::default(),
+        )
+        .await;
+    assert_eq!(
+        plan.actions.len(),
+        1,
+        "churn should trigger one repair action"
+    );
+    assert_eq!(
+        plan.actions[0].reason_code,
+        RepairReasonCode::DiversityDeficit
+    );
+
+    emit_source_diversity_log(
+        "source_diversity_plan_recovers_after_source_churn",
+        &test_zone(),
+        object_id,
+        evaluation.distinct_nodes,
+        evaluation.max_node_fraction_bps,
+        policy.min_source_diversity,
+        policy.max_node_fraction_bps,
+        &plan
+            .actions
+            .iter()
+            .map(|action| action.reason_code)
+            .collect::<Vec<_>>(),
+        "diversity_deficit_detected_after_churn",
+    );
+}
+
+#[fcp_async_core::runtime::test]
+async fn source_diversity_duplicate_esi_cannot_spoof_new_source() {
+    let store = MemorySymbolStore::new(MemorySymbolStoreConfig::default());
+    let object_n = 9;
+    let object_id = test_object_id(object_n);
+
+    let mut meta = test_object_meta(object_n);
+    meta.source_symbols = 2;
+    store.put_object_meta(meta).await.expect("put meta");
+
+    store
+        .put_symbol(test_symbol_with_source(object_n, 0, 30))
+        .await
+        .expect("put first source symbol");
+    store
+        .put_symbol(test_symbol_with_source(object_n, 1, 30))
+        .await
+        .expect("put second source symbol");
+
+    store
+        .put_symbol(test_symbol_with_source(object_n, 1, 31))
+        .await
+        .expect("duplicate esi should be ignored");
+
+    let policy = ObjectPlacementPolicy {
+        min_nodes: 1,
+        max_node_fraction_bps: 10_000,
+        preferred_devices: vec![],
+        excluded_devices: vec![],
+        target_coverage_bps: 10_000,
+        min_source_diversity: 2,
+    };
+
+    let distribution = store
+        .get_distribution(&object_id)
+        .await
+        .expect("distribution");
+    let evaluation = CoverageEvaluation::from_distribution(object_id, &distribution);
+    assert_eq!(
+        distribution.total_symbols, 2,
+        "duplicate ESI must not increase symbol count"
+    );
+    assert_eq!(
+        evaluation.distinct_nodes, 1,
+        "duplicate ESI must not create a fake source"
+    );
+    assert!(
+        !store.can_reconstruct_with_policy(&object_id, &policy).await,
+        "spoofed source metadata must not satisfy diversity"
+    );
+
+    emit_source_diversity_log(
+        "source_diversity_duplicate_esi_cannot_spoof_new_source",
+        &test_zone(),
+        object_id,
+        evaluation.distinct_nodes,
+        evaluation.max_node_fraction_bps,
+        policy.min_source_diversity,
+        policy.max_node_fraction_bps,
+        &[],
+        "duplicate_ignored",
+    );
+}
+
 // ── CoverageEvaluation + SymbolDistribution ──
 
 #[test]
@@ -600,10 +890,7 @@ async fn gc_expired_lease_evicted() {
     };
     let gc = GarbageCollector::new(config);
     let store = MemoryObjectStore::new(MemoryObjectStoreConfig::default());
-    let obj = test_stored_object_with_retention(
-        1,
-        RetentionClass::Lease { expires_at: 500 },
-    );
+    let obj = test_stored_object_with_retention(1, RetentionClass::Lease { expires_at: 500 });
     let id = obj.object_id;
     store.put(obj).await.expect("put");
 
@@ -621,10 +908,7 @@ async fn gc_expired_lease_evicted() {
 async fn gc_active_lease_survives() {
     let gc = GarbageCollector::new(GcConfig::default());
     let store = MemoryObjectStore::new(MemoryObjectStoreConfig::default());
-    let obj = test_stored_object_with_retention(
-        1,
-        RetentionClass::Lease { expires_at: 5000 },
-    );
+    let obj = test_stored_object_with_retention(1, RetentionClass::Lease { expires_at: 5000 });
     let id = obj.object_id;
     store.put(obj).await.expect("put");
 
@@ -666,11 +950,17 @@ async fn gc_would_collect() {
     store.put(obj).await.expect("put");
 
     let roots = GcRoots::new();
-    assert!(gc.would_collect(&id, &test_zone(), &roots, &store, 1000).await);
+    assert!(
+        gc.would_collect(&id, &test_zone(), &roots, &store, 1000)
+            .await
+    );
 
     let mut pinned_roots = GcRoots::new();
     pinned_roots.add_pin(id);
-    assert!(!gc.would_collect(&id, &test_zone(), &pinned_roots, &store, 1000).await);
+    assert!(
+        !gc.would_collect(&id, &test_zone(), &pinned_roots, &store, 1000)
+            .await
+    );
 }
 
 // ── GcRoots ──
@@ -762,7 +1052,10 @@ fn repair_controller_calculate_priority() {
 
     let priority_bad = controller.calculate_priority(&bad, &policy);
     let priority_less_bad = controller.calculate_priority(&less_bad, &policy);
-    assert!(priority_bad > priority_less_bad, "worse coverage should have higher priority");
+    assert!(
+        priority_bad > priority_less_bad,
+        "worse coverage should have higher priority"
+    );
 }
 
 #[test]
@@ -1287,9 +1580,11 @@ fn quarantine_error_display() {
 fn repair_config_serde() {
     let config = RepairControllerConfig::default();
     let json = serde_json::to_string(&config).expect("serialize");
-    let deserialized: RepairControllerConfig =
-        serde_json::from_str(&json).expect("deserialize");
-    assert_eq!(deserialized.max_concurrent_repairs, config.max_concurrent_repairs);
+    let deserialized: RepairControllerConfig = serde_json::from_str(&json).expect("deserialize");
+    assert_eq!(
+        deserialized.max_concurrent_repairs,
+        config.max_concurrent_repairs
+    );
 }
 
 #[test]

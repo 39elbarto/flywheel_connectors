@@ -314,10 +314,7 @@ impl SegmentConnector {
     }
 
     /// Handle the `simulate` method.
-    pub async fn handle_simulate(
-        &self,
-        params: serde_json::Value,
-    ) -> FcpResult<serde_json::Value> {
+    pub async fn handle_simulate(&self, params: serde_json::Value) -> FcpResult<serde_json::Value> {
         let operation = params
             .get("operation_id")
             .and_then(serde_json::Value::as_str)
@@ -388,7 +385,10 @@ impl SegmentConnector {
         }
 
         let resp = client.track(&body).await?;
-        let success = resp.get("success").and_then(serde_json::Value::as_bool).unwrap_or(false);
+        let success = resp
+            .get("success")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
         Ok(json!({ "success": success }))
     }
 }
@@ -631,8 +631,18 @@ mod tests {
     #[test]
     fn doctor_result_healthy_when_all_pass() {
         let checks = vec![
-            DoctorCheck { name: "a".into(), passed: true, message: None, critical: true },
-            DoctorCheck { name: "b".into(), passed: true, message: None, critical: false },
+            DoctorCheck {
+                name: "a".into(),
+                passed: true,
+                message: None,
+                critical: true,
+            },
+            DoctorCheck {
+                name: "b".into(),
+                passed: true,
+                message: None,
+                critical: false,
+            },
         ];
         let r = DoctorResult::from_checks(checks);
         assert_eq!(r.status, DoctorStatus::Healthy);
@@ -641,7 +651,12 @@ mod tests {
     #[test]
     fn doctor_result_degraded_when_non_critical_fails() {
         let checks = vec![
-            DoctorCheck { name: "a".into(), passed: true, message: None, critical: true },
+            DoctorCheck {
+                name: "a".into(),
+                passed: true,
+                message: None,
+                critical: true,
+            },
             DoctorCheck {
                 name: "b".into(),
                 passed: false,
@@ -691,7 +706,11 @@ mod tests {
     fn operations_all_have_idempotency() {
         let ops = operations_info();
         for op in ops.as_array().unwrap() {
-            assert!(op.get("idempotency").is_some(), "op {:?} missing idempotency", op["id"]);
+            assert!(
+                op.get("idempotency").is_some(),
+                "op {:?} missing idempotency",
+                op["id"]
+            );
         }
     }
 

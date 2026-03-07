@@ -748,9 +748,7 @@ mod tests {
 
     #[test]
     fn client_with_retry_config() {
-        let client = PlaidClient::new("id", "sec")
-            .unwrap()
-            .with_retry_config(5);
+        let client = PlaidClient::new("id", "sec").unwrap().with_retry_config(5);
         let _ = format!("{:p}", &client);
     }
 

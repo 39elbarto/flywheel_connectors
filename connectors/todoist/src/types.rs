@@ -321,7 +321,8 @@ mod tests {
             "id": "t1",
             "content": "Buy milk",
             "description": "From the organic store"
-        })).unwrap();
+        }))
+        .unwrap();
         assert_eq!(t.description, Some("From the organic store".into()));
     }
 
@@ -359,7 +360,8 @@ mod tests {
 
     #[test]
     fn due_recurring_true() {
-        let d: Due = serde_json::from_value(json!({"is_recurring": true, "string": "every day"})).unwrap();
+        let d: Due =
+            serde_json::from_value(json!({"is_recurring": true, "string": "every day"})).unwrap();
         assert_eq!(d.is_recurring, Some(true));
         assert_eq!(d.string, Some("every day".into()));
     }
@@ -395,7 +397,8 @@ mod tests {
             "error": "Forbidden",
             "error_code": 403,
             "http_code": 403
-        })).unwrap();
+        }))
+        .unwrap();
         assert_eq!(e.error_code, Some(403));
         assert_eq!(e.http_code, Some(403));
     }

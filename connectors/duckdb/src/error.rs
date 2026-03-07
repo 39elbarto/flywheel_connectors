@@ -468,9 +468,7 @@ mod tests {
 
     #[test]
     fn rate_limited_retry_after_zero() {
-        let err = DuckDbError::RateLimited {
-            retry_after_ms: 0,
-        };
+        let err = DuckDbError::RateLimited { retry_after_ms: 0 };
         assert_eq!(err.retry_after(), Some(Duration::from_millis(0)));
     }
 

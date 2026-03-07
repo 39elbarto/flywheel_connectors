@@ -545,7 +545,13 @@ mod tests {
         // Add an extra chunk
         chunks.push(RawChunk::new(vec![0u8; 50]));
         let result = manifest.reconstruct(&chunks);
-        assert!(matches!(result, Err(ChunkError::MissingChunks { expected: 2, got: 3 })));
+        assert!(matches!(
+            result,
+            Err(ChunkError::MissingChunks {
+                expected: 2,
+                got: 3
+            })
+        ));
     }
 
     #[test]

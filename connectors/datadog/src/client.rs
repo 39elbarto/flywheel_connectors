@@ -80,7 +80,11 @@ impl DatadogAuth {
 impl fmt::Debug for DatadogAuth {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::ApiKeys { .. } => f.debug_struct("ApiKeys").field("api_key", &"<redacted>").field("app_key", &"<redacted>").finish(),
+            Self::ApiKeys { .. } => f
+                .debug_struct("ApiKeys")
+                .field("api_key", &"<redacted>")
+                .field("app_key", &"<redacted>")
+                .finish(),
             Self::CredentialId(id) => f.debug_tuple("CredentialId").field(id).finish(),
         }
     }
@@ -219,10 +223,7 @@ impl DatadogClient {
     // -- Events --
 
     /// Create an event.
-    pub async fn create_event(
-        &self,
-        body: &serde_json::Value,
-    ) -> DatadogResult<serde_json::Value> {
+    pub async fn create_event(&self, body: &serde_json::Value) -> DatadogResult<serde_json::Value> {
         self.post("/events", body).await
     }
 
@@ -235,10 +236,7 @@ impl DatadogClient {
         sources: Option<&str>,
         tags: Option<&str>,
     ) -> DatadogResult<serde_json::Value> {
-        let mut params = vec![
-            format!("start={start}"),
-            format!("end={end}"),
-        ];
+        let mut params = vec![format!("start={start}"), format!("end={end}")];
         if let Some(p) = priority {
             params.push(format!("priority={p}"));
         }
@@ -312,10 +310,7 @@ impl DatadogClient {
     // -- Logs --
 
     /// Search logs.
-    pub async fn search_logs(
-        &self,
-        body: &serde_json::Value,
-    ) -> DatadogResult<serde_json::Value> {
+    pub async fn search_logs(&self, body: &serde_json::Value) -> DatadogResult<serde_json::Value> {
         self.post("/logs-queries/list", body).await
     }
 }

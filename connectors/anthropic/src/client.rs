@@ -902,8 +902,12 @@ mod tests {
     #[test]
     fn client_reset_token_counts() {
         let client = AnthropicClient::new("key").unwrap();
-        client.total_input_tokens.store(100, std::sync::atomic::Ordering::Relaxed);
-        client.total_output_tokens.store(50, std::sync::atomic::Ordering::Relaxed);
+        client
+            .total_input_tokens
+            .store(100, std::sync::atomic::Ordering::Relaxed);
+        client
+            .total_output_tokens
+            .store(50, std::sync::atomic::Ordering::Relaxed);
         assert_eq!(client.total_input_tokens(), 100);
         assert_eq!(client.total_output_tokens(), 50);
         client.reset_token_counts();
@@ -1031,10 +1035,7 @@ mod tests {
             r#"{"error":{"type":"invalid_request_error","message":"context length exceeded"}}"#,
         );
         let err = parse_error_response(StatusCode::BAD_REQUEST, &bytes);
-        assert!(matches!(
-            err,
-            AnthropicError::ContextLengthExceeded { .. }
-        ));
+        assert!(matches!(err, AnthropicError::ContextLengthExceeded { .. }));
     }
 
     #[test]

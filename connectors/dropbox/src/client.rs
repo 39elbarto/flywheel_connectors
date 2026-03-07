@@ -414,12 +414,8 @@ mod tests {
 
     #[test]
     fn client_with_credential_id() {
-        let client = DropboxClient::new(
-            DropboxAuth::CredentialId(CredentialId::new()),
-            None,
-            None,
-        )
-        .unwrap();
+        let client =
+            DropboxClient::new(DropboxAuth::CredentialId(CredentialId::new()), None, None).unwrap();
         let dbg = format!("{client:?}");
         assert!(dbg.contains("CredentialId"));
     }

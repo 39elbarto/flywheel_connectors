@@ -35,8 +35,7 @@ async fn setup_connector(mock_url: &str) -> AmplitudeConnector {
 /// Compute the expected Basic auth header value.
 fn expected_auth_header() -> String {
     use base64::Engine;
-    let encoded =
-        base64::engine::general_purpose::STANDARD.encode("test_api_key:test_secret_key");
+    let encoded = base64::engine::general_purpose::STANDARD.encode("test_api_key:test_secret_key");
     format!("Basic {encoded}")
 }
 
@@ -360,10 +359,7 @@ async fn error_401() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/cohorts"))
-        .respond_with(
-            ResponseTemplate::new(401)
-                .set_body_json(json!({"error": "Invalid API key"})),
-        )
+        .respond_with(ResponseTemplate::new(401).set_body_json(json!({"error": "Invalid API key"})))
         .mount(&server)
         .await;
 
@@ -383,10 +379,7 @@ async fn error_403() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/cohorts"))
-        .respond_with(
-            ResponseTemplate::new(403)
-                .set_body_json(json!({"error": "Forbidden"})),
-        )
+        .respond_with(ResponseTemplate::new(403).set_body_json(json!({"error": "Forbidden"})))
         .mount(&server)
         .await;
 
@@ -406,10 +399,7 @@ async fn error_404() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/charts/missing_chart/query"))
-        .respond_with(
-            ResponseTemplate::new(404)
-                .set_body_json(json!({"error": "Chart not found"})),
-        )
+        .respond_with(ResponseTemplate::new(404).set_body_json(json!({"error": "Chart not found"})))
         .mount(&server)
         .await;
 
@@ -634,9 +624,7 @@ async fn configure_rejects_no_auth() {
 #[fcp_async_core::runtime::test]
 async fn configure_rejects_api_key_only() {
     let mut c = AmplitudeConnector::new();
-    assert!(
-        c.handle_configure(json!({"api_key": "key"})).await.is_err()
-    );
+    assert!(c.handle_configure(json!({"api_key": "key"})).await.is_err());
 }
 
 #[fcp_async_core::runtime::test]

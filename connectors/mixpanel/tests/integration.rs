@@ -320,8 +320,7 @@ async fn error_401() {
     Mock::given(method("GET"))
         .and(path("/funnels/list"))
         .respond_with(
-            ResponseTemplate::new(401)
-                .set_body_json(json!({"error": "Invalid credentials"})),
+            ResponseTemplate::new(401).set_body_json(json!({"error": "Invalid credentials"})),
         )
         .mount(&server)
         .await;
@@ -342,10 +341,7 @@ async fn error_403() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/funnels/list"))
-        .respond_with(
-            ResponseTemplate::new(403)
-                .set_body_json(json!({"error": "Forbidden"})),
-        )
+        .respond_with(ResponseTemplate::new(403).set_body_json(json!({"error": "Forbidden"})))
         .mount(&server)
         .await;
 
@@ -366,8 +362,7 @@ async fn error_404() {
     Mock::given(method("POST"))
         .and(path("/insights"))
         .respond_with(
-            ResponseTemplate::new(404)
-                .set_body_json(json!({"error": "Report not found"})),
+            ResponseTemplate::new(404).set_body_json(json!({"error": "Report not found"})),
         )
         .mount(&server)
         .await;

@@ -426,9 +426,8 @@ mod tests {
 
     #[test]
     fn document_list_many_results() {
-        let results: Vec<serde_json::Value> = (0..50)
-            .map(|i| json!({"id": format!("doc_{i}")}))
-            .collect();
+        let results: Vec<serde_json::Value> =
+            (0..50).map(|i| json!({"id": format!("doc_{i}")})).collect();
         let dl: DocumentList = serde_json::from_value(json!({"results": results})).unwrap();
         assert_eq!(dl.results.len(), 50);
     }

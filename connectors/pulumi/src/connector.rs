@@ -279,12 +279,13 @@ impl PulumiConnector {
     pub async fn handle_invoke(&self, params: serde_json::Value) -> FcpResult<serde_json::Value> {
         self.base.check_ready()?;
 
-        let operation = params.get("operation_id").and_then(serde_json::Value::as_str).ok_or_else(|| {
-            FcpError::InvalidRequest {
+        let operation = params
+            .get("operation_id")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| FcpError::InvalidRequest {
                 code: 1003,
                 message: "Missing operation_id".into(),
-            }
-        })?;
+            })?;
 
         let input = params.get("input").cloned().unwrap_or_else(|| json!({}));
 
@@ -353,7 +354,9 @@ impl PulumiConnector {
         client: &PulumiClient,
         input: &serde_json::Value,
     ) -> Result<serde_json::Value, PulumiError> {
-        let organization = input.get("organization").and_then(serde_json::Value::as_str);
+        let organization = input
+            .get("organization")
+            .and_then(serde_json::Value::as_str);
         let project = input.get("project").and_then(serde_json::Value::as_str);
         client.list_stacks(organization, project).await
     }
@@ -694,8 +697,18 @@ mod tests {
     #[test]
     fn doctor_result_healthy_when_all_pass() {
         let checks = vec![
-            DoctorCheck { name: "a".into(), passed: true, message: None, critical: true },
-            DoctorCheck { name: "b".into(), passed: true, message: None, critical: false },
+            DoctorCheck {
+                name: "a".into(),
+                passed: true,
+                message: None,
+                critical: true,
+            },
+            DoctorCheck {
+                name: "b".into(),
+                passed: true,
+                message: None,
+                critical: false,
+            },
         ];
         let r = DoctorResult::from_checks(checks);
         assert_eq!(r.status, DoctorStatus::Healthy);
@@ -704,8 +717,18 @@ mod tests {
     #[test]
     fn doctor_result_degraded_when_non_critical_fails() {
         let checks = vec![
-            DoctorCheck { name: "a".into(), passed: true, message: None, critical: true },
-            DoctorCheck { name: "b".into(), passed: false, message: Some("warn".into()), critical: false },
+            DoctorCheck {
+                name: "a".into(),
+                passed: true,
+                message: None,
+                critical: true,
+            },
+            DoctorCheck {
+                name: "b".into(),
+                passed: false,
+                message: Some("warn".into()),
+                critical: false,
+            },
         ];
         let r = DoctorResult::from_checks(checks);
         assert_eq!(r.status, DoctorStatus::Degraded);
@@ -763,7 +786,10 @@ mod tests {
             critical: false,
         };
         let v = serde_json::to_value(&check).unwrap();
-        assert!(v.get("message").is_none(), "message should be skipped when None");
+        assert!(
+            v.get("message").is_none(),
+            "message should be skipped when None"
+        );
     }
 
     #[test]
@@ -794,9 +820,18 @@ mod tests {
 
     #[test]
     fn doctor_status_values_serialize_lowercase() {
-        assert_eq!(serde_json::to_value(DoctorStatus::Healthy).unwrap(), "healthy");
-        assert_eq!(serde_json::to_value(DoctorStatus::Degraded).unwrap(), "degraded");
-        assert_eq!(serde_json::to_value(DoctorStatus::Unhealthy).unwrap(), "unhealthy");
+        assert_eq!(
+            serde_json::to_value(DoctorStatus::Healthy).unwrap(),
+            "healthy"
+        );
+        assert_eq!(
+            serde_json::to_value(DoctorStatus::Degraded).unwrap(),
+            "degraded"
+        );
+        assert_eq!(
+            serde_json::to_value(DoctorStatus::Unhealthy).unwrap(),
+            "unhealthy"
+        );
     }
 
     #[test]
@@ -815,7 +850,11 @@ mod tests {
 
     #[test]
     fn doctor_status_serde_roundtrip() {
-        for status in [DoctorStatus::Healthy, DoctorStatus::Degraded, DoctorStatus::Unhealthy] {
+        for status in [
+            DoctorStatus::Healthy,
+            DoctorStatus::Degraded,
+            DoctorStatus::Unhealthy,
+        ] {
             let s = serde_json::to_string(&status).unwrap();
             let back: DoctorStatus = serde_json::from_str(&s).unwrap();
             assert_eq!(back, status);
@@ -825,8 +864,18 @@ mod tests {
     #[test]
     fn doctor_result_multiple_critical_failures() {
         let result = DoctorResult::from_checks(vec![
-            DoctorCheck { name: "a".into(), passed: false, message: None, critical: true },
-            DoctorCheck { name: "b".into(), passed: false, message: None, critical: true },
+            DoctorCheck {
+                name: "a".into(),
+                passed: false,
+                message: None,
+                critical: true,
+            },
+            DoctorCheck {
+                name: "b".into(),
+                passed: false,
+                message: None,
+                critical: true,
+            },
         ]);
         assert_eq!(result.status, DoctorStatus::Unhealthy);
     }
@@ -892,7 +941,11 @@ mod tests {
     fn operations_all_have_idempotency() {
         let ops = operations_info();
         for op in ops.as_array().unwrap() {
-            assert!(op.get("idempotency").is_some(), "op {:?} missing idempotency", op["id"]);
+            assert!(
+                op.get("idempotency").is_some(),
+                "op {:?} missing idempotency",
+                op["id"]
+            );
         }
     }
 

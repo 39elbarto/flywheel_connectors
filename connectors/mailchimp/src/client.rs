@@ -126,9 +126,7 @@ impl MailchimpClient {
                     base64::engine::general_purpose::STANDARD.encode(credentials.as_bytes());
                 req.header("Authorization", format!("Basic {encoded}"))
             }
-            MailchimpAuth::CredentialId(id) => {
-                req.header("X-FCP-Credential-Id", id.to_string())
-            }
+            MailchimpAuth::CredentialId(id) => req.header("X-FCP-Credential-Id", id.to_string()),
         }
     }
 
@@ -249,10 +247,7 @@ impl MailchimpClient {
     }
 
     /// Send a campaign.
-    pub async fn send_campaign(
-        &self,
-        campaign_id: &str,
-    ) -> MailchimpResult<serde_json::Value> {
+    pub async fn send_campaign(&self, campaign_id: &str) -> MailchimpResult<serde_json::Value> {
         self.post_empty(&format!("/campaigns/{campaign_id}/actions/send"))
             .await
     }
@@ -311,18 +306,12 @@ mod tests {
 
     #[test]
     fn base_url_for_dc_us1() {
-        assert_eq!(
-            base_url_for_dc("us1"),
-            "https://us1.api.mailchimp.com/3.0"
-        );
+        assert_eq!(base_url_for_dc("us1"), "https://us1.api.mailchimp.com/3.0");
     }
 
     #[test]
     fn base_url_for_dc_eu1() {
-        assert_eq!(
-            base_url_for_dc("eu1"),
-            "https://eu1.api.mailchimp.com/3.0"
-        );
+        assert_eq!(base_url_for_dc("eu1"), "https://eu1.api.mailchimp.com/3.0");
     }
 
     #[test]
@@ -353,8 +342,7 @@ mod tests {
 
     #[test]
     fn client_base_url_accessor() {
-        let client =
-            MailchimpClient::new(MailchimpAuth::ApiKey("key-us3".into()), None).unwrap();
+        let client = MailchimpClient::new(MailchimpAuth::ApiKey("key-us3".into()), None).unwrap();
         assert_eq!(client.base_url(), "https://us3.api.mailchimp.com/3.0");
     }
 
@@ -362,11 +350,8 @@ mod tests {
 
     #[test]
     fn client_credential_default_url() {
-        let client = MailchimpClient::new(
-            MailchimpAuth::CredentialId(CredentialId::new()),
-            None,
-        )
-        .unwrap();
+        let client =
+            MailchimpClient::new(MailchimpAuth::CredentialId(CredentialId::new()), None).unwrap();
         assert_eq!(client.base_url(), "https://us1.api.mailchimp.com/3.0");
     }
 
@@ -384,11 +369,7 @@ mod tests {
     fn client_debug_shows_credential_id() {
         let cred = CredentialId::new();
         let cred_str = cred.to_string();
-        let client = MailchimpClient::new(
-            MailchimpAuth::CredentialId(cred),
-            None,
-        )
-        .unwrap();
+        let client = MailchimpClient::new(MailchimpAuth::CredentialId(cred), None).unwrap();
         let dbg = format!("{client:?}");
         assert!(dbg.contains(&cred_str));
         assert!(dbg.contains("MailchimpClient"));
@@ -432,17 +413,16 @@ mod tests {
 
     #[test]
     fn base_url_for_dc_us21() {
-        assert_eq!(base_url_for_dc("us21"), "https://us21.api.mailchimp.com/3.0");
+        assert_eq!(
+            base_url_for_dc("us21"),
+            "https://us21.api.mailchimp.com/3.0"
+        );
     }
 
     #[test]
     fn client_no_dc_in_key_defaults_us1() {
         // A key with no dash: rsplit returns the whole string
-        let client = MailchimpClient::new(
-            MailchimpAuth::ApiKey("nodash".into()),
-            None,
-        )
-        .unwrap();
+        let client = MailchimpClient::new(MailchimpAuth::ApiKey("nodash".into()), None).unwrap();
         // extract_dc("nodash") returns Some("nodash")
         assert!(client.base_url().contains("nodash"));
     }
@@ -450,11 +430,7 @@ mod tests {
     #[test]
     fn client_key_trailing_dash_defaults_us1() {
         // A key ending with dash: extract_dc returns None, defaults to us1
-        let client = MailchimpClient::new(
-            MailchimpAuth::ApiKey("mykey-".into()),
-            None,
-        )
-        .unwrap();
+        let client = MailchimpClient::new(MailchimpAuth::ApiKey("mykey-".into()), None).unwrap();
         assert_eq!(client.base_url(), "https://us1.api.mailchimp.com/3.0");
     }
 

@@ -2315,8 +2315,7 @@ mod tests {
 
     #[test]
     fn decode_hello_cbor_rejects_empty() {
-        let context = LogContext::new("handshake", "decode_hello_cbor")
-            .with_reason("empty_input");
+        let context = LogContext::new("handshake", "decode_hello_cbor").with_reason("empty_input");
         run_logged_test("decode_hello_cbor_rejects_empty", 1, &context, || {
             let err = decode_hello_cbor(&[]).expect_err("empty should fail");
             assert!(matches!(err, SessionError::Cbor(_)));
@@ -2325,8 +2324,8 @@ mod tests {
 
     #[test]
     fn decode_hello_cbor_rejects_garbage() {
-        let context = LogContext::new("handshake", "decode_hello_cbor")
-            .with_reason("garbage_input");
+        let context =
+            LogContext::new("handshake", "decode_hello_cbor").with_reason("garbage_input");
         run_logged_test("decode_hello_cbor_rejects_garbage", 1, &context, || {
             let err = decode_hello_cbor(&[0xFF, 0xFE, 0xFD]).expect_err("garbage");
             assert!(matches!(err, SessionError::Cbor(_)));
@@ -2335,8 +2334,7 @@ mod tests {
 
     #[test]
     fn decode_hello_cbor_rejects_oversized() {
-        let context = LogContext::new("handshake", "decode_hello_cbor")
-            .with_reason("oversized");
+        let context = LogContext::new("handshake", "decode_hello_cbor").with_reason("oversized");
         run_logged_test("decode_hello_cbor_rejects_oversized", 1, &context, || {
             let oversized = vec![0u8; MAX_HANDSHAKE_BYTES + 1];
             let err = decode_hello_cbor(&oversized).expect_err("oversized");
@@ -2360,8 +2358,7 @@ mod tests {
 
     #[test]
     fn decode_ack_cbor_rejects_invalid() {
-        let context = LogContext::new("handshake", "decode_ack_cbor")
-            .with_reason("invalid_cbor");
+        let context = LogContext::new("handshake", "decode_ack_cbor").with_reason("invalid_cbor");
         run_logged_test("decode_ack_cbor_rejects_invalid", 1, &context, || {
             let err = decode_ack_cbor(&[0xAA, 0xBB]).expect_err("invalid");
             assert!(matches!(err, SessionError::Cbor(_)));
@@ -2382,8 +2379,7 @@ mod tests {
 
     #[test]
     fn decode_cookie_bytes_invalid_length() {
-        let context = LogContext::new("handshake", "decode_cookie")
-            .with_reason("invalid_length");
+        let context = LogContext::new("handshake", "decode_cookie").with_reason("invalid_length");
         run_logged_test("decode_cookie_bytes_invalid_length", 1, &context, || {
             let err = decode_cookie_bytes(&[0u8; 16]).expect_err("too short");
             assert!(matches!(err, SessionError::InvalidCookieLength { len: 16 }));
@@ -2392,8 +2388,7 @@ mod tests {
 
     #[test]
     fn decode_cookie_bytes_empty() {
-        let context = LogContext::new("handshake", "decode_cookie")
-            .with_reason("empty");
+        let context = LogContext::new("handshake", "decode_cookie").with_reason("empty");
         run_logged_test("decode_cookie_bytes_empty", 1, &context, || {
             let err = decode_cookie_bytes(&[]).expect_err("empty");
             assert!(matches!(err, SessionError::InvalidCookieLength { len: 0 }));
@@ -2404,8 +2399,7 @@ mod tests {
 
     #[test]
     fn hello_verify_missing_signature() {
-        let context = LogContext::new("handshake", "verify")
-            .with_reason("missing_signature");
+        let context = LogContext::new("handshake", "verify").with_reason("missing_signature");
         run_logged_test("hello_verify_missing_signature", 1, &context, || {
             let hello = make_hello(); // signature is None
             let key = Ed25519SigningKey::generate();
@@ -2416,8 +2410,7 @@ mod tests {
 
     #[test]
     fn ack_verify_missing_signature() {
-        let context = LogContext::new("handshake", "verify")
-            .with_reason("missing_signature");
+        let context = LogContext::new("handshake", "verify").with_reason("missing_signature");
         run_logged_test("ack_verify_missing_signature", 1, &context, || {
             let ack = make_ack(); // signature is None
             let hello = make_hello();
@@ -2450,8 +2443,7 @@ mod tests {
 
     #[test]
     fn suite_try_from_id_invalid() {
-        let context = LogContext::new("handshake", "suite_id")
-            .with_reason("invalid_id");
+        let context = LogContext::new("handshake", "suite_id").with_reason("invalid_id");
         run_logged_test("suite_try_from_id_invalid", 3, &context, || {
             assert!(matches!(
                 SessionCryptoSuite::try_from_id(0),
@@ -2539,21 +2531,31 @@ mod tests {
     fn session_error_display_variants() {
         let context = LogContext::new("types", "error_display");
         run_logged_test("session_error_display_variants", 5, &context, || {
-            assert!(SessionError::MissingSignature
-                .to_string()
-                .contains("missing signature"));
-            assert!(SessionError::InvalidSignature
-                .to_string()
-                .contains("signature verification"));
-            assert!(SessionError::InvalidCookie
-                .to_string()
-                .contains("invalid stateless cookie"));
-            assert!(SessionError::InvalidAttestation
-                .to_string()
-                .contains("attestation"));
-            assert!(SessionError::InvalidMacKeyLength
-                .to_string()
-                .contains("MAC key"));
+            assert!(
+                SessionError::MissingSignature
+                    .to_string()
+                    .contains("missing signature")
+            );
+            assert!(
+                SessionError::InvalidSignature
+                    .to_string()
+                    .contains("signature verification")
+            );
+            assert!(
+                SessionError::InvalidCookie
+                    .to_string()
+                    .contains("invalid stateless cookie")
+            );
+            assert!(
+                SessionError::InvalidAttestation
+                    .to_string()
+                    .contains("attestation")
+            );
+            assert!(
+                SessionError::InvalidMacKeyLength
+                    .to_string()
+                    .contains("MAC key")
+            );
         });
     }
 
@@ -2570,8 +2572,7 @@ mod tests {
                 timestamp: 1_700_000_000,
             };
             let json = serde_json::to_string(&retry).expect("serialize");
-            let decoded: MeshSessionHelloRetry =
-                serde_json::from_str(&json).expect("deserialize");
+            let decoded: MeshSessionHelloRetry = serde_json::from_str(&json).expect("deserialize");
             assert_eq!(decoded.from.as_str(), "node-a");
             assert_eq!(decoded.to.as_str(), "node-b");
             assert_eq!(decoded.timestamp, 1_700_000_000);

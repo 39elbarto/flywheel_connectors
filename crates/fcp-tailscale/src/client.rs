@@ -13,12 +13,12 @@ use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use asupersync::http::h1::{HttpClient, HttpClientBuilder, Method};
-use fcp_async_core::{sync::RwLock, time};
-use serde::{Deserialize, Serialize};
 use crate::error::{TailscaleError, TailscaleResult};
 use crate::identity::NodeId;
 use crate::tag::TailscaleTag;
+use asupersync::http::h1::{HttpClient, HttpClientBuilder, Method};
+use fcp_async_core::{sync::RwLock, time};
+use serde::{Deserialize, Serialize};
 
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -262,13 +262,19 @@ impl LocalApiClient {
 
         let response = match time::timeout(
             self.request_timeout,
-            self.client.request(Method::Get, &url, Vec::new(), Vec::new()),
+            self.client
+                .request(Method::Get, &url, Vec::new(), Vec::new()),
         )
         .await
         {
             Ok(Ok(response)) => response,
             Ok(Err(error)) => return Err(TailscaleError::from_http_client_error(&error)),
-            Err(error) => return Err(TailscaleError::from_async_error(error, self.request_timeout)),
+            Err(error) => {
+                return Err(TailscaleError::from_async_error(
+                    error,
+                    self.request_timeout,
+                ));
+            }
         };
 
         if !response.is_success() {
@@ -285,7 +291,9 @@ impl LocalApiClient {
             return Err(TailscaleError::LocalApiError(message));
         }
 
-        response.json().map_err(|e| TailscaleError::ParseError(e.to_string()))
+        response
+            .json()
+            .map_err(|e| TailscaleError::ParseError(e.to_string()))
     }
 }
 
@@ -884,18 +892,10 @@ mod tests {
     #[fcp_async_core::runtime::test]
     async fn status_peers_converts_keys_to_node_id() {
         let client = MockTailscaleClient::new();
-        let p1 = MockTailscaleClient::mock_peer(
-            "node-aaa",
-            "h1",
-            "100.64.0.2".parse().unwrap(),
-            &[],
-        );
-        let p2 = MockTailscaleClient::mock_peer(
-            "node-bbb",
-            "h2",
-            "100.64.0.3".parse().unwrap(),
-            &[],
-        );
+        let p1 =
+            MockTailscaleClient::mock_peer("node-aaa", "h1", "100.64.0.2".parse().unwrap(), &[]);
+        let p2 =
+            MockTailscaleClient::mock_peer("node-bbb", "h2", "100.64.0.3".parse().unwrap(), &[]);
         client.add_peer(p1).await;
         client.add_peer(p2).await;
 
@@ -950,12 +950,8 @@ mod tests {
 
         for i in 0..5 {
             let ip: IpAddr = format!("100.64.0.{}", 10 + i).parse().unwrap();
-            let peer = MockTailscaleClient::mock_peer(
-                &format!("node-{i}"),
-                &format!("host-{i}"),
-                ip,
-                &[],
-            );
+            let peer =
+                MockTailscaleClient::mock_peer(&format!("node-{i}"), &format!("host-{i}"), ip, &[]);
             client.add_peer(peer).await;
         }
 
@@ -1335,12 +1331,8 @@ mod tests {
     #[fcp_async_core::runtime::test]
     async fn test_mock_client_add_peer_replaces_existing() {
         let client = MockTailscaleClient::new();
-        let peer1 = MockTailscaleClient::mock_peer(
-            "node-1",
-            "host-v1",
-            "100.64.0.2".parse().unwrap(),
-            &[],
-        );
+        let peer1 =
+            MockTailscaleClient::mock_peer("node-1", "host-v1", "100.64.0.2".parse().unwrap(), &[]);
         client.add_peer(peer1).await;
 
         let peer2 = MockTailscaleClient::mock_peer(
@@ -1440,12 +1432,8 @@ mod tests {
 
     #[test]
     fn self_node_debug() {
-        let node = MockTailscaleClient::mock_self_node(
-            "s1",
-            "myhost",
-            "100.64.0.1".parse().unwrap(),
-            &[],
-        );
+        let node =
+            MockTailscaleClient::mock_self_node("s1", "myhost", "100.64.0.1".parse().unwrap(), &[]);
         let dbg = format!("{node:?}");
         assert!(dbg.contains("SelfNode"));
         assert!(dbg.contains("s1"));

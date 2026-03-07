@@ -668,9 +668,7 @@ async fn error_401() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/states"))
-        .respond_with(
-            ResponseTemplate::new(401).set_body_json(json!({"message": "Unauthorized"})),
-        )
+        .respond_with(ResponseTemplate::new(401).set_body_json(json!({"message": "Unauthorized"})))
         .mount(&server)
         .await;
 
@@ -737,8 +735,7 @@ async fn error_503() {
     Mock::given(method("GET"))
         .and(path("/states"))
         .respond_with(
-            ResponseTemplate::new(503)
-                .set_body_json(json!({"message": "Home Assistant starting"})),
+            ResponseTemplate::new(503).set_body_json(json!({"message": "Home Assistant starting"})),
         )
         .mount(&server)
         .await;

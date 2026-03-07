@@ -38,12 +38,20 @@ use fcp_slack::connector::SlackConnector;
 // ============================================================================
 
 fn generate_valid_token(signing_key: &Ed25519SigningKey, cap: &str) -> fcp_core::CapabilityToken {
+    generate_valid_token_for_operation(signing_key, cap, cap)
+}
+
+fn generate_valid_token_for_operation(
+    signing_key: &Ed25519SigningKey,
+    cap: &str,
+    operation: &str,
+) -> fcp_core::CapabilityToken {
     let now = Utc::now();
     let cose = CapabilityTokenBuilder::new()
         .capability_id(cap)
         .zone_id("z:work")
         .principal("user:test")
-        .operations(&[cap])
+        .operations(&[operation])
         .issuer("node:test")
         .validity(now, now + Duration::hours(1))
         .sign(signing_key)
@@ -359,16 +367,17 @@ async fn upload_file_happy_path() {
         .await;
 
     let mut connector = SlackConnector::new();
-    let key = setup_handshake(&mut connector, &["slack.upload_file"]).await;
+    let key = setup_handshake(&mut connector, &["slack.files.write"]).await;
     setup_configure(&mut connector, &mock_server.uri()).await;
 
-    let token = generate_valid_token(&key, "slack.upload_file");
+    let token = generate_valid_token_for_operation(&key, "slack.files.write", "slack.upload_file");
     let result = connector
         .handle_invoke(json!({
             "operation": "slack.upload_file",
             "input": {
                 "channels": "C01234567",
-                "content": "log data here",
+                "content_object_id": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                "resolved_content": "log data here",
                 "filename": "output.log"
             },
             "capability_token": token
@@ -378,6 +387,15 @@ async fn upload_file_happy_path() {
 
     assert_eq!(result["file"]["id"], "F01234567");
     assert_eq!(result["file"]["name"], "output.log");
+    assert_eq!(
+        result["source_object_id"],
+        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+    );
+    assert_eq!(
+        result["file_object_id"].as_str().unwrap().len(),
+        64,
+        "file_object_id should be a hex ObjectId"
+    );
 }
 
 #[tokio::test]
@@ -404,10 +422,10 @@ async fn download_file_happy_path() {
         .await;
 
     let mut connector = SlackConnector::new();
-    let key = setup_handshake(&mut connector, &["slack.download_file"]).await;
+    let key = setup_handshake(&mut connector, &["slack.files.read"]).await;
     setup_configure(&mut connector, &mock_server.uri()).await;
 
-    let token = generate_valid_token(&key, "slack.download_file");
+    let token = generate_valid_token_for_operation(&key, "slack.files.read", "slack.download_file");
     let result = connector
         .handle_invoke(json!({
             "operation": "slack.download_file",
@@ -419,11 +437,12 @@ async fn download_file_happy_path() {
 
     assert_eq!(result["file"]["id"], "F01234567");
     assert_eq!(result["file"]["name"], "report.pdf");
-    assert!(
-        result["file"]["url_private_download"]
-            .as_str()
-            .unwrap()
-            .contains("download")
+    assert!(result["file"]["url_private_download"].is_null());
+    assert!(result["file"]["url_private"].is_null());
+    assert_eq!(
+        result["content_object_id"].as_str().unwrap().len(),
+        64,
+        "content_object_id should be a hex ObjectId"
     );
 }
 
@@ -604,14 +623,19 @@ async fn upload_file_emits_receipt() {
         .await;
 
     let mut connector = SlackConnector::new();
-    let key = setup_handshake(&mut connector, &["slack.upload_file"]).await;
+    let key = setup_handshake(&mut connector, &["slack.files.write"]).await;
     setup_configure(&mut connector, &mock_server.uri()).await;
 
-    let token = generate_valid_token(&key, "slack.upload_file");
+    let token = generate_valid_token_for_operation(&key, "slack.files.write", "slack.upload_file");
     let result = connector
         .handle_invoke(json!({
             "operation": "slack.upload_file",
-            "input": { "channels": "C01234567", "content": "a,b,c", "filename": "data.csv" },
+            "input": {
+                "channels": "C01234567",
+                "content_object_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "resolved_content": "a,b,c",
+                "filename": "data.csv"
+            },
             "capability_token": token
         }))
         .await
@@ -620,7 +644,12 @@ async fn upload_file_emits_receipt() {
     let receipt = &result["receipt"];
     assert_eq!(receipt["operation"], "slack.upload_file");
     assert_eq!(receipt["effect"], "file_uploaded");
-    assert_eq!(receipt["resource"], "file:F09876543");
+    assert!(
+        receipt["resource"]
+            .as_str()
+            .unwrap()
+            .starts_with("file_object:")
+    );
 }
 
 #[tokio::test]
@@ -1845,14 +1874,17 @@ async fn validate_upload_file_missing_channels() {
     let _ctx = AsyncTestContext::for_scenario("slack.validation.missing_channels");
     let mock_server = MockServer::start().await;
     let mut connector = SlackConnector::new();
-    let key = setup_handshake(&mut connector, &["slack.upload_file"]).await;
+    let key = setup_handshake(&mut connector, &["slack.files.write"]).await;
     setup_configure(&mut connector, &mock_server.uri()).await;
 
-    let token = generate_valid_token(&key, "slack.upload_file");
+    let token = generate_valid_token_for_operation(&key, "slack.files.write", "slack.upload_file");
     let result = connector
         .handle_invoke(json!({
             "operation": "slack.upload_file",
-            "input": { "content": "data" },
+            "input": {
+                "content_object_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "resolved_content": "data"
+            },
             "capability_token": token
         }))
         .await;

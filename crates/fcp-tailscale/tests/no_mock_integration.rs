@@ -9,9 +9,8 @@ use std::net::{IpAddr, Ipv4Addr};
 use fcp_crypto::ed25519::Ed25519SigningKey;
 use fcp_crypto::x25519::X25519SecretKey;
 use fcp_tailscale::{
-    MeshIdentity, MockTailscaleClient, NodeId, NodeKeyAttestation, NodeKeys,
+    FCP_TAG_PREFIX, MeshIdentity, MockTailscaleClient, NodeId, NodeKeyAttestation, NodeKeys,
     TailscaleClient, TailscaleError, TailscaleTag, ZoneAclGenerator, ZoneAclRule, ZoneTagMapping,
-    FCP_TAG_PREFIX,
 };
 
 // ── helpers ──
@@ -307,10 +306,7 @@ fn attestation_wrong_node_id_fails() {
         NodeKeyAttestation::sign(&owner_key, &node_id, &node_keys, &tags, 24).expect("sign");
 
     let result = attestation.verify(&owner_key.verifying_key(), &wrong_id, &node_keys, &tags);
-    assert!(
-        result.is_err(),
-        "wrong node ID should fail verification"
-    );
+    assert!(result.is_err(), "wrong node ID should fail verification");
 }
 
 #[test]
@@ -380,8 +376,8 @@ fn mesh_identity_with_attestation() {
     let node_id = NodeId::new("node1");
     let tags = vec![TailscaleTag::fcp_tag("work")];
 
-    let attestation = NodeKeyAttestation::sign(&owner_key, &node_id, &node_keys, &tags, 24)
-        .expect("sign");
+    let attestation =
+        NodeKeyAttestation::sign(&owner_key, &node_id, &node_keys, &tags, 24).expect("sign");
 
     let identity = MeshIdentity::new(
         node_id,
@@ -393,7 +389,9 @@ fn mesh_identity_with_attestation() {
     )
     .with_attestation(attestation);
 
-    identity.verify_attestation().expect("attestation should verify");
+    identity
+        .verify_attestation()
+        .expect("attestation should verify");
     assert!(identity.is_attestation_valid());
 }
 
@@ -465,12 +463,7 @@ async fn mock_client_is_connected() {
 #[fcp_async_core::runtime::test]
 async fn mock_client_add_and_query_peer() {
     let client = MockTailscaleClient::new();
-    let peer = MockTailscaleClient::mock_peer(
-        "peer1",
-        "peer-host",
-        test_ip2(),
-        &["tag:fcp-work"],
-    );
+    let peer = MockTailscaleClient::mock_peer("peer1", "peer-host", test_ip2(), &["tag:fcp-work"]);
     client.add_peer(peer).await;
 
     let status = client.status().await.expect("status");
@@ -483,12 +476,7 @@ async fn mock_client_add_and_query_peer() {
 async fn mock_client_whois_lookup() {
     let client = MockTailscaleClient::new();
     let peer_ip = test_ip2();
-    let peer = MockTailscaleClient::mock_peer(
-        "peer1",
-        "peer-host",
-        peer_ip,
-        &["tag:fcp-work"],
-    );
+    let peer = MockTailscaleClient::mock_peer("peer1", "peer-host", peer_ip, &["tag:fcp-work"]);
     client.add_peer(peer).await;
 
     let info = client.whois(peer_ip).await.expect("whois");
@@ -538,16 +526,10 @@ async fn mock_client_remove_peer() {
             &[],
         ))
         .await;
-    assert_eq!(
-        client.online_peers().await.expect("peers").len(),
-        1
-    );
+    assert_eq!(client.online_peers().await.expect("peers").len(), 1);
 
     client.remove_peer("p1").await;
-    assert_eq!(
-        client.online_peers().await.expect("peers").len(),
-        0
-    );
+    assert_eq!(client.online_peers().await.expect("peers").len(), 0);
 }
 
 #[fcp_async_core::runtime::test]
@@ -738,7 +720,6 @@ async fn full_pipeline_client_to_identity_to_attestation() {
     assert_eq!(peer_fcp_tags[0].as_str(), "tag:fcp-work");
 
     // Zone mapping from peer tags
-    let zone =
-        ZoneTagMapping::tag_to_zone(&peer_fcp_tags[0]).expect("zone from tag");
+    let zone = ZoneTagMapping::tag_to_zone(&peer_fcp_tags[0]).expect("zone from tag");
     assert_eq!(zone, "z:work");
 }

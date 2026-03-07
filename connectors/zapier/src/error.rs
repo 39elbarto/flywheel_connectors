@@ -71,7 +71,10 @@ impl ZapierError {
             Self::Json(e) => FcpError::Internal {
                 message: format!("JSON error: {e}"),
             },
-            Self::Api { status_code, message } => FcpError::External {
+            Self::Api {
+                status_code,
+                message,
+            } => FcpError::External {
                 service: "zapier".into(),
                 message: message.clone(),
                 status_code: Some(*status_code),
@@ -116,32 +119,55 @@ mod tests {
 
     #[test]
     fn rate_limited_is_retryable() {
-        assert!(ZapierError::RateLimited { retry_after_ms: 5000 }.is_retryable());
+        assert!(
+            ZapierError::RateLimited {
+                retry_after_ms: 5000
+            }
+            .is_retryable()
+        );
     }
 
     #[test]
     fn api_500_is_retryable() {
-        assert!(ZapierError::Api { status_code: 500, message: "err".into() }.is_retryable());
+        assert!(
+            ZapierError::Api {
+                status_code: 500,
+                message: "err".into()
+            }
+            .is_retryable()
+        );
     }
 
     #[test]
     fn api_502_is_retryable() {
         assert!(
-            ZapierError::Api { status_code: 502, message: "bad gateway".into() }.is_retryable()
+            ZapierError::Api {
+                status_code: 502,
+                message: "bad gateway".into()
+            }
+            .is_retryable()
         );
     }
 
     #[test]
     fn api_503_is_retryable() {
         assert!(
-            ZapierError::Api { status_code: 503, message: "unavailable".into() }.is_retryable()
+            ZapierError::Api {
+                status_code: 503,
+                message: "unavailable".into()
+            }
+            .is_retryable()
         );
     }
 
     #[test]
     fn api_429_is_retryable() {
         assert!(
-            ZapierError::Api { status_code: 429, message: "too many".into() }.is_retryable()
+            ZapierError::Api {
+                status_code: 429,
+                message: "too many".into()
+            }
+            .is_retryable()
         );
     }
 
@@ -157,26 +183,41 @@ mod tests {
 
     #[test]
     fn not_found_not_retryable() {
-        assert!(!ZapierError::NotFound { resource: "action".into() }.is_retryable());
+        assert!(
+            !ZapierError::NotFound {
+                resource: "action".into()
+            }
+            .is_retryable()
+        );
     }
 
     #[test]
     fn api_400_not_retryable() {
         assert!(
-            !ZapierError::Api { status_code: 400, message: "bad request".into() }.is_retryable()
+            !ZapierError::Api {
+                status_code: 400,
+                message: "bad request".into()
+            }
+            .is_retryable()
         );
     }
 
     #[test]
     fn api_422_not_retryable() {
         assert!(
-            !ZapierError::Api { status_code: 422, message: "unprocessable".into() }.is_retryable()
+            !ZapierError::Api {
+                status_code: 422,
+                message: "unprocessable".into()
+            }
+            .is_retryable()
         );
     }
 
     #[test]
     fn retry_after_for_rate_limited() {
-        let err = ZapierError::RateLimited { retry_after_ms: 30_000 };
+        let err = ZapierError::RateLimited {
+            retry_after_ms: 30_000,
+        };
         assert_eq!(err.retry_after(), Some(Duration::from_secs(30)));
     }
 
@@ -193,14 +234,24 @@ mod tests {
     #[test]
     fn retry_after_none_for_api_error() {
         assert_eq!(
-            ZapierError::Api { status_code: 500, message: "err".into() }.retry_after(),
+            ZapierError::Api {
+                status_code: 500,
+                message: "err".into()
+            }
+            .retry_after(),
             None
         );
     }
 
     #[test]
     fn retry_after_none_for_not_found() {
-        assert_eq!(ZapierError::NotFound { resource: "x".into() }.retry_after(), None);
+        assert_eq!(
+            ZapierError::NotFound {
+                resource: "x".into()
+            }
+            .retry_after(),
+            None
+        );
     }
 
     #[test]
@@ -212,7 +263,12 @@ mod tests {
     #[test]
     fn unauthorized_to_fcp_error() {
         match ZapierError::Unauthorized.to_fcp_error() {
-            FcpError::External { service, status_code, retryable, .. } => {
+            FcpError::External {
+                service,
+                status_code,
+                retryable,
+                ..
+            } => {
                 assert_eq!(service, "zapier");
                 assert_eq!(status_code, Some(401));
                 assert!(!retryable);
@@ -224,7 +280,12 @@ mod tests {
     #[test]
     fn forbidden_to_fcp_error() {
         match ZapierError::Forbidden.to_fcp_error() {
-            FcpError::External { service, status_code, retryable, .. } => {
+            FcpError::External {
+                service,
+                status_code,
+                retryable,
+                ..
+            } => {
                 assert_eq!(service, "zapier");
                 assert_eq!(status_code, Some(403));
                 assert!(!retryable);
@@ -235,8 +296,17 @@ mod tests {
 
     #[test]
     fn not_found_to_fcp_error() {
-        match (ZapierError::NotFound { resource: "action_xyz".into() }).to_fcp_error() {
-            FcpError::External { status_code, message, retryable, .. } => {
+        match (ZapierError::NotFound {
+            resource: "action_xyz".into(),
+        })
+        .to_fcp_error()
+        {
+            FcpError::External {
+                status_code,
+                message,
+                retryable,
+                ..
+            } => {
                 assert_eq!(status_code, Some(404));
                 assert!(message.contains("action_xyz"));
                 assert!(!retryable);
@@ -247,8 +317,17 @@ mod tests {
 
     #[test]
     fn rate_limited_to_fcp_error() {
-        match (ZapierError::RateLimited { retry_after_ms: 60_000 }).to_fcp_error() {
-            FcpError::External { status_code, retryable, retry_after, .. } => {
+        match (ZapierError::RateLimited {
+            retry_after_ms: 60_000,
+        })
+        .to_fcp_error()
+        {
+            FcpError::External {
+                status_code,
+                retryable,
+                retry_after,
+                ..
+            } => {
                 assert_eq!(status_code, Some(429));
                 assert!(retryable);
                 assert_eq!(retry_after, Some(Duration::from_secs(60)));
@@ -259,9 +338,19 @@ mod tests {
 
     #[test]
     fn api_error_to_fcp_error() {
-        match (ZapierError::Api { status_code: 503, message: "unavailable".into() }).to_fcp_error()
+        match (ZapierError::Api {
+            status_code: 503,
+            message: "unavailable".into(),
+        })
+        .to_fcp_error()
         {
-            FcpError::External { service, status_code, retryable, message, .. } => {
+            FcpError::External {
+                service,
+                status_code,
+                retryable,
+                message,
+                ..
+            } => {
                 assert_eq!(service, "zapier");
                 assert_eq!(status_code, Some(503));
                 assert!(retryable);
@@ -282,8 +371,17 @@ mod tests {
 
     #[test]
     fn api_error_non_retryable_to_fcp_error() {
-        match (ZapierError::Api { status_code: 400, message: "bad".into() }).to_fcp_error() {
-            FcpError::External { status_code, retryable, .. } => {
+        match (ZapierError::Api {
+            status_code: 400,
+            message: "bad".into(),
+        })
+        .to_fcp_error()
+        {
+            FcpError::External {
+                status_code,
+                retryable,
+                ..
+            } => {
                 assert_eq!(status_code, Some(400));
                 assert!(!retryable);
             }
@@ -310,7 +408,10 @@ mod tests {
     #[test]
     fn error_display_not_found() {
         assert_eq!(
-            ZapierError::NotFound { resource: "action".into() }.to_string(),
+            ZapierError::NotFound {
+                resource: "action".into()
+            }
+            .to_string(),
             "Not found: action"
         );
     }
@@ -318,7 +419,10 @@ mod tests {
     #[test]
     fn error_display_rate_limited() {
         assert_eq!(
-            ZapierError::RateLimited { retry_after_ms: 2000 }.to_string(),
+            ZapierError::RateLimited {
+                retry_after_ms: 2000
+            }
+            .to_string(),
             "Rate limited, retry after 2000ms"
         );
     }
@@ -326,7 +430,11 @@ mod tests {
     #[test]
     fn error_display_api() {
         assert_eq!(
-            ZapierError::Api { status_code: 500, message: "Internal".into() }.to_string(),
+            ZapierError::Api {
+                status_code: 500,
+                message: "Internal".into()
+            }
+            .to_string(),
             "Zapier API error (500): Internal"
         );
     }
@@ -341,20 +449,32 @@ mod tests {
     #[test]
     fn api_599_is_retryable() {
         assert!(
-            ZapierError::Api { status_code: 599, message: "err".into() }.is_retryable()
+            ZapierError::Api {
+                status_code: 599,
+                message: "err".into()
+            }
+            .is_retryable()
         );
     }
 
     #[test]
     fn api_499_not_retryable() {
         assert!(
-            !ZapierError::Api { status_code: 499, message: "err".into() }.is_retryable()
+            !ZapierError::Api {
+                status_code: 499,
+                message: "err".into()
+            }
+            .is_retryable()
         );
     }
 
     #[test]
     fn rate_limited_to_fcp_error_has_service() {
-        match (ZapierError::RateLimited { retry_after_ms: 1000 }).to_fcp_error() {
+        match (ZapierError::RateLimited {
+            retry_after_ms: 1000,
+        })
+        .to_fcp_error()
+        {
             FcpError::External { service, .. } => assert_eq!(service, "zapier"),
             other => panic!("expected External, got {other:?}"),
         }
@@ -362,8 +482,16 @@ mod tests {
 
     #[test]
     fn not_found_to_fcp_error_not_retryable() {
-        match (ZapierError::NotFound { resource: "zap".into() }).to_fcp_error() {
-            FcpError::External { retryable, retry_after, .. } => {
+        match (ZapierError::NotFound {
+            resource: "zap".into(),
+        })
+        .to_fcp_error()
+        {
+            FcpError::External {
+                retryable,
+                retry_after,
+                ..
+            } => {
                 assert!(!retryable);
                 assert_eq!(retry_after, None);
             }
@@ -380,7 +508,11 @@ mod tests {
     #[test]
     fn api_501_is_retryable() {
         assert!(
-            ZapierError::Api { status_code: 501, message: "not impl".into() }.is_retryable()
+            ZapierError::Api {
+                status_code: 501,
+                message: "not impl".into()
+            }
+            .is_retryable()
         );
     }
 
@@ -393,7 +525,10 @@ mod tests {
 
     #[test]
     fn error_debug_api() {
-        let err = ZapierError::Api { status_code: 500, message: "err".into() };
+        let err = ZapierError::Api {
+            status_code: 500,
+            message: "err".into(),
+        };
         let dbg = format!("{err:?}");
         assert!(dbg.contains("500"));
     }
@@ -416,7 +551,12 @@ mod tests {
 
     #[test]
     fn api_error_fcp_error_no_retry_after() {
-        match (ZapierError::Api { status_code: 500, message: "err".into() }).to_fcp_error() {
+        match (ZapierError::Api {
+            status_code: 500,
+            message: "err".into(),
+        })
+        .to_fcp_error()
+        {
             FcpError::External { retry_after, .. } => assert!(retry_after.is_none()),
             other => panic!("expected External, got {other:?}"),
         }
@@ -424,7 +564,9 @@ mod tests {
 
     #[test]
     fn rate_limited_large_retry_after() {
-        let err = ZapierError::RateLimited { retry_after_ms: 3_600_000 };
+        let err = ZapierError::RateLimited {
+            retry_after_ms: 3_600_000,
+        };
         assert_eq!(err.retry_after(), Some(Duration::from_secs(3600)));
     }
 

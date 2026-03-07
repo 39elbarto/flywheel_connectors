@@ -215,7 +215,10 @@ mod tests {
             "message": "You don't have permissions to do that.",
         }))
         .unwrap();
-        assert_eq!(e.message, Some("You don't have permissions to do that.".into()));
+        assert_eq!(
+            e.message,
+            Some("You don't have permissions to do that.".into())
+        );
     }
 
     #[test]
@@ -303,7 +306,13 @@ mod tests {
 
     #[test]
     fn dashboard_debug() {
-        let d = Dashboard { id: 42, name: None, description: None, collection_id: None, archived: None };
+        let d = Dashboard {
+            id: 42,
+            name: None,
+            description: None,
+            collection_id: None,
+            archived: None,
+        };
         let dbg = format!("{d:?}");
         assert!(dbg.contains("Dashboard"));
         assert!(dbg.contains("42"));
@@ -328,7 +337,14 @@ mod tests {
 
     #[test]
     fn card_debug() {
-        let c = Card { id: 99, name: Some("Q".into()), description: None, display: None, collection_id: None, archived: None };
+        let c = Card {
+            id: 99,
+            name: Some("Q".into()),
+            description: None,
+            display: None,
+            collection_id: None,
+            archived: None,
+        };
         let dbg = format!("{c:?}");
         assert!(dbg.contains("Card"));
         assert!(dbg.contains("99"));
@@ -338,7 +354,10 @@ mod tests {
     #[allow(clippy::redundant_clone)]
     fn query_result_clone() {
         let qr = QueryResult {
-            data: Some(QueryData { rows: Some(vec![]), cols: Some(vec![]) }),
+            data: Some(QueryData {
+                rows: Some(vec![]),
+                cols: Some(vec![]),
+            }),
             status: Some("completed".into()),
         };
         let cloned = qr.clone();
@@ -348,7 +367,10 @@ mod tests {
 
     #[test]
     fn query_result_debug() {
-        let qr = QueryResult { data: None, status: None };
+        let qr = QueryResult {
+            data: None,
+            status: None,
+        };
         let dbg = format!("{qr:?}");
         assert!(dbg.contains("QueryResult"));
     }
@@ -356,7 +378,10 @@ mod tests {
     #[test]
     #[allow(clippy::redundant_clone)]
     fn query_data_clone() {
-        let qd = QueryData { rows: Some(vec![vec![json!(1)]]), cols: None };
+        let qd = QueryData {
+            rows: Some(vec![vec![json!(1)]]),
+            cols: None,
+        };
         let cloned = qd.clone();
         assert_eq!(cloned.rows.unwrap().len(), 1);
         assert!(cloned.cols.is_none());
@@ -364,7 +389,10 @@ mod tests {
 
     #[test]
     fn query_data_debug() {
-        let qd = QueryData { rows: None, cols: None };
+        let qd = QueryData {
+            rows: None,
+            cols: None,
+        };
         let dbg = format!("{qd:?}");
         assert!(dbg.contains("QueryData"));
     }
@@ -384,14 +412,20 @@ mod tests {
 
     #[test]
     fn column_debug() {
-        let col = Column { name: Some("x".into()), display_name: None, base_type: None };
+        let col = Column {
+            name: Some("x".into()),
+            display_name: None,
+            base_type: None,
+        };
         let dbg = format!("{col:?}");
         assert!(dbg.contains("Column"));
     }
 
     #[test]
     fn api_error_response_debug() {
-        let e = ApiErrorResponse { message: Some("err".into()) };
+        let e = ApiErrorResponse {
+            message: Some("err".into()),
+        };
         let dbg = format!("{e:?}");
         assert!(dbg.contains("ApiErrorResponse"));
     }
@@ -399,7 +433,9 @@ mod tests {
     #[test]
     #[allow(clippy::redundant_clone)]
     fn api_error_response_clone() {
-        let e = ApiErrorResponse { message: Some("test error".into()) };
+        let e = ApiErrorResponse {
+            message: Some("test error".into()),
+        };
         let cloned = e.clone();
         assert_eq!(cloned.message, Some("test error".into()));
     }
@@ -463,8 +499,16 @@ mod tests {
             data: Some(QueryData {
                 rows: Some(vec![vec![json!(1), json!("a")]]),
                 cols: Some(vec![
-                    Column { name: Some("id".into()), display_name: Some("ID".into()), base_type: Some("type/Integer".into()) },
-                    Column { name: Some("name".into()), display_name: Some("Name".into()), base_type: Some("type/Text".into()) },
+                    Column {
+                        name: Some("id".into()),
+                        display_name: Some("ID".into()),
+                        base_type: Some("type/Integer".into()),
+                    },
+                    Column {
+                        name: Some("name".into()),
+                        display_name: Some("Name".into()),
+                        base_type: Some("type/Text".into()),
+                    },
                 ]),
             }),
             status: Some("completed".into()),

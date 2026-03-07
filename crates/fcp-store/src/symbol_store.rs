@@ -1770,25 +1770,31 @@ mod tests {
 
     #[test]
     fn storage_used_tracks_multiple_objects() {
-        run_store_test("storage_tracks_multi", "verify", "accounting", 3, || async {
-            let store = MemorySymbolStore::new(MemorySymbolStoreConfig::default());
+        run_store_test(
+            "storage_tracks_multi",
+            "verify",
+            "accounting",
+            3,
+            || async {
+                let store = MemorySymbolStore::new(MemorySymbolStoreConfig::default());
 
-            assert_eq!(store.storage_used().await, 0);
+                assert_eq!(store.storage_used().await, 0);
 
-            store.put_object_meta(test_object_meta()).await.unwrap();
-            store.put_symbol(test_symbol(0)).await.unwrap();
-            let after_one = store.storage_used().await;
-            assert!(after_one > 0);
+                store.put_object_meta(test_object_meta()).await.unwrap();
+                store.put_symbol(test_symbol(0)).await.unwrap();
+                let after_one = store.storage_used().await;
+                assert!(after_one > 0);
 
-            store.put_symbol(test_symbol(1)).await.unwrap();
-            let after_two = store.storage_used().await;
-            assert!(after_two > after_one);
+                store.put_symbol(test_symbol(1)).await.unwrap();
+                let after_two = store.storage_used().await;
+                assert!(after_two > after_one);
 
-            StoreLogData {
-                details: Some(json!({"after_one": after_one, "after_two": after_two})),
-                ..StoreLogData::default()
-            }
-        });
+                StoreLogData {
+                    details: Some(json!({"after_one": after_one, "after_two": after_two})),
+                    ..StoreLogData::default()
+                }
+            },
+        );
     }
 
     #[test]
@@ -1852,27 +1858,33 @@ mod tests {
 
     #[test]
     fn can_reconstruct_boundary() {
-        run_store_test("can_reconstruct_boundary", "verify", "repair", 2, || async {
-            let store = MemorySymbolStore::new(MemorySymbolStoreConfig::default());
+        run_store_test(
+            "can_reconstruct_boundary",
+            "verify",
+            "repair",
+            2,
+            || async {
+                let store = MemorySymbolStore::new(MemorySymbolStoreConfig::default());
 
-            let mut meta = test_object_meta();
-            meta.source_symbols = 3;
-            store.put_object_meta(meta).await.unwrap();
+                let mut meta = test_object_meta();
+                meta.source_symbols = 3;
+                store.put_object_meta(meta).await.unwrap();
 
-            // 2 symbols: not enough (need 3)
-            store.put_symbol(test_symbol(0)).await.unwrap();
-            store.put_symbol(test_symbol(1)).await.unwrap();
-            assert!(!store.can_reconstruct(&test_object_id()).await);
+                // 2 symbols: not enough (need 3)
+                store.put_symbol(test_symbol(0)).await.unwrap();
+                store.put_symbol(test_symbol(1)).await.unwrap();
+                assert!(!store.can_reconstruct(&test_object_id()).await);
 
-            // 3 symbols: exactly enough
-            store.put_symbol(test_symbol(2)).await.unwrap();
-            assert!(store.can_reconstruct(&test_object_id()).await);
+                // 3 symbols: exactly enough
+                store.put_symbol(test_symbol(2)).await.unwrap();
+                assert!(store.can_reconstruct(&test_object_id()).await);
 
-            StoreLogData {
-                details: Some(json!({"boundary": "K=3"})),
-                ..StoreLogData::default()
-            }
-        });
+                StoreLogData {
+                    details: Some(json!({"boundary": "K=3"})),
+                    ..StoreLogData::default()
+                }
+            },
+        );
     }
 
     #[test]
@@ -1912,35 +1924,41 @@ mod tests {
 
     #[test]
     fn quota_exact_boundary() {
-        run_store_test("quota_exact_boundary", "verify", "accounting", 2, || async {
-            let sample = test_symbol(0);
-            let size = MemorySymbolStore::symbol_size(&sample);
-            // Set quota to exactly 2 symbols worth
-            let config = MemorySymbolStoreConfig {
-                max_bytes: size * 2,
-                local_node_id: 0,
-            };
-            let store = MemorySymbolStore::new(config);
-            store.put_object_meta(test_object_meta()).await.unwrap();
+        run_store_test(
+            "quota_exact_boundary",
+            "verify",
+            "accounting",
+            2,
+            || async {
+                let sample = test_symbol(0);
+                let size = MemorySymbolStore::symbol_size(&sample);
+                // Set quota to exactly 2 symbols worth
+                let config = MemorySymbolStoreConfig {
+                    max_bytes: size * 2,
+                    local_node_id: 0,
+                };
+                let store = MemorySymbolStore::new(config);
+                store.put_object_meta(test_object_meta()).await.unwrap();
 
-            store.put_symbol(test_symbol(0)).await.unwrap();
-            store.put_symbol(test_symbol(1)).await.unwrap();
+                store.put_symbol(test_symbol(0)).await.unwrap();
+                store.put_symbol(test_symbol(1)).await.unwrap();
 
-            // Third symbol should exceed quota
-            let result = store.put_symbol(test_symbol(2)).await;
-            assert!(matches!(
-                result,
-                Err(SymbolStoreError::QuotaExceeded { .. })
-            ));
+                // Third symbol should exceed quota
+                let result = store.put_symbol(test_symbol(2)).await;
+                assert!(matches!(
+                    result,
+                    Err(SymbolStoreError::QuotaExceeded { .. })
+                ));
 
-            // Verify exactly 2 stored
-            assert_eq!(store.symbol_count(&test_object_id()).await, 2);
+                // Verify exactly 2 stored
+                assert_eq!(store.symbol_count(&test_object_id()).await, 2);
 
-            StoreLogData {
-                details: Some(json!({"quota_boundary": "2_symbols_exact"})),
-                ..StoreLogData::default()
-            }
-        });
+                StoreLogData {
+                    details: Some(json!({"quota_boundary": "2_symbols_exact"})),
+                    ..StoreLogData::default()
+                }
+            },
+        );
     }
 
     #[test]
@@ -2059,49 +2077,55 @@ mod tests {
 
     #[test]
     fn multiple_objects_independent() {
-        run_store_test("multi_object_independent", "verify", "isolation", 4, || async {
-            let store = MemorySymbolStore::new(MemorySymbolStoreConfig::default());
+        run_store_test(
+            "multi_object_independent",
+            "verify",
+            "isolation",
+            4,
+            || async {
+                let store = MemorySymbolStore::new(MemorySymbolStoreConfig::default());
 
-            // Object 1
-            let meta1 = test_object_meta();
-            store.put_object_meta(meta1).await.unwrap();
-            store.put_symbol(test_symbol(0)).await.unwrap();
+                // Object 1
+                let meta1 = test_object_meta();
+                store.put_object_meta(meta1).await.unwrap();
+                store.put_symbol(test_symbol(0)).await.unwrap();
 
-            // Object 2 with different ID
-            let obj2_id = ObjectId::from_bytes([2_u8; 32]);
-            let meta2 = ObjectSymbolMeta {
-                object_id: obj2_id,
-                zone_id: test_zone(),
-                oti: test_object_meta().oti,
-                source_symbols: 16,
-                first_symbol_at: 2_000_000,
-            };
-            store.put_object_meta(meta2).await.unwrap();
-            let sym2 = StoredSymbol {
-                meta: SymbolMeta {
+                // Object 2 with different ID
+                let obj2_id = ObjectId::from_bytes([2_u8; 32]);
+                let meta2 = ObjectSymbolMeta {
                     object_id: obj2_id,
-                    esi: 0,
                     zone_id: test_zone(),
-                    source_node: Some(2),
-                    stored_at: 2_000_000,
-                },
-                data: Bytes::from(vec![1_u8; 64]),
-            };
-            store.put_symbol(sym2).await.unwrap();
+                    oti: test_object_meta().oti,
+                    source_symbols: 16,
+                    first_symbol_at: 2_000_000,
+                };
+                store.put_object_meta(meta2).await.unwrap();
+                let sym2 = StoredSymbol {
+                    meta: SymbolMeta {
+                        object_id: obj2_id,
+                        esi: 0,
+                        zone_id: test_zone(),
+                        source_node: Some(2),
+                        stored_at: 2_000_000,
+                    },
+                    data: Bytes::from(vec![1_u8; 64]),
+                };
+                store.put_symbol(sym2).await.unwrap();
 
-            assert_eq!(store.symbol_count(&test_object_id()).await, 1);
-            assert_eq!(store.symbol_count(&obj2_id).await, 1);
+                assert_eq!(store.symbol_count(&test_object_id()).await, 1);
+                assert_eq!(store.symbol_count(&obj2_id).await, 1);
 
-            // Delete object 1 should not affect object 2
-            store.delete_object(&test_object_id()).await.unwrap();
-            assert_eq!(store.symbol_count(&test_object_id()).await, 0);
-            assert_eq!(store.symbol_count(&obj2_id).await, 1);
+                // Delete object 1 should not affect object 2
+                store.delete_object(&test_object_id()).await.unwrap();
+                assert_eq!(store.symbol_count(&test_object_id()).await, 0);
+                assert_eq!(store.symbol_count(&obj2_id).await, 1);
 
-            StoreLogData {
-                details: Some(json!({"objects_independent": true})),
-                ..StoreLogData::default()
-            }
-        });
+                StoreLogData {
+                    details: Some(json!({"objects_independent": true})),
+                    ..StoreLogData::default()
+                }
+            },
+        );
     }
 
     #[test]

@@ -557,7 +557,11 @@ impl GitHubClient {
 }
 
 /// Parse an error response body.
-fn parse_error_response(status: StatusCode, bytes: &Bytes, retry_after_secs: Option<u64>) -> GitHubError {
+fn parse_error_response(
+    status: StatusCode,
+    bytes: &Bytes,
+    retry_after_secs: Option<u64>,
+) -> GitHubError {
     if let Ok(err_resp) = serde_json::from_slice::<ApiErrorResponse>(bytes) {
         if status == StatusCode::TOO_MANY_REQUESTS {
             return GitHubError::RateLimited {
@@ -1078,7 +1082,10 @@ mod tests {
 
     #[test]
     fn test_urlencoding_only_safe_chars() {
-        assert_eq!(urlencoding::encode("abc-def_ghi.jkl~mno"), "abc-def_ghi.jkl~mno");
+        assert_eq!(
+            urlencoding::encode("abc-def_ghi.jkl~mno"),
+            "abc-def_ghi.jkl~mno"
+        );
     }
 
     #[test]

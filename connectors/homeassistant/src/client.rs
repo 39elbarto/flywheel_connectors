@@ -123,9 +123,7 @@ impl HomeAssistantClient {
 
         match status.as_u16() {
             401 => Err(HomeAssistantError::Unauthorized),
-            404 => Err(HomeAssistantError::EntityNotFound {
-                entity_id: detail,
-            }),
+            404 => Err(HomeAssistantError::EntityNotFound { entity_id: detail }),
             429 => Err(HomeAssistantError::RateLimited {
                 retry_after_ms: retry_after.unwrap_or(60) * 1000,
             }),
@@ -234,7 +232,11 @@ impl HomeAssistantClient {
         if significant_changes_only.unwrap_or(false) {
             q.push(("significant_changes_only", String::new()));
         }
-        self.get(&format!("/history/period/{timestamp}"), if q.is_empty() { None } else { Some(&q) }).await
+        self.get(
+            &format!("/history/period/{timestamp}"),
+            if q.is_empty() { None } else { Some(&q) },
+        )
+        .await
     }
 
     // -- Template API for areas/devices --
@@ -352,8 +354,7 @@ mod tests {
     #[test]
     fn client_new_with_credential_id() {
         let cred = CredentialId::new();
-        let client =
-            HomeAssistantClient::new(HomeAssistantAuth::CredentialId(cred), None).unwrap();
+        let client = HomeAssistantClient::new(HomeAssistantAuth::CredentialId(cred), None).unwrap();
         assert_eq!(client.base_url, DEFAULT_BASE_URL);
     }
 

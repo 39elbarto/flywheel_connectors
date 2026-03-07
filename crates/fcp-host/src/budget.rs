@@ -1190,10 +1190,7 @@ mod tests {
 
     #[test]
     fn aggregate_metrics_saturates_on_overflow() {
-        let metrics = vec![
-            UsageMetric::tokens(u64::MAX),
-            UsageMetric::tokens(1),
-        ];
+        let metrics = vec![UsageMetric::tokens(u64::MAX), UsageMetric::tokens(1)];
         let result = aggregate_metrics(&metrics);
         assert_eq!(*result.get(&UsageMetricKind::Tokens).unwrap(), u64::MAX);
     }
@@ -1406,10 +1403,7 @@ mod tests {
         let eval = tracker.record_usage(&zone, &policy, &[UsageMetric::tokens(10)]);
         let entry = &eval.snapshot.budgets[0];
         // resets_at should be started_at + window_seconds
-        assert_eq!(
-            entry.window_resets_at,
-            entry.window_started_at + 3600
-        );
+        assert_eq!(entry.window_resets_at, entry.window_started_at + 3600);
     }
 
     // ── Multiple record_usage calls with different metric types ──

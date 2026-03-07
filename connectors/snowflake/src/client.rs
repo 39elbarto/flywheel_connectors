@@ -21,10 +21,7 @@ pub struct SnowflakeAuth {
 impl SnowflakeAuth {
     #[must_use]
     pub fn redacted_label(&self) -> String {
-        format!(
-            "account:{},token:redacted",
-            self.account_identifier
-        )
+        format!("account:{},token:redacted", self.account_identifier)
     }
 }
 
@@ -198,12 +195,8 @@ impl SnowflakeClient {
         let wh = warehouse
             .map(String::from)
             .or_else(|| self.warehouse.clone());
-        let db = database
-            .map(String::from)
-            .or_else(|| self.database.clone());
-        let sc = schema
-            .map(String::from)
-            .or_else(|| self.schema.clone());
+        let db = database.map(String::from).or_else(|| self.database.clone());
+        let sc = schema.map(String::from).or_else(|| self.schema.clone());
 
         if let Some(w) = wh {
             body["warehouse"] = serde_json::json!(w);
@@ -234,12 +227,8 @@ impl SnowflakeClient {
         let wh = warehouse
             .map(String::from)
             .or_else(|| self.warehouse.clone());
-        let db = database
-            .map(String::from)
-            .or_else(|| self.database.clone());
-        let sc = schema
-            .map(String::from)
-            .or_else(|| self.schema.clone());
+        let db = database.map(String::from).or_else(|| self.database.clone());
+        let sc = schema.map(String::from).or_else(|| self.schema.clone());
 
         if let Some(w) = wh {
             body["warehouse"] = serde_json::json!(w);
@@ -307,9 +296,14 @@ mod tests {
             access_token: "TOKEN".into(),
             account_identifier: "ACC".into(),
         };
-        let client =
-            SnowflakeClient::new(auth, Some("https://test.example.com/api/v2"), None, None, None)
-                .unwrap();
+        let client = SnowflakeClient::new(
+            auth,
+            Some("https://test.example.com/api/v2"),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
         assert_eq!(client.base_url, "https://test.example.com/api/v2");
     }
 
@@ -332,9 +326,14 @@ mod tests {
             access_token: "TOKEN".into(),
             account_identifier: "ACC".into(),
         };
-        let client =
-            SnowflakeClient::new(auth, Some("https://test.example.com/api/v2/"), None, None, None)
-                .unwrap();
+        let client = SnowflakeClient::new(
+            auth,
+            Some("https://test.example.com/api/v2/"),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
         assert_eq!(client.base_url, "https://test.example.com/api/v2");
     }
 

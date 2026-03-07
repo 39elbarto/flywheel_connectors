@@ -11,7 +11,7 @@ use serde_json::json;
 use tracing::{info, instrument};
 
 use crate::{
-    client::{MixpanelAuth, MixpanelClient, DEFAULT_BASE_URL},
+    client::{DEFAULT_BASE_URL, MixpanelAuth, MixpanelClient},
     error::MixpanelError,
 };
 
@@ -193,9 +193,12 @@ impl MixpanelConnector {
             "Configuring Mixpanel connector"
         );
 
-        let client =
-            MixpanelClient::new(config.auth.clone(), &config.project_id, Some(&config.base_url))
-                .map_err(|e| e.to_fcp_error())?;
+        let client = MixpanelClient::new(
+            config.auth.clone(),
+            &config.project_id,
+            Some(&config.base_url),
+        )
+        .map_err(|e| e.to_fcp_error())?;
 
         self.client = Some(Arc::new(client));
         self.config = Some(config);
@@ -481,10 +484,7 @@ mod tests {
             "project_id": "12345",
         }))
         .unwrap();
-        assert!(matches!(
-            config.auth,
-            MixpanelAuth::ServiceAccount { .. }
-        ));
+        assert!(matches!(config.auth, MixpanelAuth::ServiceAccount { .. }));
         assert_eq!(config.base_url, DEFAULT_BASE_URL);
         assert_eq!(config.project_id, "12345");
     }

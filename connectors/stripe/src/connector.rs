@@ -2638,16 +2638,20 @@ mod tests {
         let result = connector.handle_introspect().await.unwrap();
         let ops = result["operations"].as_array().unwrap();
 
-        let read_ops = ["stripe.get_customer", "stripe.list_customers", "stripe.get_payment_intent",
-            "stripe.get_subscription", "stripe.list_subscriptions", "stripe.get_invoice",
-            "stripe.list_invoices", "stripe.get_balance"];
+        let read_ops = [
+            "stripe.get_customer",
+            "stripe.list_customers",
+            "stripe.get_payment_intent",
+            "stripe.get_subscription",
+            "stripe.list_subscriptions",
+            "stripe.get_invoice",
+            "stripe.list_invoices",
+            "stripe.get_balance",
+        ];
         for op_id in read_ops {
             let op = ops.iter().find(|o| o["id"] == op_id);
             if let Some(op) = op {
-                assert_eq!(
-                    op["risk_level"], "low",
-                    "{op_id} should be low risk"
-                );
+                assert_eq!(op["risk_level"], "low", "{op_id} should be low risk");
             }
         }
     }
@@ -2687,11 +2691,7 @@ mod tests {
         let ops = result["operations"].as_array().unwrap();
         for op in ops {
             let summary = op["summary"].as_str().unwrap_or("");
-            assert!(
-                !summary.is_empty(),
-                "op {} has empty summary",
-                op["id"]
-            );
+            assert!(!summary.is_empty(), "op {} has empty summary", op["id"]);
         }
     }
 

@@ -572,7 +572,9 @@ mod tests {
 
     #[test]
     fn query_result_debug_format() {
-        let qr = QueryResult { result: Some(vec![json!("a")]) };
+        let qr = QueryResult {
+            result: Some(vec![json!("a")]),
+        };
         let dbg = format!("{qr:?}");
         assert!(dbg.contains("QueryResult"));
     }

@@ -3590,8 +3590,7 @@ deny_ptrace = true
 
     #[test]
     fn manifest_approval_mode_backward_compat() {
-        let mode: ManifestApprovalMode =
-            serde_json::from_str("\"approval_required\"").unwrap();
+        let mode: ManifestApprovalMode = serde_json::from_str("\"approval_required\"").unwrap();
         assert_eq!(mode, ManifestApprovalMode::ElevationToken);
     }
 
@@ -3851,19 +3850,27 @@ deny_ptrace = true
             operation_pools: std::collections::HashMap::default(),
         };
         assert_eq!(
-            make_section("tokens").to_declarations().limits[0].config.unit,
+            make_section("tokens").to_declarations().limits[0]
+                .config
+                .unit,
             RateLimitUnit::Tokens
         );
         assert_eq!(
-            make_section("bytes").to_declarations().limits[0].config.unit,
+            make_section("bytes").to_declarations().limits[0]
+                .config
+                .unit,
             RateLimitUnit::Bytes
         );
         assert_eq!(
-            make_section("custom").to_declarations().limits[0].config.unit,
+            make_section("custom").to_declarations().limits[0]
+                .config
+                .unit,
             RateLimitUnit::Custom
         );
         assert_eq!(
-            make_section("requests").to_declarations().limits[0].config.unit,
+            make_section("requests").to_declarations().limits[0]
+                .config
+                .unit,
             RateLimitUnit::Requests
         );
     }
@@ -4687,8 +4694,7 @@ deny_ptrace = true
 
     #[test]
     fn object_id_ref_invalid_hex_rejected() {
-        let err =
-            ObjectIdRef::try_from("objectid:".to_string() + &"gg".repeat(32)).unwrap_err();
+        let err = ObjectIdRef::try_from("objectid:".to_string() + &"gg".repeat(32)).unwrap_err();
         assert!(err.to_string().contains("hex"));
     }
 

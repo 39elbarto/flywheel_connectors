@@ -152,9 +152,8 @@ impl MailchimpConnector {
         let config = MailchimpConfig::from_params(&params)?;
         info!(auth = %config.auth.redacted_label(), "Configuring Mailchimp connector");
 
-        let client =
-            MailchimpClient::new(config.auth.clone(), config.base_url.as_deref())
-                .map_err(|e| e.to_fcp_error())?;
+        let client = MailchimpClient::new(config.auth.clone(), config.base_url.as_deref())
+            .map_err(|e| e.to_fcp_error())?;
 
         self.client = Some(Arc::new(client));
         self.config = Some(config);
@@ -357,7 +356,10 @@ impl MailchimpConnector {
         client: &MailchimpClient,
     ) -> Result<serde_json::Value, MailchimpError> {
         let resp = client.list_lists().await?;
-        let lists = resp.get("lists").cloned().unwrap_or(serde_json::Value::Null);
+        let lists = resp
+            .get("lists")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
         if lists.is_null() {
             return Ok(json!({ "lists": [] }));
         }
@@ -371,7 +373,10 @@ impl MailchimpConnector {
     ) -> Result<serde_json::Value, MailchimpError> {
         let list_id = require_str(input, "list_id")?;
         let resp = client.list_members(list_id).await?;
-        let members = resp.get("members").cloned().unwrap_or(serde_json::Value::Null);
+        let members = resp
+            .get("members")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
         if members.is_null() {
             return Ok(json!({ "members": [] }));
         }
@@ -393,7 +398,10 @@ impl MailchimpConnector {
         client: &MailchimpClient,
     ) -> Result<serde_json::Value, MailchimpError> {
         let resp = client.list_campaigns().await?;
-        let campaigns = resp.get("campaigns").cloned().unwrap_or(serde_json::Value::Null);
+        let campaigns = resp
+            .get("campaigns")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
         if campaigns.is_null() {
             return Ok(json!({ "campaigns": [] }));
         }
@@ -781,7 +789,11 @@ mod tests {
 
     #[test]
     fn doctor_status_serde_roundtrip() {
-        let statuses = [DoctorStatus::Healthy, DoctorStatus::Degraded, DoctorStatus::Unhealthy];
+        let statuses = [
+            DoctorStatus::Healthy,
+            DoctorStatus::Degraded,
+            DoctorStatus::Unhealthy,
+        ];
         for s in &statuses {
             let v = serde_json::to_value(s).unwrap();
             let back: DoctorStatus = serde_json::from_value(v).unwrap();
@@ -791,9 +803,18 @@ mod tests {
 
     #[test]
     fn doctor_status_lowercase_serialization() {
-        assert_eq!(serde_json::to_value(DoctorStatus::Healthy).unwrap(), "healthy");
-        assert_eq!(serde_json::to_value(DoctorStatus::Degraded).unwrap(), "degraded");
-        assert_eq!(serde_json::to_value(DoctorStatus::Unhealthy).unwrap(), "unhealthy");
+        assert_eq!(
+            serde_json::to_value(DoctorStatus::Healthy).unwrap(),
+            "healthy"
+        );
+        assert_eq!(
+            serde_json::to_value(DoctorStatus::Degraded).unwrap(),
+            "degraded"
+        );
+        assert_eq!(
+            serde_json::to_value(DoctorStatus::Unhealthy).unwrap(),
+            "unhealthy"
+        );
     }
 
     #[test]
@@ -874,7 +895,10 @@ mod tests {
         let ops = operations_info();
         for op in ops.as_array().unwrap() {
             let id = op["id"].as_str().unwrap();
-            assert!(id.starts_with("mailchimp."), "op {id} missing mailchimp prefix");
+            assert!(
+                id.starts_with("mailchimp."),
+                "op {id} missing mailchimp prefix"
+            );
         }
     }
 
@@ -884,7 +908,12 @@ mod tests {
         for op in ops.as_array().unwrap() {
             let cap = op["capability"].as_str().unwrap();
             if cap.to_ascii_lowercase().ends_with(".write") {
-                assert_ne!(op["safety_tier"].as_str().unwrap(), "safe", "write op {} should not be safe", op["id"]);
+                assert_ne!(
+                    op["safety_tier"].as_str().unwrap(),
+                    "safe",
+                    "write op {} should not be safe",
+                    op["id"]
+                );
             }
         }
     }
@@ -895,7 +924,11 @@ mod tests {
         for op in ops.as_array().unwrap() {
             let id = op["id"].as_str().unwrap();
             if id.contains("delete") {
-                assert_eq!(op["safety_tier"].as_str().unwrap(), "dangerous", "delete op {id} should be dangerous");
+                assert_eq!(
+                    op["safety_tier"].as_str().unwrap(),
+                    "dangerous",
+                    "delete op {id} should be dangerous"
+                );
             }
         }
     }
@@ -906,7 +939,11 @@ mod tests {
         for op in ops.as_array().unwrap() {
             let id = op["id"].as_str().unwrap();
             if id.contains("send") {
-                assert_eq!(op["safety_tier"].as_str().unwrap(), "dangerous", "send op {id} should be dangerous");
+                assert_eq!(
+                    op["safety_tier"].as_str().unwrap(),
+                    "dangerous",
+                    "send op {id} should be dangerous"
+                );
             }
         }
     }
@@ -975,8 +1012,18 @@ mod tests {
     #[test]
     fn doctor_result_unhealthy_overrides_degraded() {
         let r = DoctorResult::from_checks(vec![
-            DoctorCheck { name: "a".into(), passed: false, message: None, critical: true },
-            DoctorCheck { name: "b".into(), passed: false, message: None, critical: false },
+            DoctorCheck {
+                name: "a".into(),
+                passed: false,
+                message: None,
+                critical: true,
+            },
+            DoctorCheck {
+                name: "b".into(),
+                passed: false,
+                message: None,
+                critical: false,
+            },
         ]);
         assert_eq!(r.status, DoctorStatus::Unhealthy);
     }
@@ -987,7 +1034,11 @@ mod tests {
         let ops = operations_info();
         for op in ops.as_array().unwrap() {
             let idem = op["idempotency"].as_str().unwrap();
-            assert!(valid.contains(&idem), "invalid idempotency {idem} for {:?}", op["id"]);
+            assert!(
+                valid.contains(&idem),
+                "invalid idempotency {idem} for {:?}",
+                op["id"]
+            );
         }
     }
 }

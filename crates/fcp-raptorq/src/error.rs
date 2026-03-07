@@ -551,10 +551,7 @@ mod tests {
         let err = DecodeError::Runtime {
             reason: "tokio join failed".into(),
         };
-        assert_eq!(
-            err.to_string(),
-            "decode runtime failure: tokio join failed"
-        );
+        assert_eq!(err.to_string(), "decode runtime failure: tokio join failed");
     }
 
     #[test]
@@ -647,23 +644,15 @@ mod tests {
                 received: 0,
                 needed: 1,
             },
-            DecodeError::AdmissionDenied {
-                reason: "x".into(),
-            },
+            DecodeError::AdmissionDenied { reason: "x".into() },
             DecodeError::SymbolBufferExceeded {
                 buffered: 1,
                 limit: 0,
             },
             DecodeError::MemoryLimitExceeded { used: 1, limit: 0 },
-            DecodeError::InvalidSymbol {
-                reason: "x".into(),
-            },
-            DecodeError::InvalidTransmissionInfo {
-                reason: "x".into(),
-            },
-            DecodeError::Runtime {
-                reason: "x".into(),
-            },
+            DecodeError::InvalidSymbol { reason: "x".into() },
+            DecodeError::InvalidTransmissionInfo { reason: "x".into() },
+            DecodeError::Runtime { reason: "x".into() },
         ];
         for v in &variants {
             let debug = format!("{v:?}");

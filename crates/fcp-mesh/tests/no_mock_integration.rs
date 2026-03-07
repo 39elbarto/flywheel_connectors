@@ -2607,9 +2607,24 @@ fn transport_priority_ordering_invariant() {
     let policy = ZoneTransportPolicy::default();
 
     let paths = vec![
-        TransportPath::new(TransportPathKind::Direct, test_node("slow"), "slow", Some(500)),
-        TransportPath::new(TransportPathKind::Direct, test_node("fast"), "fast", Some(5)),
-        TransportPath::new(TransportPathKind::Direct, test_node("mid"), "mid", Some(100)),
+        TransportPath::new(
+            TransportPathKind::Direct,
+            test_node("slow"),
+            "slow",
+            Some(500),
+        ),
+        TransportPath::new(
+            TransportPathKind::Direct,
+            test_node("fast"),
+            "fast",
+            Some(5),
+        ),
+        TransportPath::new(
+            TransportPathKind::Direct,
+            test_node("mid"),
+            "mid",
+            Some(100),
+        ),
     ];
 
     let ranked = TransportSelector::rank_paths(&paths, &policy);

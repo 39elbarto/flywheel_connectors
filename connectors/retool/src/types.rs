@@ -49,9 +49,7 @@ pub struct ApiErrorResponse {
 impl ApiErrorResponse {
     /// Extract the most useful error message from the response.
     pub fn detail(&self) -> Option<String> {
-        self.message
-            .clone()
-            .or_else(|| self.error.clone())
+        self.message.clone().or_else(|| self.error.clone())
     }
 }
 

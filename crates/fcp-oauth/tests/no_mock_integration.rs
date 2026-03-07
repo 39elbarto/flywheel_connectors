@@ -8,9 +8,9 @@ use std::collections::{BTreeMap, HashMap};
 use std::time::Duration;
 
 use fcp_oauth::{
-    AuthorizationCallback, AuthStyle, GrantType, OAuth1Client, OAuth1Config, OAuth2Client,
-    OAuth2Config, OAuthError, OAuthProvider, OAuthTokens, Pkce, PkceMethod, ProviderEndpoints,
-    ResponseMode, TokenResponse, TokenStore, DEFAULT_REFRESH_THRESHOLD,
+    AuthStyle, AuthorizationCallback, DEFAULT_REFRESH_THRESHOLD, GrantType, OAuth1Client,
+    OAuth1Config, OAuth2Client, OAuth2Config, OAuthError, OAuthProvider, OAuthTokens, Pkce,
+    PkceMethod, ProviderEndpoints, ResponseMode, TokenResponse, TokenStore,
 };
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -59,7 +59,10 @@ fn oauth2_config_basic_construction() {
     );
     assert_eq!(config.client_id, "client-id");
     assert_eq!(config.client_secret, Some("client-secret".to_string()));
-    assert_eq!(config.authorization_url, "https://auth.example.com/authorize");
+    assert_eq!(
+        config.authorization_url,
+        "https://auth.example.com/authorize"
+    );
     assert_eq!(config.token_url, "https://auth.example.com/token");
     assert!(config.use_pkce); // default true
 }
@@ -89,14 +92,20 @@ fn oauth2_config_full_builder_chain() {
         .with_token_param("audience", "https://api.example.com")
         .with_timeout(Duration::from_secs(60));
 
-    assert_eq!(config.redirect_uri, Some("https://localhost:3000/callback".to_string()));
+    assert_eq!(
+        config.redirect_uri,
+        Some("https://localhost:3000/callback".to_string())
+    );
     assert_eq!(config.default_scopes, vec!["read", "write"]);
     assert!(config.use_pkce);
     assert_eq!(config.pkce_method, PkceMethod::S256);
     assert_eq!(config.response_mode, ResponseMode::Fragment);
     assert_eq!(config.auth_style, AuthStyle::Basic);
     assert_eq!(config.extra_auth_params["access_type"], "offline");
-    assert_eq!(config.extra_token_params["audience"], "https://api.example.com");
+    assert_eq!(
+        config.extra_token_params["audience"],
+        "https://api.example.com"
+    );
     assert_eq!(config.timeout, Duration::from_secs(60));
 }
 
@@ -106,9 +115,14 @@ fn oauth2_config_full_builder_chain() {
 
 #[test]
 fn oauth2_authorization_url_contains_required_params() {
-    let config = OAuth2Config::new("my-client", "secret", "https://auth.ex.com/authorize", "https://auth.ex.com/token")
-        .with_redirect_uri("https://localhost/cb")
-        .with_pkce(false);
+    let config = OAuth2Config::new(
+        "my-client",
+        "secret",
+        "https://auth.ex.com/authorize",
+        "https://auth.ex.com/token",
+    )
+    .with_redirect_uri("https://localhost/cb")
+    .with_pkce(false);
     let client = OAuth2Client::new(config).unwrap();
     let (url, state) = client.authorization_url(&["read", "write"]).unwrap();
 
@@ -122,10 +136,15 @@ fn oauth2_authorization_url_contains_required_params() {
 
 #[test]
 fn oauth2_authorization_url_with_pkce_includes_challenge() {
-    let config = OAuth2Config::new("id", "secret", "https://auth.ex.com/authorize", "https://auth.ex.com/token")
-        .with_redirect_uri("https://localhost/cb")
-        .with_pkce(true)
-        .with_pkce_method(PkceMethod::S256);
+    let config = OAuth2Config::new(
+        "id",
+        "secret",
+        "https://auth.ex.com/authorize",
+        "https://auth.ex.com/token",
+    )
+    .with_redirect_uri("https://localhost/cb")
+    .with_pkce(true)
+    .with_pkce_method(PkceMethod::S256);
     let client = OAuth2Client::new(config).unwrap();
     let (url, _state, pkce) = client.authorization_url_with_pkce(&["openid"]).unwrap();
 
@@ -137,11 +156,16 @@ fn oauth2_authorization_url_with_pkce_includes_challenge() {
 
 #[test]
 fn oauth2_authorization_url_with_extra_auth_params() {
-    let config = OAuth2Config::new("id", "s", "https://auth.ex.com/authorize", "https://auth.ex.com/token")
-        .with_redirect_uri("https://localhost/cb")
-        .with_pkce(false)
-        .with_auth_param("access_type", "offline")
-        .with_auth_param("prompt", "consent");
+    let config = OAuth2Config::new(
+        "id",
+        "s",
+        "https://auth.ex.com/authorize",
+        "https://auth.ex.com/token",
+    )
+    .with_redirect_uri("https://localhost/cb")
+    .with_pkce(false)
+    .with_auth_param("access_type", "offline")
+    .with_auth_param("prompt", "consent");
     let client = OAuth2Client::new(config).unwrap();
     let (url, _) = client.authorization_url(&[]).unwrap();
 
@@ -173,10 +197,8 @@ fn callback_from_query_extracts_code_and_state() {
 
 #[test]
 fn callback_from_url_extracts_query() {
-    let callback = AuthorizationCallback::from_url(
-        "https://localhost/cb?code=mycode&state=mystate",
-    )
-    .unwrap();
+    let callback =
+        AuthorizationCallback::from_url("https://localhost/cb?code=mycode&state=mystate").unwrap();
     assert_eq!(callback.code, Some("mycode".to_string()));
     assert_eq!(callback.state, Some("mystate".to_string()));
 }
@@ -197,10 +219,9 @@ fn callback_validate_fails_on_state_mismatch() {
 
 #[test]
 fn callback_validate_fails_on_error_response() {
-    let callback = AuthorizationCallback::from_query(
-        "error=access_denied&error_description=User+denied",
-    )
-    .unwrap();
+    let callback =
+        AuthorizationCallback::from_query("error=access_denied&error_description=User+denied")
+            .unwrap();
     let err = callback.validate("any").unwrap_err();
     assert!(matches!(err, OAuthError::AuthorizationError { .. }));
 }
@@ -246,8 +267,7 @@ fn pkce_uniqueness() {
 #[test]
 fn pkce_from_verifier_s256_deterministic() {
     let original = Pkce::new();
-    let reconstructed =
-        Pkce::from_verifier(original.verifier(), PkceMethod::S256).unwrap();
+    let reconstructed = Pkce::from_verifier(original.verifier(), PkceMethod::S256).unwrap();
     assert_eq!(reconstructed.challenge(), original.challenge());
     assert_eq!(reconstructed.verifier(), original.verifier());
 }
@@ -298,14 +318,29 @@ fn oauth1_config_construction() {
 
 #[test]
 fn oauth1_config_with_callback() {
-    let config = OAuth1Config::new("k", "s", "https://a.com/rt", "https://a.com/auth", "https://a.com/at")
-        .with_callback("https://localhost:3000/callback");
-    assert_eq!(config.callback_url, Some("https://localhost:3000/callback".to_string()));
+    let config = OAuth1Config::new(
+        "k",
+        "s",
+        "https://a.com/rt",
+        "https://a.com/auth",
+        "https://a.com/at",
+    )
+    .with_callback("https://localhost:3000/callback");
+    assert_eq!(
+        config.callback_url,
+        Some("https://localhost:3000/callback".to_string())
+    );
 }
 
 #[test]
 fn oauth1_client_authorization_url() {
-    let config = OAuth1Config::new("k", "s", "https://a.com/rt", "https://a.com/authorize", "https://a.com/at");
+    let config = OAuth1Config::new(
+        "k",
+        "s",
+        "https://a.com/rt",
+        "https://a.com/authorize",
+        "https://a.com/at",
+    );
     let client = OAuth1Client::new(config);
     let request_token = fcp_oauth::RequestToken {
         token: "req-token-123".to_string(),
@@ -319,7 +354,13 @@ fn oauth1_client_authorization_url() {
 
 #[test]
 fn oauth1_sign_request_produces_oauth_header() {
-    let config = OAuth1Config::new("consumer-key", "consumer-secret", "https://a.com/rt", "https://a.com/auth", "https://a.com/at");
+    let config = OAuth1Config::new(
+        "consumer-key",
+        "consumer-secret",
+        "https://a.com/rt",
+        "https://a.com/auth",
+        "https://a.com/at",
+    );
     let client = OAuth1Client::new(config);
     let tokens = fcp_oauth::OAuth1Tokens {
         token: "access-token".to_string(),
@@ -329,7 +370,12 @@ fn oauth1_sign_request_produces_oauth_header() {
     };
 
     let header = client
-        .sign_request("GET", "https://api.example.com/data", &tokens, &BTreeMap::new())
+        .sign_request(
+            "GET",
+            "https://api.example.com/data",
+            &tokens,
+            &BTreeMap::new(),
+        )
         .unwrap();
     assert!(header.starts_with("OAuth "));
     assert!(header.contains("oauth_consumer_key="));
@@ -345,7 +391,13 @@ fn oauth1_sign_request_produces_oauth_header() {
 fn oauth1_sign_request_signature_is_deterministic_for_same_nonce_and_timestamp() {
     // Two calls with different nonces will produce different signatures,
     // but the format should be consistent
-    let config = OAuth1Config::new("k", "s", "https://a.com/rt", "https://a.com/auth", "https://a.com/at");
+    let config = OAuth1Config::new(
+        "k",
+        "s",
+        "https://a.com/rt",
+        "https://a.com/auth",
+        "https://a.com/at",
+    );
     let client = OAuth1Client::new(config);
     let tokens = fcp_oauth::OAuth1Tokens {
         token: "t".to_string(),
@@ -354,8 +406,12 @@ fn oauth1_sign_request_signature_is_deterministic_for_same_nonce_and_timestamp()
         screen_name: None,
     };
 
-    let h1 = client.sign_request("GET", "https://api.ex.com/v1", &tokens, &BTreeMap::new()).unwrap();
-    let h2 = client.sign_request("GET", "https://api.ex.com/v1", &tokens, &BTreeMap::new()).unwrap();
+    let h1 = client
+        .sign_request("GET", "https://api.ex.com/v1", &tokens, &BTreeMap::new())
+        .unwrap();
+    let h2 = client
+        .sign_request("GET", "https://api.ex.com/v1", &tokens, &BTreeMap::new())
+        .unwrap();
     // Different nonces → different signatures, but both valid OAuth headers
     assert!(h1.starts_with("OAuth "));
     assert!(h2.starts_with("OAuth "));
@@ -604,7 +660,9 @@ fn token_store_update_existing() {
 #[test]
 fn token_store_update_nonexistent_fails() {
     let store = TokenStore::new();
-    let err = store.update("missing", make_tokens("t", Some(3600))).unwrap_err();
+    let err = store
+        .update("missing", make_tokens("t", Some(3600)))
+        .unwrap_err();
     assert!(matches!(err, OAuthError::TokenNotFound(_)));
 }
 
@@ -672,10 +730,7 @@ fn all_oauth2_providers_produce_valid_configs() {
             "{provider:?} should support OAuth 2.0"
         );
         let config = provider.oauth2_config("test-id", "test-secret");
-        assert!(
-            config.is_some(),
-            "{provider:?} should produce OAuth2Config"
-        );
+        assert!(config.is_some(), "{provider:?} should produce OAuth2Config");
         let cfg = config.unwrap();
         assert!(!cfg.authorization_url.is_empty());
         assert!(!cfg.token_url.is_empty());
@@ -711,12 +766,21 @@ fn custom_provider_endpoints() {
     .with_revocation_url("https://custom.example.com/revoke")
     .with_userinfo_url("https://custom.example.com/userinfo");
 
-    assert_eq!(endpoints.revocation_url, Some("https://custom.example.com/revoke".to_string()));
-    assert_eq!(endpoints.userinfo_url, Some("https://custom.example.com/userinfo".to_string()));
+    assert_eq!(
+        endpoints.revocation_url,
+        Some("https://custom.example.com/revoke".to_string())
+    );
+    assert_eq!(
+        endpoints.userinfo_url,
+        Some("https://custom.example.com/userinfo".to_string())
+    );
 
     let config = endpoints.to_oauth2_config("my-id", "my-secret");
     assert_eq!(config.client_id, "my-id");
-    assert_eq!(config.authorization_url, "https://custom.example.com/authorize");
+    assert_eq!(
+        config.authorization_url,
+        "https://custom.example.com/authorize"
+    );
     assert_eq!(config.token_url, "https://custom.example.com/token");
 }
 
@@ -783,7 +847,9 @@ fn google_provider_oauth2_with_pkce_flow() {
 
     assert!(config.use_pkce);
     let client = OAuth2Client::new(config).unwrap();
-    let (url, state, pkce) = client.authorization_url_with_pkce(&["openid", "email"]).unwrap();
+    let (url, state, pkce) = client
+        .authorization_url_with_pkce(&["openid", "email"])
+        .unwrap();
 
     assert!(url.contains("accounts.google.com"));
     assert!(url.contains("code_challenge="));

@@ -155,11 +155,11 @@ impl BoxClient {
         let mut req = self
             .add_auth(self.client.get(&url))
             .header("Accept", "application/json");
-            
+
         if let Some(q) = query {
             req = req.query(q);
         }
-            
+
         let resp = req.send().await?;
         self.handle_response(resp).await
     }
@@ -270,7 +270,8 @@ impl BoxClient {
 
     /// List collaborations for a file.
     pub async fn list_file_collaborations(&self, file_id: &str) -> BoxResult<serde_json::Value> {
-        self.get(&format!("/files/{file_id}/collaborations"), None).await
+        self.get(&format!("/files/{file_id}/collaborations"), None)
+            .await
     }
 }
 
@@ -428,12 +429,8 @@ mod tests {
 
     #[test]
     fn client_debug_does_not_leak_token() {
-        let client = BoxClient::new(
-            BoxAuth::BearerToken("secret-box-token".into()),
-            None,
-            None,
-        )
-        .unwrap();
+        let client =
+            BoxClient::new(BoxAuth::BearerToken("secret-box-token".into()), None, None).unwrap();
         let dbg = format!("{client:?}");
         assert!(!dbg.contains("secret-box-token"));
     }

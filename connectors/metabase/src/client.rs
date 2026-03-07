@@ -39,9 +39,7 @@ impl MetabaseAuth {
 impl fmt::Debug for MetabaseAuth {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::SessionToken(_) => {
-                f.debug_tuple("SessionToken").field(&"<redacted>").finish()
-            }
+            Self::SessionToken(_) => f.debug_tuple("SessionToken").field(&"<redacted>").finish(),
             Self::CredentialId(id) => f.debug_tuple("CredentialId").field(id).finish(),
         }
     }
@@ -84,9 +82,7 @@ impl MetabaseClient {
     fn add_auth(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
         match &self.auth {
             MetabaseAuth::SessionToken(token) => req.header("X-Metabase-Session", token),
-            MetabaseAuth::CredentialId(id) => {
-                req.header("X-FCP-Credential-Id", id.to_string())
-            }
+            MetabaseAuth::CredentialId(id) => req.header("X-FCP-Credential-Id", id.to_string()),
         }
     }
 
@@ -135,7 +131,10 @@ impl MetabaseClient {
             429 => Err(MetabaseError::RateLimited {
                 retry_after_ms: retry_after.unwrap_or(60) * 1000,
             }),
-            code => Err(MetabaseError::Api { status_code: code, message: detail }),
+            code => Err(MetabaseError::Api {
+                status_code: code,
+                message: detail,
+            }),
         }
     }
 
@@ -345,11 +344,7 @@ mod tests {
 
     #[test]
     fn client_new_empty_url() {
-        let client = MetabaseClient::new(
-            MetabaseAuth::SessionToken("tok".into()),
-            "",
-        )
-        .unwrap();
+        let client = MetabaseClient::new(MetabaseAuth::SessionToken("tok".into()), "").unwrap();
         assert_eq!(client.base_url, "");
     }
 }

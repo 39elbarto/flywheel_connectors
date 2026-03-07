@@ -71,7 +71,10 @@ impl GitLabError {
             Self::Json(e) => FcpError::Internal {
                 message: format!("JSON error: {e}"),
             },
-            Self::Api { status_code, message } => FcpError::External {
+            Self::Api {
+                status_code,
+                message,
+            } => FcpError::External {
                 service: "gitlab".into(),
                 message: message.clone(),
                 status_code: Some(*status_code),
@@ -118,22 +121,45 @@ mod tests {
 
     #[test]
     fn rate_limited_is_retryable() {
-        assert!(GitLabError::RateLimited { retry_after_ms: 5000 }.is_retryable());
+        assert!(
+            GitLabError::RateLimited {
+                retry_after_ms: 5000
+            }
+            .is_retryable()
+        );
     }
 
     #[test]
     fn api_500_is_retryable() {
-        assert!(GitLabError::Api { status_code: 500, message: "err".into() }.is_retryable());
+        assert!(
+            GitLabError::Api {
+                status_code: 500,
+                message: "err".into()
+            }
+            .is_retryable()
+        );
     }
 
     #[test]
     fn api_502_is_retryable() {
-        assert!(GitLabError::Api { status_code: 502, message: "bad gateway".into() }.is_retryable());
+        assert!(
+            GitLabError::Api {
+                status_code: 502,
+                message: "bad gateway".into()
+            }
+            .is_retryable()
+        );
     }
 
     #[test]
     fn api_429_is_retryable() {
-        assert!(GitLabError::Api { status_code: 429, message: "too many".into() }.is_retryable());
+        assert!(
+            GitLabError::Api {
+                status_code: 429,
+                message: "too many".into()
+            }
+            .is_retryable()
+        );
     }
 
     #[test]
@@ -148,24 +174,43 @@ mod tests {
 
     #[test]
     fn not_found_not_retryable() {
-        assert!(!GitLabError::NotFound { resource: "project".into() }.is_retryable());
+        assert!(
+            !GitLabError::NotFound {
+                resource: "project".into()
+            }
+            .is_retryable()
+        );
     }
 
     #[test]
     fn api_400_not_retryable() {
-        assert!(!GitLabError::Api { status_code: 400, message: "bad".into() }.is_retryable());
+        assert!(
+            !GitLabError::Api {
+                status_code: 400,
+                message: "bad".into()
+            }
+            .is_retryable()
+        );
     }
 
     #[test]
     fn api_404_not_retryable() {
-        assert!(!GitLabError::Api { status_code: 404, message: "not found".into() }.is_retryable());
+        assert!(
+            !GitLabError::Api {
+                status_code: 404,
+                message: "not found".into()
+            }
+            .is_retryable()
+        );
     }
 
     // ── retry_after ──────────────────────────────────────────────────
 
     #[test]
     fn retry_after_for_rate_limited() {
-        let err = GitLabError::RateLimited { retry_after_ms: 30_000 };
+        let err = GitLabError::RateLimited {
+            retry_after_ms: 30_000,
+        };
         assert_eq!(err.retry_after(), Some(Duration::from_secs(30)));
     }
 
@@ -181,12 +226,25 @@ mod tests {
 
     #[test]
     fn retry_after_none_for_api_error() {
-        assert_eq!(GitLabError::Api { status_code: 500, message: "err".into() }.retry_after(), None);
+        assert_eq!(
+            GitLabError::Api {
+                status_code: 500,
+                message: "err".into()
+            }
+            .retry_after(),
+            None
+        );
     }
 
     #[test]
     fn retry_after_none_for_not_found() {
-        assert_eq!(GitLabError::NotFound { resource: "x".into() }.retry_after(), None);
+        assert_eq!(
+            GitLabError::NotFound {
+                resource: "x".into()
+            }
+            .retry_after(),
+            None
+        );
     }
 
     // ── to_fcp_error ─────────────────────────────────────────────────
@@ -194,7 +252,12 @@ mod tests {
     #[test]
     fn unauthorized_to_fcp_error() {
         match GitLabError::Unauthorized.to_fcp_error() {
-            FcpError::External { service, status_code, retryable, .. } => {
+            FcpError::External {
+                service,
+                status_code,
+                retryable,
+                ..
+            } => {
                 assert_eq!(service, "gitlab");
                 assert_eq!(status_code, Some(401));
                 assert!(!retryable);
@@ -206,7 +269,12 @@ mod tests {
     #[test]
     fn forbidden_to_fcp_error() {
         match GitLabError::Forbidden.to_fcp_error() {
-            FcpError::External { service, status_code, retryable, .. } => {
+            FcpError::External {
+                service,
+                status_code,
+                retryable,
+                ..
+            } => {
                 assert_eq!(service, "gitlab");
                 assert_eq!(status_code, Some(403));
                 assert!(!retryable);
@@ -217,8 +285,18 @@ mod tests {
 
     #[test]
     fn not_found_to_fcp_error() {
-        match (GitLabError::NotFound { resource: "issue".into() }).to_fcp_error() {
-            FcpError::External { service, status_code, message, retryable, .. } => {
+        match (GitLabError::NotFound {
+            resource: "issue".into(),
+        })
+        .to_fcp_error()
+        {
+            FcpError::External {
+                service,
+                status_code,
+                message,
+                retryable,
+                ..
+            } => {
                 assert_eq!(service, "gitlab");
                 assert_eq!(status_code, Some(404));
                 assert!(message.contains("issue"));
@@ -230,8 +308,17 @@ mod tests {
 
     #[test]
     fn rate_limited_to_fcp_error() {
-        match (GitLabError::RateLimited { retry_after_ms: 60_000 }).to_fcp_error() {
-            FcpError::External { status_code, retryable, retry_after, .. } => {
+        match (GitLabError::RateLimited {
+            retry_after_ms: 60_000,
+        })
+        .to_fcp_error()
+        {
+            FcpError::External {
+                status_code,
+                retryable,
+                retry_after,
+                ..
+            } => {
                 assert_eq!(status_code, Some(429));
                 assert!(retryable);
                 assert_eq!(retry_after, Some(Duration::from_secs(60)));
@@ -242,8 +329,19 @@ mod tests {
 
     #[test]
     fn api_error_to_fcp_error() {
-        match (GitLabError::Api { status_code: 503, message: "unavailable".into() }).to_fcp_error() {
-            FcpError::External { service, status_code, retryable, message, .. } => {
+        match (GitLabError::Api {
+            status_code: 503,
+            message: "unavailable".into(),
+        })
+        .to_fcp_error()
+        {
+            FcpError::External {
+                service,
+                status_code,
+                retryable,
+                message,
+                ..
+            } => {
                 assert_eq!(service, "gitlab");
                 assert_eq!(status_code, Some(503));
                 assert!(retryable);
@@ -264,8 +362,17 @@ mod tests {
 
     #[test]
     fn api_error_non_retryable_to_fcp_error() {
-        match (GitLabError::Api { status_code: 400, message: "bad".into() }).to_fcp_error() {
-            FcpError::External { status_code, retryable, .. } => {
+        match (GitLabError::Api {
+            status_code: 400,
+            message: "bad".into(),
+        })
+        .to_fcp_error()
+        {
+            FcpError::External {
+                status_code,
+                retryable,
+                ..
+            } => {
                 assert_eq!(status_code, Some(400));
                 assert!(!retryable);
             }
@@ -277,27 +384,52 @@ mod tests {
 
     #[test]
     fn error_display_unauthorized() {
-        assert_eq!(GitLabError::Unauthorized.to_string(), "Authentication failed: invalid or expired token");
+        assert_eq!(
+            GitLabError::Unauthorized.to_string(),
+            "Authentication failed: invalid or expired token"
+        );
     }
 
     #[test]
     fn error_display_forbidden() {
-        assert_eq!(GitLabError::Forbidden.to_string(), "Forbidden: insufficient permissions");
+        assert_eq!(
+            GitLabError::Forbidden.to_string(),
+            "Forbidden: insufficient permissions"
+        );
     }
 
     #[test]
     fn error_display_not_found() {
-        assert_eq!(GitLabError::NotFound { resource: "project".into() }.to_string(), "Not found: project");
+        assert_eq!(
+            GitLabError::NotFound {
+                resource: "project".into()
+            }
+            .to_string(),
+            "Not found: project"
+        );
     }
 
     #[test]
     fn error_display_rate_limited() {
-        assert_eq!(GitLabError::RateLimited { retry_after_ms: 1000 }.to_string(), "Rate limited, retry after 1000ms");
+        assert_eq!(
+            GitLabError::RateLimited {
+                retry_after_ms: 1000
+            }
+            .to_string(),
+            "Rate limited, retry after 1000ms"
+        );
     }
 
     #[test]
     fn error_display_api() {
-        assert_eq!(GitLabError::Api { status_code: 500, message: "Internal".into() }.to_string(), "GitLab API error (500): Internal");
+        assert_eq!(
+            GitLabError::Api {
+                status_code: 500,
+                message: "Internal".into()
+            }
+            .to_string(),
+            "GitLab API error (500): Internal"
+        );
     }
 
     // ── Display additional ──────────────────────────────────────────
@@ -312,14 +444,19 @@ mod tests {
 
     #[test]
     fn error_display_api_empty_message() {
-        let err = GitLabError::Api { status_code: 400, message: String::new() };
+        let err = GitLabError::Api {
+            status_code: 400,
+            message: String::new(),
+        };
         let s = err.to_string();
         assert!(s.contains("400"));
     }
 
     #[test]
     fn error_display_not_found_empty_resource() {
-        let err = GitLabError::NotFound { resource: String::new() };
+        let err = GitLabError::NotFound {
+            resource: String::new(),
+        };
         assert_eq!(err.to_string(), "Not found: ");
     }
 
@@ -333,32 +470,68 @@ mod tests {
 
     #[test]
     fn api_503_is_retryable() {
-        assert!(GitLabError::Api { status_code: 503, message: "unavailable".into() }.is_retryable());
+        assert!(
+            GitLabError::Api {
+                status_code: 503,
+                message: "unavailable".into()
+            }
+            .is_retryable()
+        );
     }
 
     #[test]
     fn api_504_is_retryable() {
-        assert!(GitLabError::Api { status_code: 504, message: "timeout".into() }.is_retryable());
+        assert!(
+            GitLabError::Api {
+                status_code: 504,
+                message: "timeout".into()
+            }
+            .is_retryable()
+        );
     }
 
     #[test]
     fn api_599_is_retryable() {
-        assert!(GitLabError::Api { status_code: 599, message: "unknown".into() }.is_retryable());
+        assert!(
+            GitLabError::Api {
+                status_code: 599,
+                message: "unknown".into()
+            }
+            .is_retryable()
+        );
     }
 
     #[test]
     fn api_422_not_retryable() {
-        assert!(!GitLabError::Api { status_code: 422, message: "unprocessable".into() }.is_retryable());
+        assert!(
+            !GitLabError::Api {
+                status_code: 422,
+                message: "unprocessable".into()
+            }
+            .is_retryable()
+        );
     }
 
     #[test]
     fn api_401_not_retryable() {
-        assert!(!GitLabError::Api { status_code: 401, message: "unauth".into() }.is_retryable());
+        assert!(
+            !GitLabError::Api {
+                status_code: 401,
+                message: "unauth".into()
+            }
+            .is_retryable()
+        );
     }
 
     #[test]
     fn api_403_not_retryable() {
-        assert!(!GitLabError::Api { status_code: 403, message: "forbidden".into() }.is_retryable());
+        assert!(
+            !GitLabError::Api {
+                status_code: 403,
+                message: "forbidden".into()
+            }
+            .is_retryable()
+        );
     }
 
     #[test]
@@ -377,7 +550,9 @@ mod tests {
 
     #[test]
     fn retry_after_rate_limited_large() {
-        let err = GitLabError::RateLimited { retry_after_ms: 3_600_000 };
+        let err = GitLabError::RateLimited {
+            retry_after_ms: 3_600_000,
+        };
         assert_eq!(err.retry_after(), Some(Duration::from_secs(3600)));
     }
 
@@ -391,8 +566,18 @@ mod tests {
 
     #[test]
     fn fcp_error_rate_limited_retry_after_ms_in_message() {
-        match (GitLabError::RateLimited { retry_after_ms: 5000 }).to_fcp_error() {
-            FcpError::External { message, status_code, retryable, retry_after, .. } => {
+        match (GitLabError::RateLimited {
+            retry_after_ms: 5000,
+        })
+        .to_fcp_error()
+        {
+            FcpError::External {
+                message,
+                status_code,
+                retryable,
+                retry_after,
+                ..
+            } => {
                 assert!(message.contains("5000"));
                 assert_eq!(status_code, Some(429));
                 assert!(retryable);
@@ -420,7 +605,11 @@ mod tests {
 
     #[test]
     fn fcp_error_not_found_message_contains_resource() {
-        match (GitLabError::NotFound { resource: "merge_request/42".into() }).to_fcp_error() {
+        match (GitLabError::NotFound {
+            resource: "merge_request/42".into(),
+        })
+        .to_fcp_error()
+        {
             FcpError::External { message, .. } => assert!(message.contains("merge_request/42")),
             other => panic!("expected External, got {other:?}"),
         }
@@ -428,8 +617,17 @@ mod tests {
 
     #[test]
     fn fcp_error_api_retryable_500_range() {
-        match (GitLabError::Api { status_code: 502, message: "bad gw".into() }).to_fcp_error() {
-            FcpError::External { retryable, retry_after, .. } => {
+        match (GitLabError::Api {
+            status_code: 502,
+            message: "bad gw".into(),
+        })
+        .to_fcp_error()
+        {
+            FcpError::External {
+                retryable,
+                retry_after,
+                ..
+            } => {
                 assert!(retryable);
                 assert!(retry_after.is_none());
             }
@@ -439,7 +637,12 @@ mod tests {
 
     #[test]
     fn fcp_error_api_non_retryable_400_range() {
-        match (GitLabError::Api { status_code: 422, message: "unprocessable".into() }).to_fcp_error() {
+        match (GitLabError::Api {
+            status_code: 422,
+            message: "unprocessable".into(),
+        })
+        .to_fcp_error()
+        {
             FcpError::External { retryable, .. } => assert!(!retryable),
             other => panic!("expected External, got {other:?}"),
         }
@@ -448,11 +651,18 @@ mod tests {
     #[test]
     fn fcp_error_all_variants_have_gitlab_service() {
         let variants: Vec<GitLabError> = vec![
-            GitLabError::Api { status_code: 400, message: "bad".into() },
-            GitLabError::RateLimited { retry_after_ms: 1000 },
+            GitLabError::Api {
+                status_code: 400,
+                message: "bad".into(),
+            },
+            GitLabError::RateLimited {
+                retry_after_ms: 1000,
+            },
             GitLabError::Unauthorized,
             GitLabError::Forbidden,
-            GitLabError::NotFound { resource: "x".into() },
+            GitLabError::NotFound {
+                resource: "x".into(),
+            },
         ];
         for err in variants {
             match err.to_fcp_error() {
@@ -479,21 +689,37 @@ mod tests {
 
     #[test]
     fn error_debug_api() {
-        let dbg = format!("{:?}", GitLabError::Api { status_code: 500, message: "err".into() });
+        let dbg = format!(
+            "{:?}",
+            GitLabError::Api {
+                status_code: 500,
+                message: "err".into()
+            }
+        );
         assert!(dbg.contains("Api"));
         assert!(dbg.contains("500"));
     }
 
     #[test]
     fn error_debug_rate_limited() {
-        let dbg = format!("{:?}", GitLabError::RateLimited { retry_after_ms: 10_000 });
+        let dbg = format!(
+            "{:?}",
+            GitLabError::RateLimited {
+                retry_after_ms: 10_000
+            }
+        );
         assert!(dbg.contains("RateLimited"));
         assert!(dbg.contains("10000"));
     }
 
     #[test]
     fn error_debug_not_found() {
-        let dbg = format!("{:?}", GitLabError::NotFound { resource: "proj/1".into() });
+        let dbg = format!(
+            "{:?}",
+            GitLabError::NotFound {
+                resource: "proj/1".into()
+            }
+        );
         assert!(dbg.contains("NotFound"));
         assert!(dbg.contains("proj/1"));
     }
@@ -518,26 +744,36 @@ mod tests {
 
     #[test]
     fn rate_limited_max_u64() {
-        let err = GitLabError::RateLimited { retry_after_ms: u64::MAX };
+        let err = GitLabError::RateLimited {
+            retry_after_ms: u64::MAX,
+        };
         assert!(err.is_retryable());
         assert!(err.retry_after().is_some());
     }
 
     #[test]
     fn api_error_status_code_zero() {
-        let err = GitLabError::Api { status_code: 0, message: "weird".into() };
+        let err = GitLabError::Api {
+            status_code: 0,
+            message: "weird".into(),
+        };
         assert!(!err.is_retryable());
     }
 
     #[test]
     fn api_error_status_code_max() {
-        let err = GitLabError::Api { status_code: u16::MAX, message: "overflow".into() };
+        let err = GitLabError::Api {
+            status_code: u16::MAX,
+            message: "overflow".into(),
+        };
         assert!(!err.is_retryable());
     }
 
     #[test]
     fn not_found_unicode_resource() {
-        let err = GitLabError::NotFound { resource: "project/\u{1F680}".into() };
+        let err = GitLabError::NotFound {
+            resource: "project/\u{1F680}".into(),
+        };
         let s = err.to_string();
         assert!(s.contains('\u{1F680}'));
         match err.to_fcp_error() {
@@ -549,7 +785,10 @@ mod tests {
     #[test]
     fn api_error_long_message() {
         let long = "x".repeat(10_000);
-        let err = GitLabError::Api { status_code: 500, message: long.clone() };
+        let err = GitLabError::Api {
+            status_code: 500,
+            message: long.clone(),
+        };
         assert!(err.to_string().contains(&long));
     }
 }

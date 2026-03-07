@@ -44,7 +44,9 @@ async fn configure_missing_auth_fails() {
 #[fcp_async_core::runtime::test]
 async fn handshake_before_configure_fails() {
     let mut connector = GrafanaConnector::new();
-    let result = connector.handle_handshake(json!({"session_id": "s1"})).await;
+    let result = connector
+        .handle_handshake(json!({"session_id": "s1"}))
+        .await;
     assert!(result.is_err());
 }
 
@@ -55,7 +57,9 @@ async fn handshake_after_configure_succeeds() {
         .handle_configure(json!({"auth_token": "tok"}))
         .await
         .unwrap();
-    let result = connector.handle_handshake(json!({"session_id": "s1"})).await;
+    let result = connector
+        .handle_handshake(json!({"session_id": "s1"}))
+        .await;
     assert!(result.is_ok());
     let val = result.unwrap();
     assert_eq!(val["connector_id"], "fcp.grafana");
@@ -257,7 +261,9 @@ async fn invoke_dashboards_delete() {
     let server = MockServer::start().await;
     Mock::given(method("DELETE"))
         .and(path("/dashboards/uid/abc123"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"message": "Dashboard deleted"})))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"message": "Dashboard deleted"})),
+        )
         .mount(&server)
         .await;
 
@@ -466,7 +472,9 @@ async fn invoke_not_found_error() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/dashboards/uid/nonexistent"))
-        .respond_with(ResponseTemplate::new(404).set_body_json(json!({"message": "Dashboard not found"})))
+        .respond_with(
+            ResponseTemplate::new(404).set_body_json(json!({"message": "Dashboard not found"})),
+        )
         .mount(&server)
         .await;
 
@@ -619,7 +627,10 @@ async fn handshake_returns_capabilities() {
         .unwrap();
     let caps = result["capabilities"].as_array().unwrap();
     assert!(!caps.is_empty());
-    assert!(caps.iter().any(|c| c.as_str() == Some("grafana.dashboards.read")));
+    assert!(
+        caps.iter()
+            .any(|c| c.as_str() == Some("grafana.dashboards.read"))
+    );
 }
 
 // -- Simulate --
@@ -653,9 +664,7 @@ async fn simulate_all_known_operations() {
 async fn invoke_missing_operation_id_fails() {
     let server = MockServer::start().await;
     let connector = configured_connector(&server.uri()).await;
-    let result = connector
-        .handle_invoke(json!({"input": {}}))
-        .await;
+    let result = connector.handle_invoke(json!({"input": {}})).await;
     assert!(result.is_err());
 }
 
@@ -666,10 +675,7 @@ async fn invoke_api_403_forbidden() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/datasources"))
-        .respond_with(
-            ResponseTemplate::new(403)
-                .set_body_json(json!({"message": "Forbidden"})),
-        )
+        .respond_with(ResponseTemplate::new(403).set_body_json(json!({"message": "Forbidden"})))
         .mount(&server)
         .await;
 
@@ -689,8 +695,7 @@ async fn invoke_api_500_server_error() {
     Mock::given(method("GET"))
         .and(path_regex("/search.*"))
         .respond_with(
-            ResponseTemplate::new(500)
-                .set_body_json(json!({"message": "Internal Server Error"})),
+            ResponseTemplate::new(500).set_body_json(json!({"message": "Internal Server Error"})),
         )
         .mount(&server)
         .await;
@@ -732,9 +737,7 @@ async fn doctor_configured_not_handshaken_is_degraded() {
     let result = connector.handle_doctor().await.unwrap();
     // Client and config are set, but handshake not done → non-critical failure → degraded
     let checks = result["checks"].as_array().unwrap();
-    let handshake_check = checks
-        .iter()
-        .find(|c| c["name"] == "handshake");
+    let handshake_check = checks.iter().find(|c| c["name"] == "handshake");
     if let Some(hc) = handshake_check {
         assert_eq!(hc["passed"], false);
     }

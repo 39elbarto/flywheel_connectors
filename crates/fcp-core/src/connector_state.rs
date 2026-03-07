@@ -21,16 +21,16 @@
 //! - Fork detection MUST pause connector execution and require resolution
 //! - Snapshots enable compaction of older state objects
 
-use fcp_cbor::{to_canonical_cbor, SerializationError};
+use fcp_cbor::{SerializationError, to_canonical_cbor};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use thiserror::Error;
 use uuid::Uuid;
 
 use crate::{
-    validate_lease, validate_lease_handoff, ComputationCheckpoint, ConnectorId, InstanceId, Lease,
-    LeaseHandoff, LeaseId, LeasePurpose, LeaseTransferValidationError, LeaseValidationError,
-    MigrationCapabilityContext, ObjectHeader, ObjectId, TailscaleNodeId, ZoneId,
+    ComputationCheckpoint, ConnectorId, InstanceId, Lease, LeaseHandoff, LeaseId, LeasePurpose,
+    LeaseTransferValidationError, LeaseValidationError, MigrationCapabilityContext, ObjectHeader,
+    ObjectId, TailscaleNodeId, ZoneId, validate_lease, validate_lease_handoff,
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -849,7 +849,7 @@ impl MigratableComputation {
                 return Err(ComputationMigrationError::InvalidStateTransition {
                     state: self.state.clone(),
                     action: "resume",
-                })
+                });
             }
         }
 
@@ -1956,10 +1956,12 @@ mod tests {
         let outcome = detector.resolve_manual(fork, invalid_head, 1_700_000_001);
 
         assert!(!outcome.resolved);
-        assert!(outcome
-            .failure_reason
-            .unwrap()
-            .contains("not one of the fork branches"));
+        assert!(
+            outcome
+                .failure_reason
+                .unwrap()
+                .contains("not one of the fork branches")
+        );
     }
 
     #[test]

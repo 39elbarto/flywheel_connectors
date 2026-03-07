@@ -60,10 +60,7 @@ fn run_fcp_loop() -> Result<()> {
     Ok(())
 }
 
-async fn handle_message(
-    connector: &mut AnnasArchiveConnector,
-    message: &str,
-) -> serde_json::Value {
+async fn handle_message(connector: &mut AnnasArchiveConnector, message: &str) -> serde_json::Value {
     let request: serde_json::Value = match serde_json::from_str(message) {
         Ok(v) => v,
         Err(e) => {

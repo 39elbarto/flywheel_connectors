@@ -114,7 +114,10 @@ async fn lifecycle_handshake_returns_connector_info() {
     c.handle_configure(json!({ "api_token": "test_token", "base_url": server.uri() }))
         .await
         .unwrap();
-    let hs = c.handle_handshake(json!({"session_id": "s1"})).await.unwrap();
+    let hs = c
+        .handle_handshake(json!({"session_id": "s1"}))
+        .await
+        .unwrap();
     assert_eq!(hs["connector_id"], "fcp.segment");
     assert_eq!(hs["protocol_version"], "2.0");
 }
@@ -402,8 +405,9 @@ async fn error_401() {
     Mock::given(method("GET"))
         .and(path("/sources"))
         .respond_with(
-            ResponseTemplate::new(401)
-                .set_body_json(json!({"error": {"message": "Unauthorized", "code": "AUTH_FAILED"}})),
+            ResponseTemplate::new(401).set_body_json(
+                json!({"error": {"message": "Unauthorized", "code": "AUTH_FAILED"}}),
+            ),
         )
         .mount(&server)
         .await;
@@ -448,8 +452,9 @@ async fn error_404() {
     Mock::given(method("GET"))
         .and(path("/sources/missing_src/destinations"))
         .respond_with(
-            ResponseTemplate::new(404)
-                .set_body_json(json!({"error": {"message": "Source not found", "code": "NOT_FOUND"}})),
+            ResponseTemplate::new(404).set_body_json(
+                json!({"error": {"message": "Source not found", "code": "NOT_FOUND"}}),
+            ),
         )
         .mount(&server)
         .await;
@@ -472,7 +477,9 @@ async fn error_429() {
         .and(path("/sources"))
         .respond_with(
             ResponseTemplate::new(429)
-                .set_body_json(json!({"error": {"message": "Rate limit exceeded", "code": "RATE_LIMIT"}}))
+                .set_body_json(
+                    json!({"error": {"message": "Rate limit exceeded", "code": "RATE_LIMIT"}}),
+                )
                 .insert_header("retry-after", "60"),
         )
         .mount(&server)

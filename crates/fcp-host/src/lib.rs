@@ -17,8 +17,10 @@ mod budget;
 mod discovery;
 mod doctor;
 mod error;
+mod resilience;
 
 pub use budget::*;
 pub use discovery::*;
 pub use doctor::*;
 pub use error::*;
+pub use resilience::*;

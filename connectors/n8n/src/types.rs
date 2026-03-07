@@ -140,7 +140,10 @@ mod tests {
             active: Some(true),
             created_at: None,
             updated_at: None,
-            tags: Some(vec![Tag { id: Some("t1".into()), name: Some("dev".into()) }]),
+            tags: Some(vec![Tag {
+                id: Some("t1".into()),
+                name: Some("dev".into()),
+            }]),
         };
         let v = serde_json::to_value(&w).unwrap();
         assert_eq!(v["id"], "w1");
@@ -366,7 +369,10 @@ mod tests {
             active: Some(true),
             created_at: None,
             updated_at: None,
-            tags: Some(vec![Tag { id: Some("t1".into()), name: Some("dev".into()) }]),
+            tags: Some(vec![Tag {
+                id: Some("t1".into()),
+                name: Some("dev".into()),
+            }]),
         };
         let cloned = Workflow::clone(&w);
         assert_eq!(cloned.id, "w1");
@@ -391,7 +397,10 @@ mod tests {
 
     #[test]
     fn tag_clone() {
-        let t = Tag { id: Some("t1".into()), name: Some("prod".into()) };
+        let t = Tag {
+            id: Some("t1".into()),
+            name: Some("prod".into()),
+        };
         let cloned = Tag::clone(&t);
         assert_eq!(cloned.id, Some("t1".into()));
         assert_eq!(cloned.name, Some("prod".into()));
@@ -399,7 +408,10 @@ mod tests {
 
     #[test]
     fn tag_debug() {
-        let t = Tag { id: Some("t1".into()), name: Some("dev".into()) };
+        let t = Tag {
+            id: Some("t1".into()),
+            name: Some("dev".into()),
+        };
         let dbg = format!("{t:?}");
         assert!(dbg.contains("t1"));
         assert!(dbg.contains("dev"));

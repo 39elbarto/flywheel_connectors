@@ -29,8 +29,14 @@ fn check_status_serde_roundtrip() {
 
 #[test]
 fn check_status_snake_case_serialization() {
-    assert_eq!(serde_json::to_string(&CheckStatus::Pass).unwrap(), "\"pass\"");
-    assert_eq!(serde_json::to_string(&CheckStatus::Fail).unwrap(), "\"fail\"");
+    assert_eq!(
+        serde_json::to_string(&CheckStatus::Pass).unwrap(),
+        "\"pass\""
+    );
+    assert_eq!(
+        serde_json::to_string(&CheckStatus::Fail).unwrap(),
+        "\"fail\""
+    );
     assert_eq!(
         serde_json::to_string(&CheckStatus::Skipped).unwrap(),
         "\"skipped\""
@@ -310,10 +316,7 @@ fn forensics_missing_schema_version() {
     let result = schemas::validate_asupersync_forensics_entry(&entry, None);
     match result {
         Err(ForensicsValidationError::RuleViolation { diagnostic, .. }) => {
-            assert_eq!(
-                diagnostic.rule_id,
-                "asupersync.forensics.v1.schema_version"
-            );
+            assert_eq!(diagnostic.rule_id, "asupersync.forensics.v1.schema_version");
             assert_eq!(diagnostic.field, "schema_version");
         }
         other => panic!("expected RuleViolation, got {other:?}"),
@@ -327,10 +330,7 @@ fn forensics_wrong_schema_version() {
     let result = schemas::validate_asupersync_forensics_entry(&entry, None);
     match result {
         Err(ForensicsValidationError::RuleViolation { diagnostic, .. }) => {
-            assert_eq!(
-                diagnostic.rule_id,
-                "asupersync.forensics.v1.schema_version"
-            );
+            assert_eq!(diagnostic.rule_id, "asupersync.forensics.v1.schema_version");
             assert!(diagnostic.message.contains("wrong/v2"));
         }
         other => panic!("expected RuleViolation, got {other:?}"),
@@ -370,10 +370,7 @@ fn forensics_not_object_fails() {
     let result = schemas::validate_asupersync_forensics_entry(&json!([1, 2, 3]), None);
     match result {
         Err(ForensicsValidationError::RuleViolation { diagnostic, .. }) => {
-            assert_eq!(
-                diagnostic.rule_id,
-                "asupersync.forensics.v1.record.object"
-            );
+            assert_eq!(diagnostic.rule_id, "asupersync.forensics.v1.record.object");
         }
         other => panic!("expected RuleViolation, got {other:?}"),
     }
@@ -620,16 +617,17 @@ fn schema_constants_are_valid_json() {
 
     for (name, schema) in schemas {
         let parsed: Result<serde_json::Value, _> = serde_json::from_str(schema);
-        assert!(parsed.is_ok(), "{name} schema is not valid JSON: {}", parsed.unwrap_err());
+        assert!(
+            parsed.is_ok(),
+            "{name} schema is not valid JSON: {}",
+            parsed.unwrap_err()
+        );
     }
 }
 
 #[test]
 fn asupersync_forensics_version_marker() {
-    assert_eq!(
-        schemas::ASUPERSYNC_FORENSICS_V1,
-        "asupersync-forensics/v1"
-    );
+    assert_eq!(schemas::ASUPERSYNC_FORENSICS_V1, "asupersync-forensics/v1");
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -860,10 +858,7 @@ fn static_compliance_finding_flow_to_report() {
     };
 
     assert!(!report.passed());
-    assert_eq!(
-        report.static_checks.findings[0].status,
-        CheckStatus::Fail
-    );
+    assert_eq!(report.static_checks.findings[0].status, CheckStatus::Fail);
     assert_eq!(
         report.dynamic_checks.findings[0].status,
         CheckStatus::Skipped
@@ -964,7 +959,9 @@ fn forensics_validation_produces_deterministic_diagnostics() {
             assert_eq!(diagnostic.rule_id, "asupersync.forensics.v1.trace_id");
             assert_eq!(diagnostic.field, "trace_id");
         }
-        ForensicsValidationError::InvalidJsonLine { .. } => panic!("expected RuleViolation, got {err:?}"),
+        ForensicsValidationError::InvalidJsonLine { .. } => {
+            panic!("expected RuleViolation, got {err:?}")
+        }
     }
 
     // Convert to compliance finding for reporting
@@ -973,9 +970,6 @@ fn forensics_validation_produces_deterministic_diagnostics() {
         status: CheckStatus::Fail,
         message: format!("{err}"),
     };
-    assert_eq!(
-        finding.check,
-        "forensics.asupersync.forensics.v1.trace_id"
-    );
+    assert_eq!(finding.check, "forensics.asupersync.forensics.v1.trace_id");
     assert_eq!(finding.status, CheckStatus::Fail);
 }

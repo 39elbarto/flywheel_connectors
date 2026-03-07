@@ -461,7 +461,8 @@ mod tests {
 
     #[test]
     fn conversation_reply_clone() {
-        let r: ConversationReply = serde_json::from_value(json!({"id": "rc", "body": "hi"})).unwrap();
+        let r: ConversationReply =
+            serde_json::from_value(json!({"id": "rc", "body": "hi"})).unwrap();
         let r2 = r.clone();
         assert_eq!(r.id, "rc");
         assert_eq!(r2.body, Some("hi".into()));
@@ -507,7 +508,8 @@ mod tests {
 
     #[test]
     fn tag_serialize_type_rename() {
-        let t: Tag = serde_json::from_value(json!({"id": "t1", "type": "tag", "name": "VIP"})).unwrap();
+        let t: Tag =
+            serde_json::from_value(json!({"id": "t1", "type": "tag", "name": "VIP"})).unwrap();
         let v = serde_json::to_value(&t).unwrap();
         assert_eq!(v["type"], "tag");
         assert!(v.get("tag_type").is_none());
@@ -609,7 +611,8 @@ mod tests {
 
     #[test]
     fn next_page_serialize_roundtrip() {
-        let np: NextPage = serde_json::from_value(json!({"page": 2, "starting_after": "xyz"})).unwrap();
+        let np: NextPage =
+            serde_json::from_value(json!({"page": 2, "starting_after": "xyz"})).unwrap();
         let v = serde_json::to_value(&np).unwrap();
         assert_eq!(v["page"], 2);
         assert_eq!(v["starting_after"], "xyz");
@@ -674,7 +677,8 @@ mod tests {
 
     #[test]
     fn api_error_clone() {
-        let e: ApiError = serde_json::from_value(json!({"code": "not_found", "message": "missing"})).unwrap();
+        let e: ApiError =
+            serde_json::from_value(json!({"code": "not_found", "message": "missing"})).unwrap();
         let e2 = e.clone();
         assert_eq!(e.code, Some("not_found".into()));
         assert_eq!(e2.message, Some("missing".into()));

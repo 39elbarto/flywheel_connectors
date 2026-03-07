@@ -133,7 +133,10 @@ mod tests {
         assert_eq!(t.id, Some("track_abc123".into()));
         assert_eq!(t.name, Some("Kind of Blue".into()));
         assert_eq!(t.artists.as_ref().unwrap().len(), 1);
-        assert_eq!(t.artists.as_ref().unwrap()[0].name, Some("Miles Davis".into()));
+        assert_eq!(
+            t.artists.as_ref().unwrap()[0].name,
+            Some("Miles Davis".into())
+        );
         assert_eq!(t.album.as_ref().unwrap().name, Some("Kind of Blue".into()));
         assert_eq!(
             t.album.as_ref().unwrap().release_date,
@@ -604,10 +607,7 @@ mod tests {
         };
         let v = serde_json::to_value(&i).unwrap();
         let back: Image = serde_json::from_value(v).unwrap();
-        assert_eq!(
-            back.url,
-            Some("https://img.example.com/pic.jpg".into())
-        );
+        assert_eq!(back.url, Some("https://img.example.com/pic.jpg".into()));
         assert!(back.height.is_none());
     }
 

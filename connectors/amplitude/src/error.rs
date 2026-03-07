@@ -446,9 +446,7 @@ mod tests {
 
     #[test]
     fn rate_limited_retry_after_zero() {
-        let err = AmplitudeError::RateLimited {
-            retry_after_ms: 0,
-        };
+        let err = AmplitudeError::RateLimited { retry_after_ms: 0 };
         assert_eq!(err.retry_after(), Some(Duration::from_millis(0)));
     }
 
@@ -551,21 +549,37 @@ mod tests {
 
     #[test]
     fn error_debug_not_found() {
-        let dbg = format!("{:?}", AmplitudeError::NotFound { resource: "chart".into() });
+        let dbg = format!(
+            "{:?}",
+            AmplitudeError::NotFound {
+                resource: "chart".into()
+            }
+        );
         assert!(dbg.contains("NotFound"));
         assert!(dbg.contains("chart"));
     }
 
     #[test]
     fn error_debug_rate_limited() {
-        let dbg = format!("{:?}", AmplitudeError::RateLimited { retry_after_ms: 5000 });
+        let dbg = format!(
+            "{:?}",
+            AmplitudeError::RateLimited {
+                retry_after_ms: 5000
+            }
+        );
         assert!(dbg.contains("RateLimited"));
         assert!(dbg.contains("5000"));
     }
 
     #[test]
     fn error_debug_api() {
-        let dbg = format!("{:?}", AmplitudeError::Api { status_code: 500, message: "err".into() });
+        let dbg = format!(
+            "{:?}",
+            AmplitudeError::Api {
+                status_code: 500,
+                message: "err".into()
+            }
+        );
         assert!(dbg.contains("Api"));
         assert!(dbg.contains("500"));
     }

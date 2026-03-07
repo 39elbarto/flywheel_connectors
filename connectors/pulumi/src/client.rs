@@ -102,7 +102,11 @@ impl PulumiClient {
         }
     }
 
-    async fn handle_error(&self, status: StatusCode, resp: Response) -> PulumiResult<serde_json::Value> {
+    async fn handle_error(
+        &self,
+        status: StatusCode,
+        resp: Response,
+    ) -> PulumiResult<serde_json::Value> {
         let retry_after = resp
             .headers()
             .get("retry-after")
@@ -122,7 +126,10 @@ impl PulumiClient {
             429 => Err(PulumiError::RateLimited {
                 retry_after_ms: retry_after.unwrap_or(60) * 1000,
             }),
-            code => Err(PulumiError::Api { status_code: code, message }),
+            code => Err(PulumiError::Api {
+                status_code: code,
+                message,
+            }),
         }
     }
 
@@ -134,7 +141,8 @@ impl PulumiClient {
     ) -> PulumiResult<serde_json::Value> {
         let url = format!("{}{path}", self.base_url);
         debug!(url = %url, "GET request");
-        let mut req = self.add_auth(self.client.get(&url))
+        let mut req = self
+            .add_auth(self.client.get(&url))
             .header("Accept", "application/json");
         if let Some(q) = query {
             req = req.query(q);
@@ -147,7 +155,8 @@ impl PulumiClient {
     async fn post(&self, path: &str, body: &serde_json::Value) -> PulumiResult<serde_json::Value> {
         let url = format!("{}{path}", self.base_url);
         debug!(url = %url, "POST request");
-        let req = self.add_auth(self.client.post(&url))
+        let req = self
+            .add_auth(self.client.post(&url))
             .header("Accept", "application/json")
             .json(body);
         let resp = req.send().await?;
@@ -158,7 +167,8 @@ impl PulumiClient {
     async fn delete(&self, path: &str) -> PulumiResult<serde_json::Value> {
         let url = format!("{}{path}", self.base_url);
         debug!(url = %url, "DELETE request");
-        let req = self.add_auth(self.client.delete(&url))
+        let req = self
+            .add_auth(self.client.delete(&url))
             .header("Accept", "application/json");
         let resp = req.send().await?;
         self.handle_response(resp).await
@@ -179,7 +189,8 @@ impl PulumiClient {
         if let Some(p) = project {
             q.push(("project", p.to_string()));
         }
-        self.get("/stacks", if q.is_empty() { None } else { Some(&q) }).await
+        self.get("/stacks", if q.is_empty() { None } else { Some(&q) })
+            .await
     }
 
     /// Get a stack by organization, project, and stack name.
@@ -189,7 +200,8 @@ impl PulumiClient {
         project: &str,
         stack: &str,
     ) -> PulumiResult<serde_json::Value> {
-        self.get(&format!("/stacks/{organization}/{project}/{stack}"), None).await
+        self.get(&format!("/stacks/{organization}/{project}/{stack}"), None)
+            .await
     }
 
     /// Create a new stack.
@@ -200,7 +212,8 @@ impl PulumiClient {
         stack: &str,
     ) -> PulumiResult<serde_json::Value> {
         let body = serde_json::json!({"stackName": stack});
-        self.post(&format!("/stacks/{organization}/{project}"), &body).await
+        self.post(&format!("/stacks/{organization}/{project}"), &body)
+            .await
     }
 
     /// Delete a stack.
@@ -210,7 +223,8 @@ impl PulumiClient {
         project: &str,
         stack: &str,
     ) -> PulumiResult<serde_json::Value> {
-        self.delete(&format!("/stacks/{organization}/{project}/{stack}")).await
+        self.delete(&format!("/stacks/{organization}/{project}/{stack}"))
+            .await
     }
 
     /// Export stack state.
@@ -220,7 +234,11 @@ impl PulumiClient {
         project: &str,
         stack: &str,
     ) -> PulumiResult<serde_json::Value> {
-        self.get(&format!("/stacks/{organization}/{project}/{stack}/export"), None).await
+        self.get(
+            &format!("/stacks/{organization}/{project}/{stack}/export"),
+            None,
+        )
+        .await
     }
 
     // -- Deployments --
@@ -232,7 +250,11 @@ impl PulumiClient {
         project: &str,
         stack: &str,
     ) -> PulumiResult<serde_json::Value> {
-        self.get(&format!("/stacks/{organization}/{project}/{stack}/updates"), None).await
+        self.get(
+            &format!("/stacks/{organization}/{project}/{stack}/updates"),
+            None,
+        )
+        .await
     }
 }
 
@@ -276,11 +298,7 @@ mod tests {
 
     #[test]
     fn client_new_with_defaults() {
-        let client = PulumiClient::new(
-            PulumiAuth::BearerToken("tok".into()),
-            None,
-        )
-        .unwrap();
+        let client = PulumiClient::new(PulumiAuth::BearerToken("tok".into()), None).unwrap();
         assert_eq!(client.base_url, DEFAULT_BASE_URL);
     }
 
@@ -296,11 +314,7 @@ mod tests {
 
     #[test]
     fn client_debug_format() {
-        let client = PulumiClient::new(
-            PulumiAuth::BearerToken("secret".into()),
-            None,
-        )
-        .unwrap();
+        let client = PulumiClient::new(PulumiAuth::BearerToken("secret".into()), None).unwrap();
         let dbg = format!("{client:?}");
         assert!(!dbg.contains("secret"));
         assert!(dbg.contains("redacted"));

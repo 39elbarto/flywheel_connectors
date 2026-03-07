@@ -71,7 +71,10 @@ impl KubernetesError {
             Self::Json(e) => FcpError::Internal {
                 message: format!("JSON error: {e}"),
             },
-            Self::Api { status_code, message } => FcpError::External {
+            Self::Api {
+                status_code,
+                message,
+            } => FcpError::External {
                 service: "kubernetes".into(),
                 message: message.clone(),
                 status_code: Some(*status_code),
@@ -116,36 +119,55 @@ mod tests {
 
     #[test]
     fn rate_limited_is_retryable() {
-        assert!(KubernetesError::RateLimited { retry_after_ms: 5000 }.is_retryable());
+        assert!(
+            KubernetesError::RateLimited {
+                retry_after_ms: 5000
+            }
+            .is_retryable()
+        );
     }
 
     #[test]
     fn api_500_is_retryable() {
         assert!(
-            KubernetesError::Api { status_code: 500, message: "err".into() }.is_retryable()
+            KubernetesError::Api {
+                status_code: 500,
+                message: "err".into()
+            }
+            .is_retryable()
         );
     }
 
     #[test]
     fn api_503_is_retryable() {
         assert!(
-            KubernetesError::Api { status_code: 503, message: "unavailable".into() }
-                .is_retryable()
+            KubernetesError::Api {
+                status_code: 503,
+                message: "unavailable".into()
+            }
+            .is_retryable()
         );
     }
 
     #[test]
     fn api_502_is_retryable() {
         assert!(
-            KubernetesError::Api { status_code: 502, message: "bad gateway".into() }
-                .is_retryable()
+            KubernetesError::Api {
+                status_code: 502,
+                message: "bad gateway".into()
+            }
+            .is_retryable()
         );
     }
 
     #[test]
     fn api_429_is_retryable() {
         assert!(
-            KubernetesError::Api { status_code: 429, message: "too many".into() }.is_retryable()
+            KubernetesError::Api {
+                status_code: 429,
+                message: "too many".into()
+            }
+            .is_retryable()
         );
     }
 
@@ -161,28 +183,41 @@ mod tests {
 
     #[test]
     fn not_found_not_retryable() {
-        assert!(!KubernetesError::NotFound { resource: "pod".into() }.is_retryable());
+        assert!(
+            !KubernetesError::NotFound {
+                resource: "pod".into()
+            }
+            .is_retryable()
+        );
     }
 
     #[test]
     fn api_400_not_retryable() {
         assert!(
-            !KubernetesError::Api { status_code: 400, message: "bad request".into() }
-                .is_retryable()
+            !KubernetesError::Api {
+                status_code: 400,
+                message: "bad request".into()
+            }
+            .is_retryable()
         );
     }
 
     #[test]
     fn api_422_not_retryable() {
         assert!(
-            !KubernetesError::Api { status_code: 422, message: "unprocessable".into() }
-                .is_retryable()
+            !KubernetesError::Api {
+                status_code: 422,
+                message: "unprocessable".into()
+            }
+            .is_retryable()
         );
     }
 
     #[test]
     fn retry_after_for_rate_limited() {
-        let err = KubernetesError::RateLimited { retry_after_ms: 30_000 };
+        let err = KubernetesError::RateLimited {
+            retry_after_ms: 30_000,
+        };
         assert_eq!(err.retry_after(), Some(Duration::from_secs(30)));
     }
 
@@ -199,14 +234,24 @@ mod tests {
     #[test]
     fn retry_after_none_for_api_error() {
         assert_eq!(
-            KubernetesError::Api { status_code: 500, message: "err".into() }.retry_after(),
+            KubernetesError::Api {
+                status_code: 500,
+                message: "err".into()
+            }
+            .retry_after(),
             None
         );
     }
 
     #[test]
     fn retry_after_none_for_not_found() {
-        assert_eq!(KubernetesError::NotFound { resource: "x".into() }.retry_after(), None);
+        assert_eq!(
+            KubernetesError::NotFound {
+                resource: "x".into()
+            }
+            .retry_after(),
+            None
+        );
     }
 
     #[test]
@@ -218,7 +263,12 @@ mod tests {
     #[test]
     fn unauthorized_to_fcp_error() {
         match KubernetesError::Unauthorized.to_fcp_error() {
-            FcpError::External { service, status_code, retryable, .. } => {
+            FcpError::External {
+                service,
+                status_code,
+                retryable,
+                ..
+            } => {
                 assert_eq!(service, "kubernetes");
                 assert_eq!(status_code, Some(401));
                 assert!(!retryable);
@@ -230,7 +280,12 @@ mod tests {
     #[test]
     fn forbidden_to_fcp_error() {
         match KubernetesError::Forbidden.to_fcp_error() {
-            FcpError::External { service, status_code, retryable, .. } => {
+            FcpError::External {
+                service,
+                status_code,
+                retryable,
+                ..
+            } => {
                 assert_eq!(service, "kubernetes");
                 assert_eq!(status_code, Some(403));
                 assert!(!retryable);
@@ -241,8 +296,17 @@ mod tests {
 
     #[test]
     fn not_found_to_fcp_error() {
-        match (KubernetesError::NotFound { resource: "pod/nginx".into() }).to_fcp_error() {
-            FcpError::External { status_code, message, retryable, .. } => {
+        match (KubernetesError::NotFound {
+            resource: "pod/nginx".into(),
+        })
+        .to_fcp_error()
+        {
+            FcpError::External {
+                status_code,
+                message,
+                retryable,
+                ..
+            } => {
                 assert_eq!(status_code, Some(404));
                 assert!(message.contains("pod/nginx"));
                 assert!(!retryable);
@@ -253,8 +317,17 @@ mod tests {
 
     #[test]
     fn rate_limited_to_fcp_error() {
-        match (KubernetesError::RateLimited { retry_after_ms: 60_000 }).to_fcp_error() {
-            FcpError::External { status_code, retryable, retry_after, .. } => {
+        match (KubernetesError::RateLimited {
+            retry_after_ms: 60_000,
+        })
+        .to_fcp_error()
+        {
+            FcpError::External {
+                status_code,
+                retryable,
+                retry_after,
+                ..
+            } => {
                 assert_eq!(status_code, Some(429));
                 assert!(retryable);
                 assert_eq!(retry_after, Some(Duration::from_secs(60)));
@@ -265,10 +338,19 @@ mod tests {
 
     #[test]
     fn api_error_to_fcp_error() {
-        match (KubernetesError::Api { status_code: 503, message: "unavailable".into() })
-            .to_fcp_error()
+        match (KubernetesError::Api {
+            status_code: 503,
+            message: "unavailable".into(),
+        })
+        .to_fcp_error()
         {
-            FcpError::External { service, status_code, retryable, message, .. } => {
+            FcpError::External {
+                service,
+                status_code,
+                retryable,
+                message,
+                ..
+            } => {
                 assert_eq!(service, "kubernetes");
                 assert_eq!(status_code, Some(503));
                 assert!(retryable);
@@ -289,8 +371,17 @@ mod tests {
 
     #[test]
     fn api_error_non_retryable_to_fcp_error() {
-        match (KubernetesError::Api { status_code: 400, message: "bad".into() }).to_fcp_error() {
-            FcpError::External { status_code, retryable, .. } => {
+        match (KubernetesError::Api {
+            status_code: 400,
+            message: "bad".into(),
+        })
+        .to_fcp_error()
+        {
+            FcpError::External {
+                status_code,
+                retryable,
+                ..
+            } => {
                 assert_eq!(status_code, Some(400));
                 assert!(!retryable);
             }
@@ -317,7 +408,10 @@ mod tests {
     #[test]
     fn error_display_not_found() {
         assert_eq!(
-            KubernetesError::NotFound { resource: "pod".into() }.to_string(),
+            KubernetesError::NotFound {
+                resource: "pod".into()
+            }
+            .to_string(),
             "Not found: pod"
         );
     }
@@ -325,7 +419,10 @@ mod tests {
     #[test]
     fn error_display_rate_limited() {
         assert_eq!(
-            KubernetesError::RateLimited { retry_after_ms: 2000 }.to_string(),
+            KubernetesError::RateLimited {
+                retry_after_ms: 2000
+            }
+            .to_string(),
             "Rate limited, retry after 2000ms"
         );
     }
@@ -333,7 +430,11 @@ mod tests {
     #[test]
     fn error_display_api() {
         assert_eq!(
-            KubernetesError::Api { status_code: 500, message: "Internal".into() }.to_string(),
+            KubernetesError::Api {
+                status_code: 500,
+                message: "Internal".into()
+            }
+            .to_string(),
             "Kubernetes API error (500): Internal"
         );
     }
@@ -373,7 +474,11 @@ mod tests {
     #[test]
     fn api_504_is_retryable() {
         assert!(
-            KubernetesError::Api { status_code: 504, message: "timeout".into() }.is_retryable()
+            KubernetesError::Api {
+                status_code: 504,
+                message: "timeout".into()
+            }
+            .is_retryable()
         );
     }
 
@@ -399,7 +504,12 @@ mod tests {
 
     #[test]
     fn api_error_to_fcp_has_no_retry_after() {
-        match (KubernetesError::Api { status_code: 500, message: "err".into() }).to_fcp_error() {
+        match (KubernetesError::Api {
+            status_code: 500,
+            message: "err".into(),
+        })
+        .to_fcp_error()
+        {
             FcpError::External { retry_after, .. } => {
                 assert_eq!(retry_after, None);
             }
@@ -409,7 +519,11 @@ mod tests {
 
     #[test]
     fn rate_limited_to_fcp_error_message_contains_ms() {
-        match (KubernetesError::RateLimited { retry_after_ms: 5000 }).to_fcp_error() {
+        match (KubernetesError::RateLimited {
+            retry_after_ms: 5000,
+        })
+        .to_fcp_error()
+        {
             FcpError::External { message, .. } => {
                 assert!(message.contains("5000"));
             }
@@ -419,7 +533,11 @@ mod tests {
 
     #[test]
     fn not_found_to_fcp_error_has_no_retry_after() {
-        match (KubernetesError::NotFound { resource: "x".into() }).to_fcp_error() {
+        match (KubernetesError::NotFound {
+            resource: "x".into(),
+        })
+        .to_fcp_error()
+        {
             FcpError::External { retry_after, .. } => {
                 assert_eq!(retry_after, None);
             }

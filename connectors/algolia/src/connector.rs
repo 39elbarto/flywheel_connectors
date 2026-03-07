@@ -138,9 +138,8 @@ impl AlgoliaConnector {
         let config = AlgoliaConfig::from_params(&params)?;
         info!(auth = %config.auth.redacted_label(), "Configuring Algolia connector");
 
-        let client =
-            AlgoliaClient::new(config.auth.clone(), config.base_url.as_deref())
-                .map_err(|e| e.to_fcp_error())?;
+        let client = AlgoliaClient::new(config.auth.clone(), config.base_url.as_deref())
+            .map_err(|e| e.to_fcp_error())?;
 
         self.client = Some(Arc::new(client));
         self.config = Some(config);
@@ -886,7 +885,11 @@ mod tests {
 
     #[test]
     fn doctor_status_serde_roundtrip() {
-        let statuses = [DoctorStatus::Healthy, DoctorStatus::Degraded, DoctorStatus::Unhealthy];
+        let statuses = [
+            DoctorStatus::Healthy,
+            DoctorStatus::Degraded,
+            DoctorStatus::Unhealthy,
+        ];
         for status in &statuses {
             let v = serde_json::to_value(status).unwrap();
             let back: DoctorStatus = serde_json::from_value(v).unwrap();

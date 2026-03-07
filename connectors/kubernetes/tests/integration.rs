@@ -99,7 +99,12 @@ async fn list_pods() {
         .await;
 
     let c = setup_connector(&server.uri()).await;
-    let result = c.handle_invoke(json!({"operation_id": "kubernetes.list_pods", "input": {"namespace": "default"}})).await.unwrap();
+    let result = c
+        .handle_invoke(
+            json!({"operation_id": "kubernetes.list_pods", "input": {"namespace": "default"}}),
+        )
+        .await
+        .unwrap();
     assert_eq!(result["pods"].as_array().unwrap().len(), 2);
 }
 
@@ -108,12 +113,19 @@ async fn list_pods_empty() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/api/v1/namespaces/production/pods"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"kind": "PodList", "items": []})))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"kind": "PodList", "items": []})),
+        )
         .mount(&server)
         .await;
 
     let c = setup_connector(&server.uri()).await;
-    let result = c.handle_invoke(json!({"operation_id": "kubernetes.list_pods", "input": {"namespace": "production"}})).await.unwrap();
+    let result = c
+        .handle_invoke(
+            json!({"operation_id": "kubernetes.list_pods", "input": {"namespace": "production"}}),
+        )
+        .await
+        .unwrap();
     assert!(result["pods"].as_array().unwrap().is_empty());
 }
 
@@ -121,7 +133,11 @@ async fn list_pods_empty() {
 async fn list_pods_missing_namespace() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
-    assert!(c.handle_invoke(json!({"operation_id": "kubernetes.list_pods", "input": {}})).await.is_err());
+    assert!(
+        c.handle_invoke(json!({"operation_id": "kubernetes.list_pods", "input": {}}))
+            .await
+            .is_err()
+    );
 }
 
 // -- get_pod --
@@ -146,14 +162,24 @@ async fn get_pod() {
 async fn get_pod_missing_namespace() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
-    assert!(c.handle_invoke(json!({"operation_id": "kubernetes.get_pod", "input": {"name": "nginx"}})).await.is_err());
+    assert!(
+        c.handle_invoke(json!({"operation_id": "kubernetes.get_pod", "input": {"name": "nginx"}}))
+            .await
+            .is_err()
+    );
 }
 
 #[fcp_async_core::runtime::test]
 async fn get_pod_missing_name() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
-    assert!(c.handle_invoke(json!({"operation_id": "kubernetes.get_pod", "input": {"namespace": "default"}})).await.is_err());
+    assert!(
+        c.handle_invoke(
+            json!({"operation_id": "kubernetes.get_pod", "input": {"namespace": "default"}})
+        )
+        .await
+        .is_err()
+    );
 }
 
 // -- delete_pod --
@@ -163,7 +189,10 @@ async fn delete_pod() {
     let server = MockServer::start().await;
     Mock::given(method("DELETE"))
         .and(path("/api/v1/namespaces/default/pods/nginx-abc123"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"kind": "Status", "status": "Success"})))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"kind": "Status", "status": "Success"})),
+        )
         .mount(&server)
         .await;
 
@@ -176,7 +205,13 @@ async fn delete_pod() {
 async fn delete_pod_missing_name() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
-    assert!(c.handle_invoke(json!({"operation_id": "kubernetes.delete_pod", "input": {"namespace": "default"}})).await.is_err());
+    assert!(
+        c.handle_invoke(
+            json!({"operation_id": "kubernetes.delete_pod", "input": {"namespace": "default"}})
+        )
+        .await
+        .is_err()
+    );
 }
 
 // -- get_pod_logs --
@@ -185,8 +220,13 @@ async fn delete_pod_missing_name() {
 async fn get_pod_logs() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
-        .and(path_regex(r"/api/v1/namespaces/default/pods/nginx-abc123/log.*"))
-        .respond_with(ResponseTemplate::new(200).set_body_string("Starting nginx\nReady to accept connections"))
+        .and(path_regex(
+            r"/api/v1/namespaces/default/pods/nginx-abc123/log.*",
+        ))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_string("Starting nginx\nReady to accept connections"),
+        )
         .mount(&server)
         .await;
 
@@ -199,7 +239,13 @@ async fn get_pod_logs() {
 async fn get_pod_logs_missing_namespace() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
-    assert!(c.handle_invoke(json!({"operation_id": "kubernetes.get_pod_logs", "input": {"name": "nginx"}})).await.is_err());
+    assert!(
+        c.handle_invoke(
+            json!({"operation_id": "kubernetes.get_pod_logs", "input": {"name": "nginx"}})
+        )
+        .await
+        .is_err()
+    );
 }
 
 // -- stream_pod_logs --
@@ -208,14 +254,23 @@ async fn get_pod_logs_missing_namespace() {
 async fn stream_pod_logs() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
-        .and(path_regex(r"/api/v1/namespaces/default/pods/nginx-abc123/log.*"))
-        .respond_with(ResponseTemplate::new(200).set_body_string("live log line 1\nlive log line 2"))
+        .and(path_regex(
+            r"/api/v1/namespaces/default/pods/nginx-abc123/log.*",
+        ))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_string("live log line 1\nlive log line 2"),
+        )
         .mount(&server)
         .await;
 
     let c = setup_connector(&server.uri()).await;
     let result = c.handle_invoke(json!({"operation_id": "kubernetes.stream_pod_logs", "input": {"namespace": "default", "name": "nginx-abc123"}})).await.unwrap();
-    assert!(result["log_line"].as_str().unwrap().contains("live log line"));
+    assert!(
+        result["log_line"]
+            .as_str()
+            .unwrap()
+            .contains("live log line")
+    );
 }
 
 // -- list_deployments --
@@ -241,7 +296,11 @@ async fn list_deployments() {
 async fn list_deployments_missing_namespace() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
-    assert!(c.handle_invoke(json!({"operation_id": "kubernetes.list_deployments", "input": {}})).await.is_err());
+    assert!(
+        c.handle_invoke(json!({"operation_id": "kubernetes.list_deployments", "input": {}}))
+            .await
+            .is_err()
+    );
 }
 
 // -- get_deployment --
@@ -251,7 +310,9 @@ async fn get_deployment() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/apis/apps/v1/namespaces/default/deployments/web-app"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"kind": "Deployment", "metadata": {"name": "web-app"}, "spec": {"replicas": 3}})))
+        .respond_with(ResponseTemplate::new(200).set_body_json(
+            json!({"kind": "Deployment", "metadata": {"name": "web-app"}, "spec": {"replicas": 3}}),
+        ))
         .mount(&server)
         .await;
 
@@ -266,9 +327,16 @@ async fn get_deployment() {
 async fn scale_deployment() {
     let server = MockServer::start().await;
     Mock::given(method("PATCH"))
-        .and(path("/apis/apps/v1/namespaces/default/deployments/web-app/scale"))
-        .and(header("Content-Type", "application/strategic-merge-patch+json"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"kind": "Scale", "spec": {"replicas": 5}, "status": {"replicas": 5}})))
+        .and(path(
+            "/apis/apps/v1/namespaces/default/deployments/web-app/scale",
+        ))
+        .and(header(
+            "Content-Type",
+            "application/strategic-merge-patch+json",
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(
+            json!({"kind": "Scale", "spec": {"replicas": 5}, "status": {"replicas": 5}}),
+        ))
         .mount(&server)
         .await;
 
@@ -291,8 +359,14 @@ async fn rollout_restart() {
     let server = MockServer::start().await;
     Mock::given(method("PATCH"))
         .and(path("/apis/apps/v1/namespaces/default/deployments/web-app"))
-        .and(header("Content-Type", "application/strategic-merge-patch+json"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"kind": "Deployment", "metadata": {"name": "web-app"}})))
+        .and(header(
+            "Content-Type",
+            "application/strategic-merge-patch+json",
+        ))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"kind": "Deployment", "metadata": {"name": "web-app"}})),
+        )
         .mount(&server)
         .await;
 
@@ -305,7 +379,13 @@ async fn rollout_restart() {
 async fn rollout_restart_missing_name() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
-    assert!(c.handle_invoke(json!({"operation_id": "kubernetes.rollout_restart", "input": {"namespace": "default"}})).await.is_err());
+    assert!(
+        c.handle_invoke(
+            json!({"operation_id": "kubernetes.rollout_restart", "input": {"namespace": "default"}})
+        )
+        .await
+        .is_err()
+    );
 }
 
 // -- get_service --
@@ -415,7 +495,12 @@ async fn watch_events() {
         .await;
 
     let c = setup_connector(&server.uri()).await;
-    let result = c.handle_invoke(json!({"operation_id": "kubernetes.watch_events", "input": {"namespace": "default"}})).await.unwrap();
+    let result = c
+        .handle_invoke(
+            json!({"operation_id": "kubernetes.watch_events", "input": {"namespace": "default"}}),
+        )
+        .await
+        .unwrap();
     assert_eq!(result["events"].as_array().unwrap().len(), 1);
 }
 
@@ -423,7 +508,11 @@ async fn watch_events() {
 async fn watch_events_missing_namespace() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
-    assert!(c.handle_invoke(json!({"operation_id": "kubernetes.watch_events", "input": {}})).await.is_err());
+    assert!(
+        c.handle_invoke(json!({"operation_id": "kubernetes.watch_events", "input": {}}))
+            .await
+            .is_err()
+    );
 }
 
 // -- Error handling --
@@ -433,12 +522,21 @@ async fn error_401() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/api/v1/namespaces/default/pods"))
-        .respond_with(ResponseTemplate::new(401).set_body_json(json!({"kind": "Status", "message": "Unauthorized", "code": 401})))
+        .respond_with(
+            ResponseTemplate::new(401)
+                .set_body_json(json!({"kind": "Status", "message": "Unauthorized", "code": 401})),
+        )
         .mount(&server)
         .await;
 
     let c = setup_connector(&server.uri()).await;
-    assert!(c.handle_invoke(json!({"operation_id": "kubernetes.list_pods", "input": {"namespace": "default"}})).await.is_err());
+    assert!(
+        c.handle_invoke(
+            json!({"operation_id": "kubernetes.list_pods", "input": {"namespace": "default"}})
+        )
+        .await
+        .is_err()
+    );
 }
 
 #[fcp_async_core::runtime::test]
@@ -446,12 +544,22 @@ async fn error_403() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/api/v1/namespaces/kube-system/pods"))
-        .respond_with(ResponseTemplate::new(403).set_body_json(json!({"kind": "Status", "message": "pods is forbidden", "code": 403})))
+        .respond_with(
+            ResponseTemplate::new(403).set_body_json(
+                json!({"kind": "Status", "message": "pods is forbidden", "code": 403}),
+            ),
+        )
         .mount(&server)
         .await;
 
     let c = setup_connector(&server.uri()).await;
-    assert!(c.handle_invoke(json!({"operation_id": "kubernetes.list_pods", "input": {"namespace": "kube-system"}})).await.is_err());
+    assert!(
+        c.handle_invoke(
+            json!({"operation_id": "kubernetes.list_pods", "input": {"namespace": "kube-system"}})
+        )
+        .await
+        .is_err()
+    );
 }
 
 #[fcp_async_core::runtime::test]
@@ -459,7 +567,10 @@ async fn error_404() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/api/v1/namespaces/default/pods/missing-pod"))
-        .respond_with(ResponseTemplate::new(404).set_body_json(json!({"kind": "Status", "message": "pods not found", "code": 404})))
+        .respond_with(
+            ResponseTemplate::new(404)
+                .set_body_json(json!({"kind": "Status", "message": "pods not found", "code": 404})),
+        )
         .mount(&server)
         .await;
 
@@ -474,14 +585,22 @@ async fn error_429() {
         .and(path("/api/v1/namespaces/default/pods"))
         .respond_with(
             ResponseTemplate::new(429)
-                .set_body_json(json!({"kind": "Status", "message": "Too many requests", "code": 429}))
+                .set_body_json(
+                    json!({"kind": "Status", "message": "Too many requests", "code": 429}),
+                )
                 .insert_header("retry-after", "60"),
         )
         .mount(&server)
         .await;
 
     let c = setup_connector(&server.uri()).await;
-    assert!(c.handle_invoke(json!({"operation_id": "kubernetes.list_pods", "input": {"namespace": "default"}})).await.is_err());
+    assert!(
+        c.handle_invoke(
+            json!({"operation_id": "kubernetes.list_pods", "input": {"namespace": "default"}})
+        )
+        .await
+        .is_err()
+    );
 }
 
 #[fcp_async_core::runtime::test]
@@ -494,7 +613,13 @@ async fn error_500() {
         .await;
 
     let c = setup_connector(&server.uri()).await;
-    assert!(c.handle_invoke(json!({"operation_id": "kubernetes.list_pods", "input": {"namespace": "default"}})).await.is_err());
+    assert!(
+        c.handle_invoke(
+            json!({"operation_id": "kubernetes.list_pods", "input": {"namespace": "default"}})
+        )
+        .await
+        .is_err()
+    );
 }
 
 // -- Unknown op / Simulate --
@@ -503,42 +628,76 @@ async fn error_500() {
 async fn unknown_operation() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
-    assert!(c.handle_invoke(json!({"operation_id": "kubernetes.nope", "input": {}})).await.is_err());
+    assert!(
+        c.handle_invoke(json!({"operation_id": "kubernetes.nope", "input": {}}))
+            .await
+            .is_err()
+    );
 }
 
 #[fcp_async_core::runtime::test]
 async fn simulate_known() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
-    assert!(c.handle_simulate(json!({"operation_id": "kubernetes.list_pods"})).await.unwrap()["allowed"].as_bool().unwrap());
+    assert!(
+        c.handle_simulate(json!({"operation_id": "kubernetes.list_pods"}))
+            .await
+            .unwrap()["allowed"]
+            .as_bool()
+            .unwrap()
+    );
 }
 
 #[fcp_async_core::runtime::test]
 async fn simulate_unknown() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
-    assert!(!c.handle_simulate(json!({"operation_id": "kubernetes.nope"})).await.unwrap()["allowed"].as_bool().unwrap());
+    assert!(
+        !c.handle_simulate(json!({"operation_id": "kubernetes.nope"}))
+            .await
+            .unwrap()["allowed"]
+            .as_bool()
+            .unwrap()
+    );
 }
 
 #[fcp_async_core::runtime::test]
 async fn simulate_delete_pod() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
-    assert!(c.handle_simulate(json!({"operation_id": "kubernetes.delete_pod"})).await.unwrap()["allowed"].as_bool().unwrap());
+    assert!(
+        c.handle_simulate(json!({"operation_id": "kubernetes.delete_pod"}))
+            .await
+            .unwrap()["allowed"]
+            .as_bool()
+            .unwrap()
+    );
 }
 
 #[fcp_async_core::runtime::test]
 async fn simulate_get_secret() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
-    assert!(c.handle_simulate(json!({"operation_id": "kubernetes.get_secret"})).await.unwrap()["allowed"].as_bool().unwrap());
+    assert!(
+        c.handle_simulate(json!({"operation_id": "kubernetes.get_secret"}))
+            .await
+            .unwrap()["allowed"]
+            .as_bool()
+            .unwrap()
+    );
 }
 
 #[fcp_async_core::runtime::test]
 async fn simulate_watch_events() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
-    assert!(c.handle_simulate(json!({"operation_id": "kubernetes.watch_events"})).await.unwrap()["allowed"].as_bool().unwrap());
+    assert!(
+        c.handle_simulate(json!({"operation_id": "kubernetes.watch_events"}))
+            .await
+            .unwrap()["allowed"]
+            .as_bool()
+            .unwrap()
+    );
 }
 
 // -- Counters --
@@ -548,12 +707,18 @@ async fn counters_increment() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/api/v1/namespaces/default/pods"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"kind": "PodList", "items": []})))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"kind": "PodList", "items": []})),
+        )
         .mount(&server)
         .await;
 
     let c = setup_connector(&server.uri()).await;
-    c.handle_invoke(json!({"operation_id": "kubernetes.list_pods", "input": {"namespace": "default"}})).await.unwrap();
+    c.handle_invoke(
+        json!({"operation_id": "kubernetes.list_pods", "input": {"namespace": "default"}}),
+    )
+    .await
+    .unwrap();
     let h = c.handle_health().await.unwrap();
     assert_eq!(h["requests"], 1);
     assert_eq!(h["errors"], 0);
@@ -569,7 +734,11 @@ async fn counters_error_increment() {
         .await;
 
     let c = setup_connector(&server.uri()).await;
-    let _ = c.handle_invoke(json!({"operation_id": "kubernetes.list_pods", "input": {"namespace": "default"}})).await;
+    let _ = c
+        .handle_invoke(
+            json!({"operation_id": "kubernetes.list_pods", "input": {"namespace": "default"}}),
+        )
+        .await;
     let h = c.handle_health().await.unwrap();
     assert_eq!(h["requests"], 1);
     assert_eq!(h["errors"], 1);

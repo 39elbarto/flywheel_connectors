@@ -843,17 +843,16 @@ mod tests {
         let client = GraphqlSubscriptionClient::new("wss://api.test.com/graphql", "svc")
             .with_header("Authorization", "Bearer old")
             .with_header("Authorization", "Bearer new");
-        assert_eq!(
-            client.headers.get("Authorization").unwrap(),
-            "Bearer new"
-        );
+        assert_eq!(client.headers.get("Authorization").unwrap(), "Bearer new");
         assert_eq!(client.headers.len(), 1);
     }
 
     #[test]
     fn subscription_config_custom_init_payload() {
         let config = GraphqlSubscriptionConfig {
-            init_payload: Some(serde_json::json!({"type": "connection_init", "payload": {"token": "abc"}})),
+            init_payload: Some(
+                serde_json::json!({"type": "connection_init", "payload": {"token": "abc"}}),
+            ),
             ack_timeout: Duration::from_secs(5),
             ..GraphqlSubscriptionConfig::default()
         };

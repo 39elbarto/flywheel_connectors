@@ -630,9 +630,7 @@ mod tests {
     #[test]
     #[allow(clippy::redundant_clone)]
     fn create_records_response_clone() {
-        let resp = CreateRecordsResponse {
-            records: vec![],
-        };
+        let resp = CreateRecordsResponse { records: vec![] };
         let cloned = resp.clone();
         assert!(cloned.records.is_empty());
     }
@@ -750,9 +748,7 @@ mod tests {
 
     #[test]
     fn base_schema_response_debug() {
-        let resp = BaseSchemaResponse {
-            tables: vec![],
-        };
+        let resp = BaseSchemaResponse { tables: vec![] };
         let dbg = format!("{resp:?}");
         assert!(dbg.contains("BaseSchemaResponse"));
     }

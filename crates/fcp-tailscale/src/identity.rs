@@ -1106,8 +1106,12 @@ mod tests {
         // Verify with an extra tag
         let mut extra_tags = tags;
         extra_tags.push(TailscaleTag::fcp_tag("private"));
-        let result =
-            attestation.verify(&owner_key.verifying_key(), &node_id, &node_keys, &extra_tags);
+        let result = attestation.verify(
+            &owner_key.verifying_key(),
+            &node_id,
+            &node_keys,
+            &extra_tags,
+        );
         assert!(result.is_err());
     }
 
@@ -1127,8 +1131,7 @@ mod tests {
 
         // Verify with fewer tags
         let fewer = vec![TailscaleTag::fcp_tag("work")];
-        let result =
-            attestation.verify(&owner_key.verifying_key(), &node_id, &node_keys, &fewer);
+        let result = attestation.verify(&owner_key.verifying_key(), &node_id, &node_keys, &fewer);
         assert!(result.is_err());
     }
 

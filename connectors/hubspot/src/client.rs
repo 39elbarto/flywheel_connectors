@@ -157,11 +157,7 @@ impl HubSpotClient {
     }
 
     #[instrument(skip(self, body), fields(url))]
-    async fn post(
-        &self,
-        path: &str,
-        body: &serde_json::Value,
-    ) -> HubSpotResult<serde_json::Value> {
+    async fn post(&self, path: &str, body: &serde_json::Value) -> HubSpotResult<serde_json::Value> {
         let url = format!("{}{path}", self.base_url);
         debug!(url = %url, "POST request");
 
@@ -330,20 +326,14 @@ impl HubSpotClient {
     }
 
     /// Create a deal.
-    pub async fn create_deal(
-        &self,
-        body: &serde_json::Value,
-    ) -> HubSpotResult<serde_json::Value> {
+    pub async fn create_deal(&self, body: &serde_json::Value) -> HubSpotResult<serde_json::Value> {
         self.post("/crm/v3/objects/deals", body).await
     }
 
     // -- Pipelines --
 
     /// List pipelines for an object type.
-    pub async fn list_pipelines(
-        &self,
-        object_type: &str,
-    ) -> HubSpotResult<serde_json::Value> {
+    pub async fn list_pipelines(&self, object_type: &str) -> HubSpotResult<serde_json::Value> {
         self.get(&format!("/crm/v3/pipelines/{object_type}")).await
     }
 
@@ -439,7 +429,8 @@ mod tests {
 
     #[test]
     fn client_debug_redacts_bearer() {
-        let client = HubSpotClient::new(HubSpotAuth::BearerToken("super-secret-pat".into()), None).unwrap();
+        let client =
+            HubSpotClient::new(HubSpotAuth::BearerToken("super-secret-pat".into()), None).unwrap();
         let dbg = format!("{client:?}");
         assert!(!dbg.contains("super-secret-pat"));
         assert!(dbg.contains("redacted"));
@@ -485,14 +476,22 @@ mod tests {
     #[test]
     fn with_client_trims_slash() {
         let client = reqwest::Client::new();
-        let hs = HubSpotClient::with_client(client, HubSpotAuth::BearerToken("t".into()), "https://test.com/");
+        let hs = HubSpotClient::with_client(
+            client,
+            HubSpotAuth::BearerToken("t".into()),
+            "https://test.com/",
+        );
         assert_eq!(hs.base_url, "https://test.com");
     }
 
     #[test]
     fn with_client_no_slash() {
         let client = reqwest::Client::new();
-        let hs = HubSpotClient::with_client(client, HubSpotAuth::BearerToken("t".into()), "https://test.com");
+        let hs = HubSpotClient::with_client(
+            client,
+            HubSpotAuth::BearerToken("t".into()),
+            "https://test.com",
+        );
         assert_eq!(hs.base_url, "https://test.com");
     }
 }

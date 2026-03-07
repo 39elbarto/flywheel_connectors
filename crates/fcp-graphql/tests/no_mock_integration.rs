@@ -68,8 +68,7 @@ impl GraphqlOperation for CreatePost {
     type Variables = CreatePostVars;
     type ResponseData = CreatePostData;
 
-    const QUERY: &'static str =
-        "mutation CreatePost($title: String!, $body: String!) { createPost(title: $title, body: $body) { id } }";
+    const QUERY: &'static str = "mutation CreatePost($title: String!, $body: String!) { createPost(title: $title, body: $body) { id } }";
     const OPERATION_NAME: &'static str = "CreatePost";
 
     fn is_idempotent() -> bool {
@@ -196,13 +195,15 @@ fn retryable_errors_allow_retry_with_always_strategy() {
         strategy: RetryStrategy::Always,
     };
 
-    let retryable = [server_error_500(), server_error_503(), server_error_500(), rate_limit_error()];
+    let retryable = [
+        server_error_500(),
+        server_error_503(),
+        server_error_500(),
+        rate_limit_error(),
+    ];
 
     for (i, err) in retryable.iter().enumerate() {
-        assert!(
-            err.is_retryable(),
-            "error {i} should be retryable: {err}"
-        );
+        assert!(err.is_retryable(), "error {i} should be retryable: {err}");
         let decision = policy.decide(err, 1, false);
         assert!(
             matches!(decision, RetryDecision::RetryAfter(_)),
@@ -348,9 +349,7 @@ fn error_to_fcp_error_complete_mapping() {
 
     // 429 with retry_after → RateLimited
     match rate_limit_error().to_fcp_error(service) {
-        FcpError::RateLimited {
-            retry_after_ms, ..
-        } => assert_eq!(retry_after_ms, 30_000),
+        FcpError::RateLimited { retry_after_ms, .. } => assert_eq!(retry_after_ms, 30_000),
         other => panic!("expected RateLimited, got {other:?}"),
     }
 
@@ -361,9 +360,7 @@ fn error_to_fcp_error_complete_mapping() {
         retry_after: None,
     };
     match err_429_no_retry.to_fcp_error(service) {
-        FcpError::RateLimited {
-            retry_after_ms, ..
-        } => assert_eq!(retry_after_ms, 1000),
+        FcpError::RateLimited { retry_after_ms, .. } => assert_eq!(retry_after_ms, 1000),
         other => panic!("expected RateLimited, got {other:?}"),
     }
 
@@ -400,9 +397,7 @@ fn error_to_fcp_error_complete_mapping() {
     // GraphqlErrors → External (first error message)
     match graphql_field_error().to_fcp_error(service) {
         FcpError::External {
-            message,
-            retryable,
-            ..
+            message, retryable, ..
         } => {
             assert!(message.contains("Cannot query field"));
             assert!(!retryable);
@@ -439,9 +434,7 @@ fn error_to_fcp_error_complete_mapping() {
     let err_exhausted = GraphqlClientError::RetriesExhausted { attempts: 5 };
     match err_exhausted.to_fcp_error(service) {
         FcpError::External {
-            retryable,
-            message,
-            ..
+            retryable, message, ..
         } => {
             assert!(!retryable);
             assert!(message.contains("5 attempts"));
@@ -784,13 +777,12 @@ async fn paginate_cursor_stops_on_none_end_cursor() {
 
 #[fcp_async_core::runtime::test]
 async fn paginate_cursor_client_error_propagates() {
-    let result: Result<Vec<i32>, _> =
-        fcp_graphql::paginate_cursor(None, None, |_cursor| async {
-            Err(GraphqlClientError::Protocol {
-                message: "server gone".into(),
-            })
+    let result: Result<Vec<i32>, _> = fcp_graphql::paginate_cursor(None, None, |_cursor| async {
+        Err(GraphqlClientError::Protocol {
+            message: "server gone".into(),
         })
-        .await;
+    })
+    .await;
 
     match result {
         Err(PaginationError::Client(GraphqlClientError::Protocol { message })) => {
@@ -802,11 +794,10 @@ async fn paginate_cursor_client_error_propagates() {
 
 #[fcp_async_core::runtime::test]
 async fn paginate_offset_client_error_propagates() {
-    let result: Result<Vec<i32>, _> =
-        fcp_graphql::paginate_offset(0, None, |_offset| async {
-            Err(GraphqlClientError::Json("bad json".into()))
-        })
-        .await;
+    let result: Result<Vec<i32>, _> = fcp_graphql::paginate_offset(0, None, |_offset| async {
+        Err(GraphqlClientError::Json("bad json".into()))
+    })
+    .await;
 
     match result {
         Err(PaginationError::Client(GraphqlClientError::Json(msg))) => {
@@ -1056,9 +1047,7 @@ fn full_error_pipeline_server_error() {
     // Step 3: after exhaustion, map to FCP error
     match err.to_fcp_error("my-service") {
         FcpError::External {
-            service,
-            retryable,
-            ..
+            service, retryable, ..
         } => {
             assert_eq!(service, "my-service");
             assert!(retryable);
@@ -1084,9 +1073,7 @@ fn full_error_pipeline_rate_limit() {
     ));
 
     match err.to_fcp_error("api") {
-        FcpError::RateLimited {
-            retry_after_ms, ..
-        } => assert_eq!(retry_after_ms, 30_000),
+        FcpError::RateLimited { retry_after_ms, .. } => assert_eq!(retry_after_ms, 30_000),
         other => panic!("expected RateLimited, got {other:?}"),
     }
 }

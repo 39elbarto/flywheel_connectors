@@ -2200,20 +2200,26 @@ mod tests {
 
     #[test]
     fn offline_summary_debug_format() {
-        run_offline_test("offline_summary_debug_format", "verify", "traits", 1, || {
-            let mut cap = OfflineCapability::new();
-            let a1 = OfflineAccess::new(test_object_id(), 10, 15, 1024);
-            cap.track(a1);
+        run_offline_test(
+            "offline_summary_debug_format",
+            "verify",
+            "traits",
+            1,
+            || {
+                let mut cap = OfflineCapability::new();
+                let a1 = OfflineAccess::new(test_object_id(), 10, 15, 1024);
+                cap.track(a1);
 
-            let summary = cap.summary();
-            let debug_str = format!("{summary:?}");
-            assert!(debug_str.contains("OfflineSummary"));
+                let summary = cap.summary();
+                let debug_str = format!("{summary:?}");
+                assert!(debug_str.contains("OfflineSummary"));
 
-            OfflineLogData {
-                details: Some(json!({"debug": "format_ok"})),
-                ..OfflineLogData::default()
-            }
-        });
+                OfflineLogData {
+                    details: Some(json!({"debug": "format_ok"})),
+                    ..OfflineLogData::default()
+                }
+            },
+        );
     }
 
     // =====================================================================
@@ -2290,118 +2296,93 @@ mod tests {
 
     #[test]
     fn access_pattern_tracker_clear_then_reuse() {
-        run_offline_test(
-            "tracker_clear_then_reuse",
-            "verify",
-            "clear",
-            4,
-            || {
-                let mut tracker = AccessPatternTracker::new();
+        run_offline_test("tracker_clear_then_reuse", "verify", "clear", 4, || {
+            let mut tracker = AccessPatternTracker::new();
 
-                tracker.record_access(test_object_id());
-                tracker.record_access(test_object_id_2());
-                assert_eq!(tracker.tracked_count(), 2);
+            tracker.record_access(test_object_id());
+            tracker.record_access(test_object_id_2());
+            assert_eq!(tracker.tracked_count(), 2);
 
-                tracker.clear();
-                assert_eq!(tracker.tracked_count(), 0);
+            tracker.clear();
+            assert_eq!(tracker.tracked_count(), 0);
 
-                // After clear, accessing same object starts fresh
-                tracker.record_access(test_object_id());
-                assert_eq!(tracker.tracked_count(), 1);
-                assert_eq!(tracker.access_count(&test_object_id()), 1);
+            // After clear, accessing same object starts fresh
+            tracker.record_access(test_object_id());
+            assert_eq!(tracker.tracked_count(), 1);
+            assert_eq!(tracker.access_count(&test_object_id()), 1);
 
-                OfflineLogData {
-                    details: Some(json!({"clear_then_reuse": true})),
-                    ..OfflineLogData::default()
-                }
-            },
-        );
+            OfflineLogData {
+                details: Some(json!({"clear_then_reuse": true})),
+                ..OfflineLogData::default()
+            }
+        });
     }
 
     #[test]
     fn access_pattern_tracker_decay_to_near_zero() {
-        run_offline_test(
-            "tracker_decay_to_near_zero",
-            "verify",
-            "decay",
-            2,
-            || {
-                let mut tracker = AccessPatternTracker::new();
-                tracker.record_access(test_object_id());
+        run_offline_test("tracker_decay_to_near_zero", "verify", "decay", 2, || {
+            let mut tracker = AccessPatternTracker::new();
+            tracker.record_access(test_object_id());
 
-                // Decay many times to drive EWMA toward zero
-                for _ in 0..50 {
-                    tracker.decay_all(0.1);
-                }
+            // Decay many times to drive EWMA toward zero
+            for _ in 0..50 {
+                tracker.decay_all(0.1);
+            }
 
-                let score = tracker.priority_score(&test_object_id());
-                // After aggressive decay, score should be very small
-                assert!(score < 0.001);
-                // Access count is unchanged by decay
-                assert_eq!(tracker.access_count(&test_object_id()), 1);
+            let score = tracker.priority_score(&test_object_id());
+            // After aggressive decay, score should be very small
+            assert!(score < 0.001);
+            // Access count is unchanged by decay
+            assert_eq!(tracker.access_count(&test_object_id()), 1);
 
-                OfflineLogData {
-                    details: Some(json!({"decayed_score": score})),
-                    ..OfflineLogData::default()
-                }
-            },
-        );
+            OfflineLogData {
+                details: Some(json!({"decayed_score": score})),
+                ..OfflineLogData::default()
+            }
+        });
     }
 
     #[test]
     fn access_pattern_tracker_decay_factor_clamped() {
-        run_offline_test(
-            "tracker_decay_factor_clamped",
-            "verify",
-            "decay",
-            2,
-            || {
-                let mut tracker = AccessPatternTracker::new();
-                tracker.record_access(test_object_id());
+        run_offline_test("tracker_decay_factor_clamped", "verify", "decay", 2, || {
+            let mut tracker = AccessPatternTracker::new();
+            tracker.record_access(test_object_id());
 
-                let score_before = tracker.priority_score(&test_object_id());
+            let score_before = tracker.priority_score(&test_object_id());
 
-                // Factor > 1.0 should be clamped to 1.0 (no amplification)
-                tracker.decay_all(5.0);
-                let score_after = tracker.priority_score(&test_object_id());
+            // Factor > 1.0 should be clamped to 1.0 (no amplification)
+            tracker.decay_all(5.0);
+            let score_after = tracker.priority_score(&test_object_id());
 
-                // With factor clamped to 1.0, score should remain approximately the same
-                assert!((score_after - score_before).abs() < 0.01);
+            // With factor clamped to 1.0, score should remain approximately the same
+            assert!((score_after - score_before).abs() < 0.01);
 
-                OfflineLogData {
-                    details: Some(json!({
-                        "score_before": score_before,
-                        "score_after": score_after
-                    })),
-                    ..OfflineLogData::default()
-                }
-            },
-        );
+            OfflineLogData {
+                details: Some(json!({
+                    "score_before": score_before,
+                    "score_after": score_after
+                })),
+                ..OfflineLogData::default()
+            }
+        });
     }
 
     #[test]
     fn access_pattern_tracker_with_config_negative_alpha() {
-        run_offline_test(
-            "tracker_negative_alpha",
-            "verify",
-            "config",
-            2,
-            || {
-                // Alpha < 0.0 should be clamped to 0.0
-                let mut tracker =
-                    AccessPatternTracker::with_config(-1.0, Duration::from_secs(60), 50);
-                assert_eq!(tracker.tracked_count(), 0);
+        run_offline_test("tracker_negative_alpha", "verify", "config", 2, || {
+            // Alpha < 0.0 should be clamped to 0.0
+            let mut tracker = AccessPatternTracker::with_config(-1.0, Duration::from_secs(60), 50);
+            assert_eq!(tracker.tracked_count(), 0);
 
-                // Record access and verify it still works
-                tracker.record_access(test_object_id());
-                assert_eq!(tracker.access_count(&test_object_id()), 1);
+            // Record access and verify it still works
+            tracker.record_access(test_object_id());
+            assert_eq!(tracker.access_count(&test_object_id()), 1);
 
-                OfflineLogData {
-                    details: Some(json!({"negative_alpha_clamped": true})),
-                    ..OfflineLogData::default()
-                }
-            },
-        );
+            OfflineLogData {
+                details: Some(json!({"negative_alpha_clamped": true})),
+                ..OfflineLogData::default()
+            }
+        });
     }
 
     #[test]

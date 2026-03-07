@@ -7,9 +7,9 @@ use std::time::Duration;
 
 use fcp_core::{ObjectId, ZoneId, ZoneKey, ZoneKeyAlgorithm, ZoneKeyId};
 use fcp_raptorq::{
-    ChunkError, ChunkedObjectManifest, DecodeAdmissionController, DecodeError,
-    EncodingDecision, EncodeError, ObjectTransmissionInformation, RaptorQConfig, RaptorQDecoder,
-    RaptorQEncoder, RaptorQPathProfile, RaptorQPreset, RawChunk, SymbolEnvelope,
+    ChunkError, ChunkedObjectManifest, DecodeAdmissionController, DecodeError, EncodeError,
+    EncodingDecision, ObjectTransmissionInformation, RaptorQConfig, RaptorQDecoder, RaptorQEncoder,
+    RaptorQPathProfile, RaptorQPreset, RawChunk, SymbolEnvelope,
 };
 use fcp_tailscale::NodeId;
 
@@ -601,11 +601,7 @@ fn envelope_encrypt_decrypt_xchacha20() {
     .unwrap();
 
     let decrypted = envelope
-        .decrypt(
-            &zone_key,
-            ZoneKeyAlgorithm::XChaCha20Poly1305,
-            zone_key_id,
-        )
+        .decrypt(&zone_key, ZoneKeyAlgorithm::XChaCha20Poly1305, zone_key_id)
         .unwrap();
     assert_eq!(decrypted, plaintext);
 }
@@ -633,11 +629,7 @@ fn envelope_wrong_key_fails() {
     .unwrap();
 
     let err = envelope
-        .decrypt(
-            &wrong_key,
-            ZoneKeyAlgorithm::ChaCha20Poly1305,
-            zone_key_id,
-        )
+        .decrypt(&wrong_key, ZoneKeyAlgorithm::ChaCha20Poly1305, zone_key_id)
         .unwrap_err();
     assert!(format!("{err}").contains("decryption failed"));
 }
@@ -916,8 +908,7 @@ fn permit_rejects_excess_symbols() {
 
 #[test]
 fn permit_rejects_excess_memory() {
-    let controller =
-        DecodeAdmissionController::with_limits(16, 200, Duration::from_secs(30), 1000);
+    let controller = DecodeAdmissionController::with_limits(16, 200, Duration::from_secs(30), 1000);
 
     let mut permit = controller.acquire().unwrap();
     permit.try_buffer_symbol(150).unwrap();
@@ -980,10 +971,7 @@ fn encode_error_display() {
     let err = EncodeError::EmptyPayload;
     assert!(format!("{err}").contains("empty"));
 
-    let err = EncodeError::PayloadTooLarge {
-        size: 100,
-        max: 50,
-    };
+    let err = EncodeError::PayloadTooLarge { size: 100, max: 50 };
     let msg = format!("{err}");
     assert!(msg.contains("100"));
     assert!(msg.contains("50"));

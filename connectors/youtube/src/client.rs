@@ -1,18 +1,23 @@
 //! YouTube Data API v3 HTTP client.
 
+use std::collections::BTreeMap;
 use std::fmt;
 use std::fmt::Write as _;
 
-use fcp_core::CredentialId;
-use reqwest::{Client, StatusCode, header};
+use fcp_google_discovery::auth::GoogleMaterializedAuth;
+use fcp_google_discovery::executor::{
+    GoogleApiError, GoogleExecuteRequest, GoogleExecuteResponse, GoogleResponseBody,
+    GoogleResponseMode, GoogleRestError, GoogleRestExecutor,
+};
+use fcp_google_discovery::{DiscoveryMethod, DiscoveryParameter};
+use reqwest::{Client, StatusCode, Url, header};
 use tracing::{debug, warn};
 
 use crate::{
     error::{YouTubeError, YouTubeResult},
     types::{
-        ApiErrorResponse, CaptionListResponse, CaptionTrack, ChannelListResponse, Comment,
-        CommentThreadListResponse, PlaylistItemListResponse, PlaylistListResponse,
-        SearchListResponse, VideoListResponse,
+        CaptionListResponse, CaptionTrack, ChannelListResponse, Comment, CommentThreadListResponse,
+        PlaylistItemListResponse, PlaylistListResponse, SearchListResponse, VideoListResponse,
     },
 };
 
@@ -24,8 +29,8 @@ pub const DEFAULT_BASE_URL: &str = "https://www.googleapis.com/youtube/v3";
 pub enum YouTubeAuth {
     /// Direct API key (appended as `?key=` query parameter).
     ApiKey(String),
-    /// Secretless credential reference (egress proxy injection).
-    CredentialId(CredentialId),
+    /// Shared Google auth materialization (token or secretless credential reference).
+    GoogleShared(GoogleMaterializedAuth),
 }
 
 impl YouTubeAuth {
@@ -34,14 +39,23 @@ impl YouTubeAuth {
     pub fn redacted_label(&self) -> String {
         match self {
             Self::ApiKey(_) => "api_key:redacted".to_string(),
-            Self::CredentialId(id) => format!("credential_id:{id}"),
+            Self::GoogleShared(auth) => {
+                if let Some(credential_id) = auth.credential_id() {
+                    format!("google_auth:credential_id:{credential_id}")
+                } else {
+                    "google_auth:bearer:redacted".to_string()
+                }
+            }
         }
     }
 
     /// Whether this auth mode requires egress proxy credential injection.
     #[must_use]
-    pub const fn is_secretless(&self) -> bool {
-        matches!(self, Self::CredentialId(_))
+    pub fn is_secretless(&self) -> bool {
+        matches!(
+            self,
+            Self::GoogleShared(GoogleMaterializedAuth::CredentialReference { .. })
+        )
     }
 }
 
@@ -49,14 +63,14 @@ impl fmt::Debug for YouTubeAuth {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::ApiKey(_) => f.debug_tuple("ApiKey").field(&"<redacted>").finish(),
-            Self::CredentialId(id) => f.debug_tuple("CredentialId").field(id).finish(),
+            Self::GoogleShared(auth) => f.debug_tuple("GoogleShared").field(auth).finish(),
         }
     }
 }
 
 /// YouTube Data API v3 client.
 pub struct YouTubeClient {
-    http: Client,
+    executor: GoogleRestExecutor,
     auth: YouTubeAuth,
     base_url: String,
     max_retries: u32,
@@ -80,7 +94,7 @@ impl YouTubeClient {
             .map_err(YouTubeError::Http)?;
 
         Ok(Self {
-            http,
+            executor: GoogleRestExecutor::new().with_client(http),
             auth,
             base_url: DEFAULT_BASE_URL.to_string(),
             max_retries: 2,
@@ -119,15 +133,25 @@ impl YouTubeClient {
     fn url_with_key(&self, base: &str) -> String {
         match &self.auth {
             YouTubeAuth::ApiKey(key) => format!("{base}&key={key}"),
-            YouTubeAuth::CredentialId(_) => base.to_string(),
+            YouTubeAuth::GoogleShared(_) => base.to_string(),
         }
     }
 
     /// Apply auth headers to a request builder (credential_id mode).
-    fn apply_auth(&self, builder: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+    fn apply_shared_auth<'a>(&'a self, request: &mut GoogleExecuteRequest<'a>) {
         match &self.auth {
-            YouTubeAuth::ApiKey(_) => builder,
-            YouTubeAuth::CredentialId(id) => builder.header("X-FCP-Credential-ID", id.to_string()),
+            YouTubeAuth::ApiKey(key) => {
+                if !request.parameters.contains_key("key") {
+                    request
+                        .parameters
+                        .entry("key".to_string())
+                        .or_default()
+                        .push(key.clone());
+                }
+            }
+            YouTubeAuth::GoogleShared(auth) => {
+                request.auth = Some(auth);
+            }
         }
     }
 
@@ -345,103 +369,26 @@ impl YouTubeClient {
     // ── Internal HTTP helpers ────────────────────────────────────
 
     async fn get_json<T: serde::de::DeserializeOwned>(&self, url: &str) -> YouTubeResult<T> {
-        let mut last_err = None;
-
-        for attempt in 0..=self.max_retries {
-            if attempt > 0 {
-                let delay = std::time::Duration::from_millis(500 * u64::from(attempt));
-                debug!(attempt, delay_ms = delay.as_millis(), "retrying request");
-                fcp_async_core::time::sleep(delay).await;
-            }
-
-            let redacted_url = redact_key(url);
-            debug!(url = %redacted_url, "GET request");
-
-            let builder = self.apply_auth(self.http.get(url));
-            let result = builder.send().await;
-
-            match result {
-                Ok(response) => {
-                    let status = response.status();
-                    if status.is_success() {
-                        let text = response.text().await.map_err(YouTubeError::Http)?;
-                        let parsed: T = serde_json::from_str(&text)?;
-                        return Ok(parsed);
-                    }
-
-                    let err =
-                        parse_error_response(status, &response.text().await.unwrap_or_default());
-                    if err.is_retryable() && attempt < self.max_retries {
-                        warn!(attempt, status = %status, "retryable error");
-                        last_err = Some(err);
-                        continue;
-                    }
-                    return Err(err);
-                }
-                Err(e) => {
-                    if attempt < self.max_retries {
-                        warn!(attempt, error = %e, "request failed, will retry");
-                        last_err = Some(YouTubeError::Http(e));
-                        continue;
-                    }
-                    return Err(YouTubeError::Http(e));
-                }
-            }
-        }
-
-        Err(last_err.unwrap_or(YouTubeError::Api {
-            message: "Max retries exceeded".into(),
-            status_code: None,
-        }))
+        let response = self
+            .execute_with_retry("GET", url, None, GoogleResponseMode::Json)
+            .await?;
+        decode_json_response(response)
     }
 
     async fn get_text(&self, url: &str) -> YouTubeResult<String> {
-        let mut last_err = None;
-
-        for attempt in 0..=self.max_retries {
-            if attempt > 0 {
-                let delay = std::time::Duration::from_millis(500 * u64::from(attempt));
-                debug!(attempt, delay_ms = delay.as_millis(), "retrying request");
-                fcp_async_core::time::sleep(delay).await;
+        let response = self
+            .execute_with_retry("GET", url, None, GoogleResponseMode::Binary)
+            .await?;
+        match response.body {
+            GoogleResponseBody::Binary(bytes) => {
+                String::from_utf8(bytes).map_err(|error| YouTubeError::Api {
+                    message: format!("non-utf8 text response: {error}"),
+                    status_code: Some(response.status_code),
+                })
             }
-
-            let redacted_url = redact_key(url);
-            debug!(url = %redacted_url, "GET text request");
-
-            let builder = self.apply_auth(self.http.get(url));
-            let result = builder.send().await;
-
-            match result {
-                Ok(response) => {
-                    let status = response.status();
-                    if status.is_success() {
-                        return response.text().await.map_err(YouTubeError::Http);
-                    }
-
-                    let err =
-                        parse_error_response(status, &response.text().await.unwrap_or_default());
-                    if err.is_retryable() && attempt < self.max_retries {
-                        warn!(attempt, status = %status, "retryable error");
-                        last_err = Some(err);
-                        continue;
-                    }
-                    return Err(err);
-                }
-                Err(e) => {
-                    if attempt < self.max_retries {
-                        warn!(attempt, error = %e, "request failed, will retry");
-                        last_err = Some(YouTubeError::Http(e));
-                        continue;
-                    }
-                    return Err(YouTubeError::Http(e));
-                }
-            }
+            GoogleResponseBody::Json(value) => Ok(value.to_string()),
+            GoogleResponseBody::Empty => Ok(String::new()),
         }
-
-        Err(last_err.unwrap_or(YouTubeError::Api {
-            message: "Max retries exceeded".into(),
-            status_code: None,
-        }))
     }
 
     async fn post_json<T: serde::de::DeserializeOwned>(
@@ -449,66 +396,186 @@ impl YouTubeClient {
         url: &str,
         body: &serde_json::Value,
     ) -> YouTubeResult<T> {
-        let redacted_url = redact_key(url);
-        debug!(url = %redacted_url, "POST request");
+        let response = self
+            .execute_with_retry("POST", url, Some(body), GoogleResponseMode::Json)
+            .await?;
+        decode_json_response(response)
+    }
 
-        let builder = self.apply_auth(self.http.post(url).json(body));
-        let response = builder.send().await.map_err(YouTubeError::Http)?;
+    async fn execute_with_retry(
+        &self,
+        http_method: &'static str,
+        url: &str,
+        body: Option<&serde_json::Value>,
+        response_mode: GoogleResponseMode,
+    ) -> YouTubeResult<GoogleExecuteResponse> {
+        let mut last_err = None;
 
-        let status = response.status();
-        if status.is_success() {
-            let text = response.text().await.map_err(YouTubeError::Http)?;
-            let parsed: T = serde_json::from_str(&text)?;
-            return Ok(parsed);
+        for attempt in 0..=self.max_retries {
+            if attempt > 0 {
+                let delay = std::time::Duration::from_millis(500 * u64::from(attempt));
+                debug!(attempt, delay_ms = delay.as_millis(), "retrying request");
+                fcp_async_core::time::sleep(delay).await;
+            }
+
+            let redacted_url = redact_key(url);
+            debug!(url = %redacted_url, method = http_method, "request");
+
+            let response = self
+                .execute_once(http_method, url, body, response_mode)
+                .await;
+            match response {
+                Ok(response) => return Ok(response),
+                Err(error) if error.is_retryable() && attempt < self.max_retries => {
+                    warn!(attempt, error = %error, "retryable error");
+                    last_err = Some(error);
+                }
+                Err(error) => return Err(error),
+            }
         }
 
-        let body_text = response.text().await.unwrap_or_default();
-        Err(parse_error_response(status, &body_text))
+        Err(last_err.unwrap_or(YouTubeError::Api {
+            message: "Max retries exceeded".into(),
+            status_code: None,
+        }))
+    }
+
+    async fn execute_once(
+        &self,
+        http_method: &'static str,
+        raw_url: &str,
+        body: Option<&serde_json::Value>,
+        response_mode: GoogleResponseMode,
+    ) -> YouTubeResult<GoogleExecuteResponse> {
+        let parsed_url = Url::parse(raw_url).map_err(|error| YouTubeError::Api {
+            message: format!("invalid request url `{raw_url}`: {error}"),
+            status_code: None,
+        })?;
+
+        let mut parameters: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        for (name, value) in parsed_url.query_pairs() {
+            parameters
+                .entry(name.into_owned())
+                .or_default()
+                .push(value.into_owned());
+        }
+
+        let method_parameters = parameters
+            .keys()
+            .map(|name| {
+                (
+                    name.clone(),
+                    DiscoveryParameter {
+                        location: Some("query".to_string()),
+                        required: false,
+                        repeated: true,
+                        type_name: Some("string".to_string()),
+                        format: None,
+                        description: None,
+                    },
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+
+        let path = parsed_url.path().trim_start_matches('/').to_string();
+        let method = DiscoveryMethod {
+            key: format!("youtube.transport.{}", http_method.to_ascii_lowercase()),
+            id: format!("youtube.transport.{}", http_method.to_ascii_lowercase()),
+            http_method: http_method.to_string(),
+            path: path.clone(),
+            flat_path: None,
+            canonical_path: path,
+            resource_path: Vec::new(),
+            description: None,
+            scopes: Vec::new(),
+            request_ref: None,
+            response_ref: None,
+            parameters: method_parameters,
+            supports_media_download: http_method == "GET",
+            supports_media_upload: false,
+            media_upload: None,
+        };
+        let schemas = BTreeMap::new();
+        let mut base_url = parsed_url.origin().ascii_serialization();
+        if !base_url.ends_with('/') {
+            base_url.push('/');
+        }
+
+        let mut request = GoogleExecuteRequest::new(&method, &schemas, &base_url);
+        request.parameters = parameters;
+        request.body = body.cloned();
+        request.response_mode = response_mode;
+        self.apply_shared_auth(&mut request);
+
+        self.executor
+            .execute(&request)
+            .await
+            .map_err(map_rest_error)
     }
 }
 
-/// Parse an error response from the YouTube API.
-fn parse_error_response(status: StatusCode, body: &str) -> YouTubeError {
-    if let Ok(err_resp) = serde_json::from_str::<ApiErrorResponse>(body) {
-        if let Some(error) = err_resp.error {
-            let message = error.message.unwrap_or_else(|| format!("HTTP {status}"));
-            let reason = error
-                .errors
-                .as_ref()
-                .and_then(|e| e.first())
-                .and_then(|e| e.reason.as_deref());
-
-            if status == StatusCode::UNAUTHORIZED {
-                return YouTubeError::Unauthorized;
-            }
-
-            if status == StatusCode::FORBIDDEN {
-                if reason == Some("quotaExceeded") || reason == Some("dailyLimitExceeded") {
-                    return YouTubeError::QuotaExceeded;
-                }
-                return YouTubeError::Forbidden { message };
-            }
-
-            if status == StatusCode::NOT_FOUND {
-                return YouTubeError::NotFound { resource: message };
-            }
-
-            if status == StatusCode::TOO_MANY_REQUESTS {
-                return YouTubeError::RateLimited {
-                    retry_after_ms: 60_000,
-                };
-            }
-
-            return YouTubeError::Api {
-                message,
-                status_code: Some(status.as_u16()),
-            };
+fn decode_json_response<T: serde::de::DeserializeOwned>(
+    response: GoogleExecuteResponse,
+) -> YouTubeResult<T> {
+    match response.body {
+        GoogleResponseBody::Json(value) => {
+            serde_json::from_value(value).map_err(YouTubeError::Json)
         }
+        GoogleResponseBody::Binary(bytes) => {
+            serde_json::from_slice(&bytes).map_err(YouTubeError::Json)
+        }
+        GoogleResponseBody::Empty => Err(YouTubeError::Api {
+            message: "expected json response body".to_string(),
+            status_code: Some(response.status_code),
+        }),
+    }
+}
+
+fn map_rest_error(error: GoogleRestError) -> YouTubeError {
+    match error {
+        GoogleRestError::Http { source } => YouTubeError::Http(source),
+        GoogleRestError::JsonDecode { source } => YouTubeError::Json(source),
+        GoogleRestError::Api { error, .. } => map_google_api_error(error),
+        other => YouTubeError::Api {
+            message: other.to_string(),
+            status_code: None,
+        },
+    }
+}
+
+fn map_google_api_error(error: GoogleApiError) -> YouTubeError {
+    if error.status_code == StatusCode::UNAUTHORIZED.as_u16() {
+        return YouTubeError::Unauthorized;
+    }
+
+    if error.status_code == StatusCode::TOO_MANY_REQUESTS.as_u16() {
+        return YouTubeError::RateLimited {
+            retry_after_ms: 60_000,
+        };
+    }
+
+    if error.status_code == StatusCode::NOT_FOUND.as_u16() {
+        return YouTubeError::NotFound {
+            resource: error.message,
+        };
+    }
+
+    if error.status_code == StatusCode::FORBIDDEN.as_u16() {
+        let quota_reason = matches!(
+            error.reason.as_deref(),
+            Some("quotaExceeded" | "dailyLimitExceeded" | "userRateLimitExceeded")
+        );
+        if quota_reason {
+            return YouTubeError::QuotaExceeded;
+        }
+        return YouTubeError::Forbidden {
+            message: error.message,
+        };
     }
 
     YouTubeError::Api {
-        message: format!("HTTP {status}: {body}"),
-        status_code: Some(status.as_u16()),
+        message: error.message,
+        status_code: Some(error.status_code),
     }
 }
 

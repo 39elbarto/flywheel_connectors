@@ -62,10 +62,7 @@ async fn lifecycle_shutdown() {
     let server = MockServer::start().await;
     let mut c = setup_connector(&server.uri()).await;
     c.handle_shutdown(json!({})).await.unwrap();
-    assert_eq!(
-        c.handle_health().await.unwrap()["status"],
-        "unconfigured"
-    );
+    assert_eq!(c.handle_health().await.unwrap()["status"], "unconfigured");
 }
 
 #[fcp_async_core::runtime::test]
@@ -120,10 +117,11 @@ async fn accounts_get() {
 async fn accounts_get_missing_id() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
-    assert!(c
-        .handle_invoke(json!({"operation_id": "salesforce.accounts.get", "input": {}}))
-        .await
-        .is_err());
+    assert!(
+        c.handle_invoke(json!({"operation_id": "salesforce.accounts.get", "input": {}}))
+            .await
+            .is_err()
+    );
 }
 
 // -- Accounts List --
@@ -208,13 +206,14 @@ async fn contacts_create() {
 async fn contacts_create_missing_last_name() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
-    assert!(c
-        .handle_invoke(json!({
+    assert!(
+        c.handle_invoke(json!({
             "operation_id": "salesforce.contacts.create",
             "input": {"first_name": "Alice"}
         }))
         .await
-        .is_err());
+        .is_err()
+    );
 }
 
 // -- Contacts Delete --
@@ -244,10 +243,11 @@ async fn contacts_delete() {
 async fn contacts_delete_missing_id() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
-    assert!(c
-        .handle_invoke(json!({"operation_id": "salesforce.contacts.delete", "input": {}}))
-        .await
-        .is_err());
+    assert!(
+        c.handle_invoke(json!({"operation_id": "salesforce.contacts.delete", "input": {}}))
+            .await
+            .is_err()
+    );
 }
 
 // -- Leads List --
@@ -303,10 +303,11 @@ async fn leads_convert() {
 async fn leads_convert_missing_id() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
-    assert!(c
-        .handle_invoke(json!({"operation_id": "salesforce.leads.convert", "input": {}}))
-        .await
-        .is_err());
+    assert!(
+        c.handle_invoke(json!({"operation_id": "salesforce.leads.convert", "input": {}}))
+            .await
+            .is_err()
+    );
 }
 
 // -- Opportunities List --
@@ -368,13 +369,14 @@ async fn opportunities_create_missing_fields() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
     // Missing stage_name and close_date
-    assert!(c
-        .handle_invoke(json!({
+    assert!(
+        c.handle_invoke(json!({
             "operation_id": "salesforce.opportunities.create",
             "input": {"name": "Deal"}
         }))
         .await
-        .is_err());
+        .is_err()
+    );
 }
 
 // -- Cases List --
@@ -430,13 +432,14 @@ async fn cases_create() {
 async fn cases_create_missing_subject() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
-    assert!(c
-        .handle_invoke(json!({
+    assert!(
+        c.handle_invoke(json!({
             "operation_id": "salesforce.cases.create",
             "input": {"priority": "High"}
         }))
         .await
-        .is_err());
+        .is_err()
+    );
 }
 
 // -- SOQL Query --
@@ -469,10 +472,11 @@ async fn soql_query() {
 async fn soql_query_missing_query() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
-    assert!(c
-        .handle_invoke(json!({"operation_id": "salesforce.soql.query", "input": {}}))
-        .await
-        .is_err());
+    assert!(
+        c.handle_invoke(json!({"operation_id": "salesforce.soql.query", "input": {}}))
+            .await
+            .is_err()
+    );
 }
 
 // -- Reports Get --
@@ -505,10 +509,11 @@ async fn reports_get() {
 async fn reports_get_missing_id() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
-    assert!(c
-        .handle_invoke(json!({"operation_id": "salesforce.reports.get", "input": {}}))
-        .await
-        .is_err());
+    assert!(
+        c.handle_invoke(json!({"operation_id": "salesforce.reports.get", "input": {}}))
+            .await
+            .is_err()
+    );
 }
 
 // -- Error Handling --
@@ -518,18 +523,18 @@ async fn error_401() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path_regex(format!("{API}/query.*")))
-        .respond_with(
-            ResponseTemplate::new(401)
-                .set_body_json(json!([{"message": "Session expired", "errorCode": "INVALID_SESSION_ID"}])),
-        )
+        .respond_with(ResponseTemplate::new(401).set_body_json(
+            json!([{"message": "Session expired", "errorCode": "INVALID_SESSION_ID"}]),
+        ))
         .mount(&server)
         .await;
 
     let c = setup_connector(&server.uri()).await;
-    assert!(c
-        .handle_invoke(json!({"operation_id": "salesforce.accounts.list", "input": {}}))
-        .await
-        .is_err());
+    assert!(
+        c.handle_invoke(json!({"operation_id": "salesforce.accounts.list", "input": {}}))
+            .await
+            .is_err()
+    );
 }
 
 #[fcp_async_core::runtime::test]
@@ -537,18 +542,18 @@ async fn error_403() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path_regex(format!("{API}/query.*")))
-        .respond_with(
-            ResponseTemplate::new(403)
-                .set_body_json(json!([{"message": "Insufficient privileges", "errorCode": "INSUFFICIENT_ACCESS"}])),
-        )
+        .respond_with(ResponseTemplate::new(403).set_body_json(
+            json!([{"message": "Insufficient privileges", "errorCode": "INSUFFICIENT_ACCESS"}]),
+        ))
         .mount(&server)
         .await;
 
     let c = setup_connector(&server.uri()).await;
-    assert!(c
-        .handle_invoke(json!({"operation_id": "salesforce.accounts.list", "input": {}}))
-        .await
-        .is_err());
+    assert!(
+        c.handle_invoke(json!({"operation_id": "salesforce.accounts.list", "input": {}}))
+            .await
+            .is_err()
+    );
 }
 
 #[fcp_async_core::runtime::test]
@@ -564,13 +569,14 @@ async fn error_404() {
         .await;
 
     let c = setup_connector(&server.uri()).await;
-    assert!(c
-        .handle_invoke(json!({
+    assert!(
+        c.handle_invoke(json!({
             "operation_id": "salesforce.accounts.get",
             "input": {"account_id": "nonexistent"}
         }))
         .await
-        .is_err());
+        .is_err()
+    );
 }
 
 #[fcp_async_core::runtime::test]
@@ -587,10 +593,11 @@ async fn error_429() {
         .await;
 
     let c = setup_connector(&server.uri()).await;
-    assert!(c
-        .handle_invoke(json!({"operation_id": "salesforce.accounts.list", "input": {}}))
-        .await
-        .is_err());
+    assert!(
+        c.handle_invoke(json!({"operation_id": "salesforce.accounts.list", "input": {}}))
+            .await
+            .is_err()
+    );
 }
 
 // -- Unknown Op / Simulate --
@@ -599,34 +606,37 @@ async fn error_429() {
 async fn unknown_operation() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
-    assert!(c
-        .handle_invoke(json!({"operation_id": "salesforce.nope", "input": {}}))
-        .await
-        .is_err());
+    assert!(
+        c.handle_invoke(json!({"operation_id": "salesforce.nope", "input": {}}))
+            .await
+            .is_err()
+    );
 }
 
 #[fcp_async_core::runtime::test]
 async fn simulate_known() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
-    assert!(c
-        .handle_simulate(json!({"operation_id": "salesforce.accounts.list"}))
-        .await
-        .unwrap()["allowed"]
-        .as_bool()
-        .unwrap());
+    assert!(
+        c.handle_simulate(json!({"operation_id": "salesforce.accounts.list"}))
+            .await
+            .unwrap()["allowed"]
+            .as_bool()
+            .unwrap()
+    );
 }
 
 #[fcp_async_core::runtime::test]
 async fn simulate_unknown() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
-    assert!(!c
-        .handle_simulate(json!({"operation_id": "salesforce.nope"}))
-        .await
-        .unwrap()["allowed"]
-        .as_bool()
-        .unwrap());
+    assert!(
+        !c.handle_simulate(json!({"operation_id": "salesforce.nope"}))
+            .await
+            .unwrap()["allowed"]
+            .as_bool()
+            .unwrap()
+    );
 }
 
 // -- Counters --
@@ -656,7 +666,9 @@ async fn counters_error_increment() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path_regex(format!("{API}/query.*")))
-        .respond_with(ResponseTemplate::new(500).set_body_json(json!({"message": "Internal error"})))
+        .respond_with(
+            ResponseTemplate::new(500).set_body_json(json!({"message": "Internal error"})),
+        )
         .mount(&server)
         .await;
 
@@ -680,5 +692,9 @@ async fn configure_missing_auth_fails() {
 #[fcp_async_core::runtime::test]
 async fn configure_empty_token_fails() {
     let mut c = SalesforceConnector::new();
-    assert!(c.handle_configure(json!({"access_token": ""})).await.is_err());
+    assert!(
+        c.handle_configure(json!({"access_token": ""}))
+            .await
+            .is_err()
+    );
 }

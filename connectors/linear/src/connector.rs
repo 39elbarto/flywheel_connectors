@@ -1225,7 +1225,8 @@ mod tests {
     fn config_from_credential_id() {
         let cfg = LinearConfig::from_params(&json!({
             "credential_id": "550e8400-e29b-41d4-a716-446655440000"
-        })).unwrap();
+        }))
+        .unwrap();
         assert!(cfg.auth.is_secretless());
     }
 
@@ -1234,7 +1235,8 @@ mod tests {
         let cfg = LinearConfig::from_params(&json!({
             "api_key": "test",
             "api_url": "https://linear.example.com/graphql"
-        })).unwrap();
+        }))
+        .unwrap();
         assert_eq!(cfg.api_url, "https://linear.example.com/graphql");
     }
 

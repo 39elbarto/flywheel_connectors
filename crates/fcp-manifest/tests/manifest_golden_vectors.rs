@@ -4102,7 +4102,7 @@ fn spotify_full_manifest_parses_with_all_operations() {
         "spotify.player.stream",
         "spotify.playlist.get",
         "spotify.search",
-        "spotify.track.get"
+        "spotify.track.get",
     ];
     for op_name in &expected_ops {
         assert!(ops.contains_key(*op_name), "missing operation: {op_name}");
@@ -4230,7 +4230,7 @@ fn mongodb_full_manifest_parses_with_all_operations() {
         "mongodb.databases.list",
         "mongodb.documents.delete",
         "mongodb.documents.find",
-        "mongodb.documents.insert"
+        "mongodb.documents.insert",
     ];
     for op_name in &expected_ops {
         assert!(ops.contains_key(*op_name), "missing operation: {op_name}");
@@ -4307,7 +4307,7 @@ fn dropbox_full_manifest_parses_with_all_operations() {
         "dropbox.files.delete",
         "dropbox.files.get_metadata",
         "dropbox.files.list",
-        "dropbox.sharing.list"
+        "dropbox.sharing.list",
     ];
     for op_name in &expected_ops {
         assert!(ops.contains_key(*op_name), "missing operation: {op_name}");
@@ -5154,7 +5154,7 @@ fn asana_full_manifest_parses_with_all_operations() {
         "asana.tasks.create",
         "asana.tasks.delete",
         "asana.tasks.list",
-        "asana.workspaces.list"
+        "asana.workspaces.list",
     ];
     for op_name in &expected_ops {
         assert!(ops.contains_key(*op_name), "missing operation: {op_name}");
@@ -5193,7 +5193,7 @@ fn trello_full_manifest_parses_with_all_operations() {
         "trello.cards.create",
         "trello.cards.delete",
         "trello.cards.list",
-        "trello.lists.get"
+        "trello.lists.get",
     ];
     for op_name in &expected_ops {
         assert!(ops.contains_key(*op_name), "missing operation: {op_name}");
@@ -5232,7 +5232,7 @@ fn sendgrid_full_manifest_parses_with_all_operations() {
         "sendgrid.contacts.list",
         "sendgrid.mail.send",
         "sendgrid.stats.get",
-        "sendgrid.templates.list"
+        "sendgrid.templates.list",
     ];
     for op_name in &expected_ops {
         assert!(ops.contains_key(*op_name), "missing operation: {op_name}");
@@ -5423,7 +5423,7 @@ fn bitbucket_full_manifest_parses_with_all_operations() {
         "bitbucket.pipelines.list",
         "bitbucket.pull_requests.create",
         "bitbucket.pull_requests.list",
-        "bitbucket.repos.list"
+        "bitbucket.repos.list",
     ];
     for op_name in &expected_ops {
         assert!(ops.contains_key(*op_name), "missing operation: {op_name}");
@@ -5535,11 +5535,7 @@ fn duckdb_full_manifest_parses_with_all_operations() {
     assert_eq!(parsed.connector.id.as_str(), "fcp.duckdb");
 
     let ops = &parsed.provides.operations;
-    let expected_ops = [
-        "duckdb.execute",
-        "duckdb.query",
-        "duckdb.tables.list"
-    ];
+    let expected_ops = ["duckdb.execute", "duckdb.query", "duckdb.tables.list"];
     for op_name in &expected_ops {
         assert!(ops.contains_key(*op_name), "missing operation: {op_name}");
     }
@@ -5841,7 +5837,7 @@ fn monday_full_manifest_parses_with_all_operations() {
         "monday.boards.list",
         "monday.items.create",
         "monday.items.delete",
-        "monday.items.list"
+        "monday.items.list",
     ];
     for op_name in &expected_ops {
         assert!(ops.contains_key(*op_name), "missing operation: {op_name}");
@@ -5951,10 +5947,7 @@ fn retool_full_manifest_parses_with_all_operations() {
     assert_eq!(parsed.connector.id.as_str(), "fcp.retool");
 
     let ops = &parsed.provides.operations;
-    let expected_ops = [
-        "retool.workflows.list",
-        "retool.workflows.run",
-    ];
+    let expected_ops = ["retool.workflows.list", "retool.workflows.run"];
     for op_name in &expected_ops {
         assert!(ops.contains_key(*op_name), "missing operation: {op_name}");
     }
@@ -6019,7 +6012,8 @@ fn semanticscholar_full_manifest_parses_with_all_operations() {
     let raw = std::fs::read_to_string(&path)
         .unwrap_or_else(|err| panic!("failed to read semanticscholar manifest: {err}"));
     let with_hash = with_computed_hash(&raw);
-    let parsed = ConnectorManifest::parse_str(&with_hash).expect("valid full semanticscholar manifest");
+    let parsed =
+        ConnectorManifest::parse_str(&with_hash).expect("valid full semanticscholar manifest");
 
     assert_eq!(parsed.connector.id.as_str(), "fcp.semanticscholar");
 
@@ -6099,7 +6093,8 @@ fn webhook_receiver_full_manifest_parses_with_all_operations() {
     let raw = std::fs::read_to_string(&path)
         .unwrap_or_else(|err| panic!("failed to read webhook-receiver manifest: {err}"));
     let with_hash = with_computed_hash(&raw);
-    let parsed = ConnectorManifest::parse_str(&with_hash).expect("valid full webhook-receiver manifest");
+    let parsed =
+        ConnectorManifest::parse_str(&with_hash).expect("valid full webhook-receiver manifest");
 
     assert_eq!(parsed.connector.id.as_str(), "fcp.webhook-receiver");
 
@@ -6142,10 +6137,7 @@ fn zapier_full_manifest_parses_with_all_operations() {
     assert_eq!(parsed.connector.id.as_str(), "fcp.zapier");
 
     let ops = &parsed.provides.operations;
-    let expected_ops = [
-        "zapier.zaps.execute",
-        "zapier.zaps.list",
-    ];
+    let expected_ops = ["zapier.zaps.execute", "zapier.zaps.list"];
     for op_name in &expected_ops {
         assert!(ops.contains_key(*op_name), "missing operation: {op_name}");
     }
@@ -6154,7 +6146,6 @@ fn zapier_full_manifest_parses_with_all_operations() {
     let pools = parsed.rate_limits.as_ref().expect("rate_limits");
     assert_eq!(pools.pools.len(), 2);
 }
-
 
 #[test]
 fn annas_archive_full_manifest_parses_with_all_operations() {

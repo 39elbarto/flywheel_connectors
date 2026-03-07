@@ -203,7 +203,9 @@ async fn members_list_missing_list_id() {
 async fn members_delete() {
     let server = MockServer::start().await;
     Mock::given(method("DELETE"))
-        .and(path("/lists/abc123/members/d41d8cd98f00b204e9800998ecf8427e"))
+        .and(path(
+            "/lists/abc123/members/d41d8cd98f00b204e9800998ecf8427e",
+        ))
         .respond_with(ResponseTemplate::new(204))
         .mount(&server)
         .await;

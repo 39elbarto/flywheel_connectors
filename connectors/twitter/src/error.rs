@@ -434,7 +434,10 @@ mod tests {
 
     #[test]
     fn display_not_configured() {
-        assert_eq!(TwitterError::NotConfigured.to_string(), "Connector not configured");
+        assert_eq!(
+            TwitterError::NotConfigured.to_string(),
+            "Connector not configured"
+        );
     }
 
     // ── Edge cases ──────────────────────────────────────────────────

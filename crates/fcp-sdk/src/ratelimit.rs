@@ -953,7 +953,7 @@ mod tests {
         tracker.try_consume("op", 2);
         let err = tracker.try_consume("op", 1).unwrap();
         assert_eq!(err.pool_id, "tight");
-        
+
         let status = tracker.pool_status("loose").unwrap();
         // Since the 3rd operation failed on 'tight', 'loose' should not be consumed for the 3rd time
         assert_eq!(status.remaining, 98); // 100 - 2, not 97!

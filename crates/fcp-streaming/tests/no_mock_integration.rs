@@ -12,12 +12,9 @@ use wiremock::matchers::{header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use fcp_streaming::{
-    BatchStream, CountingStream, RateLimitedStream, TimeoutStream,
-    ReconnectConfig, ReconnectHandler,
-    SseClient, SseConfig, SseEvent,
-    StreamError, StreamResult,
-    WsClient, WsCloseFrame, WsConfig, WsMessage,
-    DEFAULT_BUFFER_SIZE, DEFAULT_RECONNECT_DELAY, MAX_RECONNECT_DELAY,
+    BatchStream, CountingStream, DEFAULT_BUFFER_SIZE, DEFAULT_RECONNECT_DELAY, MAX_RECONNECT_DELAY,
+    RateLimitedStream, ReconnectConfig, ReconnectHandler, SseClient, SseConfig, SseEvent,
+    StreamError, StreamResult, TimeoutStream, WsClient, WsCloseFrame, WsConfig, WsMessage,
     with_retry,
 };
 
@@ -913,7 +910,9 @@ fn ws_client_connection_refused() {
 
 #[test]
 fn sse_event_builder_full_chain() {
-    let event = SseEvent::new("payload").with_event("message").with_id("123");
+    let event = SseEvent::new("payload")
+        .with_event("message")
+        .with_id("123");
 
     assert_eq!(event.data, "payload");
     assert_eq!(event.event, Some("message".to_string()));
@@ -1205,7 +1204,9 @@ fn error_buffer_overflow_contains_details() {
         limit: 1_000_000,
     };
     let display = err.to_string();
-    assert!(display.contains("2000000") || display.contains("2_000_000") || display.contains("buffer"));
+    assert!(
+        display.contains("2000000") || display.contains("2_000_000") || display.contains("buffer")
+    );
 }
 
 #[test]

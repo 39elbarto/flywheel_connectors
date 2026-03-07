@@ -301,8 +301,7 @@ mod tests {
 
     #[test]
     fn delete_index_response() {
-        let r: DeleteIndexResponse =
-            serde_json::from_value(json!({"acknowledged": true})).unwrap();
+        let r: DeleteIndexResponse = serde_json::from_value(json!({"acknowledged": true})).unwrap();
         assert!(r.acknowledged.unwrap());
     }
 
@@ -519,7 +518,8 @@ mod tests {
 
     #[test]
     fn index_document_response_debug() {
-        let r: IndexDocumentResponse = serde_json::from_value(json!({"result": "created"})).unwrap();
+        let r: IndexDocumentResponse =
+            serde_json::from_value(json!({"result": "created"})).unwrap();
         let dbg = format!("{r:?}");
         assert!(dbg.contains("IndexDocumentResponse"));
     }
@@ -663,7 +663,8 @@ mod tests {
 
     #[test]
     fn delete_index_response_false() {
-        let r: DeleteIndexResponse = serde_json::from_value(json!({"acknowledged": false})).unwrap();
+        let r: DeleteIndexResponse =
+            serde_json::from_value(json!({"acknowledged": false})).unwrap();
         assert!(!r.acknowledged.unwrap());
     }
 
@@ -736,7 +737,10 @@ mod tests {
             ]
         }))
         .unwrap();
-        assert_eq!(e.error_type, Some("search_phase_execution_exception".into()));
+        assert_eq!(
+            e.error_type,
+            Some("search_phase_execution_exception".into())
+        );
         assert_eq!(e.root_cause.as_ref().unwrap().len(), 1);
     }
 

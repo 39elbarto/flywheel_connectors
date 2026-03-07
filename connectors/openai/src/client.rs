@@ -1053,7 +1053,7 @@ fn parse_openai_reset(s: &str) -> Option<u64> {
             current_unit.push(c);
         }
     }
-    
+
     if !current_num.is_empty() && !current_unit.is_empty() {
         if let Ok(val) = current_num.parse::<f64>() {
             match current_unit.as_str() {
@@ -1074,9 +1074,16 @@ fn parse_openai_reset(s: &str) -> Option<u64> {
 }
 
 /// Parse an error response.
-fn parse_error_response(status: StatusCode, headers: &reqwest::header::HeaderMap, bytes: &Bytes) -> OpenAIError {
+fn parse_error_response(
+    status: StatusCode,
+    headers: &reqwest::header::HeaderMap,
+    bytes: &Bytes,
+) -> OpenAIError {
     let mut retry_after_ms = 30_000; // Default 30s
-    if let Some(reset) = headers.get("x-ratelimit-reset-requests").and_then(|v| v.to_str().ok()) {
+    if let Some(reset) = headers
+        .get("x-ratelimit-reset-requests")
+        .and_then(|v| v.to_str().ok())
+    {
         if let Some(ms) = parse_openai_reset(reset) {
             retry_after_ms = ms;
         }
@@ -1092,9 +1099,7 @@ fn parse_error_response(status: StatusCode, headers: &reqwest::header::HeaderMap
 
         // Check for specific error types
         if status == StatusCode::TOO_MANY_REQUESTS {
-            return OpenAIError::RateLimited {
-                retry_after_ms,
-            };
+            return OpenAIError::RateLimited { retry_after_ms };
         }
 
         if status == StatusCode::SERVICE_UNAVAILABLE {

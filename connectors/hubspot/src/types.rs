@@ -304,7 +304,8 @@ mod tests {
     fn paging_roundtrip() {
         let p: Paging = serde_json::from_value(json!({
             "next": {"after": "abc", "link": "https://api.hubapi.com/next"}
-        })).unwrap();
+        }))
+        .unwrap();
         assert_eq!(p.next.as_ref().unwrap().after.as_deref(), Some("abc"));
     }
 
@@ -333,7 +334,10 @@ mod tests {
 
     #[test]
     fn paging_next_serialize_roundtrip() {
-        let pn = PagingNext { after: Some("cur".into()), link: Some("http://link".into()) };
+        let pn = PagingNext {
+            after: Some("cur".into()),
+            link: Some("http://link".into()),
+        };
         let v = serde_json::to_value(&pn).unwrap();
         assert_eq!(v["after"], "cur");
         let pn2: PagingNext = serde_json::from_value(v).unwrap();
@@ -391,7 +395,8 @@ mod tests {
     fn pipeline_stage_with_metadata() {
         let s: PipelineStage = serde_json::from_value(json!({
             "id": "s1", "metadata": {"probability": 0.5}
-        })).unwrap();
+        }))
+        .unwrap();
         assert_eq!(s.metadata.unwrap()["probability"], 0.5);
     }
 
@@ -472,7 +477,8 @@ mod tests {
             "status": "error",
             "category": "VALIDATION_ERROR",
             "correlationId": "corr-123"
-        })).unwrap();
+        }))
+        .unwrap();
         assert_eq!(e.status.as_deref(), Some("error"));
         assert_eq!(e.category.as_deref(), Some("VALIDATION_ERROR"));
         assert_eq!(e.correlation_id.as_deref(), Some("corr-123"));

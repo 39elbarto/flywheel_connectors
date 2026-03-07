@@ -84,7 +84,8 @@ mod tests {
             "id": 1, "name": "my-project", "path_with_namespace": "user/my-project",
             "web_url": "https://gitlab.com/user/my-project", "visibility": "private",
             "default_branch": "main", "archived": false
-        })).unwrap();
+        }))
+        .unwrap();
         assert_eq!(p.name.as_deref(), Some("my-project"));
         assert!(!p.archived.unwrap());
     }
@@ -100,7 +101,8 @@ mod tests {
         let i: Issue = serde_json::from_value(json!({
             "id": 1, "iid": 42, "title": "Bug", "state": "opened",
             "labels": ["bug", "critical"], "web_url": "https://gitlab.com/..."
-        })).unwrap();
+        }))
+        .unwrap();
         assert_eq!(i.iid, Some(42));
         assert_eq!(i.labels.len(), 2);
     }
@@ -117,7 +119,8 @@ mod tests {
             "id": 1, "iid": 10, "title": "Feature", "state": "merged",
             "source_branch": "feature", "target_branch": "main",
             "merge_status": "can_be_merged"
-        })).unwrap();
+        }))
+        .unwrap();
         assert_eq!(m.state.as_deref(), Some("merged"));
     }
 
@@ -126,7 +129,8 @@ mod tests {
         let p: Pipeline = serde_json::from_value(json!({
             "id": 1, "iid": 5, "status": "success", "ref": "main",
             "sha": "abc123", "source": "push"
-        })).unwrap();
+        }))
+        .unwrap();
         assert_eq!(p.status.as_deref(), Some("success"));
         assert_eq!(p.ref_name.as_deref(), Some("main"));
     }
@@ -135,7 +139,8 @@ mod tests {
     fn api_error_response() {
         let e: ApiErrorResponse = serde_json::from_value(json!({
             "message": "404 Not Found", "error": "not_found"
-        })).unwrap();
+        }))
+        .unwrap();
         assert_eq!(e.error.as_deref(), Some("not_found"));
     }
 
@@ -155,7 +160,8 @@ mod tests {
             "default_branch": "develop", "visibility": "public",
             "created_at": "2024-01-01T00:00:00Z", "last_activity_at": "2025-01-01T00:00:00Z",
             "archived": true
-        })).unwrap();
+        }))
+        .unwrap();
         assert_eq!(p.id, Some(42));
         assert_eq!(p.name.as_deref(), Some("proj"));
         assert_eq!(p.path_with_namespace.as_deref(), Some("group/proj"));
@@ -171,9 +177,15 @@ mod tests {
     #[test]
     fn project_serialize_roundtrip() {
         let p = Project {
-            id: Some(1), name: Some("test".into()), path_with_namespace: Some("g/t".into()),
-            description: None, web_url: Some("url".into()), default_branch: Some("main".into()),
-            visibility: Some("private".into()), created_at: None, last_activity_at: None,
+            id: Some(1),
+            name: Some("test".into()),
+            path_with_namespace: Some("g/t".into()),
+            description: None,
+            web_url: Some("url".into()),
+            default_branch: Some("main".into()),
+            visibility: Some("private".into()),
+            created_at: None,
+            last_activity_at: None,
             archived: Some(false),
         };
         let v = serde_json::to_value(&p).unwrap();
@@ -227,7 +239,8 @@ mod tests {
             "labels": ["bug", "p1"],
             "author": {"id": 1, "name": "Jane"},
             "assignee": {"id": 2, "name": "John"}
-        })).unwrap();
+        }))
+        .unwrap();
         assert_eq!(i.id, Some(100));
         assert_eq!(i.iid, Some(10));
         assert_eq!(i.title.as_deref(), Some("Bug report"));
@@ -242,11 +255,17 @@ mod tests {
     #[test]
     fn issue_serialize_roundtrip() {
         let i = Issue {
-            id: Some(1), iid: Some(2), title: Some("T".into()),
-            description: None, state: Some("closed".into()),
-            web_url: None, created_at: None, updated_at: None,
+            id: Some(1),
+            iid: Some(2),
+            title: Some("T".into()),
+            description: None,
+            state: Some("closed".into()),
+            web_url: None,
+            created_at: None,
+            updated_at: None,
             labels: vec!["a".into(), "b".into()],
-            author: None, assignee: None,
+            author: None,
+            assignee: None,
         };
         let v = serde_json::to_value(&i).unwrap();
         assert_eq!(v["iid"], 2);
@@ -294,7 +313,8 @@ mod tests {
             "web_url": "https://gl.com/mr/20",
             "created_at": "2024-01-01", "updated_at": "2024-01-02",
             "author": {"id": 1}, "merge_status": "can_be_merged"
-        })).unwrap();
+        }))
+        .unwrap();
         assert_eq!(m.id, Some(200));
         assert_eq!(m.iid, Some(20));
         assert_eq!(m.title.as_deref(), Some("Feature X"));
@@ -316,11 +336,18 @@ mod tests {
     #[test]
     fn merge_request_serialize_roundtrip() {
         let m = MergeRequest {
-            id: Some(1), iid: Some(5), title: Some("MR".into()),
-            description: None, state: Some("opened".into()),
-            source_branch: Some("feat".into()), target_branch: Some("main".into()),
-            web_url: None, created_at: None, updated_at: None,
-            author: None, merge_status: Some("unchecked".into()),
+            id: Some(1),
+            iid: Some(5),
+            title: Some("MR".into()),
+            description: None,
+            state: Some("opened".into()),
+            source_branch: Some("feat".into()),
+            target_branch: Some("main".into()),
+            web_url: None,
+            created_at: None,
+            updated_at: None,
+            author: None,
+            merge_status: Some("unchecked".into()),
         };
         let v = serde_json::to_value(&m).unwrap();
         assert_eq!(v["source_branch"], "feat");
@@ -344,7 +371,8 @@ mod tests {
 
     #[test]
     fn merge_request_extra_fields_ignored() {
-        let m: MergeRequest = serde_json::from_value(json!({"id": 1, "approvals_before_merge": 2})).unwrap();
+        let m: MergeRequest =
+            serde_json::from_value(json!({"id": 1, "approvals_before_merge": 2})).unwrap();
         assert_eq!(m.id, Some(1));
     }
 
@@ -358,7 +386,8 @@ mod tests {
             "web_url": "https://gl.com/pipe/30",
             "created_at": "2024-05-01", "updated_at": "2024-05-02",
             "source": "web"
-        })).unwrap();
+        }))
+        .unwrap();
         assert_eq!(p.id, Some(300));
         assert_eq!(p.iid, Some(30));
         assert_eq!(p.status.as_deref(), Some("running"));
@@ -377,9 +406,14 @@ mod tests {
     #[test]
     fn pipeline_serialize_roundtrip() {
         let p = Pipeline {
-            id: Some(1), iid: Some(2), status: Some("success".into()),
-            ref_name: Some("main".into()), sha: Some("abc".into()),
-            web_url: None, created_at: None, updated_at: None,
+            id: Some(1),
+            iid: Some(2),
+            status: Some("success".into()),
+            ref_name: Some("main".into()),
+            sha: Some("abc".into()),
+            web_url: None,
+            created_at: None,
+            updated_at: None,
             source: Some("push".into()),
         };
         let v = serde_json::to_value(&p).unwrap();
@@ -426,7 +460,8 @@ mod tests {
         // GitLab sometimes returns message as an object
         let e: ApiErrorResponse = serde_json::from_value(json!({
             "message": {"base": ["is invalid"]}
-        })).unwrap();
+        }))
+        .unwrap();
         assert!(e.message.is_some());
         assert!(e.message.unwrap().is_object());
     }
@@ -435,7 +470,8 @@ mod tests {
     fn api_error_response_message_as_string() {
         let e: ApiErrorResponse = serde_json::from_value(json!({
             "message": "404 Not Found"
-        })).unwrap();
+        }))
+        .unwrap();
         assert_eq!(e.message.unwrap().as_str(), Some("404 Not Found"));
     }
 
@@ -457,14 +493,16 @@ mod tests {
 
     #[test]
     fn api_error_response_null_fields() {
-        let e: ApiErrorResponse = serde_json::from_value(json!({"error": null, "message": null})).unwrap();
+        let e: ApiErrorResponse =
+            serde_json::from_value(json!({"error": null, "message": null})).unwrap();
         assert!(e.error.is_none());
         assert!(e.message.is_none());
     }
 
     #[test]
     fn api_error_response_extra_fields_ignored() {
-        let e: ApiErrorResponse = serde_json::from_value(json!({"error": "e", "extra": 42})).unwrap();
+        let e: ApiErrorResponse =
+            serde_json::from_value(json!({"error": "e", "extra": 42})).unwrap();
         assert_eq!(e.error.as_deref(), Some("e"));
     }
 
@@ -479,11 +517,16 @@ mod tests {
     #[test]
     fn project_json_string_roundtrip() {
         let p = Project {
-            id: Some(42), name: Some("roundtrip".into()),
-            path_with_namespace: None, description: None,
-            web_url: None, default_branch: None,
-            visibility: None, created_at: None,
-            last_activity_at: None, archived: None,
+            id: Some(42),
+            name: Some("roundtrip".into()),
+            path_with_namespace: None,
+            description: None,
+            web_url: None,
+            default_branch: None,
+            visibility: None,
+            created_at: None,
+            last_activity_at: None,
+            archived: None,
         };
         let s = serde_json::to_string(&p).unwrap();
         let back: Project = serde_json::from_str(&s).unwrap();
@@ -494,10 +537,17 @@ mod tests {
     #[test]
     fn issue_json_string_roundtrip() {
         let i = Issue {
-            id: Some(7), iid: Some(3), title: Some("RT".into()),
-            description: None, state: None, web_url: None,
-            created_at: None, updated_at: None,
-            labels: vec!["l1".into()], author: None, assignee: None,
+            id: Some(7),
+            iid: Some(3),
+            title: Some("RT".into()),
+            description: None,
+            state: None,
+            web_url: None,
+            created_at: None,
+            updated_at: None,
+            labels: vec!["l1".into()],
+            author: None,
+            assignee: None,
         };
         let s = serde_json::to_string(&i).unwrap();
         let back: Issue = serde_json::from_str(&s).unwrap();
@@ -508,10 +558,18 @@ mod tests {
     #[test]
     fn merge_request_json_string_roundtrip() {
         let m = MergeRequest {
-            id: Some(99), iid: None, title: Some("MR RT".into()),
-            description: None, state: None, source_branch: None,
-            target_branch: None, web_url: None, created_at: None,
-            updated_at: None, author: None, merge_status: None,
+            id: Some(99),
+            iid: None,
+            title: Some("MR RT".into()),
+            description: None,
+            state: None,
+            source_branch: None,
+            target_branch: None,
+            web_url: None,
+            created_at: None,
+            updated_at: None,
+            author: None,
+            merge_status: None,
         };
         let s = serde_json::to_string(&m).unwrap();
         let back: MergeRequest = serde_json::from_str(&s).unwrap();
@@ -521,9 +579,14 @@ mod tests {
     #[test]
     fn pipeline_json_string_roundtrip() {
         let p = Pipeline {
-            id: Some(77), iid: None, status: Some("pending".into()),
-            ref_name: Some("main".into()), sha: None,
-            web_url: None, created_at: None, updated_at: None,
+            id: Some(77),
+            iid: None,
+            status: Some("pending".into()),
+            ref_name: Some("main".into()),
+            sha: None,
+            web_url: None,
+            created_at: None,
+            updated_at: None,
             source: None,
         };
         let s = serde_json::to_string(&p).unwrap();
@@ -536,7 +599,8 @@ mod tests {
 
     #[test]
     fn project_unicode_name() {
-        let p: Project = serde_json::from_value(json!({"name": "Projet \u{00e9}l\u{00e8}ve"})).unwrap();
+        let p: Project =
+            serde_json::from_value(json!({"name": "Projet \u{00e9}l\u{00e8}ve"})).unwrap();
         assert!(p.name.unwrap().contains('\u{00e9}'));
     }
 

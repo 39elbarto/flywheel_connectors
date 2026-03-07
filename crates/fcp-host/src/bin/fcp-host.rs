@@ -29,7 +29,7 @@ use fcp_host::{
     BudgetPolicyEngine, ConnectorArchetype, ConnectorRegistry, ConnectorSummary, DiscoveryEndpoint,
     DiscoveryFilter, DiscoveryResponse, DoctorReport, DoctorRequest, DoctorService,
     HostHealthResponse, HostHealthStatus, IntrospectionResponse, PreflightRequest,
-    PreflightResponse,
+    PreflightResponse, RequestPriority, ResilienceError, ResilienceLayer, merge_connector_health,
 };
 use fcp_host::{HostError, HostResult};
 use serde::Deserialize;
@@ -58,10 +58,11 @@ struct ConnectorConfig {
 struct SubprocessConnector {
     summary: ConnectorSummary,
     runner: Mutex<ConnectorProcessRunner>,
+    resilience: Arc<ResilienceLayer>,
 }
 
 impl SubprocessConnector {
-    async fn spawn(config: ConnectorConfig) -> HostResult<Self> {
+    async fn spawn(config: ConnectorConfig, resilience: Arc<ResilienceLayer>) -> HostResult<Self> {
         let connector_id: ConnectorId = config.id.parse().map_err(|err| {
             HostError::InvalidFilter(format!("invalid connector id '{}': {err}", config.id))
         })?;
@@ -99,7 +100,9 @@ impl SubprocessConnector {
         let connector = Self {
             summary,
             runner: Mutex::new(runner),
+            resilience,
         };
+        connector.resilience.ensure_connector(&connector.summary.id);
 
         if let Some(config_payload) = config.config {
             connector.configure(config_payload).await?;
@@ -114,23 +117,28 @@ impl SubprocessConnector {
     }
 
     async fn rpc(&self, method: &str, params: serde_json::Value) -> HostResult<serde_json::Value> {
-        let mut runner = self.runner.lock().await;
-        let request = json!({
-            "jsonrpc": "2.0",
-            "id": RequestId::random().0,
-            "method": method,
-            "params": params,
-        });
-        let response = runner
-            .request(&request)
+        let connector_id = self.summary.id.clone();
+        self.resilience
+            .execute(&connector_id, operation_priority(method), method, async {
+                let mut runner = self.runner.lock().await;
+                let request = json!({
+                    "jsonrpc": "2.0",
+                    "id": RequestId::random().0,
+                    "method": method,
+                    "params": params,
+                });
+                let response = runner.request(&request).await.map_err(|err| {
+                    HostError::RegistryError(format!("connector IO error: {err}"))
+                })?;
+                if let Some(error) = response.get("error") {
+                    return Err(HostError::RegistryError(format!(
+                        "connector error: {error}"
+                    )));
+                }
+                Ok(response.get("result").cloned().unwrap_or(json!({})))
+            })
             .await
-            .map_err(|err| HostError::RegistryError(format!("connector IO error: {err}")))?;
-        if let Some(error) = response.get("error") {
-            return Err(HostError::RegistryError(format!(
-                "connector error: {error}"
-            )));
-        }
-        Ok(response.get("result").cloned().unwrap_or(json!({})))
+            .map_err(|error| map_resilience_error(&connector_id, method, error))
     }
 
     async fn introspect(&self) -> HostResult<Introspection> {
@@ -155,12 +163,17 @@ impl SubprocessConnector {
         let mut summary = self.summary.clone();
         match self.health().await {
             Ok(snapshot) => {
-                summary.health = ConnectorHealth::from(&snapshot.status);
+                summary.health = merge_connector_health(
+                    ConnectorHealth::from(&snapshot.status),
+                    self.resilience.connector_health(&self.summary.id),
+                );
                 summary.last_health_check = Some(chrono::Utc::now());
             }
             Err(err) => {
-                summary.health =
-                    ConnectorHealth::unavailable(format!("health check failed: {err}"));
+                summary.health = merge_connector_health(
+                    ConnectorHealth::unavailable(format!("health check failed: {err}")),
+                    self.resilience.connector_health(&self.summary.id),
+                );
                 summary.last_health_check = Some(chrono::Utc::now());
             }
         }
@@ -171,18 +184,21 @@ impl SubprocessConnector {
 #[derive(Clone)]
 struct SubprocessRegistry {
     connectors: HashMap<ConnectorId, Arc<SubprocessConnector>>,
+    _resilience: Arc<ResilienceLayer>,
     version: u64,
 }
 
 impl SubprocessRegistry {
     async fn from_configs(configs: Vec<ConnectorConfig>) -> HostResult<Self> {
+        let resilience = Arc::new(ResilienceLayer::default());
         let mut map = HashMap::new();
         for config in configs {
-            let connector = SubprocessConnector::spawn(config).await?;
+            let connector = SubprocessConnector::spawn(config, Arc::clone(&resilience)).await?;
             map.insert(connector.summary.id.clone(), Arc::new(connector));
         }
         Ok(Self {
             connectors: map,
+            _resilience: resilience,
             version: 1,
         })
     }
@@ -313,6 +329,13 @@ impl ConnectorProcessRunner {
     async fn request(&mut self, value: &serde_json::Value) -> std::io::Result<serde_json::Value> {
         self.send_json(value).await?;
         self.read_json().await
+    }
+}
+
+impl Drop for ConnectorProcessRunner {
+    fn drop(&mut self) {
+        // Prevent zombie process leaks by terminating the child on drop.
+        let _ = self._child.start_kill();
     }
 }
 
@@ -746,12 +769,57 @@ fn parse_connector_id(raw: &str) -> Result<ConnectorId, (StatusCode, String)> {
     })
 }
 
+fn operation_priority(method: &str) -> RequestPriority {
+    match method {
+        "configure" => RequestPriority::Critical,
+        "health" | "self_check" => RequestPriority::High,
+        "introspect" => RequestPriority::Normal,
+        _ => RequestPriority::Normal,
+    }
+}
+
+fn map_resilience_error(
+    connector_id: &ConnectorId,
+    method: &str,
+    error: ResilienceError<HostError>,
+) -> HostError {
+    match error {
+        ResilienceError::Inner(error) => error,
+        ResilienceError::LoadShed { load_per_mille } => HostError::Unavailable(format!(
+            "connector '{connector_id}' method '{method}' load shed at {load_per_mille}‰"
+        )),
+        ResilienceError::Unhealthy { reason } => HostError::Unavailable(format!(
+            "connector '{connector_id}' method '{method}' unhealthy: {reason}"
+        )),
+        ResilienceError::CircuitOpen { retry_after } => HostError::Unavailable(format!(
+            "connector '{connector_id}' method '{method}' circuit open for another {}ms",
+            retry_after.as_millis()
+        )),
+        ResilienceError::HalfOpenLimited => HostError::Unavailable(format!(
+            "connector '{connector_id}' method '{method}' half-open probe already in flight"
+        )),
+        ResilienceError::BulkheadFull => HostError::Unavailable(format!(
+            "connector '{connector_id}' method '{method}' bulkhead queue full"
+        )),
+        ResilienceError::QueueTimeout { timeout } => HostError::Unavailable(format!(
+            "connector '{connector_id}' method '{method}' bulkhead queue timed out after {}ms",
+            timeout.as_millis()
+        )),
+        ResilienceError::TimedOut { timeout } => HostError::Unavailable(format!(
+            "connector '{connector_id}' method '{method}' timed out after {}ms",
+            timeout.as_millis()
+        )),
+    }
+}
+
 fn map_host_error(err: HostError) -> (StatusCode, String) {
     match err {
         HostError::ConnectorNotFound(_) => (StatusCode::NOT_FOUND, err.to_string()),
         HostError::InvalidFilter(_) => (StatusCode::BAD_REQUEST, err.to_string()),
         HostError::PreflightFailed(_) => (StatusCode::FORBIDDEN, err.to_string()),
-        HostError::CacheError(_) => (StatusCode::SERVICE_UNAVAILABLE, err.to_string()),
+        HostError::CacheError(_) | HostError::Unavailable(_) => {
+            (StatusCode::SERVICE_UNAVAILABLE, err.to_string())
+        }
         HostError::RegistryError(_) | HostError::Internal(_) => {
             (StatusCode::INTERNAL_SERVER_ERROR, err.to_string())
         }
@@ -761,6 +829,186 @@ fn map_host_error(err: HostError) -> (StatusCode, String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fcp_core::OperationId;
+
+    fn compiled_test_connector_binary() -> std::path::PathBuf {
+        if let Some(path) = option_env!("CARGO_BIN_EXE_fcp-test-connector") {
+            return std::path::PathBuf::from(path);
+        }
+
+        let current_exe = std::env::current_exe().expect("current test executable path");
+        let deps_dir = current_exe
+            .parent()
+            .expect("test executable should have parent directory");
+        let profile_dir = deps_dir
+            .parent()
+            .expect("test executable should live under target/<profile>/deps");
+        let candidate = profile_dir.join(format!(
+            "fcp-test-connector{}",
+            std::env::consts::EXE_SUFFIX
+        ));
+        assert!(
+            candidate.exists(),
+            "expected compiled fcp-test-connector at {}",
+            candidate.display()
+        );
+        candidate
+    }
+
+    fn subprocess_test_connector_config(connector_id: &str) -> ConnectorConfig {
+        ConnectorConfig {
+            id: connector_id.to_string(),
+            binary: compiled_test_connector_binary().display().to_string(),
+            name: Some("Test Connector".to_string()),
+            description: Some("Subprocess test connector".to_string()),
+            args: Vec::new(),
+            env: HashMap::from([(
+                "FCP_TEST_CONNECTOR_ID".to_string(),
+                connector_id.to_string(),
+            )]),
+            config: Some(json!({})),
+            categories: vec!["test".to_string()],
+            version: None,
+        }
+    }
+
+    #[fcp_async_core::runtime::test(flavor = "multi_thread")]
+    async fn connector_process_runner_handles_multiple_roundtrips_with_test_connector() {
+        let binary = compiled_test_connector_binary();
+        let mut runner = ConnectorProcessRunner::spawn(
+            &binary.display().to_string(),
+            &[],
+            &HashMap::from([(
+                "FCP_TEST_CONNECTOR_ID".to_string(),
+                "fcp.test.runner:utility:1.0.0".to_string(),
+            )]),
+        )
+        .await
+        .expect("spawn test connector");
+
+        let configure = json!({
+            "jsonrpc": "2.0",
+            "id": RequestId::random().0,
+            "method": "configure",
+            "params": {},
+        });
+        let configured =
+            fcp_async_core::time::timeout(Duration::from_secs(2), runner.request(&configure))
+                .await
+                .expect("configure should not hang")
+                .expect("configure should succeed");
+        assert_eq!(configured["result"]["status"], "ok");
+
+        let health = json!({
+            "jsonrpc": "2.0",
+            "id": RequestId::random().0,
+            "method": "health",
+            "params": {},
+        });
+        let health_response =
+            fcp_async_core::time::timeout(Duration::from_secs(2), runner.request(&health))
+                .await
+                .expect("health should not hang")
+                .expect("health should succeed");
+        assert_eq!(health_response["result"]["status"]["state"], "ready");
+        assert!(health_response["result"]["status"]["error"].is_null());
+    }
+
+    #[fcp_async_core::runtime::test(flavor = "multi_thread")]
+    async fn subprocess_connector_supports_multiple_rpc_calls_after_configure() {
+        let connector_id = "fcp.test.subprocess:utility:1.0.0";
+        let connector = fcp_async_core::time::timeout(
+            Duration::from_secs(2),
+            SubprocessConnector::spawn(
+                subprocess_test_connector_config(connector_id),
+                Arc::new(ResilienceLayer::default()),
+            ),
+        )
+        .await
+        .expect("spawn should not hang")
+        .expect("spawn should succeed");
+
+        let health = fcp_async_core::time::timeout(Duration::from_secs(2), connector.health())
+            .await
+            .expect("health should not hang")
+            .expect("health should succeed");
+        assert!(matches!(health.status, fcp_core::HealthState::Ready));
+
+        let introspection =
+            fcp_async_core::time::timeout(Duration::from_secs(2), connector.introspect())
+                .await
+                .expect("introspect should not hang")
+                .expect("introspect should succeed");
+        assert_eq!(introspection.operations.len(), 1);
+        assert_eq!(
+            introspection.operations[0].id,
+            OperationId::from_static("test.echo")
+        );
+    }
+
+    #[test]
+    fn subprocess_connector_supports_multiple_rpc_calls_on_block_on_sync_runtime() {
+        let result = fcp_async_core::runtime::block_on_sync(async {
+            let connector_id = "fcp.test.block-on-sync:utility:1.0.0";
+            let connector = fcp_async_core::time::timeout(
+                Duration::from_secs(2),
+                SubprocessConnector::spawn(
+                    subprocess_test_connector_config(connector_id),
+                    Arc::new(ResilienceLayer::default()),
+                ),
+            )
+            .await
+            .expect("spawn should not hang")
+            .expect("spawn should succeed");
+
+            let health = fcp_async_core::time::timeout(Duration::from_secs(2), connector.health())
+                .await
+                .expect("health should not hang")
+                .expect("health should succeed");
+            assert!(matches!(health.status, fcp_core::HealthState::Ready));
+
+            let introspection =
+                fcp_async_core::time::timeout(Duration::from_secs(2), connector.introspect())
+                    .await
+                    .expect("introspect should not hang")
+                    .expect("introspect should succeed");
+            assert_eq!(introspection.operations.len(), 1);
+            assert_eq!(
+                introspection.operations[0].id,
+                OperationId::from_static("test.echo")
+            );
+        });
+
+        result.expect("block_on_sync runtime should complete");
+    }
+
+    #[fcp_async_core::runtime::test(flavor = "multi_thread")]
+    async fn subprocess_registry_lists_and_introspects_real_connector_configs() {
+        let connector_id = ConnectorId::from_static("fcp.test.registry:utility:1.0.0");
+        let registry = fcp_async_core::time::timeout(
+            Duration::from_secs(2),
+            SubprocessRegistry::from_configs(vec![subprocess_test_connector_config(
+                connector_id.as_str(),
+            )]),
+        )
+        .await
+        .expect("registry construction should not hang")
+        .expect("registry construction should succeed");
+
+        let summaries = fcp_async_core::time::timeout(Duration::from_secs(2), registry.list())
+            .await
+            .expect("registry list should not hang");
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries[0].id, connector_id);
+
+        let introspection = fcp_async_core::time::timeout(
+            Duration::from_secs(2),
+            registry.get_introspection(&connector_id),
+        )
+        .await
+        .expect("registry introspection should not hang");
+        assert!(introspection.is_some());
+    }
 
     // ── parse_bind_target: TCP ──
 
@@ -989,6 +1237,34 @@ mod tests {
         assert!(msg.contains("internal error"));
     }
 
+    #[test]
+    fn map_host_error_unavailable() {
+        let (status, msg) = map_host_error(HostError::Unavailable("circuit open".into()));
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert!(msg.contains("unavailable"));
+    }
+
+    #[test]
+    fn operation_priority_marks_health_as_high() {
+        assert_eq!(operation_priority("health"), RequestPriority::High);
+        assert_eq!(operation_priority("self_check"), RequestPriority::High);
+        assert_eq!(operation_priority("configure"), RequestPriority::Critical);
+    }
+
+    #[test]
+    fn map_resilience_error_load_shed_to_unavailable() {
+        let connector_id = ConnectorId::from_static("fcp.test:echo:1.0.0");
+        let error = map_resilience_error(
+            &connector_id,
+            "introspect",
+            ResilienceError::LoadShed {
+                load_per_mille: 950,
+            },
+        );
+        assert!(matches!(error, HostError::Unavailable(_)));
+        assert!(error.to_string().contains("load shed"));
+    }
+
     // ── parse_connector_id ──
 
     #[test]
@@ -1081,6 +1357,7 @@ mod tests {
     fn subprocess_registry_version() {
         let registry = SubprocessRegistry {
             connectors: HashMap::new(),
+            _resilience: Arc::new(ResilienceLayer::default()),
             version: 42,
         };
         assert_eq!(registry.version(), 42);
@@ -1090,6 +1367,7 @@ mod tests {
     fn subprocess_registry_clone() {
         let registry = SubprocessRegistry {
             connectors: HashMap::new(),
+            _resilience: Arc::new(ResilienceLayer::default()),
             version: 7,
         };
         let cloned = registry.clone();
@@ -1103,6 +1381,7 @@ mod tests {
     async fn app_state_clone_preserves_started_at() {
         let registry = Arc::new(SubprocessRegistry {
             connectors: HashMap::new(),
+            _resilience: Arc::new(ResilienceLayer::default()),
             version: 1,
         });
         let doctor = DoctorService::new(Arc::clone(&registry));

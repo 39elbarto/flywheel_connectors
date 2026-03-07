@@ -11,7 +11,7 @@ use serde_json::json;
 use tracing::{info, instrument};
 
 use crate::{
-    client::{PostHogAuth, PostHogClient, DEFAULT_BASE_URL},
+    client::{DEFAULT_BASE_URL, PostHogAuth, PostHogClient},
     error::PostHogError,
 };
 
@@ -174,9 +174,12 @@ impl PostHogConnector {
             "Configuring PostHog connector"
         );
 
-        let client =
-            PostHogClient::new(config.auth.clone(), &config.project_id, Some(&config.base_url))
-                .map_err(|e| e.to_fcp_error())?;
+        let client = PostHogClient::new(
+            config.auth.clone(),
+            &config.project_id,
+            Some(&config.base_url),
+        )
+        .map_err(|e| e.to_fcp_error())?;
 
         self.client = Some(Arc::new(client));
         self.config = Some(config);
@@ -377,7 +380,10 @@ impl PostHogConnector {
     ) -> Result<serde_json::Value, PostHogError> {
         let query = require_str(input, "query")?;
         let resp = client.query_events(query).await?;
-        let results = resp.get("results").cloned().unwrap_or(serde_json::Value::Null);
+        let results = resp
+            .get("results")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
         Ok(json!({ "results": results }))
     }
 
@@ -794,7 +800,11 @@ mod tests {
 
     #[test]
     fn doctor_status_serde_roundtrip() {
-        let statuses = [DoctorStatus::Healthy, DoctorStatus::Degraded, DoctorStatus::Unhealthy];
+        let statuses = [
+            DoctorStatus::Healthy,
+            DoctorStatus::Degraded,
+            DoctorStatus::Unhealthy,
+        ];
         for s in &statuses {
             let v = serde_json::to_value(s).unwrap();
             let back: DoctorStatus = serde_json::from_value(v).unwrap();
@@ -804,9 +814,18 @@ mod tests {
 
     #[test]
     fn doctor_status_lowercase_serialization() {
-        assert_eq!(serde_json::to_value(DoctorStatus::Healthy).unwrap(), "healthy");
-        assert_eq!(serde_json::to_value(DoctorStatus::Degraded).unwrap(), "degraded");
-        assert_eq!(serde_json::to_value(DoctorStatus::Unhealthy).unwrap(), "unhealthy");
+        assert_eq!(
+            serde_json::to_value(DoctorStatus::Healthy).unwrap(),
+            "healthy"
+        );
+        assert_eq!(
+            serde_json::to_value(DoctorStatus::Degraded).unwrap(),
+            "degraded"
+        );
+        assert_eq!(
+            serde_json::to_value(DoctorStatus::Unhealthy).unwrap(),
+            "unhealthy"
+        );
     }
 
     #[test]
@@ -965,8 +984,18 @@ mod tests {
     #[test]
     fn doctor_result_unhealthy_overrides_degraded() {
         let r = DoctorResult::from_checks(vec![
-            DoctorCheck { name: "a".into(), passed: false, message: None, critical: true },
-            DoctorCheck { name: "b".into(), passed: false, message: None, critical: false },
+            DoctorCheck {
+                name: "a".into(),
+                passed: false,
+                message: None,
+                critical: true,
+            },
+            DoctorCheck {
+                name: "b".into(),
+                passed: false,
+                message: None,
+                critical: false,
+            },
         ]);
         assert_eq!(r.status, DoctorStatus::Unhealthy);
     }

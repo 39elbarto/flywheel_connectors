@@ -315,10 +315,7 @@ impl KubernetesConnector {
         })
     }
 
-    pub async fn handle_simulate(
-        &self,
-        params: serde_json::Value,
-    ) -> FcpResult<serde_json::Value> {
+    pub async fn handle_simulate(&self, params: serde_json::Value) -> FcpResult<serde_json::Value> {
         let operation = params
             .get("operation_id")
             .and_then(serde_json::Value::as_str)
@@ -353,9 +350,15 @@ impl KubernetesConnector {
         input: &serde_json::Value,
     ) -> Result<serde_json::Value, KubernetesError> {
         let namespace = require_str(input, "namespace")?;
-        let label_selector = input.get("label_selector").and_then(serde_json::Value::as_str);
-        let field_selector = input.get("field_selector").and_then(serde_json::Value::as_str);
-        let resp = client.list_pods(namespace, label_selector, field_selector).await?;
+        let label_selector = input
+            .get("label_selector")
+            .and_then(serde_json::Value::as_str);
+        let field_selector = input
+            .get("field_selector")
+            .and_then(serde_json::Value::as_str);
+        let resp = client
+            .list_pods(namespace, label_selector, field_selector)
+            .await?;
         let items = resp.get("items").cloned().unwrap_or(json!([]));
         Ok(json!({ "pods": items }))
     }
@@ -394,7 +397,9 @@ impl KubernetesConnector {
         let name = require_str(input, "name")?;
         let container = input.get("container").and_then(serde_json::Value::as_str);
         let tail_lines = input.get("tail_lines").and_then(serde_json::Value::as_u64);
-        let since_seconds = input.get("since_seconds").and_then(serde_json::Value::as_u64);
+        let since_seconds = input
+            .get("since_seconds")
+            .and_then(serde_json::Value::as_u64);
         let logs = client
             .get_pod_logs(namespace, name, container, tail_lines, since_seconds)
             .await?;
@@ -422,7 +427,9 @@ impl KubernetesConnector {
         input: &serde_json::Value,
     ) -> Result<serde_json::Value, KubernetesError> {
         let namespace = require_str(input, "namespace")?;
-        let label_selector = input.get("label_selector").and_then(serde_json::Value::as_str);
+        let label_selector = input
+            .get("label_selector")
+            .and_then(serde_json::Value::as_str);
         let resp = client.list_deployments(namespace, label_selector).await?;
         let items = resp.get("items").cloned().unwrap_or(json!([]));
         Ok(json!({ "deployments": items }))
@@ -455,7 +462,9 @@ impl KubernetesConnector {
             })?;
         #[allow(clippy::cast_possible_truncation)]
         let replicas_u32 = replicas as u32;
-        let resp = client.scale_deployment(namespace, name, replicas_u32).await?;
+        let resp = client
+            .scale_deployment(namespace, name, replicas_u32)
+            .await?;
         Ok(json!({ "deployment": resp }))
     }
 
@@ -545,8 +554,12 @@ impl KubernetesConnector {
         input: &serde_json::Value,
     ) -> Result<serde_json::Value, KubernetesError> {
         let namespace = require_str(input, "namespace")?;
-        let field_selector = input.get("field_selector").and_then(serde_json::Value::as_str);
-        let resource_version = input.get("resource_version").and_then(serde_json::Value::as_str);
+        let field_selector = input
+            .get("field_selector")
+            .and_then(serde_json::Value::as_str);
+        let resource_version = input
+            .get("resource_version")
+            .and_then(serde_json::Value::as_str);
         let resp = client
             .list_events(namespace, field_selector, resource_version)
             .await?;
@@ -590,20 +603,27 @@ mod tests {
 
     #[test]
     fn config_from_bearer_token() {
-        let config = KubernetesConfig::from_params(&json!({"bearer_token": "test-k8s-token"})).unwrap();
+        let config =
+            KubernetesConfig::from_params(&json!({"bearer_token": "test-k8s-token"})).unwrap();
         assert!(matches!(config.auth, KubernetesAuth::BearerToken(_)));
         assert_eq!(config.base_url, DEFAULT_BASE_URL);
     }
 
     #[test]
     fn config_from_credential_id() {
-        let config = KubernetesConfig::from_params(&json!({"credential_id": "550e8400-e29b-41d4-a716-446655440000"})).unwrap();
+        let config = KubernetesConfig::from_params(
+            &json!({"credential_id": "550e8400-e29b-41d4-a716-446655440000"}),
+        )
+        .unwrap();
         assert!(config.auth.is_secretless());
     }
 
     #[test]
     fn config_custom_base_url() {
-        let config = KubernetesConfig::from_params(&json!({"bearer_token": "tok", "base_url": "https://k8s.example.com"})).unwrap();
+        let config = KubernetesConfig::from_params(
+            &json!({"bearer_token": "tok", "base_url": "https://k8s.example.com"}),
+        )
+        .unwrap();
         assert_eq!(config.base_url, "https://k8s.example.com");
     }
 
@@ -639,7 +659,8 @@ mod tests {
 
     #[test]
     fn config_trims_bearer_token() {
-        let config = KubernetesConfig::from_params(&json!({"bearer_token": "  my-token  "})).unwrap();
+        let config =
+            KubernetesConfig::from_params(&json!({"bearer_token": "  my-token  "})).unwrap();
         match &config.auth {
             KubernetesAuth::BearerToken(t) => assert_eq!(t, "my-token"),
             KubernetesAuth::CredentialId(_) => panic!("expected BearerToken"),
@@ -648,7 +669,10 @@ mod tests {
 
     #[test]
     fn require_str_present() {
-        assert_eq!(require_str(&json!({"namespace": "default"}), "namespace").unwrap(), "default");
+        assert_eq!(
+            require_str(&json!({"namespace": "default"}), "namespace").unwrap(),
+            "default"
+        );
     }
 
     #[test]
@@ -690,7 +714,12 @@ mod tests {
     #[test]
     fn operations_ids_are_unique() {
         let ops = operations_info();
-        let ids: Vec<&str> = ops.as_array().unwrap().iter().filter_map(|o| o["id"].as_str()).collect();
+        let ids: Vec<&str> = ops
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|o| o["id"].as_str())
+            .collect();
         let mut unique = ids.clone();
         unique.sort_unstable();
         unique.dedup();
@@ -728,14 +757,27 @@ mod tests {
     #[test]
     fn operations_contain_all_manifest_ids() {
         let ops = operations_info();
-        let ids: Vec<&str> = ops.as_array().unwrap().iter().filter_map(|o| o["id"].as_str()).collect();
+        let ids: Vec<&str> = ops
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|o| o["id"].as_str())
+            .collect();
         for expected in &[
-            "kubernetes.list_pods", "kubernetes.get_pod", "kubernetes.delete_pod",
-            "kubernetes.get_pod_logs", "kubernetes.stream_pod_logs",
-            "kubernetes.list_deployments", "kubernetes.get_deployment",
-            "kubernetes.scale_deployment", "kubernetes.rollout_restart",
-            "kubernetes.get_service", "kubernetes.get_configmap",
-            "kubernetes.update_configmap", "kubernetes.get_secret", "kubernetes.watch_events",
+            "kubernetes.list_pods",
+            "kubernetes.get_pod",
+            "kubernetes.delete_pod",
+            "kubernetes.get_pod_logs",
+            "kubernetes.stream_pod_logs",
+            "kubernetes.list_deployments",
+            "kubernetes.get_deployment",
+            "kubernetes.scale_deployment",
+            "kubernetes.rollout_restart",
+            "kubernetes.get_service",
+            "kubernetes.get_configmap",
+            "kubernetes.update_configmap",
+            "kubernetes.get_secret",
+            "kubernetes.watch_events",
         ] {
             assert!(ids.contains(expected), "missing: {expected}");
         }
@@ -751,37 +793,79 @@ mod tests {
     #[test]
     fn doctor_result_healthy_when_all_pass() {
         let checks = vec![
-            DoctorCheck { name: "a".into(), passed: true, message: None, critical: true },
-            DoctorCheck { name: "b".into(), passed: true, message: None, critical: false },
+            DoctorCheck {
+                name: "a".into(),
+                passed: true,
+                message: None,
+                critical: true,
+            },
+            DoctorCheck {
+                name: "b".into(),
+                passed: true,
+                message: None,
+                critical: false,
+            },
         ];
-        assert_eq!(DoctorResult::from_checks(checks).status, DoctorStatus::Healthy);
+        assert_eq!(
+            DoctorResult::from_checks(checks).status,
+            DoctorStatus::Healthy
+        );
     }
 
     #[test]
     fn doctor_result_degraded_when_non_critical_fails() {
         let checks = vec![
-            DoctorCheck { name: "a".into(), passed: true, message: None, critical: true },
-            DoctorCheck { name: "b".into(), passed: false, message: Some("warn".into()), critical: false },
+            DoctorCheck {
+                name: "a".into(),
+                passed: true,
+                message: None,
+                critical: true,
+            },
+            DoctorCheck {
+                name: "b".into(),
+                passed: false,
+                message: Some("warn".into()),
+                critical: false,
+            },
         ];
-        assert_eq!(DoctorResult::from_checks(checks).status, DoctorStatus::Degraded);
+        assert_eq!(
+            DoctorResult::from_checks(checks).status,
+            DoctorStatus::Degraded
+        );
     }
 
     #[test]
     fn doctor_result_unhealthy_when_critical_fails() {
-        let checks = vec![DoctorCheck { name: "config".into(), passed: false, message: Some("not configured".into()), critical: true }];
-        assert_eq!(DoctorResult::from_checks(checks).status, DoctorStatus::Unhealthy);
+        let checks = vec![DoctorCheck {
+            name: "config".into(),
+            passed: false,
+            message: Some("not configured".into()),
+            critical: true,
+        }];
+        assert_eq!(
+            DoctorResult::from_checks(checks).status,
+            DoctorStatus::Unhealthy
+        );
     }
 
     #[test]
     fn doctor_result_serializes() {
-        let r = DoctorResult::from_checks(vec![DoctorCheck { name: "test".into(), passed: true, message: None, critical: false }]);
+        let r = DoctorResult::from_checks(vec![DoctorCheck {
+            name: "test".into(),
+            passed: true,
+            message: None,
+            critical: false,
+        }]);
         let v = serde_json::to_value(&r).unwrap();
         assert_eq!(v["status"], "healthy");
     }
 
     #[test]
     fn doctor_result_empty_checks() {
-        assert_eq!(DoctorResult::from_checks(vec![]).status, DoctorStatus::Healthy);
+        assert_eq!(
+            DoctorResult::from_checks(vec![]).status,
+            DoctorStatus::Healthy
+        );
     }
 
     #[test]
@@ -795,7 +879,12 @@ mod tests {
     #[test]
     fn delete_pod_is_dangerous() {
         let ops = operations_info();
-        let op = ops.as_array().unwrap().iter().find(|o| o["id"] == "kubernetes.delete_pod").unwrap();
+        let op = ops
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["id"] == "kubernetes.delete_pod")
+            .unwrap();
         assert_eq!(op["risk_level"], "high");
         assert_eq!(op["safety_tier"], "dangerous");
         assert_eq!(op["capability"], "kubernetes.admin");
@@ -804,7 +893,12 @@ mod tests {
     #[test]
     fn scale_deployment_is_risky() {
         let ops = operations_info();
-        let op = ops.as_array().unwrap().iter().find(|o| o["id"] == "kubernetes.scale_deployment").unwrap();
+        let op = ops
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["id"] == "kubernetes.scale_deployment")
+            .unwrap();
         assert_eq!(op["risk_level"], "high");
         assert_eq!(op["safety_tier"], "risky");
     }
@@ -812,7 +906,12 @@ mod tests {
     #[test]
     fn get_secret_uses_secrets_capability() {
         let ops = operations_info();
-        let op = ops.as_array().unwrap().iter().find(|o| o["id"] == "kubernetes.get_secret").unwrap();
+        let op = ops
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["id"] == "kubernetes.get_secret")
+            .unwrap();
         assert_eq!(op["capability"], "kubernetes.secrets");
         assert_eq!(op["risk_level"], "high");
     }
@@ -820,7 +919,12 @@ mod tests {
     #[test]
     fn rollout_restart_uses_write_capability() {
         let ops = operations_info();
-        let op = ops.as_array().unwrap().iter().find(|o| o["id"] == "kubernetes.rollout_restart").unwrap();
+        let op = ops
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["id"] == "kubernetes.rollout_restart")
+            .unwrap();
         assert_eq!(op["capability"], "kubernetes.write");
         assert_eq!(op["idempotency"], "none");
     }
@@ -828,7 +932,12 @@ mod tests {
     #[test]
     fn update_configmap_is_risky() {
         let ops = operations_info();
-        let op = ops.as_array().unwrap().iter().find(|o| o["id"] == "kubernetes.update_configmap").unwrap();
+        let op = ops
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["id"] == "kubernetes.update_configmap")
+            .unwrap();
         assert_eq!(op["risk_level"], "medium");
         assert_eq!(op["safety_tier"], "risky");
     }
@@ -836,7 +945,12 @@ mod tests {
     #[test]
     fn watch_events_is_safe() {
         let ops = operations_info();
-        let op = ops.as_array().unwrap().iter().find(|o| o["id"] == "kubernetes.watch_events").unwrap();
+        let op = ops
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["id"] == "kubernetes.watch_events")
+            .unwrap();
         assert_eq!(op["risk_level"], "low");
         assert_eq!(op["safety_tier"], "safe");
     }
@@ -851,35 +965,60 @@ mod tests {
     #[test]
     fn operations_list_pods_capability() {
         let ops = operations_info();
-        let op = ops.as_array().unwrap().iter().find(|o| o["id"] == "kubernetes.list_pods").unwrap();
+        let op = ops
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["id"] == "kubernetes.list_pods")
+            .unwrap();
         assert_eq!(op["capability"], "kubernetes.read");
     }
 
     #[test]
     fn operations_get_pod_capability() {
         let ops = operations_info();
-        let op = ops.as_array().unwrap().iter().find(|o| o["id"] == "kubernetes.get_pod").unwrap();
+        let op = ops
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["id"] == "kubernetes.get_pod")
+            .unwrap();
         assert_eq!(op["capability"], "kubernetes.read");
     }
 
     #[test]
     fn operations_get_configmap_capability() {
         let ops = operations_info();
-        let op = ops.as_array().unwrap().iter().find(|o| o["id"] == "kubernetes.get_configmap").unwrap();
+        let op = ops
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["id"] == "kubernetes.get_configmap")
+            .unwrap();
         assert_eq!(op["capability"], "kubernetes.read");
     }
 
     #[test]
     fn operations_update_configmap_capability() {
         let ops = operations_info();
-        let op = ops.as_array().unwrap().iter().find(|o| o["id"] == "kubernetes.update_configmap").unwrap();
+        let op = ops
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["id"] == "kubernetes.update_configmap")
+            .unwrap();
         assert_eq!(op["capability"], "kubernetes.write");
     }
 
     #[test]
     fn operations_get_service_capability() {
         let ops = operations_info();
-        let op = ops.as_array().unwrap().iter().find(|o| o["id"] == "kubernetes.get_service").unwrap();
+        let op = ops
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["id"] == "kubernetes.get_service")
+            .unwrap();
         assert_eq!(op["capability"], "kubernetes.read");
     }
 
@@ -894,8 +1033,18 @@ mod tests {
     #[test]
     fn doctor_result_multiple_critical_failures() {
         let checks = vec![
-            DoctorCheck { name: "a".into(), passed: false, message: Some("fail 1".into()), critical: true },
-            DoctorCheck { name: "b".into(), passed: false, message: Some("fail 2".into()), critical: true },
+            DoctorCheck {
+                name: "a".into(),
+                passed: false,
+                message: Some("fail 1".into()),
+                critical: true,
+            },
+            DoctorCheck {
+                name: "b".into(),
+                passed: false,
+                message: Some("fail 2".into()),
+                critical: true,
+            },
         ];
         let r = DoctorResult::from_checks(checks);
         assert_eq!(r.status, DoctorStatus::Unhealthy);
@@ -904,23 +1053,42 @@ mod tests {
 
     #[test]
     fn doctor_check_skip_serializing_none_message() {
-        let check = DoctorCheck { name: "test".into(), passed: true, message: None, critical: false };
+        let check = DoctorCheck {
+            name: "test".into(),
+            passed: true,
+            message: None,
+            critical: false,
+        };
         let v = serde_json::to_value(&check).unwrap();
         assert!(!v.as_object().unwrap().contains_key("message"));
     }
 
     #[test]
     fn doctor_check_serializes_some_message() {
-        let check = DoctorCheck { name: "test".into(), passed: false, message: Some("warn".into()), critical: false };
+        let check = DoctorCheck {
+            name: "test".into(),
+            passed: false,
+            message: Some("warn".into()),
+            critical: false,
+        };
         let v = serde_json::to_value(&check).unwrap();
         assert_eq!(v["message"], "warn");
     }
 
     #[test]
     fn doctor_status_serde_roundtrip() {
-        assert_eq!(serde_json::to_value(DoctorStatus::Healthy).unwrap(), "healthy");
-        assert_eq!(serde_json::to_value(DoctorStatus::Degraded).unwrap(), "degraded");
-        assert_eq!(serde_json::to_value(DoctorStatus::Unhealthy).unwrap(), "unhealthy");
+        assert_eq!(
+            serde_json::to_value(DoctorStatus::Healthy).unwrap(),
+            "healthy"
+        );
+        assert_eq!(
+            serde_json::to_value(DoctorStatus::Degraded).unwrap(),
+            "degraded"
+        );
+        assert_eq!(
+            serde_json::to_value(DoctorStatus::Unhealthy).unwrap(),
+            "unhealthy"
+        );
     }
 
     #[test]
@@ -935,13 +1103,21 @@ mod tests {
 
     #[test]
     fn require_str_empty_string_is_ok() {
-        assert_eq!(require_str(&json!({"namespace": ""}), "namespace").unwrap(), "");
+        assert_eq!(
+            require_str(&json!({"namespace": ""}), "namespace").unwrap(),
+            ""
+        );
     }
 
     #[test]
     fn operations_get_pod_logs_capability() {
         let ops = operations_info();
-        let op = ops.as_array().unwrap().iter().find(|o| o["id"] == "kubernetes.get_pod_logs").unwrap();
+        let op = ops
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["id"] == "kubernetes.get_pod_logs")
+            .unwrap();
         assert_eq!(op["capability"], "kubernetes.read");
         assert_eq!(op["risk_level"], "low");
     }
@@ -949,42 +1125,72 @@ mod tests {
     #[test]
     fn operations_stream_pod_logs_capability() {
         let ops = operations_info();
-        let op = ops.as_array().unwrap().iter().find(|o| o["id"] == "kubernetes.stream_pod_logs").unwrap();
+        let op = ops
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["id"] == "kubernetes.stream_pod_logs")
+            .unwrap();
         assert_eq!(op["capability"], "kubernetes.read");
     }
 
     #[test]
     fn operations_list_deployments_capability() {
         let ops = operations_info();
-        let op = ops.as_array().unwrap().iter().find(|o| o["id"] == "kubernetes.list_deployments").unwrap();
+        let op = ops
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["id"] == "kubernetes.list_deployments")
+            .unwrap();
         assert_eq!(op["capability"], "kubernetes.read");
     }
 
     #[test]
     fn operations_get_deployment_capability() {
         let ops = operations_info();
-        let op = ops.as_array().unwrap().iter().find(|o| o["id"] == "kubernetes.get_deployment").unwrap();
+        let op = ops
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["id"] == "kubernetes.get_deployment")
+            .unwrap();
         assert_eq!(op["capability"], "kubernetes.read");
     }
 
     #[test]
     fn operations_scale_deployment_idempotency() {
         let ops = operations_info();
-        let op = ops.as_array().unwrap().iter().find(|o| o["id"] == "kubernetes.scale_deployment").unwrap();
+        let op = ops
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["id"] == "kubernetes.scale_deployment")
+            .unwrap();
         assert_eq!(op["idempotency"], "best_effort");
     }
 
     #[test]
     fn operations_delete_pod_idempotency() {
         let ops = operations_info();
-        let op = ops.as_array().unwrap().iter().find(|o| o["id"] == "kubernetes.delete_pod").unwrap();
+        let op = ops
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["id"] == "kubernetes.delete_pod")
+            .unwrap();
         assert_eq!(op["idempotency"], "best_effort");
     }
 
     #[test]
     fn operations_watch_events_capability() {
         let ops = operations_info();
-        let op = ops.as_array().unwrap().iter().find(|o| o["id"] == "kubernetes.watch_events").unwrap();
+        let op = ops
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["id"] == "kubernetes.watch_events")
+            .unwrap();
         assert_eq!(op["capability"], "kubernetes.read");
     }
 
@@ -994,7 +1200,10 @@ mod tests {
             let id = op["id"].as_str().unwrap();
             let cap = op["capability"].as_str().unwrap();
             if id.contains("scale") || id.contains("rollout") || id.contains("update") {
-                assert_eq!(cap, "kubernetes.write", "op {id} should use kubernetes.write");
+                assert_eq!(
+                    cap, "kubernetes.write",
+                    "op {id} should use kubernetes.write"
+                );
             }
         }
     }

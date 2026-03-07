@@ -413,10 +413,7 @@ async fn error_502() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/workflows"))
-        .respond_with(
-            ResponseTemplate::new(502)
-                .set_body_json(json!({"message": "Bad gateway"})),
-        )
+        .respond_with(ResponseTemplate::new(502).set_body_json(json!({"message": "Bad gateway"})))
         .mount(&server)
         .await;
 
@@ -491,9 +488,7 @@ async fn simulate_empty_operation() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
     assert!(
-        !c.handle_simulate(json!({}))
-            .await
-            .unwrap()["allowed"]
+        !c.handle_simulate(json!({})).await.unwrap()["allowed"]
             .as_bool()
             .unwrap()
     );
@@ -585,7 +580,10 @@ async fn handshake_returns_capabilities() {
     }))
     .await
     .unwrap();
-    let hs = c.handle_handshake(json!({"session_id": "s1"})).await.unwrap();
+    let hs = c
+        .handle_handshake(json!({"session_id": "s1"}))
+        .await
+        .unwrap();
     assert_eq!(hs["connector_id"], "fcp.retool");
     assert_eq!(hs["protocol_version"], "2.0");
     let caps = hs["capabilities"].as_array().unwrap();
@@ -709,7 +707,10 @@ async fn doctor_unconfigured_shows_failures() {
     let c = RetoolConnector::new();
     let doc = c.handle_doctor().await.unwrap();
     let checks = doc["checks"].as_array().unwrap();
-    let config_check = checks.iter().find(|c| c["name"] == "configuration").unwrap();
+    let config_check = checks
+        .iter()
+        .find(|c| c["name"] == "configuration")
+        .unwrap();
     assert!(!config_check["passed"].as_bool().unwrap());
     assert!(config_check["message"].as_str().is_some());
 }

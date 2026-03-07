@@ -392,11 +392,8 @@ mod tests {
 
     #[test]
     fn client_with_empty_custom_url() {
-        let client = LinkedInClient::new(
-            LinkedInAuth::AccessToken("tok".into()),
-            Some(""),
-        )
-        .unwrap();
+        let client =
+            LinkedInClient::new(LinkedInAuth::AccessToken("tok".into()), Some("")).unwrap();
         assert!(client.base_url.is_empty());
     }
 

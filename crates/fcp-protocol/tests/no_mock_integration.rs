@@ -5,12 +5,9 @@
 //! external dependencies.
 
 use fcp_core::{
-    ObjectHeader, ObjectId, Provenance, TailscaleNodeId, ZoneId, ZoneIdHash,
-    ZoneKeyId,
+    ObjectHeader, ObjectId, Provenance, TailscaleNodeId, ZoneId, ZoneIdHash, ZoneKeyId,
 };
-use fcp_crypto::{
-    AeadKey, Ed25519SigningKey, X25519SecretKey,
-};
+use fcp_crypto::{AeadKey, Ed25519SigningKey, X25519SecretKey};
 use fcp_protocol::{
     ControlPlaneObject, ControlPlaneRetention, FcpcFrame, FcpcFrameFlags, FcpcFrameHeader,
     FcpsFrame, FcpsFrameHeader, FrameFlags, MeshSessionAck, MeshSessionHello, MeshSessionId,
@@ -198,7 +195,10 @@ fn fcps_frame_encode_decode_roundtrip() {
 
     let frame = FcpsFrame {
         header: FcpsFrameHeader {
-            total_payload_len: symbols.iter().map(|s| u32::try_from(s.wire_size()).unwrap()).sum(),
+            total_payload_len: symbols
+                .iter()
+                .map(|s| u32::try_from(s.wire_size()).unwrap())
+                .sum(),
             ..header
         },
         symbols,
@@ -241,8 +241,7 @@ fn signed_frame_sign_and_verify() {
     };
 
     let source_id = test_node_id("node-1");
-    let signed =
-        SignedFcpsFrame::new(frame, source_id, 12345, &signing_key);
+    let signed = SignedFcpsFrame::new(frame, source_id, 12345, &signing_key);
 
     signed
         .verify(&signing_key.verifying_key())
@@ -626,9 +625,7 @@ fn hello_sign_and_verify() {
     hello.sign(&signing_key).expect("sign");
     assert!(hello.signature.is_some());
 
-    hello
-        .verify(&signing_key.verifying_key())
-        .expect("verify");
+    hello.verify(&signing_key.verifying_key()).expect("verify");
 }
 
 #[test]
@@ -1181,27 +1178,23 @@ fn sender_subkey_derivation_unique() {
     let zone_key = test_aead_key();
     let zone_key_id = test_zone_key_id();
 
-    let k1 = fcp_protocol::derive_sender_subkey(
-        &zone_key,
-        &zone_key_id,
-        &test_node_id("node-a"),
-        1,
-    );
-    let k2 = fcp_protocol::derive_sender_subkey(
-        &zone_key,
-        &zone_key_id,
-        &test_node_id("node-b"),
-        1,
-    );
-    let k3 = fcp_protocol::derive_sender_subkey(
-        &zone_key,
-        &zone_key_id,
-        &test_node_id("node-a"),
-        2,
-    );
+    let k1 =
+        fcp_protocol::derive_sender_subkey(&zone_key, &zone_key_id, &test_node_id("node-a"), 1);
+    let k2 =
+        fcp_protocol::derive_sender_subkey(&zone_key, &zone_key_id, &test_node_id("node-b"), 1);
+    let k3 =
+        fcp_protocol::derive_sender_subkey(&zone_key, &zone_key_id, &test_node_id("node-a"), 2);
 
-    assert_ne!(k1.as_bytes(), k2.as_bytes(), "different node → different key");
-    assert_ne!(k1.as_bytes(), k3.as_bytes(), "different instance → different key");
+    assert_ne!(
+        k1.as_bytes(),
+        k2.as_bytes(),
+        "different node → different key"
+    );
+    assert_ne!(
+        k1.as_bytes(),
+        k3.as_bytes(),
+        "different instance → different key"
+    );
 }
 
 #[test]
@@ -1236,11 +1229,8 @@ fn control_plane_object_new() {
 
 #[test]
 fn control_plane_retention_classification() {
-    let audit_schema = fcp_cbor::SchemaId::new(
-        "fcp.audit",
-        "AuditEvent",
-        semver::Version::new(1, 0, 0),
-    );
+    let audit_schema =
+        fcp_cbor::SchemaId::new("fcp.audit", "AuditEvent", semver::Version::new(1, 0, 0));
     assert_eq!(
         fcp_protocol::retention_for_schema(&audit_schema),
         ControlPlaneRetention::Required
@@ -1260,11 +1250,9 @@ fn fcps_datagram_encode_decode() {
     };
 
     let encoded = datagram.encode();
-    let decoded = fcp_protocol::FcpsDatagram::decode(
-        &encoded,
-        fcp_protocol::DEFAULT_MAX_DATAGRAM_BYTES,
-    )
-    .expect("decode");
+    let decoded =
+        fcp_protocol::FcpsDatagram::decode(&encoded, fcp_protocol::DEFAULT_MAX_DATAGRAM_BYTES)
+            .expect("decode");
     assert_eq!(decoded.seq, 7);
     assert_eq!(decoded.frame_bytes, vec![0xBB; 100]);
 }

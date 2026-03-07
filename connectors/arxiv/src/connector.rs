@@ -8,11 +8,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tracing::{info, instrument};
 
-use crate::{
-    client::ArxivClient,
-    error::ArxivError,
-    types::arxiv_categories,
-};
+use crate::{client::ArxivClient, error::ArxivError, types::arxiv_categories};
 
 /// Parsed and validated arXiv connector configuration.
 #[derive(Debug, Clone)]
@@ -635,10 +631,7 @@ mod tests {
     #[test]
     fn config_defaults() {
         let config = ArxivConfig::from_params(&json!({}));
-        assert_eq!(
-            config.arxiv_base_url,
-            crate::client::DEFAULT_ARXIV_BASE_URL
-        );
+        assert_eq!(config.arxiv_base_url, crate::client::DEFAULT_ARXIV_BASE_URL);
         assert_eq!(
             config.scholar_base_url,
             crate::client::DEFAULT_SCHOLAR_BASE_URL

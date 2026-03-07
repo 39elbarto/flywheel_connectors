@@ -295,10 +295,7 @@ fn state_model_empty_schema_version_rejected() {
 
 #[test]
 fn network_empty_host_allow_rejected() {
-    let toml = base_manifest().replace(
-        "host_allow = [\"api.example.test\"]",
-        "host_allow = []",
-    );
+    let toml = base_manifest().replace("host_allow = [\"api.example.test\"]", "host_allow = []");
     let err = parse_err(&toml);
     assert!(err.contains("host_allow"));
     assert!(err.contains("must not be empty"));
@@ -373,10 +370,8 @@ fn network_trailing_dot_host_rejected() {
 
 #[test]
 fn network_empty_host_entry_rejected() {
-    let toml = base_manifest().replace(
-        "host_allow = [\"api.example.test\"]",
-        "host_allow = [\"\"]",
-    );
+    let toml =
+        base_manifest().replace("host_allow = [\"api.example.test\"]", "host_allow = [\"\"]");
     let err = parse_err(&toml);
     assert!(err.contains("must not be empty"));
 }
@@ -492,10 +487,7 @@ fn network_spki_pins_parse() {
 
 #[test]
 fn duplicate_capability_across_lists_rejected() {
-    let toml = base_manifest().replace(
-        "optional = []",
-        "",
-    ).replace(
+    let toml = base_manifest().replace("optional = []", "").replace(
         "required = [\"network.egress\"]",
         "required = [\"network.egress\"]\noptional = [\"network.egress\"]",
     );
@@ -517,10 +509,8 @@ fn capability_in_required_and_forbidden_rejected() {
 
 #[test]
 fn sandbox_zero_wall_clock_timeout_rejected() {
-    let toml = base_manifest().replace(
-        "wall_clock_timeout_ms = 30000",
-        "wall_clock_timeout_ms = 0",
-    );
+    let toml =
+        base_manifest().replace("wall_clock_timeout_ms = 30000", "wall_clock_timeout_ms = 0");
     let err = parse_err(&toml);
     assert!(err.contains("wall_clock_timeout_ms"));
 }
@@ -528,7 +518,8 @@ fn sandbox_zero_wall_clock_timeout_rejected() {
 #[test]
 fn sandbox_all_profiles_parse() {
     for profile in ["strict", "strict_plus", "moderate", "permissive"] {
-        let toml = base_manifest().replace("profile = \"strict\"", &format!("profile = \"{profile}\""));
+        let toml =
+            base_manifest().replace("profile = \"strict\"", &format!("profile = \"{profile}\""));
         parse_valid(&toml);
     }
 }
@@ -537,20 +528,14 @@ fn sandbox_all_profiles_parse() {
 
 #[test]
 fn empty_connector_description_rejected() {
-    let toml = base_manifest().replace(
-        "description = \"A test connector\"",
-        "description = \"\"",
-    );
+    let toml = base_manifest().replace("description = \"A test connector\"", "description = \"\"");
     let err = parse_err(&toml);
     assert!(err.contains("connector.description"));
 }
 
 #[test]
 fn empty_archetypes_rejected() {
-    let toml = base_manifest().replace(
-        "archetypes = [\"operational\"]",
-        "archetypes = []",
-    );
+    let toml = base_manifest().replace("archetypes = [\"operational\"]", "archetypes = []");
     let err = parse_err(&toml);
     assert!(err.contains("archetypes"));
 }
@@ -605,10 +590,7 @@ fn zero_max_datagram_bytes_rejected() {
 
 #[test]
 fn empty_operation_description_rejected() {
-    let toml = base_manifest().replace(
-        "description = \"Test operation\"",
-        "description = \"  \"",
-    );
+    let toml = base_manifest().replace("description = \"Test operation\"", "description = \"  \"");
     let err = parse_err(&toml);
     assert!(err.contains("description"));
 }
@@ -622,10 +604,12 @@ fn no_operations_rejected() {
         );
     // parse_str_unchecked should work, but validate should fail
     let unchecked = ConnectorManifest::parse_str_unchecked(&toml);
-    assert!(unchecked.is_err() || {
-        let m = unchecked.unwrap();
-        m.validate().is_err()
-    });
+    assert!(
+        unchecked.is_err() || {
+            let m = unchecked.unwrap();
+            m.validate().is_err()
+        }
+    );
 }
 
 #[test]
@@ -635,9 +619,11 @@ fn operation_without_network_constraints_ok() {
         "",
     );
     let manifest = parse_valid(&toml);
-    assert!(manifest.provides.operations["test_op"]
-        .network_constraints
-        .is_none());
+    assert!(
+        manifest.provides.operations["test_op"]
+            .network_constraints
+            .is_none()
+    );
 }
 
 #[test]
@@ -710,7 +696,8 @@ fn rate_limit_shorthand_aliases() {
             .as_ref()
             .unwrap();
         assert_eq!(
-            rl.as_inner().per_ms, expected_ms,
+            rl.as_inner().per_ms,
+            expected_ms,
             "rate_limit {input} => expected {expected_ms}ms"
         );
     }
@@ -927,7 +914,10 @@ fn interface_hash_changes_with_capability_change() {
     let m2 = ConnectorManifest::parse_str_unchecked(&toml2).unwrap();
     let h1 = m1.compute_interface_hash().unwrap();
     let h2 = m2.compute_interface_hash().unwrap();
-    assert_ne!(h1, h2, "different capabilities should produce different hash");
+    assert_ne!(
+        h1, h2,
+        "different capabilities should produce different hash"
+    );
 }
 
 #[test]
@@ -947,7 +937,10 @@ object_id = "objectid:{oid}"
     let m2 = ConnectorManifest::parse_str_unchecked(&toml2).unwrap();
     let h1 = m1.compute_interface_hash().unwrap();
     let h2 = m2.compute_interface_hash().unwrap();
-    assert_eq!(h1, h2, "supply chain metadata should not affect interface hash");
+    assert_eq!(
+        h1, h2,
+        "supply chain metadata should not affect interface hash"
+    );
 }
 
 #[test]
@@ -990,7 +983,10 @@ fn manifest_serde_json_roundtrip() {
 #[test]
 fn all_idempotency_classes_parse() {
     for class in ["strict", "best_effort", "none"] {
-        let toml = base_manifest().replace("idempotency = \"strict\"", &format!("idempotency = \"{class}\""));
+        let toml = base_manifest().replace(
+            "idempotency = \"strict\"",
+            &format!("idempotency = \"{class}\""),
+        );
         parse_valid(&toml);
     }
 }
@@ -1000,7 +996,8 @@ fn all_idempotency_classes_parse() {
 #[test]
 fn all_risk_levels_parse() {
     for level in ["low", "medium", "high", "critical"] {
-        let toml = base_manifest().replace("risk_level = \"low\"", &format!("risk_level = \"{level}\""));
+        let toml =
+            base_manifest().replace("risk_level = \"low\"", &format!("risk_level = \"{level}\""));
         parse_valid(&toml);
     }
 }
@@ -1008,7 +1005,10 @@ fn all_risk_levels_parse() {
 #[test]
 fn all_safety_tiers_parse() {
     for tier in ["safe", "risky", "dangerous"] {
-        let toml = base_manifest().replace("safety_tier = \"safe\"", &format!("safety_tier = \"{tier}\""));
+        let toml = base_manifest().replace(
+            "safety_tier = \"safe\"",
+            &format!("safety_tier = \"{tier}\""),
+        );
         parse_valid(&toml);
     }
 }
@@ -1064,20 +1064,14 @@ fn unknown_connector_field_rejected() {
 #[test]
 fn parse_str_unchecked_skips_validation() {
     // A manifest with wrong format should parse unchecked but fail validate
-    let toml = base_manifest().replace(
-        "format = \"fcp-connector-manifest\"",
-        "format = \"wrong\"",
-    );
+    let toml = base_manifest().replace("format = \"fcp-connector-manifest\"", "format = \"wrong\"");
     let m = ConnectorManifest::parse_str_unchecked(&toml).unwrap();
     assert!(m.validate().is_err());
 }
 
 #[test]
 fn parse_str_runs_validation() {
-    let toml = base_manifest().replace(
-        "format = \"fcp-connector-manifest\"",
-        "format = \"wrong\"",
-    );
+    let toml = base_manifest().replace("format = \"fcp-connector-manifest\"", "format = \"wrong\"");
     let with_hash = with_computed_hash(&toml);
     assert!(ConnectorManifest::parse_str(&with_hash).is_err());
 }

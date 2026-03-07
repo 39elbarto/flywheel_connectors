@@ -70,11 +70,7 @@ impl fmt::Debug for PostHogClient {
 
 impl PostHogClient {
     /// Create a new `PostHog` client.
-    pub fn new(
-        auth: PostHogAuth,
-        project_id: &str,
-        base_url: Option<&str>,
-    ) -> PostHogResult<Self> {
+    pub fn new(auth: PostHogAuth, project_id: &str, base_url: Option<&str>) -> PostHogResult<Self> {
         let client = Client::builder()
             .timeout(Duration::from_secs(30))
             .user_agent("fcp-posthog/0.1.0 (FCP connector)")
@@ -94,9 +90,7 @@ impl PostHogClient {
     fn add_auth(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
         match &self.auth {
             PostHogAuth::ApiKey(key) => req.header("Authorization", format!("Bearer {key}")),
-            PostHogAuth::CredentialId(id) => {
-                req.header("X-FCP-Credential-Id", id.to_string())
-            }
+            PostHogAuth::CredentialId(id) => req.header("X-FCP-Credential-Id", id.to_string()),
         }
     }
 
@@ -164,11 +158,7 @@ impl PostHogClient {
     }
 
     #[instrument(skip(self, body), fields(url))]
-    async fn post(
-        &self,
-        path: &str,
-        body: &serde_json::Value,
-    ) -> PostHogResult<serde_json::Value> {
+    async fn post(&self, path: &str, body: &serde_json::Value) -> PostHogResult<serde_json::Value> {
         let url = format!("{}{path}", self.base_url);
         debug!(url = %url, "POST request");
         let req = self
@@ -189,11 +179,8 @@ impl PostHogClient {
                 "query": hogql_query
             }
         });
-        self.post(
-            &format!("/projects/{}/query", self.project_id),
-            &body,
-        )
-        .await
+        self.post(&format!("/projects/{}/query", self.project_id), &body)
+            .await
     }
 
     // -- Insights --
@@ -208,11 +195,8 @@ impl PostHogClient {
 
     /// List feature flags.
     pub async fn list_feature_flags(&self) -> PostHogResult<serde_json::Value> {
-        self.get(&format!(
-            "/projects/{}/feature_flags",
-            self.project_id
-        ))
-        .await
+        self.get(&format!("/projects/{}/feature_flags", self.project_id))
+            .await
     }
 }
 
@@ -270,8 +254,7 @@ mod tests {
 
     #[test]
     fn client_debug_redacts() {
-        let client =
-            PostHogClient::new(PostHogAuth::ApiKey("secret".into()), "123", None).unwrap();
+        let client = PostHogClient::new(PostHogAuth::ApiKey("secret".into()), "123", None).unwrap();
         let dbg = format!("{client:?}");
         assert!(!dbg.contains("secret"));
         assert!(dbg.contains("redacted"));
@@ -292,12 +275,8 @@ mod tests {
 
     #[test]
     fn client_debug_shows_project_id() {
-        let client = PostHogClient::new(
-            PostHogAuth::ApiKey("phx_key".into()),
-            "proj_999",
-            None,
-        )
-        .unwrap();
+        let client =
+            PostHogClient::new(PostHogAuth::ApiKey("phx_key".into()), "proj_999", None).unwrap();
         let dbg = format!("{client:?}");
         assert!(dbg.contains("proj_999"));
         assert!(dbg.contains("PostHogClient"));
@@ -307,12 +286,7 @@ mod tests {
     fn client_debug_shows_credential_id() {
         let cred = CredentialId::new();
         let cred_str = cred.to_string();
-        let client = PostHogClient::new(
-            PostHogAuth::CredentialId(cred),
-            "1",
-            None,
-        )
-        .unwrap();
+        let client = PostHogClient::new(PostHogAuth::CredentialId(cred), "1", None).unwrap();
         let dbg = format!("{client:?}");
         assert!(dbg.contains(&cred_str));
     }
@@ -350,34 +324,21 @@ mod tests {
 
     #[test]
     fn client_stores_project_id() {
-        let client = PostHogClient::new(
-            PostHogAuth::ApiKey("phx_key".into()),
-            "my_project",
-            None,
-        )
-        .unwrap();
+        let client =
+            PostHogClient::new(PostHogAuth::ApiKey("phx_key".into()), "my_project", None).unwrap();
         assert_eq!(client.project_id, "my_project");
     }
 
     #[test]
     fn client_credential_default_url() {
-        let client = PostHogClient::new(
-            PostHogAuth::CredentialId(CredentialId::new()),
-            "1",
-            None,
-        )
-        .unwrap();
+        let client =
+            PostHogClient::new(PostHogAuth::CredentialId(CredentialId::new()), "1", None).unwrap();
         assert_eq!(client.base_url, DEFAULT_BASE_URL);
     }
 
     #[test]
     fn client_empty_project_id() {
-        let client = PostHogClient::new(
-            PostHogAuth::ApiKey("phx_key".into()),
-            "",
-            None,
-        )
-        .unwrap();
+        let client = PostHogClient::new(PostHogAuth::ApiKey("phx_key".into()), "", None).unwrap();
         assert_eq!(client.project_id, "");
     }
 }

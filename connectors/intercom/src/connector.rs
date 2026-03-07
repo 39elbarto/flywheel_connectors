@@ -281,12 +281,13 @@ impl IntercomConnector {
     pub async fn handle_invoke(&self, params: serde_json::Value) -> FcpResult<serde_json::Value> {
         self.base.check_ready()?;
 
-        let operation = params.get("operation_id").and_then(serde_json::Value::as_str).ok_or_else(|| {
-            FcpError::InvalidRequest {
+        let operation = params
+            .get("operation_id")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| FcpError::InvalidRequest {
                 code: 1003,
                 message: "Missing operation_id".into(),
-            }
-        })?;
+            })?;
 
         let input = params.get("input").cloned().unwrap_or_else(|| json!({}));
 
@@ -356,7 +357,9 @@ impl IntercomConnector {
         input: &serde_json::Value,
     ) -> Result<serde_json::Value, IntercomError> {
         let per_page = input.get("per_page").and_then(serde_json::Value::as_i64);
-        let starting_after = input.get("starting_after").and_then(serde_json::Value::as_str);
+        let starting_after = input
+            .get("starting_after")
+            .and_then(serde_json::Value::as_str);
         let data = client.list_contacts(per_page, starting_after).await?;
         Ok(data)
     }
@@ -387,7 +390,9 @@ impl IntercomConnector {
         input: &serde_json::Value,
     ) -> Result<serde_json::Value, IntercomError> {
         let per_page = input.get("per_page").and_then(serde_json::Value::as_i64);
-        let starting_after = input.get("starting_after").and_then(serde_json::Value::as_str);
+        let starting_after = input
+            .get("starting_after")
+            .and_then(serde_json::Value::as_str);
         let data = client.list_conversations(per_page, starting_after).await?;
         Ok(data)
     }
@@ -687,8 +692,18 @@ mod tests {
     #[test]
     fn doctor_result_healthy_when_all_pass() {
         let checks = vec![
-            DoctorCheck { name: "a".into(), passed: true, message: None, critical: true },
-            DoctorCheck { name: "b".into(), passed: true, message: None, critical: false },
+            DoctorCheck {
+                name: "a".into(),
+                passed: true,
+                message: None,
+                critical: true,
+            },
+            DoctorCheck {
+                name: "b".into(),
+                passed: true,
+                message: None,
+                critical: false,
+            },
         ];
         let r = DoctorResult::from_checks(checks);
         assert_eq!(r.status, DoctorStatus::Healthy);
@@ -697,8 +712,18 @@ mod tests {
     #[test]
     fn doctor_result_degraded_when_non_critical_fails() {
         let checks = vec![
-            DoctorCheck { name: "a".into(), passed: true, message: None, critical: true },
-            DoctorCheck { name: "b".into(), passed: false, message: Some("warn".into()), critical: false },
+            DoctorCheck {
+                name: "a".into(),
+                passed: true,
+                message: None,
+                critical: true,
+            },
+            DoctorCheck {
+                name: "b".into(),
+                passed: false,
+                message: Some("warn".into()),
+                critical: false,
+            },
         ];
         let r = DoctorResult::from_checks(checks);
         assert_eq!(r.status, DoctorStatus::Degraded);
@@ -731,7 +756,8 @@ mod tests {
 
     #[test]
     fn config_trims_access_token() {
-        let config = IntercomConfig::from_params(&json!({ "access_token": "  tok_test  " })).unwrap();
+        let config =
+            IntercomConfig::from_params(&json!({ "access_token": "  tok_test  " })).unwrap();
         match &config.auth {
             IntercomAuth::BearerToken(t) => assert_eq!(t, "tok_test"),
             IntercomAuth::CredentialId(_) => panic!("expected BearerToken"),
@@ -742,7 +768,11 @@ mod tests {
     fn operations_all_have_idempotency() {
         let ops = operations_info();
         for op in ops.as_array().unwrap() {
-            assert!(op.get("idempotency").is_some(), "op {:?} missing idempotency", op["id"]);
+            assert!(
+                op.get("idempotency").is_some(),
+                "op {:?} missing idempotency",
+                op["id"]
+            );
         }
     }
 

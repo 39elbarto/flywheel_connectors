@@ -212,8 +212,7 @@ mod tests {
 
     #[test]
     fn funnel_large_id() {
-        let f: Funnel =
-            serde_json::from_value(json!({"funnel_id": 9999999999u64})).unwrap();
+        let f: Funnel = serde_json::from_value(json!({"funnel_id": 9999999999u64})).unwrap();
         assert_eq!(f.funnel_id, 9999999999);
     }
 

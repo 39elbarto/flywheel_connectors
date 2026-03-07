@@ -1200,4 +1200,456 @@ mod tests {
 
         assert_eq!(covered, expected);
     }
+
+    // ── GoogleAuthContext tests ──────────────────────────────────────────
+
+    #[test]
+    fn auth_context_display_connector_runtime() {
+        let ctx = GoogleAuthContext::ConnectorRuntime;
+        assert_eq!(ctx.to_string(), "connector_runtime");
+    }
+
+    #[test]
+    fn auth_context_display_provisioning_setup() {
+        let ctx = GoogleAuthContext::ProvisioningSetup;
+        assert_eq!(ctx.to_string(), "provisioning_setup");
+    }
+
+    #[test]
+    fn auth_context_clone_and_eq() {
+        let a = GoogleAuthContext::ConnectorRuntime;
+        let b = a;
+        assert_eq!(a, b);
+
+        let c = GoogleAuthContext::ProvisioningSetup;
+        let d = c;
+        assert_eq!(c, d);
+
+        assert_ne!(a, c);
+    }
+
+    // ── GoogleAuthSourceKind tests ──────────────────────────────────────
+
+    #[test]
+    fn source_kind_ordering() {
+        let kinds = [
+            GoogleAuthSourceKind::AccessToken,
+            GoogleAuthSourceKind::CredentialId,
+            GoogleAuthSourceKind::OAuthRefresh,
+            GoogleAuthSourceKind::CredentialsFile,
+            GoogleAuthSourceKind::EncryptedLocalCredentials,
+            GoogleAuthSourceKind::DefaultCredentials,
+            GoogleAuthSourceKind::ApplicationDefaultCredentials,
+        ];
+        // Derived Ord uses variant declaration order, so each successive kind
+        // should be strictly greater than the previous one.
+        for window in kinds.windows(2) {
+            assert!(
+                window[0] < window[1],
+                "{:?} should be less than {:?}",
+                window[0],
+                window[1]
+            );
+        }
+    }
+
+    #[test]
+    fn source_kind_clone_and_eq() {
+        let a = GoogleAuthSourceKind::OAuthRefresh;
+        let b = a;
+        assert_eq!(a, b);
+
+        let c = GoogleAuthSourceKind::CredentialId;
+        assert_ne!(a, c);
+    }
+
+    // ── GoogleAuthSourceDisposition tests ───────────────────────────────
+
+    #[test]
+    fn disposition_all_variants_debug() {
+        let allowed = format!("{:?}", GoogleAuthSourceDisposition::Allowed);
+        assert!(allowed.contains("Allowed"), "got: {allowed}");
+
+        let prov = format!("{:?}", GoogleAuthSourceDisposition::ProvisioningOnly);
+        assert!(prov.contains("ProvisioningOnly"), "got: {prov}");
+
+        let rejected = format!("{:?}", GoogleAuthSourceDisposition::Rejected);
+        assert!(rejected.contains("Rejected"), "got: {rejected}");
+    }
+
+    // ── GoogleAuthSourcePolicy tests ────────────────────────────────────
+
+    #[test]
+    fn source_policy_matrix_has_correct_count() {
+        let policies = google_auth_source_policies();
+        assert_eq!(
+            policies.len(),
+            7,
+            "expected exactly 7 policy rows (one per source kind)"
+        );
+    }
+
+    #[test]
+    fn source_policies_all_contexts_covered() {
+        // Every source kind should have a disposition for both runtime and provisioning.
+        for policy in google_auth_source_policies() {
+            // Ensure the runtime and provisioning dispositions are not some
+            // impossible default — they must each be one of the three valid values.
+            let valid = [
+                GoogleAuthSourceDisposition::Allowed,
+                GoogleAuthSourceDisposition::ProvisioningOnly,
+                GoogleAuthSourceDisposition::Rejected,
+            ];
+            assert!(
+                valid.contains(&policy.runtime),
+                "runtime disposition for {:?} must be valid",
+                policy.source
+            );
+            assert!(
+                valid.contains(&policy.provisioning),
+                "provisioning disposition for {:?} must be valid",
+                policy.source
+            );
+            assert!(
+                !policy.rationale.is_empty(),
+                "rationale for {:?} must not be empty",
+                policy.source
+            );
+        }
+    }
+
+    // ── GoogleAuthError Display tests ───────────────────────────────────
+
+    #[test]
+    fn auth_error_display_no_source_selected() {
+        let err = GoogleAuthError::ExactlyOneSourceRequired { count: 0 };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("expected exactly one auth source but found 0"),
+            "got: {msg}"
+        );
+    }
+
+    #[test]
+    fn auth_error_display_multiple_sources() {
+        let err = GoogleAuthError::ExactlyOneSourceRequired { count: 3 };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("expected exactly one auth source but found 3"),
+            "got: {msg}"
+        );
+    }
+
+    #[test]
+    fn auth_error_display_source_rejected() {
+        let err = GoogleAuthError::SourceNotAllowed {
+            auth_source: GoogleAuthSourceKind::EncryptedLocalCredentials,
+            context: GoogleAuthContext::ConnectorRuntime,
+            reason: "test reason",
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("encrypted_local_credentials"), "got: {msg}");
+        assert!(msg.contains("connector_runtime"), "got: {msg}");
+        assert!(msg.contains("test reason"), "got: {msg}");
+    }
+
+    #[test]
+    fn auth_error_display_scope_mismatch() {
+        let err = GoogleAuthError::MissingRequiredScopes {
+            missing: vec!["scope.a".to_string(), "scope.c".to_string()],
+            granted: vec!["scope.b".to_string()],
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("scope.a"), "got: {msg}");
+        assert!(msg.contains("scope.c"), "got: {msg}");
+        assert!(msg.contains("scope.b"), "got: {msg}");
+    }
+
+    #[test]
+    fn auth_error_display_materialization_failed() {
+        let err = GoogleAuthError::OAuthRefreshExchange {
+            message: "network timeout".to_string(),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("oauth refresh exchange failed"), "got: {msg}");
+        assert!(msg.contains("network timeout"), "got: {msg}");
+    }
+
+    // ── GoogleRefreshExchangeRequest tests ──────────────────────────────
+
+    #[test]
+    fn refresh_exchange_request_fields() {
+        let request = GoogleRefreshExchangeRequest {
+            client_id: "cid".to_string(),
+            client_secret: "csec".to_string(),
+            refresh_token: "rt".to_string(),
+            token_url: "https://example.com/token".to_string(),
+            requested_scopes: vec!["s1".to_string(), "s2".to_string()],
+        };
+        assert_eq!(request.client_id, "cid");
+        assert_eq!(request.client_secret, "csec");
+        assert_eq!(request.refresh_token, "rt");
+        assert_eq!(request.token_url, "https://example.com/token");
+        assert_eq!(request.requested_scopes.len(), 2);
+
+        // Clone + PartialEq
+        let cloned = request.clone();
+        assert_eq!(request, cloned);
+    }
+
+    #[test]
+    fn refresh_exchange_result_with_scopes() {
+        let result = GoogleRefreshExchangeResult {
+            access_token: "ya29.tok".to_string(),
+            granted_scopes: vec![
+                "https://www.googleapis.com/auth/gmail.readonly".to_string(),
+                "https://www.googleapis.com/auth/calendar".to_string(),
+            ],
+        };
+        assert_eq!(result.access_token, "ya29.tok");
+        assert_eq!(result.granted_scopes.len(), 2);
+        assert!(
+            result
+                .granted_scopes
+                .contains(&"https://www.googleapis.com/auth/gmail.readonly".to_string())
+        );
+
+        let cloned = result.clone();
+        assert_eq!(result, cloned);
+    }
+
+    // ── GoogleAuthSource tests ──────────────────────────────────────────
+
+    #[test]
+    fn auth_source_access_token_construction() {
+        let source = GoogleAuthSource::AccessToken {
+            access_token: "ya29.test".to_string(),
+        };
+        assert_eq!(source.kind(), GoogleAuthSourceKind::AccessToken);
+        // Clone + PartialEq
+        let cloned = source.clone();
+        assert_eq!(source, cloned);
+    }
+
+    #[test]
+    fn auth_source_credential_id_construction() {
+        let cid = CredentialId::new();
+        let source = GoogleAuthSource::CredentialId { credential_id: cid };
+        assert_eq!(source.kind(), GoogleAuthSourceKind::CredentialId);
+        let cloned = source.clone();
+        assert_eq!(source, cloned);
+    }
+
+    #[test]
+    fn auth_source_oauth_refresh_construction() {
+        let source = GoogleAuthSource::OAuthRefresh(GoogleOAuthRefreshSource {
+            client_id: "cid".to_string(),
+            client_secret: "csec".to_string(),
+            refresh_token: "rt".to_string(),
+            token_url: DEFAULT_GOOGLE_OAUTH_TOKEN_URL.to_string(),
+        });
+        assert_eq!(source.kind(), GoogleAuthSourceKind::OAuthRefresh);
+        let cloned = source.clone();
+        assert_eq!(source, cloned);
+    }
+
+    // ── GoogleAuthSelection from_config tests ───────────────────────────
+
+    #[test]
+    fn auth_selection_from_config_empty_params_fails() {
+        let params = json!({});
+        let err = GoogleAuthSelection::from_connector_config(&params)
+            .expect_err("empty params should fail");
+        assert!(
+            matches!(err, GoogleAuthError::ExactlyOneSourceRequired { count: 0 }),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn auth_selection_from_config_access_token() {
+        let params = json!({ "access_token": "ya29.direct" });
+        let sel = GoogleAuthSelection::from_connector_config(&params).expect("access_token config");
+        assert_eq!(sel.source_kind(), GoogleAuthSourceKind::AccessToken);
+        assert!(sel.required_scopes.is_empty());
+        assert!(sel.quota_project_id.is_none());
+    }
+
+    #[test]
+    fn auth_selection_from_config_credential_id() {
+        let cid = CredentialId::new();
+        let params = json!({ "credential_id": cid.to_string() });
+        let sel =
+            GoogleAuthSelection::from_connector_config(&params).expect("credential_id config");
+        assert_eq!(sel.source_kind(), GoogleAuthSourceKind::CredentialId);
+    }
+
+    #[test]
+    fn auth_selection_from_config_multiple_sources_rejected() {
+        let cid = CredentialId::new();
+        let params = json!({
+            "access_token": "ya29.tok",
+            "credential_id": cid.to_string(),
+            "credentials_file": "/tmp/creds.json"
+        });
+        let err = GoogleAuthSelection::from_connector_config(&params)
+            .expect_err("multiple sources should fail");
+        match err {
+            GoogleAuthError::ExactlyOneSourceRequired { count } => {
+                assert!(count >= 2, "expected count >= 2, got {count}");
+            }
+            other => panic!("unexpected error: {other}"),
+        }
+    }
+
+    #[test]
+    fn auth_selection_rejects_credentials_file_at_runtime() {
+        let params = json!({ "credentials_file": "/tmp/creds.json" });
+        let err = GoogleAuthSelection::from_connector_config(&params)
+            .expect_err("credentials_file at runtime should fail");
+        assert!(
+            matches!(
+                &err,
+                GoogleAuthError::SourceNotAllowed {
+                    auth_source: GoogleAuthSourceKind::CredentialsFile,
+                    context: GoogleAuthContext::ConnectorRuntime,
+                    ..
+                }
+            ),
+            "unexpected error: {err}"
+        );
+    }
+
+    // ── GoogleMaterializedAuth tests ────────────────────────────────────
+
+    #[test]
+    fn materialized_auth_access_token_getter() {
+        let mat = GoogleMaterializedAuth::BearerToken {
+            access_token: "ya29.hello".to_string(),
+            source: GoogleAuthSourceKind::AccessToken,
+            granted_scopes: Vec::new(),
+            quota_project_id: None,
+        };
+        assert_eq!(mat.access_token(), Some("ya29.hello"));
+        assert!(mat.credential_id().is_none());
+    }
+
+    #[test]
+    fn materialized_auth_credential_id_getter() {
+        let cid = CredentialId::new();
+        let mat = GoogleMaterializedAuth::CredentialReference {
+            credential_id: cid,
+            quota_project_id: None,
+        };
+        assert_eq!(mat.credential_id(), Some(cid));
+        assert!(mat.access_token().is_none());
+    }
+
+    #[test]
+    fn materialized_auth_granted_scopes() {
+        let mat = GoogleMaterializedAuth::BearerToken {
+            access_token: "ya29.tok".to_string(),
+            source: GoogleAuthSourceKind::OAuthRefresh,
+            granted_scopes: vec!["scope.a".to_string(), "scope.b".to_string()],
+            quota_project_id: None,
+        };
+        assert_eq!(
+            mat.granted_scopes(),
+            &["scope.a".to_string(), "scope.b".to_string()]
+        );
+
+        // CredentialReference returns empty scopes
+        let cid = CredentialId::new();
+        let cred_ref = GoogleMaterializedAuth::CredentialReference {
+            credential_id: cid,
+            quota_project_id: None,
+        };
+        assert!(cred_ref.granted_scopes().is_empty());
+    }
+
+    #[test]
+    fn materialized_auth_apply_headers_bearer() {
+        let mat = GoogleMaterializedAuth::BearerToken {
+            access_token: "ya29.test-apply".to_string(),
+            source: GoogleAuthSourceKind::AccessToken,
+            granted_scopes: Vec::new(),
+            quota_project_id: None,
+        };
+        let mut headers = Vec::new();
+        mat.apply_headers(&mut headers);
+        assert_eq!(
+            header_value(&headers, GOOGLE_AUTHORIZATION_HEADER),
+            Some("Bearer ya29.test-apply")
+        );
+        // No quota project header when None
+        assert!(header_value(&headers, GOOGLE_QUOTA_PROJECT_HEADER).is_none());
+    }
+
+    #[test]
+    fn materialized_auth_apply_headers_credential_id() {
+        let cid = CredentialId::new();
+        let mat = GoogleMaterializedAuth::CredentialReference {
+            credential_id: cid,
+            quota_project_id: None,
+        };
+        let mut headers = Vec::new();
+        mat.apply_headers(&mut headers);
+        assert_eq!(
+            header_value(&headers, FCP_CREDENTIAL_ID_HEADER),
+            Some(cid.to_string().as_str())
+        );
+        assert!(header_value(&headers, GOOGLE_AUTHORIZATION_HEADER).is_none());
+    }
+
+    #[test]
+    fn materialized_auth_apply_headers_with_quota_project() {
+        let mat = GoogleMaterializedAuth::BearerToken {
+            access_token: "ya29.quota".to_string(),
+            source: GoogleAuthSourceKind::AccessToken,
+            granted_scopes: Vec::new(),
+            quota_project_id: Some("my-billing-project".to_string()),
+        };
+        let mut headers = Vec::new();
+        mat.apply_headers(&mut headers);
+        assert_eq!(
+            header_value(&headers, GOOGLE_QUOTA_PROJECT_HEADER),
+            Some("my-billing-project")
+        );
+        assert_eq!(
+            header_value(&headers, GOOGLE_AUTHORIZATION_HEADER),
+            Some("Bearer ya29.quota")
+        );
+    }
+
+    #[test]
+    fn materialized_auth_apply_headers_quota_project_case_insensitive() {
+        let mat = GoogleMaterializedAuth::BearerToken {
+            access_token: "ya29.case".to_string(),
+            source: GoogleAuthSourceKind::AccessToken,
+            granted_scopes: Vec::new(),
+            quota_project_id: Some("new-project".to_string()),
+        };
+        // Pre-populate with a differently-cased quota header
+        let mut headers = vec![
+            ("X-Goog-User-Project".to_string(), "old-project".to_string()),
+            ("x-custom".to_string(), "keep-me".to_string()),
+        ];
+        mat.apply_headers(&mut headers);
+
+        // The old header should have been replaced (case-insensitive upsert)
+        let quota_count = headers
+            .iter()
+            .filter(|(name, _)| name.eq_ignore_ascii_case(GOOGLE_QUOTA_PROJECT_HEADER))
+            .count();
+        assert_eq!(
+            quota_count, 1,
+            "should have exactly one quota header after upsert"
+        );
+        assert_eq!(
+            header_value(&headers, GOOGLE_QUOTA_PROJECT_HEADER),
+            Some("new-project")
+        );
+        // Custom header should be preserved
+        assert_eq!(header_value(&headers, "x-custom"), Some("keep-me"));
+    }
 }

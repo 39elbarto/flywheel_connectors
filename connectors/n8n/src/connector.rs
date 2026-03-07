@@ -157,8 +157,8 @@ impl N8nConnector {
         let config = N8nConfig::from_params(&params)?;
         info!(auth = %config.auth.redacted_label(), base_url = %config.base_url, "Configuring n8n connector");
 
-        let client = N8nClient::new(config.auth.clone(), &config.base_url)
-            .map_err(|e| e.to_fcp_error())?;
+        let client =
+            N8nClient::new(config.auth.clone(), &config.base_url).map_err(|e| e.to_fcp_error())?;
 
         self.client = Some(Arc::new(client));
         self.config = Some(config);
@@ -322,10 +322,7 @@ impl N8nConnector {
     }
 
     /// Handle the `simulate` method.
-    pub async fn handle_simulate(
-        &self,
-        params: serde_json::Value,
-    ) -> FcpResult<serde_json::Value> {
+    pub async fn handle_simulate(&self, params: serde_json::Value) -> FcpResult<serde_json::Value> {
         let operation = params
             .get("operation_id")
             .and_then(serde_json::Value::as_str)
@@ -731,8 +728,18 @@ mod tests {
     #[test]
     fn doctor_result_healthy_when_all_pass() {
         let checks = vec![
-            DoctorCheck { name: "a".into(), passed: true, message: None, critical: true },
-            DoctorCheck { name: "b".into(), passed: true, message: None, critical: false },
+            DoctorCheck {
+                name: "a".into(),
+                passed: true,
+                message: None,
+                critical: true,
+            },
+            DoctorCheck {
+                name: "b".into(),
+                passed: true,
+                message: None,
+                critical: false,
+            },
         ];
         let r = DoctorResult::from_checks(checks);
         assert_eq!(r.status, DoctorStatus::Healthy);
@@ -741,7 +748,12 @@ mod tests {
     #[test]
     fn doctor_result_degraded_when_non_critical_fails() {
         let checks = vec![
-            DoctorCheck { name: "a".into(), passed: true, message: None, critical: true },
+            DoctorCheck {
+                name: "a".into(),
+                passed: true,
+                message: None,
+                critical: true,
+            },
             DoctorCheck {
                 name: "b".into(),
                 passed: false,
@@ -795,7 +807,11 @@ mod tests {
     fn operations_all_have_idempotency() {
         let ops = operations_info();
         for op in ops.as_array().unwrap() {
-            assert!(op.get("idempotency").is_some(), "op {:?} missing idempotency", op["id"]);
+            assert!(
+                op.get("idempotency").is_some(),
+                "op {:?} missing idempotency",
+                op["id"]
+            );
         }
     }
 
@@ -825,10 +841,12 @@ mod tests {
         ];
         for (op_id, expected_cap) in &expected_caps {
             let found = ops.as_array().unwrap().iter().any(|o| {
-                o["id"].as_str() == Some(op_id)
-                    && o["capability"].as_str() == Some(expected_cap)
+                o["id"].as_str() == Some(op_id) && o["capability"].as_str() == Some(expected_cap)
             });
-            assert!(found, "operation {op_id} should have capability {expected_cap}");
+            assert!(
+                found,
+                "operation {op_id} should have capability {expected_cap}"
+            );
         }
     }
 

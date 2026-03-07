@@ -557,9 +557,7 @@ mod tests {
 
     #[test]
     fn retry_after_zero_ms() {
-        let err = MongoDbError::RateLimited {
-            retry_after_ms: 0,
-        };
+        let err = MongoDbError::RateLimited { retry_after_ms: 0 };
         assert_eq!(err.retry_after(), Some(Duration::from_millis(0)));
     }
 

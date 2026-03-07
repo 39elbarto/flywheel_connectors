@@ -84,7 +84,9 @@ impl DuckDbClient {
 
     fn add_auth(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
         match &self.auth {
-            DuckDbAuth::ServiceToken(token) => req.header("Authorization", format!("Bearer {token}")),
+            DuckDbAuth::ServiceToken(token) => {
+                req.header("Authorization", format!("Bearer {token}"))
+            }
             DuckDbAuth::CredentialId(id) => req.header("X-FCP-Credential-Id", id.to_string()),
         }
     }
@@ -167,10 +169,7 @@ impl DuckDbClient {
     // -- SQL --
 
     /// Execute a SQL query via the `MotherDuck` SQL endpoint.
-    pub async fn execute_query(
-        &self,
-        body: &serde_json::Value,
-    ) -> DuckDbResult<serde_json::Value> {
+    pub async fn execute_query(&self, body: &serde_json::Value) -> DuckDbResult<serde_json::Value> {
         self.post("/sql", body).await
     }
 
@@ -225,10 +224,7 @@ impl DuckDbClient {
     }
 
     /// Create a new database share.
-    pub async fn create_share(
-        &self,
-        body: &serde_json::Value,
-    ) -> DuckDbResult<serde_json::Value> {
+    pub async fn create_share(&self, body: &serde_json::Value) -> DuckDbResult<serde_json::Value> {
         self.post("/shares", body).await
     }
 }
@@ -268,8 +264,7 @@ mod tests {
 
     #[test]
     fn client_new_default_url() {
-        let client =
-            DuckDbClient::new(DuckDbAuth::ServiceToken("tok".into()), None).unwrap();
+        let client = DuckDbClient::new(DuckDbAuth::ServiceToken("tok".into()), None).unwrap();
         assert_eq!(client.base_url, DEFAULT_BASE_URL);
     }
 
@@ -285,8 +280,7 @@ mod tests {
 
     #[test]
     fn client_debug_redacts() {
-        let client =
-            DuckDbClient::new(DuckDbAuth::ServiceToken("secret".into()), None).unwrap();
+        let client = DuckDbClient::new(DuckDbAuth::ServiceToken("secret".into()), None).unwrap();
         let dbg = format!("{client:?}");
         assert!(!dbg.contains("secret"));
         assert!(dbg.contains("redacted"));
@@ -337,21 +331,15 @@ mod tests {
 
     #[test]
     fn client_new_with_credential_id() {
-        let client = DuckDbClient::new(
-            DuckDbAuth::CredentialId(CredentialId::new()),
-            None,
-        )
-        .unwrap();
+        let client =
+            DuckDbClient::new(DuckDbAuth::CredentialId(CredentialId::new()), None).unwrap();
         assert_eq!(client.base_url, DEFAULT_BASE_URL);
     }
 
     #[test]
     fn client_debug_credential_id() {
-        let client = DuckDbClient::new(
-            DuckDbAuth::CredentialId(CredentialId::new()),
-            None,
-        )
-        .unwrap();
+        let client =
+            DuckDbClient::new(DuckDbAuth::CredentialId(CredentialId::new()), None).unwrap();
         let dbg = format!("{client:?}");
         assert!(dbg.contains("CredentialId"));
         assert!(dbg.contains("DuckDbClient"));

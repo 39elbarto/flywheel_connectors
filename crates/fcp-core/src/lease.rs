@@ -248,9 +248,7 @@ pub enum LeaseTransferValidationError {
     },
     #[error("handoff previous fencing token mismatch: expected {expected}, got {got}")]
     PreviousFenceMismatch { expected: u64, got: u64 },
-    #[error(
-        "handoff fencing token must increase monotonically (previous {previous}, next {next})"
-    )]
+    #[error("handoff fencing token must increase monotonically (previous {previous}, next {next})")]
     NonMonotonicFence { previous: u64, next: u64 },
 }
 

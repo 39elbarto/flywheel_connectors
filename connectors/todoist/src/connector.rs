@@ -316,10 +316,7 @@ impl TodoistConnector {
     }
 
     /// Handle the `simulate` method.
-    pub async fn handle_simulate(
-        &self,
-        params: serde_json::Value,
-    ) -> FcpResult<serde_json::Value> {
+    pub async fn handle_simulate(&self, params: serde_json::Value) -> FcpResult<serde_json::Value> {
         let operation = params
             .get("operation_id")
             .and_then(serde_json::Value::as_str)
@@ -664,8 +661,18 @@ mod tests {
     #[test]
     fn doctor_result_healthy_when_all_pass() {
         let checks = vec![
-            DoctorCheck { name: "a".into(), passed: true, message: None, critical: true },
-            DoctorCheck { name: "b".into(), passed: true, message: None, critical: false },
+            DoctorCheck {
+                name: "a".into(),
+                passed: true,
+                message: None,
+                critical: true,
+            },
+            DoctorCheck {
+                name: "b".into(),
+                passed: true,
+                message: None,
+                critical: false,
+            },
         ];
         let r = DoctorResult::from_checks(checks);
         assert_eq!(r.status, DoctorStatus::Healthy);
@@ -674,7 +681,12 @@ mod tests {
     #[test]
     fn doctor_result_degraded_when_non_critical_fails() {
         let checks = vec![
-            DoctorCheck { name: "a".into(), passed: true, message: None, critical: true },
+            DoctorCheck {
+                name: "a".into(),
+                passed: true,
+                message: None,
+                critical: true,
+            },
             DoctorCheck {
                 name: "b".into(),
                 passed: false,
@@ -724,7 +736,11 @@ mod tests {
     fn operations_all_have_idempotency() {
         let ops = operations_info();
         for op in ops.as_array().unwrap() {
-            assert!(op.get("idempotency").is_some(), "op {:?} missing idempotency", op["id"]);
+            assert!(
+                op.get("idempotency").is_some(),
+                "op {:?} missing idempotency",
+                op["id"]
+            );
         }
     }
 
@@ -789,21 +805,36 @@ mod tests {
 
     #[test]
     fn doctor_check_skip_none_message() {
-        let c = DoctorCheck { name: "test".into(), passed: true, message: None, critical: false };
+        let c = DoctorCheck {
+            name: "test".into(),
+            passed: true,
+            message: None,
+            critical: false,
+        };
         let v = serde_json::to_value(&c).unwrap();
         assert!(!v.as_object().unwrap().contains_key("message"));
     }
 
     #[test]
     fn doctor_check_includes_some_message() {
-        let c = DoctorCheck { name: "test".into(), passed: false, message: Some("fail".into()), critical: true };
+        let c = DoctorCheck {
+            name: "test".into(),
+            passed: false,
+            message: Some("fail".into()),
+            critical: true,
+        };
         let v = serde_json::to_value(&c).unwrap();
         assert_eq!(v["message"], "fail");
     }
 
     #[test]
     fn doctor_check_roundtrip() {
-        let c = DoctorCheck { name: "cfg".into(), passed: true, message: None, critical: true };
+        let c = DoctorCheck {
+            name: "cfg".into(),
+            passed: true,
+            message: None,
+            critical: true,
+        };
         let v = serde_json::to_value(&c).unwrap();
         let c2: DoctorCheck = serde_json::from_value(v).unwrap();
         assert_eq!(c2.name, "cfg");
@@ -814,9 +845,12 @@ mod tests {
 
     #[test]
     fn doctor_result_roundtrip() {
-        let r = DoctorResult::from_checks(vec![
-            DoctorCheck { name: "a".into(), passed: true, message: None, critical: true },
-        ]);
+        let r = DoctorResult::from_checks(vec![DoctorCheck {
+            name: "a".into(),
+            passed: true,
+            message: None,
+            critical: true,
+        }]);
         let v = serde_json::to_value(&r).unwrap();
         let r2: DoctorResult = serde_json::from_value(v).unwrap();
         assert_eq!(r2.status, DoctorStatus::Healthy);
@@ -826,8 +860,18 @@ mod tests {
     #[test]
     fn doctor_result_unhealthy_overrides_degraded() {
         let r = DoctorResult::from_checks(vec![
-            DoctorCheck { name: "a".into(), passed: false, message: None, critical: true },
-            DoctorCheck { name: "b".into(), passed: false, message: None, critical: false },
+            DoctorCheck {
+                name: "a".into(),
+                passed: false,
+                message: None,
+                critical: true,
+            },
+            DoctorCheck {
+                name: "b".into(),
+                passed: false,
+                message: None,
+                critical: false,
+            },
         ]);
         assert_eq!(r.status, DoctorStatus::Unhealthy);
     }
@@ -891,7 +935,10 @@ mod tests {
     fn require_str_error_message() {
         let input = json!({});
         match require_str(&input, "content").unwrap_err() {
-            TodoistError::Api { status_code, message } => {
+            TodoistError::Api {
+                status_code,
+                message,
+            } => {
                 assert_eq!(status_code, 400);
                 assert!(message.contains("content"));
             }
@@ -904,8 +951,12 @@ mod tests {
     #[test]
     fn operations_projects_list_safe() {
         let ops = operations_info();
-        let op = ops.as_array().unwrap().iter()
-            .find(|o| o["id"] == "todoist.projects.list").unwrap();
+        let op = ops
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["id"] == "todoist.projects.list")
+            .unwrap();
         assert_eq!(op["safety_tier"], "safe");
         assert_eq!(op["risk_level"], "low");
     }
@@ -913,8 +964,12 @@ mod tests {
     #[test]
     fn operations_tasks_delete_dangerous() {
         let ops = operations_info();
-        let op = ops.as_array().unwrap().iter()
-            .find(|o| o["id"] == "todoist.tasks.delete").unwrap();
+        let op = ops
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["id"] == "todoist.tasks.delete")
+            .unwrap();
         assert_eq!(op["safety_tier"], "dangerous");
         assert_eq!(op["risk_level"], "high");
     }
@@ -925,7 +980,11 @@ mod tests {
         let ops = operations_info();
         for op in ops.as_array().unwrap() {
             let idem = op["idempotency"].as_str().unwrap();
-            assert!(valid.contains(&idem), "invalid idempotency {idem} for {:?}", op["id"]);
+            assert!(
+                valid.contains(&idem),
+                "invalid idempotency {idem} for {:?}",
+                op["id"]
+            );
         }
     }
 
@@ -934,7 +993,10 @@ mod tests {
         let ops = operations_info();
         for op in ops.as_array().unwrap() {
             let id = op["id"].as_str().unwrap();
-            assert!(id.starts_with("todoist."), "op {id} missing todoist. prefix");
+            assert!(
+                id.starts_with("todoist."),
+                "op {id} missing todoist. prefix"
+            );
         }
     }
 }

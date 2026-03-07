@@ -126,7 +126,11 @@ pub fn arxiv_categories() -> Vec<ArxivCategory> {
         cat("cs.DB", "Databases", "cs"),
         cat("cs.DL", "Digital Libraries", "cs"),
         cat("cs.DM", "Discrete Mathematics", "cs"),
-        cat("cs.DC", "Distributed, Parallel, and Cluster Computing", "cs"),
+        cat(
+            "cs.DC",
+            "Distributed, Parallel, and Cluster Computing",
+            "cs",
+        ),
         cat("cs.ET", "Emerging Technologies", "cs"),
         cat("cs.FL", "Formal Languages and Automata Theory", "cs"),
         cat("cs.GL", "General Literature", "cs"),
@@ -188,7 +192,11 @@ pub fn arxiv_categories() -> Vec<ArxivCategory> {
         // Physics
         cat("astro-ph", "Astrophysics", "physics"),
         cat("cond-mat", "Condensed Matter", "physics"),
-        cat("gr-qc", "General Relativity and Quantum Cosmology", "physics"),
+        cat(
+            "gr-qc",
+            "General Relativity and Quantum Cosmology",
+            "physics",
+        ),
         cat("hep-ex", "High Energy Physics - Experiment", "physics"),
         cat("hep-lat", "High Energy Physics - Lattice", "physics"),
         cat("hep-ph", "High Energy Physics - Phenomenology", "physics"),

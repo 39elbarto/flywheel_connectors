@@ -312,10 +312,7 @@ impl ZapierConnector {
     }
 
     /// Handle the `simulate` method.
-    pub async fn handle_simulate(
-        &self,
-        params: serde_json::Value,
-    ) -> FcpResult<serde_json::Value> {
+    pub async fn handle_simulate(&self, params: serde_json::Value) -> FcpResult<serde_json::Value> {
         let operation = params
             .get("operation_id")
             .and_then(serde_json::Value::as_str)
@@ -587,8 +584,16 @@ mod tests {
     fn operations_all_have_schemas() {
         let ops = operations_info();
         for op in ops.as_array().unwrap() {
-            assert!(op.get("input_schema").is_some(), "missing input_schema for {:?}", op["id"]);
-            assert!(op.get("output_schema").is_some(), "missing output_schema for {:?}", op["id"]);
+            assert!(
+                op.get("input_schema").is_some(),
+                "missing input_schema for {:?}",
+                op["id"]
+            );
+            assert!(
+                op.get("output_schema").is_some(),
+                "missing output_schema for {:?}",
+                op["id"]
+            );
             assert_eq!(
                 op["input_schema"]["type"].as_str().unwrap(),
                 "object",
@@ -677,28 +682,47 @@ mod tests {
     fn operations_all_have_idempotency() {
         let ops = operations_info();
         for op in ops.as_array().unwrap() {
-            assert!(op.get("idempotency").is_some(), "op {:?} missing idempotency", op["id"]);
+            assert!(
+                op.get("idempotency").is_some(),
+                "op {:?} missing idempotency",
+                op["id"]
+            );
         }
     }
 
     #[test]
     fn operations_list_is_strict_idempotent() {
         let ops = operations_info();
-        let list_op = ops.as_array().unwrap().iter().find(|o| o["id"] == "zapier.zaps.list").unwrap();
+        let list_op = ops
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["id"] == "zapier.zaps.list")
+            .unwrap();
         assert_eq!(list_op["idempotency"].as_str().unwrap(), "strict");
     }
 
     #[test]
     fn operations_execute_is_not_idempotent() {
         let ops = operations_info();
-        let exec_op = ops.as_array().unwrap().iter().find(|o| o["id"] == "zapier.zaps.execute").unwrap();
+        let exec_op = ops
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["id"] == "zapier.zaps.execute")
+            .unwrap();
         assert_eq!(exec_op["idempotency"].as_str().unwrap(), "none");
     }
 
     #[test]
     fn operations_execute_has_required_input_fields() {
         let ops = operations_info();
-        let exec_op = ops.as_array().unwrap().iter().find(|o| o["id"] == "zapier.zaps.execute").unwrap();
+        let exec_op = ops
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["id"] == "zapier.zaps.execute")
+            .unwrap();
         let required = exec_op["input_schema"]["required"].as_array().unwrap();
         let req_strs: Vec<&str> = required.iter().filter_map(|v| v.as_str()).collect();
         assert!(req_strs.contains(&"action_id"));
@@ -708,7 +732,12 @@ mod tests {
     #[test]
     fn operations_list_has_no_required_input() {
         let ops = operations_info();
-        let list_op = ops.as_array().unwrap().iter().find(|o| o["id"] == "zapier.zaps.list").unwrap();
+        let list_op = ops
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["id"] == "zapier.zaps.list")
+            .unwrap();
         let required = list_op["input_schema"]["required"].as_array().unwrap();
         assert!(required.is_empty());
     }
@@ -716,24 +745,54 @@ mod tests {
     #[test]
     fn operations_list_output_has_zaps() {
         let ops = operations_info();
-        let list_op = ops.as_array().unwrap().iter().find(|o| o["id"] == "zapier.zaps.list").unwrap();
+        let list_op = ops
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["id"] == "zapier.zaps.list")
+            .unwrap();
         let required = list_op["output_schema"]["required"].as_array().unwrap();
-        assert!(required.iter().filter_map(|v| v.as_str()).any(|s| s == "zaps"));
+        assert!(
+            required
+                .iter()
+                .filter_map(|v| v.as_str())
+                .any(|s| s == "zaps")
+        );
     }
 
     #[test]
     fn operations_execute_output_has_result() {
         let ops = operations_info();
-        let exec_op = ops.as_array().unwrap().iter().find(|o| o["id"] == "zapier.zaps.execute").unwrap();
+        let exec_op = ops
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["id"] == "zapier.zaps.execute")
+            .unwrap();
         let required = exec_op["output_schema"]["required"].as_array().unwrap();
-        assert!(required.iter().filter_map(|v| v.as_str()).any(|s| s == "result"));
+        assert!(
+            required
+                .iter()
+                .filter_map(|v| v.as_str())
+                .any(|s| s == "result")
+        );
     }
 
     #[test]
     fn doctor_result_healthy_when_all_pass() {
         let checks = vec![
-            DoctorCheck { name: "a".into(), passed: true, message: None, critical: true },
-            DoctorCheck { name: "b".into(), passed: true, message: None, critical: false },
+            DoctorCheck {
+                name: "a".into(),
+                passed: true,
+                message: None,
+                critical: true,
+            },
+            DoctorCheck {
+                name: "b".into(),
+                passed: true,
+                message: None,
+                critical: false,
+            },
         ];
         let r = DoctorResult::from_checks(checks);
         assert_eq!(r.status, DoctorStatus::Healthy);
@@ -742,7 +801,12 @@ mod tests {
     #[test]
     fn doctor_result_degraded_when_non_critical_fails() {
         let checks = vec![
-            DoctorCheck { name: "a".into(), passed: true, message: None, critical: true },
+            DoctorCheck {
+                name: "a".into(),
+                passed: true,
+                message: None,
+                critical: true,
+            },
             DoctorCheck {
                 name: "b".into(),
                 passed: false,
@@ -788,8 +852,18 @@ mod tests {
     #[test]
     fn doctor_result_multiple_critical_failures() {
         let checks = vec![
-            DoctorCheck { name: "a".into(), passed: false, message: None, critical: true },
-            DoctorCheck { name: "b".into(), passed: false, message: None, critical: true },
+            DoctorCheck {
+                name: "a".into(),
+                passed: false,
+                message: None,
+                critical: true,
+            },
+            DoctorCheck {
+                name: "b".into(),
+                passed: false,
+                message: None,
+                critical: true,
+            },
         ];
         let r = DoctorResult::from_checks(checks);
         assert_eq!(r.status, DoctorStatus::Unhealthy);
@@ -854,17 +928,36 @@ mod tests {
     #[test]
     fn operations_capabilities_match_manifest() {
         let ops = operations_info();
-        let list_op = ops.as_array().unwrap().iter().find(|o| o["id"] == "zapier.zaps.list").unwrap();
+        let list_op = ops
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["id"] == "zapier.zaps.list")
+            .unwrap();
         assert_eq!(list_op["capability"].as_str().unwrap(), "zapier.zaps.read");
-        let exec_op = ops.as_array().unwrap().iter().find(|o| o["id"] == "zapier.zaps.execute").unwrap();
+        let exec_op = ops
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["id"] == "zapier.zaps.execute")
+            .unwrap();
         assert_eq!(exec_op["capability"].as_str().unwrap(), "zapier.zaps.write");
     }
 
     #[test]
     fn doctor_status_serializes_lowercase() {
-        assert_eq!(serde_json::to_value(DoctorStatus::Healthy).unwrap(), "healthy");
-        assert_eq!(serde_json::to_value(DoctorStatus::Degraded).unwrap(), "degraded");
-        assert_eq!(serde_json::to_value(DoctorStatus::Unhealthy).unwrap(), "unhealthy");
+        assert_eq!(
+            serde_json::to_value(DoctorStatus::Healthy).unwrap(),
+            "healthy"
+        );
+        assert_eq!(
+            serde_json::to_value(DoctorStatus::Degraded).unwrap(),
+            "degraded"
+        );
+        assert_eq!(
+            serde_json::to_value(DoctorStatus::Unhealthy).unwrap(),
+            "unhealthy"
+        );
     }
 
     #[test]
@@ -888,7 +981,12 @@ mod tests {
     #[test]
     fn operations_execute_is_risky() {
         let ops = operations_info();
-        let exec_op = ops.as_array().unwrap().iter().find(|o| o["id"] == "zapier.zaps.execute").unwrap();
+        let exec_op = ops
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["id"] == "zapier.zaps.execute")
+            .unwrap();
         assert_eq!(exec_op["safety_tier"], "risky");
         assert_eq!(exec_op["risk_level"], "medium");
     }
@@ -896,7 +994,12 @@ mod tests {
     #[test]
     fn operations_list_is_safe() {
         let ops = operations_info();
-        let list_op = ops.as_array().unwrap().iter().find(|o| o["id"] == "zapier.zaps.list").unwrap();
+        let list_op = ops
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["id"] == "zapier.zaps.list")
+            .unwrap();
         assert_eq!(list_op["safety_tier"], "safe");
         assert_eq!(list_op["risk_level"], "low");
     }

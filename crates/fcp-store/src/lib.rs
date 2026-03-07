@@ -48,8 +48,9 @@ pub use quarantine::{
     QuarantinedObject,
 };
 pub use repair::{
-    RepairController, RepairControllerConfig, RepairPermit, RepairRequest, RepairResult,
-    RepairStats, TargetedRepairRequest,
+    RepairController, RepairControllerConfig, RepairCycleBudget, RepairCycleUsage, RepairPermit,
+    RepairPlan, RepairPlanAction, RepairPlanningOptions, RepairPolicyTargets, RepairReasonCode,
+    RepairRequest, RepairResult, RepairStats, TargetedRepairRequest,
 };
 pub use symbol_store::{
     MemorySymbolStore, MemorySymbolStoreConfig, ObjectSymbolMeta, ObjectTransmissionInfo,

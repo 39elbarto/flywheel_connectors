@@ -159,13 +159,13 @@ pub struct RepairCycleUsage {
 }
 
 impl RepairCycleUsage {
-    fn can_fit(&self, budget: &RepairCycleBudget, action: &RepairPlanAction) -> bool {
+    const fn can_fit(&self, budget: &RepairCycleBudget, action: &RepairPlanAction) -> bool {
         self.repairs < budget.max_repairs
             && self.bytes.saturating_add(action.estimated_bytes) <= budget.max_bytes
             && self.decode_ms.saturating_add(action.estimated_decode_ms) <= budget.max_decode_ms
     }
 
-    fn record(&mut self, action: &RepairPlanAction) {
+    const fn record(&mut self, action: &RepairPlanAction) {
         self.repairs += 1;
         self.bytes = self.bytes.saturating_add(action.estimated_bytes);
         self.decode_ms = self.decode_ms.saturating_add(action.estimated_decode_ms);
@@ -502,7 +502,7 @@ impl RepairController {
         }
     }
 
-    fn plan_reason_code(
+    const fn plan_reason_code(
         &self,
         coverage: &CoverageEvaluation,
         policy: &ObjectPlacementPolicy,
@@ -529,7 +529,7 @@ impl RepairController {
         None
     }
 
-    fn calculate_plan_priority(
+    const fn calculate_plan_priority(
         &self,
         coverage: &CoverageEvaluation,
         policy: &ObjectPlacementPolicy,

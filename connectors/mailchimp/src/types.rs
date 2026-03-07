@@ -276,7 +276,8 @@ mod tests {
             "id": "a1",
             "name": "List",
             "member_count": 100
-        })).unwrap();
+        }))
+        .unwrap();
         let cloned = a.clone();
         assert_eq!(a.id, "a1");
         assert_eq!(cloned.name, Some("List".into()));
@@ -309,7 +310,8 @@ mod tests {
         let a: Audience = serde_json::from_value(json!({
             "id": "a1",
             "member_count": 0
-        })).unwrap();
+        }))
+        .unwrap();
         assert_eq!(a.member_count, Some(0));
     }
 
@@ -318,7 +320,8 @@ mod tests {
         let m: Member = serde_json::from_value(json!({
             "id": "m1",
             "email_address": "a@b.com"
-        })).unwrap();
+        }))
+        .unwrap();
         let cloned = m.clone();
         assert_eq!(m.id, Some("m1".into()));
         assert_eq!(cloned.email_address, Some("a@b.com".into()));
@@ -348,7 +351,13 @@ mod tests {
 
     #[test]
     fn member_all_statuses() {
-        for status in &["subscribed", "unsubscribed", "cleaned", "pending", "transactional"] {
+        for status in &[
+            "subscribed",
+            "unsubscribed",
+            "cleaned",
+            "pending",
+            "transactional",
+        ] {
             let m: Member = serde_json::from_value(json!({"status": status})).unwrap();
             assert_eq!(m.status.as_deref(), Some(*status));
         }
@@ -359,7 +368,8 @@ mod tests {
         let c: Campaign = serde_json::from_value(json!({
             "id": "c1",
             "type": "regular"
-        })).unwrap();
+        }))
+        .unwrap();
         let cloned = c.clone();
         assert_eq!(c.id, "c1");
         assert_eq!(cloned.campaign_type, Some("regular".into()));
@@ -393,7 +403,8 @@ mod tests {
     fn campaign_settings_clone() {
         let s: CampaignSettings = serde_json::from_value(json!({
             "subject_line": "Hello"
-        })).unwrap();
+        }))
+        .unwrap();
         let cloned = s.clone();
         assert_eq!(s.subject_line, Some("Hello".into()));
         assert_eq!(cloned.subject_line, Some("Hello".into()));
@@ -424,7 +435,8 @@ mod tests {
         let e: ApiErrorResponse = serde_json::from_value(json!({
             "detail": "err",
             "title": "Error"
-        })).unwrap();
+        }))
+        .unwrap();
         let cloned = e.clone();
         assert_eq!(e.detail, Some("err".into()));
         assert_eq!(cloned.title, Some("Error".into()));
@@ -441,7 +453,8 @@ mod tests {
     fn api_error_response_with_instance() {
         let e: ApiErrorResponse = serde_json::from_value(json!({
             "instance": "abc-123-instance"
-        })).unwrap();
+        }))
+        .unwrap();
         assert_eq!(e.instance, Some("abc-123-instance".into()));
     }
 
@@ -449,7 +462,8 @@ mod tests {
     fn api_error_response_status_numeric() {
         let e: ApiErrorResponse = serde_json::from_value(json!({
             "status": 429
-        })).unwrap();
+        }))
+        .unwrap();
         assert_eq!(e.status, Some(429));
     }
 
@@ -458,7 +472,8 @@ mod tests {
         let a: Audience = serde_json::from_value(json!({
             "id": "big",
             "member_count": 999_999
-        })).unwrap();
+        }))
+        .unwrap();
         assert_eq!(a.member_count, Some(999_999));
     }
 }

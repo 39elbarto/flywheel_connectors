@@ -3308,8 +3308,18 @@ mod tests {
     #[test]
     fn test_doctor_result_from_checks_healthy() {
         let checks = vec![
-            DoctorCheck { name: "a".into(), passed: true, message: None, critical: true },
-            DoctorCheck { name: "b".into(), passed: true, message: None, critical: false },
+            DoctorCheck {
+                name: "a".into(),
+                passed: true,
+                message: None,
+                critical: true,
+            },
+            DoctorCheck {
+                name: "b".into(),
+                passed: true,
+                message: None,
+                critical: false,
+            },
         ];
         let result = DoctorResult::from_checks(checks);
         assert_eq!(result.status, DoctorStatus::Healthy);
@@ -3318,8 +3328,18 @@ mod tests {
     #[test]
     fn test_doctor_result_from_checks_degraded() {
         let checks = vec![
-            DoctorCheck { name: "a".into(), passed: true, message: None, critical: true },
-            DoctorCheck { name: "b".into(), passed: false, message: None, critical: false },
+            DoctorCheck {
+                name: "a".into(),
+                passed: true,
+                message: None,
+                critical: true,
+            },
+            DoctorCheck {
+                name: "b".into(),
+                passed: false,
+                message: None,
+                critical: false,
+            },
         ];
         let result = DoctorResult::from_checks(checks);
         assert_eq!(result.status, DoctorStatus::Degraded);
@@ -3327,9 +3347,12 @@ mod tests {
 
     #[test]
     fn test_doctor_result_from_checks_unhealthy() {
-        let checks = vec![
-            DoctorCheck { name: "a".into(), passed: false, message: None, critical: true },
-        ];
+        let checks = vec![DoctorCheck {
+            name: "a".into(),
+            passed: false,
+            message: None,
+            critical: true,
+        }];
         let result = DoctorResult::from_checks(checks);
         assert_eq!(result.status, DoctorStatus::Unhealthy);
     }
@@ -3339,8 +3362,18 @@ mod tests {
         let result = DoctorResult {
             status: DoctorStatus::Degraded,
             checks: vec![
-                DoctorCheck { name: "c1".into(), passed: true, message: None, critical: true },
-                DoctorCheck { name: "c2".into(), passed: false, message: Some("warn".into()), critical: false },
+                DoctorCheck {
+                    name: "c1".into(),
+                    passed: true,
+                    message: None,
+                    critical: true,
+                },
+                DoctorCheck {
+                    name: "c2".into(),
+                    passed: false,
+                    message: Some("warn".into()),
+                    critical: false,
+                },
             ],
         };
         let json_str = serde_json::to_string(&result).unwrap();

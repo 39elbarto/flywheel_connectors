@@ -855,7 +855,10 @@ mod tests {
         // Next 8 bytes: seq LE
         assert_eq!(&aad[16..24], &0x0102_0304_0506_0708u64.to_le_bytes());
         // Last 2 bytes: flags LE
-        assert_eq!(&aad[24..26], &FcpcFrameFlags::ENCRYPTED.bits().to_le_bytes());
+        assert_eq!(
+            &aad[24..26],
+            &FcpcFrameFlags::ENCRYPTED.bits().to_le_bytes()
+        );
     }
 
     #[test]
@@ -914,8 +917,15 @@ mod tests {
     fn frame_debug_contains_type_name() {
         let session_id = MeshSessionId(SESSION_ID_BYTES);
         let dir = SessionDirection::InitiatorToResponder;
-        let frame = FcpcFrame::seal(session_id, 1, dir, FcpcFrameFlags::default(), b"dbg", &K_CTX)
-            .expect("seal");
+        let frame = FcpcFrame::seal(
+            session_id,
+            1,
+            dir,
+            FcpcFrameFlags::default(),
+            b"dbg",
+            &K_CTX,
+        )
+        .expect("seal");
         let dbg = format!("{frame:?}");
         assert!(dbg.contains("FcpcFrame"));
         assert!(dbg.contains("FcpcFrameHeader"));
@@ -965,9 +975,15 @@ mod tests {
     fn seal_seq_zero_works() {
         let session_id = MeshSessionId(SESSION_ID_BYTES);
         let dir = SessionDirection::InitiatorToResponder;
-        let frame =
-            FcpcFrame::seal(session_id, 0, dir, FcpcFrameFlags::default(), b"seq0", &K_CTX)
-                .expect("seal seq 0");
+        let frame = FcpcFrame::seal(
+            session_id,
+            0,
+            dir,
+            FcpcFrameFlags::default(),
+            b"seq0",
+            &K_CTX,
+        )
+        .expect("seal seq 0");
         let encoded = frame.encode();
         let decoded = FcpcFrame::decode(&encoded).expect("decode ok");
         let opened = decoded.open(dir, &K_CTX).expect("open ok");
@@ -1000,10 +1016,24 @@ mod tests {
         let dir = SessionDirection::InitiatorToResponder;
         let key_a = [0x11; 32];
         let key_b = [0x22; 32];
-        let a = FcpcFrame::seal(session_id, 1, dir, FcpcFrameFlags::default(), b"same", &key_a)
-            .expect("seal a");
-        let b = FcpcFrame::seal(session_id, 1, dir, FcpcFrameFlags::default(), b"same", &key_b)
-            .expect("seal b");
+        let a = FcpcFrame::seal(
+            session_id,
+            1,
+            dir,
+            FcpcFrameFlags::default(),
+            b"same",
+            &key_a,
+        )
+        .expect("seal a");
+        let b = FcpcFrame::seal(
+            session_id,
+            1,
+            dir,
+            FcpcFrameFlags::default(),
+            b"same",
+            &key_b,
+        )
+        .expect("seal b");
         assert_ne!(a.ciphertext, b.ciphertext);
         assert_ne!(a.tag, b.tag);
     }

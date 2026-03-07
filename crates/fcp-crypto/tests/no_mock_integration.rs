@@ -4,36 +4,60 @@
 //! (AEAD + HKDF, Ed25519 + COSE tokens, X25519 + HPKE, Shamir + HPKE,
 //! canonicalization + signing) without mocks or stubs.
 
-use fcp_crypto::{
-    // AEAD
-    AeadKey, ChaCha20Nonce, ChaCha20Poly1305Cipher, XChaCha20Nonce, XChaCha20Poly1305Cipher,
-    chacha20_decrypt, chacha20_encrypt, xchacha20_decrypt, xchacha20_encrypt,
-    // MAC
-    Blake3Mac, MacKey, blake3_mac, blake3_mac_full, blake3_mac_verify,
-    // Ed25519
-    Ed25519Signature, Ed25519SigningKey, Ed25519VerifyingKey,
-    // X25519
-    X25519PublicKey, X25519SecretKey,
-    // HKDF
-    DerivedKey, Fcp2KeyDerivation, HkdfSha256,
-    // KID
-    KeyId,
-    // HPKE
-    Fcp2Aad, HpkeSealedBox, hpke_open, hpke_seal,
-    // Canonicalize
-    canonical_signing_bytes, schema_hash,
-    // COSE
-    CapabilityTokenBuilder, CoseToken, CwtClaims,
-    // Shamir
-    ShamirShare, reconstruct_secret, split_secret,
-    // Errors
-    CryptoError,
-};
 use fcp_crypto::aead::{AEAD_KEY_SIZE, AEAD_TAG_SIZE, CHACHA20_NONCE_SIZE, XCHACHA20_NONCE_SIZE};
 use fcp_crypto::canonicalize::{
     NodeSignature, sort_node_signatures, verify_node_signature_order, verify_signature_order,
 };
-use fcp_crypto::mac::{IncrementalMac, BLAKE3_MAC_SIZE, MAC_KEY_SIZE, MAC_SIZE};
+use fcp_crypto::mac::{BLAKE3_MAC_SIZE, IncrementalMac, MAC_KEY_SIZE, MAC_SIZE};
+use fcp_crypto::{
+    // AEAD
+    AeadKey,
+    // MAC
+    Blake3Mac,
+    // COSE
+    CapabilityTokenBuilder,
+    ChaCha20Nonce,
+    ChaCha20Poly1305Cipher,
+    CoseToken,
+    // Errors
+    CryptoError,
+    CwtClaims,
+    // HKDF
+    DerivedKey,
+    // Ed25519
+    Ed25519Signature,
+    Ed25519SigningKey,
+    Ed25519VerifyingKey,
+    // HPKE
+    Fcp2Aad,
+    Fcp2KeyDerivation,
+    HkdfSha256,
+    HpkeSealedBox,
+    // KID
+    KeyId,
+    MacKey,
+    // Shamir
+    ShamirShare,
+    // X25519
+    X25519PublicKey,
+    X25519SecretKey,
+    XChaCha20Nonce,
+    XChaCha20Poly1305Cipher,
+    blake3_mac,
+    blake3_mac_full,
+    blake3_mac_verify,
+    // Canonicalize
+    canonical_signing_bytes,
+    chacha20_decrypt,
+    chacha20_encrypt,
+    hpke_open,
+    hpke_seal,
+    reconstruct_secret,
+    schema_hash,
+    split_secret,
+    xchacha20_decrypt,
+    xchacha20_encrypt,
+};
 
 use chrono::{Duration as ChronoDuration, Utc};
 
@@ -182,9 +206,10 @@ fn ed25519_contextual_signatures_isolated() {
         .unwrap();
 
     // Verify with wrong context fails
-    assert!(vk
-        .verify_with_context(b"context-B", b"message", &sig_a)
-        .is_err());
+    assert!(
+        vk.verify_with_context(b"context-B", b"message", &sig_a)
+            .is_err()
+    );
 }
 
 // ============================================================================
@@ -370,12 +395,12 @@ fn shamir_different_subsets_same_result() {
     let secret = b"deterministic-reconstruction-ok!";
     let shares = split_secret(secret, 3, 5).unwrap();
 
-    let r1 = reconstruct_secret(&[shares[0].clone(), shares[1].clone(), shares[2].clone()])
-        .unwrap();
-    let r2 = reconstruct_secret(&[shares[2].clone(), shares[3].clone(), shares[4].clone()])
-        .unwrap();
-    let r3 = reconstruct_secret(&[shares[0].clone(), shares[2].clone(), shares[4].clone()])
-        .unwrap();
+    let r1 =
+        reconstruct_secret(&[shares[0].clone(), shares[1].clone(), shares[2].clone()]).unwrap();
+    let r2 =
+        reconstruct_secret(&[shares[2].clone(), shares[3].clone(), shares[4].clone()]).unwrap();
+    let r3 =
+        reconstruct_secret(&[shares[0].clone(), shares[2].clone(), shares[4].clone()]).unwrap();
 
     assert_eq!(r1.as_bytes(), secret);
     assert_eq!(r2.as_bytes(), secret);
@@ -754,8 +779,7 @@ fn full_frame_authentication_pipeline() {
     let shared = alice.diffie_hellman(&bob.public_key());
     let session_key =
         Fcp2KeyDerivation::derive_session_key(shared.as_bytes(), b"frame-sess", "send").unwrap();
-    let mac_derived =
-        Fcp2KeyDerivation::derive_mac_key(session_key.as_bytes(), "header").unwrap();
+    let mac_derived = Fcp2KeyDerivation::derive_mac_key(session_key.as_bytes(), "header").unwrap();
 
     let mac_key = MacKey::from_bytes(*mac_derived.as_bytes());
 

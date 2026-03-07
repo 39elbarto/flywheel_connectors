@@ -203,7 +203,7 @@ const LINK_LOCAL_CIDRS: &[&str] = &[
 /// Default CIDR ranges that are denied when `deny_tailnet_ranges` is true.
 /// Tailscale uses CGNAT space (100.64.0.0/10) for its mesh network.
 const TAILNET_CIDRS: &[&str] = &[
-    "100.64.0.0/10",      // CGNAT / Tailscale IPv4 address space
+    "100.64.0.0/10",       // CGNAT / Tailscale IPv4 address space
     "fd7a:115c:a1e0::/48", // Tailscale IPv6 address space
 ];
 
@@ -1023,7 +1023,7 @@ mod tests {
         assert!(is_tailnet_range("100.127.255.255".parse().unwrap()));
         assert!(!is_tailnet_range("100.128.0.1".parse().unwrap()));
         assert!(!is_tailnet_range("100.63.255.255".parse().unwrap()));
-        
+
         // IPv6 Tailscale range
         assert!(is_tailnet_range("fd7a:115c:a1e0::1".parse().unwrap()));
         assert!(is_tailnet_range("fd7a:115c:a1e0::ffff".parse().unwrap()));
@@ -2923,8 +2923,7 @@ mod tests {
             credential_id: Some("cred-1".into()),
         };
 
-        let result =
-            guard.authorize_tcp(&req, &constraints, &injector, "op", &["cred-1".into()]);
+        let result = guard.authorize_tcp(&req, &constraints, &injector, "op", &["cred-1".into()]);
         assert!(result.is_err());
         if let Err(EgressError::Denied { code, .. }) = result {
             assert_eq!(code, DenyReason::CredentialHostNotAllowed);
@@ -3008,7 +3007,11 @@ mod tests {
     #[test]
     fn test_sni_verification_exact_match_succeeds() {
         let verifier = DefaultTlsVerifier;
-        assert!(verifier.verify_sni("api.example.com", "api.example.com").is_ok());
+        assert!(
+            verifier
+                .verify_sni("api.example.com", "api.example.com")
+                .is_ok()
+        );
     }
 
     #[test]
@@ -3048,17 +3051,23 @@ mod tests {
         constraints.cidr_deny = vec!["198.51.100.0/24".into(), "203.0.113.0/24".into()];
 
         // First range
-        assert!(guard
-            .check_ip_constraints("198.51.100.42".parse().unwrap(), &constraints)
-            .is_err());
+        assert!(
+            guard
+                .check_ip_constraints("198.51.100.42".parse().unwrap(), &constraints)
+                .is_err()
+        );
         // Second range
-        assert!(guard
-            .check_ip_constraints("203.0.113.1".parse().unwrap(), &constraints)
-            .is_err());
+        assert!(
+            guard
+                .check_ip_constraints("203.0.113.1".parse().unwrap(), &constraints)
+                .is_err()
+        );
         // Outside both ranges
-        assert!(guard
-            .check_ip_constraints("8.8.8.8".parse().unwrap(), &constraints)
-            .is_ok());
+        assert!(
+            guard
+                .check_ip_constraints("8.8.8.8".parse().unwrap(), &constraints)
+                .is_ok()
+        );
     }
 
     #[test]
@@ -3070,12 +3079,16 @@ mod tests {
         constraints.cidr_deny = vec!["not-a-cidr".into(), "203.0.113.0/24".into()];
 
         // Invalid CIDR is silently ignored, valid one still works
-        assert!(guard
-            .check_ip_constraints("203.0.113.1".parse().unwrap(), &constraints)
-            .is_err());
-        assert!(guard
-            .check_ip_constraints("8.8.8.8".parse().unwrap(), &constraints)
-            .is_ok());
+        assert!(
+            guard
+                .check_ip_constraints("203.0.113.1".parse().unwrap(), &constraints)
+                .is_err()
+        );
+        assert!(
+            guard
+                .check_ip_constraints("8.8.8.8".parse().unwrap(), &constraints)
+                .is_ok()
+        );
     }
 
     // ── Hostname canonicalization edge cases ──────────────────────────
@@ -3430,16 +3443,14 @@ mod tests {
         constraints.deny_private_ranges = false;
         constraints.cidr_deny = vec!["2001:db8::/32".into()];
 
-        let result =
-            guard.check_ip_constraints("2001:db8::1".parse().unwrap(), &constraints);
+        let result = guard.check_ip_constraints("2001:db8::1".parse().unwrap(), &constraints);
         assert!(result.is_err());
         if let Err(EgressError::Denied { code, .. }) = result {
             assert_eq!(code, DenyReason::CidrDenyMatched);
         }
 
         // Outside the range should pass
-        let result =
-            guard.check_ip_constraints("2001:db9::1".parse().unwrap(), &constraints);
+        let result = guard.check_ip_constraints("2001:db9::1".parse().unwrap(), &constraints);
         assert!(result.is_ok());
     }
 
@@ -3472,10 +3483,7 @@ mod tests {
     fn test_host_allow_multiple_patterns_first_match_wins() {
         let guard = EgressGuard::new();
         let mut constraints = test_constraints();
-        constraints.host_allow = vec![
-            "specific.example.com".into(),
-            "*.example.com".into(),
-        ];
+        constraints.host_allow = vec!["specific.example.com".into(), "*.example.com".into()];
         constraints.port_allow = vec![443];
 
         // Exact match should work
@@ -3639,8 +3647,7 @@ mod tests {
             credential_id: Some("cred-1".into()),
         };
 
-        let result =
-            guard.authorize_tcp(&req, &constraints, &injector, "op", &["cred-1".into()]);
+        let result = guard.authorize_tcp(&req, &constraints, &injector, "op", &["cred-1".into()]);
         assert!(result.is_err());
         if let Err(EgressError::Denied { code, reason }) = result {
             assert_eq!(code, DenyReason::CredentialNotAuthorized);

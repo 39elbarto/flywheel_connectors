@@ -182,10 +182,7 @@ mod tests {
             "publicationTypes": ["JournalArticle"],
         }))
         .unwrap();
-        assert_eq!(
-            p.publication_types,
-            Some(vec!["JournalArticle".into()])
-        );
+        assert_eq!(p.publication_types, Some(vec!["JournalArticle".into()]));
     }
 
     #[test]
@@ -614,8 +611,7 @@ mod tests {
 
     #[test]
     fn search_response_debug() {
-        let s: SearchResponse =
-            serde_json::from_value(json!({"total": 0, "data": []})).unwrap();
+        let s: SearchResponse = serde_json::from_value(json!({"total": 0, "data": []})).unwrap();
         let dbg = format!("{s:?}");
         assert!(dbg.contains("SearchResponse"));
     }

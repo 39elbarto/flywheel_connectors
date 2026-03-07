@@ -1037,4 +1037,550 @@ mod tests {
             GoogleGenerationError::MissingServicePolicy { service } if service == "foo"
         ));
     }
+
+    // ── GoogleGenerationError Display ──────────────────────────────────
+
+    #[test]
+    fn generation_error_display_missing_service() {
+        let err = GoogleGenerationError::MissingServicePolicy {
+            service: "drive".to_string(),
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("drive"),
+            "expected service name in message: {msg}"
+        );
+        assert!(
+            msg.contains("missing"),
+            "expected 'missing' in message: {msg}"
+        );
+    }
+
+    #[test]
+    fn generation_error_display_unclassified_op() {
+        let err = GoogleGenerationError::UnclassifiedOperation {
+            service: "gmail".to_string(),
+            operation_key: "users.labels.create".to_string(),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("gmail"), "expected service in message: {msg}");
+        assert!(
+            msg.contains("users.labels.create"),
+            "expected op key in message: {msg}"
+        );
+    }
+
+    // ── canonicalize_segment ───────────────────────────────────────────
+
+    #[test]
+    fn canonicalize_lowercase_passthrough() {
+        assert_eq!(canonicalize_segment("list"), "list");
+    }
+
+    #[test]
+    fn canonicalize_camel_case_splits() {
+        assert_eq!(canonicalize_segment("listHistory"), "list_history");
+    }
+
+    #[test]
+    fn canonicalize_upper_prefix_splits() {
+        assert_eq!(canonicalize_segment("HTMLParser"), "h_t_m_l_parser");
+    }
+
+    #[test]
+    fn canonicalize_empty_becomes_op() {
+        assert_eq!(canonicalize_segment(""), "op");
+    }
+
+    #[test]
+    fn canonicalize_trims_underscores() {
+        assert_eq!(canonicalize_segment("_hello_"), "hello");
+    }
+
+    #[test]
+    fn canonicalize_special_chars_replaced() {
+        // Non-alphanumeric chars become underscores, then trimmed
+        let result = canonicalize_segment("a@b#c");
+        assert!(result.contains('a'));
+        assert!(result.contains('b'));
+        assert!(result.contains('c'));
+        assert!(!result.contains('@'));
+        assert!(!result.contains('#'));
+    }
+
+    // ── build_operation_id_string ──────────────────────────────────────
+
+    #[test]
+    fn operation_id_simple_key() {
+        assert_eq!(build_operation_id_string("gmail", "list"), "gmail.list");
+    }
+
+    #[test]
+    fn operation_id_dotted_key() {
+        assert_eq!(
+            build_operation_id_string("gmail", "users.messages.list"),
+            "gmail.users.messages.list"
+        );
+    }
+
+    #[test]
+    fn operation_id_camel_case_method() {
+        assert_eq!(
+            build_operation_id_string("gmail", "users.messages.listHistory"),
+            "gmail.users.messages.list_history"
+        );
+    }
+
+    // ── derive_idempotency ────────────────────────────────────────────
+
+    #[test]
+    fn idempotency_get_is_strict() {
+        assert!(matches!(
+            derive_idempotency("GET", SafetyTier::Safe),
+            IdempotencyClass::Strict
+        ));
+    }
+
+    #[test]
+    fn idempotency_head_is_strict() {
+        assert!(matches!(
+            derive_idempotency("HEAD", SafetyTier::Safe),
+            IdempotencyClass::Strict
+        ));
+    }
+
+    #[test]
+    fn idempotency_put_is_best_effort() {
+        assert!(matches!(
+            derive_idempotency("PUT", SafetyTier::Safe),
+            IdempotencyClass::BestEffort
+        ));
+    }
+
+    #[test]
+    fn idempotency_delete_is_best_effort() {
+        assert!(matches!(
+            derive_idempotency("DELETE", SafetyTier::Safe),
+            IdempotencyClass::BestEffort
+        ));
+    }
+
+    #[test]
+    fn idempotency_post_is_none() {
+        assert!(matches!(
+            derive_idempotency("POST", SafetyTier::Safe),
+            IdempotencyClass::None
+        ));
+    }
+
+    #[test]
+    fn idempotency_dangerous_safety_always_strict() {
+        // Even POST becomes Strict when safety tier is Dangerous
+        assert!(matches!(
+            derive_idempotency("POST", SafetyTier::Dangerous),
+            IdempotencyClass::Strict
+        ));
+    }
+
+    // ── map_policy_risk_level ─────────────────────────────────────────
+
+    #[test]
+    fn map_risk_level_all_variants() {
+        assert!(matches!(
+            map_policy_risk_level(PolicyRiskLevel::Low),
+            RiskLevel::Low
+        ));
+        assert!(matches!(
+            map_policy_risk_level(PolicyRiskLevel::Medium),
+            RiskLevel::Medium
+        ));
+        assert!(matches!(
+            map_policy_risk_level(PolicyRiskLevel::High),
+            RiskLevel::High
+        ));
+        assert!(matches!(
+            map_policy_risk_level(PolicyRiskLevel::Critical),
+            RiskLevel::Critical
+        ));
+    }
+
+    // ── map_policy_safety_tier ────────────────────────────────────────
+
+    #[test]
+    fn map_safety_tier_all_variants() {
+        assert!(matches!(
+            map_policy_safety_tier(PolicySafetyTier::Safe),
+            SafetyTier::Safe
+        ));
+        assert!(matches!(
+            map_policy_safety_tier(PolicySafetyTier::Risky),
+            SafetyTier::Risky
+        ));
+        assert!(matches!(
+            map_policy_safety_tier(PolicySafetyTier::Dangerous),
+            SafetyTier::Dangerous
+        ));
+        assert!(matches!(
+            map_policy_safety_tier(PolicySafetyTier::Critical),
+            SafetyTier::Critical
+        ));
+        assert!(matches!(
+            map_policy_safety_tier(PolicySafetyTier::Forbidden),
+            SafetyTier::Forbidden
+        ));
+    }
+
+    // ── map_policy_approval_mode ──────────────────────────────────────
+
+    #[test]
+    fn map_approval_mode_all_variants() {
+        assert!(map_policy_approval_mode(PolicyApprovalMode::None).is_none());
+        assert!(matches!(
+            map_policy_approval_mode(PolicyApprovalMode::Policy),
+            Some(ApprovalMode::Policy)
+        ));
+        assert!(matches!(
+            map_policy_approval_mode(PolicyApprovalMode::Interactive),
+            Some(ApprovalMode::Interactive)
+        ));
+        assert!(matches!(
+            map_policy_approval_mode(PolicyApprovalMode::ElevationToken),
+            Some(ApprovalMode::ElevationToken)
+        ));
+    }
+
+    // ── first_sentence ────────────────────────────────────────────────
+
+    #[test]
+    fn first_sentence_extracts_before_period() {
+        assert_eq!(
+            first_sentence("Hello world. More text"),
+            Some("Hello world".to_string())
+        );
+    }
+
+    #[test]
+    fn first_sentence_no_period_returns_full() {
+        assert_eq!(
+            first_sentence("Hello world"),
+            Some("Hello world".to_string())
+        );
+    }
+
+    #[test]
+    fn first_sentence_empty_returns_none() {
+        assert_eq!(first_sentence(""), None);
+    }
+
+    #[test]
+    fn first_sentence_only_whitespace_returns_none() {
+        assert_eq!(first_sentence("   "), None);
+    }
+
+    // ── build_example_payload ─────────────────────────────────────────
+
+    #[test]
+    fn example_payload_no_properties_returns_empty() {
+        let schema = serde_json::json!({});
+        assert_eq!(build_example_payload(&schema), "{}");
+    }
+
+    #[test]
+    fn example_payload_required_string() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "name": { "type": "string" }
+            },
+            "required": ["name"]
+        });
+        let payload = build_example_payload(&schema);
+        let parsed: Value = serde_json::from_str(&payload).expect("valid json");
+        assert_eq!(parsed.get("name").and_then(Value::as_str), Some("<value>"));
+    }
+
+    #[test]
+    fn example_payload_required_integer() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "count": { "type": "integer" }
+            },
+            "required": ["count"]
+        });
+        let payload = build_example_payload(&schema);
+        let parsed: Value = serde_json::from_str(&payload).expect("valid json");
+        assert_eq!(parsed.get("count").and_then(Value::as_u64), Some(1));
+    }
+
+    #[test]
+    fn example_payload_required_boolean() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "active": { "type": "boolean" }
+            },
+            "required": ["active"]
+        });
+        let payload = build_example_payload(&schema);
+        let parsed: Value = serde_json::from_str(&payload).expect("valid json");
+        assert_eq!(parsed.get("active").and_then(Value::as_bool), Some(false));
+    }
+
+    // ── parameter_to_json_schema ──────────────────────────────────────
+
+    #[test]
+    fn param_schema_string_type() {
+        let param = DiscoveryParameter {
+            location: None,
+            required: false,
+            repeated: false,
+            type_name: Some("string".to_string()),
+            format: None,
+            description: None,
+        };
+        let schema = parameter_to_json_schema(&param);
+        assert_eq!(schema.get("type").and_then(Value::as_str), Some("string"));
+    }
+
+    #[test]
+    fn param_schema_integer_type() {
+        let param = DiscoveryParameter {
+            location: None,
+            required: false,
+            repeated: false,
+            type_name: Some("integer".to_string()),
+            format: None,
+            description: None,
+        };
+        let schema = parameter_to_json_schema(&param);
+        assert_eq!(schema.get("type").and_then(Value::as_str), Some("integer"));
+    }
+
+    #[test]
+    fn param_schema_repeated_creates_array() {
+        let param = DiscoveryParameter {
+            location: None,
+            required: false,
+            repeated: true,
+            type_name: Some("string".to_string()),
+            format: None,
+            description: None,
+        };
+        let schema = parameter_to_json_schema(&param);
+        assert_eq!(schema.get("type").and_then(Value::as_str), Some("array"));
+        assert!(schema.get("items").is_some());
+        assert_eq!(
+            schema
+                .get("items")
+                .and_then(|v| v.get("type"))
+                .and_then(Value::as_str),
+            Some("string")
+        );
+    }
+
+    #[test]
+    fn param_schema_with_format() {
+        let param = DiscoveryParameter {
+            location: None,
+            required: false,
+            repeated: false,
+            type_name: Some("string".to_string()),
+            format: Some("int64".to_string()),
+            description: None,
+        };
+        let schema = parameter_to_json_schema(&param);
+        assert_eq!(schema.get("format").and_then(Value::as_str), Some("int64"));
+    }
+
+    #[test]
+    fn param_schema_with_description_and_location() {
+        let param = DiscoveryParameter {
+            location: Some("query".to_string()),
+            required: false,
+            repeated: false,
+            type_name: Some("string".to_string()),
+            format: None,
+            description: Some("Filter expression".to_string()),
+        };
+        let schema = parameter_to_json_schema(&param);
+        let desc = schema
+            .get("description")
+            .and_then(Value::as_str)
+            .expect("description present");
+        assert!(desc.contains("Filter expression"));
+        assert!(desc.contains("query"));
+    }
+
+    // ── build_output_schema ───────────────────────────────────────────
+
+    #[test]
+    fn output_schema_media_download() {
+        let method = DiscoveryMethod {
+            key: "files.get".to_string(),
+            id: "drive.files.get".to_string(),
+            http_method: "GET".to_string(),
+            path: "files/{fileId}".to_string(),
+            flat_path: None,
+            canonical_path: "files/{fileId}".to_string(),
+            resource_path: vec![],
+            description: None,
+            scopes: vec![],
+            request_ref: None,
+            response_ref: None,
+            parameters: BTreeMap::new(),
+            supports_media_download: true,
+            supports_media_upload: false,
+            media_upload: None,
+        };
+        let schemas = BTreeMap::new();
+        let output = build_output_schema(&method, &schemas);
+        assert_eq!(output.get("type").and_then(Value::as_str), Some("string"));
+        assert_eq!(
+            output.get("contentEncoding").and_then(Value::as_str),
+            Some("base64")
+        );
+    }
+
+    #[test]
+    fn output_schema_no_response_ref() {
+        let method = DiscoveryMethod {
+            key: "test.op".to_string(),
+            id: "test.op".to_string(),
+            http_method: "POST".to_string(),
+            path: "op".to_string(),
+            flat_path: None,
+            canonical_path: "op".to_string(),
+            resource_path: vec![],
+            description: None,
+            scopes: vec![],
+            request_ref: None,
+            response_ref: None,
+            parameters: BTreeMap::new(),
+            supports_media_download: false,
+            supports_media_upload: false,
+            media_upload: None,
+        };
+        let schemas = BTreeMap::new();
+        let output = build_output_schema(&method, &schemas);
+        assert_eq!(output.get("type").and_then(Value::as_str), Some("object"));
+    }
+
+    // ── GoogleGeneratedArtifacts ──────────────────────────────────────
+
+    #[test]
+    fn generated_artifacts_operation_count() {
+        let service = DiscoveryServiceId::new("gmail", "v1").expect("valid service id");
+        let normalized = normalize_snapshot_bytes(
+            &service,
+            GMAIL_FIXTURE.as_bytes(),
+            DiscoveryEndpointKind::Standard,
+            "https://example.test",
+        )
+        .expect("normalize fixture");
+        let policy = default_google_policy_catalog();
+
+        let generated =
+            generate_google_service_artifacts(&normalized.snapshot, &policy).expect("generation");
+        assert_eq!(
+            generated.operation_count(),
+            generated.introspection.operations.len()
+        );
+    }
+
+    // ── GoogleMcpToolDescriptor serde ─────────────────────────────────
+
+    #[test]
+    fn mcp_tool_descriptor_serde_roundtrip() {
+        let descriptor = GoogleMcpToolDescriptor {
+            name: "gmail.users.messages.list".to_string(),
+            description: "List messages".to_string(),
+            input_schema: serde_json::json!({"type": "object"}),
+            output_schema: serde_json::json!({"type": "object"}),
+            capability: CapabilityId::from_static("gmail.read"),
+            risk_level: RiskLevel::Low,
+            safety_tier: SafetyTier::Safe,
+            idempotency: IdempotencyClass::Strict,
+            approval_mode: None,
+            requires_confirmation: false,
+            supports_simulate: true,
+            required_scopes: vec!["https://www.googleapis.com/auth/gmail.readonly".to_string()],
+            policy_notes: vec![],
+            ai_hints: None,
+        };
+
+        let json = serde_json::to_string(&descriptor).expect("serialize");
+        let roundtripped: GoogleMcpToolDescriptor =
+            serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(roundtripped.name, descriptor.name);
+        assert_eq!(roundtripped.description, descriptor.description);
+        assert_eq!(roundtripped.required_scopes, descriptor.required_scopes);
+        assert!(matches!(roundtripped.risk_level, RiskLevel::Low));
+        assert!(matches!(roundtripped.safety_tier, SafetyTier::Safe));
+        assert!(matches!(roundtripped.idempotency, IdempotencyClass::Strict));
+    }
+
+    // ── GoogleManifestFragment serde ──────────────────────────────────
+
+    #[test]
+    fn manifest_fragment_serde_roundtrip() {
+        let fragment = GoogleManifestFragment {
+            connector_id: "fcp.google.gmail".to_string(),
+            operations: vec![GoogleManifestOperationFragment {
+                operation_id: "gmail.users.messages.list".to_string(),
+                summary: "List messages".to_string(),
+                description: Some("List user messages".to_string()),
+                input_schema: serde_json::json!({"type": "object"}),
+                output_schema: serde_json::json!({"type": "object"}),
+                capability: "gmail.read".to_string(),
+                risk_level: RiskLevel::Low,
+                safety_tier: SafetyTier::Safe,
+                idempotency: IdempotencyClass::Strict,
+                approval_mode: None,
+                requires_confirmation: false,
+                supports_simulate: true,
+                required_scopes: vec![],
+                policy_notes: vec![],
+            }],
+        };
+
+        let json = serde_json::to_string(&fragment).expect("serialize");
+        let roundtripped: GoogleManifestFragment =
+            serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(roundtripped.connector_id, fragment.connector_id);
+        assert_eq!(roundtripped.operations.len(), 1);
+        assert_eq!(
+            roundtripped.operations[0].operation_id,
+            "gmail.users.messages.list"
+        );
+    }
+
+    // ── GoogleAgentSkillArtifact serde ────────────────────────────────
+
+    #[test]
+    fn agent_skill_artifact_serde_roundtrip() {
+        let skill = GoogleAgentSkillArtifact {
+            skill_id: "skill.gmail.users.messages.list".to_string(),
+            tool_name: "gmail.users.messages.list".to_string(),
+            display_name: "Google gmail users messages list".to_string(),
+            summary: "List messages".to_string(),
+            when_to_use: "Use when listing messages".to_string(),
+            required_capability: "gmail.read".to_string(),
+            risk_level: RiskLevel::Low,
+            approval_mode: None,
+            required_scopes: vec!["https://www.googleapis.com/auth/gmail.readonly".to_string()],
+            recommended_zones: vec!["us-central1".to_string()],
+            host_allow: vec!["gmail.googleapis.com".to_string()],
+            notes: vec![],
+        };
+
+        let json = serde_json::to_string(&skill).expect("serialize");
+        let roundtripped: GoogleAgentSkillArtifact =
+            serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(roundtripped.skill_id, skill.skill_id);
+        assert_eq!(roundtripped.tool_name, skill.tool_name);
+        assert_eq!(roundtripped.required_scopes, skill.required_scopes);
+        assert_eq!(roundtripped.recommended_zones, skill.recommended_zones);
+        assert_eq!(roundtripped.host_allow, skill.host_allow);
+    }
 }

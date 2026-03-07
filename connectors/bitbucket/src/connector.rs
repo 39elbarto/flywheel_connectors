@@ -59,8 +59,7 @@ impl BitbucketConfig {
             None => None,
         };
 
-        let has_app_password =
-            app_password_username.is_some() && app_password_value.is_some();
+        let has_app_password = app_password_username.is_some() && app_password_value.is_some();
         let has_access_token = access_token.is_some();
         let has_credential_id = credential_id.is_some();
 
@@ -77,7 +76,9 @@ impl BitbucketConfig {
             });
         }
 
-        let auth = if let (Some(u), Some(p)) = (app_password_username.clone(), app_password_value.clone()) {
+        let auth = if let (Some(u), Some(p)) =
+            (app_password_username.clone(), app_password_value.clone())
+        {
             BitbucketAuth::AppPassword {
                 username: u,
                 app_password: p,
@@ -343,18 +344,10 @@ impl BitbucketConnector {
 
         let result = match operation {
             "bitbucket.user.get" => self.invoke_user_get(client).await,
-            "bitbucket.repositories.list" => {
-                self.invoke_repositories_list(client, &input).await
-            }
-            "bitbucket.repositories.get" => {
-                self.invoke_repositories_get(client, &input).await
-            }
-            "bitbucket.pull_requests.list" => {
-                self.invoke_pull_requests_list(client, &input).await
-            }
-            "bitbucket.pull_requests.get" => {
-                self.invoke_pull_requests_get(client, &input).await
-            }
+            "bitbucket.repositories.list" => self.invoke_repositories_list(client, &input).await,
+            "bitbucket.repositories.get" => self.invoke_repositories_get(client, &input).await,
+            "bitbucket.pull_requests.list" => self.invoke_pull_requests_list(client, &input).await,
+            "bitbucket.pull_requests.get" => self.invoke_pull_requests_get(client, &input).await,
             "bitbucket.pull_requests.create" => {
                 self.invoke_pull_requests_create(client, &input).await
             }
@@ -468,9 +461,7 @@ impl BitbucketConnector {
         let workspace = require_str(input, "workspace")?;
         let repo_slug = require_str(input, "repo_slug")?;
         let pr_id = require_str(input, "pr_id")?;
-        let resp = client
-            .get_pull_request(workspace, repo_slug, pr_id)
-            .await?;
+        let resp = client.get_pull_request(workspace, repo_slug, pr_id).await?;
         Ok(json!({ "pull_request": resp }))
     }
 
@@ -502,7 +493,9 @@ impl BitbucketConnector {
             }
         });
 
-        client.create_pull_request(workspace, repo_slug, &body).await
+        client
+            .create_pull_request(workspace, repo_slug, &body)
+            .await
     }
 
     async fn invoke_branches_list(
@@ -1063,7 +1056,11 @@ mod tests {
 
     #[test]
     fn doctor_status_serde_roundtrip() {
-        let statuses = [DoctorStatus::Healthy, DoctorStatus::Degraded, DoctorStatus::Unhealthy];
+        let statuses = [
+            DoctorStatus::Healthy,
+            DoctorStatus::Degraded,
+            DoctorStatus::Unhealthy,
+        ];
         for status in &statuses {
             let v = serde_json::to_value(status).unwrap();
             let back: DoctorStatus = serde_json::from_value(v).unwrap();

@@ -498,20 +498,36 @@ mod tests {
 
     #[test]
     fn error_debug_format_not_found() {
-        let dbg = format!("{:?}", EvernoteError::NotFound { resource: "note".into() });
+        let dbg = format!(
+            "{:?}",
+            EvernoteError::NotFound {
+                resource: "note".into()
+            }
+        );
         assert!(dbg.contains("NotFound"));
         assert!(dbg.contains("note"));
     }
 
     #[test]
     fn error_debug_format_rate_limited() {
-        let dbg = format!("{:?}", EvernoteError::RateLimited { retry_after_ms: 100 });
+        let dbg = format!(
+            "{:?}",
+            EvernoteError::RateLimited {
+                retry_after_ms: 100
+            }
+        );
         assert!(dbg.contains("RateLimited"));
     }
 
     #[test]
     fn error_debug_format_api() {
-        let dbg = format!("{:?}", EvernoteError::Api { status_code: 418, message: "teapot".into() });
+        let dbg = format!(
+            "{:?}",
+            EvernoteError::Api {
+                status_code: 418,
+                message: "teapot".into()
+            }
+        );
         assert!(dbg.contains("Api"));
         assert!(dbg.contains("418"));
     }
@@ -529,7 +545,9 @@ mod tests {
 
     #[test]
     fn rate_limited_large_retry_after() {
-        let err = EvernoteError::RateLimited { retry_after_ms: 7_200_000 };
+        let err = EvernoteError::RateLimited {
+            retry_after_ms: 7_200_000,
+        };
         assert_eq!(err.retry_after(), Some(Duration::from_secs(7200)));
     }
 
@@ -555,7 +573,12 @@ mod tests {
 
     #[test]
     fn api_error_fcp_retry_after_is_none() {
-        match (EvernoteError::Api { status_code: 502, message: "gw".into() }).to_fcp_error() {
+        match (EvernoteError::Api {
+            status_code: 502,
+            message: "gw".into(),
+        })
+        .to_fcp_error()
+        {
             FcpError::External { retry_after, .. } => assert!(retry_after.is_none()),
             other => panic!("expected External, got {other:?}"),
         }
@@ -563,7 +586,11 @@ mod tests {
 
     #[test]
     fn not_found_fcp_error_retryable_false() {
-        match (EvernoteError::NotFound { resource: "nb".into() }).to_fcp_error() {
+        match (EvernoteError::NotFound {
+            resource: "nb".into(),
+        })
+        .to_fcp_error()
+        {
             FcpError::External { retryable, .. } => assert!(!retryable),
             other => panic!("expected External, got {other:?}"),
         }

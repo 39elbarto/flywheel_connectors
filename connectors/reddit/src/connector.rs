@@ -36,10 +36,12 @@ impl RedditConfig {
                     code: 1003,
                     message: "credential_id must be a string".into(),
                 })?;
-                Some(CredentialId::parse(raw).map_err(|_| FcpError::InvalidRequest {
-                    code: 1003,
-                    message: "credential_id must be a valid UUID".into(),
-                })?)
+                Some(
+                    CredentialId::parse(raw).map_err(|_| FcpError::InvalidRequest {
+                        code: 1003,
+                        message: "credential_id must be a valid UUID".into(),
+                    })?,
+                )
             }
             None => None,
         };
@@ -79,7 +81,11 @@ struct DoctorResult {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
-enum DoctorStatus { Healthy, Degraded, Unhealthy }
+enum DoctorStatus {
+    Healthy,
+    Degraded,
+    Unhealthy,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct DoctorCheck {
@@ -129,11 +135,16 @@ impl RedditConnector {
 }
 
 impl Default for RedditConnector {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl RedditConnector {
-    pub async fn handle_configure(&mut self, params: serde_json::Value) -> FcpResult<serde_json::Value> {
+    pub async fn handle_configure(
+        &mut self,
+        params: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
         let config = RedditConfig::from_params(&params)?;
         info!(auth = %config.auth.redacted_label(), base_url = %config.base_url, "Configuring Reddit connector");
         let client = RedditClient::new(config.auth.clone(), Some(&config.base_url))
@@ -144,11 +155,20 @@ impl RedditConnector {
         Ok(json!({}))
     }
 
-    pub async fn handle_handshake(&mut self, params: serde_json::Value) -> FcpResult<serde_json::Value> {
+    pub async fn handle_handshake(
+        &mut self,
+        params: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
         if self.config.is_none() {
-            return Err(FcpError::InvalidRequest { code: 1004, message: "Connector not configured".into() });
+            return Err(FcpError::InvalidRequest {
+                code: 1004,
+                message: "Connector not configured".into(),
+            });
         }
-        self.session_id = params.get("session_id").and_then(|v| v.as_str()).map(str::to_string);
+        self.session_id = params
+            .get("session_id")
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
         self.base.set_handshaken(true);
         Ok(json!({
             "protocol_version": "2.0",
@@ -165,35 +185,82 @@ impl RedditConnector {
     pub async fn handle_health(&self) -> FcpResult<serde_json::Value> {
         let configured = self.config.is_some();
         let handshaken = self.session_id.is_some();
-        let status = if configured && handshaken { "healthy" } else if configured { "degraded" } else { "unconfigured" };
-        Ok(json!({ "status": status, "configured": configured, "handshaken": handshaken, "requests": self.request_count.load(Ordering::Relaxed), "errors": self.error_count.load(Ordering::Relaxed) }))
+        let status = if configured && handshaken {
+            "healthy"
+        } else if configured {
+            "degraded"
+        } else {
+            "unconfigured"
+        };
+        Ok(
+            json!({ "status": status, "configured": configured, "handshaken": handshaken, "requests": self.request_count.load(Ordering::Relaxed), "errors": self.error_count.load(Ordering::Relaxed) }),
+        )
     }
 
     pub async fn handle_doctor(&self) -> FcpResult<serde_json::Value> {
         let mut checks = Vec::new();
-        checks.push(DoctorCheck { name: "configuration".into(), passed: self.config.is_some(), message: if self.config.is_none() { Some("Not configured".into()) } else { None }, critical: true });
-        checks.push(DoctorCheck { name: "client_initialized".into(), passed: self.client.is_some(), message: if self.client.is_none() { Some("API client not initialized".into()) } else { None }, critical: true });
+        checks.push(DoctorCheck {
+            name: "configuration".into(),
+            passed: self.config.is_some(),
+            message: if self.config.is_none() {
+                Some("Not configured".into())
+            } else {
+                None
+            },
+            critical: true,
+        });
+        checks.push(DoctorCheck {
+            name: "client_initialized".into(),
+            passed: self.client.is_some(),
+            message: if self.client.is_none() {
+                Some("API client not initialized".into())
+            } else {
+                None
+            },
+            critical: true,
+        });
         let handshaken = self.session_id.is_some();
-        checks.push(DoctorCheck { name: "handshake".into(), passed: handshaken, message: if handshaken { None } else { Some("Handshake not completed".into()) }, critical: false });
+        checks.push(DoctorCheck {
+            name: "handshake".into(),
+            passed: handshaken,
+            message: if handshaken {
+                None
+            } else {
+                Some("Handshake not completed".into())
+            },
+            critical: false,
+        });
         let result = DoctorResult::from_checks(checks);
         Ok(serde_json::to_value(result).unwrap_or_else(|_| json!({"status": "error"})))
     }
 
     pub async fn handle_self_check(&self) -> FcpResult<serde_json::Value> {
-        Ok(json!({ "connector_id": "fcp.reddit", "version": "0.1.0", "status": if self.config.is_some() { "ready" } else { "unconfigured" } }))
+        Ok(
+            json!({ "connector_id": "fcp.reddit", "version": "0.1.0", "status": if self.config.is_some() { "ready" } else { "unconfigured" } }),
+        )
     }
 
     pub async fn handle_introspect(&self) -> FcpResult<serde_json::Value> {
-        Ok(json!({ "connector_id": "fcp.reddit", "version": "0.1.0", "operations": operations_info() }))
+        Ok(
+            json!({ "connector_id": "fcp.reddit", "version": "0.1.0", "operations": operations_info() }),
+        )
     }
 
     #[instrument(skip(self, params))]
     pub async fn handle_invoke(&self, params: serde_json::Value) -> FcpResult<serde_json::Value> {
         self.base.check_ready()?;
-        let operation = params.get("operation_id").and_then(|v| v.as_str()).ok_or_else(|| FcpError::InvalidRequest { code: 1003, message: "Missing operation_id".into() })?;
+        let operation = params
+            .get("operation_id")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| FcpError::InvalidRequest {
+                code: 1003,
+                message: "Missing operation_id".into(),
+            })?;
         let input = params.get("input").cloned().unwrap_or_else(|| json!({}));
         self.request_count.fetch_add(1, Ordering::Relaxed);
-        let client = self.client.as_ref().ok_or_else(|| FcpError::Internal { message: "Client not initialized".into() })?;
+        let client = self.client.as_ref().ok_or_else(|| FcpError::Internal {
+            message: "Client not initialized".into(),
+        })?;
 
         let result = match operation {
             "reddit.search_posts" => self.invoke_search_posts(client, &input).await,
@@ -205,19 +272,38 @@ impl RedditConnector {
             "reddit.mod_remove" => self.invoke_mod_remove(client, &input).await,
             "reddit.download_media" => self.invoke_download_media(client, &input).await,
             "reddit.stream_subreddit_new" => self.invoke_stream_subreddit_new(client, &input).await,
-            _ => return Err(FcpError::InvalidRequest { code: 1002, message: format!("Unknown operation: {operation}") }),
+            _ => {
+                return Err(FcpError::InvalidRequest {
+                    code: 1002,
+                    message: format!("Unknown operation: {operation}"),
+                });
+            }
         };
 
-        result.map_err(|e| { self.error_count.fetch_add(1, Ordering::Relaxed); e.to_fcp_error() })
+        result.map_err(|e| {
+            self.error_count.fetch_add(1, Ordering::Relaxed);
+            e.to_fcp_error()
+        })
     }
 
     pub async fn handle_simulate(&self, params: serde_json::Value) -> FcpResult<serde_json::Value> {
-        let operation = params.get("operation_id").and_then(|v| v.as_str()).unwrap_or("");
-        let allowed = operations_info().as_array().is_some_and(|ops| ops.iter().any(|o| o.get("id").and_then(|v| v.as_str()) == Some(operation)));
-        Ok(json!({ "allowed": allowed, "reason": if allowed { "Operation supported" } else { "Unknown operation" } }))
+        let operation = params
+            .get("operation_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let allowed = operations_info().as_array().is_some_and(|ops| {
+            ops.iter()
+                .any(|o| o.get("id").and_then(|v| v.as_str()) == Some(operation))
+        });
+        Ok(
+            json!({ "allowed": allowed, "reason": if allowed { "Operation supported" } else { "Unknown operation" } }),
+        )
     }
 
-    pub async fn handle_shutdown(&mut self, _params: serde_json::Value) -> FcpResult<serde_json::Value> {
+    pub async fn handle_shutdown(
+        &mut self,
+        _params: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
         info!("Reddit connector shutting down");
         self.client = None;
         self.config = None;
@@ -228,7 +314,11 @@ impl RedditConnector {
 
     // ── Operations ────────────────────────────────────────────────────
 
-    async fn invoke_search_posts(&self, client: &RedditClient, input: &serde_json::Value) -> Result<serde_json::Value, RedditError> {
+    async fn invoke_search_posts(
+        &self,
+        client: &RedditClient,
+        input: &serde_json::Value,
+    ) -> Result<serde_json::Value, RedditError> {
         let query = require_str(input, "query")?;
         let subreddit = input.get("subreddit").and_then(|v| v.as_str());
         let sort = input.get("sort").and_then(|v| v.as_str());
@@ -248,7 +338,11 @@ impl RedditConnector {
         Ok(extract_listing(&data))
     }
 
-    async fn invoke_list_subreddit_new(&self, client: &RedditClient, input: &serde_json::Value) -> Result<serde_json::Value, RedditError> {
+    async fn invoke_list_subreddit_new(
+        &self,
+        client: &RedditClient,
+        input: &serde_json::Value,
+    ) -> Result<serde_json::Value, RedditError> {
         let subreddit = require_str(input, "subreddit")?;
         let limit = input.get("limit").and_then(serde_json::Value::as_i64);
         let after = input.get("after").and_then(|v| v.as_str());
@@ -256,11 +350,19 @@ impl RedditConnector {
         Ok(extract_listing(&data))
     }
 
-    async fn invoke_get_post_thread(&self, client: &RedditClient, input: &serde_json::Value) -> Result<serde_json::Value, RedditError> {
+    async fn invoke_get_post_thread(
+        &self,
+        client: &RedditClient,
+        input: &serde_json::Value,
+    ) -> Result<serde_json::Value, RedditError> {
         let post_fullname = require_str(input, "post_fullname")?;
         let sort = input.get("sort").and_then(|v| v.as_str());
-        let comment_limit = input.get("comment_limit").and_then(serde_json::Value::as_i64);
-        let data = client.get_post_thread(post_fullname, sort, comment_limit).await?;
+        let comment_limit = input
+            .get("comment_limit")
+            .and_then(serde_json::Value::as_i64);
+        let data = client
+            .get_post_thread(post_fullname, sort, comment_limit)
+            .await?;
         // Reddit returns an array of two listings: [post_listing, comments_listing]
         Ok(data.as_array().map_or_else(
             || json!({ "post": data, "comments": [] }),
@@ -272,14 +374,24 @@ impl RedditConnector {
         ))
     }
 
-    async fn invoke_create_post(&self, client: &RedditClient, input: &serde_json::Value) -> Result<serde_json::Value, RedditError> {
+    async fn invoke_create_post(
+        &self,
+        client: &RedditClient,
+        input: &serde_json::Value,
+    ) -> Result<serde_json::Value, RedditError> {
         let subreddit = require_str(input, "subreddit")?;
         let kind = require_str(input, "kind")?;
         let title = require_str(input, "title")?;
         let text = input.get("text").and_then(|v| v.as_str());
         let url = input.get("url").and_then(|v| v.as_str());
-        let nsfw = input.get("nsfw").and_then(serde_json::Value::as_bool).unwrap_or(false);
-        let spoiler = input.get("spoiler").and_then(serde_json::Value::as_bool).unwrap_or(false);
+        let nsfw = input
+            .get("nsfw")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+        let spoiler = input
+            .get("spoiler")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
         client
             .create_post(&client::CreatePostParams {
                 subreddit,
@@ -293,38 +405,63 @@ impl RedditConnector {
             .await
     }
 
-    async fn invoke_create_comment(&self, client: &RedditClient, input: &serde_json::Value) -> Result<serde_json::Value, RedditError> {
+    async fn invoke_create_comment(
+        &self,
+        client: &RedditClient,
+        input: &serde_json::Value,
+    ) -> Result<serde_json::Value, RedditError> {
         let parent_fullname = require_str(input, "parent_fullname")?;
         let text = require_str(input, "text")?;
         client.create_comment(parent_fullname, text).await
     }
 
-    async fn invoke_send_message(&self, client: &RedditClient, input: &serde_json::Value) -> Result<serde_json::Value, RedditError> {
+    async fn invoke_send_message(
+        &self,
+        client: &RedditClient,
+        input: &serde_json::Value,
+    ) -> Result<serde_json::Value, RedditError> {
         let recipient = require_str(input, "recipient")?;
         let subject = require_str(input, "subject")?;
         let message = require_str(input, "message")?;
         client.send_message(recipient, subject, message).await
     }
 
-    async fn invoke_mod_remove(&self, client: &RedditClient, input: &serde_json::Value) -> Result<serde_json::Value, RedditError> {
+    async fn invoke_mod_remove(
+        &self,
+        client: &RedditClient,
+        input: &serde_json::Value,
+    ) -> Result<serde_json::Value, RedditError> {
         let thing_fullname = require_str(input, "thing_fullname")?;
-        let spam = input.get("spam").and_then(serde_json::Value::as_bool).unwrap_or(false);
+        let spam = input
+            .get("spam")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
         let data = client.mod_remove(thing_fullname, spam).await?;
         // Reddit returns empty on success
         Ok(json!({ "removed": true, "raw": data }))
     }
 
-    async fn invoke_download_media(&self, client: &RedditClient, input: &serde_json::Value) -> Result<serde_json::Value, RedditError> {
+    async fn invoke_download_media(
+        &self,
+        client: &RedditClient,
+        input: &serde_json::Value,
+    ) -> Result<serde_json::Value, RedditError> {
         let url = require_str(input, "url")?;
         let max_bytes = input.get("max_bytes").and_then(serde_json::Value::as_i64);
         client.download_media(url, max_bytes).await
     }
 
-    async fn invoke_stream_subreddit_new(&self, client: &RedditClient, input: &serde_json::Value) -> Result<serde_json::Value, RedditError> {
+    async fn invoke_stream_subreddit_new(
+        &self,
+        client: &RedditClient,
+        input: &serde_json::Value,
+    ) -> Result<serde_json::Value, RedditError> {
         // Single-poll implementation: fetch new posts and return as events
         let subreddit = require_str(input, "subreddit")?;
         let batch_limit = input.get("batch_limit").and_then(serde_json::Value::as_i64);
-        let data = client.list_subreddit_new(subreddit, batch_limit, None).await?;
+        let data = client
+            .list_subreddit_new(subreddit, batch_limit, None)
+            .await?;
         let listing = extract_listing(&data);
         let events = listing.get("posts").cloned().unwrap_or_else(|| json!([]));
         let next_checkpoint = listing.get("next_after").cloned().unwrap_or(json!(null));
@@ -333,10 +470,13 @@ impl RedditConnector {
 }
 
 fn require_str<'a>(input: &'a serde_json::Value, field: &str) -> Result<&'a str, RedditError> {
-    input.get(field).and_then(|v| v.as_str()).ok_or_else(|| RedditError::Api {
-        status_code: 400,
-        message: format!("Missing required field: {field}"),
-    })
+    input
+        .get(field)
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| RedditError::Api {
+            status_code: 400,
+            message: format!("Missing required field: {field}"),
+        })
 }
 
 /// Extract posts and pagination from a `Reddit` listing response.
@@ -386,13 +526,18 @@ mod tests {
 
     #[test]
     fn config_from_credential_id() {
-        let config = RedditConfig::from_params(&json!({ "credential_id": "550e8400-e29b-41d4-a716-446655440000" })).unwrap();
+        let config = RedditConfig::from_params(
+            &json!({ "credential_id": "550e8400-e29b-41d4-a716-446655440000" }),
+        )
+        .unwrap();
         assert!(config.auth.is_secretless());
     }
 
     #[test]
     fn config_rejects_both() {
-        let result = RedditConfig::from_params(&json!({ "bearer_token": "tok", "credential_id": "550e8400-e29b-41d4-a716-446655440000" }));
+        let result = RedditConfig::from_params(
+            &json!({ "bearer_token": "tok", "credential_id": "550e8400-e29b-41d4-a716-446655440000" }),
+        );
         assert!(result.is_err());
         match result.unwrap_err() {
             FcpError::InvalidRequest { message, .. } => assert!(message.contains("exactly one")),
@@ -434,7 +579,8 @@ mod tests {
         let config = RedditConfig::from_params(&json!({
             "bearer_token": "tok",
             "base_url": "https://custom.reddit.example/api"
-        })).unwrap();
+        }))
+        .unwrap();
         assert_eq!(config.base_url, "https://custom.reddit.example/api");
     }
 
@@ -463,8 +609,18 @@ mod tests {
     #[test]
     fn doctor_result_healthy() {
         let r = DoctorResult::from_checks(vec![
-            DoctorCheck { name: "a".into(), passed: true, message: None, critical: true },
-            DoctorCheck { name: "b".into(), passed: true, message: None, critical: false },
+            DoctorCheck {
+                name: "a".into(),
+                passed: true,
+                message: None,
+                critical: true,
+            },
+            DoctorCheck {
+                name: "b".into(),
+                passed: true,
+                message: None,
+                critical: false,
+            },
         ]);
         assert_eq!(r.status, DoctorStatus::Healthy);
     }
@@ -472,25 +628,48 @@ mod tests {
     #[test]
     fn doctor_result_degraded_non_critical_fails() {
         let r = DoctorResult::from_checks(vec![
-            DoctorCheck { name: "a".into(), passed: true, message: None, critical: true },
-            DoctorCheck { name: "b".into(), passed: false, message: Some("warn".into()), critical: false },
+            DoctorCheck {
+                name: "a".into(),
+                passed: true,
+                message: None,
+                critical: true,
+            },
+            DoctorCheck {
+                name: "b".into(),
+                passed: false,
+                message: Some("warn".into()),
+                critical: false,
+            },
         ]);
         assert_eq!(r.status, DoctorStatus::Degraded);
     }
 
     #[test]
     fn doctor_result_unhealthy_critical_fails() {
-        let r = DoctorResult::from_checks(vec![
-            DoctorCheck { name: "a".into(), passed: false, message: Some("down".into()), critical: true },
-        ]);
+        let r = DoctorResult::from_checks(vec![DoctorCheck {
+            name: "a".into(),
+            passed: false,
+            message: Some("down".into()),
+            critical: true,
+        }]);
         assert_eq!(r.status, DoctorStatus::Unhealthy);
     }
 
     #[test]
     fn doctor_result_unhealthy_overrides_degraded() {
         let r = DoctorResult::from_checks(vec![
-            DoctorCheck { name: "a".into(), passed: false, message: None, critical: true },
-            DoctorCheck { name: "b".into(), passed: false, message: None, critical: false },
+            DoctorCheck {
+                name: "a".into(),
+                passed: false,
+                message: None,
+                critical: true,
+            },
+            DoctorCheck {
+                name: "b".into(),
+                passed: false,
+                message: None,
+                critical: false,
+            },
         ]);
         assert_eq!(r.status, DoctorStatus::Unhealthy);
     }
@@ -503,9 +682,12 @@ mod tests {
 
     #[test]
     fn doctor_result_serializes() {
-        let r = DoctorResult::from_checks(vec![
-            DoctorCheck { name: "config".into(), passed: true, message: None, critical: true },
-        ]);
+        let r = DoctorResult::from_checks(vec![DoctorCheck {
+            name: "config".into(),
+            passed: true,
+            message: None,
+            critical: true,
+        }]);
         let v = serde_json::to_value(&r).unwrap();
         assert_eq!(v["status"], "healthy");
         assert!(v["checks"][0]["message"].is_null());
@@ -524,7 +706,10 @@ mod tests {
         let input = json!({});
         let err = require_str(&input, "query").unwrap_err();
         match err {
-            RedditError::Api { status_code, message } => {
+            RedditError::Api {
+                status_code,
+                message,
+            } => {
                 assert_eq!(status_code, 400);
                 assert!(message.contains("query"));
             }
@@ -600,7 +785,12 @@ mod tests {
     #[test]
     fn operations_ids_are_unique() {
         let ops = operations_info();
-        let ids: Vec<&str> = ops.as_array().unwrap().iter().filter_map(|o| o["id"].as_str()).collect();
+        let ids: Vec<&str> = ops
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|o| o["id"].as_str())
+            .collect();
         let mut unique = ids.clone();
         unique.sort_unstable();
         unique.dedup();
@@ -613,18 +803,34 @@ mod tests {
         for op in ops.as_array().unwrap() {
             let cap = op["capability"].as_str().unwrap();
             if cap.to_ascii_lowercase().ends_with(".read") {
-                assert_eq!(op["safety_tier"].as_str().unwrap(), "safe", "read op {} should be safe", op["id"]);
+                assert_eq!(
+                    op["safety_tier"].as_str().unwrap(),
+                    "safe",
+                    "read op {} should be safe",
+                    op["id"]
+                );
             }
         }
     }
 
     #[test]
     fn all_operations_have_required_fields() {
-        let required = ["id", "summary", "capability", "risk_level", "safety_tier", "idempotency"];
+        let required = [
+            "id",
+            "summary",
+            "capability",
+            "risk_level",
+            "safety_tier",
+            "idempotency",
+        ];
         let ops = operations_info();
         for op in ops.as_array().unwrap() {
             for field in &required {
-                assert!(op.get(field).is_some(), "op {:?} missing field {field}", op["id"]);
+                assert!(
+                    op.get(field).is_some(),
+                    "op {:?} missing field {field}",
+                    op["id"]
+                );
             }
         }
     }
@@ -635,7 +841,11 @@ mod tests {
         let ops = operations_info();
         for op in ops.as_array().unwrap() {
             let level = op["risk_level"].as_str().unwrap();
-            assert!(valid.contains(&level), "invalid risk_level {level} for {:?}", op["id"]);
+            assert!(
+                valid.contains(&level),
+                "invalid risk_level {level} for {:?}",
+                op["id"]
+            );
         }
     }
 
@@ -645,14 +855,23 @@ mod tests {
         let ops = operations_info();
         for op in ops.as_array().unwrap() {
             let tier = op["safety_tier"].as_str().unwrap();
-            assert!(valid.contains(&tier), "invalid safety_tier {tier} for {:?}", op["id"]);
+            assert!(
+                valid.contains(&tier),
+                "invalid safety_tier {tier} for {:?}",
+                op["id"]
+            );
         }
     }
 
     #[test]
     fn operations_contain_expected_ids() {
         let ops = operations_info();
-        let ids: Vec<&str> = ops.as_array().unwrap().iter().filter_map(|o| o["id"].as_str()).collect();
+        let ids: Vec<&str> = ops
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|o| o["id"].as_str())
+            .collect();
         let expected = [
             "reddit.search_posts",
             "reddit.list_subreddit_new",
@@ -724,21 +943,36 @@ mod tests {
 
     #[test]
     fn doctor_check_skip_none_message() {
-        let c = DoctorCheck { name: "test".into(), passed: true, message: None, critical: false };
+        let c = DoctorCheck {
+            name: "test".into(),
+            passed: true,
+            message: None,
+            critical: false,
+        };
         let v = serde_json::to_value(&c).unwrap();
         assert!(!v.as_object().unwrap().contains_key("message"));
     }
 
     #[test]
     fn doctor_check_includes_some_message() {
-        let c = DoctorCheck { name: "test".into(), passed: false, message: Some("fail".into()), critical: true };
+        let c = DoctorCheck {
+            name: "test".into(),
+            passed: false,
+            message: Some("fail".into()),
+            critical: true,
+        };
         let v = serde_json::to_value(&c).unwrap();
         assert_eq!(v["message"], "fail");
     }
 
     #[test]
     fn doctor_check_roundtrip() {
-        let c = DoctorCheck { name: "cfg".into(), passed: true, message: None, critical: true };
+        let c = DoctorCheck {
+            name: "cfg".into(),
+            passed: true,
+            message: None,
+            critical: true,
+        };
         let v = serde_json::to_value(&c).unwrap();
         let c2: DoctorCheck = serde_json::from_value(v).unwrap();
         assert_eq!(c2.name, "cfg");
@@ -750,9 +984,12 @@ mod tests {
 
     #[test]
     fn doctor_result_roundtrip() {
-        let r = DoctorResult::from_checks(vec![
-            DoctorCheck { name: "a".into(), passed: true, message: None, critical: true },
-        ]);
+        let r = DoctorResult::from_checks(vec![DoctorCheck {
+            name: "a".into(),
+            passed: true,
+            message: None,
+            critical: true,
+        }]);
         let v = serde_json::to_value(&r).unwrap();
         let r2: DoctorResult = serde_json::from_value(v).unwrap();
         assert_eq!(r2.status, DoctorStatus::Healthy);
@@ -835,16 +1072,24 @@ mod tests {
     #[test]
     fn operations_search_is_idempotent() {
         let ops = operations_info();
-        let search_op = ops.as_array().unwrap().iter()
-            .find(|o| o["id"] == "reddit.search_posts").unwrap();
+        let search_op = ops
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["id"] == "reddit.search_posts")
+            .unwrap();
         assert_eq!(search_op["idempotency"], "strict");
     }
 
     #[test]
     fn operations_create_post_is_dangerous() {
         let ops = operations_info();
-        let op = ops.as_array().unwrap().iter()
-            .find(|o| o["id"] == "reddit.create_post").unwrap();
+        let op = ops
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["id"] == "reddit.create_post")
+            .unwrap();
         assert_eq!(op["safety_tier"], "dangerous");
         assert_eq!(op["risk_level"], "high");
     }
@@ -852,8 +1097,12 @@ mod tests {
     #[test]
     fn operations_stream_is_risky() {
         let ops = operations_info();
-        let op = ops.as_array().unwrap().iter()
-            .find(|o| o["id"] == "reddit.stream_subreddit_new").unwrap();
+        let op = ops
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["id"] == "reddit.stream_subreddit_new")
+            .unwrap();
         assert_eq!(op["safety_tier"], "risky");
     }
 
@@ -872,7 +1121,11 @@ mod tests {
         let ops = operations_info();
         for op in ops.as_array().unwrap() {
             let idem = op["idempotency"].as_str().unwrap();
-            assert!(valid.contains(&idem), "invalid idempotency {idem} for {:?}", op["id"]);
+            assert!(
+                valid.contains(&idem),
+                "invalid idempotency {idem} for {:?}",
+                op["id"]
+            );
         }
     }
 }

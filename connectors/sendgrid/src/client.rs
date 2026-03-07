@@ -379,11 +379,7 @@ mod tests {
 
     #[test]
     fn client_with_empty_custom_url() {
-        let client = SendGridClient::new(
-            SendGridAuth::ApiKey("SG.key".into()),
-            Some(""),
-        )
-        .unwrap();
+        let client = SendGridClient::new(SendGridAuth::ApiKey("SG.key".into()), Some("")).unwrap();
         assert!(client.base_url.is_empty());
     }
 

@@ -94,10 +94,7 @@ impl AnnasArchiveClient {
     ) -> AnnasArchiveResult<serde_json::Value> {
         let url = format!("{}{path}", self.base_url);
         debug!(url = %url, "GET request");
-        let mut req = self
-            .client
-            .get(&url)
-            .header("Accept", "application/json");
+        let mut req = self.client.get(&url).header("Accept", "application/json");
         if let Some(q) = query {
             req = req.query(q);
         }

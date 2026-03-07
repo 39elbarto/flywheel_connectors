@@ -99,7 +99,10 @@ async fn lifecycle_doctor_unconfigured() {
     let doc = c.handle_doctor().await.unwrap();
     assert_eq!(doc["status"], "unhealthy");
     let checks = doc["checks"].as_array().unwrap();
-    let config_check = checks.iter().find(|c| c["name"] == "configuration").unwrap();
+    let config_check = checks
+        .iter()
+        .find(|c| c["name"] == "configuration")
+        .unwrap();
     assert_eq!(config_check["passed"], false);
     assert!(config_check["critical"].as_bool().unwrap());
 }
@@ -124,9 +127,18 @@ async fn lifecycle_introspect_all_ops_have_required_fields() {
     for op in ops {
         assert!(op["id"].as_str().is_some(), "missing id in op");
         assert!(op["summary"].as_str().is_some(), "missing summary in op");
-        assert!(op["capability"].as_str().is_some(), "missing capability in op");
-        assert!(op["risk_level"].as_str().is_some(), "missing risk_level in op");
-        assert!(op["safety_tier"].as_str().is_some(), "missing safety_tier in op");
+        assert!(
+            op["capability"].as_str().is_some(),
+            "missing capability in op"
+        );
+        assert!(
+            op["risk_level"].as_str().is_some(),
+            "missing risk_level in op"
+        );
+        assert!(
+            op["safety_tier"].as_str().is_some(),
+            "missing safety_tier in op"
+        );
     }
 }
 
@@ -137,7 +149,10 @@ async fn lifecycle_handshake_response_fields() {
     c.handle_configure(json!({ "access_token": "BQtoken", "base_url": server.uri() }))
         .await
         .unwrap();
-    let hs = c.handle_handshake(json!({"session_id": "sess-42"})).await.unwrap();
+    let hs = c
+        .handle_handshake(json!({"session_id": "sess-42"}))
+        .await
+        .unwrap();
     assert_eq!(hs["protocol_version"], "2.0");
     assert_eq!(hs["connector_id"], "fcp.spotify");
     assert_eq!(hs["connector_version"], "0.1.0");
@@ -175,13 +190,21 @@ async fn configure_missing_auth() {
 #[fcp_async_core::runtime::test]
 async fn configure_empty_access_token() {
     let mut c = SpotifyConnector::new();
-    assert!(c.handle_configure(json!({"access_token": ""})).await.is_err());
+    assert!(
+        c.handle_configure(json!({"access_token": ""}))
+            .await
+            .is_err()
+    );
 }
 
 #[fcp_async_core::runtime::test]
 async fn configure_whitespace_access_token() {
     let mut c = SpotifyConnector::new();
-    assert!(c.handle_configure(json!({"access_token": "   "})).await.is_err());
+    assert!(
+        c.handle_configure(json!({"access_token": "   "}))
+            .await
+            .is_err()
+    );
 }
 
 #[fcp_async_core::runtime::test]
@@ -1010,9 +1033,7 @@ async fn error_non_json_body() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/albums/badid"))
-        .respond_with(
-            ResponseTemplate::new(500).set_body_string("Something went terribly wrong"),
-        )
+        .respond_with(ResponseTemplate::new(500).set_body_string("Something went terribly wrong"))
         .mount(&server)
         .await;
 

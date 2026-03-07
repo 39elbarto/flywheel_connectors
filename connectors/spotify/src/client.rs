@@ -293,8 +293,7 @@ mod tests {
 
     #[test]
     fn client_new_default_url() {
-        let client =
-            SpotifyClient::new(SpotifyAuth::AccessToken("tok".into()), None).unwrap();
+        let client = SpotifyClient::new(SpotifyAuth::AccessToken("tok".into()), None).unwrap();
         assert_eq!(client.base_url, DEFAULT_BASE_URL);
     }
 
@@ -310,8 +309,7 @@ mod tests {
 
     #[test]
     fn client_debug_redacts() {
-        let client =
-            SpotifyClient::new(SpotifyAuth::AccessToken("secret".into()), None).unwrap();
+        let client = SpotifyClient::new(SpotifyAuth::AccessToken("secret".into()), None).unwrap();
         let dbg = format!("{client:?}");
         assert!(!dbg.contains("secret"));
         assert!(dbg.contains("redacted"));
@@ -375,8 +373,7 @@ mod tests {
 
     #[test]
     fn client_debug_contains_base_url() {
-        let client =
-            SpotifyClient::new(SpotifyAuth::AccessToken("tok".into()), None).unwrap();
+        let client = SpotifyClient::new(SpotifyAuth::AccessToken("tok".into()), None).unwrap();
         let dbg = format!("{client:?}");
         assert!(dbg.contains("SpotifyClient"));
         assert!(dbg.contains(DEFAULT_BASE_URL));
@@ -422,11 +419,8 @@ mod tests {
 
     #[test]
     fn client_with_credential_id_auth() {
-        let client = SpotifyClient::new(
-            SpotifyAuth::CredentialId(CredentialId::new()),
-            None,
-        )
-        .unwrap();
+        let client =
+            SpotifyClient::new(SpotifyAuth::CredentialId(CredentialId::new()), None).unwrap();
         let dbg = format!("{client:?}");
         assert!(dbg.contains("CredentialId"));
     }

@@ -134,7 +134,10 @@ impl TodoistClient {
             429 => Err(TodoistError::RateLimited {
                 retry_after_ms: retry_after.unwrap_or(60) * 1000,
             }),
-            code => Err(TodoistError::Api { status_code: code, message: detail }),
+            code => Err(TodoistError::Api {
+                status_code: code,
+                message: detail,
+            }),
         }
     }
 
@@ -149,21 +152,17 @@ impl TodoistClient {
         let mut req = self
             .add_auth(self.client.get(&url))
             .header("Accept", "application/json");
-        
+
         if let Some(q) = query {
             req = req.query(q);
         }
-            
+
         let resp = req.send().await?;
         self.handle_response(resp).await
     }
 
     #[instrument(skip(self, body), fields(url))]
-    async fn post(
-        &self,
-        path: &str,
-        body: &serde_json::Value,
-    ) -> TodoistResult<serde_json::Value> {
+    async fn post(&self, path: &str, body: &serde_json::Value) -> TodoistResult<serde_json::Value> {
         let url = format!("{}{path}", self.base_url);
         debug!(url = %url, "POST request");
         let req = self
@@ -206,10 +205,7 @@ impl TodoistClient {
     // -- Tasks --
 
     /// List tasks, optionally filtered by project.
-    pub async fn list_tasks(
-        &self,
-        project_id: Option<&str>,
-    ) -> TodoistResult<serde_json::Value> {
+    pub async fn list_tasks(&self, project_id: Option<&str>) -> TodoistResult<serde_json::Value> {
         if let Some(pid) = project_id {
             self.get("/tasks", Some(&[("project_id", pid)])).await
         } else {
@@ -218,10 +214,7 @@ impl TodoistClient {
     }
 
     /// Create a new task.
-    pub async fn create_task(
-        &self,
-        body: &serde_json::Value,
-    ) -> TodoistResult<serde_json::Value> {
+    pub async fn create_task(&self, body: &serde_json::Value) -> TodoistResult<serde_json::Value> {
         self.post("/tasks", body).await
     }
 
@@ -271,8 +264,7 @@ mod tests {
 
     #[test]
     fn client_new_default_url() {
-        let client =
-            TodoistClient::new(TodoistAuth::BearerToken("tok".into()), None).unwrap();
+        let client = TodoistClient::new(TodoistAuth::BearerToken("tok".into()), None).unwrap();
         assert_eq!(client.base_url, DEFAULT_BASE_URL);
     }
 
@@ -288,8 +280,7 @@ mod tests {
 
     #[test]
     fn client_debug_redacts() {
-        let client =
-            TodoistClient::new(TodoistAuth::BearerToken("secret".into()), None).unwrap();
+        let client = TodoistClient::new(TodoistAuth::BearerToken("secret".into()), None).unwrap();
         let dbg = format!("{client:?}");
         assert!(!dbg.contains("secret"));
         assert!(dbg.contains("redacted"));

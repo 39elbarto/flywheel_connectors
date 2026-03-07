@@ -269,7 +269,10 @@ async fn paper_get() {
         }))
         .await
         .unwrap();
-    assert_eq!(result["paperId"], "649def34f8be52c8b66281af98ae884c09aef38b");
+    assert_eq!(
+        result["paperId"],
+        "649def34f8be52c8b66281af98ae884c09aef38b"
+    );
     assert_eq!(result["title"], "Attention Is All You Need");
     assert_eq!(result["year"], 2017);
 }
@@ -698,8 +701,7 @@ async fn error_401() {
     Mock::given(method("GET"))
         .and(path("/paper/search"))
         .respond_with(
-            ResponseTemplate::new(401)
-                .set_body_json(json!({"message": "Invalid API key"})),
+            ResponseTemplate::new(401).set_body_json(json!({"message": "Invalid API key"})),
         )
         .mount(&server)
         .await;
@@ -720,10 +722,7 @@ async fn error_403() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/paper/search"))
-        .respond_with(
-            ResponseTemplate::new(403)
-                .set_body_json(json!({"message": "Forbidden"})),
-        )
+        .respond_with(ResponseTemplate::new(403).set_body_json(json!({"message": "Forbidden"})))
         .mount(&server)
         .await;
 
@@ -744,8 +743,7 @@ async fn error_404() {
     Mock::given(method("GET"))
         .and(path("/paper/nonexistent_id"))
         .respond_with(
-            ResponseTemplate::new(404)
-                .set_body_json(json!({"message": "Paper not found"})),
+            ResponseTemplate::new(404).set_body_json(json!({"message": "Paper not found"})),
         )
         .mount(&server)
         .await;

@@ -445,9 +445,7 @@ impl HubSpotConnector {
         let limit = input.get("limit").and_then(|v| v.as_i64());
         let after = input.get("after").and_then(|v| v.as_str());
         let properties = extract_string_array(input, "properties");
-        client
-            .list_deals(limit, after, properties.as_deref())
-            .await
+        client.list_deals(limit, after, properties.as_deref()).await
     }
 
     async fn invoke_deals_create(
@@ -787,7 +785,8 @@ mod tests {
 
     #[test]
     fn config_trims_token() {
-        let config = HubSpotConfig::from_params(&json!({ "access_token": "  pat-na1-test  " })).unwrap();
+        let config =
+            HubSpotConfig::from_params(&json!({ "access_token": "  pat-na1-test  " })).unwrap();
         match &config.auth {
             HubSpotAuth::BearerToken(t) => assert_eq!(t, "pat-na1-test"),
             HubSpotAuth::CredentialId(_) => panic!("expected BearerToken"),
@@ -836,7 +835,11 @@ mod tests {
     fn operations_all_have_idempotency() {
         let ops = operations_info();
         for op in ops.as_array().unwrap() {
-            assert!(op.get("idempotency").is_some(), "op {:?} missing idempotency", op["id"]);
+            assert!(
+                op.get("idempotency").is_some(),
+                "op {:?} missing idempotency",
+                op["id"]
+            );
         }
     }
 
@@ -845,15 +848,28 @@ mod tests {
         let ops = operations_info();
         for op in ops.as_array().unwrap() {
             let id = op["id"].as_str().unwrap();
-            assert!(id.starts_with("hubspot."), "op {id} missing hubspot. prefix");
+            assert!(
+                id.starts_with("hubspot."),
+                "op {id} missing hubspot. prefix"
+            );
         }
     }
 
     #[test]
     fn doctor_result_degraded() {
         let checks = vec![
-            DoctorCheck { name: "a".into(), passed: true, message: None, critical: true },
-            DoctorCheck { name: "b".into(), passed: false, message: Some("warn".into()), critical: false },
+            DoctorCheck {
+                name: "a".into(),
+                passed: true,
+                message: None,
+                critical: true,
+            },
+            DoctorCheck {
+                name: "b".into(),
+                passed: false,
+                message: Some("warn".into()),
+                critical: false,
+            },
         ];
         let r = DoctorResult::from_checks(checks);
         assert_eq!(r.status, DoctorStatus::Degraded);
@@ -862,8 +878,18 @@ mod tests {
     #[test]
     fn doctor_result_all_pass() {
         let checks = vec![
-            DoctorCheck { name: "a".into(), passed: true, message: None, critical: true },
-            DoctorCheck { name: "b".into(), passed: true, message: None, critical: false },
+            DoctorCheck {
+                name: "a".into(),
+                passed: true,
+                message: None,
+                critical: true,
+            },
+            DoctorCheck {
+                name: "b".into(),
+                passed: true,
+                message: None,
+                critical: false,
+            },
         ];
         let r = DoctorResult::from_checks(checks);
         assert_eq!(r.status, DoctorStatus::Healthy);
@@ -935,21 +961,36 @@ mod tests {
 
     #[test]
     fn doctor_check_skip_none_message() {
-        let c = DoctorCheck { name: "test".into(), passed: true, message: None, critical: false };
+        let c = DoctorCheck {
+            name: "test".into(),
+            passed: true,
+            message: None,
+            critical: false,
+        };
         let v = serde_json::to_value(&c).unwrap();
         assert!(!v.as_object().unwrap().contains_key("message"));
     }
 
     #[test]
     fn doctor_check_includes_some_message() {
-        let c = DoctorCheck { name: "test".into(), passed: false, message: Some("fail".into()), critical: true };
+        let c = DoctorCheck {
+            name: "test".into(),
+            passed: false,
+            message: Some("fail".into()),
+            critical: true,
+        };
         let v = serde_json::to_value(&c).unwrap();
         assert_eq!(v["message"], "fail");
     }
 
     #[test]
     fn doctor_check_roundtrip() {
-        let c = DoctorCheck { name: "cfg".into(), passed: true, message: None, critical: true };
+        let c = DoctorCheck {
+            name: "cfg".into(),
+            passed: true,
+            message: None,
+            critical: true,
+        };
         let v = serde_json::to_value(&c).unwrap();
         let c2: DoctorCheck = serde_json::from_value(v).unwrap();
         assert_eq!(c2.name, "cfg");
@@ -960,9 +1001,12 @@ mod tests {
 
     #[test]
     fn doctor_result_roundtrip() {
-        let r = DoctorResult::from_checks(vec![
-            DoctorCheck { name: "a".into(), passed: true, message: None, critical: true },
-        ]);
+        let r = DoctorResult::from_checks(vec![DoctorCheck {
+            name: "a".into(),
+            passed: true,
+            message: None,
+            critical: true,
+        }]);
         let v = serde_json::to_value(&r).unwrap();
         let r2: DoctorResult = serde_json::from_value(v).unwrap();
         assert_eq!(r2.status, DoctorStatus::Healthy);
@@ -971,12 +1015,17 @@ mod tests {
 
     #[test]
     fn doctor_result_serializes_message_none() {
-        let r = DoctorResult::from_checks(vec![
-            DoctorCheck { name: "cfg".into(), passed: true, message: None, critical: true },
-        ]);
+        let r = DoctorResult::from_checks(vec![DoctorCheck {
+            name: "cfg".into(),
+            passed: true,
+            message: None,
+            critical: true,
+        }]);
         let v = serde_json::to_value(&r).unwrap();
-        assert!(v["checks"][0].as_object().unwrap().get("message").is_none()
-            || v["checks"][0]["message"].is_null());
+        assert!(
+            v["checks"][0].as_object().unwrap().get("message").is_none()
+                || v["checks"][0]["message"].is_null()
+        );
     }
 
     // ── Config edge cases ───────────────────────────────────────────
@@ -1048,8 +1097,12 @@ mod tests {
     #[test]
     fn operations_contacts_list_is_safe() {
         let ops = operations_info();
-        let op = ops.as_array().unwrap().iter()
-            .find(|o| o["id"] == "hubspot.contacts.list").unwrap();
+        let op = ops
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["id"] == "hubspot.contacts.list")
+            .unwrap();
         assert_eq!(op["safety_tier"], "safe");
         assert_eq!(op["risk_level"], "low");
     }
@@ -1057,8 +1110,12 @@ mod tests {
     #[test]
     fn operations_contacts_delete_is_dangerous() {
         let ops = operations_info();
-        let op = ops.as_array().unwrap().iter()
-            .find(|o| o["id"] == "hubspot.contacts.delete").unwrap();
+        let op = ops
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["id"] == "hubspot.contacts.delete")
+            .unwrap();
         assert_eq!(op["safety_tier"], "dangerous");
         assert_eq!(op["risk_level"], "high");
     }
@@ -1069,15 +1126,23 @@ mod tests {
         let ops = operations_info();
         for op in ops.as_array().unwrap() {
             let idem = op["idempotency"].as_str().unwrap();
-            assert!(valid.contains(&idem), "invalid idempotency {idem} for {:?}", op["id"]);
+            assert!(
+                valid.contains(&idem),
+                "invalid idempotency {idem} for {:?}",
+                op["id"]
+            );
         }
     }
 
     #[test]
     fn operations_expected_ids_present() {
         let ops = operations_info();
-        let ids: Vec<&str> = ops.as_array().unwrap().iter()
-            .filter_map(|o| o["id"].as_str()).collect();
+        let ids: Vec<&str> = ops
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|o| o["id"].as_str())
+            .collect();
         let expected = [
             "hubspot.contacts.list",
             "hubspot.contacts.get",

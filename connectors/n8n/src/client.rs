@@ -81,9 +81,7 @@ impl N8nClient {
     fn add_auth(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
         match &self.auth {
             N8nAuth::ApiKey(key) => req.header("X-N8N-API-KEY", key),
-            N8nAuth::CredentialId(id) => {
-                req.header("X-FCP-Credential-Id", id.to_string())
-            }
+            N8nAuth::CredentialId(id) => req.header("X-FCP-Credential-Id", id.to_string()),
         }
     }
 
@@ -132,7 +130,10 @@ impl N8nClient {
             429 => Err(N8nError::RateLimited {
                 retry_after_ms: retry_after.unwrap_or(60) * 1000,
             }),
-            code => Err(N8nError::Api { status_code: code, message: detail }),
+            code => Err(N8nError::Api {
+                status_code: code,
+                message: detail,
+            }),
         }
     }
 
@@ -148,11 +149,7 @@ impl N8nClient {
     }
 
     #[instrument(skip(self, body), fields(url))]
-    async fn patch(
-        &self,
-        path: &str,
-        body: &serde_json::Value,
-    ) -> N8nResult<serde_json::Value> {
+    async fn patch(&self, path: &str, body: &serde_json::Value) -> N8nResult<serde_json::Value> {
         let url = format!("{}{path}", self.base_url);
         debug!(url = %url, "PATCH request");
         let req = self
@@ -176,11 +173,7 @@ impl N8nClient {
     }
 
     /// Activate or deactivate a workflow.
-    pub async fn activate_workflow(
-        &self,
-        id: &str,
-        active: bool,
-    ) -> N8nResult<serde_json::Value> {
+    pub async fn activate_workflow(&self, id: &str, active: bool) -> N8nResult<serde_json::Value> {
         let body = serde_json::json!({ "active": active });
         self.patch(&format!("/workflows/{id}"), &body).await
     }

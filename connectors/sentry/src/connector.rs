@@ -989,7 +989,11 @@ mod tests {
     fn operations_all_have_idempotency() {
         let ops = operations_info();
         for op in ops.as_array().unwrap() {
-            assert!(op.get("idempotency").is_some(), "op {:?} missing idempotency", op["id"]);
+            assert!(
+                op.get("idempotency").is_some(),
+                "op {:?} missing idempotency",
+                op["id"]
+            );
         }
     }
 
@@ -999,13 +1003,18 @@ mod tests {
         let ops = operations_info();
         for op in ops.as_array().unwrap() {
             let tier = op["safety_tier"].as_str().unwrap();
-            assert!(valid.contains(&tier), "invalid safety_tier: {tier} for op {:?}", op["id"]);
+            assert!(
+                valid.contains(&tier),
+                "invalid safety_tier: {tier} for op {:?}",
+                op["id"]
+            );
         }
     }
 
     #[test]
     fn config_trims_auth_token() {
-        let config = SentryConfig::from_params(&json!({ "auth_token": "  sntrys_test  " })).unwrap();
+        let config =
+            SentryConfig::from_params(&json!({ "auth_token": "  sntrys_test  " })).unwrap();
         match &config.auth {
             SentryAuth::BearerToken(t) => assert_eq!(t, "sntrys_test"),
             SentryAuth::CredentialId(_) => panic!("expected BearerToken"),
@@ -1023,8 +1032,18 @@ mod tests {
     #[test]
     fn doctor_result_multiple_critical_failures() {
         let checks = vec![
-            DoctorCheck { name: "a".into(), passed: false, message: Some("fail".into()), critical: true },
-            DoctorCheck { name: "b".into(), passed: false, message: Some("fail".into()), critical: true },
+            DoctorCheck {
+                name: "a".into(),
+                passed: false,
+                message: Some("fail".into()),
+                critical: true,
+            },
+            DoctorCheck {
+                name: "b".into(),
+                passed: false,
+                message: Some("fail".into()),
+                critical: true,
+            },
         ];
         let r = DoctorResult::from_checks(checks);
         assert_eq!(r.status, DoctorStatus::Unhealthy);
@@ -1078,9 +1097,18 @@ mod tests {
 
     #[test]
     fn doctor_status_serializes_lowercase() {
-        assert_eq!(serde_json::to_value(DoctorStatus::Healthy).unwrap(), "healthy");
-        assert_eq!(serde_json::to_value(DoctorStatus::Degraded).unwrap(), "degraded");
-        assert_eq!(serde_json::to_value(DoctorStatus::Unhealthy).unwrap(), "unhealthy");
+        assert_eq!(
+            serde_json::to_value(DoctorStatus::Healthy).unwrap(),
+            "healthy"
+        );
+        assert_eq!(
+            serde_json::to_value(DoctorStatus::Degraded).unwrap(),
+            "degraded"
+        );
+        assert_eq!(
+            serde_json::to_value(DoctorStatus::Unhealthy).unwrap(),
+            "unhealthy"
+        );
     }
 
     #[test]
@@ -1105,8 +1133,18 @@ mod tests {
     #[test]
     fn doctor_result_roundtrip() {
         let r = DoctorResult::from_checks(vec![
-            DoctorCheck { name: "c1".into(), passed: true, message: None, critical: true },
-            DoctorCheck { name: "c2".into(), passed: false, message: Some("warn".into()), critical: false },
+            DoctorCheck {
+                name: "c1".into(),
+                passed: true,
+                message: None,
+                critical: true,
+            },
+            DoctorCheck {
+                name: "c2".into(),
+                passed: false,
+                message: Some("warn".into()),
+                critical: false,
+            },
         ]);
         let v = serde_json::to_value(&r).unwrap();
         assert_eq!(v["status"], "degraded");
@@ -1120,7 +1158,12 @@ mod tests {
     #[test]
     fn operations_contain_expected_ids() {
         let ops = operations_info();
-        let ids: Vec<&str> = ops.as_array().unwrap().iter().filter_map(|o| o["id"].as_str()).collect();
+        let ids: Vec<&str> = ops
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|o| o["id"].as_str())
+            .collect();
         assert!(ids.contains(&"sentry.list_projects"));
         assert!(ids.contains(&"sentry.list_issues"));
         assert!(ids.contains(&"sentry.get_issue"));
@@ -1135,7 +1178,10 @@ mod tests {
     fn operations_delete_is_dangerous() {
         for op in operations_info().as_array().unwrap() {
             if op["id"].as_str().unwrap().contains("delete") {
-                assert_eq!(op["safety_tier"], "dangerous", "delete ops should be dangerous");
+                assert_eq!(
+                    op["safety_tier"], "dangerous",
+                    "delete ops should be dangerous"
+                );
                 assert_eq!(op["risk_level"], "high", "delete ops should be high risk");
             }
         }
@@ -1145,7 +1191,11 @@ mod tests {
     fn operations_admin_capability_for_dangerous_ops() {
         for op in operations_info().as_array().unwrap() {
             if op["safety_tier"] == "dangerous" {
-                assert_eq!(op["capability"], "sentry.admin", "{} should require admin", op["id"]);
+                assert_eq!(
+                    op["capability"], "sentry.admin",
+                    "{} should require admin",
+                    op["id"]
+                );
             }
         }
     }

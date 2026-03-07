@@ -435,10 +435,7 @@ async fn download_documents() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path_regex(".*/envelopes/env-001/documents/combined"))
-        .respond_with(
-            ResponseTemplate::new(200)
-                .set_body_bytes(b"%PDF-1.4 fake content".to_vec()),
-        )
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(b"%PDF-1.4 fake content".to_vec()))
         .mount(&server)
         .await;
 
@@ -453,7 +450,10 @@ async fn download_documents() {
     let doc = result["document"].as_str().unwrap();
     assert!(!doc.is_empty());
     // Check it's base64-encoded
-    assert!(doc.chars().all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '/' || c == '='));
+    assert!(
+        doc.chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '/' || c == '=')
+    );
 }
 
 #[fcp_async_core::runtime::test]
@@ -601,10 +601,9 @@ async fn error_500() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path_regex(".*/envelopes"))
-        .respond_with(
-            ResponseTemplate::new(500)
-                .set_body_json(json!({"errorCode": "INTERNAL_SERVER_ERROR", "message": "Internal server error"})),
-        )
+        .respond_with(ResponseTemplate::new(500).set_body_json(
+            json!({"errorCode": "INTERNAL_SERVER_ERROR", "message": "Internal server error"}),
+        ))
         .mount(&server)
         .await;
 
@@ -685,7 +684,10 @@ async fn simulate_all_operations() {
             .handle_simulate(json!({"operation_id": op}))
             .await
             .unwrap();
-        assert!(result["allowed"].as_bool().unwrap(), "op {op} should be allowed");
+        assert!(
+            result["allowed"].as_bool().unwrap(),
+            "op {op} should be allowed"
+        );
     }
 }
 
@@ -722,7 +724,8 @@ async fn counters_error_increment() {
     Mock::given(method("GET"))
         .and(path_regex(".*/envelopes.*"))
         .respond_with(
-            ResponseTemplate::new(500).set_body_json(json!({"errorCode": "INTERNAL", "message": "error"})),
+            ResponseTemplate::new(500)
+                .set_body_json(json!({"errorCode": "INTERNAL", "message": "error"})),
         )
         .mount(&server)
         .await;

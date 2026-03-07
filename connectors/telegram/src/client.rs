@@ -1415,9 +1415,7 @@ mod tests {
 
     #[test]
     fn test_send_message_options_chaining() {
-        let opts = SendMessageOptions::default()
-            .html()
-            .reply_to_message_id(7);
+        let opts = SendMessageOptions::default().html().reply_to_message_id(7);
         assert_eq!(opts.parse_mode.as_deref(), Some("HTML"));
         assert_eq!(opts.reply_to_message_id, Some(7));
     }

@@ -35,7 +35,11 @@ fn context_slot_key() -> String {
 
 fn push_context(ctx: Arc<TelemetryContext>) -> String {
     let key = context_slot_key();
-    context_stacks().lock().entry(key.clone()).or_default().push(ctx);
+    context_stacks()
+        .lock()
+        .entry(key.clone())
+        .or_default()
+        .push(ctx);
     key
 }
 

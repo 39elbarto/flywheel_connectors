@@ -14,16 +14,16 @@ use fcp_sdk::formatting::{
 };
 use fcp_sdk::ratelimit::{RateLimitError, RateLimitPoolBuilder, RateLimitTracker};
 use fcp_sdk::retry::{
-    RetryDecision, RetryPolicy, decision_from_error_message, decision_from_http_status,
-    map_external_error, DEFAULT_RATE_LIMIT_RETRY_AFTER,
+    DEFAULT_RATE_LIMIT_RETRY_AFTER, RetryDecision, RetryPolicy, decision_from_error_message,
+    decision_from_http_status, map_external_error,
 };
 use fcp_sdk::runtime::{HealthTracker, HealthTransition, SupervisorConfig};
 use fcp_sdk::streaming::{BufferLimits, EventStreamManager, ReplayError};
 use fcp_sdk::{
     ConnectorId, EventAck, EventCaps, EventData, EventNack, FcpError, HealthState, InstanceId,
     Limits, Principal, RateLimitConfig, RateLimitDeclarations, RateLimitEnforcement, RateLimitPool,
-    RateLimitScope, RateLimitUnit, RequestId, SchemaValidationError, SubscribeRequest,
-    TrustLevel, ZoneId,
+    RateLimitScope, RateLimitUnit, RequestId, SchemaValidationError, SubscribeRequest, TrustLevel,
+    ZoneId,
 };
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
@@ -165,7 +165,8 @@ fn http_status_messages_flow_through_classification() {
 #[test]
 fn http_429_maps_to_rate_limited_fcp_error() {
     let hint = Duration::from_secs(10);
-    let (decision, error) = map_external_error("api-service", Some(429), "rate limited", Some(hint));
+    let (decision, error) =
+        map_external_error("api-service", Some(429), "rate limited", Some(hint));
 
     assert_eq!(decision, RetryDecision::After(hint));
     assert!(matches!(
@@ -486,7 +487,13 @@ fn streaming_emit_subscribe_replay_flow() {
         capability_token: None,
     };
     let outcome = mgr.handle_subscribe(&req).unwrap();
-    assert!(outcome.response.result.confirmed_topics.contains(&"topic-a".into()));
+    assert!(
+        outcome
+            .response
+            .result
+            .confirmed_topics
+            .contains(&"topic-a".into())
+    );
 
     let replayed = mgr.replay_from("topic-a", "").unwrap();
     assert_eq!(replayed.len(), 5);
@@ -754,7 +761,10 @@ fn schema_compiler_caches_and_reuses() {
     validator.validate(&json!("hello")).unwrap();
 
     let err = validator.validate(&json!(42)).unwrap_err();
-    assert!(matches!(err, SchemaValidationError::ValidationFailed { .. }));
+    assert!(matches!(
+        err,
+        SchemaValidationError::ValidationFailed { .. }
+    ));
 }
 
 // ============================================================================
@@ -809,12 +819,8 @@ fn end_to_end_message_only_error_flow() {
     let policy = RetryPolicy::new()
         .with_jitter_enabled(false)
         .with_base_backoff_ms(200);
-    let (decision, _) = map_external_error(
-        "internal",
-        None,
-        "Connection refused by remote host",
-        None,
-    );
+    let (decision, _) =
+        map_external_error("internal", None, "Connection refused by remote host", None);
 
     assert_eq!(decision, RetryDecision::Backoff);
     let delay = policy.next_delay(0, decision, None).unwrap();
@@ -889,7 +895,13 @@ fn subscribe_to_nonexistent_topic_creates_it() {
         capability_token: None,
     };
     let outcome = mgr.handle_subscribe(&req).unwrap();
-    assert!(outcome.response.result.confirmed_topics.contains(&"new-topic".into()));
+    assert!(
+        outcome
+            .response
+            .result
+            .confirmed_topics
+            .contains(&"new-topic".into())
+    );
 
     let replayed = mgr.replay_from("new-topic", "").unwrap();
     assert!(replayed.is_empty());

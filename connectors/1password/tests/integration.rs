@@ -552,7 +552,10 @@ async fn simulate_each_known_operation() {
             .handle_simulate(json!({"operation_id": op}))
             .await
             .unwrap();
-        assert!(res["allowed"].as_bool().unwrap(), "op {op} should be allowed");
+        assert!(
+            res["allowed"].as_bool().unwrap(),
+            "op {op} should be allowed"
+        );
     }
 }
 

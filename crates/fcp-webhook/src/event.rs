@@ -649,8 +649,8 @@ mod tests {
 
     #[test]
     fn test_event_get_null_intermediate() {
-        let event = WebhookEvent::new("e1", "push", "github")
-            .with_payload(serde_json::json!({"a": null}));
+        let event =
+            WebhookEvent::new("e1", "push", "github").with_payload(serde_json::json!({"a": null}));
         // Traversing through null returns None
         assert!(event.get("a.b").is_none());
     }
@@ -675,12 +675,11 @@ mod tests {
 
     #[test]
     fn test_event_get_i64_large_values() {
-        let event = WebhookEvent::new("e1", "push", "github")
-            .with_payload(serde_json::json!({
-                "max": i64::MAX,
-                "min": i64::MIN,
-                "zero": 0
-            }));
+        let event = WebhookEvent::new("e1", "push", "github").with_payload(serde_json::json!({
+            "max": i64::MAX,
+            "min": i64::MIN,
+            "zero": 0
+        }));
         assert_eq!(event.get_i64("max"), Some(i64::MAX));
         assert_eq!(event.get_i64("min"), Some(i64::MIN));
         assert_eq!(event.get_i64("zero"), Some(0));

@@ -537,8 +537,7 @@ mod tests {
 
     #[test]
     fn find_many_result_single_document() {
-        let r: FindManyResult =
-            serde_json::from_value(json!({ "documents": [{"x": 1}] })).unwrap();
+        let r: FindManyResult = serde_json::from_value(json!({ "documents": [{"x": 1}] })).unwrap();
         assert_eq!(r.documents.unwrap().len(), 1);
     }
 
@@ -560,8 +559,7 @@ mod tests {
 
     #[test]
     fn delete_result_large_count() {
-        let r: DeleteResult =
-            serde_json::from_value(json!({ "deletedCount": 999999 })).unwrap();
+        let r: DeleteResult = serde_json::from_value(json!({ "deletedCount": 999999 })).unwrap();
         assert_eq!(r.deleted_count, Some(999_999));
     }
 }

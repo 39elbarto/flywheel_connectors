@@ -87,9 +87,7 @@ impl SegmentClient {
             SegmentAuth::BearerToken(token) => {
                 req.header("Authorization", format!("Bearer {token}"))
             }
-            SegmentAuth::CredentialId(id) => {
-                req.header("X-FCP-Credential-Id", id.to_string())
-            }
+            SegmentAuth::CredentialId(id) => req.header("X-FCP-Credential-Id", id.to_string()),
         }
     }
 
@@ -139,7 +137,10 @@ impl SegmentClient {
             429 => Err(SegmentError::RateLimited {
                 retry_after_ms: retry_after.unwrap_or(60) * 1000,
             }),
-            code => Err(SegmentError::Api { status_code: code, message: detail }),
+            code => Err(SegmentError::Api {
+                status_code: code,
+                message: detail,
+            }),
         }
     }
 
@@ -155,11 +156,7 @@ impl SegmentClient {
     }
 
     #[instrument(skip(self, body), fields(url))]
-    async fn post(
-        &self,
-        path: &str,
-        body: &serde_json::Value,
-    ) -> SegmentResult<serde_json::Value> {
+    async fn post(&self, path: &str, body: &serde_json::Value) -> SegmentResult<serde_json::Value> {
         let url = format!("{}{path}", self.base_url);
         debug!(url = %url, "POST request");
         let req = self
@@ -181,7 +178,8 @@ impl SegmentClient {
 
     /// List all destinations for a source.
     pub async fn list_destinations(&self, source_id: &str) -> SegmentResult<serde_json::Value> {
-        self.get(&format!("/sources/{source_id}/destinations")).await
+        self.get(&format!("/sources/{source_id}/destinations"))
+            .await
     }
 
     // -- Track --
@@ -227,8 +225,7 @@ mod tests {
 
     #[test]
     fn client_new_default_url() {
-        let client =
-            SegmentClient::new(SegmentAuth::BearerToken("tok".into()), None).unwrap();
+        let client = SegmentClient::new(SegmentAuth::BearerToken("tok".into()), None).unwrap();
         assert_eq!(client.base_url, DEFAULT_BASE_URL);
     }
 
@@ -244,8 +241,7 @@ mod tests {
 
     #[test]
     fn client_debug_redacts() {
-        let client =
-            SegmentClient::new(SegmentAuth::BearerToken("secret".into()), None).unwrap();
+        let client = SegmentClient::new(SegmentAuth::BearerToken("secret".into()), None).unwrap();
         let dbg = format!("{client:?}");
         assert!(!dbg.contains("secret"));
         assert!(dbg.contains("redacted"));
@@ -277,8 +273,7 @@ mod tests {
 
     #[test]
     fn client_debug_shows_base_url() {
-        let client =
-            SegmentClient::new(SegmentAuth::BearerToken("tok".into()), None).unwrap();
+        let client = SegmentClient::new(SegmentAuth::BearerToken("tok".into()), None).unwrap();
         let dbg = format!("{client:?}");
         assert!(dbg.contains("SegmentClient"));
         assert!(dbg.contains("segmentapis.com"));

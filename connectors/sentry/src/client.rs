@@ -557,7 +557,8 @@ mod tests {
 
     #[test]
     fn client_debug_redacts_token() {
-        let client = SentryClient::new(SentryAuth::BearerToken("supersecret".into()), None).unwrap();
+        let client =
+            SentryClient::new(SentryAuth::BearerToken("supersecret".into()), None).unwrap();
         let dbg = format!("{client:?}");
         assert!(!dbg.contains("supersecret"));
         assert!(dbg.contains("SentryClient"));
@@ -574,11 +575,8 @@ mod tests {
 
     #[test]
     fn client_new_with_credential_id() {
-        let client = SentryClient::new(
-            SentryAuth::CredentialId(CredentialId::new()),
-            None,
-        )
-        .unwrap();
+        let client =
+            SentryClient::new(SentryAuth::CredentialId(CredentialId::new()), None).unwrap();
         assert_eq!(client.base_url, DEFAULT_BASE_URL);
     }
 

@@ -332,10 +332,7 @@ mod tests {
             "message": "The envelope is not in a valid state for this operation.",
         }))
         .unwrap();
-        assert_eq!(
-            e.error_code,
-            Some("ENVELOPE_NOT_IN_CORRECT_STATE".into())
-        );
+        assert_eq!(e.error_code, Some("ENVELOPE_NOT_IN_CORRECT_STATE".into()));
         assert!(e.message.unwrap().contains("not in a valid state"));
     }
 
@@ -451,24 +448,21 @@ mod tests {
 
     #[test]
     fn envelope_summary_debug() {
-        let e: EnvelopeSummary =
-            serde_json::from_value(json!({"envelopeId": "dbg"})).unwrap();
+        let e: EnvelopeSummary = serde_json::from_value(json!({"envelopeId": "dbg"})).unwrap();
         let dbg = format!("{e:?}");
         assert!(dbg.contains("EnvelopeSummary"));
     }
 
     #[test]
     fn envelope_debug() {
-        let e: Envelope =
-            serde_json::from_value(json!({"envelopeId": "dbg"})).unwrap();
+        let e: Envelope = serde_json::from_value(json!({"envelopeId": "dbg"})).unwrap();
         let dbg = format!("{e:?}");
         assert!(dbg.contains("Envelope"));
     }
 
     #[test]
     fn template_debug() {
-        let t: Template =
-            serde_json::from_value(json!({"templateId": "dbg"})).unwrap();
+        let t: Template = serde_json::from_value(json!({"templateId": "dbg"})).unwrap();
         let dbg = format!("{t:?}");
         assert!(dbg.contains("Template"));
     }
@@ -502,10 +496,7 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(e.status, Some("voided".into()));
-        assert_eq!(
-            e.voided_reason,
-            Some("Cancelled by sender".into())
-        );
+        assert_eq!(e.voided_reason, Some("Cancelled by sender".into()));
     }
 
     #[test]
@@ -533,16 +524,12 @@ mod tests {
             "nextUri": "/envelopes?start_position=10"
         }))
         .unwrap();
-        assert_eq!(
-            l.next_uri,
-            Some("/envelopes?start_position=10".into())
-        );
+        assert_eq!(l.next_uri, Some("/envelopes?start_position=10".into()));
     }
 
     #[test]
     fn envelope_create_response_minimal() {
-        let r: EnvelopeCreateResponse =
-            serde_json::from_value(json!({"envelopeId": "x"})).unwrap();
+        let r: EnvelopeCreateResponse = serde_json::from_value(json!({"envelopeId": "x"})).unwrap();
         assert_eq!(r.envelope_id, "x");
         assert!(r.status.is_none());
         assert!(r.uri.is_none());

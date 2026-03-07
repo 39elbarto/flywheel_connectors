@@ -85,9 +85,7 @@ impl OnePasswordClient {
     fn add_auth(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
         match &self.auth {
             OnePasswordAuth::BearerToken(token) => req.bearer_auth(token),
-            OnePasswordAuth::CredentialId(id) => {
-                req.header("X-FCP-Credential-Id", id.to_string())
-            }
+            OnePasswordAuth::CredentialId(id) => req.header("X-FCP-Credential-Id", id.to_string()),
         }
     }
 
@@ -281,8 +279,7 @@ mod tests {
     #[test]
     fn client_debug_does_not_leak_token() {
         let client =
-            OnePasswordClient::new(OnePasswordAuth::BearerToken("my-secret".into()), None)
-                .unwrap();
+            OnePasswordClient::new(OnePasswordAuth::BearerToken("my-secret".into()), None).unwrap();
         let dbg = format!("{client:?}");
         assert!(!dbg.contains("my-secret"));
         assert!(dbg.contains("redacted"));

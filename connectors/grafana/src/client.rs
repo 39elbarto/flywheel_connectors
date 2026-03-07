@@ -157,11 +157,7 @@ impl GrafanaClient {
     }
 
     #[instrument(skip(self, body), fields(url))]
-    async fn post(
-        &self,
-        path: &str,
-        body: &serde_json::Value,
-    ) -> GrafanaResult<serde_json::Value> {
+    async fn post(&self, path: &str, body: &serde_json::Value) -> GrafanaResult<serde_json::Value> {
         let url = format!("{}{path}", self.base_url);
         debug!(url = %url, "POST request");
 
@@ -261,8 +257,7 @@ impl GrafanaClient {
         } else {
             format!("?{}", params.join("&"))
         };
-        self.get(&format!("/ruler/grafana/api/v1/rules{qs}"))
-            .await
+        self.get(&format!("/ruler/grafana/api/v1/rules{qs}")).await
     }
 
     /// Create an alert rule.
@@ -387,11 +382,8 @@ mod tests {
 
     #[test]
     fn client_debug_redacts_token() {
-        let client = GrafanaClient::new(
-            GrafanaAuth::BearerToken("supersecret".into()),
-            None,
-        )
-        .unwrap();
+        let client =
+            GrafanaClient::new(GrafanaAuth::BearerToken("supersecret".into()), None).unwrap();
         let dbg = format!("{client:?}");
         assert!(!dbg.contains("supersecret"));
         assert!(dbg.contains("GrafanaClient"));

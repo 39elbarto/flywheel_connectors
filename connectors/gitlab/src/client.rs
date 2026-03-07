@@ -111,7 +111,11 @@ impl GitLabClient {
         }
     }
 
-    async fn handle_error(&self, status: StatusCode, resp: Response) -> GitLabResult<serde_json::Value> {
+    async fn handle_error(
+        &self,
+        status: StatusCode,
+        resp: Response,
+    ) -> GitLabResult<serde_json::Value> {
         let retry_after = resp
             .headers()
             .get("retry-after")
@@ -121,9 +125,7 @@ impl GitLabClient {
         let body = resp.text().await.unwrap_or_default();
         let detail = serde_json::from_str::<ApiErrorResponse>(&body)
             .ok()
-            .and_then(|e| {
-                e.error.or_else(|| e.message.map(|m| m.to_string()))
-            })
+            .and_then(|e| e.error.or_else(|| e.message.map(|m| m.to_string())))
             .unwrap_or_else(|| body.clone());
 
         match status.as_u16() {
@@ -133,7 +135,10 @@ impl GitLabClient {
             429 => Err(GitLabError::RateLimited {
                 retry_after_ms: retry_after.unwrap_or(60) * 1000,
             }),
-            code => Err(GitLabError::Api { status_code: code, message: detail }),
+            code => Err(GitLabError::Api {
+                status_code: code,
+                message: detail,
+            }),
         }
     }
 
@@ -176,14 +181,16 @@ impl GitLabClient {
         project_id: &str,
         body: &serde_json::Value,
     ) -> GitLabResult<serde_json::Value> {
-        self.post(&format!("/projects/{project_id}/issues"), body).await
+        self.post(&format!("/projects/{project_id}/issues"), body)
+            .await
     }
 
     // -- Merge Requests --
 
     /// List merge requests.
     pub async fn list_merge_requests(&self, project_id: &str) -> GitLabResult<serde_json::Value> {
-        self.get(&format!("/projects/{project_id}/merge_requests")).await
+        self.get(&format!("/projects/{project_id}/merge_requests"))
+            .await
     }
 
     // -- Pipelines --

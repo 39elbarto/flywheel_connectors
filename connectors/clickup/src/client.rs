@@ -85,9 +85,7 @@ impl ClickUpClient {
     fn add_auth(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
         match &self.auth {
             ClickUpAuth::ApiToken(token) => req.header("Authorization", token),
-            ClickUpAuth::CredentialId(id) => {
-                req.header("X-FCP-Credential-Id", id.to_string())
-            }
+            ClickUpAuth::CredentialId(id) => req.header("X-FCP-Credential-Id", id.to_string()),
         }
     }
 
@@ -136,7 +134,10 @@ impl ClickUpClient {
             429 => Err(ClickUpError::RateLimited {
                 retry_after_ms: retry_after.unwrap_or(60) * 1000,
             }),
-            code => Err(ClickUpError::Api { status_code: code, message: detail }),
+            code => Err(ClickUpError::Api {
+                status_code: code,
+                message: detail,
+            }),
         }
     }
 
@@ -152,11 +153,7 @@ impl ClickUpClient {
     }
 
     #[instrument(skip(self, body), fields(url))]
-    async fn post(
-        &self,
-        path: &str,
-        body: &serde_json::Value,
-    ) -> ClickUpResult<serde_json::Value> {
+    async fn post(&self, path: &str, body: &serde_json::Value) -> ClickUpResult<serde_json::Value> {
         let url = format!("{}{path}", self.base_url);
         debug!(url = %url, "POST request");
         let req = self
@@ -249,8 +246,7 @@ mod tests {
 
     #[test]
     fn client_new_default_url() {
-        let client =
-            ClickUpClient::new(ClickUpAuth::ApiToken("tok".into()), None).unwrap();
+        let client = ClickUpClient::new(ClickUpAuth::ApiToken("tok".into()), None).unwrap();
         assert_eq!(client.base_url, DEFAULT_BASE_URL);
     }
 
@@ -266,8 +262,7 @@ mod tests {
 
     #[test]
     fn client_debug_redacts() {
-        let client =
-            ClickUpClient::new(ClickUpAuth::ApiToken("secret".into()), None).unwrap();
+        let client = ClickUpClient::new(ClickUpAuth::ApiToken("secret".into()), None).unwrap();
         let dbg = format!("{client:?}");
         assert!(!dbg.contains("secret"));
         assert!(dbg.contains("redacted"));
@@ -287,8 +282,7 @@ mod tests {
 
     #[test]
     fn client_debug_contains_base_url() {
-        let client =
-            ClickUpClient::new(ClickUpAuth::ApiToken("tok".into()), None).unwrap();
+        let client = ClickUpClient::new(ClickUpAuth::ApiToken("tok".into()), None).unwrap();
         let dbg = format!("{client:?}");
         assert!(dbg.contains("ClickUpClient"));
         assert!(dbg.contains("base_url"));
@@ -336,11 +330,8 @@ mod tests {
 
     #[test]
     fn client_new_with_credential_id() {
-        let client = ClickUpClient::new(
-            ClickUpAuth::CredentialId(CredentialId::new()),
-            None,
-        )
-        .unwrap();
+        let client =
+            ClickUpClient::new(ClickUpAuth::CredentialId(CredentialId::new()), None).unwrap();
         assert_eq!(client.base_url, DEFAULT_BASE_URL);
     }
 

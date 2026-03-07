@@ -516,11 +516,9 @@ async fn error_401() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/user"))
-        .respond_with(
-            ResponseTemplate::new(401).set_body_json(json!({
-                "error": {"message": "Access token expired"}
-            })),
-        )
+        .respond_with(ResponseTemplate::new(401).set_body_json(json!({
+            "error": {"message": "Access token expired"}
+        })))
         .mount(&server)
         .await;
 
@@ -540,11 +538,9 @@ async fn error_403() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/repositories/myteam"))
-        .respond_with(
-            ResponseTemplate::new(403).set_body_json(json!({
-                "error": {"message": "Forbidden"}
-            })),
-        )
+        .respond_with(ResponseTemplate::new(403).set_body_json(json!({
+            "error": {"message": "Forbidden"}
+        })))
         .mount(&server)
         .await;
 
@@ -564,11 +560,9 @@ async fn error_404() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/repositories/myteam/missing"))
-        .respond_with(
-            ResponseTemplate::new(404).set_body_json(json!({
-                "error": {"message": "Repository not found"}
-            })),
-        )
+        .respond_with(ResponseTemplate::new(404).set_body_json(json!({
+            "error": {"message": "Repository not found"}
+        })))
         .mount(&server)
         .await;
 

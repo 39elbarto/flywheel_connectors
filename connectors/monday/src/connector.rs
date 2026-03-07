@@ -9,7 +9,7 @@ use serde_json::json;
 use tracing::{info, instrument};
 
 use crate::{
-    client::{MondayAuth, MondayClient, DEFAULT_BASE_URL},
+    client::{DEFAULT_BASE_URL, MondayAuth, MondayClient},
     error::MondayError,
 };
 
@@ -391,9 +391,7 @@ impl MondayConnector {
     ) -> Result<serde_json::Value, MondayError> {
         let board_id = require_str(input, "board_id")?;
         let item_name = require_str(input, "item_name")?;
-        let column_values = input
-            .get("column_values")
-            .map(|v| v.to_string());
+        let column_values = input.get("column_values").map(|v| v.to_string());
         let resp = client
             .create_item(board_id, item_name, column_values.as_deref())
             .await?;

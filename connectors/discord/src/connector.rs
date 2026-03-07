@@ -33,7 +33,7 @@ use url::Url;
 use crate::{
     api::DiscordApiClient,
     config::DiscordConfig,
-    gateway::{DISCORD_GATEWAY_STATE_FILE, GatewayConnection, GatewayEvent},
+    gateway::{DISCORD_GATEWAY_STATE_FILE, GatewayConnection, GatewayEvent, GatewayEventFrame},
     types::Embed,
 };
 
@@ -1923,11 +1923,11 @@ fn host_allowed_by_network_constraints(host: &str) -> bool {
 
 /// Convert a Discord gateway event to an FCP `EventEnvelope`.
 fn gateway_event_to_fcp(
-    event: &GatewayEvent,
+    event: &GatewayEventFrame,
     connector_id: &ConnectorId,
     instance_id: &InstanceId,
 ) -> Option<EventEnvelope> {
-    let (topic, payload, principal_info) = match event {
+    let (topic, payload, principal_info) = match &event.event {
         GatewayEvent::Ready(ready) => {
             let payload = json!({
                 "session_id": ready.session_id,
@@ -2020,7 +2020,7 @@ fn gateway_event_to_fcp(
         }
         GatewayEvent::Unknown { event_name, data } => {
             let topic = format!("discord.{}", event_name.to_lowercase());
-            return Some(EventEnvelope::new(
+            let mut envelope = EventEnvelope::new(
                 topic,
                 EventData::new(
                     connector_id.clone(),
@@ -2034,7 +2034,11 @@ fn gateway_event_to_fcp(
                     },
                     data.clone(),
                 ),
-            ));
+            );
+            if let Some(seq) = event.seq {
+                envelope = envelope.with_seq(seq).with_cursor_seq(seq);
+            }
+            return Some(envelope);
         }
     };
 
@@ -2054,7 +2058,11 @@ fn gateway_event_to_fcp(
         payload,
     );
 
-    Some(EventEnvelope::new(topic, event_data))
+    let mut envelope = EventEnvelope::new(topic, event_data);
+    if let Some(seq) = event.seq {
+        envelope = envelope.with_seq(seq).with_cursor_seq(seq);
+    }
+    Some(envelope)
 }
 
 #[cfg(test)]
@@ -2489,11 +2497,16 @@ mod tests {
             }
         });
 
-        let event = GatewayEvent::MessageCreate(payload.clone());
+        let event = GatewayEventFrame {
+            seq: Some(77),
+            event: GatewayEvent::MessageCreate(payload.clone()),
+        };
         let envelope =
             gateway_event_to_fcp(&event, &connector_id, &instance_id).expect("event envelope");
 
         assert_eq!(envelope.topic, "discord.message");
+        assert_eq!(envelope.seq, 77);
+        assert_eq!(envelope.cursor, "77");
         assert_eq!(envelope.data.payload, payload);
         assert_eq!(envelope.data.zone_id, ZoneId::community());
         assert_eq!(envelope.data.principal.id, "user-1");

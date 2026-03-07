@@ -87,9 +87,11 @@ impl CronStore {
 
     /// Get a schedule by ID.
     pub fn get_schedule(&self, schedule_id: &str) -> CronResult<&Schedule> {
-        self.schedules.get(schedule_id).ok_or_else(|| CronError::ScheduleNotFound {
-            schedule_id: schedule_id.to_string(),
-        })
+        self.schedules
+            .get(schedule_id)
+            .ok_or_else(|| CronError::ScheduleNotFound {
+                schedule_id: schedule_id.to_string(),
+            })
     }
 
     /// Trigger a schedule, recording an execution.
@@ -229,7 +231,11 @@ mod tests {
     #[test]
     fn create_schedule_too_few_fields() {
         let mut store = CronStore::new();
-        assert!(store.create_schedule("bad", "* * *", "op.test", None, None).is_err());
+        assert!(
+            store
+                .create_schedule("bad", "* * *", "op.test", None, None)
+                .is_err()
+        );
     }
 
     #[test]
@@ -245,13 +251,19 @@ mod tests {
     #[test]
     fn create_schedule_empty_expression() {
         let mut store = CronStore::new();
-        assert!(store.create_schedule("bad", "", "op.test", None, None).is_err());
+        assert!(
+            store
+                .create_schedule("bad", "", "op.test", None, None)
+                .is_err()
+        );
     }
 
     #[test]
     fn create_schedule_duplicate_name() {
         let mut store = CronStore::new();
-        store.create_schedule("dup", "0 * * * *", "op.a", None, None).unwrap();
+        store
+            .create_schedule("dup", "0 * * * *", "op.a", None, None)
+            .unwrap();
         let result = store.create_schedule("dup", "*/5 * * * *", "op.b", None, None);
         assert!(result.is_err());
         match result.unwrap_err() {
@@ -263,17 +275,27 @@ mod tests {
     #[test]
     fn list_schedules_returns_all() {
         let mut store = CronStore::new();
-        store.create_schedule("a", "0 * * * *", "op.a", None, None).unwrap();
-        store.create_schedule("b", "*/5 * * * *", "op.b", None, None).unwrap();
-        store.create_schedule("c", "0 0 * * *", "op.c", None, None).unwrap();
+        store
+            .create_schedule("a", "0 * * * *", "op.a", None, None)
+            .unwrap();
+        store
+            .create_schedule("b", "*/5 * * * *", "op.b", None, None)
+            .unwrap();
+        store
+            .create_schedule("c", "0 0 * * *", "op.c", None, None)
+            .unwrap();
         assert_eq!(store.list_schedules().len(), 3);
     }
 
     #[test]
     fn list_schedules_sorted_by_created_at() {
         let mut store = CronStore::new();
-        store.create_schedule("first", "0 * * * *", "op.a", None, None).unwrap();
-        store.create_schedule("second", "*/5 * * * *", "op.b", None, None).unwrap();
+        store
+            .create_schedule("first", "0 * * * *", "op.a", None, None)
+            .unwrap();
+        store
+            .create_schedule("second", "*/5 * * * *", "op.b", None, None)
+            .unwrap();
         let schedules = store.list_schedules();
         assert!(schedules[0].created_at <= schedules[1].created_at);
     }
@@ -281,7 +303,9 @@ mod tests {
     #[test]
     fn get_schedule_found() {
         let mut store = CronStore::new();
-        let id = store.create_schedule("test", "0 * * * *", "op.test", None, None).unwrap();
+        let id = store
+            .create_schedule("test", "0 * * * *", "op.test", None, None)
+            .unwrap();
         let sched = store.get_schedule(&id).unwrap();
         assert_eq!(sched.name, "test");
         assert_eq!(sched.expression, "0 * * * *");
@@ -304,7 +328,9 @@ mod tests {
     #[test]
     fn delete_schedule_success() {
         let mut store = CronStore::new();
-        let id = store.create_schedule("del", "0 * * * *", "op.test", None, None).unwrap();
+        let id = store
+            .create_schedule("del", "0 * * * *", "op.test", None, None)
+            .unwrap();
         assert_eq!(store.schedule_count(), 1);
         store.delete_schedule(&id).unwrap();
         assert_eq!(store.schedule_count(), 0);
@@ -326,7 +352,9 @@ mod tests {
     #[test]
     fn delete_schedule_makes_it_gone() {
         let mut store = CronStore::new();
-        let id = store.create_schedule("gone", "0 * * * *", "op.test", None, None).unwrap();
+        let id = store
+            .create_schedule("gone", "0 * * * *", "op.test", None, None)
+            .unwrap();
         store.delete_schedule(&id).unwrap();
         assert!(store.get_schedule(&id).is_err());
     }
@@ -334,7 +362,9 @@ mod tests {
     #[test]
     fn trigger_schedule_success() {
         let mut store = CronStore::new();
-        let sched_id = store.create_schedule("trig", "0 * * * *", "op.test", None, None).unwrap();
+        let sched_id = store
+            .create_schedule("trig", "0 * * * *", "op.test", None, None)
+            .unwrap();
         let exec_id = store.trigger_schedule(&sched_id).unwrap();
         assert!(exec_id.starts_with("exec_"));
         assert_eq!(store.execution_count(), 1);
@@ -350,7 +380,9 @@ mod tests {
     #[test]
     fn trigger_creates_execution_record() {
         let mut store = CronStore::new();
-        let sched_id = store.create_schedule("exec", "0 * * * *", "op.test", None, None).unwrap();
+        let sched_id = store
+            .create_schedule("exec", "0 * * * *", "op.test", None, None)
+            .unwrap();
         store.trigger_schedule(&sched_id).unwrap();
         let execs = store.list_executions(Some(&sched_id), None);
         assert_eq!(execs.len(), 1);
@@ -361,7 +393,9 @@ mod tests {
     #[test]
     fn trigger_multiple_creates_multiple_executions() {
         let mut store = CronStore::new();
-        let sched_id = store.create_schedule("multi", "0 * * * *", "op.test", None, None).unwrap();
+        let sched_id = store
+            .create_schedule("multi", "0 * * * *", "op.test", None, None)
+            .unwrap();
         store.trigger_schedule(&sched_id).unwrap();
         store.trigger_schedule(&sched_id).unwrap();
         store.trigger_schedule(&sched_id).unwrap();
@@ -371,8 +405,12 @@ mod tests {
     #[test]
     fn list_executions_all() {
         let mut store = CronStore::new();
-        let s1 = store.create_schedule("s1", "0 * * * *", "op.a", None, None).unwrap();
-        let s2 = store.create_schedule("s2", "*/5 * * * *", "op.b", None, None).unwrap();
+        let s1 = store
+            .create_schedule("s1", "0 * * * *", "op.a", None, None)
+            .unwrap();
+        let s2 = store
+            .create_schedule("s2", "*/5 * * * *", "op.b", None, None)
+            .unwrap();
         store.trigger_schedule(&s1).unwrap();
         store.trigger_schedule(&s2).unwrap();
         store.trigger_schedule(&s1).unwrap();
@@ -383,8 +421,12 @@ mod tests {
     #[test]
     fn list_executions_filtered() {
         let mut store = CronStore::new();
-        let s1 = store.create_schedule("s1", "0 * * * *", "op.a", None, None).unwrap();
-        let s2 = store.create_schedule("s2", "*/5 * * * *", "op.b", None, None).unwrap();
+        let s1 = store
+            .create_schedule("s1", "0 * * * *", "op.a", None, None)
+            .unwrap();
+        let s2 = store
+            .create_schedule("s2", "*/5 * * * *", "op.b", None, None)
+            .unwrap();
         store.trigger_schedule(&s1).unwrap();
         store.trigger_schedule(&s2).unwrap();
         store.trigger_schedule(&s1).unwrap();
@@ -396,7 +438,9 @@ mod tests {
     #[test]
     fn list_executions_with_limit() {
         let mut store = CronStore::new();
-        let sid = store.create_schedule("lim", "0 * * * *", "op.test", None, None).unwrap();
+        let sid = store
+            .create_schedule("lim", "0 * * * *", "op.test", None, None)
+            .unwrap();
         for _ in 0..10 {
             store.trigger_schedule(&sid).unwrap();
         }
@@ -407,7 +451,9 @@ mod tests {
     #[test]
     fn list_executions_limit_capped_at_100() {
         let mut store = CronStore::new();
-        let sid = store.create_schedule("cap", "0 * * * *", "op.test", None, None).unwrap();
+        let sid = store
+            .create_schedule("cap", "0 * * * *", "op.test", None, None)
+            .unwrap();
         for _ in 0..5 {
             store.trigger_schedule(&sid).unwrap();
         }
@@ -418,7 +464,9 @@ mod tests {
     #[test]
     fn list_executions_default_limit() {
         let mut store = CronStore::new();
-        let sid = store.create_schedule("def", "0 * * * *", "op.test", None, None).unwrap();
+        let sid = store
+            .create_schedule("def", "0 * * * *", "op.test", None, None)
+            .unwrap();
         for _ in 0..5 {
             store.trigger_schedule(&sid).unwrap();
         }
@@ -429,7 +477,9 @@ mod tests {
     #[test]
     fn list_executions_most_recent_first() {
         let mut store = CronStore::new();
-        let sid = store.create_schedule("order", "0 * * * *", "op.test", None, None).unwrap();
+        let sid = store
+            .create_schedule("order", "0 * * * *", "op.test", None, None)
+            .unwrap();
         store.trigger_schedule(&sid).unwrap();
         store.trigger_schedule(&sid).unwrap();
         let execs = store.list_executions(None, None);
@@ -439,7 +489,9 @@ mod tests {
     #[test]
     fn list_executions_empty_for_unknown_schedule() {
         let mut store = CronStore::new();
-        let sid = store.create_schedule("known", "0 * * * *", "op.test", None, None).unwrap();
+        let sid = store
+            .create_schedule("known", "0 * * * *", "op.test", None, None)
+            .unwrap();
         store.trigger_schedule(&sid).unwrap();
         let result = store.list_executions(Some("sched_unknown"), None);
         assert!(result.is_empty());
@@ -455,8 +507,12 @@ mod tests {
     #[test]
     fn create_multiple_different_names() {
         let mut store = CronStore::new();
-        let id1 = store.create_schedule("a", "0 * * * *", "op.a", None, None).unwrap();
-        let id2 = store.create_schedule("b", "0 * * * *", "op.b", None, None).unwrap();
+        let id1 = store
+            .create_schedule("a", "0 * * * *", "op.a", None, None)
+            .unwrap();
+        let id2 = store
+            .create_schedule("b", "0 * * * *", "op.b", None, None)
+            .unwrap();
         assert_ne!(id1, id2);
         assert_eq!(store.schedule_count(), 2);
     }
@@ -464,7 +520,9 @@ mod tests {
     #[test]
     fn schedule_has_created_at() {
         let mut store = CronStore::new();
-        let id = store.create_schedule("ts", "0 * * * *", "op.test", None, None).unwrap();
+        let id = store
+            .create_schedule("ts", "0 * * * *", "op.test", None, None)
+            .unwrap();
         let sched = store.get_schedule(&id).unwrap();
         assert!(!sched.created_at.is_empty());
     }
@@ -472,7 +530,9 @@ mod tests {
     #[test]
     fn execution_has_triggered_at() {
         let mut store = CronStore::new();
-        let sid = store.create_schedule("ts", "0 * * * *", "op.test", None, None).unwrap();
+        let sid = store
+            .create_schedule("ts", "0 * * * *", "op.test", None, None)
+            .unwrap();
         store.trigger_schedule(&sid).unwrap();
         let execs = store.list_executions(None, None);
         assert!(!execs[0].triggered_at.is_empty());
@@ -481,16 +541,22 @@ mod tests {
     #[test]
     fn delete_then_create_same_name() {
         let mut store = CronStore::new();
-        let id = store.create_schedule("reuse", "0 * * * *", "op.test", None, None).unwrap();
+        let id = store
+            .create_schedule("reuse", "0 * * * *", "op.test", None, None)
+            .unwrap();
         store.delete_schedule(&id).unwrap();
-        let id2 = store.create_schedule("reuse", "*/5 * * * *", "op.test2", None, None).unwrap();
+        let id2 = store
+            .create_schedule("reuse", "*/5 * * * *", "op.test2", None, None)
+            .unwrap();
         assert_ne!(id, id2);
     }
 
     #[test]
     fn executions_persist_after_schedule_delete() {
         let mut store = CronStore::new();
-        let sid = store.create_schedule("persist", "0 * * * *", "op.test", None, None).unwrap();
+        let sid = store
+            .create_schedule("persist", "0 * * * *", "op.test", None, None)
+            .unwrap();
         store.trigger_schedule(&sid).unwrap();
         store.delete_schedule(&sid).unwrap();
         assert_eq!(store.execution_count(), 1);
@@ -509,7 +575,9 @@ mod tests {
     #[test]
     fn list_executions_with_limit_zero() {
         let mut store = CronStore::new();
-        let sid = store.create_schedule("z", "0 * * * *", "op.test", None, None).unwrap();
+        let sid = store
+            .create_schedule("z", "0 * * * *", "op.test", None, None)
+            .unwrap();
         store.trigger_schedule(&sid).unwrap();
         let result = store.list_executions(None, Some(0));
         assert!(result.is_empty());
@@ -518,7 +586,9 @@ mod tests {
     #[test]
     fn list_executions_with_limit_one() {
         let mut store = CronStore::new();
-        let sid = store.create_schedule("one", "0 * * * *", "op.test", None, None).unwrap();
+        let sid = store
+            .create_schedule("one", "0 * * * *", "op.test", None, None)
+            .unwrap();
         store.trigger_schedule(&sid).unwrap();
         store.trigger_schedule(&sid).unwrap();
         store.trigger_schedule(&sid).unwrap();
@@ -529,8 +599,12 @@ mod tests {
     #[test]
     fn trigger_multiple_schedules_interleaved() {
         let mut store = CronStore::new();
-        let s1 = store.create_schedule("s1", "0 * * * *", "op.a", None, None).unwrap();
-        let s2 = store.create_schedule("s2", "*/5 * * * *", "op.b", None, None).unwrap();
+        let s1 = store
+            .create_schedule("s1", "0 * * * *", "op.a", None, None)
+            .unwrap();
+        let s2 = store
+            .create_schedule("s2", "*/5 * * * *", "op.b", None, None)
+            .unwrap();
         store.trigger_schedule(&s1).unwrap();
         store.trigger_schedule(&s2).unwrap();
         store.trigger_schedule(&s1).unwrap();
@@ -543,7 +617,9 @@ mod tests {
     #[test]
     fn create_schedule_payload_none_vs_null() {
         let mut store = CronStore::new();
-        let id = store.create_schedule("none", "0 * * * *", "op.test", None, None).unwrap();
+        let id = store
+            .create_schedule("none", "0 * * * *", "op.test", None, None)
+            .unwrap();
         let sched = store.get_schedule(&id).unwrap();
         assert!(sched.payload.is_none());
     }
@@ -561,9 +637,15 @@ mod tests {
     #[test]
     fn schedule_ids_are_unique() {
         let mut store = CronStore::new();
-        let id1 = store.create_schedule("u1", "0 * * * *", "op.a", None, None).unwrap();
-        let id2 = store.create_schedule("u2", "0 * * * *", "op.b", None, None).unwrap();
-        let id3 = store.create_schedule("u3", "0 * * * *", "op.c", None, None).unwrap();
+        let id1 = store
+            .create_schedule("u1", "0 * * * *", "op.a", None, None)
+            .unwrap();
+        let id2 = store
+            .create_schedule("u2", "0 * * * *", "op.b", None, None)
+            .unwrap();
+        let id3 = store
+            .create_schedule("u3", "0 * * * *", "op.c", None, None)
+            .unwrap();
         assert_ne!(id1, id2);
         assert_ne!(id2, id3);
         assert_ne!(id1, id3);
@@ -572,7 +654,9 @@ mod tests {
     #[test]
     fn execution_ids_are_unique() {
         let mut store = CronStore::new();
-        let sid = store.create_schedule("ex", "0 * * * *", "op.test", None, None).unwrap();
+        let sid = store
+            .create_schedule("ex", "0 * * * *", "op.test", None, None)
+            .unwrap();
         let e1 = store.trigger_schedule(&sid).unwrap();
         let e2 = store.trigger_schedule(&sid).unwrap();
         let e3 = store.trigger_schedule(&sid).unwrap();
@@ -591,7 +675,9 @@ mod tests {
     #[test]
     fn trigger_after_schedule_deleted() {
         let mut store = CronStore::new();
-        let sid = store.create_schedule("gone", "0 * * * *", "op.test", None, None).unwrap();
+        let sid = store
+            .create_schedule("gone", "0 * * * *", "op.test", None, None)
+            .unwrap();
         store.delete_schedule(&sid).unwrap();
         assert!(store.trigger_schedule(&sid).is_err());
     }

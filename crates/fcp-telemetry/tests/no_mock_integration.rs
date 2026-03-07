@@ -13,37 +13,51 @@
 use std::collections::HashMap;
 
 use fcp_telemetry::{
+    // usage.rs
+    CapabilityRecommendationReport,
+    CapabilitySuggestionKind,
+    CapabilityUsageAggregate,
+    CapabilityUsageStore,
     // context.rs
-    ContextGuard, TelemetryContext, TraceContext, TraceContextError,
-    SPAN_ID_SIZE, TRACE_FLAG_SAMPLED, TRACE_ID_SIZE,
+    ContextGuard,
+    // tracing_layer re-exports
+    FcpSpan,
     // export.rs
-    HealthResponse, prometheus_text_format,
-    // logging.rs
-    redact_sensitive,
+    HealthResponse,
+    LegacyTraceContext,
+    RecommendationConfig,
+    SPAN_ID_SIZE,
+    TRACE_FLAG_SAMPLED,
+    TRACE_ID_SIZE,
+    TRACEPARENT_HEADER,
+    TRACESTATE_HEADER,
+    // lib.rs
+    TelemetryConfig,
+    TelemetryContext,
+    TelemetryError,
+    TraceContext,
+    TraceContextError,
+    UsageTelemetryConfig,
+    extract_trace_context,
+    inject_trace_context,
     // metrics.rs
     metrics::{
-        HealthStatusMetric, Timer, TimerGuard,
-        decrement_gauge, get_counter, get_gauge, get_histogram,
-        increment_counter, increment_counter_by, increment_gauge,
-        record_event_dropped, record_event_emitted, record_histogram,
-        record_request_error, record_request_success, record_symbol_coverage,
-        record_diversity_violation, set_gauge, update_health_status, update_rate_limit,
+        HealthStatusMetric, Timer, TimerGuard, decrement_gauge, get_counter, get_gauge,
+        get_histogram, increment_counter, increment_counter_by, increment_gauge,
+        record_diversity_violation, record_event_dropped, record_event_emitted, record_histogram,
+        record_request_error, record_request_success, record_symbol_coverage, set_gauge,
+        update_health_status, update_rate_limit,
     },
+    prometheus_text_format,
+    recommend_capabilities,
+    // logging.rs
+    redact_sensitive,
     // trace_capture.rs
     trace_capture::{
-        AdmissionOutcome, CapturedTrace, GossipEvent, LeaseEvent, PolicyDecision,
-        RedactionPolicy, RoutingDecision, SessionEvent, TraceCapture, TraceCaptureConfig,
-        TraceError, TraceEvent, TraceExportFormat, TRACE_VERSION,
+        AdmissionOutcome, CapturedTrace, GossipEvent, LeaseEvent, PolicyDecision, RedactionPolicy,
+        RoutingDecision, SessionEvent, TRACE_VERSION, TraceCapture, TraceCaptureConfig, TraceError,
+        TraceEvent, TraceExportFormat,
     },
-    // usage.rs
-    CapabilityRecommendationReport, CapabilityUsageStore, RecommendationConfig,
-    UsageTelemetryConfig, recommend_capabilities, CapabilityUsageAggregate,
-    CapabilitySuggestionKind,
-    // tracing_layer re-exports
-    FcpSpan, LegacyTraceContext, TRACEPARENT_HEADER, TRACESTATE_HEADER,
-    extract_trace_context, inject_trace_context,
-    // lib.rs
-    TelemetryConfig, TelemetryError,
 };
 
 use fcp_core::{
@@ -388,9 +402,7 @@ fn trace_capture_redacted_snapshot_applies_policy() {
     let policy = RedactionPolicy::default().with_field("session_id");
     let config = TraceCaptureConfig::new().enabled().with_redaction(policy);
     let mut capture = TraceCapture::new("cap-redact", config);
-    capture
-        .record(make_session(1, "t1", "secret-123"))
-        .unwrap();
+    capture.record(make_session(1, "t1", "secret-123")).unwrap();
 
     let redacted = capture.redacted_snapshot();
     assert!(redacted.redacted);
@@ -585,7 +597,10 @@ fn trace_capture_max_size_bytes_enforced() {
         }
     }
     assert!(hit_limit, "should have hit size limit");
-    assert!(!capture.snapshot().is_empty(), "should have recorded some events");
+    assert!(
+        !capture.snapshot().is_empty(),
+        "should have recorded some events"
+    );
 }
 
 // ============================================================================
@@ -709,7 +724,10 @@ fn usage_store_retention_prunes_stale() {
     let snap = store.snapshot();
     // Old entry should be pruned (200 - 100 = 100 > 10)
     assert_eq!(snap.len(), 1);
-    assert_eq!(snap[0].key.connector_id.as_str(), "fcp.fresh:request-response:1");
+    assert_eq!(
+        snap[0].key.connector_id.as_str(),
+        "fcp.fresh:request-response:1"
+    );
 }
 
 #[test]
@@ -873,8 +891,8 @@ fn health_response_healthy_with_checks() {
 
 #[test]
 fn health_response_unhealthy_with_failed_check() {
-    let resp = HealthResponse::healthy("1.0.0", 100)
-        .with_check("db", false, Some("Connection refused"));
+    let resp =
+        HealthResponse::healthy("1.0.0", 100).with_check("db", false, Some("Connection refused"));
 
     assert!(!resp.is_healthy());
 }
@@ -892,8 +910,7 @@ fn health_response_unhealthy_constructor() {
 
 #[test]
 fn health_response_json_serialization() {
-    let resp = HealthResponse::healthy("1.0.0", 3600)
-        .with_check("db", true, Some("OK"));
+    let resp = HealthResponse::healthy("1.0.0", 3600).with_check("db", true, Some("OK"));
 
     let json = serde_json::to_string(&resp).unwrap();
     assert!(json.contains("\"status\":\"healthy\""));
@@ -904,8 +921,7 @@ fn health_response_json_serialization() {
 
 #[test]
 fn health_response_skip_none_message() {
-    let resp = HealthResponse::healthy("1.0.0", 0)
-        .with_check("api", true, None);
+    let resp = HealthResponse::healthy("1.0.0", 0).with_check("api", true, None);
 
     let json = serde_json::to_string(&resp).unwrap();
     assert!(!json.contains("\"message\":null"));
@@ -944,7 +960,10 @@ fn redact_sensitive_nested_objects() {
     ];
 
     let redacted = redact_sensitive(&value, &fields);
-    assert_eq!(redacted["request"]["headers"]["Authorization"], "[REDACTED]");
+    assert_eq!(
+        redacted["request"]["headers"]["Authorization"],
+        "[REDACTED]"
+    );
     assert_eq!(
         redacted["request"]["headers"]["Content-Type"],
         "application/json"

@@ -18,14 +18,14 @@ pub const DEFAULT_BASE_URL: &str = "https://api.semanticscholar.org/graph/v1";
 pub const DEFAULT_PAPER_SEARCH_FIELDS: &str = "paperId,title,abstract,year,citationCount,authors";
 
 /// Default fields for paper detail.
-pub const DEFAULT_PAPER_DETAIL_FIELDS: &str =
-    "paperId,title,abstract,year,venue,citationCount,referenceCount,authors,isOpenAccess,externalIds,fieldsOfStudy";
+pub const DEFAULT_PAPER_DETAIL_FIELDS: &str = "paperId,title,abstract,year,venue,citationCount,referenceCount,authors,isOpenAccess,externalIds,fieldsOfStudy";
 
 /// Default fields for citations/references.
 pub const DEFAULT_CITATION_FIELDS: &str = "paperId,title,year,citationCount,authors";
 
 /// Default fields for author detail.
-pub const DEFAULT_AUTHOR_FIELDS: &str = "authorId,name,hIndex,citationCount,paperCount,affiliations";
+pub const DEFAULT_AUTHOR_FIELDS: &str =
+    "authorId,name,hIndex,citationCount,paperCount,affiliations";
 
 /// Default fields for author papers.
 pub const DEFAULT_AUTHOR_PAPERS_FIELDS: &str = "paperId,title,year,citationCount";
@@ -81,10 +81,7 @@ impl fmt::Debug for SemanticScholarClient {
 
 impl SemanticScholarClient {
     /// Create a new Semantic Scholar client.
-    pub fn new(
-        auth: SemanticScholarAuth,
-        base_url: Option<&str>,
-    ) -> SemanticScholarResult<Self> {
+    pub fn new(auth: SemanticScholarAuth, base_url: Option<&str>) -> SemanticScholarResult<Self> {
         let client = Client::builder()
             .timeout(Duration::from_secs(30))
             .user_agent("fcp-semanticscholar/0.1.0 (FCP connector)")
@@ -180,10 +177,7 @@ impl SemanticScholarClient {
         fields: Option<&str>,
     ) -> SemanticScholarResult<serde_json::Value> {
         let f = fields.unwrap_or(DEFAULT_PAPER_SEARCH_FIELDS);
-        let mut q = vec![
-            ("query", query.to_string()),
-            ("fields", f.to_string()),
-        ];
+        let mut q = vec![("query", query.to_string()), ("fields", f.to_string())];
         if let Some(l) = limit {
             q.push(("limit", l.to_string()));
         }
@@ -200,7 +194,11 @@ impl SemanticScholarClient {
         fields: Option<&str>,
     ) -> SemanticScholarResult<serde_json::Value> {
         let f = fields.unwrap_or(DEFAULT_PAPER_DETAIL_FIELDS);
-        self.get(&format!("/paper/{paper_id}"), Some(&[("fields", f.to_string())])).await
+        self.get(
+            &format!("/paper/{paper_id}"),
+            Some(&[("fields", f.to_string())]),
+        )
+        .await
     }
 
     /// Get citations of a paper.
@@ -215,7 +213,8 @@ impl SemanticScholarClient {
         if let Some(l) = limit {
             q.push(("limit", l.to_string()));
         }
-        self.get(&format!("/paper/{paper_id}/citations"), Some(&q)).await
+        self.get(&format!("/paper/{paper_id}/citations"), Some(&q))
+            .await
     }
 
     /// Get references of a paper.
@@ -230,7 +229,8 @@ impl SemanticScholarClient {
         if let Some(l) = limit {
             q.push(("limit", l.to_string()));
         }
-        self.get(&format!("/paper/{paper_id}/references"), Some(&q)).await
+        self.get(&format!("/paper/{paper_id}/references"), Some(&q))
+            .await
     }
 
     /// Get recommended papers based on a seed paper.
@@ -245,7 +245,8 @@ impl SemanticScholarClient {
         if let Some(l) = limit {
             q.push(("limit", l.to_string()));
         }
-        self.get(&format!("/paper/{paper_id}/recommendations"), Some(&q)).await
+        self.get(&format!("/paper/{paper_id}/recommendations"), Some(&q))
+            .await
     }
 
     // -- Authors --
@@ -257,7 +258,11 @@ impl SemanticScholarClient {
         fields: Option<&str>,
     ) -> SemanticScholarResult<serde_json::Value> {
         let f = fields.unwrap_or(DEFAULT_AUTHOR_FIELDS);
-        self.get(&format!("/author/{author_id}"), Some(&[("fields", f.to_string())])).await
+        self.get(
+            &format!("/author/{author_id}"),
+            Some(&[("fields", f.to_string())]),
+        )
+        .await
     }
 
     /// Get papers by an author.
@@ -272,7 +277,8 @@ impl SemanticScholarClient {
         if let Some(l) = limit {
             q.push(("limit", l.to_string()));
         }
-        self.get(&format!("/author/{author_id}/papers"), Some(&q)).await
+        self.get(&format!("/author/{author_id}/papers"), Some(&q))
+            .await
     }
 }
 
@@ -352,8 +358,7 @@ mod tests {
 
     #[test]
     fn client_new_default_url() {
-        let client =
-            SemanticScholarClient::new(SemanticScholarAuth::None, None).unwrap();
+        let client = SemanticScholarClient::new(SemanticScholarAuth::None, None).unwrap();
         assert_eq!(client.base_url, DEFAULT_BASE_URL);
     }
 
@@ -369,19 +374,16 @@ mod tests {
 
     #[test]
     fn client_new_trims_trailing_slash() {
-        let client = SemanticScholarClient::new(
-            SemanticScholarAuth::None,
-            Some("https://example.com/"),
-        )
-        .unwrap();
+        let client =
+            SemanticScholarClient::new(SemanticScholarAuth::None, Some("https://example.com/"))
+                .unwrap();
         assert!(!client.base_url.ends_with('/'));
     }
 
     #[test]
     fn client_debug_format() {
         let client =
-            SemanticScholarClient::new(SemanticScholarAuth::ApiKey("secret".into()), None)
-                .unwrap();
+            SemanticScholarClient::new(SemanticScholarAuth::ApiKey("secret".into()), None).unwrap();
         let dbg = format!("{client:?}");
         assert!(dbg.contains("SemanticScholarClient"));
         assert!(!dbg.contains("secret"));
@@ -442,11 +444,9 @@ mod tests {
 
     #[test]
     fn client_new_multiple_trailing_slashes() {
-        let client = SemanticScholarClient::new(
-            SemanticScholarAuth::None,
-            Some("https://example.com///"),
-        )
-        .unwrap();
+        let client =
+            SemanticScholarClient::new(SemanticScholarAuth::None, Some("https://example.com///"))
+                .unwrap();
         // trim_end_matches('/') removes all trailing slashes
         assert!(!client.base_url.ends_with('/'));
     }
@@ -479,8 +479,7 @@ mod tests {
     #[test]
     fn client_stores_api_key_auth() {
         let client =
-            SemanticScholarClient::new(SemanticScholarAuth::ApiKey("my_key".into()), None)
-                .unwrap();
+            SemanticScholarClient::new(SemanticScholarAuth::ApiKey("my_key".into()), None).unwrap();
         let dbg = format!("{client:?}");
         assert!(dbg.contains("ApiKey"));
         assert!(!dbg.contains("my_key"));

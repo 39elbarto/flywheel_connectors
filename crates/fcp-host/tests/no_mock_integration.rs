@@ -24,8 +24,8 @@ use fcp_host::{
     BudgetAction, BudgetPolicyEngine, BudgetTracker, ConnectorArchetype, ConnectorRegistry,
     ConnectorSummary, DiscoveryEndpoint, DiscoveryFilter, DoctorReport, DoctorRequest,
     DoctorService, HealthFilter, HostError, HostHealthResponse, HostHealthStatus,
-    IntrospectionResponse, PolicyEngine, PreflightRequest, SafetyTierExt,
-    SelfCheckResponse, ToolDescriptor,
+    IntrospectionResponse, PolicyEngine, PreflightRequest, SafetyTierExt, SelfCheckResponse,
+    ToolDescriptor,
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -236,9 +236,7 @@ async fn budget_engine_preflight_allows_within_budget() {
         .await;
 
     // Use some budget but stay within limits
-    engine
-        .record_usage(&zone, &[UsageMetric::tokens(50)])
-        .await;
+    engine.record_usage(&zone, &[UsageMetric::tokens(50)]).await;
 
     let registry = TestRegistry::new();
     let endpoint = DiscoveryEndpoint::new(Arc::new(registry), Arc::new(engine));
@@ -961,10 +959,7 @@ fn safety_tier_ordering_is_total() {
 
     // Every tier is at_most itself
     for tier in &tiers {
-        assert!(
-            tier.is_at_most(*tier),
-            "{tier:?} should be at_most itself"
-        );
+        assert!(tier.is_at_most(*tier), "{tier:?} should be at_most itself");
     }
 
     // Strict ordering
@@ -1154,10 +1149,7 @@ fn host_error_variants_display_correctly() {
             HostError::InvalidFilter("bad zone".into()),
             "invalid filter",
         ),
-        (
-            HostError::RegistryError("timeout".into()),
-            "registry error",
-        ),
+        (HostError::RegistryError("timeout".into()), "registry error"),
         (
             HostError::PreflightFailed("denied".into()),
             "preflight failed",
@@ -1203,7 +1195,10 @@ fn budget_deny_produces_fcp_error() {
 
     let fcp_err = eval.to_error().expect("should produce FcpError");
     let msg = fcp_err.to_string();
-    assert!(msg.contains("budget") || msg.contains("exceeded"), "error message should reference budget: {msg}");
+    assert!(
+        msg.contains("budget") || msg.contains("exceeded"),
+        "error message should reference budget: {msg}"
+    );
 }
 
 #[test]
@@ -1379,11 +1374,19 @@ async fn full_pipeline_discover_introspect_preflight_denied() {
     assert_eq!(introspection.tools.len(), 2);
 
     // Verify tool properties
-    let send = introspection.tools.iter().find(|t| t.name == "send").unwrap();
+    let send = introspection
+        .tools
+        .iter()
+        .find(|t| t.name == "send")
+        .unwrap();
     assert!(send.requires_confirmation);
     assert!(!send.idempotent);
 
-    let list = introspection.tools.iter().find(|t| t.name == "list").unwrap();
+    let list = introspection
+        .tools
+        .iter()
+        .find(|t| t.name == "list")
+        .unwrap();
     assert!(!list.requires_confirmation);
     assert!(list.idempotent);
 
@@ -1814,10 +1817,7 @@ fn budget_evaluation_error_window_seconds_correct() {
     let eval = tracker.record_usage(&zone, &policy, &[UsageMetric::tokens(200)]);
     let err = eval.to_error().unwrap();
 
-    if let fcp_core::FcpError::BudgetExceeded {
-        window_seconds, ..
-    } = err
-    {
+    if let fcp_core::FcpError::BudgetExceeded { window_seconds, .. } = err {
         assert_eq!(window_seconds, window_secs);
     } else {
         panic!("expected BudgetExceeded");
@@ -1924,7 +1924,10 @@ fn connector_archetype_equality_and_copy() {
     let b = a; // Copy
     assert_eq!(a, b);
     assert_ne!(ConnectorArchetype::Streaming, ConnectorArchetype::Polling);
-    assert_ne!(ConnectorArchetype::Webhook, ConnectorArchetype::RequestResponse);
+    assert_ne!(
+        ConnectorArchetype::Webhook,
+        ConnectorArchetype::RequestResponse
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2002,9 +2005,7 @@ async fn budget_engine_remove_readd_lifecycle() {
         .await;
 
     // Record some usage
-    engine
-        .record_usage(&zone, &[UsageMetric::tokens(60)])
-        .await;
+    engine.record_usage(&zone, &[UsageMetric::tokens(60)]).await;
     let snap = engine.snapshot(&zone).await.unwrap();
     assert_eq!(snap.budgets[0].used, 60);
 
@@ -2039,7 +2040,10 @@ async fn budget_engine_remove_readd_lifecycle() {
         .await;
 
     let snap = engine.snapshot(&zone).await.unwrap();
-    assert_eq!(snap.budgets[0].used, 60, "tracker retains usage across policy changes");
+    assert_eq!(
+        snap.budgets[0].used, 60,
+        "tracker retains usage across policy changes"
+    );
     assert_eq!(snap.budgets[0].limit, 50, "new policy limit applied");
 }
 
@@ -2315,7 +2319,11 @@ async fn discover_filter_available_only() {
     let response = endpoint.discover(Some(filter)).await;
     assert_eq!(response.connectors.len(), 2);
     // Should include Healthy and Degraded but not Down
-    let names: Vec<&str> = response.connectors.iter().map(|c| c.name.as_str()).collect();
+    let names: Vec<&str> = response
+        .connectors
+        .iter()
+        .map(|c| c.name.as_str())
+        .collect();
     assert!(names.contains(&"Healthy"));
     assert!(names.contains(&"Degraded"));
     assert!(!names.contains(&"Down"));
@@ -2356,7 +2364,10 @@ fn doctor_report_baseline_defaults() {
 
 #[test]
 fn freshness_level_default_is_fresh() {
-    assert_eq!(fcp_host::FreshnessLevel::default(), fcp_host::FreshnessLevel::Fresh);
+    assert_eq!(
+        fcp_host::FreshnessLevel::default(),
+        fcp_host::FreshnessLevel::Fresh
+    );
 }
 
 #[test]
@@ -2457,7 +2468,11 @@ async fn discover_filter_max_risk_risky() {
     };
     let response = endpoint.discover(Some(filter)).await;
     assert_eq!(response.connectors.len(), 2); // Reader (Safe) + Stream (Risky)
-    let names: Vec<&str> = response.connectors.iter().map(|c| c.name.as_str()).collect();
+    let names: Vec<&str> = response
+        .connectors
+        .iter()
+        .map(|c| c.name.as_str())
+        .collect();
     assert!(names.contains(&"Reader"));
     assert!(names.contains(&"Stream"));
     assert!(!names.contains(&"Writer")); // Dangerous

@@ -50,7 +50,10 @@ impl AmplitudeConfig {
             .map(str::to_string);
 
         Ok(Self {
-            auth: AmplitudeAuth { api_key, secret_key },
+            auth: AmplitudeAuth {
+                api_key,
+                secret_key,
+            },
             base_url,
         })
     }
@@ -135,9 +138,8 @@ impl AmplitudeConnector {
         let config = AmplitudeConfig::from_params(&params)?;
         info!(auth = %config.auth.redacted_label(), "Configuring Amplitude connector");
 
-        let client =
-            AmplitudeClient::new(config.auth.clone(), config.base_url.as_deref())
-                .map_err(|e| e.to_fcp_error())?;
+        let client = AmplitudeClient::new(config.auth.clone(), config.base_url.as_deref())
+            .map_err(|e| e.to_fcp_error())?;
 
         self.client = Some(Arc::new(client));
         self.config = Some(config);
@@ -272,7 +274,10 @@ impl AmplitudeConnector {
                 message: "Missing operation_id".into(),
             })?;
 
-        let input = params.get("input").cloned().unwrap_or(serde_json::Value::Null);
+        let input = params
+            .get("input")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
 
         self.request_count.fetch_add(1, Ordering::Relaxed);
 
@@ -912,9 +917,24 @@ mod tests {
     #[test]
     fn doctor_result_preserves_check_count() {
         let checks = vec![
-            DoctorCheck { name: "a".into(), passed: true, message: None, critical: true },
-            DoctorCheck { name: "b".into(), passed: true, message: None, critical: false },
-            DoctorCheck { name: "c".into(), passed: true, message: None, critical: false },
+            DoctorCheck {
+                name: "a".into(),
+                passed: true,
+                message: None,
+                critical: true,
+            },
+            DoctorCheck {
+                name: "b".into(),
+                passed: true,
+                message: None,
+                critical: false,
+            },
+            DoctorCheck {
+                name: "c".into(),
+                passed: true,
+                message: None,
+                critical: false,
+            },
         ];
         let r = DoctorResult::from_checks(checks);
         assert_eq!(r.checks.len(), 3);
@@ -981,7 +1001,11 @@ mod tests {
     fn operations_all_strict_idempotency() {
         let ops = operations_info();
         for op in ops.as_array().unwrap() {
-            assert_eq!(op["idempotency"], "strict", "op {:?} should be strict", op["id"]);
+            assert_eq!(
+                op["idempotency"], "strict",
+                "op {:?} should be strict",
+                op["id"]
+            );
         }
     }
 

@@ -23,7 +23,9 @@ pub struct AnnasArchiveConnector {
 impl AnnasArchiveConnector {
     pub fn new() -> Self {
         Self {
-            base: Arc::new(BaseConnector::new(ConnectorId::from_static("annas-archive"))),
+            base: Arc::new(BaseConnector::new(ConnectorId::from_static(
+                "annas-archive",
+            ))),
             client: None,
             base_url: DEFAULT_BASE_URL.to_string(),
             session_id: None,
@@ -184,10 +186,7 @@ impl AnnasArchiveConnector {
         })
     }
 
-    pub async fn handle_simulate(
-        &self,
-        params: serde_json::Value,
-    ) -> FcpResult<serde_json::Value> {
+    pub async fn handle_simulate(&self, params: serde_json::Value) -> FcpResult<serde_json::Value> {
         let operation = params
             .get("operation_id")
             .and_then(serde_json::Value::as_str)
@@ -414,8 +413,14 @@ mod tests {
     #[fcp_async_core::runtime::test]
     async fn invoke_requires_ready() {
         let c = connector();
-        let err = c.handle_invoke(json!({"operation_id": "annas.search", "input": {}})).await.unwrap_err();
-        assert!(matches!(err, FcpError::NotConfigured | FcpError::NotHandshaken));
+        let err = c
+            .handle_invoke(json!({"operation_id": "annas.search", "input": {}}))
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            FcpError::NotConfigured | FcpError::NotHandshaken
+        ));
     }
 
     #[fcp_async_core::runtime::test]

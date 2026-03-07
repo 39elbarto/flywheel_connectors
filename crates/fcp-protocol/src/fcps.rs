@@ -2079,9 +2079,7 @@ mod tests {
 
     #[test]
     fn frame_error_invalid_magic_display() {
-        let err = FrameError::InvalidMagic {
-            got: [0, 0, 0, 0],
-        };
+        let err = FrameError::InvalidMagic { got: [0, 0, 0, 0] };
         assert!(err.to_string().contains("magic"));
     }
 

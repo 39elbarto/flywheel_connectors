@@ -867,10 +867,8 @@ mod tests {
     fn subkey_unique_per_zone_key_id() {
         let zone_key = AeadKey::from_bytes([0xBB; 32]);
         let node = TailscaleNodeId::new("node-z");
-        let subkey_a =
-            derive_sender_subkey(&zone_key, &ZoneKeyId::from_bytes([0x01; 8]), &node, 1);
-        let subkey_b =
-            derive_sender_subkey(&zone_key, &ZoneKeyId::from_bytes([0x02; 8]), &node, 1);
+        let subkey_a = derive_sender_subkey(&zone_key, &ZoneKeyId::from_bytes([0x01; 8]), &node, 1);
+        let subkey_b = derive_sender_subkey(&zone_key, &ZoneKeyId::from_bytes([0x02; 8]), &node, 1);
         assert_ne!(subkey_a.as_bytes(), subkey_b.as_bytes());
     }
 
@@ -900,13 +898,8 @@ mod tests {
         let zone_key = AeadKey::generate();
         let ctx = test_context();
 
-        let (ciphertext, auth_tag) = encrypt_symbol(
-            &zone_key,
-            ZoneKeyAlgorithm::XChaCha20Poly1305,
-            &ctx,
-            b"",
-        )
-        .unwrap();
+        let (ciphertext, auth_tag) =
+            encrypt_symbol(&zone_key, ZoneKeyAlgorithm::XChaCha20Poly1305, &ctx, b"").unwrap();
         assert!(ciphertext.is_empty());
 
         let decrypted = decrypt_symbol(

@@ -13,6 +13,7 @@ fn bench_zone() -> ZoneId {
     "z:bench".parse().unwrap()
 }
 
+#[allow(clippy::missing_const_for_fn)]
 fn bench_policy() -> ObjectPlacementPolicy {
     ObjectPlacementPolicy {
         min_nodes: 1,

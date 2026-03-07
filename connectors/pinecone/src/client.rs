@@ -934,10 +934,7 @@ mod tests {
             .unwrap()
             .with_control_plane_url("http://custom-control.io");
         let debug = format!("{client:?}");
-        assert!(
-            debug.contains("http://custom-control.io"),
-            "debug: {debug}"
-        );
+        assert!(debug.contains("http://custom-control.io"), "debug: {debug}");
     }
 
     #[test]
@@ -946,17 +943,12 @@ mod tests {
             .unwrap()
             .with_data_plane_url("http://custom-data.io");
         let debug = format!("{client:?}");
-        assert!(
-            debug.contains("http://custom-data.io"),
-            "debug: {debug}"
-        );
+        assert!(debug.contains("http://custom-data.io"), "debug: {debug}");
     }
 
     #[test]
     fn client_with_retry_config() {
-        let client = PineconeClient::new("key")
-            .unwrap()
-            .with_retry_config(5);
+        let client = PineconeClient::new("key").unwrap().with_retry_config(5);
         // Verify it doesn't panic; the retry config is internal
         let debug = format!("{client:?}");
         assert!(debug.contains("PineconeClient"), "debug: {debug}");
@@ -984,8 +976,7 @@ mod tests {
 
     #[test]
     fn client_new_with_auth_api_key() {
-        let client =
-            PineconeClient::new_with_auth(PineconeAuth::ApiKey("mykey".into())).unwrap();
+        let client = PineconeClient::new_with_auth(PineconeAuth::ApiKey("mykey".into())).unwrap();
         let debug = format!("{client:?}");
         assert!(debug.contains("PineconeClient"), "debug: {debug}");
     }
@@ -993,8 +984,7 @@ mod tests {
     #[test]
     fn client_new_with_auth_credential_id() {
         let cid = CredentialId::parse(&uuid::Uuid::new_v4().to_string()).unwrap();
-        let client =
-            PineconeClient::new_with_auth(PineconeAuth::CredentialId(cid)).unwrap();
+        let client = PineconeClient::new_with_auth(PineconeAuth::CredentialId(cid)).unwrap();
         let debug = format!("{client:?}");
         assert!(debug.contains("CredentialId"), "debug: {debug}");
     }
@@ -1014,9 +1004,7 @@ mod tests {
 
         Mock::given(method("GET"))
             .and(path("/indexes"))
-            .respond_with(
-                ResponseTemplate::new(403).set_body_string("Forbidden"),
-            )
+            .respond_with(ResponseTemplate::new(403).set_body_string("Forbidden"))
             .mount(&mock_server)
             .await;
 
@@ -1123,10 +1111,7 @@ mod tests {
             .with_data_plane_url(&mock_server.uri());
 
         let filter = serde_json::json!({"genre": {"$eq": "sci-fi"}});
-        let stats = client
-            .describe_index_stats(Some(&filter))
-            .await
-            .unwrap();
+        let stats = client.describe_index_stats(Some(&filter)).await.unwrap();
         assert_eq!(stats.dimension, Some(128));
     }
 

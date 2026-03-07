@@ -75,7 +75,10 @@ impl TerraformError {
             Self::Json(e) => FcpError::Internal {
                 message: format!("JSON error: {e}"),
             },
-            Self::Api { status_code, message } => FcpError::External {
+            Self::Api {
+                status_code,
+                message,
+            } => FcpError::External {
                 service: "terraform".into(),
                 message: message.clone(),
                 status_code: Some(*status_code),
@@ -127,27 +130,44 @@ mod tests {
 
     #[test]
     fn rate_limited_is_retryable() {
-        assert!(TerraformError::RateLimited { retry_after_ms: 5000 }.is_retryable());
+        assert!(
+            TerraformError::RateLimited {
+                retry_after_ms: 5000
+            }
+            .is_retryable()
+        );
     }
 
     #[test]
     fn api_500_is_retryable() {
         assert!(
-            TerraformError::Api { status_code: 500, message: "err".into() }.is_retryable()
+            TerraformError::Api {
+                status_code: 500,
+                message: "err".into()
+            }
+            .is_retryable()
         );
     }
 
     #[test]
     fn api_503_is_retryable() {
         assert!(
-            TerraformError::Api { status_code: 503, message: "unavailable".into() }.is_retryable()
+            TerraformError::Api {
+                status_code: 503,
+                message: "unavailable".into()
+            }
+            .is_retryable()
         );
     }
 
     #[test]
     fn api_429_is_retryable() {
         assert!(
-            TerraformError::Api { status_code: 429, message: "too many".into() }.is_retryable()
+            TerraformError::Api {
+                status_code: 429,
+                message: "too many".into()
+            }
+            .is_retryable()
         );
     }
 
@@ -163,24 +183,40 @@ mod tests {
 
     #[test]
     fn not_found_not_retryable() {
-        assert!(!TerraformError::NotFound { resource: "workspace".into() }.is_retryable());
+        assert!(
+            !TerraformError::NotFound {
+                resource: "workspace".into()
+            }
+            .is_retryable()
+        );
     }
 
     #[test]
     fn conflict_not_retryable() {
-        assert!(!TerraformError::Conflict { message: "run in progress".into() }.is_retryable());
+        assert!(
+            !TerraformError::Conflict {
+                message: "run in progress".into()
+            }
+            .is_retryable()
+        );
     }
 
     #[test]
     fn api_400_not_retryable() {
         assert!(
-            !TerraformError::Api { status_code: 400, message: "bad request".into() }.is_retryable()
+            !TerraformError::Api {
+                status_code: 400,
+                message: "bad request".into()
+            }
+            .is_retryable()
         );
     }
 
     #[test]
     fn retry_after_for_rate_limited() {
-        let err = TerraformError::RateLimited { retry_after_ms: 30_000 };
+        let err = TerraformError::RateLimited {
+            retry_after_ms: 30_000,
+        };
         assert_eq!(err.retry_after(), Some(Duration::from_secs(30)));
     }
 
@@ -197,20 +233,33 @@ mod tests {
     #[test]
     fn retry_after_none_for_api_error() {
         assert_eq!(
-            TerraformError::Api { status_code: 500, message: "err".into() }.retry_after(),
+            TerraformError::Api {
+                status_code: 500,
+                message: "err".into()
+            }
+            .retry_after(),
             None
         );
     }
 
     #[test]
     fn retry_after_none_for_not_found() {
-        assert_eq!(TerraformError::NotFound { resource: "x".into() }.retry_after(), None);
+        assert_eq!(
+            TerraformError::NotFound {
+                resource: "x".into()
+            }
+            .retry_after(),
+            None
+        );
     }
 
     #[test]
     fn retry_after_none_for_conflict() {
         assert_eq!(
-            TerraformError::Conflict { message: "busy".into() }.retry_after(),
+            TerraformError::Conflict {
+                message: "busy".into()
+            }
+            .retry_after(),
             None
         );
     }
@@ -218,7 +267,12 @@ mod tests {
     #[test]
     fn unauthorized_to_fcp_error() {
         match TerraformError::Unauthorized.to_fcp_error() {
-            FcpError::External { service, status_code, retryable, .. } => {
+            FcpError::External {
+                service,
+                status_code,
+                retryable,
+                ..
+            } => {
                 assert_eq!(service, "terraform");
                 assert_eq!(status_code, Some(401));
                 assert!(!retryable);
@@ -230,7 +284,12 @@ mod tests {
     #[test]
     fn forbidden_to_fcp_error() {
         match TerraformError::Forbidden.to_fcp_error() {
-            FcpError::External { service, status_code, retryable, .. } => {
+            FcpError::External {
+                service,
+                status_code,
+                retryable,
+                ..
+            } => {
                 assert_eq!(service, "terraform");
                 assert_eq!(status_code, Some(403));
                 assert!(!retryable);
@@ -241,8 +300,17 @@ mod tests {
 
     #[test]
     fn not_found_to_fcp_error() {
-        match (TerraformError::NotFound { resource: "ws-abc".into() }).to_fcp_error() {
-            FcpError::External { status_code, message, retryable, .. } => {
+        match (TerraformError::NotFound {
+            resource: "ws-abc".into(),
+        })
+        .to_fcp_error()
+        {
+            FcpError::External {
+                status_code,
+                message,
+                retryable,
+                ..
+            } => {
                 assert_eq!(status_code, Some(404));
                 assert!(message.contains("ws-abc"));
                 assert!(!retryable);
@@ -253,8 +321,17 @@ mod tests {
 
     #[test]
     fn conflict_to_fcp_error() {
-        match (TerraformError::Conflict { message: "run active".into() }).to_fcp_error() {
-            FcpError::External { status_code, message, retryable, .. } => {
+        match (TerraformError::Conflict {
+            message: "run active".into(),
+        })
+        .to_fcp_error()
+        {
+            FcpError::External {
+                status_code,
+                message,
+                retryable,
+                ..
+            } => {
                 assert_eq!(status_code, Some(409));
                 assert_eq!(message, "run active");
                 assert!(!retryable);
@@ -265,8 +342,17 @@ mod tests {
 
     #[test]
     fn rate_limited_to_fcp_error() {
-        match (TerraformError::RateLimited { retry_after_ms: 60_000 }).to_fcp_error() {
-            FcpError::External { status_code, retryable, retry_after, .. } => {
+        match (TerraformError::RateLimited {
+            retry_after_ms: 60_000,
+        })
+        .to_fcp_error()
+        {
+            FcpError::External {
+                status_code,
+                retryable,
+                retry_after,
+                ..
+            } => {
                 assert_eq!(status_code, Some(429));
                 assert!(retryable);
                 assert_eq!(retry_after, Some(Duration::from_secs(60)));
@@ -277,10 +363,19 @@ mod tests {
 
     #[test]
     fn api_error_to_fcp_error() {
-        match (TerraformError::Api { status_code: 503, message: "unavailable".into() })
-            .to_fcp_error()
+        match (TerraformError::Api {
+            status_code: 503,
+            message: "unavailable".into(),
+        })
+        .to_fcp_error()
         {
-            FcpError::External { service, status_code, retryable, message, .. } => {
+            FcpError::External {
+                service,
+                status_code,
+                retryable,
+                message,
+                ..
+            } => {
                 assert_eq!(service, "terraform");
                 assert_eq!(status_code, Some(503));
                 assert!(retryable);
@@ -301,8 +396,17 @@ mod tests {
 
     #[test]
     fn api_error_non_retryable_to_fcp_error() {
-        match (TerraformError::Api { status_code: 400, message: "bad".into() }).to_fcp_error() {
-            FcpError::External { status_code, retryable, .. } => {
+        match (TerraformError::Api {
+            status_code: 400,
+            message: "bad".into(),
+        })
+        .to_fcp_error()
+        {
+            FcpError::External {
+                status_code,
+                retryable,
+                ..
+            } => {
                 assert_eq!(status_code, Some(400));
                 assert!(!retryable);
             }
@@ -329,7 +433,10 @@ mod tests {
     #[test]
     fn error_display_not_found() {
         assert_eq!(
-            TerraformError::NotFound { resource: "workspace".into() }.to_string(),
+            TerraformError::NotFound {
+                resource: "workspace".into()
+            }
+            .to_string(),
             "Not found: workspace"
         );
     }
@@ -337,7 +444,10 @@ mod tests {
     #[test]
     fn error_display_rate_limited() {
         assert_eq!(
-            TerraformError::RateLimited { retry_after_ms: 2000 }.to_string(),
+            TerraformError::RateLimited {
+                retry_after_ms: 2000
+            }
+            .to_string(),
             "Rate limited, retry after 2000ms"
         );
     }
@@ -345,7 +455,11 @@ mod tests {
     #[test]
     fn error_display_api() {
         assert_eq!(
-            TerraformError::Api { status_code: 500, message: "Internal".into() }.to_string(),
+            TerraformError::Api {
+                status_code: 500,
+                message: "Internal".into()
+            }
+            .to_string(),
             "Terraform API error (500): Internal"
         );
     }
@@ -353,7 +467,10 @@ mod tests {
     #[test]
     fn error_display_conflict() {
         assert_eq!(
-            TerraformError::Conflict { message: "run in progress".into() }.to_string(),
+            TerraformError::Conflict {
+                message: "run in progress".into()
+            }
+            .to_string(),
             "Conflict: run in progress"
         );
     }
@@ -361,21 +478,33 @@ mod tests {
     #[test]
     fn api_501_is_retryable() {
         assert!(
-            TerraformError::Api { status_code: 501, message: "not implemented".into() }.is_retryable()
+            TerraformError::Api {
+                status_code: 501,
+                message: "not implemented".into()
+            }
+            .is_retryable()
         );
     }
 
     #[test]
     fn api_599_is_retryable() {
         assert!(
-            TerraformError::Api { status_code: 599, message: "edge".into() }.is_retryable()
+            TerraformError::Api {
+                status_code: 599,
+                message: "edge".into()
+            }
+            .is_retryable()
         );
     }
 
     #[test]
     fn api_499_not_retryable() {
         assert!(
-            !TerraformError::Api { status_code: 499, message: "client".into() }.is_retryable()
+            !TerraformError::Api {
+                status_code: 499,
+                message: "client".into()
+            }
+            .is_retryable()
         );
     }
 
@@ -387,7 +516,10 @@ mod tests {
 
     #[test]
     fn error_debug_format_api() {
-        let err = TerraformError::Api { status_code: 503, message: "unavailable".into() };
+        let err = TerraformError::Api {
+            status_code: 503,
+            message: "unavailable".into(),
+        };
         let dbg = format!("{err:?}");
         assert!(dbg.contains("Api"));
         assert!(dbg.contains("503"));
@@ -401,7 +533,9 @@ mod tests {
 
     #[test]
     fn error_debug_format_conflict() {
-        let err = TerraformError::Conflict { message: "busy".into() };
+        let err = TerraformError::Conflict {
+            message: "busy".into(),
+        };
         let dbg = format!("{err:?}");
         assert!(dbg.contains("Conflict"));
         assert!(dbg.contains("busy"));
@@ -415,13 +549,19 @@ mod tests {
 
     #[test]
     fn retry_after_large_value() {
-        let err = TerraformError::RateLimited { retry_after_ms: 3_600_000 };
+        let err = TerraformError::RateLimited {
+            retry_after_ms: 3_600_000,
+        };
         assert_eq!(err.retry_after(), Some(Duration::from_secs(3600)));
     }
 
     #[test]
     fn conflict_to_fcp_error_service() {
-        match (TerraformError::Conflict { message: "busy".into() }).to_fcp_error() {
+        match (TerraformError::Conflict {
+            message: "busy".into(),
+        })
+        .to_fcp_error()
+        {
             FcpError::External { service, .. } => assert_eq!(service, "terraform"),
             other => panic!("expected External, got {other:?}"),
         }
@@ -429,7 +569,12 @@ mod tests {
 
     #[test]
     fn api_error_retryable_has_no_retry_after() {
-        match (TerraformError::Api { status_code: 500, message: "err".into() }).to_fcp_error() {
+        match (TerraformError::Api {
+            status_code: 500,
+            message: "err".into(),
+        })
+        .to_fcp_error()
+        {
             FcpError::External { retry_after, .. } => assert!(retry_after.is_none()),
             other => panic!("expected External, got {other:?}"),
         }
@@ -446,21 +591,33 @@ mod tests {
     #[test]
     fn api_502_is_retryable() {
         assert!(
-            TerraformError::Api { status_code: 502, message: "bad gateway".into() }.is_retryable()
+            TerraformError::Api {
+                status_code: 502,
+                message: "bad gateway".into()
+            }
+            .is_retryable()
         );
     }
 
     #[test]
     fn api_504_is_retryable() {
         assert!(
-            TerraformError::Api { status_code: 504, message: "gateway timeout".into() }.is_retryable()
+            TerraformError::Api {
+                status_code: 504,
+                message: "gateway timeout".into()
+            }
+            .is_retryable()
         );
     }
 
     #[test]
     fn api_422_not_retryable() {
         assert!(
-            !TerraformError::Api { status_code: 422, message: "unprocessable".into() }.is_retryable()
+            !TerraformError::Api {
+                status_code: 422,
+                message: "unprocessable".into()
+            }
+            .is_retryable()
         );
     }
 

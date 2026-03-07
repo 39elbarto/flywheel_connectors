@@ -87,9 +87,7 @@ impl ZapierClient {
             ZapierAuth::BearerToken(token) => {
                 req.header("Authorization", format!("Bearer {token}"))
             }
-            ZapierAuth::CredentialId(id) => {
-                req.header("X-FCP-Credential-Id", id.to_string())
-            }
+            ZapierAuth::CredentialId(id) => req.header("X-FCP-Credential-Id", id.to_string()),
         }
     }
 
@@ -138,7 +136,10 @@ impl ZapierClient {
             429 => Err(ZapierError::RateLimited {
                 retry_after_ms: retry_after.unwrap_or(60) * 1000,
             }),
-            code => Err(ZapierError::Api { status_code: code, message: detail }),
+            code => Err(ZapierError::Api {
+                status_code: code,
+                message: detail,
+            }),
         }
     }
 
@@ -154,11 +155,7 @@ impl ZapierClient {
     }
 
     #[instrument(skip(self, body), fields(url))]
-    async fn post(
-        &self,
-        path: &str,
-        body: &serde_json::Value,
-    ) -> ZapierResult<serde_json::Value> {
+    async fn post(&self, path: &str, body: &serde_json::Value) -> ZapierResult<serde_json::Value> {
         let url = format!("{}{path}", self.base_url);
         debug!(url = %url, "POST request");
         let req = self
@@ -204,7 +201,8 @@ impl ZapierClient {
                 obj.insert("instructions".into(), serde_json::Value::Null);
             }
         }
-        self.post(&format!("/exposed/{action_id}/execute/"), &body).await
+        self.post(&format!("/exposed/{action_id}/execute/"), &body)
+            .await
     }
 }
 
@@ -250,8 +248,7 @@ mod tests {
 
     #[test]
     fn client_new_default_url() {
-        let client =
-            ZapierClient::new(ZapierAuth::BearerToken("tok".into()), None).unwrap();
+        let client = ZapierClient::new(ZapierAuth::BearerToken("tok".into()), None).unwrap();
         assert_eq!(client.base_url, DEFAULT_BASE_URL);
     }
 
@@ -277,8 +274,7 @@ mod tests {
 
     #[test]
     fn client_debug_redacts() {
-        let client =
-            ZapierClient::new(ZapierAuth::BearerToken("secret".into()), None).unwrap();
+        let client = ZapierClient::new(ZapierAuth::BearerToken("secret".into()), None).unwrap();
         let dbg = format!("{client:?}");
         assert!(!dbg.contains("secret"));
         assert!(dbg.contains("redacted"));
@@ -286,8 +282,7 @@ mod tests {
 
     #[test]
     fn client_debug_shows_base_url() {
-        let client =
-            ZapierClient::new(ZapierAuth::BearerToken("tok".into()), None).unwrap();
+        let client = ZapierClient::new(ZapierAuth::BearerToken("tok".into()), None).unwrap();
         let dbg = format!("{client:?}");
         assert!(dbg.contains("api.zapier.com"));
     }
@@ -345,8 +340,7 @@ mod tests {
 
     #[test]
     fn client_debug_contains_zapier_client() {
-        let client =
-            ZapierClient::new(ZapierAuth::BearerToken("tok".into()), None).unwrap();
+        let client = ZapierClient::new(ZapierAuth::BearerToken("tok".into()), None).unwrap();
         let dbg = format!("{client:?}");
         assert!(dbg.contains("ZapierClient"));
     }

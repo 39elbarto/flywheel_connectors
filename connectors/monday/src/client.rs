@@ -171,17 +171,13 @@ impl MondayClient {
 
     /// List boards.
     pub async fn list_boards(&self, limit: u64) -> MondayResult<serde_json::Value> {
-        let query = format!(
-            "{{ boards(limit: {limit}) {{ id name state board_kind }} }}"
-        );
+        let query = format!("{{ boards(limit: {limit}) {{ id name state board_kind }} }}");
         self.query(&query).await
     }
 
     /// Get a single board by ID.
     pub async fn get_board(&self, board_id: &str) -> MondayResult<serde_json::Value> {
-        let query = format!(
-            "{{ boards(ids: [{board_id}]) {{ id name description state }} }}"
-        );
+        let query = format!("{{ boards(ids: [{board_id}]) {{ id name description state }} }}");
         self.query(&query).await
     }
 
@@ -219,9 +215,7 @@ impl MondayClient {
 
     /// Delete an item.
     pub async fn delete_item(&self, item_id: &str) -> MondayResult<serde_json::Value> {
-        let query = format!(
-            "mutation {{ delete_item(item_id: {item_id}) {{ id }} }}"
-        );
+        let query = format!("mutation {{ delete_item(item_id: {item_id}) {{ id }} }}");
         self.query(&query).await
     }
 

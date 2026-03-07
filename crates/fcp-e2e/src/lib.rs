@@ -2184,8 +2184,7 @@ mod tests {
             provenance: None,
             approval_tokens: vec![],
         };
-        let suite =
-            ConnectorSuite::default_deny("cfg_check", test_handshake(), invoke, "FCP-0000");
+        let suite = ConnectorSuite::default_deny("cfg_check", test_handshake(), invoke, "FCP-0000");
         assert_eq!(suite.config, serde_json::json!({}));
     }
 
@@ -2268,10 +2267,7 @@ mod tests {
         }];
         let json = findings_to_json(&findings);
         assert_eq!(json.len(), 1);
-        assert_eq!(
-            json[0].get("message").and_then(|v| v.as_str()),
-            Some("yep")
-        );
+        assert_eq!(json[0].get("message").and_then(|v| v.as_str()), Some("yep"));
     }
 }
 

@@ -17,10 +17,9 @@ use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
 
 use fcp_graphql::{
     CursorPage, CursorPageInfo, GraphqlClientBuilder, GraphqlClientError, GraphqlErrorLocation,
-    GraphqlOperation, GraphqlPathSegment, GraphqlQuery, GraphqlRequest,
-    GraphqlSubscriptionClient, GraphqlSubscriptionConfig, OffsetPage, PageLimit, PaginationError,
-    RetryDecision, RetryPolicy, RetryStrategy, SchemaValidationMode, paginate_cursor,
-    paginate_offset,
+    GraphqlOperation, GraphqlPathSegment, GraphqlQuery, GraphqlRequest, GraphqlSubscriptionClient,
+    GraphqlSubscriptionConfig, OffsetPage, PageLimit, PaginationError, RetryDecision, RetryPolicy,
+    RetryStrategy, SchemaValidationMode, paginate_cursor, paginate_offset,
 };
 use fcp_streaming::WsConfig;
 
@@ -844,9 +843,7 @@ async fn subscription_receives_next_message() {
 
     let server_task = task::spawn(async move {
         let (stream, _) = listener.accept().await.expect("accept");
-        let mut ws = accept_async(TokioIo::new(stream))
-            .await
-            .expect("accept ws");
+        let mut ws = accept_async(TokioIo::new(stream)).await.expect("accept ws");
 
         let init = ws.next().await.expect("init message").expect("init ok");
         let init_text = init.into_text().expect("init text");
@@ -919,9 +916,7 @@ async fn subscription_reconnects_after_disconnect() {
     let server_task = task::spawn(async move {
         for connection_idx in 0..2 {
             let (stream, _) = listener.accept().await.expect("accept");
-            let mut ws = accept_async(TokioIo::new(stream))
-                .await
-                .expect("accept ws");
+            let mut ws = accept_async(TokioIo::new(stream)).await.expect("accept ws");
 
             let init = ws.next().await.expect("init message").expect("init ok");
             let init_text = init.into_text().expect("init text");
@@ -1023,9 +1018,7 @@ async fn subscription_disconnect_without_reconnect_emits_error() {
 
     let server_task = task::spawn(async move {
         let (stream, _) = listener.accept().await.expect("accept");
-        let mut ws = accept_async(TokioIo::new(stream))
-            .await
-            .expect("accept ws");
+        let mut ws = accept_async(TokioIo::new(stream)).await.expect("accept ws");
 
         let _init = ws.next().await.expect("init message").expect("init ok");
         ws.send(Message::Text(
@@ -1085,9 +1078,7 @@ async fn subscription_drop_sends_complete_frame() {
 
     let server_task = task::spawn(async move {
         let (stream, _) = listener.accept().await.expect("accept");
-        let mut ws = accept_async(TokioIo::new(stream))
-            .await
-            .expect("accept ws");
+        let mut ws = accept_async(TokioIo::new(stream)).await.expect("accept ws");
 
         let _init = ws.next().await.expect("init message").expect("init ok");
         ws.send(Message::Text(
@@ -1257,7 +1248,10 @@ async fn bearer_token_sent_in_authorization_header() {
 
     Mock::given(method("POST"))
         .and(path("/"))
-        .and(wiremock::matchers::header("Authorization", "Bearer tok-secret"))
+        .and(wiremock::matchers::header(
+            "Authorization",
+            "Bearer tok-secret",
+        ))
         .respond_with(
             ResponseTemplate::new(200)
                 .set_body_json(serde_json::json!({"data": {"viewer": {"id": "auth-1"}}})),
@@ -1609,15 +1603,9 @@ async fn graphql_error_locations_and_path_preserved() {
             assert_eq!(e.locations[0].line, 2);
             assert_eq!(e.locations[0].column, 5);
             assert_eq!(e.path.len(), 3);
-            assert_eq!(
-                e.path[0],
-                GraphqlPathSegment::Key("viewer".into())
-            );
+            assert_eq!(e.path[0], GraphqlPathSegment::Key("viewer".into()));
             assert_eq!(e.path[1], GraphqlPathSegment::Index(0));
-            assert_eq!(
-                e.path[2],
-                GraphqlPathSegment::Key("email".into())
-            );
+            assert_eq!(e.path[2], GraphqlPathSegment::Key("email".into()));
             assert_eq!(
                 e.extensions.as_ref().unwrap()["code"],
                 "GRAPHQL_VALIDATION_FAILED"
@@ -1741,14 +1729,11 @@ async fn subscription_with_init_payload() {
 
     let server_task = task::spawn(async move {
         let (stream, _) = listener.accept().await.expect("accept");
-        let mut ws = accept_async(TokioIo::new(stream))
-            .await
-            .expect("accept ws");
+        let mut ws = accept_async(TokioIo::new(stream)).await.expect("accept ws");
 
         let init = ws.next().await.expect("init message").expect("init ok");
         let init_text = init.into_text().expect("init text");
-        let init_value: serde_json::Value =
-            serde_json::from_str(&init_text).expect("init json");
+        let init_value: serde_json::Value = serde_json::from_str(&init_text).expect("init json");
 
         // Verify the init_payload is included
         assert_eq!(
@@ -1926,10 +1911,7 @@ fn graphql_query_serde_roundtrip() {
 
 #[test]
 fn graphql_request_serde_skips_none_op_name() {
-    let req = GraphqlRequest::new(
-        GraphqlQuery::new("{ users { id } }"),
-        serde_json::json!({}),
-    );
+    let req = GraphqlRequest::new(GraphqlQuery::new("{ users { id } }"), serde_json::json!({}));
     let json = serde_json::to_string(&req).unwrap();
     assert!(!json.contains("operation_name"));
 }

@@ -206,11 +206,7 @@ impl DocuSignClient {
     }
 
     #[instrument(skip(self, body), fields(url))]
-    async fn put(
-        &self,
-        path: &str,
-        body: &serde_json::Value,
-    ) -> DocuSignResult<serde_json::Value> {
+    async fn put(&self, path: &str, body: &serde_json::Value) -> DocuSignResult<serde_json::Value> {
         let url = format!("{}{path}", self.base_url);
         debug!(url = %url, "PUT request");
         let req = self
@@ -394,11 +390,7 @@ mod tests {
 
     #[test]
     fn client_default_base_url() {
-        let c = DocuSignClient::new(
-            DocuSignAuth::BearerToken("tok".into()),
-            None,
-        )
-        .unwrap();
+        let c = DocuSignClient::new(DocuSignAuth::BearerToken("tok".into()), None).unwrap();
         assert_eq!(c.base_url, DEFAULT_BASE_URL);
     }
 
@@ -427,11 +419,7 @@ mod tests {
 
     #[test]
     fn client_debug_format() {
-        let c = DocuSignClient::new(
-            DocuSignAuth::BearerToken("secret".into()),
-            None,
-        )
-        .unwrap();
+        let c = DocuSignClient::new(DocuSignAuth::BearerToken("secret".into()), None).unwrap();
         let dbg = format!("{c:?}");
         assert!(!dbg.contains("secret"));
         assert!(dbg.contains("DocuSignClient"));
@@ -455,11 +443,7 @@ mod tests {
 
     #[test]
     fn client_debug_contains_base_url() {
-        let c = DocuSignClient::new(
-            DocuSignAuth::BearerToken("tok".into()),
-            None,
-        )
-        .unwrap();
+        let c = DocuSignClient::new(DocuSignAuth::BearerToken("tok".into()), None).unwrap();
         let dbg = format!("{c:?}");
         assert!(dbg.contains("base_url"));
     }
@@ -467,8 +451,7 @@ mod tests {
     #[test]
     fn client_new_with_credential_id() {
         let cred = CredentialId::new();
-        let c =
-            DocuSignClient::new(DocuSignAuth::CredentialId(cred), None).unwrap();
+        let c = DocuSignClient::new(DocuSignAuth::CredentialId(cred), None).unwrap();
         assert_eq!(c.base_url, DEFAULT_BASE_URL);
     }
 

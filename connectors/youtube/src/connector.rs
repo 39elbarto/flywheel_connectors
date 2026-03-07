@@ -4,10 +4,11 @@ use std::sync::Arc;
 
 use fcp_core::{
     AgentHint, BaseConnector, CapabilityGrant, CapabilityId, CapabilityToken, CapabilityVerifier,
-    ConnectorId, CredentialId, EventCaps, FcpError, FcpResult, HandshakeRequest, HandshakeResponse,
+    ConnectorId, EventCaps, FcpError, FcpResult, HandshakeRequest, HandshakeResponse,
     IdempotencyClass, Introspection, OperationId, OperationInfo, RiskLevel, SafetyTier,
     SelfCheckReport, SessionId, SimulateRequest, SimulateResponse,
 };
+use fcp_google_discovery::{ServiceAliasRegistry, auth::GoogleAuthSelection};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tracing::{info, instrument};
@@ -22,10 +23,33 @@ use crate::{
 struct YouTubeConfig {
     auth: YouTubeAuth,
     base_url: String,
+    service_identity: String,
 }
 
 impl YouTubeConfig {
-    fn from_params(params: &serde_json::Value) -> FcpResult<Self> {
+    async fn from_params(params: &serde_json::Value) -> FcpResult<Self> {
+        let service_selector = params
+            .get("service_selector")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or("youtube");
+        let service = ServiceAliasRegistry::default()
+            .resolve(service_selector)
+            .map_err(|error| FcpError::InvalidRequest {
+                code: 1003,
+                message: format!("Invalid service_selector: {error}"),
+            })?;
+        if service.api_name != "youtube" || service.api_version != "v3" {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: format!(
+                    "service_selector must resolve to youtube:v3 (got {})",
+                    service.identity()
+                ),
+            });
+        }
+
         let api_key = params
             .get("api_key")
             .and_then(|v| v.as_str())
@@ -33,37 +57,45 @@ impl YouTubeConfig {
             .filter(|v| !v.is_empty())
             .map(str::to_string);
 
-        let credential_id = match params.get("credential_id") {
-            Some(value) => {
-                let raw = value.as_str().ok_or(FcpError::InvalidRequest {
-                    code: 1003,
-                    message: "credential_id must be a string".into(),
-                })?;
-                Some(
-                    CredentialId::parse(raw).map_err(|_| FcpError::InvalidRequest {
-                        code: 1003,
-                        message: "credential_id must be a valid UUID".into(),
-                    })?,
-                )
-            }
-            None => None,
-        };
+        let shared_auth_fields_present = [
+            "credential_id",
+            "access_token",
+            "refresh_token",
+            "client_id",
+            "client_secret",
+            "credentials_file",
+            "encrypted_local_credentials_profile",
+            "use_default_credentials",
+            "use_application_default_credentials",
+        ]
+        .iter()
+        .any(|field| params.get(*field).is_some());
 
-        let auth = match (api_key, credential_id) {
-            (Some(key), None) => YouTubeAuth::ApiKey(key),
-            (None, Some(cid)) => YouTubeAuth::CredentialId(cid),
-            (Some(_), Some(_)) => {
+        let auth = if let Some(key) = api_key {
+            if shared_auth_fields_present {
                 return Err(FcpError::InvalidRequest {
                     code: 1003,
-                    message: "Provide exactly one of api_key or credential_id, not both".into(),
+                    message: "Provide exactly one of api_key or shared Google auth source".into(),
                 });
             }
-            (None, None) => {
-                return Err(FcpError::InvalidRequest {
-                    code: 1003,
-                    message: "Missing authentication: provide api_key or credential_id".into(),
-                });
-            }
+            YouTubeAuth::ApiKey(key)
+        } else {
+            let selection =
+                GoogleAuthSelection::from_connector_config(params).map_err(|error| {
+                    FcpError::InvalidRequest {
+                        code: 1003,
+                        message: format!("Invalid Google auth configuration: {error}"),
+                    }
+                })?;
+            let materialized =
+                selection
+                    .materialize()
+                    .await
+                    .map_err(|error| FcpError::InvalidRequest {
+                        code: 1003,
+                        message: format!("Failed to materialize Google auth source: {error}"),
+                    })?;
+            YouTubeAuth::GoogleShared(materialized)
         };
 
         let base_url = params
@@ -72,7 +104,11 @@ impl YouTubeConfig {
             .unwrap_or(DEFAULT_BASE_URL)
             .to_string();
 
-        Ok(Self { auth, base_url })
+        Ok(Self {
+            auth,
+            base_url,
+            service_identity: service.identity(),
+        })
     }
 }
 
@@ -143,7 +179,7 @@ impl YouTubeConnector {
         &mut self,
         params: serde_json::Value,
     ) -> FcpResult<serde_json::Value> {
-        let config = YouTubeConfig::from_params(&params)?;
+        let config = YouTubeConfig::from_params(&params).await?;
 
         let mut client =
             YouTubeClient::new_with_auth(config.auth.clone()).map_err(|e| FcpError::Internal {
@@ -228,6 +264,7 @@ impl YouTubeConnector {
         if let Some(config) = &self.config {
             result["auth"] = json!(config.auth.redacted_label());
             result["base_url"] = json!(config.base_url);
+            result["service"] = json!(config.service_identity);
         }
         Ok(result)
     }
@@ -291,7 +328,14 @@ impl YouTubeConnector {
             message: format!("auth={}", config.auth.redacted_label()),
         });
 
-        // 5. Network constraints
+        // 5. Discovery service binding
+        checks.push(DoctorCheck {
+            name: "discovery_service".into(),
+            status: DoctorStatus::Healthy,
+            message: format!("service={}", config.service_identity),
+        });
+
+        // 6. Network constraints
         let expected_host = "www.googleapis.com";
         let host_ok = config.base_url.contains(expected_host)
             || config.base_url.starts_with("http://localhost")
@@ -312,7 +356,7 @@ impl YouTubeConnector {
             },
         });
 
-        // 6. Credential injection (secretless mode)
+        // 7. Credential injection (secretless mode)
         checks.push(DoctorCheck {
             name: "credential_injection".into(),
             status: if config.auth.is_secretless() {

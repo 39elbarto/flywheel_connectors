@@ -1017,9 +1017,24 @@ mod tests {
     #[test]
     fn doctor_result_preserves_check_count() {
         let checks = vec![
-            DoctorCheck { name: "a".into(), passed: true, message: None, critical: true },
-            DoctorCheck { name: "b".into(), passed: true, message: None, critical: false },
-            DoctorCheck { name: "c".into(), passed: false, message: Some("x".into()), critical: false },
+            DoctorCheck {
+                name: "a".into(),
+                passed: true,
+                message: None,
+                critical: true,
+            },
+            DoctorCheck {
+                name: "b".into(),
+                passed: true,
+                message: None,
+                critical: false,
+            },
+            DoctorCheck {
+                name: "c".into(),
+                passed: false,
+                message: Some("x".into()),
+                critical: false,
+            },
         ];
         let r = DoctorResult::from_checks(checks);
         assert_eq!(r.checks.len(), 3);

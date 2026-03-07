@@ -391,8 +391,9 @@ async fn error_401() {
     Mock::given(method("GET"))
         .and(path("/indexes"))
         .respond_with(
-            ResponseTemplate::new(401)
-                .set_body_json(json!({"message": "Invalid Application-Id or API key", "status": 401})),
+            ResponseTemplate::new(401).set_body_json(
+                json!({"message": "Invalid Application-Id or API key", "status": 401}),
+            ),
         )
         .mount(&server)
         .await;
@@ -669,7 +670,10 @@ async fn handshake_returns_capabilities() {
     }))
     .await
     .unwrap();
-    let hs = c.handle_handshake(json!({"session_id": "s1"})).await.unwrap();
+    let hs = c
+        .handle_handshake(json!({"session_id": "s1"}))
+        .await
+        .unwrap();
     assert_eq!(hs["connector_id"], "fcp.algolia");
     assert_eq!(hs["protocol_version"], "2.0");
     let caps = hs["capabilities"].as_array().unwrap();

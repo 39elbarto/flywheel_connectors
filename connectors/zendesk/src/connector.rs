@@ -1509,7 +1509,11 @@ mod tests {
         let valid_levels = ["low", "medium", "high", "critical"];
         for op in ops {
             let level = op["risk_level"].as_str().unwrap();
-            assert!(valid_levels.contains(&level), "Invalid risk_level for {}: {level}", op["id"]);
+            assert!(
+                valid_levels.contains(&level),
+                "Invalid risk_level for {}: {level}",
+                op["id"]
+            );
         }
     }
 
@@ -1518,9 +1522,14 @@ mod tests {
         let connector = ZendeskConnector::new();
         let result = connector.handle_introspect().await.unwrap();
         let ops = result["operations"].as_array().unwrap();
-        let read_ops = ["zendesk.get_ticket", "zendesk.search_tickets",
-                        "zendesk.list_ticket_comments", "zendesk.search_articles",
-                        "zendesk.get_article", "zendesk.search_users"];
+        let read_ops = [
+            "zendesk.get_ticket",
+            "zendesk.search_tickets",
+            "zendesk.list_ticket_comments",
+            "zendesk.search_articles",
+            "zendesk.get_article",
+            "zendesk.search_users",
+        ];
         for op in ops {
             let id = op["id"].as_str().unwrap();
             if read_ops.contains(&id) {
@@ -1534,7 +1543,10 @@ mod tests {
         let connector = ZendeskConnector::new();
         let result = connector.handle_introspect().await.unwrap();
         let ops = result["operations"].as_array().unwrap();
-        let delete_op = ops.iter().find(|o| o["id"] == "zendesk.delete_ticket").unwrap();
+        let delete_op = ops
+            .iter()
+            .find(|o| o["id"] == "zendesk.delete_ticket")
+            .unwrap();
         assert_eq!(delete_op["risk_level"], "high");
     }
 
@@ -1565,7 +1577,10 @@ mod tests {
         let connector = ZendeskConnector::new();
         let result = connector.handle_introspect().await.unwrap();
         let ops = result["operations"].as_array().unwrap();
-        let op = ops.iter().find(|o| o["id"] == "zendesk.create_ticket").unwrap();
+        let op = ops
+            .iter()
+            .find(|o| o["id"] == "zendesk.create_ticket")
+            .unwrap();
         let required = op["input_schema"]["required"].as_array().unwrap();
         assert!(required.iter().any(|v| v == "subject"));
     }
@@ -1575,7 +1590,10 @@ mod tests {
         let connector = ZendeskConnector::new();
         let result = connector.handle_introspect().await.unwrap();
         let ops = result["operations"].as_array().unwrap();
-        let op = ops.iter().find(|o| o["id"] == "zendesk.get_ticket").unwrap();
+        let op = ops
+            .iter()
+            .find(|o| o["id"] == "zendesk.get_ticket")
+            .unwrap();
         let required = op["input_schema"]["required"].as_array().unwrap();
         assert!(required.iter().any(|v| v == "ticket_id"));
     }
@@ -1585,7 +1603,10 @@ mod tests {
         let connector = ZendeskConnector::new();
         let result = connector.handle_introspect().await.unwrap();
         let ops = result["operations"].as_array().unwrap();
-        let op = ops.iter().find(|o| o["id"] == "zendesk.search_tickets").unwrap();
+        let op = ops
+            .iter()
+            .find(|o| o["id"] == "zendesk.search_tickets")
+            .unwrap();
         let required = op["input_schema"]["required"].as_array().unwrap();
         assert!(required.iter().any(|v| v == "query"));
     }
@@ -1595,7 +1616,10 @@ mod tests {
         let connector = ZendeskConnector::new();
         let result = connector.handle_introspect().await.unwrap();
         let ops = result["operations"].as_array().unwrap();
-        let op = ops.iter().find(|o| o["id"] == "zendesk.apply_macro").unwrap();
+        let op = ops
+            .iter()
+            .find(|o| o["id"] == "zendesk.apply_macro")
+            .unwrap();
         let required = op["input_schema"]["required"].as_array().unwrap();
         assert!(required.iter().any(|v| v == "ticket_id"));
         assert!(required.iter().any(|v| v == "macro_id"));
@@ -1680,7 +1704,10 @@ mod tests {
         });
         match ZendeskConfig::from_params(&params) {
             Ok(config) => {
-                assert_eq!(config.base_url.as_deref(), Some("http://localhost:9999/api/v2"));
+                assert_eq!(
+                    config.base_url.as_deref(),
+                    Some("http://localhost:9999/api/v2")
+                );
             }
             Err(e) => panic!("Expected Ok, got: {e:?}"),
         }

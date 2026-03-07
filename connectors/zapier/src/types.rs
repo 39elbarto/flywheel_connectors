@@ -221,7 +221,10 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(r.status, Some("error".into()));
-        assert_eq!(r.error, Some("Action execution failed: invalid params".into()));
+        assert_eq!(
+            r.error,
+            Some("Action execution failed: invalid params".into())
+        );
         assert!(r.result.is_none());
     }
 

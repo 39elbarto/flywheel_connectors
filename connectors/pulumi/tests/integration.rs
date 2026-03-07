@@ -22,7 +22,9 @@ async fn setup_connector(mock_url: &str) -> PulumiConnector {
     c.handle_configure(json!({ "access_token": "pul-test-token", "base_url": mock_url }))
         .await
         .unwrap();
-    c.handle_handshake(json!({"session_id": "test"})).await.unwrap();
+    c.handle_handshake(json!({"session_id": "test"}))
+        .await
+        .unwrap();
     c
 }
 
@@ -427,7 +429,8 @@ async fn error_401() {
     Mock::given(method("GET"))
         .and(path_regex("/stacks.*"))
         .respond_with(
-            ResponseTemplate::new(401).set_body_json(json!({"code": 401, "message": "Unauthorized"})),
+            ResponseTemplate::new(401)
+                .set_body_json(json!({"code": 401, "message": "Unauthorized"})),
         )
         .mount(&server)
         .await;

@@ -5562,7 +5562,10 @@ sig = "base64:{sig_b64}"
         };
         let json = serde_json::to_string(&target).unwrap();
         let deserialized: TufTargetInfo = serde_json::from_str(&json).unwrap();
-        assert_eq!(deserialized.target_path, "connectors/fcp.sentry/0.1.0/linux-amd64");
+        assert_eq!(
+            deserialized.target_path,
+            "connectors/fcp.sentry/0.1.0/linux-amd64"
+        );
         assert_eq!(deserialized.hash, "sha256:targetbytes");
         assert_eq!(deserialized.length, 1_048_576);
         assert_eq!(deserialized.delegations.len(), 2);
@@ -5601,10 +5604,7 @@ sig = "base64:{sig_b64}"
 
     #[async_trait]
     impl RegistrySource for MockRegistrySource {
-        async fn fetch_bundle(
-            &self,
-            connector_id: &str,
-        ) -> Result<ConnectorBundle, RegistryError> {
+        async fn fetch_bundle(&self, connector_id: &str) -> Result<ConnectorBundle, RegistryError> {
             self.bundles
                 .get(connector_id)
                 .cloned()
@@ -5759,10 +5759,7 @@ sig = "base64:{sig_b64}"
                     actual: "root_b".into(),
                 },
             ),
-            (
-                "expired",
-                SupplyChainVerificationError::TufExpired,
-            ),
+            ("expired", SupplyChainVerificationError::TufExpired),
             (
                 "fcp.test",
                 SupplyChainVerificationError::TufTargetNotFound {
@@ -5771,15 +5768,9 @@ sig = "base64:{sig_b64}"
             ),
             (
                 "rollback",
-                SupplyChainVerificationError::TufRollback {
-                    current: 5,
-                    got: 3,
-                },
+                SupplyChainVerificationError::TufRollback { current: 5, got: 3 },
             ),
-            (
-                "freeze",
-                SupplyChainVerificationError::TufFreeze,
-            ),
+            ("freeze", SupplyChainVerificationError::TufFreeze),
             (
                 "Sigstore signature invalid",
                 SupplyChainVerificationError::SigstoreSignatureInvalid,
@@ -5814,7 +5805,9 @@ sig = "base64:{sig_b64}"
         for (expected_substring, error) in errors {
             let display = error.to_string();
             assert!(
-                display.to_lowercase().contains(&expected_substring.to_lowercase()),
+                display
+                    .to_lowercase()
+                    .contains(&expected_substring.to_lowercase()),
                 "Expected '{}' display to contain '{}', got: '{}'",
                 std::any::type_name::<SupplyChainVerificationError>(),
                 expected_substring,
@@ -6019,24 +6012,18 @@ sig = "base64:{sig_b64}"
 
     #[test]
     fn noop_tuf_fetch_root() {
-        run_registry_test(
-            "noop_tuf_fetch_root",
-            "unit",
-            "verifier",
-            3,
-            || async {
-                let v = NoOpTufVerifier;
-                let root = v.fetch_root().await.unwrap();
-                assert_eq!(root.version, 1);
-                assert!(root.root_hash.is_empty());
-                assert_eq!(root.expires, u64::MAX);
+        run_registry_test("noop_tuf_fetch_root", "unit", "verifier", 3, || async {
+            let v = NoOpTufVerifier;
+            let root = v.fetch_root().await.unwrap();
+            assert_eq!(root.version, 1);
+            assert!(root.root_hash.is_empty());
+            assert_eq!(root.expires, u64::MAX);
 
-                RegistryLogData {
-                    reason_code: Some("noop_tuf_root_ok".to_string()),
-                    ..RegistryLogData::default()
-                }
-            },
-        );
+            RegistryLogData {
+                reason_code: Some("noop_tuf_root_ok".to_string()),
+                ..RegistryLogData::default()
+            }
+        });
     }
 
     #[test]
@@ -6196,10 +6183,7 @@ sig = "base64:{sig_b64}"
                 let result = v.verify_target(&pinned, "path").await;
                 assert!(matches!(
                     result,
-                    Err(SupplyChainVerificationError::TufRollback {
-                        current: 5,
-                        got: 2
-                    })
+                    Err(SupplyChainVerificationError::TufRollback { current: 5, got: 2 })
                 ));
 
                 RegistryLogData {
@@ -6277,7 +6261,10 @@ sig = "base64:{sig_b64}"
                     key_ids: vec![],
                     threshold: 1,
                 };
-                let result = v.verify_target(&pinned, "connectors/fcp.test").await.unwrap();
+                let result = v
+                    .verify_target(&pinned, "connectors/fcp.test")
+                    .await
+                    .unwrap();
                 assert!(result.verified);
                 assert_eq!(result.root_version, 1);
                 assert!(result.target.is_some());
@@ -6345,12 +6332,7 @@ sig = "base64:{sig_b64}"
                     issuer: "y".into(),
                 };
                 let result = v
-                    .verify_bundle(
-                        &bundle,
-                        "sha256:artifact",
-                        &["github-actions".into()],
-                        &[],
-                    )
+                    .verify_bundle(&bundle, "sha256:artifact", &["github-actions".into()], &[])
                     .await;
                 assert!(matches!(
                     result,
@@ -6391,12 +6373,7 @@ sig = "base64:{sig_b64}"
                     issuer: "y".into(),
                 };
                 let result = v
-                    .verify_bundle(
-                        &bundle,
-                        "sha256:a",
-                        &[],
-                        &["https://github.com".into()],
-                    )
+                    .verify_bundle(&bundle, "sha256:a", &[], &["https://github.com".into()])
                     .await;
                 assert!(matches!(
                     result,
@@ -6469,7 +6446,10 @@ sig = "base64:{sig_b64}"
     #[test]
     fn registry_error_all_variant_display() {
         let errors: Vec<(&str, RegistryError)> = vec![
-            ("signature section missing", RegistryError::MissingSignatures),
+            (
+                "signature section missing",
+                RegistryError::MissingSignatures,
+            ),
             (
                 "kid",
                 RegistryError::UnknownKid {
@@ -6506,14 +6486,8 @@ sig = "base64:{sig_b64}"
                     capability: "network.exec".into(),
                 },
             ),
-            (
-                "transparency log",
-                RegistryError::TransparencyLogMissing,
-            ),
-            (
-                "transparency",
-                RegistryError::TransparencyEvidenceMissing,
-            ),
+            ("transparency log", RegistryError::TransparencyLogMissing),
+            ("transparency", RegistryError::TransparencyEvidenceMissing),
             (
                 "attestation",
                 RegistryError::RequiredAttestationMissing {
@@ -6524,26 +6498,22 @@ sig = "base64:{sig_b64}"
                 "attestation evidence",
                 RegistryError::AttestationEvidenceMissing,
             ),
-            (
-                "SLSA",
-                RegistryError::SlsaLevelInsufficient { required: 3 },
-            ),
+            ("SLSA", RegistryError::SlsaLevelInsufficient { required: 3 }),
             (
                 "builder",
                 RegistryError::UntrustedBuilder {
                     builder: "evil-builder".into(),
                 },
             ),
-            (
-                "malformed",
-                RegistryError::SignatureBytes,
-            ),
+            ("malformed", RegistryError::SignatureBytes),
         ];
 
         for (expected_substring, error) in errors {
             let display = error.to_string();
             assert!(
-                display.to_lowercase().contains(&expected_substring.to_lowercase()),
+                display
+                    .to_lowercase()
+                    .contains(&expected_substring.to_lowercase()),
                 "RegistryError display for {:?} should contain '{}', got: '{}'",
                 std::mem::discriminant(&error),
                 expected_substring,
@@ -6610,10 +6580,7 @@ sig = "base64:{sig_b64}"
         async fn get_header(&self, id: &ObjectId) -> Result<ObjectHeader, ObjectStoreError> {
             Err(ObjectStoreError::NotFound(*id))
         }
-        async fn get_storage_meta(
-            &self,
-            id: &ObjectId,
-        ) -> Result<StorageMeta, ObjectStoreError> {
+        async fn get_storage_meta(&self, id: &ObjectId) -> Result<StorageMeta, ObjectStoreError> {
             Err(ObjectStoreError::NotFound(*id))
         }
         async fn set_retention(
@@ -6986,8 +6953,7 @@ trusted_builders = ["trusted-ci"]
                 // Ed25519 signatures are 64 bytes
                 let sig_bytes = [0u8; 64];
                 let encoded = base64::engine::general_purpose::STANDARD.encode(sig_bytes);
-                let sig =
-                    Base64Bytes::try_from(format!("base64:{encoded}")).expect("base64 parse");
+                let sig = Base64Bytes::try_from(format!("base64:{encoded}")).expect("base64 parse");
                 let result = signature_from_entry(&sig);
                 assert!(result.is_ok());
 
@@ -7131,13 +7097,14 @@ trusted_builders = ["trusted-ci"]
                 let msg = signature_message(signing_bytes, binary_hash);
 
                 // Message format: le_u32(signing_len) || signing_bytes || le_u32(hash_len) || hash_bytes
-                let signing_len =
-                    u32::from_le_bytes(msg[0..4].try_into().expect("4 bytes"));
+                let signing_len = u32::from_le_bytes(msg[0..4].try_into().expect("4 bytes"));
                 assert_eq!(signing_len as usize, signing_bytes.len());
 
                 let hash_offset = 4 + signing_bytes.len();
                 let hash_len = u32::from_le_bytes(
-                    msg[hash_offset..hash_offset + 4].try_into().expect("4 bytes"),
+                    msg[hash_offset..hash_offset + 4]
+                        .try_into()
+                        .expect("4 bytes"),
                 );
                 assert_eq!(hash_len as usize, binary_hash.len());
 

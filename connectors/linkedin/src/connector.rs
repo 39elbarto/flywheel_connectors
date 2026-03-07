@@ -1086,8 +1086,7 @@ mod tests {
     #[test]
     fn config_accepts_trimmed_access_token() {
         let config =
-            LinkedInConfig::from_params(&json!({ "access_token": "\t  valid_token  \n" }))
-                .unwrap();
+            LinkedInConfig::from_params(&json!({ "access_token": "\t  valid_token  \n" })).unwrap();
         match &config.auth {
             LinkedInAuth::AccessToken(t) => assert_eq!(t, "valid_token"),
             LinkedInAuth::CredentialId(_) => panic!("expected AccessToken"),

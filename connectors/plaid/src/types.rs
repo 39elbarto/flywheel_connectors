@@ -1804,10 +1804,7 @@ mod tests {
         let cloned = original.clone();
         drop(original);
         assert_eq!(cloned.error_type.as_deref(), Some("API_ERROR"));
-        assert_eq!(
-            cloned.error_code.as_deref(),
-            Some("INTERNAL_SERVER_ERROR")
-        );
+        assert_eq!(cloned.error_code.as_deref(), Some("INTERNAL_SERVER_ERROR"));
     }
 
     // ---- Extra unknown fields tolerance ----
@@ -1897,7 +1894,10 @@ mod tests {
         };
         let json = serde_json::to_value(&acc).unwrap();
         assert!(json.get("type").is_some(), "Should use 'type' key in JSON");
-        assert!(json.get("account_type").is_none(), "Should NOT use 'account_type' key");
+        assert!(
+            json.get("account_type").is_none(),
+            "Should NOT use 'account_type' key"
+        );
         assert_eq!(json["type"], "depository");
     }
 

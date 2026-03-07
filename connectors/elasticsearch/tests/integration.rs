@@ -449,9 +449,7 @@ async fn indices_delete() {
     let server = MockServer::start().await;
     Mock::given(method("DELETE"))
         .and(path("/old-logs-2024"))
-        .respond_with(
-            ResponseTemplate::new(200).set_body_json(json!({"acknowledged": true})),
-        )
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"acknowledged": true})))
         .mount(&server)
         .await;
 

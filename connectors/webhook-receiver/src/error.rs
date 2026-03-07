@@ -105,43 +105,66 @@ mod tests {
     #[test]
     fn endpoint_not_found_not_retryable() {
         assert!(
-            !WebhookReceiverError::EndpointNotFound { endpoint_id: "ep_1".into() }.is_retryable()
+            !WebhookReceiverError::EndpointNotFound {
+                endpoint_id: "ep_1".into()
+            }
+            .is_retryable()
         );
     }
 
     #[test]
     fn duplicate_path_not_retryable() {
         assert!(
-            !WebhookReceiverError::DuplicatePath { path: "/hooks/test".into() }.is_retryable()
+            !WebhookReceiverError::DuplicatePath {
+                path: "/hooks/test".into()
+            }
+            .is_retryable()
         );
     }
 
     #[test]
     fn invalid_input_not_retryable() {
-        assert!(!WebhookReceiverError::InvalidInput { message: "bad".into() }.is_retryable());
+        assert!(
+            !WebhookReceiverError::InvalidInput {
+                message: "bad".into()
+            }
+            .is_retryable()
+        );
     }
 
     #[test]
     fn capacity_exceeded_is_retryable() {
         assert!(
-            WebhookReceiverError::CapacityExceeded { message: "full".into() }.is_retryable()
+            WebhookReceiverError::CapacityExceeded {
+                message: "full".into()
+            }
+            .is_retryable()
         );
     }
 
     #[test]
     fn internal_not_retryable() {
-        assert!(!WebhookReceiverError::Internal { message: "err".into() }.is_retryable());
+        assert!(
+            !WebhookReceiverError::Internal {
+                message: "err".into()
+            }
+            .is_retryable()
+        );
     }
 
     #[test]
     fn retry_after_for_capacity_exceeded() {
-        let err = WebhookReceiverError::CapacityExceeded { message: "full".into() };
+        let err = WebhookReceiverError::CapacityExceeded {
+            message: "full".into(),
+        };
         assert_eq!(err.retry_after(), Some(Duration::from_secs(5)));
     }
 
     #[test]
     fn retry_after_none_for_not_found() {
-        let err = WebhookReceiverError::EndpointNotFound { endpoint_id: "ep_1".into() };
+        let err = WebhookReceiverError::EndpointNotFound {
+            endpoint_id: "ep_1".into(),
+        };
         assert_eq!(err.retry_after(), None);
     }
 
@@ -153,22 +176,34 @@ mod tests {
 
     #[test]
     fn retry_after_none_for_invalid_input() {
-        let err = WebhookReceiverError::InvalidInput { message: "bad".into() };
+        let err = WebhookReceiverError::InvalidInput {
+            message: "bad".into(),
+        };
         assert_eq!(err.retry_after(), None);
     }
 
     #[test]
     fn retry_after_none_for_internal() {
-        let err = WebhookReceiverError::Internal { message: "err".into() };
+        let err = WebhookReceiverError::Internal {
+            message: "err".into(),
+        };
         assert_eq!(err.retry_after(), None);
     }
 
     #[test]
     fn endpoint_not_found_to_fcp_error() {
-        match (WebhookReceiverError::EndpointNotFound { endpoint_id: "ep_abc".into() })
-            .to_fcp_error()
+        match (WebhookReceiverError::EndpointNotFound {
+            endpoint_id: "ep_abc".into(),
+        })
+        .to_fcp_error()
         {
-            FcpError::External { service, status_code, retryable, message, .. } => {
+            FcpError::External {
+                service,
+                status_code,
+                retryable,
+                message,
+                ..
+            } => {
                 assert_eq!(service, "webhook-receiver");
                 assert_eq!(status_code, Some(404));
                 assert!(!retryable);
@@ -180,9 +215,18 @@ mod tests {
 
     #[test]
     fn duplicate_path_to_fcp_error() {
-        match (WebhookReceiverError::DuplicatePath { path: "/hooks/github".into() }).to_fcp_error()
+        match (WebhookReceiverError::DuplicatePath {
+            path: "/hooks/github".into(),
+        })
+        .to_fcp_error()
         {
-            FcpError::External { service, status_code, retryable, message, .. } => {
+            FcpError::External {
+                service,
+                status_code,
+                retryable,
+                message,
+                ..
+            } => {
                 assert_eq!(service, "webhook-receiver");
                 assert_eq!(status_code, Some(409));
                 assert!(!retryable);
@@ -194,10 +238,17 @@ mod tests {
 
     #[test]
     fn invalid_input_to_fcp_error() {
-        match (WebhookReceiverError::InvalidInput { message: "missing field".into() })
-            .to_fcp_error()
+        match (WebhookReceiverError::InvalidInput {
+            message: "missing field".into(),
+        })
+        .to_fcp_error()
         {
-            FcpError::External { status_code, retryable, message, .. } => {
+            FcpError::External {
+                status_code,
+                retryable,
+                message,
+                ..
+            } => {
                 assert_eq!(status_code, Some(400));
                 assert!(!retryable);
                 assert_eq!(message, "missing field");
@@ -208,10 +259,18 @@ mod tests {
 
     #[test]
     fn capacity_exceeded_to_fcp_error() {
-        match (WebhookReceiverError::CapacityExceeded { message: "too many".into() })
-            .to_fcp_error()
+        match (WebhookReceiverError::CapacityExceeded {
+            message: "too many".into(),
+        })
+        .to_fcp_error()
         {
-            FcpError::External { status_code, retryable, retry_after, message, .. } => {
+            FcpError::External {
+                status_code,
+                retryable,
+                retry_after,
+                message,
+                ..
+            } => {
                 assert_eq!(status_code, Some(429));
                 assert!(retryable);
                 assert_eq!(retry_after, Some(Duration::from_secs(5)));
@@ -223,7 +282,11 @@ mod tests {
 
     #[test]
     fn internal_to_fcp_error() {
-        match (WebhookReceiverError::Internal { message: "boom".into() }).to_fcp_error() {
+        match (WebhookReceiverError::Internal {
+            message: "boom".into(),
+        })
+        .to_fcp_error()
+        {
             FcpError::Internal { message } => assert_eq!(message, "boom"),
             other => panic!("expected Internal, got {other:?}"),
         }
@@ -241,7 +304,10 @@ mod tests {
     #[test]
     fn error_display_endpoint_not_found() {
         assert_eq!(
-            WebhookReceiverError::EndpointNotFound { endpoint_id: "ep_1".into() }.to_string(),
+            WebhookReceiverError::EndpointNotFound {
+                endpoint_id: "ep_1".into()
+            }
+            .to_string(),
             "Endpoint not found: ep_1"
         );
     }
@@ -249,7 +315,10 @@ mod tests {
     #[test]
     fn error_display_duplicate_path() {
         assert_eq!(
-            WebhookReceiverError::DuplicatePath { path: "/hooks/test".into() }.to_string(),
+            WebhookReceiverError::DuplicatePath {
+                path: "/hooks/test".into()
+            }
+            .to_string(),
             "Endpoint path already registered: /hooks/test"
         );
     }
@@ -257,7 +326,10 @@ mod tests {
     #[test]
     fn error_display_invalid_input() {
         assert_eq!(
-            WebhookReceiverError::InvalidInput { message: "bad data".into() }.to_string(),
+            WebhookReceiverError::InvalidInput {
+                message: "bad data".into()
+            }
+            .to_string(),
             "Invalid input: bad data"
         );
     }
@@ -265,7 +337,10 @@ mod tests {
     #[test]
     fn error_display_capacity_exceeded() {
         assert_eq!(
-            WebhookReceiverError::CapacityExceeded { message: "store full".into() }.to_string(),
+            WebhookReceiverError::CapacityExceeded {
+                message: "store full".into()
+            }
+            .to_string(),
             "Store capacity exceeded: store full"
         );
     }
@@ -273,7 +348,10 @@ mod tests {
     #[test]
     fn error_display_internal() {
         assert_eq!(
-            WebhookReceiverError::Internal { message: "something broke".into() }.to_string(),
+            WebhookReceiverError::Internal {
+                message: "something broke".into()
+            }
+            .to_string(),
             "Internal error: something broke"
         );
     }
@@ -294,35 +372,60 @@ mod tests {
 
     #[test]
     fn error_debug_endpoint_not_found() {
-        let dbg = format!("{:?}", WebhookReceiverError::EndpointNotFound { endpoint_id: "ep_1".into() });
+        let dbg = format!(
+            "{:?}",
+            WebhookReceiverError::EndpointNotFound {
+                endpoint_id: "ep_1".into()
+            }
+        );
         assert!(dbg.contains("EndpointNotFound"));
         assert!(dbg.contains("ep_1"));
     }
 
     #[test]
     fn error_debug_duplicate_path() {
-        let dbg = format!("{:?}", WebhookReceiverError::DuplicatePath { path: "/hooks/x".into() });
+        let dbg = format!(
+            "{:?}",
+            WebhookReceiverError::DuplicatePath {
+                path: "/hooks/x".into()
+            }
+        );
         assert!(dbg.contains("DuplicatePath"));
         assert!(dbg.contains("/hooks/x"));
     }
 
     #[test]
     fn error_debug_invalid_input() {
-        let dbg = format!("{:?}", WebhookReceiverError::InvalidInput { message: "bad data".into() });
+        let dbg = format!(
+            "{:?}",
+            WebhookReceiverError::InvalidInput {
+                message: "bad data".into()
+            }
+        );
         assert!(dbg.contains("InvalidInput"));
         assert!(dbg.contains("bad data"));
     }
 
     #[test]
     fn error_debug_capacity_exceeded() {
-        let dbg = format!("{:?}", WebhookReceiverError::CapacityExceeded { message: "full".into() });
+        let dbg = format!(
+            "{:?}",
+            WebhookReceiverError::CapacityExceeded {
+                message: "full".into()
+            }
+        );
         assert!(dbg.contains("CapacityExceeded"));
         assert!(dbg.contains("full"));
     }
 
     #[test]
     fn error_debug_internal() {
-        let dbg = format!("{:?}", WebhookReceiverError::Internal { message: "boom".into() });
+        let dbg = format!(
+            "{:?}",
+            WebhookReceiverError::Internal {
+                message: "boom".into()
+            }
+        );
         assert!(dbg.contains("Internal"));
         assert!(dbg.contains("boom"));
     }
@@ -345,13 +448,19 @@ mod tests {
 
     #[test]
     fn capacity_exceeded_retry_after_is_5_seconds() {
-        let err = WebhookReceiverError::CapacityExceeded { message: "max endpoints".into() };
+        let err = WebhookReceiverError::CapacityExceeded {
+            message: "max endpoints".into(),
+        };
         assert_eq!(err.retry_after(), Some(Duration::from_secs(5)));
     }
 
     #[test]
     fn endpoint_not_found_fcp_error_has_service() {
-        match (WebhookReceiverError::EndpointNotFound { endpoint_id: "ep_z".into() }).to_fcp_error() {
+        match (WebhookReceiverError::EndpointNotFound {
+            endpoint_id: "ep_z".into(),
+        })
+        .to_fcp_error()
+        {
             FcpError::External { service, .. } => assert_eq!(service, "webhook-receiver"),
             other => panic!("expected External, got {other:?}"),
         }
@@ -367,7 +476,11 @@ mod tests {
 
     #[test]
     fn invalid_input_fcp_error_has_400() {
-        match (WebhookReceiverError::InvalidInput { message: "test".into() }).to_fcp_error() {
+        match (WebhookReceiverError::InvalidInput {
+            message: "test".into(),
+        })
+        .to_fcp_error()
+        {
             FcpError::External { status_code, .. } => assert_eq!(status_code, Some(400)),
             other => panic!("expected External, got {other:?}"),
         }
@@ -375,7 +488,11 @@ mod tests {
 
     #[test]
     fn capacity_exceeded_fcp_error_has_retry_after() {
-        match (WebhookReceiverError::CapacityExceeded { message: "full".into() }).to_fcp_error() {
+        match (WebhookReceiverError::CapacityExceeded {
+            message: "full".into(),
+        })
+        .to_fcp_error()
+        {
             FcpError::External { retry_after, .. } => {
                 assert_eq!(retry_after, Some(Duration::from_secs(5)));
             }
@@ -385,7 +502,11 @@ mod tests {
 
     #[test]
     fn internal_fcp_error_preserves_message() {
-        match (WebhookReceiverError::Internal { message: "critical failure".into() }).to_fcp_error() {
+        match (WebhookReceiverError::Internal {
+            message: "critical failure".into(),
+        })
+        .to_fcp_error()
+        {
             FcpError::Internal { message } => assert_eq!(message, "critical failure"),
             other => panic!("expected Internal, got {other:?}"),
         }
@@ -404,7 +525,11 @@ mod tests {
 
     #[test]
     fn endpoint_not_found_fcp_error_not_retryable() {
-        match (WebhookReceiverError::EndpointNotFound { endpoint_id: "ep_x".into() }).to_fcp_error() {
+        match (WebhookReceiverError::EndpointNotFound {
+            endpoint_id: "ep_x".into(),
+        })
+        .to_fcp_error()
+        {
             FcpError::External { retryable, .. } => assert!(!retryable),
             other => panic!("expected External, got {other:?}"),
         }
@@ -412,7 +537,11 @@ mod tests {
 
     #[test]
     fn capacity_exceeded_fcp_error_is_retryable() {
-        match (WebhookReceiverError::CapacityExceeded { message: "full".into() }).to_fcp_error() {
+        match (WebhookReceiverError::CapacityExceeded {
+            message: "full".into(),
+        })
+        .to_fcp_error()
+        {
             FcpError::External { retryable, .. } => assert!(retryable),
             other => panic!("expected External, got {other:?}"),
         }
@@ -428,7 +557,11 @@ mod tests {
 
     #[test]
     fn invalid_input_fcp_error_not_retryable() {
-        match (WebhookReceiverError::InvalidInput { message: "test".into() }).to_fcp_error() {
+        match (WebhookReceiverError::InvalidInput {
+            message: "test".into(),
+        })
+        .to_fcp_error()
+        {
             FcpError::External { retryable, .. } => assert!(!retryable),
             other => panic!("expected External, got {other:?}"),
         }

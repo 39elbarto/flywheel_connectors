@@ -1399,13 +1399,12 @@ mod tests {
         for thread_id in 0..4u64 {
             let store = Arc::clone(&store);
             handles.push(std::thread::spawn(move || {
-                let connector =
-                    ConnectorId::from_static(match thread_id {
-                        0 => "fcp.t0:request-response:1",
-                        1 => "fcp.t1:request-response:1",
-                        2 => "fcp.t2:request-response:1",
-                        _ => "fcp.t3:request-response:1",
-                    });
+                let connector = ConnectorId::from_static(match thread_id {
+                    0 => "fcp.t0:request-response:1",
+                    1 => "fcp.t1:request-response:1",
+                    2 => "fcp.t2:request-response:1",
+                    _ => "fcp.t3:request-response:1",
+                });
                 for i in 0..10u64 {
                     let event = event_for(
                         ZoneId::work(),
@@ -1481,7 +1480,10 @@ mod tests {
         // Old entries should be pruned, only the new one remains
         let snap = store.snapshot();
         assert_eq!(snap.len(), 1);
-        assert_eq!(snap[0].key.connector_id.as_str(), "fcp.c:request-response:1");
+        assert_eq!(
+            snap[0].key.connector_id.as_str(),
+            "fcp.c:request-response:1"
+        );
     }
 
     // ── Aggregation ──
@@ -1735,7 +1737,10 @@ mod tests {
 
         let snap = store.snapshot();
         assert_eq!(snap.len(), 1);
-        assert_eq!(snap[0].key.connector_id.as_str(), "fcp.new:request-response:1");
+        assert_eq!(
+            snap[0].key.connector_id.as_str(),
+            "fcp.new:request-response:1"
+        );
     }
 
     #[test]
@@ -1995,11 +2000,7 @@ mod tests {
 
     #[test]
     fn recommendation_report_generated_at_matches_now() {
-        let report = recommend_capabilities(
-            &[],
-            42_000,
-            RecommendationConfig::default(),
-        );
+        let report = recommend_capabilities(&[], 42_000, RecommendationConfig::default());
         assert_eq!(report.generated_at, 42_000);
     }
 
@@ -2011,7 +2012,11 @@ mod tests {
         let events = [
             (ZoneId::work(), "fcp.z:request-response:1", "fcp.z.write"),
             (ZoneId::work(), "fcp.a:request-response:1", "fcp.a.read"),
-            (ZoneId::private(), "fcp.m:request-response:1", "fcp.m.delete"),
+            (
+                ZoneId::private(),
+                "fcp.m:request-response:1",
+                "fcp.m.delete",
+            ),
         ];
 
         for (zone, conn, cap) in &events {
@@ -2041,7 +2046,10 @@ mod tests {
                 snap[i + 1].key.connector_id.as_str(),
                 snap[i + 1].key.capability_id.as_str(),
             );
-            assert!(key_a <= key_b, "snapshot should be sorted: {key_a:?} <= {key_b:?}");
+            assert!(
+                key_a <= key_b,
+                "snapshot should be sorted: {key_a:?} <= {key_b:?}"
+            );
         }
     }
 }

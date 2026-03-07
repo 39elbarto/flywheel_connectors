@@ -226,10 +226,7 @@ impl SemanticScholarConnector {
             critical: false,
         });
 
-        let has_key = self
-            .config
-            .as_ref()
-            .is_some_and(|c| c.auth.has_key());
+        let has_key = self.config.as_ref().is_some_and(|c| c.auth.has_key());
         checks.push(DoctorCheck {
             name: "api_key".into(),
             passed: has_key,
@@ -287,9 +284,7 @@ impl SemanticScholarConnector {
         let result = match operation {
             "semanticscholar.paper.search" => self.invoke_paper_search(client, &input).await,
             "semanticscholar.paper.get" => self.invoke_paper_get(client, &input).await,
-            "semanticscholar.paper.citations" => {
-                self.invoke_paper_citations(client, &input).await
-            }
+            "semanticscholar.paper.citations" => self.invoke_paper_citations(client, &input).await,
             "semanticscholar.paper.references" => {
                 self.invoke_paper_references(client, &input).await
             }
@@ -297,9 +292,7 @@ impl SemanticScholarConnector {
                 self.invoke_paper_recommendations(client, &input).await
             }
             "semanticscholar.author.get" => self.invoke_author_get(client, &input).await,
-            "semanticscholar.author.papers" => {
-                self.invoke_author_papers(client, &input).await
-            }
+            "semanticscholar.author.papers" => self.invoke_author_papers(client, &input).await,
             _ => {
                 return Err(FcpError::InvalidRequest {
                     code: 1002,
@@ -982,45 +975,50 @@ mod tests {
     fn operations_paper_citations_present() {
         let ops = operations_info();
         let arr = ops.as_array().unwrap();
-        assert!(arr
-            .iter()
-            .any(|o| o["id"].as_str() == Some("semanticscholar.paper.citations")));
+        assert!(
+            arr.iter()
+                .any(|o| o["id"].as_str() == Some("semanticscholar.paper.citations"))
+        );
     }
 
     #[test]
     fn operations_paper_references_present() {
         let ops = operations_info();
         let arr = ops.as_array().unwrap();
-        assert!(arr
-            .iter()
-            .any(|o| o["id"].as_str() == Some("semanticscholar.paper.references")));
+        assert!(
+            arr.iter()
+                .any(|o| o["id"].as_str() == Some("semanticscholar.paper.references"))
+        );
     }
 
     #[test]
     fn operations_paper_recommendations_present() {
         let ops = operations_info();
         let arr = ops.as_array().unwrap();
-        assert!(arr
-            .iter()
-            .any(|o| o["id"].as_str() == Some("semanticscholar.paper.recommendations")));
+        assert!(
+            arr.iter()
+                .any(|o| o["id"].as_str() == Some("semanticscholar.paper.recommendations"))
+        );
     }
 
     #[test]
     fn operations_author_get_present() {
         let ops = operations_info();
         let arr = ops.as_array().unwrap();
-        assert!(arr
-            .iter()
-            .any(|o| o["id"].as_str() == Some("semanticscholar.author.get")));
+        assert!(
+            arr.iter()
+                .any(|o| o["id"].as_str() == Some("semanticscholar.author.get"))
+        );
     }
 
     #[test]
     fn operations_author_papers_present() {
         let ops = operations_info();
         let arr = ops.as_array().unwrap();
-        assert!(arr
-            .iter()
-            .any(|o| o["id"].as_str() == Some("semanticscholar.author.papers")));
+        assert!(
+            arr.iter()
+                .any(|o| o["id"].as_str() == Some("semanticscholar.author.papers"))
+        );
     }
 
     // --- DoctorStatus serde ---

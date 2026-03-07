@@ -116,11 +116,7 @@ impl BitwardenClient {
         let body = resp.text().await.unwrap_or_default();
         let detail = serde_json::from_str::<ApiErrorResponse>(&body)
             .ok()
-            .and_then(|e| {
-                e.message
-                    .or(e.error_description)
-                    .or(e.error)
-            })
+            .and_then(|e| e.message.or(e.error_description).or(e.error))
             .unwrap_or_else(|| body.clone());
 
         match status.as_u16() {
@@ -204,7 +200,11 @@ impl BitwardenClient {
         if let Some(f) = folder_id {
             q.push(("folderId", f.to_string()));
         }
-        self.get("/list/object/items", if q.is_empty() { None } else { Some(&q) }).await
+        self.get(
+            "/list/object/items",
+            if q.is_empty() { None } else { Some(&q) },
+        )
+        .await
     }
 
     /// Get a single vault item by ID.
@@ -266,8 +266,7 @@ mod tests {
 
     #[test]
     fn client_new_default_url() {
-        let client =
-            BitwardenClient::new(BitwardenAuth::BearerToken("tok".into()), None).unwrap();
+        let client = BitwardenClient::new(BitwardenAuth::BearerToken("tok".into()), None).unwrap();
         assert_eq!(client.base_url, DEFAULT_BASE_URL);
     }
 

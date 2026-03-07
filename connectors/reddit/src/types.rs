@@ -72,7 +72,8 @@ mod tests {
             "author": "testuser", "subreddit": "rust", "score": 42,
             "num_comments": 5, "permalink": "/r/rust/comments/abc123/test/",
             "created_utc": 1709600000.0, "over_18": false, "spoiler": false, "is_self": true
-        })).unwrap();
+        }))
+        .unwrap();
         assert_eq!(p.name.as_deref(), Some("t3_abc123"));
         assert_eq!(p.score, Some(42));
         assert!(p.is_self.unwrap());
@@ -89,7 +90,8 @@ mod tests {
         let c: Comment = serde_json::from_value(json!({
             "name": "t1_xyz", "body": "Great post!", "author": "user2",
             "score": 10, "created_utc": 1709600100.0, "parent_id": "t3_abc123"
-        })).unwrap();
+        }))
+        .unwrap();
         assert_eq!(c.name.as_deref(), Some("t1_xyz"));
         assert_eq!(c.score, Some(10));
     }
@@ -103,7 +105,8 @@ mod tests {
                 ],
                 "after": "t3_next"
             }
-        })).unwrap();
+        }))
+        .unwrap();
         assert_eq!(l.data.children.len(), 1);
         assert_eq!(l.data.after.as_deref(), Some("t3_next"));
     }
@@ -112,7 +115,8 @@ mod tests {
     fn listing_empty() {
         let l: Listing = serde_json::from_value(json!({
             "data": { "children": [], "after": null }
-        })).unwrap();
+        }))
+        .unwrap();
         assert!(l.data.children.is_empty());
         assert!(l.data.after.is_none());
     }
@@ -121,7 +125,8 @@ mod tests {
     fn api_error_response() {
         let e: ApiErrorResponse = serde_json::from_value(json!({
             "message": "Forbidden", "error": 403
-        })).unwrap();
+        }))
+        .unwrap();
         assert_eq!(e.message.as_deref(), Some("Forbidden"));
     }
 
@@ -161,7 +166,8 @@ mod tests {
     fn post_clone() {
         let p: Post = serde_json::from_value(json!({
             "name": "t3_clone", "title": "Clone Test"
-        })).unwrap();
+        }))
+        .unwrap();
         #[allow(clippy::redundant_clone)]
         let p2 = p.clone();
         assert_eq!(p2.name, Some("t3_clone".into()));
@@ -179,7 +185,8 @@ mod tests {
     fn post_negative_score() {
         let p: Post = serde_json::from_value(json!({
             "score": -42, "num_comments": 0
-        })).unwrap();
+        }))
+        .unwrap();
         assert_eq!(p.score, Some(-42));
         assert_eq!(p.num_comments, Some(0));
     }
@@ -244,7 +251,8 @@ mod tests {
     fn listing_clone() {
         let l: Listing = serde_json::from_value(json!({
             "data": { "children": [], "after": null }
-        })).unwrap();
+        }))
+        .unwrap();
         #[allow(clippy::redundant_clone)]
         let l2 = l.clone();
         assert!(l2.data.children.is_empty());
@@ -254,7 +262,8 @@ mod tests {
     fn listing_debug() {
         let l: Listing = serde_json::from_value(json!({
             "data": { "children": [], "after": "cursor" }
-        })).unwrap();
+        }))
+        .unwrap();
         let dbg = format!("{l:?}");
         assert!(dbg.contains("cursor"));
     }
@@ -264,7 +273,8 @@ mod tests {
         // children uses #[serde(default)] so omitting it should work
         let l: Listing = serde_json::from_value(json!({
             "data": { "after": null }
-        })).unwrap();
+        }))
+        .unwrap();
         assert!(l.data.children.is_empty());
     }
 
@@ -275,7 +285,8 @@ mod tests {
             .collect();
         let l: Listing = serde_json::from_value(json!({
             "data": { "children": children, "after": "t3_49" }
-        })).unwrap();
+        }))
+        .unwrap();
         assert_eq!(l.data.children.len(), 50);
     }
 
@@ -308,7 +319,8 @@ mod tests {
     fn api_error_response_clone() {
         let e: ApiErrorResponse = serde_json::from_value(json!({
             "message": "err", "error": 500
-        })).unwrap();
+        }))
+        .unwrap();
         #[allow(clippy::redundant_clone)]
         let e2 = e.clone();
         assert_eq!(e2.message, Some("err".into()));
@@ -326,7 +338,8 @@ mod tests {
         let e: ApiErrorResponse = serde_json::from_value(json!({
             "message": "Bad Request",
             "error": "invalid_grant"
-        })).unwrap();
+        }))
+        .unwrap();
         assert_eq!(e.error.unwrap().as_str(), Some("invalid_grant"));
     }
 }

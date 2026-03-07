@@ -557,10 +557,9 @@ async fn error_401() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/"))
-        .respond_with(
-            ResponseTemplate::new(401)
-                .set_body_json(json!({"error_message": "Not Authenticated", "error_code": "NOT_AUTHENTICATED"})),
-        )
+        .respond_with(ResponseTemplate::new(401).set_body_json(
+            json!({"error_message": "Not Authenticated", "error_code": "NOT_AUTHENTICATED"}),
+        ))
         .mount(&server)
         .await;
 
@@ -581,8 +580,7 @@ async fn error_403() {
     Mock::given(method("POST"))
         .and(path("/"))
         .respond_with(
-            ResponseTemplate::new(403)
-                .set_body_json(json!({"error_message": "Forbidden"})),
+            ResponseTemplate::new(403).set_body_json(json!({"error_message": "Forbidden"})),
         )
         .mount(&server)
         .await;

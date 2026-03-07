@@ -150,10 +150,11 @@ async fn init_success() {
     Mock::given(method("GET"))
         .and(path("/organizations/test-org/workspaces/myproject"))
         .and(header("Authorization", "Bearer test-terraform-token"))
-        .respond_with(
-            ResponseTemplate::new(200)
-                .set_body_json(workspace_mock("ws-1", "myproject", "1.7.0")),
-        )
+        .respond_with(ResponseTemplate::new(200).set_body_json(workspace_mock(
+            "ws-1",
+            "myproject",
+            "1.7.0",
+        )))
         .mount(&server)
         .await;
 
@@ -193,8 +194,7 @@ async fn validate_success() {
     Mock::given(method("GET"))
         .and(path("/organizations/test-org/workspaces/infra"))
         .respond_with(
-            ResponseTemplate::new(200)
-                .set_body_json(workspace_mock("ws-v", "infra", "1.6.0")),
+            ResponseTemplate::new(200).set_body_json(workspace_mock("ws-v", "infra", "1.6.0")),
         )
         .mount(&server)
         .await;
@@ -220,8 +220,7 @@ async fn plan_success() {
     Mock::given(method("GET"))
         .and(path("/organizations/test-org/workspaces/prod"))
         .respond_with(
-            ResponseTemplate::new(200)
-                .set_body_json(workspace_mock("ws-p", "prod", "1.7.0")),
+            ResponseTemplate::new(200).set_body_json(workspace_mock("ws-p", "prod", "1.7.0")),
         )
         .mount(&server)
         .await;
@@ -412,8 +411,7 @@ async fn state_list_success() {
     Mock::given(method("GET"))
         .and(path("/organizations/test-org/workspaces/infra"))
         .respond_with(
-            ResponseTemplate::new(200)
-                .set_body_json(workspace_mock("ws-sl", "infra", "1.7.0")),
+            ResponseTemplate::new(200).set_body_json(workspace_mock("ws-sl", "infra", "1.7.0")),
         )
         .mount(&server)
         .await;
@@ -460,8 +458,7 @@ async fn state_list_with_filter() {
     Mock::given(method("GET"))
         .and(path("/organizations/test-org/workspaces/infra"))
         .respond_with(
-            ResponseTemplate::new(200)
-                .set_body_json(workspace_mock("ws-sf", "infra", "1.7.0")),
+            ResponseTemplate::new(200).set_body_json(workspace_mock("ws-sf", "infra", "1.7.0")),
         )
         .mount(&server)
         .await;
@@ -513,8 +510,7 @@ async fn state_show_success() {
     Mock::given(method("GET"))
         .and(path("/organizations/test-org/workspaces/infra"))
         .respond_with(
-            ResponseTemplate::new(200)
-                .set_body_json(workspace_mock("ws-ss", "infra", "1.7.0")),
+            ResponseTemplate::new(200).set_body_json(workspace_mock("ws-ss", "infra", "1.7.0")),
         )
         .mount(&server)
         .await;
@@ -574,8 +570,7 @@ async fn output_success() {
     Mock::given(method("GET"))
         .and(path("/organizations/test-org/workspaces/infra"))
         .respond_with(
-            ResponseTemplate::new(200)
-                .set_body_json(workspace_mock("ws-out", "infra", "1.7.0")),
+            ResponseTemplate::new(200).set_body_json(workspace_mock("ws-out", "infra", "1.7.0")),
         )
         .mount(&server)
         .await;
@@ -635,8 +630,7 @@ async fn import_success() {
     Mock::given(method("GET"))
         .and(path("/organizations/test-org/workspaces/infra"))
         .respond_with(
-            ResponseTemplate::new(200)
-                .set_body_json(workspace_mock("ws-imp", "infra", "1.7.0")),
+            ResponseTemplate::new(200).set_body_json(workspace_mock("ws-imp", "infra", "1.7.0")),
         )
         .mount(&server)
         .await;
@@ -704,8 +698,7 @@ async fn detect_drift_success() {
     Mock::given(method("GET"))
         .and(path("/organizations/test-org/workspaces/prod"))
         .respond_with(
-            ResponseTemplate::new(200)
-                .set_body_json(workspace_mock("ws-drift", "prod", "1.7.0")),
+            ResponseTemplate::new(200).set_body_json(workspace_mock("ws-drift", "prod", "1.7.0")),
         )
         .mount(&server)
         .await;
@@ -755,20 +748,19 @@ async fn list_modules_success() {
     Mock::given(method("GET"))
         .and(path("/organizations/test-org/workspaces/infra"))
         .respond_with(
-            ResponseTemplate::new(200)
-                .set_body_json(workspace_mock("ws-mod", "infra", "1.7.0")),
+            ResponseTemplate::new(200).set_body_json(workspace_mock("ws-mod", "infra", "1.7.0")),
         )
         .mount(&server)
         .await;
     Mock::given(method("GET"))
         .and(path("/workspaces/ws-mod/configuration-versions"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(jsonapi_list(vec![
-            jsonapi_item(
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(jsonapi_list(vec![jsonapi_item(
                 "configuration-versions",
                 "cv-1",
                 json!({"source": "terraform+cloud", "status": "uploaded"}),
-            ),
-        ])))
+            )])),
+        )
         .mount(&server)
         .await;
 
@@ -970,17 +962,28 @@ async fn simulate_all_ops() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
     let ops = [
-        "terraform.init", "terraform.validate", "terraform.plan",
-        "terraform.show_plan", "terraform.apply", "terraform.destroy",
-        "terraform.state_list", "terraform.state_show", "terraform.output",
-        "terraform.import", "terraform.detect_drift", "terraform.list_modules",
+        "terraform.init",
+        "terraform.validate",
+        "terraform.plan",
+        "terraform.show_plan",
+        "terraform.apply",
+        "terraform.destroy",
+        "terraform.state_list",
+        "terraform.state_show",
+        "terraform.output",
+        "terraform.import",
+        "terraform.detect_drift",
+        "terraform.list_modules",
     ];
     for op in &ops {
         let r = c
             .handle_simulate(json!({"operation_id": op}))
             .await
             .unwrap();
-        assert!(r["allowed"].as_bool().unwrap(), "simulate should allow {op}");
+        assert!(
+            r["allowed"].as_bool().unwrap(),
+            "simulate should allow {op}"
+        );
     }
 }
 
@@ -994,8 +997,7 @@ async fn counters_increment_on_success() {
     Mock::given(method("GET"))
         .and(path("/organizations/test-org/workspaces/proj"))
         .respond_with(
-            ResponseTemplate::new(200)
-                .set_body_json(workspace_mock("ws-c", "proj", "1.7.0")),
+            ResponseTemplate::new(200).set_body_json(workspace_mock("ws-c", "proj", "1.7.0")),
         )
         .mount(&server)
         .await;
@@ -1043,8 +1045,7 @@ async fn init_with_custom_org() {
     Mock::given(method("GET"))
         .and(path("/organizations/other-org/workspaces/proj"))
         .respond_with(
-            ResponseTemplate::new(200)
-                .set_body_json(workspace_mock("ws-other", "proj", "1.7.0")),
+            ResponseTemplate::new(200).set_body_json(workspace_mock("ws-other", "proj", "1.7.0")),
         )
         .mount(&server)
         .await;

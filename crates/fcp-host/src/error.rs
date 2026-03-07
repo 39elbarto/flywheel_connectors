@@ -25,6 +25,10 @@ pub enum HostError {
     #[error("cache error: {0}")]
     CacheError(String),
 
+    /// Connector or host surface is temporarily unavailable.
+    #[error("unavailable: {0}")]
+    Unavailable(String),
+
     /// Internal error.
     #[error("internal error: {0}")]
     Internal(String),
@@ -70,6 +74,13 @@ mod tests {
         let err = HostError::CacheError("eviction failed".into());
         assert!(err.to_string().contains("cache error"));
         assert!(err.to_string().contains("eviction failed"));
+    }
+
+    #[test]
+    fn unavailable_display() {
+        let err = HostError::Unavailable("circuit breaker open".into());
+        assert!(err.to_string().contains("unavailable"));
+        assert!(err.to_string().contains("circuit breaker open"));
     }
 
     #[test]

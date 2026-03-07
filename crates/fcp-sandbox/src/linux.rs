@@ -621,26 +621,30 @@ impl Sandbox for LinuxSandbox {
 
         // Pre-compute seccomp filter to avoid allocation in child
         let filter = self.build_seccomp_filter(policy);
-        
+
         // Pre-compute CStrings for Landlock paths to avoid allocation in child
         let mut readonly_cpaths = Vec::new();
         for p in &policy.readonly_paths {
             use std::os::unix::ffi::OsStrExt;
-            readonly_cpaths.push(std::ffi::CString::new(p.as_os_str().as_bytes())
-                .map_err(|e| SandboxError::InvalidConfig(format!("invalid path: {e}")))?);
+            readonly_cpaths.push(
+                std::ffi::CString::new(p.as_os_str().as_bytes())
+                    .map_err(|e| SandboxError::InvalidConfig(format!("invalid path: {e}")))?,
+            );
         }
-        
+
         let mut writable_cpaths = Vec::new();
         for p in &policy.writable_paths {
             use std::os::unix::ffi::OsStrExt;
-            writable_cpaths.push(std::ffi::CString::new(p.as_os_str().as_bytes())
-                .map_err(|e| SandboxError::InvalidConfig(format!("invalid path: {e}")))?);
+            writable_cpaths.push(
+                std::ffi::CString::new(p.as_os_str().as_bytes())
+                    .map_err(|e| SandboxError::InvalidConfig(format!("invalid path: {e}")))?,
+            );
         }
 
         unsafe {
             cmd.pre_exec(move || {
                 // Avoid logging or allocating in pre_exec to maintain async-signal-safety.
-                
+
                 if userns_available {
                     let mut flags = libc::CLONE_NEWUSER
                         | libc::CLONE_NEWNS
@@ -655,17 +659,29 @@ impl Sandbox for LinuxSandbox {
                 // Apply rlimits directly
                 let memory_limit_bytes = policy_clone.memory_limit_bytes;
                 let cpu_seconds = policy_clone.wall_clock_timeout.as_secs();
-                
-                let limit_data = libc::rlimit { rlim_cur: memory_limit_bytes, rlim_max: memory_limit_bytes };
+
+                let limit_data = libc::rlimit {
+                    rlim_cur: memory_limit_bytes,
+                    rlim_max: memory_limit_bytes,
+                };
                 libc::setrlimit(libc::RLIMIT_DATA, &limit_data);
-                
-                let limit_cpu = libc::rlimit { rlim_cur: cpu_seconds, rlim_max: cpu_seconds + 5 };
+
+                let limit_cpu = libc::rlimit {
+                    rlim_cur: cpu_seconds,
+                    rlim_max: cpu_seconds + 5,
+                };
                 libc::setrlimit(libc::RLIMIT_CPU, &limit_cpu);
-                
-                let limit_fd = libc::rlimit { rlim_cur: 1024, rlim_max: 4096 };
+
+                let limit_fd = libc::rlimit {
+                    rlim_cur: 1024,
+                    rlim_max: 4096,
+                };
                 libc::setrlimit(libc::RLIMIT_NOFILE, &limit_fd);
-                
-                let limit_core = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+
+                let limit_core = libc::rlimit {
+                    rlim_cur: 0,
+                    rlim_max: 0,
+                };
                 libc::setrlimit(libc::RLIMIT_CORE, &limit_core);
 
                 // Apply Landlock if available
@@ -684,7 +700,8 @@ impl Sandbox for LinuxSandbox {
                         | LANDLOCK_ACCESS_FS_MAKE_BLOCK
                         | LANDLOCK_ACCESS_FS_MAKE_SYM;
 
-                    let readonly_access = LANDLOCK_ACCESS_FS_READ_FILE | LANDLOCK_ACCESS_FS_READ_DIR;
+                    let readonly_access =
+                        LANDLOCK_ACCESS_FS_READ_FILE | LANDLOCK_ACCESS_FS_READ_DIR;
 
                     let writable_access = readonly_access
                         | LANDLOCK_ACCESS_FS_WRITE_FILE
@@ -694,7 +711,9 @@ impl Sandbox for LinuxSandbox {
                         | LANDLOCK_ACCESS_FS_MAKE_REG
                         | LANDLOCK_ACCESS_FS_MAKE_SYM;
 
-                    let attr = LandlockRulesetAttr { handled_access_fs: all_fs_access };
+                    let attr = LandlockRulesetAttr {
+                        handled_access_fs: all_fs_access,
+                    };
                     let ruleset_fd = libc::syscall(
                         libc::SYS_landlock_create_ruleset,
                         &attr as *const _,
@@ -739,7 +758,7 @@ impl Sandbox for LinuxSandbox {
                     len: filter.len() as u16,
                     filter: filter.as_ptr(),
                 };
-                
+
                 if libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) == 0 {
                     libc::prctl(
                         libc::PR_SET_SECCOMP,

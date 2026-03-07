@@ -735,10 +735,7 @@ mod tests {
         let e = super::LogSchemaError::MissingField {
             field: "correlation_id",
         };
-        assert_eq!(
-            e.to_string(),
-            "missing required field: correlation_id"
-        );
+        assert_eq!(e.to_string(), "missing required field: correlation_id");
     }
 
     #[test]

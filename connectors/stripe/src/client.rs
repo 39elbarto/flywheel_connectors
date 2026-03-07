@@ -1132,9 +1132,7 @@ mod tests {
 
     #[test]
     fn client_with_retry_config() {
-        let client = StripeClient::new("sk_test")
-            .unwrap()
-            .with_retry_config(5);
+        let client = StripeClient::new("sk_test").unwrap().with_retry_config(5);
         assert_eq!(client.max_retries, 5);
     }
 
@@ -1152,8 +1150,7 @@ mod tests {
 
     #[test]
     fn client_new_with_auth_secret_key() {
-        let client =
-            StripeClient::new_with_auth(StripeAuth::SecretKey("sk_key".into())).unwrap();
+        let client = StripeClient::new_with_auth(StripeAuth::SecretKey("sk_key".into())).unwrap();
         assert!(!client.auth().is_secretless());
         assert_eq!(client.api_url(), DEFAULT_API_URL);
     }
@@ -1162,8 +1159,7 @@ mod tests {
     fn client_new_with_auth_credential_id() {
         let cred_id =
             fcp_core::CredentialId::parse("550e8400-e29b-41d4-a716-446655440000").unwrap();
-        let client =
-            StripeClient::new_with_auth(StripeAuth::CredentialId(cred_id)).unwrap();
+        let client = StripeClient::new_with_auth(StripeAuth::CredentialId(cred_id)).unwrap();
         assert!(client.auth().is_secretless());
     }
 

@@ -9,28 +9,41 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use chrono::Utc;
+use fcp_bootstrap::genesis::{GENESIS_SCHEMA_VERSION, REQUIRED_ZONES};
 use fcp_bootstrap::{
-    // Ceremony
-    CeremonyCheckpoint, CeremonyId, CeremonyPhase,
-    ParticipantId, ThresholdCeremony, ThresholdConfig,
-    // Cold recovery
-    ColdRecovery, ColdRecoveryError, ColdRecoveryWarning,
+    // Workflow
+    BootstrapConfig,
     // Error
     BootstrapError,
-    // Genesis
-    GenesisState, GenesisValidationError,
-    // Hardware token
-    DetectedToken, TokenDetector,
+    BootstrapMode,
     // Phase
-    BootstrapPhase, InitSuggestion, PartialStateSuggestion,
+    BootstrapPhase,
+    // Ceremony
+    CeremonyCheckpoint,
+    CeremonyId,
+    CeremonyPhase,
+    // Cold recovery
+    ColdRecovery,
+    ColdRecoveryError,
+    ColdRecoveryWarning,
+    // Hardware token
+    DetectedToken,
+    // Genesis
+    GenesisState,
+    GenesisValidationError,
+    InitSuggestion,
+    PartialStateSuggestion,
+    ParticipantId,
     // Recovery
-    RecoveryPhrase, RecoveryPhraseError,
+    RecoveryPhrase,
+    RecoveryPhraseError,
+    ThresholdCeremony,
+    ThresholdConfig,
     // Time
-    TimeValidation, TimeValidationResult,
-    // Workflow
-    BootstrapConfig, BootstrapMode,
+    TimeValidation,
+    TimeValidationResult,
+    TokenDetector,
 };
-use fcp_bootstrap::genesis::{GENESIS_SCHEMA_VERSION, REQUIRED_ZONES};
 use fcp_crypto::Ed25519SigningKey;
 
 // ============================================================================
@@ -135,7 +148,11 @@ fn cold_recovery_from_phrase() {
 
     assert!(!recovery.was_verified()); // no fingerprint provided
     assert!(!recovery.warnings.is_empty());
-    assert!(recovery.warnings.contains(&ColdRecoveryWarning::FingerprintNotVerified));
+    assert!(
+        recovery
+            .warnings
+            .contains(&ColdRecoveryWarning::FingerprintNotVerified)
+    );
 
     recovery.genesis.validate().unwrap();
 }
@@ -149,7 +166,11 @@ fn cold_recovery_with_fingerprint_verification() {
 
     let recovery = ColdRecovery::from_phrase(&phrase, Some(&fp)).unwrap();
     assert!(recovery.was_verified());
-    assert!(!recovery.warnings.contains(&ColdRecoveryWarning::FingerprintNotVerified));
+    assert!(
+        !recovery
+            .warnings
+            .contains(&ColdRecoveryWarning::FingerprintNotVerified)
+    );
 }
 
 #[test]
@@ -252,10 +273,7 @@ fn ceremony_checkpoint_and_resume() {
 
     let checkpoint = ceremony.create_checkpoint();
     let resumed = ThresholdCeremony::resume(checkpoint).unwrap();
-    assert!(matches!(
-        resumed.phase,
-        CeremonyPhase::Gathering { .. }
-    ));
+    assert!(matches!(resumed.phase, CeremonyPhase::Gathering { .. }));
 }
 
 #[test]
@@ -341,7 +359,10 @@ fn phase_descriptions_non_empty() {
     ];
 
     for phase in &phases {
-        assert!(!phase.description().is_empty(), "{phase:?} has empty description");
+        assert!(
+            !phase.description().is_empty(),
+            "{phase:?} has empty description"
+        );
     }
 }
 
@@ -668,27 +689,35 @@ fn threshold_config_zero_threshold() {
 
 #[test]
 fn ceremony_phase_terminal_and_nonterminal() {
-    assert!(!CeremonyPhase::Gathering {
-        joined: vec![],
-        target: 3,
-    }
-    .is_terminal());
+    assert!(
+        !CeremonyPhase::Gathering {
+            joined: vec![],
+            target: 3,
+        }
+        .is_terminal()
+    );
 
-    assert!(!CeremonyPhase::Round1Commitments {
-        commitments: HashMap::new(),
-    }
-    .is_terminal());
+    assert!(
+        !CeremonyPhase::Round1Commitments {
+            commitments: HashMap::new(),
+        }
+        .is_terminal()
+    );
 
-    assert!(CeremonyPhase::Complete {
-        group_public_key: [0; 32],
-    }
-    .is_terminal());
+    assert!(
+        CeremonyPhase::Complete {
+            group_public_key: [0; 32],
+        }
+        .is_terminal()
+    );
 
-    assert!(CeremonyPhase::Failed {
-        reason: "err".into(),
-        at_phase: "round1".into(),
-    }
-    .is_terminal());
+    assert!(
+        CeremonyPhase::Failed {
+            reason: "err".into(),
+            at_phase: "round1".into(),
+        }
+        .is_terminal()
+    );
 }
 
 // ============================================================================

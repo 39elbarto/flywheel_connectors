@@ -982,10 +982,7 @@ mod tests {
             .with_base_url("http://localhost:8888");
         assert_eq!(client.account_sid(), "ACtest123");
         let debug = format!("{client:?}");
-        assert!(
-            debug.contains("http://localhost:8888"),
-            "debug: {debug}"
-        );
+        assert!(debug.contains("http://localhost:8888"), "debug: {debug}");
     }
 
     #[test]
@@ -1065,9 +1062,7 @@ mod tests {
         let base = format!("{}/2010-04-01/Accounts/ACtest123", mock_server.uri());
 
         Mock::given(method("GET"))
-            .and(path(
-                "/2010-04-01/Accounts/ACtest123/Recordings.json",
-            ))
+            .and(path("/2010-04-01/Accounts/ACtest123/Recordings.json"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "recordings": [
                     {"sid": "RE1", "duration": "30"},
@@ -1107,12 +1102,10 @@ mod tests {
 
         Mock::given(method("GET"))
             .and(path("/2010-04-01/Accounts/ACtest123/Messages.json"))
-            .respond_with(
-                ResponseTemplate::new(400).set_body_json(serde_json::json!({
-                    "code": 21211,
-                    "message": "Invalid 'To' Phone Number"
-                })),
-            )
+            .respond_with(ResponseTemplate::new(400).set_body_json(serde_json::json!({
+                "code": 21211,
+                "message": "Invalid 'To' Phone Number"
+            })))
             .mount(&mock_server)
             .await;
 
@@ -1140,9 +1133,7 @@ mod tests {
 
         Mock::given(method("GET"))
             .and(path("/2010-04-01/Accounts/ACtest123.json"))
-            .respond_with(
-                ResponseTemplate::new(503).set_body_string("Service Unavailable"),
-            )
+            .respond_with(ResponseTemplate::new(503).set_body_string("Service Unavailable"))
             .mount(&mock_server)
             .await;
 
@@ -1183,7 +1174,13 @@ mod tests {
         let client = test_client(&base);
         let media = vec!["https://example.com/image.png".to_string()];
         let msg = client
-            .send_message("+15551111111", "+15552222222", "With media", Some(&media), None)
+            .send_message(
+                "+15551111111",
+                "+15552222222",
+                "With media",
+                Some(&media),
+                None,
+            )
             .await
             .unwrap();
         assert_eq!(msg.sid, "SMmedia");
@@ -1312,9 +1309,7 @@ mod tests {
         let base = format!("{}/2010-04-01/Accounts/ACtest123", mock_server.uri());
 
         Mock::given(method("GET"))
-            .and(path(
-                "/2010-04-01/Accounts/ACtest123/Recordings.json",
-            ))
+            .and(path("/2010-04-01/Accounts/ACtest123/Recordings.json"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "recordings": [{"sid": "REfiltered"}],
                 "next_page_uri": null

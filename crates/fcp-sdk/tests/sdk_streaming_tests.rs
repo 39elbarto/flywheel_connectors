@@ -497,3 +497,46 @@ fn test_record_envelope_preserves_existing_values() {
     let recorded = manager.record(envelope);
     assert_eq!(recorded.cursor, "custom-cursor-123");
 }
+
+#[test]
+fn test_telegram_ordering_example_preserves_seq_and_thread_metadata() {
+    let mut manager = EventStreamManager::new(event_caps(true, false, 10));
+    let thread = ThreadInfo::new("chat-123", ThreadKind::Channel);
+    let envelope = EventEnvelope::new(
+        "telegram.message.new",
+        sample_event_data().with_thread_info(thread.clone()),
+    )
+    .with_seq(41)
+    .with_cursor_seq(41);
+
+    let recorded = manager.record(envelope);
+    assert_eq!(recorded.seq, 41);
+    assert_eq!(recorded.cursor, "41");
+    assert_eq!(recorded.data.thread_info.as_ref(), Some(&thread));
+
+    let replayed = manager.replay_from("telegram.message.new", "").unwrap();
+    assert_eq!(replayed.len(), 1);
+    assert_eq!(replayed[0].seq, 41);
+    assert_eq!(replayed[0].cursor, "41");
+    assert_eq!(replayed[0].data.thread_info.as_ref(), Some(&thread));
+}
+
+#[test]
+fn test_discord_ordering_example_preserves_explicit_gateway_seq() {
+    let mut manager = EventStreamManager::new(event_caps(true, false, 10));
+    let first = manager.record(
+        EventEnvelope::new("discord.message", sample_event_data())
+            .with_seq(812)
+            .with_cursor_seq(812),
+    );
+    let second = manager.emit("discord.message", sample_event_data());
+
+    assert_eq!(first.seq, 812);
+    assert_eq!(first.cursor, "812");
+    assert_eq!(second.seq, 813);
+    assert_eq!(second.cursor, "813");
+
+    let replayed = manager.replay_from("discord.message", "812").unwrap();
+    assert_eq!(replayed.len(), 1);
+    assert_eq!(replayed[0].seq, 813);
+}

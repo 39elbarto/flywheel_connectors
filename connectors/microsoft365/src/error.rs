@@ -424,7 +424,9 @@ mod tests {
     #[test]
     fn m365result_ok_unwraps() {
         let result: M365Result<u32> = Ok(42);
-        let Ok(val) = result else { panic!("expected Ok") };
+        let Ok(val) = result else {
+            panic!("expected Ok")
+        };
         assert_eq!(val, 42);
     }
 
@@ -432,14 +434,18 @@ mod tests {
     fn m365result_err_is_err() {
         let result: M365Result<u32> = Err(M365Error::InvalidConfig("bad".into()));
         assert!(result.is_err());
-        let Err(err) = result else { panic!("expected Err") };
+        let Err(err) = result else {
+            panic!("expected Err")
+        };
         assert!(!err.is_retryable());
     }
 
     #[test]
     fn m365result_with_complex_type() {
         let result: M365Result<Vec<String>> = Ok(vec!["hello".into()]);
-        let Ok(val) = result else { panic!("expected Ok") };
+        let Ok(val) = result else {
+            panic!("expected Ok")
+        };
         assert_eq!(val.len(), 1);
     }
 

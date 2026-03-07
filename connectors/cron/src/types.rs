@@ -84,7 +84,10 @@ mod tests {
             created_at: "2026-03-05T00:00:00Z".into(),
         };
         let v = serde_json::to_value(&s).unwrap();
-        assert!(v.get("payload").is_none(), "payload should be skipped when None");
+        assert!(
+            v.get("payload").is_none(),
+            "payload should be skipped when None"
+        );
     }
 
     #[test]

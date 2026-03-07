@@ -367,10 +367,7 @@ mod tests {
             "last_edited_by": "DWZX6FOBBGSQPDYMM3Q4CWQVGE"
         }))
         .unwrap();
-        assert_eq!(
-            i.last_edited_by,
-            Some("DWZX6FOBBGSQPDYMM3Q4CWQVGE".into())
-        );
+        assert_eq!(i.last_edited_by, Some("DWZX6FOBBGSQPDYMM3Q4CWQVGE".into()));
     }
 
     #[test]
@@ -418,8 +415,7 @@ mod tests {
 
     #[test]
     fn item_url_minimal() {
-        let u: ItemUrl =
-            serde_json::from_value(json!({"href": "https://example.com"})).unwrap();
+        let u: ItemUrl = serde_json::from_value(json!({"href": "https://example.com"})).unwrap();
         assert!(u.label.is_none());
         assert!(u.primary.is_none());
     }

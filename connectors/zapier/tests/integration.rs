@@ -124,7 +124,10 @@ async fn lifecycle_handshake_returns_capabilities() {
     c.handle_configure(json!({ "api_key": "tok", "base_url": server.uri() }))
         .await
         .unwrap();
-    let result = c.handle_handshake(json!({"session_id": "s1"})).await.unwrap();
+    let result = c
+        .handle_handshake(json!({"session_id": "s1"}))
+        .await
+        .unwrap();
     assert_eq!(result["protocol_version"], "2.0");
     assert_eq!(result["connector_id"], "fcp.zapier");
     let caps = result["capabilities"].as_array().unwrap();
@@ -341,8 +344,7 @@ async fn error_401() {
     Mock::given(method("GET"))
         .and(path("/exposed/"))
         .respond_with(
-            ResponseTemplate::new(401)
-                .set_body_json(json!({"error": "Authentication required"})),
+            ResponseTemplate::new(401).set_body_json(json!({"error": "Authentication required"})),
         )
         .mount(&server)
         .await;
@@ -363,10 +365,7 @@ async fn error_403() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/exposed/"))
-        .respond_with(
-            ResponseTemplate::new(403)
-                .set_body_json(json!({"error": "Forbidden"})),
-        )
+        .respond_with(ResponseTemplate::new(403).set_body_json(json!({"error": "Forbidden"})))
         .mount(&server)
         .await;
 
@@ -387,8 +386,7 @@ async fn error_404() {
     Mock::given(method("POST"))
         .and(path("/exposed/bad_id/execute/"))
         .respond_with(
-            ResponseTemplate::new(404)
-                .set_body_json(json!({"detail": "Action not found"})),
+            ResponseTemplate::new(404).set_body_json(json!({"detail": "Action not found"})),
         )
         .mount(&server)
         .await;
@@ -556,10 +554,7 @@ async fn simulate_unknown() {
 async fn simulate_empty_operation() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
-    let result = c
-        .handle_simulate(json!({}))
-        .await
-        .unwrap();
+    let result = c.handle_simulate(json!({})).await.unwrap();
     assert!(!result["allowed"].as_bool().unwrap());
 }
 
@@ -641,7 +636,11 @@ async fn configure_rejects_empty_api_key() {
 #[fcp_async_core::runtime::test]
 async fn configure_rejects_whitespace_api_key() {
     let mut c = ZapierConnector::new();
-    assert!(c.handle_configure(json!({ "api_key": "   " })).await.is_err());
+    assert!(
+        c.handle_configure(json!({ "api_key": "   " }))
+            .await
+            .is_err()
+    );
 }
 
 #[fcp_async_core::runtime::test]

@@ -323,10 +323,9 @@ async fn get_full_text() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path_regex("/e-print/.*"))
-        .respond_with(
-            ResponseTemplate::new(200)
-                .set_body_string("\\documentclass{article}\n\\begin{document}\nHello world\n\\end{document}"),
-        )
+        .respond_with(ResponseTemplate::new(200).set_body_string(
+            "\\documentclass{article}\n\\begin{document}\nHello world\n\\end{document}",
+        ))
         .mount(&server)
         .await;
 
@@ -788,8 +787,7 @@ async fn error_scholar_500() {
     Mock::given(method("GET"))
         .and(path_regex("/author/search.*"))
         .respond_with(
-            ResponseTemplate::new(500)
-                .set_body_json(json!({"message": "Internal Server Error"})),
+            ResponseTemplate::new(500).set_body_json(json!({"message": "Internal Server Error"})),
         )
         .mount(&server)
         .await;

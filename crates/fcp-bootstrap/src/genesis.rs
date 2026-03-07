@@ -595,10 +595,7 @@ mod tests {
         let cbor = genesis.to_cbor().unwrap();
         let restored = GenesisState::from_cbor(&cbor).unwrap();
         assert_eq!(genesis.fingerprint(), restored.fingerprint());
-        assert_eq!(
-            restored.created_at,
-            DateTime::from_timestamp(0, 0).unwrap()
-        );
+        assert_eq!(restored.created_at, DateTime::from_timestamp(0, 0).unwrap());
     }
 
     // ---- Validation: timestamp within tolerance ----
@@ -672,9 +669,7 @@ mod tests {
     fn genesis_validation_missing_community_zone() {
         let signing_key = Ed25519SigningKey::generate();
         let mut genesis = GenesisState::create(&signing_key.verifying_key());
-        genesis
-            .initial_zones
-            .retain(|z| z.zone_id != "z:community");
+        genesis.initial_zones.retain(|z| z.zone_id != "z:community");
         let result = genesis.validate();
         assert!(matches!(
             result,
@@ -841,7 +836,11 @@ mod tests {
         // 12 bytes base64 URL-safe no padding = 16 chars
         assert_eq!(b64_part.len(), 16, "base64 part should be 16 chars");
         // Should only contain URL-safe base64 characters
-        assert!(b64_part.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_'));
+        assert!(
+            b64_part
+                .chars()
+                .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+        );
     }
 
     // ---- owner_verifying_key consistency ----

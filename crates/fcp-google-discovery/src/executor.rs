@@ -1403,4 +1403,1529 @@ mod tests {
         assert_eq!(parsed.status.as_deref(), Some("PERMISSION_DENIED"));
         assert!(parsed.access_not_configured_hint);
     }
+
+    // ── GoogleUploadMode ──────────────────────────────────────────────
+
+    #[test]
+    fn upload_mode_simple_type() {
+        assert_eq!(GoogleUploadMode::Simple.upload_type(), "media");
+    }
+
+    #[test]
+    fn upload_mode_multipart_type() {
+        assert_eq!(GoogleUploadMode::Multipart.upload_type(), "multipart");
+    }
+
+    #[test]
+    fn upload_mode_resumable_type() {
+        assert_eq!(GoogleUploadMode::Resumable.upload_type(), "resumable");
+    }
+
+    // ── GoogleUploadPayload ───────────────────────────────────────────
+
+    #[test]
+    fn upload_payload_simple_constructor() {
+        let payload = GoogleUploadPayload::simple("image/png", vec![0x89, 0x50, 0x4e, 0x47]);
+        assert_eq!(payload.mode, GoogleUploadMode::Simple);
+        assert_eq!(payload.content_type, "image/png");
+        assert_eq!(payload.bytes, vec![0x89, 0x50, 0x4e, 0x47]);
+        assert!(payload.metadata.is_none());
+    }
+
+    #[test]
+    fn upload_payload_multipart_constructor() {
+        let meta = serde_json::json!({"name": "file.txt"});
+        let payload =
+            GoogleUploadPayload::multipart("text/plain", b"hello world".to_vec(), meta.clone());
+        assert_eq!(payload.mode, GoogleUploadMode::Multipart);
+        assert_eq!(payload.content_type, "text/plain");
+        assert_eq!(payload.bytes, b"hello world");
+        assert_eq!(payload.metadata, Some(meta));
+    }
+
+    #[test]
+    fn upload_payload_resumable_constructor() {
+        let meta = serde_json::json!({"title": "doc.pdf"});
+        let payload = GoogleUploadPayload::resumable(
+            "application/pdf",
+            vec![0x25, 0x50, 0x44, 0x46],
+            meta.clone(),
+        );
+        assert_eq!(payload.mode, GoogleUploadMode::Resumable);
+        assert_eq!(payload.content_type, "application/pdf");
+        assert_eq!(payload.bytes, vec![0x25, 0x50, 0x44, 0x46]);
+        assert_eq!(payload.metadata, Some(meta));
+    }
+
+    // ── GoogleResponseBody ────────────────────────────────────────────
+
+    #[test]
+    fn response_body_empty_variant() {
+        let body = GoogleResponseBody::Empty;
+        assert!(body.as_json().is_none());
+        assert!(body.as_bytes().is_none());
+    }
+
+    #[test]
+    fn response_body_json_variant() {
+        let val = serde_json::json!({"ok": true});
+        let body = GoogleResponseBody::Json(val.clone());
+        assert_eq!(body.as_json(), Some(&val));
+        assert!(body.as_bytes().is_none());
+    }
+
+    #[test]
+    fn response_body_binary_variant() {
+        let data = vec![1, 2, 3, 4, 5];
+        let body = GoogleResponseBody::Binary(data.clone());
+        assert_eq!(body.as_bytes(), Some(data.as_slice()));
+        assert!(body.as_json().is_none());
+    }
+
+    // ── GoogleApiError fields ─────────────────────────────────────────
+
+    #[test]
+    fn api_error_fields_accessible() {
+        let error = GoogleApiError {
+            status_code: 404,
+            message: "Not Found".to_string(),
+            status: Some("NOT_FOUND".to_string()),
+            reason: Some("notFound".to_string()),
+            domain: Some("global".to_string()),
+            access_not_configured_hint: false,
+        };
+        assert_eq!(error.status_code, 404);
+        assert_eq!(error.message, "Not Found");
+        assert_eq!(error.status.as_deref(), Some("NOT_FOUND"));
+        assert_eq!(error.reason.as_deref(), Some("notFound"));
+        assert_eq!(error.domain.as_deref(), Some("global"));
+        assert!(!error.access_not_configured_hint);
+    }
+
+    #[test]
+    fn api_error_access_not_configured_hint_via_reason() {
+        let body = serde_json::json!({
+            "error": {
+                "code": 403,
+                "message": "Some other message",
+                "errors": [{"reason": "accessNotConfigured", "domain": "usageLimits"}]
+            }
+        });
+        let bytes = serde_json::to_vec(&body).expect("serialize");
+        let parsed = parse_google_api_error(StatusCode::FORBIDDEN, &bytes);
+        assert!(parsed.access_not_configured_hint);
+    }
+
+    #[test]
+    fn api_error_access_not_configured_hint_via_message() {
+        let body = serde_json::json!({
+            "error": {
+                "code": 403,
+                "message": "Calendar API has not been used in project 999 before or it is disabled.",
+                "errors": [{"reason": "forbidden", "domain": "global"}]
+            }
+        });
+        let bytes = serde_json::to_vec(&body).expect("serialize");
+        let parsed = parse_google_api_error(StatusCode::FORBIDDEN, &bytes);
+        assert!(parsed.access_not_configured_hint);
+    }
+
+    // ── GoogleExecuteRequest ──────────────────────────────────────────
+
+    #[test]
+    fn execute_request_new_sets_defaults() {
+        let method = method_fixture("GET", "v1/items", BTreeMap::new());
+        let schemas = BTreeMap::new();
+        let request = GoogleExecuteRequest::new(&method, &schemas, "https://example.com/");
+        assert!(request.parameters.is_empty());
+        assert!(request.body.is_none());
+        assert!(request.upload.is_none());
+        assert_eq!(request.response_mode, GoogleResponseMode::Auto);
+        assert!(request.auth.is_none());
+        assert!(request.extra_headers.is_empty());
+        assert_eq!(request.base_url, "https://example.com/");
+    }
+
+    #[test]
+    fn execute_request_field_assignment() {
+        let method = method_fixture("POST", "v1/items", BTreeMap::new());
+        let schemas = BTreeMap::new();
+        let mut request = GoogleExecuteRequest::new(&method, &schemas, "https://example.com/");
+
+        request.body = Some(serde_json::json!({"key": "value"}));
+        request.response_mode = GoogleResponseMode::Json;
+        request
+            .extra_headers
+            .push(("X-Custom".to_string(), "val".to_string()));
+        request
+            .parameters
+            .insert("q".to_string(), vec!["search".to_string()]);
+
+        assert!(request.body.is_some());
+        assert_eq!(request.response_mode, GoogleResponseMode::Json);
+        assert_eq!(request.extra_headers.len(), 1);
+        assert_eq!(request.parameters.len(), 1);
+    }
+
+    #[test]
+    fn execute_request_parameter_setting() {
+        let mut params_meta = BTreeMap::new();
+        params_meta.insert("q".to_string(), query_parameter_meta(false, true));
+        params_meta.insert("maxResults".to_string(), query_parameter_meta(false, false));
+        let method = method_fixture("GET", "v1/items", params_meta);
+        let schemas = BTreeMap::new();
+        let mut request = GoogleExecuteRequest::new(&method, &schemas, "https://example.com/");
+
+        request
+            .parameters
+            .insert("q".to_string(), vec!["a".to_string(), "b".to_string()]);
+        request
+            .parameters
+            .insert("maxResults".to_string(), vec!["10".to_string()]);
+
+        assert_eq!(request.parameters["q"].len(), 2);
+        assert_eq!(request.parameters["maxResults"], vec!["10"]);
+    }
+
+    // ── GoogleRestError Display ───────────────────────────────────────
+
+    #[test]
+    fn rest_error_display_validation() {
+        let error = GoogleRestError::RequestBodyValidation {
+            schema: "Message".to_string(),
+            path: "$.raw".to_string(),
+            message: "missing required field".to_string(),
+        };
+        let display = error.to_string();
+        assert!(display.contains("Message"));
+        assert!(display.contains("$.raw"));
+        assert!(display.contains("missing required field"));
+    }
+
+    #[test]
+    fn rest_error_display_request_failed() {
+        let error = GoogleRestError::UnsupportedHttpMethod {
+            method: "TRACE".to_string(),
+        };
+        let display = error.to_string();
+        assert!(display.contains("TRACE"));
+    }
+
+    #[test]
+    fn rest_error_display_api_error() {
+        let api_error = GoogleApiError {
+            status_code: 500,
+            message: "Internal Server Error".to_string(),
+            status: None,
+            reason: None,
+            domain: None,
+            access_not_configured_hint: false,
+        };
+        let error = GoogleRestError::Api {
+            status_code: 500,
+            message: "Internal Server Error".to_string(),
+            error: api_error,
+        };
+        let display = error.to_string();
+        assert!(display.contains("500"));
+        assert!(display.contains("Internal Server Error"));
+    }
+
+    #[test]
+    fn rest_error_display_body_decode() {
+        let json_err = serde_json::from_str::<serde_json::Value>("not-json").unwrap_err();
+        let error = GoogleRestError::JsonDecode { source: json_err };
+        let display = error.to_string();
+        assert!(display.contains("decode response json"));
+    }
+
+    #[test]
+    fn rest_error_display_missing_required_parameter() {
+        let error = GoogleRestError::MissingRequiredParameter {
+            name: "userId".to_string(),
+            location: Some("path".to_string()),
+            location_suffix: " in `path`".to_string(),
+        };
+        let display = error.to_string();
+        assert!(display.contains("userId"));
+        assert!(display.contains("in `path`"));
+    }
+
+    #[test]
+    fn rest_error_display_unknown_parameter() {
+        let error = GoogleRestError::UnknownParameter {
+            method_key: "users.list".to_string(),
+            name: "bogus".to_string(),
+        };
+        let display = error.to_string();
+        assert!(display.contains("bogus"));
+        assert!(display.contains("users.list"));
+    }
+
+    #[test]
+    fn rest_error_display_empty_parameter_value() {
+        let error = GoogleRestError::EmptyParameterValue {
+            name: "q".to_string(),
+        };
+        let display = error.to_string();
+        assert!(display.contains('q'));
+        assert!(display.contains("at least one value"));
+    }
+
+    #[test]
+    fn rest_error_display_invalid_parameter_multiplicity() {
+        let error = GoogleRestError::InvalidParameterMultiplicity {
+            name: "id".to_string(),
+        };
+        let display = error.to_string();
+        assert!(display.contains("id"));
+        assert!(display.contains("not repeatable"));
+    }
+
+    #[test]
+    fn rest_error_display_invalid_path_template() {
+        let error = GoogleRestError::InvalidPathTemplate {
+            template: "v1/{".to_string(),
+            message: "missing closing `}`".to_string(),
+        };
+        let display = error.to_string();
+        assert!(display.contains("v1/{"));
+        assert!(display.contains("missing closing"));
+    }
+
+    #[test]
+    fn rest_error_display_missing_path_parameter() {
+        let error = GoogleRestError::MissingPathParameter {
+            name: "fileId".to_string(),
+            template: "v1/files/{fileId}".to_string(),
+        };
+        let display = error.to_string();
+        assert!(display.contains("fileId"));
+        assert!(display.contains("v1/files/{fileId}"));
+    }
+
+    #[test]
+    fn rest_error_display_path_traversal() {
+        let error = GoogleRestError::PathTraversalRejected {
+            name: "path".to_string(),
+            segment: "..".to_string(),
+        };
+        let display = error.to_string();
+        assert!(display.contains("path"));
+        assert!(display.contains(".."));
+    }
+
+    #[test]
+    fn rest_error_display_invalid_base_url() {
+        let error = GoogleRestError::InvalidBaseUrl {
+            base_url: "not-a-url".to_string(),
+            message: "relative URL without a base".to_string(),
+        };
+        let display = error.to_string();
+        assert!(display.contains("not-a-url"));
+    }
+
+    #[test]
+    fn rest_error_display_missing_request_body() {
+        let error = GoogleRestError::MissingRequestBody {
+            schema: "Message".to_string(),
+        };
+        let display = error.to_string();
+        assert!(display.contains("Message"));
+        assert!(display.contains("required"));
+    }
+
+    #[test]
+    fn rest_error_display_body_not_allowed() {
+        let error = GoogleRestError::BodyNotAllowed {
+            http_method: "GET".to_string(),
+        };
+        let display = error.to_string();
+        assert!(display.contains("GET"));
+        assert!(display.contains("not allowed"));
+    }
+
+    #[test]
+    fn rest_error_display_unknown_schema_reference() {
+        let error = GoogleRestError::UnknownSchemaReference {
+            schema: "FakeSchema".to_string(),
+        };
+        let display = error.to_string();
+        assert!(display.contains("FakeSchema"));
+    }
+
+    #[test]
+    fn rest_error_display_invalid_upload_configuration() {
+        let error = GoogleRestError::InvalidUploadConfiguration {
+            message: "method does not expose mediaUpload metadata".to_string(),
+        };
+        let display = error.to_string();
+        assert!(display.contains("mediaUpload"));
+    }
+
+    #[test]
+    fn rest_error_display_invalid_upload_content_type() {
+        let error = GoogleRestError::InvalidUploadContentType {
+            content_type: "bad/type".to_string(),
+            message: "parse error".to_string(),
+        };
+        let display = error.to_string();
+        assert!(display.contains("bad/type"));
+    }
+
+    // ── GoogleResponseMode ────────────────────────────────────────────
+
+    #[test]
+    fn response_mode_all_variants() {
+        let auto = GoogleResponseMode::Auto;
+        let json = GoogleResponseMode::Json;
+        let binary = GoogleResponseMode::Binary;
+
+        // Distinct variants
+        assert_ne!(auto, json);
+        assert_ne!(json, binary);
+        assert_ne!(auto, binary);
+
+        // Self-equality
+        assert_eq!(auto, GoogleResponseMode::Auto);
+        assert_eq!(json, GoogleResponseMode::Json);
+        assert_eq!(binary, GoogleResponseMode::Binary);
+    }
+
+    // ── GoogleExecuteResponse ─────────────────────────────────────────
+
+    #[test]
+    fn execute_response_fields() {
+        let response = GoogleExecuteResponse {
+            status_code: 200,
+            headers: vec![("content-type".to_string(), "application/json".to_string())],
+            body: GoogleResponseBody::Json(serde_json::json!({"id": "abc"})),
+            next_page_token: Some("token-2".to_string()),
+        };
+        assert_eq!(response.status_code, 200);
+        assert_eq!(response.headers.len(), 1);
+        assert_eq!(response.headers[0].0, "content-type");
+        assert!(response.body.as_json().is_some());
+        assert_eq!(response.next_page_token.as_deref(), Some("token-2"));
+    }
+
+    #[test]
+    fn execute_response_no_pagination_token() {
+        let response = GoogleExecuteResponse {
+            status_code: 204,
+            headers: Vec::new(),
+            body: GoogleResponseBody::Empty,
+            next_page_token: None,
+        };
+        assert_eq!(response.status_code, 204);
+        assert!(response.headers.is_empty());
+        assert!(response.next_page_token.is_none());
+    }
+
+    // ── render_path_template edge cases ───────────────────────────────
+
+    #[test]
+    fn render_path_no_params_passthrough() {
+        let params = BTreeMap::new();
+        let rendered =
+            render_path_template("gmail/v1/users/me/profile", &params).expect("no placeholders");
+        assert_eq!(rendered, "gmail/v1/users/me/profile");
+    }
+
+    #[test]
+    fn render_path_percent_encodes_special_chars() {
+        let params = BTreeMap::from([("id".to_string(), vec!["hello world".to_string()])]);
+        let rendered = render_path_template("v1/items/{id}", &params).expect("rendered");
+        assert!(rendered.contains("hello%20world"));
+        assert!(!rendered.contains(' '));
+    }
+
+    #[test]
+    fn render_path_encodes_at_sign_and_slash_in_normal_expansion() {
+        let params = BTreeMap::from([("email".to_string(), vec!["a@b.com".to_string()])]);
+        let rendered = render_path_template("v1/users/{email}", &params).expect("rendered");
+        assert!(rendered.contains("a%40b.com"));
+    }
+
+    #[test]
+    fn render_path_reserved_expansion_preserves_slashes() {
+        let params =
+            BTreeMap::from([("name".to_string(), vec!["projects/p/topics/t".to_string()])]);
+        let rendered = render_path_template("v1/{+name}", &params).expect("rendered");
+        assert_eq!(rendered, "v1/projects/p/topics/t");
+    }
+
+    #[test]
+    fn render_path_empty_template_rejected() {
+        let params = BTreeMap::new();
+        let error = render_path_template("", &params).expect_err("empty template");
+        assert!(matches!(error, GoogleRestError::InvalidPathTemplate { .. }));
+    }
+
+    #[test]
+    fn render_path_whitespace_only_template_rejected() {
+        let params = BTreeMap::new();
+        let error = render_path_template("   ", &params).expect_err("whitespace template");
+        assert!(matches!(error, GoogleRestError::InvalidPathTemplate { .. }));
+    }
+
+    #[test]
+    fn render_path_unmatched_close_brace_rejected() {
+        let params = BTreeMap::new();
+        let error =
+            render_path_template("v1/items}/list", &params).expect_err("unmatched close brace");
+        assert!(matches!(error, GoogleRestError::InvalidPathTemplate { .. }));
+    }
+
+    #[test]
+    fn render_path_missing_close_brace_rejected() {
+        let params = BTreeMap::new();
+        let error = render_path_template("v1/items/{id", &params).expect_err("missing close brace");
+        assert!(matches!(error, GoogleRestError::InvalidPathTemplate { .. }));
+    }
+
+    #[test]
+    fn render_path_empty_placeholder_token_rejected() {
+        let params = BTreeMap::new();
+        let error = render_path_template("v1/items/{}", &params).expect_err("empty placeholder");
+        assert!(matches!(error, GoogleRestError::InvalidPathTemplate { .. }));
+    }
+
+    #[test]
+    fn render_path_empty_plus_name_rejected() {
+        let params = BTreeMap::new();
+        let error = render_path_template("v1/items/{+}", &params).expect_err("empty plus name");
+        assert!(matches!(error, GoogleRestError::InvalidPathTemplate { .. }));
+    }
+
+    #[test]
+    fn render_path_missing_parameter_value() {
+        let params = BTreeMap::new();
+        let error = render_path_template("v1/items/{id}", &params).expect_err("missing param");
+        assert!(matches!(
+            error,
+            GoogleRestError::MissingPathParameter { .. }
+        ));
+    }
+
+    #[test]
+    fn render_path_empty_string_parameter_value() {
+        let params = BTreeMap::from([("id".to_string(), vec![String::new()])]);
+        let error = render_path_template("v1/items/{id}", &params).expect_err("empty value");
+        assert!(matches!(
+            error,
+            GoogleRestError::MissingPathParameter { .. }
+        ));
+    }
+
+    #[test]
+    fn render_path_multiple_placeholders() {
+        let params = BTreeMap::from([
+            ("userId".to_string(), vec!["me".to_string()]),
+            ("messageId".to_string(), vec!["abc123".to_string()]),
+        ]);
+        let rendered =
+            render_path_template("gmail/v1/users/{userId}/messages/{messageId}", &params)
+                .expect("rendered");
+        assert_eq!(rendered, "gmail/v1/users/me/messages/abc123");
+    }
+
+    #[test]
+    fn render_path_traversal_dot_in_normal_expansion() {
+        let params = BTreeMap::from([("id".to_string(), vec!["..".to_string()])]);
+        let error = render_path_template("v1/{id}", &params).expect_err("dot-dot traversal");
+        assert!(matches!(
+            error,
+            GoogleRestError::PathTraversalRejected { .. }
+        ));
+    }
+
+    #[test]
+    fn render_path_traversal_single_dot_in_normal_expansion() {
+        let params = BTreeMap::from([("id".to_string(), vec![".".to_string()])]);
+        let error = render_path_template("v1/{id}", &params).expect_err("single dot traversal");
+        assert!(matches!(
+            error,
+            GoogleRestError::PathTraversalRejected { .. }
+        ));
+    }
+
+    #[test]
+    fn render_path_non_traversal_dot_in_normal_expansion() {
+        // "a.b" is not "." or ".." — should be allowed
+        let params = BTreeMap::from([("id".to_string(), vec!["a.b".to_string()])]);
+        let rendered = render_path_template("v1/{id}", &params).expect("allowed");
+        assert!(rendered.contains("a.b"));
+    }
+
+    // ── Query parameter edge cases ────────────────────────────────────
+
+    #[test]
+    fn query_params_multiple_values() {
+        let mut method_params = BTreeMap::new();
+        method_params.insert("labels".to_string(), query_parameter_meta(false, true));
+        let method = method_fixture("GET", "v1/items", method_params);
+        let schemas = BTreeMap::new();
+        let mut request = GoogleExecuteRequest::new(&method, &schemas, "https://example.com/");
+        request.parameters.insert(
+            "labels".to_string(),
+            vec!["a".to_string(), "b".to_string(), "c".to_string()],
+        );
+
+        let rendered_path =
+            render_path_template(&method.canonical_path, &request.parameters).expect("path");
+        let mut url = build_url(request.base_url, &rendered_path).expect("url");
+        append_query_parameters(&mut url, &request).expect("query");
+        let query = url.query().unwrap_or_default().to_string();
+
+        assert!(query.contains("labels=a"));
+        assert!(query.contains("labels=b"));
+        assert!(query.contains("labels=c"));
+    }
+
+    #[test]
+    fn query_params_empty_value_string() {
+        let mut method_params = BTreeMap::new();
+        method_params.insert("filter".to_string(), query_parameter_meta(false, false));
+        let method = method_fixture("GET", "v1/items", method_params);
+        let schemas = BTreeMap::new();
+        let mut request = GoogleExecuteRequest::new(&method, &schemas, "https://example.com/");
+        request
+            .parameters
+            .insert("filter".to_string(), vec![String::new()]);
+
+        let rendered_path =
+            render_path_template(&method.canonical_path, &request.parameters).expect("path");
+        let mut url = build_url(request.base_url, &rendered_path).expect("url");
+        append_query_parameters(&mut url, &request).expect("query");
+        let query = url.query().unwrap_or_default().to_string();
+
+        assert!(query.contains("filter="));
+    }
+
+    // ── Schema validation ─────────────────────────────────────────────
+
+    fn schema_with_properties(
+        required: Vec<&str>,
+        properties: Vec<(&str, DiscoverySchema)>,
+    ) -> DiscoverySchema {
+        DiscoverySchema {
+            type_name: Some("object".to_string()),
+            format: None,
+            description: None,
+            required: required.into_iter().map(str::to_string).collect(),
+            enum_values: Vec::new(),
+            properties: properties
+                .into_iter()
+                .map(|(k, v)| (k.to_string(), v))
+                .collect(),
+            items: None,
+            ref_name: None,
+            additional_properties: None,
+        }
+    }
+
+    fn schema_typed(type_name: &str) -> DiscoverySchema {
+        DiscoverySchema {
+            type_name: Some(type_name.to_string()),
+            format: None,
+            description: None,
+            required: Vec::new(),
+            enum_values: Vec::new(),
+            properties: BTreeMap::new(),
+            items: None,
+            ref_name: None,
+            additional_properties: None,
+        }
+    }
+
+    #[test]
+    fn validate_schema_accepts_valid_body() {
+        let schema = schema_with_properties(
+            vec!["name"],
+            vec![
+                ("name", schema_typed("string")),
+                ("age", schema_typed("integer")),
+            ],
+        );
+        let schemas = BTreeMap::new();
+        let body = serde_json::json!({"name": "Alice", "age": 30});
+        let result = validate_schema_value("TestSchema", &schema, &body, &schemas, "$", 0);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn validate_schema_rejects_wrong_type() {
+        let schema = schema_with_properties(vec![], vec![("count", schema_typed("integer"))]);
+        let schemas = BTreeMap::new();
+        let body = serde_json::json!({"count": "not-a-number"});
+        let result = validate_schema_value("TestSchema", &schema, &body, &schemas, "$", 0);
+        assert!(result.is_err());
+        let error = result.unwrap_err();
+        assert!(matches!(
+            error,
+            GoogleRestError::RequestBodyValidation { ref message, .. }
+                if message == "expected integer"
+        ));
+    }
+
+    #[test]
+    fn validate_schema_missing_required_field() {
+        let schema = schema_with_properties(vec!["email"], vec![("email", schema_typed("string"))]);
+        let schemas = BTreeMap::new();
+        let body = serde_json::json!({});
+        let result = validate_schema_value("TestSchema", &schema, &body, &schemas, "$", 0);
+        assert!(result.is_err());
+        let error = result.unwrap_err();
+        assert!(matches!(
+            error,
+            GoogleRestError::RequestBodyValidation { ref path, ref message, .. }
+                if path == "$.email" && message == "missing required field"
+        ));
+    }
+
+    #[test]
+    fn validate_schema_additional_properties_validated() {
+        let additional = schema_typed("string");
+        let schema = DiscoverySchema {
+            type_name: Some("object".to_string()),
+            format: None,
+            description: None,
+            required: Vec::new(),
+            enum_values: Vec::new(),
+            properties: BTreeMap::new(),
+            items: None,
+            ref_name: None,
+            additional_properties: Some(Box::new(additional)),
+        };
+        let schemas = BTreeMap::new();
+
+        // Valid: additional property is a string
+        let body_ok = serde_json::json!({"key": "value"});
+        assert!(validate_schema_value("TestSchema", &schema, &body_ok, &schemas, "$", 0).is_ok());
+
+        // Invalid: additional property is not a string
+        let body_bad = serde_json::json!({"key": 42});
+        let result = validate_schema_value("TestSchema", &schema, &body_bad, &schemas, "$", 0);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn validate_schema_rejects_non_object_for_object_schema() {
+        let schema = schema_object(vec![]);
+        let schemas = BTreeMap::new();
+        let body = serde_json::json!("not-an-object");
+        let result = validate_schema_value("TestSchema", &schema, &body, &schemas, "$", 0);
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            GoogleRestError::RequestBodyValidation { ref message, .. }
+                if message == "expected object"
+        ));
+    }
+
+    #[test]
+    fn validate_schema_array_type() {
+        let item_schema = schema_typed("string");
+        let array_schema = DiscoverySchema {
+            type_name: Some("array".to_string()),
+            format: None,
+            description: None,
+            required: Vec::new(),
+            enum_values: Vec::new(),
+            properties: BTreeMap::new(),
+            items: Some(Box::new(item_schema)),
+            ref_name: None,
+            additional_properties: None,
+        };
+        let schemas = BTreeMap::new();
+
+        // Valid array of strings
+        let body_ok = serde_json::json!(["a", "b", "c"]);
+        assert!(
+            validate_schema_value("TestSchema", &array_schema, &body_ok, &schemas, "$", 0).is_ok()
+        );
+
+        // Invalid: array containing non-strings
+        let body_bad = serde_json::json!(["a", 42]);
+        let result =
+            validate_schema_value("TestSchema", &array_schema, &body_bad, &schemas, "$", 0);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn validate_schema_rejects_non_array_for_array_schema() {
+        let array_schema = DiscoverySchema {
+            type_name: Some("array".to_string()),
+            format: None,
+            description: None,
+            required: Vec::new(),
+            enum_values: Vec::new(),
+            properties: BTreeMap::new(),
+            items: None,
+            ref_name: None,
+            additional_properties: None,
+        };
+        let schemas = BTreeMap::new();
+        let body = serde_json::json!("not-an-array");
+        let result = validate_schema_value("TestSchema", &array_schema, &body, &schemas, "$", 0);
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            GoogleRestError::RequestBodyValidation { ref message, .. }
+                if message == "expected array"
+        ));
+    }
+
+    #[test]
+    fn validate_schema_string_type() {
+        let schema = schema_typed("string");
+        let schemas = BTreeMap::new();
+
+        assert!(
+            validate_schema_value("S", &schema, &serde_json::json!("hello"), &schemas, "$", 0)
+                .is_ok()
+        );
+        assert!(
+            validate_schema_value("S", &schema, &serde_json::json!(42), &schemas, "$", 0).is_err()
+        );
+    }
+
+    #[test]
+    fn validate_schema_number_type() {
+        let schema = schema_typed("number");
+        let schemas = BTreeMap::new();
+
+        assert!(
+            validate_schema_value("S", &schema, &serde_json::json!(2.5), &schemas, "$", 0).is_ok()
+        );
+        assert!(
+            validate_schema_value("S", &schema, &serde_json::json!(42), &schemas, "$", 0).is_ok()
+        );
+        assert!(
+            validate_schema_value("S", &schema, &serde_json::json!("nan"), &schemas, "$", 0)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn validate_schema_boolean_type() {
+        let schema = schema_typed("boolean");
+        let schemas = BTreeMap::new();
+
+        assert!(
+            validate_schema_value("S", &schema, &serde_json::json!(true), &schemas, "$", 0).is_ok()
+        );
+        assert!(
+            validate_schema_value("S", &schema, &serde_json::json!(false), &schemas, "$", 0)
+                .is_ok()
+        );
+        assert!(
+            validate_schema_value("S", &schema, &serde_json::json!("true"), &schemas, "$", 0)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn validate_schema_ref_name_resolves() {
+        let ref_schema = DiscoverySchema {
+            type_name: None,
+            format: None,
+            description: None,
+            required: Vec::new(),
+            enum_values: Vec::new(),
+            properties: BTreeMap::new(),
+            items: None,
+            ref_name: Some("Actual".to_string()),
+            additional_properties: None,
+        };
+        let actual_schema = schema_typed("string");
+        let schemas = BTreeMap::from([("Actual".to_string(), actual_schema)]);
+
+        assert!(
+            validate_schema_value(
+                "Root",
+                &ref_schema,
+                &serde_json::json!("ok"),
+                &schemas,
+                "$",
+                0
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_schema_value(
+                "Root",
+                &ref_schema,
+                &serde_json::json!(42),
+                &schemas,
+                "$",
+                0
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn validate_schema_ref_name_unknown_rejects() {
+        let ref_schema = DiscoverySchema {
+            type_name: None,
+            format: None,
+            description: None,
+            required: Vec::new(),
+            enum_values: Vec::new(),
+            properties: BTreeMap::new(),
+            items: None,
+            ref_name: Some("Missing".to_string()),
+            additional_properties: None,
+        };
+        let schemas = BTreeMap::new();
+        let result = validate_schema_value(
+            "Root",
+            &ref_schema,
+            &serde_json::json!("x"),
+            &schemas,
+            "$",
+            0,
+        );
+        assert!(matches!(
+            result.unwrap_err(),
+            GoogleRestError::UnknownSchemaReference { ref schema }
+                if schema == "Missing"
+        ));
+    }
+
+    #[test]
+    fn validate_schema_depth_limit_exceeded() {
+        let schema = schema_typed("string");
+        let schemas = BTreeMap::new();
+        let result = validate_schema_value(
+            "Deep",
+            &schema,
+            &serde_json::json!("x"),
+            &schemas,
+            "$",
+            MAX_SCHEMA_VALIDATION_DEPTH + 1,
+        );
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            GoogleRestError::RequestBodyValidation { ref message, .. }
+                if message.contains("depth limit")
+        ));
+    }
+
+    // ── GoogleRestExecutor ────────────────────────────────────────────
+
+    #[test]
+    fn rest_executor_new_creates_instance() {
+        let executor = GoogleRestExecutor::new();
+        // Debug impl should succeed without panic
+        let debug = format!("{executor:?}");
+        assert!(debug.contains("GoogleRestExecutor"));
+    }
+
+    #[test]
+    fn rest_executor_default_creates_instance() {
+        let executor = GoogleRestExecutor::default();
+        let debug = format!("{executor:?}");
+        assert!(debug.contains("GoogleRestExecutor"));
+    }
+
+    #[test]
+    fn rest_executor_with_client() {
+        let client = reqwest::Client::new();
+        let executor = GoogleRestExecutor::new().with_client(client);
+        let debug = format!("{executor:?}");
+        assert!(debug.contains("GoogleRestExecutor"));
+    }
+
+    // ── parse_http_method ─────────────────────────────────────────────
+
+    #[test]
+    fn parse_http_method_valid_verbs() {
+        assert_eq!(parse_http_method("GET").unwrap(), Method::GET);
+        assert_eq!(parse_http_method("POST").unwrap(), Method::POST);
+        assert_eq!(parse_http_method("PUT").unwrap(), Method::PUT);
+        assert_eq!(parse_http_method("PATCH").unwrap(), Method::PATCH);
+        assert_eq!(parse_http_method("DELETE").unwrap(), Method::DELETE);
+    }
+
+    #[test]
+    fn parse_http_method_case_insensitive() {
+        assert_eq!(parse_http_method("get").unwrap(), Method::GET);
+        assert_eq!(parse_http_method("Post").unwrap(), Method::POST);
+        assert_eq!(parse_http_method(" patch ").unwrap(), Method::PATCH);
+    }
+
+    #[test]
+    fn parse_http_method_unsupported() {
+        let error = parse_http_method("TRACE").unwrap_err();
+        assert!(matches!(
+            error,
+            GoogleRestError::UnsupportedHttpMethod { ref method }
+                if method == "TRACE"
+        ));
+    }
+
+    // ── validate_parameters ───────────────────────────────────────────
+
+    #[test]
+    fn validate_parameters_unknown_parameter() {
+        let method = method_fixture("GET", "v1/items", BTreeMap::new());
+        let mut params = BTreeMap::new();
+        params.insert("bogus".to_string(), vec!["value".to_string()]);
+        let error = validate_parameters(&method, &params).unwrap_err();
+        assert!(matches!(error, GoogleRestError::UnknownParameter { .. }));
+    }
+
+    #[test]
+    fn validate_parameters_empty_values_rejected() {
+        let mut method_params = BTreeMap::new();
+        method_params.insert("q".to_string(), query_parameter_meta(false, false));
+        let method = method_fixture("GET", "v1/items", method_params);
+        let mut params = BTreeMap::new();
+        params.insert("q".to_string(), Vec::new());
+        let error = validate_parameters(&method, &params).unwrap_err();
+        assert!(matches!(error, GoogleRestError::EmptyParameterValue { .. }));
+    }
+
+    #[test]
+    fn validate_parameters_non_repeated_rejects_multiple() {
+        let mut method_params = BTreeMap::new();
+        method_params.insert("q".to_string(), query_parameter_meta(false, false));
+        let method = method_fixture("GET", "v1/items", method_params);
+        let mut params = BTreeMap::new();
+        params.insert("q".to_string(), vec!["a".to_string(), "b".to_string()]);
+        let error = validate_parameters(&method, &params).unwrap_err();
+        assert!(matches!(
+            error,
+            GoogleRestError::InvalidParameterMultiplicity { .. }
+        ));
+    }
+
+    #[test]
+    fn validate_parameters_required_missing() {
+        let mut method_params = BTreeMap::new();
+        method_params.insert("userId".to_string(), path_param(true));
+        let method = method_fixture("GET", "v1/users/{userId}", method_params);
+        let params = BTreeMap::new();
+        let error = validate_parameters(&method, &params).unwrap_err();
+        assert!(matches!(
+            error,
+            GoogleRestError::MissingRequiredParameter { ref name, .. }
+                if name == "userId"
+        ));
+    }
+
+    #[test]
+    fn validate_parameters_required_with_blank_values() {
+        let mut method_params = BTreeMap::new();
+        method_params.insert("userId".to_string(), path_param(true));
+        let method = method_fixture("GET", "v1/users/{userId}", method_params);
+        let mut params = BTreeMap::new();
+        params.insert("userId".to_string(), vec!["  ".to_string()]);
+        let error = validate_parameters(&method, &params).unwrap_err();
+        assert!(matches!(
+            error,
+            GoogleRestError::MissingRequiredParameter { .. }
+        ));
+    }
+
+    #[test]
+    fn validate_parameters_repeated_allows_multiple() {
+        let mut method_params = BTreeMap::new();
+        method_params.insert("labels".to_string(), query_parameter_meta(false, true));
+        let method = method_fixture("GET", "v1/items", method_params);
+        let mut params = BTreeMap::new();
+        params.insert(
+            "labels".to_string(),
+            vec!["a".to_string(), "b".to_string(), "c".to_string()],
+        );
+        assert!(validate_parameters(&method, &params).is_ok());
+    }
+
+    #[test]
+    fn validate_parameters_optional_can_be_absent() {
+        let mut method_params = BTreeMap::new();
+        method_params.insert("q".to_string(), query_parameter_meta(false, false));
+        let method = method_fixture("GET", "v1/items", method_params);
+        let params = BTreeMap::new();
+        assert!(validate_parameters(&method, &params).is_ok());
+    }
+
+    // ── location_suffix ───────────────────────────────────────────────
+
+    #[test]
+    fn location_suffix_some_value() {
+        assert_eq!(location_suffix(Some("path")), " in `path`");
+        assert_eq!(location_suffix(Some("query")), " in `query`");
+    }
+
+    #[test]
+    fn location_suffix_none_value() {
+        assert_eq!(location_suffix(None), String::new());
+    }
+
+    // ── decode_response_body ──────────────────────────────────────────
+
+    #[test]
+    fn decode_response_body_empty_bytes_returns_empty() {
+        let result = decode_response_body(b"", None, GoogleResponseMode::Auto).expect("decode");
+        assert!(matches!(result, GoogleResponseBody::Empty));
+    }
+
+    #[test]
+    fn decode_response_body_json_mode_valid() {
+        let bytes = serde_json::to_vec(&serde_json::json!({"ok": true})).expect("serialize");
+        let result = decode_response_body(&bytes, None, GoogleResponseMode::Json).expect("decode");
+        assert!(result.as_json().is_some());
+    }
+
+    #[test]
+    fn decode_response_body_json_mode_invalid_fails() {
+        let result = decode_response_body(b"not-json", None, GoogleResponseMode::Json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn decode_response_body_binary_mode() {
+        let result = decode_response_body(b"raw", Some("text/plain"), GoogleResponseMode::Binary)
+            .expect("decode");
+        assert_eq!(result.as_bytes(), Some(&b"raw"[..]));
+    }
+
+    #[test]
+    fn decode_response_body_auto_json_by_content_type() {
+        let bytes = serde_json::to_vec(&serde_json::json!({"x": 1})).expect("serialize");
+        let result =
+            decode_response_body(&bytes, Some("application/json"), GoogleResponseMode::Auto)
+                .expect("decode");
+        assert!(result.as_json().is_some());
+    }
+
+    #[test]
+    fn decode_response_body_auto_json_by_leading_brace() {
+        let bytes = b"{\"x\":1}";
+        let result = decode_response_body(bytes, Some("text/plain"), GoogleResponseMode::Auto)
+            .expect("decode");
+        assert!(result.as_json().is_some());
+    }
+
+    #[test]
+    fn decode_response_body_auto_json_by_leading_bracket() {
+        let bytes = b"[1,2,3]";
+        let result = decode_response_body(bytes, Some("text/plain"), GoogleResponseMode::Auto)
+            .expect("decode");
+        assert!(result.as_json().is_some());
+    }
+
+    #[test]
+    fn decode_response_body_auto_binary_fallback() {
+        let result = decode_response_body(
+            b"raw-binary",
+            Some("application/octet-stream"),
+            GoogleResponseMode::Auto,
+        )
+        .expect("decode");
+        assert!(result.as_bytes().is_some());
+    }
+
+    #[test]
+    fn decode_response_body_auto_invalid_json_falls_back_to_binary() {
+        // Starts with '{' but is not valid JSON — should fall back to binary
+        let result = decode_response_body(
+            b"{not valid json",
+            Some("text/plain"),
+            GoogleResponseMode::Auto,
+        )
+        .expect("decode");
+        assert!(result.as_bytes().is_some());
+    }
+
+    // ── extract_next_page_token ───────────────────────────────────────
+
+    #[test]
+    fn extract_next_page_token_camel_case() {
+        let body = serde_json::json!({"nextPageToken": "abc"});
+        assert_eq!(extract_next_page_token(&body), Some("abc"));
+    }
+
+    #[test]
+    fn extract_next_page_token_snake_case() {
+        let body = serde_json::json!({"next_page_token": "def"});
+        assert_eq!(extract_next_page_token(&body), Some("def"));
+    }
+
+    #[test]
+    fn extract_next_page_token_missing() {
+        let body = serde_json::json!({"items": []});
+        assert_eq!(extract_next_page_token(&body), None);
+    }
+
+    #[test]
+    fn extract_next_page_token_non_string() {
+        let body = serde_json::json!({"nextPageToken": 42});
+        assert_eq!(extract_next_page_token(&body), None);
+    }
+
+    // ── parse_google_api_error ────────────────────────────────────────
+
+    #[test]
+    fn parse_google_api_error_non_json_body() {
+        let parsed = parse_google_api_error(StatusCode::INTERNAL_SERVER_ERROR, b"Server Error");
+        assert_eq!(parsed.status_code, 500);
+        assert!(parsed.message.contains("Server Error"));
+        assert!(!parsed.access_not_configured_hint);
+    }
+
+    #[test]
+    fn parse_google_api_error_empty_body() {
+        let parsed = parse_google_api_error(StatusCode::BAD_GATEWAY, b"");
+        assert_eq!(parsed.status_code, 502);
+        assert!(parsed.message.contains("502"));
+        assert!(parsed.status.is_none());
+    }
+
+    #[test]
+    fn parse_google_api_error_valid_envelope() {
+        let body = serde_json::json!({
+            "error": {
+                "code": 429,
+                "message": "Rate limit exceeded",
+                "status": "RESOURCE_EXHAUSTED",
+                "errors": [{"reason": "rateLimitExceeded", "domain": "usageLimits"}]
+            }
+        });
+        let bytes = serde_json::to_vec(&body).expect("serialize");
+        let parsed = parse_google_api_error(StatusCode::TOO_MANY_REQUESTS, &bytes);
+        assert_eq!(parsed.status_code, 429);
+        assert_eq!(parsed.message, "Rate limit exceeded");
+        assert_eq!(parsed.status.as_deref(), Some("RESOURCE_EXHAUSTED"));
+        assert_eq!(parsed.reason.as_deref(), Some("rateLimitExceeded"));
+        assert_eq!(parsed.domain.as_deref(), Some("usageLimits"));
+        assert!(!parsed.access_not_configured_hint);
+    }
+
+    #[test]
+    fn parse_google_api_error_envelope_no_code_falls_back_to_status() {
+        let body = serde_json::json!({
+            "error": {
+                "message": "Something went wrong"
+            }
+        });
+        let bytes = serde_json::to_vec(&body).expect("serialize");
+        let parsed = parse_google_api_error(StatusCode::BAD_REQUEST, &bytes);
+        assert_eq!(parsed.status_code, 400);
+        assert_eq!(parsed.message, "Something went wrong");
+    }
+
+    #[test]
+    fn parse_google_api_error_envelope_empty_message_uses_http_code() {
+        let body = serde_json::json!({
+            "error": {
+                "code": 404,
+                "message": "   "
+            }
+        });
+        let bytes = serde_json::to_vec(&body).expect("serialize");
+        let parsed = parse_google_api_error(StatusCode::NOT_FOUND, &bytes);
+        assert_eq!(parsed.status_code, 404);
+        assert!(parsed.message.contains("404"));
+    }
+
+    // ── build_url ─────────────────────────────────────────────────────
+
+    #[test]
+    fn build_url_valid_join() {
+        let url = build_url("https://example.com/", "v1/items").expect("url");
+        assert_eq!(url.as_str(), "https://example.com/v1/items");
+    }
+
+    #[test]
+    fn build_url_strips_leading_slash() {
+        let url = build_url("https://example.com/", "/v1/items").expect("url");
+        assert_eq!(url.as_str(), "https://example.com/v1/items");
+    }
+
+    #[test]
+    fn build_url_invalid_base() {
+        let error = build_url("not-a-url", "v1/items").unwrap_err();
+        assert!(matches!(error, GoogleRestError::InvalidBaseUrl { .. }));
+    }
+
+    // ── resolve_path_template (method-level) ──────────────────────────
+
+    #[test]
+    fn resolve_path_template_no_upload_uses_canonical() {
+        let method = method_fixture("GET", "gmail/v1/users/me/profile", BTreeMap::new());
+        let resolved = resolve_path_template(&method, None).expect("resolved");
+        assert_eq!(resolved, "gmail/v1/users/me/profile");
+    }
+
+    #[test]
+    fn resolve_path_template_upload_without_media_metadata_fails() {
+        let method = method_fixture("POST", "v1/files", BTreeMap::new());
+        let upload = GoogleUploadPayload::simple("application/octet-stream", vec![]);
+        let error = resolve_path_template(&method, Some(&upload)).unwrap_err();
+        assert!(matches!(
+            error,
+            GoogleRestError::InvalidUploadConfiguration { .. }
+        ));
+    }
+
+    #[test]
+    fn resolve_path_template_multipart_uses_simple_path() {
+        let mut method = method_fixture("POST", "v1/files", BTreeMap::new());
+        method.media_upload = Some(crate::DiscoveryMediaUpload {
+            accept: vec!["*/*".to_string()],
+            max_size: None,
+            simple_path: Some("upload/v1/files".to_string()),
+            resumable_path: Some("upload/v1/files/resumable".to_string()),
+        });
+        let upload = GoogleUploadPayload::multipart(
+            "application/octet-stream",
+            vec![1],
+            serde_json::json!({}),
+        );
+        let resolved = resolve_path_template(&method, Some(&upload)).expect("resolved");
+        assert_eq!(resolved, "upload/v1/files");
+    }
+
+    #[test]
+    fn resolve_path_template_missing_simple_path_fails() {
+        let mut method = method_fixture("POST", "v1/files", BTreeMap::new());
+        method.media_upload = Some(crate::DiscoveryMediaUpload {
+            accept: vec!["*/*".to_string()],
+            max_size: None,
+            simple_path: None,
+            resumable_path: Some("upload/v1/files/resumable".to_string()),
+        });
+        let upload = GoogleUploadPayload::simple("application/octet-stream", vec![]);
+        let error = resolve_path_template(&method, Some(&upload)).unwrap_err();
+        assert!(matches!(
+            error,
+            GoogleRestError::InvalidUploadConfiguration { .. }
+        ));
+    }
+
+    #[test]
+    fn resolve_path_template_missing_resumable_path_fails() {
+        let mut method = method_fixture("POST", "v1/files", BTreeMap::new());
+        method.media_upload = Some(crate::DiscoveryMediaUpload {
+            accept: vec!["*/*".to_string()],
+            max_size: None,
+            simple_path: Some("upload/v1/files".to_string()),
+            resumable_path: None,
+        });
+        let upload = GoogleUploadPayload::resumable(
+            "application/octet-stream",
+            vec![],
+            serde_json::json!({}),
+        );
+        let error = resolve_path_template(&method, Some(&upload)).unwrap_err();
+        assert!(matches!(
+            error,
+            GoogleRestError::InvalidUploadConfiguration { .. }
+        ));
+    }
+
+    // ── validate_request_body (method-level) ──────────────────────────
+
+    #[test]
+    fn validate_request_body_no_schema_ref_always_ok() {
+        let method = method_fixture("GET", "v1/items", BTreeMap::new());
+        let schemas = BTreeMap::new();
+        assert!(validate_request_body(&method, &schemas, None, None).is_ok());
+        assert!(
+            validate_request_body(&method, &schemas, Some(&serde_json::json!({})), None,).is_ok()
+        );
+    }
+
+    #[test]
+    fn validate_request_body_missing_for_post_with_schema() {
+        let mut method = method_fixture("POST", "v1/items", BTreeMap::new());
+        method.request_ref = Some("Item".to_string());
+        let schemas = BTreeMap::from([("Item".to_string(), schema_object(vec![]))]);
+        let error = validate_request_body(&method, &schemas, None, None).unwrap_err();
+        assert!(matches!(error, GoogleRestError::MissingRequestBody { .. }));
+    }
+
+    #[test]
+    fn validate_request_body_missing_schema_in_map() {
+        let mut method = method_fixture("POST", "v1/items", BTreeMap::new());
+        method.request_ref = Some("NonExistent".to_string());
+        let schemas = BTreeMap::new();
+        let body = serde_json::json!({});
+        let error = validate_request_body(&method, &schemas, Some(&body), None).unwrap_err();
+        assert!(matches!(
+            error,
+            GoogleRestError::UnknownSchemaReference { .. }
+        ));
+    }
+
+    #[test]
+    fn validate_request_body_get_with_schema_ref_no_body_ok() {
+        // GET methods with schema_ref but no body should be OK (not required for GET)
+        let mut method = method_fixture("GET", "v1/items", BTreeMap::new());
+        method.request_ref = Some("Item".to_string());
+        let schemas = BTreeMap::from([("Item".to_string(), schema_object(vec![]))]);
+        assert!(validate_request_body(&method, &schemas, None, None).is_ok());
+    }
+
+    // ── encode_path_value / encode_path_segment ───────────────────────
+
+    #[test]
+    fn encode_path_segment_preserves_unreserved() {
+        let encoded = encode_path_segment("hello-world_test.file~name");
+        assert_eq!(encoded, "hello-world_test.file~name");
+    }
+
+    #[test]
+    fn encode_path_segment_encodes_special() {
+        let encoded = encode_path_segment("a@b c/d");
+        assert!(encoded.contains("%40"));
+        assert!(encoded.contains("%20"));
+        assert!(encoded.contains("%2F"));
+    }
+
+    #[test]
+    fn encode_path_value_reserved_preserves_slashes() {
+        let encoded = encode_path_value("projects/p/topics/t", true);
+        assert_eq!(encoded, "projects/p/topics/t");
+    }
+
+    #[test]
+    fn encode_path_value_non_reserved_encodes_slashes() {
+        let encoded = encode_path_value("a/b", false);
+        assert!(encoded.contains("%2F"));
+    }
+
+    // ── GoogleUploadPayload clone and eq ──────────────────────────────
+
+    #[test]
+    fn upload_payload_clone_and_eq() {
+        let payload = GoogleUploadPayload::simple("text/plain", b"data".to_vec());
+        let cloned = payload.clone();
+        assert_eq!(payload, cloned);
+    }
+
+    #[test]
+    fn upload_mode_clone_copy_eq() {
+        let mode = GoogleUploadMode::Resumable;
+        let copied = mode;
+        assert_eq!(mode, copied);
+        // Verify all variants are distinct via Copy
+        let a = GoogleUploadMode::Simple;
+        let b = GoogleUploadMode::Multipart;
+        let c = GoogleUploadMode::Resumable;
+        assert_ne!(a, b);
+        assert_ne!(b, c);
+        assert_ne!(a, c);
+    }
+
+    #[test]
+    fn response_body_clone_and_eq() {
+        let body = GoogleResponseBody::Json(serde_json::json!({"a": 1}));
+        let cloned = body.clone();
+        assert_eq!(body, cloned);
+    }
+
+    #[test]
+    fn api_error_clone_and_eq() {
+        let error = GoogleApiError {
+            status_code: 401,
+            message: "Unauthorized".to_string(),
+            status: None,
+            reason: None,
+            domain: None,
+            access_not_configured_hint: false,
+        };
+        let cloned = error.clone();
+        assert_eq!(error, cloned);
+    }
+
+    #[test]
+    fn execute_response_clone_and_eq() {
+        let response = GoogleExecuteResponse {
+            status_code: 200,
+            headers: Vec::new(),
+            body: GoogleResponseBody::Empty,
+            next_page_token: None,
+        };
+        let cloned = response.clone();
+        assert_eq!(response, cloned);
+    }
+
+    // ── body_for_validation ───────────────────────────────────────────
+
+    #[test]
+    fn body_for_validation_prefers_upload_metadata() {
+        let method = method_fixture("POST", "v1/items", BTreeMap::new());
+        let schemas = BTreeMap::new();
+        let mut request = GoogleExecuteRequest::new(&method, &schemas, "https://example.com/");
+        request.body = Some(serde_json::json!({"from_body": true}));
+        request.upload = Some(GoogleUploadPayload::multipart(
+            "text/plain",
+            vec![],
+            serde_json::json!({"from_upload": true}),
+        ));
+
+        let result = body_for_validation(&request);
+        assert_eq!(result, Some(serde_json::json!({"from_upload": true})));
+    }
+
+    #[test]
+    fn body_for_validation_falls_back_to_body() {
+        let method = method_fixture("POST", "v1/items", BTreeMap::new());
+        let schemas = BTreeMap::new();
+        let mut request = GoogleExecuteRequest::new(&method, &schemas, "https://example.com/");
+        request.body = Some(serde_json::json!({"from_body": true}));
+
+        let result = body_for_validation(&request);
+        assert_eq!(result, Some(serde_json::json!({"from_body": true})));
+    }
+
+    #[test]
+    fn body_for_validation_simple_upload_no_metadata() {
+        let method = method_fixture("POST", "v1/items", BTreeMap::new());
+        let schemas = BTreeMap::new();
+        let mut request = GoogleExecuteRequest::new(&method, &schemas, "https://example.com/");
+        request.upload = Some(GoogleUploadPayload::simple("text/plain", vec![]));
+
+        let result = body_for_validation(&request);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn body_for_validation_none_when_both_absent() {
+        let method = method_fixture("GET", "v1/items", BTreeMap::new());
+        let schemas = BTreeMap::new();
+        let request = GoogleExecuteRequest::new(&method, &schemas, "https://example.com/");
+
+        let result = body_for_validation(&request);
+        assert!(result.is_none());
+    }
+
+    // ── reject_path_traversal ─────────────────────────────────────────
+
+    #[test]
+    fn reject_path_traversal_normal_safe_values() {
+        assert!(reject_path_traversal("id", "normal-value", false).is_ok());
+        assert!(reject_path_traversal("id", "a.b.c", false).is_ok());
+        assert!(reject_path_traversal("id", "../etc", false).is_ok()); // not "." or ".."
+    }
+
+    #[test]
+    fn reject_path_traversal_normal_dotdot() {
+        assert!(reject_path_traversal("id", "..", false).is_err());
+        assert!(reject_path_traversal("id", ".", false).is_err());
+    }
+
+    #[test]
+    fn reject_path_traversal_reserved_checks_segments() {
+        assert!(reject_path_traversal("name", "a/../b", true).is_err());
+        assert!(reject_path_traversal("name", "a/./b", true).is_err());
+        assert!(reject_path_traversal("name", "a/b/c", true).is_ok());
+    }
 }

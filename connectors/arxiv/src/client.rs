@@ -129,19 +129,12 @@ impl ArxivClient {
     async fn scholar_get(&self, path: &str) -> ArxivResult<serde_json::Value> {
         let url = format!("{}{path}", self.scholar_base_url);
         debug!(url = %url, "Scholar GET request");
-        let req = self.add_scholar_auth(
-            self.client
-                .get(&url)
-                .header("Accept", "application/json"),
-        );
+        let req = self.add_scholar_auth(self.client.get(&url).header("Accept", "application/json"));
         let resp = req.send().await?;
         self.handle_scholar_response(resp).await
     }
 
-    async fn handle_scholar_response(
-        &self,
-        resp: Response,
-    ) -> ArxivResult<serde_json::Value> {
+    async fn handle_scholar_response(&self, resp: Response) -> ArxivResult<serde_json::Value> {
         let status = resp.status();
         if status.is_success() {
             let body = resp.text().await?;
@@ -248,9 +241,12 @@ impl ArxivClient {
         let url = format!("/api/query?id_list={}", urlencoded(arxiv_id));
         let xml = self.arxiv_get(&url).await?;
         let papers = xml_parser::parse_atom_entries(&xml);
-        let paper = papers.into_iter().next().ok_or_else(|| ArxivError::NotFound {
-            resource: format!("paper {arxiv_id}"),
-        })?;
+        let paper = papers
+            .into_iter()
+            .next()
+            .ok_or_else(|| ArxivError::NotFound {
+                resource: format!("paper {arxiv_id}"),
+            })?;
         Ok(serde_json::json!({
             "paper": paper,
         }))

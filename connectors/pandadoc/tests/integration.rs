@@ -19,8 +19,12 @@ use fcp_pandadoc::connector::PandaDocConnector;
 
 async fn setup_connector(mock_url: &str) -> PandaDocConnector {
     let mut c = PandaDocConnector::new();
-    c.handle_configure(json!({ "api_key": "test-api-key", "base_url": mock_url })).await.unwrap();
-    c.handle_handshake(json!({"session_id": "test"})).await.unwrap();
+    c.handle_configure(json!({ "api_key": "test-api-key", "base_url": mock_url }))
+        .await
+        .unwrap();
+    c.handle_handshake(json!({"session_id": "test"}))
+        .await
+        .unwrap();
     c
 }
 
@@ -92,13 +96,17 @@ async fn documents_list() {
                 {"id": "d2", "name": "Invoice", "status": "document.sent"},
             ]
         })))
-        .mount(&server).await;
+        .mount(&server)
+        .await;
 
     let c = setup_connector(&server.uri()).await;
-    let result = c.handle_invoke(json!({
-        "operation_id": "pandadoc.documents.list",
-        "input": {"status": "draft", "count": 20}
-    })).await.unwrap();
+    let result = c
+        .handle_invoke(json!({
+            "operation_id": "pandadoc.documents.list",
+            "input": {"status": "draft", "count": 20}
+        }))
+        .await
+        .unwrap();
     assert_eq!(result["results"].as_array().unwrap().len(), 2);
 }
 
@@ -110,13 +118,17 @@ async fn documents_list_empty() {
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "results": []
         })))
-        .mount(&server).await;
+        .mount(&server)
+        .await;
 
     let c = setup_connector(&server.uri()).await;
-    let result = c.handle_invoke(json!({
-        "operation_id": "pandadoc.documents.list",
-        "input": {}
-    })).await.unwrap();
+    let result = c
+        .handle_invoke(json!({
+            "operation_id": "pandadoc.documents.list",
+            "input": {}
+        }))
+        .await
+        .unwrap();
     assert!(result["results"].as_array().unwrap().is_empty());
 }
 
@@ -133,13 +145,17 @@ async fn documents_get() {
             "status": "document.draft",
             "date_created": "2026-03-01T00:00:00Z",
         })))
-        .mount(&server).await;
+        .mount(&server)
+        .await;
 
     let c = setup_connector(&server.uri()).await;
-    let result = c.handle_invoke(json!({
-        "operation_id": "pandadoc.documents.get",
-        "input": {"document_id": "doc_abc123"}
-    })).await.unwrap();
+    let result = c
+        .handle_invoke(json!({
+            "operation_id": "pandadoc.documents.get",
+            "input": {"document_id": "doc_abc123"}
+        }))
+        .await
+        .unwrap();
     assert_eq!(result["id"], "doc_abc123");
     assert_eq!(result["name"], "Test NDA");
 }
@@ -148,10 +164,14 @@ async fn documents_get() {
 async fn documents_get_missing_id() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
-    assert!(c.handle_invoke(json!({
-        "operation_id": "pandadoc.documents.get",
-        "input": {}
-    })).await.is_err());
+    assert!(
+        c.handle_invoke(json!({
+            "operation_id": "pandadoc.documents.get",
+            "input": {}
+        }))
+        .await
+        .is_err()
+    );
 }
 
 // -- Documents Create --
@@ -166,17 +186,21 @@ async fn documents_create() {
             "status": "document.uploaded",
             "name": "NDA for Acme",
         })))
-        .mount(&server).await;
+        .mount(&server)
+        .await;
 
     let c = setup_connector(&server.uri()).await;
-    let result = c.handle_invoke(json!({
-        "operation_id": "pandadoc.documents.create",
-        "input": {
-            "name": "NDA for Acme",
-            "template_uuid": "tpl_abc123",
-            "recipients": [{"email": "bob@acme.com", "role": "signer"}]
-        }
-    })).await.unwrap();
+    let result = c
+        .handle_invoke(json!({
+            "operation_id": "pandadoc.documents.create",
+            "input": {
+                "name": "NDA for Acme",
+                "template_uuid": "tpl_abc123",
+                "recipients": [{"email": "bob@acme.com", "role": "signer"}]
+            }
+        }))
+        .await
+        .unwrap();
     assert_eq!(result["id"], "new_doc_123");
 }
 
@@ -184,53 +208,69 @@ async fn documents_create() {
 async fn documents_create_missing_name() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
-    assert!(c.handle_invoke(json!({
-        "operation_id": "pandadoc.documents.create",
-        "input": {
-            "template_uuid": "tpl_abc",
-            "recipients": [{"email": "a@b.com"}]
-        }
-    })).await.is_err());
+    assert!(
+        c.handle_invoke(json!({
+            "operation_id": "pandadoc.documents.create",
+            "input": {
+                "template_uuid": "tpl_abc",
+                "recipients": [{"email": "a@b.com"}]
+            }
+        }))
+        .await
+        .is_err()
+    );
 }
 
 #[fcp_async_core::runtime::test]
 async fn documents_create_missing_template() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
-    assert!(c.handle_invoke(json!({
-        "operation_id": "pandadoc.documents.create",
-        "input": {
-            "name": "Test",
-            "recipients": [{"email": "a@b.com"}]
-        }
-    })).await.is_err());
+    assert!(
+        c.handle_invoke(json!({
+            "operation_id": "pandadoc.documents.create",
+            "input": {
+                "name": "Test",
+                "recipients": [{"email": "a@b.com"}]
+            }
+        }))
+        .await
+        .is_err()
+    );
 }
 
 #[fcp_async_core::runtime::test]
 async fn documents_create_missing_recipients() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
-    assert!(c.handle_invoke(json!({
-        "operation_id": "pandadoc.documents.create",
-        "input": {
-            "name": "Test",
-            "template_uuid": "tpl_abc"
-        }
-    })).await.is_err());
+    assert!(
+        c.handle_invoke(json!({
+            "operation_id": "pandadoc.documents.create",
+            "input": {
+                "name": "Test",
+                "template_uuid": "tpl_abc"
+            }
+        }))
+        .await
+        .is_err()
+    );
 }
 
 #[fcp_async_core::runtime::test]
 async fn documents_create_recipients_not_array() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
-    assert!(c.handle_invoke(json!({
-        "operation_id": "pandadoc.documents.create",
-        "input": {
-            "name": "Test",
-            "template_uuid": "tpl_abc",
-            "recipients": "not_an_array"
-        }
-    })).await.is_err());
+    assert!(
+        c.handle_invoke(json!({
+            "operation_id": "pandadoc.documents.create",
+            "input": {
+                "name": "Test",
+                "template_uuid": "tpl_abc",
+                "recipients": "not_an_array"
+            }
+        }))
+        .await
+        .is_err()
+    );
 }
 
 // -- Documents Send --
@@ -244,16 +284,20 @@ async fn documents_send() {
             "id": "doc_abc",
             "status": "document.sent",
         })))
-        .mount(&server).await;
+        .mount(&server)
+        .await;
 
     let c = setup_connector(&server.uri()).await;
-    let result = c.handle_invoke(json!({
-        "operation_id": "pandadoc.documents.send",
-        "input": {
-            "document_id": "doc_abc",
-            "message": "Please sign this NDA."
-        }
-    })).await.unwrap();
+    let result = c
+        .handle_invoke(json!({
+            "operation_id": "pandadoc.documents.send",
+            "input": {
+                "document_id": "doc_abc",
+                "message": "Please sign this NDA."
+            }
+        }))
+        .await
+        .unwrap();
     assert_eq!(result["status"], "document.sent");
 }
 
@@ -266,13 +310,17 @@ async fn documents_send_without_message() {
             "id": "doc_abc",
             "status": "document.sent",
         })))
-        .mount(&server).await;
+        .mount(&server)
+        .await;
 
     let c = setup_connector(&server.uri()).await;
-    let result = c.handle_invoke(json!({
-        "operation_id": "pandadoc.documents.send",
-        "input": {"document_id": "doc_abc"}
-    })).await.unwrap();
+    let result = c
+        .handle_invoke(json!({
+            "operation_id": "pandadoc.documents.send",
+            "input": {"document_id": "doc_abc"}
+        }))
+        .await
+        .unwrap();
     assert_eq!(result["status"], "document.sent");
 }
 
@@ -280,10 +328,14 @@ async fn documents_send_without_message() {
 async fn documents_send_missing_document_id() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
-    assert!(c.handle_invoke(json!({
-        "operation_id": "pandadoc.documents.send",
-        "input": {"message": "Please sign"}
-    })).await.is_err());
+    assert!(
+        c.handle_invoke(json!({
+            "operation_id": "pandadoc.documents.send",
+            "input": {"message": "Please sign"}
+        }))
+        .await
+        .is_err()
+    );
 }
 
 // -- Documents Delete --
@@ -294,13 +346,17 @@ async fn documents_delete() {
     Mock::given(method("DELETE"))
         .and(path("/documents/doc_abc123"))
         .respond_with(ResponseTemplate::new(204))
-        .mount(&server).await;
+        .mount(&server)
+        .await;
 
     let c = setup_connector(&server.uri()).await;
-    let result = c.handle_invoke(json!({
-        "operation_id": "pandadoc.documents.delete",
-        "input": {"document_id": "doc_abc123"}
-    })).await.unwrap();
+    let result = c
+        .handle_invoke(json!({
+            "operation_id": "pandadoc.documents.delete",
+            "input": {"document_id": "doc_abc123"}
+        }))
+        .await
+        .unwrap();
     assert_eq!(result["deleted"], true);
 }
 
@@ -308,10 +364,14 @@ async fn documents_delete() {
 async fn documents_delete_missing_id() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
-    assert!(c.handle_invoke(json!({
-        "operation_id": "pandadoc.documents.delete",
-        "input": {}
-    })).await.is_err());
+    assert!(
+        c.handle_invoke(json!({
+            "operation_id": "pandadoc.documents.delete",
+            "input": {}
+        }))
+        .await
+        .is_err()
+    );
 }
 
 // -- Templates List --
@@ -327,13 +387,17 @@ async fn templates_list() {
                 {"id": "tpl_2", "name": "Invoice Template"},
             ]
         })))
-        .mount(&server).await;
+        .mount(&server)
+        .await;
 
     let c = setup_connector(&server.uri()).await;
-    let result = c.handle_invoke(json!({
-        "operation_id": "pandadoc.templates.list",
-        "input": {}
-    })).await.unwrap();
+    let result = c
+        .handle_invoke(json!({
+            "operation_id": "pandadoc.templates.list",
+            "input": {}
+        }))
+        .await
+        .unwrap();
     assert_eq!(result["results"].as_array().unwrap().len(), 2);
 }
 
@@ -345,13 +409,18 @@ async fn error_401() {
     Mock::given(method("GET"))
         .and(path_regex("/documents.*"))
         .respond_with(ResponseTemplate::new(401).set_body_json(json!({"detail": "Unauthorized"})))
-        .mount(&server).await;
+        .mount(&server)
+        .await;
 
     let c = setup_connector(&server.uri()).await;
-    assert!(c.handle_invoke(json!({
-        "operation_id": "pandadoc.documents.list",
-        "input": {}
-    })).await.is_err());
+    assert!(
+        c.handle_invoke(json!({
+            "operation_id": "pandadoc.documents.list",
+            "input": {}
+        }))
+        .await
+        .is_err()
+    );
 }
 
 #[fcp_async_core::runtime::test]
@@ -360,13 +429,18 @@ async fn error_403() {
     Mock::given(method("GET"))
         .and(path_regex("/documents.*"))
         .respond_with(ResponseTemplate::new(403).set_body_json(json!({"detail": "Forbidden"})))
-        .mount(&server).await;
+        .mount(&server)
+        .await;
 
     let c = setup_connector(&server.uri()).await;
-    assert!(c.handle_invoke(json!({
-        "operation_id": "pandadoc.documents.list",
-        "input": {}
-    })).await.is_err());
+    assert!(
+        c.handle_invoke(json!({
+            "operation_id": "pandadoc.documents.list",
+            "input": {}
+        }))
+        .await
+        .is_err()
+    );
 }
 
 #[fcp_async_core::runtime::test]
@@ -374,14 +448,21 @@ async fn error_404() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path_regex("/documents/.*"))
-        .respond_with(ResponseTemplate::new(404).set_body_json(json!({"detail": "Document not found"})))
-        .mount(&server).await;
+        .respond_with(
+            ResponseTemplate::new(404).set_body_json(json!({"detail": "Document not found"})),
+        )
+        .mount(&server)
+        .await;
 
     let c = setup_connector(&server.uri()).await;
-    assert!(c.handle_invoke(json!({
-        "operation_id": "pandadoc.documents.get",
-        "input": {"document_id": "missing_doc"}
-    })).await.is_err());
+    assert!(
+        c.handle_invoke(json!({
+            "operation_id": "pandadoc.documents.get",
+            "input": {"document_id": "missing_doc"}
+        }))
+        .await
+        .is_err()
+    );
 }
 
 #[fcp_async_core::runtime::test]
@@ -394,13 +475,18 @@ async fn error_429() {
                 .set_body_json(json!({"detail": "Too many requests"}))
                 .insert_header("retry-after", "60"),
         )
-        .mount(&server).await;
+        .mount(&server)
+        .await;
 
     let c = setup_connector(&server.uri()).await;
-    assert!(c.handle_invoke(json!({
-        "operation_id": "pandadoc.documents.list",
-        "input": {}
-    })).await.is_err());
+    assert!(
+        c.handle_invoke(json!({
+            "operation_id": "pandadoc.documents.list",
+            "input": {}
+        }))
+        .await
+        .is_err()
+    );
 }
 
 // -- Unknown op / Simulate --
@@ -409,24 +495,40 @@ async fn error_429() {
 async fn unknown_operation() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
-    assert!(c.handle_invoke(json!({
-        "operation_id": "pandadoc.nope",
-        "input": {}
-    })).await.is_err());
+    assert!(
+        c.handle_invoke(json!({
+            "operation_id": "pandadoc.nope",
+            "input": {}
+        }))
+        .await
+        .is_err()
+    );
 }
 
 #[fcp_async_core::runtime::test]
 async fn simulate_known() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
-    assert!(c.handle_simulate(json!({"operation_id": "pandadoc.documents.list"})).await.unwrap()["allowed"].as_bool().unwrap());
+    assert!(
+        c.handle_simulate(json!({"operation_id": "pandadoc.documents.list"}))
+            .await
+            .unwrap()["allowed"]
+            .as_bool()
+            .unwrap()
+    );
 }
 
 #[fcp_async_core::runtime::test]
 async fn simulate_unknown() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
-    assert!(!c.handle_simulate(json!({"operation_id": "pandadoc.nope"})).await.unwrap()["allowed"].as_bool().unwrap());
+    assert!(
+        !c.handle_simulate(json!({"operation_id": "pandadoc.nope"}))
+            .await
+            .unwrap()["allowed"]
+            .as_bool()
+            .unwrap()
+    );
 }
 
 // -- Counters --
@@ -439,13 +541,16 @@ async fn counters_increment() {
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "results": [],
         })))
-        .mount(&server).await;
+        .mount(&server)
+        .await;
 
     let c = setup_connector(&server.uri()).await;
     c.handle_invoke(json!({
         "operation_id": "pandadoc.documents.list",
         "input": {}
-    })).await.unwrap();
+    }))
+    .await
+    .unwrap();
     let h = c.handle_health().await.unwrap();
     assert_eq!(h["requests"], 1);
     assert_eq!(h["errors"], 0);
@@ -457,13 +562,16 @@ async fn counters_error_increment() {
     Mock::given(method("GET"))
         .and(path_regex("/documents.*"))
         .respond_with(ResponseTemplate::new(500).set_body_json(json!({"detail": "Internal error"})))
-        .mount(&server).await;
+        .mount(&server)
+        .await;
 
     let c = setup_connector(&server.uri()).await;
-    let _ = c.handle_invoke(json!({
-        "operation_id": "pandadoc.documents.list",
-        "input": {}
-    })).await;
+    let _ = c
+        .handle_invoke(json!({
+            "operation_id": "pandadoc.documents.list",
+            "input": {}
+        }))
+        .await;
     let h = c.handle_health().await.unwrap();
     assert_eq!(h["requests"], 1);
     assert_eq!(h["errors"], 1);

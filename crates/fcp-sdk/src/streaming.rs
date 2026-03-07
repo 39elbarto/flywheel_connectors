@@ -58,7 +58,9 @@ pub enum ReplayError {
         cursor: String,
     },
     /// The cursor points to an event that has been trimmed from the buffer.
-    #[error("cursor {cursor_seq} is older than oldest buffered seq {oldest_seq} for topic '{topic}'")]
+    #[error(
+        "cursor {cursor_seq} is older than oldest buffered seq {oldest_seq} for topic '{topic}'"
+    )]
     CursorStale {
         /// The topic that had a stale cursor.
         topic: String,
@@ -150,7 +152,11 @@ impl TopicState {
         self.buffer.back().map(|env| env.cursor.clone())
     }
 
-    fn replay_from_cursor(&self, topic: &str, cursor: &str) -> Result<Vec<EventEnvelope>, ReplayError> {
+    fn replay_from_cursor(
+        &self,
+        topic: &str,
+        cursor: &str,
+    ) -> Result<Vec<EventEnvelope>, ReplayError> {
         if cursor.is_empty() {
             return Ok(self.buffer.iter().cloned().collect());
         }

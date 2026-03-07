@@ -403,9 +403,7 @@ async fn error_401() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/collections"))
-        .respond_with(
-            ResponseTemplate::new(401).set_body_json(json!({"message": "Unauthorized"})),
-        )
+        .respond_with(ResponseTemplate::new(401).set_body_json(json!({"message": "Unauthorized"})))
         .mount(&server)
         .await;
 

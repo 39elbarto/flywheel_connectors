@@ -240,9 +240,11 @@ mod tests {
         }"#;
         let cache = SchemaCache::default();
         assert!(cache.validate(schema, &json!({"name": "Alice"})).is_ok());
-        assert!(cache
-            .validate(schema, &json!({"name": "Alice", "extra": true}))
-            .is_err());
+        assert!(
+            cache
+                .validate(schema, &json!({"name": "Alice", "extra": true}))
+                .is_err()
+        );
     }
 
     #[test]
@@ -297,12 +299,12 @@ mod tests {
             "required": ["address"]
         }"#;
         let cache = SchemaCache::default();
-        assert!(cache
-            .validate(schema, &json!({"address": {"city": "NYC"}}))
-            .is_ok());
-        assert!(cache
-            .validate(schema, &json!({"address": {}}))
-            .is_err());
+        assert!(
+            cache
+                .validate(schema, &json!({"address": {"city": "NYC"}}))
+                .is_ok()
+        );
+        assert!(cache.validate(schema, &json!({"address": {}})).is_err());
         assert!(cache.validate(schema, &json!({})).is_err());
     }
 

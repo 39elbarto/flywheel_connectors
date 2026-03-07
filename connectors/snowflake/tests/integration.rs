@@ -605,8 +605,7 @@ async fn error_500() {
     Mock::given(method("GET"))
         .and(path("/databases"))
         .respond_with(
-            ResponseTemplate::new(500)
-                .set_body_json(json!({"message": "Internal server error"})),
+            ResponseTemplate::new(500).set_body_json(json!({"message": "Internal server error"})),
         )
         .mount(&server)
         .await;
@@ -768,8 +767,7 @@ async fn counters_error_increment() {
     Mock::given(method("GET"))
         .and(path("/databases"))
         .respond_with(
-            ResponseTemplate::new(500)
-                .set_body_json(json!({"message": "Internal error"})),
+            ResponseTemplate::new(500).set_body_json(json!({"message": "Internal error"})),
         )
         .mount(&server)
         .await;

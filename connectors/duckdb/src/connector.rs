@@ -9,7 +9,7 @@ use serde_json::json;
 use tracing::{info, instrument};
 
 use crate::{
-    client::{DuckDbAuth, DuckDbClient, DEFAULT_BASE_URL},
+    client::{DEFAULT_BASE_URL, DuckDbAuth, DuckDbClient},
     error::DuckDbError,
 };
 
@@ -388,10 +388,7 @@ impl DuckDbConnector {
         client: &DuckDbClient,
     ) -> Result<serde_json::Value, DuckDbError> {
         let resp = client.list_databases().await?;
-        let databases = resp
-            .get("databases")
-            .cloned()
-            .unwrap_or_else(|| json!([]));
+        let databases = resp.get("databases").cloned().unwrap_or_else(|| json!([]));
         Ok(json!({ "databases": databases }))
     }
 
@@ -849,8 +846,7 @@ mod tests {
 
     #[test]
     fn config_trims_service_token() {
-        let config =
-            DuckDbConfig::from_params(&json!({ "service_token": "  sk_test  " })).unwrap();
+        let config = DuckDbConfig::from_params(&json!({ "service_token": "  sk_test  " })).unwrap();
         match &config.auth {
             DuckDbAuth::ServiceToken(t) => assert_eq!(t, "sk_test"),
             DuckDbAuth::CredentialId(_) => panic!("expected ServiceToken"),
@@ -950,7 +946,11 @@ mod tests {
 
     #[test]
     fn doctor_status_serde_roundtrip() {
-        let statuses = [DoctorStatus::Healthy, DoctorStatus::Degraded, DoctorStatus::Unhealthy];
+        let statuses = [
+            DoctorStatus::Healthy,
+            DoctorStatus::Degraded,
+            DoctorStatus::Unhealthy,
+        ];
         for status in &statuses {
             let v = serde_json::to_value(status).unwrap();
             let back: DoctorStatus = serde_json::from_value(v).unwrap();

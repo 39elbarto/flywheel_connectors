@@ -27,10 +27,10 @@ use std::time::Duration;
 use chrono::Utc;
 use fcp_core::TaintFlag;
 use fcp_webhook::{
-    DeadLetterQueue, DeliveryStatus, Ed25519Verifier, EventRouter, EventSubscription,
-    GitHubWebhook, HmacSha1Verifier, HmacSha256Verifier, LinearWebhook, SignatureAlgorithm,
-    SignatureVerifier, SlackWebhook, StripeWebhook, WebhookConfig, WebhookError, WebhookEvent,
-    WebhookHandler, WebhookProvider, DEFAULT_MAX_PAYLOAD_SIZE, DEFAULT_TIMESTAMP_TOLERANCE,
+    DEFAULT_MAX_PAYLOAD_SIZE, DEFAULT_TIMESTAMP_TOLERANCE, DeadLetterQueue, DeliveryStatus,
+    Ed25519Verifier, EventRouter, EventSubscription, GitHubWebhook, HmacSha1Verifier,
+    HmacSha256Verifier, LinearWebhook, SignatureAlgorithm, SignatureVerifier, SlackWebhook,
+    StripeWebhook, WebhookConfig, WebhookError, WebhookEvent, WebhookHandler, WebhookProvider,
 };
 
 // ─── Full pipeline tests ──────────────────────────────────────────────
@@ -49,7 +49,10 @@ fn pipeline_github_verify_route_deliver() {
         EventSubscription::for_types(vec!["issues".into(), "issue_comment".into()]),
         "issue_tracker",
     );
-    router.subscribe(EventSubscription::all().with_provider("github"), "audit_log");
+    router.subscribe(
+        EventSubscription::all().with_provider("github"),
+        "audit_log",
+    );
     let dlq = DeadLetterQueue::new(100);
 
     // 2. Simulate incoming webhook
@@ -100,10 +103,7 @@ fn pipeline_github_push_routes_to_ci() {
     );
 
     let body = br#"{"ref":"refs/heads/main","commits":[]}"#;
-    let sig = format!(
-        "sha256={}",
-        HmacSha256Verifier::new("secret").compute(body)
-    );
+    let sig = format!("sha256={}", HmacSha256Verifier::new("secret").compute(body));
     let mut headers = HashMap::new();
     headers.insert("x-hub-signature-256".into(), sig);
     headers.insert("x-github-event".into(), "push".into());
@@ -168,10 +168,7 @@ fn pipeline_slack_verify_route_event_callback() {
 
     let mut headers = HashMap::new();
     headers.insert("x-slack-signature".into(), format!("v0={computed}"));
-    headers.insert(
-        "x-slack-request-timestamp".into(),
-        timestamp.to_string(),
-    );
+    headers.insert("x-slack-request-timestamp".into(), timestamp.to_string());
 
     let event = slack.verify_and_parse(&headers, body).unwrap();
     assert_eq!(event.id, "Ev_slack_1");
@@ -193,7 +190,8 @@ fn pipeline_linear_verify_and_route() {
         "issue_sync",
     );
 
-    let body = br#"{"type":"Issue","action":"create","webhookId":"wh_lin_1","data":{"title":"Bug fix"}}"#;
+    let body =
+        br#"{"type":"Issue","action":"create","webhookId":"wh_lin_1","data":{"title":"Bug fix"}}"#;
     let sig = HmacSha256Verifier::new("linear_secret").compute(body);
     let mut headers = HashMap::new();
     headers.insert("linear-signature".into(), sig);
@@ -273,11 +271,7 @@ fn dlq_overflow_evicts_oldest_events() {
     let dlq = DeadLetterQueue::new(5);
 
     for i in 0..10 {
-        dlq.push(WebhookEvent::new(
-            format!("evt_{i}"),
-            "test",
-            "provider",
-        ));
+        dlq.push(WebhookEvent::new(format!("evt_{i}"), "test", "provider"));
     }
 
     assert_eq!(dlq.len(), 5);
@@ -404,12 +398,11 @@ fn ed25519_verify_with_keypair() {
     use ed25519_dalek::{Signer, SigningKey};
 
     let signing_key = SigningKey::from_bytes(&[
-        0x9d, 0x61, 0xb1, 0x9d, 0xef, 0xfd, 0x5a, 0x60, 0xba, 0x84, 0x4a, 0xf4, 0x92, 0xec,
-        0x2c, 0xc4, 0x44, 0x49, 0xc5, 0x69, 0x7b, 0x32, 0x69, 0x19, 0x70, 0x3b, 0xac, 0x03,
-        0x1c, 0xae, 0x7f, 0x60,
+        0x9d, 0x61, 0xb1, 0x9d, 0xef, 0xfd, 0x5a, 0x60, 0xba, 0x84, 0x4a, 0xf4, 0x92, 0xec, 0x2c,
+        0xc4, 0x44, 0x49, 0xc5, 0x69, 0x7b, 0x32, 0x69, 0x19, 0x70, 0x3b, 0xac, 0x03, 0x1c, 0xae,
+        0x7f, 0x60,
     ]);
-    let verifier =
-        Ed25519Verifier::from_bytes(&signing_key.verifying_key().to_bytes()).unwrap();
+    let verifier = Ed25519Verifier::from_bytes(&signing_key.verifying_key().to_bytes()).unwrap();
 
     let payloads = [
         b"hello world".as_slice(),
@@ -441,9 +434,9 @@ fn each_verifier_reports_correct_algorithm() {
     assert_eq!(sha1.algorithm(), SignatureAlgorithm::HmacSha1);
 
     let ed_key = [
-        0x9d, 0x61, 0xb1, 0x9d, 0xef, 0xfd, 0x5a, 0x60, 0xba, 0x84, 0x4a, 0xf4, 0x92, 0xec,
-        0x2c, 0xc4, 0x44, 0x49, 0xc5, 0x69, 0x7b, 0x32, 0x69, 0x19, 0x70, 0x3b, 0xac, 0x03,
-        0x1c, 0xae, 0x7f, 0x60,
+        0x9d, 0x61, 0xb1, 0x9d, 0xef, 0xfd, 0x5a, 0x60, 0xba, 0x84, 0x4a, 0xf4, 0x92, 0xec, 0x2c,
+        0xc4, 0x44, 0x49, 0xc5, 0x69, 0x7b, 0x32, 0x69, 0x19, 0x70, 0x3b, 0xac, 0x03, 0x1c, 0xae,
+        0x7f, 0x60,
     ];
     let signing = ed25519_dalek::SigningKey::from_bytes(&ed_key);
     let ed = Ed25519Verifier::from_bytes(&signing.verifying_key().to_bytes()).unwrap();
@@ -462,7 +455,12 @@ fn all_providers_set_taint_flags() {
     h.insert("x-hub-signature-256".into(), sig);
     h.insert("x-github-event".into(), "ping".into());
     let event = gh.verify_and_parse(&h, body).unwrap();
-    assert!(event.metadata.taint_flags.contains(TaintFlag::WebhookInjected));
+    assert!(
+        event
+            .metadata
+            .taint_flags
+            .contains(TaintFlag::WebhookInjected)
+    );
     assert!(event.metadata.taint_flags.contains(TaintFlag::PublicInput));
 
     // Linear
@@ -472,7 +470,12 @@ fn all_providers_set_taint_flags() {
     let mut h = HashMap::new();
     h.insert("linear-signature".into(), sig);
     let event = ln.verify_and_parse(&h, body).unwrap();
-    assert!(event.metadata.taint_flags.contains(TaintFlag::WebhookInjected));
+    assert!(
+        event
+            .metadata
+            .taint_flags
+            .contains(TaintFlag::WebhookInjected)
+    );
     assert!(event.metadata.taint_flags.contains(TaintFlag::PublicInput));
 
     // Stripe
@@ -484,7 +487,12 @@ fn all_providers_set_taint_flags() {
     let mut h = HashMap::new();
     h.insert("stripe-signature".into(), format!("t={ts},v1={sig}"));
     let event = st.verify_and_parse(&h, body).unwrap();
-    assert!(event.metadata.taint_flags.contains(TaintFlag::WebhookInjected));
+    assert!(
+        event
+            .metadata
+            .taint_flags
+            .contains(TaintFlag::WebhookInjected)
+    );
     assert!(event.metadata.taint_flags.contains(TaintFlag::PublicInput));
 
     // Slack
@@ -497,7 +505,12 @@ fn all_providers_set_taint_flags() {
     h.insert("x-slack-signature".into(), format!("v0={computed}"));
     h.insert("x-slack-request-timestamp".into(), ts.to_string());
     let event = sl.verify_and_parse(&h, body).unwrap();
-    assert!(event.metadata.taint_flags.contains(TaintFlag::WebhookInjected));
+    assert!(
+        event
+            .metadata
+            .taint_flags
+            .contains(TaintFlag::WebhookInjected)
+    );
     assert!(event.metadata.taint_flags.contains(TaintFlag::PublicInput));
 }
 
@@ -508,11 +521,7 @@ fn replay_protection_ttl_lifecycle() {
     let config = WebhookConfig::new()
         .with_idempotency(true)
         .with_idempotency_ttl(Duration::from_millis(50));
-    let handler = WebhookHandler::with_config(
-        HmacSha256Verifier::new("s"),
-        "test",
-        config,
-    );
+    let handler = WebhookHandler::with_config(HmacSha256Verifier::new("s"), "test", config);
 
     // Claim event
     assert!(handler.claim_event("evt_ttl_1").is_ok());
@@ -608,14 +617,8 @@ fn event_payload_path_traversal() {
     }));
 
     assert_eq!(event.get_str("ref"), Some("refs/heads/main"));
-    assert_eq!(
-        event.get_str("repository.full_name"),
-        Some("org/repo")
-    );
-    assert_eq!(
-        event.get_str("repository.owner.login"),
-        Some("user")
-    );
+    assert_eq!(event.get_str("repository.full_name"), Some("org/repo"));
+    assert_eq!(event.get_str("repository.owner.login"), Some("user"));
     assert_eq!(event.get_i64("repository.owner.id"), Some(12345));
     assert_eq!(event.get_str("empty_string"), Some(""));
     assert_eq!(event.get_str("null_field"), None);
@@ -646,8 +649,18 @@ fn event_serde_roundtrip_preserves_all_fields() {
     assert_eq!(roundtrip.get_i64("nested.a"), Some(1));
     assert_eq!(roundtrip.header("content-type"), Some("application/json"));
     assert_eq!(roundtrip.header("x-request-id"), Some("req_123"));
-    assert!(roundtrip.metadata.taint_flags.contains(TaintFlag::WebhookInjected));
-    assert!(roundtrip.metadata.taint_flags.contains(TaintFlag::PublicInput));
+    assert!(
+        roundtrip
+            .metadata
+            .taint_flags
+            .contains(TaintFlag::WebhookInjected)
+    );
+    assert!(
+        roundtrip
+            .metadata
+            .taint_flags
+            .contains(TaintFlag::PublicInput)
+    );
 }
 
 // ─── WebhookProvider display ──────────────────────────────────────────
@@ -744,7 +757,9 @@ fn stripe_multiple_v1_signatures_any_valid_accepts() {
     let real_sig = HmacSha256Verifier::new(secret).compute(signed.as_bytes());
 
     // Multiple v1 signatures — only one needs to match
-    let header = format!("t={ts},v1=deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef,v1={real_sig}");
+    let header = format!(
+        "t={ts},v1=deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef,v1={real_sig}"
+    );
 
     let stripe = StripeWebhook::new(secret);
     let mut headers = HashMap::new();
@@ -1084,10 +1099,7 @@ fn stripe_rejects_far_future_timestamp() {
     let sig = HmacSha256Verifier::new(secret).compute(signed.as_bytes());
 
     let mut headers = HashMap::new();
-    headers.insert(
-        "stripe-signature".into(),
-        format!("t={future_ts},v1={sig}"),
-    );
+    headers.insert("stripe-signature".into(), format!("t={future_ts},v1={sig}"));
 
     let result = stripe.verify_and_parse(&headers, body);
     assert!(matches!(
@@ -1177,10 +1189,7 @@ fn cross_provider_signatures_do_not_leak() {
     let signed = format!("{ts}.{}", String::from_utf8_lossy(body));
     let wrong_sig = HmacSha256Verifier::new(gh_secret).compute(signed.as_bytes());
     let mut headers = HashMap::new();
-    headers.insert(
-        "stripe-signature".into(),
-        format!("t={ts},v1={wrong_sig}"),
-    );
+    headers.insert("stripe-signature".into(), format!("t={ts},v1={wrong_sig}"));
     assert!(stripe.verify_and_parse(&headers, body).is_err());
 }
 
@@ -1315,9 +1324,9 @@ fn ed25519_from_hex_full_pipeline() {
     use ed25519_dalek::{Signer, SigningKey};
 
     let signing_key = SigningKey::from_bytes(&[
-        0x9d, 0x61, 0xb1, 0x9d, 0xef, 0xfd, 0x5a, 0x60, 0xba, 0x84, 0x4a, 0xf4, 0x92, 0xec,
-        0x2c, 0xc4, 0x44, 0x49, 0xc5, 0x69, 0x7b, 0x32, 0x69, 0x19, 0x70, 0x3b, 0xac, 0x03,
-        0x1c, 0xae, 0x7f, 0x60,
+        0x9d, 0x61, 0xb1, 0x9d, 0xef, 0xfd, 0x5a, 0x60, 0xba, 0x84, 0x4a, 0xf4, 0x92, 0xec, 0x2c,
+        0xc4, 0x44, 0x49, 0xc5, 0x69, 0x7b, 0x32, 0x69, 0x19, 0x70, 0x3b, 0xac, 0x03, 0x1c, 0xae,
+        0x7f, 0x60,
     ]);
     let pub_hex = hex::encode(signing_key.verifying_key().to_bytes());
     let verifier = Ed25519Verifier::from_hex(&pub_hex).unwrap();
@@ -1412,10 +1421,7 @@ fn multi_provider_pipeline_end_to_end() {
     let failed = WebhookEvent::new("failed_delivery", "push", "github");
     dlq.push(failed);
     assert_eq!(dlq.len(), 1);
-    assert_eq!(
-        dlq.all()[0].metadata.status,
-        DeliveryStatus::DeadLettered
-    );
+    assert_eq!(dlq.all()[0].metadata.status, DeliveryStatus::DeadLettered);
 }
 
 // ─── Timestamp error contains all fields ──────────────────────────────
@@ -1428,10 +1434,7 @@ fn timestamp_error_fields_populated() {
     let signed = format!("{old_ts}.{}", String::from_utf8_lossy(body));
     let sig = HmacSha256Verifier::new("s").compute(signed.as_bytes());
     let mut headers = HashMap::new();
-    headers.insert(
-        "stripe-signature".into(),
-        format!("t={old_ts},v1={sig}"),
-    );
+    headers.insert("stripe-signature".into(), format!("t={old_ts},v1={sig}"));
 
     match stripe.verify_and_parse(&headers, body) {
         Err(WebhookError::TimestampValidation {
@@ -1580,7 +1583,10 @@ fn slack_non_numeric_timestamp() {
     let body = br#"{"type":"event"}"#;
     let mut headers = HashMap::new();
     headers.insert("x-slack-signature".to_string(), "v0=abc".to_string());
-    headers.insert("x-slack-request-timestamp".to_string(), "not-a-number".to_string());
+    headers.insert(
+        "x-slack-request-timestamp".to_string(),
+        "not-a-number".to_string(),
+    );
     let err = slack.verify_and_parse(&headers, body).unwrap_err();
     assert!(matches!(err, WebhookError::InvalidPayload(_)));
 }
@@ -1616,7 +1622,13 @@ fn handler_rejects_oversized_payload_before_sig_check() {
     // 20-byte payload, invalid signature — should fail with PayloadTooLarge, not InvalidSig
     let big = vec![b'x'; 20];
     let err = handler.verify(&big, "invalid-sig").unwrap_err();
-    assert!(matches!(err, WebhookError::PayloadTooLarge { size: 20, limit: 10 }));
+    assert!(matches!(
+        err,
+        WebhookError::PayloadTooLarge {
+            size: 20,
+            limit: 10
+        }
+    ));
 }
 
 #[test]
@@ -1641,7 +1653,13 @@ fn handler_payload_one_over_limit_rejected() {
     );
     let body = vec![b'x'; 11];
     let err = handler.verify(&body, "whatever").unwrap_err();
-    assert!(matches!(err, WebhookError::PayloadTooLarge { size: 11, limit: 10 }));
+    assert!(matches!(
+        err,
+        WebhookError::PayloadTooLarge {
+            size: 11,
+            limit: 10
+        }
+    ));
 }
 
 // ─── IP allowlist edge cases ───────────────────────────────────────────
@@ -1663,10 +1681,8 @@ fn ip_allowlist_exact_match_required() {
     let handler = WebhookHandler::with_config(
         HmacSha256Verifier::new("s"),
         "test",
-        WebhookConfig::new().with_ip_allowlist(vec![
-            "192.168.1.1".to_string(),
-            "10.0.0.1".to_string(),
-        ]),
+        WebhookConfig::new()
+            .with_ip_allowlist(vec!["192.168.1.1".to_string(), "10.0.0.1".to_string()]),
     );
     assert!(handler.check_ip("192.168.1.1").is_ok());
     assert!(handler.check_ip("10.0.0.1").is_ok());
@@ -1679,10 +1695,7 @@ fn ip_allowlist_ipv6_address() {
     let handler = WebhookHandler::with_config(
         HmacSha256Verifier::new("s"),
         "test",
-        WebhookConfig::new().with_ip_allowlist(vec![
-            "::1".to_string(),
-            "2001:db8::1".to_string(),
-        ]),
+        WebhookConfig::new().with_ip_allowlist(vec!["::1".to_string(), "2001:db8::1".to_string()]),
     );
     assert!(handler.check_ip("::1").is_ok());
     assert!(handler.check_ip("2001:db8::1").is_ok());
@@ -1842,9 +1855,19 @@ fn event_multiple_taint_flags() {
         .with_taint_flag(TaintFlag::PublicInput)
         .with_taint_flag(TaintFlag::UntrustedTransform);
 
-    assert!(event.metadata.taint_flags.contains(TaintFlag::WebhookInjected));
+    assert!(
+        event
+            .metadata
+            .taint_flags
+            .contains(TaintFlag::WebhookInjected)
+    );
     assert!(event.metadata.taint_flags.contains(TaintFlag::PublicInput));
-    assert!(event.metadata.taint_flags.contains(TaintFlag::UntrustedTransform));
+    assert!(
+        event
+            .metadata
+            .taint_flags
+            .contains(TaintFlag::UntrustedTransform)
+    );
 }
 
 #[test]
@@ -1853,7 +1876,12 @@ fn event_default_webhook_taint_idempotent() {
         .with_default_webhook_taint()
         .with_default_webhook_taint(); // applying twice
 
-    assert!(event.metadata.taint_flags.contains(TaintFlag::WebhookInjected));
+    assert!(
+        event
+            .metadata
+            .taint_flags
+            .contains(TaintFlag::WebhookInjected)
+    );
     assert!(event.metadata.taint_flags.contains(TaintFlag::PublicInput));
 }
 
@@ -1930,11 +1958,8 @@ fn handler_provider_and_config_accessors() {
         .with_max_payload_size(1024)
         .with_max_retries(5)
         .with_idempotency(false);
-    let handler = WebhookHandler::with_config(
-        HmacSha256Verifier::new("s"),
-        "custom-provider",
-        config,
-    );
+    let handler =
+        WebhookHandler::with_config(HmacSha256Verifier::new("s"), "custom-provider", config);
 
     assert_eq!(handler.provider(), "custom-provider");
     assert_eq!(handler.config().max_payload_size, 1024);

@@ -163,9 +163,7 @@ mod tests {
 
     #[test]
     fn error_debug_duplicate_name() {
-        let err = CronError::DuplicateName {
-            name: "dup".into(),
-        };
+        let err = CronError::DuplicateName { name: "dup".into() };
         let dbg = format!("{err:?}");
         assert!(dbg.contains("DuplicateName"));
         assert!(dbg.contains("dup"));

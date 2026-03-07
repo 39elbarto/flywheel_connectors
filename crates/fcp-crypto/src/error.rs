@@ -111,7 +111,10 @@ mod tests {
             expected: 64,
             actual: 32,
         };
-        assert_eq!(err.to_string(), "invalid signature length: expected 64, got 32");
+        assert_eq!(
+            err.to_string(),
+            "invalid signature length: expected 64, got 32"
+        );
     }
 
     #[test]

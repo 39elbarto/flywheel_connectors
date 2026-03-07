@@ -127,8 +127,9 @@ mod tests {
 
     #[test]
     fn json_error_is_not_retryable() {
-        let err: AnnasArchiveError =
-            serde_json::from_str::<serde_json::Value>("invalid").unwrap_err().into();
+        let err: AnnasArchiveError = serde_json::from_str::<serde_json::Value>("invalid")
+            .unwrap_err()
+            .into();
         assert!(!err.is_retryable());
     }
 
@@ -138,7 +139,13 @@ mod tests {
             retry_after_ms: 1000,
         };
         let fcp = err.to_fcp_error();
-        assert!(matches!(fcp, FcpError::External { retryable: true, .. }));
+        assert!(matches!(
+            fcp,
+            FcpError::External {
+                retryable: true,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -164,7 +171,13 @@ mod tests {
     fn fcp_error_unavailable() {
         let err = AnnasArchiveError::ServiceUnavailable;
         let fcp = err.to_fcp_error();
-        assert!(matches!(fcp, FcpError::External { retryable: true, .. }));
+        assert!(matches!(
+            fcp,
+            FcpError::External {
+                retryable: true,
+                ..
+            }
+        ));
     }
 
     #[test]

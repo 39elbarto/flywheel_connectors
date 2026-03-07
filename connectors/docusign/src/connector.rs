@@ -304,9 +304,7 @@ impl DocuSignConnector {
             "docusign.add_recipients" => self.invoke_add_recipients(client, &input).await,
             "docusign.list_templates" => self.invoke_list_templates(client, &input).await,
             "docusign.get_template" => self.invoke_get_template(client, &input).await,
-            "docusign.download_documents" => {
-                self.invoke_download_documents(client, &input).await
-            }
+            "docusign.download_documents" => self.invoke_download_documents(client, &input).await,
             "docusign.stream_connect_events" => {
                 self.invoke_stream_connect_events(client, &input).await
             }
@@ -368,9 +366,7 @@ impl DocuSignConnector {
             from_date: input.get("from_date").and_then(serde_json::Value::as_str),
             to_date: input.get("to_date").and_then(serde_json::Value::as_str),
             status: input.get("status").and_then(serde_json::Value::as_str),
-            search_text: input
-                .get("search_text")
-                .and_then(serde_json::Value::as_str),
+            search_text: input.get("search_text").and_then(serde_json::Value::as_str),
             count: input.get("count").and_then(serde_json::Value::as_i64),
             start_position: input
                 .get("start_position")
@@ -387,7 +383,9 @@ impl DocuSignConnector {
         let account_id = require_str(input, "account_id")?;
         let envelope_id = require_str(input, "envelope_id")?;
         let include = input.get("include").and_then(serde_json::Value::as_str);
-        let data = client.get_envelope(account_id, envelope_id, include).await?;
+        let data = client
+            .get_envelope(account_id, envelope_id, include)
+            .await?;
         Ok(json!({ "envelope": data }))
     }
 
@@ -397,12 +395,13 @@ impl DocuSignConnector {
         input: &serde_json::Value,
     ) -> Result<serde_json::Value, DocuSignError> {
         let account_id = require_str(input, "account_id")?;
-        let envelope_definition = input
-            .get("envelope_definition")
-            .ok_or_else(|| DocuSignError::Api {
-                status_code: 400,
-                message: "Missing required field: envelope_definition".into(),
-            })?;
+        let envelope_definition =
+            input
+                .get("envelope_definition")
+                .ok_or_else(|| DocuSignError::Api {
+                    status_code: 400,
+                    message: "Missing required field: envelope_definition".into(),
+                })?;
         client
             .create_envelope(account_id, envelope_definition)
             .await
@@ -438,12 +437,10 @@ impl DocuSignConnector {
     ) -> Result<serde_json::Value, DocuSignError> {
         let account_id = require_str(input, "account_id")?;
         let envelope_id = require_str(input, "envelope_id")?;
-        let recipients = input
-            .get("recipients")
-            .ok_or_else(|| DocuSignError::Api {
-                status_code: 400,
-                message: "Missing required field: recipients".into(),
-            })?;
+        let recipients = input.get("recipients").ok_or_else(|| DocuSignError::Api {
+            status_code: 400,
+            message: "Missing required field: recipients".into(),
+        })?;
         let data = client
             .add_recipients(account_id, envelope_id, recipients)
             .await?;
@@ -456,9 +453,7 @@ impl DocuSignConnector {
         input: &serde_json::Value,
     ) -> Result<serde_json::Value, DocuSignError> {
         let account_id = require_str(input, "account_id")?;
-        let search_text = input
-            .get("search_text")
-            .and_then(serde_json::Value::as_str);
+        let search_text = input.get("search_text").and_then(serde_json::Value::as_str);
         client.list_templates(account_id, search_text).await
     }
 
@@ -480,9 +475,7 @@ impl DocuSignConnector {
     ) -> Result<serde_json::Value, DocuSignError> {
         let account_id = require_str(input, "account_id")?;
         let envelope_id = require_str(input, "envelope_id")?;
-        let document_id = input
-            .get("document_id")
-            .and_then(serde_json::Value::as_str);
+        let document_id = input.get("document_id").and_then(serde_json::Value::as_str);
         let bytes = client
             .download_documents(account_id, envelope_id, document_id)
             .await?;
@@ -524,8 +517,16 @@ fn base64_encode(data: &[u8]) -> String {
     let mut result = String::with_capacity(data.len().div_ceil(3) * 4);
     for chunk in data.chunks(3) {
         let b0 = u32::from(chunk[0]);
-        let b1 = if chunk.len() > 1 { u32::from(chunk[1]) } else { 0 };
-        let b2 = if chunk.len() > 2 { u32::from(chunk[2]) } else { 0 };
+        let b1 = if chunk.len() > 1 {
+            u32::from(chunk[1])
+        } else {
+            0
+        };
+        let b2 = if chunk.len() > 2 {
+            u32::from(chunk[2])
+        } else {
+            0
+        };
         let triple = (b0 << 16) | (b1 << 8) | b2;
         result.push(CHARS[((triple >> 18) & 0x3F) as usize] as char);
         result.push(CHARS[((triple >> 12) & 0x3F) as usize] as char);
@@ -1046,11 +1047,7 @@ mod tests {
         let ops = operations_info();
         for op in ops.as_array().unwrap() {
             let summary = op["summary"].as_str().unwrap();
-            assert!(
-                !summary.is_empty(),
-                "empty summary for op {:?}",
-                op["id"]
-            );
+            assert!(!summary.is_empty(), "empty summary for op {:?}", op["id"]);
         }
     }
 

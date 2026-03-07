@@ -114,11 +114,7 @@ mod tests {
 
     #[test]
     fn endpoint_new_generates_uuid() {
-        let ep = WebhookEndpoint::new(
-            "/hooks/github".into(),
-            "whsec_abc123".into(),
-            vec![],
-        );
+        let ep = WebhookEndpoint::new("/hooks/github".into(), "whsec_abc123".into(), vec![]);
         assert!(ep.endpoint_id.starts_with("ep_"));
         assert_eq!(ep.path, "/hooks/github");
         assert_eq!(ep.signing_secret, "whsec_abc123");
@@ -331,7 +327,11 @@ mod tests {
     #[test]
     #[allow(clippy::redundant_clone)]
     fn endpoint_clone() {
-        let ep = WebhookEndpoint::new("/hooks/test".into(), "secret".into(), vec!["10.0.0.0/8".into()]);
+        let ep = WebhookEndpoint::new(
+            "/hooks/test".into(),
+            "secret".into(),
+            vec!["10.0.0.0/8".into()],
+        );
         let cloned = ep.clone();
         assert_eq!(cloned.endpoint_id, ep.endpoint_id);
         assert_eq!(cloned.path, "/hooks/test");
@@ -343,7 +343,12 @@ mod tests {
     #[test]
     #[allow(clippy::redundant_clone)]
     fn event_clone() {
-        let evt = WebhookEvent::new("ep_1".into(), json!({"key": "val"}), true, Some("1.2.3.4".into()));
+        let evt = WebhookEvent::new(
+            "ep_1".into(),
+            json!({"key": "val"}),
+            true,
+            Some("1.2.3.4".into()),
+        );
         let cloned = evt.clone();
         assert_eq!(cloned.event_id, evt.event_id);
         assert_eq!(cloned.endpoint_id, "ep_1");
@@ -375,7 +380,11 @@ mod tests {
         let ep = WebhookEndpoint::new(
             "/hooks/multi".into(),
             "s".into(),
-            vec!["10.0.0.0/8".into(), "172.16.0.0/12".into(), "192.168.0.0/16".into()],
+            vec![
+                "10.0.0.0/8".into(),
+                "172.16.0.0/12".into(),
+                "192.168.0.0/16".into(),
+            ],
         );
         assert_eq!(ep.allowed_sources.len(), 3);
         let json = serde_json::to_value(&ep).unwrap();
@@ -439,9 +448,16 @@ mod tests {
 
     #[test]
     fn event_serialization_with_headers() {
-        let mut evt = WebhookEvent::new("ep_1".into(), json!({"x": 1}), true, Some("10.0.0.1".into()));
-        evt.headers.insert("content-type".into(), "application/json".into());
-        evt.headers.insert("x-hub-signature".into(), "sha256=abc".into());
+        let mut evt = WebhookEvent::new(
+            "ep_1".into(),
+            json!({"x": 1}),
+            true,
+            Some("10.0.0.1".into()),
+        );
+        evt.headers
+            .insert("content-type".into(), "application/json".into());
+        evt.headers
+            .insert("x-hub-signature".into(), "sha256=abc".into());
         let json = serde_json::to_value(&evt).unwrap();
         assert_eq!(json["headers"]["content-type"], "application/json");
         assert_eq!(json["headers"]["x-hub-signature"], "sha256=abc");
@@ -466,7 +482,11 @@ mod tests {
 
     #[test]
     fn endpoint_json_string_roundtrip() {
-        let ep = WebhookEndpoint::new("/hooks/stripe".into(), "whsec_xyz".into(), vec!["1.2.3.4/32".into()]);
+        let ep = WebhookEndpoint::new(
+            "/hooks/stripe".into(),
+            "whsec_xyz".into(),
+            vec!["1.2.3.4/32".into()],
+        );
         let s = serde_json::to_string(&ep).unwrap();
         let ep2: WebhookEndpoint = serde_json::from_str(&s).unwrap();
         assert_eq!(ep2.endpoint_id, ep.endpoint_id);
@@ -477,7 +497,12 @@ mod tests {
 
     #[test]
     fn event_json_string_roundtrip() {
-        let evt = WebhookEvent::new("ep_test".into(), json!({"key": "val"}), false, Some("10.0.0.1".into()));
+        let evt = WebhookEvent::new(
+            "ep_test".into(),
+            json!({"key": "val"}),
+            false,
+            Some("10.0.0.1".into()),
+        );
         let s = serde_json::to_string(&evt).unwrap();
         let evt2: WebhookEvent = serde_json::from_str(&s).unwrap();
         assert_eq!(evt2.event_id, evt.event_id);

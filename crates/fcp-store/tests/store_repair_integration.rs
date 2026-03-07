@@ -23,8 +23,8 @@ use fcp_raptorq::{RaptorQConfig, RaptorQDecoder, RaptorQEncoder};
 use fcp_store::{
     CoverageEvaluation, CoverageHealth, MemoryObjectStore, MemoryObjectStoreConfig,
     MemorySymbolStore, MemorySymbolStoreConfig, ObjectStore, ObjectSymbolMeta,
-    ObjectTransmissionInfo, RepairController, RepairControllerConfig, RepairResult, StoredSymbol,
-    SymbolMeta, SymbolStore,
+    ObjectTransmissionInfo, RepairController, RepairControllerConfig, RepairCycleBudget,
+    RepairPlanningOptions, RepairReasonCode, RepairResult, StoredSymbol, SymbolMeta, SymbolStore,
 };
 use serde_json::json;
 use uuid::Uuid;
@@ -555,6 +555,153 @@ fn repair_controller_drives_convergence() {
                     "repairs_attempted": stats.repairs_attempted,
                     "repairs_succeeded": stats.repairs_succeeded,
                     "symbols_added": stats.symbols_added,
+                })),
+                ..StoreLogData::default()
+            }
+        },
+    );
+}
+
+/// Deterministic planner cycle improves the number of objects that meet the zone SLO.
+#[test]
+#[allow(clippy::too_many_lines)]
+fn repair_planner_cycle_improves_zone_slo() {
+    run_store_test(
+        "repair_planner_cycle_improves_zone_slo",
+        "integration",
+        "repair_plan",
+        5,
+        || async {
+            let config = test_raptorq_config();
+            let store = MemorySymbolStore::new(MemorySymbolStoreConfig {
+                max_bytes: 2 * 1024 * 1024,
+                local_node_id: 1,
+            });
+            let controller = RepairController::new(RepairControllerConfig {
+                min_deficit_bps: 100,
+                max_symbols_per_repair: 4,
+                ..Default::default()
+            });
+
+            let mut policies = HashMap::new();
+            let mut repair_catalog: HashMap<ObjectId, Vec<(u32, Vec<u8>)>> = HashMap::new();
+
+            for (index, (raw_id, payload_len)) in [
+                ([0xC1; 32], 640usize),
+                ([0xC2; 32], 704usize),
+                ([0xC3; 32], 768usize),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let object_id = ObjectId::from_bytes(raw_id);
+                let payload = make_payload(payload_len + index);
+                let (symbols, oti, source_k) = encode_payload(&payload, &config);
+                let partial: Vec<_> = symbols
+                    .iter()
+                    .take((source_k as usize / 2).max(1))
+                    .cloned()
+                    .collect();
+
+                store_symbols(&store, object_id, oti, source_k, &partial, 1).await;
+                repair_catalog.insert(object_id, symbols);
+                policies.insert(
+                    object_id,
+                    ObjectPlacementPolicy {
+                        min_nodes: 1,
+                        max_node_fraction_bps: 10000,
+                        preferred_devices: vec![],
+                        excluded_devices: vec![],
+                        target_coverage_bps: 10000,
+                        min_source_diversity: 0,
+                    },
+                );
+            }
+
+            let options = RepairPlanningOptions {
+                cycle_id: 41,
+                budget: RepairCycleBudget {
+                    max_repairs: 2,
+                    max_bytes: u64::MAX,
+                    max_decode_ms: u32::MAX,
+                },
+                ..Default::default()
+            };
+
+            let before_plan = controller
+                .plan_zone(&test_zone(), &store, &policies, &options)
+                .await;
+            assert_eq!(before_plan.actions.len(), 2, "budget should cap repairs");
+            assert!(
+                before_plan
+                    .actions
+                    .iter()
+                    .all(|action| action.reason_code == RepairReasonCode::PolicySloDeficit)
+            );
+
+            for action in &before_plan.actions {
+                let symbols = repair_catalog
+                    .get(&action.object_id)
+                    .expect("catalog entry for planned object");
+                let mut added = 0_u32;
+
+                for (esi, data) in symbols {
+                    if added >= action.estimated_symbols {
+                        break;
+                    }
+                    if store.get_symbol(&action.object_id, *esi).await.is_err() {
+                        let symbol = StoredSymbol {
+                            meta: SymbolMeta {
+                                object_id: action.object_id,
+                                esi: *esi,
+                                zone_id: test_zone(),
+                                source_node: Some(2),
+                                stored_at: 2_000_000 + u64::from(*esi),
+                            },
+                            data: Bytes::from(data.clone()),
+                        };
+                        store.put_symbol(symbol).await.unwrap();
+                        added += 1;
+                    }
+                }
+            }
+
+            let after_plan = controller
+                .plan_zone(
+                    &test_zone(),
+                    &store,
+                    &policies,
+                    &RepairPlanningOptions {
+                        cycle_id: 42,
+                        ..options
+                    },
+                )
+                .await;
+
+            assert!(
+                after_plan.object_count_below_target < before_plan.object_count_below_target,
+                "planner cycle should reduce below-target objects: {} -> {}",
+                before_plan.object_count_below_target,
+                after_plan.object_count_below_target,
+            );
+            assert!(
+                after_plan.budget_used.repairs <= before_plan.budget.max_repairs,
+                "budget accounting should stay within configured cycle cap",
+            );
+
+            StoreLogData {
+                symbol_count: Some(before_plan.object_count_tracked as u32),
+                details: Some(json!({
+                    "before_below_target": before_plan.object_count_below_target,
+                    "after_below_target": after_plan.object_count_below_target,
+                    "planned_actions": before_plan.actions.iter().map(|action| {
+                        json!({
+                            "object_id": action.object_id.to_string(),
+                            "reason_code": action.reason_code.as_str(),
+                            "estimated_symbols": action.estimated_symbols,
+                            "estimated_bytes": action.estimated_bytes
+                        })
+                    }).collect::<Vec<_>>()
                 })),
                 ..StoreLogData::default()
             }

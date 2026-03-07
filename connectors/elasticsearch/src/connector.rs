@@ -126,7 +126,9 @@ impl ElasticsearchConnector {
     /// Create a new Elasticsearch connector.
     pub fn new() -> Self {
         Self {
-            base: Arc::new(BaseConnector::new(ConnectorId::from_static("elasticsearch"))),
+            base: Arc::new(BaseConnector::new(ConnectorId::from_static(
+                "elasticsearch",
+            ))),
             config: None,
             client: None,
             session_id: None,
@@ -393,13 +395,14 @@ impl ElasticsearchConnector {
         client: &ElasticsearchClient,
         input: &serde_json::Value,
     ) -> Result<serde_json::Value, ElasticsearchError> {
-        let operations = input
-            .get("operations")
-            .and_then(|v| v.as_array())
-            .ok_or(ElasticsearchError::Api {
-                status_code: 400,
-                message: "Missing required field: operations".into(),
-            })?;
+        let operations =
+            input
+                .get("operations")
+                .and_then(|v| v.as_array())
+                .ok_or(ElasticsearchError::Api {
+                    status_code: 400,
+                    message: "Missing required field: operations".into(),
+                })?;
         client.bulk(operations).await
     }
 
@@ -431,7 +434,10 @@ impl ElasticsearchConnector {
 }
 
 /// Extract a required string field from input.
-fn require_str<'a>(input: &'a serde_json::Value, field: &str) -> Result<&'a str, ElasticsearchError> {
+fn require_str<'a>(
+    input: &'a serde_json::Value,
+    field: &str,
+) -> Result<&'a str, ElasticsearchError> {
     input
         .get(field)
         .and_then(|v| v.as_str())
@@ -528,10 +534,7 @@ mod tests {
         }))
         .unwrap();
         assert!(matches!(config.auth, ElasticsearchAuth::ApiKey(_)));
-        assert_eq!(
-            config.base_url,
-            "https://my-cluster.elastic-cloud.com:9243"
-        );
+        assert_eq!(config.base_url, "https://my-cluster.elastic-cloud.com:9243");
     }
 
     #[test]

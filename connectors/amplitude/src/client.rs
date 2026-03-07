@@ -275,8 +275,7 @@ mod tests {
             api_key: "KEY".into(),
             secret_key: "SECRET".into(),
         };
-        let client =
-            AmplitudeClient::new(auth, Some("https://test.example.com/api/")).unwrap();
+        let client = AmplitudeClient::new(auth, Some("https://test.example.com/api/")).unwrap();
         assert_eq!(client.base_url, "https://test.example.com/api");
     }
 
@@ -315,8 +314,7 @@ mod tests {
             api_key: "K".into(),
             secret_key: "S".into(),
         };
-        let client =
-            AmplitudeClient::new(auth, Some("https://example.com///")).unwrap();
+        let client = AmplitudeClient::new(auth, Some("https://example.com///")).unwrap();
         // trim_end_matches removes all trailing slashes
         assert_eq!(client.base_url, "https://example.com");
     }

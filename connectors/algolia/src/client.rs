@@ -135,11 +135,7 @@ impl AlgoliaClient {
     }
 
     #[instrument(skip(self, body), fields(url))]
-    async fn post(
-        &self,
-        path: &str,
-        body: &serde_json::Value,
-    ) -> AlgoliaResult<serde_json::Value> {
+    async fn post(&self, path: &str, body: &serde_json::Value) -> AlgoliaResult<serde_json::Value> {
         let url = format!("{}{path}", self.base_url);
         debug!(url = %url, "POST request");
         let req = self
@@ -262,8 +258,7 @@ mod tests {
             application_id: "APP".into(),
             api_key: "KEY".into(),
         };
-        let client =
-            AlgoliaClient::new(auth, Some("https://test.example.com/1/")).unwrap();
+        let client = AlgoliaClient::new(auth, Some("https://test.example.com/1/")).unwrap();
         assert_eq!(client.base_url, "https://test.example.com/1");
     }
 

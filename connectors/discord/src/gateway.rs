@@ -265,13 +265,19 @@ mod tests {
             .expect("gateway loop success");
 
         match event_rx.recv().await.expect("ready event") {
-            GatewayEvent::Ready(ready) => assert_eq!(ready.session_id, "sess-identify"),
-            other => panic!("expected Ready event, got {other:?}"),
+            GatewayEventFrame {
+                seq: Some(1),
+                event: GatewayEvent::Ready(ready),
+            } => assert_eq!(ready.session_id, "sess-identify"),
+            other => panic!("expected Ready event with seq=1, got {other:?}"),
         }
 
         match event_rx.recv().await.expect("message create event") {
-            GatewayEvent::MessageCreate(message) => assert_eq!(message["id"], "msg-1"),
-            other => panic!("expected MessageCreate event, got {other:?}"),
+            GatewayEventFrame {
+                seq: Some(2),
+                event: GatewayEvent::MessageCreate(message),
+            } => assert_eq!(message["id"], "msg-1"),
+            other => panic!("expected MessageCreate event with seq=2, got {other:?}"),
         }
 
         assert_eq!(state.session_id.as_deref(), Some("sess-identify"));
@@ -332,8 +338,11 @@ mod tests {
             .expect("gateway loop success");
 
         match event_rx.recv().await.expect("resumed event") {
-            GatewayEvent::Resumed => {}
-            other => panic!("expected Resumed event, got {other:?}"),
+            GatewayEventFrame {
+                seq: Some(8),
+                event: GatewayEvent::Resumed,
+            } => {}
+            other => panic!("expected Resumed event with seq=8, got {other:?}"),
         }
         assert_eq!(state.sequence, Some(8));
 
@@ -385,8 +394,11 @@ mod tests {
             .expect("gateway loop success");
 
         match event_rx.recv().await.expect("message delete event") {
-            GatewayEvent::MessageDelete(payload) => assert_eq!(payload["id"], "msg-delete-1"),
-            other => panic!("expected MessageDelete event, got {other:?}"),
+            GatewayEventFrame {
+                seq: Some(9),
+                event: GatewayEvent::MessageDelete(payload),
+            } => assert_eq!(payload["id"], "msg-delete-1"),
+            other => panic!("expected MessageDelete event with seq=9, got {other:?}"),
         }
         assert_eq!(state.sequence, Some(9));
 
@@ -607,8 +619,11 @@ mod tests {
             .expect("connect with persisted state");
 
         match stream.events.recv().await.expect("resumed event") {
-            GatewayEvent::Resumed => {}
-            other => panic!("expected Resumed event, got {other:?}"),
+            GatewayEventFrame {
+                seq: Some(8),
+                event: GatewayEvent::Resumed,
+            } => {}
+            other => panic!("expected Resumed event with seq=8, got {other:?}"),
         }
         stream
             .join_handle
@@ -732,6 +747,15 @@ pub enum GatewayEvent {
         event_name: String,
         data: serde_json::Value,
     },
+}
+
+/// A gateway event plus the sequence observed on the dispatch frame.
+#[derive(Clone, Debug)]
+pub struct GatewayEventFrame {
+    /// Discord gateway dispatch sequence.
+    pub seq: Option<u64>,
+    /// Parsed event payload.
+    pub event: GatewayEvent,
 }
 
 /// Discord Gateway connection.
@@ -1006,7 +1030,7 @@ fn dispatch_event(
 
 /// Handle for a single gateway connection attempt.
 pub struct GatewayStream {
-    pub events: mpsc::Receiver<GatewayEvent>,
+    pub events: mpsc::Receiver<GatewayEventFrame>,
     pub join_handle: fcp_async_core::task::JoinHandle<DiscordResult<()>>,
 }
 
@@ -1020,7 +1044,7 @@ impl std::fmt::Debug for GatewayStream {
 async fn run_gateway_loop(
     ws_stream: WsConnection,
     config: DiscordConfig,
-    event_tx: mpsc::Sender<GatewayEvent>,
+    event_tx: mpsc::Sender<GatewayEventFrame>,
     mut state: GatewayState,
     state_store: Arc<Mutex<GatewayState>>,
     state_path: Option<PathBuf>,
@@ -1044,7 +1068,7 @@ async fn run_gateway_loop(
 async fn run_gateway_loop_inner(
     mut ws_stream: WsConnection,
     config: DiscordConfig,
-    event_tx: &mpsc::Sender<GatewayEvent>,
+    event_tx: &mpsc::Sender<GatewayEventFrame>,
     state: &mut GatewayState,
     state_path: Option<&Path>,
 ) -> DiscordResult<()> {
@@ -1198,9 +1222,13 @@ async fn run_gateway_loop_inner(
                         let event_name = payload.t.clone().unwrap_or_default();
                         let data = payload.d.clone().unwrap_or_default();
                         let event = dispatch_event(event_name, data, state)?;
+                        let frame = GatewayEventFrame {
+                            seq: payload.s,
+                            event,
+                        };
                         persist_gateway_state_if_configured(state_path, state)?;
 
-                        if event_tx.send(event).await.is_err() {
+                        if event_tx.send(frame).await.is_err() {
                             info!("Event receiver dropped, closing gateway");
                             return Ok(());
                         }

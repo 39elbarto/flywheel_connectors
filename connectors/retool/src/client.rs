@@ -137,11 +137,7 @@ impl RetoolClient {
     }
 
     #[instrument(skip(self, body), fields(url))]
-    async fn post(
-        &self,
-        path: &str,
-        body: &serde_json::Value,
-    ) -> RetoolResult<serde_json::Value> {
+    async fn post(&self, path: &str, body: &serde_json::Value) -> RetoolResult<serde_json::Value> {
         let url = format!("{}{path}", self.base_url);
         debug!(url = %url, "POST request");
         let req = self
@@ -260,8 +256,7 @@ mod tests {
             api_token: "tok".into(),
         };
         let client =
-            RetoolClient::new(auth, Some("ignored"), Some("https://custom.example.com"))
-                .unwrap();
+            RetoolClient::new(auth, Some("ignored"), Some("https://custom.example.com")).unwrap();
         assert_eq!(client.base_url, "https://custom.example.com");
     }
 
@@ -320,8 +315,7 @@ mod tests {
         let auth = RetoolAuth {
             api_token: "tok".into(),
         };
-        let client =
-            RetoolClient::new(auth, None, Some("https://example.com/api/v1///")).unwrap();
+        let client = RetoolClient::new(auth, None, Some("https://example.com/api/v1///")).unwrap();
         assert!(!client.base_url.ends_with('/'));
     }
 

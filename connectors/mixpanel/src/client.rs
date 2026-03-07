@@ -105,9 +105,7 @@ impl MixpanelClient {
                 let encoded = BASE64.encode(format!("{username}:{secret}"));
                 req.header("Authorization", format!("Basic {encoded}"))
             }
-            MixpanelAuth::CredentialId(id) => {
-                req.header("X-FCP-Credential-Id", id.to_string())
-            }
+            MixpanelAuth::CredentialId(id) => req.header("X-FCP-Credential-Id", id.to_string()),
         }
     }
 
@@ -213,20 +211,14 @@ impl MixpanelClient {
 
     /// List saved funnels.
     pub async fn list_funnels(&self) -> MixpanelResult<serde_json::Value> {
-        self.get(&format!(
-            "/funnels/list?project_id={}",
-            self.project_id
-        ))
-        .await
+        self.get(&format!("/funnels/list?project_id={}", self.project_id))
+            .await
     }
 
     // -- Insights --
 
     /// Run an Insights query by bookmark ID.
-    pub async fn query_insights(
-        &self,
-        bookmark_id: &str,
-    ) -> MixpanelResult<serde_json::Value> {
+    pub async fn query_insights(&self, bookmark_id: &str) -> MixpanelResult<serde_json::Value> {
         let body = serde_json::json!({
             "project_id": self.project_id.parse::<u64>().unwrap_or(0),
             "bookmark_id": bookmark_id,
@@ -425,8 +417,10 @@ mod tests {
         let encoded = BASE64.encode("user:p@ss:w0rd!");
         assert!(!encoded.is_empty());
         // Should be valid base64 (only contains [A-Za-z0-9+/=])
-        assert!(encoded
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '/' || c == '='));
+        assert!(
+            encoded
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '/' || c == '=')
+        );
     }
 }

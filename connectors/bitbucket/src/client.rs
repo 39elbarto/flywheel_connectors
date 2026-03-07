@@ -102,9 +102,7 @@ impl BitbucketClient {
                 app_password,
             } => req.basic_auth(username, Some(app_password)),
             BitbucketAuth::AccessToken(token) => req.bearer_auth(token),
-            BitbucketAuth::CredentialId(id) => {
-                req.header("X-FCP-Credential-Id", id.to_string())
-            }
+            BitbucketAuth::CredentialId(id) => req.header("X-FCP-Credential-Id", id.to_string()),
         }
     }
 
@@ -297,10 +295,8 @@ impl BitbucketClient {
         workspace: &str,
         repo_slug: &str,
     ) -> BitbucketResult<serde_json::Value> {
-        self.get(&format!(
-            "/repositories/{workspace}/{repo_slug}/pipelines"
-        ))
-        .await
+        self.get(&format!("/repositories/{workspace}/{repo_slug}/pipelines"))
+            .await
     }
 }
 
@@ -365,8 +361,7 @@ mod tests {
 
     #[test]
     fn client_new_default_url() {
-        let client =
-            BitbucketClient::new(BitbucketAuth::AccessToken("tok".into()), None).unwrap();
+        let client = BitbucketClient::new(BitbucketAuth::AccessToken("tok".into()), None).unwrap();
         assert_eq!(client.base_url, DEFAULT_BASE_URL);
     }
 
@@ -492,21 +487,15 @@ mod tests {
 
     #[test]
     fn client_new_with_credential_id() {
-        let client = BitbucketClient::new(
-            BitbucketAuth::CredentialId(CredentialId::new()),
-            None,
-        )
-        .unwrap();
+        let client =
+            BitbucketClient::new(BitbucketAuth::CredentialId(CredentialId::new()), None).unwrap();
         assert_eq!(client.base_url, DEFAULT_BASE_URL);
     }
 
     #[test]
     fn client_debug_credential_id() {
-        let client = BitbucketClient::new(
-            BitbucketAuth::CredentialId(CredentialId::new()),
-            None,
-        )
-        .unwrap();
+        let client =
+            BitbucketClient::new(BitbucketAuth::CredentialId(CredentialId::new()), None).unwrap();
         let dbg = format!("{client:?}");
         assert!(dbg.contains("CredentialId"));
         assert!(dbg.contains("BitbucketClient"));

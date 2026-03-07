@@ -102,7 +102,11 @@ impl PandaDocClient {
         }
     }
 
-    async fn handle_error(&self, status: StatusCode, resp: Response) -> PandaDocResult<serde_json::Value> {
+    async fn handle_error(
+        &self,
+        status: StatusCode,
+        resp: Response,
+    ) -> PandaDocResult<serde_json::Value> {
         let retry_after = resp
             .headers()
             .get("retry-after")
@@ -122,7 +126,10 @@ impl PandaDocClient {
             429 => Err(PandaDocError::RateLimited {
                 retry_after_ms: retry_after.unwrap_or(60) * 1000,
             }),
-            code => Err(PandaDocError::Api { status_code: code, message: detail }),
+            code => Err(PandaDocError::Api {
+                status_code: code,
+                message: detail,
+            }),
         }
     }
 
@@ -134,7 +141,8 @@ impl PandaDocClient {
     ) -> PandaDocResult<serde_json::Value> {
         let url = format!("{}{path}", self.base_url);
         debug!(url = %url, "GET request");
-        let mut req = self.add_auth(self.client.get(&url))
+        let mut req = self
+            .add_auth(self.client.get(&url))
             .header("Accept", "application/json");
         if let Some(q) = query {
             req = req.query(q);
@@ -144,10 +152,15 @@ impl PandaDocClient {
     }
 
     #[instrument(skip(self, body), fields(url))]
-    async fn post(&self, path: &str, body: &serde_json::Value) -> PandaDocResult<serde_json::Value> {
+    async fn post(
+        &self,
+        path: &str,
+        body: &serde_json::Value,
+    ) -> PandaDocResult<serde_json::Value> {
         let url = format!("{}{path}", self.base_url);
         debug!(url = %url, "POST request");
-        let req = self.add_auth(self.client.post(&url))
+        let req = self
+            .add_auth(self.client.post(&url))
             .header("Accept", "application/json")
             .json(body);
         let resp = req.send().await?;
@@ -158,7 +171,8 @@ impl PandaDocClient {
     async fn delete(&self, path: &str) -> PandaDocResult<serde_json::Value> {
         let url = format!("{}{path}", self.base_url);
         debug!(url = %url, "DELETE request");
-        let req = self.add_auth(self.client.delete(&url))
+        let req = self
+            .add_auth(self.client.delete(&url))
             .header("Accept", "application/json");
         let resp = req.send().await?;
         self.handle_response(resp).await
@@ -179,14 +193,15 @@ impl PandaDocClient {
         if let Some(c) = count {
             query.push(("count", c.to_string()));
         }
-        self.get("/documents", if query.is_empty() { None } else { Some(&query) }).await
+        self.get(
+            "/documents",
+            if query.is_empty() { None } else { Some(&query) },
+        )
+        .await
     }
 
     /// Get a document by ID.
-    pub async fn get_document(
-        &self,
-        document_id: &str,
-    ) -> PandaDocResult<serde_json::Value> {
+    pub async fn get_document(&self, document_id: &str) -> PandaDocResult<serde_json::Value> {
         self.get(&format!("/documents/{document_id}"), None).await
     }
 
@@ -204,14 +219,12 @@ impl PandaDocClient {
         document_id: &str,
         body: &serde_json::Value,
     ) -> PandaDocResult<serde_json::Value> {
-        self.post(&format!("/documents/{document_id}/send"), body).await
+        self.post(&format!("/documents/{document_id}/send"), body)
+            .await
     }
 
     /// Delete a document.
-    pub async fn delete_document(
-        &self,
-        document_id: &str,
-    ) -> PandaDocResult<serde_json::Value> {
+    pub async fn delete_document(&self, document_id: &str) -> PandaDocResult<serde_json::Value> {
         self.delete(&format!("/documents/{document_id}")).await
     }
 
@@ -314,11 +327,9 @@ mod tests {
 
     #[test]
     fn client_debug_redacts_token() {
-        let client = PandaDocClient::new(
-            PandaDocAuth::BearerToken("my-secret-api-key".into()),
-            None,
-        )
-        .unwrap();
+        let client =
+            PandaDocClient::new(PandaDocAuth::BearerToken("my-secret-api-key".into()), None)
+                .unwrap();
         let dbg = format!("{client:?}");
         assert!(!dbg.contains("my-secret-api-key"));
         assert!(dbg.contains("PandaDocClient"));

@@ -980,9 +980,7 @@ mod tests {
             event_type: "test.event".into(),
             created: 0,
             livemode: None,
-            data: StripeWebhookEventData {
-                object: json!({}),
-            },
+            data: StripeWebhookEventData { object: json!({}) },
         };
         let dbg = format!("{e:?}");
         assert!(dbg.contains("StripeWebhookEvent"));
@@ -993,7 +991,8 @@ mod tests {
 
     #[test]
     fn webhook_event_livemode_none() {
-        let json_str = r#"{"id":"evt_1","object":"event","type":"test","created":0,"data":{"object":{}}}"#;
+        let json_str =
+            r#"{"id":"evt_1","object":"event","type":"test","created":0,"data":{"object":{}}}"#;
         let event: StripeWebhookEvent = serde_json::from_str(json_str).unwrap();
         assert!(event.livemode.is_none());
     }

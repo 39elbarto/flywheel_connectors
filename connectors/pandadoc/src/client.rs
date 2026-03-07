@@ -374,4 +374,20 @@ mod tests {
         let dbg = format!("{client:?}");
         assert!(!dbg.contains("v1/"));
     }
+
+    #[test]
+    fn auth_bearer_debug_shows_tuple_form() {
+        let auth = PandaDocAuth::BearerToken("my-key".into());
+        let dbg = format!("{auth:?}");
+        assert!(dbg.contains("BearerToken"));
+        assert!(!dbg.contains("my-key"));
+    }
+
+    #[test]
+    fn auth_credential_clone_preserves_secretless() {
+        let cred = PandaDocAuth::CredentialId(CredentialId::new());
+        let cloned = cred.clone();
+        assert!(cred.is_secretless());
+        assert!(cloned.is_secretless());
+    }
 }

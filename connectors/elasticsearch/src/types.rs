@@ -792,4 +792,28 @@ mod tests {
         assert_eq!(v["took"], 20);
         assert_eq!(v["errors"], false);
     }
+
+    #[test]
+    fn cluster_health_serialize_roundtrip() {
+        let r: ClusterHealthResponse = serde_json::from_value(json!({
+            "cluster_name": "rt-cluster",
+            "status": "green",
+            "number_of_nodes": 5,
+            "active_shards_percent_as_number": 99.5
+        }))
+        .unwrap();
+        let v = serde_json::to_value(&r).unwrap();
+        let back: ClusterHealthResponse = serde_json::from_value(v).unwrap();
+        assert_eq!(back.cluster_name, Some("rt-cluster".into()));
+        assert_eq!(back.number_of_nodes, Some(5));
+    }
+
+    #[test]
+    fn delete_index_response_serialize_roundtrip() {
+        let r: DeleteIndexResponse =
+            serde_json::from_value(json!({"acknowledged": true})).unwrap();
+        let v = serde_json::to_value(&r).unwrap();
+        let back: DeleteIndexResponse = serde_json::from_value(v).unwrap();
+        assert!(back.acknowledged.unwrap());
+    }
 }

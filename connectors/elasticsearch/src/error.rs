@@ -668,4 +668,32 @@ mod tests {
         let dbg = format!("{:?}", ElasticsearchError::Json(bad.unwrap_err()));
         assert!(dbg.contains("Json"));
     }
+
+    #[test]
+    fn api_600_not_retryable() {
+        assert!(
+            !ElasticsearchError::Api {
+                status_code: 600,
+                message: "custom".into()
+            }
+            .is_retryable()
+        );
+    }
+
+    #[test]
+    fn rate_limited_fcp_error_service() {
+        match (ElasticsearchError::RateLimited {
+            retry_after_ms: 1000,
+        })
+        .to_fcp_error()
+        {
+            FcpError::External {
+                service, message, ..
+            } => {
+                assert_eq!(service, "elasticsearch");
+                assert!(message.contains("1000"));
+            }
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
 }

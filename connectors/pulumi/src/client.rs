@@ -409,4 +409,32 @@ mod tests {
         // Check it contains a UUID-like string
         assert!(label.len() > "credential_id:".len());
     }
+
+    // ── Additional client tests ───────────────────────────────────
+
+    #[test]
+    fn default_base_url_starts_with_https() {
+        assert!(DEFAULT_BASE_URL.starts_with("https://"));
+    }
+
+    #[test]
+    fn default_base_url_no_trailing_slash() {
+        assert!(!DEFAULT_BASE_URL.ends_with('/'));
+    }
+
+    #[test]
+    fn client_new_empty_base_url_string() {
+        let client =
+            PulumiClient::new(PulumiAuth::BearerToken("tok".into()), Some("")).unwrap();
+        assert_eq!(client.base_url, "");
+    }
+
+    #[test]
+    fn auth_bearer_with_long_token() {
+        let long_token = "a".repeat(1000);
+        let auth = PulumiAuth::BearerToken(long_token);
+        let dbg = format!("{auth:?}");
+        assert!(dbg.contains("redacted"));
+        assert!(!dbg.contains(&"a".repeat(100)));
+    }
 }

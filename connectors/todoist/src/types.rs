@@ -402,4 +402,198 @@ mod tests {
         assert_eq!(e.error_code, Some(403));
         assert_eq!(e.http_code, Some(403));
     }
+
+    // ── Additional type coverage tests ────────────────────────────
+
+    #[test]
+    fn project_serialize_roundtrip() {
+        let p: Project = serde_json::from_value(json!({
+            "id": "p1",
+            "name": "Work",
+            "color": "blue",
+            "is_shared": false,
+            "is_favorite": true
+        }))
+        .unwrap();
+        let v = serde_json::to_value(&p).unwrap();
+        let p2: Project = serde_json::from_value(v).unwrap();
+        assert_eq!(p2.id, "p1");
+        assert_eq!(p2.name, Some("Work".into()));
+        assert_eq!(p2.color, Some("blue".into()));
+    }
+
+    #[test]
+    fn project_empty_string_name() {
+        let p: Project = serde_json::from_value(json!({
+            "id": "p1",
+            "name": ""
+        }))
+        .unwrap();
+        assert_eq!(p.name, Some(String::new()));
+    }
+
+    #[test]
+    fn task_serialize_with_due() {
+        let t: Task = serde_json::from_value(json!({
+            "id": "t1",
+            "content": "Test",
+            "due": {
+                "date": "2026-04-01",
+                "string": "April 1",
+                "is_recurring": false
+            }
+        }))
+        .unwrap();
+        let v = serde_json::to_value(&t).unwrap();
+        assert_eq!(v["due"]["date"], "2026-04-01");
+        assert_eq!(v["due"]["string"], "April 1");
+    }
+
+    #[test]
+    fn task_high_priority() {
+        let t: Task = serde_json::from_value(json!({
+            "id": "t1",
+            "priority": 255
+        }))
+        .unwrap();
+        assert_eq!(t.priority, Some(255));
+    }
+
+    #[test]
+    fn task_zero_comment_count() {
+        let t: Task = serde_json::from_value(json!({
+            "id": "t1",
+            "comment_count": 0
+        }))
+        .unwrap();
+        assert_eq!(t.comment_count, Some(0));
+    }
+
+    #[test]
+    fn task_negative_order() {
+        let t: Task = serde_json::from_value(json!({
+            "id": "t1",
+            "order": -5
+        }))
+        .unwrap();
+        assert_eq!(t.order, Some(-5));
+    }
+
+    #[test]
+    fn due_all_none_optionals() {
+        let d: Due = serde_json::from_value(json!({})).unwrap();
+        assert!(d.date.is_none());
+        assert!(d.string.is_none());
+        assert!(d.datetime.is_none());
+        assert!(d.timezone.is_none());
+        assert!(d.is_recurring.is_none());
+    }
+
+    #[test]
+    fn due_with_datetime_only() {
+        let d: Due = serde_json::from_value(json!({
+            "datetime": "2026-05-01T14:30:00Z"
+        }))
+        .unwrap();
+        assert!(d.date.is_none());
+        assert_eq!(d.datetime, Some("2026-05-01T14:30:00Z".into()));
+    }
+
+    #[test]
+    fn due_empty_string_fields() {
+        let d: Due = serde_json::from_value(json!({
+            "date": "",
+            "string": "",
+            "timezone": ""
+        }))
+        .unwrap();
+        assert_eq!(d.date, Some(String::new()));
+        assert_eq!(d.string, Some(String::new()));
+        assert_eq!(d.timezone, Some(String::new()));
+    }
+
+    #[test]
+    fn project_view_style_board() {
+        let p: Project = serde_json::from_value(json!({
+            "id": "p1",
+            "view_style": "board"
+        }))
+        .unwrap();
+        assert_eq!(p.view_style, Some("board".into()));
+    }
+
+    #[test]
+    fn project_large_comment_count() {
+        let p: Project = serde_json::from_value(json!({
+            "id": "p1",
+            "comment_count": 999_999
+        }))
+        .unwrap();
+        assert_eq!(p.comment_count, Some(999_999));
+    }
+
+    #[test]
+    fn api_error_response_error_only() {
+        let e: ApiErrorResponse = serde_json::from_value(json!({
+            "error": "Resource not found"
+        }))
+        .unwrap();
+        assert_eq!(e.error_message, Some("Resource not found".into()));
+        assert!(e.error_code.is_none());
+        assert!(e.http_code.is_none());
+    }
+
+    #[test]
+    fn api_error_response_extra_fields_ignored() {
+        let e: ApiErrorResponse = serde_json::from_value(json!({
+            "error": "Bad request",
+            "extra_field": "should be ignored"
+        }))
+        .unwrap();
+        assert_eq!(e.error_message, Some("Bad request".into()));
+    }
+
+    #[test]
+    fn task_url_value() {
+        let t: Task = serde_json::from_value(json!({
+            "id": "t1",
+            "url": "https://todoist.com/showTask?id=t1"
+        }))
+        .unwrap();
+        assert_eq!(t.url, Some("https://todoist.com/showTask?id=t1".into()));
+    }
+
+    #[test]
+    fn project_url_value() {
+        let p: Project = serde_json::from_value(json!({
+            "id": "p1",
+            "url": "https://todoist.com/showProject?id=p1"
+        }))
+        .unwrap();
+        assert_eq!(p.url, Some("https://todoist.com/showProject?id=p1".into()));
+    }
+
+    #[test]
+    fn project_negative_order() {
+        let p: Project = serde_json::from_value(json!({
+            "id": "p1",
+            "order": -10
+        }))
+        .unwrap();
+        assert_eq!(p.order, Some(-10));
+    }
+
+    #[test]
+    fn due_serialize_preserves_recurring() {
+        let d = Due {
+            date: None,
+            string: Some("every week".into()),
+            datetime: None,
+            timezone: None,
+            is_recurring: Some(true),
+        };
+        let v = serde_json::to_value(&d).unwrap();
+        assert_eq!(v["is_recurring"], true);
+        assert_eq!(v["string"], "every week");
+    }
 }

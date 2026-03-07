@@ -368,4 +368,55 @@ mod tests {
         .unwrap();
         assert_eq!(client.base_url, "https://custom.example.com");
     }
+
+    // ── Additional client coverage tests ──────────────────────────
+
+    #[test]
+    fn auth_redacted_label_does_not_contain_token() {
+        let auth = TodoistAuth::BearerToken("my-api-token-12345".into());
+        let label = auth.redacted_label();
+        assert!(!label.contains("my-api-token-12345"));
+        assert!(label.contains("redacted"));
+    }
+
+    #[test]
+    fn auth_credential_label_contains_id() {
+        let id = CredentialId::new();
+        let id_str = id.to_string();
+        let auth = TodoistAuth::CredentialId(id);
+        let label = auth.redacted_label();
+        assert!(label.contains(&id_str));
+    }
+
+    #[test]
+    fn client_new_empty_string_url() {
+        let client = TodoistClient::new(
+            TodoistAuth::BearerToken("tok".into()),
+            Some(""),
+        )
+        .unwrap();
+        let dbg = format!("{client:?}");
+        assert!(dbg.contains("TodoistClient"));
+    }
+
+    #[test]
+    fn auth_debug_credential_id_contains_id_value() {
+        let id = CredentialId::new();
+        let id_str = id.to_string();
+        let auth = TodoistAuth::CredentialId(id);
+        let dbg = format!("{auth:?}");
+        assert!(dbg.contains(&id_str));
+    }
+
+    #[test]
+    fn client_credential_id_auth_debug() {
+        let client = TodoistClient::new(
+            TodoistAuth::CredentialId(CredentialId::new()),
+            None,
+        )
+        .unwrap();
+        let dbg = format!("{client:?}");
+        assert!(dbg.contains("CredentialId"));
+        assert!(dbg.contains(DEFAULT_BASE_URL));
+    }
 }

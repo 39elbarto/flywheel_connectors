@@ -999,4 +999,193 @@ mod tests {
             );
         }
     }
+
+    // ── Additional connector coverage tests ───────────────────────
+
+    #[test]
+    fn config_clone_preserves_base_url() {
+        let config = TodoistConfig::from_params(&json!({
+            "api_token": "tok",
+            "base_url": "https://custom.todoist.io/v2"
+        }))
+        .unwrap();
+        let cloned = config.clone();
+        assert_eq!(config.base_url, "https://custom.todoist.io/v2");
+        assert_eq!(cloned.base_url, "https://custom.todoist.io/v2");
+    }
+
+    #[test]
+    fn config_clone_preserves_auth() {
+        let config = TodoistConfig::from_params(&json!({
+            "api_token": "my_token"
+        }))
+        .unwrap();
+        let cloned = config.clone();
+        assert_eq!(config.base_url, DEFAULT_BASE_URL);
+        assert_eq!(cloned.base_url, DEFAULT_BASE_URL);
+    }
+
+    #[test]
+    fn config_debug_format() {
+        let config = TodoistConfig::from_params(&json!({
+            "api_token": "tok"
+        }))
+        .unwrap();
+        let dbg = format!("{config:?}");
+        assert!(dbg.contains("TodoistConfig"));
+    }
+
+    #[test]
+    fn connector_new_equals_default() {
+        let c = TodoistConnector::new();
+        assert!(c.config.is_none());
+        assert!(c.client.is_none());
+        assert!(c.session_id.is_none());
+    }
+
+    #[test]
+    fn doctor_status_debug_format() {
+        assert!(format!("{:?}", DoctorStatus::Healthy).contains("Healthy"));
+        assert!(format!("{:?}", DoctorStatus::Degraded).contains("Degraded"));
+        assert!(format!("{:?}", DoctorStatus::Unhealthy).contains("Unhealthy"));
+    }
+
+    #[test]
+    fn doctor_status_ne_comparison() {
+        assert_ne!(DoctorStatus::Healthy, DoctorStatus::Degraded);
+        assert_ne!(DoctorStatus::Degraded, DoctorStatus::Unhealthy);
+    }
+
+    #[test]
+    fn doctor_check_clone() {
+        let c = DoctorCheck {
+            name: "clone_test".into(),
+            passed: true,
+            message: Some("cloned".into()),
+            critical: false,
+        };
+        let c2 = c.clone();
+        assert_eq!(c.name, "clone_test");
+        assert_eq!(c2.message, Some("cloned".into()));
+    }
+
+    #[test]
+    fn doctor_result_clone() {
+        let r = DoctorResult::from_checks(vec![DoctorCheck {
+            name: "a".into(),
+            passed: true,
+            message: None,
+            critical: true,
+        }]);
+        let r2 = r.clone();
+        assert_eq!(r.status, DoctorStatus::Healthy);
+        assert_eq!(r2.checks.len(), 1);
+    }
+
+    #[test]
+    fn doctor_result_serializes_with_message() {
+        let r = DoctorResult::from_checks(vec![DoctorCheck {
+            name: "x".into(),
+            passed: false,
+            message: Some("detail".into()),
+            critical: false,
+        }]);
+        let v = serde_json::to_value(&r).unwrap();
+        assert_eq!(v["status"], "degraded");
+        assert_eq!(v["checks"][0]["message"], "detail");
+    }
+
+    #[test]
+    fn doctor_result_multiple_critical_failures() {
+        let r = DoctorResult::from_checks(vec![
+            DoctorCheck { name: "a".into(), passed: false, message: None, critical: true },
+            DoctorCheck { name: "b".into(), passed: false, message: None, critical: true },
+        ]);
+        assert_eq!(r.status, DoctorStatus::Unhealthy);
+    }
+
+    #[test]
+    fn operations_tasks_create_is_risky() {
+        let ops = operations_info();
+        let op = ops.as_array().unwrap().iter()
+            .find(|o| o["id"] == "todoist.tasks.create")
+            .unwrap();
+        assert_eq!(op["safety_tier"], "risky");
+        assert_eq!(op["risk_level"], "medium");
+    }
+
+    #[test]
+    fn operations_tasks_complete_is_risky() {
+        let ops = operations_info();
+        let op = ops.as_array().unwrap().iter()
+            .find(|o| o["id"] == "todoist.tasks.complete")
+            .unwrap();
+        assert_eq!(op["safety_tier"], "risky");
+        assert_eq!(op["idempotency"], "strict");
+    }
+
+    #[test]
+    fn operations_tasks_create_not_idempotent() {
+        let ops = operations_info();
+        let op = ops.as_array().unwrap().iter()
+            .find(|o| o["id"] == "todoist.tasks.create")
+            .unwrap();
+        assert_eq!(op["idempotency"], "none");
+    }
+
+    #[test]
+    fn operations_tasks_list_capability() {
+        let ops = operations_info();
+        let op = ops.as_array().unwrap().iter()
+            .find(|o| o["id"] == "todoist.tasks.list")
+            .unwrap();
+        assert_eq!(op["capability"], "todoist.tasks.read");
+    }
+
+    #[test]
+    fn operations_projects_list_capability() {
+        let ops = operations_info();
+        let op = ops.as_array().unwrap().iter()
+            .find(|o| o["id"] == "todoist.projects.list")
+            .unwrap();
+        assert_eq!(op["capability"], "todoist.projects.read");
+    }
+
+    #[test]
+    fn require_str_with_float_value() {
+        let input = json!({"task_id": 1.23});
+        assert!(require_str(&input, "task_id").is_err());
+    }
+
+    #[test]
+    fn require_str_with_object_value() {
+        let input = json!({"task_id": {"nested": true}});
+        assert!(require_str(&input, "task_id").is_err());
+    }
+
+    #[test]
+    fn config_error_non_string_credential_id_message() {
+        let result = TodoistConfig::from_params(&json!({
+            "credential_id": 12345,
+        }));
+        match result.unwrap_err() {
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(message.contains("must be a string"));
+            }
+            e => panic!("expected InvalidRequest, got {e:?}"),
+        }
+    }
+
+    #[test]
+    fn config_error_invalid_uuid_message() {
+        let result = TodoistConfig::from_params(&json!({
+            "credential_id": "not-a-uuid",
+        }));
+        match result.unwrap_err() {
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(message.contains("valid UUID"));
+            }
+            e => panic!("expected InvalidRequest, got {e:?}"),
+        }
+    }
 }

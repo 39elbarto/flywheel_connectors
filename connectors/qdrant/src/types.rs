@@ -985,4 +985,217 @@ mod tests {
         let result = serde_json::from_value::<CountResult>(json);
         assert!(result.is_err());
     }
+
+    // ── Additional types tests (2026-03-07) ──────────────────────────────
+
+    #[test]
+    fn collection_special_characters_name() {
+        let c = Collection {
+            name: "test-collection_v2.1".into(),
+        };
+        let json_str = serde_json::to_string(&c).unwrap();
+        let back: Collection = serde_json::from_str(&json_str).unwrap();
+        assert_eq!(back.name, "test-collection_v2.1");
+    }
+
+    #[test]
+    fn collection_info_large_counts() {
+        let json = json!({
+            "status": "green",
+            "vectors_count": 999_999_999,
+            "indexed_vectors_count": 888_888_888,
+            "points_count": 777_777_777,
+            "segments_count": 100
+        });
+        let info: CollectionInfo = serde_json::from_value(json).unwrap();
+        assert_eq!(info.vectors_count, Some(999_999_999));
+        assert_eq!(info.indexed_vectors_count, Some(888_888_888));
+        assert_eq!(info.points_count, Some(777_777_777));
+    }
+
+    #[test]
+    fn collection_info_config_nested_structure() {
+        let json = json!({
+            "status": "green",
+            "config": {
+                "params": {
+                    "vectors": {"size": 1536, "distance": "Cosine"},
+                    "hnsw_config": {"m": 16, "ef_construct": 100}
+                }
+            }
+        });
+        let info: CollectionInfo = serde_json::from_value(json).unwrap();
+        let config = info.config.unwrap();
+        assert_eq!(config["params"]["vectors"]["size"], 1536);
+    }
+
+    #[test]
+    fn point_empty_payload_object() {
+        let p = Point {
+            id: json!(1),
+            vector: None,
+            payload: Some(json!({})),
+        };
+        let val = serde_json::to_value(&p).unwrap();
+        assert!(val.get("payload").is_some());
+        assert!(val["payload"].as_object().unwrap().is_empty());
+    }
+
+    #[test]
+    fn point_high_dimensional_vector() {
+        let vec_data: Vec<f64> = (0..768).map(|i| f64::from(i) * 0.001).collect();
+        let p = Point {
+            id: json!("hd-1"),
+            vector: Some(json!(vec_data)),
+            payload: None,
+        };
+        let val = serde_json::to_value(&p).unwrap();
+        let back: Point = serde_json::from_value(val).unwrap();
+        assert_eq!(back.vector.unwrap().as_array().unwrap().len(), 768);
+    }
+
+    #[test]
+    fn point_uuid_id() {
+        let p = Point {
+            id: json!("550e8400-e29b-41d4-a716-446655440000"),
+            vector: None,
+            payload: None,
+        };
+        let val = serde_json::to_value(&p).unwrap();
+        assert_eq!(val["id"], "550e8400-e29b-41d4-a716-446655440000");
+    }
+
+    #[test]
+    fn search_result_high_score() {
+        let sr = SearchResult {
+            id: json!(1),
+            version: Some(10),
+            score: 1.0,
+            payload: None,
+            vector: None,
+        };
+        let json_str = serde_json::to_string(&sr).unwrap();
+        let back: SearchResult = serde_json::from_str(&json_str).unwrap();
+        assert!((back.score - 1.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn search_result_very_small_score() {
+        let sr = SearchResult {
+            id: json!(99),
+            version: None,
+            score: 0.00001,
+            payload: None,
+            vector: None,
+        };
+        assert!((sr.score - 0.00001).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn scroll_result_many_points() {
+        let points: Vec<serde_json::Value> = (0..100).map(|i| json!({"id": i})).collect();
+        let sr = ScrollResult {
+            points,
+            next_page_offset: Some(json!(100)),
+        };
+        assert_eq!(sr.points.len(), 100);
+        assert_eq!(sr.next_page_offset, Some(json!(100)));
+    }
+
+    #[test]
+    fn scroll_result_integer_offset() {
+        let json = json!({"points": [{"id": 1}], "next_page_offset": 42});
+        let sr: ScrollResult = serde_json::from_value(json).unwrap();
+        assert_eq!(sr.next_page_offset, Some(json!(42)));
+    }
+
+    #[test]
+    fn qdrant_response_with_error_status() {
+        let json = json!({"status": {"error": "collection not found"}, "time": 0.001});
+        let resp: QdrantResponse = serde_json::from_value(json).unwrap();
+        let status = resp.status.unwrap();
+        assert_eq!(status["error"], "collection not found");
+    }
+
+    #[test]
+    fn qdrant_response_status_as_string() {
+        let json = json!({"status": "ok", "result": [1, 2, 3]});
+        let resp: QdrantResponse = serde_json::from_value(json).unwrap();
+        assert_eq!(resp.status.unwrap().as_str(), Some("ok"));
+    }
+
+    #[test]
+    fn list_collections_result_debug_with_entries() {
+        let result = ListCollectionsResult {
+            collections: vec![
+                Collection { name: "x".into() },
+                Collection { name: "y".into() },
+            ],
+        };
+        let debug = format!("{result:?}");
+        assert!(debug.contains('x'));
+        assert!(debug.contains('y'));
+    }
+
+    #[test]
+    fn operation_response_result_object() {
+        let json = json!({"status": "ok", "result": {"operation_id": 42, "status": "completed"}});
+        let resp: OperationResponse = serde_json::from_value(json).unwrap();
+        assert_eq!(resp.result.unwrap()["operation_id"], 42);
+    }
+
+    #[test]
+    fn operation_receipt_long_timestamp() {
+        let receipt = OperationReceipt {
+            operation: "upsert".into(),
+            effect: "inserted".into(),
+            resource: "test_col".into(),
+            timestamp: "2026-03-07T12:34:56.789012345Z".into(),
+        };
+        let val = serde_json::to_value(&receipt).unwrap();
+        assert!(val["timestamp"].as_str().unwrap().contains("789012345"));
+    }
+
+    #[test]
+    fn collection_info_optimizer_status_object() {
+        let json = json!({
+            "status": "green",
+            "optimizer_status": {"status": "ok", "message": "all segments optimized"}
+        });
+        let info: CollectionInfo = serde_json::from_value(json).unwrap();
+        let opt = info.optimizer_status.unwrap();
+        assert_eq!(opt["status"], "ok");
+    }
+
+    #[test]
+    fn point_complex_payload() {
+        let p = Point {
+            id: json!(1),
+            vector: None,
+            payload: Some(json!({
+                "text": "hello world",
+                "tags": ["rust", "ai"],
+                "metadata": {"source": "wiki", "page": 42}
+            })),
+        };
+        let val = serde_json::to_value(&p).unwrap();
+        let payload = &val["payload"];
+        assert_eq!(payload["tags"].as_array().unwrap().len(), 2);
+        assert_eq!(payload["metadata"]["page"], 42);
+    }
+
+    #[test]
+    fn search_result_with_named_vectors() {
+        let sr = SearchResult {
+            id: json!(1),
+            version: Some(1),
+            score: 0.85,
+            payload: None,
+            vector: Some(json!({"text": [0.1, 0.2], "image": [0.3, 0.4]})),
+        };
+        let val = serde_json::to_value(&sr).unwrap();
+        let vec_val = &val["vector"];
+        assert!(vec_val.get("text").is_some());
+        assert!(vec_val.get("image").is_some());
+    }
 }

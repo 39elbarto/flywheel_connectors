@@ -379,4 +379,33 @@ mod tests {
         let dbg = format!("{client:?}");
         assert!(dbg.contains("CredentialId"));
     }
+
+    // ── Additional client coverage tests ──────────────────────────
+
+    #[test]
+    fn auth_clone_credential() {
+        let cred = IntercomAuth::CredentialId(CredentialId::new());
+        let cloned = cred.clone();
+        assert!(cred.is_secretless());
+        assert!(cloned.is_secretless());
+    }
+
+    #[test]
+    fn auth_redacted_label_does_not_contain_token() {
+        let auth = IntercomAuth::BearerToken("my-secret-token-xyz".into());
+        let label = auth.redacted_label();
+        assert!(!label.contains("my-secret-token-xyz"));
+        assert!(label.contains("redacted"));
+    }
+
+    #[test]
+    fn client_new_empty_string_url() {
+        let client = IntercomClient::new(
+            IntercomAuth::BearerToken("tok".into()),
+            Some(""),
+        )
+        .unwrap();
+        let dbg = format!("{client:?}");
+        assert!(dbg.contains("IntercomClient"));
+    }
 }

@@ -1332,4 +1332,119 @@ mod tests {
         let info: ModelInfo = serde_json::from_value(json).unwrap();
         assert!(info.description.as_ref().unwrap().contains("\"quotes\""));
     }
+
+    // ── Additional type coverage tests ────────────────────────────
+
+    #[test]
+    fn content_with_no_role() {
+        let content = Content {
+            role: None,
+            parts: vec![Part::Text {
+                text: "hello".into(),
+            }],
+        };
+        let json_str = serde_json::to_string(&content).unwrap();
+        let back: Content = serde_json::from_str(&json_str).unwrap();
+        assert!(back.role.is_none());
+        assert_eq!(back.parts.len(), 1);
+    }
+
+    #[test]
+    fn content_multiple_parts_roundtrip() {
+        let content = Content {
+            role: Some("user".into()),
+            parts: vec![
+                Part::Text {
+                    text: "part one".into(),
+                },
+                Part::Text {
+                    text: "part two".into(),
+                },
+            ],
+        };
+        let v = serde_json::to_value(&content).unwrap();
+        assert_eq!(v["parts"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn usage_metadata_large_values() {
+        let usage = UsageMetadata {
+            prompt_token_count: 1_000_000,
+            candidates_token_count: 500_000,
+            total_token_count: 1_500_000,
+        };
+        let v = serde_json::to_value(&usage).unwrap();
+        assert_eq!(v["promptTokenCount"], 1_000_000);
+        assert_eq!(v["totalTokenCount"], 1_500_000);
+    }
+
+    #[test]
+    fn embedding_large_vector() {
+        let values: Vec<f64> = (0..768).map(|i| f64::from(i) * 0.001).collect();
+        let emb = Embedding {
+            values,
+        };
+        let json_str = serde_json::to_string(&emb).unwrap();
+        let back: Embedding = serde_json::from_str(&json_str).unwrap();
+        assert_eq!(back.values.len(), 768);
+        assert!((back.values[0]).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn candidate_finish_reason_other_values() {
+        for reason in &["STOP", "MAX_TOKENS", "SAFETY", "RECITATION", "OTHER"] {
+            let json = json!({"finishReason": reason});
+            let c: Candidate = serde_json::from_value(json).unwrap();
+            assert_eq!(c.finish_reason.as_deref(), Some(*reason));
+        }
+    }
+
+    #[test]
+    fn safety_rating_various_probabilities() {
+        for prob in &["NEGLIGIBLE", "LOW", "MEDIUM", "HIGH"] {
+            let rating = SafetyRating {
+                category: "HARM_CATEGORY_HARASSMENT".into(),
+                probability: prob.to_string(),
+            };
+            let json_str = serde_json::to_string(&rating).unwrap();
+            let back: SafetyRating = serde_json::from_str(&json_str).unwrap();
+            assert_eq!(back.probability, *prob);
+        }
+    }
+
+    #[test]
+    fn api_error_detail_all_fields() {
+        let detail = ApiErrorDetail {
+            message: Some("error msg".into()),
+            status: Some("INVALID_ARGUMENT".into()),
+            code: Some(400),
+        };
+        assert_eq!(detail.message.as_deref(), Some("error msg"));
+        assert_eq!(detail.status.as_deref(), Some("INVALID_ARGUMENT"));
+        assert_eq!(detail.code, Some(400));
+    }
+
+    #[test]
+    fn usage_counters_accumulation() {
+        let mut counters = UsageCounters::default();
+        counters.input_tokens += 100;
+        counters.output_tokens += 200;
+        counters.requests_total += 3;
+        counters.requests_error += 1;
+        assert_eq!(counters.input_tokens, 100);
+        assert_eq!(counters.output_tokens, 200);
+        assert_eq!(counters.requests_total, 3);
+        assert_eq!(counters.requests_error, 1);
+    }
+
+    #[test]
+    fn function_call_data_complex_args() {
+        let data = FunctionCallData {
+            name: "complex_fn".into(),
+            args: json!({"nested": {"key": [1, 2, 3]}, "flag": true}),
+        };
+        let json_str = serde_json::to_string(&data).unwrap();
+        let back: FunctionCallData = serde_json::from_str(&json_str).unwrap();
+        assert_eq!(back.args["nested"]["key"].as_array().unwrap().len(), 3);
+    }
 }

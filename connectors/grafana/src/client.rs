@@ -429,4 +429,34 @@ mod tests {
         let auth = GrafanaAuth::CredentialId(CredentialId::new());
         assert!(auth.is_secretless());
     }
+
+    // ── Additional client coverage tests ──────────────────────────
+
+    #[test]
+    fn auth_redacted_label_does_not_contain_token() {
+        let auth = GrafanaAuth::BearerToken("glsa_super_secret_key_12345".into());
+        let label = auth.redacted_label();
+        assert!(!label.contains("glsa_super_secret_key_12345"));
+        assert!(label.contains("redacted"));
+    }
+
+    #[test]
+    fn auth_credential_label_contains_id() {
+        let id = CredentialId::new();
+        let id_str = id.to_string();
+        let auth = GrafanaAuth::CredentialId(id);
+        let label = auth.redacted_label();
+        assert!(label.contains(&id_str));
+    }
+
+    #[test]
+    fn client_new_empty_string_url() {
+        let client = GrafanaClient::new(
+            GrafanaAuth::BearerToken("tok".into()),
+            Some(""),
+        )
+        .unwrap();
+        let dbg = format!("{client:?}");
+        assert!(dbg.contains("GrafanaClient"));
+    }
 }

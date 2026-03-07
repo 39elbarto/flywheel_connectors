@@ -569,4 +569,159 @@ mod tests {
         assert_eq!(v["type"], "dash-db");
         assert!(v.get("result_type").is_none());
     }
+
+    // ── Additional type coverage tests ────────────────────────────
+
+    #[test]
+    fn datasource_serialize_type_rename() {
+        let d: Datasource = serde_json::from_value(json!({
+            "type": "prometheus"
+        }))
+        .unwrap();
+        let v = serde_json::to_value(&d).unwrap();
+        assert_eq!(v["type"], "prometheus");
+        assert!(v.get("datasource_type").is_none());
+    }
+
+    #[test]
+    fn alert_rule_serialize_renames() {
+        let a: AlertRule = serde_json::from_value(json!({
+            "ruleGroup": "default",
+            "folderUID": "folder-abc",
+            "noDataState": "OK",
+            "execErrState": "Error",
+            "for": "10m"
+        }))
+        .unwrap();
+        let v = serde_json::to_value(&a).unwrap();
+        assert_eq!(v["ruleGroup"], "default");
+        assert_eq!(v["folderUID"], "folder-abc");
+        assert_eq!(v["for"], "10m");
+        assert!(v.get("rule_group").is_none());
+        assert!(v.get("folder_uid").is_none());
+        assert!(v.get("for_duration").is_none());
+    }
+
+    #[test]
+    fn annotation_serialize_renames() {
+        let a: Annotation = serde_json::from_value(json!({
+            "dashboardId": 5,
+            "dashboardUID": "uid-1",
+            "panelId": 2,
+            "timeEnd": 1_700_000_000
+        }))
+        .unwrap();
+        let v = serde_json::to_value(&a).unwrap();
+        assert_eq!(v["dashboardId"], 5);
+        assert_eq!(v["dashboardUID"], "uid-1");
+        assert_eq!(v["panelId"], 2);
+        assert_eq!(v["timeEnd"], 1_700_000_000);
+        assert!(v.get("dashboard_id").is_none());
+        assert!(v.get("panel_id").is_none());
+    }
+
+    #[test]
+    fn dashboard_meta_clone() {
+        let m: DashboardMeta = serde_json::from_value(json!({
+            "slug": "test-dash",
+            "version": 7
+        }))
+        .unwrap();
+        let m2 = m.clone();
+        assert_eq!(m.slug, Some("test-dash".into()));
+        assert_eq!(m2.version, Some(7));
+    }
+
+    #[test]
+    fn dashboard_meta_debug() {
+        let m: DashboardMeta = serde_json::from_value(json!({})).unwrap();
+        let dbg = format!("{m:?}");
+        assert!(dbg.contains("DashboardMeta"));
+    }
+
+    #[test]
+    fn dashboard_save_response_clone() {
+        let r: DashboardSaveResponse = serde_json::from_value(json!({
+            "uid": "abc", "status": "success"
+        }))
+        .unwrap();
+        let r2 = r.clone();
+        assert_eq!(r.uid, Some("abc".into()));
+        assert_eq!(r2.status, Some("success".into()));
+    }
+
+    #[test]
+    fn dashboard_save_response_debug() {
+        let r: DashboardSaveResponse = serde_json::from_value(json!({})).unwrap();
+        let dbg = format!("{r:?}");
+        assert!(dbg.contains("DashboardSaveResponse"));
+    }
+
+    #[test]
+    fn datasource_query_response_clone() {
+        let r: DatasourceQueryResponse = serde_json::from_value(json!({
+            "results": {"A": {"frames": []}}
+        }))
+        .unwrap();
+        let r2 = r.clone();
+        assert!(r.results.is_some());
+        assert!(r2.results.is_some());
+    }
+
+    #[test]
+    fn datasource_query_response_debug() {
+        let r: DatasourceQueryResponse = serde_json::from_value(json!({})).unwrap();
+        let dbg = format!("{r:?}");
+        assert!(dbg.contains("DatasourceQueryResponse"));
+    }
+
+    #[test]
+    fn annotation_create_response_clone() {
+        let r: AnnotationCreateResponse = serde_json::from_value(json!({
+            "id": 42, "message": "created"
+        }))
+        .unwrap();
+        let r2 = r.clone();
+        assert_eq!(r.id, Some(42));
+        assert_eq!(r2.message, Some("created".into()));
+    }
+
+    #[test]
+    fn annotation_create_response_debug() {
+        let r: AnnotationCreateResponse = serde_json::from_value(json!({})).unwrap();
+        let dbg = format!("{r:?}");
+        assert!(dbg.contains("AnnotationCreateResponse"));
+    }
+
+    #[test]
+    fn alert_rule_debug() {
+        let a: AlertRule = serde_json::from_value(json!({})).unwrap();
+        let dbg = format!("{a:?}");
+        assert!(dbg.contains("AlertRule"));
+    }
+
+    #[test]
+    fn api_error_response_clone() {
+        let e: ApiErrorResponse = serde_json::from_value(json!({
+            "message": "err", "status": "error"
+        }))
+        .unwrap();
+        let e2 = e.clone();
+        assert_eq!(e.message, Some("err".into()));
+        assert_eq!(e2.status, Some("error".into()));
+    }
+
+    #[test]
+    fn dashboard_full_response_debug() {
+        let d: DashboardFullResponse = serde_json::from_value(json!({})).unwrap();
+        let dbg = format!("{d:?}");
+        assert!(dbg.contains("DashboardFullResponse"));
+    }
+
+    #[test]
+    fn dashboard_full_response_minimal() {
+        let d: DashboardFullResponse = serde_json::from_value(json!({})).unwrap();
+        assert!(d.dashboard.is_none());
+        assert!(d.meta.is_none());
+    }
 }

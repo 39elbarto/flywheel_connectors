@@ -740,6 +740,88 @@ mod tests {
         let _: Box<dyn std::error::Error + Send + Sync> = Box::new(err);
     }
 
+    // ── Additional coverage ─────────────────────────────────────────
+
+    #[test]
+    fn to_fcp_error_api_503() {
+        let err = GoogleAiError::Api {
+            message: "service unavailable".into(),
+            status_code: Some(503),
+            error_type: None,
+        };
+        match err.to_fcp_error() {
+            FcpError::External {
+                retryable,
+                status_code,
+                service,
+                ..
+            } => {
+                assert!(retryable);
+                assert_eq!(status_code, Some(503));
+                assert_eq!(service, "google-ai");
+            }
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn to_fcp_error_rate_limit_large_value() {
+        let err = GoogleAiError::RateLimit {
+            retry_after_ms: 300_000,
+        };
+        match err.to_fcp_error() {
+            FcpError::RateLimited {
+                retry_after_ms, ..
+            } => {
+                assert_eq!(retry_after_ms, 300_000);
+            }
+            other => panic!("expected RateLimited, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn is_retryable_api_504() {
+        assert!(
+            GoogleAiError::Api {
+                message: "gateway timeout".into(),
+                status_code: Some(504),
+                error_type: None,
+            }
+            .is_retryable()
+        );
+    }
+
+    #[test]
+    fn display_rate_limit_is_generic() {
+        // The display string is just "Rate limited" regardless of retry_after_ms value
+        let err1 = GoogleAiError::RateLimit {
+            retry_after_ms: 100,
+        };
+        let err2 = GoogleAiError::RateLimit {
+            retry_after_ms: 99_999,
+        };
+        assert_eq!(err1.to_string(), err2.to_string());
+    }
+
+    #[test]
+    fn api_error_long_message_preserved() {
+        let long_msg = "m".repeat(10_000);
+        let err = GoogleAiError::Api {
+            message: long_msg.clone(),
+            status_code: Some(500),
+            error_type: None,
+        };
+        assert!(err.to_string().contains(&long_msg));
+    }
+
+    #[test]
+    fn invalid_config_empty_is_valid() {
+        let err = GoogleAiError::InvalidConfig(String::new());
+        assert_eq!(err.to_string(), "Invalid configuration: ");
+        assert!(!err.is_retryable());
+        assert!(err.retry_after().is_none());
+    }
+
     // ── Edge cases ────────────────────────────────────────────────────
 
     #[test]

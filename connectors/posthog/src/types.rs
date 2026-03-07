@@ -446,4 +446,110 @@ mod tests {
         assert!(v["id"].is_null());
         assert!(v["key"].is_null());
     }
+
+    #[test]
+    fn event_row_properties_complex_object() {
+        let e: EventRow = serde_json::from_value(json!({
+            "event": "$identify",
+            "properties": {
+                "$set": {"email": "test@example.com"},
+                "$set_once": {"first_seen": "2026-01-01"},
+                "nested": {"deeply": {"value": 42}}
+            }
+        }))
+        .unwrap();
+        let props = e.properties.unwrap();
+        assert_eq!(props["$set"]["email"], "test@example.com");
+        assert_eq!(props["nested"]["deeply"]["value"], 42);
+    }
+
+    #[test]
+    fn event_row_properties_array() {
+        let e: EventRow = serde_json::from_value(json!({
+            "event": "$autocapture",
+            "properties": [1, 2, 3]
+        }))
+        .unwrap();
+        let props = e.properties.unwrap();
+        assert!(props.is_array());
+        assert_eq!(props.as_array().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn insight_filters_complex_structure() {
+        let i: Insight = serde_json::from_value(json!({
+            "id": 100,
+            "filters": {
+                "events": [
+                    {"id": "$pageview", "type": "events"},
+                    {"id": "$identify", "type": "events"}
+                ],
+                "display": "ActionsLineGraph",
+                "interval": "week"
+            }
+        }))
+        .unwrap();
+        let filters = i.filters.unwrap();
+        assert_eq!(filters["events"].as_array().unwrap().len(), 2);
+        assert_eq!(filters["display"], "ActionsLineGraph");
+    }
+
+    #[test]
+    fn feature_flag_filters_with_groups() {
+        let f: FeatureFlag = serde_json::from_value(json!({
+            "id": 50,
+            "key": "multi-group-flag",
+            "filters": {
+                "groups": [
+                    {"properties": [{"key": "country", "value": "US"}], "rollout_percentage": 75},
+                    {"properties": [{"key": "plan", "value": "pro"}], "rollout_percentage": 100}
+                ]
+            }
+        }))
+        .unwrap();
+        let filters = f.filters.unwrap();
+        assert_eq!(filters["groups"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn api_error_response_all_fields_present() {
+        let e: ApiErrorResponse = serde_json::from_value(json!({
+            "type": "validation_error",
+            "code": "invalid_input",
+            "detail": "Field 'email' is required",
+            "attr": "email"
+        }))
+        .unwrap();
+        assert_eq!(e.error_type, Some("validation_error".into()));
+        assert_eq!(e.code, Some("invalid_input".into()));
+        assert_eq!(e.detail, Some("Field 'email' is required".into()));
+        assert_eq!(e.attr, Some("email".into()));
+    }
+
+    #[test]
+    fn event_row_roundtrip_preserves_all_fields() {
+        let original = EventRow {
+            event: Some("$screen".into()),
+            timestamp: Some("2026-06-15T09:30:00Z".into()),
+            distinct_id: Some("device_abc".into()),
+            properties: Some(json!({"$screen_name": "Dashboard"})),
+        };
+        let serialized = serde_json::to_string(&original).unwrap();
+        let deserialized: EventRow = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(deserialized.event, Some("$screen".into()));
+        assert_eq!(deserialized.timestamp, Some("2026-06-15T09:30:00Z".into()));
+        assert_eq!(deserialized.distinct_id, Some("device_abc".into()));
+        assert_eq!(deserialized.properties.unwrap()["$screen_name"], "Dashboard");
+    }
+
+    #[test]
+    fn insight_large_id() {
+        let i: Insight = serde_json::from_value(json!({
+            "id": 999_999_999,
+            "short_id": "zzz999"
+        }))
+        .unwrap();
+        assert_eq!(i.id, Some(999_999_999));
+        assert_eq!(i.short_id, Some("zzz999".into()));
+    }
 }

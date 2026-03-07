@@ -614,4 +614,53 @@ mod tests {
     fn default_base_url_value() {
         assert_eq!(DEFAULT_BASE_URL, "https://oauth.reddit.com");
     }
+
+    #[test]
+    fn urlencoded_multiple_spaces() {
+        assert_eq!(urlencoded("a b c d"), "a+b+c+d");
+    }
+
+    #[test]
+    fn urlencoded_consecutive_specials() {
+        let encoded = urlencoded("&&==");
+        assert_eq!(encoded, "%26%26%3D%3D");
+    }
+
+    #[test]
+    fn urlencoded_unicode_passthrough() {
+        // Non-ASCII characters are not encoded by this simple encoder
+        let encoded = urlencoded("hello\u{00e9}");
+        assert!(encoded.contains('\u{00e9}'));
+    }
+
+    #[test]
+    fn search_params_all_none_fields() {
+        let params = SearchParams {
+            query: "q",
+            subreddit: None,
+            sort: None,
+            time_range: None,
+            limit: None,
+            after: None,
+        };
+        assert!(params.sort.is_none());
+        assert!(params.time_range.is_none());
+        assert!(params.limit.is_none());
+        assert!(params.after.is_none());
+    }
+
+    #[test]
+    fn create_post_params_both_text_and_url() {
+        let params = CreatePostParams {
+            subreddit: "test",
+            kind: "self",
+            title: "Both",
+            text: Some("body text"),
+            url: Some("https://example.com"),
+            nsfw: false,
+            spoiler: false,
+        };
+        assert!(params.text.is_some());
+        assert!(params.url.is_some());
+    }
 }

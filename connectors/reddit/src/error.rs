@@ -636,4 +636,10 @@ mod tests {
         );
         assert!(dbg.contains("user_x"));
     }
+
+    #[test]
+    fn error_debug_forbidden() {
+        let dbg = format!("{:?}", RedditError::Forbidden);
+        assert!(dbg.contains("Forbidden"));
+    }
 }

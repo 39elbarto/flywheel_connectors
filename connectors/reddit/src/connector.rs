@@ -1128,4 +1128,112 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn extract_listing_preserves_post_data_fields() {
+        let data = json!({
+            "data": {
+                "children": [
+                    {"kind": "t3", "data": {"name": "t3_test", "title": "My Title", "score": 42}}
+                ],
+                "after": null
+            }
+        });
+        let result = extract_listing(&data);
+        let posts = result["posts"].as_array().unwrap();
+        assert_eq!(posts[0]["title"], "My Title");
+        assert_eq!(posts[0]["score"], 42);
+    }
+
+    #[test]
+    fn extract_listing_multiple_post_types() {
+        let data = json!({
+            "data": {
+                "children": [
+                    {"kind": "t3", "data": {"name": "t3_a"}},
+                    {"kind": "t1", "data": {"name": "t1_b"}},
+                    {"kind": "t3", "data": {"name": "t3_c"}}
+                ],
+                "after": "t3_c"
+            }
+        });
+        let result = extract_listing(&data);
+        assert_eq!(result["posts"].as_array().unwrap().len(), 3);
+        assert_eq!(result["next_after"], "t3_c");
+    }
+
+    #[test]
+    fn require_str_float_value() {
+        let input = json!({"field": 1.23});
+        assert!(require_str(&input, "field").is_err());
+    }
+
+    #[test]
+    fn require_str_nested_object() {
+        let input = json!({"field": {"nested": "value"}});
+        assert!(require_str(&input, "field").is_err());
+    }
+
+    #[test]
+    fn doctor_result_single_non_critical_pass() {
+        let r = DoctorResult::from_checks(vec![DoctorCheck {
+            name: "optional".into(),
+            passed: true,
+            message: None,
+            critical: false,
+        }]);
+        assert_eq!(r.status, DoctorStatus::Healthy);
+        assert_eq!(r.checks.len(), 1);
+    }
+
+    #[test]
+    fn doctor_check_clone() {
+        let c = DoctorCheck {
+            name: "clonetest".into(),
+            passed: true,
+            message: Some("msg".into()),
+            critical: false,
+        };
+        let c2 = c.clone();
+        assert_eq!(c.name, "clonetest");
+        assert_eq!(c2.message, Some("msg".into()));
+    }
+
+    #[test]
+    fn doctor_check_debug() {
+        let c = DoctorCheck {
+            name: "dbgcheck".into(),
+            passed: false,
+            message: None,
+            critical: true,
+        };
+        let dbg = format!("{c:?}");
+        assert!(dbg.contains("dbgcheck"));
+    }
+
+    #[test]
+    fn operations_mod_remove_is_dangerous() {
+        let ops = operations_info();
+        let op = ops
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["id"] == "reddit.mod_remove")
+            .unwrap();
+        assert_eq!(op["safety_tier"], "dangerous");
+        assert_eq!(op["risk_level"], "high");
+    }
+
+    #[test]
+    fn operations_download_media_is_safe() {
+        let ops = operations_info();
+        let op = ops
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["id"] == "reddit.download_media")
+            .unwrap();
+        assert_eq!(op["safety_tier"], "safe");
+        assert_eq!(op["risk_level"], "low");
+    }
 }

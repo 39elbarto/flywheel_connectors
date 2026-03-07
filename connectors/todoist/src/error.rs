@@ -612,4 +612,110 @@ mod tests {
         );
         assert!(dbg.contains("task_42"));
     }
+
+    // ── Additional error coverage tests ───────────────────────────
+
+    #[test]
+    fn api_504_is_retryable() {
+        assert!(
+            TodoistError::Api {
+                status_code: 504,
+                message: "Gateway Timeout".into()
+            }
+            .is_retryable()
+        );
+    }
+
+    #[test]
+    fn api_501_is_retryable() {
+        assert!(
+            TodoistError::Api {
+                status_code: 501,
+                message: "Not Implemented".into()
+            }
+            .is_retryable()
+        );
+    }
+
+    #[test]
+    fn api_409_not_retryable() {
+        assert!(
+            !TodoistError::Api {
+                status_code: 409,
+                message: "Conflict".into()
+            }
+            .is_retryable()
+        );
+    }
+
+    #[test]
+    fn api_422_not_retryable() {
+        assert!(
+            !TodoistError::Api {
+                status_code: 422,
+                message: "Unprocessable".into()
+            }
+            .is_retryable()
+        );
+    }
+
+    #[test]
+    fn rate_limited_fcp_error_service_2000ms() {
+        match (TodoistError::RateLimited {
+            retry_after_ms: 2000,
+        })
+        .to_fcp_error()
+        {
+            FcpError::External { service, .. } => {
+                assert_eq!(service, "todoist");
+            }
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn api_error_fcp_retry_after_none() {
+        match (TodoistError::Api {
+            status_code: 500,
+            message: "err".into(),
+        })
+        .to_fcp_error()
+        {
+            FcpError::External { retry_after, .. } => {
+                assert!(retry_after.is_none());
+            }
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn error_debug_forbidden() {
+        let dbg = format!("{:?}", TodoistError::Forbidden);
+        assert!(dbg.contains("Forbidden"));
+    }
+
+    #[test]
+    fn error_debug_json() {
+        let bad: Result<serde_json::Value, _> = serde_json::from_str("{bad");
+        let dbg = format!("{:?}", TodoistError::Json(bad.unwrap_err()));
+        assert!(dbg.contains("Json"));
+    }
+
+    #[test]
+    fn error_display_rate_limited_large() {
+        assert_eq!(
+            TodoistError::RateLimited {
+                retry_after_ms: 3_600_000
+            }
+            .to_string(),
+            "Rate limited, retry after 3600000ms"
+        );
+    }
+
+    #[test]
+    fn json_error_display_starts_with_json() {
+        let bad: Result<serde_json::Value, _> = serde_json::from_str("{invalid");
+        let err = TodoistError::Json(bad.unwrap_err());
+        assert!(err.to_string().starts_with("JSON error:"));
+    }
 }

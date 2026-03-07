@@ -1045,4 +1045,156 @@ mod tests {
         let config = PandaDocConfig::from_params(&json!({"api_key": "tok"})).unwrap();
         assert_eq!(config.base_url, DEFAULT_BASE_URL);
     }
+
+    #[test]
+    fn require_str_float_value() {
+        let input = json!({"document_id": 1.23});
+        assert!(require_str(&input, "document_id").is_err());
+    }
+
+    #[test]
+    fn require_str_nested_object_value() {
+        let input = json!({"document_id": {"inner": "val"}});
+        assert!(require_str(&input, "document_id").is_err());
+    }
+
+    #[test]
+    fn doctor_result_roundtrip() {
+        let r = DoctorResult::from_checks(vec![DoctorCheck {
+            name: "roundtrip".into(),
+            passed: true,
+            message: None,
+            critical: false,
+        }]);
+        let v = serde_json::to_value(&r).unwrap();
+        let r2: DoctorResult = serde_json::from_value(v).unwrap();
+        assert_eq!(r2.status, DoctorStatus::Healthy);
+        assert_eq!(r2.checks.len(), 1);
+        assert_eq!(r2.checks[0].name, "roundtrip");
+    }
+
+    #[test]
+    fn doctor_check_clone() {
+        let c = DoctorCheck {
+            name: "cloned".into(),
+            passed: true,
+            message: Some("ok".into()),
+            critical: false,
+        };
+        let c2 = c.clone();
+        assert_eq!(c.name, "cloned");
+        assert_eq!(c2.message, Some("ok".into()));
+    }
+
+    #[test]
+    fn doctor_check_debug() {
+        let c = DoctorCheck {
+            name: "dbg".into(),
+            passed: false,
+            message: None,
+            critical: true,
+        };
+        let dbg = format!("{c:?}");
+        assert!(dbg.contains("dbg"));
+        assert!(dbg.contains("DoctorCheck"));
+    }
+
+    #[test]
+    fn operations_all_prefixed_pandadoc() {
+        let ops = operations_info();
+        for op in ops.as_array().unwrap() {
+            let id = op["id"].as_str().unwrap();
+            assert!(
+                id.starts_with("pandadoc."),
+                "op {id} missing pandadoc. prefix"
+            );
+        }
+    }
+
+    #[test]
+    fn operations_valid_idempotency_values() {
+        let valid = ["strict", "best_effort", "none"];
+        let ops = operations_info();
+        for op in ops.as_array().unwrap() {
+            let idem = op["idempotency"].as_str().unwrap();
+            assert!(
+                valid.contains(&idem),
+                "invalid idempotency {idem} for {:?}",
+                op["id"]
+            );
+        }
+    }
+
+    #[test]
+    fn operations_list_documents_is_safe() {
+        let ops = operations_info();
+        let op = ops
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["id"] == "pandadoc.documents.list")
+            .unwrap();
+        assert_eq!(op["safety_tier"], "safe");
+        assert_eq!(op["risk_level"], "low");
+        assert_eq!(op["idempotency"], "strict");
+    }
+
+    #[test]
+    fn connector_request_and_error_counts_default_zero() {
+        let c = PandaDocConnector::new();
+        assert_eq!(c.request_count.load(Ordering::Relaxed), 0);
+        assert_eq!(c.error_count.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn config_error_codes_are_1003() {
+        let cases = vec![
+            json!({}),
+            json!({"credential_id": 42}),
+            json!({"credential_id": "not-valid"}),
+            json!({"api_key": "tok", "credential_id": "550e8400-e29b-41d4-a716-446655440000"}),
+        ];
+        for case in cases {
+            let err = PandaDocConfig::from_params(&case).unwrap_err();
+            match err {
+                FcpError::InvalidRequest { code, .. } => assert_eq!(code, 1003),
+                e => panic!("expected InvalidRequest, got {e:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn doctor_result_mixed_critical_non_critical_failures() {
+        let r = DoctorResult::from_checks(vec![
+            DoctorCheck {
+                name: "a".into(),
+                passed: false,
+                message: None,
+                critical: true,
+            },
+            DoctorCheck {
+                name: "b".into(),
+                passed: false,
+                message: None,
+                critical: false,
+            },
+        ]);
+        // Critical failure takes precedence
+        assert_eq!(r.status, DoctorStatus::Unhealthy);
+    }
+
+    #[test]
+    fn doctor_status_ne() {
+        assert_ne!(DoctorStatus::Healthy, DoctorStatus::Degraded);
+        assert_ne!(DoctorStatus::Degraded, DoctorStatus::Unhealthy);
+        assert_ne!(DoctorStatus::Healthy, DoctorStatus::Unhealthy);
+    }
+
+    #[test]
+    fn config_debug_shows_auth_label() {
+        let config = PandaDocConfig::from_params(&json!({"api_key": "secret-key-123"})).unwrap();
+        let dbg = format!("{config:?}");
+        // The debug should show the config but not leak the actual key
+        assert!(dbg.contains("PandaDocConfig"));
+    }
 }

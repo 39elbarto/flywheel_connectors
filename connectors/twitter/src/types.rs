@@ -2582,4 +2582,310 @@ mod tests {
         assert_eq!(back.tag.as_deref(), Some("dev_tweets"));
         assert_eq!(back.value, "from:twitterdev");
     }
+
+    // ── Additional coverage ─────────────────────────────────────────────
+
+    #[test]
+    fn tweet_default_has_empty_fields() {
+        let tweet = Tweet::default();
+        assert!(tweet.id.is_empty());
+        assert!(tweet.text.is_empty());
+        assert!(tweet.author_id.is_none());
+        assert!(tweet.conversation_id.is_none());
+        assert!(tweet.created_at.is_none());
+        assert!(tweet.in_reply_to_user_id.is_none());
+        assert!(tweet.lang.is_none());
+        assert!(tweet.possibly_sensitive.is_none());
+        assert!(tweet.source.is_none());
+        assert!(tweet.public_metrics.is_none());
+        assert!(tweet.referenced_tweets.is_none());
+        assert!(tweet.entities.is_none());
+        assert!(tweet.attachments.is_none());
+        assert!(tweet.context_annotations.is_none());
+        assert!(tweet.reply_settings.is_none());
+    }
+
+    #[test]
+    fn user_default_has_empty_fields() {
+        let user = User::default();
+        assert!(user.id.is_empty());
+        assert!(user.name.is_empty());
+        assert!(user.username.is_empty());
+        assert!(user.description.is_none());
+        assert!(user.profile_image_url.is_none());
+        assert!(user.location.is_none());
+        assert!(user.url.is_none());
+        assert!(user.verified.is_none());
+        assert!(user.verified_type.is_none());
+        assert!(user.protected.is_none());
+        assert!(user.created_at.is_none());
+        assert!(user.public_metrics.is_none());
+        assert!(user.pinned_tweet_id.is_none());
+        assert!(user.entities.is_none());
+    }
+
+    #[test]
+    fn stream_tweet_debug() {
+        let st = StreamTweet {
+            data: Tweet {
+                id: "st1".into(),
+                text: "streamed".into(),
+                ..Default::default()
+            },
+            includes: None,
+            matching_rules: None,
+        };
+        let dbg = format!("{st:?}");
+        assert!(dbg.contains("StreamTweet"));
+        assert!(dbg.contains("streamed"));
+    }
+
+    #[test]
+    fn stream_tweet_clone() {
+        let st = StreamTweet {
+            data: Tweet {
+                id: "st2".into(),
+                text: "clonable".into(),
+                ..Default::default()
+            },
+            includes: Some(Includes {
+                users: vec![],
+                tweets: vec![],
+                media: vec![],
+                places: vec![],
+                polls: vec![],
+            }),
+            matching_rules: Some(vec![MatchingRule {
+                id: "r1".into(),
+                tag: Some("tag".into()),
+            }]),
+        };
+        let cloned = st.clone();
+        assert_eq!(st.data.id, "st2");
+        assert_eq!(cloned.data.text, "clonable");
+        assert_eq!(cloned.includes.as_ref().unwrap().users.len(), 0);
+        assert_eq!(cloned.matching_rules.as_ref().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn includes_default_empty() {
+        let json = json!({});
+        let inc: Includes = serde_json::from_value(json).unwrap();
+        assert!(inc.users.is_empty());
+        assert!(inc.tweets.is_empty());
+        assert!(inc.media.is_empty());
+        assert!(inc.places.is_empty());
+        assert!(inc.polls.is_empty());
+    }
+
+    // ── Extended type coverage ──────────────────────────────────
+
+    #[test]
+    fn tweet_with_lang_and_source() {
+        let t: Tweet = serde_json::from_value(json!({
+            "id": "t1",
+            "text": "hello",
+            "lang": "en",
+            "source": "Twitter Web App",
+        }))
+        .unwrap();
+        assert_eq!(t.lang.as_deref(), Some("en"));
+        assert_eq!(t.source.as_deref(), Some("Twitter Web App"));
+    }
+
+    #[test]
+    fn tweet_with_possibly_sensitive_true() {
+        let t: Tweet = serde_json::from_value(json!({
+            "id": "t2",
+            "text": "sensitive content",
+            "possibly_sensitive": true,
+        }))
+        .unwrap();
+        assert_eq!(t.possibly_sensitive, Some(true));
+    }
+
+    #[test]
+    fn tweet_with_reply_settings_mentioned_users() {
+        let t: Tweet = serde_json::from_value(json!({
+            "id": "t3",
+            "text": "restricted",
+            "reply_settings": "mentionedUsers",
+        }))
+        .unwrap();
+        assert_eq!(t.reply_settings.as_deref(), Some("mentionedUsers"));
+    }
+
+    #[test]
+    fn tweet_with_edit_history_tweet_ids() {
+        let t: Tweet = serde_json::from_value(json!({
+            "id": "t4",
+            "text": "edited",
+            "edit_history_tweet_ids": ["t4", "t4_v2"],
+        }))
+        .unwrap();
+        let ids = t.edit_history_tweet_ids.unwrap();
+        assert_eq!(ids.len(), 2);
+        assert_eq!(ids[1], "t4_v2");
+    }
+
+    #[test]
+    fn user_with_protected_account() {
+        let u: User = serde_json::from_value(json!({
+            "id": "u1",
+            "name": "Private",
+            "username": "private_user",
+            "protected": true,
+        }))
+        .unwrap();
+        assert_eq!(u.protected, Some(true));
+    }
+
+    #[test]
+    fn user_with_verified_type_blue() {
+        let u: User = serde_json::from_value(json!({
+            "id": "u2",
+            "name": "Verified",
+            "username": "verified_user",
+            "verified": true,
+            "verified_type": "blue",
+        }))
+        .unwrap();
+        assert_eq!(u.verified_type.as_deref(), Some("blue"));
+    }
+
+    #[test]
+    fn user_with_pinned_tweet() {
+        let u: User = serde_json::from_value(json!({
+            "id": "u3",
+            "name": "User",
+            "username": "user3",
+            "pinned_tweet_id": "pinned123",
+        }))
+        .unwrap();
+        assert_eq!(u.pinned_tweet_id.as_deref(), Some("pinned123"));
+    }
+
+    #[test]
+    fn dm_event_full_fields() {
+        let dm: DmEvent = serde_json::from_value(json!({
+            "id": "dm1",
+            "event_type": "MessageCreate",
+            "text": "Hello there",
+            "sender_id": "u100",
+            "dm_conversation_id": "conv-1",
+            "created_at": "2026-03-07T10:00:00Z",
+        }))
+        .unwrap();
+        assert_eq!(dm.event_type, "MessageCreate");
+        assert_eq!(dm.text.as_deref(), Some("Hello there"));
+        assert_eq!(dm.sender_id.as_deref(), Some("u100"));
+        assert_eq!(dm.dm_conversation_id.as_deref(), Some("conv-1"));
+    }
+
+    #[test]
+    fn dm_event_minimal_fields() {
+        let dm: DmEvent = serde_json::from_value(json!({
+            "id": "dm2",
+            "event_type": "MessageCreate",
+        }))
+        .unwrap();
+        assert!(dm.text.is_none());
+        assert!(dm.sender_id.is_none());
+    }
+
+    #[test]
+    fn response_meta_with_previous_token() {
+        let meta: ResponseMeta = serde_json::from_value(json!({
+            "previous_token": "prev-xyz",
+        }))
+        .unwrap();
+        assert_eq!(meta.previous_token.as_deref(), Some("prev-xyz"));
+    }
+
+    #[test]
+    fn entities_default_all_none() {
+        let e = Entities::default();
+        assert!(e.hashtags.is_none());
+        assert!(e.mentions.is_none());
+        assert!(e.urls.is_none());
+        assert!(e.cashtags.is_none());
+        assert!(e.annotations.is_none());
+    }
+
+    #[test]
+    fn url_entity_with_unwound_url() {
+        let u: UrlEntity = serde_json::from_value(json!({
+            "url": "https://t.co/abc",
+            "expanded_url": "https://example.com",
+            "unwound_url": "https://final.example.com",
+            "start": 10,
+            "end": 30,
+        }))
+        .unwrap();
+        assert_eq!(u.unwound_url.as_deref(), Some("https://final.example.com"));
+    }
+
+    #[test]
+    fn media_with_alt_text_and_dimensions() {
+        let m: Media = serde_json::from_value(json!({
+            "media_key": "mk1",
+            "type": "photo",
+            "url": "https://pbs.twimg.com/media/photo.jpg",
+            "width": 1200,
+            "height": 800,
+            "alt_text": "A photo description",
+        }))
+        .unwrap();
+        assert_eq!(m.width, Some(1200));
+        assert_eq!(m.height, Some(800));
+        assert_eq!(m.alt_text.as_deref(), Some("A photo description"));
+    }
+
+    #[test]
+    fn media_video_with_duration() {
+        let m: Media = serde_json::from_value(json!({
+            "media_key": "mk2",
+            "type": "video",
+            "duration_ms": 15000,
+            "preview_image_url": "https://pbs.twimg.com/preview.jpg",
+        }))
+        .unwrap();
+        assert_eq!(m.duration_ms, Some(15000));
+        assert_eq!(m.media_type, "video");
+    }
+
+    #[test]
+    fn create_tweet_request_with_reply() {
+        let req = CreateTweetRequest {
+            text: Some("Reply text".into()),
+            reply: Some(TweetReply {
+                in_reply_to_tweet_id: "parent-tweet-id".into(),
+                exclude_reply_user_ids: None,
+            }),
+            ..Default::default()
+        };
+        let v = serde_json::to_value(&req).unwrap();
+        assert_eq!(v["reply"]["in_reply_to_tweet_id"], "parent-tweet-id");
+    }
+
+    #[test]
+    fn search_tweets_params_all_fields() {
+        let params = SearchTweetsParams {
+            query: "rust lang".into(),
+            max_results: Some(50),
+            next_token: Some("next-abc".into()),
+            since_id: Some("since-100".into()),
+            until_id: Some("until-200".into()),
+            start_time: Some("2026-03-01T00:00:00Z".into()),
+            end_time: Some("2026-03-07T00:00:00Z".into()),
+            sort_order: Some("relevancy".into()),
+            tweet_fields: Some(vec!["id".into(), "text".into()]),
+            expansions: Some(vec!["author_id".into()]),
+            user_fields: Some(vec!["name".into()]),
+            media_fields: Some(vec!["url".into()]),
+        };
+        assert_eq!(params.query, "rust lang");
+        assert_eq!(params.max_results, Some(50));
+        assert_eq!(params.sort_order.as_deref(), Some("relevancy"));
+    }
 }

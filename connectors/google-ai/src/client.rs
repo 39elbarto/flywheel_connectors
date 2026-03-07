@@ -725,4 +725,76 @@ mod tests {
         };
         assert!(!err.is_retryable());
     }
+
+    // ── Additional sync client tests ──────────────────────────────
+
+    #[test]
+    fn default_base_url_value() {
+        assert_eq!(
+            DEFAULT_BASE_URL,
+            "https://generativelanguage.googleapis.com/v1beta"
+        );
+    }
+
+    #[test]
+    fn default_base_url_starts_with_https() {
+        assert!(DEFAULT_BASE_URL.starts_with("https://"));
+    }
+
+    #[test]
+    fn auth_debug_redacts_api_key() {
+        let auth = GoogleAiAuth::ApiKey("AIzaSyB-secret-key".into());
+        let dbg = format!("{auth:?}");
+        assert!(!dbg.contains("AIzaSyB-secret-key"));
+        assert!(dbg.contains("redacted"));
+    }
+
+    #[test]
+    fn auth_credential_id_debug() {
+        let id = CredentialId::new();
+        let auth = GoogleAiAuth::CredentialId(id);
+        let dbg = format!("{auth:?}");
+        assert!(dbg.contains("CredentialId"));
+    }
+
+    #[test]
+    fn auth_redacted_label_api_key() {
+        let auth = GoogleAiAuth::ApiKey("test".into());
+        assert_eq!(auth.redacted_label(), "api_key:redacted");
+    }
+
+    #[test]
+    fn auth_redacted_label_credential_id() {
+        let auth = GoogleAiAuth::CredentialId(CredentialId::new());
+        assert!(auth.redacted_label().starts_with("credential_id:"));
+    }
+
+    #[test]
+    fn auth_is_secretless_api_key() {
+        let auth = GoogleAiAuth::ApiKey("k".into());
+        assert!(!auth.is_secretless());
+    }
+
+    #[test]
+    fn auth_is_secretless_credential() {
+        let auth = GoogleAiAuth::CredentialId(CredentialId::new());
+        assert!(auth.is_secretless());
+    }
+
+    #[test]
+    fn auth_clone_api_key() {
+        let auth = GoogleAiAuth::ApiKey("key".into());
+        let cloned = auth.clone();
+        assert_eq!(cloned.redacted_label(), auth.redacted_label());
+    }
+
+    #[test]
+    fn client_new_creates_with_default_base_url() {
+        let client = GoogleAiClient::new("test-key").unwrap();
+        let usage = client.get_usage();
+        assert_eq!(usage.requests_total, 0);
+        assert_eq!(usage.requests_error, 0);
+        assert_eq!(usage.input_tokens, 0);
+        assert_eq!(usage.output_tokens, 0);
+    }
 }

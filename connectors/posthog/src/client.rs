@@ -341,4 +341,48 @@ mod tests {
         let client = PostHogClient::new(PostHogAuth::ApiKey("phx_key".into()), "", None).unwrap();
         assert_eq!(client.project_id, "");
     }
+
+    #[test]
+    fn client_url_no_trailing_slash_untouched() {
+        let client = PostHogClient::new(
+            PostHogAuth::ApiKey("phx_key".into()),
+            "10",
+            Some("https://posthog.internal.io/api"),
+        )
+        .unwrap();
+        assert_eq!(client.base_url, "https://posthog.internal.io/api");
+    }
+
+    #[test]
+    fn auth_api_key_debug_does_not_leak() {
+        let auth = PostHogAuth::ApiKey("phx_very_secret_key_99999".into());
+        let dbg = format!("{auth:?}");
+        assert!(!dbg.contains("phx_very_secret_key_99999"));
+        assert!(dbg.contains("ApiKey"));
+    }
+
+    #[test]
+    fn client_debug_contains_base_url() {
+        let client = PostHogClient::new(
+            PostHogAuth::ApiKey("phx_key".into()),
+            "42",
+            Some("https://custom.posthog.io/api"),
+        )
+        .unwrap();
+        let dbg = format!("{client:?}");
+        assert!(dbg.contains("https://custom.posthog.io/api"));
+    }
+
+    #[test]
+    fn default_base_url_starts_with_https() {
+        assert!(DEFAULT_BASE_URL.starts_with("https://"));
+    }
+
+    #[test]
+    fn auth_credential_id_not_secretless_for_api_key() {
+        let key1 = PostHogAuth::ApiKey(String::new());
+        assert!(!key1.is_secretless());
+        let key2 = PostHogAuth::ApiKey("any_key".into());
+        assert!(!key2.is_secretless());
+    }
 }

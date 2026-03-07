@@ -497,4 +497,65 @@ mod tests {
         .unwrap();
         assert!(s.tags.is_none());
     }
+
+    // ── Additional type coverage tests ────────────────────────────
+
+    #[test]
+    fn stack_tags_null_value() {
+        let s: Stack = serde_json::from_value(json!({
+            "orgName": "o", "projectName": "p", "stackName": "s",
+            "tags": null
+        }))
+        .unwrap();
+        assert!(s.tags.is_none());
+    }
+
+    #[test]
+    fn stack_tags_nested_object() {
+        let s: Stack = serde_json::from_value(json!({
+            "orgName": "o", "projectName": "p", "stackName": "s",
+            "tags": {"env": {"sub": "value"}, "region": "us-west"}
+        }))
+        .unwrap();
+        let tags = s.tags.unwrap();
+        assert_eq!(tags["env"]["sub"], "value");
+    }
+
+    #[test]
+    fn stack_summary_last_update_zero() {
+        let ss: StackSummary = serde_json::from_value(json!({
+            "orgName": "o", "projectName": "p", "stackName": "s",
+            "lastUpdate": 0
+        }))
+        .unwrap();
+        assert_eq!(ss.last_update, Some(0));
+    }
+
+    #[test]
+    fn deployment_update_resource_changes_complex() {
+        let du: DeploymentUpdate = serde_json::from_value(json!({
+            "resourceChanges": {"create": 3, "update": 2, "delete": 1, "same": 10}
+        }))
+        .unwrap();
+        let rc = du.resource_changes.unwrap();
+        assert_eq!(rc["create"], 3);
+        assert_eq!(rc["same"], 10);
+    }
+
+    #[test]
+    fn deployment_update_start_end_times() {
+        let du: DeploymentUpdate = serde_json::from_value(json!({
+            "startTime": 1000, "endTime": 2000
+        }))
+        .unwrap();
+        assert_eq!(du.start_time, Some(1000));
+        assert_eq!(du.end_time, Some(2000));
+    }
+
+    #[test]
+    fn api_error_response_code_only() {
+        let e: ApiErrorResponse = serde_json::from_value(json!({"code": 401})).unwrap();
+        assert_eq!(e.code, Some(401));
+        assert!(e.message.is_none());
+    }
 }

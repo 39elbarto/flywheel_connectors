@@ -1160,4 +1160,165 @@ mod tests {
             assert!(ids.contains(e), "missing expected operation {e}");
         }
     }
+
+    // ── Additional connector tests ────────────────────────────────
+
+    #[test]
+    fn operations_all_summaries_non_empty() {
+        let ops = operations_info();
+        for op in ops.as_array().unwrap() {
+            let summary = op["summary"].as_str().unwrap();
+            assert!(!summary.is_empty(), "op {:?} has empty summary", op["id"]);
+        }
+    }
+
+    #[test]
+    fn operations_risk_levels_valid() {
+        let valid = ["low", "medium", "high"];
+        let ops = operations_info();
+        for op in ops.as_array().unwrap() {
+            let rl = op["risk_level"].as_str().unwrap();
+            assert!(valid.contains(&rl), "invalid risk_level: {rl}");
+        }
+    }
+
+    #[test]
+    fn operations_safety_tiers_valid() {
+        let valid = ["safe", "risky", "dangerous"];
+        let ops = operations_info();
+        for op in ops.as_array().unwrap() {
+            let st = op["safety_tier"].as_str().unwrap();
+            assert!(valid.contains(&st), "invalid safety_tier: {st}");
+        }
+    }
+
+    #[test]
+    fn doctor_result_debug_format() {
+        let r = DoctorResult::from_checks(vec![]);
+        let dbg = format!("{r:?}");
+        assert!(dbg.contains("DoctorResult"));
+    }
+
+    #[test]
+    fn doctor_check_clone() {
+        let c = DoctorCheck {
+            name: "connectivity".into(),
+            passed: true,
+            message: Some("connected".into()),
+            critical: false,
+        };
+        let cloned = c.clone();
+        assert_eq!(cloned.name, c.name);
+        assert_eq!(cloned.passed, c.passed);
+        assert_eq!(cloned.message, c.message);
+    }
+
+    #[test]
+    fn require_str_error_contains_field_name() {
+        let input = json!({});
+        let err = require_str(&input, "contact_id").unwrap_err();
+        match err {
+            HubSpotError::Api { message, .. } => {
+                assert!(message.contains("contact_id"));
+            }
+            e => panic!("expected Api, got {e:?}"),
+        }
+    }
+
+    #[test]
+    fn require_str_float_value() {
+        let input = json!({"field": 1.23});
+        assert!(require_str(&input, "field").is_err());
+    }
+
+    #[test]
+    fn require_str_nested_object() {
+        let input = json!({"field": {"a": {"b": "c"}}});
+        assert!(require_str(&input, "field").is_err());
+    }
+
+    #[test]
+    fn extract_string_array_nested_objects() {
+        let input = json!({"tags": [{"key": "val"}, "str"]});
+        let arr = extract_string_array(&input, "tags").unwrap();
+        assert_eq!(arr, vec!["str"]);
+    }
+
+    #[test]
+    fn doctor_status_serde_roundtrip() {
+        let v = serde_json::to_value(DoctorStatus::Healthy).unwrap();
+        assert_eq!(v, "healthy");
+        let v = serde_json::to_value(DoctorStatus::Degraded).unwrap();
+        assert_eq!(v, "degraded");
+        let v = serde_json::to_value(DoctorStatus::Unhealthy).unwrap();
+        assert_eq!(v, "unhealthy");
+    }
+
+    #[test]
+    fn doctor_status_deserialize() {
+        let s: DoctorStatus = serde_json::from_value(json!("healthy")).unwrap();
+        assert_eq!(s, DoctorStatus::Healthy);
+        let s: DoctorStatus = serde_json::from_value(json!("degraded")).unwrap();
+        assert_eq!(s, DoctorStatus::Degraded);
+        let s: DoctorStatus = serde_json::from_value(json!("unhealthy")).unwrap();
+        assert_eq!(s, DoctorStatus::Unhealthy);
+    }
+
+    #[test]
+    fn doctor_status_copy_semantics() {
+        let status = DoctorStatus::Healthy;
+        let copied = status;
+        assert_eq!(status, copied);
+    }
+
+    #[test]
+    fn doctor_status_eq_and_ne() {
+        assert_eq!(DoctorStatus::Healthy, DoctorStatus::Healthy);
+        assert_ne!(DoctorStatus::Healthy, DoctorStatus::Degraded);
+        assert_ne!(DoctorStatus::Degraded, DoctorStatus::Unhealthy);
+    }
+
+    #[test]
+    fn doctor_check_debug_format() {
+        let c = DoctorCheck {
+            name: "api_check".into(),
+            passed: false,
+            message: Some("timeout".into()),
+            critical: true,
+        };
+        let dbg = format!("{c:?}");
+        assert!(dbg.contains("api_check"));
+        assert!(dbg.contains("timeout"));
+    }
+
+    #[test]
+    fn doctor_result_clone_preserves_status() {
+        let r = DoctorResult::from_checks(vec![DoctorCheck {
+            name: "x".into(),
+            passed: true,
+            message: None,
+            critical: false,
+        }]);
+        let cloned = r.clone();
+        assert_eq!(r.status, DoctorStatus::Healthy);
+        assert_eq!(cloned.checks.len(), 1);
+    }
+
+    #[test]
+    fn operations_all_have_capabilities() {
+        let ops = operations_info();
+        for op in ops.as_array().unwrap() {
+            let cap = op["capability"].as_str().unwrap();
+            assert!(!cap.is_empty(), "op {:?} has empty capability", op["id"]);
+        }
+    }
+
+    #[test]
+    fn operations_ids_all_start_with_hubspot() {
+        let ops = operations_info();
+        for op in ops.as_array().unwrap() {
+            let id = op["id"].as_str().unwrap();
+            assert!(id.starts_with("hubspot."), "op {id} should start with hubspot.");
+        }
+    }
 }

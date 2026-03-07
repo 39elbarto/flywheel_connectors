@@ -587,4 +587,64 @@ mod tests {
             other => panic!("expected External, got {other:?}"),
         }
     }
+
+    // ── Additional error coverage tests ───────────────────────────
+
+    #[test]
+    fn api_504_is_retryable() {
+        assert!(
+            GrafanaError::Api {
+                status_code: 504,
+                message: "Gateway Timeout".into()
+            }
+            .is_retryable()
+        );
+    }
+
+    #[test]
+    fn api_501_is_retryable() {
+        assert!(
+            GrafanaError::Api {
+                status_code: 501,
+                message: "Not Implemented".into()
+            }
+            .is_retryable()
+        );
+    }
+
+    #[test]
+    fn api_422_not_retryable() {
+        assert!(
+            !GrafanaError::Api {
+                status_code: 422,
+                message: "Unprocessable".into()
+            }
+            .is_retryable()
+        );
+    }
+
+    #[test]
+    fn forbidden_fcp_error_message() {
+        match GrafanaError::Forbidden.to_fcp_error() {
+            FcpError::External { message, .. } => {
+                assert_eq!(message, "Insufficient permissions");
+            }
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unauthorized_fcp_error_message() {
+        match GrafanaError::Unauthorized.to_fcp_error() {
+            FcpError::External {
+                message,
+                retry_after,
+                ..
+            } => {
+                assert_eq!(message, "Authentication failed");
+                assert!(retry_after.is_none());
+            }
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
 }

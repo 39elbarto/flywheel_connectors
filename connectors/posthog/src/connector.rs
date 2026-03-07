@@ -999,4 +999,234 @@ mod tests {
         ]);
         assert_eq!(r.status, DoctorStatus::Unhealthy);
     }
+
+    #[test]
+    fn doctor_result_multiple_critical_all_pass() {
+        let r = DoctorResult::from_checks(vec![
+            DoctorCheck {
+                name: "config".into(),
+                passed: true,
+                message: None,
+                critical: true,
+            },
+            DoctorCheck {
+                name: "client".into(),
+                passed: true,
+                message: None,
+                critical: true,
+            },
+            DoctorCheck {
+                name: "handshake".into(),
+                passed: true,
+                message: None,
+                critical: false,
+            },
+        ]);
+        assert_eq!(r.status, DoctorStatus::Healthy);
+        assert_eq!(r.checks.len(), 3);
+    }
+
+    #[test]
+    fn doctor_check_roundtrip_with_message() {
+        let check = DoctorCheck {
+            name: "connectivity".into(),
+            passed: false,
+            message: Some("Cannot reach PostHog API".into()),
+            critical: true,
+        };
+        let v = serde_json::to_value(&check).unwrap();
+        let back: DoctorCheck = serde_json::from_value(v).unwrap();
+        assert_eq!(back.name, "connectivity");
+        assert!(!back.passed);
+        assert_eq!(back.message, Some("Cannot reach PostHog API".into()));
+        assert!(back.critical);
+    }
+
+    #[test]
+    fn operations_summaries_are_non_empty() {
+        let ops = operations_info();
+        for op in ops.as_array().unwrap() {
+            let summary = op["summary"].as_str().unwrap();
+            assert!(!summary.is_empty(), "empty summary for op {:?}", op["id"]);
+        }
+    }
+
+    #[test]
+    fn require_str_boolean_value_returns_error() {
+        let input = json!({"field": true});
+        assert!(require_str(&input, "field").is_err());
+    }
+
+    #[test]
+    fn require_str_array_value_returns_error() {
+        let input = json!({"field": [1, 2, 3]});
+        assert!(require_str(&input, "field").is_err());
+    }
+
+    // ── require_str additional edge cases ────────────────────────────
+
+    #[test]
+    fn require_str_float_value() {
+        let input = json!({"query": 1.23});
+        assert!(require_str(&input, "query").is_err());
+    }
+
+    #[test]
+    fn require_str_object_value() {
+        let input = json!({"query": {"nested": true}});
+        assert!(require_str(&input, "query").is_err());
+    }
+
+    #[test]
+    fn require_str_nested_key_not_found() {
+        let input = json!({"outer": {"inner": "val"}});
+        assert!(require_str(&input, "inner").is_err());
+    }
+
+    // ── DoctorStatus additional coverage ────────────────────────────
+
+    #[test]
+    fn doctor_status_serde_all_variants_roundtrip() {
+        let statuses = [
+            DoctorStatus::Healthy,
+            DoctorStatus::Degraded,
+            DoctorStatus::Unhealthy,
+        ];
+        for s in &statuses {
+            let json = serde_json::to_value(s).unwrap();
+            let back: DoctorStatus = serde_json::from_value(json).unwrap();
+            assert_eq!(*s, back);
+        }
+    }
+
+    #[test]
+    fn doctor_status_copy_semantics() {
+        let s = DoctorStatus::Healthy;
+        let s2 = s;
+        assert_eq!(s, s2);
+    }
+
+    #[test]
+    fn doctor_status_ne_comparison() {
+        assert_ne!(DoctorStatus::Healthy, DoctorStatus::Degraded);
+        assert_ne!(DoctorStatus::Degraded, DoctorStatus::Unhealthy);
+    }
+
+    // ── DoctorCheck additional coverage ─────────────────────────────
+
+    #[test]
+    fn doctor_check_debug_clone_roundtrip() {
+        let check = DoctorCheck {
+            name: "auth".into(),
+            passed: false,
+            message: Some("expired".into()),
+            critical: true,
+        };
+        let cloned = check.clone();
+        assert_eq!(check.name, "auth");
+        assert!(cloned.critical);
+        let dbg = format!("{cloned:?}");
+        assert!(dbg.contains("DoctorCheck"));
+    }
+
+    // ── DoctorResult additional coverage ────────────────────────────
+
+    #[test]
+    fn doctor_result_serde_roundtrip_healthy() {
+        let r = DoctorResult::from_checks(vec![DoctorCheck {
+            name: "cfg".into(),
+            passed: true,
+            message: None,
+            critical: true,
+        }]);
+        let json = serde_json::to_value(&r).unwrap();
+        let back: DoctorResult = serde_json::from_value(json).unwrap();
+        assert_eq!(back.status, DoctorStatus::Healthy);
+    }
+
+    #[test]
+    fn doctor_result_clone_preserves_checks() {
+        let r = DoctorResult::from_checks(vec![DoctorCheck {
+            name: "c".into(),
+            passed: true,
+            message: None,
+            critical: false,
+        }]);
+        let cloned = r.clone();
+        assert_eq!(r.status, cloned.status);
+        assert_eq!(cloned.checks.len(), 1);
+    }
+
+    #[test]
+    fn doctor_result_debug_format() {
+        let r = DoctorResult::from_checks(vec![]);
+        let dbg = format!("{r:?}");
+        assert!(dbg.contains("DoctorResult"));
+    }
+
+    // ── Config / Connector tests ────────────────────────────────────
+
+    #[test]
+    fn config_debug_format() {
+        let config = PostHogConfig::from_params(&json!({
+            "api_key": "phx_test",
+            "project_id": "1"
+        }))
+        .unwrap();
+        let dbg = format!("{config:?}");
+        assert!(dbg.contains("PostHogConfig"));
+    }
+
+    #[test]
+    fn config_clone_preserves_url() {
+        let config = PostHogConfig::from_params(&json!({
+            "api_key": "phx_test",
+            "project_id": "1",
+            "base_url": "https://custom.posthog.com"
+        }))
+        .unwrap();
+        let cloned = config.clone();
+        assert_eq!(config.base_url, cloned.base_url);
+    }
+
+    #[test]
+    fn connector_initial_counts() {
+        let c = PostHogConnector::new();
+        assert_eq!(c.request_count.load(Ordering::Relaxed), 0);
+        assert_eq!(c.error_count.load(Ordering::Relaxed), 0);
+    }
+
+    // ── operations_info additional checks ───────────────────────────
+
+    #[test]
+    fn operations_all_prefixed_posthog() {
+        let ops = operations_info();
+        for op in ops.as_array().unwrap() {
+            let id = op["id"].as_str().unwrap();
+            assert!(
+                id.starts_with("posthog."),
+                "op {id} missing posthog. prefix"
+            );
+        }
+    }
+
+    #[test]
+    fn operations_valid_risk_levels() {
+        let valid = ["low", "medium", "high", "critical"];
+        let ops = operations_info();
+        for op in ops.as_array().unwrap() {
+            let rl = op["risk_level"].as_str().unwrap();
+            assert!(valid.contains(&rl), "invalid risk_level: {rl}");
+        }
+    }
+
+    #[test]
+    fn operations_valid_safety_tiers() {
+        let valid = ["safe", "risky", "dangerous"];
+        let ops = operations_info();
+        for op in ops.as_array().unwrap() {
+            let st = op["safety_tier"].as_str().unwrap();
+            assert!(valid.contains(&st), "invalid safety_tier: {st}");
+        }
+    }
 }

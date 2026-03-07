@@ -1160,4 +1160,184 @@ mod tests {
         let input = json!({"uid": true});
         assert!(require_str(&input, "uid").is_err());
     }
+
+    // ── Additional connector coverage tests ───────────────────────
+
+    #[test]
+    fn config_clone_preserves_base_url() {
+        let config = GrafanaConfig::from_params(&json!({
+            "auth_token": "tok",
+            "base_url": "https://custom.grafana.io/api"
+        }))
+        .unwrap();
+        let cloned = config.clone();
+        assert_eq!(config.base_url, "https://custom.grafana.io/api");
+        assert_eq!(cloned.base_url, "https://custom.grafana.io/api");
+    }
+
+    #[test]
+    fn config_debug_format() {
+        let config = GrafanaConfig::from_params(&json!({
+            "auth_token": "tok"
+        }))
+        .unwrap();
+        let dbg = format!("{config:?}");
+        assert!(dbg.contains("GrafanaConfig"));
+    }
+
+    #[test]
+    fn config_trims_auth_token() {
+        let config = GrafanaConfig::from_params(&json!({
+            "auth_token": "  glsa_abc123  "
+        }))
+        .unwrap();
+        match &config.auth {
+            GrafanaAuth::BearerToken(t) => assert_eq!(t, "glsa_abc123"),
+            GrafanaAuth::CredentialId(_) => panic!("expected BearerToken"),
+        }
+    }
+
+    #[test]
+    fn connector_request_count_initial() {
+        let c = GrafanaConnector::new();
+        assert_eq!(c.request_count.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn connector_error_count_initial() {
+        let c = GrafanaConnector::new();
+        assert_eq!(c.error_count.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn doctor_check_clone() {
+        let c = DoctorCheck {
+            name: "clone_test".into(),
+            passed: true,
+            message: Some("cloned".into()),
+            critical: false,
+        };
+        let c2 = c.clone();
+        assert_eq!(c.name, "clone_test");
+        assert_eq!(c2.message, Some("cloned".into()));
+    }
+
+    #[test]
+    fn doctor_result_clone() {
+        let r = DoctorResult::from_checks(vec![DoctorCheck {
+            name: "a".into(),
+            passed: true,
+            message: None,
+            critical: true,
+        }]);
+        let r2 = r.clone();
+        assert_eq!(r.status, DoctorStatus::Healthy);
+        assert_eq!(r2.checks.len(), 1);
+    }
+
+    #[test]
+    fn doctor_result_roundtrip() {
+        let r = DoctorResult::from_checks(vec![DoctorCheck {
+            name: "cfg".into(),
+            passed: true,
+            message: None,
+            critical: true,
+        }]);
+        let v = serde_json::to_value(&r).unwrap();
+        let r2: DoctorResult = serde_json::from_value(v).unwrap();
+        assert_eq!(r2.status, DoctorStatus::Healthy);
+        assert_eq!(r2.checks.len(), 1);
+    }
+
+    #[test]
+    fn operations_info_safety_tiers_valid() {
+        let valid = ["safe", "risky", "dangerous"];
+        let ops = operations_info();
+        for op in ops.as_array().unwrap() {
+            let st = op["safety_tier"].as_str().unwrap();
+            assert!(valid.contains(&st), "invalid safety_tier: {st}");
+        }
+    }
+
+    #[test]
+    fn operations_info_dashboards_create_is_risky() {
+        let ops = operations_info();
+        let op = ops.as_array().unwrap().iter()
+            .find(|o| o["id"] == "grafana.dashboards.create")
+            .unwrap();
+        assert_eq!(op["safety_tier"], "risky");
+        assert_eq!(op["risk_level"], "medium");
+    }
+
+    #[test]
+    fn operations_info_alerts_create_not_idempotent() {
+        let ops = operations_info();
+        let op = ops.as_array().unwrap().iter()
+            .find(|o| o["id"] == "grafana.alerts.create")
+            .unwrap();
+        assert_eq!(op["idempotency"], "none");
+    }
+
+    #[test]
+    fn operations_info_all_prefixed_grafana() {
+        let ops = operations_info();
+        for op in ops.as_array().unwrap() {
+            let id = op["id"].as_str().unwrap();
+            assert!(id.starts_with("grafana."), "op {id} missing grafana. prefix");
+        }
+    }
+
+    #[test]
+    fn require_str_error_message_contains_field() {
+        let input = json!({});
+        match require_str(&input, "dashboard_uid").unwrap_err() {
+            GrafanaError::Api { status_code, message } => {
+                assert_eq!(status_code, 400);
+                assert!(message.contains("dashboard_uid"));
+            }
+            e => panic!("expected Api error, got {e:?}"),
+        }
+    }
+
+    #[test]
+    fn require_str_with_float_value() {
+        let input = json!({"uid": 1.23});
+        assert!(require_str(&input, "uid").is_err());
+    }
+
+    #[test]
+    fn operations_info_dashboards_get_capability() {
+        let ops = operations_info();
+        let op = ops.as_array().unwrap().iter()
+            .find(|o| o["id"] == "grafana.dashboards.get")
+            .unwrap();
+        assert_eq!(op["capability"], "grafana.dashboards.read");
+    }
+
+    #[test]
+    fn operations_info_datasources_query_is_safe() {
+        let ops = operations_info();
+        let op = ops.as_array().unwrap().iter()
+            .find(|o| o["id"] == "grafana.datasources.query")
+            .unwrap();
+        assert_eq!(op["safety_tier"], "safe");
+        assert_eq!(op["risk_level"], "low");
+    }
+
+    #[test]
+    fn operations_info_alerts_list_is_safe_and_strict() {
+        let ops = operations_info();
+        let op = ops.as_array().unwrap().iter()
+            .find(|o| o["id"] == "grafana.alerts.list")
+            .unwrap();
+        assert_eq!(op["safety_tier"], "safe");
+        assert_eq!(op["idempotency"], "strict");
+    }
+
+    #[test]
+    fn doctor_status_ne_comparison() {
+        assert_ne!(DoctorStatus::Healthy, DoctorStatus::Degraded);
+        assert_ne!(DoctorStatus::Degraded, DoctorStatus::Unhealthy);
+        assert_ne!(DoctorStatus::Healthy, DoctorStatus::Unhealthy);
+    }
 }

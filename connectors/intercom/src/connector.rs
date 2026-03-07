@@ -789,4 +789,218 @@ mod tests {
         assert!(c.client.is_none());
         assert!(c.session_id.is_none());
     }
+
+    // ── Additional tests for expanded coverage ────────────────────
+
+    #[test]
+    fn connector_new_has_zero_counters() {
+        let c = IntercomConnector::new();
+        assert_eq!(c.request_count.load(Ordering::Relaxed), 0);
+        assert_eq!(c.error_count.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn config_clone_preserves_auth() {
+        let config = IntercomConfig::from_params(&json!({
+            "access_token": "tok_abc"
+        }))
+        .unwrap();
+        let cloned = config.clone();
+        assert_eq!(config.base_url, DEFAULT_BASE_URL);
+        assert_eq!(cloned.base_url, DEFAULT_BASE_URL);
+    }
+
+    #[test]
+    fn config_clone_preserves_base_url() {
+        let config = IntercomConfig::from_params(&json!({
+            "access_token": "tok",
+            "base_url": "https://custom.io"
+        }))
+        .unwrap();
+        let cloned = config.clone();
+        assert_eq!(config.base_url, "https://custom.io");
+        assert_eq!(cloned.base_url, "https://custom.io");
+    }
+
+    #[test]
+    fn config_debug_format() {
+        let config = IntercomConfig::from_params(&json!({
+            "access_token": "tok"
+        }))
+        .unwrap();
+        let dbg = format!("{config:?}");
+        assert!(dbg.contains("IntercomConfig"));
+    }
+
+    #[test]
+    fn doctor_status_serde_roundtrip() {
+        for status in [DoctorStatus::Healthy, DoctorStatus::Degraded, DoctorStatus::Unhealthy] {
+            let s = serde_json::to_string(&status).unwrap();
+            let back: DoctorStatus = serde_json::from_str(&s).unwrap();
+            assert_eq!(back, status);
+        }
+    }
+
+    #[test]
+    fn doctor_status_copy_semantics() {
+        let s = DoctorStatus::Degraded;
+        let s2 = s;
+        assert_eq!(s, s2);
+    }
+
+    #[test]
+    fn doctor_status_debug_format() {
+        assert!(format!("{:?}", DoctorStatus::Healthy).contains("Healthy"));
+        assert!(format!("{:?}", DoctorStatus::Degraded).contains("Degraded"));
+        assert!(format!("{:?}", DoctorStatus::Unhealthy).contains("Unhealthy"));
+    }
+
+    #[test]
+    fn doctor_check_skip_none_message() {
+        let c = DoctorCheck {
+            name: "test".into(),
+            passed: true,
+            message: None,
+            critical: false,
+        };
+        let v = serde_json::to_value(&c).unwrap();
+        assert!(!v.as_object().unwrap().contains_key("message"));
+    }
+
+    #[test]
+    fn doctor_check_includes_some_message() {
+        let c = DoctorCheck {
+            name: "test".into(),
+            passed: false,
+            message: Some("fail detail".into()),
+            critical: true,
+        };
+        let v = serde_json::to_value(&c).unwrap();
+        assert_eq!(v["message"], "fail detail");
+    }
+
+    #[test]
+    fn doctor_check_roundtrip() {
+        let c = DoctorCheck {
+            name: "connectivity".into(),
+            passed: true,
+            message: Some("OK".into()),
+            critical: false,
+        };
+        let serialized = serde_json::to_string(&c).unwrap();
+        let back: DoctorCheck = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(back.name, "connectivity");
+        assert!(back.passed);
+        assert_eq!(back.message, Some("OK".into()));
+    }
+
+    #[test]
+    fn doctor_result_multiple_critical_failures() {
+        let r = DoctorResult::from_checks(vec![
+            DoctorCheck { name: "a".into(), passed: false, message: None, critical: true },
+            DoctorCheck { name: "b".into(), passed: false, message: None, critical: true },
+        ]);
+        assert_eq!(r.status, DoctorStatus::Unhealthy);
+    }
+
+    #[test]
+    fn doctor_result_unhealthy_overrides_degraded() {
+        let r = DoctorResult::from_checks(vec![
+            DoctorCheck { name: "a".into(), passed: false, message: None, critical: true },
+            DoctorCheck { name: "b".into(), passed: false, message: None, critical: false },
+        ]);
+        assert_eq!(r.status, DoctorStatus::Unhealthy);
+    }
+
+    #[test]
+    fn doctor_result_serializes_with_message() {
+        let r = DoctorResult::from_checks(vec![DoctorCheck {
+            name: "x".into(),
+            passed: false,
+            message: Some("detail here".into()),
+            critical: false,
+        }]);
+        let v = serde_json::to_value(&r).unwrap();
+        assert_eq!(v["status"], "degraded");
+        assert_eq!(v["checks"][0]["message"], "detail here");
+    }
+
+    #[test]
+    fn operations_contacts_create_is_risky() {
+        let ops = operations_info();
+        let op = ops.as_array().unwrap().iter()
+            .find(|o| o["id"] == "intercom.contacts.create")
+            .unwrap();
+        assert_eq!(op["safety_tier"], "risky");
+        assert_eq!(op["risk_level"], "medium");
+    }
+
+    #[test]
+    fn operations_contacts_delete_is_dangerous() {
+        let ops = operations_info();
+        let op = ops.as_array().unwrap().iter()
+            .find(|o| o["id"] == "intercom.contacts.delete")
+            .unwrap();
+        assert_eq!(op["safety_tier"], "dangerous");
+        assert_eq!(op["risk_level"], "high");
+    }
+
+    #[test]
+    fn operations_conversations_reply_not_idempotent() {
+        let ops = operations_info();
+        let op = ops.as_array().unwrap().iter()
+            .find(|o| o["id"] == "intercom.conversations.reply")
+            .unwrap();
+        assert_eq!(op["idempotency"], "none");
+    }
+
+    #[test]
+    fn operations_tags_list_is_safe() {
+        let ops = operations_info();
+        let op = ops.as_array().unwrap().iter()
+            .find(|o| o["id"] == "intercom.tags.list")
+            .unwrap();
+        assert_eq!(op["safety_tier"], "safe");
+        assert_eq!(op["risk_level"], "low");
+        assert_eq!(op["idempotency"], "strict");
+    }
+
+    #[test]
+    fn operations_all_prefixed_intercom() {
+        let ops = operations_info();
+        for op in ops.as_array().unwrap() {
+            let id = op["id"].as_str().unwrap();
+            assert!(id.starts_with("intercom."), "op {id} missing intercom. prefix");
+        }
+    }
+
+    #[test]
+    fn require_str_boolean_value() {
+        let input = json!({"role": true});
+        assert!(require_str(&input, "role").is_err());
+    }
+
+    #[test]
+    fn require_str_array_value() {
+        let input = json!({"role": [1, 2, 3]});
+        assert!(require_str(&input, "role").is_err());
+    }
+
+    #[test]
+    fn require_str_empty_string() {
+        let input = json!({"role": ""});
+        assert_eq!(require_str(&input, "role").unwrap(), "");
+    }
+
+    #[test]
+    fn require_str_error_message_content() {
+        let input = json!({});
+        match require_str(&input, "contact_id").unwrap_err() {
+            IntercomError::Api { status_code, message } => {
+                assert_eq!(status_code, 400);
+                assert!(message.contains("contact_id"));
+            }
+            e => panic!("expected Api error, got {e:?}"),
+        }
+    }
 }

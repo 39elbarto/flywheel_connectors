@@ -1089,6 +1089,253 @@ mod tests {
     // BusyTime tests
     // ═══════════════════════════════════════════════════════════════════════
 
+    // ═══════════════════════════════════════════════════════════════════════
+    // Additional serde edge-case and coverage tests (2026-03-07)
+    // ═══════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn calendar_entry_non_primary_defaults_false() {
+        let json = json!({"id": "c1"});
+        let entry: CalendarEntry = serde_json::from_value(json).unwrap();
+        assert!(!entry.primary);
+        assert!(entry.summary.is_none());
+        assert!(entry.description.is_none());
+        assert!(entry.time_zone.is_none());
+    }
+
+    #[test]
+    fn calendar_entry_roundtrip_all_fields() {
+        let entry = CalendarEntry {
+            id: "cal@example.com".into(),
+            summary: Some("Work".into()),
+            description: Some("Work calendar".into()),
+            time_zone: Some("America/New_York".into()),
+            primary: true,
+        };
+        let json = serde_json::to_value(&entry).unwrap();
+        let back: CalendarEntry = serde_json::from_value(json).unwrap();
+        assert_eq!(back.id, "cal@example.com");
+        assert_eq!(back.summary.as_deref(), Some("Work"));
+        assert_eq!(back.description.as_deref(), Some("Work calendar"));
+        assert_eq!(back.time_zone.as_deref(), Some("America/New_York"));
+        assert!(back.primary);
+    }
+
+    #[test]
+    fn calendar_entry_debug_contains_fields() {
+        let entry = CalendarEntry {
+            id: "debug-cal".into(),
+            summary: Some("My Cal".into()),
+            description: None,
+            time_zone: None,
+            primary: false,
+        };
+        let dbg = format!("{entry:?}");
+        assert!(dbg.contains("CalendarEntry"), "got: {dbg}");
+        assert!(dbg.contains("debug-cal"), "got: {dbg}");
+    }
+
+    #[test]
+    fn calendar_entry_clone_uses_original() {
+        let entry = CalendarEntry {
+            id: "orig".into(),
+            summary: Some("S".into()),
+            description: None,
+            time_zone: None,
+            primary: true,
+        };
+        let _cloned = entry.clone();
+        assert_eq!(entry.id, "orig");
+        assert!(entry.primary);
+    }
+
+    #[test]
+    fn event_empty_all_defaults() {
+        let json = json!({});
+        let evt: Event = serde_json::from_value(json).unwrap();
+        assert!(evt.id.is_none());
+        assert!(evt.status.is_none());
+        assert!(evt.summary.is_none());
+        assert!(evt.description.is_none());
+        assert!(evt.location.is_none());
+        assert!(evt.start.is_none());
+        assert!(evt.end.is_none());
+        assert!(evt.creator.is_none());
+        assert!(evt.organizer.is_none());
+        assert!(evt.attendees.is_empty());
+        assert!(evt.html_link.is_none());
+        assert!(evt.hangout_link.is_none());
+        assert!(evt.recurrence.is_empty());
+    }
+
+    #[test]
+    fn event_with_recurrence_rules() {
+        let json = json!({
+            "id": "rec1",
+            "recurrence": ["RRULE:FREQ=WEEKLY;BYDAY=MO", "EXDATE:20260310T100000Z"]
+        });
+        let evt: Event = serde_json::from_value(json).unwrap();
+        assert_eq!(evt.recurrence.len(), 2);
+        assert!(evt.recurrence[0].contains("WEEKLY"));
+    }
+
+    #[test]
+    fn event_multiple_attendees_with_options() {
+        let json = json!({
+            "id": "multi-att",
+            "attendees": [
+                {"email": "a@test.com"},
+                {"email": "b@test.com", "responseStatus": "accepted"},
+                {"email": "c@test.com", "optional": true}
+            ]
+        });
+        let evt: Event = serde_json::from_value(json).unwrap();
+        assert_eq!(evt.attendees.len(), 3);
+        assert_eq!(evt.attendees[0].email.as_deref(), Some("a@test.com"));
+        assert!(evt.attendees[2].optional);
+    }
+
+    #[test]
+    fn event_clone_uses_original() {
+        let evt = Event {
+            id: Some("e-orig".into()),
+            status: Some("confirmed".into()),
+            summary: Some("Meeting".into()),
+            description: None,
+            location: None,
+            start: None,
+            end: None,
+            creator: None,
+            organizer: None,
+            attendees: vec![],
+            html_link: None,
+            hangout_link: None,
+            recurrence: vec![],
+        };
+        let _cloned = evt.clone();
+        assert_eq!(evt.id.as_deref(), Some("e-orig"));
+        assert_eq!(evt.status.as_deref(), Some("confirmed"));
+    }
+
+    #[test]
+    fn event_date_time_date_only() {
+        let json = json!({"date": "2026-03-15"});
+        let edt: EventDateTime = serde_json::from_value(json).unwrap();
+        assert!(edt.date_time.is_none());
+        assert_eq!(edt.date.as_deref(), Some("2026-03-15"));
+        assert!(edt.time_zone.is_none());
+    }
+
+    #[test]
+    fn event_date_time_with_timezone() {
+        let edt = EventDateTime {
+            date_time: Some("2026-03-15T14:00:00".into()),
+            date: None,
+            time_zone: Some("Europe/London".into()),
+        };
+        let json = serde_json::to_value(&edt).unwrap();
+        assert_eq!(json["timeZone"], "Europe/London");
+        assert_eq!(json["dateTime"], "2026-03-15T14:00:00");
+    }
+
+    #[test]
+    fn event_date_time_clone_uses_original() {
+        let edt = EventDateTime {
+            date_time: Some("2026-01-01T00:00:00Z".into()),
+            date: None,
+            time_zone: None,
+        };
+        let _cloned = edt.clone();
+        assert_eq!(edt.date_time.as_deref(), Some("2026-01-01T00:00:00Z"));
+    }
+
+    #[test]
+    fn event_person_all_none() {
+        let json = json!({});
+        let person: EventPerson = serde_json::from_value(json).unwrap();
+        assert!(person.email.is_none());
+        assert!(person.display_name.is_none());
+        assert!(!person.self_);
+    }
+
+    #[test]
+    fn attendee_serialize_optional_false_included() {
+        let att = Attendee {
+            email: Some("test@test.com".into()),
+            display_name: None,
+            response_status: None,
+            optional: false,
+        };
+        let json = serde_json::to_value(&att).unwrap();
+        // optional=false should be explicitly serialized (not skipped)
+        assert_eq!(json["optional"], false);
+    }
+
+    #[test]
+    fn free_busy_response_deserialize() {
+        let json = json!({"calendars": {"primary": {"busy": [{"start": "a", "end": "b"}]}}});
+        let resp: FreeBusyResponse = serde_json::from_value(json).unwrap();
+        assert!(!resp.calendars.is_empty());
+        assert!(resp.calendars.contains_key("primary"));
+    }
+
+    #[test]
+    fn free_busy_response_empty() {
+        let json = json!({});
+        let resp: FreeBusyResponse = serde_json::from_value(json).unwrap();
+        assert!(resp.calendars.is_empty());
+    }
+
+    #[test]
+    fn free_busy_response_empty_calendars() {
+        let json = json!({"calendars": {}});
+        let resp: FreeBusyResponse = serde_json::from_value(json).unwrap();
+        assert!(resp.calendars.is_empty());
+    }
+
+    #[test]
+    fn free_busy_request_serialize() {
+        let req = FreeBusyRequest {
+            time_min: "2026-06-01T00:00:00Z".into(),
+            time_max: "2026-06-02T00:00:00Z".into(),
+            items: vec![FreeBusyRequestItem { id: "cal1".into() }],
+        };
+        let json = serde_json::to_value(&req).unwrap();
+        assert_eq!(json["timeMin"], "2026-06-01T00:00:00Z");
+        assert_eq!(json["items"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn event_with_links() {
+        let json = json!({
+            "id": "linked",
+            "htmlLink": "https://calendar.google.com/event?eid=abc",
+            "hangoutLink": "https://meet.google.com/xyz-abc-def"
+        });
+        let evt: Event = serde_json::from_value(json).unwrap();
+        assert!(evt.html_link.as_deref().unwrap().contains("calendar.google.com"));
+        assert!(evt.hangout_link.as_deref().unwrap().contains("meet.google.com"));
+    }
+
+    #[test]
+    fn event_with_creator_and_organizer() {
+        let json = json!({
+            "id": "org-event",
+            "creator": {"email": "creator@test.com", "displayName": "Creator"},
+            "organizer": {"email": "org@test.com", "self": true}
+        });
+        let evt: Event = serde_json::from_value(json).unwrap();
+        assert_eq!(evt.creator.as_ref().unwrap().email.as_deref(), Some("creator@test.com"));
+        assert!(evt.organizer.as_ref().unwrap().self_);
+    }
+
+    #[test]
+    fn free_busy_request_item_empty_id() {
+        let item = FreeBusyRequestItem { id: String::new() };
+        let json = serde_json::to_value(&item).unwrap();
+        assert_eq!(json["id"], "");
+    }
+
     #[test]
     fn busy_time_serde() {
         let json = json!({
@@ -1244,13 +1491,6 @@ mod tests {
             2
         );
         assert!(resp.calendars["holidays"].busy.is_empty());
-    }
-
-    #[test]
-    fn free_busy_response_empty_calendars() {
-        let json = json!({"calendars": {}});
-        let resp: FreeBusyResponse = serde_json::from_value(json).unwrap();
-        assert!(resp.calendars.is_empty());
     }
 
     #[test]

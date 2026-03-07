@@ -788,4 +788,343 @@ mod tests {
         assert!(c.client.is_none());
         assert!(c.session_id.is_none());
     }
+
+    #[test]
+    fn connector_new_equals_default() {
+        let c = ElasticsearchConnector::new();
+        assert!(c.config.is_none());
+        assert!(c.client.is_none());
+        assert!(c.session_id.is_none());
+        assert_eq!(c.request_count.load(Ordering::Relaxed), 0);
+        assert_eq!(c.error_count.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn require_str_empty_string() {
+        let input = json!({"index": ""});
+        assert_eq!(require_str(&input, "index").unwrap(), "");
+    }
+
+    #[test]
+    fn require_str_boolean_value() {
+        let input = json!({"index": true});
+        assert!(require_str(&input, "index").is_err());
+    }
+
+    #[test]
+    fn require_str_array_value() {
+        let input = json!({"index": [1, 2]});
+        assert!(require_str(&input, "index").is_err());
+    }
+
+    #[test]
+    fn require_str_object_value() {
+        let input = json!({"index": {"nested": true}});
+        assert!(require_str(&input, "index").is_err());
+    }
+
+    #[test]
+    fn require_i64_string_value() {
+        let input = json!({"size": "100"});
+        assert!(require_i64(&input, "size").is_err());
+    }
+
+    #[test]
+    fn require_i64_null_value() {
+        let input = json!({"size": null});
+        assert!(require_i64(&input, "size").is_err());
+    }
+
+    #[test]
+    fn require_i64_negative_value() {
+        let input = json!({"size": -42});
+        assert_eq!(require_i64(&input, "size").unwrap(), -42);
+    }
+
+    #[test]
+    fn require_str_error_contains_field_name() {
+        let input = json!({});
+        let err = require_str(&input, "my_field").unwrap_err();
+        assert!(err.to_string().contains("my_field"));
+    }
+
+    #[test]
+    fn require_i64_error_contains_field_name() {
+        let input = json!({});
+        let err = require_i64(&input, "my_count").unwrap_err();
+        assert!(err.to_string().contains("my_count"));
+    }
+
+    #[test]
+    fn operations_contain_expected_ids() {
+        let ops = operations_info();
+        let ids: Vec<&str> = ops
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|o| o["id"].as_str())
+            .collect();
+        let expected = [
+            "elasticsearch.search",
+            "elasticsearch.get_document",
+            "elasticsearch.index_document",
+            "elasticsearch.bulk",
+            "elasticsearch.indices.list",
+            "elasticsearch.indices.delete",
+            "elasticsearch.cluster.health",
+        ];
+        for e in &expected {
+            assert!(ids.contains(e), "missing expected operation {e}");
+        }
+    }
+
+    #[test]
+    fn operations_all_prefixed_elasticsearch() {
+        let ops = operations_info();
+        for op in ops.as_array().unwrap() {
+            let id = op["id"].as_str().unwrap();
+            assert!(
+                id.starts_with("elasticsearch."),
+                "op {id} missing elasticsearch. prefix"
+            );
+        }
+    }
+
+    #[test]
+    fn operations_safety_tiers_valid() {
+        let valid = ["safe", "risky", "dangerous"];
+        let ops = operations_info();
+        for op in ops.as_array().unwrap() {
+            let st = op["safety_tier"].as_str().unwrap();
+            assert!(valid.contains(&st), "invalid safety_tier: {st}");
+        }
+    }
+
+    #[test]
+    fn operations_all_have_idempotency() {
+        let ops = operations_info();
+        for op in ops.as_array().unwrap() {
+            assert!(
+                op.get("idempotency").is_some(),
+                "op {:?} missing idempotency",
+                op["id"]
+            );
+        }
+    }
+
+    #[test]
+    fn operations_valid_idempotency_values() {
+        let valid = ["strict", "best_effort", "none"];
+        let ops = operations_info();
+        for op in ops.as_array().unwrap() {
+            let idem = op["idempotency"].as_str().unwrap();
+            assert!(
+                valid.contains(&idem),
+                "invalid idempotency {idem} for {:?}",
+                op["id"]
+            );
+        }
+    }
+
+    #[test]
+    fn operations_delete_index_is_dangerous() {
+        let ops = operations_info();
+        let op = ops
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["id"] == "elasticsearch.indices.delete")
+            .unwrap();
+        assert_eq!(op["safety_tier"], "dangerous");
+        assert_eq!(op["risk_level"], "high");
+    }
+
+    #[test]
+    fn operations_bulk_is_risky() {
+        let ops = operations_info();
+        let op = ops
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["id"] == "elasticsearch.bulk")
+            .unwrap();
+        assert_eq!(op["safety_tier"], "risky");
+        assert_eq!(op["idempotency"], "none");
+    }
+
+    #[test]
+    fn doctor_result_empty_checks() {
+        let r = DoctorResult::from_checks(vec![]);
+        assert_eq!(r.status, DoctorStatus::Healthy);
+    }
+
+    #[test]
+    fn doctor_result_multiple_critical_failures() {
+        let r = DoctorResult::from_checks(vec![
+            DoctorCheck {
+                name: "a".into(),
+                passed: false,
+                message: None,
+                critical: true,
+            },
+            DoctorCheck {
+                name: "b".into(),
+                passed: false,
+                message: None,
+                critical: true,
+            },
+        ]);
+        assert_eq!(r.status, DoctorStatus::Unhealthy);
+    }
+
+    #[test]
+    fn doctor_result_mixed_failures() {
+        let r = DoctorResult::from_checks(vec![
+            DoctorCheck {
+                name: "crit".into(),
+                passed: false,
+                message: None,
+                critical: true,
+            },
+            DoctorCheck {
+                name: "opt".into(),
+                passed: false,
+                message: None,
+                critical: false,
+            },
+        ]);
+        assert_eq!(r.status, DoctorStatus::Unhealthy);
+    }
+
+    #[test]
+    fn doctor_check_skip_none_message() {
+        let c = DoctorCheck {
+            name: "test".into(),
+            passed: true,
+            message: None,
+            critical: false,
+        };
+        let v = serde_json::to_value(&c).unwrap();
+        assert!(!v.as_object().unwrap().contains_key("message"));
+    }
+
+    #[test]
+    fn doctor_check_includes_some_message() {
+        let c = DoctorCheck {
+            name: "test".into(),
+            passed: false,
+            message: Some("failure".into()),
+            critical: true,
+        };
+        let v = serde_json::to_value(&c).unwrap();
+        assert_eq!(v["message"], "failure");
+    }
+
+    #[test]
+    fn doctor_check_roundtrip() {
+        let c = DoctorCheck {
+            name: "cfg".into(),
+            passed: true,
+            message: Some("ok".into()),
+            critical: true,
+        };
+        let s = serde_json::to_string(&c).unwrap();
+        let c2: DoctorCheck = serde_json::from_str(&s).unwrap();
+        assert_eq!(c2.name, "cfg");
+        assert!(c2.passed);
+        assert_eq!(c2.message, Some("ok".into()));
+    }
+
+    #[test]
+    fn doctor_result_roundtrip() {
+        let r = DoctorResult::from_checks(vec![DoctorCheck {
+            name: "a".into(),
+            passed: true,
+            message: None,
+            critical: true,
+        }]);
+        let v = serde_json::to_value(&r).unwrap();
+        let r2: DoctorResult = serde_json::from_value(v).unwrap();
+        assert_eq!(r2.status, DoctorStatus::Healthy);
+        assert_eq!(r2.checks.len(), 1);
+    }
+
+    #[test]
+    fn doctor_status_serde_all_variants() {
+        for status in [
+            DoctorStatus::Healthy,
+            DoctorStatus::Degraded,
+            DoctorStatus::Unhealthy,
+        ] {
+            let v = serde_json::to_value(status).unwrap();
+            let back: DoctorStatus = serde_json::from_value(v).unwrap();
+            assert_eq!(back, status);
+        }
+    }
+
+    #[test]
+    fn doctor_status_eq_ne() {
+        assert_eq!(DoctorStatus::Healthy, DoctorStatus::Healthy);
+        assert_ne!(DoctorStatus::Healthy, DoctorStatus::Degraded);
+        assert_ne!(DoctorStatus::Degraded, DoctorStatus::Unhealthy);
+    }
+
+    #[test]
+    fn doctor_status_copy() {
+        let s = DoctorStatus::Degraded;
+        let s2 = s;
+        assert_eq!(s, s2);
+    }
+
+    #[test]
+    fn config_trims_api_key() {
+        let config =
+            ElasticsearchConfig::from_params(&json!({"api_key": "  my-key  "})).unwrap();
+        match &config.auth {
+            ElasticsearchAuth::ApiKey(k) => assert_eq!(k, "my-key"),
+            ElasticsearchAuth::CredentialId(_) => panic!("expected ApiKey"),
+        }
+    }
+
+    #[test]
+    fn config_error_codes_are_1003() {
+        let cases = vec![
+            json!({}),
+            json!({"credential_id": 42}),
+            json!({"credential_id": "not-valid"}),
+            json!({"api_key": "k", "credential_id": "550e8400-e29b-41d4-a716-446655440000"}),
+        ];
+        for case in cases {
+            let err = ElasticsearchConfig::from_params(&case).unwrap_err();
+            match err {
+                FcpError::InvalidRequest { code, .. } => assert_eq!(code, 1003),
+                e => panic!("expected InvalidRequest, got {e:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn config_rejects_both_error_message() {
+        let result = ElasticsearchConfig::from_params(&json!({
+            "api_key": "k",
+            "credential_id": "550e8400-e29b-41d4-a716-446655440000",
+        }));
+        match result.unwrap_err() {
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(message.contains("exactly one"));
+            }
+            e => panic!("expected InvalidRequest, got {e:?}"),
+        }
+    }
+
+    #[test]
+    fn config_rejects_none_error_message() {
+        let result = ElasticsearchConfig::from_params(&json!({}));
+        match result.unwrap_err() {
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(message.contains("Missing"));
+            }
+            e => panic!("expected InvalidRequest, got {e:?}"),
+        }
+    }
 }

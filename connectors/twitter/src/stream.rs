@@ -452,4 +452,102 @@ mod tests {
         let cloned = tweet_event.clone();
         assert!(matches!(cloned, StreamEvent::Tweet(t) if t.data.id == "100"));
     }
+
+    #[test]
+    fn test_stream_event_debug_connected() {
+        let event = StreamEvent::Connected;
+        let dbg = format!("{event:?}");
+        assert!(dbg.contains("Connected"));
+    }
+
+    #[test]
+    fn test_stream_event_debug_disconnected() {
+        let event = StreamEvent::Disconnected {
+            reason: "timeout".into(),
+        };
+        let dbg = format!("{event:?}");
+        assert!(dbg.contains("timeout"));
+    }
+
+    #[test]
+    fn test_stream_event_debug_heartbeat() {
+        let event = StreamEvent::Heartbeat;
+        let dbg = format!("{event:?}");
+        assert!(dbg.contains("Heartbeat"));
+    }
+
+    #[test]
+    fn test_stream_event_debug_error() {
+        let event = StreamEvent::Error("connection refused".into());
+        let dbg = format!("{event:?}");
+        assert!(dbg.contains("connection refused"));
+    }
+
+    #[test]
+    fn test_filtered_stream_debug() {
+        let config = TwitterConfig {
+            bearer_token: Some("test".into()),
+            ..Default::default()
+        };
+        let fs = FilteredStream::new(config).unwrap();
+        let dbg = format!("{fs:?}");
+        assert!(dbg.contains("FilteredStream"));
+    }
+
+    #[test]
+    fn test_heartbeat_three_bytes() {
+        assert!(!is_heartbeat_chunk(&Bytes::from("abc")));
+    }
+
+    #[test]
+    fn test_extract_stream_error_non_json() {
+        let result = extract_stream_error("not json at all");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_extract_stream_error_empty_json_object() {
+        let result = extract_stream_error("{}");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_extract_stream_error_errors_key_without_detail() {
+        let payload = serde_json::json!({"errors": [{"code": 88}]}).to_string();
+        let result = extract_stream_error(&payload);
+        assert_eq!(result, Some("Unknown stream error".to_string()));
+    }
+
+    // ── Additional stream tests ─────────────────────────────────
+
+    #[test]
+    fn test_extract_stream_error_with_detail_field() {
+        let payload = serde_json::json!({"detail": "bad request"}).to_string();
+        let result = extract_stream_error(&payload);
+        assert_eq!(result, Some("bad request".to_string()));
+    }
+
+    #[test]
+    fn test_parse_stream_line_tweet_with_author() {
+        let payload = serde_json::json!({
+            "data": {
+                "id": "999",
+                "text": "authored tweet",
+                "author_id": "u42"
+            }
+        })
+        .to_string();
+        let event = parse_stream_line(&payload).unwrap();
+        let tweet = match event {
+            Some(StreamEvent::Tweet(t)) => t,
+            other => panic!("expected Tweet, got {other:?}"),
+        };
+        assert_eq!(tweet.data.author_id.as_deref(), Some("u42"));
+    }
+
+    #[test]
+    fn test_heartbeat_large_chunk_not_heartbeat() {
+        let data = Bytes::from(vec![b' '; 100]);
+        assert!(!is_heartbeat_chunk(&data));
+    }
 }

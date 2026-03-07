@@ -663,4 +663,68 @@ mod tests {
         let dbg = format!("{:?}", IntercomError::Json(bad.unwrap_err()));
         assert!(dbg.contains("Json"));
     }
+
+    // ── Additional coverage tests ─────────────────────────────────
+
+    #[test]
+    fn api_501_is_retryable() {
+        assert!(
+            IntercomError::Api {
+                status_code: 501,
+                message: "Not Implemented".into()
+            }
+            .is_retryable()
+        );
+    }
+
+    #[test]
+    fn api_200_not_retryable() {
+        assert!(
+            !IntercomError::Api {
+                status_code: 200,
+                message: "ok".into()
+            }
+            .is_retryable()
+        );
+    }
+
+    #[test]
+    fn retry_after_large_value() {
+        let err = IntercomError::RateLimited {
+            retry_after_ms: 3_600_000,
+        };
+        assert_eq!(err.retry_after(), Some(Duration::from_secs(3600)));
+    }
+
+    #[test]
+    fn rate_limited_fcp_error_service_name() {
+        match (IntercomError::RateLimited {
+            retry_after_ms: 1000,
+        })
+        .to_fcp_error()
+        {
+            FcpError::External {
+                service, message, ..
+            } => {
+                assert_eq!(service, "intercom");
+                assert!(message.contains("1000"));
+            }
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn api_error_to_fcp_error_retry_after_is_none() {
+        match (IntercomError::Api {
+            status_code: 500,
+            message: "server error".into(),
+        })
+        .to_fcp_error()
+        {
+            FcpError::External { retry_after, .. } => {
+                assert!(retry_after.is_none());
+            }
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
 }

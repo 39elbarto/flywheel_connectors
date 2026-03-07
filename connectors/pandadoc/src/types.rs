@@ -465,4 +465,22 @@ mod tests {
         assert_eq!(c.detail, e.detail);
         assert_eq!(c.status, e.status);
     }
+
+    #[test]
+    fn document_sent_clone() {
+        let ds: DocumentSent = serde_json::from_value(json!({
+            "id": "ds_clone", "status": "document.sent"
+        }))
+        .unwrap();
+        let c = ds.clone();
+        assert_eq!(ds.id, Some("ds_clone".into()));
+        assert_eq!(c.status, Some("document.sent".into()));
+    }
+
+    #[test]
+    fn document_list_debug() {
+        let dl: DocumentList = serde_json::from_value(json!({"results": []})).unwrap();
+        let dbg = format!("{dl:?}");
+        assert!(dbg.contains("DocumentList"));
+    }
 }

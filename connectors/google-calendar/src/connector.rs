@@ -2173,4 +2173,105 @@ mod tests {
             );
         }
     }
+
+    // ── Additional connector tests (2026-03-07) ──────────────────────────
+
+    #[test]
+    fn connector_default_impl() {
+        let c = GoogleCalendarConnector::default();
+        assert!(c.config.is_none());
+        assert!(c.client.is_none());
+        assert!(c.verifier.is_none());
+        assert!(c.session_id.is_none());
+    }
+
+    #[test]
+    fn require_str_returns_value() {
+        let input = json!({"calendar_id": "primary"});
+        let v = require_str(&input, "calendar_id").unwrap();
+        assert_eq!(v, "primary");
+    }
+
+    #[test]
+    fn require_str_missing_field_returns_error() {
+        let input = json!({});
+        let result = require_str(&input, "calendar_id");
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(message.contains("calendar_id"));
+            }
+            e => panic!("Expected InvalidRequest, got: {e:?}"),
+        }
+    }
+
+    #[test]
+    fn require_str_null_value_returns_error() {
+        let input = json!({"calendar_id": null});
+        assert!(require_str(&input, "calendar_id").is_err());
+    }
+
+    #[test]
+    fn require_str_integer_value_returns_error() {
+        let input = json!({"calendar_id": 42});
+        assert!(require_str(&input, "calendar_id").is_err());
+    }
+
+    #[test]
+    fn require_str_empty_string_is_ok() {
+        let input = json!({"field": ""});
+        assert_eq!(require_str(&input, "field").unwrap(), "");
+    }
+
+    #[test]
+    fn self_check_ok_result() {
+        let report = self_check_report_from_result(Ok(()));
+        let v = serde_json::to_value(report).unwrap();
+        assert_eq!(v["status"], "ok");
+    }
+
+    #[test]
+    fn doctor_status_eq() {
+        assert_eq!(DoctorStatus::Healthy, DoctorStatus::Healthy);
+        assert_eq!(DoctorStatus::Degraded, DoctorStatus::Degraded);
+        assert_eq!(DoctorStatus::Unhealthy, DoctorStatus::Unhealthy);
+        assert_ne!(DoctorStatus::Healthy, DoctorStatus::Unhealthy);
+    }
+
+    #[test]
+    fn doctor_status_serde_roundtrip() {
+        for s in [DoctorStatus::Healthy, DoctorStatus::Degraded, DoctorStatus::Unhealthy] {
+            let v = serde_json::to_value(s).unwrap();
+            let back: DoctorStatus = serde_json::from_value(v).unwrap();
+            assert_eq!(s, back);
+        }
+    }
+
+    #[test]
+    fn doctor_check_serialize() {
+        let check = DoctorCheck {
+            name: "test_check".into(),
+            status: DoctorStatus::Healthy,
+            message: "all good".into(),
+        };
+        let v = serde_json::to_value(&check).unwrap();
+        assert_eq!(v["name"], "test_check");
+        assert_eq!(v["status"], "healthy");
+        assert_eq!(v["message"], "all good");
+    }
+
+    #[test]
+    fn doctor_result_serialize() {
+        let result = DoctorResult {
+            status: DoctorStatus::Degraded,
+            checks: vec![DoctorCheck {
+                name: "c1".into(),
+                status: DoctorStatus::Degraded,
+                message: "warning".into(),
+            }],
+        };
+        let v = serde_json::to_value(&result).unwrap();
+        assert_eq!(v["status"], "degraded");
+        assert_eq!(v["checks"].as_array().unwrap().len(), 1);
+    }
 }

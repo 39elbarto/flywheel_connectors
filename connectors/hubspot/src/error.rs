@@ -625,4 +625,60 @@ mod tests {
         );
         assert!(dbg.contains("contact_42"));
     }
+
+    // ── Additional error edge cases ──────────────────────────────
+
+    #[test]
+    fn api_501_is_retryable() {
+        assert!(
+            HubSpotError::Api {
+                status_code: 501,
+                message: "not implemented".into()
+            }
+            .is_retryable()
+        );
+    }
+
+    #[test]
+    fn api_504_is_retryable() {
+        assert!(
+            HubSpotError::Api {
+                status_code: 504,
+                message: "gateway timeout".into()
+            }
+            .is_retryable()
+        );
+    }
+
+    #[test]
+    fn api_error_long_message() {
+        let long_msg = "e".repeat(5000);
+        let err = HubSpotError::Api {
+            status_code: 500,
+            message: long_msg.clone(),
+        };
+        assert!(err.to_string().contains(&long_msg));
+    }
+
+    #[test]
+    fn not_found_fcp_error_service_is_hubspot() {
+        match (HubSpotError::NotFound {
+            resource: "company".into(),
+        })
+        .to_fcp_error()
+        {
+            FcpError::External { service, .. } => {
+                assert_eq!(service, "hubspot");
+            }
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rate_limited_display_large_ms() {
+        let err = HubSpotError::RateLimited {
+            retry_after_ms: 600_000,
+        };
+        assert_eq!(err.to_string(), "Rate limited, retry after 600000ms");
+    }
 }

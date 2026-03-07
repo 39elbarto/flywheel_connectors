@@ -1046,4 +1046,144 @@ mod tests {
             PulumiAuth::CredentialId(_) => panic!("expected BearerToken"),
         }
     }
+
+    // ── Additional connector tests ────────────────────────────────
+
+    #[test]
+    fn operations_all_summaries_non_empty() {
+        let ops = operations_info();
+        for op in ops.as_array().unwrap() {
+            let summary = op["summary"].as_str().unwrap();
+            assert!(!summary.is_empty(), "op {:?} has empty summary", op["id"]);
+        }
+    }
+
+    #[test]
+    fn operations_list_is_safe_and_low() {
+        let ops = operations_info();
+        let list_op = ops
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["id"] == "pulumi.stacks.list")
+            .unwrap();
+        assert_eq!(list_op["safety_tier"], "safe");
+        assert_eq!(list_op["risk_level"], "low");
+    }
+
+    #[test]
+    fn operations_get_is_safe_and_low() {
+        let ops = operations_info();
+        let get_op = ops
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["id"] == "pulumi.stacks.get")
+            .unwrap();
+        assert_eq!(get_op["safety_tier"], "safe");
+        assert_eq!(get_op["risk_level"], "low");
+    }
+
+    #[test]
+    fn doctor_result_debug_format() {
+        let r = DoctorResult::from_checks(vec![]);
+        let dbg = format!("{r:?}");
+        assert!(dbg.contains("DoctorResult"));
+    }
+
+    #[test]
+    fn doctor_check_clone() {
+        let c = DoctorCheck {
+            name: "test".into(),
+            passed: true,
+            message: Some("ok".into()),
+            critical: false,
+        };
+        let cloned = c.clone();
+        assert_eq!(cloned.name, c.name);
+        assert_eq!(cloned.passed, c.passed);
+        assert_eq!(cloned.message, c.message);
+    }
+
+    #[test]
+    fn require_str_float_value() {
+        let input = json!({"field": 1.23});
+        assert!(require_str(&input, "field").is_err());
+    }
+
+    #[test]
+    fn require_str_integer_value() {
+        let input = json!({"field": 99});
+        assert!(require_str(&input, "field").is_err());
+    }
+
+    #[test]
+    fn require_str_nested_deep_object() {
+        let input = json!({"field": {"a": {"b": {"c": "d"}}}});
+        assert!(require_str(&input, "field").is_err());
+    }
+
+    #[test]
+    fn doctor_status_deserialize_roundtrip() {
+        let s: DoctorStatus = serde_json::from_value(json!("healthy")).unwrap();
+        assert_eq!(s, DoctorStatus::Healthy);
+        let s: DoctorStatus = serde_json::from_value(json!("degraded")).unwrap();
+        assert_eq!(s, DoctorStatus::Degraded);
+        let s: DoctorStatus = serde_json::from_value(json!("unhealthy")).unwrap();
+        assert_eq!(s, DoctorStatus::Unhealthy);
+    }
+
+    #[test]
+    fn doctor_status_copy_semantics() {
+        let status = DoctorStatus::Degraded;
+        let copied = status;
+        assert_eq!(status, copied);
+    }
+
+    #[test]
+    fn doctor_status_eq_ne() {
+        assert_eq!(DoctorStatus::Healthy, DoctorStatus::Healthy);
+        assert_ne!(DoctorStatus::Healthy, DoctorStatus::Degraded);
+    }
+
+    #[test]
+    fn doctor_check_debug_format() {
+        let c = DoctorCheck {
+            name: "api".into(),
+            passed: false,
+            message: Some("timeout".into()),
+            critical: true,
+        };
+        let dbg = format!("{c:?}");
+        assert!(dbg.contains("api"));
+        assert!(dbg.contains("timeout"));
+    }
+
+    #[test]
+    fn operations_all_have_capabilities() {
+        let ops = operations_info();
+        for op in ops.as_array().unwrap() {
+            let cap = op["capability"].as_str().unwrap();
+            assert!(!cap.is_empty(), "op {:?} has empty capability", op["id"]);
+        }
+    }
+
+    #[test]
+    fn operations_ids_all_start_with_pulumi() {
+        let ops = operations_info();
+        for op in ops.as_array().unwrap() {
+            let id = op["id"].as_str().unwrap();
+            assert!(id.starts_with("pulumi."), "op {id} should start with pulumi.");
+        }
+    }
+
+    #[test]
+    fn operations_all_risk_levels_valid() {
+        let valid = ["low", "medium", "high"];
+        let ops = operations_info();
+        for op in ops.as_array().unwrap() {
+            let rl = op["risk_level"].as_str().unwrap();
+            assert!(valid.contains(&rl), "invalid risk_level: {rl}");
+        }
+    }
 }

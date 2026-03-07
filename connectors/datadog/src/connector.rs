@@ -1054,4 +1054,279 @@ mod tests {
         ]);
         assert_eq!(r.status, DoctorStatus::Unhealthy);
     }
+
+    // ── Additional connector / config / operations tests ─────────
+
+    #[test]
+    fn config_with_region_us1_explicit() {
+        let config = DatadogConfig::from_params(&json!({
+            "api_key": "k", "app_key": "a", "region": "us1",
+        }))
+        .unwrap();
+        assert_eq!(config.base_url, "https://api.datadoghq.com/api/v1");
+    }
+
+    #[test]
+    fn config_with_region_us_alias() {
+        let config = DatadogConfig::from_params(&json!({
+            "api_key": "k", "app_key": "a", "region": "us",
+        }))
+        .unwrap();
+        assert_eq!(config.base_url, "https://api.datadoghq.com/api/v1");
+    }
+
+    #[test]
+    fn config_with_region_eu_alias() {
+        let config = DatadogConfig::from_params(&json!({
+            "api_key": "k", "app_key": "a", "region": "eu",
+        }))
+        .unwrap();
+        assert_eq!(config.base_url, "https://api.datadoghq.eu/api/v1");
+    }
+
+    #[test]
+    fn config_trims_api_key_whitespace() {
+        let config = DatadogConfig::from_params(&json!({
+            "api_key": "  my-key  ", "app_key": "  my-app  ",
+        }))
+        .unwrap();
+        assert!(matches!(config.auth, DatadogAuth::ApiKeys { .. }));
+    }
+
+    #[test]
+    fn config_rejects_empty_app_key() {
+        assert!(DatadogConfig::from_params(&json!({"api_key": "k", "app_key": ""})).is_err());
+    }
+
+    #[test]
+    fn config_rejects_whitespace_app_key() {
+        assert!(DatadogConfig::from_params(&json!({"api_key": "k", "app_key": "   "})).is_err());
+    }
+
+    #[test]
+    fn operations_write_ops_have_higher_risk() {
+        for op in operations_info().as_array().unwrap() {
+            if op["capability"].as_str().unwrap().as_bytes().ends_with(b".write") {
+                let rl = op["risk_level"].as_str().unwrap();
+                assert!(
+                    rl == "medium" || rl == "high",
+                    "write op {} should be medium/high risk, got {rl}",
+                    op["id"]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn operations_idempotency_values_valid() {
+        let valid = ["none", "strict", "idempotent"];
+        for op in operations_info().as_array().unwrap() {
+            let id_val = op["idempotency"].as_str().unwrap();
+            assert!(
+                valid.contains(&id_val),
+                "op {} has invalid idempotency: {id_val}",
+                op["id"]
+            );
+        }
+    }
+
+    #[test]
+    fn require_str_with_boolean_value() {
+        assert!(require_str(&json!({"q": true}), "q").is_err());
+    }
+
+    #[test]
+    fn require_str_with_array_value() {
+        assert!(require_str(&json!({"q": [1, 2]}), "q").is_err());
+    }
+
+    #[test]
+    fn require_i64_with_boolean_value() {
+        assert!(require_i64(&json!({"n": false}), "n").is_err());
+    }
+
+    #[test]
+    fn require_i64_with_string_number() {
+        assert!(require_i64(&json!({"n": "42"}), "n").is_err());
+    }
+
+    #[test]
+    fn require_i64_large_value() {
+        assert_eq!(
+            require_i64(&json!({"n": 1_000_000_000}), "n").unwrap(),
+            1_000_000_000
+        );
+    }
+
+    #[test]
+    fn doctor_check_clone() {
+        let check = DoctorCheck {
+            name: "test".into(),
+            passed: true,
+            message: Some("ok".into()),
+            critical: false,
+        };
+        let cloned = check.clone();
+        assert_eq!(check.name, "test");
+        assert_eq!(cloned.name, "test");
+        assert!(cloned.passed);
+    }
+
+    #[test]
+    fn doctor_result_clone_and_debug() {
+        let r = DoctorResult::from_checks(vec![DoctorCheck {
+            name: "x".into(),
+            passed: true,
+            message: None,
+            critical: false,
+        }]);
+        let cloned = r.clone();
+        assert_eq!(r.status, DoctorStatus::Healthy);
+        assert_eq!(cloned.checks.len(), 1);
+        let dbg = format!("{r:?}");
+        assert!(dbg.contains("DoctorResult"));
+    }
+
+    #[test]
+    fn doctor_status_debug_format() {
+        assert_eq!(format!("{:?}", DoctorStatus::Degraded), "Degraded");
+        assert_eq!(format!("{:?}", DoctorStatus::Unhealthy), "Unhealthy");
+    }
+
+    #[test]
+    fn doctor_all_noncritical_pass_is_healthy() {
+        let r = DoctorResult::from_checks(vec![
+            DoctorCheck {
+                name: "a".into(),
+                passed: true,
+                message: None,
+                critical: false,
+            },
+            DoctorCheck {
+                name: "b".into(),
+                passed: true,
+                message: None,
+                critical: false,
+            },
+        ]);
+        assert_eq!(r.status, DoctorStatus::Healthy);
+    }
+
+    #[test]
+    fn doctor_critical_pass_noncritical_fail() {
+        let r = DoctorResult::from_checks(vec![
+            DoctorCheck {
+                name: "a".into(),
+                passed: true,
+                message: None,
+                critical: true,
+            },
+            DoctorCheck {
+                name: "b".into(),
+                passed: false,
+                message: Some("warn".into()),
+                critical: false,
+            },
+            DoctorCheck {
+                name: "c".into(),
+                passed: false,
+                message: None,
+                critical: false,
+            },
+        ]);
+        assert_eq!(r.status, DoctorStatus::Degraded);
+    }
+
+    // ── Additional require_str / require_i64 edge cases ─────────────
+
+    #[test]
+    fn require_str_float_value() {
+        assert!(require_str(&json!({"q": 1.23}), "q").is_err());
+    }
+
+    #[test]
+    fn require_str_nested_object() {
+        assert!(require_str(&json!({"q": {"a": {"b": "c"}}}), "q").is_err());
+    }
+
+    #[test]
+    fn require_i64_nested_object() {
+        assert!(require_i64(&json!({"n": {"x": 1}}), "n").is_err());
+    }
+
+    #[test]
+    fn require_i64_array_value() {
+        assert!(require_i64(&json!({"n": [1, 2, 3]}), "n").is_err());
+    }
+
+    #[test]
+    fn require_i64_null_via_missing() {
+        assert!(require_i64(&json!({}), "missing_field").is_err());
+    }
+
+    // ── operations additional ────────────────────────────────────────
+
+    #[test]
+    fn operations_all_capabilities_non_empty() {
+        let ops = operations_info();
+        for op in ops.as_array().unwrap() {
+            let cap = op["capability"].as_str().unwrap();
+            assert!(!cap.is_empty(), "op {:?} has empty capability", op["id"]);
+        }
+    }
+
+    #[test]
+    fn operations_risk_levels_valid() {
+        let valid = ["low", "medium", "high"];
+        let ops = operations_info();
+        for op in ops.as_array().unwrap() {
+            let rl = op["risk_level"].as_str().unwrap();
+            assert!(valid.contains(&rl), "invalid risk_level: {rl}");
+        }
+    }
+
+    #[test]
+    fn operations_ids_all_start_with_datadog() {
+        let ops = operations_info();
+        for op in ops.as_array().unwrap() {
+            let id = op["id"].as_str().unwrap();
+            assert!(id.starts_with("datadog."), "op {id} should start with datadog.");
+        }
+    }
+
+    // ── Doctor status additional ─────────────────────────────────────
+
+    #[test]
+    fn doctor_status_serde_roundtrip() {
+        let v = serde_json::to_value(DoctorStatus::Healthy).unwrap();
+        assert_eq!(v, "healthy");
+        let v = serde_json::to_value(DoctorStatus::Degraded).unwrap();
+        assert_eq!(v, "degraded");
+        let v = serde_json::to_value(DoctorStatus::Unhealthy).unwrap();
+        assert_eq!(v, "unhealthy");
+    }
+
+    #[test]
+    fn doctor_status_deserialize() {
+        let s: DoctorStatus = serde_json::from_value(json!("healthy")).unwrap();
+        assert_eq!(s, DoctorStatus::Healthy);
+        let s: DoctorStatus = serde_json::from_value(json!("degraded")).unwrap();
+        assert_eq!(s, DoctorStatus::Degraded);
+        let s: DoctorStatus = serde_json::from_value(json!("unhealthy")).unwrap();
+        assert_eq!(s, DoctorStatus::Unhealthy);
+    }
+
+    #[test]
+    fn doctor_status_copy() {
+        let status = DoctorStatus::Healthy;
+        let copied = status;
+        assert_eq!(status, copied);
+    }
+
+    #[test]
+    fn doctor_status_eq() {
+        assert_eq!(DoctorStatus::Healthy, DoctorStatus::Healthy);
+        assert_ne!(DoctorStatus::Healthy, DoctorStatus::Degraded);
+        assert_ne!(DoctorStatus::Degraded, DoctorStatus::Unhealthy);
+    }
 }

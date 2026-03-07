@@ -521,4 +521,93 @@ mod tests {
         assert!(DEFAULT_BASE_URL.contains("datadoghq"));
         assert!(!DEFAULT_BASE_URL.ends_with('/'));
     }
+
+    // ── Additional region / auth / client tests ──────────────────
+
+    #[test]
+    fn region_clone() {
+        let r = DatadogRegion::Us3;
+        let cloned = r;
+        assert_eq!(r, cloned);
+    }
+
+    #[test]
+    fn region_all_variants_have_distinct_urls() {
+        let urls: Vec<&str> = [
+            DatadogRegion::Us1,
+            DatadogRegion::Us3,
+            DatadogRegion::Us5,
+            DatadogRegion::Eu1,
+            DatadogRegion::Ap1,
+        ]
+        .iter()
+        .map(|r| r.api_base_url())
+        .collect();
+        let mut unique = urls.clone();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(urls.len(), unique.len());
+    }
+
+    #[test]
+    fn region_all_urls_start_with_https() {
+        for r in &[
+            DatadogRegion::Us1,
+            DatadogRegion::Us3,
+            DatadogRegion::Us5,
+            DatadogRegion::Eu1,
+            DatadogRegion::Ap1,
+        ] {
+            assert!(
+                r.api_base_url().starts_with("https://"),
+                "{r:?} url should start with https"
+            );
+        }
+    }
+
+    #[test]
+    fn region_parse_mixed_case_us3() {
+        assert_eq!(DatadogRegion::parse_region("Us3"), Some(DatadogRegion::Us3));
+        assert_eq!(DatadogRegion::parse_region("US3"), Some(DatadogRegion::Us3));
+    }
+
+    #[test]
+    fn region_parse_mixed_case_us5() {
+        assert_eq!(DatadogRegion::parse_region("Us5"), Some(DatadogRegion::Us5));
+        assert_eq!(DatadogRegion::parse_region("US5"), Some(DatadogRegion::Us5));
+    }
+
+    #[test]
+    fn region_parse_mixed_case_ap1() {
+        assert_eq!(DatadogRegion::parse_region("Ap1"), Some(DatadogRegion::Ap1));
+        assert_eq!(DatadogRegion::parse_region("AP1"), Some(DatadogRegion::Ap1));
+    }
+
+    #[test]
+    fn auth_debug_api_keys_contains_struct_name() {
+        let auth = DatadogAuth::ApiKeys {
+            api_key: "k".into(),
+            app_key: "a".into(),
+        };
+        let dbg = format!("{auth:?}");
+        assert!(dbg.contains("ApiKeys"));
+    }
+
+    #[test]
+    fn client_with_client_preserves_base_url() {
+        let inner = Client::new();
+        let auth = DatadogAuth::ApiKeys {
+            api_key: "k".into(),
+            app_key: "a".into(),
+        };
+        let client = DatadogClient::with_client(inner, auth, "https://test.example.com/api/v1");
+        assert_eq!(client.base_url, "https://test.example.com/api/v1");
+    }
+
+    #[test]
+    fn client_new_with_credential_id() {
+        let auth = DatadogAuth::CredentialId(CredentialId::new());
+        let client = DatadogClient::new(auth, None).unwrap();
+        assert_eq!(client.base_url, DEFAULT_BASE_URL);
+    }
 }

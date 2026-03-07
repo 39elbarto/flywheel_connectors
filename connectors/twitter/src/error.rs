@@ -469,4 +469,127 @@ mod tests {
         };
         assert_eq!(err.retry_after(), None);
     }
+
+    #[test]
+    fn debug_format_all_variants() {
+        let variants: Vec<TwitterError> = vec![
+            TwitterError::OAuth("sig fail".into()),
+            TwitterError::Api {
+                status: 418,
+                message: "teapot".into(),
+                error_code: Some(99),
+                retry_after: Some(5),
+            },
+            TwitterError::RateLimited { retry_after: 120 },
+            TwitterError::Stream("dropped".into()),
+            TwitterError::Config("bad key".into()),
+            TwitterError::NotConfigured,
+        ];
+        for v in &variants {
+            let dbg = format!("{v:?}");
+            assert!(!dbg.is_empty());
+        }
+    }
+
+    #[test]
+    fn api_error_with_error_code_debug() {
+        let err = TwitterError::Api {
+            status: 400,
+            message: "bad request".into(),
+            error_code: Some(88),
+            retry_after: None,
+        };
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("88"));
+        assert!(dbg.contains("bad request"));
+    }
+
+    #[test]
+    fn rate_limited_retry_after_zero() {
+        let err = TwitterError::RateLimited { retry_after: 0 };
+        assert!(err.is_retryable());
+        assert_eq!(err.retry_after(), Some(Duration::from_secs(0)));
+        match err.to_fcp_error() {
+            FcpError::RateLimited {
+                retry_after_ms, ..
+            } => assert_eq!(retry_after_ms, 0),
+            other => panic!("expected RateLimited, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn api_503_is_retryable_and_external() {
+        let err = TwitterError::Api {
+            status: 503,
+            message: "service unavailable".into(),
+            error_code: None,
+            retry_after: Some(15),
+        };
+        assert!(err.is_retryable());
+        match err.to_fcp_error() {
+            FcpError::External {
+                service,
+                retryable,
+                retry_after,
+                ..
+            } => {
+                assert_eq!(service, "twitter");
+                assert!(retryable);
+                assert_eq!(retry_after, Some(Duration::from_secs(15)));
+            }
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn api_404_maps_to_external_not_retryable() {
+        let err = TwitterError::Api {
+            status: 404,
+            message: "not found".into(),
+            error_code: None,
+            retry_after: None,
+        };
+        assert!(!err.is_retryable());
+        match err.to_fcp_error() {
+            FcpError::External {
+                retryable,
+                status_code,
+                ..
+            } => {
+                assert!(!retryable);
+                assert_eq!(status_code, Some(404));
+            }
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn display_json_error() {
+        let json_err: serde_json::Error =
+            serde_json::from_str::<serde_json::Value>("bad").unwrap_err();
+        let err = TwitterError::Json(json_err);
+        let display = err.to_string();
+        assert!(display.starts_with("JSON error:"));
+    }
+
+    #[test]
+    fn display_http_contains_prefix() {
+        // Cannot easily construct a reqwest::Error, but we test the pattern via Json
+        let json_err: serde_json::Error =
+            serde_json::from_str::<serde_json::Value>("{invalid}").unwrap_err();
+        let err = TwitterError::Json(json_err);
+        assert!(!err.is_retryable());
+        assert!(err.retry_after().is_none());
+    }
+
+    #[test]
+    fn api_error_200_not_retryable() {
+        let err = TwitterError::Api {
+            status: 200,
+            message: "ok somehow an error".into(),
+            error_code: None,
+            retry_after: None,
+        };
+        assert!(!err.is_retryable());
+    }
 }

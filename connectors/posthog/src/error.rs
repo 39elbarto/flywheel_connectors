@@ -611,4 +611,56 @@ mod tests {
             .is_retryable()
         );
     }
+
+    #[test]
+    fn api_504_is_retryable() {
+        assert!(
+            PostHogError::Api {
+                status_code: 504,
+                message: "gateway timeout".into()
+            }
+            .is_retryable()
+        );
+    }
+
+    #[test]
+    fn error_debug_api() {
+        let err = PostHogError::Api {
+            status_code: 418,
+            message: "teapot".into(),
+        };
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("Api"));
+        assert!(dbg.contains("418"));
+        assert!(dbg.contains("teapot"));
+    }
+
+    #[test]
+    fn error_debug_forbidden() {
+        let err = PostHogError::Forbidden;
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("Forbidden"));
+    }
+
+    #[test]
+    fn not_found_to_fcp_error_service_is_posthog() {
+        match (PostHogError::NotFound {
+            resource: "dashboard_42".into(),
+        })
+        .to_fcp_error()
+        {
+            FcpError::External { service, .. } => assert_eq!(service, "posthog"),
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rate_limited_display_large_ms() {
+        let err = PostHogError::RateLimited {
+            retry_after_ms: 120_000,
+        };
+        let display = err.to_string();
+        assert!(display.contains("120000"));
+        assert!(display.contains("retry after"));
+    }
 }

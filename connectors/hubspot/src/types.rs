@@ -483,4 +483,62 @@ mod tests {
         assert_eq!(e.category.as_deref(), Some("VALIDATION_ERROR"));
         assert_eq!(e.correlation_id.as_deref(), Some("corr-123"));
     }
+
+    // ── Additional type coverage tests ────────────────────────────
+
+    #[test]
+    fn crm_object_created_at_and_updated_at() {
+        let o: CrmObject = serde_json::from_value(json!({
+            "createdAt": "2026-01-15T10:30:00Z",
+            "updatedAt": "2026-03-01T14:00:00Z"
+        }))
+        .unwrap();
+        assert_eq!(o.created_at.as_deref(), Some("2026-01-15T10:30:00Z"));
+        assert_eq!(o.updated_at.as_deref(), Some("2026-03-01T14:00:00Z"));
+    }
+
+    #[test]
+    fn crm_object_properties_complex() {
+        let o: CrmObject = serde_json::from_value(json!({
+            "properties": {"email": "test@example.com", "score": 42, "tags": ["vip"]}
+        }))
+        .unwrap();
+        let props = o.properties.unwrap();
+        assert_eq!(props["email"], "test@example.com");
+        assert_eq!(props["score"], 42);
+        assert!(props["tags"].is_array());
+    }
+
+    #[test]
+    fn pipeline_stages_empty_vec() {
+        let p: Pipeline = serde_json::from_value(json!({"stages": []})).unwrap();
+        assert!(p.stages.is_empty());
+    }
+
+    #[test]
+    fn pipeline_stage_clone() {
+        let s: PipelineStage =
+            serde_json::from_value(json!({"id": "s1", "label": "New"})).unwrap();
+        let cloned = s.clone();
+        assert_eq!(cloned.id, s.id);
+        assert_eq!(cloned.label, s.label);
+    }
+
+    #[test]
+    fn webhook_event_all_none_fields() {
+        let e: WebhookEvent = serde_json::from_value(json!({})).unwrap();
+        assert!(e.subscription_id.is_none());
+        assert!(e.portal_id.is_none());
+        assert!(e.occurred_at.is_none());
+        assert!(e.object_id.is_none());
+        assert!(e.property_name.is_none());
+        assert!(e.property_value.is_none());
+        assert!(e.change_source.is_none());
+    }
+
+    #[test]
+    fn pipeline_display_order_negative() {
+        let p: Pipeline = serde_json::from_value(json!({"displayOrder": -1})).unwrap();
+        assert_eq!(p.display_order, Some(-1));
+    }
 }

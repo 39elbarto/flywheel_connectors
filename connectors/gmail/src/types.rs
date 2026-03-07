@@ -609,4 +609,281 @@ mod tests {
         assert!(item.reason.is_empty());
         assert!(item.message.is_empty());
     }
+
+    // ── Additional GmailMessage coverage ────────────────────────────
+
+    #[test]
+    fn gmail_message_clone_preserves_fields() {
+        let msg = GmailMessage {
+            id: "msg-c".into(),
+            thread_id: Some("t-c".into()),
+            label_ids: vec!["INBOX".into()],
+            snippet: "cloneable".into(),
+            history_id: Some("999".into()),
+            internal_date: Some("1709000000".into()),
+            size_estimate: 4096,
+            payload: None,
+        };
+        let cloned = msg.clone();
+        assert_eq!(msg.id, "msg-c");
+        assert_eq!(cloned.snippet, "cloneable");
+        assert_eq!(cloned.size_estimate, 4096);
+        assert_eq!(cloned.history_id.as_deref(), Some("999"));
+    }
+
+    #[test]
+    fn gmail_message_debug_format() {
+        let msg = GmailMessage {
+            id: "msg-d".into(),
+            thread_id: None,
+            label_ids: vec![],
+            snippet: "debug test".into(),
+            history_id: None,
+            internal_date: None,
+            size_estimate: 0,
+            payload: None,
+        };
+        let dbg = format!("{msg:?}");
+        assert!(dbg.contains("GmailMessage"));
+        assert!(dbg.contains("debug test"));
+    }
+
+    #[test]
+    fn gmail_message_with_multiple_labels() {
+        let json = serde_json::json!({
+            "id": "msg-labels",
+            "labelIds": ["INBOX", "UNREAD", "STARRED", "IMPORTANT"]
+        });
+        let msg: GmailMessage = serde_json::from_value(json).unwrap();
+        assert_eq!(msg.label_ids.len(), 4);
+        assert!(msg.label_ids.contains(&"STARRED".to_string()));
+    }
+
+    // ── MessagePart additional coverage ─────────────────────────────
+
+    #[test]
+    fn message_part_clone_debug() {
+        let part = MessagePart {
+            part_id: "0".into(),
+            mime_type: "text/plain".into(),
+            filename: String::new(),
+            headers: vec![Header {
+                name: "Subject".into(),
+                value: "Test".into(),
+            }],
+            body: None,
+            parts: None,
+        };
+        let cloned = part.clone();
+        assert_eq!(part.mime_type, "text/plain");
+        assert_eq!(cloned.headers.len(), 1);
+        let dbg = format!("{cloned:?}");
+        assert!(dbg.contains("MessagePart"));
+    }
+
+    #[test]
+    fn message_part_body_clone_debug() {
+        let body = MessagePartBody {
+            attachment_id: Some("att-clone".into()),
+            size: 2048,
+            data: Some("data123".into()),
+        };
+        let cloned = body.clone();
+        assert_eq!(body.attachment_id.as_deref(), Some("att-clone"));
+        assert_eq!(cloned.size, 2048);
+        let dbg = format!("{cloned:?}");
+        assert!(dbg.contains("MessagePartBody"));
+    }
+
+    // ── Header additional coverage ──────────────────────────────────
+
+    #[test]
+    fn header_clone_debug() {
+        let h = Header {
+            name: "To".into(),
+            value: "bob@example.com".into(),
+        };
+        let cloned = h.clone();
+        assert_eq!(h.name, "To");
+        assert_eq!(cloned.value, "bob@example.com");
+        let dbg = format!("{cloned:?}");
+        assert!(dbg.contains("Header"));
+    }
+
+    // ── GmailThread additional coverage ─────────────────────────────
+
+    #[test]
+    fn gmail_thread_clone_debug() {
+        let thread = GmailThread {
+            id: "t-clone".into(),
+            history_id: None,
+            messages: vec![],
+            snippet: "thread snip".into(),
+        };
+        let cloned = thread.clone();
+        assert_eq!(thread.id, "t-clone");
+        assert_eq!(cloned.snippet, "thread snip");
+        let dbg = format!("{cloned:?}");
+        assert!(dbg.contains("GmailThread"));
+    }
+
+    // ── GmailLabel additional coverage ──────────────────────────────
+
+    #[test]
+    fn gmail_label_clone_debug() {
+        let label = GmailLabel {
+            id: "Label_clone".into(),
+            name: "CloneTest".into(),
+            message_list_visibility: None,
+            label_list_visibility: None,
+            label_type: None,
+            messages_total: 10,
+            messages_unread: 2,
+            threads_total: 8,
+            threads_unread: 1,
+        };
+        let cloned = label.clone();
+        assert_eq!(label.name, "CloneTest");
+        assert_eq!(cloned.messages_total, 10);
+        let dbg = format!("{cloned:?}");
+        assert!(dbg.contains("GmailLabel"));
+    }
+
+    // ── GmailDraft additional coverage ──────────────────────────────
+
+    #[test]
+    fn gmail_draft_clone_debug() {
+        let draft = GmailDraft {
+            id: "draft-clone".into(),
+            message: None,
+        };
+        let cloned = draft.clone();
+        assert_eq!(draft.id, "draft-clone");
+        assert!(cloned.message.is_none());
+        let dbg = format!("{cloned:?}");
+        assert!(dbg.contains("GmailDraft"));
+    }
+
+    // ── MessagesListResponse additional coverage ────────────────────
+
+    #[test]
+    fn messages_list_response_clone_debug() {
+        let resp: MessagesListResponse = serde_json::from_value(serde_json::json!({
+            "messages": [{"id": "m1"}],
+            "resultSizeEstimate": 1
+        }))
+        .unwrap();
+        let cloned = resp.clone();
+        assert_eq!(resp.messages.len(), 1);
+        let dbg = format!("{cloned:?}");
+        assert!(dbg.contains("MessagesListResponse"));
+    }
+
+    // ── MessageRef additional coverage ───────────────────────────────
+
+    #[test]
+    fn message_ref_clone_debug() {
+        let mref = MessageRef {
+            id: "mref-1".into(),
+            thread_id: None,
+        };
+        let cloned = mref.clone();
+        assert_eq!(mref.id, "mref-1");
+        assert!(cloned.thread_id.is_none());
+        let dbg = format!("{cloned:?}");
+        assert!(dbg.contains("MessageRef"));
+    }
+
+    #[test]
+    fn message_ref_without_thread() {
+        let json = serde_json::json!({"id": "m-no-thread"});
+        let mref: MessageRef = serde_json::from_value(json).unwrap();
+        assert_eq!(mref.id, "m-no-thread");
+        assert!(mref.thread_id.is_none());
+    }
+
+    // ── ThreadRef additional coverage ───────────────────────────────
+
+    #[test]
+    fn thread_ref_clone_debug() {
+        let tref = ThreadRef {
+            id: "t-clone".into(),
+            snippet: "snip".into(),
+            history_id: Some("500".into()),
+        };
+        let cloned = tref.clone();
+        assert_eq!(tref.id, "t-clone");
+        assert_eq!(cloned.snippet, "snip");
+        let dbg = format!("{cloned:?}");
+        assert!(dbg.contains("ThreadRef"));
+    }
+
+    #[test]
+    fn thread_ref_minimal() {
+        let json = serde_json::json!({"id": "t-min"});
+        let tref: ThreadRef = serde_json::from_value(json).unwrap();
+        assert_eq!(tref.id, "t-min");
+        assert!(tref.snippet.is_empty());
+        assert!(tref.history_id.is_none());
+    }
+
+    // ── GmailApiError additional coverage ───────────────────────────
+
+    #[test]
+    fn gmail_api_error_clone_debug() {
+        let json = serde_json::json!({
+            "error": {
+                "code": 429,
+                "message": "Rate Limit Exceeded"
+            }
+        });
+        let err: GmailApiError = serde_json::from_value(json).unwrap();
+        let cloned = err.clone();
+        assert_eq!(err.error.code, 429);
+        let dbg = format!("{cloned:?}");
+        assert!(dbg.contains("GmailApiError"));
+    }
+
+    // ── GmailErrorDetail additional coverage ────────────────────────
+
+    #[test]
+    fn gmail_error_detail_clone_debug() {
+        let detail = GmailErrorDetail {
+            code: 403,
+            message: "Insufficient Permission".into(),
+            errors: vec![],
+        };
+        let cloned = detail.clone();
+        assert_eq!(cloned.code, 403);
+        assert_eq!(cloned.message, "Insufficient Permission");
+        let dbg = format!("{detail:?}");
+        assert!(dbg.contains("GmailErrorDetail"));
+    }
+
+    // ── GmailErrorItem additional coverage ──────────────────────────
+
+    #[test]
+    fn gmail_error_item_clone_debug() {
+        let item = GmailErrorItem {
+            domain: "global".into(),
+            reason: "notFound".into(),
+            message: "Not Found".into(),
+        };
+        let cloned = item.clone();
+        assert_eq!(cloned.domain, "global");
+        let dbg = format!("{item:?}");
+        assert!(dbg.contains("GmailErrorItem"));
+    }
+
+    #[test]
+    fn gmail_error_item_populated() {
+        let json = serde_json::json!({
+            "domain": "usageLimits",
+            "reason": "rateLimitExceeded",
+            "message": "Rate Limit Exceeded"
+        });
+        let item: GmailErrorItem = serde_json::from_value(json).unwrap();
+        assert_eq!(item.domain, "usageLimits");
+        assert_eq!(item.reason, "rateLimitExceeded");
+    }
 }

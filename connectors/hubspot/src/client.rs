@@ -494,4 +494,32 @@ mod tests {
         );
         assert_eq!(hs.base_url, "https://test.com");
     }
+
+    // ── Additional client tests ───────────────────────────────────
+
+    #[test]
+    fn default_base_url_starts_with_https() {
+        assert!(DEFAULT_BASE_URL.starts_with("https://"));
+    }
+
+    #[test]
+    fn default_base_url_no_trailing_slash() {
+        assert!(!DEFAULT_BASE_URL.ends_with('/'));
+    }
+
+    #[test]
+    fn auth_bearer_with_long_token() {
+        let long_token = "pat-na1-".to_string() + &"x".repeat(500);
+        let auth = HubSpotAuth::BearerToken(long_token);
+        let dbg = format!("{auth:?}");
+        assert!(dbg.contains("redacted"));
+        assert!(!dbg.contains(&"x".repeat(100)));
+    }
+
+    #[test]
+    fn client_new_empty_base_url() {
+        let client =
+            HubSpotClient::new(HubSpotAuth::BearerToken("tok".into()), Some("")).unwrap();
+        assert_eq!(client.base_url, "");
+    }
 }

@@ -595,4 +595,159 @@ mod tests {
         .unwrap();
         assert_eq!(s.tag_set.as_ref().unwrap().len(), 2);
     }
+
+    // ── Additional serde / edge-case tests ──────────────────────
+
+    #[test]
+    fn event_with_all_fields() {
+        let e = Event {
+            id: Some(42),
+            title: Some("title".into()),
+            text: Some("body text".into()),
+            date_happened: Some(1000),
+            priority: Some("low".into()),
+            alert_type: Some("warning".into()),
+            tags: vec!["a".into(), "b".into()],
+            host: Some("host-1".into()),
+            source: Some("src".into()),
+            url: Some("https://example.com".into()),
+        };
+        let v = serde_json::to_value(&e).unwrap();
+        assert_eq!(v["id"], 42);
+        assert_eq!(v["url"], "https://example.com");
+        assert_eq!(v["tags"].as_array().unwrap().len(), 2);
+        let back: Event = serde_json::from_value(v).unwrap();
+        assert_eq!(back.priority.as_deref(), Some("low"));
+    }
+
+    #[test]
+    fn event_create_response_without_event() {
+        let r: EventCreateResponse = serde_json::from_value(json!({
+            "status": "accepted"
+        }))
+        .unwrap();
+        assert!(r.event.is_none());
+        assert_eq!(r.status.as_deref(), Some("accepted"));
+    }
+
+    #[test]
+    fn event_list_response_with_many_events() {
+        let r: EventListResponse = serde_json::from_value(json!({
+            "events": [
+                {"id": 1},
+                {"id": 2},
+                {"id": 3},
+                {"id": 4},
+                {"id": 5},
+            ]
+        }))
+        .unwrap();
+        assert_eq!(r.events.len(), 5);
+    }
+
+    #[test]
+    fn metric_series_with_expression() {
+        let s: MetricSeries = serde_json::from_value(json!({
+            "metric": "cpu",
+            "expression": "avg:system.cpu{*}",
+            "pointlist": [[1.0, 50.0]],
+        }))
+        .unwrap();
+        assert_eq!(s.expression.as_deref(), Some("avg:system.cpu{*}"));
+    }
+
+    #[test]
+    fn metric_series_with_unit() {
+        let s: MetricSeries = serde_json::from_value(json!({
+            "metric": "mem",
+            "pointlist": [],
+            "unit": [{"name": "byte"}, null],
+        }))
+        .unwrap();
+        assert!(s.unit.is_some());
+    }
+
+    #[test]
+    fn metric_submit_series_with_host() {
+        let s = MetricSubmitSeries {
+            metric: "custom.req".into(),
+            points: vec![vec![1.0, 100.0]],
+            metric_type: Some("rate".into()),
+            tags: vec!["service:web".into()],
+            host: Some("web-01".into()),
+        };
+        let v = serde_json::to_value(&s).unwrap();
+        assert_eq!(v["host"], "web-01");
+        assert_eq!(v["type"], "rate");
+    }
+
+    #[test]
+    fn monitor_with_all_optional_fields() {
+        let m = Monitor {
+            id: Some(10),
+            name: Some("Mon".into()),
+            monitor_type: Some("service check".into()),
+            query: Some("\"ntp.in_sync\".over(\"*\")".into()),
+            message: Some("NTP desync @ops".into()),
+            overall_state: Some("Alert".into()),
+            tags: vec!["team:infra".into()],
+            created: Some("2026-01-01".into()),
+            modified: Some("2026-03-01".into()),
+            creator: Some(json!({"name": "admin"})),
+            options: Some(json!({"notify_no_data": true})),
+        };
+        let v = serde_json::to_value(&m).unwrap();
+        assert_eq!(v["type"], "service check");
+        assert_eq!(v["tags"][0], "team:infra");
+        let back: Monitor = serde_json::from_value(v).unwrap();
+        assert_eq!(back.overall_state.as_deref(), Some("Alert"));
+    }
+
+    #[test]
+    fn log_content_with_attributes() {
+        let c: LogContent = serde_json::from_value(json!({
+            "timestamp": "2026-03-01T00:00:00Z",
+            "message": "request completed",
+            "host": "api-01",
+            "service": "backend",
+            "status": "info",
+            "tags": ["env:staging"],
+            "attributes": {"http.status_code": 200, "http.method": "POST"}
+        }))
+        .unwrap();
+        assert_eq!(c.host.as_deref(), Some("api-01"));
+        assert!(c.attributes.is_some());
+        let attrs = c.attributes.unwrap();
+        assert_eq!(attrs["http.status_code"], 200);
+    }
+
+    #[test]
+    fn log_entry_clone_and_debug() {
+        let l = LogEntry {
+            id: Some("log-abc".into()),
+            content: Some(LogContent {
+                timestamp: None,
+                message: Some("test".into()),
+                host: None,
+                service: None,
+                status: None,
+                tags: vec![],
+                attributes: None,
+            }),
+        };
+        let cloned = l.clone();
+        assert_eq!(l.id.as_deref(), Some("log-abc"));
+        assert_eq!(cloned.id.as_deref(), Some("log-abc"));
+        let dbg = format!("{l:?}");
+        assert!(dbg.contains("LogEntry"));
+    }
+
+    #[test]
+    fn api_error_response_debug_format() {
+        let e: ApiErrorResponse =
+            serde_json::from_value(json!({"errors": ["err1"]})).unwrap();
+        let dbg = format!("{e:?}");
+        assert!(dbg.contains("ApiErrorResponse"));
+        assert!(dbg.contains("err1"));
+    }
 }

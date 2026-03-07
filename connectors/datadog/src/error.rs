@@ -550,4 +550,71 @@ mod tests {
         assert!(dbg.contains("RateLimited"));
         assert!(dbg.contains("100"));
     }
+
+    // ── Additional boundary / fcp_error tests ────────────────────
+
+    #[test]
+    fn api_501_is_retryable() {
+        let err = DatadogError::Api {
+            status_code: 501,
+            message: "Not Implemented".into(),
+        };
+        assert!(err.is_retryable());
+    }
+
+    #[test]
+    fn api_502_is_retryable() {
+        let err = DatadogError::Api {
+            status_code: 502,
+            message: "Bad Gateway".into(),
+        };
+        assert!(err.is_retryable());
+    }
+
+    #[test]
+    fn api_200_not_retryable() {
+        let err = DatadogError::Api {
+            status_code: 200,
+            message: "ok".into(),
+        };
+        assert!(!err.is_retryable());
+    }
+
+    #[test]
+    fn api_403_not_retryable() {
+        let err = DatadogError::Api {
+            status_code: 403,
+            message: "Forbidden".into(),
+        };
+        assert!(!err.is_retryable());
+    }
+
+    #[test]
+    fn api_404_not_retryable() {
+        let err = DatadogError::Api {
+            status_code: 404,
+            message: "nope".into(),
+        };
+        assert!(!err.is_retryable());
+    }
+
+    #[test]
+    fn not_found_fcp_error_not_retryable() {
+        let fcp = DatadogError::NotFound {
+            resource: "dashboard-x".into(),
+        }
+        .to_fcp_error();
+        match fcp {
+            FcpError::External { retryable, .. } => assert!(!retryable),
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn forbidden_fcp_error_service_is_datadog() {
+        match DatadogError::Forbidden.to_fcp_error() {
+            FcpError::External { service, .. } => assert_eq!(service, "datadog"),
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
 }

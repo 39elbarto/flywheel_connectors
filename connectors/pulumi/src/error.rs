@@ -587,4 +587,61 @@ mod tests {
             other => panic!("expected External, got {other:?}"),
         }
     }
+
+    // ── Additional edge-case tests ────────────────────────────────
+
+    #[test]
+    fn api_501_is_retryable() {
+        assert!(
+            PulumiError::Api {
+                status_code: 501,
+                message: "not implemented".into()
+            }
+            .is_retryable()
+        );
+    }
+
+    #[test]
+    fn api_504_is_retryable() {
+        assert!(
+            PulumiError::Api {
+                status_code: 504,
+                message: "gateway timeout".into()
+            }
+            .is_retryable()
+        );
+    }
+
+    #[test]
+    fn api_error_long_message() {
+        let long_msg = "x".repeat(10_000);
+        let err = PulumiError::Api {
+            status_code: 500,
+            message: long_msg.clone(),
+        };
+        let display = err.to_string();
+        assert!(display.contains(&long_msg));
+    }
+
+    #[test]
+    fn not_found_fcp_error_service_is_pulumi() {
+        match (PulumiError::NotFound {
+            resource: "stack".into(),
+        })
+        .to_fcp_error()
+        {
+            FcpError::External { service, .. } => {
+                assert_eq!(service, "pulumi");
+            }
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rate_limited_display_large_ms() {
+        let err = PulumiError::RateLimited {
+            retry_after_ms: 999_999,
+        };
+        assert_eq!(err.to_string(), "Rate limited, retry after 999999ms");
+    }
 }

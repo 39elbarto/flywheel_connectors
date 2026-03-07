@@ -690,4 +690,93 @@ mod tests {
         let dbg = format!("{e:?}");
         assert!(dbg.contains("ApiError"));
     }
+
+    // ── Additional type coverage tests ────────────────────────────
+
+    #[test]
+    fn contact_list_serialize_type_rename() {
+        let cl: ContactList = serde_json::from_value(json!({
+            "type": "list",
+            "data": []
+        }))
+        .unwrap();
+        let v = serde_json::to_value(&cl).unwrap();
+        assert_eq!(v["type"], "list");
+        assert!(v.get("list_type").is_none());
+    }
+
+    #[test]
+    fn conversation_serialize_type_rename() {
+        let c: Conversation = serde_json::from_value(json!({
+            "id": "c1",
+            "type": "conversation"
+        }))
+        .unwrap();
+        let v = serde_json::to_value(&c).unwrap();
+        assert_eq!(v["type"], "conversation");
+        assert!(v.get("conversation_type").is_none());
+    }
+
+    #[test]
+    fn conversation_list_serialize_type_rename() {
+        let cl: ConversationList = serde_json::from_value(json!({
+            "type": "conversation.list",
+            "conversations": []
+        }))
+        .unwrap();
+        let v = serde_json::to_value(&cl).unwrap();
+        assert_eq!(v["type"], "conversation.list");
+        assert!(v.get("list_type").is_none());
+    }
+
+    #[test]
+    fn tag_list_serialize_type_rename() {
+        let tl: TagList = serde_json::from_value(json!({
+            "type": "list",
+            "data": []
+        }))
+        .unwrap();
+        let v = serde_json::to_value(&tl).unwrap();
+        assert_eq!(v["type"], "list");
+        assert!(v.get("list_type").is_none());
+    }
+
+    #[test]
+    fn contact_list_multiple_items() {
+        let cl: ContactList = serde_json::from_value(json!({
+            "data": [
+                {"id": "c1", "role": "user"},
+                {"id": "c2", "role": "lead"},
+                {"id": "c3", "role": "user"}
+            ],
+            "total_count": 3
+        }))
+        .unwrap();
+        assert_eq!(cl.data.len(), 3);
+        assert_eq!(cl.total_count, Some(3));
+    }
+
+    #[test]
+    fn conversation_list_debug() {
+        let cl: ConversationList = serde_json::from_value(json!({
+            "conversations": []
+        }))
+        .unwrap();
+        let dbg = format!("{cl:?}");
+        assert!(dbg.contains("ConversationList"));
+    }
+
+    #[test]
+    fn conversation_reply_debug() {
+        let r: ConversationReply = serde_json::from_value(json!({"id": "r_dbg"})).unwrap();
+        let dbg = format!("{r:?}");
+        assert!(dbg.contains("ConversationReply"));
+    }
+
+    #[test]
+    fn api_error_empty_code_and_message() {
+        let e: ApiError = serde_json::from_value(json!({"code": "", "message": ""})).unwrap();
+        assert_eq!(e.code, Some(String::new()));
+        assert_eq!(e.message, Some(String::new()));
+    }
 }

@@ -69,6 +69,7 @@ members = [
     "connectors/redis",
     "connectors/intercom",
     "connectors/pandadoc",
+    "connectors/postgresql",
     "connectors/pulumi",
     "connectors/todoist",
     "connectors/clickup",

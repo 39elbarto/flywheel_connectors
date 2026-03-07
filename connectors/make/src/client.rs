@@ -246,4 +246,92 @@ mod tests {
         assert!(!dbg.contains("secret"));
         assert!(dbg.contains("redacted"));
     }
+
+    #[test]
+    fn client_new_strips_trailing_slash() {
+        let client =
+            MakeClient::new(MakeAuth::ApiToken("tok".into()), Some("https://x.com/api/"))
+                .unwrap();
+        assert_eq!(client.base_url, "https://x.com/api");
+    }
+
+    #[test]
+    fn client_new_no_trailing_slash_unchanged() {
+        let client =
+            MakeClient::new(MakeAuth::ApiToken("tok".into()), Some("https://x.com/api"))
+                .unwrap();
+        assert_eq!(client.base_url, "https://x.com/api");
+    }
+
+    #[test]
+    fn auth_api_token_debug_hides_value() {
+        let auth = MakeAuth::ApiToken("my-super-secret-key-12345".into());
+        let dbg = format!("{auth:?}");
+        assert!(dbg.contains("ApiToken"));
+        assert!(!dbg.contains("my-super-secret-key-12345"));
+    }
+
+    #[test]
+    fn auth_credential_id_debug_shows_id() {
+        let id = CredentialId::new();
+        let id_str = id.to_string();
+        let auth = MakeAuth::CredentialId(id);
+        let dbg = format!("{auth:?}");
+        assert!(dbg.contains("CredentialId"));
+        assert!(dbg.contains(&id_str));
+    }
+
+    #[test]
+    fn auth_clone() {
+        let auth = MakeAuth::ApiToken("tok".into());
+        let cloned = auth.clone();
+        assert_eq!(auth.redacted_label(), cloned.redacted_label());
+    }
+
+    #[test]
+    fn client_debug_contains_base_url() {
+        let client = MakeClient::new(
+            MakeAuth::ApiToken("tok".into()),
+            Some("https://eu1.make.com/api/v2"),
+        )
+        .unwrap();
+        let dbg = format!("{client:?}");
+        assert!(dbg.contains("MakeClient"));
+        assert!(dbg.contains("eu1.make.com"));
+    }
+
+    #[test]
+    fn default_base_url_is_us1() {
+        assert!(DEFAULT_BASE_URL.contains("us1.make.com"));
+        assert!(DEFAULT_BASE_URL.contains("/api/v2"));
+    }
+
+    #[test]
+    fn auth_api_token_is_not_secretless() {
+        let auth = MakeAuth::ApiToken("key-123".into());
+        assert!(!auth.is_secretless());
+        assert_eq!(auth.redacted_label(), "api_token:redacted");
+    }
+
+    #[test]
+    fn auth_credential_is_secretless() {
+        let auth = MakeAuth::CredentialId(CredentialId::new());
+        assert!(auth.is_secretless());
+        assert!(auth.redacted_label().starts_with("credential_id:"));
+    }
+
+    #[test]
+    fn client_new_empty_url_string() {
+        let client = MakeClient::new(MakeAuth::ApiToken("tok".into()), Some("")).unwrap();
+        assert_eq!(client.base_url, "");
+    }
+
+    #[test]
+    fn client_new_multiple_trailing_slashes() {
+        let client =
+            MakeClient::new(MakeAuth::ApiToken("tok".into()), Some("https://x.com///"))
+                .unwrap();
+        // Only trims one trailing slash
+        assert!(client.base_url.ends_with("//"));
+    }
 }

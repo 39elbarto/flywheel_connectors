@@ -526,4 +526,266 @@ mod tests {
         c.error_count.fetch_add(1, Ordering::Relaxed);
         assert_eq!(c.error_count.load(Ordering::Relaxed), 1);
     }
+
+    #[test]
+    fn connector_default_base_url() {
+        let c = connector();
+        assert_eq!(c.base_url, DEFAULT_BASE_URL);
+    }
+
+    #[test]
+    fn connector_default_no_client() {
+        let c = connector();
+        assert!(c.client.is_none());
+        assert!(c.session_id.is_none());
+    }
+
+    #[test]
+    fn connector_default_trait() {
+        let c = AnnasArchiveConnector::default();
+        assert!(c.client.is_none());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn configure_stores_custom_url() {
+        let mut c = connector();
+        c.handle_configure(json!({"base_url": "https://mirror.test.com"}))
+            .await
+            .unwrap();
+        assert_eq!(c.base_url, "https://mirror.test.com");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn configure_default_url() {
+        let mut c = connector();
+        c.handle_configure(json!({})).await.unwrap();
+        assert_eq!(c.base_url, DEFAULT_BASE_URL);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn handshake_stores_session_id() {
+        let mut c = connector();
+        c.handle_configure(json!({})).await.unwrap();
+        c.handle_handshake(json!({"session_id": "sess-99"}))
+            .await
+            .unwrap();
+        assert_eq!(c.session_id.as_deref(), Some("sess-99"));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn handshake_no_session_id() {
+        let mut c = connector();
+        c.handle_configure(json!({})).await.unwrap();
+        c.handle_handshake(json!({})).await.unwrap();
+        assert!(c.session_id.is_none());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn handshake_response_has_capabilities() {
+        let mut c = connector();
+        c.handle_configure(json!({})).await.unwrap();
+        let resp = c.handle_handshake(json!({})).await.unwrap();
+        let caps = resp["capabilities"].as_array().unwrap();
+        assert_eq!(caps.len(), 2);
+        let cap_strs: Vec<&str> = caps.iter().map(|c| c.as_str().unwrap()).collect();
+        assert!(cap_strs.contains(&"annas.search"));
+        assert!(cap_strs.contains(&"annas.read"));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn health_requests_and_errors_tracked() {
+        let mut c = connector();
+        c.handle_configure(json!({})).await.unwrap();
+        c.handle_handshake(json!({})).await.unwrap();
+        c.request_count.fetch_add(5, Ordering::Relaxed);
+        c.error_count.fetch_add(2, Ordering::Relaxed);
+        let resp = c.handle_health().await.unwrap();
+        assert_eq!(resp["requests"], 5);
+        assert_eq!(resp["errors"], 2);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn doctor_unconfigured() {
+        let c = connector();
+        let resp = c.handle_doctor().await.unwrap();
+        assert_eq!(resp["status"], "unconfigured");
+        let checks = resp["checks"].as_array().unwrap();
+        let config_check = &checks[0];
+        assert_eq!(config_check["name"], "configuration");
+        assert_eq!(config_check["passed"], false);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn doctor_configured() {
+        let mut c = connector();
+        c.handle_configure(json!({})).await.unwrap();
+        let resp = c.handle_doctor().await.unwrap();
+        assert_eq!(resp["status"], "healthy");
+        let checks = resp["checks"].as_array().unwrap();
+        let config_check = &checks[0];
+        assert_eq!(config_check["passed"], true);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn doctor_no_auth_check_always_passes() {
+        let c = connector();
+        let resp = c.handle_doctor().await.unwrap();
+        let checks = resp["checks"].as_array().unwrap();
+        let no_auth = checks.iter().find(|c| c["name"] == "no_auth_required").unwrap();
+        assert_eq!(no_auth["passed"], true);
+        assert_eq!(no_auth["critical"], false);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn self_check_unconfigured() {
+        let c = connector();
+        let resp = c.handle_self_check().await.unwrap();
+        assert_eq!(resp["connector_id"], "fcp.annas-archive");
+        assert_eq!(resp["version"], "0.1.0");
+        assert_eq!(resp["status"], "unconfigured");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn self_check_ready() {
+        let mut c = connector();
+        c.handle_configure(json!({})).await.unwrap();
+        let resp = c.handle_self_check().await.unwrap();
+        assert_eq!(resp["status"], "ready");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn introspect_operations_all_safe() {
+        let c = connector();
+        let resp = c.handle_introspect().await.unwrap();
+        for op in resp["operations"].as_array().unwrap() {
+            assert_eq!(op["safety_tier"], "safe");
+            assert_eq!(op["risk_level"], "low");
+            assert_eq!(op["idempotency"], "strict");
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn simulate_all_known_operations() {
+        let c = connector();
+        for op in ["annas.search", "annas.metadata", "annas.lookup.isbn", "annas.lookup.md5"] {
+            let resp = c
+                .handle_simulate(json!({"operation_id": op}))
+                .await
+                .unwrap();
+            assert_eq!(resp["allowed"], true, "{op} should be allowed");
+            assert_eq!(resp["reason"], "Operation supported");
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn simulate_empty_operation() {
+        let c = connector();
+        let resp = c.handle_simulate(json!({})).await.unwrap();
+        assert_eq!(resp["allowed"], false);
+        assert_eq!(resp["reason"], "Unknown operation");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn shutdown_clears_client() {
+        let mut c = connector();
+        c.handle_configure(json!({})).await.unwrap();
+        assert!(c.client.is_some());
+        c.handle_shutdown(json!({})).await.unwrap();
+        assert!(c.client.is_none());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn shutdown_idempotent() {
+        let mut c = connector();
+        c.handle_shutdown(json!({})).await.unwrap();
+        c.handle_shutdown(json!({})).await.unwrap();
+        assert!(c.client.is_none());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn invoke_configured_but_not_handshaken() {
+        let mut c = connector();
+        c.handle_configure(json!({})).await.unwrap();
+        let err = c
+            .handle_invoke(json!({"operation_id": "annas.search", "input": {"query": "test"}}))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, FcpError::NotHandshaken));
+    }
+
+    #[test]
+    fn require_str_empty_string() {
+        let input = json!({"query": ""});
+        assert_eq!(require_str(&input, "query").unwrap(), "");
+    }
+
+    #[test]
+    fn require_str_array_value() {
+        let input = json!({"query": [1, 2]});
+        assert!(require_str(&input, "query").is_err());
+    }
+
+    #[test]
+    fn require_str_bool_value() {
+        let input = json!({"query": true});
+        assert!(require_str(&input, "query").is_err());
+    }
+
+    #[test]
+    fn require_str_object_value() {
+        let input = json!({"query": {"nested": "v"}});
+        assert!(require_str(&input, "query").is_err());
+    }
+
+    #[test]
+    fn operations_info_ids_unique() {
+        let ops = operations_info();
+        let ids: Vec<&str> = ops
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|o| o["id"].as_str())
+            .collect();
+        let mut unique = ids.clone();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(ids.len(), unique.len());
+    }
+
+    #[test]
+    fn operations_info_all_have_required_fields() {
+        let ops = operations_info();
+        for op in ops.as_array().unwrap() {
+            assert!(op.get("id").is_some());
+            assert!(op.get("summary").is_some());
+            assert!(op.get("capability").is_some());
+            assert!(op.get("risk_level").is_some());
+            assert!(op.get("safety_tier").is_some());
+            assert!(op.get("idempotency").is_some());
+        }
+    }
+
+    #[test]
+    fn operations_info_contains_expected_ids() {
+        let ops = operations_info();
+        let ids: Vec<&str> = ops
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|o| o["id"].as_str())
+            .collect();
+        assert!(ids.contains(&"annas.search"));
+        assert!(ids.contains(&"annas.metadata"));
+        assert!(ids.contains(&"annas.lookup.isbn"));
+        assert!(ids.contains(&"annas.lookup.md5"));
+    }
+
+    #[test]
+    fn request_count_multiple_increments() {
+        let c = connector();
+        for _ in 0..10 {
+            c.request_count.fetch_add(1, Ordering::Relaxed);
+        }
+        assert_eq!(c.request_count.load(Ordering::Relaxed), 10);
+    }
 }

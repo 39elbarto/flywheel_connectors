@@ -147,4 +147,65 @@ mod tests {
     fn default_base_url_correct() {
         assert_eq!(DEFAULT_BASE_URL, "https://annas-archive.org");
     }
+
+    #[test]
+    fn client_new_default_url() {
+        let client = AnnasArchiveClient::new(None).unwrap();
+        assert_eq!(client.base_url, DEFAULT_BASE_URL);
+    }
+
+    #[test]
+    fn client_new_custom_url() {
+        let client = AnnasArchiveClient::new(Some("https://mirror.example.com")).unwrap();
+        assert_eq!(client.base_url, "https://mirror.example.com");
+    }
+
+    #[test]
+    fn client_new_strips_trailing_slash() {
+        let client = AnnasArchiveClient::new(Some("https://example.com/")).unwrap();
+        assert_eq!(client.base_url, "https://example.com");
+    }
+
+    #[test]
+    fn client_new_no_trailing_slash_unchanged() {
+        let client = AnnasArchiveClient::new(Some("https://example.com")).unwrap();
+        assert_eq!(client.base_url, "https://example.com");
+    }
+
+    #[test]
+    fn client_debug_shows_base_url() {
+        let client = AnnasArchiveClient::new(Some("https://test.example.com")).unwrap();
+        let dbg = format!("{client:?}");
+        assert!(dbg.contains("AnnasArchiveClient"));
+        assert!(dbg.contains("test.example.com"));
+    }
+
+    #[test]
+    fn client_new_empty_url() {
+        let client = AnnasArchiveClient::new(Some("")).unwrap();
+        assert_eq!(client.base_url, "");
+    }
+
+    #[test]
+    fn client_debug_default_url() {
+        let client = AnnasArchiveClient::new(None).unwrap();
+        let dbg = format!("{client:?}");
+        assert!(dbg.contains("annas-archive.org"));
+    }
+
+    #[test]
+    fn default_base_url_is_https() {
+        assert!(DEFAULT_BASE_URL.starts_with("https://"));
+    }
+
+    #[test]
+    fn default_base_url_no_trailing_slash() {
+        assert!(!DEFAULT_BASE_URL.ends_with('/'));
+    }
+
+    #[test]
+    fn client_new_multiple_trailing_slashes() {
+        let client = AnnasArchiveClient::new(Some("https://x.com///")).unwrap();
+        assert!(client.base_url.ends_with("//"));
+    }
 }

@@ -215,4 +215,215 @@ mod tests {
         assert!(e.message.is_none());
         assert!(e.detail.is_none());
     }
+
+    #[test]
+    fn scenario_clone() {
+        let s = Scenario {
+            id: 1,
+            name: Some("Test".into()),
+            description: None,
+            is_enabled: Some(true),
+            team_id: Some(5),
+        };
+        let c = s.clone();
+        assert_eq!(c.id, s.id);
+        assert_eq!(c.name, s.name);
+        assert_eq!(c.is_enabled, s.is_enabled);
+    }
+
+    #[test]
+    fn scenario_debug() {
+        let s = Scenario {
+            id: 42,
+            name: Some("Debug Test".into()),
+            description: None,
+            is_enabled: None,
+            team_id: None,
+        };
+        let dbg = format!("{s:?}");
+        assert!(dbg.contains("Scenario"));
+        assert!(dbg.contains("42"));
+    }
+
+    #[test]
+    fn execution_clone() {
+        let e = Execution {
+            id: 10,
+            scenario_id: Some(5),
+            status: Some("done".into()),
+            started: None,
+            finished: None,
+        };
+        let c = e.clone();
+        assert_eq!(c.id, e.id);
+        assert_eq!(c.status, e.status);
+    }
+
+    #[test]
+    fn execution_debug() {
+        let e = Execution {
+            id: 99,
+            scenario_id: None,
+            status: Some("running".into()),
+            started: None,
+            finished: None,
+        };
+        let dbg = format!("{e:?}");
+        assert!(dbg.contains("Execution"));
+        assert!(dbg.contains("running"));
+    }
+
+    #[test]
+    fn scenario_run_result_clone() {
+        let r = ScenarioRunResult {
+            execution_id: Some("exec_1".into()),
+        };
+        let c = r.clone();
+        assert_eq!(c.execution_id, r.execution_id);
+    }
+
+    #[test]
+    fn scenario_run_result_debug() {
+        let r = ScenarioRunResult {
+            execution_id: Some("exec_abc".into()),
+        };
+        let dbg = format!("{r:?}");
+        assert!(dbg.contains("ScenarioRunResult"));
+    }
+
+    #[test]
+    fn api_error_clone() {
+        let e = ApiErrorResponse {
+            message: Some("err".into()),
+            detail: None,
+        };
+        let c = e.clone();
+        assert_eq!(c.message, e.message);
+    }
+
+    #[test]
+    fn api_error_debug() {
+        let e = ApiErrorResponse {
+            message: Some("test".into()),
+            detail: None,
+        };
+        let dbg = format!("{e:?}");
+        assert!(dbg.contains("ApiErrorResponse"));
+    }
+
+    #[test]
+    fn scenario_from_json_string() {
+        let s: Scenario =
+            serde_json::from_str(r#"{"id":7,"name":"FromStr"}"#).unwrap();
+        assert_eq!(s.id, 7);
+        assert_eq!(s.name, Some("FromStr".into()));
+    }
+
+    #[test]
+    fn execution_from_json_string() {
+        let e: Execution =
+            serde_json::from_str(r#"{"id":3,"status":"failed"}"#).unwrap();
+        assert_eq!(e.id, 3);
+        assert_eq!(e.status, Some("failed".into()));
+    }
+
+    #[test]
+    fn scenario_missing_id_fails() {
+        assert!(serde_json::from_value::<Scenario>(json!({"name": "x"})).is_err());
+    }
+
+    #[test]
+    fn execution_missing_id_fails() {
+        assert!(serde_json::from_value::<Execution>(json!({"status": "ok"})).is_err());
+    }
+
+    #[test]
+    fn scenario_run_result_extra_fields_ignored() {
+        let r: ScenarioRunResult =
+            serde_json::from_value(json!({"executionId": "e1", "extra": true})).unwrap();
+        assert_eq!(r.execution_id, Some("e1".into()));
+    }
+
+    #[test]
+    fn scenario_unicode_name() {
+        let s: Scenario = serde_json::from_value(json!({"id": 1, "name": "日本語テスト"})).unwrap();
+        assert_eq!(s.name, Some("日本語テスト".into()));
+    }
+
+    #[test]
+    fn execution_all_statuses() {
+        for status in ["success", "failed", "running", "waiting", "cancelled"] {
+            let e: Execution =
+                serde_json::from_value(json!({"id": 1, "status": status})).unwrap();
+            assert_eq!(e.status.as_deref(), Some(status));
+        }
+    }
+
+    #[test]
+    fn scenario_is_enabled_false() {
+        let s: Scenario =
+            serde_json::from_value(json!({"id": 1, "isEnabled": false})).unwrap();
+        assert_eq!(s.is_enabled, Some(false));
+    }
+
+    #[test]
+    fn scenario_negative_id() {
+        let s: Scenario = serde_json::from_value(json!({"id": -1})).unwrap();
+        assert_eq!(s.id, -1);
+    }
+
+    #[test]
+    fn scenario_roundtrip_preserves_rename() {
+        let s = Scenario {
+            id: 1,
+            name: None,
+            description: None,
+            is_enabled: Some(true),
+            team_id: Some(42),
+        };
+        let v = serde_json::to_value(&s).unwrap();
+        assert!(v.get("isEnabled").is_some());
+        assert!(v.get("is_enabled").is_none());
+        assert!(v.get("teamId").is_some());
+        assert!(v.get("team_id").is_none());
+    }
+
+    #[test]
+    fn execution_roundtrip_preserves_rename() {
+        let e = Execution {
+            id: 1,
+            scenario_id: Some(10),
+            status: None,
+            started: None,
+            finished: None,
+        };
+        let v = serde_json::to_value(&e).unwrap();
+        assert!(v.get("scenarioId").is_some());
+        assert!(v.get("scenario_id").is_none());
+    }
+
+    #[test]
+    fn scenario_run_result_preserves_rename() {
+        let r = ScenarioRunResult {
+            execution_id: Some("e1".into()),
+        };
+        let v = serde_json::to_value(&r).unwrap();
+        assert!(v.get("executionId").is_some());
+        assert!(v.get("execution_id").is_none());
+    }
+
+    #[test]
+    fn api_error_response_extra_fields() {
+        let e: ApiErrorResponse =
+            serde_json::from_value(json!({"message": "m", "unknown": 42})).unwrap();
+        assert_eq!(e.message, Some("m".into()));
+    }
+
+    #[test]
+    fn api_error_response_null_fields() {
+        let e: ApiErrorResponse =
+            serde_json::from_value(json!({"message": null, "detail": null})).unwrap();
+        assert!(e.message.is_none());
+        assert!(e.detail.is_none());
+    }
 }

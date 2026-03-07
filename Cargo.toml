@@ -106,6 +106,7 @@ members = [
     "connectors/kubernetes",
     "connectors/terraform",
     "connectors/annas-archive",
+    "connectors/make",
 ]
 
 # Default to the FCP2 platform core crates (connectors are explicitly targeted).

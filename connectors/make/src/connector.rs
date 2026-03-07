@@ -701,4 +701,442 @@ mod tests {
         assert!(c.client.is_none());
         assert!(c.session_id.is_none());
     }
+
+    #[test]
+    fn connector_new_counters_zero() {
+        let c = MakeConnector::new();
+        assert_eq!(c.request_count.load(Ordering::Relaxed), 0);
+        assert_eq!(c.error_count.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn request_count_increments() {
+        let c = MakeConnector::new();
+        c.request_count.fetch_add(1, Ordering::Relaxed);
+        c.request_count.fetch_add(1, Ordering::Relaxed);
+        assert_eq!(c.request_count.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn error_count_increments() {
+        let c = MakeConnector::new();
+        c.error_count.fetch_add(3, Ordering::Relaxed);
+        assert_eq!(c.error_count.load(Ordering::Relaxed), 3);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn configure_with_api_token() {
+        let mut c = MakeConnector::new();
+        let resp = c.handle_configure(json!({"api_token": "tok_test"})).await.unwrap();
+        assert_eq!(resp, json!({}));
+        assert!(c.config.is_some());
+        assert!(c.client.is_some());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn configure_with_credential_id() {
+        let mut c = MakeConnector::new();
+        let resp = c
+            .handle_configure(json!({"credential_id": "550e8400-e29b-41d4-a716-446655440000"}))
+            .await
+            .unwrap();
+        assert_eq!(resp, json!({}));
+        assert!(c.config.is_some());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn configure_rejects_no_auth() {
+        let mut c = MakeConnector::new();
+        let err = c.handle_configure(json!({})).await.unwrap_err();
+        assert!(matches!(err, FcpError::InvalidRequest { .. }));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn configure_rejects_both_auth() {
+        let mut c = MakeConnector::new();
+        let err = c
+            .handle_configure(json!({
+                "api_token": "tok",
+                "credential_id": "550e8400-e29b-41d4-a716-446655440000"
+            }))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, FcpError::InvalidRequest { .. }));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn configure_with_custom_url() {
+        let mut c = MakeConnector::new();
+        c.handle_configure(json!({
+            "api_token": "tok",
+            "base_url": "https://eu1.make.com/api/v2"
+        }))
+        .await
+        .unwrap();
+        let cfg = c.config.as_ref().unwrap();
+        assert_eq!(cfg.base_url, "https://eu1.make.com/api/v2");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn handshake_before_configure_fails() {
+        let mut c = MakeConnector::new();
+        let err = c.handle_handshake(json!({})).await.unwrap_err();
+        assert!(matches!(err, FcpError::InvalidRequest { .. }));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn handshake_after_configure_succeeds() {
+        let mut c = MakeConnector::new();
+        c.handle_configure(json!({"api_token": "tok"})).await.unwrap();
+        let resp = c.handle_handshake(json!({})).await.unwrap();
+        assert_eq!(resp["protocol_version"], "2.0");
+        assert_eq!(resp["connector_id"], "fcp.make");
+        assert_eq!(resp["connector_version"], "0.1.0");
+        let caps = resp["capabilities"].as_array().unwrap();
+        assert_eq!(caps.len(), 3);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn handshake_stores_session_id() {
+        let mut c = MakeConnector::new();
+        c.handle_configure(json!({"api_token": "tok"})).await.unwrap();
+        c.handle_handshake(json!({"session_id": "sess-42"})).await.unwrap();
+        assert_eq!(c.session_id.as_deref(), Some("sess-42"));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn handshake_no_session_id() {
+        let mut c = MakeConnector::new();
+        c.handle_configure(json!({"api_token": "tok"})).await.unwrap();
+        c.handle_handshake(json!({})).await.unwrap();
+        assert!(c.session_id.is_none());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn health_unconfigured() {
+        let c = MakeConnector::new();
+        let resp = c.handle_health().await.unwrap();
+        assert_eq!(resp["status"], "unconfigured");
+        assert_eq!(resp["configured"], false);
+        assert_eq!(resp["handshaken"], false);
+        assert_eq!(resp["requests"], 0);
+        assert_eq!(resp["errors"], 0);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn health_configured_not_handshaken() {
+        let mut c = MakeConnector::new();
+        c.handle_configure(json!({"api_token": "tok"})).await.unwrap();
+        let resp = c.handle_health().await.unwrap();
+        assert_eq!(resp["status"], "degraded");
+        assert_eq!(resp["configured"], true);
+        assert_eq!(resp["handshaken"], false);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn health_fully_ready() {
+        let mut c = MakeConnector::new();
+        c.handle_configure(json!({"api_token": "tok"})).await.unwrap();
+        c.handle_handshake(json!({})).await.unwrap();
+        let resp = c.handle_health().await.unwrap();
+        assert_eq!(resp["status"], "healthy");
+        assert_eq!(resp["configured"], true);
+        assert_eq!(resp["handshaken"], true);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn doctor_unconfigured() {
+        let c = MakeConnector::new();
+        let resp = c.handle_doctor().await.unwrap();
+        assert_eq!(resp["status"], "unhealthy");
+        let checks = resp["checks"].as_array().unwrap();
+        assert!(checks.len() >= 2);
+        let config_check = &checks[0];
+        assert_eq!(config_check["passed"], false);
+        assert_eq!(config_check["critical"], true);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn doctor_configured_not_handshaken() {
+        let mut c = MakeConnector::new();
+        c.handle_configure(json!({"api_token": "tok"})).await.unwrap();
+        let resp = c.handle_doctor().await.unwrap();
+        assert_eq!(resp["status"], "degraded");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn doctor_fully_ready() {
+        let mut c = MakeConnector::new();
+        c.handle_configure(json!({"api_token": "tok"})).await.unwrap();
+        c.handle_handshake(json!({})).await.unwrap();
+        let resp = c.handle_doctor().await.unwrap();
+        assert_eq!(resp["status"], "healthy");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn self_check_unconfigured() {
+        let c = MakeConnector::new();
+        let resp = c.handle_self_check().await.unwrap();
+        assert_eq!(resp["connector_id"], "fcp.make");
+        assert_eq!(resp["status"], "unconfigured");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn self_check_configured() {
+        let mut c = MakeConnector::new();
+        c.handle_configure(json!({"api_token": "tok"})).await.unwrap();
+        let resp = c.handle_self_check().await.unwrap();
+        assert_eq!(resp["status"], "ready");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn introspect_returns_operations() {
+        let c = MakeConnector::new();
+        let resp = c.handle_introspect().await.unwrap();
+        assert_eq!(resp["connector_id"], "fcp.make");
+        let ops = resp["operations"].as_array().unwrap();
+        assert_eq!(ops.len(), 3);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn invoke_requires_ready() {
+        let c = MakeConnector::new();
+        let err = c
+            .handle_invoke(json!({"operation_id": "make.scenarios.list"}))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, FcpError::NotConfigured | FcpError::NotHandshaken));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn invoke_missing_operation_id() {
+        let mut c = MakeConnector::new();
+        c.handle_configure(json!({"api_token": "tok"})).await.unwrap();
+        c.handle_handshake(json!({})).await.unwrap();
+        let err = c.handle_invoke(json!({"input": {}})).await.unwrap_err();
+        assert!(matches!(err, FcpError::InvalidRequest { .. }));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn invoke_unknown_operation() {
+        let mut c = MakeConnector::new();
+        c.handle_configure(json!({"api_token": "tok"})).await.unwrap();
+        c.handle_handshake(json!({})).await.unwrap();
+        let err = c
+            .handle_invoke(json!({"operation_id": "make.nonexistent"}))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, FcpError::InvalidRequest { .. }));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn simulate_known_operations() {
+        let c = MakeConnector::new();
+        for op in ["make.scenarios.list", "make.scenarios.run", "make.executions.list"] {
+            let resp = c.handle_simulate(json!({"operation_id": op})).await.unwrap();
+            assert_eq!(resp["allowed"], true, "op {op} should be allowed");
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn simulate_unknown_operation() {
+        let c = MakeConnector::new();
+        let resp = c
+            .handle_simulate(json!({"operation_id": "make.unknown"}))
+            .await
+            .unwrap();
+        assert_eq!(resp["allowed"], false);
+        assert_eq!(resp["reason"], "Unknown operation");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn simulate_empty_operation() {
+        let c = MakeConnector::new();
+        let resp = c.handle_simulate(json!({})).await.unwrap();
+        assert_eq!(resp["allowed"], false);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn shutdown_clears_state() {
+        let mut c = MakeConnector::new();
+        c.handle_configure(json!({"api_token": "tok"})).await.unwrap();
+        c.handle_handshake(json!({"session_id": "s1"})).await.unwrap();
+        assert!(c.config.is_some());
+        assert!(c.client.is_some());
+
+        c.handle_shutdown(json!({})).await.unwrap();
+        assert!(c.config.is_none());
+        assert!(c.client.is_none());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn shutdown_idempotent() {
+        let mut c = MakeConnector::new();
+        c.handle_shutdown(json!({})).await.unwrap();
+        c.handle_shutdown(json!({})).await.unwrap();
+        assert!(c.config.is_none());
+    }
+
+    #[test]
+    fn doctor_check_serde_skips_none_message() {
+        let check = DoctorCheck {
+            name: "test".into(),
+            passed: true,
+            message: None,
+            critical: false,
+        };
+        let v = serde_json::to_value(&check).unwrap();
+        assert!(!v.as_object().unwrap().contains_key("message"));
+    }
+
+    #[test]
+    fn doctor_check_serde_includes_message() {
+        let check = DoctorCheck {
+            name: "test".into(),
+            passed: false,
+            message: Some("not ok".into()),
+            critical: true,
+        };
+        let v = serde_json::to_value(&check).unwrap();
+        assert_eq!(v["message"], "not ok");
+    }
+
+    #[test]
+    fn doctor_status_serde_values() {
+        assert_eq!(
+            serde_json::to_value(DoctorStatus::Healthy).unwrap(),
+            "healthy"
+        );
+        assert_eq!(
+            serde_json::to_value(DoctorStatus::Degraded).unwrap(),
+            "degraded"
+        );
+        assert_eq!(
+            serde_json::to_value(DoctorStatus::Unhealthy).unwrap(),
+            "unhealthy"
+        );
+    }
+
+    #[test]
+    fn doctor_status_deserialize() {
+        let h: DoctorStatus = serde_json::from_value(json!("healthy")).unwrap();
+        assert_eq!(h, DoctorStatus::Healthy);
+        let d: DoctorStatus = serde_json::from_value(json!("degraded")).unwrap();
+        assert_eq!(d, DoctorStatus::Degraded);
+        let u: DoctorStatus = serde_json::from_value(json!("unhealthy")).unwrap();
+        assert_eq!(u, DoctorStatus::Unhealthy);
+    }
+
+    #[test]
+    fn doctor_result_multiple_critical_failures() {
+        let checks = vec![
+            DoctorCheck { name: "a".into(), passed: false, message: None, critical: true },
+            DoctorCheck { name: "b".into(), passed: false, message: None, critical: true },
+        ];
+        let r = DoctorResult::from_checks(checks);
+        assert_eq!(r.status, DoctorStatus::Unhealthy);
+        assert_eq!(r.checks.len(), 2);
+    }
+
+    #[test]
+    fn doctor_result_clone() {
+        let r = DoctorResult::from_checks(vec![DoctorCheck {
+            name: "x".into(),
+            passed: true,
+            message: None,
+            critical: false,
+        }]);
+        let c = r.clone();
+        assert_eq!(c.status, r.status);
+        assert_eq!(c.checks.len(), r.checks.len());
+    }
+
+    #[test]
+    fn doctor_result_debug() {
+        let r = DoctorResult::from_checks(vec![]);
+        let dbg = format!("{r:?}");
+        assert!(dbg.contains("DoctorResult"));
+    }
+
+    #[test]
+    fn config_api_token_trimmed() {
+        let c = MakeConfig::from_params(&json!({"api_token": "  key  "})).unwrap();
+        match &c.auth {
+            MakeAuth::ApiToken(k) => assert_eq!(k, "key"),
+            _ => panic!("expected ApiToken"),
+        }
+    }
+
+    #[test]
+    fn config_default_base_url_when_absent() {
+        let c = MakeConfig::from_params(&json!({"api_token": "tok"})).unwrap();
+        assert_eq!(c.base_url, DEFAULT_BASE_URL);
+    }
+
+    #[test]
+    fn require_str_array_value() {
+        let input = json!({"scenario_id": [1, 2]});
+        assert!(require_str(&input, "scenario_id").is_err());
+    }
+
+    #[test]
+    fn require_str_bool_value() {
+        let input = json!({"scenario_id": true});
+        assert!(require_str(&input, "scenario_id").is_err());
+    }
+
+    #[test]
+    fn require_str_object_value() {
+        let input = json!({"scenario_id": {"nested": "val"}});
+        assert!(require_str(&input, "scenario_id").is_err());
+    }
+
+    #[test]
+    fn require_str_empty_string() {
+        let input = json!({"scenario_id": ""});
+        assert_eq!(require_str(&input, "scenario_id").unwrap(), "");
+    }
+
+    #[test]
+    fn operations_write_ops_are_risky() {
+        let ops = operations_info();
+        for op in ops.as_array().unwrap() {
+            let cap = op["capability"].as_str().unwrap();
+            if cap.ends_with(".write") {
+                assert_eq!(
+                    op["safety_tier"].as_str().unwrap(),
+                    "risky",
+                    "write op {} should be risky",
+                    op["id"]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn operations_scenarios_run_is_not_idempotent() {
+        let ops = operations_info();
+        let run_op = ops
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["id"] == "make.scenarios.run")
+            .unwrap();
+        assert_eq!(run_op["idempotency"], "none");
+    }
+
+    #[test]
+    fn operations_list_ops_are_strict_idempotent() {
+        let ops = operations_info();
+        for op in ops.as_array().unwrap() {
+            let id = op["id"].as_str().unwrap();
+            if id.contains("list") {
+                assert_eq!(
+                    op["idempotency"].as_str().unwrap(),
+                    "strict",
+                    "list op {id} should be strict"
+                );
+            }
+        }
+    }
 }

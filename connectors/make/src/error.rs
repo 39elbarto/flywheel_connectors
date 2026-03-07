@@ -307,4 +307,136 @@ mod tests {
             "Make API error (500): Internal"
         );
     }
+
+    #[test]
+    fn api_501_is_retryable() {
+        assert!(MakeError::Api { status_code: 501, message: "not impl".into() }.is_retryable());
+    }
+
+    #[test]
+    fn api_599_is_retryable() {
+        assert!(MakeError::Api { status_code: 599, message: "edge".into() }.is_retryable());
+    }
+
+    #[test]
+    fn api_600_not_retryable() {
+        assert!(!MakeError::Api { status_code: 600, message: "over".into() }.is_retryable());
+    }
+
+    #[test]
+    fn api_499_not_retryable() {
+        assert!(!MakeError::Api { status_code: 499, message: "x".into() }.is_retryable());
+    }
+
+    #[test]
+    fn json_not_retryable() {
+        let inner = serde_json::from_str::<serde_json::Value>("{bad").unwrap_err();
+        assert!(!MakeError::Json(inner).is_retryable());
+    }
+
+    #[test]
+    fn json_retry_after_none() {
+        let inner = serde_json::from_str::<serde_json::Value>("{bad").unwrap_err();
+        assert!(MakeError::Json(inner).retry_after().is_none());
+    }
+
+    #[test]
+    fn retry_after_zero_ms() {
+        let err = MakeError::RateLimited { retry_after_ms: 0 };
+        assert_eq!(err.retry_after(), Some(Duration::from_millis(0)));
+    }
+
+    #[test]
+    fn retry_after_large_value() {
+        let err = MakeError::RateLimited { retry_after_ms: 3_600_000 };
+        assert_eq!(err.retry_after(), Some(Duration::from_secs(3600)));
+    }
+
+    #[test]
+    fn json_error_to_fcp_is_internal() {
+        let inner = serde_json::from_str::<serde_json::Value>("nope").unwrap_err();
+        match MakeError::Json(inner).to_fcp_error() {
+            FcpError::Internal { message } => assert!(message.contains("JSON")),
+            other => panic!("expected Internal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn api_non_retryable_to_fcp_has_no_retry_after() {
+        match (MakeError::Api { status_code: 400, message: "bad".into() }).to_fcp_error() {
+            FcpError::External { retry_after, .. } => assert!(retry_after.is_none()),
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn not_found_to_fcp_status_404() {
+        match (MakeError::NotFound { resource: "x".into() }).to_fcp_error() {
+            FcpError::External { status_code, retryable, service, .. } => {
+                assert_eq!(status_code, Some(404));
+                assert!(!retryable);
+                assert_eq!(service, "make");
+            }
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn error_debug_all_variants() {
+        let dbg_api = format!("{:?}", MakeError::Api { status_code: 500, message: "x".into() });
+        assert!(dbg_api.contains("Api"));
+
+        let dbg_rl = format!("{:?}", MakeError::RateLimited { retry_after_ms: 1000 });
+        assert!(dbg_rl.contains("RateLimited"));
+
+        let dbg_unauth = format!("{:?}", MakeError::Unauthorized);
+        assert!(dbg_unauth.contains("Unauthorized"));
+
+        let dbg_forbidden = format!("{:?}", MakeError::Forbidden);
+        assert!(dbg_forbidden.contains("Forbidden"));
+
+        let dbg_nf = format!("{:?}", MakeError::NotFound { resource: "s".into() });
+        assert!(dbg_nf.contains("NotFound"));
+    }
+
+    #[test]
+    fn rate_limited_display_contains_ms() {
+        let err = MakeError::RateLimited { retry_after_ms: 42_000 };
+        assert!(err.to_string().contains("42000"));
+    }
+
+    #[test]
+    fn api_error_empty_message() {
+        let err = MakeError::Api { status_code: 418, message: String::new() };
+        let s = err.to_string();
+        assert!(s.contains("418"));
+    }
+
+    #[test]
+    fn not_found_empty_resource() {
+        let err = MakeError::NotFound { resource: String::new() };
+        assert!(err.to_string().contains("Not found:"));
+    }
+
+    #[test]
+    fn unauthorized_to_fcp_not_retryable() {
+        match MakeError::Unauthorized.to_fcp_error() {
+            FcpError::External { retryable, retry_after, .. } => {
+                assert!(!retryable);
+                assert!(retry_after.is_none());
+            }
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn forbidden_to_fcp_not_retryable() {
+        match MakeError::Forbidden.to_fcp_error() {
+            FcpError::External { retryable, retry_after, .. } => {
+                assert!(!retryable);
+                assert!(retry_after.is_none());
+            }
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
 }

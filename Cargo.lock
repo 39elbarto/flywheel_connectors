@@ -2376,6 +2376,7 @@ dependencies = [
  "chrono",
  "fcp-airtable",
  "fcp-anthropic",
+ "fcp-arxiv",
  "fcp-async-core",
  "fcp-browser",
  "fcp-conformance",
@@ -2884,6 +2885,23 @@ dependencies = [
  "anyhow",
  "async-trait",
  "base64 0.22.1",
+ "fcp-async-core",
+ "fcp-core",
+ "reqwest 0.13.2",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tracing",
+ "tracing-subscriber",
+ "wiremock",
+]
+
+[[package]]
+name = "fcp-make"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
  "fcp-async-core",
  "fcp-core",
  "reqwest 0.13.2",

@@ -38,6 +38,55 @@ llm_router = []
 twilio = []
 cron = []
 semanticscholar = []
+reddit = []
+sentry = []
+hubspot = []
+homeassistant = []
+docusign = []
+spotify = []
+kubernetes = []
+terraform = []
+pulumi = []
+pandadoc = []
+bitwarden = []
+intercom = []
+onepassword = []
+algolia = []
+amplitude = []
+annas_archive = []
+asana = []
+bigquery = []
+bitbucket = []
+box_connector = []
+clickup = []
+datadog = []
+dropbox = []
+duckdb = []
+elasticsearch = []
+evernote = []
+gitlab = []
+grafana = []
+linkedin = []
+logseq = []
+mailchimp = []
+make = []
+mcp_bridge = []
+metabase = []
+mixpanel = []
+monday = []
+mongodb = []
+n8n = []
+posthog = []
+retool = []
+roam = []
+salesforce = []
+segment = []
+sendgrid = []
+snowflake = []
+todoist = []
+trello = []
+webhook_receiver = []
+zapier = []
 
 [dependencies]
 fcp-core = { workspace = true }
@@ -82,6 +131,55 @@ fcp-llm-router = { path = "../../connectors/llm-router", features = ["testing"] 
 fcp-twilio = { path = "../../connectors/twilio" }
 fcp-cron = { path = "../../connectors/cron" }
 fcp-semanticscholar = { path = "../../connectors/semanticscholar" }
+fcp-reddit = { path = "../../connectors/reddit" }
+fcp-sentry = { path = "../../connectors/sentry" }
+fcp-hubspot = { path = "../../connectors/hubspot" }
+fcp-homeassistant = { path = "../../connectors/homeassistant" }
+fcp-docusign = { path = "../../connectors/docusign" }
+fcp-spotify = { path = "../../connectors/spotify" }
+fcp-kubernetes = { path = "../../connectors/kubernetes" }
+fcp-terraform = { path = "../../connectors/terraform" }
+fcp-pulumi = { path = "../../connectors/pulumi" }
+fcp-pandadoc = { path = "../../connectors/pandadoc" }
+fcp-bitwarden = { path = "../../connectors/bitwarden" }
+fcp-intercom = { path = "../../connectors/intercom" }
+fcp-onepassword = { path = "../../connectors/1password" }
+fcp-algolia = { path = "../../connectors/algolia" }
+fcp-amplitude = { path = "../../connectors/amplitude" }
+fcp-annas-archive = { path = "../../connectors/annas-archive" }
+fcp-asana = { path = "../../connectors/asana" }
+fcp-bigquery = { path = "../../connectors/bigquery" }
+fcp-bitbucket = { path = "../../connectors/bitbucket" }
+fcp-box = { path = "../../connectors/box" }
+fcp-clickup = { path = "../../connectors/clickup" }
+fcp-datadog = { path = "../../connectors/datadog" }
+fcp-dropbox = { path = "../../connectors/dropbox" }
+fcp-duckdb = { path = "../../connectors/duckdb" }
+fcp-elasticsearch = { path = "../../connectors/elasticsearch" }
+fcp-evernote = { path = "../../connectors/evernote" }
+fcp-gitlab = { path = "../../connectors/gitlab" }
+fcp-grafana = { path = "../../connectors/grafana" }
+fcp-linkedin = { path = "../../connectors/linkedin" }
+fcp-logseq = { path = "../../connectors/logseq" }
+fcp-mailchimp = { path = "../../connectors/mailchimp" }
+fcp-make = { path = "../../connectors/make" }
+fcp-mcp-bridge = { path = "../../connectors/mcp-bridge" }
+fcp-metabase = { path = "../../connectors/metabase" }
+fcp-mixpanel = { path = "../../connectors/mixpanel" }
+fcp-monday = { path = "../../connectors/monday" }
+fcp-mongodb = { path = "../../connectors/mongodb" }
+fcp-n8n = { path = "../../connectors/n8n" }
+fcp-posthog = { path = "../../connectors/posthog" }
+fcp-retool = { path = "../../connectors/retool" }
+fcp-roam = { path = "../../connectors/roam" }
+fcp-salesforce = { path = "../../connectors/salesforce" }
+fcp-segment = { path = "../../connectors/segment" }
+fcp-sendgrid = { path = "../../connectors/sendgrid" }
+fcp-snowflake = { path = "../../connectors/snowflake" }
+fcp-todoist = { path = "../../connectors/todoist" }
+fcp-trello = { path = "../../connectors/trello" }
+fcp-webhook-receiver = { path = "../../connectors/webhook-receiver" }
+fcp-zapier = { path = "../../connectors/zapier" }
 pretty_assertions = { workspace = true }
 reqwest = { workspace = true }
 fcp-manifest = { workspace = true }

@@ -733,6 +733,158 @@ mod tests {
     }
 
     #[test]
+    fn config_clone() {
+        let config = MemoryObjectStoreConfig { max_bytes: 999 };
+        let cloned = config.clone();
+        assert_eq!(cloned.max_bytes, config.max_bytes);
+    }
+
+    #[test]
+    fn config_debug() {
+        let config = MemoryObjectStoreConfig::default();
+        let dbg = format!("{config:?}");
+        assert!(dbg.contains("MemoryObjectStoreConfig"));
+    }
+
+    #[test]
+    fn storage_used_accumulates() {
+        run_store_test(
+            "storage_used_accumulates",
+            "verify",
+            "accounting",
+            2,
+            || async {
+                let store = MemoryObjectStore::new(MemoryObjectStoreConfig::default());
+
+                let obj1 = test_stored_object(1, b"aaaa");
+                let obj2 = test_stored_object(2, b"bbbb");
+
+                store.put(obj1).await.unwrap();
+                let used1 = store.storage_used().await;
+
+                store.put(obj2).await.unwrap();
+                let used2 = store.storage_used().await;
+
+                assert!(used2 > used1);
+                assert_eq!(used2, used1 * 2); // Same size objects
+
+                StoreLogData {
+                    details: Some(json!({"used1": used1, "used2": used2})),
+                    ..StoreLogData::default()
+                }
+            },
+        );
+    }
+
+    #[test]
+    fn get_after_delete_returns_not_found() {
+        run_store_test("get_after_delete", "verify", "read", 1, || async {
+            let store = MemoryObjectStore::new(MemoryObjectStoreConfig::default());
+            let obj = test_stored_object(1, b"data");
+            let id = obj.object_id;
+
+            store.put(obj).await.unwrap();
+            store.delete(&id).await.unwrap();
+
+            let result = store.get(&id).await;
+            assert!(matches!(result, Err(ObjectStoreError::NotFound(_))));
+
+            StoreLogData {
+                object_id: Some(id),
+                details: Some(json!({"get_after_delete": "not_found"})),
+                ..StoreLogData::default()
+            }
+        });
+    }
+
+    #[test]
+    fn set_retention_from_pinned_to_ephemeral() {
+        run_store_test("retention_pinned_to_ephemeral", "verify", "retention", 2, || async {
+            let store = MemoryObjectStore::new(MemoryObjectStoreConfig::default());
+            let obj = test_stored_object(1, b"body");
+            let id = obj.object_id;
+
+            store.put(obj).await.unwrap();
+            store.set_retention(&id, RetentionClass::Pinned).await.unwrap();
+
+            let meta = store.get_storage_meta(&id).await.unwrap();
+            assert!(matches!(meta.retention, RetentionClass::Pinned));
+
+            store.set_retention(&id, RetentionClass::Ephemeral).await.unwrap();
+            let meta = store.get_storage_meta(&id).await.unwrap();
+            assert!(matches!(meta.retention, RetentionClass::Ephemeral));
+
+            StoreLogData {
+                object_id: Some(id),
+                details: Some(json!({"pinned_to_ephemeral": true})),
+                ..StoreLogData::default()
+            }
+        });
+    }
+
+    #[test]
+    fn list_zone_non_matching_empty() {
+        run_store_test("list_zone_non_matching", "verify", "list", 1, || async {
+            let store = MemoryObjectStore::new(MemoryObjectStoreConfig::default());
+            store.put(test_stored_object(1, b"a")).await.unwrap();
+
+            let other_zone: ZoneId = "z:other".parse().unwrap();
+            let ids = store.list_zone(&other_zone).await;
+            assert!(ids.is_empty());
+
+            StoreLogData {
+                details: Some(json!({"non_matching": true})),
+                ..StoreLogData::default()
+            }
+        });
+    }
+
+    #[test]
+    fn multiple_put_delete_storage_returns_zero() {
+        run_store_test("put_delete_cycles", "verify", "accounting", 1, || async {
+            let store = MemoryObjectStore::new(MemoryObjectStoreConfig::default());
+
+            for i in 1..=5 {
+                let obj = test_stored_object(i, &[0_u8; 100]);
+                store.put(obj).await.unwrap();
+            }
+            for i in 1..=5 {
+                store.delete(&ObjectId::from_bytes([i; 32])).await.unwrap();
+            }
+
+            assert_eq!(store.storage_used().await, 0);
+
+            StoreLogData {
+                details: Some(json!({"cycles": 5, "final_used": 0})),
+                ..StoreLogData::default()
+            }
+        });
+    }
+
+    #[test]
+    fn quota_exact_boundary() {
+        run_store_test("quota_exact_boundary", "verify", "write", 2, || async {
+            // Object size = body.len() + 512 header estimate
+            // So a body of 488 bytes → 1000 total
+            let config = MemoryObjectStoreConfig { max_bytes: 1000 };
+            let store = MemoryObjectStore::new(config);
+
+            let obj = test_stored_object(1, &vec![0_u8; 488]);
+            store.put(obj).await.unwrap(); // Exactly at quota
+
+            // Second object should fail
+            let obj2 = test_stored_object(2, b"x");
+            let result = store.put(obj2).await;
+            assert!(matches!(result, Err(ObjectStoreError::QuotaExceeded { .. })));
+
+            StoreLogData {
+                details: Some(json!({"boundary": true})),
+                ..StoreLogData::default()
+            }
+        });
+    }
+
+    #[test]
     fn delete_frees_storage() {
         run_store_test(
             "delete_frees_storage",

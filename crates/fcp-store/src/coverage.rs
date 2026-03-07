@@ -1088,6 +1088,317 @@ mod tests {
     }
 
     #[test]
+    fn coverage_deficit_below_target() {
+        run_store_test("deficit_below_target", "verify", "placement", 1, || {
+            let object_id = test_object_id();
+            let mut dist = SymbolDistribution::new(10);
+            for _ in 0..5 {
+                dist.add_symbol(1, 100);
+            }
+            let eval = CoverageEvaluation::from_distribution(object_id, &dist);
+
+            // 5000 bps coverage, target 10000 → deficit = 5000
+            assert_eq!(eval.coverage_deficit_bps(10_000), 5000);
+
+            StoreLogData {
+                object_id: Some(object_id),
+                coverage_bps: Some(eval.coverage_bps),
+                details: Some(json!({"deficit": 5000})),
+                ..StoreLogData::default()
+            }
+        });
+    }
+
+    #[test]
+    fn symbols_needed_zero_source() {
+        run_store_test("symbols_needed_zero_source", "verify", "placement", 1, || {
+            let object_id = test_object_id();
+            let dist = SymbolDistribution::new(0);
+            let eval = CoverageEvaluation::from_distribution(object_id, &dist);
+
+            // Zero source symbols → always 0 needed
+            assert_eq!(eval.symbols_needed(10_000), 0);
+
+            StoreLogData {
+                details: Some(json!({"zero_source": true})),
+                ..StoreLogData::default()
+            }
+        });
+    }
+
+    #[test]
+    fn from_distribution_many_nodes_even() {
+        run_store_test("many_nodes_even", "verify", "placement", 3, || {
+            let object_id = test_object_id();
+            let mut dist = SymbolDistribution::new(20);
+            // 4 symbols on each of 5 nodes = 20 total
+            for node_id in 1..=5 {
+                for _ in 0..4 {
+                    dist.add_symbol(node_id, 50);
+                }
+            }
+
+            let eval = CoverageEvaluation::from_distribution(object_id, &dist);
+
+            assert_eq!(eval.distinct_nodes, 5);
+            assert_eq!(eval.max_node_fraction_bps, 2000); // 4/20 = 0.2 = 2000bps
+            assert_eq!(eval.coverage_bps, 10_000);
+
+            StoreLogData {
+                object_id: Some(object_id),
+                coverage_bps: Some(eval.coverage_bps),
+                details: Some(json!({"nodes": 5, "even": true})),
+                ..StoreLogData::default()
+            }
+        });
+    }
+
+    #[test]
+    fn meets_policy_fails_target_coverage() {
+        run_store_test("fails_target_coverage", "verify", "placement", 1, || {
+            let object_id = test_object_id();
+            let mut dist = SymbolDistribution::new(10);
+            // Only 5 symbols → 5000 bps
+            for _ in 0..5 {
+                dist.add_symbol(1, 100);
+            }
+
+            let eval = CoverageEvaluation::from_distribution(object_id, &dist);
+
+            let policy = fcp_core::ObjectPlacementPolicy {
+                min_nodes: 1,
+                max_node_fraction_bps: 10_000,
+                preferred_devices: vec![],
+                excluded_devices: vec![],
+                target_coverage_bps: 10_000,
+                min_source_diversity: 0,
+            };
+
+            assert!(!eval.meets_policy(&policy));
+
+            StoreLogData {
+                object_id: Some(object_id),
+                coverage_bps: Some(eval.coverage_bps),
+                details: Some(json!({"fails_target": true})),
+                ..StoreLogData::default()
+            }
+        });
+    }
+
+    #[test]
+    fn meets_diversity_zero_requirement() {
+        run_store_test("diversity_zero_req", "verify", "placement", 1, || {
+            let object_id = test_object_id();
+            let mut dist = SymbolDistribution::new(10);
+            for _ in 0..10 {
+                dist.add_symbol(1, 100);
+            }
+            let eval = CoverageEvaluation::from_distribution(object_id, &dist);
+
+            let policy = fcp_core::ObjectPlacementPolicy {
+                min_nodes: 1,
+                max_node_fraction_bps: 10_000,
+                preferred_devices: vec![],
+                excluded_devices: vec![],
+                target_coverage_bps: 10_000,
+                min_source_diversity: 0, // No diversity requirement
+            };
+
+            // Available + no diversity requirement → passes
+            assert!(eval.meets_diversity_for_reconstruction(&policy));
+
+            StoreLogData {
+                details: Some(json!({"zero_diversity_req": true})),
+                ..StoreLogData::default()
+            }
+        });
+    }
+
+    #[test]
+    fn diversity_bps_exceeds_requirement() {
+        run_store_test("diversity_exceeds", "verify", "placement", 1, || {
+            let object_id = test_object_id();
+            let mut dist = SymbolDistribution::new(10);
+            for node_id in 1..=5 {
+                dist.add_symbol(node_id, 100);
+                dist.add_symbol(node_id, 100);
+            }
+            let eval = CoverageEvaluation::from_distribution(object_id, &dist);
+
+            // Have 5 nodes, need 3 → 10000 (capped)
+            assert_eq!(eval.diversity_bps(3), 10_000);
+
+            StoreLogData {
+                details: Some(json!({"diversity_bps": 10_000})),
+                ..StoreLogData::default()
+            }
+        });
+    }
+
+    #[test]
+    fn remove_symbol_saturating_bytes() {
+        run_store_test("remove_saturating", "verify", "placement", 2, || {
+            let mut dist = SymbolDistribution::new(10);
+            dist.add_symbol(1, 50);
+
+            // Remove more bytes than recorded → saturates to 0
+            dist.remove_symbol(1, 200);
+            assert_eq!(dist.total_symbols, 0);
+            assert!(dist.nodes.is_empty()); // Node removed when count reaches 0
+
+            StoreLogData {
+                details: Some(json!({"saturating": true})),
+                ..StoreLogData::default()
+            }
+        });
+    }
+
+    #[test]
+    fn add_symbol_max_node_symbols() {
+        run_store_test("max_node_symbols", "verify", "placement", 2, || {
+            let mut dist = SymbolDistribution::new(10);
+            for _ in 0..7 {
+                dist.add_symbol(1, 100);
+            }
+            for _ in 0..3 {
+                dist.add_symbol(2, 100);
+            }
+
+            assert_eq!(dist.max_node_symbols(), 7);
+            assert_eq!(dist.total_symbols, 10);
+
+            StoreLogData {
+                details: Some(json!({"max": 7})),
+                ..StoreLogData::default()
+            }
+        });
+    }
+
+    #[test]
+    fn coverage_evaluation_debug() {
+        run_store_test("eval_debug", "verify", "traits", 1, || {
+            let object_id = test_object_id();
+            let dist = SymbolDistribution::new(10);
+            let eval = CoverageEvaluation::from_distribution(object_id, &dist);
+            let dbg = format!("{eval:?}");
+            assert!(dbg.contains("CoverageEvaluation"));
+
+            StoreLogData {
+                details: Some(json!({"debug": true})),
+                ..StoreLogData::default()
+            }
+        });
+    }
+
+    #[test]
+    fn symbol_distribution_debug() {
+        run_store_test("dist_debug", "verify", "traits", 1, || {
+            let dist = SymbolDistribution::new(5);
+            let dbg = format!("{dist:?}");
+            assert!(dbg.contains("SymbolDistribution"));
+
+            StoreLogData {
+                details: Some(json!({"debug": true})),
+                ..StoreLogData::default()
+            }
+        });
+    }
+
+    #[test]
+    fn from_distribution_single_symbol() {
+        run_store_test("single_symbol", "verify", "placement", 3, || {
+            let object_id = test_object_id();
+            let mut dist = SymbolDistribution::new(10);
+            dist.add_symbol(1, 100);
+
+            let eval = CoverageEvaluation::from_distribution(object_id, &dist);
+
+            assert_eq!(eval.distinct_nodes, 1);
+            assert_eq!(eval.coverage_bps, 1000); // 1/10 = 10%
+            assert_eq!(eval.max_node_fraction_bps, 10_000); // 1/1 = 100%
+
+            StoreLogData {
+                object_id: Some(object_id),
+                coverage_bps: Some(eval.coverage_bps),
+                details: Some(json!({"single_symbol": true})),
+                ..StoreLogData::default()
+            }
+        });
+    }
+
+    #[test]
+    fn health_degraded_min_nodes_not_met() {
+        run_store_test("health_degraded_nodes", "verify", "placement", 1, || {
+            let object_id = test_object_id();
+            let mut dist = SymbolDistribution::new(10);
+            for _ in 0..10 {
+                dist.add_symbol(1, 100);
+            }
+            let eval = CoverageEvaluation::from_distribution(object_id, &dist);
+
+            let policy = fcp_core::ObjectPlacementPolicy {
+                min_nodes: 3,
+                max_node_fraction_bps: 10_000,
+                preferred_devices: vec![],
+                excluded_devices: vec![],
+                target_coverage_bps: 10_000,
+                min_source_diversity: 0,
+            };
+
+            // Available but doesn't meet min_nodes → Degraded
+            assert_eq!(eval.health(&policy), CoverageHealth::Degraded);
+
+            StoreLogData {
+                details: Some(json!({"health": "degraded"})),
+                ..StoreLogData::default()
+            }
+        });
+    }
+
+    #[test]
+    fn diversity_deficit_exact_match() {
+        run_store_test("diversity_deficit_exact", "verify", "placement", 1, || {
+            let object_id = test_object_id();
+            let mut dist = SymbolDistribution::new(10);
+            dist.add_symbol(1, 100);
+            dist.add_symbol(2, 100);
+            dist.add_symbol(3, 100);
+            let eval = CoverageEvaluation::from_distribution(object_id, &dist);
+
+            // Have 3, need 3 → deficit 0
+            assert_eq!(eval.diversity_deficit(3), 0);
+
+            StoreLogData {
+                details: Some(json!({"deficit": 0})),
+                ..StoreLogData::default()
+            }
+        });
+    }
+
+    #[test]
+    fn add_remove_cycle() {
+        run_store_test("add_remove_cycle", "verify", "placement", 3, || {
+            let mut dist = SymbolDistribution::new(10);
+
+            dist.add_symbol(1, 100);
+            dist.add_symbol(1, 100);
+            assert_eq!(dist.total_symbols, 2);
+
+            dist.remove_symbol(1, 100);
+            assert_eq!(dist.total_symbols, 1);
+
+            dist.remove_symbol(1, 100);
+            assert_eq!(dist.total_symbols, 0);
+            assert!(dist.nodes.is_empty());
+
+            StoreLogData {
+                details: Some(json!({"cycle": true})),
+                ..StoreLogData::default()
+            }
+        });
+    }
+
+    #[test]
     fn min_source_diversity_in_policy() {
         run_store_test(
             "min_source_diversity_in_policy",

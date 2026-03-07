@@ -1469,6 +1469,213 @@ mod tests {
     }
 
     #[test]
+    fn object_admission_policy_serde_roundtrip() {
+        run_store_test("policy_serde", "verify", "serde", 1, || {
+            let policy = ObjectAdmissionPolicy {
+                max_quarantine_bytes_per_zone: 1024,
+                max_quarantine_objects_per_zone: 50,
+                quarantine_ttl_secs: 7200,
+                require_schema_validation: false,
+            };
+            let json = serde_json::to_string(&policy).unwrap();
+            let deserialized: ObjectAdmissionPolicy = serde_json::from_str(&json).unwrap();
+            assert_eq!(
+                deserialized.max_quarantine_bytes_per_zone,
+                policy.max_quarantine_bytes_per_zone
+            );
+            assert_eq!(
+                deserialized.max_quarantine_objects_per_zone,
+                policy.max_quarantine_objects_per_zone
+            );
+            assert_eq!(deserialized.quarantine_ttl_secs, 7200);
+            assert!(!deserialized.require_schema_validation);
+
+            StoreLogData {
+                details: Some(json!({"serde": "policy_roundtrip"})),
+                ..StoreLogData::default()
+            }
+        });
+    }
+
+    #[test]
+    fn quarantined_object_clone() {
+        run_store_test("quarantined_obj_clone", "verify", "traits", 2, || {
+            let obj = test_object(1, 100, 1000);
+            let cloned = obj.clone();
+            assert_eq!(cloned.object_id, obj.object_id);
+            assert_eq!(cloned.data.len(), obj.data.len());
+
+            StoreLogData {
+                object_id: Some(obj.object_id),
+                details: Some(json!({"clone": true})),
+                ..StoreLogData::default()
+            }
+        });
+    }
+
+    #[test]
+    fn quarantined_object_debug() {
+        let obj = test_object(1, 50, 1000);
+        let dbg = format!("{obj:?}");
+        assert!(dbg.contains("QuarantinedObject"));
+    }
+
+    #[test]
+    fn multiple_zones_isolation() {
+        run_store_test("multiple_zones", "verify", "quarantine", 3, || {
+            let store = QuarantineStore::new(ObjectAdmissionPolicy::default());
+
+            let mut obj1 = test_object(1, 100, 1000);
+            obj1.zone_id = "z:alpha".parse().unwrap();
+
+            let mut obj2 = test_object(2, 100, 2000);
+            obj2.zone_id = "z:beta".parse().unwrap();
+
+            store.quarantine(obj1).unwrap();
+            store.quarantine(obj2).unwrap();
+
+            let alpha: ZoneId = "z:alpha".parse().unwrap();
+            let beta: ZoneId = "z:beta".parse().unwrap();
+
+            assert_eq!(store.zone_stats(&alpha).object_count, 1);
+            assert_eq!(store.zone_stats(&beta).object_count, 1);
+            assert_eq!(store.list_zone(&alpha).len(), 1);
+
+            StoreLogData {
+                details: Some(json!({"zones": 2})),
+                ..StoreLogData::default()
+            }
+        });
+    }
+
+    #[test]
+    fn evict_expired_empty_store() {
+        run_store_test("evict_empty", "verify", "quarantine", 1, || {
+            let store = QuarantineStore::new(ObjectAdmissionPolicy::default());
+            let evicted = store.evict_expired(999_999);
+            assert_eq!(evicted, 0);
+
+            StoreLogData {
+                details: Some(json!({"evicted": 0})),
+                ..StoreLogData::default()
+            }
+        });
+    }
+
+    #[test]
+    fn evict_expired_all_expired() {
+        run_store_test("evict_all_expired", "verify", "quarantine", 2, || {
+            let policy = ObjectAdmissionPolicy {
+                quarantine_ttl_secs: 100,
+                ..Default::default()
+            };
+            let store = QuarantineStore::new(policy);
+
+            store.quarantine(test_object(1, 100, 100)).unwrap();
+            store.quarantine(test_object(2, 100, 200)).unwrap();
+            store.quarantine(test_object(3, 100, 300)).unwrap();
+
+            // All older than TTL
+            let evicted = store.evict_expired(500);
+            assert_eq!(evicted, 3);
+
+            let stats = store.zone_stats(&test_zone());
+            assert_eq!(stats.object_count, 0);
+
+            StoreLogData {
+                details: Some(json!({"evicted": 3})),
+                ..StoreLogData::default()
+            }
+        });
+    }
+
+    #[test]
+    fn is_near_capacity_zero_max() {
+        // Edge case: max_bytes=0, max_objects=0
+        let stats = QuarantineStats {
+            object_count: 0,
+            used_bytes: 0,
+            max_bytes: 0,
+            max_objects: 0,
+        };
+        // Should not panic (uses .max(1) internally)
+        let _result = stats.is_near_capacity(90);
+    }
+
+    #[test]
+    fn quarantine_stats_clone() {
+        let stats = QuarantineStats {
+            object_count: 3,
+            used_bytes: 500,
+            max_bytes: 1000,
+            max_objects: 100,
+        };
+        let cloned = stats.clone();
+        assert_eq!(cloned.object_count, stats.object_count);
+        assert_eq!(cloned.used_bytes, stats.used_bytes);
+    }
+
+    #[test]
+    fn quarantine_stats_debug() {
+        let stats = QuarantineStats {
+            object_count: 1,
+            used_bytes: 100,
+            max_bytes: 1000,
+            max_objects: 10,
+        };
+        let dbg = format!("{stats:?}");
+        assert!(dbg.contains("QuarantineStats"));
+    }
+
+    #[test]
+    fn promotion_reason_clone() {
+        let reason = PromotionReason::LocalPin {
+            reason: "test".into(),
+        };
+        let cloned = reason.clone();
+        assert_eq!(reason, cloned);
+    }
+
+    #[test]
+    fn object_admission_policy_clone() {
+        let policy = ObjectAdmissionPolicy::default();
+        let cloned = policy.clone();
+        assert_eq!(
+            cloned.max_quarantine_bytes_per_zone,
+            policy.max_quarantine_bytes_per_zone
+        );
+    }
+
+    #[test]
+    fn object_admission_policy_debug() {
+        let policy = ObjectAdmissionPolicy::default();
+        let dbg = format!("{policy:?}");
+        assert!(dbg.contains("ObjectAdmissionPolicy"));
+    }
+
+    #[test]
+    fn get_returns_correct_data() {
+        run_store_test("get_correct_data", "verify", "quarantine", 2, || {
+            let store = QuarantineStore::new(ObjectAdmissionPolicy::default());
+
+            let mut obj = test_object(1, 100, 1000);
+            obj.source_peer = Some(42);
+            obj.peer_reputation = 75;
+
+            store.quarantine(obj).unwrap();
+
+            let retrieved = store.get(&ObjectId::from_bytes([1; 32])).unwrap();
+            assert_eq!(retrieved.source_peer, Some(42));
+            assert_eq!(retrieved.peer_reputation, 75);
+
+            StoreLogData {
+                details: Some(json!({"correct_data": true})),
+                ..StoreLogData::default()
+            }
+        });
+    }
+
+    #[test]
     fn eviction_entry_ord_oldest_first() {
         // EvictionEntry is private, but we test indirectly through quarantine behavior
         // Objects with oldest timestamps should be evicted first

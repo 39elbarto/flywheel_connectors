@@ -15,7 +15,7 @@ STEP_CONTEXT="null"
 if [[ -n "${CARGO_CMD:-}" ]]; then
   read -r -a CARGO_CMD_ARR <<< "${CARGO_CMD}"
 elif command -v rch >/dev/null 2>&1; then
-  CARGO_CMD_ARR=(env TMPDIR=/tmp rch exec -- env CARGO_TARGET_DIR=.target-policy-bundle-flow cargo)
+  CARGO_CMD_ARR=(env TMPDIR=/tmp rch exec -- env FCP_POLICY_BUNDLE_E2E_PRINT_JSONL=1 CARGO_TARGET_DIR=.target-policy-bundle-flow cargo)
 else
   CARGO_CMD_ARR=(cargo)
 fi
@@ -144,7 +144,7 @@ step_run_bundle_flow_test() {
       "${CARGO_CMD_ARR[@]}" test -p fcp-cli --test policy_e2e_test \
       e2e_policy_bundle_apply_and_rollback_flow -- --nocapture
   ) 2>&1 | tee "${RAW_OUTPUT}"
-  awk '/^\{"timestamp":/ { print }' "${RAW_OUTPUT}" > "${DETAIL_JSONL}"
+  awk '/^\{.*"test_name":"e2e_policy_bundle_apply_and_rollback_flow"/ { print }' "${RAW_OUTPUT}" > "${DETAIL_JSONL}"
   [[ -s "${DETAIL_JSONL}" ]]
   cat "${DETAIL_JSONL}" >> "${LOG_JSONL}"
 }

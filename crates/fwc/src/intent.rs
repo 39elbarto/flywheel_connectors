@@ -806,14 +806,7 @@ fn build_operation_plan(
         } else {
             "Invoke the compiled connector operation.".to_owned()
         },
-        vec![
-            "fwc".to_owned(),
-            "invoke".to_owned(),
-            connector.id.clone(),
-            operation_hint,
-            "--file".to_owned(),
-            "./intent-payload.json".to_owned(),
-        ],
+        operation_invoke_argv(&connector.id, &operation_hint, action.mutating),
         action.mutating,
         action.mutating,
         vec![
@@ -841,6 +834,24 @@ fn build_operation_plan(
     }
 
     plan
+}
+
+fn operation_invoke_argv(
+    connector_id: &str,
+    operation_hint: &str,
+    payload_required: bool,
+) -> Vec<String> {
+    let mut argv = vec![
+        "fwc".to_owned(),
+        "invoke".to_owned(),
+        connector_id.to_owned(),
+        operation_hint.to_owned(),
+    ];
+    if payload_required {
+        argv.push("--file".to_owned());
+        argv.push("./intent-payload.json".to_owned());
+    }
+    argv
 }
 
 fn infer_connector_candidates(
@@ -2688,6 +2699,23 @@ mod tests {
                 .iter()
                 .all(|s| !s.side_effecting || !s.approval_required)
                 || plan.steps.is_empty()
+        );
+    }
+
+    #[test]
+    fn compiler_search_invoke_step_does_not_force_payload_placeholder() {
+        let plan = compile(&request("search for issues on github"));
+        let invoke = plan
+            .steps
+            .iter()
+            .find(|step| step.command == "invoke")
+            .expect("search plan should include invoke");
+
+        assert!(
+            !invoke
+                .argv
+                .iter()
+                .any(|segment| segment == "./intent-payload.json")
         );
     }
 

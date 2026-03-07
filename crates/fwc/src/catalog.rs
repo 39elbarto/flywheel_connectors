@@ -1,9 +1,9 @@
 use serde_json::{Value, json};
 
 pub const COMMANDS: &[&str] = &[
-    "guide", "plan", "explain", "do", "list", "search", "show", "ops", "schema", "examples",
-    "status", "enable", "disable", "start", "stop", "restart", "install", "update", "pin", "unpin",
-    "config", "invoke", "simulate", "logs",
+    "guide", "task", "plan", "explain", "do", "list", "search", "show", "ops", "schema",
+    "examples", "status", "enable", "disable", "start", "stop", "restart", "install", "update",
+    "pin", "unpin", "config", "invoke", "simulate", "logs",
 ];
 
 #[allow(clippy::too_many_lines)]
@@ -37,6 +37,12 @@ pub fn guide_payload(command: Option<&str>) -> Value {
                     "internal_error": 1,
                 },
                 "recommended_workflow": [
+                    "fwc task \"<intent>\"",
+                    "fwc task resolve <task-id> --until ready",
+                    "fwc task ask <task-id>",
+                    "fwc task advance <task-id>",
+                    "fwc task approve <task-id>",
+                    "fwc task run <task-id>",
                     "fwc plan \"<intent>\"",
                     "fwc explain \"<intent>\"",
                     "fwc do \"<intent>\"",
@@ -51,6 +57,10 @@ pub fn guide_payload(command: Option<&str>) -> Value {
                     "fwc invoke <connector> <operation> --file payload.json",
                 ],
                 "progressive_disclosure": [
+                    {
+                        "command": "task",
+                        "contract": "Persist the whole workflow as a resumable capsule so agents can resolve draft bindings, answer one blocking question at a time, approve, and resume execution without restating the entire intent."
+                    },
                     {
                         "command": "plan/explain/do",
                         "contract": "Start from intent, but compile down to explicit primitive commands, reasoning, and next actions instead of hiding the workflow."
@@ -78,6 +88,10 @@ pub fn guide_payload(command: Option<&str>) -> Value {
                 ],
                 "families": [
                     {
+                        "name": "workflow",
+                        "commands": ["task"],
+                    },
+                    {
                         "name": "intent",
                         "commands": ["plan", "explain", "do"],
                     },
@@ -99,9 +113,10 @@ pub fn guide_payload(command: Option<&str>) -> Value {
                     }
                 ],
                 "phase": {
-                    "current_bead": "flywheel_connectors-1g7z0.22",
-                    "current_scope": "Build workflow macros and stronger next-action guidance on top of the new intent compiler and standalone fwc scaffold.",
+                    "current_bead": "flywheel_connectors-3kbu1",
+                    "current_scope": "Ship self-resolving workflow capsules so intent-derived jobs can persist drafts, identifier candidates, and the smallest remaining clarification question before execution.",
                     "follow_on_beads": [
+                        "flywheel_connectors-3kbu1",
                         "flywheel_connectors-1g7z0.22",
                         "flywheel_connectors-1g7z0.23",
                         "flywheel_connectors-1g7z0.24",
@@ -167,6 +182,10 @@ fn command_contract(command: &str) -> Option<Value> {
             "next_beads": ["flywheel_connectors-1g7z0.1", "flywheel_connectors-1g7z0.2"],
             "workflow_handoff": ["Use `fwc list` to begin discovery once host-backed data is wired in."],
         })),
+        "task" => Some(workflow_contract(
+            "Create and resume durable workflow capsules for connector jobs.",
+            "A resumable capsule view over compiled intent, bindings, approvals, and execution receipts so agents can operate on a short task id instead of replaying the full workflow from scratch.",
+        )),
         "plan" => Some(intent_contract(
             "Compile a natural-language goal into explicit primitive `fwc` steps.",
             "Transparent workflow plan with connector inference, operation hints, ambiguities, missing information, and exact next commands.",
@@ -279,6 +298,21 @@ fn intent_contract(summary: &str, intended_shape: &str) -> Value {
             "Use `plan` first when the agent knows the goal but not the exact connector primitive.",
             "Use `explain` when you need the compiler's reasoning before trusting the plan.",
             "Use `do` for transparent materialization; it defaults to simulation and only advances to approval when explicitly requested."
+        ],
+    })
+}
+
+fn workflow_contract(summary: &str, intended_shape: &str) -> Value {
+    json!({
+        "family": "workflow",
+        "summary": summary,
+        "intended_shape": intended_shape,
+        "next_beads": ["flywheel_connectors-3kbu1", "flywheel_connectors-1g7z0.22", "flywheel_connectors-1g7z0.23", "flywheel_connectors-1g7z0.24"],
+        "workflow_handoff": [
+            "Use `fwc task \"<intent>\"` to create the capsule in one shot.",
+            "Use `fwc task resolve <task-id> --until ready` to persist draft bindings, identifier candidates, and the smallest remaining question.",
+            "Use `fwc task ask <task-id>` when you want the single best clarification prompt instead of the full capsule dump.",
+            "Use `fwc task bind <task-id> key=value ...` to attach resolved values without rewriting the request, then `advance`, `approve`, and `run` when the workflow is ready."
         ],
     })
 }

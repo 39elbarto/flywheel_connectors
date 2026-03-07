@@ -16,7 +16,7 @@ use crate::intent::{self, CompiledIntent, IntentMode};
 const TASK_SCHEMA_VERSION: u32 = 1;
 const PAYLOAD_PLACEHOLDER: &str = "./intent-payload.json";
 const TASK_SUBCOMMANDS: &[&str] = &[
-    "create", "show", "list", "advance", "bind", "approve", "run",
+    "create", "show", "list", "resolve", "ask", "advance", "bind", "approve", "run",
 ];
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -61,6 +61,59 @@ pub struct ExecutionReceipt {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct IdentifierCandidate {
+    pub binding: String,
+    pub query: String,
+    pub status: String,
+    pub connector: Option<String>,
+    pub operation_hint: Option<String>,
+    pub rationale: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ClarificationPrompt {
+    pub key: String,
+    pub question: String,
+    pub rationale: String,
+    pub examples: Vec<String>,
+    pub suggested_bindings: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ResolutionReceipt {
+    pub recorded_at: String,
+    pub trigger: String,
+    pub mode: String,
+    pub status: String,
+    pub status_before: String,
+    pub status_after: String,
+    pub stop_reason: String,
+    pub pass_count: usize,
+    pub safe_step_count: usize,
+    pub changed: bool,
+    pub added_draft_bindings: Vec<String>,
+    pub identifier_candidates_added: usize,
+    pub evidence_added: usize,
+    pub pending_question_key: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct ResolutionState {
+    pub draft_bindings: BTreeMap<String, String>,
+    pub identifier_candidates: Vec<IdentifierCandidate>,
+    pub evidence: Vec<String>,
+    pub pending_question: Option<ClarificationPrompt>,
+    pub history: Vec<ResolutionReceipt>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct ResolutionPatch {
+    pub draft_bindings: BTreeMap<String, String>,
+    pub identifier_candidates: Vec<IdentifierCandidate>,
+    pub evidence: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct WorkflowTask {
     pub schema_version: u32,
     pub id: String,
@@ -73,6 +126,9 @@ pub struct WorkflowTask {
     pub compiled: CompiledIntent,
     pub unresolved_bindings: Vec<String>,
     pub next_actions: Vec<String>,
+    #[serde(default)]
+    pub resolution: ResolutionState,
+    #[serde(default)]
     pub execution_history: Vec<ExecutionReceipt>,
 }
 
@@ -86,6 +142,11 @@ impl WorkflowTask {
     pub fn last_execution(&self) -> Option<&ExecutionReceipt> {
         self.execution_history.last()
     }
+
+    #[must_use]
+    pub fn last_resolution(&self) -> Option<&ResolutionReceipt> {
+        self.resolution.history.last()
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -97,6 +158,8 @@ pub struct TaskOverview {
     pub approval_required: bool,
     pub approved: bool,
     pub unresolved_bindings: usize,
+    pub pending_question: bool,
+    pub resolution_history_count: usize,
     pub last_execution_status: Option<String>,
     pub updated_at: String,
 }
@@ -104,6 +167,12 @@ pub struct TaskOverview {
 #[derive(Clone, Debug)]
 pub struct TaskStore {
     root_dir: PathBuf,
+}
+
+#[derive(Clone, Debug)]
+pub struct AppliedResolution {
+    pub task: WorkflowTask,
+    pub receipt: ResolutionReceipt,
 }
 
 impl TaskStore {
@@ -139,6 +208,7 @@ impl TaskStore {
             approval: ApprovalState::default(),
             unresolved_bindings: Vec::new(),
             next_actions: Vec::new(),
+            resolution: ResolutionState::default(),
             execution_history: Vec::new(),
         };
         recompute_task(&mut task, true);
@@ -203,6 +273,8 @@ impl TaskStore {
                     approval_required,
                     approved: task.approval.workflow,
                     unresolved_bindings,
+                    pending_question: task.resolution.pending_question.is_some(),
+                    resolution_history_count: task.resolution.history.len(),
                     last_execution_status,
                     updated_at: task.updated_at,
                 }
@@ -222,20 +294,161 @@ impl TaskStore {
         let Some(mut task) = self.load(task_id)? else {
             return Ok(None);
         };
+        let previous_effective_bindings = effective_bindings(&task);
+        let mut invalidated_resolution = false;
+        let mut approval_should_reset = false;
+        let mut execution_should_reset = false;
 
         for (key, value) in bindings {
             match key.as_str() {
-                "connector" => task.request.connector_override = Some(value),
-                "zone" => task.request.zone_override = Some(value),
+                "connector" => {
+                    if task.request.connector_override.as_ref() != Some(&value) {
+                        task.request.connector_override = Some(value);
+                        invalidated_resolution = true;
+                        approval_should_reset = true;
+                        execution_should_reset = true;
+                    }
+                }
+                "zone" => {
+                    if task.request.zone_override.as_ref() != Some(&value) {
+                        task.request.zone_override = Some(value);
+                        invalidated_resolution = true;
+                        approval_should_reset = true;
+                        execution_should_reset = true;
+                    }
+                }
                 _ => {
+                    clear_conflicting_payload_bindings(&mut task, &key);
+                    task.resolution.draft_bindings.remove(&key);
+                    task.resolution
+                        .identifier_candidates
+                        .retain(|candidate| candidate.binding != key);
+                    if previous_effective_bindings.get(&key) != Some(&value) {
+                        approval_should_reset = true;
+                        execution_should_reset = true;
+                    }
                     task.bindings.insert(key, value);
                 }
             }
         }
 
+        if invalidated_resolution {
+            reset_resolution_state(&mut task);
+        }
+        if approval_should_reset {
+            reset_approval(&mut task);
+        }
+        if execution_should_reset {
+            reset_execution_history(&mut task);
+        }
+
         recompute_task(&mut task, true);
         self.save(&task)?;
         Ok(Some(task))
+    }
+
+    pub fn append_resolution(
+        &self,
+        task_id: &str,
+        trigger: &str,
+        mode: &str,
+        pass_count: usize,
+        safe_step_count: usize,
+        patch: ResolutionPatch,
+    ) -> Result<Option<AppliedResolution>> {
+        let Some(mut task) = self.load(task_id)? else {
+            return Ok(None);
+        };
+
+        let status_before = task.capsule_status.clone();
+        let previous_effective_bindings = effective_bindings(&task);
+        let mut changed = false;
+        let mut added_draft_bindings = Vec::new();
+        let mut identifier_candidates_added = 0;
+        let mut evidence_added = 0;
+
+        for (key, value) in patch.draft_bindings {
+            if task.bindings.contains_key(&key) {
+                continue;
+            }
+            if task.resolution.draft_bindings.get(&key) == Some(&value) {
+                continue;
+            }
+            task.resolution.draft_bindings.insert(key.clone(), value);
+            added_draft_bindings.push(key);
+            changed = true;
+        }
+
+        for candidate in patch.identifier_candidates {
+            if task.bindings.contains_key(&candidate.binding) {
+                continue;
+            }
+            if task
+                .resolution
+                .identifier_candidates
+                .iter()
+                .any(|existing| {
+                    identifier_candidate_key(existing) == identifier_candidate_key(&candidate)
+                })
+            {
+                continue;
+            }
+            task.resolution.identifier_candidates.push(candidate);
+            identifier_candidates_added += 1;
+            changed = true;
+        }
+
+        for evidence in patch.evidence {
+            if task
+                .resolution
+                .evidence
+                .iter()
+                .any(|existing| existing == &evidence)
+            {
+                continue;
+            }
+            task.resolution.evidence.push(evidence);
+            evidence_added += 1;
+            changed = true;
+        }
+
+        recompute_task(&mut task, true);
+        if changed {
+            if effective_bindings(&task) != previous_effective_bindings {
+                reset_execution_history(&mut task);
+            }
+            reset_approval(&mut task);
+            recompute_task(&mut task, true);
+        }
+
+        let receipt = ResolutionReceipt {
+            recorded_at: now_rfc3339(),
+            trigger: trigger.to_owned(),
+            mode: mode.to_owned(),
+            status: if changed {
+                "updated".to_owned()
+            } else {
+                "no-change".to_owned()
+            },
+            status_before,
+            status_after: task.capsule_status.clone(),
+            stop_reason: resolution_stop_reason(&task, changed),
+            pass_count,
+            safe_step_count,
+            changed,
+            added_draft_bindings,
+            identifier_candidates_added,
+            evidence_added,
+            pending_question_key: task
+                .resolution
+                .pending_question
+                .as_ref()
+                .map(|question| question.key.clone()),
+        };
+        task.resolution.history.push(receipt.clone());
+        self.save(&task)?;
+
+        Ok(Some(AppliedResolution { task, receipt }))
     }
 
     pub fn approve(&self, task_id: &str) -> Result<Option<WorkflowTask>> {
@@ -355,7 +568,7 @@ pub fn validate_binding_entries(entries: &[String]) -> Result<Vec<(String, Strin
         bail!("at least one `key=value` binding is required");
     }
 
-    entries
+    let bindings = entries
         .iter()
         .map(|entry| {
             let Some((key, value)) = entry.split_once('=') else {
@@ -368,7 +581,17 @@ pub fn validate_binding_entries(entries: &[String]) -> Result<Vec<(String, Strin
             }
             Ok((key.to_owned(), value.to_owned()))
         })
-        .collect()
+        .collect::<Result<Vec<_>>>()?;
+
+    let has_payload_json = bindings.iter().any(|(key, _)| key == "payload_json");
+    let has_payload_file = bindings.iter().any(|(key, _)| key == "payload_file");
+    if has_payload_json && has_payload_file {
+        bail!(
+            "`payload_json=` and `payload_file=` are mutually exclusive; bind only one payload source at a time"
+        );
+    }
+
+    Ok(bindings)
 }
 
 pub const fn task_subcommands() -> &'static [&'static str] {
@@ -377,7 +600,14 @@ pub const fn task_subcommands() -> &'static [&'static str] {
 
 #[must_use]
 pub fn effective_bindings(task: &WorkflowTask) -> BTreeMap<String, String> {
-    let mut bindings = task.bindings.clone();
+    let mut bindings = task.resolution.draft_bindings.clone();
+    bindings.extend(task.bindings.clone());
+    if task.bindings.contains_key("payload_file") && !task.bindings.contains_key("payload_json") {
+        bindings.remove("payload_json");
+    }
+    if task.bindings.contains_key("payload_json") && !task.bindings.contains_key("payload_file") {
+        bindings.remove("payload_file");
+    }
     if !bindings.contains_key("payload_json") && !bindings.contains_key("payload_file") {
         if let Some(payload_json) = synthesized_payload_json(&task.compiled) {
             bindings.insert("payload_json".to_owned(), payload_json);
@@ -386,15 +616,62 @@ pub fn effective_bindings(task: &WorkflowTask) -> BTreeMap<String, String> {
     bindings
 }
 
+#[must_use]
+pub fn ready_for_execution(task: &WorkflowTask) -> bool {
+    task.compiled.status == "ready"
+        && task.unresolved_bindings.is_empty()
+        && task.resolution.pending_question.is_none()
+}
+
 fn recompute_task(task: &mut WorkflowTask, touch_updated_at: bool) {
     task.compiled = task.request.compile(task.approval.workflow);
     let effective_bindings = effective_bindings(task);
     apply_binding_awareness(&mut task.compiled, &effective_bindings);
     task.unresolved_bindings = unresolved_bindings(&task.compiled, &effective_bindings);
+    task.resolution.pending_question = derive_pending_question(task, &effective_bindings);
     task.capsule_status = derive_capsule_status(task);
     task.next_actions = build_task_next_actions(task);
     if touch_updated_at {
         task.updated_at = now_rfc3339();
+    }
+}
+
+fn reset_resolution_state(task: &mut WorkflowTask) {
+    task.resolution = ResolutionState::default();
+}
+
+fn reset_approval(task: &mut WorkflowTask) {
+    task.approval.workflow = false;
+    task.approval.approved_at = None;
+}
+
+fn reset_execution_history(task: &mut WorkflowTask) {
+    task.execution_history.clear();
+}
+
+fn clear_conflicting_payload_bindings(task: &mut WorkflowTask, key: &str) {
+    match key {
+        "payload_json" => {
+            task.bindings.remove("payload_file");
+            task.resolution.draft_bindings.remove("payload_file");
+        }
+        "payload_file" => {
+            task.bindings.remove("payload_json");
+            task.resolution.draft_bindings.remove("payload_json");
+        }
+        _ => {}
+    }
+}
+
+fn resolution_stop_reason(task: &WorkflowTask, changed: bool) -> String {
+    if ready_for_execution(task) {
+        "ready".to_owned()
+    } else if task.resolution.pending_question.is_some() {
+        "pending-question".to_owned()
+    } else if changed {
+        "state-updated".to_owned()
+    } else {
+        "no-further-progress".to_owned()
     }
 }
 
@@ -405,6 +682,10 @@ fn derive_capsule_status(task: &WorkflowTask) -> String {
 
     if !task.unresolved_bindings.is_empty() {
         return "needs-bindings".to_owned();
+    }
+
+    if task.resolution.pending_question.is_some() {
+        return "needs-answer".to_owned();
     }
 
     if let Some(last) = task.last_execution() {
@@ -438,6 +719,10 @@ fn build_task_next_actions(task: &WorkflowTask) -> Vec<String> {
     let mut actions = Vec::new();
 
     if task.compiled.status != "ready" {
+        actions.push(format!(
+            "Run `fwc task ask {}` to surface the smallest blocking clarification question.",
+            task.id
+        ));
         actions.extend(task.compiled.next_actions.iter().take(4).cloned());
         if task.compiled.status == "ambiguous" {
             actions.push(format!(
@@ -447,6 +732,26 @@ fn build_task_next_actions(task: &WorkflowTask) -> Vec<String> {
         }
         actions.push(format!(
             "Inspect the current capsule state with `fwc task show {}`.",
+            task.id
+        ));
+        return dedup(actions);
+    }
+
+    if task.resolution.pending_question.is_some() {
+        actions.push(format!(
+            "Run `fwc task ask {}` to inspect the current blocking question.",
+            task.id
+        ));
+        if let Some(question) = task.resolution.pending_question.as_ref() {
+            if let Some(binding) = question.suggested_bindings.first() {
+                actions.push(format!(
+                    "Answer the capsule with `fwc task bind {} {binding}`.",
+                    task.id
+                ));
+            }
+        }
+        actions.push(format!(
+            "Inspect the latest capsule state with `fwc task show {}`.",
             task.id
         ));
         return dedup(actions);
@@ -463,6 +768,13 @@ fn build_task_next_actions(task: &WorkflowTask) -> Vec<String> {
         actions.push(format!(
             "Bind the missing values with `fwc task bind {} {}`.",
             task.id, example_bindings
+        ));
+    }
+
+    if task.resolution.history.is_empty() {
+        actions.push(format!(
+            "Run `fwc task resolve {} --until-ready` to persist draft bindings, evidence, and any remaining question.",
+            task.id
         ));
     }
 
@@ -550,6 +862,285 @@ fn payload_related_message(message: &str) -> bool {
         || message.contains("content that should be appended")
 }
 
+#[must_use]
+pub fn resolution_patch(task: &WorkflowTask) -> ResolutionPatch {
+    let mut patch = ResolutionPatch::default();
+    let bindings = effective_bindings(task);
+    let has_persisted_payload = task.bindings.contains_key("payload_json")
+        || task.bindings.contains_key("payload_file")
+        || task.resolution.draft_bindings.contains_key("payload_json")
+        || task.resolution.draft_bindings.contains_key("payload_file");
+
+    if !has_persisted_payload {
+        if let Some(payload_json) = resolution_payload_json(task) {
+            patch
+                .draft_bindings
+                .insert("payload_json".to_owned(), payload_json);
+            patch.evidence.push(
+                "Drafted `payload_json` directly from the intent so the capsule can stay self-contained by default."
+                    .to_owned(),
+            );
+        }
+    }
+
+    if let Some(query) = resolution_lookup_query(task) {
+        if let Some(query_binding) = lookup_binding_name(task)
+            && !bindings.contains_key(&query_binding)
+        {
+            patch
+                .draft_bindings
+                .insert(query_binding.clone(), query.clone());
+            patch.evidence.push(format!(
+                "Preserved the current lookup text as `{query_binding}` so the capsule keeps a compact, reusable search query."
+            ));
+        }
+
+        if needs_identifier_resolution(task)
+            && let Some(identifier_binding) = identifier_binding_name(task)
+            && !bindings.contains_key(&identifier_binding)
+        {
+            patch.identifier_candidates.push(IdentifierCandidate {
+                binding: identifier_binding.clone(),
+                query: query.clone(),
+                status: "needs-search".to_owned(),
+                connector: task
+                    .compiled
+                    .chosen_connector
+                    .as_ref()
+                    .map(|candidate| candidate.id.clone()),
+                operation_hint: task.compiled.operation_hint.clone(),
+                rationale: format!(
+                    "The capsule has a human-readable target (`{query}`), but `{identifier_binding}` still needs the concrete identifier that the connector operation will expect."
+                ),
+            });
+            patch.evidence.push(format!(
+                "Recorded `{query}` as an identifier lookup candidate for `{identifier_binding}`."
+            ));
+        }
+    }
+
+    patch
+}
+
+#[must_use]
+pub fn resolution_patch_would_change(task: &WorkflowTask, patch: &ResolutionPatch) -> bool {
+    patch.draft_bindings.iter().any(|(key, value)| {
+        !task.bindings.contains_key(key) && task.resolution.draft_bindings.get(key) != Some(value)
+    }) || patch.identifier_candidates.iter().any(|candidate| {
+        !task.bindings.contains_key(&candidate.binding)
+            && !task
+                .resolution
+                .identifier_candidates
+                .iter()
+                .any(|existing| {
+                    identifier_candidate_key(existing) == identifier_candidate_key(candidate)
+                })
+    }) || patch.evidence.iter().any(|evidence| {
+        !task
+            .resolution
+            .evidence
+            .iter()
+            .any(|existing| existing == evidence)
+    })
+}
+
+fn derive_pending_question(
+    task: &WorkflowTask,
+    bindings: &BTreeMap<String, String>,
+) -> Option<ClarificationPrompt> {
+    if !task.compiled.ambiguities.is_empty() {
+        let candidates = task
+            .compiled
+            .chosen_connector
+            .iter()
+            .chain(task.compiled.alternative_connectors.iter())
+            .map(|candidate| format!("connector={}", candidate.id))
+            .take(4)
+            .collect::<Vec<_>>();
+        return Some(ClarificationPrompt {
+            key: "connector".to_owned(),
+            question: "Which connector should this capsule target?".to_owned(),
+            rationale: task.compiled.ambiguities.first().map_or_else(
+                || {
+                    "Multiple connectors fit the current intent and the compiler needs an explicit choice."
+                        .to_owned()
+                },
+                |ambiguity| ambiguity.message.clone(),
+            ),
+            examples: candidates.clone(),
+            suggested_bindings: candidates,
+        });
+    }
+
+    if let Some(candidate) = task
+        .resolution
+        .identifier_candidates
+        .iter()
+        .find(|candidate| !bindings.contains_key(&candidate.binding))
+    {
+        let suggested = format!("{}=<resolved-id>", candidate.binding);
+        return Some(ClarificationPrompt {
+            key: candidate.binding.clone(),
+            question: format!(
+                "Which exact `{}` should `{}` resolve to?",
+                candidate.binding, candidate.query
+            ),
+            rationale: candidate.rationale.clone(),
+            examples: vec![
+                suggested.clone(),
+                format!("{}=rec_1234567890", candidate.binding),
+            ],
+            suggested_bindings: vec![suggested],
+        });
+    }
+
+    if task
+        .unresolved_bindings
+        .iter()
+        .any(|binding| binding == "payload_file")
+        && !bindings.contains_key("payload_json")
+        && !bindings.contains_key("payload_file")
+    {
+        let payload_example =
+            resolution_payload_json(task).unwrap_or_else(|| json!({ "input": "..." }).to_string());
+        return Some(ClarificationPrompt {
+            key: "payload_json".to_owned(),
+            question: "What request payload should this capsule use?".to_owned(),
+            rationale: task
+                .compiled
+                .missing_information
+                .iter()
+                .find(|message| payload_related_message(message))
+                .cloned()
+                .unwrap_or_else(|| {
+                    "The compiler still needs a request body before the workflow can run."
+                        .to_owned()
+                }),
+            examples: vec![
+                format!("payload_json={payload_example}"),
+                "payload_file=payload.json".to_owned(),
+            ],
+            suggested_bindings: vec![
+                format!("payload_json={payload_example}"),
+                "payload_file=payload.json".to_owned(),
+            ],
+        });
+    }
+
+    task.compiled
+        .missing_information
+        .first()
+        .cloned()
+        .map(|message| ClarificationPrompt {
+            key: "input".to_owned(),
+            question: message,
+            rationale:
+                "The compiler still reports one missing fact that blocks deterministic execution."
+                    .to_owned(),
+            examples: task
+                .compiled
+                .suggested_command_lines
+                .iter()
+                .take(2)
+                .cloned()
+                .collect(),
+            suggested_bindings: Vec::new(),
+        })
+}
+
+fn resolution_payload_json(task: &WorkflowTask) -> Option<String> {
+    if let Some(payload_json) = synthesized_payload_json(&task.compiled) {
+        return Some(payload_json);
+    }
+
+    let (_, payload) = split_append_lookup_payload(task.compiled.lookup_literal.as_deref()?)?;
+    serde_json::to_string(&json!({ "content": payload })).ok()
+}
+
+fn resolution_lookup_query(task: &WorkflowTask) -> Option<String> {
+    task.compiled
+        .lookup_literal
+        .as_deref()
+        .and_then(|lookup| split_append_lookup_payload(lookup).map(|(resolved, _)| resolved))
+        .or_else(|| {
+            task.compiled
+                .lookup_literal
+                .as_deref()
+                .map(trim_literal_fragment)
+                .filter(|lookup| !lookup.is_empty())
+        })
+}
+
+fn split_append_lookup_payload(query: &str) -> Option<(String, String)> {
+    let lower = query.to_lowercase();
+    for marker in [" and append ", " then append ", " append "] {
+        let Some(index) = lower.find(marker) else {
+            continue;
+        };
+        let left = trim_literal_fragment(&query[..index]);
+        let right = trim_literal_fragment(&query[index + marker.len()..]);
+        if !left.is_empty() && !right.is_empty() {
+            return Some((left, right));
+        }
+    }
+    None
+}
+
+fn trim_literal_fragment(raw: &str) -> String {
+    raw.trim()
+        .trim_matches(|ch| matches!(ch, '"' | '\''))
+        .trim_end_matches('.')
+        .trim()
+        .to_owned()
+}
+
+fn lookup_binding_name(task: &WorkflowTask) -> Option<String> {
+    if !task
+        .compiled
+        .steps
+        .iter()
+        .any(|step| step.command == "search")
+    {
+        return None;
+    }
+
+    Some(match task.compiled.action.resource.as_deref() {
+        Some("page") => "page_query".to_owned(),
+        Some("issue") => "issue_query".to_owned(),
+        Some(resource) => format!("{}_query", resource.replace('-', "_")),
+        None => "resource_query".to_owned(),
+    })
+}
+
+fn identifier_binding_name(task: &WorkflowTask) -> Option<String> {
+    task.compiled.chosen_connector.as_ref()?;
+
+    Some(match task.compiled.action.resource.as_deref() {
+        Some("page") => "page_id".to_owned(),
+        Some("issue") => "issue_id".to_owned(),
+        Some("message") => "message_id".to_owned(),
+        Some(resource) => format!("{}_id", resource.replace('-', "_")),
+        None => "resource_id".to_owned(),
+    })
+}
+
+fn needs_identifier_resolution(task: &WorkflowTask) -> bool {
+    task.compiled
+        .steps
+        .iter()
+        .any(|step| step.command == "search")
+}
+
+fn identifier_candidate_key(candidate: &IdentifierCandidate) -> String {
+    format!(
+        "{}\u{1f}{}\u{1f}{}\u{1f}{}",
+        candidate.binding,
+        candidate.query,
+        candidate.connector.as_deref().unwrap_or_default(),
+        candidate.operation_hint.as_deref().unwrap_or_default(),
+    )
+}
+
 fn synthesized_payload_json(compiled: &CompiledIntent) -> Option<String> {
     let payload = compiled.payload_literal.as_deref()?;
     let body = match (
@@ -607,8 +1198,12 @@ fn now_rfc3339() -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{TaskStore, WorkflowRequest, validate_binding_entries};
+    use super::{
+        ResolutionPatch, TaskStore, WorkflowRequest, effective_bindings, ready_for_execution,
+        resolution_patch, resolution_patch_would_change, validate_binding_entries,
+    };
     use serde_json::json;
+    use std::collections::BTreeMap;
     use uuid::Uuid;
 
     fn store() -> TaskStore {
@@ -672,6 +1267,97 @@ mod tests {
     }
 
     #[test]
+    fn bind_payload_file_replaces_drafted_payload_json() {
+        let store = store();
+        let task = store
+            .create(WorkflowRequest {
+                intent: "create a GitHub issue titled \"FWC: add workflow macros\"".to_owned(),
+                connector_override: None,
+                zone_override: None,
+            })
+            .expect("task should be created");
+        let applied = store
+            .append_resolution(
+                &task.id,
+                "resolve",
+                "single-pass",
+                1,
+                4,
+                resolution_patch(&task),
+            )
+            .expect("resolution should persist")
+            .expect("task should exist");
+
+        assert!(
+            applied
+                .task
+                .resolution
+                .draft_bindings
+                .contains_key("payload_json")
+        );
+
+        let rebound = store
+            .bind(
+                &task.id,
+                vec![("payload_file".to_owned(), "payload.json".to_owned())],
+            )
+            .expect("bind should succeed")
+            .expect("task should exist");
+
+        assert_eq!(
+            rebound.bindings.get("payload_file").map(String::as_str),
+            Some("payload.json")
+        );
+        assert!(!rebound.bindings.contains_key("payload_json"));
+        assert!(
+            !rebound
+                .resolution
+                .draft_bindings
+                .contains_key("payload_json")
+        );
+        assert!(!effective_bindings(&rebound).contains_key("payload_json"));
+    }
+
+    #[test]
+    fn bind_payload_file_replaces_existing_payload_json() {
+        let store = store();
+        let task = store
+            .create(WorkflowRequest {
+                intent: "create a GitHub issue titled \"FWC: add workflow macros\"".to_owned(),
+                connector_override: None,
+                zone_override: None,
+            })
+            .expect("task should be created");
+        let rebound = store
+            .bind(
+                &task.id,
+                vec![(
+                    "payload_json".to_owned(),
+                    "{\"title\":\"custom\"}".to_owned(),
+                )],
+            )
+            .expect("first bind should succeed")
+            .expect("task should exist");
+
+        assert!(rebound.bindings.contains_key("payload_json"));
+
+        let switched = store
+            .bind(
+                &task.id,
+                vec![("payload_file".to_owned(), "payload.json".to_owned())],
+            )
+            .expect("second bind should succeed")
+            .expect("task should exist");
+
+        assert_eq!(
+            switched.bindings.get("payload_file").map(String::as_str),
+            Some("payload.json")
+        );
+        assert!(!switched.bindings.contains_key("payload_json"));
+        assert!(!effective_bindings(&switched).contains_key("payload_json"));
+    }
+
+    #[test]
     fn append_execution_updates_capsule_status() {
         let store = store();
         let task = store
@@ -702,9 +1388,319 @@ mod tests {
     }
 
     #[test]
+    fn resolution_patch_drafts_payload_for_github_issue_capsule() {
+        let store = store();
+        let task = store
+            .create(WorkflowRequest {
+                intent: "create a GitHub issue titled \"FWC: add workflow macros\"".to_owned(),
+                connector_override: None,
+                zone_override: None,
+            })
+            .expect("task should be created");
+
+        let patch = resolution_patch(&task);
+
+        assert_eq!(
+            patch.draft_bindings.get("payload_json"),
+            Some(&"{\"title\":\"FWC: add workflow macros\"}".to_owned())
+        );
+        assert!(resolution_patch_would_change(&task, &patch));
+    }
+
+    #[test]
+    fn resolution_patch_salvages_append_lookup_and_identifier_candidate() {
+        let store = store();
+        let task = store
+            .create(WorkflowRequest {
+                intent: "find the Notion page named Roadmap and append Summary".to_owned(),
+                connector_override: None,
+                zone_override: None,
+            })
+            .expect("task should be created");
+
+        let patch = resolution_patch(&task);
+
+        assert_eq!(
+            patch.draft_bindings.get("payload_json"),
+            Some(&"{\"content\":\"Summary\"}".to_owned())
+        );
+        assert_eq!(
+            patch.draft_bindings.get("page_query"),
+            Some(&"Roadmap".to_owned())
+        );
+        assert_eq!(patch.identifier_candidates.len(), 1);
+        assert_eq!(patch.identifier_candidates[0].binding, "page_id");
+        assert_eq!(patch.identifier_candidates[0].query, "Roadmap");
+    }
+
+    #[test]
+    fn append_resolution_turns_salvaged_append_into_single_question() {
+        let store = store();
+        let task = store
+            .create(WorkflowRequest {
+                intent: "find the Notion page named Roadmap and append Summary".to_owned(),
+                connector_override: None,
+                zone_override: None,
+            })
+            .expect("task should be created");
+
+        let patch = resolution_patch(&task);
+        let applied = store
+            .append_resolution(&task.id, "resolve", "single-pass", 1, 5, patch)
+            .expect("resolution should persist")
+            .expect("task should exist");
+
+        assert_eq!(applied.task.capsule_status, "needs-answer");
+        assert_eq!(
+            applied
+                .task
+                .resolution
+                .pending_question
+                .as_ref()
+                .map(|question| question.key.as_str()),
+            Some("page_id")
+        );
+        assert!(!ready_for_execution(&applied.task));
+    }
+
+    #[test]
+    fn binding_identifier_clears_pending_question_and_restores_readiness() {
+        let store = store();
+        let task = store
+            .create(WorkflowRequest {
+                intent: "find the Notion page named Roadmap and append Summary".to_owned(),
+                connector_override: None,
+                zone_override: None,
+            })
+            .expect("task should be created");
+
+        let patch = resolution_patch(&task);
+        let applied = store
+            .append_resolution(&task.id, "resolve", "single-pass", 1, 5, patch)
+            .expect("resolution should persist")
+            .expect("task should exist");
+        let rebound = store
+            .bind(
+                &applied.task.id,
+                vec![("page_id".to_owned(), "notion-page-123".to_owned())],
+            )
+            .expect("binding should succeed")
+            .expect("task should exist");
+
+        assert_eq!(rebound.capsule_status, "ready-to-simulate");
+        assert!(rebound.resolution.pending_question.is_none());
+        assert!(rebound.resolution.identifier_candidates.is_empty());
+        assert!(ready_for_execution(&rebound));
+    }
+
+    #[test]
+    fn binding_connector_resets_stale_resolution_state() {
+        let store = store();
+        let task = store
+            .create(WorkflowRequest {
+                intent: "find the Notion page named Roadmap and append Summary".to_owned(),
+                connector_override: None,
+                zone_override: None,
+            })
+            .expect("task should be created");
+
+        let applied = store
+            .append_resolution(
+                &task.id,
+                "resolve",
+                "single-pass",
+                1,
+                5,
+                resolution_patch(&task),
+            )
+            .expect("resolution should persist")
+            .expect("task should exist");
+        let rebound = store
+            .bind(
+                &applied.task.id,
+                vec![("connector".to_owned(), "slack".to_owned())],
+            )
+            .expect("bind should succeed")
+            .expect("task should exist");
+
+        assert!(rebound.resolution.draft_bindings.is_empty());
+        assert!(rebound.resolution.identifier_candidates.is_empty());
+        assert!(rebound.resolution.evidence.is_empty());
+        assert!(rebound.resolution.history.is_empty());
+    }
+
+    #[test]
+    fn bind_resets_approval_when_effective_state_changes() {
+        let store = store();
+        let task = store
+            .create(WorkflowRequest {
+                intent: "create a GitHub issue titled \"FWC: add workflow macros\"".to_owned(),
+                connector_override: None,
+                zone_override: None,
+            })
+            .expect("task should be created");
+        let approved = store
+            .approve(&task.id)
+            .expect("approve should succeed")
+            .expect("task should exist");
+
+        assert!(approved.approval.workflow);
+
+        let rebound = store
+            .bind(
+                &task.id,
+                vec![(
+                    "payload_json".to_owned(),
+                    "{\"title\":\"changed\"}".to_owned(),
+                )],
+            )
+            .expect("bind should succeed")
+            .expect("task should exist");
+
+        assert!(!rebound.approval.workflow);
+        assert!(rebound.approval.approved_at.is_none());
+    }
+
+    #[test]
+    fn bind_clears_stale_execution_history_when_effective_state_changes() {
+        let store = store();
+        let task = store
+            .create(WorkflowRequest {
+                intent: "create a GitHub issue titled \"FWC: add workflow macros\"".to_owned(),
+                connector_override: None,
+                zone_override: None,
+            })
+            .expect("task should be created");
+        let simulated = store
+            .append_execution(
+                &task.id,
+                "advance",
+                "simulate",
+                json!({
+                    "status": "simulated",
+                    "executed_count": 4,
+                    "withheld_count": 1,
+                    "stopped_before_side_effect": true,
+                }),
+            )
+            .expect("execution should persist")
+            .expect("task should exist");
+
+        assert_eq!(simulated.capsule_status, "ready-to-approve");
+
+        let rebound = store
+            .bind(
+                &task.id,
+                vec![(
+                    "payload_json".to_owned(),
+                    "{\"title\":\"changed\"}".to_owned(),
+                )],
+            )
+            .expect("bind should succeed")
+            .expect("task should exist");
+
+        assert!(rebound.execution_history.is_empty());
+        assert_eq!(rebound.capsule_status, "ready-to-simulate");
+    }
+
+    #[test]
+    fn append_resolution_resets_approval_when_resolution_changes_state() {
+        let store = store();
+        let task = store
+            .create(WorkflowRequest {
+                intent: "find the Notion page named Roadmap and append Summary".to_owned(),
+                connector_override: None,
+                zone_override: None,
+            })
+            .expect("task should be created");
+        let approved = store
+            .approve(&task.id)
+            .expect("approve should succeed")
+            .expect("task should exist");
+
+        assert!(approved.approval.workflow);
+
+        let applied = store
+            .append_resolution(
+                &task.id,
+                "resolve",
+                "single-pass",
+                1,
+                5,
+                resolution_patch(&approved),
+            )
+            .expect("resolution should persist")
+            .expect("task should exist");
+
+        assert!(!applied.task.approval.workflow);
+        assert!(applied.task.approval.approved_at.is_none());
+        assert_eq!(applied.receipt.stop_reason, "pending-question");
+    }
+
+    #[test]
+    fn append_resolution_clears_stale_execution_history_when_bindings_change() {
+        let store = store();
+        let task = store
+            .create(WorkflowRequest {
+                intent: "create a GitHub issue".to_owned(),
+                connector_override: Some("github".to_owned()),
+                zone_override: None,
+            })
+            .expect("task should be created");
+        let simulated = store
+            .append_execution(
+                &task.id,
+                "advance",
+                "simulate",
+                json!({
+                    "status": "simulated",
+                    "executed_count": 4,
+                    "withheld_count": 1,
+                    "stopped_before_side_effect": true,
+                }),
+            )
+            .expect("execution should persist")
+            .expect("task should exist");
+
+        assert_eq!(simulated.capsule_status, "needs-clarification");
+
+        let applied = store
+            .append_resolution(
+                &task.id,
+                "resolve",
+                "single-pass",
+                1,
+                4,
+                ResolutionPatch {
+                    draft_bindings: BTreeMap::from([(
+                        "payload_json".to_owned(),
+                        "{\"title\":\"FWC draft\"}".to_owned(),
+                    )]),
+                    identifier_candidates: Vec::new(),
+                    evidence: vec!["Drafted payload_json".to_owned()],
+                },
+            )
+            .expect("resolution should persist")
+            .expect("task should exist");
+
+        assert!(applied.task.execution_history.is_empty());
+        assert_eq!(applied.task.capsule_status, "ready-to-simulate");
+    }
+
+    #[test]
     fn binding_validation_rejects_malformed_entries() {
         let error = validate_binding_entries(&["payload_json".to_owned()])
             .expect_err("missing equals sign should fail");
         assert!(error.to_string().contains("expected `key=value`"));
+    }
+
+    #[test]
+    fn binding_validation_rejects_multiple_payload_sources() {
+        let error = validate_binding_entries(&[
+            "payload_json={\"title\":\"hello\"}".to_owned(),
+            "payload_file=payload.json".to_owned(),
+        ])
+        .expect_err("multiple payload sources should fail");
+        assert!(error.to_string().contains("mutually exclusive"));
     }
 }

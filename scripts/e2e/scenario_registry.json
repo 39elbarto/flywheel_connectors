@@ -1,6 +1,6 @@
 {
   "schema_version": "asupersync-e2e-scenario-registry/v1",
-  "registry_version": 14,
+  "registry_version": 15,
   "program_epic": "flywheel_connectors-235t",
   "owner_bead": "flywheel_connectors-235t.26.6.1",
   "governance_rules": {
@@ -227,6 +227,16 @@
       "contract_id": "contract.policy_allow_deny",
       "archetype": "request_response",
       "failure_class": "policy_ceiling_violation",
+      "user_impact_category": "security"
+    },
+    {
+      "key": "policy_bundle_flow",
+      "scenario_id": "asupersync.e2e.policy_bundle_flow",
+      "script": "scripts/e2e/policy_bundle_flow.sh",
+      "required": true,
+      "contract_id": "contract.policy_bundle_preview_apply_rollback",
+      "archetype": "request_response",
+      "failure_class": "policy_bundle_state_regression",
       "user_impact_category": "security"
     },
     {

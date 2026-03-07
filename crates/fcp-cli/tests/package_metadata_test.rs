@@ -93,8 +93,8 @@ version = "0.1.0"
     );
     assert_eq!(
         metadata.get("profile").and_then(|v| v.as_str()),
-        Some("debug"),
-        "default profile should be debug when --release not passed"
+        Some("release"),
+        "default profile should be release"
     );
 
     let sbom_path = payload

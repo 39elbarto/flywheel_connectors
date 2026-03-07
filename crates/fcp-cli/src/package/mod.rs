@@ -137,10 +137,16 @@ fn build_connector(crate_path: &Path, args: &PackageArgs) -> Result<PathBuf> {
     }
 
     // Add deterministic build flags.
-    // Use CARGO_ENCODED_RUSTFLAGS (0x1f-separated) instead of RUSTFLAGS so that
-    // build hooks (e.g. rch) do not corrupt the flag string during shell expansion.
+    // Use CARGO_ENCODED_RUSTFLAGS (0x1f-separated) to avoid shell expansion issues
+    // with build hooks. Disable split-debuginfo to avoid requiring rust-objcopy
+    // (which may not be installed if llvm-tools-preview is absent).
     cmd.env("CARGO_INCREMENTAL", "0");
-    cmd.env("CARGO_ENCODED_RUSTFLAGS", "-Cdebuginfo=0");
+    cmd.env(
+        "CARGO_ENCODED_RUSTFLAGS",
+        "-Cdebuginfo=0\x1f-Csplit-debuginfo=off",
+    );
+    cmd.env("CARGO_PROFILE_RELEASE_SPLIT_DEBUGINFO", "off");
+    cmd.env("CARGO_PROFILE_RELEASE_STRIP", "none");
     cmd.env_remove("RUSTFLAGS");
     // Keep packaging builds isolated from parent-process target-dir settings.
     cmd.env("CARGO_TARGET_DIR", &target_root);

@@ -4,18 +4,23 @@
 //! to actual invocation (allow/deny) without executing side effects. JSONL log entries
 //! with `phase=simulate` and evidence object IDs.
 
-use std::time::Duration;
+use std::fs;
+use std::path::Path;
+use std::time::{Duration, Instant};
 
+use assert_cmd::Command;
 use chrono::Utc;
 use fcp_conformance::TestHarness;
 use fcp_core::{
     ApprovalScope, ApprovalToken, CapabilityId, Decision, DecisionReasonCode, ExecutionScope,
-    InvokeRequest, ObjectHeader, PolicyPattern, PolicySimulationInput, Provenance,
-    ProvenanceRecord, SafetyTier, TransportMode, ZoneId, ZonePolicyObject, ZoneTransportPolicy,
-    simulate_policy_decision,
+    InvokeRequest, ObjectHeader, PolicyBundlePolicyRef, PolicyPattern, PolicyPreviewSample,
+    PolicySimulationInput, Provenance, ProvenanceRecord, SafetyTier, TransportMode, ZoneId,
+    ZonePolicyObject, ZoneTransportPolicy, simulate_policy_decision,
 };
 use fcp_testkit::LogCapture;
+use serde::Serialize;
 use serde_json::json;
+use tempfile::TempDir;
 use uuid::Uuid;
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -483,6 +488,75 @@ fn execution_approval(invoke: &InvokeRequest, now_ms: u64) -> ApprovalToken {
         }),
         zone_id: invoke.zone_id.clone(),
         signature: None,
+    }
+}
+
+fn bundle_policy_ref(object_hash_char: char) -> PolicyBundlePolicyRef {
+    PolicyBundlePolicyRef {
+        object_id: "obj-zone-policy".to_string(),
+        schema_id: "fcp.core:ZonePolicy@1.0.0".to_string(),
+        object_hash: format!("blake3-256:{}", object_hash_char.to_string().repeat(64)),
+    }
+}
+
+fn preview_sample(sample_id: &str, transport: TransportMode) -> PolicyPreviewSample {
+    PolicyPreviewSample {
+        id: sample_id.to_string(),
+        invoke_request: base_invoke(ZoneId::work()),
+        transport,
+        checkpoint_fresh: true,
+        revocation_fresh: true,
+        execution_approval_required: false,
+        sanitizer_receipts: Vec::new(),
+        related_object_ids: Vec::new(),
+        request_object_id: None,
+        request_input_hash: None,
+        safety_tier: SafetyTier::Safe,
+        principal: Some("user:alice".to_string()),
+        capability_id: Some("cap.read".to_string()),
+        provenance_record: Some(ProvenanceRecord::new(ZoneId::work())),
+        now_ms: Some(BASE_TIMESTAMP_MS),
+        posture_attestation: None,
+    }
+}
+
+fn write_json_file<T: Serialize>(path: impl AsRef<Path>, value: &T) {
+    fs::write(
+        path,
+        serde_json::to_string_pretty(value).expect("serialize json file"),
+    )
+    .expect("write json file");
+}
+
+fn read_json_file(path: impl AsRef<Path>) -> serde_json::Value {
+    serde_json::from_str(&fs::read_to_string(path).expect("read json file")).expect("parse json")
+}
+
+fn run_fcp_json<I, S>(args: I) -> (serde_json::Value, u64)
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<std::ffi::OsStr>,
+{
+    let start = Instant::now();
+    let output = Command::new(env!("CARGO_BIN_EXE_fcp"))
+        .args(args)
+        .env("RUST_LOG", "error")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    #[allow(clippy::cast_possible_truncation)]
+    let duration_ms = start.elapsed().as_millis() as u64;
+    (
+        serde_json::from_slice(&output).expect("parse fcp json payload"),
+        duration_ms,
+    )
+}
+
+fn emit_policy_bundle_flow_artifact(jsonl: &str) {
+    if std::env::var_os("FCP_POLICY_BUNDLE_E2E_PRINT_JSONL").is_some() {
+        print!("{jsonl}");
     }
 }
 
@@ -1007,4 +1081,448 @@ fn e2e_policy_rollback_plan_restores_previous_state() {
 
     harness.stop();
     harness.assert_logs_valid();
+}
+
+/// E2E bundle workflow: create, diff, preview, apply, and roll back with structured logs.
+#[test]
+#[allow(clippy::too_many_lines)]
+fn e2e_policy_bundle_apply_and_rollback_flow() {
+    let mut harness = PolicySimulationHarness::new("e2e_policy_bundle_apply_and_rollback_flow");
+    harness.start();
+
+    let temp_dir = TempDir::new().expect("tempdir");
+    let zone = ZoneId::work();
+    let zone_str = zone.to_string();
+    let signing_key_hex = "11".repeat(32);
+
+    let before_policy = base_zone_policy(zone.clone());
+    let mut after_policy = before_policy.clone();
+    after_policy.capability_allow.push(PolicyPattern {
+        pattern: "cap.read".to_string(),
+    });
+    after_policy.transport_policy.allow_derp = true;
+
+    let before_policy_path = temp_dir.path().join("zone-policy-before.json");
+    let after_policy_path = temp_dir.path().join("zone-policy-after.json");
+    let before_refs_path = temp_dir.path().join("bundle-before-policies.json");
+    let after_refs_path = temp_dir.path().join("bundle-after-policies.json");
+    let before_objects_path = temp_dir.path().join("bundle-before-objects.json");
+    let after_objects_path = temp_dir.path().join("bundle-after-objects.json");
+    let before_bundle_path = temp_dir.path().join("bundle-before.json");
+    let after_bundle_path = temp_dir.path().join("bundle-after.json");
+    let preview_samples_path = temp_dir.path().join("bundle-preview-samples.json");
+    let state_path = temp_dir.path().join("bundle-state.json");
+    let simulate_before_path = temp_dir.path().join("simulate-before.json");
+    let simulate_after_path = temp_dir.path().join("simulate-after.json");
+
+    write_json_file(&before_policy_path, &before_policy);
+    write_json_file(&after_policy_path, &after_policy);
+    write_json_file(&before_refs_path, &vec![bundle_policy_ref('a')]);
+    write_json_file(&after_refs_path, &vec![bundle_policy_ref('b')]);
+    write_json_file(
+        &before_objects_path,
+        &json!({ "obj-zone-policy": &before_policy }),
+    );
+    write_json_file(
+        &after_objects_path,
+        &json!({ "obj-zone-policy": &after_policy }),
+    );
+    write_json_file(
+        &preview_samples_path,
+        &vec![
+            preview_sample("sample_lan_cap_read", TransportMode::Lan),
+            preview_sample("sample_derp_cap_read", TransportMode::Derp),
+        ],
+    );
+    write_json_file(
+        &simulate_before_path,
+        &base_simulation_input(before_policy.clone(), base_invoke(zone.clone())),
+    );
+    write_json_file(
+        &simulate_after_path,
+        &base_simulation_input(after_policy.clone(), base_invoke(zone.clone())),
+    );
+
+    let before_bundle_path_str = before_bundle_path.display().to_string();
+    let after_bundle_path_str = after_bundle_path.display().to_string();
+    let before_refs_path_str = before_refs_path.display().to_string();
+    let after_refs_path_str = after_refs_path.display().to_string();
+    let before_objects_path_str = before_objects_path.display().to_string();
+    let after_objects_path_str = after_objects_path.display().to_string();
+    let preview_samples_path_str = preview_samples_path.display().to_string();
+    let state_path_str = state_path.display().to_string();
+    let simulate_before_path_str = simulate_before_path.display().to_string();
+    let simulate_after_path_str = simulate_after_path.display().to_string();
+
+    let (before_bundle_payload, create_before_duration_ms) = run_fcp_json(vec![
+        "policy".to_string(),
+        "bundle".to_string(),
+        "create".to_string(),
+        "--bundle-id".to_string(),
+        "bundle-before".to_string(),
+        "--zone".to_string(),
+        zone_str.clone(),
+        "--policy-seq".to_string(),
+        "1".to_string(),
+        "--policies".to_string(),
+        before_refs_path_str.clone(),
+        "--created-at".to_string(),
+        "2026-03-07T12:00:00Z".to_string(),
+        "--key-id".to_string(),
+        "kid-before".to_string(),
+        "--signing-key-hex".to_string(),
+        signing_key_hex.clone(),
+        "--out".to_string(),
+        before_bundle_path_str.clone(),
+    ]);
+    assert_eq!(before_bundle_payload["bundle_id"], "bundle-before");
+    assert_eq!(before_bundle_payload["policy_seq"], 1);
+    harness.emit_log_with_result(
+        "execute",
+        "policy_bundle_flow",
+        &json!({
+            "stage": "create_before_bundle",
+            "bundle_id": before_bundle_payload["bundle_id"],
+            "reason_codes": [],
+        }),
+        "pass",
+        create_before_duration_ms,
+        LogAssertions::new(1, 0),
+    );
+
+    let (after_bundle_payload, create_after_duration_ms) = run_fcp_json(vec![
+        "policy".to_string(),
+        "bundle".to_string(),
+        "create".to_string(),
+        "--bundle-id".to_string(),
+        "bundle-after".to_string(),
+        "--zone".to_string(),
+        zone_str.clone(),
+        "--policy-seq".to_string(),
+        "2".to_string(),
+        "--policies".to_string(),
+        after_refs_path_str.clone(),
+        "--previous-bundle".to_string(),
+        "bundle-before".to_string(),
+        "--created-at".to_string(),
+        "2026-03-07T12:05:00Z".to_string(),
+        "--key-id".to_string(),
+        "kid-after".to_string(),
+        "--signing-key-hex".to_string(),
+        signing_key_hex,
+        "--out".to_string(),
+        after_bundle_path_str.clone(),
+    ]);
+    assert_eq!(after_bundle_payload["bundle_id"], "bundle-after");
+    assert_eq!(after_bundle_payload["previous_bundle"], "bundle-before");
+    harness.emit_log_with_result(
+        "execute",
+        "policy_bundle_flow",
+        &json!({
+            "stage": "create_after_bundle",
+            "bundle_id": after_bundle_payload["bundle_id"],
+            "reason_codes": [],
+        }),
+        "pass",
+        create_after_duration_ms,
+        LogAssertions::new(1, 0),
+    );
+
+    let (bundle_diff_payload, diff_duration_ms) = run_fcp_json(vec![
+        "policy".to_string(),
+        "bundle".to_string(),
+        "diff".to_string(),
+        "--before".to_string(),
+        before_bundle_path_str.clone(),
+        "--after".to_string(),
+        after_bundle_path_str.clone(),
+        "--objects-before".to_string(),
+        before_objects_path_str.clone(),
+        "--objects-after".to_string(),
+        after_objects_path_str.clone(),
+        "--json".to_string(),
+    ]);
+    assert_eq!(bundle_diff_payload["before_bundle_id"], "bundle-before");
+    assert_eq!(bundle_diff_payload["after_bundle_id"], "bundle-after");
+    assert!(
+        bundle_diff_payload["risk"]["flags"]
+            .as_array()
+            .is_some_and(|flags| flags
+                .iter()
+                .any(|flag| flag["code"].as_str() == Some("transport_derp_enabled"))),
+        "bundle diff must surface transport_derp_enabled"
+    );
+    assert_eq!(
+        bundle_diff_payload["zone_policy"]["added"]["capability_allow"][0],
+        "cap.read"
+    );
+    harness.emit_log_with_result(
+        "execute",
+        "policy_bundle_flow",
+        &json!({
+            "stage": "bundle_diff",
+            "bundle_id": after_bundle_payload["bundle_id"],
+            "reason_codes": [],
+            "risk_flags": bundle_diff_payload["risk"]["flags"],
+        }),
+        "pass",
+        diff_duration_ms,
+        LogAssertions::new(1, 0),
+    );
+
+    let (preview_payload, preview_duration_ms) = run_fcp_json(vec![
+        "policy".to_string(),
+        "bundle".to_string(),
+        "preview".to_string(),
+        "--before".to_string(),
+        before_bundle_path_str.clone(),
+        "--after".to_string(),
+        after_bundle_path_str.clone(),
+        "--objects-before".to_string(),
+        before_objects_path_str.clone(),
+        "--objects-after".to_string(),
+        after_objects_path_str.clone(),
+        "--samples".to_string(),
+        preview_samples_path_str.clone(),
+        "--json".to_string(),
+    ]);
+    assert_eq!(preview_payload["summary"]["total"], 2);
+    assert_eq!(preview_payload["summary"]["would_allow"], 2);
+    let preview_reason_codes = preview_payload["entries"]
+        .as_array()
+        .expect("preview entries")
+        .iter()
+        .flat_map(|entry| {
+            [
+                entry["before"]["reason_code"].clone(),
+                entry["after"]["reason_code"].clone(),
+            ]
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        preview_reason_codes
+            .iter()
+            .any(|value| value.as_str() == Some("capability.insufficient"))
+    );
+    assert!(
+        preview_reason_codes
+            .iter()
+            .any(|value| value.as_str() == Some("transport.derp_forbidden"))
+    );
+    assert!(
+        preview_reason_codes
+            .iter()
+            .any(|value| value.as_str() == Some("allow"))
+    );
+    harness.emit_log_with_result(
+        "execute",
+        "policy_bundle_flow",
+        &json!({
+            "stage": "bundle_preview",
+            "bundle_id": after_bundle_payload["bundle_id"],
+            "reason_codes": preview_reason_codes,
+        }),
+        "pass",
+        preview_duration_ms,
+        LogAssertions::new(1, 0),
+    );
+
+    let (simulate_before_payload, simulate_before_duration_ms) = run_fcp_json(vec![
+        "policy".to_string(),
+        "simulate".to_string(),
+        "--input".to_string(),
+        simulate_before_path_str.clone(),
+        "--json".to_string(),
+    ]);
+    assert_eq!(simulate_before_payload["decision"], "deny");
+    assert_eq!(
+        simulate_before_payload["reason_code"],
+        DecisionReasonCode::CapabilityInsufficient.as_str()
+    );
+    harness.emit_log_with_result(
+        "verify",
+        "policy_bundle_flow",
+        &json!({
+            "stage": "simulate_before_apply",
+            "bundle_id": "bundle-before",
+            "reason_codes": [simulate_before_payload["reason_code"].clone()],
+        }),
+        "pass",
+        simulate_before_duration_ms,
+        LogAssertions::new(1, 0),
+    );
+
+    let (apply_before_payload, apply_before_duration_ms) = run_fcp_json(vec![
+        "policy".to_string(),
+        "bundle".to_string(),
+        "apply".to_string(),
+        "--bundle".to_string(),
+        before_bundle_path_str.clone(),
+        "--state".to_string(),
+        state_path_str.clone(),
+        "--json".to_string(),
+    ]);
+    assert_eq!(apply_before_payload["bundle_id"], "bundle-before");
+    assert_eq!(apply_before_payload["changed"], true);
+    let state_after_before_apply = read_json_file(&state_path);
+    assert_eq!(
+        state_after_before_apply["current"]["bundle"]["bundle_id"],
+        "bundle-before"
+    );
+    assert_eq!(
+        state_after_before_apply["audit_events"][0]["event_type"],
+        "policy.bundle.applied"
+    );
+    harness.emit_log_with_result(
+        "execute",
+        "policy_bundle_flow",
+        &json!({
+            "stage": "apply_before_bundle",
+            "bundle_id": apply_before_payload["bundle_id"],
+            "reason_codes": [],
+            "audit_event_id": apply_before_payload["audit_event"]["audit_event_id"],
+        }),
+        "pass",
+        apply_before_duration_ms,
+        LogAssertions::new(1, 0),
+    );
+
+    let (apply_after_payload, apply_after_duration_ms) = run_fcp_json(vec![
+        "policy".to_string(),
+        "bundle".to_string(),
+        "apply".to_string(),
+        "--bundle".to_string(),
+        after_bundle_path_str.clone(),
+        "--state".to_string(),
+        state_path_str.clone(),
+        "--json".to_string(),
+    ]);
+    assert_eq!(apply_after_payload["bundle_id"], "bundle-after");
+    assert_eq!(apply_after_payload["replaced_bundle_id"], "bundle-before");
+    assert_eq!(
+        apply_after_payload["declared_previous_bundle_id"],
+        "bundle-before"
+    );
+    let state_after_after_apply = read_json_file(&state_path);
+    assert_eq!(
+        state_after_after_apply["current"]["bundle"]["bundle_id"],
+        "bundle-after"
+    );
+    assert_eq!(
+        state_after_after_apply["previous"]["bundle"]["bundle_id"],
+        "bundle-before"
+    );
+    harness.emit_log_with_result(
+        "execute",
+        "policy_bundle_flow",
+        &json!({
+            "stage": "apply_after_bundle",
+            "bundle_id": apply_after_payload["bundle_id"],
+            "reason_codes": [],
+            "audit_event_id": apply_after_payload["audit_event"]["audit_event_id"],
+        }),
+        "pass",
+        apply_after_duration_ms,
+        LogAssertions::new(1, 0),
+    );
+
+    let (simulate_after_payload, simulate_after_duration_ms) = run_fcp_json(vec![
+        "policy".to_string(),
+        "simulate".to_string(),
+        "--input".to_string(),
+        simulate_after_path_str.clone(),
+        "--json".to_string(),
+    ]);
+    assert_eq!(simulate_after_payload["decision"], "allow");
+    assert_eq!(
+        simulate_after_payload["reason_code"],
+        DecisionReasonCode::Allow.as_str()
+    );
+    harness.emit_log_with_result(
+        "verify",
+        "policy_bundle_flow",
+        &json!({
+            "stage": "simulate_after_apply",
+            "bundle_id": "bundle-after",
+            "reason_codes": [simulate_after_payload["reason_code"].clone()],
+        }),
+        "pass",
+        simulate_after_duration_ms,
+        LogAssertions::new(1, 0),
+    );
+
+    let (rollback_payload, rollback_duration_ms) = run_fcp_json(vec![
+        "policy".to_string(),
+        "bundle".to_string(),
+        "rollback".to_string(),
+        "--to".to_string(),
+        before_bundle_path_str,
+        "--state".to_string(),
+        state_path_str,
+        "--json".to_string(),
+    ]);
+    assert_eq!(rollback_payload["target_bundle_id"], "bundle-before");
+    assert_eq!(rollback_payload["replaced_bundle_id"], "bundle-after");
+    let final_state = read_json_file(&state_path);
+    assert_eq!(
+        final_state["current"]["bundle"]["bundle_id"],
+        "bundle-before"
+    );
+    assert_eq!(
+        final_state["previous"]["bundle"]["bundle_id"],
+        "bundle-after"
+    );
+    assert_eq!(
+        final_state["audit_events"]
+            .as_array()
+            .expect("audit events")
+            .len(),
+        3
+    );
+    assert_eq!(
+        final_state["audit_events"][2]["event_type"],
+        "policy.bundle.rolled_back"
+    );
+    harness.emit_log_with_result(
+        "verify",
+        "policy_bundle_flow",
+        &json!({
+            "stage": "rollback_to_before_bundle",
+            "bundle_id": rollback_payload["target_bundle_id"],
+            "reason_codes": [],
+            "audit_event_id": rollback_payload["audit_event"]["audit_event_id"],
+        }),
+        "pass",
+        rollback_duration_ms,
+        LogAssertions::new(1, 0),
+    );
+
+    let (simulate_restored_payload, simulate_restored_duration_ms) = run_fcp_json(vec![
+        "policy".to_string(),
+        "simulate".to_string(),
+        "--input".to_string(),
+        simulate_before_path_str,
+        "--json".to_string(),
+    ]);
+    assert_eq!(simulate_restored_payload["decision"], "deny");
+    assert_eq!(
+        simulate_restored_payload["reason_code"],
+        DecisionReasonCode::CapabilityInsufficient.as_str()
+    );
+    harness.emit_log_with_result(
+        "verify",
+        "policy_bundle_flow",
+        &json!({
+            "stage": "simulate_after_rollback",
+            "bundle_id": "bundle-before",
+            "reason_codes": [simulate_restored_payload["reason_code"].clone()],
+        }),
+        "pass",
+        simulate_restored_duration_ms,
+        LogAssertions::new(1, 0),
+    );
+
+    harness.stop();
+    harness.assert_logs_valid();
+    emit_policy_bundle_flow_artifact(&harness.jsonl());
 }

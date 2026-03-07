@@ -2529,6 +2529,7 @@ dependencies = [
  "fcp-async-core",
  "fcp-core",
  "fcp-crypto",
+ "fcp-google-discovery",
  "fcp-manifest",
  "fcp-testkit",
  "futures-util",

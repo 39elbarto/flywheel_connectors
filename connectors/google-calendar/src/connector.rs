@@ -1,70 +1,87 @@
 //! FCP Google Calendar Connector implementation.
 
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use fcp_core::{
     AgentHint, BaseConnector, CapabilityGrant, CapabilityId, CapabilityToken, CapabilityVerifier,
-    ConnectorId, CredentialId, EventCaps, FcpError, FcpResult, HandshakeRequest, HandshakeResponse,
+    ConnectorId, EventCaps, FcpError, FcpResult, HandshakeRequest, HandshakeResponse,
     IdempotencyClass, Introspection, OperationId, OperationInfo, RiskLevel, SafetyTier,
     SelfCheckReport, SessionId, SimulateRequest, SimulateResponse,
+};
+use fcp_google_discovery::{
+    ServiceAliasRegistry,
+    auth::{GoogleAuthError, GoogleAuthSelection, GoogleMaterializedAuth},
+    provisioning::load_default_google_provisioning_bundle,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tracing::{info, instrument};
 
 use crate::{
-    client::{DEFAULT_BASE_URL, GoogleCalendarAuth, GoogleCalendarClient},
+    client::{
+        DEFAULT_BASE_URL, GoogleCalendarClient, google_auth_is_secretless,
+        google_auth_redacted_label,
+    },
     error::GoogleCalendarError,
     types::{Attendee, Event, EventDateTime, FreeBusyRequest, FreeBusyRequestItem},
 };
 
 /// Validated configuration for the Google Calendar connector.
 struct GoogleCalendarConfig {
-    auth: GoogleCalendarAuth,
+    auth: GoogleMaterializedAuth,
     base_url: String,
+    service_identity: String,
+    required_scopes: Vec<String>,
 }
 
 impl GoogleCalendarConfig {
     /// Parse and validate configuration from FCP params.
-    ///
-    /// Strict auth: exactly one of `token` or `credential_id` must be supplied.
-    fn from_params(params: &serde_json::Value) -> FcpResult<Self> {
-        let token = params
-            .get("token")
-            .and_then(|v| v.as_str())
-            .map(String::from);
-        let credential_id = match params.get("credential_id") {
-            Some(value) => {
-                let raw = value.as_str().ok_or(FcpError::InvalidRequest {
-                    code: 1003,
-                    message: "credential_id must be a string".into(),
-                })?;
-                Some(
-                    CredentialId::parse(raw).map_err(|_| FcpError::InvalidRequest {
-                        code: 1003,
-                        message: "credential_id must be a valid UUID".into(),
-                    })?,
-                )
-            }
-            None => None,
-        };
+    async fn from_params(params: &serde_json::Value) -> FcpResult<Self> {
+        let service_selector = params
+            .get("service_selector")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or("calendar");
+        let service = ServiceAliasRegistry::default()
+            .resolve(service_selector)
+            .map_err(|error| FcpError::InvalidRequest {
+                code: 1003,
+                message: format!("Invalid service_selector: {error}"),
+            })?;
+        if service.api_name != "calendar" || service.api_version != "v3" {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: format!(
+                    "service_selector must resolve to calendar:v3 (got {})",
+                    service.identity()
+                ),
+            });
+        }
 
-        let auth = match (token, credential_id) {
-            (Some(t), None) => GoogleCalendarAuth::Token(t),
-            (None, Some(cid)) => GoogleCalendarAuth::CredentialId(cid),
-            (Some(_), Some(_)) => {
-                return Err(FcpError::InvalidRequest {
-                    code: 1003,
-                    message: "Supply exactly one of `token` or `credential_id`, not both".into(),
-                });
-            }
-            (None, None) => {
-                return Err(FcpError::InvalidRequest {
-                    code: 1003,
-                    message: "Missing authentication: supply `token` or `credential_id`".into(),
-                });
-            }
-        };
+        let required_scopes = resolve_calendar_required_scopes(params)?;
+        let mut auth_params = params.clone();
+        let auth_object = auth_params
+            .as_object_mut()
+            .ok_or(FcpError::InvalidRequest {
+                code: 1003,
+                message: "configure params must be a JSON object".into(),
+            })?;
+        auth_object.insert(
+            "required_scopes".to_string(),
+            json!(required_scopes.clone()),
+        );
+
+        let selection =
+            GoogleAuthSelection::from_connector_config(&auth_params).map_err(map_auth_error)?;
+        let auth = selection
+            .materialize()
+            .await
+            .map_err(|error| FcpError::InvalidRequest {
+                code: 1003,
+                message: format!("Failed to materialize Google auth source: {error}"),
+            })?;
 
         let base_url = params
             .get("base_url")
@@ -72,7 +89,94 @@ impl GoogleCalendarConfig {
             .unwrap_or(DEFAULT_BASE_URL)
             .to_string();
 
-        Ok(Self { auth, base_url })
+        Ok(Self {
+            auth,
+            base_url,
+            service_identity: service.identity(),
+            required_scopes,
+        })
+    }
+}
+
+fn parse_string_array_field(
+    params: &serde_json::Value,
+    field: &str,
+) -> FcpResult<Option<Vec<String>>> {
+    let Some(value) = params.get(field) else {
+        return Ok(None);
+    };
+    let values = value.as_array().ok_or(FcpError::InvalidRequest {
+        code: 1003,
+        message: format!("`{field}` must be an array of strings"),
+    })?;
+    if values.is_empty() {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("`{field}` must not be empty"),
+        });
+    }
+
+    let mut deduped = BTreeSet::new();
+    for value in values {
+        let item = value.as_str().ok_or(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("`{field}` must contain only strings"),
+        })?;
+        let item = item.trim();
+        if item.is_empty() {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: format!("`{field}` entries must not be empty"),
+            });
+        }
+        deduped.insert(item.to_string());
+    }
+
+    Ok(Some(deduped.into_iter().collect()))
+}
+
+fn resolve_calendar_required_scopes(params: &serde_json::Value) -> FcpResult<Vec<String>> {
+    let explicit_scopes = parse_string_array_field(params, "required_scopes")?;
+    let scope_triggers = parse_string_array_field(params, "scope_triggers")?.unwrap_or_default();
+    if explicit_scopes.is_some() && !scope_triggers.is_empty() {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "Provide either `required_scopes` or `scope_triggers`, not both".into(),
+        });
+    }
+    if let Some(scopes) = explicit_scopes {
+        return Ok(scopes);
+    }
+
+    let bundle = load_default_google_provisioning_bundle("calendar").map_err(|error| {
+        FcpError::Internal {
+            message: format!(
+                "Failed to load embedded Google Calendar provisioning bundle: {error}"
+            ),
+        }
+    })?;
+    bundle
+        .scopes_for_triggers(scope_triggers)
+        .map_err(|error| FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("Invalid calendar scope trigger selection: {error}"),
+        })
+}
+
+fn map_auth_error(error: GoogleAuthError) -> FcpError {
+    match error {
+        GoogleAuthError::ExactlyOneSourceRequired { count: 0 } => FcpError::InvalidRequest {
+            code: 1003,
+            message: "Missing authentication: supply one Google auth source".into(),
+        },
+        GoogleAuthError::ExactlyOneSourceRequired { .. } => FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("Provide exactly one Google auth source: {error}"),
+        },
+        _ => FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("Invalid Google auth configuration: {error}"),
+        },
     }
 }
 
@@ -131,7 +235,7 @@ impl GoogleCalendarConnector {
         &mut self,
         params: serde_json::Value,
     ) -> FcpResult<serde_json::Value> {
-        let config = GoogleCalendarConfig::from_params(&params)?;
+        let config = GoogleCalendarConfig::from_params(&params).await?;
 
         let client = GoogleCalendarClient::new_with_auth(config.auth.clone())
             .map_err(|e| FcpError::Internal {
@@ -139,13 +243,26 @@ impl GoogleCalendarConnector {
             })?
             .with_base_url(&config.base_url);
 
-        info!(auth = %config.auth.redacted_label(), "Google Calendar connector configured");
+        info!(
+            auth = %google_auth_redacted_label(&config.auth),
+            service = %config.service_identity,
+            "Google Calendar connector configured"
+        );
 
         self.config = Some(config);
         self.client = Some(client);
         self.base.set_configured(true);
 
-        Ok(json!({ "status": "configured" }))
+        let config = self.config.as_ref().expect("config stored after configure");
+        Ok(json!({
+            "status": "configured",
+            "details": {
+                "service_identity": config.service_identity,
+                "required_scopes": config.required_scopes,
+                "auth_mode": google_auth_redacted_label(&config.auth),
+                "base_url": config.base_url,
+            }
+        }))
     }
 
     /// Handle handshake method.
@@ -217,8 +334,10 @@ impl GoogleCalendarConnector {
             }
         });
         if let Some(config) = &self.config {
-            health["auth_mode"] = json!(config.auth.redacted_label());
+            health["auth_mode"] = json!(google_auth_redacted_label(&config.auth));
             health["base_url"] = json!(config.base_url);
+            health["service_identity"] = json!(config.service_identity);
+            health["required_scopes"] = json!(config.required_scopes);
         }
         Ok(health)
     }
@@ -278,15 +397,35 @@ impl GoogleCalendarConnector {
         // 4. Auth mode
         if let Some(config) = &self.config {
             checks.push(DoctorCheck {
+                name: "service_identity".into(),
+                status: DoctorStatus::Healthy,
+                message: format!("Discovery service: {}", config.service_identity),
+            });
+            checks.push(DoctorCheck {
                 name: "auth_mode".into(),
                 status: DoctorStatus::Healthy,
-                message: format!("Auth: {}", config.auth.redacted_label()),
+                message: format!("Auth: {}", google_auth_redacted_label(&config.auth)),
+            });
+            checks.push(DoctorCheck {
+                name: "required_scopes".into(),
+                status: DoctorStatus::Healthy,
+                message: format!("Required scopes: {}", config.required_scopes.join(", ")),
             });
         } else {
+            checks.push(DoctorCheck {
+                name: "service_identity".into(),
+                status: DoctorStatus::Unhealthy,
+                message: "Discovery service not set (not configured)".into(),
+            });
             checks.push(DoctorCheck {
                 name: "auth_mode".into(),
                 status: DoctorStatus::Unhealthy,
                 message: "Auth mode not set (not configured)".into(),
+            });
+            checks.push(DoctorCheck {
+                name: "required_scopes".into(),
+                status: DoctorStatus::Unhealthy,
+                message: "Required scopes not set (not configured)".into(),
             });
         }
 
@@ -306,7 +445,7 @@ impl GoogleCalendarConnector {
 
         // 6. Credential injection
         if let Some(config) = &self.config {
-            if config.auth.is_secretless() {
+            if google_auth_is_secretless(&config.auth) {
                 checks.push(DoctorCheck {
                     name: "credential_injection".into(),
                     status: DoctorStatus::Healthy,
@@ -360,7 +499,7 @@ impl GoogleCalendarConnector {
 
         // In credential_id mode, we can't verify connectivity without the egress proxy
         if let Some(config) = &self.config {
-            if config.auth.is_secretless() {
+            if google_auth_is_secretless(&config.auth) {
                 let report = SelfCheckReport::degraded(
                     "credential_injection_required",
                     "Configured with credential_id; egress proxy injection required for checks",
@@ -1352,6 +1491,12 @@ mod tests {
         assert_eq!(result["status"], "configured");
         assert!(connector.client.is_some());
         assert!(connector.config.is_some());
+        let config = connector.config.as_ref().unwrap();
+        assert_eq!(config.service_identity, "calendar:v3");
+        assert_eq!(
+            config.required_scopes,
+            vec!["https://www.googleapis.com/auth/calendar.readonly".to_string()]
+        );
     }
 
     #[fcp_async_core::runtime::test]
@@ -1364,6 +1509,8 @@ mod tests {
             .unwrap();
         assert_eq!(result["status"], "configured");
         assert!(connector.config.is_some());
+        let config = connector.config.as_ref().unwrap();
+        assert!(google_auth_is_secretless(&config.auth));
     }
 
     #[fcp_async_core::runtime::test]
@@ -1399,6 +1546,63 @@ mod tests {
     }
 
     #[fcp_async_core::runtime::test]
+    async fn test_configure_service_selector_alias() {
+        let mut connector = GoogleCalendarConnector::new();
+        connector
+            .handle_configure(json!({
+                "token": "tok",
+                "service_selector": "gcal"
+            }))
+            .await
+            .unwrap();
+
+        let config = connector.config.as_ref().unwrap();
+        assert_eq!(config.service_identity, "calendar:v3");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_configure_scope_triggers_widen_required_scopes() {
+        let mut connector = GoogleCalendarConnector::new();
+        connector
+            .handle_configure(json!({
+                "token": "tok",
+                "scope_triggers": [
+                    "User enables event create, update, delete, or quick-add workflows."
+                ]
+            }))
+            .await
+            .unwrap();
+
+        let config = connector.config.as_ref().unwrap();
+        assert_eq!(
+            config.required_scopes,
+            vec![
+                "https://www.googleapis.com/auth/calendar.events".to_string(),
+                "https://www.googleapis.com/auth/calendar.readonly".to_string()
+            ]
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_configure_rejects_invalid_service_selector() {
+        let mut connector = GoogleCalendarConnector::new();
+        let result = connector
+            .handle_configure(json!({
+                "token": "tok",
+                "service_selector": "gmail"
+            }))
+            .await;
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(message.contains("service_selector"));
+                assert!(message.contains("calendar:v3"));
+            }
+            e => panic!("Expected InvalidRequest, got: {e:?}"),
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
     async fn test_configure_custom_base_url() {
         let mut connector = GoogleCalendarConnector::new();
         connector
@@ -1421,8 +1625,9 @@ mod tests {
             .unwrap();
         let health = connector.handle_health().await.unwrap();
         assert_eq!(health["status"], "healthy");
-        assert_eq!(health["auth_mode"], "token:redacted");
+        assert_eq!(health["auth_mode"], "google_auth:bearer:redacted");
         assert!(health["base_url"].as_str().is_some());
+        assert_eq!(health["service_identity"], "calendar:v3");
     }
 
     #[fcp_async_core::runtime::test]

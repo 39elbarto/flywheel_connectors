@@ -1,12 +1,18 @@
 //! Google Calendar API client.
 
+use std::collections::BTreeMap;
 use std::fmt;
-use std::fmt::Write;
+use std::fmt::Write as _;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use fcp_core::CredentialId;
-use reqwest::{Client, Response, StatusCode};
+use fcp_google_discovery::auth::{GoogleAuthSourceKind, GoogleMaterializedAuth};
+use fcp_google_discovery::executor::{
+    GoogleApiError, GoogleExecuteRequest, GoogleExecuteResponse, GoogleResponseBody,
+    GoogleResponseMode, GoogleRestError, GoogleRestExecutor,
+};
+use fcp_google_discovery::{DiscoveryMethod, DiscoveryParameter};
+use reqwest::{Client, StatusCode, Url, header};
 use tracing::{debug, instrument, warn};
 
 use crate::{
@@ -17,45 +23,26 @@ use crate::{
 /// Default Google Calendar API base URL.
 pub const DEFAULT_BASE_URL: &str = "https://www.googleapis.com/calendar/v3";
 
-/// Authentication mode for the Google Calendar API.
-#[derive(Clone)]
-pub enum GoogleCalendarAuth {
-    /// Direct `OAuth2` bearer token.
-    Token(String),
-    /// Secretless credential reference (egress proxy injection).
-    CredentialId(CredentialId),
-}
-
-impl GoogleCalendarAuth {
-    /// Render a redacted label suitable for logs/diagnostics.
-    #[must_use]
-    pub fn redacted_label(&self) -> String {
-        match self {
-            Self::Token(_) => "token:redacted".to_string(),
-            Self::CredentialId(id) => format!("credential_id:{id}"),
-        }
-    }
-
-    /// Whether this auth mode requires egress proxy credential injection.
-    #[must_use]
-    pub const fn is_secretless(&self) -> bool {
-        matches!(self, Self::CredentialId(_))
+/// Render a redacted auth label suitable for logs/diagnostics.
+#[must_use]
+pub(crate) fn google_auth_redacted_label(auth: &GoogleMaterializedAuth) -> String {
+    if let Some(credential_id) = auth.credential_id() {
+        format!("google_auth:credential_id:{credential_id}")
+    } else {
+        "google_auth:bearer:redacted".to_string()
     }
 }
 
-impl fmt::Debug for GoogleCalendarAuth {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Token(_) => f.debug_tuple("Token").field(&"<redacted>").finish(),
-            Self::CredentialId(id) => f.debug_tuple("CredentialId").field(id).finish(),
-        }
-    }
+/// Whether the provided auth mode requires egress proxy credential injection.
+#[must_use]
+pub(crate) fn google_auth_is_secretless(auth: &GoogleMaterializedAuth) -> bool {
+    auth.credential_id().is_some()
 }
 
-/// Google Calendar API client with retry logic and rate limit awareness.
+/// Google Calendar API client with retry logic and shared Google execution.
 pub struct GoogleCalendarClient {
-    client: Client,
-    auth: GoogleCalendarAuth,
+    executor: GoogleRestExecutor,
+    auth: GoogleMaterializedAuth,
     base_url: String,
     max_retries: u32,
     initial_delay_ms: u64,
@@ -66,7 +53,7 @@ pub struct GoogleCalendarClient {
 impl fmt::Debug for GoogleCalendarClient {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("GoogleCalendarClient")
-            .field("auth", &self.auth)
+            .field("auth", &google_auth_redacted_label(&self.auth))
             .field("base_url", &self.base_url)
             .field("max_retries", &self.max_retries)
             .finish_non_exhaustive()
@@ -76,21 +63,30 @@ impl fmt::Debug for GoogleCalendarClient {
 impl GoogleCalendarClient {
     /// Create a new Google Calendar client with an `OAuth2` access token.
     pub fn new(token: impl Into<String>) -> GCalResult<Self> {
-        Self::new_with_auth(GoogleCalendarAuth::Token(token.into()))
+        Self::new_with_auth(GoogleMaterializedAuth::BearerToken {
+            access_token: token.into(),
+            source: GoogleAuthSourceKind::AccessToken,
+            granted_scopes: Vec::new(),
+            quota_project_id: None,
+        })
     }
 
-    /// Create a new Google Calendar client with explicit auth mode.
-    pub fn new_with_auth(auth: GoogleCalendarAuth) -> GCalResult<Self> {
-        let client = Client::builder()
+    /// Create a new Google Calendar client with explicit shared Google auth.
+    pub fn new_with_auth(auth: GoogleMaterializedAuth) -> GCalResult<Self> {
+        let mut headers = header::HeaderMap::new();
+        headers.insert(header::ACCEPT, "application/json".parse().unwrap());
+
+        let http = Client::builder()
+            .default_headers(headers)
             .timeout(Duration::from_secs(30))
             .user_agent("fcp-google-calendar/0.1.0")
             .build()
             .map_err(GoogleCalendarError::Http)?;
 
         Ok(Self {
-            client,
+            executor: GoogleRestExecutor::new().with_client(http),
             auth,
-            base_url: DEFAULT_BASE_URL.into(),
+            base_url: DEFAULT_BASE_URL.to_string(),
             max_retries: 3,
             initial_delay_ms: 1000,
             max_delay_ms: 60_000,
@@ -123,16 +119,6 @@ impl GoogleCalendarClient {
     #[must_use]
     pub fn total_requests(&self) -> u64 {
         self.total_requests.load(Ordering::Relaxed)
-    }
-
-    /// Apply authentication to an outgoing request.
-    fn apply_auth(&self, builder: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
-        match &self.auth {
-            GoogleCalendarAuth::Token(token) => builder.bearer_auth(token),
-            GoogleCalendarAuth::CredentialId(id) => {
-                builder.header("X-FCP-Credential-ID", id.to_string())
-            }
-        }
     }
 
     /// Lightweight connectivity probe (list calendars with maxResults=1).
@@ -351,7 +337,10 @@ impl GoogleCalendarClient {
     // ── Internal HTTP helpers ───────────────────────────────────
 
     async fn get<T: serde::de::DeserializeOwned>(&self, url: &str) -> GCalResult<T> {
-        self.get_with_params(url, &[]).await
+        let response = self
+            .execute_with_retry("GET", url, None, GoogleResponseMode::Json)
+            .await?;
+        decode_json_response(response)
     }
 
     async fn get_with_params<T: serde::de::DeserializeOwned>(
@@ -362,8 +351,8 @@ impl GoogleCalendarClient {
         let mut url = base_url.to_string();
         if !params.is_empty() {
             url.push('?');
-            for (i, (key, value)) in params.iter().enumerate() {
-                if i > 0 {
+            for (index, (key, value)) in params.iter().enumerate() {
+                if index > 0 {
                     url.push('&');
                 }
                 let encoded = percent_encoding::utf8_percent_encode(
@@ -373,41 +362,7 @@ impl GoogleCalendarClient {
                 let _ = write!(url, "{key}={encoded}");
             }
         }
-        self.total_requests.fetch_add(1, Ordering::Relaxed);
-
-        let mut attempt = 0;
-        let mut delay = Duration::from_millis(self.initial_delay_ms);
-
-        loop {
-            attempt += 1;
-            let response = self.apply_auth(self.client.get(&url)).send().await;
-
-            match response {
-                Ok(resp) => {
-                    if let Some(retry_result) = Self::check_rate_limit(&resp) {
-                        if attempt <= self.max_retries {
-                            let wait = retry_result.unwrap_or(delay);
-                            warn!(attempt, "Rate limited, waiting {wait:?}");
-                            fcp_async_core::time::sleep(wait).await;
-                            continue;
-                        }
-                        return Err(GoogleCalendarError::RateLimited {
-                            retry_after_secs: retry_result.map_or(60, |d| d.as_secs()),
-                        });
-                    }
-                    if let Some(err) = Self::check_api_error(&resp) {
-                        return Err(err);
-                    }
-                    return resp.json::<T>().await.map_err(Into::into);
-                }
-                Err(e) if e.is_timeout() && attempt <= self.max_retries => {
-                    warn!(attempt, "Request timed out, retrying in {delay:?}");
-                    fcp_async_core::time::sleep(delay).await;
-                    delay = std::cmp::min(delay * 2, Duration::from_millis(self.max_delay_ms));
-                }
-                Err(e) => return Err(e.into()),
-            }
-        }
+        self.get(&url).await
     }
 
     async fn post_json<T: serde::de::DeserializeOwned>(
@@ -415,45 +370,10 @@ impl GoogleCalendarClient {
         url: &str,
         body: &serde_json::Value,
     ) -> GCalResult<T> {
-        self.total_requests.fetch_add(1, Ordering::Relaxed);
-
-        let mut attempt = 0;
-        let mut delay = Duration::from_millis(self.initial_delay_ms);
-
-        loop {
-            attempt += 1;
-            let response = self
-                .apply_auth(self.client.post(url))
-                .json(body)
-                .send()
-                .await;
-
-            match response {
-                Ok(resp) => {
-                    if let Some(retry_result) = Self::check_rate_limit(&resp) {
-                        if attempt <= self.max_retries {
-                            let wait = retry_result.unwrap_or(delay);
-                            warn!(attempt, "Rate limited, waiting {wait:?}");
-                            fcp_async_core::time::sleep(wait).await;
-                            continue;
-                        }
-                        return Err(GoogleCalendarError::RateLimited {
-                            retry_after_secs: retry_result.map_or(60, |d| d.as_secs()),
-                        });
-                    }
-                    if let Some(err) = Self::check_api_error(&resp) {
-                        return Err(err);
-                    }
-                    return resp.json::<T>().await.map_err(Into::into);
-                }
-                Err(e) if e.is_timeout() && attempt <= self.max_retries => {
-                    warn!(attempt, "Request timed out, retrying in {delay:?}");
-                    fcp_async_core::time::sleep(delay).await;
-                    delay = std::cmp::min(delay * 2, Duration::from_millis(self.max_delay_ms));
-                }
-                Err(e) => return Err(e.into()),
-            }
-        }
+        let response = self
+            .execute_with_retry("POST", url, Some(body), GoogleResponseMode::Json)
+            .await?;
+        decode_json_response(response)
     }
 
     async fn put_json<T: serde::de::DeserializeOwned>(
@@ -461,111 +381,198 @@ impl GoogleCalendarClient {
         url: &str,
         body: &serde_json::Value,
     ) -> GCalResult<T> {
-        self.total_requests.fetch_add(1, Ordering::Relaxed);
-
-        let mut attempt = 0;
-        let mut delay = Duration::from_millis(self.initial_delay_ms);
-
-        loop {
-            attempt += 1;
-            let response = self
-                .apply_auth(self.client.put(url))
-                .json(body)
-                .send()
-                .await;
-
-            match response {
-                Ok(resp) => {
-                    if let Some(retry_result) = Self::check_rate_limit(&resp) {
-                        if attempt <= self.max_retries {
-                            let wait = retry_result.unwrap_or(delay);
-                            warn!(attempt, "Rate limited, waiting {wait:?}");
-                            fcp_async_core::time::sleep(wait).await;
-                            continue;
-                        }
-                        return Err(GoogleCalendarError::RateLimited {
-                            retry_after_secs: retry_result.map_or(60, |d| d.as_secs()),
-                        });
-                    }
-                    if let Some(err) = Self::check_api_error(&resp) {
-                        return Err(err);
-                    }
-                    return resp.json::<T>().await.map_err(Into::into);
-                }
-                Err(e) if e.is_timeout() && attempt <= self.max_retries => {
-                    warn!(attempt, "Request timed out, retrying in {delay:?}");
-                    fcp_async_core::time::sleep(delay).await;
-                    delay = std::cmp::min(delay * 2, Duration::from_millis(self.max_delay_ms));
-                }
-                Err(e) => return Err(e.into()),
-            }
-        }
+        let response = self
+            .execute_with_retry("PUT", url, Some(body), GoogleResponseMode::Json)
+            .await?;
+        decode_json_response(response)
     }
 
     async fn delete(&self, url: &str) -> GCalResult<()> {
+        let _ = self
+            .execute_with_retry("DELETE", url, None, GoogleResponseMode::Auto)
+            .await?;
+        Ok(())
+    }
+
+    async fn execute_with_retry(
+        &self,
+        http_method: &'static str,
+        url: &str,
+        body: Option<&serde_json::Value>,
+        response_mode: GoogleResponseMode,
+    ) -> GCalResult<GoogleExecuteResponse> {
         self.total_requests.fetch_add(1, Ordering::Relaxed);
 
-        let mut attempt = 0;
+        let mut last_err = None;
         let mut delay = Duration::from_millis(self.initial_delay_ms);
 
-        loop {
-            attempt += 1;
-            let response = self.apply_auth(self.client.delete(url)).send().await;
+        for attempt in 0..=self.max_retries {
+            if attempt > 0 {
+                let wait = last_err
+                    .as_ref()
+                    .and_then(GoogleCalendarError::retry_after)
+                    .unwrap_or(delay);
+                warn!(attempt, delay_ms = wait.as_millis(), "retrying request");
+                fcp_async_core::time::sleep(wait).await;
+                delay = std::cmp::min(delay * 2, Duration::from_millis(self.max_delay_ms));
+            }
 
-            match response {
-                Ok(resp) => {
-                    if let Some(retry_result) = Self::check_rate_limit(&resp) {
-                        if attempt <= self.max_retries {
-                            let wait = retry_result.unwrap_or(delay);
-                            warn!(attempt, "Rate limited, waiting {wait:?}");
-                            fcp_async_core::time::sleep(wait).await;
-                            continue;
-                        }
-                        return Err(GoogleCalendarError::RateLimited {
-                            retry_after_secs: retry_result.map_or(60, |d| d.as_secs()),
-                        });
-                    }
-                    if let Some(err) = Self::check_api_error(&resp) {
-                        return Err(err);
-                    }
-                    return Ok(());
+            let redacted_url = redact_url(url);
+            debug!(url = %redacted_url, method = http_method, "request");
+
+            match self
+                .execute_once(http_method, url, body, response_mode)
+                .await
+            {
+                Ok(response) => return Ok(response),
+                Err(error) if error.is_retryable() && attempt < self.max_retries => {
+                    warn!(attempt, error = %error, "retryable error");
+                    last_err = Some(error);
                 }
-                Err(e) if e.is_timeout() && attempt <= self.max_retries => {
-                    warn!(attempt, "Request timed out, retrying in {delay:?}");
-                    fcp_async_core::time::sleep(delay).await;
-                    delay = std::cmp::min(delay * 2, Duration::from_millis(self.max_delay_ms));
-                }
-                Err(e) => return Err(e.into()),
+                Err(error) => return Err(error),
             }
         }
+
+        Err(last_err.unwrap_or(GoogleCalendarError::Api {
+            code: 500,
+            message: "Max retries exceeded".into(),
+        }))
     }
 
-    #[allow(clippy::option_option)]
-    fn check_rate_limit(response: &Response) -> Option<Option<Duration>> {
-        if response.status() == StatusCode::TOO_MANY_REQUESTS {
-            let retry_after = response
-                .headers()
-                .get("retry-after")
-                .and_then(|v| v.to_str().ok())
-                .and_then(|v| v.parse::<u64>().ok())
-                .map(Duration::from_secs);
-            Some(retry_after)
-        } else {
-            None
+    async fn execute_once(
+        &self,
+        http_method: &'static str,
+        raw_url: &str,
+        body: Option<&serde_json::Value>,
+        response_mode: GoogleResponseMode,
+    ) -> GCalResult<GoogleExecuteResponse> {
+        let parsed_url = Url::parse(raw_url).map_err(|error| GoogleCalendarError::Api {
+            code: 400,
+            message: format!("invalid request url `{raw_url}`: {error}"),
+        })?;
+
+        let mut parameters: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        for (name, value) in parsed_url.query_pairs() {
+            parameters
+                .entry(name.into_owned())
+                .or_default()
+                .push(value.into_owned());
         }
+
+        let method_parameters = parameters
+            .keys()
+            .map(|name| {
+                (
+                    name.clone(),
+                    DiscoveryParameter {
+                        location: Some("query".to_string()),
+                        required: false,
+                        repeated: true,
+                        type_name: Some("string".to_string()),
+                        format: None,
+                        description: None,
+                    },
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+
+        let path = parsed_url.path().trim_start_matches('/').to_string();
+        let method = DiscoveryMethod {
+            key: format!("calendar.transport.{}", http_method.to_ascii_lowercase()),
+            id: format!("calendar.transport.{}", http_method.to_ascii_lowercase()),
+            http_method: http_method.to_string(),
+            path: path.clone(),
+            flat_path: None,
+            canonical_path: path,
+            resource_path: Vec::new(),
+            description: None,
+            scopes: Vec::new(),
+            request_ref: None,
+            response_ref: None,
+            parameters: method_parameters,
+            supports_media_download: http_method == "GET",
+            supports_media_upload: false,
+            media_upload: None,
+        };
+
+        let schemas = BTreeMap::new();
+        let mut base_url = parsed_url.origin().ascii_serialization();
+        if !base_url.ends_with('/') {
+            base_url.push('/');
+        }
+
+        let mut request = GoogleExecuteRequest::new(&method, &schemas, &base_url);
+        request.parameters = parameters;
+        request.body = body.cloned();
+        request.response_mode = response_mode;
+        request.auth = Some(&self.auth);
+
+        self.executor
+            .execute(&request)
+            .await
+            .map_err(map_rest_error)
     }
+}
 
-    fn check_api_error(response: &Response) -> Option<GoogleCalendarError> {
-        let status = response.status();
-        if status.is_success() {
-            return None;
+fn decode_json_response<T: serde::de::DeserializeOwned>(
+    response: GoogleExecuteResponse,
+) -> GCalResult<T> {
+    match response.body {
+        GoogleResponseBody::Json(value) => {
+            serde_json::from_value(value).map_err(GoogleCalendarError::Json)
         }
-
-        if status == StatusCode::UNAUTHORIZED {
-            return Some(GoogleCalendarError::Unauthorized);
+        GoogleResponseBody::Binary(bytes) => {
+            serde_json::from_slice(&bytes).map_err(GoogleCalendarError::Json)
         }
-
-        debug!(status = %status, "Google Calendar API returned error status");
-        None
+        GoogleResponseBody::Empty => Err(GoogleCalendarError::Api {
+            code: response.status_code.into(),
+            message: "expected json response body".to_string(),
+        }),
     }
+}
+
+fn map_rest_error(error: GoogleRestError) -> GoogleCalendarError {
+    match error {
+        GoogleRestError::Http { source } => GoogleCalendarError::Http(source),
+        GoogleRestError::JsonDecode { source } => GoogleCalendarError::Json(source),
+        GoogleRestError::Api { error, .. } => map_google_api_error(error),
+        other => GoogleCalendarError::Api {
+            code: 500,
+            message: other.to_string(),
+        },
+    }
+}
+
+fn map_google_api_error(error: GoogleApiError) -> GoogleCalendarError {
+    match error.status_code {
+        code if code == StatusCode::UNAUTHORIZED.as_u16() => GoogleCalendarError::Unauthorized,
+        code if code == StatusCode::TOO_MANY_REQUESTS.as_u16() => {
+            GoogleCalendarError::RateLimited {
+                retry_after_secs: 60,
+            }
+        }
+        code => GoogleCalendarError::Api {
+            code: u32::from(code),
+            message: error.message,
+        },
+    }
+}
+
+fn redact_url(url: &str) -> String {
+    let Ok(mut parsed) = Url::parse(url) else {
+        return url.to_string();
+    };
+
+    let pairs = parsed
+        .query_pairs()
+        .map(|(name, value)| {
+            if name.eq_ignore_ascii_case("key") {
+                (name.into_owned(), "redacted".to_string())
+            } else {
+                (name.into_owned(), value.into_owned())
+            }
+        })
+        .collect::<Vec<_>>();
+    parsed.query_pairs_mut().clear().extend_pairs(pairs);
+    parsed.to_string()
 }

@@ -107,6 +107,7 @@ members = [
     "connectors/terraform",
     "connectors/annas-archive",
     "connectors/make",
+    "connectors/bigquery",
 ]
 
 # Default to the FCP2 platform core crates (connectors are explicitly targeted).

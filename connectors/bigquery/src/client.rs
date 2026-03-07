@@ -337,4 +337,63 @@ mod tests {
         };
         assert_eq!(auth.redacted_label(), "access_token:redacted");
     }
+
+    #[test]
+    fn client_new_empty_url() {
+        let auth = BigQueryAuth {
+            access_token: "tok".into(),
+        };
+        let client = BigQueryClient::new(auth, None, Some("")).unwrap();
+        assert_eq!(client.base_url, "");
+    }
+
+    #[test]
+    fn client_new_multiple_trailing_slashes() {
+        let auth = BigQueryAuth {
+            access_token: "tok".into(),
+        };
+        let client = BigQueryClient::new(auth, None, Some("https://x.com///")).unwrap();
+        assert!(client.base_url.ends_with("//"));
+    }
+
+    #[test]
+    fn default_base_url_is_https() {
+        assert!(DEFAULT_BASE_URL.starts_with("https://"));
+    }
+
+    #[test]
+    fn default_base_url_no_trailing_slash() {
+        assert!(!DEFAULT_BASE_URL.ends_with('/'));
+    }
+
+    #[test]
+    fn client_debug_contains_struct_name() {
+        let auth = BigQueryAuth {
+            access_token: "tok".into(),
+        };
+        let client = BigQueryClient::new(auth, None, None).unwrap();
+        let dbg = format!("{client:?}");
+        assert!(dbg.contains("BigQueryClient"));
+        assert!(dbg.contains("auth"));
+        assert!(dbg.contains("base_url"));
+    }
+
+    #[test]
+    fn auth_debug_contains_struct_name() {
+        let auth = BigQueryAuth {
+            access_token: "tok".into(),
+        };
+        let dbg = format!("{auth:?}");
+        assert!(dbg.contains("BigQueryAuth"));
+    }
+
+    #[test]
+    fn client_new_no_trailing_slash_unchanged() {
+        let auth = BigQueryAuth {
+            access_token: "tok".into(),
+        };
+        let client =
+            BigQueryClient::new(auth, None, Some("https://example.com")).unwrap();
+        assert_eq!(client.base_url, "https://example.com");
+    }
 }

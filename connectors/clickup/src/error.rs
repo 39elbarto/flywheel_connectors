@@ -557,4 +557,108 @@ mod tests {
         assert!(dbg.contains("RateLimited"));
         assert!(dbg.contains("100"));
     }
+
+    #[test]
+    fn api_501_is_retryable() {
+        assert!(
+            ClickUpError::Api {
+                status_code: 501,
+                message: "not impl".into()
+            }
+            .is_retryable()
+        );
+    }
+
+    #[test]
+    fn api_600_not_retryable() {
+        assert!(
+            !ClickUpError::Api {
+                status_code: 600,
+                message: "over".into()
+            }
+            .is_retryable()
+        );
+    }
+
+    #[test]
+    fn error_debug_not_found() {
+        let dbg = format!(
+            "{:?}",
+            ClickUpError::NotFound {
+                resource: "task/123".into()
+            }
+        );
+        assert!(dbg.contains("NotFound"));
+        assert!(dbg.contains("task/123"));
+    }
+
+    #[test]
+    fn error_debug_forbidden() {
+        let dbg = format!("{:?}", ClickUpError::Forbidden);
+        assert!(dbg.contains("Forbidden"));
+    }
+
+    #[test]
+    fn error_debug_json() {
+        let inner = serde_json::from_str::<serde_json::Value>("bad").unwrap_err();
+        let dbg = format!("{:?}", ClickUpError::Json(inner));
+        assert!(dbg.contains("Json"));
+    }
+
+    #[test]
+    fn from_serde_json_error() {
+        let inner = serde_json::from_str::<serde_json::Value>("{bad}").unwrap_err();
+        let err: ClickUpError = inner.into();
+        assert!(matches!(err, ClickUpError::Json(_)));
+    }
+
+    #[test]
+    fn unauthorized_fcp_no_retry_after() {
+        match ClickUpError::Unauthorized.to_fcp_error() {
+            FcpError::External { retry_after, .. } => assert!(retry_after.is_none()),
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn forbidden_fcp_no_retry_after() {
+        match ClickUpError::Forbidden.to_fcp_error() {
+            FcpError::External { retry_after, .. } => assert!(retry_after.is_none()),
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn not_found_fcp_no_retry_after() {
+        match (ClickUpError::NotFound {
+            resource: "x".into(),
+        })
+        .to_fcp_error()
+        {
+            FcpError::External { retry_after, .. } => assert!(retry_after.is_none()),
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn not_found_unicode_resource() {
+        let err = ClickUpError::NotFound {
+            resource: "task/\u{1F680}".into(),
+        };
+        assert!(err.to_string().contains('\u{1F680}'));
+        match err.to_fcp_error() {
+            FcpError::External { message, .. } => assert!(message.contains('\u{1F680}')),
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn api_error_long_message() {
+        let long = "x".repeat(10_000);
+        let err = ClickUpError::Api {
+            status_code: 500,
+            message: long.clone(),
+        };
+        assert!(err.to_string().contains(&long));
+    }
 }

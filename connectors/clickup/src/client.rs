@@ -343,4 +343,59 @@ mod tests {
         assert!(!dbg.contains("ABCDEFGHIJKLMNOP"));
         assert!(dbg.contains("ApiToken"));
     }
+
+    #[test]
+    fn client_new_empty_url() {
+        let client = ClickUpClient::new(ClickUpAuth::ApiToken("tok".into()), Some("")).unwrap();
+        assert_eq!(client.base_url, "");
+    }
+
+    #[test]
+    fn client_new_multiple_trailing_slashes() {
+        let client = ClickUpClient::new(
+            ClickUpAuth::ApiToken("tok".into()),
+            Some("https://x.com///"),
+        )
+        .unwrap();
+        assert!(client.base_url.ends_with("//"));
+    }
+
+    #[test]
+    fn default_base_url_contains_v2() {
+        assert!(DEFAULT_BASE_URL.contains("v2"));
+    }
+
+    #[test]
+    fn auth_debug_format_starts_with_variant() {
+        let tok = ClickUpAuth::ApiToken("t".into());
+        assert!(format!("{tok:?}").starts_with("ApiToken"));
+        let cred = ClickUpAuth::CredentialId(CredentialId::new());
+        assert!(format!("{cred:?}").starts_with("CredentialId"));
+    }
+
+    #[test]
+    fn client_debug_shows_auth_field() {
+        let client = ClickUpClient::new(ClickUpAuth::ApiToken("tok".into()), None).unwrap();
+        let dbg = format!("{client:?}");
+        assert!(dbg.contains("auth"));
+    }
+
+    #[test]
+    fn auth_redacted_label_credential_contains_uuid() {
+        let id = CredentialId::new();
+        let id_str = id.to_string();
+        let auth = ClickUpAuth::CredentialId(id);
+        let label = auth.redacted_label();
+        assert!(label.contains(&id_str));
+    }
+
+    #[test]
+    fn client_new_no_trailing_slash_unchanged() {
+        let client = ClickUpClient::new(
+            ClickUpAuth::ApiToken("tok".into()),
+            Some("https://example.com"),
+        )
+        .unwrap();
+        assert_eq!(client.base_url, "https://example.com");
+    }
 }

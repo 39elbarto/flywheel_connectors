@@ -928,4 +928,131 @@ mod tests {
         .unwrap();
         assert_eq!(config.base_url, DEFAULT_BASE_URL);
     }
+
+    #[test]
+    fn require_str_object_value() {
+        let input = json!({"f": {"nested": true}});
+        assert!(require_str(&input, "f").is_err());
+    }
+
+    #[test]
+    fn require_str_float_value() {
+        let input = json!({"f": 3.14});
+        assert!(require_str(&input, "f").is_err());
+    }
+
+    #[test]
+    fn operations_list_ops_are_strict_idempotent() {
+        let ops = operations_info();
+        for op in ops.as_array().unwrap() {
+            let id = op["id"].as_str().unwrap();
+            if id.contains("list") {
+                assert_eq!(
+                    op["idempotency"].as_str().unwrap(),
+                    "strict",
+                    "list op {id} should be strict idempotent"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn operations_create_is_not_idempotent() {
+        let ops = operations_info();
+        for op in ops.as_array().unwrap() {
+            let id = op["id"].as_str().unwrap();
+            if id.contains("create") {
+                assert_eq!(
+                    op["idempotency"].as_str().unwrap(),
+                    "none",
+                    "create op {id} should have no idempotency"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn operations_delete_is_not_idempotent() {
+        let ops = operations_info();
+        for op in ops.as_array().unwrap() {
+            let id = op["id"].as_str().unwrap();
+            if id.contains("delete") {
+                assert_eq!(
+                    op["idempotency"].as_str().unwrap(),
+                    "none",
+                    "delete op {id} should have no idempotency"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn doctor_status_debug() {
+        assert!(format!("{:?}", DoctorStatus::Healthy).contains("Healthy"));
+        assert!(format!("{:?}", DoctorStatus::Degraded).contains("Degraded"));
+        assert!(format!("{:?}", DoctorStatus::Unhealthy).contains("Unhealthy"));
+    }
+
+    #[test]
+    fn doctor_check_clone_and_debug() {
+        let check = DoctorCheck {
+            name: "my_check".into(),
+            passed: true,
+            message: Some("ok".into()),
+            critical: false,
+        };
+        let cloned = check.clone();
+        assert_eq!(check.name, "my_check");
+        assert_eq!(cloned.message.as_deref(), Some("ok"));
+        let dbg = format!("{cloned:?}");
+        assert!(dbg.contains("DoctorCheck"));
+        assert!(dbg.contains("my_check"));
+    }
+
+    #[test]
+    fn doctor_result_debug_and_clone() {
+        let r = DoctorResult::from_checks(vec![DoctorCheck {
+            name: "c".into(),
+            passed: true,
+            message: None,
+            critical: false,
+        }]);
+        let cloned = r.clone();
+        assert_eq!(r.status, DoctorStatus::Healthy);
+        assert_eq!(cloned.checks.len(), 1);
+        let dbg = format!("{r:?}");
+        assert!(dbg.contains("DoctorResult"));
+        assert!(dbg.contains("Healthy"));
+    }
+
+    #[test]
+    fn config_debug_and_clone() {
+        let config = ClickUpConfig::from_params(&json!({"api_token": "test"})).unwrap();
+        let cloned = config.clone();
+        assert_eq!(config.base_url, DEFAULT_BASE_URL);
+        assert_eq!(cloned.base_url, DEFAULT_BASE_URL);
+        let dbg = format!("{config:?}");
+        assert!(dbg.contains("ClickUpConfig"));
+    }
+
+    #[test]
+    fn operations_all_summaries_non_empty() {
+        let ops = operations_info();
+        for op in ops.as_array().unwrap() {
+            let summary = op["summary"].as_str().unwrap();
+            assert!(!summary.is_empty(), "op {:?} has empty summary", op["id"]);
+        }
+    }
+
+    #[test]
+    fn operations_all_capabilities_prefixed() {
+        let ops = operations_info();
+        for op in ops.as_array().unwrap() {
+            let cap = op["capability"].as_str().unwrap();
+            assert!(
+                cap.starts_with("clickup."),
+                "capability {cap} should start with clickup."
+            );
+        }
+    }
 }

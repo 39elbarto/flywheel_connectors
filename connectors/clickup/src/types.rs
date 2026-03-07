@@ -547,4 +547,91 @@ mod tests {
             Some("https://app.clickup.com/t/task_abc123")
         );
     }
+
+    #[test]
+    fn task_priority_serialize_roundtrip() {
+        let p = TaskPriority {
+            id: Some("1".into()),
+            priority: Some("urgent".into()),
+            color: Some("#f50000".into()),
+        };
+        let v = serde_json::to_value(&p).unwrap();
+        let back: TaskPriority = serde_json::from_value(v).unwrap();
+        assert_eq!(back.priority.as_deref(), Some("urgent"));
+        assert_eq!(back.color.as_deref(), Some("#f50000"));
+    }
+
+    #[test]
+    fn task_list_serialize_roundtrip() {
+        let l = TaskList {
+            id: Some("l1".into()),
+            name: Some("Sprint 1".into()),
+        };
+        let v = serde_json::to_value(&l).unwrap();
+        let back: TaskList = serde_json::from_value(v).unwrap();
+        assert_eq!(back.id.as_deref(), Some("l1"));
+        assert_eq!(back.name.as_deref(), Some("Sprint 1"));
+    }
+
+    #[test]
+    fn api_error_response_extra_fields_ignored() {
+        let e: ApiErrorResponse = serde_json::from_value(json!({
+            "err": "oops",
+            "ECODE": "ERR_001",
+            "extra_field": true,
+        }))
+        .unwrap();
+        assert_eq!(e.err.as_deref(), Some("oops"));
+    }
+
+    #[test]
+    fn task_unicode_name() {
+        let t: Task = serde_json::from_value(json!({
+            "id": "t1",
+            "name": "\u{1F41B} Fix bug",
+        }))
+        .unwrap();
+        assert!(t.name.unwrap().contains('\u{1F41B}'));
+    }
+
+    #[test]
+    fn space_private_true() {
+        let s: Space = serde_json::from_value(json!({
+            "id": "s1",
+            "private": true,
+        }))
+        .unwrap();
+        assert_eq!(s.private, Some(true));
+    }
+
+    #[test]
+    fn list_archived_true() {
+        let l: List = serde_json::from_value(json!({
+            "id": "l1",
+            "archived": true,
+        }))
+        .unwrap();
+        assert_eq!(l.archived, Some(true));
+    }
+
+    #[test]
+    fn space_from_json_string() {
+        let s: Space = serde_json::from_str(r#"{"id":"s1","name":"from_str"}"#).unwrap();
+        assert_eq!(s.id, "s1");
+        assert_eq!(s.name.as_deref(), Some("from_str"));
+    }
+
+    #[test]
+    fn list_from_json_string() {
+        let l: List = serde_json::from_str(r#"{"id":"l1","task_count":5}"#).unwrap();
+        assert_eq!(l.id, "l1");
+        assert_eq!(l.task_count, Some(5));
+    }
+
+    #[test]
+    fn task_from_json_string() {
+        let t: Task = serde_json::from_str(r#"{"id":"t1","name":"hello"}"#).unwrap();
+        assert_eq!(t.id, "t1");
+        assert_eq!(t.name.as_deref(), Some("hello"));
+    }
 }

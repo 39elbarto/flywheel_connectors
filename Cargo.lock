@@ -1978,6 +1978,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "fcp-bigquery"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "fcp-async-core",
+ "fcp-core",
+ "fcp-google-discovery",
+ "reqwest 0.13.2",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tracing",
+ "tracing-subscriber",
+ "wiremock",
+]
+
+[[package]]
 name = "fcp-bitbucket"
 version = "0.1.0"
 dependencies = [

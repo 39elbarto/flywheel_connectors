@@ -226,4 +226,153 @@ mod tests {
         let token = GitLabAuth::PrivateToken("tok".into());
         assert_eq!(token.redacted_label(), "private_token:redacted");
     }
+
+    #[test]
+    fn auth_credential_label() {
+        let id = CredentialId::new();
+        let id_str = id.to_string();
+        let auth = GitLabAuth::CredentialId(id);
+        let label = auth.redacted_label();
+        assert!(label.starts_with("credential_id:"));
+        assert!(label.contains(&id_str));
+    }
+
+    #[test]
+    fn auth_debug_credential_id_contains_id() {
+        let id = CredentialId::new();
+        let id_str = id.to_string();
+        let auth = GitLabAuth::CredentialId(id);
+        let dbg = format!("{auth:?}");
+        assert!(dbg.contains(&id_str));
+        assert!(dbg.contains("CredentialId"));
+    }
+
+    #[test]
+    fn auth_clone_private_token() {
+        let auth = GitLabAuth::PrivateToken("glpat-test".into());
+        let cloned = auth.clone();
+        assert!(!auth.is_secretless());
+        assert!(!cloned.is_secretless());
+        assert_eq!(cloned.redacted_label(), "private_token:redacted");
+    }
+
+    #[test]
+    fn auth_clone_credential_id() {
+        let auth = GitLabAuth::CredentialId(CredentialId::new());
+        let cloned = auth.clone();
+        assert!(auth.is_secretless());
+        assert!(cloned.is_secretless());
+        assert!(cloned.redacted_label().starts_with("credential_id:"));
+    }
+
+    #[test]
+    fn client_new_default_url() {
+        let client =
+            GitLabClient::new(GitLabAuth::PrivateToken("tok".into()), None).unwrap();
+        assert_eq!(client.base_url, DEFAULT_BASE_URL);
+    }
+
+    #[test]
+    fn client_new_custom_url() {
+        let client = GitLabClient::new(
+            GitLabAuth::PrivateToken("tok".into()),
+            Some("https://gitlab.example.com/api/v4/"),
+        )
+        .unwrap();
+        assert_eq!(client.base_url, "https://gitlab.example.com/api/v4");
+    }
+
+    #[test]
+    fn client_new_trims_trailing_slash() {
+        let client = GitLabClient::new(
+            GitLabAuth::PrivateToken("tok".into()),
+            Some("https://test.com/"),
+        )
+        .unwrap();
+        assert_eq!(client.base_url, "https://test.com");
+    }
+
+    #[test]
+    fn client_debug_contains_base_url() {
+        let client =
+            GitLabClient::new(GitLabAuth::PrivateToken("tok".into()), None).unwrap();
+        let dbg = format!("{client:?}");
+        assert!(dbg.contains("GitLabClient"));
+        assert!(dbg.contains("base_url"));
+        assert!(dbg.contains("gitlab.com"));
+    }
+
+    #[test]
+    fn client_debug_redacts_token() {
+        let client =
+            GitLabClient::new(GitLabAuth::PrivateToken("glpat-secret123".into()), None).unwrap();
+        let dbg = format!("{client:?}");
+        assert!(!dbg.contains("glpat-secret123"));
+        assert!(dbg.contains("redacted"));
+    }
+
+    #[test]
+    fn default_base_url_is_https() {
+        assert!(DEFAULT_BASE_URL.starts_with("https://"));
+    }
+
+    #[test]
+    fn default_base_url_no_trailing_slash() {
+        assert!(!DEFAULT_BASE_URL.ends_with('/'));
+    }
+
+    #[test]
+    fn default_base_url_contains_v4() {
+        assert!(DEFAULT_BASE_URL.contains("v4"));
+    }
+
+    #[test]
+    fn client_with_client_trims_trailing_slash() {
+        let http_client = Client::new();
+        let client = GitLabClient::with_client(
+            http_client,
+            GitLabAuth::PrivateToken("tok".into()),
+            "https://test.com/",
+        );
+        assert_eq!(client.base_url, "https://test.com");
+    }
+
+    #[test]
+    fn client_new_with_credential_id() {
+        let client = GitLabClient::new(
+            GitLabAuth::CredentialId(CredentialId::new()),
+            None,
+        )
+        .unwrap();
+        assert_eq!(client.base_url, DEFAULT_BASE_URL);
+    }
+
+    #[test]
+    fn client_new_empty_url() {
+        let client = GitLabClient::new(
+            GitLabAuth::PrivateToken("tok".into()),
+            Some(""),
+        )
+        .unwrap();
+        assert_eq!(client.base_url, "");
+    }
+
+    #[test]
+    fn client_new_multiple_trailing_slashes() {
+        let client = GitLabClient::new(
+            GitLabAuth::PrivateToken("tok".into()),
+            Some("https://x.com///"),
+        )
+        .unwrap();
+        assert!(client.base_url.ends_with("//"));
+    }
+
+    #[test]
+    fn auth_debug_no_token_leak() {
+        let auth = GitLabAuth::PrivateToken("glpat-ABCDEF1234567890".into());
+        let dbg = format!("{auth:?}");
+        assert!(!dbg.contains("ABCDEF"));
+        assert!(!dbg.contains("glpat-"));
+        assert!(dbg.contains("PrivateToken"));
+    }
 }

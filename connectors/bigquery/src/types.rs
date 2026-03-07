@@ -714,4 +714,103 @@ mod tests {
         let back: SchemaField = serde_json::from_value(json).unwrap();
         assert_eq!(back.field_type, "TIMESTAMP");
     }
+
+    #[test]
+    fn dataset_reference_clone_and_debug() {
+        let r = DatasetReference {
+            dataset_id: "ds1".into(),
+            project_id: Some("proj".into()),
+        };
+        let cloned = r.clone();
+        assert_eq!(r.dataset_id, "ds1");
+        assert_eq!(cloned.project_id.as_deref(), Some("proj"));
+        let dbg = format!("{cloned:?}");
+        assert!(dbg.contains("DatasetReference"));
+    }
+
+    #[test]
+    fn table_reference_clone_and_debug() {
+        let r = TableReference {
+            project_id: Some("proj".into()),
+            dataset_id: Some("ds".into()),
+            table_id: "tbl".into(),
+        };
+        let cloned = r.clone();
+        assert_eq!(r.table_id, "tbl");
+        assert_eq!(cloned.dataset_id.as_deref(), Some("ds"));
+        let dbg = format!("{cloned:?}");
+        assert!(dbg.contains("TableReference"));
+    }
+
+    #[test]
+    fn job_reference_clone_and_debug() {
+        let r = JobReference {
+            project_id: Some("proj".into()),
+            job_id: "j1".into(),
+            location: Some("US".into()),
+        };
+        let cloned = r.clone();
+        assert_eq!(r.job_id, "j1");
+        assert_eq!(cloned.location.as_deref(), Some("US"));
+        let dbg = format!("{cloned:?}");
+        assert!(dbg.contains("JobReference"));
+    }
+
+    #[test]
+    fn api_error_response_clone_and_debug() {
+        let e: ApiErrorResponse = serde_json::from_value(json!({
+            "error": {"code": 403, "message": "forbidden"}
+        }))
+        .unwrap();
+        let cloned = e.clone();
+        assert!(cloned.error.is_some());
+        let dbg = format!("{cloned:?}");
+        assert!(dbg.contains("ApiErrorResponse"));
+    }
+
+    #[test]
+    fn query_response_cache_hit_true() {
+        let r: QueryResponse = serde_json::from_value(json!({
+            "cacheHit": true,
+            "jobComplete": true,
+            "totalRows": "0"
+        }))
+        .unwrap();
+        assert_eq!(r.cache_hit, Some(true));
+    }
+
+    #[test]
+    fn dataset_entry_extra_fields_ignored() {
+        let e: DatasetEntry = serde_json::from_value(json!({
+            "kind": "bigquery#dataset",
+            "unknown_extra": 42
+        }))
+        .unwrap();
+        assert_eq!(e.kind, Some("bigquery#dataset".into()));
+    }
+
+    #[test]
+    fn table_entry_type_rename() {
+        let e: TableEntry = serde_json::from_value(json!({
+            "type": "VIEW"
+        }))
+        .unwrap();
+        assert_eq!(e.table_type.as_deref(), Some("VIEW"));
+        let v = serde_json::to_value(&e).unwrap();
+        assert_eq!(v["type"], "VIEW");
+        assert!(v.get("table_type").is_none());
+    }
+
+    #[test]
+    fn job_status_clone_and_debug() {
+        let s = JobStatus {
+            state: Some("RUNNING".into()),
+            error_result: None,
+        };
+        let cloned = s.clone();
+        assert_eq!(s.state.as_deref(), Some("RUNNING"));
+        assert!(cloned.error_result.is_none());
+        let dbg = format!("{cloned:?}");
+        assert!(dbg.contains("JobStatus"));
+    }
 }

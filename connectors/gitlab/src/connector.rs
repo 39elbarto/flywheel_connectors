@@ -732,4 +732,246 @@ mod tests {
         assert_eq!(c.request_count.load(Ordering::Relaxed), 0);
         assert_eq!(c.error_count.load(Ordering::Relaxed), 0);
     }
+
+    #[test]
+    fn connector_new_counters_zero() {
+        let c = GitLabConnector::new();
+        assert_eq!(c.request_count.load(Ordering::Relaxed), 0);
+        assert_eq!(c.error_count.load(Ordering::Relaxed), 0);
+        assert!(c.config.is_none());
+    }
+
+    #[test]
+    fn doctor_status_serializes_lowercase() {
+        assert_eq!(serde_json::to_value(DoctorStatus::Healthy).unwrap(), "healthy");
+        assert_eq!(serde_json::to_value(DoctorStatus::Degraded).unwrap(), "degraded");
+        assert_eq!(serde_json::to_value(DoctorStatus::Unhealthy).unwrap(), "unhealthy");
+    }
+
+    #[test]
+    fn doctor_status_deserializes_lowercase() {
+        let s: DoctorStatus = serde_json::from_value(json!("healthy")).unwrap();
+        assert_eq!(s, DoctorStatus::Healthy);
+        let s: DoctorStatus = serde_json::from_value(json!("degraded")).unwrap();
+        assert_eq!(s, DoctorStatus::Degraded);
+        let s: DoctorStatus = serde_json::from_value(json!("unhealthy")).unwrap();
+        assert_eq!(s, DoctorStatus::Unhealthy);
+    }
+
+    #[test]
+    fn doctor_status_copy_eq() {
+        let s = DoctorStatus::Healthy;
+        let s2 = s; // Copy
+        assert_eq!(s, s2);
+    }
+
+    #[test]
+    fn doctor_result_roundtrip() {
+        let r = DoctorResult::from_checks(vec![
+            DoctorCheck {
+                name: "c1".into(),
+                passed: true,
+                message: None,
+                critical: true,
+            },
+            DoctorCheck {
+                name: "c2".into(),
+                passed: false,
+                message: Some("warn".into()),
+                critical: false,
+            },
+        ]);
+        let v = serde_json::to_value(&r).unwrap();
+        assert_eq!(v["status"], "degraded");
+        let back: DoctorResult = serde_json::from_value(v).unwrap();
+        assert_eq!(back.status, DoctorStatus::Degraded);
+        assert_eq!(back.checks.len(), 2);
+    }
+
+    #[test]
+    fn doctor_check_message_none_omitted() {
+        let check = DoctorCheck {
+            name: "test".into(),
+            passed: true,
+            message: None,
+            critical: false,
+        };
+        let v = serde_json::to_value(&check).unwrap();
+        assert!(!v.as_object().unwrap().contains_key("message"));
+    }
+
+    #[test]
+    fn doctor_check_message_some_present() {
+        let check = DoctorCheck {
+            name: "test".into(),
+            passed: false,
+            message: Some("err".into()),
+            critical: true,
+        };
+        let v = serde_json::to_value(&check).unwrap();
+        assert_eq!(v["message"], "err");
+    }
+
+    #[test]
+    fn require_str_empty_string() {
+        let input = json!({"f": ""});
+        assert_eq!(require_str(&input, "f").unwrap(), "");
+    }
+
+    #[test]
+    fn require_str_boolean_value() {
+        let input = json!({"f": true});
+        assert!(require_str(&input, "f").is_err());
+    }
+
+    #[test]
+    fn require_str_array_value() {
+        let input = json!({"f": [1, 2, 3]});
+        assert!(require_str(&input, "f").is_err());
+    }
+
+    #[test]
+    fn require_str_object_value() {
+        let input = json!({"f": {"nested": true}});
+        assert!(require_str(&input, "f").is_err());
+    }
+
+    #[test]
+    fn operations_list_ops_are_strict_idempotent() {
+        let ops = operations_info();
+        for op in ops.as_array().unwrap() {
+            let id = op["id"].as_str().unwrap();
+            if id.contains("list") {
+                assert_eq!(
+                    op["idempotency"].as_str().unwrap(),
+                    "strict",
+                    "list op {id} should be strict idempotent"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn operations_create_is_not_idempotent() {
+        let ops = operations_info();
+        for op in ops.as_array().unwrap() {
+            let id = op["id"].as_str().unwrap();
+            if id.contains("create") {
+                assert_eq!(
+                    op["idempotency"].as_str().unwrap(),
+                    "none",
+                    "create op {id} should not be idempotent"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn operations_all_summaries_non_empty() {
+        let ops = operations_info();
+        for op in ops.as_array().unwrap() {
+            let summary = op["summary"].as_str().unwrap();
+            assert!(!summary.is_empty(), "op {:?} has empty summary", op["id"]);
+        }
+    }
+
+    #[test]
+    fn operations_all_capabilities_prefixed() {
+        let ops = operations_info();
+        for op in ops.as_array().unwrap() {
+            let cap = op["capability"].as_str().unwrap();
+            assert!(
+                cap.starts_with("gitlab."),
+                "capability {cap} should start with gitlab."
+            );
+        }
+    }
+
+    #[test]
+    fn doctor_result_debug_and_clone() {
+        let r = DoctorResult::from_checks(vec![DoctorCheck {
+            name: "c".into(),
+            passed: true,
+            message: None,
+            critical: false,
+        }]);
+        let cloned = r.clone();
+        assert_eq!(r.status, DoctorStatus::Healthy);
+        assert_eq!(cloned.checks.len(), 1);
+        let dbg = format!("{r:?}");
+        assert!(dbg.contains("DoctorResult"));
+    }
+
+    #[test]
+    fn doctor_check_clone_and_debug() {
+        let check = DoctorCheck {
+            name: "test".into(),
+            passed: false,
+            message: Some("fail".into()),
+            critical: true,
+        };
+        let cloned = check.clone();
+        assert_eq!(check.name, "test");
+        assert_eq!(cloned.message.as_deref(), Some("fail"));
+        let dbg = format!("{cloned:?}");
+        assert!(dbg.contains("DoctorCheck"));
+    }
+
+    #[test]
+    fn config_debug_and_clone() {
+        let config =
+            GitLabConfig::from_params(&json!({"private_token": "glpat-test"})).unwrap();
+        let cloned = config.clone();
+        assert_eq!(config.base_url, DEFAULT_BASE_URL);
+        assert_eq!(cloned.base_url, DEFAULT_BASE_URL);
+        let dbg = format!("{config:?}");
+        assert!(dbg.contains("GitLabConfig"));
+    }
+
+    #[test]
+    fn doctor_multiple_critical_failures() {
+        let r = DoctorResult::from_checks(vec![
+            DoctorCheck {
+                name: "a".into(),
+                passed: false,
+                message: None,
+                critical: true,
+            },
+            DoctorCheck {
+                name: "b".into(),
+                passed: false,
+                message: None,
+                critical: true,
+            },
+        ]);
+        assert_eq!(r.status, DoctorStatus::Unhealthy);
+    }
+
+    #[test]
+    #[allow(clippy::case_sensitive_file_extension_comparisons)]
+    fn operations_write_ops_have_correct_capability() {
+        let ops = operations_info();
+        for op in ops.as_array().unwrap() {
+            let id = op["id"].as_str().unwrap();
+            let cap = op["capability"].as_str().unwrap();
+            if id.contains("create") {
+                assert!(cap.ends_with(".write"), "write op {id} has cap {cap}");
+            }
+        }
+    }
+
+    #[test]
+    fn operations_create_is_risky() {
+        let ops = operations_info();
+        for op in ops.as_array().unwrap() {
+            let id = op["id"].as_str().unwrap();
+            if id.contains("create") {
+                assert_eq!(
+                    op["safety_tier"].as_str().unwrap(),
+                    "risky",
+                    "create op {id} should be risky"
+                );
+            }
+        }
+    }
 }

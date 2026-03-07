@@ -21,13 +21,15 @@
 
 pub mod types;
 
-use anyhow::Result;
+use anyhow::{Context as _, Result};
 use clap::{Args, Subcommand};
 
 use fcp_core::{
-    AgentHint, ApprovalMode, CapabilityId, ConnectorHealth, IdempotencyClass, RateLimitConfig,
-    RateLimitDeclarations, RateLimitEnforcement, RateLimitPool, RateLimitScope, RateLimitUnit,
-    RiskLevel, SafetyTier,
+    AgentHint, ApprovalMode, CapabilityId, ConnectorHealth, HashAlgorithm,
+    IdempotencyClass, RateLimitConfig, RateLimitDeclarations, RateLimitEnforcement, RateLimitPool,
+    RateLimitScope, RateLimitUnit, RiskLevel, SafetyTier, SoftwareBillOfMaterials,
+    SupplyChainAttestation, SupplyChainVerificationPolicy, VerificationDecision,
+    VerificationPipeline,
 };
 use types::{
     AuthCapsDescriptor, ConnectorHealthDisplay, ConnectorInfo, ConnectorIntrospection,
@@ -73,6 +75,12 @@ pub enum ConnectorCommand {
 
     /// Roll back a connector to a previous version.
     Rollback(RollbackArgs),
+
+    /// Verify supply chain attestation and SBOM for a connector.
+    ///
+    /// Checks the attestation, SBOM, and policy gates, producing a
+    /// verification evidence bundle as structured JSON.
+    Verify(VerifyArgs),
 }
 
 /// Arguments for `fcp connector list`.
@@ -182,6 +190,37 @@ pub struct RolloutStatusArgs {
     pub json: bool,
 }
 
+/// Arguments for `fcp connector verify`.
+#[derive(Args, Debug)]
+pub struct VerifyArgs {
+    /// Connector ID (e.g., "fcp.discord:messaging:v1").
+    pub connector_id: String,
+
+    /// Path to attestation file (JSON).
+    #[arg(long)]
+    pub attestation: Option<String>,
+
+    /// Path to SBOM file (JSON).
+    #[arg(long)]
+    pub sbom: Option<String>,
+
+    /// Binary artifact digest (blake3-256:<hex>).
+    #[arg(long)]
+    pub digest: Option<String>,
+
+    /// Minimum SLSA level required (0-4).
+    #[arg(long, default_value_t = 0)]
+    pub min_slsa_level: u8,
+
+    /// Allow unsigned artifacts (dev mode only).
+    #[arg(long, default_value_t = false)]
+    pub allow_unsigned: bool,
+
+    /// Output JSON instead of human-readable format.
+    #[arg(long, default_value_t = false)]
+    pub json: bool,
+}
+
 /// Arguments for `fcp connector rollback`.
 #[derive(Args, Debug)]
 pub struct RollbackArgs {
@@ -207,6 +246,7 @@ pub fn run(args: &ConnectorArgs) -> Result<()> {
         ConnectorCommand::Unpin(unpin_args) => run_unpin(unpin_args),
         ConnectorCommand::Rollout(rollout_args) => run_rollout(rollout_args),
         ConnectorCommand::Rollback(rollback_args) => run_rollback(rollback_args),
+        ConnectorCommand::Verify(verify_args) => run_verify(verify_args),
     }
 }
 
@@ -1191,6 +1231,130 @@ const fn rate_limit_scope_label(scope: RateLimitScope) -> &'static str {
     }
 }
 
+// ── Supply Chain: verify ──────────────────────────────────────
+
+/// JSON output for verify command.
+#[derive(Debug, serde::Serialize)]
+struct VerifyOutput {
+    connector_id: String,
+    decision: String,
+    reason_code: String,
+    artifact_digest: String,
+    steps: Vec<VerifyStepOutput>,
+    evidence_digest: String,
+    policy: VerifyPolicyOutput,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct VerifyStepOutput {
+    step: String,
+    passed: bool,
+    detail: String,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct VerifyPolicyOutput {
+    require_attestation: bool,
+    require_sbom: bool,
+    min_slsa_level: u8,
+    allow_unsigned: bool,
+}
+
+fn run_verify(args: &VerifyArgs) -> Result<()> {
+    let policy = SupplyChainVerificationPolicy {
+        require_attestation: args.attestation.is_some() || !args.allow_unsigned,
+        require_sbom: args.sbom.is_some() || !args.allow_unsigned,
+        min_slsa_level: args.min_slsa_level,
+        trusted_builders: vec![],
+        allow_unsigned: args.allow_unsigned,
+        require_digest_match: args.digest.is_some(),
+    };
+
+    let attestation: Option<SupplyChainAttestation> = match &args.attestation {
+        Some(path) => {
+            let content = std::fs::read_to_string(path)
+                .with_context(|| format!("failed to read attestation file: {path}"))?;
+            Some(serde_json::from_str(&content)
+                .with_context(|| format!("invalid attestation JSON in {path}"))?)
+        }
+        None => None,
+    };
+
+    let sbom: Option<SoftwareBillOfMaterials> = match &args.sbom {
+        Some(path) => {
+            let content = std::fs::read_to_string(path)
+                .with_context(|| format!("failed to read SBOM file: {path}"))?;
+            Some(serde_json::from_str(&content)
+                .with_context(|| format!("invalid SBOM JSON in {path}"))?)
+        }
+        None => None,
+    };
+
+    let artifact_digest = args.digest.clone().unwrap_or_default();
+
+    let pipeline = VerificationPipeline::new(policy.clone());
+    let evidence = pipeline.verify(
+        &artifact_digest,
+        attestation.as_ref(),
+        sbom.as_ref(),
+    );
+
+    let evidence_digest = evidence
+        .content_hash(HashAlgorithm::Blake3_256)
+        .map_err(|e| anyhow::anyhow!("evidence hash failed: {e}"))?;
+
+    let output = VerifyOutput {
+        connector_id: args.connector_id.clone(),
+        decision: format!("{:?}", evidence.decision).to_lowercase(),
+        reason_code: format!("{}", evidence.reason_code),
+        artifact_digest: evidence.artifact_digest.clone(),
+        steps: evidence
+            .steps
+            .iter()
+            .map(|s| VerifyStepOutput {
+                step: s.step.clone(),
+                passed: s.passed,
+                detail: s.detail.clone(),
+            })
+            .collect(),
+        evidence_digest,
+        policy: VerifyPolicyOutput {
+            require_attestation: policy.require_attestation,
+            require_sbom: policy.require_sbom,
+            min_slsa_level: policy.min_slsa_level,
+            allow_unsigned: policy.allow_unsigned,
+        },
+    };
+
+    let allowed = evidence.decision == VerificationDecision::Allow;
+
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&output)?);
+    } else if allowed {
+        println!("Verification PASSED for {}", args.connector_id);
+        println!("  Reason: {}", output.reason_code);
+        for step in &output.steps {
+            let icon = if step.passed { "  pass" } else { "  FAIL" };
+            println!("  {icon}: {} — {}", step.step, step.detail);
+        }
+        println!("  Evidence: {}", output.evidence_digest);
+    } else {
+        println!("Verification FAILED for {}", args.connector_id);
+        println!("  Reason: {}", output.reason_code);
+        for step in &output.steps {
+            let icon = if step.passed { "  pass" } else { "  FAIL" };
+            println!("  {icon}: {} — {}", step.step, step.detail);
+        }
+        println!("  Evidence: {}", output.evidence_digest);
+    }
+
+    if !allowed {
+        std::process::exit(1);
+    }
+
+    Ok(())
+}
+
 // ── Lifecycle: pin/unpin/rollout/rollback ─────────────────────
 
 /// JSON output for pin/unpin operations.
@@ -1870,5 +2034,134 @@ mod tests {
         let json = serde_json::to_string(&output).unwrap();
         assert!(json.contains("\"from_version\":\"2.0.0\""));
         assert!(json.contains("\"to_version\":\"1.0.0\""));
+    }
+
+    // ── Verify Tests ─────────────────────────────────────────────
+
+    #[test]
+    fn verify_output_serializes_to_json() {
+        let output = VerifyOutput {
+            connector_id: "fcp.test:utility:v1".to_string(),
+            decision: "deny".to_string(),
+            reason_code: "attestation_missing".to_string(),
+            artifact_digest: String::new(),
+            steps: vec![VerifyStepOutput {
+                step: "attestation_presence".to_string(),
+                passed: false,
+                detail: "missing".to_string(),
+            }],
+            evidence_digest: "blake3-256:abcd".to_string(),
+            policy: VerifyPolicyOutput {
+                require_attestation: true,
+                require_sbom: true,
+                min_slsa_level: 0,
+                allow_unsigned: false,
+            },
+        };
+        let json = serde_json::to_string(&output).unwrap();
+        assert!(json.contains("\"decision\":\"deny\""));
+        assert!(json.contains("\"reason_code\":\"attestation_missing\""));
+        assert!(json.contains("\"require_attestation\":true"));
+    }
+
+    #[test]
+    fn verify_policy_output_fields() {
+        let output = VerifyPolicyOutput {
+            require_attestation: false,
+            require_sbom: false,
+            min_slsa_level: 3,
+            allow_unsigned: true,
+        };
+        let json = serde_json::to_string(&output).unwrap();
+        assert!(json.contains("\"min_slsa_level\":3"));
+        assert!(json.contains("\"allow_unsigned\":true"));
+    }
+
+    #[test]
+    fn verify_step_output_serializes() {
+        let step = VerifyStepOutput {
+            step: "sbom_validation".to_string(),
+            passed: true,
+            detail: "SBOM structurally valid".to_string(),
+        };
+        let json = serde_json::to_string(&step).unwrap();
+        assert!(json.contains("\"passed\":true"));
+        assert!(json.contains("sbom_validation"));
+    }
+
+    #[test]
+    fn verify_args_allow_unsigned_relaxes_policy() {
+        // When allow_unsigned is set with no attestation/sbom paths,
+        // the policy should not require them.
+        let args = VerifyArgs {
+            connector_id: "fcp.test:utility:v1".to_string(),
+            attestation: None,
+            sbom: None,
+            digest: None,
+            min_slsa_level: 0,
+            allow_unsigned: true,
+            json: true,
+        };
+        // Note: run_verify exits process on failure, so we test indirectly
+        // via the policy construction logic.
+        let policy = SupplyChainVerificationPolicy {
+            require_attestation: args.attestation.is_some() || !args.allow_unsigned,
+            require_sbom: args.sbom.is_some() || !args.allow_unsigned,
+            min_slsa_level: args.min_slsa_level,
+            trusted_builders: vec![],
+            allow_unsigned: args.allow_unsigned,
+            require_digest_match: args.digest.is_some(),
+        };
+        assert!(!policy.require_attestation);
+        assert!(!policy.require_sbom);
+        assert!(policy.allow_unsigned);
+    }
+
+    #[test]
+    fn verify_args_strict_requires_attestation() {
+        let args = VerifyArgs {
+            connector_id: "fcp.test:utility:v1".to_string(),
+            attestation: None,
+            sbom: None,
+            digest: None,
+            min_slsa_level: 0,
+            allow_unsigned: false,
+            json: true,
+        };
+        let policy = SupplyChainVerificationPolicy {
+            require_attestation: args.attestation.is_some() || !args.allow_unsigned,
+            require_sbom: args.sbom.is_some() || !args.allow_unsigned,
+            min_slsa_level: args.min_slsa_level,
+            trusted_builders: vec![],
+            allow_unsigned: args.allow_unsigned,
+            require_digest_match: args.digest.is_some(),
+        };
+        assert!(policy.require_attestation);
+        assert!(policy.require_sbom);
+        assert!(!policy.allow_unsigned);
+    }
+
+    #[test]
+    fn verify_args_with_attestation_path_requires_it() {
+        let args = VerifyArgs {
+            connector_id: "fcp.test:utility:v1".to_string(),
+            attestation: Some("/tmp/att.json".to_string()),
+            sbom: None,
+            digest: None,
+            min_slsa_level: 2,
+            allow_unsigned: true,
+            json: true,
+        };
+        let policy = SupplyChainVerificationPolicy {
+            require_attestation: args.attestation.is_some() || !args.allow_unsigned,
+            require_sbom: args.sbom.is_some() || !args.allow_unsigned,
+            min_slsa_level: args.min_slsa_level,
+            trusted_builders: vec![],
+            allow_unsigned: args.allow_unsigned,
+            require_digest_match: args.digest.is_some(),
+        };
+        assert!(policy.require_attestation);
+        assert!(!policy.require_sbom);
+        assert_eq!(policy.min_slsa_level, 2);
     }
 }

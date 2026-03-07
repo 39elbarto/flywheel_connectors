@@ -215,15 +215,21 @@ fn parse_stream_line(line_str: &str) -> Result<Option<StreamEvent>, serde_json::
 
 fn extract_stream_error(line_str: &str) -> Option<String> {
     let error = serde_json::from_str::<serde_json::Value>(line_str).ok()?;
+
+    if let Some(msg) = error.get("detail").or_else(|| error.get("title")).and_then(|v| v.as_str()) {
+        return Some(msg.to_string());
+    }
+
+    if let Some(errors) = error.get("errors").and_then(|v| v.as_array()) {
+        if let Some(first) = errors.first() {
+            if let Some(msg) = first.get("detail").or_else(|| first.get("title")).and_then(|v| v.as_str()) {
+                return Some(msg.to_string());
+            }
+        }
+    }
+
     if error.get("errors").is_some() || error.get("title").is_some() {
-        Some(
-            error
-                .get("detail")
-                .or_else(|| error.get("title"))
-                .and_then(|v| v.as_str())
-                .unwrap_or("Unknown stream error")
-                .to_string(),
-        )
+        Some("Unknown stream error".to_string())
     } else {
         None
     }
@@ -403,7 +409,7 @@ mod tests {
         .to_string();
 
         let event = parse_stream_line(&payload).unwrap();
-        assert!(matches!(event, Some(StreamEvent::Error(msg)) if msg == "Unknown stream error"));
+        assert!(matches!(event, Some(StreamEvent::Error(msg)) if msg == "Stream disconnected"));
     }
 
     #[test]

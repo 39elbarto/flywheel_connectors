@@ -262,6 +262,128 @@ pub struct MergePullRequestRequest {
     pub sha: Option<String>,
 }
 
+// ── Webhook Events ─────────────────────────────────────────────
+
+/// GitHub webhook payload envelope.
+///
+/// The host verifies the HMAC-SHA256 signature before forwarding.
+/// The connector receives the pre-verified, typed payload.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WebhookPayload {
+    /// GitHub event type header (X-GitHub-Event).
+    pub event_type: WebhookEventType,
+    /// GitHub delivery ID (X-GitHub-Delivery) for deduplication.
+    pub delivery_id: String,
+    /// Event payload data — structure varies by event type.
+    pub data: serde_json::Value,
+    /// Repository context (if applicable).
+    #[serde(default)]
+    pub repository: Option<WebhookRepository>,
+    /// Sender (actor who triggered the event).
+    #[serde(default)]
+    pub sender: Option<WebhookSender>,
+}
+
+/// Webhook event type discriminant (maps to X-GitHub-Event header).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebhookEventType {
+    Issues,
+    IssueComment,
+    PullRequest,
+    PullRequestReview,
+    Push,
+    WorkflowRun,
+    Create,
+    Delete,
+    Release,
+    Ping,
+}
+
+impl std::fmt::Display for WebhookEventType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Issues => write!(f, "issues"),
+            Self::IssueComment => write!(f, "issue_comment"),
+            Self::PullRequest => write!(f, "pull_request"),
+            Self::PullRequestReview => write!(f, "pull_request_review"),
+            Self::Push => write!(f, "push"),
+            Self::WorkflowRun => write!(f, "workflow_run"),
+            Self::Create => write!(f, "create"),
+            Self::Delete => write!(f, "delete"),
+            Self::Release => write!(f, "release"),
+            Self::Ping => write!(f, "ping"),
+        }
+    }
+}
+
+/// Webhook action discriminant (common across many event types).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebhookAction {
+    Opened,
+    Closed,
+    Reopened,
+    Edited,
+    Created,
+    Deleted,
+    Synchronize,
+    Submitted,
+    Completed,
+    Requested,
+    Published,
+    Merged,
+}
+
+impl std::fmt::Display for WebhookAction {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Opened => write!(f, "opened"),
+            Self::Closed => write!(f, "closed"),
+            Self::Reopened => write!(f, "reopened"),
+            Self::Edited => write!(f, "edited"),
+            Self::Created => write!(f, "created"),
+            Self::Deleted => write!(f, "deleted"),
+            Self::Synchronize => write!(f, "synchronize"),
+            Self::Submitted => write!(f, "submitted"),
+            Self::Completed => write!(f, "completed"),
+            Self::Requested => write!(f, "requested"),
+            Self::Published => write!(f, "published"),
+            Self::Merged => write!(f, "merged"),
+        }
+    }
+}
+
+/// Lightweight repository reference in webhook payloads.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WebhookRepository {
+    pub id: u64,
+    pub full_name: String,
+    pub html_url: String,
+    #[serde(default)]
+    pub private: bool,
+}
+
+/// Lightweight sender reference in webhook payloads.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WebhookSender {
+    pub login: String,
+    pub id: u64,
+    #[serde(default)]
+    pub avatar_url: Option<String>,
+}
+
+impl WebhookEventType {
+    /// Convert to FCP event topic string with optional action.
+    #[must_use]
+    pub fn to_topic(&self, action: Option<&str>) -> String {
+        match action {
+            Some(act) => format!("github.{self}.{act}"),
+            None => format!("github.{self}"),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1373,5 +1495,164 @@ mod tests {
         assert_eq!(cloned.commit_title.as_deref(), Some("title"));
         let debug = format!("{req:?}");
         assert!(debug.contains("title"));
+    }
+
+    // ════════════════════════════════════════════════════════════════
+    // Webhook types
+    // ════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn webhook_event_type_serde_roundtrip() {
+        for (et, expected) in [
+            (WebhookEventType::Issues, "\"issues\""),
+            (WebhookEventType::IssueComment, "\"issue_comment\""),
+            (WebhookEventType::PullRequest, "\"pull_request\""),
+            (WebhookEventType::PullRequestReview, "\"pull_request_review\""),
+            (WebhookEventType::Push, "\"push\""),
+            (WebhookEventType::WorkflowRun, "\"workflow_run\""),
+            (WebhookEventType::Create, "\"create\""),
+            (WebhookEventType::Delete, "\"delete\""),
+            (WebhookEventType::Release, "\"release\""),
+            (WebhookEventType::Ping, "\"ping\""),
+        ] {
+            let json = serde_json::to_string(&et).unwrap();
+            assert_eq!(json, expected, "serde for {et:?}");
+            let back: WebhookEventType = serde_json::from_str(&json).unwrap();
+            assert_eq!(et, back);
+        }
+    }
+
+    #[test]
+    fn webhook_event_type_display() {
+        assert_eq!(WebhookEventType::Issues.to_string(), "issues");
+        assert_eq!(WebhookEventType::PullRequest.to_string(), "pull_request");
+        assert_eq!(WebhookEventType::WorkflowRun.to_string(), "workflow_run");
+    }
+
+    #[test]
+    fn webhook_event_type_to_topic_with_action() {
+        assert_eq!(
+            WebhookEventType::Issues.to_topic(Some("opened")),
+            "github.issues.opened"
+        );
+        assert_eq!(
+            WebhookEventType::PullRequest.to_topic(Some("closed")),
+            "github.pull_request.closed"
+        );
+    }
+
+    #[test]
+    fn webhook_event_type_to_topic_without_action() {
+        assert_eq!(WebhookEventType::Push.to_topic(None), "github.push");
+        assert_eq!(WebhookEventType::Ping.to_topic(None), "github.ping");
+    }
+
+    #[test]
+    fn webhook_action_serde_roundtrip() {
+        for (action, expected) in [
+            (WebhookAction::Opened, "\"opened\""),
+            (WebhookAction::Closed, "\"closed\""),
+            (WebhookAction::Reopened, "\"reopened\""),
+            (WebhookAction::Edited, "\"edited\""),
+            (WebhookAction::Created, "\"created\""),
+            (WebhookAction::Deleted, "\"deleted\""),
+            (WebhookAction::Synchronize, "\"synchronize\""),
+            (WebhookAction::Submitted, "\"submitted\""),
+            (WebhookAction::Completed, "\"completed\""),
+            (WebhookAction::Requested, "\"requested\""),
+            (WebhookAction::Published, "\"published\""),
+            (WebhookAction::Merged, "\"merged\""),
+        ] {
+            let json = serde_json::to_string(&action).unwrap();
+            assert_eq!(json, expected, "serde for {action:?}");
+            let back: WebhookAction = serde_json::from_str(&json).unwrap();
+            assert_eq!(action, back);
+        }
+    }
+
+    #[test]
+    fn webhook_payload_minimal_deserialization() {
+        let json = json!({
+            "event_type": "issues",
+            "delivery_id": "d-123",
+            "data": {"action": "opened", "issue": {"number": 42}}
+        });
+        let payload: WebhookPayload = serde_json::from_value(json).unwrap();
+        assert_eq!(payload.event_type, WebhookEventType::Issues);
+        assert_eq!(payload.delivery_id, "d-123");
+        assert!(payload.repository.is_none());
+        assert!(payload.sender.is_none());
+    }
+
+    #[test]
+    fn webhook_payload_full_deserialization() {
+        let json = json!({
+            "event_type": "pull_request",
+            "delivery_id": "d-456",
+            "data": {"action": "opened", "number": 10},
+            "repository": {
+                "id": 12345,
+                "full_name": "octocat/hello",
+                "html_url": "https://github.com/octocat/hello",
+                "private": false
+            },
+            "sender": {
+                "login": "octocat",
+                "id": 1,
+                "avatar_url": "https://avatars.githubusercontent.com/u/1"
+            }
+        });
+        let payload: WebhookPayload = serde_json::from_value(json).unwrap();
+        assert_eq!(payload.event_type, WebhookEventType::PullRequest);
+        assert_eq!(payload.repository.as_ref().unwrap().full_name, "octocat/hello");
+        assert_eq!(payload.sender.as_ref().unwrap().login, "octocat");
+    }
+
+    #[test]
+    fn webhook_payload_serialization_roundtrip() {
+        let payload = WebhookPayload {
+            event_type: WebhookEventType::Push,
+            delivery_id: "d-789".into(),
+            data: json!({"ref": "refs/heads/main", "commits": []}),
+            repository: Some(WebhookRepository {
+                id: 100,
+                full_name: "test/repo".into(),
+                html_url: "https://github.com/test/repo".into(),
+                private: true,
+            }),
+            sender: Some(WebhookSender {
+                login: "alice".into(),
+                id: 42,
+                avatar_url: None,
+            }),
+        };
+        let json_str = serde_json::to_string(&payload).unwrap();
+        let back: WebhookPayload = serde_json::from_str(&json_str).unwrap();
+        assert_eq!(back.event_type, WebhookEventType::Push);
+        assert_eq!(back.delivery_id, "d-789");
+        assert!(back.repository.unwrap().private);
+    }
+
+    #[test]
+    fn webhook_repository_deserialization() {
+        let json = json!({
+            "id": 999,
+            "full_name": "owner/repo",
+            "html_url": "https://github.com/owner/repo"
+        });
+        let repo: WebhookRepository = serde_json::from_value(json).unwrap();
+        assert_eq!(repo.id, 999);
+        assert!(!repo.private); // default
+    }
+
+    #[test]
+    fn webhook_sender_deserialization() {
+        let json = json!({
+            "login": "bot",
+            "id": 7
+        });
+        let sender: WebhookSender = serde_json::from_value(json).unwrap();
+        assert_eq!(sender.login, "bot");
+        assert!(sender.avatar_url.is_none());
     }
 }

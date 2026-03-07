@@ -690,6 +690,35 @@ impl GitHubConnector {
                         related: vec![CapabilityId::from_static("github.get_file_content")],
                     },
                 ),
+                op_info(
+                    "github.process_webhook",
+                    "Process an inbound GitHub webhook payload forwarded by fcp-host",
+                    json!({
+                        "type": "object",
+                        "required": ["payload"],
+                        "properties": {
+                            "payload": { "type": "object" }
+                        }
+                    }),
+                    json!({
+                        "type": "object",
+                        "properties": {
+                            "event": { "type": "object" }
+                        }
+                    }),
+                    "github.process_webhook",
+                    RiskLevel::Low,
+                    SafetyTier::Safe,
+                    IdempotencyClass::Strict,
+                    AgentHint {
+                        when_to_use: "Process a pre-verified GitHub webhook payload forwarded by fcp-host.".into(),
+                        common_mistakes: vec!["Sending raw HTTP bodies instead of typed WebhookPayload".into()],
+                        examples: vec![
+                            r#"{"payload": {"event_type": "issues", "delivery_id": "d-1", "data": {"action": "opened"}}}"#.into(),
+                        ],
+                        related: vec![CapabilityId::from_static("github.get_issue"), CapabilityId::from_static("github.get_pull_request")],
+                    },
+                ),
             ],
             events: vec![],
             resource_types: vec![],
@@ -786,6 +815,7 @@ impl GitHubConnector {
             "github.trigger_workflow" => self.invoke_trigger_workflow(input).await,
             "github.get_file_content" => self.invoke_get_file_content(input).await,
             "github.search_code" => self.invoke_search_code(input).await,
+            "github.process_webhook" => self.invoke_process_webhook(input).await,
             _ => Err(FcpError::OperationNotGranted {
                 operation: operation.into(),
             }),
@@ -1023,6 +1053,134 @@ impl GitHubConnector {
         Ok(json!({
             "items": results.items,
             "total_count": results.total_count
+        }))
+    }
+
+    async fn invoke_process_webhook(
+        &self,
+        input: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
+        use crate::types::{WebhookEventType, WebhookPayload};
+
+        let payload_value = input.get("payload").ok_or(FcpError::InvalidRequest {
+            code: 1003,
+            message: "Missing required field: payload".into(),
+        })?;
+
+        let payload: WebhookPayload =
+            serde_json::from_value(payload_value.clone()).map_err(|e| FcpError::InvalidRequest {
+                code: 1003,
+                message: format!("Invalid webhook payload: {e}"),
+            })?;
+
+        // Extract action from payload data if present
+        let action = payload.data.get("action").and_then(|v| v.as_str());
+
+        let topic = payload.event_type.to_topic(action);
+
+        info!(
+            event = "github.webhook.processed",
+            topic = %topic,
+            event_type = %payload.event_type,
+            delivery_id = %payload.delivery_id,
+            repository = ?payload.repository.as_ref().map(|r| &r.full_name),
+            "GitHub webhook event processed"
+        );
+
+        // Build resource URI from event type and data
+        let resource_uri = match payload.event_type {
+            WebhookEventType::Issues => {
+                let num = payload
+                    .data
+                    .get("issue")
+                    .and_then(|i| i.get("number"))
+                    .and_then(|n| n.as_u64());
+                let repo = payload
+                    .repository
+                    .as_ref()
+                    .map_or("unknown", |r| r.full_name.as_str());
+                match num {
+                    Some(n) => format!("github://{repo}/issues/{n}"),
+                    None => format!("github://{repo}/issues"),
+                }
+            }
+            WebhookEventType::IssueComment => {
+                let comment_id = payload
+                    .data
+                    .get("comment")
+                    .and_then(|c| c.get("id"))
+                    .and_then(|i| i.as_u64());
+                let repo = payload
+                    .repository
+                    .as_ref()
+                    .map_or("unknown", |r| r.full_name.as_str());
+                match comment_id {
+                    Some(id) => format!("github://{repo}/comments/{id}"),
+                    None => format!("github://{repo}/comments"),
+                }
+            }
+            WebhookEventType::PullRequest => {
+                let num = payload
+                    .data
+                    .get("pull_request")
+                    .and_then(|p| p.get("number"))
+                    .and_then(|n| n.as_u64());
+                let repo = payload
+                    .repository
+                    .as_ref()
+                    .map_or("unknown", |r| r.full_name.as_str());
+                match num {
+                    Some(n) => format!("github://{repo}/pulls/{n}"),
+                    None => format!("github://{repo}/pulls"),
+                }
+            }
+            WebhookEventType::Push => {
+                let ref_name = payload
+                    .data
+                    .get("ref")
+                    .and_then(|r| r.as_str())
+                    .unwrap_or("unknown");
+                let repo = payload
+                    .repository
+                    .as_ref()
+                    .map_or("unknown", |r| r.full_name.as_str());
+                format!("github://{repo}/ref/{ref_name}")
+            }
+            WebhookEventType::WorkflowRun => {
+                let run_id = payload
+                    .data
+                    .get("workflow_run")
+                    .and_then(|w| w.get("id"))
+                    .and_then(|i| i.as_u64());
+                let repo = payload
+                    .repository
+                    .as_ref()
+                    .map_or("unknown", |r| r.full_name.as_str());
+                match run_id {
+                    Some(id) => format!("github://{repo}/actions/runs/{id}"),
+                    None => format!("github://{repo}/actions"),
+                }
+            }
+            _ => {
+                let repo = payload
+                    .repository
+                    .as_ref()
+                    .map_or("unknown", |r| r.full_name.as_str());
+                format!("github://{repo}/{}", payload.event_type)
+            }
+        };
+
+        Ok(json!({
+            "event": {
+                "topic": topic,
+                "event_type": payload.event_type.to_string(),
+                "action": action,
+                "delivery_id": payload.delivery_id,
+                "resource_uri": resource_uri,
+                "repository": payload.repository,
+                "sender": payload.sender,
+                "data": payload.data,
+            }
         }))
     }
 

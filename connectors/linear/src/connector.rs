@@ -4,9 +4,9 @@ use std::sync::Arc;
 
 use fcp_core::{
     AgentHint, BaseConnector, CapabilityGrant, CapabilityId, CapabilityToken, CapabilityVerifier,
-    ConnectorId, CredentialId, EventCaps, FcpError, FcpResult, HandshakeRequest, HandshakeResponse,
-    IdempotencyClass, Introspection, OperationId, OperationInfo, RiskLevel, SafetyTier,
-    SelfCheckReport, SessionId, SimulateRequest, SimulateResponse,
+    ConnectorId, CredentialId, EventCaps, EventInfo, FcpError, FcpResult, HandshakeRequest,
+    HandshakeResponse, IdempotencyClass, Introspection, OperationId, OperationInfo, RiskLevel,
+    SafetyTier, SelfCheckReport, SessionId, SimulateRequest, SimulateResponse,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -594,8 +594,222 @@ impl LinearConnector {
                         related: vec![CapabilityId::from_static("linear.list_teams")],
                     },
                 ),
+                op_info(
+                    "linear.process_webhook",
+                    "Process an inbound Linear webhook payload forwarded by fcp-host",
+                    json!({
+                        "type": "object",
+                        "required": ["payload"],
+                        "properties": {
+                            "payload": {
+                                "type": "object",
+                                "description": "Raw Linear webhook payload"
+                            }
+                        }
+                    }),
+                    json!({
+                        "type": "object",
+                        "properties": {
+                            "event": {
+                                "type": "object",
+                                "properties": {
+                                    "topic": { "type": "string" },
+                                    "resource_type": { "type": "string" },
+                                    "action": { "type": "string" },
+                                    "resource_uri": { "type": "string" },
+                                    "data": { "type": "object" }
+                                }
+                            }
+                        }
+                    }),
+                    "linear.process_webhook",
+                    RiskLevel::Low,
+                    SafetyTier::Safe,
+                    IdempotencyClass::Strict,
+                    AgentHint {
+                        when_to_use: "Process a webhook event forwarded by fcp-host.".into(),
+                        common_mistakes: vec![
+                            "Sending the payload without the wrapper object".into(),
+                        ],
+                        examples: vec![
+                            r#"{"payload": {"action": "create", "type": "Issue", "createdAt": "2026-03-07T00:00:00Z", "data": {"id": "i1"}}}"#.into(),
+                        ],
+                        related: vec![
+                            CapabilityId::from_static("linear.get_issue"),
+                        ],
+                    },
+                ),
             ],
-            events: vec![],
+            events: vec![
+                EventInfo {
+                    topic: "linear.issue.create".into(),
+                    schema: json!({
+                        "type": "object",
+                        "properties": {
+                            "topic": { "type": "string" },
+                            "resource_type": { "type": "string", "enum": ["Issue"] },
+                            "action": { "type": "string", "enum": ["create"] },
+                            "resource_uri": { "type": "string" },
+                            "data": { "type": "object" }
+                        }
+                    }),
+                    requires_ack: false,
+                },
+                EventInfo {
+                    topic: "linear.issue.update".into(),
+                    schema: json!({
+                        "type": "object",
+                        "properties": {
+                            "topic": { "type": "string" },
+                            "resource_type": { "type": "string", "enum": ["Issue"] },
+                            "action": { "type": "string", "enum": ["update"] },
+                            "resource_uri": { "type": "string" },
+                            "data": { "type": "object" }
+                        }
+                    }),
+                    requires_ack: false,
+                },
+                EventInfo {
+                    topic: "linear.issue.remove".into(),
+                    schema: json!({
+                        "type": "object",
+                        "properties": {
+                            "topic": { "type": "string" },
+                            "resource_type": { "type": "string", "enum": ["Issue"] },
+                            "action": { "type": "string", "enum": ["remove"] },
+                            "resource_uri": { "type": "string" },
+                            "data": { "type": "object" }
+                        }
+                    }),
+                    requires_ack: false,
+                },
+                EventInfo {
+                    topic: "linear.comment.create".into(),
+                    schema: json!({
+                        "type": "object",
+                        "properties": {
+                            "topic": { "type": "string" },
+                            "resource_type": { "type": "string", "enum": ["Comment"] },
+                            "action": { "type": "string", "enum": ["create"] },
+                            "resource_uri": { "type": "string" },
+                            "data": { "type": "object" }
+                        }
+                    }),
+                    requires_ack: false,
+                },
+                EventInfo {
+                    topic: "linear.comment.update".into(),
+                    schema: json!({
+                        "type": "object",
+                        "properties": {
+                            "topic": { "type": "string" },
+                            "resource_type": { "type": "string", "enum": ["Comment"] },
+                            "action": { "type": "string", "enum": ["update"] },
+                            "resource_uri": { "type": "string" },
+                            "data": { "type": "object" }
+                        }
+                    }),
+                    requires_ack: false,
+                },
+                EventInfo {
+                    topic: "linear.comment.remove".into(),
+                    schema: json!({
+                        "type": "object",
+                        "properties": {
+                            "topic": { "type": "string" },
+                            "resource_type": { "type": "string", "enum": ["Comment"] },
+                            "action": { "type": "string", "enum": ["remove"] },
+                            "resource_uri": { "type": "string" },
+                            "data": { "type": "object" }
+                        }
+                    }),
+                    requires_ack: false,
+                },
+                EventInfo {
+                    topic: "linear.project.create".into(),
+                    schema: json!({
+                        "type": "object",
+                        "properties": {
+                            "topic": { "type": "string" },
+                            "resource_type": { "type": "string", "enum": ["Project"] },
+                            "action": { "type": "string", "enum": ["create"] },
+                            "resource_uri": { "type": "string" },
+                            "data": { "type": "object" }
+                        }
+                    }),
+                    requires_ack: false,
+                },
+                EventInfo {
+                    topic: "linear.project.update".into(),
+                    schema: json!({
+                        "type": "object",
+                        "properties": {
+                            "topic": { "type": "string" },
+                            "resource_type": { "type": "string", "enum": ["Project"] },
+                            "action": { "type": "string", "enum": ["update"] },
+                            "resource_uri": { "type": "string" },
+                            "data": { "type": "object" }
+                        }
+                    }),
+                    requires_ack: false,
+                },
+                EventInfo {
+                    topic: "linear.project.remove".into(),
+                    schema: json!({
+                        "type": "object",
+                        "properties": {
+                            "topic": { "type": "string" },
+                            "resource_type": { "type": "string", "enum": ["Project"] },
+                            "action": { "type": "string", "enum": ["remove"] },
+                            "resource_uri": { "type": "string" },
+                            "data": { "type": "object" }
+                        }
+                    }),
+                    requires_ack: false,
+                },
+                EventInfo {
+                    topic: "linear.cycle.create".into(),
+                    schema: json!({
+                        "type": "object",
+                        "properties": {
+                            "topic": { "type": "string" },
+                            "resource_type": { "type": "string", "enum": ["Cycle"] },
+                            "action": { "type": "string", "enum": ["create"] },
+                            "resource_uri": { "type": "string" },
+                            "data": { "type": "object" }
+                        }
+                    }),
+                    requires_ack: false,
+                },
+                EventInfo {
+                    topic: "linear.cycle.update".into(),
+                    schema: json!({
+                        "type": "object",
+                        "properties": {
+                            "topic": { "type": "string" },
+                            "resource_type": { "type": "string", "enum": ["Cycle"] },
+                            "action": { "type": "string", "enum": ["update"] },
+                            "resource_uri": { "type": "string" },
+                            "data": { "type": "object" }
+                        }
+                    }),
+                    requires_ack: false,
+                },
+                EventInfo {
+                    topic: "linear.cycle.remove".into(),
+                    schema: json!({
+                        "type": "object",
+                        "properties": {
+                            "topic": { "type": "string" },
+                            "resource_type": { "type": "string", "enum": ["Cycle"] },
+                            "action": { "type": "string", "enum": ["remove"] },
+                            "resource_uri": { "type": "string" },
+                            "data": { "type": "object" }
+                        }
+                    }),
+                    requires_ack: false,
+                },
+            ],
             resource_types: vec![],
             auth_caps: None,
             event_caps: None,
@@ -679,6 +893,7 @@ impl LinearConnector {
             "linear.list_cycles" => self.invoke_list_cycles(input).await,
             "linear.add_comment" => self.invoke_add_comment(input).await,
             "linear.list_projects" => self.invoke_list_projects().await,
+            "linear.process_webhook" => self.invoke_process_webhook(input).await,
             _ => Err(FcpError::OperationNotGranted {
                 operation: operation.into(),
             }),
@@ -785,6 +1000,65 @@ impl LinearConnector {
             .map_err(|e: LinearError| e.to_fcp_error())?;
 
         Ok(json!({ "projects": projects }))
+    }
+
+    async fn invoke_process_webhook(
+        &self,
+        input: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
+        use crate::types::{WebhookPayload, WebhookResourceType};
+
+        let payload_value = input.get("payload").ok_or(FcpError::InvalidRequest {
+            code: 1003,
+            message: "Missing required field: payload".into(),
+        })?;
+
+        let payload: WebhookPayload =
+            serde_json::from_value(payload_value.clone()).map_err(|e| FcpError::InvalidRequest {
+                code: 1003,
+                message: format!("Invalid webhook payload: {e}"),
+            })?;
+
+        let topic = payload.resource_type.to_topic(payload.action);
+
+        info!(
+            event = "linear.webhook.processed",
+            topic = %topic,
+            resource_type = %payload.resource_type,
+            action = %payload.action,
+            webhook_id = ?payload.webhook_id,
+            "Linear webhook event processed"
+        );
+
+        // Extract resource ID from data if available
+        let resource_id = payload
+            .data
+            .get("id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown");
+
+        let resource_uri = match payload.resource_type {
+            WebhookResourceType::Issue => format!("linear://issue/{resource_id}"),
+            WebhookResourceType::Comment => format!("linear://comment/{resource_id}"),
+            WebhookResourceType::Project => format!("linear://project/{resource_id}"),
+            WebhookResourceType::Cycle => format!("linear://cycle/{resource_id}"),
+            WebhookResourceType::IssueLabel => format!("linear://label/{resource_id}"),
+            WebhookResourceType::Reaction => format!("linear://reaction/{resource_id}"),
+        };
+
+        Ok(json!({
+            "event": {
+                "topic": topic,
+                "resource_type": payload.resource_type.to_string(),
+                "action": payload.action.to_string(),
+                "resource_uri": resource_uri,
+                "resource_id": resource_id,
+                "actor": payload.actor,
+                "timestamp": payload.created_at,
+                "data": payload.data,
+                "webhook_id": payload.webhook_id,
+            }
+        }))
     }
 
     /// Handle shutdown.
@@ -980,7 +1254,19 @@ mod tests {
         assert!(op_ids.contains(&"linear.list_cycles"));
         assert!(op_ids.contains(&"linear.add_comment"));
         assert!(op_ids.contains(&"linear.list_projects"));
-        assert_eq!(ops.len(), 8);
+        assert!(op_ids.contains(&"linear.process_webhook"));
+        assert_eq!(ops.len(), 9);
+
+        // Verify event descriptors are present
+        let events = result["events"].as_array().unwrap();
+        assert_eq!(events.len(), 12);
+        let topics: Vec<&str> = events.iter().map(|e| e["topic"].as_str().unwrap()).collect();
+        assert!(topics.contains(&"linear.issue.create"));
+        assert!(topics.contains(&"linear.issue.update"));
+        assert!(topics.contains(&"linear.issue.remove"));
+        assert!(topics.contains(&"linear.comment.create"));
+        assert!(topics.contains(&"linear.project.update"));
+        assert!(topics.contains(&"linear.cycle.remove"));
     }
 
     // ── Doctor tests ──────────────────────────────────────────────

@@ -173,6 +173,87 @@ pub struct CommentCreatePayload {
     pub comment: Option<IssueComment>,
 }
 
+// ── Webhook Events ─────────────────────────────────────────────
+
+/// Linear webhook payload envelope.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WebhookPayload {
+    /// Webhook action type.
+    pub action: WebhookAction,
+    /// Actor who triggered the event (may be absent for system events).
+    #[serde(default)]
+    pub actor: Option<User>,
+    /// ISO-8601 timestamp of the event.
+    pub created_at: String,
+    /// Webhook delivery URL (redacted in logs).
+    #[serde(default)]
+    pub url: Option<String>,
+    /// Resource type that triggered the event.
+    #[serde(rename = "type")]
+    pub resource_type: WebhookResourceType,
+    /// Event payload data — varies by resource type.
+    #[serde(default)]
+    pub data: serde_json::Value,
+    /// Organization ID (present on org-level webhooks).
+    #[serde(default)]
+    pub organization_id: Option<String>,
+    /// Webhook ID for deduplication.
+    #[serde(default)]
+    pub webhook_id: Option<String>,
+}
+
+/// Webhook action discriminant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum WebhookAction {
+    Create,
+    Update,
+    Remove,
+}
+
+impl std::fmt::Display for WebhookAction {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Create => write!(f, "create"),
+            Self::Update => write!(f, "update"),
+            Self::Remove => write!(f, "remove"),
+        }
+    }
+}
+
+/// Webhook resource type discriminant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WebhookResourceType {
+    Issue,
+    Comment,
+    Project,
+    Cycle,
+    IssueLabel,
+    Reaction,
+}
+
+impl std::fmt::Display for WebhookResourceType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Issue => write!(f, "Issue"),
+            Self::Comment => write!(f, "Comment"),
+            Self::Project => write!(f, "Project"),
+            Self::Cycle => write!(f, "Cycle"),
+            Self::IssueLabel => write!(f, "IssueLabel"),
+            Self::Reaction => write!(f, "Reaction"),
+        }
+    }
+}
+
+impl WebhookResourceType {
+    /// Convert to FCP event topic string.
+    #[must_use]
+    pub fn to_topic(&self, action: WebhookAction) -> String {
+        format!("linear.{}.{action}", self.to_string().to_lowercase())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1424,5 +1505,136 @@ mod tests {
         });
         let issue: Issue = serde_json::from_value(json).unwrap();
         assert!(issue.description.unwrap().contains('\n'));
+    }
+
+    // ════════════════════════════════════════════════════════════════
+    // Webhook types
+    // ════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn webhook_action_serde_roundtrip() {
+        for (action, expected) in [
+            (WebhookAction::Create, "\"create\""),
+            (WebhookAction::Update, "\"update\""),
+            (WebhookAction::Remove, "\"remove\""),
+        ] {
+            let json = serde_json::to_string(&action).unwrap();
+            assert_eq!(json, expected);
+            let back: WebhookAction = serde_json::from_str(&json).unwrap();
+            assert_eq!(action, back);
+        }
+    }
+
+    #[test]
+    fn webhook_action_display() {
+        assert_eq!(WebhookAction::Create.to_string(), "create");
+        assert_eq!(WebhookAction::Update.to_string(), "update");
+        assert_eq!(WebhookAction::Remove.to_string(), "remove");
+    }
+
+    #[test]
+    fn webhook_resource_type_serde_roundtrip() {
+        for (rt, expected) in [
+            (WebhookResourceType::Issue, "\"Issue\""),
+            (WebhookResourceType::Comment, "\"Comment\""),
+            (WebhookResourceType::Project, "\"Project\""),
+            (WebhookResourceType::Cycle, "\"Cycle\""),
+            (WebhookResourceType::IssueLabel, "\"IssueLabel\""),
+            (WebhookResourceType::Reaction, "\"Reaction\""),
+        ] {
+            let json = serde_json::to_string(&rt).unwrap();
+            assert_eq!(json, expected);
+            let back: WebhookResourceType = serde_json::from_str(&json).unwrap();
+            assert_eq!(rt, back);
+        }
+    }
+
+    #[test]
+    fn webhook_resource_type_to_topic() {
+        assert_eq!(
+            WebhookResourceType::Issue.to_topic(WebhookAction::Create),
+            "linear.issue.create"
+        );
+        assert_eq!(
+            WebhookResourceType::Comment.to_topic(WebhookAction::Update),
+            "linear.comment.update"
+        );
+        assert_eq!(
+            WebhookResourceType::Cycle.to_topic(WebhookAction::Remove),
+            "linear.cycle.remove"
+        );
+    }
+
+    #[test]
+    fn webhook_payload_minimal_deserialization() {
+        let json = json!({
+            "action": "create",
+            "createdAt": "2026-03-07T00:00:00.000Z",
+            "type": "Issue",
+            "data": {"id": "issue-1", "identifier": "LIN-1", "title": "Test"}
+        });
+        let payload: WebhookPayload = serde_json::from_value(json).unwrap();
+        assert_eq!(payload.action, WebhookAction::Create);
+        assert_eq!(payload.resource_type, WebhookResourceType::Issue);
+        assert!(payload.actor.is_none());
+        assert!(payload.url.is_none());
+    }
+
+    #[test]
+    fn webhook_payload_full_deserialization() {
+        let json = json!({
+            "action": "update",
+            "actor": {"id": "u1", "name": "Alice"},
+            "createdAt": "2026-03-07T12:00:00.000Z",
+            "url": "https://linear.app/hooks/xxx",
+            "type": "Comment",
+            "data": {"id": "c1", "body": "Hello"},
+            "organizationId": "org-1",
+            "webhookId": "wh-1"
+        });
+        let payload: WebhookPayload = serde_json::from_value(json).unwrap();
+        assert_eq!(payload.action, WebhookAction::Update);
+        assert_eq!(payload.resource_type, WebhookResourceType::Comment);
+        assert_eq!(payload.actor.as_ref().unwrap().name, "Alice");
+        assert_eq!(payload.organization_id.as_deref(), Some("org-1"));
+        assert_eq!(payload.webhook_id.as_deref(), Some("wh-1"));
+    }
+
+    #[test]
+    fn webhook_payload_serialization_roundtrip() {
+        let payload = WebhookPayload {
+            action: WebhookAction::Create,
+            actor: Some(User {
+                id: "u1".into(),
+                name: "Bob".into(),
+                display_name: None,
+                email: None,
+            }),
+            created_at: "2026-03-07T00:00:00.000Z".into(),
+            url: None,
+            resource_type: WebhookResourceType::Issue,
+            data: json!({"id": "i1"}),
+            organization_id: None,
+            webhook_id: Some("wh-123".into()),
+        };
+
+        let json_str = serde_json::to_string(&payload).unwrap();
+        let back: WebhookPayload = serde_json::from_str(&json_str).unwrap();
+        assert_eq!(back.action, WebhookAction::Create);
+        assert_eq!(back.resource_type, WebhookResourceType::Issue);
+        assert_eq!(back.actor.unwrap().name, "Bob");
+    }
+
+    #[test]
+    fn webhook_payload_unknown_fields_ignored() {
+        let json = json!({
+            "action": "create",
+            "createdAt": "2026-03-07T00:00:00.000Z",
+            "type": "Issue",
+            "data": {},
+            "unknownField": "should be ignored"
+        });
+        let payload: WebhookPayload = serde_json::from_value(json).unwrap();
+        assert_eq!(payload.action, WebhookAction::Create);
     }
 }

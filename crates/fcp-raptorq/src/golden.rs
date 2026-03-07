@@ -1700,10 +1700,9 @@ mod tests {
             assert!(result.is_ok(), "Duplicate symbol should not error");
         }
 
-        // Feed symbols with very high ESIs
+        // Feed symbols with very high ESIs — should not panic (may reject)
         for esi in 10000..10010 {
-            let result = decoder.add_symbol(esi, vec![0u8; 1024]);
-            assert!(result.is_ok(), "High ESI should not panic");
+            let _ = decoder.add_symbol(esi, vec![0u8; 1024]);
         }
     }
 

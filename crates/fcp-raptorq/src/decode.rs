@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 use asupersync::raptorq::decoder::{
     DecodeError as AsupersyncDecodeError, InactivationDecoder, ReceivedSymbol,
 };
-use fcp_async_core::{AsyncError, ExecutionContext};
+use fcp_async_core::{AsyncError, Deadline, ExecutionContext};
 
 use crate::config::RaptorQConfig;
 use crate::error::DecodeError;
@@ -398,6 +398,9 @@ impl DecodeAdmissionController {
     {
         if context.is_cancelled() {
             return Err(DecodeError::Cancelled);
+        }
+        if context.deadline().is_some_and(Deadline::is_expired) {
+            return Err(DecodeError::Timeout);
         }
 
         let mut permit = self.acquire()?;

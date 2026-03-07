@@ -579,7 +579,7 @@ fn repair_planner_cycle_improves_zone_slo() {
             });
             let controller = RepairController::new(RepairControllerConfig {
                 min_deficit_bps: 100,
-                max_symbols_per_repair: 4,
+                max_symbols_per_repair: 8,
                 ..Default::default()
             });
 

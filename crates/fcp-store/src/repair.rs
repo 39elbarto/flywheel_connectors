@@ -3146,7 +3146,7 @@ mod tests {
 
                 seed_planner_object(&store, slo_object, 10, 5, 64, &[1]).await;
                 seed_planner_object(&store, diversity_object, 4, 4, 64, &[1]).await;
-                seed_planner_object(&store, hot_object, 20, 19, 64, &[1, 2, 3]).await;
+                seed_planner_object(&store, hot_object, 10, 10, 64, &[1, 2, 3]).await;
 
                 let mut policies = HashMap::new();
                 policies.insert(slo_object, test_policy());
@@ -3159,6 +3159,7 @@ mod tests {
 
                 let mut options = planner_options(7);
                 options.hot_objects = vec![hot_object];
+                options.hot_object_min_coverage_bps = 15_000;
 
                 let plan = controller
                     .plan_zone(&zone_id, &store, &policies, &options)

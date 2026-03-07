@@ -3,7 +3,9 @@
 mod catalog;
 mod intent;
 mod render;
+mod workflow;
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -24,6 +26,7 @@ invocation across every connector in the workspace.
 Defaults:
   - TOON output is the default because agent-facing output should stay token-efficient.
   - Use --format json when you need full-fidelity structured output.
+  - For resumable work, prefer `task '<intent>'` so the workflow can survive agent/context resets.
   - For goal-oriented work, prefer `plan` -> `explain` -> `do --simulate` -> `do --approve`.
   - Prefer progressive disclosure: list -> show -> ops -> schema -> config doctor -> simulate -> invoke.
 ";
@@ -31,6 +34,11 @@ Defaults:
 const AFTER_HELP: &str = "\
 Examples:
   fwc guide
+  fwc task \"append this summary to the Notion page named Roadmap\"
+  fwc task show w:deadbeef
+  fwc task bind w:deadbeef connector=notion payload_json='{...}'
+  fwc task approve w:deadbeef
+  fwc task run w:deadbeef
   fwc list
   fwc plan \"create a GitHub issue titled 'FWC: add workflow macros'\"
   fwc explain \"find the Notion page named Roadmap and append this summary\"
@@ -69,6 +77,10 @@ enum Commands {
     /// Explain the fwc command taxonomy and UX contract in structured form.
     #[command(visible_alias = "contract")]
     Guide(GuideArgs),
+
+    /// Create and resume durable workflow capsules for connector jobs.
+    #[command(visible_alias = "tasks")]
+    Task(TaskArgs),
 
     /// Compile a natural-language goal into exact primitive fwc steps.
     #[command(visible_alias = "workflow")]
@@ -214,6 +226,63 @@ impl DoIntentArgs {
             },
         }
     }
+}
+
+#[derive(Args, Debug, Serialize)]
+struct TaskArgs {
+    #[command(subcommand)]
+    command: TaskCommand,
+}
+
+#[derive(Subcommand, Debug, Serialize)]
+#[serde(tag = "subcommand", content = "args", rename_all = "kebab-case")]
+enum TaskCommand {
+    /// Create a resumable workflow capsule from a natural-language intent.
+    Create(IntentArgs),
+
+    /// Show the current state of one workflow capsule.
+    Show(TaskIdArgs),
+
+    /// List recent workflow capsules.
+    List(TaskListArgs),
+
+    /// Advance a workflow capsule by executing the next safe stage.
+    Advance(TaskIdArgs),
+
+    /// Bind resolved values such as connector ids, payload files, or resource identifiers.
+    Bind(TaskBindArgs),
+
+    /// Mark the workflow capsule as approved for side-effecting execution.
+    Approve(TaskIdArgs),
+
+    /// Execute the workflow capsule according to its current approvals and bindings.
+    Run(TaskIdArgs),
+}
+
+#[derive(Args, Debug, Serialize)]
+struct TaskIdArgs {
+    /// Workflow capsule id such as w:7f3k9a1b.
+    task_id: String,
+}
+
+#[derive(Args, Debug, Serialize)]
+struct TaskListArgs {
+    /// Optional status filter such as ready-to-simulate, needs-bindings, approved, or materialized.
+    #[arg(long)]
+    status: Option<String>,
+
+    /// Maximum number of capsules to list.
+    #[arg(long, default_value_t = 20)]
+    limit: usize,
+}
+
+#[derive(Args, Debug, Serialize)]
+struct TaskBindArgs {
+    /// Workflow capsule id such as w:7f3k9a1b.
+    task_id: String,
+
+    /// One or more `key=value` bindings, for example `connector=notion` or `payload_file=payload.json`.
+    bindings: Vec<String>,
 }
 
 #[derive(Args, Debug, Serialize)]
@@ -482,6 +551,7 @@ fn dispatch(cli: &Cli) -> Result<DispatchOutcome> {
             };
             DispatchOutcome { payload, exit_code }
         }
+        Commands::Task(args) => task_dispatch(args)?,
         Commands::Plan(args) => intent_plan_dispatch(&args.request(intent::IntentMode::Plan))?,
         Commands::Explain(args) => {
             intent_explain_dispatch(&args.request(intent::IntentMode::Explain))?
@@ -518,6 +588,267 @@ where
 {
     Ok(DispatchOutcome {
         payload: catalog::planned_payload(command, &serde_json::to_value(args)?),
+        exit_code: ExitCode::SUCCESS,
+    })
+}
+
+fn task_dispatch(args: &TaskArgs) -> Result<DispatchOutcome> {
+    match &args.command {
+        TaskCommand::Create(args) => task_create_dispatch(args),
+        TaskCommand::Show(args) => task_show_dispatch(args),
+        TaskCommand::List(args) => task_list_dispatch(args),
+        TaskCommand::Advance(args) => task_advance_dispatch(args),
+        TaskCommand::Bind(args) => task_bind_dispatch(args),
+        TaskCommand::Approve(args) => task_approve_dispatch(args),
+        TaskCommand::Run(args) => task_run_dispatch(args),
+    }
+}
+
+fn task_create_dispatch(args: &IntentArgs) -> Result<DispatchOutcome> {
+    let store = workflow::TaskStore::discover()?;
+    let task = store.create(workflow::WorkflowRequest {
+        intent: args.intent.clone(),
+        connector_override: args.connector.clone(),
+        zone_override: args.zone.clone(),
+    })?;
+    Ok(DispatchOutcome {
+        payload: json!({
+            "status": "created",
+            "command": "task",
+            "subcommand": "create",
+            "message": "Created a resumable workflow capsule from the requested intent.",
+            "task": serde_json::to_value(task)?,
+            "state_root": store.root_dir().display().to_string(),
+        }),
+        exit_code: ExitCode::SUCCESS,
+    })
+}
+
+fn task_show_dispatch(args: &TaskIdArgs) -> Result<DispatchOutcome> {
+    let store = workflow::TaskStore::discover()?;
+    let Some(task) = store.load(&args.task_id)? else {
+        return Ok(missing_task_dispatch(&args.task_id));
+    };
+
+    Ok(DispatchOutcome {
+        payload: json!({
+            "status": "ok",
+            "command": "task",
+            "subcommand": "show",
+            "message": "Loaded the current workflow capsule state.",
+            "task": serde_json::to_value(task)?,
+            "state_root": store.root_dir().display().to_string(),
+        }),
+        exit_code: ExitCode::SUCCESS,
+    })
+}
+
+fn task_list_dispatch(args: &TaskListArgs) -> Result<DispatchOutcome> {
+    let store = workflow::TaskStore::discover()?;
+    let tasks = store.list(args.limit, args.status.as_deref())?;
+    Ok(DispatchOutcome {
+        payload: json!({
+            "status": "ok",
+            "command": "task",
+            "subcommand": "list",
+            "message": "Listed recent workflow capsules.",
+            "tasks": serde_json::to_value(tasks)?,
+            "state_root": store.root_dir().display().to_string(),
+        }),
+        exit_code: ExitCode::SUCCESS,
+    })
+}
+
+fn task_bind_dispatch(args: &TaskBindArgs) -> Result<DispatchOutcome> {
+    let bindings = match workflow::validate_binding_entries(&args.bindings) {
+        Ok(bindings) => bindings,
+        Err(error) => {
+            return Ok(structured_error(
+                "invalid-task-binding",
+                error.to_string(),
+                CliExitCode::Validation,
+                true,
+                &std::env::args().collect::<Vec<_>>(),
+                &std::env::args().collect::<Vec<_>>(),
+                ErrorDetails {
+                    did_you_mean: Vec::new(),
+                    examples: vec![
+                        format!(
+                            "fwc task bind {} connector=notion payload_file=payload.json",
+                            args.task_id
+                        ),
+                        format!(
+                            "fwc task bind {} zone=z:work payload_json='{{\"text\":\"hello\"}}'",
+                            args.task_id
+                        ),
+                    ],
+                    next_actions: vec![
+                        "Pass one or more bindings as `key=value` pairs.".to_owned(),
+                        "Use `connector=` or `zone=` to refine the compiler request itself."
+                            .to_owned(),
+                    ],
+                },
+            ));
+        }
+    };
+    let store = workflow::TaskStore::discover()?;
+    let Some(task) = store.bind(&args.task_id, bindings)? else {
+        return Ok(missing_task_dispatch(&args.task_id));
+    };
+
+    Ok(DispatchOutcome {
+        payload: json!({
+            "status": "updated",
+            "command": "task",
+            "subcommand": "bind",
+            "message": "Updated the workflow capsule bindings and recomputed its status.",
+            "task": serde_json::to_value(task)?,
+        }),
+        exit_code: ExitCode::SUCCESS,
+    })
+}
+
+fn task_approve_dispatch(args: &TaskIdArgs) -> Result<DispatchOutcome> {
+    let store = workflow::TaskStore::discover()?;
+    let Some(task) = store.approve(&args.task_id)? else {
+        return Ok(missing_task_dispatch(&args.task_id));
+    };
+
+    Ok(DispatchOutcome {
+        payload: json!({
+            "status": "approved",
+            "command": "task",
+            "subcommand": "approve",
+            "message": "Marked the workflow capsule as approved for side-effecting execution.",
+            "task": serde_json::to_value(task)?,
+        }),
+        exit_code: ExitCode::SUCCESS,
+    })
+}
+
+fn task_advance_dispatch(args: &TaskIdArgs) -> Result<DispatchOutcome> {
+    let store = workflow::TaskStore::discover()?;
+    let Some(task) = store.refresh(&args.task_id)? else {
+        return Ok(missing_task_dispatch(&args.task_id));
+    };
+    if task.compiled.status != "ready" || !task.unresolved_bindings.is_empty() {
+        return Ok(DispatchOutcome {
+            payload: json!({
+                "status": task.capsule_status,
+                "command": "task",
+                "subcommand": "advance",
+                "message": "The workflow capsule still needs clarification or bindings before it can advance safely.",
+                "task": serde_json::to_value(task)?,
+            }),
+            exit_code: CliExitCode::Validation.into(),
+        });
+    }
+
+    let approve = !task.has_side_effects();
+    let execution = materialize_compiled_steps(&task.compiled, approve, Some(&task.bindings))?;
+    let Some(task) = store.append_execution(
+        &args.task_id,
+        "advance",
+        if approve { "approve" } else { "simulate" },
+        execution.clone(),
+    )?
+    else {
+        return Ok(missing_task_dispatch(&args.task_id));
+    };
+
+    Ok(DispatchOutcome {
+        payload: json!({
+            "status": task.capsule_status,
+            "command": "task",
+            "subcommand": "advance",
+            "message": if approve {
+                "Advanced the workflow capsule by executing its current non-side-effecting plan."
+            } else {
+                "Advanced the workflow capsule by materializing its next safe simulation step."
+            },
+            "execution": execution,
+            "task": serde_json::to_value(task)?,
+        }),
+        exit_code: ExitCode::SUCCESS,
+    })
+}
+
+fn task_run_dispatch(args: &TaskIdArgs) -> Result<DispatchOutcome> {
+    let store = workflow::TaskStore::discover()?;
+    let Some(task) = store.refresh(&args.task_id)? else {
+        return Ok(missing_task_dispatch(&args.task_id));
+    };
+    if task.compiled.status != "ready" || !task.unresolved_bindings.is_empty() {
+        return Ok(DispatchOutcome {
+            payload: json!({
+                "status": task.capsule_status,
+                "command": "task",
+                "subcommand": "run",
+                "message": "The workflow capsule cannot run yet because it still needs clarification or bindings.",
+                "task": serde_json::to_value(task)?,
+            }),
+            exit_code: CliExitCode::Validation.into(),
+        });
+    }
+    if task.has_side_effects() && !task.approval.workflow {
+        return Ok(structured_error(
+            "task-approval-required",
+            format!(
+                "Workflow capsule `{}` contains side-effecting steps and must be approved before `run`.",
+                task.id
+            ),
+            CliExitCode::Validation,
+            true,
+            &std::env::args().collect::<Vec<_>>(),
+            &std::env::args().collect::<Vec<_>>(),
+            ErrorDetails {
+                did_you_mean: Vec::new(),
+                examples: vec![
+                    format!("fwc task show {}", task.id),
+                    format!("fwc task approve {}", task.id),
+                    format!("fwc task run {}", task.id),
+                ],
+                next_actions: vec![
+                    "Inspect the simulated plan before approval if you have not done that yet."
+                        .to_owned(),
+                    format!(
+                        "Run `fwc task approve {}` once you are ready to proceed.",
+                        task.id
+                    ),
+                ],
+            },
+        ));
+    }
+
+    let execution =
+        materialize_compiled_steps(&task.compiled, task.approval.workflow, Some(&task.bindings))?;
+    let Some(task) = store.append_execution(
+        &args.task_id,
+        "run",
+        if task.approval.workflow {
+            "approve"
+        } else {
+            "simulate"
+        },
+        execution.clone(),
+    )?
+    else {
+        return Ok(missing_task_dispatch(&args.task_id));
+    };
+
+    Ok(DispatchOutcome {
+        payload: json!({
+            "status": task.capsule_status,
+            "command": "task",
+            "subcommand": "run",
+            "message": if task.approval.workflow {
+                "Ran the approved workflow capsule. External side effects are still scaffold-backed until host-backed execution lands."
+            } else {
+                "Ran the workflow capsule in non-side-effecting mode."
+            },
+            "execution": execution,
+            "task": serde_json::to_value(task)?,
+        }),
         exit_code: ExitCode::SUCCESS,
     })
 }
@@ -577,7 +908,7 @@ fn intent_do_dispatch(args: &DoIntentArgs) -> Result<DispatchOutcome> {
     }
 
     let approve = args.approve;
-    let execution = materialize_compiled_steps(&compiled, approve)?;
+    let execution = materialize_compiled_steps(&compiled, approve, None)?;
     let defaulted_to_simulation = !args.simulate && !args.approve;
 
     Ok(DispatchOutcome {
@@ -601,12 +932,17 @@ fn intent_do_dispatch(args: &DoIntentArgs) -> Result<DispatchOutcome> {
     })
 }
 
-fn materialize_compiled_steps(compiled: &intent::CompiledIntent, approve: bool) -> Result<Value> {
+fn materialize_compiled_steps(
+    compiled: &intent::CompiledIntent,
+    approve: bool,
+    bindings: Option<&BTreeMap<String, String>>,
+) -> Result<Value> {
     let mut executed_steps = Vec::new();
     let mut withheld_steps = Vec::new();
     let mut stopped_before_side_effect = false;
 
     for step in &compiled.steps {
+        let (resolved_argv, resolved_command_line) = resolve_step_argv(step, bindings);
         if !approve && (stopped_before_side_effect || step.side_effecting) {
             let reason = if step.side_effecting {
                 "Simulation mode stops before the first side-effecting primitive."
@@ -619,7 +955,8 @@ fn materialize_compiled_steps(compiled: &intent::CompiledIntent, approve: bool) 
                 "phase": step.phase,
                 "purpose": step.purpose,
                 "command": step.command,
-                "command_line": step.command_line,
+                "command_line": resolved_command_line,
+                "argv": resolved_argv,
                 "approval_required": step.approval_required,
                 "side_effecting": step.side_effecting,
                 "notes": step.notes,
@@ -629,10 +966,9 @@ fn materialize_compiled_steps(compiled: &intent::CompiledIntent, approve: bool) 
             continue;
         }
 
-        let parsed = Cli::try_parse_from(&step.argv).map_err(|error| {
+        let parsed = Cli::try_parse_from(&resolved_argv).map_err(|error| {
             anyhow::anyhow!(
-                "failed to parse compiled primitive `{}`: {error}",
-                step.command_line
+                "failed to parse compiled primitive `{resolved_command_line}`: {error}"
             )
         })?;
         let primitive = dispatch(&parsed)?;
@@ -644,7 +980,8 @@ fn materialize_compiled_steps(compiled: &intent::CompiledIntent, approve: bool) 
             "phase": step.phase,
             "purpose": step.purpose,
             "command": step.command,
-            "command_line": step.command_line,
+            "command_line": resolved_command_line,
+            "argv": resolved_argv,
             "approval_required": step.approval_required,
             "side_effecting": step.side_effecting,
             "notes": step.notes,
@@ -674,6 +1011,80 @@ fn materialize_compiled_steps(compiled: &intent::CompiledIntent, approve: bool) 
         "stopped_before_side_effect": stopped_before_side_effect,
         "scaffold_backed": true,
     }))
+}
+
+fn resolve_step_argv(
+    step: &intent::CompiledStep,
+    bindings: Option<&BTreeMap<String, String>>,
+) -> (Vec<String>, String) {
+    let Some(bindings) = bindings else {
+        return (step.argv.clone(), step.command_line.clone());
+    };
+
+    let mut argv = Vec::new();
+    let mut index = 0;
+
+    while index < step.argv.len() {
+        if step.argv[index] == "--file"
+            && step
+                .argv
+                .get(index + 1)
+                .is_some_and(|value| value == "./intent-payload.json")
+        {
+            if let Some(payload_json) = bindings.get("payload_json") {
+                argv.push("--input".to_owned());
+                argv.push(payload_json.clone());
+                index += 2;
+                continue;
+            }
+            if let Some(payload_file) = bindings.get("payload_file") {
+                argv.push("--file".to_owned());
+                argv.push(payload_file.clone());
+                index += 2;
+                continue;
+            }
+        }
+
+        let segment = &step.argv[index];
+        if let Some(name) = segment
+            .strip_prefix('<')
+            .and_then(|rest| rest.strip_suffix('>'))
+        {
+            argv.push(
+                bindings
+                    .get(name)
+                    .cloned()
+                    .unwrap_or_else(|| segment.clone()),
+            );
+        } else {
+            argv.push(segment.clone());
+        }
+        index += 1;
+    }
+
+    (argv.clone(), intent::shell_join(&argv))
+}
+
+fn missing_task_dispatch(task_id: &str) -> DispatchOutcome {
+    structured_error(
+        "unknown-task",
+        format!("No workflow capsule with id `{task_id}` was found."),
+        CliExitCode::Validation,
+        true,
+        &std::env::args().collect::<Vec<_>>(),
+        &std::env::args().collect::<Vec<_>>(),
+        ErrorDetails {
+            did_you_mean: Vec::new(),
+            examples: vec![
+                "fwc task list".to_owned(),
+                "fwc task \"create a GitHub issue titled 'FWC: add workflow macros'\"".to_owned(),
+            ],
+            next_actions: vec![
+                "Use `fwc task list` to discover existing workflow capsules.".to_owned(),
+                "Create a new capsule if this workflow has not been saved yet.".to_owned(),
+            ],
+        },
+    )
 }
 
 #[derive(Debug)]
@@ -847,6 +1258,25 @@ fn normalize_args(
         }
     }
 
+    let Some(command_index) = first_command_index(&args) else {
+        return Ok(NormalizedArgs { args, corrections });
+    };
+
+    if args
+        .get(command_index)
+        .is_some_and(|segment| segment == "task")
+        && args.get(command_index + 1).is_some_and(|segment| {
+            !segment.starts_with('-') && !workflow::task_subcommands().contains(&segment.as_str())
+        })
+    {
+        corrections.push(InputCorrection {
+            from: format!("task {}", args[command_index + 1]),
+            to: format!("task create {}", args[command_index + 1]),
+            rationale: "Defaulted `fwc task <intent>` to `fwc task create <intent>` because intent-first workflow creation is the canonical capsule entrypoint.",
+        });
+        args.insert(command_index + 1, "create".to_owned());
+    }
+
     Ok(NormalizedArgs { args, corrections })
 }
 
@@ -901,6 +1331,7 @@ fn canonical_command_alias(token: &str) -> Option<&'static str> {
         "workflow" => Some("plan"),
         "why" => Some("explain"),
         "run" => Some("do"),
+        "tasks" => Some("task"),
         "ls" => Some("list"),
         "info" | "inspect" | "describe" => Some("show"),
         "operations" | "operation" | "op" => Some("ops"),
@@ -964,22 +1395,46 @@ fn parse_failure_dispatch(args: &[String], error: &clap::Error) -> DispatchOutco
     let command = command_index.and_then(|index| args.get(index).map(String::as_str));
 
     match error.kind() {
-        ErrorKind::MissingSubcommand => structured_error(
-            "missing-command",
-            "No `fwc` command was provided.",
-            CliExitCode::Parse,
-            true,
-            args,
-            &normalized_args,
-            ErrorDetails {
-                did_you_mean: Vec::new(),
-                examples: vec!["fwc guide".to_owned(), "fwc list".to_owned()],
-                next_actions: vec![
-                    "Run `fwc guide` to inspect the command taxonomy.".to_owned(),
-                    "Run `fwc list` if you want to start from connector discovery.".to_owned(),
-                ],
-            },
-        ),
+        ErrorKind::MissingSubcommand => {
+            if command == Some("task") {
+                return structured_error(
+                    "missing-task-subcommand",
+                    "No task intent or task subcommand was provided.",
+                    CliExitCode::Parse,
+                    true,
+                    args,
+                    &normalized_args,
+                    ErrorDetails {
+                        did_you_mean: Vec::new(),
+                        examples: vec![
+                            "fwc task \"disable the slack connector in z:work\"".to_owned(),
+                            "fwc task list".to_owned(),
+                        ],
+                        next_actions: vec![
+                            "Pass a quoted intent after `fwc task` to create a new capsule.".to_owned(),
+                            "Or use `fwc task show|list|advance|bind|approve|run` with an existing task id.".to_owned(),
+                        ],
+                    },
+                );
+            }
+
+            structured_error(
+                "missing-command",
+                "No `fwc` command was provided.",
+                CliExitCode::Parse,
+                true,
+                args,
+                &normalized_args,
+                ErrorDetails {
+                    did_you_mean: Vec::new(),
+                    examples: vec!["fwc guide".to_owned(), "fwc list".to_owned()],
+                    next_actions: vec![
+                        "Run `fwc guide` to inspect the command taxonomy.".to_owned(),
+                        "Run `fwc list` if you want to start from connector discovery.".to_owned(),
+                    ],
+                },
+            )
+        }
         ErrorKind::InvalidSubcommand | ErrorKind::UnknownArgument => match command {
             Some("config") => unknown_subcommand_dispatch(
                 "config-subcommand",
@@ -993,6 +1448,21 @@ fn parse_failure_dispatch(args: &[String], error: &clap::Error) -> DispatchOutco
                 vec![
                     "fwc config schema github".to_owned(),
                     "fwc config doctor github".to_owned(),
+                ],
+            ),
+            Some("task") => unknown_subcommand_dispatch(
+                "task-subcommand",
+                "task",
+                args,
+                &normalized_args,
+                command_index
+                    .and_then(|index| args.get(index + 1))
+                    .map(String::as_str),
+                workflow::task_subcommands(),
+                vec![
+                    "fwc task \"disable the slack connector in z:work\"".to_owned(),
+                    "fwc task list".to_owned(),
+                    "fwc task show <task-id>".to_owned(),
                 ],
             ),
             Some(token) => unknown_subcommand_dispatch(
@@ -1085,6 +1555,38 @@ fn parse_failure_dispatch(args: &[String], error: &clap::Error) -> DispatchOutco
                         },
                     );
                 }
+
+                if command == "task"
+                    && args
+                        .get(command_index.unwrap_or(0) + 1)
+                        .is_some_and(|segment| segment == "bind")
+                {
+                    let task_id = args
+                        .get(command_index.unwrap_or(0) + 2)
+                        .cloned()
+                        .unwrap_or_else(|| "<task-id>".to_owned());
+                    return structured_error(
+                        "missing-task-bindings",
+                        "`fwc task bind` needs a workflow id plus one or more `key=value` bindings.",
+                        CliExitCode::Validation,
+                        true,
+                        args,
+                        &normalized_args,
+                        ErrorDetails {
+                            did_you_mean: Vec::new(),
+                            examples: vec![
+                                format!("fwc task show {task_id}"),
+                                format!(
+                                    "fwc task bind {task_id} connector=notion payload_file=payload.json"
+                                ),
+                            ],
+                            next_actions: vec![
+                                "Pass one or more `key=value` bindings after the task id.".to_owned(),
+                                "Use `connector=` and `zone=` to refine compiler inference; use `payload_file=` or `payload_json=` for request materialization.".to_owned(),
+                            ],
+                        },
+                    );
+                }
             }
 
             structured_error(
@@ -1136,6 +1638,11 @@ fn unknown_subcommand_dispatch(
         vec![
             "Use `fwc config schema <connector>` to inspect configuration requirements.".to_owned(),
             "Use `fwc config doctor <connector>` after any config change.".to_owned(),
+        ]
+    } else if scope == "task" {
+        vec![
+            "Use `fwc task \"<intent>\"` to create a new workflow capsule.".to_owned(),
+            "Use `fwc task list` to discover existing capsules before `show`, `bind`, `advance`, `approve`, or `run`.".to_owned(),
         ]
     } else {
         vec![format!(
@@ -1304,10 +1811,10 @@ mod tests {
     #[test]
     fn guide_lists_progressive_disclosure_workflow() {
         let payload = catalog::guide_payload(None);
-        assert_eq!(payload["recommended_workflow"][0], "fwc plan \"<intent>\"");
+        assert_eq!(payload["recommended_workflow"][0], "fwc task \"<intent>\"");
         assert_eq!(
             payload["phase"]["current_bead"],
-            "flywheel_connectors-1g7z0.22"
+            "flywheel_connectors-2wecj"
         );
     }
 
@@ -1332,6 +1839,25 @@ mod tests {
                 .expect_err("op show should not auto-correct");
         assert_eq!(error.exit_code, CliExitCode::AmbiguousCorrection.into());
         assert_eq!(error.payload["error"]["type"], "ambiguous-correction");
+    }
+
+    #[test]
+    fn normalize_defaults_task_intent_to_create() {
+        let normalized = normalize_args(
+            &["fwc", "task", "disable the slack connector in z:work"].map(str::to_owned),
+        )
+        .expect("task intent should normalize");
+
+        assert_eq!(
+            normalized.args,
+            vec![
+                "fwc",
+                "task",
+                "create",
+                "disable the slack connector in z:work"
+            ]
+        );
+        assert_eq!(normalized.corrections.len(), 1);
     }
 
     #[test]
@@ -1410,6 +1936,90 @@ mod tests {
         assert_eq!(payload["workflow"]["status"], "ready");
         assert_eq!(payload["workflow"]["chosen_connector"]["id"], "github");
         assert_eq!(payload["workflow"]["operation_hint"], "issues.create");
+    }
+
+    #[test]
+    fn execute_task_create_and_show_round_trips_capsule() {
+        let create_args = vec![
+            "fwc".to_owned(),
+            "--json".to_owned(),
+            "task".to_owned(),
+            "create a GitHub issue titled \"FWC: add workflow macros\"".to_owned(),
+        ];
+        let created = execute(&create_args).expect("task creation should succeed");
+        let created_payload: Value =
+            serde_json::from_str(&created.text).expect("json output should parse cleanly");
+        let task_id = created_payload["task"]["id"]
+            .as_str()
+            .expect("task id should be present")
+            .to_owned();
+
+        let show_args = vec![
+            "fwc".to_owned(),
+            "--json".to_owned(),
+            "task".to_owned(),
+            "show".to_owned(),
+            task_id,
+        ];
+        let shown = execute(&show_args).expect("task show should succeed");
+        let shown_payload: Value =
+            serde_json::from_str(&shown.text).expect("json output should parse cleanly");
+
+        assert_eq!(created.exit_code, CliExitCode::Success.into());
+        assert_eq!(shown.exit_code, CliExitCode::Success.into());
+        assert_eq!(
+            shown_payload["task"]["compiled"]["chosen_connector"]["id"],
+            "github"
+        );
+        assert_eq!(shown_payload["task"]["capsule_status"], "ready-to-simulate");
+    }
+
+    #[test]
+    fn execute_task_bind_and_approve_updates_capsule_state() {
+        let create_args = vec![
+            "fwc".to_owned(),
+            "--json".to_owned(),
+            "task".to_owned(),
+            "send a message to a channel".to_owned(),
+        ];
+        let created = execute(&create_args).expect("task creation should succeed");
+        let created_payload: Value =
+            serde_json::from_str(&created.text).expect("json output should parse cleanly");
+        let task_id = created_payload["task"]["id"]
+            .as_str()
+            .expect("task id should be present")
+            .to_owned();
+
+        let bind_args = vec![
+            "fwc".to_owned(),
+            "--json".to_owned(),
+            "task".to_owned(),
+            "bind".to_owned(),
+            task_id.clone(),
+            "connector=slack".to_owned(),
+            "payload_json={\"text\":\"hello\"}".to_owned(),
+        ];
+        let bound = execute(&bind_args).expect("task bind should succeed");
+        let bound_payload: Value =
+            serde_json::from_str(&bound.text).expect("json output should parse cleanly");
+        assert_eq!(
+            bound_payload["task"]["compiled"]["chosen_connector"]["id"],
+            "slack"
+        );
+
+        let approve_args = vec![
+            "fwc".to_owned(),
+            "--json".to_owned(),
+            "task".to_owned(),
+            "approve".to_owned(),
+            task_id,
+        ];
+        let approved = execute(&approve_args).expect("task approve should succeed");
+        let approved_payload: Value =
+            serde_json::from_str(&approved.text).expect("json output should parse cleanly");
+
+        assert_eq!(approved.exit_code, CliExitCode::Success.into());
+        assert_eq!(approved_payload["task"]["approval"]["workflow"], true);
     }
 
     #[test]

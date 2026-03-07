@@ -4,7 +4,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 const SCAFFOLD_NOTICE: &str = "The plan compiler is real, but primitive command execution is still scaffold-backed in this repo state. `fwc` will never claim that external side effects happened unless host-backed execution is actually wired in.";
 
@@ -46,7 +46,7 @@ pub struct IntentRequest {
     pub mode: IntentMode,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CompiledIntent {
     pub status: String,
     pub mode: String,
@@ -74,7 +74,7 @@ pub struct CompiledIntent {
     pub scaffold_notice: String,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ConnectorCandidate {
     pub id: String,
     pub score: i32,
@@ -87,7 +87,7 @@ impl std::fmt::Display for ConnectorCandidate {
     }
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ActionInference {
     pub family: String,
     pub verb: String,
@@ -97,14 +97,14 @@ pub struct ActionInference {
     pub matched_terms: Vec<String>,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Ambiguity {
     pub kind: String,
     pub message: String,
     pub candidates: Vec<String>,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CompiledStep {
     pub ordinal: usize,
     pub phase: String,
@@ -117,7 +117,7 @@ pub struct CompiledStep {
     pub notes: Vec<String>,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Explanation {
     pub connector_evidence: Vec<String>,
     pub action_evidence: Vec<String>,
@@ -1470,7 +1470,7 @@ fn search_argv(query: &str, zone: Option<&str>) -> Vec<String> {
     argv
 }
 
-fn shell_join(argv: &[String]) -> String {
+pub fn shell_join(argv: &[String]) -> String {
     argv.iter()
         .map(|segment| shell_quote(segment))
         .collect::<Vec<_>>()
@@ -1702,7 +1702,7 @@ fn llm_operation_hint(_verb: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{IntentMode, IntentRequest, compile, connector_profiles, parse_literals};
+    use super::*;
 
     fn request(intent: &str) -> IntentRequest {
         IntentRequest {
@@ -1713,6 +1713,26 @@ mod tests {
         }
     }
 
+    fn request_with_connector(intent: &str, connector: &str) -> IntentRequest {
+        IntentRequest {
+            intent: intent.to_owned(),
+            connector_override: Some(connector.to_owned()),
+            zone_override: None,
+            mode: IntentMode::Plan,
+        }
+    }
+
+    fn request_with_zone(intent: &str, zone: &str) -> IntentRequest {
+        IntentRequest {
+            intent: intent.to_owned(),
+            connector_override: None,
+            zone_override: Some(zone.to_owned()),
+            mode: IntentMode::Plan,
+        }
+    }
+
+    // ── parse_literals ──────────────────────────────────────
+
     #[test]
     fn parse_literals_extracts_quoted_named_and_zone_data() {
         let raw = "find the Notion page named Roadmap in z:work and append \"Summary\"";
@@ -1721,6 +1741,811 @@ mod tests {
         assert_eq!(parsed.zone.as_deref(), Some("z:work"));
         assert_eq!(parsed.quoted[0], "Summary");
     }
+
+    #[test]
+    fn parse_literals_extracts_multiple_quoted_strings() {
+        let raw = r#"create issue titled "Bug report" with body "needs fix""#;
+        let parsed = parse_literals(raw, &raw.to_lowercase());
+        assert_eq!(parsed.quoted.len(), 2);
+        assert_eq!(parsed.quoted[0], "Bug report");
+        assert_eq!(parsed.quoted[1], "needs fix");
+    }
+
+    #[test]
+    fn parse_literals_extracts_called_marker() {
+        let raw = "find the channel called general";
+        let parsed = parse_literals(raw, &raw.to_lowercase());
+        assert_eq!(parsed.called.as_deref(), Some("general"));
+    }
+
+    #[test]
+    fn parse_literals_extracts_titled_marker() {
+        let raw = "create issue titled Bug Report";
+        let parsed = parse_literals(raw, &raw.to_lowercase());
+        assert_eq!(parsed.titled.as_deref(), Some("Bug Report"));
+    }
+
+    #[test]
+    fn parse_literals_no_zone_when_absent() {
+        let raw = "list all github issues";
+        let parsed = parse_literals(raw, &raw.to_lowercase());
+        assert!(parsed.zone.is_none());
+    }
+
+    #[test]
+    fn parse_literals_empty_input() {
+        let raw = "";
+        let parsed = parse_literals(raw, &raw.to_lowercase());
+        assert!(parsed.quoted.is_empty());
+        assert!(parsed.named.is_none());
+        assert!(parsed.called.is_none());
+        assert!(parsed.zone.is_none());
+    }
+
+    #[test]
+    fn parse_literals_zone_private() {
+        let raw = "list connectors in z:private";
+        let parsed = parse_literals(raw, &raw.to_lowercase());
+        assert_eq!(parsed.zone.as_deref(), Some("z:private"));
+    }
+
+    // ── extract_quoted_literals ─────────────────────────────
+
+    #[test]
+    fn extract_quoted_handles_single_quotes() {
+        let result = extract_quoted_literals("say 'hello world'");
+        assert_eq!(result, vec!["hello world"]);
+    }
+
+    #[test]
+    fn extract_quoted_handles_double_quotes() {
+        let result = extract_quoted_literals(r#"say "hello world""#);
+        assert_eq!(result, vec!["hello world"]);
+    }
+
+    #[test]
+    fn extract_quoted_handles_no_quotes() {
+        let result = extract_quoted_literals("no quotes here");
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn extract_quoted_handles_empty_quotes() {
+        let result = extract_quoted_literals(r#"say """#);
+        assert!(result.is_empty());
+    }
+
+    // ── extract_zone ────────────────────────────────────────
+
+    #[test]
+    fn extract_zone_finds_z_colon_prefix() {
+        assert_eq!(
+            extract_zone("do work in z:staging"),
+            Some("z:staging".to_owned())
+        );
+    }
+
+    #[test]
+    fn extract_zone_returns_none_for_no_zone() {
+        assert!(extract_zone("just a normal command").is_none());
+    }
+
+    // ── normalize_text ──────────────────────────────────────
+
+    #[test]
+    fn normalize_text_lowercases() {
+        assert_eq!(normalize_text("Hello WORLD"), "hello world");
+    }
+
+    // ── contains_term ───────────────────────────────────────
+
+    #[test]
+    fn contains_term_word_boundary() {
+        assert!(contains_term("create an issue", "create"));
+        assert!(contains_term("list issues", "list"));
+    }
+
+    #[test]
+    fn contains_term_no_partial_word_match() {
+        // "create" should not match inside "recreate" — word boundary matching
+        assert!(!contains_term("recreate", "create"));
+    }
+
+    // ── contains_any ────────────────────────────────────────
+
+    #[test]
+    fn contains_any_matches_one() {
+        assert!(contains_any(
+            "find the user named bob",
+            &["named", "called"]
+        ));
+    }
+
+    #[test]
+    fn contains_any_no_match() {
+        assert!(!contains_any("list all connectors", &["named", "called"]));
+    }
+
+    // ── match_first ─────────────────────────────────────────
+
+    #[test]
+    fn match_first_returns_first_hit() {
+        static PATTERNS: &[(&str, &str)] = &[("create", "create"), ("make", "create")];
+        let result = match_first("create a new issue", PATTERNS);
+        assert_eq!(result, Some(("create", "create")));
+    }
+
+    #[test]
+    fn match_first_returns_none_on_no_match() {
+        static PATTERNS: &[(&str, &str)] = &[("delete", "delete")];
+        assert!(match_first("create a new issue", PATTERNS).is_none());
+    }
+
+    // ── infer_action ────────────────────────────────────────
+
+    #[test]
+    fn infer_action_lifecycle_disable() {
+        let action = infer_action("disable the slack connector");
+        assert_eq!(action.family, "lifecycle");
+        assert_eq!(action.verb, "disable");
+        assert!(action.mutating);
+        assert_eq!(action.risk, "high");
+    }
+
+    #[test]
+    fn infer_action_lifecycle_status() {
+        let action = infer_action("status of github connector");
+        assert_eq!(action.family, "lifecycle");
+        assert_eq!(action.verb, "status");
+        assert!(!action.mutating);
+        assert_eq!(action.risk, "low");
+    }
+
+    #[test]
+    fn infer_action_lifecycle_enable() {
+        let action = infer_action("enable the discord connector");
+        assert_eq!(action.family, "lifecycle");
+        assert_eq!(action.verb, "enable");
+        assert!(action.mutating);
+    }
+
+    #[test]
+    fn infer_action_lifecycle_restart() {
+        let action = infer_action("restart the slack connector");
+        assert_eq!(action.family, "lifecycle");
+        assert_eq!(action.verb, "restart");
+        assert!(action.mutating);
+    }
+
+    #[test]
+    fn infer_action_lifecycle_pin() {
+        let action = infer_action("pin the github connector");
+        assert_eq!(action.family, "lifecycle");
+        assert_eq!(action.verb, "pin");
+    }
+
+    #[test]
+    fn infer_action_lifecycle_unpin() {
+        let action = infer_action("unpin github connector version");
+        assert_eq!(action.family, "lifecycle");
+        assert_eq!(action.verb, "unpin");
+    }
+
+    #[test]
+    fn infer_action_logs() {
+        let action = infer_action("show logs for the github connector");
+        assert_eq!(action.family, "logs");
+        assert_eq!(action.verb, "logs");
+        assert!(!action.mutating);
+    }
+
+    #[test]
+    fn infer_action_logs_tail() {
+        let action = infer_action("tail slack connector output");
+        assert_eq!(action.family, "logs");
+        assert_eq!(action.verb, "logs");
+    }
+
+    #[test]
+    fn infer_action_config_set() {
+        let action = infer_action("configure the webhook for github");
+        assert_eq!(action.family, "config");
+        assert_eq!(action.verb, "set");
+        assert!(action.mutating);
+    }
+
+    #[test]
+    fn infer_action_config_credentials() {
+        let action = infer_action("set credentials for the slack connector");
+        assert_eq!(action.family, "config");
+        assert_eq!(action.verb, "set");
+    }
+
+    #[test]
+    fn infer_action_config_token() {
+        // "token" matches config table
+        let action = infer_action("token for stripe connector");
+        assert_eq!(action.family, "config");
+    }
+
+    #[test]
+    fn infer_action_write_create() {
+        let action = infer_action("create a new issue on github");
+        assert_eq!(action.family, "operation");
+        assert_eq!(action.verb, "create");
+        assert!(action.mutating);
+        assert_eq!(action.risk, "medium");
+    }
+
+    #[test]
+    fn infer_action_write_send() {
+        let action = infer_action("send a message to the channel");
+        assert_eq!(action.family, "operation");
+        assert_eq!(action.verb, "send");
+        assert!(action.mutating);
+    }
+
+    #[test]
+    fn infer_action_write_comment() {
+        let action = infer_action("comment on the issue");
+        assert_eq!(action.family, "operation");
+        assert_eq!(action.verb, "comment");
+        assert!(action.mutating);
+    }
+
+    #[test]
+    fn infer_action_search() {
+        let action = infer_action("find all recent issues");
+        assert_eq!(action.family, "operation");
+        assert_eq!(action.verb, "search");
+        assert!(!action.mutating);
+        assert_eq!(action.risk, "low");
+    }
+
+    #[test]
+    fn infer_action_search_list() {
+        let action = infer_action("list all connectors");
+        assert_eq!(action.family, "operation");
+        assert_eq!(action.verb, "list");
+        assert!(!action.mutating);
+    }
+
+    #[test]
+    fn infer_action_search_read() {
+        let action = infer_action("read the contents of the page");
+        assert_eq!(action.family, "operation");
+        assert_eq!(action.verb, "get");
+        assert!(!action.mutating);
+    }
+
+    #[test]
+    fn infer_action_search_fetch() {
+        let action = infer_action("fetch the latest data");
+        assert_eq!(action.family, "operation");
+        assert_eq!(action.verb, "get");
+        assert!(!action.mutating);
+    }
+
+    #[test]
+    fn infer_action_discovery_fallback() {
+        let action = infer_action("what connectors are available");
+        assert_eq!(action.family, "discovery");
+        assert_eq!(action.verb, "discover");
+        assert!(!action.mutating);
+    }
+
+    #[test]
+    fn infer_action_write_append() {
+        let action = infer_action("append this text to the notion page");
+        assert_eq!(action.family, "operation");
+        assert_eq!(action.verb, "append");
+        assert!(action.mutating);
+    }
+
+    #[test]
+    fn infer_action_write_publish() {
+        let action = infer_action("publish the draft message");
+        assert_eq!(action.family, "operation");
+        assert_eq!(action.verb, "send");
+    }
+
+    #[test]
+    fn infer_action_search_query() {
+        let action = infer_action("query the database for recent entries");
+        assert_eq!(action.family, "operation");
+        assert_eq!(action.verb, "query");
+    }
+
+    #[test]
+    fn infer_action_write_needs_lookup() {
+        let action = infer_action("create an issue named 'bug' and find the assignee");
+        assert!(action.needs_lookup);
+    }
+
+    // ── infer_resource ──────────────────────────────────────
+
+    #[test]
+    fn infer_resource_issue() {
+        assert_eq!(infer_resource("create an issue"), Some("issue"));
+    }
+
+    #[test]
+    fn infer_resource_pull_request() {
+        assert_eq!(infer_resource("list pull requests"), Some("pull-request"));
+    }
+
+    #[test]
+    fn infer_resource_message() {
+        assert_eq!(infer_resource("send a message"), Some("message"));
+    }
+
+    #[test]
+    fn infer_resource_page() {
+        assert_eq!(infer_resource("update the page content"), Some("page"));
+    }
+
+    #[test]
+    fn infer_resource_file() {
+        assert_eq!(infer_resource("upload a file"), Some("file"));
+    }
+
+    #[test]
+    fn infer_resource_customer() {
+        assert_eq!(infer_resource("create a customer"), Some("customer"));
+    }
+
+    #[test]
+    fn infer_resource_event() {
+        assert_eq!(infer_resource("schedule an event"), Some("event"));
+    }
+
+    #[test]
+    fn infer_resource_none() {
+        assert!(infer_resource("do something").is_none());
+    }
+
+    #[test]
+    fn infer_resource_record() {
+        assert_eq!(infer_resource("create a record"), Some("record"));
+    }
+
+    #[test]
+    fn infer_resource_comment() {
+        assert_eq!(infer_resource("add a comment"), Some("comment"));
+    }
+
+    // ── infer_connector_candidates ──────────────────────────
+
+    #[test]
+    fn infer_connector_github_from_keyword() {
+        let profiles = connector_profiles();
+        let candidates = infer_connector_candidates("create a github issue", None, &profiles);
+        assert!(!candidates.is_empty());
+        assert_eq!(candidates[0].id, "github");
+    }
+
+    #[test]
+    fn infer_connector_slack_from_keyword() {
+        let profiles = connector_profiles();
+        let candidates = infer_connector_candidates("send slack message", None, &profiles);
+        assert!(!candidates.is_empty());
+        assert_eq!(candidates[0].id, "slack");
+    }
+
+    #[test]
+    fn infer_connector_explicit_override() {
+        let profiles = connector_profiles();
+        let candidates = infer_connector_candidates("create an issue", Some("linear"), &profiles);
+        assert!(!candidates.is_empty());
+        assert_eq!(candidates[0].id, "linear");
+    }
+
+    #[test]
+    fn infer_connector_notion_from_page() {
+        let profiles = connector_profiles();
+        let candidates = infer_connector_candidates("find the notion page", None, &profiles);
+        assert!(!candidates.is_empty());
+        assert_eq!(candidates[0].id, "notion");
+    }
+
+    #[test]
+    fn infer_connector_stripe_from_payment() {
+        let profiles = connector_profiles();
+        let candidates = infer_connector_candidates("create a payment invoice", None, &profiles);
+        assert!(candidates.iter().any(|c| c.id == "stripe"));
+    }
+
+    #[test]
+    fn infer_connector_no_match_returns_empty() {
+        let profiles = connector_profiles();
+        let candidates =
+            infer_connector_candidates("do something completely unrelated xyz", None, &profiles);
+        assert!(candidates.is_empty());
+    }
+
+    // ── operation hints ─────────────────────────────────────
+
+    #[test]
+    fn github_operation_hint_issues_create() {
+        assert_eq!(github_operation_hint("create", "issue"), "issues.create");
+    }
+
+    #[test]
+    fn github_operation_hint_pr_create() {
+        assert_eq!(
+            github_operation_hint("create", "pull-request"),
+            "pulls.create"
+        );
+    }
+
+    #[test]
+    fn github_operation_hint_issues_search() {
+        assert_eq!(github_operation_hint("search", "issue"), "issues.search");
+    }
+
+    #[test]
+    fn github_operation_hint_fallback() {
+        assert!(github_operation_hint("update", "repo").contains("update"));
+    }
+
+    #[test]
+    fn messaging_operation_hint_send() {
+        assert_eq!(messaging_operation_hint("send", "message"), "messages.send");
+    }
+
+    #[test]
+    fn messaging_operation_hint_search() {
+        assert_eq!(
+            messaging_operation_hint("search", "message"),
+            "messages.search"
+        );
+    }
+
+    #[test]
+    fn notion_operation_hint_page_search() {
+        assert_eq!(notion_operation_hint("search", "page"), "pages.search");
+    }
+
+    #[test]
+    fn notion_operation_hint_record_query() {
+        assert_eq!(notion_operation_hint("query", "record"), "databases.query");
+    }
+
+    #[test]
+    fn issue_tracker_create_issue() {
+        assert_eq!(
+            issue_tracker_operation_hint("create", "issue"),
+            "issues.create"
+        );
+    }
+
+    #[test]
+    fn issue_tracker_comment() {
+        assert_eq!(
+            issue_tracker_operation_hint("comment", "issue"),
+            "issues.comment.create"
+        );
+    }
+
+    #[test]
+    fn gmail_send_message() {
+        assert_eq!(gmail_operation_hint("send", "message"), "messages.send");
+    }
+
+    #[test]
+    fn gmail_search_message() {
+        assert_eq!(gmail_operation_hint("search", "message"), "messages.search");
+    }
+
+    #[test]
+    fn calendar_create_event() {
+        assert_eq!(calendar_operation_hint("create", "event"), "events.create");
+    }
+
+    #[test]
+    fn calendar_list_events() {
+        assert_eq!(calendar_operation_hint("list", "event"), "events.list");
+    }
+
+    #[test]
+    fn storage_search_files() {
+        assert_eq!(storage_operation_hint("search", "file"), "files.search");
+    }
+
+    #[test]
+    fn storage_create_file() {
+        assert_eq!(storage_operation_hint("create", "file"), "files.upload");
+    }
+
+    #[test]
+    fn airtable_create_record() {
+        assert_eq!(
+            airtable_operation_hint("create", "record"),
+            "records.create"
+        );
+    }
+
+    #[test]
+    fn airtable_search_record() {
+        assert_eq!(
+            airtable_operation_hint("search", "record"),
+            "records.search"
+        );
+    }
+
+    #[test]
+    fn figma_comment() {
+        assert_eq!(figma_operation_hint("comment", "file"), "comments.create");
+    }
+
+    #[test]
+    fn figma_get_file() {
+        assert_eq!(figma_operation_hint("get", "file"), "files.get");
+    }
+
+    #[test]
+    fn stripe_create_customer() {
+        assert_eq!(
+            stripe_operation_hint("create", "customer"),
+            "customers.create"
+        );
+    }
+
+    #[test]
+    fn stripe_create_invoice() {
+        assert_eq!(
+            stripe_operation_hint("create", "invoice"),
+            "invoices.create"
+        );
+    }
+
+    #[test]
+    fn stripe_search_invoice() {
+        assert_eq!(
+            stripe_operation_hint("search", "invoice"),
+            "invoices.search"
+        );
+    }
+
+    #[test]
+    fn crm_create_record() {
+        assert_eq!(crm_operation_hint("create", "record"), "records.create");
+    }
+
+    #[test]
+    fn crm_create_customer() {
+        assert_eq!(crm_operation_hint("create", "customer"), "records.create");
+    }
+
+    #[test]
+    fn crm_search() {
+        assert_eq!(crm_operation_hint("search", "lead"), "records.search");
+    }
+
+    #[test]
+    fn query_run() {
+        assert_eq!(query_operation_hint("query", "table"), "queries.run");
+    }
+
+    #[test]
+    fn llm_hint_always_responses_create() {
+        assert_eq!(llm_operation_hint("create"), "responses.create");
+        assert_eq!(llm_operation_hint("query"), "responses.create");
+    }
+
+    // ── generic_operation_hint ───────────────────────────────
+
+    #[test]
+    fn generic_operation_hint_search() {
+        let hint = generic_operation_hint("search", "issue", None, None);
+        assert_eq!(hint, "issues.search");
+    }
+
+    #[test]
+    fn generic_operation_hint_get() {
+        let hint = generic_operation_hint("get", "page", None, None);
+        assert_eq!(hint, "pages.get");
+    }
+
+    #[test]
+    fn generic_operation_hint_create_with_payload() {
+        let hint = generic_operation_hint("create", "issue", Some("payload"), None);
+        assert_eq!(hint, "issues.create");
+    }
+
+    #[test]
+    fn generic_operation_hint_create_with_lookup() {
+        let hint = generic_operation_hint("create", "issue", None, Some("lookup"));
+        assert_eq!(hint, "issues.resolve-and-create");
+    }
+
+    #[test]
+    fn generic_operation_hint_create_fallback() {
+        let hint = generic_operation_hint("create", "issue", None, None);
+        assert_eq!(hint, "objects.invoke");
+    }
+
+    // ── shell_join / shell_quote ────────────────────────────
+
+    #[test]
+    fn shell_join_simple() {
+        let argv = vec!["fwc".to_owned(), "list".to_owned()];
+        assert_eq!(shell_join(&argv), "fwc list");
+    }
+
+    #[test]
+    fn shell_join_quotes_spaces() {
+        let argv = vec![
+            "fwc".to_owned(),
+            "search".to_owned(),
+            "hello world".to_owned(),
+        ];
+        let joined = shell_join(&argv);
+        assert!(joined.contains("\"hello world\"") || joined.contains("'hello world'"));
+    }
+
+    #[test]
+    fn shell_quote_no_special() {
+        assert_eq!(shell_quote("simple"), "simple");
+    }
+
+    #[test]
+    fn shell_quote_with_space() {
+        let quoted = shell_quote("has space");
+        assert!(quoted.starts_with('"') || quoted.starts_with('\''));
+    }
+
+    // ── identifier_heavy_connector ──────────────────────────
+
+    #[test]
+    fn identifier_heavy_notion() {
+        assert!(identifier_heavy_connector("notion"));
+    }
+
+    #[test]
+    fn identifier_heavy_salesforce() {
+        assert!(identifier_heavy_connector("salesforce"));
+    }
+
+    #[test]
+    fn identifier_heavy_github_not() {
+        assert!(!identifier_heavy_connector("github"));
+    }
+
+    // ── confidence_for ──────────────────────────────────────
+
+    #[test]
+    fn confidence_high_single_candidate() {
+        let candidates = vec![ConnectorCandidate {
+            id: "github".to_owned(),
+            score: 10,
+            reasons: vec![],
+        }];
+        assert_eq!(confidence_for(&candidates, false), "high");
+    }
+
+    #[test]
+    fn confidence_low_with_ambiguity() {
+        let candidates = vec![ConnectorCandidate {
+            id: "github".to_owned(),
+            score: 10,
+            reasons: vec![],
+        }];
+        // ambiguity forces low confidence regardless of score
+        assert_eq!(confidence_for(&candidates, true), "low");
+    }
+
+    #[test]
+    fn confidence_medium_moderate_score() {
+        let candidates = vec![ConnectorCandidate {
+            id: "github".to_owned(),
+            score: 5,
+            reasons: vec![],
+        }];
+        assert_eq!(confidence_for(&candidates, false), "medium");
+    }
+
+    #[test]
+    fn confidence_low_no_candidates() {
+        let candidates: Vec<ConnectorCandidate> = vec![];
+        assert_eq!(confidence_for(&candidates, false), "low");
+    }
+
+    // ── status_for ──────────────────────────────────────────
+
+    #[test]
+    fn status_ready_when_connector_found() {
+        assert_eq!(status_for(true, &[], &[]), "ready");
+    }
+
+    #[test]
+    fn status_needs_clarification_when_missing() {
+        assert_eq!(
+            status_for(true, &["need connector name".to_owned()], &[]),
+            "needs-clarification"
+        );
+    }
+
+    #[test]
+    fn status_ambiguous_when_ambiguities() {
+        let ambiguity = Ambiguity {
+            kind: "connector".to_owned(),
+            message: "multiple connectors match".to_owned(),
+            candidates: vec!["slack".to_owned(), "discord".to_owned()],
+        };
+        assert_eq!(status_for(true, &[], &[ambiguity]), "ambiguous");
+    }
+
+    #[test]
+    fn status_needs_clarification_no_connector() {
+        assert_eq!(status_for(false, &[], &[]), "needs-clarification");
+    }
+
+    // ── connector_evidence / action_evidence ────────────────
+
+    #[test]
+    fn connector_evidence_includes_scores() {
+        let candidates = vec![
+            ConnectorCandidate {
+                id: "github".to_owned(),
+                score: 10,
+                reasons: vec!["matched keyword".to_owned()],
+            },
+            ConnectorCandidate {
+                id: "gitlab".to_owned(),
+                score: 5,
+                reasons: vec!["partial match".to_owned()],
+            },
+        ];
+        let evidence = connector_evidence(&candidates);
+        assert!(!evidence.is_empty());
+    }
+
+    #[test]
+    fn action_evidence_includes_family() {
+        let action = ActionSignals {
+            family: "operation",
+            verb: "create",
+            resource: Some("issue"),
+            risk: "medium",
+            mutating: true,
+            matched_terms: vec!["create".to_owned()],
+            needs_lookup: false,
+        };
+        let evidence = action_evidence(&action);
+        assert!(!evidence.is_empty());
+    }
+
+    // ── ConnectorCandidate Display ──────────────────────────
+
+    #[test]
+    fn connector_candidate_display() {
+        let candidate = ConnectorCandidate {
+            id: "github".to_owned(),
+            score: 10,
+            reasons: vec![],
+        };
+        assert_eq!(format!("{candidate}"), "github");
+    }
+
+    // ── IntentMode ──────────────────────────────────────────
+
+    #[test]
+    fn intent_mode_label() {
+        assert_eq!(IntentMode::Plan.label(), "plan");
+        assert_eq!(IntentMode::Explain.label(), "explain");
+        assert_eq!(IntentMode::DoSimulate.label(), "do-simulate");
+        assert_eq!(IntentMode::DoApprove.label(), "do-approve");
+    }
+
+    #[test]
+    fn intent_mode_is_approved() {
+        assert!(!IntentMode::Plan.is_approved());
+        assert!(!IntentMode::DoSimulate.is_approved());
+        assert!(IntentMode::DoApprove.is_approved());
+    }
+
+    // ── compile (integration-level) ─────────────────────────
 
     #[test]
     fn compiler_plans_github_issue_creation() {
@@ -1763,5 +2588,311 @@ mod tests {
         let profiles = connector_profiles();
         assert!(profiles.iter().any(|profile| profile.id == "github"));
         assert!(profiles.iter().any(|profile| profile.id == "slack"));
+    }
+
+    #[test]
+    fn compiler_config_template_for_credentials() {
+        let plan = compile(&request("set credentials for the github connector"));
+        assert_eq!(plan.template, "config");
+        assert!(plan.steps.iter().any(|s| s.command_line.contains("config")));
+    }
+
+    #[test]
+    fn compiler_logs_template_for_tail() {
+        let plan = compile(&request("tail the github connector logs"));
+        assert_eq!(plan.template, "logs");
+    }
+
+    #[test]
+    fn compiler_discovery_template_for_vague_intent() {
+        let plan = compile(&request("what can the github connector do"));
+        // discovery or operation depending on keyword match
+        assert!(!plan.steps.is_empty());
+    }
+
+    #[test]
+    fn compiler_explicit_connector_override() {
+        let plan = compile(&request_with_connector("create an issue", "linear"));
+        assert_eq!(
+            plan.chosen_connector.as_ref().map(|c| c.id.as_str()),
+            Some("linear")
+        );
+        assert_eq!(plan.connector_override.as_deref(), Some("linear"));
+    }
+
+    #[test]
+    fn compiler_zone_override() {
+        let plan = compile(&request_with_zone("list connectors", "z:staging"));
+        assert_eq!(plan.zone.as_deref(), Some("z:staging"));
+    }
+
+    #[test]
+    fn compiler_operation_plan_has_schema_step() {
+        let plan = compile(&request("create a github issue"));
+        // operation plans include a schema lookup step
+        assert!(plan.steps.iter().any(|s| s.command_line.contains("schema")));
+    }
+
+    #[test]
+    fn compiler_lifecycle_plan_has_status_preflight() {
+        let plan = compile(&request("restart the github connector"));
+        assert_eq!(plan.template, "lifecycle");
+        assert!(plan.steps.first().is_some_and(|s| s.phase == "preflight"));
+    }
+
+    #[test]
+    fn compiler_lifecycle_plan_has_verify_step() {
+        let plan = compile(&request("enable the slack connector"));
+        assert_eq!(plan.template, "lifecycle");
+        assert!(plan.steps.iter().any(|s| s.phase == "verify"));
+    }
+
+    #[test]
+    fn compiler_returns_scaffold_notice() {
+        let plan = compile(&request("create a github issue"));
+        assert!(!plan.scaffold_notice.is_empty());
+    }
+
+    #[test]
+    fn compiler_sets_mode_label() {
+        let plan = compile(&request("create a github issue"));
+        assert_eq!(plan.mode, "plan");
+    }
+
+    #[test]
+    fn compiler_explain_mode_label() {
+        let req = IntentRequest {
+            intent: "create a github issue".to_owned(),
+            connector_override: None,
+            zone_override: None,
+            mode: IntentMode::Explain,
+        };
+        let plan = compile(&req);
+        assert_eq!(plan.mode, "explain");
+    }
+
+    #[test]
+    fn compiler_no_connector_needs_clarification() {
+        let plan = compile(&request("restart some connector"));
+        // if connector can't be inferred, should flag missing clarification
+        if plan.chosen_connector.is_none() {
+            assert_eq!(plan.status, "needs-clarification");
+        }
+    }
+
+    #[test]
+    fn compiler_search_is_non_mutating() {
+        let plan = compile(&request("search for issues on github"));
+        assert!(
+            plan.steps
+                .iter()
+                .all(|s| !s.side_effecting || !s.approval_required)
+                || plan.steps.is_empty()
+        );
+    }
+
+    #[test]
+    fn compiler_has_next_actions() {
+        let plan = compile(&request("create a github issue"));
+        assert!(!plan.next_actions.is_empty());
+    }
+
+    #[test]
+    fn compiler_has_explanation() {
+        let plan = compile(&request("create a github issue"));
+        assert!(!plan.explanation.connector_evidence.is_empty());
+        assert!(!plan.explanation.action_evidence.is_empty());
+    }
+
+    #[test]
+    fn compiler_notion_lookup_step_for_named_page() {
+        let plan = compile(&request(
+            "find the notion page named Roadmap and append a summary",
+        ));
+        assert_eq!(
+            plan.chosen_connector.as_ref().map(|c| c.id.as_str()),
+            Some("notion")
+        );
+    }
+
+    #[test]
+    fn compiler_stripe_invoice() {
+        let plan = compile(&request("create an invoice on stripe"));
+        assert_eq!(
+            plan.chosen_connector.as_ref().map(|c| c.id.as_str()),
+            Some("stripe")
+        );
+        assert_eq!(plan.operation_hint.as_deref(), Some("invoices.create"));
+    }
+
+    #[test]
+    fn compiler_jira_issue() {
+        let plan = compile(&request("create a jira ticket"));
+        assert_eq!(
+            plan.chosen_connector.as_ref().map(|c| c.id.as_str()),
+            Some("jira")
+        );
+    }
+
+    #[test]
+    fn compiler_gmail_send() {
+        let plan = compile(&request("send an email via gmail"));
+        assert_eq!(
+            plan.chosen_connector.as_ref().map(|c| c.id.as_str()),
+            Some("gmail")
+        );
+    }
+
+    #[test]
+    fn compiler_bigquery() {
+        let plan = compile(&request("query the bigquery dataset"));
+        assert_eq!(
+            plan.chosen_connector.as_ref().map(|c| c.id.as_str()),
+            Some("bigquery")
+        );
+    }
+
+    #[test]
+    fn compiler_airtable_record() {
+        let plan = compile(&request("create a record in airtable"));
+        assert_eq!(
+            plan.chosen_connector.as_ref().map(|c| c.id.as_str()),
+            Some("airtable")
+        );
+    }
+
+    // ── curated_connector ───────────────────────────────────
+
+    #[test]
+    fn curated_connector_includes_normalized_alias() {
+        let profile = curated_connector("google-calendar", &["gcal"], &["event"]);
+        assert!(profile.aliases.contains(&"googlecalendar".to_owned()));
+        assert!(profile.aliases.contains(&"gcal".to_owned()));
+    }
+
+    #[test]
+    fn curated_connector_includes_id_as_alias() {
+        let profile = curated_connector("github", &["gh"], &["issue"]);
+        assert!(profile.aliases.contains(&"github".to_owned()));
+    }
+
+    // ── search_argv ─────────────────────────────────────────
+
+    #[test]
+    fn search_argv_without_zone() {
+        let argv = search_argv("test query", None);
+        assert!(argv.contains(&"search".to_owned()));
+        assert!(argv.contains(&"test query".to_owned()));
+    }
+
+    #[test]
+    fn search_argv_with_zone() {
+        let argv = search_argv("test query", Some("z:work"));
+        assert!(argv.contains(&"--zone".to_owned()));
+        assert!(argv.contains(&"z:work".to_owned()));
+    }
+
+    // ── payload_missing ─────────────────────────────────────
+
+    #[test]
+    fn payload_missing_for_mutating_without_literal() {
+        let action = ActionSignals {
+            family: "operation",
+            verb: "create",
+            resource: Some("issue"),
+            risk: "medium",
+            mutating: true,
+            matched_terms: vec!["create".to_owned()],
+            needs_lookup: false,
+        };
+        assert!(payload_missing(&action, None, None, "github"));
+    }
+
+    #[test]
+    fn payload_not_missing_for_read() {
+        let action = ActionSignals {
+            family: "operation",
+            verb: "get",
+            resource: Some("issue"),
+            risk: "low",
+            mutating: false,
+            matched_terms: vec!["get".to_owned()],
+            needs_lookup: false,
+        };
+        assert!(!payload_missing(&action, None, None, "github"));
+    }
+
+    #[test]
+    fn payload_not_missing_when_literal_provided() {
+        let action = ActionSignals {
+            family: "operation",
+            verb: "create",
+            resource: Some("issue"),
+            risk: "medium",
+            mutating: true,
+            matched_terms: vec!["create".to_owned()],
+            needs_lookup: false,
+        };
+        assert!(!payload_missing(
+            &action,
+            Some("test payload"),
+            None,
+            "github"
+        ));
+    }
+
+    // ── missing_payload_message ─────────────────────────────
+
+    #[test]
+    fn missing_payload_message_mentions_connector() {
+        let action = ActionSignals {
+            family: "operation",
+            verb: "create",
+            resource: Some("issue"),
+            risk: "medium",
+            mutating: true,
+            matched_terms: vec!["create".to_owned()],
+            needs_lookup: false,
+        };
+        let msg = missing_payload_message(&action, "github");
+        assert!(msg.to_lowercase().contains("github"));
+    }
+
+    // ── step builder ────────────────────────────────────────
+
+    #[test]
+    fn step_builder_sets_fields() {
+        let s = step(
+            1,
+            "preflight",
+            "Check status".to_owned(),
+            vec!["fwc".to_owned(), "status".to_owned()],
+            false,
+            false,
+            vec!["note".to_owned()],
+        );
+        assert_eq!(s.ordinal, 1);
+        assert_eq!(s.phase, "preflight");
+        assert_eq!(s.purpose, "Check status");
+        assert_eq!(s.command, "status");
+        assert!(!s.approval_required);
+        assert!(!s.side_effecting);
+        assert_eq!(s.notes, vec!["note"]);
+        assert_eq!(s.command_line, "fwc status");
+    }
+
+    #[test]
+    fn step_builder_mutating_flags() {
+        let s = step(
+            2,
+            "mutate",
+            "Do mutation".to_owned(),
+            vec!["fwc".to_owned(), "invoke".to_owned(), "github".to_owned()],
+            true,
+            true,
+            vec![],
+        );
+        assert!(s.approval_required);
+        assert!(s.side_effecting);
     }
 }

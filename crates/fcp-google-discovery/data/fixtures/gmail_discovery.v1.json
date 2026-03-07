@@ -1,0 +1,119 @@
+{
+  "name": "gmail",
+  "version": "v1",
+  "resources": {
+    "users": {
+      "resources": {
+        "messages": {
+          "methods": {
+            "list": {
+              "id": "gmail.users.messages.list",
+              "path": "{userId}/messages",
+              "httpMethod": "GET",
+              "description": "List Gmail messages for a mailbox.",
+              "scopes": [
+                "https://www.googleapis.com/auth/gmail.readonly"
+              ],
+              "parameters": {
+                "userId": {
+                  "type": "string",
+                  "location": "path",
+                  "required": true
+                },
+                "q": {
+                  "type": "string",
+                  "location": "query"
+                }
+              },
+              "response": {
+                "$ref": "MessageList"
+              }
+            },
+            "send": {
+              "id": "gmail.users.messages.send",
+              "path": "{userId}/messages/send",
+              "httpMethod": "POST",
+              "description": "Send a Gmail message.",
+              "scopes": [
+                "https://www.googleapis.com/auth/gmail.send"
+              ],
+              "parameters": {
+                "userId": {
+                  "type": "string",
+                  "location": "path",
+                  "required": true
+                }
+              },
+              "request": {
+                "$ref": "SendRequest"
+              },
+              "response": {
+                "$ref": "Message"
+              }
+            },
+            "listHistory": {
+              "id": "gmail.users.messages.listHistory",
+              "path": "{userId}/messages/history",
+              "httpMethod": "GET",
+              "description": "List mailbox change history.",
+              "scopes": [
+                "https://www.googleapis.com/auth/gmail.metadata"
+              ],
+              "parameters": {
+                "userId": {
+                  "type": "string",
+                  "location": "path",
+                  "required": true
+                }
+              },
+              "response": {
+                "$ref": "MessageList"
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "schemas": {
+    "MessageList": {
+      "type": "object",
+      "properties": {
+        "messages": {
+          "type": "array",
+          "items": {
+            "$ref": "Message"
+          }
+        }
+      }
+    },
+    "Message": {
+      "type": "object",
+      "required": [
+        "id"
+      ],
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "snippet": {
+          "type": "string"
+        }
+      }
+    },
+    "SendRequest": {
+      "type": "object",
+      "required": [
+        "raw"
+      ],
+      "properties": {
+        "raw": {
+          "type": "string"
+        },
+        "threadId": {
+          "type": "string"
+        }
+      }
+    }
+  }
+}

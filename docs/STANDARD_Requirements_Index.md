@@ -86,6 +86,14 @@ The Google connector foundation has an additional normative architecture contrac
 
 - **ADR**: `docs/ADR_GOOGLE_Discovery_Snapshot_Baseline.md`
 - **Owner Bead**: `flywheel_connectors-lszk.45.1.1`
+- **Service Resolution Baseline (Alias + `service:version`)**: `docs/STUDY_GOOGLE_Discovery_Service_Resolution.md`
+- **Service Resolution Baseline Owner Bead**: `flywheel_connectors-lszk.45.1.2.1`
+- **Security/Policy Mapping Baseline**: `docs/STUDY_GOOGLE_Security_Policy_Mapping.md`
+- **Security/Policy Mapping Baseline Owner Bead**: `flywheel_connectors-lszk.45.1.6`
+- **Helper Overlay Policy + Workflow Shortlist Baseline**: `crates/fcp-google-discovery/data/google_policy_matrix.v1.json` (`helper_overlay_policy`)
+- **Helper Overlay Policy Baseline Owner Bead**: `flywheel_connectors-lszk.45.1.5.2`
+- **Baseline Audit (Gmail/Calendar Convergence Map)**: `docs/STUDY_GOOGLE_Gmail_Calendar_Baseline_Audit.md`
+- **Baseline Audit Owner Bead**: `flywheel_connectors-lszk.45.2.7`
 - **Foundation Epic**: `flywheel_connectors-lszk.45.1`
 - **Program Track**: `flywheel_connectors-lszk.45`
 
@@ -96,6 +104,39 @@ All beads under `flywheel_connectors-lszk.45.1.*` and downstream migration beads
 - explicit handwritten override layers above generated metadata,
 - stable manifest/interface/introspection surfaces per shipped connector version,
 - rejection of live runtime Discovery-driven surface mutation.
+
+For Discovery substrate work under `flywheel_connectors-lszk.45.1.2.*`, the service-resolution baseline document is a required reference for:
+
+- tiny curated alias registry scope,
+- explicit `service:version` fallback behavior,
+- deterministic snapshot/cache naming identity,
+- and strict separation between service resolution and method catalog generation.
+
+For security/policy mapping and policy-derived generation work under
+`flywheel_connectors-lszk.45.1.6`, `flywheel_connectors-lszk.45.1.5.*`, and
+downstream migration beads under `flywheel_connectors-lszk.45.2.*`, the
+security/policy mapping baseline document is a required reference for:
+
+- capability/risk/safety/approval rule derivation from Discovery methods,
+- recommended zone envelopes and host allowlist defaults per Google service,
+- service-specific carve-outs that must stay explicit (not inferred from Discovery),
+- and fail-closed treatment for unmapped methods pending explicit review.
+
+For helper-overlay policy work under `flywheel_connectors-lszk.45.1.5.2` and
+downstream migration beads under `flywheel_connectors-lszk.45.2.*`, the
+`helper_overlay_policy` section of
+`crates/fcp-google-discovery/data/google_policy_matrix.v1.json` is a required
+reference for:
+
+- strict allow criteria for handwritten helper overlays above generated operations,
+- forbidden helper patterns (hidden capabilities, single-op rewrites, auth duplication),
+- and the initial high-value workflow shortlist approved for helper treatment.
+
+For Gmail/Calendar migration work specifically (`flywheel_connectors-lszk.45.2.1`, `flywheel_connectors-lszk.45.2.2`, `flywheel_connectors-lszk.45.2.6`), the baseline audit document is a required source-backed reference for:
+
+- current duplication points,
+- service-owned semantics that should remain handwritten,
+- and explicit case-by-case decisions needed during substrate migration.
 
 ---
 

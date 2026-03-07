@@ -1,0 +1,25 @@
+{
+  "name": "foo",
+  "version": "v1",
+  "methods": {
+    "doThing": {
+      "id": "foo.doThing",
+      "path": "things/do",
+      "httpMethod": "POST",
+      "request": {
+        "$ref": "DoThingRequest"
+      },
+      "response": {
+        "$ref": "DoThingResponse"
+      }
+    }
+  },
+  "schemas": {
+    "DoThingRequest": {
+      "type": "object"
+    },
+    "DoThingResponse": {
+      "type": "object"
+    }
+  }
+}

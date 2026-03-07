@@ -11,6 +11,7 @@ members = [
     "crates/fcp-conformance",
     "crates/fcp-crypto",
     "crates/fcp-e2e",
+    "crates/fcp-google-discovery",
     "crates/fcp-graphql",
     "crates/fcp-host",
     "crates/fcp-manifest",
@@ -115,6 +116,7 @@ default-members = [
     "crates/fcp-cbor",
     "crates/fcp-core",
     "crates/fcp-crypto",
+    "crates/fcp-google-discovery",
     "crates/fcp-graphql",
     "crates/fcp-host",
     "crates/fcp-manifest",
@@ -219,6 +221,7 @@ fcp-cbor = { path = "crates/fcp-cbor" }
 fcp-core = { path = "crates/fcp-core" }
 fcp-conformance = { path = "crates/fcp-conformance" }
 fcp-crypto = { path = "crates/fcp-crypto" }
+fcp-google-discovery = { path = "crates/fcp-google-discovery" }
 fcp-graphql = { path = "crates/fcp-graphql" }
 fcp-host = { path = "crates/fcp-host" }
 fcp-manifest = { path = "crates/fcp-manifest" }

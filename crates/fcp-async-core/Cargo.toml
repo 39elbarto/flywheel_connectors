@@ -16,3 +16,4 @@ asupersync = { path = "/dp/asupersync", default-features = false }
 fcp-async-core-macros = { path = "../fcp-async-core-macros" }
 futures-util.workspace = true
 thiserror.workspace = true
+tokio = { version = "1", default-features = false, features = ["rt"] }

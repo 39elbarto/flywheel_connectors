@@ -1895,6 +1895,7 @@ dependencies = [
  "fcp-async-core-macros",
  "futures-util",
  "thiserror 2.0.18",
+ "tokio",
 ]
 
 [[package]]
@@ -2538,6 +2539,22 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
+ "wiremock",
+]
+
+[[package]]
+name = "fcp-google-discovery"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "fcp-async-core",
+ "fcp-core",
+ "fcp-oauth",
+ "percent-encoding",
+ "reqwest 0.13.2",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
  "wiremock",
 ]
 

@@ -1,0 +1,946 @@
+{
+  "version": "2026-03-06",
+  "generated_from_bead": "flywheel_connectors-lszk.45.1.6",
+  "helper_overlay_policy": {
+    "intent": "Handwritten helpers are allowed only as thin workflow overlays above generated Google operations.",
+    "require_all": [
+      "Workflow spans multiple generated operations with ordered state transitions or compensating behavior.",
+      "Workflow needs connector-owned state/lease/cursor semantics not representable by one generated operation call.",
+      "Overlay adds explicit safety controls beyond per-operation policy (for example approval, dry-run, or budget gates).",
+      "Each helper step maps to concrete generated operation IDs and existing capability checks."
+    ],
+    "forbidden_patterns": [
+      "Wrapping single generated operations as custom helpers without additional workflow semantics.",
+      "Adding hidden capabilities/scopes outside the generated policy mapping.",
+      "Embedding bespoke auth transport logic that belongs in the shared Google auth/executor substrate."
+    ],
+    "review_checklist": [
+      "Document the generated operation sequence and compensation behavior.",
+      "Document replay/idempotency strategy for partial failures.",
+      "Document additional approval/budget/safety controls and owning policy object.",
+      "Add deterministic tests proving the helper remains a thin overlay."
+    ],
+    "initial_workflow_shortlist": [
+      {
+        "workflow_id": "gmail.sync_history_checkpointed",
+        "service": "gmail",
+        "summary": "Incremental mailbox synchronization with checkpoint/lease fencing and history gap recovery.",
+        "operation_dependencies": [
+          "users.history.list",
+          "users.messages.get",
+          "users.threads.get"
+        ],
+        "required_capabilities": [
+          "gmail.read"
+        ],
+        "safety_constraints": [
+          "Monotonic history checkpoint updates with anti-regression guard.",
+          "Lease-aware execution so only one active sync writer advances cursor state."
+        ],
+        "rationale": [
+          "Gmail history sync needs durable cursor semantics that are not captured by individual generated operations."
+        ]
+      },
+      {
+        "workflow_id": "gmail.triage_and_reply",
+        "service": "gmail",
+        "summary": "Thread triage that fetches context, drafts response content, and sends with explicit recipient safeguards.",
+        "operation_dependencies": [
+          "users.threads.get",
+          "users.messages.get",
+          "users.messages.send"
+        ],
+        "required_capabilities": [
+          "gmail.read",
+          "gmail.send"
+        ],
+        "safety_constraints": [
+          "Recipient/domain allowlist checks before send.",
+          "Human-visible draft/summary checkpoint before the send step."
+        ],
+        "rationale": [
+          "Composed read->write flow requires explicit sequencing and policy controls around outgoing email."
+        ]
+      },
+      {
+        "workflow_id": "calendar.find_slot_then_schedule",
+        "service": "calendar",
+        "summary": "Find available meeting windows then create an event with participant and recurrence constraints.",
+        "operation_dependencies": [
+          "freebusy.query",
+          "events.list",
+          "events.insert"
+        ],
+        "required_capabilities": [
+          "gcal.read",
+          "gcal.write"
+        ],
+        "safety_constraints": [
+          "Do not schedule outside policy-defined working windows/timezones.",
+          "Prevent duplicate event creation with idempotency keys or existing-event checks."
+        ],
+        "rationale": [
+          "Scheduling is inherently multi-step and requires deterministic conflict checks plus write gating."
+        ]
+      },
+      {
+        "workflow_id": "calendar.safe_reschedule",
+        "service": "calendar",
+        "summary": "Reschedule existing calendar events with attendee-impact awareness and bounded update fields.",
+        "operation_dependencies": [
+          "events.get",
+          "events.patch"
+        ],
+        "required_capabilities": [
+          "gcal.read",
+          "gcal.write"
+        ],
+        "safety_constraints": [
+          "Only allow approved mutable fields for patch operations.",
+          "Require explicit confirmation when attendee list or meeting location changes."
+        ],
+        "rationale": [
+          "Event updates require contextual read-before-write validation to avoid destructive meeting churn."
+        ]
+      },
+      {
+        "workflow_id": "bigquery.budget_guarded_query",
+        "service": "bigquery",
+        "summary": "Run analytic query jobs only after cost/allowlist preflight and store bounded result metadata.",
+        "operation_dependencies": [
+          "jobs.query",
+          "jobs.get",
+          "tabledata.list"
+        ],
+        "required_capabilities": [
+          "bigquery.jobs.write",
+          "bigquery.jobs.read",
+          "bigquery.tables.read"
+        ],
+        "safety_constraints": [
+          "Enforce project/dataset allowlists before query execution.",
+          "Block or require approval when estimated bytes billed exceed policy budget."
+        ],
+        "rationale": [
+          "BigQuery query execution has multi-step lifecycle and cost risk that needs explicit workflow-level controls."
+        ]
+      }
+    ]
+  },
+  "services": [
+    {
+      "service": "bigquery",
+      "api_versions": ["v2"],
+      "recommended_zones": ["z:project:analytics", "z:work"],
+      "host_allow": ["bigquery.googleapis.com"],
+      "exceptions": [
+        "jobs.query can produce high data-scan costs and broad data exfiltration if project/table constraints are weak.",
+        "Delete/cancel-style operations should default to interactive approval in shared environments.",
+        "Per-project quota and allowlisted dataset constraints should be enforced in host policy objects."
+      ],
+      "rules": [
+        {
+          "operation_pattern": "jobs.cancel",
+          "capability": "bigquery.jobs.admin",
+          "risk_level": "high",
+          "safety_tier": "dangerous",
+          "approval_mode": "interactive",
+          "required_scopes": ["https://www.googleapis.com/auth/bigquery"],
+          "notes": [
+            "Canceling jobs can terminate active workloads and should require explicit user confirmation."
+          ]
+        },
+        {
+          "operation_pattern": "jobs.query",
+          "capability": "bigquery.jobs.write",
+          "risk_level": "high",
+          "safety_tier": "risky",
+          "approval_mode": "policy",
+          "required_scopes": [
+            "https://www.googleapis.com/auth/bigquery",
+            "https://www.googleapis.com/auth/cloud-platform"
+          ],
+          "notes": [
+            "Enforce dataset/project allowlists and per-query cost budgets in host policy."
+          ]
+        },
+        {
+          "operation_pattern": "jobs.*",
+          "capability": "bigquery.jobs.read",
+          "risk_level": "low",
+          "safety_tier": "safe",
+          "approval_mode": "none",
+          "required_scopes": [
+            "https://www.googleapis.com/auth/bigquery.readonly",
+            "https://www.googleapis.com/auth/bigquery"
+          ],
+          "notes": [
+            "Read/list/get job operations are generally non-destructive and can stay non-interactive."
+          ]
+        },
+        {
+          "operation_pattern": "tabledata.insertAll",
+          "capability": "bigquery.tables.write",
+          "risk_level": "high",
+          "safety_tier": "risky",
+          "approval_mode": "policy",
+          "required_scopes": ["https://www.googleapis.com/auth/bigquery"],
+          "notes": [
+            "Streaming inserts mutate analytic datasets and should be policy-gated."
+          ]
+        },
+        {
+          "operation_pattern": "tables.delete",
+          "capability": "bigquery.tables.delete",
+          "risk_level": "critical",
+          "safety_tier": "dangerous",
+          "approval_mode": "interactive",
+          "required_scopes": ["https://www.googleapis.com/auth/bigquery"],
+          "notes": [
+            "Permanent table deletion is destructive and requires interactive approval."
+          ]
+        },
+        {
+          "operation_pattern": "tables.insert",
+          "capability": "bigquery.tables.write",
+          "risk_level": "medium",
+          "safety_tier": "risky",
+          "approval_mode": "policy",
+          "required_scopes": ["https://www.googleapis.com/auth/bigquery"],
+          "notes": []
+        },
+        {
+          "operation_pattern": "tables.patch",
+          "capability": "bigquery.tables.write",
+          "risk_level": "medium",
+          "safety_tier": "risky",
+          "approval_mode": "policy",
+          "required_scopes": ["https://www.googleapis.com/auth/bigquery"],
+          "notes": []
+        },
+        {
+          "operation_pattern": "tables.update",
+          "capability": "bigquery.tables.write",
+          "risk_level": "medium",
+          "safety_tier": "risky",
+          "approval_mode": "policy",
+          "required_scopes": ["https://www.googleapis.com/auth/bigquery"],
+          "notes": []
+        },
+        {
+          "operation_pattern": "tables.*",
+          "capability": "bigquery.tables.read",
+          "risk_level": "low",
+          "safety_tier": "safe",
+          "approval_mode": "none",
+          "required_scopes": [
+            "https://www.googleapis.com/auth/bigquery.readonly",
+            "https://www.googleapis.com/auth/bigquery"
+          ],
+          "notes": []
+        },
+        {
+          "operation_pattern": "datasets.delete",
+          "capability": "bigquery.datasets.delete",
+          "risk_level": "critical",
+          "safety_tier": "dangerous",
+          "approval_mode": "interactive",
+          "required_scopes": ["https://www.googleapis.com/auth/bigquery"],
+          "notes": [
+            "Dataset deletion is irreversible for many workflows and should be treated as destructive."
+          ]
+        },
+        {
+          "operation_pattern": "datasets.insert",
+          "capability": "bigquery.datasets.write",
+          "risk_level": "medium",
+          "safety_tier": "risky",
+          "approval_mode": "policy",
+          "required_scopes": ["https://www.googleapis.com/auth/bigquery"],
+          "notes": []
+        },
+        {
+          "operation_pattern": "datasets.patch",
+          "capability": "bigquery.datasets.write",
+          "risk_level": "medium",
+          "safety_tier": "risky",
+          "approval_mode": "policy",
+          "required_scopes": ["https://www.googleapis.com/auth/bigquery"],
+          "notes": []
+        },
+        {
+          "operation_pattern": "datasets.update",
+          "capability": "bigquery.datasets.write",
+          "risk_level": "medium",
+          "safety_tier": "risky",
+          "approval_mode": "policy",
+          "required_scopes": ["https://www.googleapis.com/auth/bigquery"],
+          "notes": []
+        },
+        {
+          "operation_pattern": "datasets.*",
+          "capability": "bigquery.datasets.read",
+          "risk_level": "low",
+          "safety_tier": "safe",
+          "approval_mode": "none",
+          "required_scopes": [
+            "https://www.googleapis.com/auth/bigquery.readonly",
+            "https://www.googleapis.com/auth/bigquery"
+          ],
+          "notes": []
+        },
+        {
+          "operation_pattern": "*",
+          "capability": "google.review_required",
+          "risk_level": "high",
+          "safety_tier": "forbidden",
+          "approval_mode": "interactive",
+          "required_scopes": [],
+          "notes": [
+            "Fail closed for unmapped methods until explicit policy classification is added."
+          ]
+        }
+      ]
+    },
+    {
+      "service": "calendar",
+      "api_versions": ["v3"],
+      "recommended_zones": ["z:private", "z:work"],
+      "host_allow": ["www.googleapis.com"],
+      "exceptions": [
+        "Recurring-event and timezone semantics remain service-owned logic and are not fully derivable from Discovery alone.",
+        "Cross-calendar ACL mutations can change data visibility and should stay policy-gated even when APIs appear routine."
+      ],
+      "rules": [
+        {
+          "operation_pattern": "acl.delete",
+          "capability": "gcal.acl.write",
+          "risk_level": "high",
+          "safety_tier": "dangerous",
+          "approval_mode": "interactive",
+          "required_scopes": ["https://www.googleapis.com/auth/calendar"],
+          "notes": []
+        },
+        {
+          "operation_pattern": "acl.insert",
+          "capability": "gcal.acl.write",
+          "risk_level": "high",
+          "safety_tier": "risky",
+          "approval_mode": "policy",
+          "required_scopes": ["https://www.googleapis.com/auth/calendar"],
+          "notes": []
+        },
+        {
+          "operation_pattern": "acl.patch",
+          "capability": "gcal.acl.write",
+          "risk_level": "high",
+          "safety_tier": "risky",
+          "approval_mode": "policy",
+          "required_scopes": ["https://www.googleapis.com/auth/calendar"],
+          "notes": []
+        },
+        {
+          "operation_pattern": "acl.update",
+          "capability": "gcal.acl.write",
+          "risk_level": "high",
+          "safety_tier": "risky",
+          "approval_mode": "policy",
+          "required_scopes": ["https://www.googleapis.com/auth/calendar"],
+          "notes": []
+        },
+        {
+          "operation_pattern": "calendarList.delete",
+          "capability": "gcal.write",
+          "risk_level": "high",
+          "safety_tier": "dangerous",
+          "approval_mode": "interactive",
+          "required_scopes": [
+            "https://www.googleapis.com/auth/calendar",
+            "https://www.googleapis.com/auth/calendar.events"
+          ],
+          "notes": []
+        },
+        {
+          "operation_pattern": "calendarList.insert",
+          "capability": "gcal.write",
+          "risk_level": "medium",
+          "safety_tier": "risky",
+          "approval_mode": "policy",
+          "required_scopes": [
+            "https://www.googleapis.com/auth/calendar",
+            "https://www.googleapis.com/auth/calendar.events"
+          ],
+          "notes": []
+        },
+        {
+          "operation_pattern": "calendarList.patch",
+          "capability": "gcal.write",
+          "risk_level": "medium",
+          "safety_tier": "risky",
+          "approval_mode": "policy",
+          "required_scopes": [
+            "https://www.googleapis.com/auth/calendar",
+            "https://www.googleapis.com/auth/calendar.events"
+          ],
+          "notes": []
+        },
+        {
+          "operation_pattern": "calendarList.update",
+          "capability": "gcal.write",
+          "risk_level": "medium",
+          "safety_tier": "risky",
+          "approval_mode": "policy",
+          "required_scopes": [
+            "https://www.googleapis.com/auth/calendar",
+            "https://www.googleapis.com/auth/calendar.events"
+          ],
+          "notes": []
+        },
+        {
+          "operation_pattern": "events.delete",
+          "capability": "gcal.delete",
+          "risk_level": "high",
+          "safety_tier": "dangerous",
+          "approval_mode": "interactive",
+          "required_scopes": [
+            "https://www.googleapis.com/auth/calendar",
+            "https://www.googleapis.com/auth/calendar.events"
+          ],
+          "notes": [
+            "Deleting events is user-visible data loss and should require explicit approval."
+          ]
+        },
+        {
+          "operation_pattern": "events.insert",
+          "capability": "gcal.write",
+          "risk_level": "medium",
+          "safety_tier": "risky",
+          "approval_mode": "policy",
+          "required_scopes": [
+            "https://www.googleapis.com/auth/calendar",
+            "https://www.googleapis.com/auth/calendar.events"
+          ],
+          "notes": []
+        },
+        {
+          "operation_pattern": "events.move",
+          "capability": "gcal.write",
+          "risk_level": "medium",
+          "safety_tier": "risky",
+          "approval_mode": "policy",
+          "required_scopes": [
+            "https://www.googleapis.com/auth/calendar",
+            "https://www.googleapis.com/auth/calendar.events"
+          ],
+          "notes": []
+        },
+        {
+          "operation_pattern": "events.patch",
+          "capability": "gcal.write",
+          "risk_level": "medium",
+          "safety_tier": "risky",
+          "approval_mode": "policy",
+          "required_scopes": [
+            "https://www.googleapis.com/auth/calendar",
+            "https://www.googleapis.com/auth/calendar.events"
+          ],
+          "notes": []
+        },
+        {
+          "operation_pattern": "events.update",
+          "capability": "gcal.write",
+          "risk_level": "medium",
+          "safety_tier": "risky",
+          "approval_mode": "policy",
+          "required_scopes": [
+            "https://www.googleapis.com/auth/calendar",
+            "https://www.googleapis.com/auth/calendar.events"
+          ],
+          "notes": []
+        },
+        {
+          "operation_pattern": "events.*",
+          "capability": "gcal.read",
+          "risk_level": "low",
+          "safety_tier": "safe",
+          "approval_mode": "none",
+          "required_scopes": [
+            "https://www.googleapis.com/auth/calendar.readonly",
+            "https://www.googleapis.com/auth/calendar.events.readonly",
+            "https://www.googleapis.com/auth/calendar.events"
+          ],
+          "notes": []
+        },
+        {
+          "operation_pattern": "freebusy.query",
+          "capability": "gcal.read",
+          "risk_level": "low",
+          "safety_tier": "safe",
+          "approval_mode": "none",
+          "required_scopes": [
+            "https://www.googleapis.com/auth/calendar.readonly",
+            "https://www.googleapis.com/auth/calendar.events.readonly"
+          ],
+          "notes": []
+        },
+        {
+          "operation_pattern": "*",
+          "capability": "google.review_required",
+          "risk_level": "high",
+          "safety_tier": "forbidden",
+          "approval_mode": "interactive",
+          "required_scopes": [],
+          "notes": [
+            "Fail closed for unmapped methods until explicit policy classification is added."
+          ]
+        }
+      ]
+    },
+    {
+      "service": "generativelanguage",
+      "api_versions": ["v1", "v1beta"],
+      "recommended_zones": ["z:project:ml", "z:work"],
+      "host_allow": ["generativelanguage.googleapis.com"],
+      "exceptions": [
+        "Model invocation itself is usually side-effect free, but downstream tool-use chains can become side-effecting and must be controlled at the host level.",
+        "When using API keys rather than OAuth, required_scopes may be empty while policy gating still applies."
+      ],
+      "rules": [
+        {
+          "operation_pattern": "models.*",
+          "capability": "google-ai.models",
+          "risk_level": "low",
+          "safety_tier": "safe",
+          "approval_mode": "none",
+          "required_scopes": [],
+          "notes": []
+        },
+        {
+          "operation_pattern": "models.countTokens",
+          "capability": "google-ai.models",
+          "risk_level": "low",
+          "safety_tier": "safe",
+          "approval_mode": "none",
+          "required_scopes": [],
+          "notes": []
+        },
+        {
+          "operation_pattern": "models.embedContent",
+          "capability": "google-ai.embed",
+          "risk_level": "low",
+          "safety_tier": "safe",
+          "approval_mode": "none",
+          "required_scopes": [],
+          "notes": []
+        },
+        {
+          "operation_pattern": "models.batchEmbedContents",
+          "capability": "google-ai.embed",
+          "risk_level": "low",
+          "safety_tier": "safe",
+          "approval_mode": "none",
+          "required_scopes": [],
+          "notes": []
+        },
+        {
+          "operation_pattern": "models.generateContent",
+          "capability": "google-ai.generate",
+          "risk_level": "medium",
+          "safety_tier": "safe",
+          "approval_mode": "none",
+          "required_scopes": [],
+          "notes": [
+            "Keep host-side prompt provenance and outbound tool policy checks enabled for generated actions."
+          ]
+        },
+        {
+          "operation_pattern": "models.streamGenerateContent",
+          "capability": "google-ai.generate",
+          "risk_level": "medium",
+          "safety_tier": "safe",
+          "approval_mode": "none",
+          "required_scopes": [],
+          "notes": [
+            "Streaming output still requires host-level policy for downstream actions."
+          ]
+        },
+        {
+          "operation_pattern": "cachedContents.create",
+          "capability": "google-ai.cache.write",
+          "risk_level": "medium",
+          "safety_tier": "risky",
+          "approval_mode": "policy",
+          "required_scopes": [],
+          "notes": []
+        },
+        {
+          "operation_pattern": "cachedContents.delete",
+          "capability": "google-ai.cache.write",
+          "risk_level": "medium",
+          "safety_tier": "risky",
+          "approval_mode": "policy",
+          "required_scopes": [],
+          "notes": []
+        },
+        {
+          "operation_pattern": "files.delete",
+          "capability": "google-ai.files.delete",
+          "risk_level": "high",
+          "safety_tier": "dangerous",
+          "approval_mode": "interactive",
+          "required_scopes": [],
+          "notes": []
+        },
+        {
+          "operation_pattern": "*",
+          "capability": "google.review_required",
+          "risk_level": "high",
+          "safety_tier": "forbidden",
+          "approval_mode": "interactive",
+          "required_scopes": [],
+          "notes": [
+            "Fail closed for unmapped methods until explicit policy classification is added."
+          ]
+        }
+      ]
+    },
+    {
+      "service": "gmail",
+      "api_versions": ["v1"],
+      "recommended_zones": ["z:private", "z:work"],
+      "host_allow": ["gmail.googleapis.com", "www.googleapis.com"],
+      "exceptions": [
+        "history.list semantics and cursor/lease progression are service-owned and must not be flattened into generic write rules.",
+        "Settings and forwarding-related mutations can have high external impact even when method names look routine."
+      ],
+      "rules": [
+        {
+          "operation_pattern": "users.messages.delete",
+          "capability": "gmail.delete",
+          "risk_level": "critical",
+          "safety_tier": "dangerous",
+          "approval_mode": "interactive",
+          "required_scopes": ["https://mail.google.com/"],
+          "notes": [
+            "Permanent delete should always require interactive confirmation."
+          ]
+        },
+        {
+          "operation_pattern": "users.messages.trash",
+          "capability": "gmail.delete",
+          "risk_level": "medium",
+          "safety_tier": "risky",
+          "approval_mode": "policy",
+          "required_scopes": [
+            "https://mail.google.com/",
+            "https://www.googleapis.com/auth/gmail.modify"
+          ],
+          "notes": []
+        },
+        {
+          "operation_pattern": "users.messages.send",
+          "capability": "gmail.send",
+          "risk_level": "high",
+          "safety_tier": "dangerous",
+          "approval_mode": "interactive",
+          "required_scopes": [
+            "https://mail.google.com/",
+            "https://www.googleapis.com/auth/gmail.send"
+          ],
+          "notes": [
+            "Outbound mail should default to interactive approval to prevent accidental/exfiltrating sends."
+          ]
+        },
+        {
+          "operation_pattern": "users.drafts.send",
+          "capability": "gmail.send",
+          "risk_level": "high",
+          "safety_tier": "dangerous",
+          "approval_mode": "interactive",
+          "required_scopes": [
+            "https://mail.google.com/",
+            "https://www.googleapis.com/auth/gmail.send"
+          ],
+          "notes": []
+        },
+        {
+          "operation_pattern": "users.messages.insert",
+          "capability": "gmail.write",
+          "risk_level": "medium",
+          "safety_tier": "risky",
+          "approval_mode": "policy",
+          "required_scopes": ["https://mail.google.com/"],
+          "notes": []
+        },
+        {
+          "operation_pattern": "users.messages.import",
+          "capability": "gmail.write",
+          "risk_level": "medium",
+          "safety_tier": "risky",
+          "approval_mode": "policy",
+          "required_scopes": ["https://mail.google.com/"],
+          "notes": []
+        },
+        {
+          "operation_pattern": "users.messages.modify",
+          "capability": "gmail.write",
+          "risk_level": "medium",
+          "safety_tier": "risky",
+          "approval_mode": "policy",
+          "required_scopes": [
+            "https://mail.google.com/",
+            "https://www.googleapis.com/auth/gmail.modify"
+          ],
+          "notes": []
+        },
+        {
+          "operation_pattern": "users.drafts.*",
+          "capability": "gmail.write",
+          "risk_level": "medium",
+          "safety_tier": "risky",
+          "approval_mode": "policy",
+          "required_scopes": [
+            "https://mail.google.com/",
+            "https://www.googleapis.com/auth/gmail.compose"
+          ],
+          "notes": []
+        },
+        {
+          "operation_pattern": "users.settings.*",
+          "capability": "gmail.settings",
+          "risk_level": "high",
+          "safety_tier": "risky",
+          "approval_mode": "policy",
+          "required_scopes": [
+            "https://mail.google.com/",
+            "https://www.googleapis.com/auth/gmail.settings.basic"
+          ],
+          "notes": [
+            "Forwarding/filter settings can materially affect data routing and should be policy-gated."
+          ]
+        },
+        {
+          "operation_pattern": "users.history.*",
+          "capability": "gmail.history.read",
+          "risk_level": "low",
+          "safety_tier": "safe",
+          "approval_mode": "none",
+          "required_scopes": [
+            "https://mail.google.com/",
+            "https://www.googleapis.com/auth/gmail.metadata",
+            "https://www.googleapis.com/auth/gmail.readonly"
+          ],
+          "notes": [
+            "Sync-history cursor progression is a service-owned semantic layer above this mapping."
+          ]
+        },
+        {
+          "operation_pattern": "users.labels.*",
+          "capability": "gmail.read",
+          "risk_level": "low",
+          "safety_tier": "safe",
+          "approval_mode": "none",
+          "required_scopes": [
+            "https://mail.google.com/",
+            "https://www.googleapis.com/auth/gmail.readonly",
+            "https://www.googleapis.com/auth/gmail.labels"
+          ],
+          "notes": []
+        },
+        {
+          "operation_pattern": "users.threads.*",
+          "capability": "gmail.read",
+          "risk_level": "low",
+          "safety_tier": "safe",
+          "approval_mode": "none",
+          "required_scopes": [
+            "https://mail.google.com/",
+            "https://www.googleapis.com/auth/gmail.readonly"
+          ],
+          "notes": []
+        },
+        {
+          "operation_pattern": "users.messages.*",
+          "capability": "gmail.read",
+          "risk_level": "low",
+          "safety_tier": "safe",
+          "approval_mode": "none",
+          "required_scopes": [
+            "https://mail.google.com/",
+            "https://www.googleapis.com/auth/gmail.readonly",
+            "https://www.googleapis.com/auth/gmail.metadata"
+          ],
+          "notes": []
+        },
+        {
+          "operation_pattern": "*",
+          "capability": "google.review_required",
+          "risk_level": "high",
+          "safety_tier": "forbidden",
+          "approval_mode": "interactive",
+          "required_scopes": [],
+          "notes": [
+            "Fail closed for unmapped methods until explicit policy classification is added."
+          ]
+        }
+      ]
+    },
+    {
+      "service": "youtube",
+      "api_versions": ["v3"],
+      "recommended_zones": ["z:community", "z:work"],
+      "host_allow": ["www.googleapis.com", "youtube.googleapis.com"],
+      "exceptions": [
+        "Resumable upload and analytics/reporting workflows have service-specific quota and long-running semantics.",
+        "Channel-management mutations can be externally visible and should not default to auto-approval."
+      ],
+      "rules": [
+        {
+          "operation_pattern": "videos.delete",
+          "capability": "youtube.delete",
+          "risk_level": "critical",
+          "safety_tier": "dangerous",
+          "approval_mode": "interactive",
+          "required_scopes": ["https://www.googleapis.com/auth/youtube"],
+          "notes": []
+        },
+        {
+          "operation_pattern": "playlistItems.delete",
+          "capability": "youtube.write",
+          "risk_level": "high",
+          "safety_tier": "dangerous",
+          "approval_mode": "interactive",
+          "required_scopes": [
+            "https://www.googleapis.com/auth/youtube",
+            "https://www.googleapis.com/auth/youtube.force-ssl"
+          ],
+          "notes": []
+        },
+        {
+          "operation_pattern": "comments.setModerationStatus",
+          "capability": "youtube.moderate",
+          "risk_level": "high",
+          "safety_tier": "dangerous",
+          "approval_mode": "interactive",
+          "required_scopes": [
+            "https://www.googleapis.com/auth/youtube.force-ssl",
+            "https://www.googleapis.com/auth/youtubepartner"
+          ],
+          "notes": []
+        },
+        {
+          "operation_pattern": "videos.insert",
+          "capability": "youtube.write",
+          "risk_level": "high",
+          "safety_tier": "risky",
+          "approval_mode": "policy",
+          "required_scopes": [
+            "https://www.googleapis.com/auth/youtube.upload",
+            "https://www.googleapis.com/auth/youtube"
+          ],
+          "notes": [
+            "Uploads are externally visible and consume significant quota; enforce policy checks."
+          ]
+        },
+        {
+          "operation_pattern": "videos.update",
+          "capability": "youtube.write",
+          "risk_level": "medium",
+          "safety_tier": "risky",
+          "approval_mode": "policy",
+          "required_scopes": ["https://www.googleapis.com/auth/youtube"],
+          "notes": []
+        },
+        {
+          "operation_pattern": "playlistItems.insert",
+          "capability": "youtube.write",
+          "risk_level": "medium",
+          "safety_tier": "risky",
+          "approval_mode": "policy",
+          "required_scopes": [
+            "https://www.googleapis.com/auth/youtube",
+            "https://www.googleapis.com/auth/youtube.force-ssl"
+          ],
+          "notes": []
+        },
+        {
+          "operation_pattern": "subscriptions.insert",
+          "capability": "youtube.write",
+          "risk_level": "medium",
+          "safety_tier": "risky",
+          "approval_mode": "policy",
+          "required_scopes": ["https://www.googleapis.com/auth/youtube"],
+          "notes": []
+        },
+        {
+          "operation_pattern": "subscriptions.delete",
+          "capability": "youtube.write",
+          "risk_level": "medium",
+          "safety_tier": "risky",
+          "approval_mode": "policy",
+          "required_scopes": ["https://www.googleapis.com/auth/youtube"],
+          "notes": []
+        },
+        {
+          "operation_pattern": "search.*",
+          "capability": "youtube.read",
+          "risk_level": "low",
+          "safety_tier": "safe",
+          "approval_mode": "none",
+          "required_scopes": [
+            "https://www.googleapis.com/auth/youtube.readonly",
+            "https://www.googleapis.com/auth/youtube.force-ssl"
+          ],
+          "notes": []
+        },
+        {
+          "operation_pattern": "videos.list",
+          "capability": "youtube.read",
+          "risk_level": "low",
+          "safety_tier": "safe",
+          "approval_mode": "none",
+          "required_scopes": [
+            "https://www.googleapis.com/auth/youtube.readonly",
+            "https://www.googleapis.com/auth/youtube.force-ssl"
+          ],
+          "notes": []
+        },
+        {
+          "operation_pattern": "channels.*",
+          "capability": "youtube.read",
+          "risk_level": "low",
+          "safety_tier": "safe",
+          "approval_mode": "none",
+          "required_scopes": [
+            "https://www.googleapis.com/auth/youtube.readonly",
+            "https://www.googleapis.com/auth/youtube.force-ssl"
+          ],
+          "notes": []
+        },
+        {
+          "operation_pattern": "playlists.*",
+          "capability": "youtube.read",
+          "risk_level": "low",
+          "safety_tier": "safe",
+          "approval_mode": "none",
+          "required_scopes": [
+            "https://www.googleapis.com/auth/youtube.readonly",
+            "https://www.googleapis.com/auth/youtube.force-ssl"
+          ],
+          "notes": []
+        },
+        {
+          "operation_pattern": "*",
+          "capability": "google.review_required",
+          "risk_level": "high",
+          "safety_tier": "forbidden",
+          "approval_mode": "interactive",
+          "required_scopes": [],
+          "notes": [
+            "Fail closed for unmapped methods until explicit policy classification is added."
+          ]
+        }
+      ]
+    }
+  ]
+}

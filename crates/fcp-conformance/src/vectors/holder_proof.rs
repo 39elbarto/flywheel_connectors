@@ -450,22 +450,35 @@ mod tests {
     #[test]
     fn all_vectors_have_unique_signing_keys() {
         let vectors = HolderProofGoldenVector::load_all();
-        let keys: std::collections::HashSet<&str> = vectors.iter().map(|v| v.holder_signing_key.as_str()).collect();
+        let keys: std::collections::HashSet<&str> = vectors
+            .iter()
+            .map(|v| v.holder_signing_key.as_str())
+            .collect();
         assert_eq!(keys.len(), vectors.len(), "all signing keys must be unique");
     }
 
     #[test]
     fn all_vectors_have_unique_signatures() {
         let vectors = HolderProofGoldenVector::load_all();
-        let sigs: std::collections::HashSet<&str> = vectors.iter().map(|v| v.expected_signature.as_str()).collect();
+        let sigs: std::collections::HashSet<&str> = vectors
+            .iter()
+            .map(|v| v.expected_signature.as_str())
+            .collect();
         assert_eq!(sigs.len(), vectors.len(), "all signatures must be unique");
     }
 
     #[test]
     fn all_vectors_have_unique_signable_bytes() {
         let vectors = HolderProofGoldenVector::load_all();
-        let bytes: std::collections::HashSet<&str> = vectors.iter().map(|v| v.expected_signable_bytes.as_str()).collect();
-        assert_eq!(bytes.len(), vectors.len(), "all signable bytes must be unique");
+        let bytes: std::collections::HashSet<&str> = vectors
+            .iter()
+            .map(|v| v.expected_signable_bytes.as_str())
+            .collect();
+        assert_eq!(
+            bytes.len(),
+            vectors.len(),
+            "all signable bytes must be unique"
+        );
     }
 
     // ── Field validation tests ──────────────────────────────
@@ -473,10 +486,16 @@ mod tests {
     #[test]
     fn all_vectors_have_valid_hex_fields() {
         for v in HolderProofGoldenVector::load_all() {
-            assert!(hex::decode(&v.holder_signing_key).is_ok(), "signing key hex");
+            assert!(
+                hex::decode(&v.holder_signing_key).is_ok(),
+                "signing key hex"
+            );
             assert!(hex::decode(&v.expected_holder_pk).is_ok(), "pk hex");
             assert!(hex::decode(&v.token_jti).is_ok(), "jti hex");
-            assert!(hex::decode(&v.expected_signable_bytes).is_ok(), "signable bytes hex");
+            assert!(
+                hex::decode(&v.expected_signable_bytes).is_ok(),
+                "signable bytes hex"
+            );
             assert!(hex::decode(&v.expected_signature).is_ok(), "signature hex");
         }
     }
@@ -485,7 +504,12 @@ mod tests {
     fn all_vectors_signing_key_is_32_bytes() {
         for v in HolderProofGoldenVector::load_all() {
             let bytes = hex::decode(&v.holder_signing_key).unwrap();
-            assert_eq!(bytes.len(), 32, "signing key for '{}' must be 32 bytes", v.description);
+            assert_eq!(
+                bytes.len(),
+                32,
+                "signing key for '{}' must be 32 bytes",
+                v.description
+            );
         }
     }
 
@@ -493,7 +517,12 @@ mod tests {
     fn all_vectors_signature_is_64_bytes() {
         for v in HolderProofGoldenVector::load_all() {
             let bytes = hex::decode(&v.expected_signature).unwrap();
-            assert_eq!(bytes.len(), 64, "signature for '{}' must be 64 bytes", v.description);
+            assert_eq!(
+                bytes.len(),
+                64,
+                "signature for '{}' must be 64 bytes",
+                v.description
+            );
         }
     }
 
@@ -501,7 +530,12 @@ mod tests {
     fn all_vectors_pk_is_32_bytes() {
         for v in HolderProofGoldenVector::load_all() {
             let bytes = hex::decode(&v.expected_holder_pk).unwrap();
-            assert_eq!(bytes.len(), 32, "pk for '{}' must be 32 bytes", v.description);
+            assert_eq!(
+                bytes.len(),
+                32,
+                "pk for '{}' must be 32 bytes",
+                v.description
+            );
         }
     }
 }

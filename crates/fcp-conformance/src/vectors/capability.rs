@@ -473,7 +473,8 @@ mod tests {
         v.expected_token_cbor = String::new();
         v.expected_kid = String::new();
         // Should still sign-and-verify without crashing
-        v.verify().expect("empty expected fields should still pass sign/verify");
+        v.verify()
+            .expect("empty expected fields should still pass sign/verify");
     }
 
     // ── Cross-vector consistency tests ───────────────────────
@@ -481,35 +482,56 @@ mod tests {
     #[test]
     fn all_vectors_have_unique_signing_keys() {
         let vectors = CapabilityTokenGoldenVector::load_all();
-        let keys: std::collections::HashSet<&str> = vectors.iter().map(|v| v.signing_key.as_str()).collect();
-        assert_eq!(keys.len(), vectors.len(), "all vectors should use different signing keys");
+        let keys: std::collections::HashSet<&str> =
+            vectors.iter().map(|v| v.signing_key.as_str()).collect();
+        assert_eq!(
+            keys.len(),
+            vectors.len(),
+            "all vectors should use different signing keys"
+        );
     }
 
     #[test]
     fn all_vectors_have_unique_public_keys() {
         let vectors = CapabilityTokenGoldenVector::load_all();
-        let pks: std::collections::HashSet<&str> = vectors.iter().map(|v| v.expected_public_key.as_str()).collect();
-        assert_eq!(pks.len(), vectors.len(), "all vectors should have different public keys");
+        let pks: std::collections::HashSet<&str> = vectors
+            .iter()
+            .map(|v| v.expected_public_key.as_str())
+            .collect();
+        assert_eq!(
+            pks.len(),
+            vectors.len(),
+            "all vectors should have different public keys"
+        );
     }
 
     #[test]
     fn all_vectors_have_unique_kids() {
         let vectors = CapabilityTokenGoldenVector::load_all();
-        let kids: std::collections::HashSet<&str> = vectors.iter().map(|v| v.expected_kid.as_str()).collect();
-        assert_eq!(kids.len(), vectors.len(), "all vectors should have different KIDs");
+        let kids: std::collections::HashSet<&str> =
+            vectors.iter().map(|v| v.expected_kid.as_str()).collect();
+        assert_eq!(
+            kids.len(),
+            vectors.len(),
+            "all vectors should have different KIDs"
+        );
     }
 
     #[test]
     fn all_vectors_have_unique_capability_ids() {
         let vectors = CapabilityTokenGoldenVector::load_all();
-        let cap_ids: std::collections::HashSet<&str> = vectors.iter().map(|v| v.capability_id.as_str()).collect();
+        let cap_ids: std::collections::HashSet<&str> =
+            vectors.iter().map(|v| v.capability_id.as_str()).collect();
         assert_eq!(cap_ids.len(), vectors.len());
     }
 
     #[test]
     fn all_vectors_have_unique_token_cbor() {
         let vectors = CapabilityTokenGoldenVector::load_all();
-        let tokens: std::collections::HashSet<&str> = vectors.iter().map(|v| v.expected_token_cbor.as_str()).collect();
+        let tokens: std::collections::HashSet<&str> = vectors
+            .iter()
+            .map(|v| v.expected_token_cbor.as_str())
+            .collect();
         assert_eq!(tokens.len(), vectors.len());
     }
 
@@ -538,7 +560,10 @@ mod tests {
     #[test]
     fn all_vectors_have_valid_timestamps() {
         for v in CapabilityTokenGoldenVector::load_all() {
-            assert!(v.not_before < v.expires, "not_before should be before expires");
+            assert!(
+                v.not_before < v.expires,
+                "not_before should be before expires"
+            );
             assert!(v.not_before > 0);
             assert!(v.expires > 0);
         }
@@ -547,7 +572,10 @@ mod tests {
     #[test]
     fn capability_ids_start_with_cap() {
         for v in CapabilityTokenGoldenVector::load_all() {
-            assert!(v.capability_id.starts_with("cap:"), "cap_id should start with cap:");
+            assert!(
+                v.capability_id.starts_with("cap:"),
+                "cap_id should start with cap:"
+            );
         }
     }
 
@@ -561,14 +589,21 @@ mod tests {
     #[test]
     fn principal_ids_start_with_agent() {
         for v in CapabilityTokenGoldenVector::load_all() {
-            assert!(v.principal_id.starts_with("agent:"), "principal should start with agent:");
+            assert!(
+                v.principal_id.starts_with("agent:"),
+                "principal should start with agent:"
+            );
         }
     }
 
     #[test]
     fn signing_keys_are_32_bytes() {
         for v in CapabilityTokenGoldenVector::load_all() {
-            assert_eq!(v.signing_key.len(), 64, "signing key should be 64 hex chars (32 bytes)");
+            assert_eq!(
+                v.signing_key.len(),
+                64,
+                "signing key should be 64 hex chars (32 bytes)"
+            );
         }
     }
 

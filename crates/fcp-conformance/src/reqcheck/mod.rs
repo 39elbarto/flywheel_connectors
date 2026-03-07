@@ -1175,7 +1175,10 @@ mod tests {
             entries: None,
         };
         let json = serde_json::to_string(&report).unwrap();
-        assert!(!json.contains("\"entries\""), "None entries should be skipped");
+        assert!(
+            !json.contains("\"entries\""),
+            "None entries should be skipped"
+        );
     }
 
     // ── ValidationError / ValidationWarning serde tests ─────

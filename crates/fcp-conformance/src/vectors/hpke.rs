@@ -436,7 +436,10 @@ mod tests {
     fn verify_fails_with_tampered_rng_seed() {
         let mut v = HpkeSealedBoxGoldenVector::vector_1_zone_key_seal();
         v.rng_seed = "bb".repeat(32);
-        assert!(v.verify().is_err(), "wrong rng_seed should produce different enc");
+        assert!(
+            v.verify().is_err(),
+            "wrong rng_seed should produce different enc"
+        );
     }
 
     #[test]
@@ -450,28 +453,40 @@ mod tests {
     fn verify_fails_with_tampered_zone_id() {
         let mut v = HpkeSealedBoxGoldenVector::vector_1_zone_key_seal();
         v.zone_id = hex::encode(b"z:private");
-        assert!(v.verify().is_err(), "wrong zone_id should change AAD and fail");
+        assert!(
+            v.verify().is_err(),
+            "wrong zone_id should change AAD and fail"
+        );
     }
 
     #[test]
     fn verify_fails_with_tampered_purpose() {
         let mut v = HpkeSealedBoxGoldenVector::vector_1_zone_key_seal();
         v.purpose = "FCP2-OBJECTID-KEY".into();
-        assert!(v.verify().is_err(), "wrong purpose should change AAD and fail");
+        assert!(
+            v.verify().is_err(),
+            "wrong purpose should change AAD and fail"
+        );
     }
 
     #[test]
     fn verify_fails_with_tampered_issued_at() {
         let mut v = HpkeSealedBoxGoldenVector::vector_1_zone_key_seal();
         v.issued_at = 999_999_999;
-        assert!(v.verify().is_err(), "wrong issued_at should change AAD and fail");
+        assert!(
+            v.verify().is_err(),
+            "wrong issued_at should change AAD and fail"
+        );
     }
 
     #[test]
     fn verify_fails_with_tampered_node_id() {
         let mut v = HpkeSealedBoxGoldenVector::vector_1_zone_key_seal();
         v.recipient_node_id = hex::encode(b"node:other.mesh.ts.net");
-        assert!(v.verify().is_err(), "wrong node_id should change AAD and fail");
+        assert!(
+            v.verify().is_err(),
+            "wrong node_id should change AAD and fail"
+        );
     }
 
     #[test]
@@ -500,28 +515,36 @@ mod tests {
     #[test]
     fn all_vectors_have_unique_recipient_keys() {
         let vectors = HpkeSealedBoxGoldenVector::load_all();
-        let keys: std::collections::HashSet<&str> = vectors.iter().map(|v| v.recipient_sk.as_str()).collect();
-        assert_eq!(keys.len(), vectors.len(), "all recipient keys must be unique");
+        let keys: std::collections::HashSet<&str> =
+            vectors.iter().map(|v| v.recipient_sk.as_str()).collect();
+        assert_eq!(
+            keys.len(),
+            vectors.len(),
+            "all recipient keys must be unique"
+        );
     }
 
     #[test]
     fn all_vectors_have_unique_rng_seeds() {
         let vectors = HpkeSealedBoxGoldenVector::load_all();
-        let seeds: std::collections::HashSet<&str> = vectors.iter().map(|v| v.rng_seed.as_str()).collect();
+        let seeds: std::collections::HashSet<&str> =
+            vectors.iter().map(|v| v.rng_seed.as_str()).collect();
         assert_eq!(seeds.len(), vectors.len(), "all rng seeds must be unique");
     }
 
     #[test]
     fn all_vectors_have_unique_purposes() {
         let vectors = HpkeSealedBoxGoldenVector::load_all();
-        let purposes: std::collections::HashSet<&str> = vectors.iter().map(|v| v.purpose.as_str()).collect();
+        let purposes: std::collections::HashSet<&str> =
+            vectors.iter().map(|v| v.purpose.as_str()).collect();
         assert_eq!(purposes.len(), vectors.len(), "all purposes must be unique");
     }
 
     #[test]
     fn all_vectors_have_unique_enc() {
         let vectors = HpkeSealedBoxGoldenVector::load_all();
-        let encs: std::collections::HashSet<&str> = vectors.iter().map(|v| v.expected_enc.as_str()).collect();
+        let encs: std::collections::HashSet<&str> =
+            vectors.iter().map(|v| v.expected_enc.as_str()).collect();
         assert_eq!(encs.len(), vectors.len(), "all enc values must be unique");
     }
 
@@ -538,7 +561,10 @@ mod tests {
             assert!(hex::decode(&v.recipient_node_id).is_ok(), "node_id hex");
             assert!(hex::decode(&v.expected_aad_cbor).is_ok(), "aad_cbor hex");
             assert!(hex::decode(&v.expected_enc).is_ok(), "enc hex");
-            assert!(hex::decode(&v.expected_ciphertext).is_ok(), "ciphertext hex");
+            assert!(
+                hex::decode(&v.expected_ciphertext).is_ok(),
+                "ciphertext hex"
+            );
         }
     }
 
@@ -546,7 +572,12 @@ mod tests {
     fn all_vectors_sk_is_32_bytes() {
         for v in HpkeSealedBoxGoldenVector::load_all() {
             let bytes = hex::decode(&v.recipient_sk).unwrap();
-            assert_eq!(bytes.len(), 32, "sk for '{}' must be 32 bytes", v.description);
+            assert_eq!(
+                bytes.len(),
+                32,
+                "sk for '{}' must be 32 bytes",
+                v.description
+            );
         }
     }
 
@@ -554,7 +585,12 @@ mod tests {
     fn all_vectors_pk_is_32_bytes() {
         for v in HpkeSealedBoxGoldenVector::load_all() {
             let bytes = hex::decode(&v.expected_recipient_pk).unwrap();
-            assert_eq!(bytes.len(), 32, "pk for '{}' must be 32 bytes", v.description);
+            assert_eq!(
+                bytes.len(),
+                32,
+                "pk for '{}' must be 32 bytes",
+                v.description
+            );
         }
     }
 
@@ -562,7 +598,12 @@ mod tests {
     fn all_vectors_enc_is_32_bytes() {
         for v in HpkeSealedBoxGoldenVector::load_all() {
             let bytes = hex::decode(&v.expected_enc).unwrap();
-            assert_eq!(bytes.len(), 32, "enc for '{}' must be 32 bytes", v.description);
+            assert_eq!(
+                bytes.len(),
+                32,
+                "enc for '{}' must be 32 bytes",
+                v.description
+            );
         }
     }
 
@@ -570,7 +611,12 @@ mod tests {
     fn all_vectors_rng_seed_is_32_bytes() {
         for v in HpkeSealedBoxGoldenVector::load_all() {
             let bytes = hex::decode(&v.rng_seed).unwrap();
-            assert_eq!(bytes.len(), 32, "rng seed for '{}' must be 32 bytes", v.description);
+            assert_eq!(
+                bytes.len(),
+                32,
+                "rng seed for '{}' must be 32 bytes",
+                v.description
+            );
         }
     }
 

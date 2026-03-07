@@ -415,12 +415,7 @@ mod tests {
 
     #[test]
     fn schema_registration_schema_id_deterministic() {
-        let reg = SchemaRegistration::new(
-            "fcp.test",
-            "Foo",
-            Version::new(1, 0, 0),
-            "desc",
-        );
+        let reg = SchemaRegistration::new("fcp.test", "Foo", Version::new(1, 0, 0), "desc");
         let id1 = reg.schema_id();
         let id2 = reg.schema_id();
         assert_eq!(id1.hash().as_bytes(), id2.hash().as_bytes());
@@ -457,29 +452,48 @@ mod tests {
     #[test]
     fn core_registrations_have_unique_schema_ids() {
         let regs = core_schema_registrations();
-        let hashes: Vec<String> = regs.iter().map(|r| generate_schema_hash(&r.schema_id())).collect();
+        let hashes: Vec<String> = regs
+            .iter()
+            .map(|r| generate_schema_hash(&r.schema_id()))
+            .collect();
         let unique: std::collections::HashSet<&String> = hashes.iter().collect();
-        assert_eq!(hashes.len(), unique.len(), "all core registrations must have unique hashes");
+        assert_eq!(
+            hashes.len(),
+            unique.len(),
+            "all core registrations must have unique hashes"
+        );
     }
 
     #[test]
     fn core_registrations_have_descriptions() {
         for reg in core_schema_registrations() {
-            assert!(!reg.description.is_empty(), "registration {} should have description", reg.name);
+            assert!(
+                !reg.description.is_empty(),
+                "registration {} should have description",
+                reg.name
+            );
         }
     }
 
     #[test]
     fn core_registrations_have_namespaces() {
         for reg in core_schema_registrations() {
-            assert!(reg.namespace.starts_with("fcp."), "registration {} namespace should start with fcp.", reg.name);
+            assert!(
+                reg.namespace.starts_with("fcp."),
+                "registration {} namespace should start with fcp.",
+                reg.name
+            );
         }
     }
 
     #[test]
     fn core_registrations_count() {
         let regs = core_schema_registrations();
-        assert!(regs.len() >= 10, "should have at least 10 core registrations, got {}", regs.len());
+        assert!(
+            regs.len() >= 10,
+            "should have at least 10 core registrations, got {}",
+            regs.len()
+        );
     }
 
     // ── serialize_to_canonical_cbor tests ────────────────────
@@ -487,18 +501,36 @@ mod tests {
     #[test]
     fn canonical_cbor_payload_starts_with_schema_hash() {
         let schema = SchemaId::new("fcp.test", "GoldenStruct", Version::new(1, 0, 0));
-        let value = TestStruct { id: 1, name: "x".into(), active: false };
+        let value = TestStruct {
+            id: 1,
+            name: "x".into(),
+            active: false,
+        };
         let (cbor_hex, payload_hex) = serialize_to_canonical_cbor(&value, &schema).unwrap();
         let expected_hash = generate_schema_hash(&schema);
-        assert!(payload_hex.starts_with(&expected_hash), "payload should start with schema hash");
-        assert!(payload_hex.ends_with(&cbor_hex), "payload should end with cbor");
+        assert!(
+            payload_hex.starts_with(&expected_hash),
+            "payload should start with schema hash"
+        );
+        assert!(
+            payload_hex.ends_with(&cbor_hex),
+            "payload should end with cbor"
+        );
     }
 
     #[test]
     fn canonical_cbor_different_values_different_bytes() {
         let schema = SchemaId::new("fcp.test", "GoldenStruct", Version::new(1, 0, 0));
-        let v1 = TestStruct { id: 1, name: "a".into(), active: true };
-        let v2 = TestStruct { id: 2, name: "b".into(), active: false };
+        let v1 = TestStruct {
+            id: 1,
+            name: "a".into(),
+            active: true,
+        };
+        let v2 = TestStruct {
+            id: 2,
+            name: "b".into(),
+            active: false,
+        };
         let (cbor1, _) = serialize_to_canonical_cbor(&v1, &schema).unwrap();
         let (cbor2, _) = serialize_to_canonical_cbor(&v2, &schema).unwrap();
         assert_ne!(cbor1, cbor2);
@@ -507,8 +539,16 @@ mod tests {
     #[test]
     fn canonical_cbor_same_schema_same_hash_prefix() {
         let schema = SchemaId::new("fcp.test", "GoldenStruct", Version::new(1, 0, 0));
-        let v1 = TestStruct { id: 1, name: "a".into(), active: true };
-        let v2 = TestStruct { id: 99, name: "z".into(), active: false };
+        let v1 = TestStruct {
+            id: 1,
+            name: "a".into(),
+            active: true,
+        };
+        let v2 = TestStruct {
+            id: 99,
+            name: "z".into(),
+            active: false,
+        };
         let (_, payload1) = serialize_to_canonical_cbor(&v1, &schema).unwrap();
         let (_, payload2) = serialize_to_canonical_cbor(&v2, &schema).unwrap();
         // First 64 hex chars (32 bytes) should be same schema hash
@@ -521,9 +561,30 @@ mod tests {
     fn generate_vector_multiple_samples() {
         let reg = SchemaRegistration::new("fcp.test", "Multi", Version::new(1, 0, 0), "multi");
         let samples = vec![
-            ("first".to_string(), TestStruct { id: 1, name: "a".into(), active: true }),
-            ("second".to_string(), TestStruct { id: 2, name: "b".into(), active: false }),
-            ("third".to_string(), TestStruct { id: 3, name: "c".into(), active: true }),
+            (
+                "first".to_string(),
+                TestStruct {
+                    id: 1,
+                    name: "a".into(),
+                    active: true,
+                },
+            ),
+            (
+                "second".to_string(),
+                TestStruct {
+                    id: 2,
+                    name: "b".into(),
+                    active: false,
+                },
+            ),
+            (
+                "third".to_string(),
+                TestStruct {
+                    id: 3,
+                    name: "c".into(),
+                    active: true,
+                },
+            ),
         ];
         let vector = generate_vector(&reg, &samples).unwrap();
         assert_eq!(vector.payloads.len(), 3);
@@ -535,7 +596,14 @@ mod tests {
     #[test]
     fn generate_vector_preserves_schema_info() {
         let reg = SchemaRegistration::new("fcp.zone", "ZoneKey", Version::new(3, 2, 1), "zone key");
-        let samples = vec![("s".to_string(), TestStruct { id: 0, name: String::new(), active: false })];
+        let samples = vec![(
+            "s".to_string(),
+            TestStruct {
+                id: 0,
+                name: String::new(),
+                active: false,
+            },
+        )];
         let vector = generate_vector(&reg, &samples).unwrap();
         assert_eq!(vector.schema_namespace, "fcp.zone");
         assert_eq!(vector.schema_name, "ZoneKey");
@@ -555,7 +623,11 @@ mod tests {
     #[test]
     fn generate_vector_payload_json_roundtrip() {
         let reg = SchemaRegistration::new("fcp.test", "RT", Version::new(1, 0, 0), "roundtrip");
-        let input = TestStruct { id: 42, name: "hello".into(), active: true };
+        let input = TestStruct {
+            id: 42,
+            name: "hello".into(),
+            active: true,
+        };
         let samples = vec![("rt".to_string(), input)];
         let vector = generate_vector(&reg, &samples).unwrap();
         let json = &vector.payloads[0].input_json;
@@ -573,7 +645,14 @@ mod tests {
         let path = dir.join("test_vectors.json");
 
         let reg = SchemaRegistration::new("fcp.test", "WF", Version::new(1, 0, 0), "write test");
-        let samples = vec![("s".to_string(), TestStruct { id: 1, name: "w".into(), active: true })];
+        let samples = vec![(
+            "s".to_string(),
+            TestStruct {
+                id: 1,
+                name: "w".into(),
+                active: true,
+            },
+        )];
         let vector = generate_vector(&reg, &samples).unwrap();
 
         let mut map = BTreeMap::new();
@@ -615,7 +694,14 @@ mod tests {
     #[test]
     fn generated_vector_json_roundtrip() {
         let reg = SchemaRegistration::new("fcp.test", "Serde", Version::new(1, 0, 0), "serde");
-        let samples = vec![("s".to_string(), TestStruct { id: 7, name: "json".into(), active: false })];
+        let samples = vec![(
+            "s".to_string(),
+            TestStruct {
+                id: 7,
+                name: "json".into(),
+                active: false,
+            },
+        )];
         let vector = generate_vector(&reg, &samples).unwrap();
 
         let json = serde_json::to_string(&vector).unwrap();
@@ -645,8 +731,16 @@ mod tests {
     fn schema_hash_is_64_hex_chars() {
         for reg in core_schema_registrations() {
             let hash = generate_schema_hash(&reg.schema_id());
-            assert_eq!(hash.len(), 64, "hash for {} should be 64 hex chars", reg.name);
-            assert!(hash.chars().all(|c| c.is_ascii_hexdigit()), "hash should be hex");
+            assert_eq!(
+                hash.len(),
+                64,
+                "hash for {} should be 64 hex chars",
+                reg.name
+            );
+            assert!(
+                hash.chars().all(|c| c.is_ascii_hexdigit()),
+                "hash should be hex"
+            );
         }
     }
 
@@ -662,11 +756,18 @@ mod tests {
     #[test]
     fn core_registrations_each_produces_distinct_hash() {
         let regs = core_schema_registrations();
-        let hashes: Vec<String> = regs.iter().map(|r| generate_schema_hash(&r.schema_id())).collect();
+        let hashes: Vec<String> = regs
+            .iter()
+            .map(|r| generate_schema_hash(&r.schema_id()))
+            .collect();
         for (i, h1) in hashes.iter().enumerate() {
             for (j, h2) in hashes.iter().enumerate() {
                 if i != j {
-                    assert_ne!(h1, h2, "registrations {} and {} should have distinct hashes", regs[i].name, regs[j].name);
+                    assert_ne!(
+                        h1, h2,
+                        "registrations {} and {} should have distinct hashes",
+                        regs[i].name, regs[j].name
+                    );
                 }
             }
         }
@@ -689,7 +790,11 @@ mod tests {
     #[test]
     fn core_registrations_versions_are_valid() {
         for reg in core_schema_registrations() {
-            assert!(reg.version.major >= 1 || reg.version.minor >= 1, "version for {} should be non-zero", reg.name);
+            assert!(
+                reg.version.major >= 1 || reg.version.minor >= 1,
+                "version for {} should be non-zero",
+                reg.name
+            );
         }
     }
 
@@ -725,7 +830,14 @@ mod tests {
     #[test]
     fn generated_vector_clone() {
         let reg = SchemaRegistration::new("fcp.test", "Cln", Version::new(1, 0, 0), "");
-        let samples = vec![("s".to_string(), TestStruct { id: 1, name: "c".into(), active: true })];
+        let samples = vec![(
+            "s".to_string(),
+            TestStruct {
+                id: 1,
+                name: "c".into(),
+                active: true,
+            },
+        )];
         let vector = generate_vector(&reg, &samples).unwrap();
         let cloned = vector.clone();
         assert_eq!(vector.schema_name, cloned.schema_name);
@@ -777,19 +889,44 @@ mod tests {
 
         let mut map1 = BTreeMap::new();
         let reg = SchemaRegistration::new("fcp.test", "V1", Version::new(1, 0, 0), "first");
-        let v1 = generate_vector(&reg, &[(String::new(), TestStruct { id: 1, name: String::new(), active: false })]).unwrap();
+        let v1 = generate_vector(
+            &reg,
+            &[(
+                String::new(),
+                TestStruct {
+                    id: 1,
+                    name: String::new(),
+                    active: false,
+                },
+            )],
+        )
+        .unwrap();
         map1.insert("key".to_string(), v1);
         write_vectors_to_file(&map1, &path).unwrap();
 
         let mut map2 = BTreeMap::new();
         let reg2 = SchemaRegistration::new("fcp.test", "V2", Version::new(2, 0, 0), "second");
-        let v2 = generate_vector(&reg2, &[(String::new(), TestStruct { id: 2, name: String::new(), active: true })]).unwrap();
+        let v2 = generate_vector(
+            &reg2,
+            &[(
+                String::new(),
+                TestStruct {
+                    id: 2,
+                    name: String::new(),
+                    active: true,
+                },
+            )],
+        )
+        .unwrap();
         map2.insert("key".to_string(), v2);
         write_vectors_to_file(&map2, &path).unwrap();
 
         let content = fs::read_to_string(&path).unwrap();
         let parsed: BTreeMap<String, GeneratedVector> = serde_json::from_str(&content).unwrap();
-        assert_eq!(parsed["key"].schema_name, "V2", "second write should overwrite first");
+        assert_eq!(
+            parsed["key"].schema_name, "V2",
+            "second write should overwrite first"
+        );
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -828,7 +965,11 @@ mod tests {
     #[test]
     fn canonical_cbor_empty_string_field() {
         let schema = SchemaId::new("fcp.test", "GoldenStruct", Version::new(1, 0, 0));
-        let v = TestStruct { id: 0, name: String::new(), active: false };
+        let v = TestStruct {
+            id: 0,
+            name: String::new(),
+            active: false,
+        };
         let result = serialize_to_canonical_cbor(&v, &schema);
         assert!(result.is_ok());
         let (cbor, payload) = result.unwrap();
@@ -839,7 +980,11 @@ mod tests {
     #[test]
     fn canonical_cbor_large_id() {
         let schema = SchemaId::new("fcp.test", "GoldenStruct", Version::new(1, 0, 0));
-        let v = TestStruct { id: u64::MAX, name: "max".into(), active: true };
+        let v = TestStruct {
+            id: u64::MAX,
+            name: "max".into(),
+            active: true,
+        };
         let result = serialize_to_canonical_cbor(&v, &schema);
         assert!(result.is_ok());
     }
@@ -847,7 +992,11 @@ mod tests {
     #[test]
     fn canonical_cbor_unicode_name() {
         let schema = SchemaId::new("fcp.test", "GoldenStruct", Version::new(1, 0, 0));
-        let v = TestStruct { id: 1, name: "日本語テスト🎉".into(), active: true };
+        let v = TestStruct {
+            id: 1,
+            name: "日本語テスト🎉".into(),
+            active: true,
+        };
         let (cbor1, _) = serialize_to_canonical_cbor(&v, &schema).unwrap();
         let (cbor2, _) = serialize_to_canonical_cbor(&v, &schema).unwrap();
         assert_eq!(cbor1, cbor2, "unicode CBOR must be deterministic");
@@ -860,7 +1009,14 @@ mod tests {
         let reg = SchemaRegistration::new("fcp.test", "HashCheck", Version::new(1, 0, 0), "hash");
         let schema = reg.schema_id();
         let expected_hash = generate_schema_hash(&schema);
-        let samples = vec![("s".to_string(), TestStruct { id: 1, name: "h".into(), active: true })];
+        let samples = vec![(
+            "s".to_string(),
+            TestStruct {
+                id: 1,
+                name: "h".into(),
+                active: true,
+            },
+        )];
         let vector = generate_vector(&reg, &samples).unwrap();
         assert_eq!(vector.expected_schema_hash, expected_hash);
     }
@@ -868,10 +1024,21 @@ mod tests {
     #[test]
     fn generate_vector_payload_cbor_starts_after_hash() {
         let reg = SchemaRegistration::new("fcp.test", "Split", Version::new(1, 0, 0), "split");
-        let samples = vec![("s".to_string(), TestStruct { id: 5, name: "x".into(), active: false })];
+        let samples = vec![(
+            "s".to_string(),
+            TestStruct {
+                id: 5,
+                name: "x".into(),
+                active: false,
+            },
+        )];
         let vector = generate_vector(&reg, &samples).unwrap();
         let payload = &vector.payloads[0];
-        assert!(payload.expected_payload.starts_with(&vector.expected_schema_hash));
+        assert!(
+            payload
+                .expected_payload
+                .starts_with(&vector.expected_schema_hash)
+        );
         assert!(payload.expected_payload.ends_with(&payload.expected_cbor));
         assert_eq!(
             payload.expected_payload.len(),

@@ -457,7 +457,10 @@ mod tests {
     #[test]
     fn all_vectors_have_fcpc_magic() {
         for v in FcpcGoldenVector::load_all() {
-            assert!(v.expected_header.starts_with("46435043"), "header should start with FCPC magic");
+            assert!(
+                v.expected_header.starts_with("46435043"),
+                "header should start with FCPC magic"
+            );
         }
     }
 
@@ -488,7 +491,10 @@ mod tests {
 
         let encoded = frame.encode();
         let decoded = FcpcFrame::decode(&encoded).unwrap();
-        assert!(decoded.open(direction, &wrong_key).is_err(), "wrong key should fail decryption");
+        assert!(
+            decoded.open(direction, &wrong_key).is_err(),
+            "wrong key should fail decryption"
+        );
     }
 
     #[test]
@@ -509,7 +515,9 @@ mod tests {
         let encoded = frame.encode();
         let decoded = FcpcFrame::decode(&encoded).unwrap();
         assert!(
-            decoded.open(SessionDirection::ResponderToInitiator, &key).is_err(),
+            decoded
+                .open(SessionDirection::ResponderToInitiator, &key)
+                .is_err(),
             "wrong direction should fail decryption"
         );
     }
@@ -521,10 +529,29 @@ mod tests {
         let plaintext = b"same";
         let direction = SessionDirection::InitiatorToResponder;
 
-        let frame1 = FcpcFrame::seal(session_id, 1, direction, FcpcFrameFlags::ENCRYPTED, plaintext, &key).unwrap();
-        let frame2 = FcpcFrame::seal(session_id, 2, direction, FcpcFrameFlags::ENCRYPTED, plaintext, &key).unwrap();
+        let frame1 = FcpcFrame::seal(
+            session_id,
+            1,
+            direction,
+            FcpcFrameFlags::ENCRYPTED,
+            plaintext,
+            &key,
+        )
+        .unwrap();
+        let frame2 = FcpcFrame::seal(
+            session_id,
+            2,
+            direction,
+            FcpcFrameFlags::ENCRYPTED,
+            plaintext,
+            &key,
+        )
+        .unwrap();
 
-        assert_ne!(frame1.ciphertext, frame2.ciphertext, "different seq should produce different ciphertext");
+        assert_ne!(
+            frame1.ciphertext, frame2.ciphertext,
+            "different seq should produce different ciphertext"
+        );
     }
 
     #[test]
@@ -533,11 +560,30 @@ mod tests {
         let plaintext = b"same";
         let direction = SessionDirection::InitiatorToResponder;
 
-        let frame1 = FcpcFrame::seal(MeshSessionId([0xAA; 16]), 1, direction, FcpcFrameFlags::ENCRYPTED, plaintext, &key).unwrap();
-        let frame2 = FcpcFrame::seal(MeshSessionId([0xBB; 16]), 1, direction, FcpcFrameFlags::ENCRYPTED, plaintext, &key).unwrap();
+        let frame1 = FcpcFrame::seal(
+            MeshSessionId([0xAA; 16]),
+            1,
+            direction,
+            FcpcFrameFlags::ENCRYPTED,
+            plaintext,
+            &key,
+        )
+        .unwrap();
+        let frame2 = FcpcFrame::seal(
+            MeshSessionId([0xBB; 16]),
+            1,
+            direction,
+            FcpcFrameFlags::ENCRYPTED,
+            plaintext,
+            &key,
+        )
+        .unwrap();
 
         // Session ID is in AAD so tags differ even if ciphertext is the same
-        assert_ne!(frame1.tag, frame2.tag, "different session_id should produce different tags");
+        assert_ne!(
+            frame1.tag, frame2.tag,
+            "different session_id should produce different tags"
+        );
     }
 
     #[test]
@@ -546,7 +592,15 @@ mod tests {
         let key = [0x66; 32];
         let direction = SessionDirection::InitiatorToResponder;
 
-        let frame = FcpcFrame::seal(session_id, 0, direction, FcpcFrameFlags::ENCRYPTED, b"", &key).unwrap();
+        let frame = FcpcFrame::seal(
+            session_id,
+            0,
+            direction,
+            FcpcFrameFlags::ENCRYPTED,
+            b"",
+            &key,
+        )
+        .unwrap();
         let encoded = frame.encode();
         let decoded = FcpcFrame::decode(&encoded).unwrap();
         let opened = decoded.open(direction, &key).unwrap();

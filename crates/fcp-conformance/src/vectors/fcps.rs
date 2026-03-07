@@ -633,7 +633,10 @@ mod tests {
     #[test]
     fn all_vectors_have_fcps_magic() {
         for v in FcpsGoldenVector::load_all() {
-            assert!(v.expected_header.starts_with("46435053"), "header should start with FCPS magic");
+            assert!(
+                v.expected_header.starts_with("46435053"),
+                "header should start with FCPS magic"
+            );
         }
     }
 
@@ -658,8 +661,14 @@ mod tests {
     fn vector_2_has_two_symbols() {
         let v = vector_2_two_symbols();
         assert_eq!(v.symbols.len(), 2);
-        assert_ne!(v.symbols[0].esi, v.symbols[1].esi, "symbols should have different ESIs");
-        assert_eq!(v.symbols[0].k, v.symbols[1].k, "symbols in same frame should have same K");
+        assert_ne!(
+            v.symbols[0].esi, v.symbols[1].esi,
+            "symbols should have different ESIs"
+        );
+        assert_eq!(
+            v.symbols[0].k, v.symbols[1].k,
+            "symbols in same frame should have same K"
+        );
     }
 
     #[test]
@@ -687,7 +696,8 @@ mod tests {
             for (i, sym) in v.symbols.iter().enumerate() {
                 let enc = hex::decode(&sym.expected_encoded).unwrap();
                 assert_eq!(
-                    enc.len(), expected_record_size,
+                    enc.len(),
+                    expected_record_size,
                     "symbol[{i}] record should be {expected_record_size} bytes"
                 );
             }
@@ -711,7 +721,11 @@ mod tests {
             let expected_len = v.symbols.len() * record_size;
             let header_bytes = hex::decode(&v.expected_header).unwrap();
             let encoded_len = u32::from_le_bytes(header_bytes[12..16].try_into().unwrap()) as usize;
-            assert_eq!(encoded_len, expected_len, "total_payload_len mismatch for: {}", v.description);
+            assert_eq!(
+                encoded_len, expected_len,
+                "total_payload_len mismatch for: {}",
+                v.description
+            );
         }
     }
 
@@ -720,7 +734,12 @@ mod tests {
         for v in FcpsGoldenVector::load_all() {
             let header_bytes = hex::decode(&v.expected_header).unwrap();
             let count = u32::from_le_bytes(header_bytes[8..12].try_into().unwrap()) as usize;
-            assert_eq!(count, v.symbols.len(), "symbol count mismatch for: {}", v.description);
+            assert_eq!(
+                count,
+                v.symbols.len(),
+                "symbol count mismatch for: {}",
+                v.description
+            );
         }
     }
 }

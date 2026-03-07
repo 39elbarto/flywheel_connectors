@@ -432,7 +432,11 @@ mod tests {
     fn signing_bytes_start_with_domain_separator() {
         for v in SigningBytesGoldenVector::load_all() {
             let bytes = hex::decode(&v.expected_signing_bytes).unwrap();
-            assert_eq!(&bytes[..12], b"FCP2-SIGN-V1", "should start with domain separator");
+            assert_eq!(
+                &bytes[..12],
+                b"FCP2-SIGN-V1",
+                "should start with domain separator"
+            );
         }
     }
 
@@ -441,7 +445,11 @@ mod tests {
         for v in SigningBytesGoldenVector::load_all() {
             let bytes = hex::decode(&v.expected_signing_bytes).unwrap();
             let hash_bytes = hex::decode(&v.expected_schema_hash).unwrap();
-            assert_eq!(&bytes[12..20], hash_bytes.as_slice(), "schema hash at offset 12");
+            assert_eq!(
+                &bytes[12..20],
+                hash_bytes.as_slice(),
+                "schema hash at offset 12"
+            );
         }
     }
 
@@ -450,7 +458,11 @@ mod tests {
         for v in SigningBytesGoldenVector::load_all() {
             let bytes = hex::decode(&v.expected_signing_bytes).unwrap();
             let cbor = hex::decode(&v.unsigned_cbor).unwrap();
-            assert_eq!(&bytes[20..], cbor.as_slice(), "cbor should be at end of signing bytes");
+            assert_eq!(
+                &bytes[20..],
+                cbor.as_slice(),
+                "cbor should be at end of signing bytes"
+            );
         }
     }
 
@@ -466,7 +478,11 @@ mod tests {
     fn schema_hash_is_8_bytes() {
         for v in SigningBytesGoldenVector::load_all() {
             let hash_bytes = hex::decode(&v.expected_schema_hash).unwrap();
-            assert_eq!(hash_bytes.len(), 8, "schema hash should be 8 bytes (truncated BLAKE3)");
+            assert_eq!(
+                hash_bytes.len(),
+                8,
+                "schema hash should be 8 bytes (truncated BLAKE3)"
+            );
         }
     }
 
@@ -491,7 +507,8 @@ mod tests {
     #[test]
     fn all_signing_vectors_have_different_schema_ids() {
         let vectors = SigningBytesGoldenVector::load_all();
-        let ids: std::collections::HashSet<&str> = vectors.iter().map(|v| v.schema_id.as_str()).collect();
+        let ids: std::collections::HashSet<&str> =
+            vectors.iter().map(|v| v.schema_id.as_str()).collect();
         assert_eq!(ids.len(), vectors.len());
     }
 

@@ -243,8 +243,14 @@ mod tests {
     #[test]
     fn canonical_vector_has_valid_hex_fields() {
         for v in CanonicalPayloadGoldenVector::load_all() {
-            assert!(hex::decode(&v.expected_schema_hash).is_ok(), "schema hash should be valid hex");
-            assert!(hex::decode(&v.expected_cbor).is_ok(), "cbor should be valid hex");
+            assert!(
+                hex::decode(&v.expected_schema_hash).is_ok(),
+                "schema hash should be valid hex"
+            );
+            assert!(
+                hex::decode(&v.expected_cbor).is_ok(),
+                "cbor should be valid hex"
+            );
         }
     }
 
@@ -266,7 +272,10 @@ mod tests {
     #[test]
     fn canonical_vector_schema_namespace_prefixed() {
         for v in CanonicalPayloadGoldenVector::load_all() {
-            assert!(v.schema_namespace.starts_with("fcp."), "namespace should start with fcp.");
+            assert!(
+                v.schema_namespace.starts_with("fcp."),
+                "namespace should start with fcp."
+            );
         }
     }
 
@@ -328,7 +337,11 @@ mod tests {
     #[test]
     fn object_id_vector_expected_id_is_32_bytes() {
         for v in ObjectIdGoldenVector::load_all() {
-            assert_eq!(v.expected_object_id.len(), 64, "object_id should be 64 hex chars");
+            assert_eq!(
+                v.expected_object_id.len(),
+                64,
+                "object_id should be 64 hex chars"
+            );
         }
     }
 
@@ -343,7 +356,10 @@ mod tests {
     fn object_id_verify_bad_key() {
         let mut v = ObjectIdGoldenVector::load_all().remove(0);
         v.key = "ff".repeat(32);
-        assert!(v.verify().is_err(), "wrong key should produce wrong object_id");
+        assert!(
+            v.verify().is_err(),
+            "wrong key should produce wrong object_id"
+        );
     }
 
     #[test]
@@ -399,6 +415,10 @@ mod tests {
         let id_a = ObjectId::new(content, &zone_a, &schema, &key);
         let id_b = ObjectId::new(content, &zone_b, &schema, &key);
 
-        assert_ne!(id_a.to_string(), id_b.to_string(), "different zones must produce different IDs");
+        assert_ne!(
+            id_a.to_string(),
+            id_b.to_string(),
+            "different zones must produce different IDs"
+        );
     }
 }

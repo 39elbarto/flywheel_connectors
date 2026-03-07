@@ -901,12 +901,12 @@ mod tests {
 
     #[test]
     fn error_catalog_variant_is_transparent() {
-        let catalog_err = PolicyCatalogError::Deserialization {
-            message: "test".to_string(),
+        let catalog_err = PolicyCatalogError::Invalid {
+            message: "test catalog error".to_string(),
         };
         let err = GoogleProvisioningError::from(catalog_err);
         let msg = err.to_string();
-        assert!(msg.contains("test"), "got: {msg}");
+        assert!(msg.contains("test catalog error"), "got: {msg}");
     }
 
     // ── GoogleProvisioningSurfaceProfile tests ────────────────────────
@@ -956,12 +956,14 @@ mod tests {
             escalation_paths: vec![GoogleProvisioningScopeEscalation {
                 trigger: "test trigger".to_string(),
                 add_scopes: vec!["scope.c".to_string()],
+                notes: vec![],
             }],
             required_api_enablement: vec!["Test API".to_string()],
             project_prerequisites: vec!["prereq".to_string()],
             gcloud_assisted_steps: vec!["step1".to_string()],
             fallback_steps: vec!["fallback1".to_string()],
             runtime_materialization: vec!["output1".to_string()],
+            notes: vec![],
         };
         let profile = GoogleProvisioningSurfaceProfile::from(&policy);
         assert_eq!(profile.surface_id, "test_surface");
@@ -1303,10 +1305,12 @@ mod tests {
                 GoogleProvisioningScopeEscalation {
                     trigger: "trigger1".to_string(),
                     add_scopes: vec!["scope.b".to_string()],
+                    notes: vec![],
                 },
                 GoogleProvisioningScopeEscalation {
                     trigger: "trigger2".to_string(),
                     add_scopes: vec!["scope.c".to_string(), "scope.d".to_string()],
+                    notes: vec![],
                 },
             ],
         };

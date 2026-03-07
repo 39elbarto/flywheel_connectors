@@ -1,6 +1,235 @@
 {
   "version": "2026-03-06",
-  "generated_from_bead": "flywheel_connectors-lszk.45.1.6",
+  "generated_from_bead": "flywheel_connectors-lszk.45.1.8.1",
+  "provisioning_policy": {
+    "intent": "Provisioning must keep default scopes narrow, treat consent restrictions as first-class policy, and separate setup-time Google Cloud automation from runtime connector credentials.",
+    "default_scope_posture": "Start with the least-broad scope set that supports the selected workflow; widen only on explicit feature selection or a method-level requirement that cannot be satisfied otherwise.",
+    "consent_restriction_rules": [
+      "Do not request broad Gmail or Calendar scopes up front when a narrower read-only or event-scoped path satisfies the selected workflow.",
+      "Treat restricted Gmail scopes, broad Calendar scopes, and Chat app-auth scopes as explicit escalation points that the provisioning UX must explain before consent.",
+      "Google Workspace Events inherits scopes from the underlying product/event type, so setup must derive scopes from the selected event surface instead of inventing a separate broad workspaceevents scope."
+    ],
+    "runtime_separation_rules": [
+      "Application Default Credentials, local credentials files, and gcloud-authenticated setup are provisioning-only inputs; runtime connectors must materialize credential_id handles or in-memory access tokens instead.",
+      "Provisioning must never persist client-secret JSON, refresh tokens, or credentials-file paths into connector-owned runtime configuration.",
+      "Any setup path that cannot produce a runtime-safe auth reference stops at provisioning completion and must not mark the connector runtime as ready."
+    ],
+    "gcloud_automation_boundary": {
+      "automatable_steps": [
+        "Select and verify the target Google Cloud project before enabling APIs or creating downstream resources.",
+        "Enable required Google APIs and Pub/Sub resources where doing so only changes project bootstrap state.",
+        "Create Pub/Sub topics/subscriptions and bind publisher IAM for Workspace Events delivery when the operator has the required project permissions.",
+        "Run non-secret diagnostics such as current project, enabled services, and Pub/Sub test pulls."
+      ],
+      "forbidden_steps": [
+        "Silently broaden OAuth scopes or auto-approve escalation without an explicit operator choice.",
+        "Attempt to bypass OAuth consent, restricted-scope verification, Google Workspace admin approval, or organization policy gates.",
+        "Treat gcloud Application Default Credentials or local credential files as steady-state connector runtime auth.",
+        "Persist setup-time secrets or downloaded credential material into connector-owned state."
+      ],
+      "fallback_policy": [
+        "If gcloud is unavailable or blocked, emit deterministic manual setup steps for the same project resources instead of relaxing policy.",
+        "Manual fallback must preserve the same default scope plan and escalation rules as the gcloud-assisted path.",
+        "Workspace Events provisioning must not create the upstream subscription until the Pub/Sub topic and publisher IAM prerequisites are confirmed."
+      ]
+    },
+    "surfaces": [
+      {
+        "surface_id": "gmail",
+        "display_name": "Gmail connector provisioning",
+        "default_scopes": [
+          "https://www.googleapis.com/auth/gmail.readonly"
+        ],
+        "required_api_enablement": [
+          "Gmail API"
+        ],
+        "project_prerequisites": [
+          "OAuth consent screen configured for the selected project.",
+          "OAuth client created for the user-auth flow used by the host provisioning UX."
+        ],
+        "escalation_paths": [
+          {
+            "trigger": "User enables outbound send or draft-send workflows.",
+            "add_scopes": [
+              "https://www.googleapis.com/auth/gmail.send",
+              "https://www.googleapis.com/auth/gmail.compose"
+            ],
+            "notes": [
+              "Prefer send/compose over full mailbox scopes when composed delivery is the only added behavior."
+            ]
+          },
+          {
+            "trigger": "User enables message mutation workflows such as modify or trash.",
+            "add_scopes": [
+              "https://www.googleapis.com/auth/gmail.modify"
+            ],
+            "notes": [
+              "Trash/modify should not escalate directly to full mailbox access."
+            ]
+          },
+          {
+            "trigger": "User explicitly enables permanent delete or import-style full-mailbox operations.",
+            "add_scopes": [
+              "https://mail.google.com/"
+            ],
+            "notes": [
+              "Restricted broad mailbox scope; require explicit acknowledgement that the workflow really needs irreversible or full-mailbox semantics."
+            ]
+          },
+          {
+            "trigger": "User enables settings, forwarding, or filter-management workflows.",
+            "add_scopes": [
+              "https://www.googleapis.com/auth/gmail.settings.basic"
+            ],
+            "notes": [
+              "Forwarding and filter changes materially affect data routing and remain outside the default path."
+            ]
+          }
+        ],
+        "gcloud_assisted_steps": [
+          "Confirm Gmail API enablement for the chosen project before launching user consent.",
+          "Inspect current consent-screen/project posture so the setup UX can explain when requested scopes increase verification burden.",
+          "Use gcloud-authenticated setup only for project/bootstrap checks; final runtime output must still be a credential_id or in-memory token path."
+        ],
+        "fallback_steps": [
+          "Provide manual console steps to enable the Gmail API and select or create the OAuth client when gcloud is unavailable.",
+          "Complete consent through the host provisioning flow, then materialize a runtime-safe credential reference instead of storing credential files."
+        ],
+        "runtime_materialization": [
+          "Connector runtime accepts credential_id, in-memory access token, or refresh-token exchange via the shared Google auth substrate.",
+          "Credentials files, default credentials, and ADC remain provisioning-only and must not be passed through as runtime config."
+        ],
+        "notes": [
+          "The initial Gmail migration target is the current read/list/history connector surface, so the default bundle stays on gmail.readonly until send or mutation features are explicitly selected.",
+          "History sync still depends on service-owned cursor/lease state, but that does not require scope widening beyond the read-only baseline."
+        ]
+      },
+      {
+        "surface_id": "calendar",
+        "display_name": "Google Calendar connector provisioning",
+        "default_scopes": [
+          "https://www.googleapis.com/auth/calendar.readonly"
+        ],
+        "required_api_enablement": [
+          "Google Calendar API"
+        ],
+        "project_prerequisites": [
+          "OAuth consent screen configured for the selected project.",
+          "OAuth client created for the interactive Calendar user-auth flow."
+        ],
+        "escalation_paths": [
+          {
+            "trigger": "User enables event create, update, delete, or quick-add workflows.",
+            "add_scopes": [
+              "https://www.googleapis.com/auth/calendar.events"
+            ],
+            "notes": [
+              "Prefer event-scoped mutation access over broader calendar-management scopes."
+            ]
+          },
+          {
+            "trigger": "User needs to create or manage secondary calendars owned by the app.",
+            "add_scopes": [
+              "https://www.googleapis.com/auth/calendar.app.created"
+            ],
+            "notes": [
+              "Use the app-created scope before asking for full calendar ownership."
+            ]
+          },
+          {
+            "trigger": "User enables calendar-list mutation, calendar-property mutation, or ACL-management workflows.",
+            "add_scopes": [
+              "https://www.googleapis.com/auth/calendar.calendarlist",
+              "https://www.googleapis.com/auth/calendar.acls",
+              "https://www.googleapis.com/auth/calendar"
+            ],
+            "notes": [
+              "This is the broad/admin edge of Calendar provisioning and should be an explicit opt-in."
+            ]
+          }
+        ],
+        "gcloud_assisted_steps": [
+          "Confirm Calendar API enablement before launching user consent.",
+          "Preflight whether the requested feature set can stay on read-only or event-scoped permissions before requesting broader calendar management."
+        ],
+        "fallback_steps": [
+          "Provide manual console steps for Calendar API enablement and OAuth client selection when gcloud cannot manage the project.",
+          "Keep the same default scope plan and return a runtime-safe credential reference after consent completes."
+        ],
+        "runtime_materialization": [
+          "Runtime should use credential_id handles or ephemeral access tokens from the shared auth chain, never raw local credentials files.",
+          "Provisioning-only auth sources such as ADC may assist setup diagnostics but must not define steady-state connector auth."
+        ],
+        "notes": [
+          "The current handwritten Calendar connector already separates runtime auth from setup by accepting token or credential_id only; migration should preserve that runtime shape while moving setup logic into the shared substrate."
+        ]
+      },
+      {
+        "surface_id": "workspace_events",
+        "display_name": "Google Workspace Events + Pub/Sub provisioning",
+        "default_scopes": [
+          "https://www.googleapis.com/auth/chat.messages.readonly"
+        ],
+        "required_api_enablement": [
+          "Google Workspace Events API",
+          "Google Cloud Pub/Sub API"
+        ],
+        "project_prerequisites": [
+          "Pub/Sub topic created in the same Google Cloud project used for the Workspace Events subscription.",
+          "Publisher IAM granted to the Google Workspace delivery service account for the selected event source."
+        ],
+        "escalation_paths": [
+          {
+            "trigger": "User selects Chat membership events instead of message-only events.",
+            "add_scopes": [
+              "https://www.googleapis.com/auth/chat.memberships.readonly"
+            ],
+            "notes": [
+              "Prefer readonly membership access unless mutation/admin behavior is explicitly requested."
+            ]
+          },
+          {
+            "trigger": "User selects Chat space metadata events.",
+            "add_scopes": [
+              "https://www.googleapis.com/auth/chat.spaces.readonly"
+            ],
+            "notes": [
+              "Keep the default user-auth flow on readonly scopes whenever possible."
+            ]
+          },
+          {
+            "trigger": "User enables Chat app-auth or higher-privilege event delivery paths that require administrator approval.",
+            "add_scopes": [
+              "https://www.googleapis.com/auth/chat.app.messages.readonly",
+              "https://www.googleapis.com/auth/chat.app.memberships",
+              "https://www.googleapis.com/auth/chat.app.spaces"
+            ],
+            "notes": [
+              "App-auth Chat scopes stay out of the default path because they require separate admin and Chat app setup."
+            ]
+          }
+        ],
+        "gcloud_assisted_steps": [
+          "Enable the Google Workspace Events API and Pub/Sub API for the chosen project.",
+          "Create the Pub/Sub topic and pull subscription used as the notification endpoint.",
+          "Bind roles/pubsub.publisher on the topic to the correct Google Workspace delivery service account for the selected event source.",
+          "Run non-destructive test pulls from the Pub/Sub subscription after subscription creation."
+        ],
+        "fallback_steps": [
+          "Provide exact manual console steps for API enablement, topic creation, publisher IAM, and pull-subscription creation when gcloud is unavailable.",
+          "Do not create the Workspace Events subscription until the Pub/Sub topic and IAM prerequisites are confirmed."
+        ],
+        "runtime_materialization": [
+          "Workspace Events runtime receives normalized topic/subscription identifiers and a runtime-safe credential reference; Pub/Sub bootstrap credentials remain a provisioning concern.",
+          "Provisioning may test Pub/Sub delivery, but ongoing subscription renewal and delivery repair belong in the connector or host runtime."
+        ],
+        "notes": [
+          "The default onboarding path assumes Chat message events because that keeps the first consent surface narrow; additional Workspace products can add their own explicit escalation entries later.",
+          "Workspace Events scopes come from the underlying Google Workspace product and event type, not from a separate broad workspaceevents OAuth scope."
+        ]
+      }
+    ]
+  },
   "helper_overlay_policy": {
     "intent": "Handwritten helpers are allowed only as thin workflow overlays above generated Google operations.",
     "require_all": [

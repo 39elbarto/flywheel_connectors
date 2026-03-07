@@ -86,10 +86,14 @@ The Google connector foundation has an additional normative architecture contrac
 
 - **ADR**: `docs/ADR_GOOGLE_Discovery_Snapshot_Baseline.md`
 - **Owner Bead**: `flywheel_connectors-lszk.45.1.1`
+- **Packaging/Distribution Addendum**: `docs/ADR_GOOGLE_Discovery_Snapshot_Baseline.md` (distribution-channel boundary for native artifacts)
+- **Packaging/Distribution Addendum Owner Bead**: `flywheel_connectors-lszk.45.1.1.1`
 - **Service Resolution Baseline (Alias + `service:version`)**: `docs/STUDY_GOOGLE_Discovery_Service_Resolution.md`
 - **Service Resolution Baseline Owner Bead**: `flywheel_connectors-lszk.45.1.2.1`
 - **Security/Policy Mapping Baseline**: `docs/STUDY_GOOGLE_Security_Policy_Mapping.md`
 - **Security/Policy Mapping Baseline Owner Bead**: `flywheel_connectors-lszk.45.1.6`
+- **Provisioning Policy Baseline (`provisioning_policy`)**: `crates/fcp-google-discovery/data/google_policy_matrix.v1.json`
+- **Provisioning Policy Baseline Owner Bead**: `flywheel_connectors-lszk.45.1.8.1`
 - **Helper Overlay Policy + Workflow Shortlist Baseline**: `crates/fcp-google-discovery/data/google_policy_matrix.v1.json` (`helper_overlay_policy`)
 - **Helper Overlay Policy Baseline Owner Bead**: `flywheel_connectors-lszk.45.1.5.2`
 - **Baseline Audit (Gmail/Calendar Convergence Map)**: `docs/STUDY_GOOGLE_Gmail_Calendar_Baseline_Audit.md`
@@ -104,6 +108,14 @@ All beads under `flywheel_connectors-lszk.45.1.*` and downstream migration beads
 - explicit handwritten override layers above generated metadata,
 - stable manifest/interface/introspection surfaces per shipped connector version,
 - rejection of live runtime Discovery-driven surface mutation.
+
+For packaging/distribution ADR work under `flywheel_connectors-lszk.45.1.1.1`
+and any downstream release/install automation for Google-family connectors, the
+same ADR is also a required reference for:
+
+- preserving native compiled connector payloads even when release channels add convenience wrappers,
+- keeping the trusted runtime boundary at `binary + manifest` rather than package-manager glue,
+- and rejecting any install/execution path that introduces Node.js or another interpreted runtime dependency into connector execution.
 
 For Discovery substrate work under `flywheel_connectors-lszk.45.1.2.*`, the service-resolution baseline document is a required reference for:
 
@@ -131,6 +143,23 @@ reference for:
 - strict allow criteria for handwritten helper overlays above generated operations,
 - forbidden helper patterns (hidden capabilities, single-op rewrites, auth duplication),
 - and the initial high-value workflow shortlist approved for helper treatment.
+
+For provisioning automation work under `flywheel_connectors-lszk.45.1.8`,
+downstream Gmail/Calendar migration beads under `flywheel_connectors-lszk.45.2.*`,
+and Workspace Events work under `flywheel_connectors-lszk.45.3.5`, the
+`provisioning_policy` section of
+`crates/fcp-google-discovery/data/google_policy_matrix.v1.json` is a required
+reference for:
+
+- narrow-by-default scope selection and explicit escalation triggers,
+- separation between provisioning-only auth sources and runtime-safe credential materialization,
+- `gcloud`-assisted API/Pub/Sub bootstrap boundaries,
+- and deterministic manual fallbacks when `gcloud` or project permissions are unavailable.
+
+The shared implementation entrypoint for that contract is
+`crates/fcp-google-discovery/src/provisioning.rs`, which materializes
+`provisioning_policy` into concrete `ProvisioningRecipe` and `SetupDescriptor`
+artifacts for Gmail, Calendar, and Workspace Events.
 
 For Gmail/Calendar migration work specifically (`flywheel_connectors-lszk.45.2.1`, `flywheel_connectors-lszk.45.2.2`, `flywheel_connectors-lszk.45.2.6`), the baseline audit document is a required source-backed reference for:
 

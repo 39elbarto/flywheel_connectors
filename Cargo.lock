@@ -2319,6 +2319,7 @@ dependencies = [
  "fcp-browser",
  "fcp-conformance",
  "fcp-core",
+ "fcp-cron",
  "fcp-crypto",
  "fcp-discord",
  "fcp-figma",
@@ -2555,6 +2556,7 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.18",
+ "tokio",
  "wiremock",
 ]
 
@@ -3952,6 +3954,7 @@ dependencies = [
  "fcp-async-core",
  "fcp-core",
  "fcp-crypto",
+ "fcp-google-discovery",
  "fcp-manifest",
  "fcp-testkit",
  "futures-util",

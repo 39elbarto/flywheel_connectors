@@ -3,6 +3,7 @@
 > **Status**: ACCEPTED  
 > **Date**: 2026-03-06  
 > **Owner Bead**: `flywheel_connectors-lszk.45.1.1`  
+> **Addendum Bead**: `flywheel_connectors-lszk.45.1.1.1`  
 > **Program Epic**: `flywheel_connectors-lszk.45.1`
 
 ---
@@ -117,6 +118,29 @@ This decision is specifically meant to preserve:
 - **Reproducible fixtures**: tests must pin against known API shapes instead of today's network response.
 - **Operational clarity**: when behavior changes, the change should appear as a commit, a bead, and a release note.
 
+### 3.6 Distribution Channels Are Separate From Runtime Form Factor
+
+The upstream `googleworkspace/cli` project is a useful packaging data point, not a runtime template: it ships a native Rust `gws` binary while also offering convenience distribution paths around prebuilt binaries.
+
+What is worth preserving:
+
+1. A broad Google CLI can still be implemented as a compiled Rust binary.
+2. Prebuilt multi-platform artifacts and convenience installers reduce operator friction.
+3. Distribution wrappers can exist without turning the actual runtime into an interpreted application.
+
+What FCP must reject:
+
+1. Requiring Node.js, `npm`, or any other interpreted runtime as part of connector execution.
+2. Shipping a connector whose operational behavior depends on JavaScript wrapper code at install time or runtime.
+3. Treating a package-manager wrapper as part of the trusted connector runtime boundary.
+
+The normative FCP rule stays stricter than upstream:
+
+1. The runtime artifact is still exactly one connector binary plus one manifest file.
+2. Any optional installer, package-manager wrapper, or release-channel helper is only a distribution shell around those native artifacts.
+3. Wrapper code MUST NOT participate in request handling, auth flow execution, tool-surface generation, or any other runtime connector semantics.
+4. A connector install path that requires `npm install` or another interpreted dependency manager is out of policy for FCP.
+
 ---
 
 ## 4. Rejected Alternatives
@@ -146,6 +170,18 @@ We reject it because it would:
 3. reduce reuse across Gmail, Calendar, Drive, Docs, Sheets, YouTube, and related services.
 
 The correct tradeoff is **Discovery-driven generation on pinned inputs**, not runtime mutation and not purely manual maintenance.
+
+### 4.3 Rejected: npm-Mediated Connector Runtime Boundary
+
+It is acceptable to learn from upstream release ergonomics, but it is not acceptable to import upstream's install-time assumptions into FCP's execution model.
+
+We reject any design where:
+
+1. a connector requires Node.js or package-manager glue to run,
+2. wrapper code becomes part of the security-reviewed runtime boundary,
+3. multi-file interpreted packaging obscures the actual shipped connector surface.
+
+FCP distribution may borrow convenience. It must not borrow runtime dependency leakage.
 
 ---
 
@@ -183,11 +219,20 @@ We still want:
 
 We just want those changes to happen at intentional update boundaries where FCP's security and audit model still holds.
 
+### 5.4 Packaging Consequence for Google Connector Work
+
+Downstream release/install work may provide operator-friendly delivery paths for Google-family connectors, but those paths must preserve the same audited runtime payload:
+
+1. a native Rust connector binary,
+2. a manifest that matches the shipped interface and policy contract,
+3. no interpreted runtime dependency in the execution path.
+
 ---
 
 ## 6. Adoption and References
 
 - This ADR is normative for `flywheel_connectors-lszk.45.1.*` foundation beads.
+- `flywheel_connectors-lszk.45.1.1.1` records the packaging/distribution addendum: convenience wrappers may distribute native artifacts, but they do not relax the binary-plus-manifest runtime rule.
 - Migration beads under `flywheel_connectors-lszk.45.2.*` MUST assume pinned snapshots, not live runtime Discovery mutation.
 - The requirements index records this ADR as the baseline architectural contract for the Google connector platform.
 - Update this ADR only through explicit bead-linked changes.

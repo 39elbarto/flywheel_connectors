@@ -38,3 +38,7 @@ fcp-testkit = { path = "../fcp-testkit", default-features = false }
 [[bench]]
 name = "symbol_store"
 harness = false
+
+[[bench]]
+name = "repair_controller"
+harness = false

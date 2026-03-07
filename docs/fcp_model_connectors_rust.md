@@ -2721,6 +2721,75 @@ These patterns map to V2 archetypes in the manifest:
 | Knowledge | Filesystem watch + search | Obsidian, Notion |
 | DevOps | Typed CLI wrappers | gh, kubectl |
 
+### 18.4 Cross-Platform Messaging Connector Synthesis (Discord + Telegram)
+
+The Discord and Telegram connector studies converge on the same FCP shape: a small control-plane adapter around a supervised transport loop, mesh-backed connector state, explicit ordering policy, and a single retry taxonomy shared by transport and API calls. Platform differences still matter, but they should appear as transport adapters and metadata mapping, not as ad hoc connector architecture.
+
+**Shared patterns that SHOULD be standardized in the SDK or template:**
+
+| Concern | Recommended FCP pattern | Discord evidence | Telegram evidence |
+|---------|-------------------------|------------------|-------------------|
+| Transport lifecycle | Run a dedicated supervisor with bounded exponential backoff, clean shutdown, and explicit liveness checks | Gateway reconnect loop, session resume, heartbeat zombie detection | Supervised polling runner, recoverable `getUpdates` conflicts, retryable network classifier |
+| Cursor/session continuity | Persist cursors or resume metadata in `ConnectorStateObject`, not local process memory or disk-only caches | `session_id`, `resume_url`, `sequence` must survive reconnects | update offsets must survive restarts without replay storms |
+| Ordering policy | Expose ordering keys and per-conversation serialization as a runtime primitive | gateway events arrive globally ordered but handlers still need scoped sequencing | per-chat sequentialization prevents state races and rate-limit bursts |
+| Retry classification | Centralize retryable vs resumable vs terminal error decisions | REST bucket retries plus WebSocket reconnect behavior | network classifier, parse fallback, 409 conflict handling |
+| Remote identity mapping | Treat platform IDs as mutable external identifiers that can require repair or migration | channels, threads, and permissions are distinct remote objects | group migration replaces chat IDs; thread routing depends on `message_thread_id` |
+| Rendering/output safety | Prefer a formatting pipeline with deterministic downgrade paths | structured message rendering is separate from transport | HTML send path falls back to plain text instead of dropping the response |
+
+**Platform-specific adaptations that SHOULD stay behind connector-internal modules:**
+
+- Polling vs WebSocket vs webhook transport differences.
+- Platform-specific rate-limit rules and bucket calculations.
+- Thread/topic/channel identifier quirks and metadata normalization.
+- Rich message formatting features that are not portable across platforms.
+
+**Reusable components worth promoting into shared connector patterns:**
+
+- `SupervisedTransport`: owns reconnect, backoff, liveness probes, and shutdown.
+- `CursorState`: mesh-backed storage for offsets, resume tokens, dedupe windows, and remote ID repairs.
+- `RetryClassifier`: one place to decide retry, resume, re-authenticate, or fail closed.
+- `OrderingExecutor`: per-channel or per-conversation serialization with bounded concurrency.
+- `RenderFallback`: rich formatting renderer with a guaranteed plain-text escape hatch.
+- `RemoteIdentityMap`: mutable mapping for chats/channels/threads that can be migrated without losing policy state.
+
+**Anti-patterns to avoid when porting incumbent connectors into FCP:**
+
+- Local-disk authoritative state for cursors or pairing data.
+- Implicit allow behavior when no allowlist or pairing state exists.
+- Multiple retry/error handlers that drift apart by transport.
+- Transport code that also mutates policy state or renders user-visible output.
+- Infinite reconnect loops with no liveness detection or shutdown path.
+
+**Porting guidance for existing connectors:**
+
+- Separate transport supervision from policy, formatting, and business logic before translating APIs.
+- Move durable state into mesh objects first; only keep best-effort caches in process.
+- Normalize platform thread or topic metadata into FCP envelopes instead of leaking platform-specific branching throughout handlers.
+- Default to deny on inbound actor authorization, callback handling, and write operations.
+
+**Ordering examples using today's SDK surface:**
+
+```rust
+use fcp_sdk::prelude::*;
+
+// Telegram: preserve update ordering and carry chat/thread identity in metadata.
+let telegram_event = EventEnvelope::new(
+    "telegram.message.new",
+    EventData::new(connector_id.clone(), instance_id.clone(), ZoneId::community(), principal, payload)
+        .with_thread_info(ThreadInfo::new(chat_id.to_string(), ThreadKind::Channel)),
+)
+.with_seq(update_id as u64)
+.with_cursor_seq(update_id as u64);
+
+// Discord: preserve gateway dispatch ordering even when the payload itself is unchanged.
+let discord_event = EventEnvelope::new(
+    "discord.message",
+    EventData::new(connector_id, instance_id, ZoneId::community(), principal, payload),
+)
+.with_seq(gateway_seq)
+.with_cursor_seq(gateway_seq);
+```
+
 ---
 
 ## 19. Rust Connector Skeleton (SDK-aligned)
@@ -2773,6 +2842,17 @@ Implementation notes:
 - Enforce Strict idempotency when required; return prior receipts on duplicate idempotency_key.
 - When producing mesh objects, include `ObjectHeader` with provenance.
 
+### 19.3 Recommended Module Layout for Messaging Connectors
+
+- `config.rs`: parse configuration and reject insecure combinations early.
+- `auth.rs`: resolve credentials and capability-scoped auth without transport concerns.
+- `transport.rs`: supervised polling, WebSocket, or webhook lifecycle.
+- `state.rs`: mesh-backed cursor, resume, dedupe, and remote-ID state.
+- `mapping.rs`: normalize platform objects into zones, channels, threads, and principals.
+- `render.rs`: outbound formatting plus safe downgrade behavior.
+- `execute.rs`: request handlers and side-effect orchestration.
+- `tests.rs` or inline `#[cfg(test)]`: transport resume, duplicate delivery, ordering, fallback rendering, and authorization regression coverage.
+
 ---
 
 ## 20. Conformance Checklist (Connector)
@@ -2801,6 +2881,7 @@ Connector MUST:
 - Use `effective_taint()` for taint checks (respecting `taint_reductions`).
 - Externalize state to `ConnectorStateObject` (authoritative state lives in mesh, not local cache).
 - Use `singleton_writer = true` in manifest if connector requires single-writer semantics.
+- Persist transport cursors, resume metadata, dedupe windows, and remote ID migrations in connector state when loss would cause replay, duplication, or policy drift.
 
 **Approval & Authorization:**
 - Use unified `ApprovalToken` with `ApprovalScope::Elevation` or `ApprovalScope::Declassification`.
@@ -2817,6 +2898,14 @@ Connector MUST:
 - Negotiate crypto suite via `MeshSessionHello`/`MeshSessionAck`.
 - Derive directional MAC keys (k_mac_i2r, k_mac_r2i) from session PRK.
 - Maintain per-sender monotonic `frame_seq`; encrypt via per-sender subkeys.
+- Supervise long-lived transports with bounded backoff, explicit liveness detection, and a clean shutdown path.
+- Centralize retry classification so reconnect, resume, re-authenticate, and fail-closed decisions are deterministic.
+
+**Messaging Semantics (NORMATIVE for messaging connectors):**
+- Provide explicit ordering keys for stateful conversations and serialize work per conversation when the upstream platform requires it.
+- Normalize remote thread, topic, or channel identifiers into connector metadata instead of hard-coding platform branches across handlers.
+- Degrade outbound rich formatting to a safe plain-text path instead of dropping user-visible responses.
+- Treat mutable remote identifiers (for example group migrations) as first-class state transitions.
 
 **Provable Authority (NORMATIVE):**
 - Verify `grant_object_ids` in CapabilityToken to confirm token grants ⊆ object grants.
@@ -2828,6 +2917,12 @@ Connector MUST:
 
 **Observability (NORMATIVE when present):**
 - Propagate `TraceContext` from `InvokeRequest` to `AuditEvent` for end-to-end tracing.
+
+**Connector-Specific Tests (NORMATIVE for messaging connectors):**
+- Cover reconnect or resume behavior, including duplicate delivery after partial failure.
+- Cover per-conversation ordering and rate-limit behavior under concurrent events.
+- Cover formatting fallback paths and hostile input that breaks platform-specific rich rendering.
+- Cover remote identifier migration or repair flows so policy state survives upstream changes.
 
 **Fuzzing and Adversarial Tests (NORMATIVE for reference implementation):**
 

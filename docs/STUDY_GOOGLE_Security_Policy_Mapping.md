@@ -1,8 +1,8 @@
 # STUDY: Google Security and Policy Mapping Baseline
 
 > **Status**: Source-backed baseline  
-> **Date**: 2026-03-06  
-> **Owner Bead**: `flywheel_connectors-lszk.45.1.6`  
+> **Date**: 2026-03-07  
+> **Owner Beads**: `flywheel_connectors-lszk.45.1.6`, `flywheel_connectors-lszk.45.1.8.1`  
 > **Program Track**: `flywheel_connectors-lszk.45`
 
 ---
@@ -17,7 +17,8 @@ Define the normative translation layer between Google Discovery methods and FCP 
 - approval modes,
 - recommended deployment zones,
 - service host allowlists,
-- service-specific exceptions/carve-outs.
+- service-specific exceptions/carve-outs,
+- and provisioning/setup policy for scope posture, escalation triggers, runtime-vs-provisioning auth separation, and `gcloud`-assisted bootstrap boundaries.
 
 This mapping is the policy substrate used by future Google generator work. Discovery says what methods exist; this policy map says how safe they are in FCP and what control envelope they must run under.
 
@@ -33,12 +34,17 @@ Typed loader and classifier API:
 
 - `crates/fcp-google-discovery/src/policy.rs`
 
+Provisioning/setup policy lives in the same artifact under the top-level
+`provisioning_policy` section so scope escalation and runtime-auth separation
+stay versioned with the method-policy map.
+
 Key behavior implemented in the typed loader:
 
 1. Deterministic parsing/validation of service profiles and method rules.
 2. Rule matching precedence: exact > prefix wildcard (`foo.*`) > catch-all (`*`).
 3. Fail-closed fallback support via per-service `*` rules (`google.review_required` + `forbidden`).
 4. Alias-aware selector resolution support through `ServiceAliasRegistry`.
+5. Deterministic validation of per-surface provisioning rules, including narrow default scopes, explicit escalation triggers, and `gcloud` automation boundaries.
 
 ---
 
@@ -95,7 +101,45 @@ This baseline covers first migration and expansion services:
 
 ---
 
-## 6) Generator Contract
+## 6) Provisioning / Setup Policy Baseline
+
+The Google foundation baseline now includes a typed provisioning policy in
+`crates/fcp-google-discovery/data/google_policy_matrix.v1.json`
+(`provisioning_policy`) with first-class profiles for:
+
+- Gmail
+- Google Calendar
+- Google Workspace Events + Pub/Sub bootstrap
+
+This section is intentionally architectural, not polish. The setup UX needs to
+encode hard Google constraints that materially affect connector behavior:
+
+1. **Narrow-by-default scopes**: start from the smallest scope bundle that
+   supports the selected workflow and only widen on explicit feature selection.
+2. **Explicit escalation triggers**: send, mutation, admin, or app-auth flows
+   must map to named escalation paths rather than silently broadening consent.
+3. **Runtime/provisioning auth separation**: ADC, local credentials files, and
+   `gcloud`-authenticated bootstrap are setup-time inputs only; runtime still
+   materializes `credential_id` handles or in-memory tokens through the shared
+   auth substrate.
+4. **`gcloud` boundary clarity**: `gcloud` may automate project/API/Pub/Sub
+   bootstrap when it genuinely reduces friction, but it must never bypass
+   consent, restricted-scope verification, admin approval, or org policy.
+5. **Deterministic fallback**: when `gcloud` is unavailable, the system must
+   emit equivalent manual steps instead of relaxing scope or auth policy.
+
+Workspace Events needs extra attention because the subscription lifecycle is not
+just OAuth consent. The Pub/Sub topic, delivery IAM, and same-project
+constraints are part of the provisioning contract and therefore belong in the
+typed policy artifact rather than ad hoc setup notes.
+
+Implementation note for `flywheel_connectors-lszk.45.1.8`: the shared planner in
+`crates/fcp-google-discovery/src/provisioning.rs` consumes this policy baseline
+and emits concrete `ProvisioningRecipe` / `SetupDescriptor` bundles so downstream
+connectors can reuse one deterministic setup contract instead of hand-rolling
+surface-specific provisioning logic.
+
+## 7) Generator Contract
 
 When deriving operation descriptors from Discovery snapshots:
 

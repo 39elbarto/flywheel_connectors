@@ -23,4 +23,5 @@ thiserror = { workspace = true }
 
 [dev-dependencies]
 fcp-async-core = { workspace = true }
+tokio = { version = "1.49", features = ["rt"] }
 wiremock = { workspace = true }

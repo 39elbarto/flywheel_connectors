@@ -301,27 +301,33 @@ related = ["slack.list_channels"]
 
 [provides.operations."slack.upload_file"]
 description = "Upload a file to a Slack channel"
-capability = "slack.write"
+capability = "slack.files.write"
 risk_level = "medium"
 safety_tier = "risky"
 requires_approval = "policy"
 idempotency = "none"
 
 [provides.operations."slack.upload_file".input_schema]
-required = ["channels", "content"]
+required = ["channels", "content_object_id", "resolved_content"]
 type = "object"
 [provides.operations."slack.upload_file".input_schema.properties.channels]
 type = "string"
-[provides.operations."slack.upload_file".input_schema.properties.content]
+[provides.operations."slack.upload_file".input_schema.properties.content_object_id]
+type = "string"
+[provides.operations."slack.upload_file".input_schema.properties.resolved_content]
 type = "string"
 [provides.operations."slack.upload_file".input_schema.properties.filename]
 type = "string"
 
 [provides.operations."slack.upload_file".output_schema]
-required = ["file"]
+required = ["file", "file_object_id", "source_object_id"]
 type = "object"
 [provides.operations."slack.upload_file".output_schema.properties.file]
 type = "object"
+[provides.operations."slack.upload_file".output_schema.properties.file_object_id]
+type = "string"
+[provides.operations."slack.upload_file".output_schema.properties.source_object_id]
+type = "string"
 
 [provides.operations."slack.upload_file".network_constraints]
 host_allow = ["slack.com", "*.slack.com", "files.slack.com"]
@@ -440,7 +446,7 @@ related = ["slack.list_channels"]
 
 [provides.operations."slack.download_file"]
 description = "Download a shared file from Slack"
-capability = "slack.read"
+capability = "slack.files.read"
 risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
@@ -453,9 +459,11 @@ type = "object"
 type = "string"
 
 [provides.operations."slack.download_file".output_schema]
-required = ["content"]
+required = ["file", "content_object_id"]
 type = "object"
-[provides.operations."slack.download_file".output_schema.properties.content]
+[provides.operations."slack.download_file".output_schema.properties.file]
+type = "object"
+[provides.operations."slack.download_file".output_schema.properties.content_object_id]
 type = "string"
 
 [provides.operations."slack.download_file".network_constraints]

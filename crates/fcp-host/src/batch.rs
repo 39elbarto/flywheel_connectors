@@ -9,7 +9,7 @@
 //!
 //! Based on bead `flywheel_connectors-2b2l`.
 
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 use fcp_core::ZoneId;
@@ -35,7 +35,7 @@ pub struct BatchInvokeRequest {
 pub struct BatchOperation {
     /// Unique identifier for this operation within the batch.
     pub id: String,
-    /// Tool identifier (e.g., "fcp.discord.send_message").
+    /// Tool identifier (e.g., ``fcp.discord.send_message``).
     pub tool: String,
     /// Input payload for the tool.
     pub input: serde_json::Value,
@@ -61,11 +61,11 @@ pub struct BatchOptions {
     pub timeout_ms: u64,
 }
 
-fn default_max_parallelism() -> u32 {
+const fn default_max_parallelism() -> u32 {
     8
 }
 
-fn default_timeout_ms() -> u64 {
+const fn default_timeout_ms() -> u64 {
     30_000
 }
 
@@ -93,7 +93,7 @@ pub enum BatchStatus {
     PartialSuccess,
     /// All operations failed.
     AllFailed,
-    /// Batch was aborted (e.g., stop_on_first_error triggered).
+    /// Batch was aborted (e.g., `stop_on_first_error` triggered).
     Aborted,
 }
 
@@ -178,14 +178,18 @@ pub struct ExecutionPlan {
 impl ExecutionPlan {
     /// Number of tiers (sequential depth).
     #[must_use]
-    pub fn depth(&self) -> usize {
+    pub const fn depth(&self) -> usize {
         self.tiers.len()
     }
 
     /// Maximum width (largest tier).
     #[must_use]
     pub fn max_width(&self) -> usize {
-        self.tiers.iter().map(|t| t.operation_ids.len()).max().unwrap_or(0)
+        self.tiers
+            .iter()
+            .map(|t| t.operation_ids.len())
+            .max()
+            .unwrap_or(0)
     }
 }
 
@@ -228,7 +232,7 @@ pub struct BatchZoneValidator {
 impl BatchZoneValidator {
     /// Create a new zone validator.
     #[must_use]
-    pub fn new(agent_zone: ZoneId, registry: ZoneRegistry) -> Self {
+    pub const fn new(agent_zone: ZoneId, registry: ZoneRegistry) -> Self {
         Self {
             agent_zone,
             registry,
@@ -238,13 +242,17 @@ impl BatchZoneValidator {
     /// Validate all operations are zone-accessible.
     ///
     /// Returns the IDs of operations that violate zone constraints.
+    ///
+    /// # Errors
+    /// Returns [`HostError::PreflightFailed`] when any operation crosses a
+    /// zone boundary that the current agent zone cannot access.
     pub fn validate(&self, operations: &[BatchOperation]) -> HostResult<()> {
         let mut violations = Vec::new();
         for op in operations {
-            if let Some(connector_zone) = self.registry.get_zone(&op.tool) {
-                if !zone_accessible(&self.agent_zone, connector_zone) {
-                    violations.push(op.id.clone());
-                }
+            if let Some(connector_zone) = self.registry.get_zone(&op.tool)
+                && !zone_accessible(&self.agent_zone, connector_zone)
+            {
+                violations.push(op.id.clone());
             }
             // Unknown tools are allowed through — the executor will handle
             // tool resolution failures separately.
@@ -264,10 +272,10 @@ impl BatchZoneValidator {
     pub fn group_by_zone(&self, operations: &[BatchOperation]) -> BTreeMap<String, Vec<String>> {
         let mut groups: BTreeMap<String, Vec<String>> = BTreeMap::new();
         for op in operations {
-            let zone_str = self
-                .registry
-                .get_zone(&op.tool)
-                .map_or_else(|| self.agent_zone.as_str().to_string(), |z| z.as_str().to_string());
+            let zone_str = self.registry.get_zone(&op.tool).map_or_else(
+                || self.agent_zone.as_str().to_string(),
+                |z| z.as_str().to_string(),
+            );
             groups.entry(zone_str).or_default().push(op.id.clone());
         }
         groups
@@ -287,13 +295,7 @@ fn zone_accessible(agent_zone: &ZoneId, connector_zone: &ZoneId) -> bool {
         return true;
     }
 
-    let hierarchy = [
-        "z:owner",
-        "z:private",
-        "z:work",
-        "z:community",
-        "z:public",
-    ];
+    let hierarchy = ["z:owner", "z:private", "z:work", "z:community", "z:public"];
 
     let agent_level = hierarchy.iter().position(|&z| z == agent);
     let connector_level = hierarchy.iter().position(|&z| z == connector);
@@ -329,7 +331,7 @@ pub struct BatchExecutor {
 impl BatchExecutor {
     /// Create a new batch executor without zone validation.
     #[must_use]
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self {
             zone_validator: None,
         }
@@ -337,13 +339,18 @@ impl BatchExecutor {
 
     /// Create a new batch executor with zone validation.
     #[must_use]
-    pub fn with_zone_validator(validator: BatchZoneValidator) -> Self {
+    pub const fn with_zone_validator(validator: BatchZoneValidator) -> Self {
         Self {
             zone_validator: Some(validator),
         }
     }
 
     /// Validate a batch request before execution.
+    ///
+    /// # Errors
+    /// Returns an error when the batch is empty, contains duplicate or
+    /// unknown dependencies, contains a dependency cycle, requests zero
+    /// parallelism, or fails zone validation.
     pub fn validate(&self, request: &BatchInvokeRequest) -> HostResult<()> {
         // Check for empty batch.
         if request.operations.is_empty() {
@@ -407,6 +414,10 @@ impl BatchExecutor {
     ///
     /// Operations are grouped into tiers: within each tier, operations are
     /// independent and can run in parallel. Tiers must execute sequentially.
+    ///
+    /// # Errors
+    /// Returns any validation error produced by [`Self::validate`] or a cycle
+    /// detection error if the dependency graph cannot be tiered.
     pub fn plan(&self, request: &BatchInvokeRequest) -> HostResult<ExecutionPlan> {
         self.validate(request)?;
         let tiers = topological_tiers(&request.operations)?;
@@ -422,6 +433,10 @@ impl BatchExecutor {
     /// value or an error. Operations are executed in topological tier order.
     /// Within each tier, operations are executed sequentially (async parallel
     /// execution is handled at a higher layer).
+    ///
+    /// # Errors
+    /// Returns any validation or planning error produced before execution
+    /// begins. Individual operation failures are captured in the response.
     pub fn execute_sync<F>(
         &self,
         request: &BatchInvokeRequest,
@@ -433,175 +448,42 @@ impl BatchExecutor {
         let plan = self.plan(request)?;
         let start = Instant::now();
         let timeout = Duration::from_millis(request.options.timeout_ms);
-
-        // Index operations by ID for quick lookup.
-        let op_map: HashMap<&str, &BatchOperation> =
-            request.operations.iter().map(|o| (o.id.as_str(), o)).collect();
-
+        let op_map: HashMap<&str, &BatchOperation> = request
+            .operations
+            .iter()
+            .map(|o| (o.id.as_str(), o))
+            .collect();
         let mut results_map: HashMap<String, OperationResult> = HashMap::new();
         let mut aborted = false;
 
         for tier in &plan.tiers {
             if aborted {
-                // Mark remaining operations as skipped.
-                for op_id in &tier.operation_ids {
-                    results_map.insert(
-                        op_id.clone(),
-                        OperationResult {
-                            id: op_id.clone(),
-                            status: OperationResultStatus::Skipped,
-                            output: None,
-                            error: None,
-                            duration_ms: 0,
-                        },
-                    );
-                }
+                record_skipped_operations(&mut results_map, &tier.operation_ids, None);
                 continue;
             }
 
-            // Check timeout.
             if start.elapsed() >= timeout {
                 aborted = true;
-                for op_id in &tier.operation_ids {
-                    results_map.insert(
-                        op_id.clone(),
-                        OperationResult {
-                            id: op_id.clone(),
-                            status: OperationResultStatus::Skipped,
-                            output: None,
-                            error: Some(BatchOperationError {
-                                code: "BATCH_TIMEOUT".into(),
-                                message: "batch timeout exceeded".into(),
-                                retry_after_ms: None,
-                            }),
-                            duration_ms: 0,
-                        },
-                    );
-                }
+                let timeout_error = batch_timeout_error();
+                record_skipped_operations(
+                    &mut results_map,
+                    &tier.operation_ids,
+                    Some(&timeout_error),
+                );
                 continue;
             }
 
-            for op_id in &tier.operation_ids {
-                if aborted {
-                    results_map.insert(
-                        op_id.clone(),
-                        OperationResult {
-                            id: op_id.clone(),
-                            status: OperationResultStatus::Skipped,
-                            output: None,
-                            error: None,
-                            duration_ms: 0,
-                        },
-                    );
-                    continue;
-                }
-
-                let op = op_map[op_id.as_str()];
-
-                // Check if any dependency failed.
-                let dep_failed = op.depends_on.iter().any(|dep_id| {
-                    results_map
-                        .get(dep_id.as_str())
-                        .is_some_and(|r| r.status != OperationResultStatus::Success)
-                });
-
-                if dep_failed {
-                    results_map.insert(
-                        op_id.clone(),
-                        OperationResult {
-                            id: op_id.clone(),
-                            status: OperationResultStatus::Skipped,
-                            output: None,
-                            error: Some(BatchOperationError {
-                                code: "DEP_FAILED".into(),
-                                message: "dependency failed".into(),
-                                retry_after_ms: None,
-                            }),
-                            duration_ms: 0,
-                        },
-                    );
-                    continue;
-                }
-
-                let op_start = Instant::now();
-                match handler(op) {
-                    Ok(output) => {
-                        results_map.insert(
-                            op_id.clone(),
-                            OperationResult {
-                                id: op_id.clone(),
-                                status: OperationResultStatus::Success,
-                                output: Some(output),
-                                error: None,
-                                duration_ms: op_start.elapsed().as_millis() as u64,
-                            },
-                        );
-                    }
-                    Err(err) => {
-                        results_map.insert(
-                            op_id.clone(),
-                            OperationResult {
-                                id: op_id.clone(),
-                                status: OperationResultStatus::Error,
-                                output: None,
-                                error: Some(err),
-                                duration_ms: op_start.elapsed().as_millis() as u64,
-                            },
-                        );
-                        if request.options.stop_on_first_error {
-                            aborted = true;
-                        }
-                    }
-                }
-            }
+            execute_tier(
+                tier,
+                &op_map,
+                &mut results_map,
+                request.options.stop_on_first_error,
+                &handler,
+                &mut aborted,
+            );
         }
 
-        // Build response in submission order.
-        let results: Vec<OperationResult> = request
-            .operations
-            .iter()
-            .map(|op| {
-                results_map.remove(op.id.as_str()).unwrap_or(OperationResult {
-                    id: op.id.clone(),
-                    status: OperationResultStatus::Skipped,
-                    output: None,
-                    error: None,
-                    duration_ms: 0,
-                })
-            })
-            .collect();
-
-        let completed = results
-            .iter()
-            .filter(|r| r.status == OperationResultStatus::Success)
-            .count();
-        let failed = results
-            .iter()
-            .filter(|r| r.status == OperationResultStatus::Error)
-            .count();
-        let skipped = results
-            .iter()
-            .filter(|r| r.status == OperationResultStatus::Skipped)
-            .count();
-
-        let status = if aborted && failed > 0 {
-            BatchStatus::Aborted
-        } else if failed == 0 {
-            BatchStatus::Success
-        } else if completed == 0 {
-            BatchStatus::AllFailed
-        } else {
-            BatchStatus::PartialSuccess
-        };
-
-        Ok(BatchInvokeResponse {
-            status,
-            completed,
-            failed,
-            skipped,
-            results,
-            total_duration_ms: start.elapsed().as_millis() as u64,
-        })
+        Ok(build_response(request, results_map, aborted, start))
     }
 }
 
@@ -696,21 +578,18 @@ fn topological_tiers(operations: &[BatchOperation]) -> HostResult<Vec<ExecutionT
     }
 
     let mut tiers = Vec::new();
-    let mut queue: VecDeque<&str> = in_degree
+    let mut queue: Vec<&str> = in_degree
         .iter()
         .filter(|(_, deg)| **deg == 0)
         .map(|(&id, _)| id)
         .collect();
-
-    // Sort for determinism.
-    let mut initial: Vec<&str> = queue.drain(..).collect();
-    initial.sort_unstable();
-    queue.extend(initial);
+    queue.sort_unstable();
 
     let mut processed = 0usize;
 
     while !queue.is_empty() {
-        let tier_ids: Vec<String> = queue.drain(..).map(String::from).collect();
+        let tier_ids: Vec<String> = queue.iter().copied().map(String::from).collect();
+        queue.clear();
         processed += tier_ids.len();
 
         let mut next_ready: Vec<&str> = Vec::new();
@@ -731,7 +610,7 @@ fn topological_tiers(operations: &[BatchOperation]) -> HostResult<Vec<ExecutionT
         });
 
         next_ready.sort_unstable();
-        queue.extend(next_ready);
+        queue = next_ready;
     }
 
     if processed != operations.len() {
@@ -741,6 +620,171 @@ fn topological_tiers(operations: &[BatchOperation]) -> HostResult<Vec<ExecutionT
     }
 
     Ok(tiers)
+}
+
+fn batch_timeout_error() -> BatchOperationError {
+    BatchOperationError {
+        code: "BATCH_TIMEOUT".into(),
+        message: "batch timeout exceeded".into(),
+        retry_after_ms: None,
+    }
+}
+
+fn dependency_failed_error() -> BatchOperationError {
+    BatchOperationError {
+        code: "DEP_FAILED".into(),
+        message: "dependency failed".into(),
+        retry_after_ms: None,
+    }
+}
+
+const fn skipped_result(id: String, error: Option<BatchOperationError>) -> OperationResult {
+    OperationResult {
+        id,
+        status: OperationResultStatus::Skipped,
+        output: None,
+        error,
+        duration_ms: 0,
+    }
+}
+
+fn executed_result(
+    id: &str,
+    result: Result<serde_json::Value, BatchOperationError>,
+    started_at: Instant,
+) -> OperationResult {
+    match result {
+        Ok(output) => OperationResult {
+            id: id.to_string(),
+            status: OperationResultStatus::Success,
+            output: Some(output),
+            error: None,
+            duration_ms: elapsed_millis(started_at),
+        },
+        Err(error) => OperationResult {
+            id: id.to_string(),
+            status: OperationResultStatus::Error,
+            output: None,
+            error: Some(error),
+            duration_ms: elapsed_millis(started_at),
+        },
+    }
+}
+
+fn elapsed_millis(started_at: Instant) -> u64 {
+    u64::try_from(started_at.elapsed().as_millis()).unwrap_or(u64::MAX)
+}
+
+fn dependency_failed(
+    operation: &BatchOperation,
+    results_map: &HashMap<String, OperationResult>,
+) -> bool {
+    operation.depends_on.iter().any(|dependency_id| {
+        results_map
+            .get(dependency_id.as_str())
+            .is_some_and(|result| result.status != OperationResultStatus::Success)
+    })
+}
+
+fn record_skipped_operations(
+    results_map: &mut HashMap<String, OperationResult>,
+    operation_ids: &[String],
+    error: Option<&BatchOperationError>,
+) {
+    for operation_id in operation_ids {
+        results_map.insert(
+            operation_id.clone(),
+            skipped_result(operation_id.clone(), error.cloned()),
+        );
+    }
+}
+
+fn execute_tier<F>(
+    tier: &ExecutionTier,
+    operation_map: &HashMap<&str, &BatchOperation>,
+    results_map: &mut HashMap<String, OperationResult>,
+    stop_on_first_error: bool,
+    handler: &F,
+    aborted: &mut bool,
+) where
+    F: Fn(&BatchOperation) -> Result<serde_json::Value, BatchOperationError>,
+{
+    for operation_id in &tier.operation_ids {
+        if *aborted {
+            results_map.insert(
+                operation_id.clone(),
+                skipped_result(operation_id.clone(), None),
+            );
+            continue;
+        }
+
+        let operation = operation_map[operation_id.as_str()];
+        if dependency_failed(operation, results_map) {
+            results_map.insert(
+                operation_id.clone(),
+                skipped_result(operation_id.clone(), Some(dependency_failed_error())),
+            );
+            continue;
+        }
+
+        let started_at = Instant::now();
+        let result = executed_result(operation_id, handler(operation), started_at);
+        if stop_on_first_error && result.status == OperationResultStatus::Error {
+            *aborted = true;
+        }
+        results_map.insert(operation_id.clone(), result);
+    }
+}
+
+fn build_response(
+    request: &BatchInvokeRequest,
+    mut results_map: HashMap<String, OperationResult>,
+    aborted: bool,
+    started_at: Instant,
+) -> BatchInvokeResponse {
+    let results: Vec<OperationResult> = request
+        .operations
+        .iter()
+        .map(|operation| {
+            results_map
+                .remove(operation.id.as_str())
+                .unwrap_or_else(|| skipped_result(operation.id.clone(), None))
+        })
+        .collect();
+
+    let completed = results
+        .iter()
+        .filter(|result| result.status == OperationResultStatus::Success)
+        .count();
+    let failed = results
+        .iter()
+        .filter(|result| result.status == OperationResultStatus::Error)
+        .count();
+    let skipped = results
+        .iter()
+        .filter(|result| result.status == OperationResultStatus::Skipped)
+        .count();
+
+    BatchInvokeResponse {
+        status: batch_status(aborted, completed, failed),
+        completed,
+        failed,
+        skipped,
+        results,
+        total_duration_ms: elapsed_millis(started_at),
+    }
+}
+
+const fn batch_status(aborted: bool, completed: usize, failed: usize) -> BatchStatus {
+    if aborted && failed > 0 {
+        BatchStatus::Aborted
+    } else if failed == 0 {
+        BatchStatus::Success
+    } else if completed == 0 {
+        BatchStatus::AllFailed
+    } else {
+        BatchStatus::PartialSuccess
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -770,15 +814,11 @@ mod tests {
         }
     }
 
-    fn ok_handler(
-        _op: &BatchOperation,
-    ) -> Result<serde_json::Value, BatchOperationError> {
-        Ok(serde_json::json!({"ok": true}))
+    fn ok_output(_op: &BatchOperation) -> serde_json::Value {
+        serde_json::json!({"ok": true})
     }
 
-    fn failing_handler(
-        _op: &BatchOperation,
-    ) -> Result<serde_json::Value, BatchOperationError> {
+    fn failing_handler(_op: &BatchOperation) -> Result<serde_json::Value, BatchOperationError> {
         Err(BatchOperationError {
             code: "TEST_ERROR".into(),
             message: "test failure".into(),
@@ -786,9 +826,7 @@ mod tests {
         })
     }
 
-    fn selective_handler(
-        op: &BatchOperation,
-    ) -> Result<serde_json::Value, BatchOperationError> {
+    fn selective_handler(op: &BatchOperation) -> Result<serde_json::Value, BatchOperationError> {
         if op.id.starts_with("fail") {
             Err(BatchOperationError {
                 code: "FAIL".into(),
@@ -813,10 +851,7 @@ mod tests {
     #[test]
     fn validate_duplicate_ids_rejected() {
         let executor = BatchExecutor::new();
-        let req = simple_request(vec![
-            op("a", "tool1", &[]),
-            op("a", "tool2", &[]),
-        ]);
+        let req = simple_request(vec![op("a", "tool1", &[]), op("a", "tool2", &[])]);
         let err = executor.validate(&req).unwrap_err();
         assert!(err.to_string().contains("duplicate operation id"));
     }
@@ -840,10 +875,7 @@ mod tests {
     #[test]
     fn validate_cycle_rejected() {
         let executor = BatchExecutor::new();
-        let req = simple_request(vec![
-            op("a", "tool1", &["b"]),
-            op("b", "tool1", &["a"]),
-        ]);
+        let req = simple_request(vec![op("a", "tool1", &["b"]), op("b", "tool1", &["a"])]);
         let err = executor.validate(&req).unwrap_err();
         assert!(err.to_string().contains("cycle"));
     }
@@ -991,8 +1023,7 @@ mod tests {
         let plan1 = executor.plan(&req).unwrap();
         let plan2 = executor.plan(&req).unwrap();
         assert_eq!(
-            plan1.tiers[0].operation_ids,
-            plan2.tiers[0].operation_ids,
+            plan1.tiers[0].operation_ids, plan2.tiers[0].operation_ids,
             "plan should be deterministic"
         );
         // Sorted alphabetically.
@@ -1004,11 +1035,8 @@ mod tests {
     #[test]
     fn execute_all_succeed() {
         let executor = BatchExecutor::new();
-        let req = simple_request(vec![
-            op("a", "tool1", &[]),
-            op("b", "tool2", &[]),
-        ]);
-        let resp = executor.execute_sync(&req, ok_handler).unwrap();
+        let req = simple_request(vec![op("a", "tool1", &[]), op("b", "tool2", &[])]);
+        let resp = executor.execute_sync(&req, |op| Ok(ok_output(op))).unwrap();
         assert_eq!(resp.status, BatchStatus::Success);
         assert_eq!(resp.completed, 2);
         assert_eq!(resp.failed, 0);
@@ -1019,10 +1047,7 @@ mod tests {
     #[test]
     fn execute_all_fail() {
         let executor = BatchExecutor::new();
-        let req = simple_request(vec![
-            op("a", "tool1", &[]),
-            op("b", "tool2", &[]),
-        ]);
+        let req = simple_request(vec![op("a", "tool1", &[]), op("b", "tool2", &[])]);
         let resp = executor.execute_sync(&req, failing_handler).unwrap();
         assert_eq!(resp.status, BatchStatus::AllFailed);
         assert_eq!(resp.completed, 0);
@@ -1099,9 +1124,13 @@ mod tests {
             op("a", "tool", &[]),
             op("m", "tool", &[]),
         ]);
-        let resp = executor.execute_sync(&req, ok_handler).unwrap();
+        let resp = executor.execute_sync(&req, |op| Ok(ok_output(op))).unwrap();
         let ids: Vec<&str> = resp.results.iter().map(|r| r.id.as_str()).collect();
-        assert_eq!(ids, vec!["z", "a", "m"], "results should be in submission order");
+        assert_eq!(
+            ids,
+            vec!["z", "a", "m"],
+            "results should be in submission order"
+        );
     }
 
     #[test]
@@ -1128,6 +1157,7 @@ mod tests {
         let b_pos = order.iter().position(|s| s == "b").unwrap();
         let c_pos = order.iter().position(|s| s == "c").unwrap();
         let d_pos = order.iter().position(|s| s == "d").unwrap();
+        drop(order);
         assert!(a_pos < b_pos);
         assert!(a_pos < c_pos);
         assert!(b_pos < d_pos);
@@ -1170,7 +1200,7 @@ mod tests {
     fn execute_duration_is_tracked() {
         let executor = BatchExecutor::new();
         let req = simple_request(vec![op("a", "tool", &[])]);
-        let resp = executor.execute_sync(&req, ok_handler).unwrap();
+        let resp = executor.execute_sync(&req, |op| Ok(ok_output(op))).unwrap();
         // Duration should be set (may be 0ms for fast ops, but field exists).
         assert!(resp.total_duration_ms < 1000);
         assert!(resp.results[0].duration_ms < 1000);
@@ -1180,58 +1210,34 @@ mod tests {
 
     #[test]
     fn zone_same_zone_accessible() {
-        assert!(zone_accessible(
-            &ZoneId::work(),
-            &ZoneId::work()
-        ));
+        assert!(zone_accessible(&ZoneId::work(), &ZoneId::work()));
     }
 
     #[test]
     fn zone_owner_accesses_everything() {
-        assert!(zone_accessible(
-            &ZoneId::owner(),
-            &ZoneId::public()
-        ));
-        assert!(zone_accessible(
-            &ZoneId::owner(),
-            &ZoneId::work()
-        ));
-        assert!(zone_accessible(
-            &ZoneId::owner(),
-            &ZoneId::private()
-        ));
+        assert!(zone_accessible(&ZoneId::owner(), &ZoneId::public()));
+        assert!(zone_accessible(&ZoneId::owner(), &ZoneId::work()));
+        assert!(zone_accessible(&ZoneId::owner(), &ZoneId::private()));
     }
 
     #[test]
     fn zone_public_cannot_access_private() {
-        assert!(!zone_accessible(
-            &ZoneId::public(),
-            &ZoneId::private()
-        ));
+        assert!(!zone_accessible(&ZoneId::public(), &ZoneId::private()));
     }
 
     #[test]
     fn zone_work_cannot_access_private() {
-        assert!(!zone_accessible(
-            &ZoneId::work(),
-            &ZoneId::private()
-        ));
+        assert!(!zone_accessible(&ZoneId::work(), &ZoneId::private()));
     }
 
     #[test]
     fn zone_work_accesses_community() {
-        assert!(zone_accessible(
-            &ZoneId::work(),
-            &ZoneId::community()
-        ));
+        assert!(zone_accessible(&ZoneId::work(), &ZoneId::community()));
     }
 
     #[test]
     fn zone_work_accesses_public() {
-        assert!(zone_accessible(
-            &ZoneId::work(),
-            &ZoneId::public()
-        ));
+        assert!(zone_accessible(&ZoneId::work(), &ZoneId::public()));
     }
 
     #[test]
@@ -1270,8 +1276,7 @@ mod tests {
     fn zone_validator_rejects_violation() {
         let mut reg = ZoneRegistry::new();
         reg.register("secret.tool", ZoneId::owner());
-        let validator =
-            BatchZoneValidator::new(ZoneId::work(), reg);
+        let validator = BatchZoneValidator::new(ZoneId::work(), reg);
         let ops = vec![op("a", "secret.tool", &[])];
         let err = validator.validate(&ops).unwrap_err();
         assert!(err.to_string().contains("zone boundary violations"));
@@ -1282,8 +1287,7 @@ mod tests {
     fn zone_validator_allows_accessible() {
         let mut reg = ZoneRegistry::new();
         reg.register("pub.tool", ZoneId::public());
-        let validator =
-            BatchZoneValidator::new(ZoneId::work(), reg);
+        let validator = BatchZoneValidator::new(ZoneId::work(), reg);
         let ops = vec![op("a", "pub.tool", &[])];
         assert!(validator.validate(&ops).is_ok());
     }
@@ -1291,8 +1295,7 @@ mod tests {
     #[test]
     fn zone_validator_unknown_tool_passes() {
         let reg = ZoneRegistry::new();
-        let validator =
-            BatchZoneValidator::new(ZoneId::work(), reg);
+        let validator = BatchZoneValidator::new(ZoneId::work(), reg);
         let ops = vec![op("a", "unknown.tool", &[])];
         assert!(validator.validate(&ops).is_ok());
     }
@@ -1302,12 +1305,8 @@ mod tests {
         let mut reg = ZoneRegistry::new();
         reg.register("secret1", ZoneId::owner());
         reg.register("secret2", ZoneId::private());
-        let validator =
-            BatchZoneValidator::new(ZoneId::public(), reg);
-        let ops = vec![
-            op("a", "secret1", &[]),
-            op("b", "secret2", &[]),
-        ];
+        let validator = BatchZoneValidator::new(ZoneId::public(), reg);
+        let ops = vec![op("a", "secret1", &[]), op("b", "secret2", &[])];
         let err = validator.validate(&ops).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains('a'));
@@ -1319,8 +1318,7 @@ mod tests {
         let mut reg = ZoneRegistry::new();
         reg.register("pub.tool", ZoneId::public());
         reg.register("work.tool", ZoneId::work());
-        let validator =
-            BatchZoneValidator::new(ZoneId::work(), reg);
+        let validator = BatchZoneValidator::new(ZoneId::work(), reg);
         let ops = vec![
             op("a", "pub.tool", &[]),
             op("b", "work.tool", &[]),
@@ -1338,8 +1336,7 @@ mod tests {
     fn executor_with_zone_validator_rejects_violations() {
         let mut reg = ZoneRegistry::new();
         reg.register("secret", ZoneId::owner());
-        let validator =
-            BatchZoneValidator::new(ZoneId::public(), reg);
+        let validator = BatchZoneValidator::new(ZoneId::public(), reg);
         let executor = BatchExecutor::with_zone_validator(validator);
         let req = simple_request(vec![op("a", "secret", &[])]);
         let err = executor.validate(&req).unwrap_err();
@@ -1455,11 +1452,7 @@ mod tests {
         let executor = BatchExecutor::new();
         let mut ops = vec![op("op0", "tool", &[])];
         for i in 1..50 {
-            ops.push(op(
-                &format!("op{i}"),
-                "tool",
-                &[&format!("op{}", i - 1)],
-            ));
+            ops.push(op(&format!("op{i}"), "tool", &[&format!("op{}", i - 1)]));
         }
         let req = simple_request(ops);
         let plan = executor.plan(&req).unwrap();
@@ -1512,10 +1505,7 @@ mod tests {
 
     #[test]
     fn cycle_two_nodes() {
-        assert!(has_cycle(&[
-            op("a", "t", &["b"]),
-            op("b", "t", &["a"]),
-        ]));
+        assert!(has_cycle(&[op("a", "t", &["b"]), op("b", "t", &["a"]),]));
     }
 
     #[test]
@@ -1543,10 +1533,7 @@ mod tests {
     fn zone_registry_register_and_get() {
         let mut reg = ZoneRegistry::new();
         reg.register("tool1", ZoneId::work());
-        assert_eq!(
-            reg.get_zone("tool1").unwrap().as_str(),
-            "z:work"
-        );
+        assert_eq!(reg.get_zone("tool1").unwrap().as_str(), "z:work");
         assert!(reg.get_zone("unknown").is_none());
     }
 
@@ -1555,10 +1542,7 @@ mod tests {
         let mut reg = ZoneRegistry::new();
         reg.register("tool1", ZoneId::work());
         reg.register("tool1", ZoneId::public());
-        assert_eq!(
-            reg.get_zone("tool1").unwrap().as_str(),
-            "z:public"
-        );
+        assert_eq!(reg.get_zone("tool1").unwrap().as_str(), "z:public");
     }
 
     // ── Execution Plan Properties ──
@@ -1622,10 +1606,7 @@ mod tests {
     fn all_skipped_counts_as_all_failed() {
         let executor = BatchExecutor::new();
         // fail1 fails, b depends on fail1 → skipped.
-        let req = simple_request(vec![
-            op("fail1", "tool", &[]),
-            op("b", "tool", &["fail1"]),
-        ]);
+        let req = simple_request(vec![op("fail1", "tool", &[]), op("b", "tool", &["fail1"])]);
         let resp = executor.execute_sync(&req, selective_handler).unwrap();
         // 1 failed, 1 skipped, 0 completed → AllFailed.
         assert_eq!(resp.completed, 0);

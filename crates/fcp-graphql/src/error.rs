@@ -823,4 +823,322 @@ mod tests {
             other => panic!("expected Json, got {other:?}"),
         }
     }
+
+    // ---- HttpErrorInfo constructors ----
+
+    #[test]
+    fn http_error_info_timeout_constructor() {
+        let info = HttpErrorInfo::timeout(Duration::from_secs(5));
+        assert!(info.is_timeout);
+        assert!(!info.is_connect);
+        assert!(!info.is_request);
+        assert_eq!(info.status_code, Some(408));
+        assert!(info.message.contains("5000"));
+    }
+
+    #[test]
+    fn http_error_info_timeout_large_duration() {
+        let info = HttpErrorInfo::timeout(Duration::from_secs(300));
+        assert!(info.message.contains("300000"));
+        assert!(info.is_timeout);
+    }
+
+    #[test]
+    fn http_error_info_cancelled_constructor() {
+        let info = HttpErrorInfo::cancelled();
+        assert!(!info.is_timeout);
+        assert!(!info.is_connect);
+        assert!(!info.is_request);
+        assert!(info.status_code.is_none());
+        assert_eq!(info.message, "request cancelled");
+    }
+
+    // ---- HttpErrorInfo Clone/Debug ----
+
+    #[test]
+    fn http_error_info_clone() {
+        let info = HttpErrorInfo {
+            message: "test".into(),
+            status_code: Some(500),
+            is_timeout: true,
+            is_connect: false,
+            is_request: false,
+        };
+        let cloned = info.clone();
+        assert_eq!(info, cloned);
+        assert_eq!(info.message, "test");
+    }
+
+    #[test]
+    fn http_error_info_debug() {
+        let info = HttpErrorInfo::cancelled();
+        let dbg = format!("{info:?}");
+        assert!(dbg.contains("HttpErrorInfo"));
+        assert!(dbg.contains("cancelled"));
+    }
+
+    // ---- GraphqlErrorLocation Clone/Debug ----
+
+    #[test]
+    fn error_location_clone() {
+        let loc = GraphqlErrorLocation { line: 5, column: 10 };
+        let cloned = loc.clone();
+        assert_eq!(loc, cloned);
+        assert_eq!(loc.line, 5);
+    }
+
+    #[test]
+    fn error_location_debug() {
+        let loc = GraphqlErrorLocation { line: 1, column: 1 };
+        let dbg = format!("{loc:?}");
+        assert!(dbg.contains("GraphqlErrorLocation"));
+    }
+
+    #[test]
+    fn error_location_inequality() {
+        let a = GraphqlErrorLocation { line: 1, column: 1 };
+        let b = GraphqlErrorLocation { line: 2, column: 1 };
+        assert_ne!(a, b);
+    }
+
+    // ---- GraphqlPathSegment additional tests ----
+
+    #[test]
+    fn path_segment_key_clone() {
+        let seg = GraphqlPathSegment::Key("field".into());
+        let cloned = seg.clone();
+        assert_eq!(seg, cloned);
+        // Use original after clone
+        assert_eq!(seg, GraphqlPathSegment::Key("field".into()));
+    }
+
+    #[test]
+    fn path_segment_index_clone() {
+        let seg = GraphqlPathSegment::Index(42);
+        let cloned = seg.clone();
+        assert_eq!(seg, cloned);
+        assert_eq!(seg, GraphqlPathSegment::Index(42));
+    }
+
+    #[test]
+    fn path_segment_debug() {
+        let key = GraphqlPathSegment::Key("name".into());
+        let idx = GraphqlPathSegment::Index(3);
+        assert!(format!("{key:?}").contains("name"));
+        assert!(format!("{idx:?}").contains('3'));
+    }
+
+    #[test]
+    fn path_segment_negative_index() {
+        let seg = GraphqlPathSegment::Index(-1);
+        let json = serde_json::to_string(&seg).unwrap();
+        assert_eq!(json, "-1");
+        let back: GraphqlPathSegment = serde_json::from_str(&json).unwrap();
+        assert_eq!(seg, back);
+    }
+
+    #[test]
+    fn path_segment_empty_key() {
+        let seg = GraphqlPathSegment::Key(String::new());
+        let json = serde_json::to_string(&seg).unwrap();
+        assert_eq!(json, r#""""#);
+        let back: GraphqlPathSegment = serde_json::from_str(&json).unwrap();
+        assert_eq!(seg, back);
+    }
+
+    #[test]
+    fn path_segment_unicode_key() {
+        let seg = GraphqlPathSegment::Key("utilisateur".into());
+        let json = serde_json::to_string(&seg).unwrap();
+        let back: GraphqlPathSegment = serde_json::from_str(&json).unwrap();
+        assert_eq!(seg, back);
+    }
+
+    // ---- GraphqlError additional tests ----
+
+    #[test]
+    fn graphql_error_clone() {
+        let err = GraphqlError {
+            message: "err".into(),
+            locations: vec![GraphqlErrorLocation { line: 1, column: 2 }],
+            path: vec![GraphqlPathSegment::Key("a".into())],
+            extensions: Some(serde_json::json!({"x": 1})),
+        };
+        let cloned = err.clone();
+        assert_eq!(err, cloned);
+        assert_eq!(err.message, "err");
+    }
+
+    #[test]
+    fn graphql_error_debug() {
+        let err = GraphqlError {
+            message: "debug test".into(),
+            locations: vec![],
+            path: vec![],
+            extensions: None,
+        };
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("debug test"));
+    }
+
+    #[test]
+    fn graphql_error_with_null_extensions() {
+        let json = r#"{"message":"err","extensions":null}"#;
+        let err: GraphqlError = serde_json::from_str(json).unwrap();
+        assert!(err.extensions.is_none());
+    }
+
+    #[test]
+    fn graphql_error_multiple_locations() {
+        let err = GraphqlError {
+            message: "multi".into(),
+            locations: vec![
+                GraphqlErrorLocation { line: 1, column: 5 },
+                GraphqlErrorLocation { line: 3, column: 10 },
+            ],
+            path: vec![],
+            extensions: None,
+        };
+        let json = serde_json::to_string(&err).unwrap();
+        let back: GraphqlError = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.locations.len(), 2);
+        assert_eq!(back.locations[1].line, 3);
+    }
+
+    #[test]
+    fn graphql_error_complex_path() {
+        let err = GraphqlError {
+            message: "deep".into(),
+            locations: vec![],
+            path: vec![
+                GraphqlPathSegment::Key("users".into()),
+                GraphqlPathSegment::Index(0),
+                GraphqlPathSegment::Key("posts".into()),
+                GraphqlPathSegment::Index(5),
+            ],
+            extensions: None,
+        };
+        let json = serde_json::to_string(&err).unwrap();
+        let back: GraphqlError = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.path.len(), 4);
+    }
+
+    // ---- GraphqlClientError Clone/Debug ----
+
+    #[test]
+    fn client_error_clone_http() {
+        let err = GraphqlClientError::Http(HttpErrorInfo {
+            message: "fail".into(),
+            status_code: Some(503),
+            is_timeout: false,
+            is_connect: true,
+            is_request: false,
+        });
+        let cloned = err.clone();
+        assert!(cloned.to_string().contains("HTTP error"));
+        assert!(err.to_string().contains("HTTP error"));
+    }
+
+    #[test]
+    fn client_error_clone_json() {
+        let err = GraphqlClientError::Json("parse".into());
+        let cloned = err.clone();
+        assert!(cloned.to_string().contains("JSON"));
+        assert!(err.to_string().contains("JSON"));
+    }
+
+    #[test]
+    fn client_error_debug_all_variants() {
+        let variants: Vec<GraphqlClientError> = vec![
+            GraphqlClientError::Http(HttpErrorInfo::cancelled()),
+            GraphqlClientError::HttpStatus {
+                status: StatusCode::BAD_REQUEST,
+                body: "bad".into(),
+                retry_after: None,
+            },
+            GraphqlClientError::Json("err".into()),
+            GraphqlClientError::GraphqlErrors { errors: vec![] },
+            GraphqlClientError::Protocol {
+                message: "proto".into(),
+            },
+            GraphqlClientError::SchemaValidation {
+                message: "schema".into(),
+                errors: vec![],
+            },
+            GraphqlClientError::RetriesExhausted { attempts: 1 },
+        ];
+        for v in &variants {
+            let dbg = format!("{v:?}");
+            assert!(!dbg.is_empty());
+        }
+    }
+
+    // ---- to_fcp_error edge cases ----
+
+    #[test]
+    fn to_fcp_http_timeout_retryable() {
+        let err = GraphqlClientError::Http(HttpErrorInfo {
+            message: "timed out".into(),
+            status_code: None,
+            is_timeout: true,
+            is_connect: false,
+            is_request: false,
+        });
+        let fcp = err.to_fcp_error("svc");
+        match fcp {
+            FcpError::External { retryable, .. } => assert!(retryable),
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn to_fcp_http_not_retryable_when_no_flags() {
+        let err = GraphqlClientError::Http(HttpErrorInfo {
+            message: "other".into(),
+            status_code: None,
+            is_timeout: false,
+            is_connect: false,
+            is_request: false,
+        });
+        let fcp = err.to_fcp_error("svc");
+        match fcp {
+            FcpError::External { retryable, .. } => assert!(!retryable),
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn to_fcp_404_not_found() {
+        let err = GraphqlClientError::HttpStatus {
+            status: StatusCode::NOT_FOUND,
+            body: "not found".into(),
+            retry_after: None,
+        };
+        let fcp = err.to_fcp_error("api");
+        match fcp {
+            FcpError::External {
+                retryable,
+                status_code,
+                ..
+            } => {
+                assert!(!retryable);
+                assert_eq!(status_code, Some(404));
+            }
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn to_fcp_502_server_error() {
+        let err = GraphqlClientError::HttpStatus {
+            status: StatusCode::BAD_GATEWAY,
+            body: "bad gw".into(),
+            retry_after: None,
+        };
+        let fcp = err.to_fcp_error("api");
+        match fcp {
+            FcpError::External { retryable, .. } => assert!(retryable),
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
 }

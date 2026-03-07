@@ -152,4 +152,106 @@ mod tests {
     fn response_mode_default_is_query() {
         assert_eq!(ResponseMode::default(), ResponseMode::Query);
     }
+
+    // ── Expanded tests: GrantType ──
+
+    #[test]
+    fn grant_type_serde_invalid_value_rejected() {
+        let result: Result<GrantType, _> = serde_json::from_str("\"invalid_grant_type\"");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn grant_type_serde_null_rejected() {
+        let result: Result<GrantType, _> = serde_json::from_str("null");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn grant_type_serde_integer_rejected() {
+        let result: Result<GrantType, _> = serde_json::from_str("42");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn grant_type_debug_contains_variant_names() {
+        assert!(format!("{:?}", GrantType::AuthorizationCode).contains("AuthorizationCode"));
+        assert!(format!("{:?}", GrantType::ClientCredentials).contains("ClientCredentials"));
+        assert!(format!("{:?}", GrantType::RefreshToken).contains("RefreshToken"));
+        assert!(format!("{:?}", GrantType::DeviceCode).contains("DeviceCode"));
+    }
+
+    #[test]
+    fn grant_type_clone() {
+        let gt = GrantType::AuthorizationCode;
+        let cloned = gt;
+        assert_eq!(gt, cloned);
+    }
+
+    #[test]
+    fn grant_type_eq_all_variants() {
+        assert_eq!(GrantType::AuthorizationCode, GrantType::AuthorizationCode);
+        assert_eq!(GrantType::ClientCredentials, GrantType::ClientCredentials);
+        assert_eq!(GrantType::RefreshToken, GrantType::RefreshToken);
+        assert_eq!(GrantType::DeviceCode, GrantType::DeviceCode);
+        assert_ne!(GrantType::AuthorizationCode, GrantType::ClientCredentials);
+        assert_ne!(GrantType::RefreshToken, GrantType::DeviceCode);
+    }
+
+    #[test]
+    fn grant_type_device_code_serde_urn_format() {
+        let json = serde_json::to_string(&GrantType::DeviceCode).unwrap();
+        assert!(json.contains("urn:ietf:params:oauth:grant-type:device_code"));
+        let roundtrip: GrantType = serde_json::from_str(&json).unwrap();
+        assert_eq!(roundtrip, GrantType::DeviceCode);
+    }
+
+    #[test]
+    fn grant_type_display_matches_serde() {
+        // Display values should match the serde JSON values (without quotes)
+        for gt in [
+            GrantType::AuthorizationCode,
+            GrantType::ClientCredentials,
+            GrantType::RefreshToken,
+            GrantType::DeviceCode,
+        ] {
+            let display = gt.to_string();
+            let serde_val = serde_json::to_string(&gt).unwrap();
+            // serde wraps in quotes, so strip them
+            let serde_inner = &serde_val[1..serde_val.len() - 1];
+            assert_eq!(display, serde_inner, "Display != serde for {gt:?}");
+        }
+    }
+
+    // ── Expanded tests: ResponseMode ──
+
+    #[test]
+    fn response_mode_clone_and_copy() {
+        let mode = ResponseMode::Fragment;
+        let copied = mode;
+        assert_eq!(mode, copied);
+    }
+
+    #[test]
+    fn response_mode_eq_all_variants() {
+        assert_eq!(ResponseMode::Query, ResponseMode::Query);
+        assert_eq!(ResponseMode::Fragment, ResponseMode::Fragment);
+        assert_eq!(ResponseMode::FormPost, ResponseMode::FormPost);
+        assert_ne!(ResponseMode::Query, ResponseMode::Fragment);
+        assert_ne!(ResponseMode::Fragment, ResponseMode::FormPost);
+    }
+
+    #[test]
+    fn response_mode_debug_output() {
+        assert!(format!("{:?}", ResponseMode::Query).contains("Query"));
+        assert!(format!("{:?}", ResponseMode::Fragment).contains("Fragment"));
+        assert!(format!("{:?}", ResponseMode::FormPost).contains("FormPost"));
+    }
+
+    // ── Expanded tests: DEFAULT_REFRESH_THRESHOLD ──
+
+    #[test]
+    fn default_refresh_threshold_is_five_minutes() {
+        assert_eq!(DEFAULT_REFRESH_THRESHOLD, std::time::Duration::from_secs(300));
+    }
 }

@@ -1126,4 +1126,141 @@ mod tests {
             other => panic!("expected GraphqlErrors, got {other:?}"),
         }
     }
+
+    // ---- upsert_header ----
+
+    #[test]
+    fn upsert_header_inserts_new() {
+        let mut headers: HeaderList = Vec::new();
+        upsert_header(&mut headers, "X-Custom", "value1");
+        assert_eq!(headers.len(), 1);
+        assert_eq!(header_value(&headers, "X-Custom"), Some("value1"));
+    }
+
+    #[test]
+    fn upsert_header_replaces_existing() {
+        let mut headers: HeaderList = Vec::new();
+        upsert_header(&mut headers, "X-Custom", "old");
+        upsert_header(&mut headers, "X-Custom", "new");
+        assert_eq!(headers.len(), 1);
+        assert_eq!(header_value(&headers, "X-Custom"), Some("new"));
+    }
+
+    #[test]
+    fn upsert_header_case_insensitive() {
+        let mut headers: HeaderList = Vec::new();
+        upsert_header(&mut headers, "Content-Type", "text/plain");
+        upsert_header(&mut headers, "content-type", "application/json");
+        assert_eq!(headers.len(), 1);
+        assert_eq!(
+            header_value(&headers, "Content-Type"),
+            Some("application/json")
+        );
+    }
+
+    #[test]
+    fn upsert_header_multiple_different_headers() {
+        let mut headers: HeaderList = Vec::new();
+        upsert_header(&mut headers, "Accept", "text/html");
+        upsert_header(&mut headers, "Authorization", "Bearer tok");
+        assert_eq!(headers.len(), 2);
+    }
+
+    // ---- header_value ----
+
+    #[test]
+    fn header_value_found() {
+        let headers = vec![("X-Test".to_string(), "val".to_string())];
+        assert_eq!(header_value(&headers, "X-Test"), Some("val"));
+    }
+
+    #[test]
+    fn header_value_not_found() {
+        let headers: HeaderList = Vec::new();
+        assert_eq!(header_value(&headers, "Missing"), None);
+    }
+
+    #[test]
+    fn header_value_case_insensitive() {
+        let headers = vec![("Authorization".to_string(), "Bearer x".to_string())];
+        assert_eq!(header_value(&headers, "authorization"), Some("Bearer x"));
+    }
+
+    // ---- Builder additional tests ----
+
+    #[test]
+    fn builder_header_overwrites_existing_case_insensitive() {
+        let builder = GraphqlClientBuilder::new("https://api.test.com/graphql")
+            .with_header("Content-Type", "text/plain");
+        // Should overwrite the default Content-Type
+        assert_eq!(
+            header_value(&builder.config.headers, "Content-Type"),
+            Some("text/plain")
+        );
+    }
+
+    #[test]
+    fn builder_bearer_token_overwrites_previous() {
+        let builder = GraphqlClientBuilder::new("https://api.test.com/graphql")
+            .with_bearer_token("old_token")
+            .with_bearer_token("new_token");
+        assert_eq!(
+            header_value(&builder.config.headers, AUTHORIZATION_HEADER),
+            Some("Bearer new_token")
+        );
+    }
+
+    #[test]
+    fn builder_clone() {
+        let builder = GraphqlClientBuilder::new("https://api.test.com/graphql")
+            .with_service_name("test")
+            .with_timeout(Duration::from_secs(15));
+        let cloned = builder.clone();
+        assert_eq!(builder.endpoint, cloned.endpoint);
+        assert_eq!(builder.config.service_name, cloned.config.service_name);
+        assert_eq!(builder.config.timeout, cloned.config.timeout);
+    }
+
+    // ---- Client additional tests ----
+
+    #[test]
+    fn client_clone_shares_metrics() {
+        let client = GraphqlClient::new("https://api.test.com/graphql");
+        let cloned = client.clone();
+        // Both point to same Arc<Metrics>
+        assert!(Arc::ptr_eq(&client.metrics, &cloned.metrics));
+    }
+
+    #[test]
+    fn client_clone_shares_schema_cache() {
+        let client = GraphqlClient::new("https://api.test.com/graphql");
+        let cloned = client.clone();
+        assert!(Arc::ptr_eq(&client.schema_cache, &cloned.schema_cache));
+    }
+
+    #[test]
+    fn client_clone_shares_http_client() {
+        let client = GraphqlClient::new("https://api.test.com/graphql");
+        let cloned = client.clone();
+        assert!(Arc::ptr_eq(&client.http, &cloned.http));
+    }
+
+    #[test]
+    fn client_debug_with_dedup() {
+        let client = GraphqlClientBuilder::new("https://api.test.com/graphql")
+            .with_dedup_in_flight(true)
+            .build()
+            .unwrap();
+        let dbg = format!("{client:?}");
+        assert!(dbg.contains("dedup_in_flight"));
+        assert!(dbg.contains("true"));
+    }
+
+    #[test]
+    fn client_debug_without_dedup() {
+        let client = GraphqlClient::new("https://api.test.com/graphql");
+        let dbg = format!("{client:?}");
+        assert!(dbg.contains("dedup_in_flight"));
+        assert!(dbg.contains("false"));
+    }
 }

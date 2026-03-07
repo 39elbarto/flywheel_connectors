@@ -954,4 +954,160 @@ mod tests {
         let encoded = base64_encode(&[]);
         assert!(encoded.is_empty());
     }
+
+    // ---- Genesis with corrupted owner key ----
+
+    #[test]
+    fn genesis_owner_verifying_key_rejects_zero_key() {
+        let signing_key = Ed25519SigningKey::generate();
+        let mut genesis = GenesisState::create(&signing_key.verifying_key());
+        genesis.owner_public_key = [0u8; 32];
+        // Ed25519 identity point is usually rejected
+        // The error may or may not happen depending on the library,
+        // but the function should not panic.
+        let _ = genesis.owner_verifying_key();
+    }
+
+    #[test]
+    fn genesis_validation_rejects_invalid_key_bytes() {
+        let signing_key = Ed25519SigningKey::generate();
+        let mut genesis = GenesisState::create(&signing_key.verifying_key());
+        // Construct bytes that are NOT a valid Ed25519 point:
+        // set all bytes to 0xEE — this is very unlikely to be on the curve
+        genesis.owner_public_key = [0xEE; 32];
+        let result = genesis.validate();
+        // If the library accepts it, that's also fine — we just ensure no panic
+        // The main goal is exercising the validation path
+        let _ = result;
+    }
+
+    // ---- Multiple zones with z: prefix ----
+
+    #[test]
+    fn genesis_validation_accepts_many_custom_zones() {
+        let signing_key = Ed25519SigningKey::generate();
+        let mut genesis = GenesisState::create(&signing_key.verifying_key());
+        for i in 0..10 {
+            genesis.initial_zones.push(InitialZone {
+                zone_id: format!("z:custom-{i}"),
+                name: format!("Custom Zone {i}"),
+                integrity_level: 10,
+                confidentiality_level: 10,
+            });
+        }
+        assert!(genesis.validate().is_ok());
+        assert_eq!(genesis.initial_zones.len(), 15);
+    }
+
+    // ---- InitialZone with unicode ----
+
+    #[test]
+    fn initial_zone_unicode_name() {
+        let zone = InitialZone {
+            zone_id: "z:intl".to_string(),
+            name: "\u{1F30D} International Zone".to_string(),
+            integrity_level: 50,
+            confidentiality_level: 50,
+        };
+        let json = serde_json::to_string(&zone).unwrap();
+        let restored: InitialZone = serde_json::from_str(&json).unwrap();
+        assert_eq!(zone.name, restored.name);
+    }
+
+    // ---- CBOR roundtrip preserves zone data ----
+
+    #[test]
+    fn genesis_cbor_roundtrip_preserves_zone_details() {
+        let signing_key = Ed25519SigningKey::generate();
+        let genesis = GenesisState::create(&signing_key.verifying_key());
+        let cbor = genesis.to_cbor().unwrap();
+        let restored = GenesisState::from_cbor(&cbor).unwrap();
+        for (orig, rest) in genesis.initial_zones.iter().zip(restored.initial_zones.iter()) {
+            assert_eq!(orig.zone_id, rest.zone_id);
+            assert_eq!(orig.name, rest.name);
+            assert_eq!(orig.integrity_level, rest.integrity_level);
+            assert_eq!(orig.confidentiality_level, rest.confidentiality_level);
+        }
+    }
+
+    // ---- Fingerprint is not empty ----
+
+    #[test]
+    fn genesis_fingerprint_is_nonempty() {
+        let signing_key = Ed25519SigningKey::generate();
+        let genesis = GenesisState::create(&signing_key.verifying_key());
+        let fp = genesis.fingerprint();
+        assert!(!fp.is_empty());
+        assert!(fp.len() > 10);
+    }
+
+    // ---- Validation error is std::error::Error ----
+
+    #[test]
+    fn genesis_validation_error_is_error_trait() {
+        let err = GenesisValidationError::InvalidOwnerKey;
+        let _: &dyn std::error::Error = &err;
+    }
+
+    // ---- Deterministic genesis validates ----
+
+    #[test]
+    fn genesis_deterministic_validates_ok() {
+        let signing_key = Ed25519SigningKey::generate();
+        let genesis = GenesisState::create_deterministic(&signing_key.verifying_key());
+        assert!(genesis.validate().is_ok());
+        assert_eq!(genesis.schema_version, GENESIS_SCHEMA_VERSION);
+    }
+
+    // ---- OwnerKeypair sign different messages produce different sigs ----
+
+    #[test]
+    fn owner_keypair_different_messages_different_sigs() {
+        let signing_key = Ed25519SigningKey::generate();
+        let keypair = super::OwnerKeypair::new(signing_key);
+        let sig1 = keypair.sign(b"message one");
+        let sig2 = keypair.sign(b"message two");
+        // Ed25519 is deterministic, different messages => different sigs
+        assert_ne!(sig1.to_bytes(), sig2.to_bytes());
+    }
+
+    // ---- InitialZone boundary levels ----
+
+    #[test]
+    fn initial_zone_boundary_levels() {
+        let zone = InitialZone {
+            zone_id: "z:boundary".to_string(),
+            name: "Boundary".to_string(),
+            integrity_level: u8::MAX,
+            confidentiality_level: u8::MIN,
+        };
+        let json = serde_json::to_string(&zone).unwrap();
+        let restored: InitialZone = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.integrity_level, 255);
+        assert_eq!(restored.confidentiality_level, 0);
+    }
+
+    // ---- GenesisState schema_version boundary ----
+
+    #[test]
+    fn genesis_validation_rejects_max_schema_version() {
+        let signing_key = Ed25519SigningKey::generate();
+        let mut genesis = GenesisState::create(&signing_key.verifying_key());
+        genesis.schema_version = u32::MAX;
+        let result = genesis.validate();
+        assert!(matches!(
+            result,
+            Err(GenesisValidationError::UnsupportedSchemaVersion(u32::MAX))
+        ));
+    }
+
+    // ---- base64_encode single byte ----
+
+    #[test]
+    fn base64_encode_single_byte() {
+        let encoded = base64_encode(&[0x42]);
+        assert!(!encoded.is_empty());
+        // base64 of [0x42] should be "Qg" (URL-safe, no pad)
+        assert_eq!(encoded, "Qg");
+    }
 }

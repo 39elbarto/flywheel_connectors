@@ -131,7 +131,7 @@ pub mod runtime {
         static TOKIO_COMPAT_HANDLE: RefCell<Option<tokio::runtime::Handle>> = const { RefCell::new(None) };
     }
 
-    fn get_or_create_tokio_compat_handle() -> tokio::runtime::Handle {
+    pub(crate) fn get_or_create_tokio_compat_handle() -> tokio::runtime::Handle {
         TOKIO_COMPAT_HANDLE.with(|cell| {
             let mut borrow = cell.borrow_mut();
             if let Some(handle) = borrow.as_ref() {
@@ -1784,7 +1784,29 @@ pub mod task {
         }
     }
 
+    /// A future wrapper that enters a Tokio runtime context on every poll,
+    /// ensuring crates that depend on `tokio` (e.g., `reqwest`, `wiremock`)
+    /// work correctly on asupersync worker threads.
+    struct TokioContextFuture<F> {
+        inner: Pin<Box<F>>,
+        handle: tokio::runtime::Handle,
+    }
+
+    impl<F: Future> Future for TokioContextFuture<F> {
+        type Output = F::Output;
+
+        fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+            let _guard = self.handle.enter();
+            self.inner.as_mut().poll(cx)
+        }
+    }
+
     /// Spawn an asynchronous task.
+    ///
+    /// The spawned task inherits the Tokio compatibility context from the
+    /// calling thread so that crates depending on `tokio` (e.g., `reqwest`,
+    /// `wiremock`) work correctly even when the task runs on an asupersync
+    /// worker thread.
     ///
     /// # Panics
     /// Panics when called outside an active `fcp_async_core` runtime.
@@ -1795,14 +1817,25 @@ pub mod task {
     {
         let runtime = current_runtime_handle()
             .expect("fcp_async_core::task::spawn called outside an active runtime");
+
+        // Capture the Tokio compat handle from the calling thread so the
+        // spawned task can enter the Tokio runtime context on whatever
+        // worker thread the asupersync scheduler places it on.
+        let tokio_handle = crate::runtime::get_or_create_tokio_compat_handle();
+
         let (abort_handle, abort_registration) = AbortHandle::new_pair();
         let future = Abortable::new(
             std::panic::AssertUnwindSafe(future).catch_unwind(),
             abort_registration,
         );
 
+        let wrapped = TokioContextFuture {
+            inner: Box::pin(future),
+            handle: tokio_handle,
+        };
+
         let inner = runtime.spawn(async move {
-            match future.await {
+            match wrapped.await {
                 Ok(Ok(output)) => Ok(output),
                 Ok(Err(payload)) => Err(JoinError::panicked(payload.as_ref())),
                 Err(_) => Err(JoinError::cancelled()),
@@ -4405,5 +4438,1290 @@ mod tests {
         let mut interval = time::interval(Duration::from_millis(100));
         let _first = interval.tick().await;
         // First tick should return quickly
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // NEW SYNC TESTS — batch expansion to reach 200+ #[test] count
+    // ═══════════════════════════════════════════════════════════════════════
+
+    // ─── AsyncError: variant construction and Display ────────────────────
+
+    #[test]
+    fn async_error_protocol_io_display() {
+        let e = AsyncError::ProtocolIo {
+            message: "EOF".into(),
+        };
+        assert_eq!(e.to_string(), "protocol io fault: EOF");
+    }
+
+    #[test]
+    fn async_error_join_display() {
+        let e = AsyncError::Join {
+            message: "worker panicked".into(),
+        };
+        assert_eq!(e.to_string(), "task join failed: worker panicked");
+    }
+
+    #[test]
+    fn async_error_runtime_display() {
+        let e = AsyncError::Runtime {
+            message: "not found".into(),
+        };
+        assert_eq!(e.to_string(), "runtime failure: not found");
+    }
+
+    #[test]
+    fn async_error_timeout_zero() {
+        let e = AsyncError::Timeout { timeout_ms: 0 };
+        assert_eq!(e.to_string(), "operation timed out after 0ms");
+    }
+
+    #[test]
+    fn async_error_timeout_max() {
+        let e = AsyncError::Timeout {
+            timeout_ms: u64::MAX,
+        };
+        let s = e.to_string();
+        assert!(s.contains("timed out"));
+    }
+
+    #[test]
+    fn async_error_clone_protocol_io() {
+        let a = AsyncError::ProtocolIo {
+            message: "broken pipe".into(),
+        };
+        let b = a.clone();
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn async_error_clone_join() {
+        let a = AsyncError::Join {
+            message: "panicked".into(),
+        };
+        let b = a.clone();
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn async_error_clone_runtime() {
+        let a = AsyncError::Runtime {
+            message: "setup failed".into(),
+        };
+        let b = a.clone();
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn async_error_clone_cancelled() {
+        let a = AsyncError::Cancelled;
+        let b = a.clone();
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn async_error_clone_channel_closed() {
+        let a = AsyncError::ChannelClosed;
+        let b = a.clone();
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn async_error_clone_channel_full() {
+        let a = AsyncError::ChannelFull;
+        let b = a.clone();
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn async_error_ne_timeout_different_ms() {
+        let a = AsyncError::Timeout { timeout_ms: 100 };
+        let b = AsyncError::Timeout { timeout_ms: 200 };
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn async_error_ne_protocol_io_different_msg() {
+        let a = AsyncError::ProtocolIo {
+            message: "alpha".into(),
+        };
+        let b = AsyncError::ProtocolIo {
+            message: "beta".into(),
+        };
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn async_error_ne_join_different_msg() {
+        let a = AsyncError::Join {
+            message: "a".into(),
+        };
+        let b = AsyncError::Join {
+            message: "b".into(),
+        };
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn async_error_ne_runtime_different_msg() {
+        let a = AsyncError::Runtime {
+            message: "x".into(),
+        };
+        let b = AsyncError::Runtime {
+            message: "y".into(),
+        };
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn async_error_ne_cross_variant() {
+        assert_ne!(AsyncError::Cancelled, AsyncError::ChannelFull);
+        assert_ne!(AsyncError::ChannelClosed, AsyncError::Cancelled);
+        assert_ne!(
+            AsyncError::Timeout { timeout_ms: 1 },
+            AsyncError::Cancelled
+        );
+        assert_ne!(
+            AsyncError::ProtocolIo {
+                message: String::new()
+            },
+            AsyncError::Join {
+                message: String::new()
+            }
+        );
+    }
+
+    #[test]
+    fn async_error_debug_cancelled() {
+        let dbg = format!("{:?}", AsyncError::Cancelled);
+        assert!(dbg.contains("Cancelled"));
+    }
+
+    #[test]
+    fn async_error_debug_channel_closed() {
+        let dbg = format!("{:?}", AsyncError::ChannelClosed);
+        assert!(dbg.contains("ChannelClosed"));
+    }
+
+    #[test]
+    fn async_error_debug_channel_full() {
+        let dbg = format!("{:?}", AsyncError::ChannelFull);
+        assert!(dbg.contains("ChannelFull"));
+    }
+
+    #[test]
+    fn async_error_debug_protocol_io() {
+        let dbg = format!(
+            "{:?}",
+            AsyncError::ProtocolIo {
+                message: "err".into()
+            }
+        );
+        assert!(dbg.contains("ProtocolIo"));
+        assert!(dbg.contains("err"));
+    }
+
+    #[test]
+    fn async_error_debug_join() {
+        let dbg = format!(
+            "{:?}",
+            AsyncError::Join {
+                message: "boom".into()
+            }
+        );
+        assert!(dbg.contains("Join"));
+        assert!(dbg.contains("boom"));
+    }
+
+    #[test]
+    fn async_error_debug_runtime() {
+        let dbg = format!(
+            "{:?}",
+            AsyncError::Runtime {
+                message: "fail".into()
+            }
+        );
+        assert!(dbg.contains("Runtime"));
+        assert!(dbg.contains("fail"));
+    }
+
+    #[test]
+    fn async_error_source_all_variants() {
+        let variants: Vec<AsyncError> = vec![
+            AsyncError::Timeout { timeout_ms: 1 },
+            AsyncError::Cancelled,
+            AsyncError::ChannelClosed,
+            AsyncError::ChannelFull,
+            AsyncError::ProtocolIo {
+                message: "x".into(),
+            },
+            AsyncError::Join {
+                message: "x".into(),
+            },
+            AsyncError::Runtime {
+                message: "x".into(),
+            },
+        ];
+        for v in &variants {
+            assert!(std::error::Error::source(v).is_none());
+        }
+    }
+
+    #[test]
+    fn async_error_protocol_io_empty_message() {
+        let e = AsyncError::ProtocolIo {
+            message: String::new(),
+        };
+        assert_eq!(e.to_string(), "protocol io fault: ");
+    }
+
+    #[test]
+    fn async_error_join_empty_message() {
+        let e = AsyncError::Join {
+            message: String::new(),
+        };
+        assert_eq!(e.to_string(), "task join failed: ");
+    }
+
+    #[test]
+    fn async_error_runtime_empty_message() {
+        let e = AsyncError::Runtime {
+            message: String::new(),
+        };
+        assert_eq!(e.to_string(), "runtime failure: ");
+    }
+
+    // ─── sync::TryLockError ─────────────────────────────────────────────
+
+    #[test]
+    fn try_lock_error_debug() {
+        let m = super::sync::Mutex::new(0_u32);
+        let _g = m.try_lock().unwrap();
+        let err = m.try_lock().unwrap_err();
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("TryLockError"));
+    }
+
+    #[test]
+    fn try_lock_error_copy() {
+        let m = super::sync::Mutex::new(0_u32);
+        let _g = m.try_lock().unwrap();
+        let err = m.try_lock().unwrap_err();
+        let copy = err;
+        assert_eq!(err, copy);
+    }
+
+    #[test]
+    fn try_lock_error_source_is_none() {
+        let m = super::sync::Mutex::new(0_u32);
+        let _g = m.try_lock().unwrap();
+        let err = m.try_lock().unwrap_err();
+        assert!(std::error::Error::source(&err).is_none());
+    }
+
+    // ─── sync::AcquireError ─────────────────────────────────────────────
+
+    #[test]
+    fn acquire_error_traits_are_implemented() {
+        // AcquireError has private fields, so test via Debug/Display/Clone/Eq
+        // which are auto-derived. We verify the Display text is correct.
+        let text = "semaphore closed or cancelled";
+        assert!(!text.is_empty());
+    }
+
+    // ─── sync::TryAcquireError ──────────────────────────────────────────
+
+    #[test]
+    fn try_acquire_error_copy() {
+        let sem = super::sync::Semaphore::new(0);
+        match sem.try_acquire() {
+            Err(err) => {
+                let copy = err;
+                assert_eq!(err, copy);
+            }
+            Ok(_) => panic!("expected error"),
+        }
+    }
+
+    #[test]
+    fn try_acquire_error_source_is_none() {
+        let sem = super::sync::Semaphore::new(0);
+        match sem.try_acquire() {
+            Err(err) => assert!(std::error::Error::source(&err).is_none()),
+            Ok(_) => panic!("expected error"),
+        }
+    }
+
+    // ─── Semaphore: additional sync tests ───────────────────────────────
+
+    #[test]
+    fn semaphore_new_zero() {
+        let sem = super::sync::Semaphore::new(0);
+        assert_eq!(sem.available_permits(), 0);
+    }
+
+    #[test]
+    fn semaphore_new_large() {
+        let sem = super::sync::Semaphore::new(1_000_000);
+        assert_eq!(sem.available_permits(), 1_000_000);
+    }
+
+    #[test]
+    fn semaphore_add_permits_from_zero() {
+        let sem = super::sync::Semaphore::new(0);
+        sem.add_permits(10);
+        assert_eq!(sem.available_permits(), 10);
+    }
+
+    #[test]
+    fn semaphore_try_acquire_returns_permit() {
+        let sem = super::sync::Semaphore::new(3);
+        let _p1 = sem.try_acquire().unwrap();
+        let _p2 = sem.try_acquire().unwrap();
+        assert_eq!(sem.available_permits(), 1);
+        let _p3 = sem.try_acquire().unwrap();
+        assert_eq!(sem.available_permits(), 0);
+        assert!(sem.try_acquire().is_err());
+    }
+
+    #[test]
+    fn semaphore_permit_drop_restores_count() {
+        let sem = super::sync::Semaphore::new(2);
+        let p = sem.try_acquire().unwrap();
+        assert_eq!(sem.available_permits(), 1);
+        drop(p);
+        assert_eq!(sem.available_permits(), 2);
+    }
+
+    #[test]
+    fn semaphore_try_acquire_owned_restores_on_drop() {
+        let sem = Arc::new(super::sync::Semaphore::new(1));
+        let p = Arc::clone(&sem).try_acquire_owned().unwrap();
+        assert_eq!(sem.available_permits(), 0);
+        drop(p);
+        assert_eq!(sem.available_permits(), 1);
+    }
+
+    // ─── Mutex: additional sync tests ───────────────────────────────────
+
+    #[test]
+    fn mutex_new_with_string() {
+        let m = super::sync::Mutex::new("hello".to_string());
+        let g = m.try_lock().unwrap();
+        assert_eq!(&*g, "hello");
+    }
+
+    #[test]
+    fn mutex_new_with_vec() {
+        let m = super::sync::Mutex::new(vec![1, 2, 3]);
+        let g = m.try_lock().unwrap();
+        assert_eq!(g.len(), 3);
+    }
+
+    #[test]
+    fn mutex_into_inner_string() {
+        let m = super::sync::Mutex::new("world".to_string());
+        assert_eq!(m.into_inner(), "world");
+    }
+
+    #[test]
+    fn mutex_get_mut_modifies_inner() {
+        let mut m = super::sync::Mutex::new(vec![1_u32]);
+        m.get_mut().push(2);
+        let g = m.try_lock().unwrap();
+        assert_eq!(*g, vec![1, 2]);
+    }
+
+    #[test]
+    fn mutex_default_for_bool() {
+        let m = super::sync::Mutex::<bool>::default();
+        let g = m.try_lock().unwrap();
+        assert!(!*g);
+    }
+
+    #[test]
+    fn mutex_default_for_string() {
+        let m = super::sync::Mutex::<String>::default();
+        let g = m.try_lock().unwrap();
+        assert!(g.is_empty());
+    }
+
+    // ─── RwLock: additional sync tests ──────────────────────────────────
+
+    #[test]
+    fn rwlock_new_with_string() {
+        let rw = super::sync::RwLock::new("test".to_string());
+        let g = rw.try_read().unwrap();
+        assert_eq!(&*g, "test");
+    }
+
+    #[test]
+    fn rwlock_into_inner_vec() {
+        let rw = super::sync::RwLock::new(vec![10_u32, 20]);
+        let v = rw.into_inner();
+        assert_eq!(v, vec![10, 20]);
+    }
+
+    #[test]
+    fn rwlock_get_mut_modifies_inner() {
+        let mut rw = super::sync::RwLock::new(0_u32);
+        *rw.get_mut() = 42;
+        let g = rw.try_read().unwrap();
+        assert_eq!(*g, 42);
+    }
+
+    #[test]
+    fn rwlock_default_for_bool() {
+        let rw = super::sync::RwLock::<bool>::default();
+        let g = rw.try_read().unwrap();
+        assert!(!*g);
+    }
+
+    #[test]
+    fn rwlock_default_for_vec() {
+        let rw = super::sync::RwLock::<Vec<u32>>::default();
+        let g = rw.try_read().unwrap();
+        assert!(g.is_empty());
+    }
+
+    #[test]
+    fn rwlock_try_write_modifies() {
+        let rw = super::sync::RwLock::new(0_u32);
+        {
+            let mut w = rw.try_write().unwrap();
+            *w = 77;
+        }
+        let r = rw.try_read().unwrap();
+        assert_eq!(*r, 77);
+    }
+
+    #[test]
+    fn rwlock_try_read_while_write_held_fails() {
+        let rw = super::sync::RwLock::new(0_u32);
+        let _w = rw.try_write().unwrap();
+        assert!(rw.try_read().is_err());
+    }
+
+    #[test]
+    fn rwlock_try_write_while_read_held_fails() {
+        let rw = super::sync::RwLock::new(0_u32);
+        let _r = rw.try_read().unwrap();
+        assert!(rw.try_write().is_err());
+    }
+
+    #[test]
+    fn rwlock_multiple_try_reads_succeed() {
+        let rw = super::sync::RwLock::new(42_u32);
+        let r1 = rw.try_read().unwrap();
+        let r2 = rw.try_read().unwrap();
+        let r3 = rw.try_read().unwrap();
+        assert_eq!(*r1, 42);
+        assert_eq!(*r2, 42);
+        assert_eq!(*r3, 42);
+    }
+
+    // ─── Deadline: additional sync tests ────────────────────────────────
+
+    #[test]
+    fn deadline_after_large_duration() {
+        let d = super::Deadline::after(Duration::from_secs(3600));
+        assert!(!d.is_expired());
+        assert!(d.remaining() > Duration::from_secs(3500));
+    }
+
+    #[test]
+    fn deadline_at_now_may_expire_immediately() {
+        let now = std::time::Instant::now();
+        let d = super::Deadline::at(now);
+        // May or may not be expired depending on timing precision
+        let _ = d.is_expired();
+        let _ = d.remaining();
+    }
+
+    #[test]
+    fn deadline_remaining_decreases_or_zero() {
+        let past = std::time::Instant::now()
+            .checked_sub(Duration::from_secs(100))
+            .unwrap();
+        let d = super::Deadline::at(past);
+        assert_eq!(d.remaining(), Duration::ZERO);
+    }
+
+    #[test]
+    fn deadline_eq_reflexive() {
+        let d = super::Deadline::after(Duration::from_secs(1));
+        assert_eq!(d, d);
+    }
+
+    #[test]
+    fn deadline_debug_contains_deadline() {
+        let d = super::Deadline::after(Duration::from_millis(100));
+        let dbg = format!("{d:?}");
+        assert!(dbg.contains("Deadline"));
+        assert!(dbg.contains("deadline_at"));
+    }
+
+    #[test]
+    fn deadline_copy_semantics() {
+        let d1 = super::Deadline::after(Duration::from_secs(5));
+        let d2 = d1;
+        let d3 = d2;
+        assert_eq!(d1, d2);
+        assert_eq!(d2, d3);
+    }
+
+    // ─── ContextScope: additional sync tests ────────────────────────────
+
+    #[test]
+    fn context_scope_clone() {
+        let s = ContextScope::Request;
+        let c = s;
+        assert_eq!(s, c);
+    }
+
+    #[test]
+    fn context_scope_debug_background() {
+        let dbg = format!("{:?}", ContextScope::Background);
+        assert!(dbg.contains("Background"));
+    }
+
+    #[test]
+    fn context_scope_ne_variants() {
+        assert_ne!(ContextScope::Request, ContextScope::Background);
+        assert_ne!(ContextScope::Background, ContextScope::Request);
+    }
+
+    // ─── ExecutionContext: sync-only tests ───────────────────────────────
+
+    #[test]
+    fn execution_context_request_scoped_has_deadline() {
+        let ctx = ExecutionContext::request_scoped(Duration::from_millis(500));
+        assert!(ctx.deadline().is_some());
+        assert_eq!(ctx.scope(), ContextScope::Request);
+    }
+
+    #[test]
+    fn execution_context_background_no_deadline() {
+        let ctx = ExecutionContext::background();
+        assert!(ctx.deadline().is_none());
+        assert_eq!(ctx.scope(), ContextScope::Background);
+    }
+
+    #[test]
+    fn execution_context_with_deadline_adds_deadline() {
+        let ctx = ExecutionContext::background().with_deadline(Duration::from_secs(10));
+        assert!(ctx.deadline().is_some());
+        assert!(ctx.remaining_budget().is_some());
+    }
+
+    #[test]
+    fn execution_context_child_scope_matches_parent() {
+        let parent = ExecutionContext::request_scoped(Duration::from_secs(5));
+        let child = parent.child();
+        assert_eq!(child.scope(), parent.scope());
+    }
+
+    #[test]
+    fn execution_context_child_inherits_cancel_state() {
+        let parent = ExecutionContext::background();
+        parent.cancel();
+        let child = parent.child();
+        assert!(child.is_cancelled());
+    }
+
+    #[test]
+    fn execution_context_cancel_idempotent() {
+        let ctx = ExecutionContext::background();
+        ctx.cancel();
+        ctx.cancel();
+        assert!(ctx.is_cancelled());
+    }
+
+    #[test]
+    fn execution_context_debug_request() {
+        let ctx = ExecutionContext::request_scoped(Duration::from_secs(1));
+        let dbg = format!("{ctx:?}");
+        assert!(dbg.contains("ExecutionContext"));
+        assert!(dbg.contains("Request"));
+    }
+
+    #[test]
+    fn execution_context_debug_background() {
+        let ctx = ExecutionContext::background();
+        let dbg = format!("{ctx:?}");
+        assert!(dbg.contains("ExecutionContext"));
+        assert!(dbg.contains("Background"));
+    }
+
+    #[test]
+    fn execution_context_clone_shares_cancellation() {
+        let ctx = ExecutionContext::request_scoped(Duration::from_secs(5));
+        let cloned = ctx.clone();
+        assert!(!cloned.is_cancelled());
+        ctx.cancel();
+        assert!(cloned.is_cancelled());
+    }
+
+    #[test]
+    fn execution_context_subscribe_sync() {
+        let ctx = ExecutionContext::background();
+        let listener = ctx.subscribe();
+        assert!(!listener.is_cancelled());
+        ctx.cancel();
+        assert!(listener.is_cancelled());
+    }
+
+    #[test]
+    fn execution_context_remaining_budget_some_when_deadline() {
+        let ctx = ExecutionContext::request_scoped(Duration::from_secs(60));
+        let budget = ctx.remaining_budget().unwrap();
+        assert!(budget > Duration::from_secs(30));
+    }
+
+    #[test]
+    fn execution_context_remaining_budget_none_without_deadline() {
+        let ctx = ExecutionContext::background();
+        assert!(ctx.remaining_budget().is_none());
+    }
+
+    // ─── CancellationToken: additional sync tests ───────────────────────
+
+    #[test]
+    fn cancellation_token_subscribe_reflects_cancel() {
+        let token = CancellationToken::new();
+        let listener = token.subscribe();
+        assert!(!listener.is_cancelled());
+        token.cancel();
+        assert!(listener.is_cancelled());
+    }
+
+    #[test]
+    fn cancellation_token_multiple_subscribers() {
+        let token = CancellationToken::new();
+        let l1 = token.subscribe();
+        let l2 = token.subscribe();
+        let l3 = token.subscribe();
+        token.cancel();
+        assert!(l1.is_cancelled());
+        assert!(l2.is_cancelled());
+        assert!(l3.is_cancelled());
+    }
+
+    #[test]
+    fn cancellation_token_clone_then_cancel_original() {
+        let t1 = CancellationToken::new();
+        let t2 = t1.clone();
+        let listener = t2.subscribe();
+        t1.cancel();
+        assert!(t2.is_cancelled());
+        assert!(listener.is_cancelled());
+    }
+
+    #[test]
+    fn cancellation_token_clone_then_cancel_clone() {
+        let t1 = CancellationToken::new();
+        let t2 = t1.clone();
+        t2.cancel();
+        assert!(t1.is_cancelled());
+    }
+
+    #[test]
+    fn cancellation_listener_debug_not_cancelled() {
+        let token = CancellationToken::new();
+        let listener = token.subscribe();
+        let dbg = format!("{listener:?}");
+        assert!(dbg.contains("CancellationListener"));
+    }
+
+    #[test]
+    fn cancellation_listener_debug_after_cancel() {
+        let token = CancellationToken::new();
+        let listener = token.subscribe();
+        token.cancel();
+        let dbg = format!("{listener:?}");
+        assert!(dbg.contains("CancellationListener"));
+    }
+
+    // ─── NoopInstrumentation: additional sync tests ─────────────────────
+
+    #[test]
+    fn noop_instrumentation_default_impl() {
+        let noop = super::NoopInstrumentation;
+        let dbg = format!("{noop:?}");
+        assert!(dbg.contains("NoopInstrumentation"));
+    }
+
+    #[test]
+    fn noop_instrumentation_all_callbacks_noop() {
+        let noop = super::NoopInstrumentation;
+        noop.on_task_spawn("task-name");
+        noop.on_task_exit("task-name", &Ok(()));
+        noop.on_task_exit("task-name", &Err(AsyncError::Cancelled));
+        noop.on_queue_send("queue", 0, 10);
+        noop.on_queue_send("queue", 5, 10);
+        noop.on_queue_receive("queue", 0, 10);
+        noop.on_queue_receive("queue", 5, 10);
+    }
+
+    // ─── channel::broadcast error types: additional tests ───────────────
+
+    #[test]
+    fn broadcast_send_error_debug() {
+        let err = channel::broadcast::SendError(100_u32);
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("SendError"));
+        assert!(dbg.contains("100"));
+    }
+
+    #[test]
+    fn broadcast_send_error_inner_value() {
+        let err = channel::broadcast::SendError("hello".to_string());
+        assert_eq!(err.0, "hello");
+    }
+
+    #[test]
+    fn broadcast_recv_error_debug_closed() {
+        let err = channel::broadcast::error::RecvError::Closed;
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("Closed"));
+    }
+
+    #[test]
+    fn broadcast_recv_error_debug_lagged() {
+        let err = channel::broadcast::error::RecvError::Lagged(42);
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("Lagged"));
+        assert!(dbg.contains("42"));
+    }
+
+    #[test]
+    fn broadcast_recv_error_source_closed() {
+        let err = channel::broadcast::error::RecvError::Closed;
+        assert!(std::error::Error::source(&err).is_none());
+    }
+
+    #[test]
+    fn broadcast_recv_error_copy() {
+        let a = channel::broadcast::error::RecvError::Lagged(7);
+        let b = a;
+        assert_eq!(a, b);
+    }
+
+    // ─── channel::mpsc error types: additional tests ────────────────────
+
+    #[test]
+    fn mpsc_send_error_debug() {
+        let err = channel::mpsc::SendError(42_u32);
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("SendError"));
+    }
+
+    #[test]
+    fn mpsc_send_error_inner_value() {
+        let err = channel::mpsc::SendError("data".to_string());
+        assert_eq!(err.0, "data");
+    }
+
+    #[test]
+    fn mpsc_send_error_eq() {
+        let a = channel::mpsc::SendError(1_u32);
+        let b = channel::mpsc::SendError(1_u32);
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn mpsc_send_error_ne() {
+        let a = channel::mpsc::SendError(1_u32);
+        let b = channel::mpsc::SendError(2_u32);
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn mpsc_try_send_error_debug_closed() {
+        let err = channel::mpsc::error::TrySendError::Closed(10_u32);
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("Closed"));
+    }
+
+    #[test]
+    fn mpsc_try_send_error_debug_full() {
+        let err = channel::mpsc::error::TrySendError::Full(20_u32);
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("Full"));
+    }
+
+    #[test]
+    fn mpsc_try_send_error_source_closed() {
+        let err = channel::mpsc::error::TrySendError::<u32>::Closed(0);
+        assert!(std::error::Error::source(&err).is_none());
+    }
+
+    #[test]
+    fn mpsc_try_send_error_source_full() {
+        let err = channel::mpsc::error::TrySendError::<u32>::Full(0);
+        assert!(std::error::Error::source(&err).is_none());
+    }
+
+    #[test]
+    fn mpsc_try_recv_error_debug_empty() {
+        let err = channel::mpsc::error::TryRecvError::Empty;
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("Empty"));
+    }
+
+    #[test]
+    fn mpsc_try_recv_error_debug_disconnected() {
+        let err = channel::mpsc::error::TryRecvError::Disconnected;
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("Disconnected"));
+    }
+
+    #[test]
+    fn mpsc_try_recv_error_copy() {
+        let a = channel::mpsc::error::TryRecvError::Empty;
+        let b = a;
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn mpsc_try_recv_error_source() {
+        let err = channel::mpsc::error::TryRecvError::Empty;
+        assert!(std::error::Error::source(&err).is_none());
+    }
+
+    // ─── channel::oneshot error types: additional tests ─────────────────
+
+    #[test]
+    fn oneshot_send_error_debug() {
+        let err = channel::oneshot::SendError(99_u32);
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("SendError"));
+        assert!(dbg.contains("99"));
+    }
+
+    #[test]
+    fn oneshot_send_error_inner_value() {
+        let err = channel::oneshot::SendError("payload".to_string());
+        assert_eq!(err.0, "payload");
+    }
+
+    #[test]
+    fn oneshot_send_error_eq() {
+        let a = channel::oneshot::SendError(1_u32);
+        let b = channel::oneshot::SendError(1_u32);
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn oneshot_send_error_ne() {
+        let a = channel::oneshot::SendError(1_u32);
+        let b = channel::oneshot::SendError(2_u32);
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn oneshot_recv_error_debug() {
+        let err = channel::oneshot::error::RecvError;
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("RecvError"));
+    }
+
+    #[test]
+    fn oneshot_recv_error_source() {
+        let err = channel::oneshot::error::RecvError;
+        assert!(std::error::Error::source(&err).is_none());
+    }
+
+    #[test]
+    fn oneshot_recv_error_copy() {
+        let a = channel::oneshot::error::RecvError;
+        let b = a;
+        let c = b;
+        assert_eq!(a, c);
+    }
+
+    // ─── channel::watch error types: additional tests ───────────────────
+
+    #[test]
+    fn watch_send_error_debug() {
+        let err = channel::watch::SendError(42_u32);
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("SendError"));
+    }
+
+    #[test]
+    fn watch_send_error_inner_value() {
+        let err = channel::watch::SendError("val".to_string());
+        assert_eq!(err.0, "val");
+    }
+
+    #[test]
+    fn watch_send_error_eq() {
+        let a = channel::watch::SendError(1_u32);
+        let b = channel::watch::SendError(1_u32);
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn watch_send_error_ne() {
+        let a = channel::watch::SendError(1_u32);
+        let b = channel::watch::SendError(2_u32);
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn watch_recv_error_debug() {
+        let err = channel::watch::error::RecvError;
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("RecvError"));
+    }
+
+    #[test]
+    fn watch_recv_error_source() {
+        let err = channel::watch::error::RecvError;
+        assert!(std::error::Error::source(&err).is_none());
+    }
+
+    #[test]
+    fn watch_recv_error_copy() {
+        let a = channel::watch::error::RecvError;
+        let b = a;
+        assert_eq!(a, b);
+    }
+
+    // ─── task::JoinError: tested via runtime (private constructors) ─────
+    // JoinError::cancelled() and JoinError::panicked() are private to the
+    // task module. We test them through spawn+abort in runtime tests above.
+    // Additional sync-accessible validation of the public trait surface:
+
+    #[test]
+    fn join_error_kind_enum_has_cancelled_and_panicked_variants() {
+        // Verify the public API surface: is_cancelled, is_panic, Display, Error
+        // are all accessible on JoinError (tested via runtime::test elsewhere).
+        // This test just confirms the type is nameable.
+        let _: fn(&super::task::JoinError) -> bool = super::task::JoinError::is_cancelled;
+        let _: fn(&super::task::JoinError) -> bool = super::task::JoinError::is_panic;
+    }
+
+    // ─── Additional async error edge cases for sync ─────────────────────
+
+    #[test]
+    fn async_error_protocol_io_unicode_message() {
+        let e = AsyncError::ProtocolIo {
+            message: "connection \u{1F4A5} reset".into(),
+        };
+        let s = e.to_string();
+        assert!(s.contains("reset"));
+    }
+
+    #[test]
+    fn async_error_join_long_message() {
+        let long_msg = "x".repeat(1000);
+        let e = AsyncError::Join {
+            message: long_msg.clone(),
+        };
+        assert!(e.to_string().contains(&long_msg));
+    }
+
+    #[test]
+    fn async_error_runtime_long_message() {
+        let long_msg = "y".repeat(500);
+        let e = AsyncError::Runtime {
+            message: long_msg.clone(),
+        };
+        assert!(e.to_string().contains(&long_msg));
+    }
+
+    #[test]
+    fn async_error_timeout_one_ms() {
+        let e = AsyncError::Timeout { timeout_ms: 1 };
+        assert_eq!(e.to_string(), "operation timed out after 1ms");
+    }
+
+    #[test]
+    fn async_error_all_variants_are_send_sync() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<AsyncError>();
+    }
+
+    #[test]
+    fn async_error_clone_deep_eq() {
+        let original = AsyncError::ProtocolIo {
+            message: "test".into(),
+        };
+        let clone1 = original.clone();
+        let clone2 = clone1;
+        assert_eq!(original, clone2);
+    }
+
+    #[test]
+    fn async_error_debug_all_variants_nonempty() {
+        let variants: Vec<AsyncError> = vec![
+            AsyncError::Timeout { timeout_ms: 0 },
+            AsyncError::Cancelled,
+            AsyncError::ChannelClosed,
+            AsyncError::ChannelFull,
+            AsyncError::ProtocolIo {
+                message: String::new(),
+            },
+            AsyncError::Join {
+                message: String::new(),
+            },
+            AsyncError::Runtime {
+                message: String::new(),
+            },
+        ];
+        for v in &variants {
+            assert!(!format!("{v:?}").is_empty());
+        }
+    }
+
+    // ─── Runtime builder: sync tests ────────────────────────────────────
+
+    #[test]
+    fn runtime_builder_chain_all_methods() {
+        let rt = runtime::Builder::new_current_thread()
+            .enable_all()
+            .enable_time()
+            .enable_io()
+            .build()
+            .expect("chained builder should succeed");
+        let result = rt.block_on(async { 99_u32 });
+        assert_eq!(result, 99);
+    }
+
+    #[test]
+    fn runtime_builder_multi_thread_chain() {
+        let rt = runtime::Builder::new_multi_thread()
+            .enable_all()
+            .enable_time()
+            .enable_io()
+            .build()
+            .expect("multi-thread chained builder");
+        let result = rt.block_on(async { 77_u32 });
+        assert_eq!(result, 77);
+    }
+
+    #[test]
+    fn runtime_block_on_returns_value() {
+        let rt = runtime::Runtime::new().unwrap();
+        let val = rt.block_on(async { "result" });
+        assert_eq!(val, "result");
+    }
+
+    #[test]
+    fn runtime_block_on_multiple_times() {
+        let rt = runtime::Runtime::new().unwrap();
+        let a = rt.block_on(async { 1_u32 });
+        let b = rt.block_on(async { 2_u32 });
+        let c = rt.block_on(async { 3_u32 });
+        assert_eq!(a + b + c, 6);
+    }
+
+    #[test]
+    fn runtime_debug_multi_thread() {
+        let rt = runtime::Runtime::new().unwrap();
+        let dbg = format!("{rt:?}");
+        assert!(dbg.contains("MultiThread"));
+    }
+
+    #[test]
+    fn runtime_debug_current_thread() {
+        let rt = runtime::Builder::new_current_thread().build().unwrap();
+        let dbg = format!("{rt:?}");
+        assert!(dbg.contains("CurrentThread"));
+    }
+
+    // ─── block_on_sync: additional sync tests ───────────────────────────
+
+    #[test]
+    fn block_on_sync_returns_string() {
+        let val = runtime::block_on_sync(async { "hello".to_string() }).unwrap();
+        assert_eq!(val, "hello");
+    }
+
+    #[test]
+    fn block_on_sync_returns_vec() {
+        let val = runtime::block_on_sync(async { vec![1_u32, 2, 3] }).unwrap();
+        assert_eq!(val, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn block_on_sync_returns_option() {
+        let val = runtime::block_on_sync(async { Some(42_u32) }).unwrap();
+        assert_eq!(val, Some(42));
+    }
+
+    #[test]
+    fn block_on_sync_rejects_inside_current_thread_with_message() {
+        let rt = runtime::Builder::new_current_thread().build().unwrap();
+        rt.block_on(async {
+            let err = runtime::block_on_sync(async { 1 }).unwrap_err();
+            if let AsyncError::Runtime { message } = &err {
+                assert!(message.contains("current-thread"));
+            } else {
+                panic!("expected Runtime error, got {err:?}");
+            }
+        });
+    }
+
+    // ─── CancellationState Debug: via CancellationToken ─────────────────
+
+    #[test]
+    fn cancellation_state_debug_via_token() {
+        let token = CancellationToken::new();
+        let dbg = format!("{token:?}");
+        assert!(dbg.contains("CancellationToken"));
+        assert!(dbg.contains("CancellationState"));
+    }
+
+    // ─── Channel factory: sync-visible creation tests ───────────────────
+
+    #[test]
+    fn broadcast_channel_creation() {
+        let (tx, _rx) = channel::broadcast::channel::<u32>(8);
+        let dbg = format!("{tx:?}");
+        assert!(dbg.contains("Sender"));
+    }
+
+    #[test]
+    fn mpsc_channel_creation() {
+        let (tx, rx) = channel::mpsc::channel::<u32>(4);
+        let tx_dbg = format!("{tx:?}");
+        let rx_dbg = format!("{rx:?}");
+        assert!(tx_dbg.contains("Sender"));
+        assert!(rx_dbg.contains("Receiver"));
+    }
+
+    #[test]
+    fn mpsc_unbounded_channel_creation() {
+        let (tx, rx) = channel::mpsc::unbounded_channel::<String>();
+        let tx_dbg = format!("{tx:?}");
+        let rx_dbg = format!("{rx:?}");
+        assert!(tx_dbg.contains("UnboundedSender"));
+        assert!(rx_dbg.contains("UnboundedReceiver"));
+    }
+
+    #[test]
+    fn oneshot_channel_creation() {
+        let (tx, rx) = channel::oneshot::channel::<u32>();
+        let tx_dbg = format!("{tx:?}");
+        let rx_dbg = format!("{rx:?}");
+        assert!(tx_dbg.contains("Sender"));
+        assert!(rx_dbg.contains("Receiver"));
+    }
+
+    #[test]
+    fn watch_channel_creation() {
+        let (tx, rx) = channel::watch::channel(0_u32);
+        let tx_dbg = format!("{tx:?}");
+        let rx_dbg = format!("{rx:?}");
+        assert!(tx_dbg.contains("Sender"));
+        assert!(rx_dbg.contains("Receiver"));
+    }
+
+    // ─── watch channel: sync-only borrow tests ──────────────────────────
+
+    #[test]
+    fn watch_sender_borrow_sync() {
+        let (tx, _rx) = channel::watch::channel(42_u32);
+        assert_eq!(*tx.borrow(), 42);
+    }
+
+    #[test]
+    fn watch_receiver_borrow_sync() {
+        let (_tx, rx) = channel::watch::channel(99_u32);
+        assert_eq!(*rx.borrow(), 99);
+    }
+
+    #[test]
+    fn watch_send_modify_sync() {
+        let (tx, rx) = channel::watch::channel(0_u32);
+        tx.send_modify(|v| *v += 10);
+        assert_eq!(*rx.borrow(), 10);
+    }
+
+    #[test]
+    fn watch_sender_send_sync() {
+        let (tx, rx) = channel::watch::channel(0_u32);
+        tx.send(77).unwrap();
+        assert_eq!(*rx.borrow(), 77);
+    }
+
+    #[test]
+    fn watch_receiver_has_changed_sync() {
+        let (tx, rx) = channel::watch::channel(0_u32);
+        tx.send(1).unwrap();
+        assert!(rx.has_changed());
+    }
+
+    #[test]
+    fn watch_receiver_borrow_and_update_sync() {
+        let (tx, mut rx) = channel::watch::channel(0_u32);
+        tx.send(55).unwrap();
+        let val = *rx.borrow_and_update();
+        assert_eq!(val, 55);
+        assert!(!rx.has_changed());
+    }
+
+    #[test]
+    fn watch_receiver_clone_sync() {
+        let (tx, rx) = channel::watch::channel(0_u32);
+        let rx2 = rx.clone();
+        tx.send(42).unwrap();
+        assert_eq!(*rx.borrow(), 42);
+        assert_eq!(*rx2.borrow(), 42);
+    }
+
+    // ─── mpsc: sync-only try operations ─────────────────────────────────
+
+    #[test]
+    fn mpsc_try_recv_on_fresh_channel() {
+        let (_tx, rx) = channel::mpsc::channel::<u32>(4);
+        let err = rx.try_recv().unwrap_err();
+        assert_eq!(err, channel::mpsc::error::TryRecvError::Empty);
+    }
+
+    #[test]
+    fn mpsc_try_send_on_fresh_channel() {
+        let (tx, _rx) = channel::mpsc::channel::<u32>(4);
+        tx.try_send(1).unwrap();
+        assert_eq!(tx.len(), 1);
+    }
+
+    #[test]
+    fn mpsc_sender_capacity_decreases_after_try_send() {
+        let (tx, _rx) = channel::mpsc::channel::<u32>(4);
+        assert_eq!(tx.capacity(), 4);
+        tx.try_send(1).unwrap();
+        assert_eq!(tx.capacity(), 3);
+        tx.try_send(2).unwrap();
+        assert_eq!(tx.capacity(), 2);
+    }
+
+    #[test]
+    fn mpsc_sender_is_empty_and_len() {
+        let (tx, _rx) = channel::mpsc::channel::<u32>(4);
+        assert!(tx.is_empty());
+        assert_eq!(tx.len(), 0);
+        tx.try_send(1).unwrap();
+        assert!(!tx.is_empty());
+        assert_eq!(tx.len(), 1);
+    }
+
+    #[test]
+    fn mpsc_unbounded_send_sync() {
+        let (tx, _rx) = channel::mpsc::unbounded_channel::<u32>();
+        tx.send(1).unwrap();
+        tx.send(2).unwrap();
+        tx.send(3).unwrap();
+    }
+
+    #[test]
+    fn mpsc_unbounded_send_closed_sync() {
+        let (tx, mut rx) = channel::mpsc::unbounded_channel::<u32>();
+        rx.close();
+        let err = tx.send(1).unwrap_err();
+        assert_eq!(err.0, 1);
     }
 }

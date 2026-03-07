@@ -424,4 +424,119 @@ mod tests {
         assert_eq!(recovery.genesis.schema_version, 1);
         assert_eq!(recovery.genesis.initial_zones.len(), 5);
     }
+
+    // ---- Debug output ----
+
+    #[test]
+    fn cold_recovery_debug_output() {
+        let phrase = test_phrase();
+        let recovery = ColdRecovery::from_phrase(&phrase, None).unwrap();
+        let debug = format!("{recovery:?}");
+        assert!(debug.contains("ColdRecovery"));
+        assert!(debug.contains("genesis"));
+        assert!(debug.contains("warnings"));
+    }
+
+    // ---- Warning clone and eq ----
+
+    #[test]
+    fn cold_recovery_warning_clone() {
+        let w = ColdRecoveryWarning::DataLoss;
+        let cloned = w.clone();
+        assert_eq!(w, cloned);
+    }
+
+    #[test]
+    fn cold_recovery_warning_all_eq() {
+        let variants = [
+            ColdRecoveryWarning::NoAuditHistory,
+            ColdRecoveryWarning::RevocationStateUnknown,
+            ColdRecoveryWarning::SingleNodeStart,
+            ColdRecoveryWarning::DataLoss,
+            ColdRecoveryWarning::FingerprintNotVerified,
+        ];
+        for v in &variants {
+            assert_eq!(*v, v.clone());
+        }
+    }
+
+    #[test]
+    fn cold_recovery_warning_ne() {
+        assert_ne!(
+            ColdRecoveryWarning::DataLoss,
+            ColdRecoveryWarning::NoAuditHistory
+        );
+        assert_ne!(
+            ColdRecoveryWarning::SingleNodeStart,
+            ColdRecoveryWarning::FingerprintNotVerified
+        );
+    }
+
+    // ---- ColdRecoveryError is std::error::Error ----
+
+    #[test]
+    fn cold_recovery_error_is_error_trait() {
+        let err = ColdRecoveryError::FingerprintMismatch {
+            expected: "a".into(),
+            actual: "b".into(),
+        };
+        let _: &dyn std::error::Error = &err;
+    }
+
+    // ---- Fingerprint is deterministic across recoveries ----
+
+    #[test]
+    fn cold_recovery_fingerprint_deterministic_multiple() {
+        let phrase = test_phrase();
+        let fps: Vec<String> = (0..3)
+            .map(|_| {
+                ColdRecovery::from_phrase(&phrase, None)
+                    .unwrap()
+                    .fingerprint()
+            })
+            .collect();
+        assert_eq!(fps[0], fps[1]);
+        assert_eq!(fps[1], fps[2]);
+    }
+
+    // ---- Owner keypair from recovery signs correctly ----
+
+    #[test]
+    fn cold_recovery_owner_keypair_signs() {
+        let phrase = test_phrase();
+        let recovery = ColdRecovery::from_phrase(&phrase, None).unwrap();
+        let msg = b"test recovery sign";
+        let sig = recovery.owner_keypair.sign(msg);
+        assert!(recovery.owner_keypair.public().verify(msg, &sig).is_ok());
+    }
+
+    // ---- CLI prompts ----
+
+    #[test]
+    fn cli_prompts_debug() {
+        let prompts = super::cli::ColdRecoveryPrompts {
+            confirmed_no_backup: true,
+            confirmed_data_loss: false,
+            expected_fingerprint: Some("SHA256:test".to_string()),
+        };
+        let debug = format!("{prompts:?}");
+        assert!(debug.contains("ColdRecoveryPrompts"));
+        assert!(debug.contains("confirmed_no_backup"));
+    }
+
+    #[test]
+    fn cli_prompts_clone() {
+        let prompts = super::cli::ColdRecoveryPrompts {
+            confirmed_no_backup: true,
+            confirmed_data_loss: true,
+            expected_fingerprint: None,
+        };
+        let cloned = prompts.clone();
+        assert_eq!(prompts.confirmed_no_backup, cloned.confirmed_no_backup);
+        assert_eq!(prompts.confirmed_data_loss, cloned.confirmed_data_loss);
+        assert_eq!(
+            prompts.expected_fingerprint,
+            cloned.expected_fingerprint
+        );
+    }
 }

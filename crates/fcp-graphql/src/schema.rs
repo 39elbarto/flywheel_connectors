@@ -328,4 +328,179 @@ mod tests {
         assert!(cache.validate(schema, &json!("hello")).is_ok());
         assert!(cache.validate(schema, &json!("Hello123")).is_err());
     }
+
+    // ---- enum schema ----
+
+    #[test]
+    fn validate_enum_string_values() {
+        let schema = r#"{"type": "string", "enum": ["red", "green", "blue"]}"#;
+        let cache = SchemaCache::default();
+        assert!(cache.validate(schema, &json!("red")).is_ok());
+        assert!(cache.validate(schema, &json!("yellow")).is_err());
+    }
+
+    #[test]
+    fn validate_enum_integer_values() {
+        let schema = r#"{"type": "integer", "enum": [1, 2, 3]}"#;
+        let cache = SchemaCache::default();
+        assert!(cache.validate(schema, &json!(2)).is_ok());
+        assert!(cache.validate(schema, &json!(4)).is_err());
+    }
+
+    // ---- const schema ----
+
+    #[test]
+    fn validate_const_value() {
+        let schema = r#"{"const": "fixed"}"#;
+        let cache = SchemaCache::default();
+        assert!(cache.validate(schema, &json!("fixed")).is_ok());
+        assert!(cache.validate(schema, &json!("other")).is_err());
+    }
+
+    // ---- array constraints ----
+
+    #[test]
+    fn validate_array_max_items() {
+        let schema = r#"{"type": "array", "maxItems": 3}"#;
+        let cache = SchemaCache::default();
+        assert!(cache.validate(schema, &json!([1, 2])).is_ok());
+        assert!(cache.validate(schema, &json!([1, 2, 3])).is_ok());
+        assert!(cache.validate(schema, &json!([1, 2, 3, 4])).is_err());
+    }
+
+    #[test]
+    fn validate_array_unique_items() {
+        let schema = r#"{"type": "array", "uniqueItems": true}"#;
+        let cache = SchemaCache::default();
+        assert!(cache.validate(schema, &json!([1, 2, 3])).is_ok());
+        assert!(cache.validate(schema, &json!([1, 1, 2])).is_err());
+    }
+
+    // ---- string constraints ----
+
+    #[test]
+    fn validate_string_max_length() {
+        let schema = r#"{"type": "string", "maxLength": 5}"#;
+        let cache = SchemaCache::default();
+        assert!(cache.validate(schema, &json!("abc")).is_ok());
+        assert!(cache.validate(schema, &json!("abcdef")).is_err());
+    }
+
+    // ---- integer constraints ----
+
+    #[test]
+    fn validate_integer_exclusive_minimum() {
+        let schema = r#"{"type": "integer", "exclusiveMinimum": 0}"#;
+        let cache = SchemaCache::default();
+        assert!(cache.validate(schema, &json!(1)).is_ok());
+        assert!(cache.validate(schema, &json!(0)).is_err());
+    }
+
+    // ---- multiple types ----
+
+    #[test]
+    fn validate_one_of_schema() {
+        let schema = r#"{"oneOf": [{"type": "string"}, {"type": "null"}]}"#;
+        let cache = SchemaCache::default();
+        assert!(cache.validate(schema, &json!("hello")).is_ok());
+        assert!(cache.validate(schema, &json!(null)).is_ok());
+        assert!(cache.validate(schema, &json!(42)).is_err());
+    }
+
+    #[test]
+    fn validate_not_schema() {
+        let schema = r#"{"not": {"type": "string"}}"#;
+        let cache = SchemaCache::default();
+        assert!(cache.validate(schema, &json!(42)).is_ok());
+        assert!(cache.validate(schema, &json!("hello")).is_err());
+    }
+
+    // ---- cache behavior ----
+
+    #[test]
+    fn cache_returns_same_validator_for_same_schema() {
+        let cache = SchemaCache::default();
+        let v1 = cache.get_or_compile(r#"{"type": "integer"}"#).unwrap();
+        let v2 = cache.get_or_compile(r#"{"type": "integer"}"#).unwrap();
+        assert!(Arc::ptr_eq(&v1, &v2));
+    }
+
+    #[test]
+    fn cache_returns_different_validators_for_different_schemas() {
+        let cache = SchemaCache::default();
+        let v1 = cache.get_or_compile(r#"{"type": "string"}"#).unwrap();
+        let v2 = cache.get_or_compile(r#"{"type": "integer"}"#).unwrap();
+        assert!(!Arc::ptr_eq(&v1, &v2));
+    }
+
+    // ---- deeply nested validation ----
+
+    #[test]
+    fn validate_deeply_nested_schema() {
+        let schema = r#"{
+            "type": "object",
+            "properties": {
+                "level1": {
+                    "type": "object",
+                    "properties": {
+                        "level2": {
+                            "type": "object",
+                            "properties": {
+                                "value": {"type": "integer"}
+                            },
+                            "required": ["value"]
+                        }
+                    },
+                    "required": ["level2"]
+                }
+            },
+            "required": ["level1"]
+        }"#;
+        let cache = SchemaCache::default();
+        assert!(
+            cache
+                .validate(
+                    schema,
+                    &json!({"level1": {"level2": {"value": 42}}})
+                )
+                .is_ok()
+        );
+        assert!(
+            cache
+                .validate(
+                    schema,
+                    &json!({"level1": {"level2": {}}})
+                )
+                .is_err()
+        );
+    }
+
+    // ---- error message content ----
+
+    #[test]
+    fn compile_invalid_schema_returns_schema_validation_error() {
+        let cache = SchemaCache::default();
+        // An invalid schema type value causes a SchemaValidation error
+        let result = cache.get_or_compile(r#"{"type": "not_a_type"}"#);
+        match result {
+            Err(GraphqlClientError::SchemaValidation { message, errors }) => {
+                assert_eq!(message, "invalid JSON Schema");
+                assert!(!errors.is_empty());
+            }
+            other => panic!("expected SchemaValidation error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_schema_error_message_has_details() {
+        let schema = r#"{"type": "object", "required": ["x", "y"]}"#;
+        let cache = SchemaCache::default();
+        match cache.validate(schema, &json!({})) {
+            Err(GraphqlClientError::SchemaValidation { message, errors }) => {
+                assert_eq!(message, "schema validation failed");
+                assert!(errors.len() >= 2);
+            }
+            other => panic!("expected SchemaValidation, got {other:?}"),
+        }
+    }
 }

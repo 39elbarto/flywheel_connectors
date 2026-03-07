@@ -1648,4 +1648,162 @@ mod tests {
             "Error should mention empty ciphertext"
         );
     }
+
+    // ---- CeremonyId serde with known values ----
+
+    #[test]
+    fn ceremony_id_clone_preserves_fields() {
+        let id = CeremonyId::generate(2, 5);
+        let cloned = id.clone();
+        assert_eq!(id.id, cloned.id);
+        assert_eq!(id.threshold, cloned.threshold);
+        assert_eq!(id.total, cloned.total);
+    }
+
+    #[test]
+    fn ceremony_id_display_contains_threshold_total() {
+        let id = CeremonyId::generate(4, 7);
+        let display = format!("{id}");
+        assert!(display.contains("4/7"));
+    }
+
+    // ---- ParticipantId serde roundtrip ----
+
+    #[test]
+    fn participant_id_serde_roundtrip() {
+        let p = test_participant(3);
+        let json = serde_json::to_string(&p).unwrap();
+        let restored: ParticipantId = serde_json::from_str(&json).unwrap();
+        assert_eq!(p, restored);
+    }
+
+    #[test]
+    fn participant_id_clone_preserves_fields() {
+        let p = test_participant(7);
+        let cloned = p.clone();
+        assert_eq!(p.index, cloned.index);
+        assert_eq!(p.name, cloned.name);
+        assert_eq!(p.public_key, cloned.public_key);
+    }
+
+    // ---- FrostCommitment serde roundtrip ----
+
+    #[test]
+    fn frost_commitment_serde_roundtrip() {
+        let c = test_commitment(2);
+        let json = serde_json::to_string(&c).unwrap();
+        let restored: FrostCommitment = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.participant_index, 2);
+        assert_eq!(restored.commitment.len(), 32);
+    }
+
+    #[test]
+    fn frost_commitment_clone() {
+        let c = test_commitment(4);
+        let cloned = c.clone();
+        assert_eq!(c.participant_index, cloned.participant_index);
+        assert_eq!(c.commitment, cloned.commitment);
+        assert_eq!(c.proof, cloned.proof);
+    }
+
+    // ---- EncryptedShare serde roundtrip ----
+
+    #[test]
+    fn encrypted_share_serde_roundtrip() {
+        let share = EncryptedShare {
+            from_index: 1,
+            to_index: 2,
+            ciphertext: vec![0xAB; 64],
+        };
+        let json = serde_json::to_string(&share).unwrap();
+        let restored: EncryptedShare = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.from_index, 1);
+        assert_eq!(restored.to_index, 2);
+        assert_eq!(restored.ciphertext.len(), 64);
+    }
+
+    // ---- ThresholdConfig serde roundtrip ----
+
+    #[test]
+    fn threshold_config_serde_roundtrip() {
+        let config = ThresholdConfig::new(3, 5);
+        let json = serde_json::to_string(&config).unwrap();
+        let restored: ThresholdConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.threshold, 3);
+        assert_eq!(restored.total, 5);
+        assert!(restored.allow_resume);
+    }
+
+    #[test]
+    fn threshold_config_clone() {
+        let config = ThresholdConfig::new(2, 4);
+        let cloned = config.clone();
+        assert_eq!(config.threshold, cloned.threshold);
+        assert_eq!(config.total, cloned.total);
+        assert_eq!(config.allow_resume, cloned.allow_resume);
+    }
+
+    // ---- ThresholdCeremony debug ----
+
+    #[test]
+    fn threshold_ceremony_debug_format() {
+        let ceremony = ThresholdCeremony::new(2, 3);
+        let debug = format!("{ceremony:?}");
+        assert!(debug.contains("ThresholdCeremony"));
+        assert!(debug.contains("participant_count"));
+        assert!(debug.contains("has_key_material"));
+    }
+
+    // ---- CeremonyTranscript default ----
+
+    #[test]
+    fn ceremony_transcript_default_is_empty() {
+        let transcript = CeremonyTranscript::default();
+        assert!(transcript.phases.is_empty());
+        assert!(transcript.joins.is_empty());
+        assert!(transcript.messages.is_empty());
+    }
+
+    // ---- Max participants reached ----
+
+    #[test]
+    fn add_participant_rejects_over_limit() {
+        let mut ceremony = ThresholdCeremony::new(1, 2);
+        ceremony.add_participant(test_participant(1)).unwrap();
+        ceremony.add_participant(test_participant(2)).unwrap();
+        // Now in Round1, adding more should fail
+        let result = ceremony.add_participant(test_participant(3));
+        assert!(result.is_err());
+    }
+
+    // ---- owner_verifying_key before completion ----
+
+    #[test]
+    fn owner_verifying_key_fails_before_completion() {
+        let ceremony = ThresholdCeremony::new(2, 3);
+        let result = ceremony.owner_verifying_key();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("not available"));
+    }
+
+    // ---- is_timed_out ----
+
+    #[test]
+    fn ceremony_is_not_timed_out_when_fresh() {
+        let ceremony = ThresholdCeremony::new(2, 3);
+        assert!(!ceremony.is_timed_out());
+    }
+
+    // ---- Checkpoint serde roundtrip ----
+
+    #[test]
+    fn checkpoint_serde_roundtrip() {
+        let mut ceremony = ThresholdCeremony::new(2, 3);
+        ceremony.add_participant(test_participant(1)).unwrap();
+        let checkpoint = ceremony.create_checkpoint();
+        let json = serde_json::to_string(&checkpoint).unwrap();
+        let restored: CeremonyCheckpoint = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.ceremony_id, checkpoint.ceremony_id);
+        assert_eq!(restored.participants.len(), checkpoint.participants.len());
+    }
 }

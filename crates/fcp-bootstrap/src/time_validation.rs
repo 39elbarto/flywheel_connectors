@@ -439,4 +439,104 @@ mod tests {
         assert!(debug.contains("TimeValidation"));
         assert!(debug.contains("CannotValidate"));
     }
+
+    // ---- Classify drift with large values ----
+
+    #[test]
+    fn classify_drift_very_large() {
+        let drift = Duration::from_secs(86400); // 1 day
+        let result = classify_drift(drift);
+        assert!(matches!(result, TimeValidationResult::DriftError { .. }));
+        assert!(result.is_error());
+        assert!(!result.should_proceed());
+    }
+
+    #[test]
+    fn classify_drift_1_millisecond() {
+        let drift = Duration::from_millis(1);
+        let result = classify_drift(drift);
+        assert!(matches!(result, TimeValidationResult::Valid));
+    }
+
+    // ---- TimeValidationResult Clone ----
+
+    #[test]
+    fn result_clone_drift_warning() {
+        let r = TimeValidationResult::DriftWarning {
+            drift: Duration::from_secs(45),
+        };
+        let cloned = r.clone();
+        assert_eq!(r, cloned);
+    }
+
+    #[test]
+    fn result_clone_drift_error() {
+        let r = TimeValidationResult::DriftError {
+            drift: Duration::from_secs(600),
+        };
+        let cloned = r.clone();
+        assert_eq!(r, cloned);
+    }
+
+    // ---- Display formatting consistency ----
+
+    #[test]
+    fn display_all_variants_non_empty() {
+        let variants = [
+            TimeValidationResult::Valid,
+            TimeValidationResult::DriftWarning {
+                drift: Duration::from_secs(60),
+            },
+            TimeValidationResult::DriftError {
+                drift: Duration::from_secs(600),
+            },
+            TimeValidationResult::CannotValidate,
+        ];
+        for v in &variants {
+            assert!(!v.to_string().is_empty());
+        }
+    }
+
+    // ---- TimeValidation with_drift boundary ----
+
+    #[test]
+    fn with_drift_at_warning_boundary() {
+        let validation = TimeValidation::with_drift(Duration::from_secs(30));
+        assert!(matches!(
+            validation.result,
+            TimeValidationResult::DriftWarning { .. }
+        ));
+        assert!(validation.result.should_proceed());
+    }
+
+    #[test]
+    fn with_drift_at_error_boundary() {
+        let validation = TimeValidation::with_drift(Duration::from_secs(300));
+        assert!(matches!(
+            validation.result,
+            TimeValidationResult::DriftError { .. }
+        ));
+        assert!(!validation.result.should_proceed());
+    }
+
+    // ---- TimeValidation clone ----
+
+    #[test]
+    fn time_validation_clone() {
+        let validation = TimeValidation::offline();
+        let cloned = validation.clone();
+        assert_eq!(validation.result, cloned.result);
+        assert_eq!(validation.drift, cloned.drift);
+        assert_eq!(validation.ntp_time, cloned.ntp_time);
+    }
+
+    // ---- compute_drift large difference ----
+
+    #[test]
+    fn compute_drift_large_difference() {
+        let now = Utc::now();
+        let ntp = now - chrono::Duration::hours(1);
+        let drift = compute_drift(now, ntp);
+        assert_eq!(drift.as_secs(), 3600);
+    }
 }

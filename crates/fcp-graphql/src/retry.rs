@@ -307,4 +307,117 @@ mod tests {
         assert_eq!(RetryStrategy::Always, RetryStrategy::Always);
         assert_ne!(RetryStrategy::Never, RetryStrategy::Always);
     }
+
+    // ---- RetryDecision Debug/Clone ----
+
+    #[test]
+    fn retry_decision_debug() {
+        let d1 = RetryDecision::DoNotRetry;
+        let d2 = RetryDecision::RetryAfter(Duration::from_millis(500));
+        assert!(format!("{d1:?}").contains("DoNotRetry"));
+        assert!(format!("{d2:?}").contains("RetryAfter"));
+    }
+
+    #[test]
+    fn retry_decision_clone() {
+        let d = RetryDecision::RetryAfter(Duration::from_millis(200));
+        let cloned = d;
+        assert_eq!(d, cloned);
+    }
+
+    // ---- RetryStrategy Debug/Clone ----
+
+    #[test]
+    fn retry_strategy_debug() {
+        assert!(format!("{:?}", RetryStrategy::Never).contains("Never"));
+        assert!(
+            format!("{:?}", RetryStrategy::IdempotentOnly).contains("IdempotentOnly")
+        );
+        assert!(format!("{:?}", RetryStrategy::Always).contains("Always"));
+    }
+
+    #[test]
+    fn retry_strategy_clone() {
+        let s = RetryStrategy::Always;
+        let cloned = s;
+        assert_eq!(s, cloned);
+    }
+
+    // ---- RetryPolicy additional tests ----
+
+    #[test]
+    fn retry_policy_debug() {
+        let p = RetryPolicy::default();
+        let dbg = format!("{p:?}");
+        assert!(dbg.contains("RetryPolicy"));
+        assert!(dbg.contains("max_attempts"));
+    }
+
+    #[test]
+    fn retry_policy_clone() {
+        let p = RetryPolicy {
+            max_attempts: 5,
+            base_delay: Duration::from_millis(100),
+            max_delay: Duration::from_secs(10),
+            max_jitter: Duration::from_millis(50),
+            strategy: RetryStrategy::Always,
+        };
+        let cloned = p.clone();
+        assert_eq!(cloned.max_attempts, p.max_attempts);
+        assert_eq!(cloned.base_delay, p.base_delay);
+        assert_eq!(cloned.max_delay, p.max_delay);
+        assert_eq!(cloned.max_jitter, p.max_jitter);
+        assert_eq!(cloned.strategy, p.strategy);
+    }
+
+    #[test]
+    fn decide_first_attempt_returns_base_delay() {
+        let p = RetryPolicy {
+            max_jitter: Duration::ZERO,
+            base_delay: Duration::from_millis(500),
+            ..RetryPolicy::default()
+        };
+        match p.decide(&retryable_error(), 1, true) {
+            RetryDecision::RetryAfter(d) => assert_eq!(d, Duration::from_millis(500)),
+            RetryDecision::DoNotRetry => panic!("should retry"),
+        }
+    }
+
+    #[test]
+    fn decide_zero_max_attempts_always_do_not_retry() {
+        let p = RetryPolicy {
+            max_attempts: 0,
+            ..RetryPolicy::default()
+        };
+        let decision = p.decide(&retryable_error(), 0, true);
+        assert_eq!(decision, RetryDecision::DoNotRetry);
+    }
+
+    #[test]
+    fn decide_single_attempt_policy() {
+        let p = RetryPolicy {
+            max_attempts: 1,
+            ..RetryPolicy::default()
+        };
+        // attempt 1 >= max_attempts(1) → do not retry
+        let decision = p.decide(&retryable_error(), 1, true);
+        assert_eq!(decision, RetryDecision::DoNotRetry);
+    }
+
+    #[test]
+    fn decide_retryable_502_status() {
+        let p = RetryPolicy {
+            max_jitter: Duration::ZERO,
+            ..RetryPolicy::default()
+        };
+        let err = GraphqlClientError::HttpStatus {
+            status: StatusCode::BAD_GATEWAY,
+            body: String::new(),
+            retry_after: None,
+        };
+        match p.decide(&err, 1, true) {
+            RetryDecision::RetryAfter(_) => {}
+            RetryDecision::DoNotRetry => panic!("502 should be retryable"),
+        }
+    }
 }

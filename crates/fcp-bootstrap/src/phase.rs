@@ -595,4 +595,146 @@ mod tests {
             PartialStateSuggestion::CleanAndRetry
         );
     }
+
+    // ---- BootstrapPhase Clone ----
+
+    #[test]
+    fn phase_clone_uninitialized() {
+        let phase = BootstrapPhase::Uninitialized;
+        let cloned = phase.clone();
+        assert_eq!(phase, cloned);
+    }
+
+    #[test]
+    fn phase_clone_ceremony_setup() {
+        let phase = BootstrapPhase::CeremonySetup {
+            participant_count: 5,
+            threshold: 3,
+        };
+        let cloned = phase.clone();
+        assert_eq!(phase, cloned);
+    }
+
+    #[test]
+    fn phase_clone_completed() {
+        let phase = BootstrapPhase::Completed {
+            fingerprint: "SHA256:test".to_string(),
+            completed_at: Utc::now(),
+        };
+        let cloned = phase.clone();
+        assert_eq!(phase, cloned);
+    }
+
+    #[test]
+    fn phase_clone_failed() {
+        let phase = BootstrapPhase::Failed {
+            reason: "disk full".to_string(),
+            at_phase: "GenesisCreate".to_string(),
+        };
+        let cloned = phase.clone();
+        assert_eq!(phase, cloned);
+    }
+
+    // ---- BootstrapPhase Debug ----
+
+    #[test]
+    fn phase_debug_contains_variant_names() {
+        let phase = BootstrapPhase::CeremonyRound2 {
+            shares_distributed: 2,
+            shares_needed: 5,
+        };
+        let debug = format!("{phase:?}");
+        assert!(debug.contains("CeremonyRound2"));
+        assert!(debug.contains('2'));
+        assert!(debug.contains('5'));
+    }
+
+    // ---- Serde roundtrip for Completed and Failed ----
+
+    #[test]
+    fn phase_serde_roundtrip_completed() {
+        let phase = BootstrapPhase::Completed {
+            fingerprint: "SHA256:fp123".to_string(),
+            completed_at: Utc::now(),
+        };
+        let json = serde_json::to_string(&phase).unwrap();
+        let back: BootstrapPhase = serde_json::from_str(&json).unwrap();
+        assert_eq!(phase, back);
+    }
+
+    #[test]
+    fn phase_serde_roundtrip_failed() {
+        let phase = BootstrapPhase::Failed {
+            reason: "timeout".to_string(),
+            at_phase: "Round1".to_string(),
+        };
+        let json = serde_json::to_string(&phase).unwrap();
+        let back: BootstrapPhase = serde_json::from_str(&json).unwrap();
+        assert_eq!(phase, back);
+    }
+
+    // ---- Phase lock with various phases ----
+
+    #[test]
+    fn phase_lock_roundtrip_uninitialized() {
+        let dir = tempdir().unwrap();
+        let phase = BootstrapPhase::Uninitialized;
+        write_phase_lock(dir.path(), &phase).unwrap();
+        let detected = detect_partial_state(dir.path());
+        assert!(detected.is_some());
+        assert_eq!(detected.unwrap(), BootstrapPhase::Uninitialized);
+    }
+
+    #[test]
+    fn phase_lock_roundtrip_ceremony_round1() {
+        let dir = tempdir().unwrap();
+        let phase = BootstrapPhase::CeremonyRound1 {
+            commitments_collected: 2,
+            commitments_needed: 5,
+        };
+        write_phase_lock(dir.path(), &phase).unwrap();
+        let detected = detect_partial_state(dir.path()).unwrap();
+        assert_eq!(detected, phase);
+    }
+
+    // ---- InitSuggestion copy ----
+
+    #[test]
+    fn init_suggestion_copy() {
+        let s = InitSuggestion::UseExisting;
+        let copied = s;
+        assert_eq!(s, copied);
+    }
+
+    #[test]
+    fn partial_state_suggestion_copy() {
+        let s = PartialStateSuggestion::Resume;
+        let copied = s;
+        assert_eq!(s, copied);
+    }
+
+    // ---- Display lengths non-empty ----
+
+    #[test]
+    fn init_suggestion_display_not_empty() {
+        let variants = [
+            InitSuggestion::UseExisting,
+            InitSuggestion::ForceOverwrite,
+            InitSuggestion::UseDifferentPath,
+        ];
+        for v in &variants {
+            assert!(!v.to_string().is_empty());
+        }
+    }
+
+    #[test]
+    fn partial_state_suggestion_display_not_empty() {
+        let variants = [
+            PartialStateSuggestion::Resume,
+            PartialStateSuggestion::CleanAndRetry,
+        ];
+        for v in &variants {
+            assert!(!v.to_string().is_empty());
+        }
+    }
 }

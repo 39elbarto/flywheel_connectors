@@ -238,4 +238,97 @@ mod tests {
         let r: BootstrapResult<u32> = Err(BootstrapError::NoHardwareTokens);
         assert!(r.is_err());
     }
+
+    // ---- Debug formatting ----
+
+    #[test]
+    fn debug_time_skew() {
+        let err = BootstrapError::TimeSkew {
+            drift: Duration::from_secs(300),
+            suggestion: "sync your clock",
+        };
+        let debug = format!("{err:?}");
+        assert!(debug.contains("TimeSkew"));
+        assert!(debug.contains("sync your clock"));
+    }
+
+    #[test]
+    fn debug_already_exists() {
+        let err = BootstrapError::AlreadyExists {
+            fingerprint: "SHA256:deadbeef".into(),
+        };
+        let debug = format!("{err:?}");
+        assert!(debug.contains("AlreadyExists"));
+        assert!(debug.contains("SHA256:deadbeef"));
+    }
+
+    #[test]
+    fn debug_partial_state() {
+        let err = BootstrapError::PartialState {
+            phase: "GenesisCreate".into(),
+        };
+        let debug = format!("{err:?}");
+        assert!(debug.contains("PartialState"));
+        assert!(debug.contains("GenesisCreate"));
+    }
+
+    #[test]
+    fn debug_fingerprint_mismatch() {
+        let err = BootstrapError::FingerprintMismatch {
+            expected: "SHA256:aaa".into(),
+            actual: "SHA256:bbb".into(),
+        };
+        let debug = format!("{err:?}");
+        assert!(debug.contains("FingerprintMismatch"));
+    }
+
+    #[test]
+    fn debug_ceremony_timeout() {
+        let err = BootstrapError::CeremonyTimeout {
+            phase: "Round1".into(),
+        };
+        let debug = format!("{err:?}");
+        assert!(debug.contains("CeremonyTimeout"));
+        assert!(debug.contains("Round1"));
+    }
+
+    // ---- Display with empty/special strings ----
+
+    #[test]
+    fn display_ceremony_empty_message() {
+        let err = BootstrapError::Ceremony(String::new());
+        let s = err.to_string();
+        assert!(s.contains("ceremony error"));
+    }
+
+    #[test]
+    fn display_crypto_unicode_message() {
+        let err = BootstrapError::Crypto("cl\u{00e9} invalide".into());
+        let s = err.to_string();
+        assert!(s.contains("cl\u{00e9}"));
+    }
+
+    #[test]
+    fn display_config_empty_message() {
+        let err = BootstrapError::Config(String::new());
+        let s = err.to_string();
+        assert!(s.contains("configuration error"));
+    }
+
+    #[test]
+    fn display_internal_long_message() {
+        let msg = "x".repeat(1000);
+        let err = BootstrapError::Internal(msg.clone());
+        assert!(err.to_string().contains(&msg));
+    }
+
+    #[test]
+    fn from_io_error_preserves_kind_not_found() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::NotFound, "missing");
+        let err: BootstrapError = io_err.into();
+        match err {
+            BootstrapError::Io(e) => assert_eq!(e.kind(), std::io::ErrorKind::NotFound),
+            other => panic!("expected Io, got {other:?}"),
+        }
+    }
 }

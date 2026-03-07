@@ -1590,4 +1590,146 @@ mod tests {
             assert_eq!(tokens.access_token(), "basic-tok");
         });
     }
+
+    // ── Expanded tests: OAuth2Config edge cases ──
+
+    #[test]
+    fn test_config_auth_param_overwrite() {
+        let config = test_config()
+            .with_auth_param("prompt", "login")
+            .with_auth_param("prompt", "consent");
+        assert_eq!(
+            config.extra_auth_params.get("prompt"),
+            Some(&"consent".to_string())
+        );
+    }
+
+    #[test]
+    fn test_config_token_param_overwrite() {
+        let config = test_config()
+            .with_token_param("audience", "v1")
+            .with_token_param("audience", "v2");
+        assert_eq!(
+            config.extra_token_params.get("audience"),
+            Some(&"v2".to_string())
+        );
+    }
+
+    #[test]
+    fn test_config_empty_scopes_vec() {
+        let config = test_config().with_scopes(Vec::new());
+        assert!(config.default_scopes.is_empty());
+    }
+
+    #[test]
+    fn test_config_timeout_zero() {
+        let config = test_config().with_timeout(Duration::from_secs(0));
+        assert_eq!(config.timeout, Duration::from_secs(0));
+    }
+
+    #[test]
+    fn test_config_timeout_large() {
+        let config = test_config().with_timeout(Duration::from_secs(300));
+        assert_eq!(config.timeout, Duration::from_secs(300));
+    }
+
+    // ── Expanded tests: AuthorizationCallback parsing ──
+
+    #[test]
+    fn test_callback_from_query_with_error() {
+        let callback = AuthorizationCallback::from_query(
+            "error=access_denied&error_description=User+denied&state=s",
+        )
+        .unwrap();
+        assert_eq!(callback.error, Some("access_denied".to_string()));
+        assert_eq!(
+            callback.error_description,
+            Some("User denied".to_string())
+        );
+        assert!(callback.code.is_none());
+    }
+
+    #[test]
+    fn test_callback_from_query_url_encoded_values() {
+        let callback =
+            AuthorizationCallback::from_query("code=abc%20def&state=my%26state").unwrap();
+        assert_eq!(callback.code, Some("abc def".to_string()));
+        assert_eq!(callback.state, Some("my&state".to_string()));
+    }
+
+    #[test]
+    fn test_callback_from_url_with_fragment_ignored() {
+        // Fragments are not part of query string
+        let callback = AuthorizationCallback::from_url(
+            "https://localhost/callback?code=abc&state=xyz#extra",
+        )
+        .unwrap();
+        assert_eq!(callback.code, Some("abc".to_string()));
+    }
+
+    #[test]
+    fn test_callback_validate_error_without_description() {
+        let callback = AuthorizationCallback {
+            code: None,
+            state: Some("state".into()),
+            error: Some("invalid_scope".into()),
+            error_description: None,
+            error_uri: None,
+        };
+        let err = callback.validate("state").unwrap_err();
+        if let OAuthError::AuthorizationError { description, .. } = err {
+            assert!(description.is_empty());
+        } else {
+            panic!("wrong variant");
+        }
+    }
+
+    // ── Expanded tests: generate_state ──
+
+    #[test]
+    fn test_generate_state_length() {
+        let state = generate_state();
+        // 32 bytes -> base64url no padding = 43 chars
+        assert_eq!(state.len(), 43);
+    }
+
+    #[test]
+    fn test_generate_state_valid_chars() {
+        let state = generate_state();
+        assert!(
+            state
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        );
+    }
+
+    #[test]
+    fn test_generate_state_uniqueness() {
+        let s1 = generate_state();
+        let s2 = generate_state();
+        let s3 = generate_state();
+        assert_ne!(s1, s2);
+        assert_ne!(s2, s3);
+    }
+
+    // ── Expanded tests: OAuth2Client with custom HTTP client ──
+
+    #[test]
+    fn test_client_with_custom_http_client() {
+        let config = test_config();
+        let http_client = HttpClientBuilder::new().build();
+        let client = OAuth2Client::with_http_client(config, http_client);
+        assert_eq!(client.config().client_id, "test_client_id");
+    }
+
+    #[test]
+    fn test_client_with_custom_http_client_config_accessor() {
+        let config = test_config()
+            .with_scopes(vec!["admin".into()])
+            .with_auth_style(AuthStyle::Basic);
+        let http_client = HttpClientBuilder::new().build();
+        let client = OAuth2Client::with_http_client(config, http_client);
+        assert_eq!(client.config().default_scopes, vec!["admin"]);
+        assert_eq!(client.config().auth_style, AuthStyle::Basic);
+    }
 }

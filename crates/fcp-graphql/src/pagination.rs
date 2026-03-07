@@ -575,4 +575,130 @@ mod tests {
         .unwrap();
         assert_eq!(items, vec![1, 2]);
     }
+
+    // ---- PageLimit additional tests ----
+
+    #[test]
+    fn page_limit_zero() {
+        let limit = PageLimit::new(0);
+        assert_eq!(limit.max_items, 0);
+    }
+
+    #[test]
+    fn page_limit_large_value() {
+        let limit = PageLimit::new(usize::MAX);
+        assert_eq!(limit.max_items, usize::MAX);
+    }
+
+    // ---- CursorPageInfo additional tests ----
+
+    #[test]
+    fn cursor_page_info_debug() {
+        let info = CursorPageInfo {
+            has_next_page: true,
+            end_cursor: Some("cursor_abc".into()),
+            total_count: Some(100),
+        };
+        let dbg = format!("{info:?}");
+        assert!(dbg.contains("CursorPageInfo"));
+        assert!(dbg.contains("cursor_abc"));
+    }
+
+    #[test]
+    fn cursor_page_info_with_all_none() {
+        let info = CursorPageInfo {
+            has_next_page: false,
+            end_cursor: None,
+            total_count: None,
+        };
+        let cloned = info.clone();
+        assert_eq!(info, cloned);
+        assert!(!info.has_next_page);
+    }
+
+    // ---- CursorPage additional tests ----
+
+    #[test]
+    fn cursor_page_debug() {
+        let page = CursorPage {
+            items: vec![1, 2, 3],
+            page_info: CursorPageInfo {
+                has_next_page: false,
+                end_cursor: None,
+                total_count: None,
+            },
+        };
+        let dbg = format!("{page:?}");
+        assert!(dbg.contains("CursorPage"));
+    }
+
+    #[test]
+    fn cursor_page_with_string_items() {
+        let page = CursorPage {
+            items: vec!["alpha".to_string(), "beta".to_string()],
+            page_info: CursorPageInfo {
+                has_next_page: true,
+                end_cursor: Some("cursor2".into()),
+                total_count: Some(10),
+            },
+        };
+        let cloned = page.clone();
+        assert_eq!(page.items.len(), cloned.items.len());
+        assert_eq!(page, cloned);
+    }
+
+    // ---- OffsetPage additional tests ----
+
+    #[test]
+    fn offset_page_debug() {
+        let page: OffsetPage<i32> = OffsetPage {
+            items: vec![10, 20],
+            next_offset: Some(2),
+            total_count: Some(100),
+        };
+        let dbg = format!("{page:?}");
+        assert!(dbg.contains("OffsetPage"));
+    }
+
+    #[test]
+    fn offset_page_empty() {
+        let page: OffsetPage<String> = OffsetPage {
+            items: vec![],
+            next_offset: None,
+            total_count: Some(0),
+        };
+        assert!(page.items.is_empty());
+        assert_eq!(page.total_count, Some(0));
+    }
+
+    #[test]
+    fn offset_page_clone() {
+        let page = OffsetPage {
+            items: vec![1, 2, 3],
+            next_offset: Some(3),
+            total_count: Some(10),
+        };
+        let cloned = page.clone();
+        assert_eq!(page, cloned);
+        assert_eq!(page.items.len(), 3);
+    }
+
+    // ---- PaginationError additional tests ----
+
+    #[test]
+    fn pagination_error_display_client() {
+        let client_err = GraphqlClientError::Protocol {
+            message: "broken".into(),
+        };
+        let err: PaginationError = client_err.into();
+        let msg = err.to_string();
+        assert!(msg.contains("pagination fetch"));
+    }
+
+    #[test]
+    fn pagination_error_from_json_error() {
+        let client_err = GraphqlClientError::Json("bad json".into());
+        let err: PaginationError = client_err.into();
+        assert!(err.to_string().contains("pagination fetch"));
+    }
 }

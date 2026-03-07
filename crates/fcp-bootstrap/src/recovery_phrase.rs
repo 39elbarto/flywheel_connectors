@@ -393,4 +393,86 @@ mod tests {
                 .contains("failed")
         );
     }
+
+    // ---- Edge cases ----
+
+    #[test]
+    fn test_from_mnemonic_empty_string() {
+        let result = RecoveryPhrase::from_mnemonic("");
+        assert!(matches!(
+            result,
+            Err(RecoveryPhraseError::WrongWordCount(0))
+        ));
+    }
+
+    #[test]
+    fn test_from_words_empty_array() {
+        let result = RecoveryPhrase::from_words(&[]);
+        assert!(matches!(
+            result,
+            Err(RecoveryPhraseError::WrongWordCount(0))
+        ));
+    }
+
+    #[test]
+    fn test_from_mnemonic_too_many_words() {
+        let words = "abandon ".repeat(25);
+        let result = RecoveryPhrase::from_mnemonic(words.trim());
+        assert!(matches!(
+            result,
+            Err(RecoveryPhraseError::WrongWordCount(25))
+        ));
+    }
+
+    #[test]
+    fn test_different_phrases_different_keypairs() {
+        let p1 = RecoveryPhrase::generate().unwrap();
+        let p2 = RecoveryPhrase::generate().unwrap();
+        let kp1 = p1.derive_owner_keypair();
+        let kp2 = p2.derive_owner_keypair();
+        assert_ne!(kp1.public().to_bytes(), kp2.public().to_bytes());
+    }
+
+    #[test]
+    fn test_entropy_different_per_generation() {
+        let p1 = RecoveryPhrase::generate().unwrap();
+        let p2 = RecoveryPhrase::generate().unwrap();
+        assert_ne!(p1.entropy(), p2.entropy());
+    }
+
+    #[test]
+    fn test_to_phrase_words_roundtrip() {
+        let phrase = RecoveryPhrase::generate().unwrap();
+        let phrase_str = phrase.to_phrase();
+        let restored = RecoveryPhrase::from_mnemonic(&phrase_str).unwrap();
+        assert_eq!(phrase, restored);
+    }
+
+    #[test]
+    fn test_owner_keypair_sign_empty_and_verify() {
+        let phrase = RecoveryPhrase::generate().unwrap();
+        let keypair = phrase.derive_owner_keypair();
+        let sig = keypair.sign(b"");
+        assert!(keypair.public().verify(b"", &sig).is_ok());
+    }
+
+    #[test]
+    fn test_owner_keypair_to_bytes_is_32() {
+        let phrase = RecoveryPhrase::generate().unwrap();
+        let keypair = phrase.derive_owner_keypair();
+        assert_eq!(keypair.to_bytes().len(), 32);
+    }
+
+    #[test]
+    fn test_error_is_error_trait() {
+        let err = RecoveryPhraseError::WrongWordCount(5);
+        let _: &dyn std::error::Error = &err;
+    }
+
+    #[test]
+    fn test_debug_format_includes_word_count() {
+        let phrase = RecoveryPhrase::generate().unwrap();
+        let debug = format!("{phrase:?}");
+        assert!(debug.contains("24"));
+    }
 }

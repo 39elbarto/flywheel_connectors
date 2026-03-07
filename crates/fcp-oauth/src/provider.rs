@@ -576,4 +576,154 @@ mod tests {
         assert!(config.authorization_url.contains("authorize"));
         assert!(config.access_token_url.contains("access_token"));
     }
+
+    // ── Expanded tests: provider URL schemes ──
+
+    #[test]
+    fn test_all_oauth2_providers_use_https() {
+        let providers = [
+            OAuthProvider::Google,
+            OAuthProvider::GitHub,
+            OAuthProvider::Twitter,
+            OAuthProvider::Slack,
+            OAuthProvider::Notion,
+            OAuthProvider::Linear,
+            OAuthProvider::Discord,
+            OAuthProvider::Spotify,
+            OAuthProvider::Microsoft,
+            OAuthProvider::Dropbox,
+        ];
+
+        for provider in providers {
+            let config = provider.oauth2_config("id", "secret").unwrap();
+            assert!(
+                config.authorization_url.starts_with("https://"),
+                "{provider:?} authorization_url should use HTTPS"
+            );
+            assert!(
+                config.token_url.starts_with("https://"),
+                "{provider:?} token_url should use HTTPS"
+            );
+        }
+    }
+
+    #[test]
+    fn test_twitter_legacy_oauth1_urls_use_https() {
+        let config = OAuthProvider::TwitterLegacy
+            .oauth1_config("key", "secret")
+            .unwrap();
+        assert!(config.request_token_url.starts_with("https://"));
+        assert!(config.authorization_url.starts_with("https://"));
+        assert!(config.access_token_url.starts_with("https://"));
+    }
+
+    // ── Expanded tests: ProviderEndpoints builder ──
+
+    #[test]
+    fn test_provider_endpoints_with_only_revocation() {
+        let endpoints = ProviderEndpoints::new("https://a.com/auth", "https://a.com/token")
+            .with_revocation_url("https://a.com/revoke");
+        assert!(endpoints.revocation_url.is_some());
+        assert!(endpoints.userinfo_url.is_none());
+    }
+
+    #[test]
+    fn test_provider_endpoints_with_only_userinfo() {
+        let endpoints = ProviderEndpoints::new("https://a.com/auth", "https://a.com/token")
+            .with_userinfo_url("https://a.com/userinfo");
+        assert!(endpoints.revocation_url.is_none());
+        assert!(endpoints.userinfo_url.is_some());
+    }
+
+    #[test]
+    fn test_provider_endpoints_to_oauth2_config_urls() {
+        let endpoints = ProviderEndpoints::new(
+            "https://custom.example.com/authorize",
+            "https://custom.example.com/token",
+        );
+        let config = endpoints.to_oauth2_config("cid", "csec");
+        assert_eq!(
+            config.authorization_url,
+            "https://custom.example.com/authorize"
+        );
+        assert_eq!(config.token_url, "https://custom.example.com/token");
+    }
+
+    // ── Expanded tests: provider PKCE settings ──
+
+    #[test]
+    fn test_non_pkce_providers_have_pkce_disabled() {
+        let non_pkce = [
+            OAuthProvider::GitHub,
+            OAuthProvider::Slack,
+            OAuthProvider::Notion,
+            OAuthProvider::Linear,
+            OAuthProvider::Discord,
+        ];
+        for provider in non_pkce {
+            let config = provider.oauth2_config("id", "sec").unwrap();
+            assert!(
+                !config.use_pkce,
+                "{provider:?} should have PKCE disabled"
+            );
+        }
+    }
+
+    #[test]
+    fn test_pkce_providers_have_pkce_enabled() {
+        let pkce_providers = [
+            OAuthProvider::Google,
+            OAuthProvider::Twitter,
+            OAuthProvider::Spotify,
+            OAuthProvider::Microsoft,
+            OAuthProvider::Dropbox,
+        ];
+        for provider in pkce_providers {
+            let config = provider.oauth2_config("id", "sec").unwrap();
+            assert!(config.use_pkce, "{provider:?} should have PKCE enabled");
+            assert_eq!(
+                config.pkce_method,
+                PkceMethod::S256,
+                "{provider:?} should use S256"
+            );
+        }
+    }
+
+    // ── Expanded tests: notion has owner param ──
+
+    #[test]
+    fn test_notion_config_has_owner_param() {
+        let config = OAuthProvider::Notion.oauth2_config("id", "sec").unwrap();
+        assert_eq!(
+            config.extra_auth_params.get("owner"),
+            Some(&"user".to_string())
+        );
+    }
+
+    #[test]
+    fn test_linear_config_has_response_type_param() {
+        let config = OAuthProvider::Linear.oauth2_config("id", "sec").unwrap();
+        assert_eq!(
+            config.extra_auth_params.get("response_type"),
+            Some(&"code".to_string())
+        );
+    }
+
+    #[test]
+    fn test_dropbox_config_has_offline_token_access() {
+        let config = OAuthProvider::Dropbox.oauth2_config("id", "sec").unwrap();
+        assert_eq!(
+            config.extra_auth_params.get("token_access_type"),
+            Some(&"offline".to_string())
+        );
+    }
+
+    #[test]
+    fn test_google_config_has_prompt_consent() {
+        let config = OAuthProvider::Google.oauth2_config("id", "sec").unwrap();
+        assert_eq!(
+            config.extra_auth_params.get("prompt"),
+            Some(&"consent".to_string())
+        );
+    }
 }

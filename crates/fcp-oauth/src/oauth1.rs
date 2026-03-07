@@ -1110,4 +1110,127 @@ mod tests {
         // Token is included as-is (caller should URL-encode if needed)
         assert!(url.contains("oauth_token=token with spaces"));
     }
+
+    // ── Expanded tests: percent_encode unicode ──
+
+    #[test]
+    fn test_percent_encode_cjk_chars() {
+        let encoded = percent_encode("\u{4e16}\u{754c}"); // 世界
+        // Each CJK char is 3 bytes in UTF-8
+        assert!(encoded.starts_with('%'));
+        assert!(!encoded.contains('\u{4e16}'));
+    }
+
+    #[test]
+    fn test_percent_encode_emoji() {
+        let encoded = percent_encode("\u{1f600}"); // 😀
+        // Emoji is 4 bytes in UTF-8, each byte percent-encoded
+        assert_eq!(encoded.len(), 12); // 4 bytes * 3 chars each (%XX)
+    }
+
+    #[test]
+    fn test_percent_encode_null_byte() {
+        let encoded = percent_encode("\0");
+        assert_eq!(encoded, "%00");
+    }
+
+    #[test]
+    fn test_percent_encode_high_ascii() {
+        let encoded = percent_encode("\x7F");
+        assert_eq!(encoded, "%7F");
+    }
+
+    // ── Expanded tests: OAuth1Config construction ──
+
+    #[test]
+    fn test_oauth1_config_with_callback_chaining() {
+        let config = OAuth1Config::new(
+            "key",
+            "secret",
+            "https://example.com/request",
+            "https://example.com/auth",
+            "https://example.com/access",
+        )
+        .with_callback("https://myapp.com/callback");
+        assert_eq!(
+            config.callback_url,
+            Some("https://myapp.com/callback".to_string())
+        );
+    }
+
+    #[test]
+    fn test_oauth1_config_with_empty_strings() {
+        let config = OAuth1Config::new("", "", "", "", "");
+        assert_eq!(config.consumer_key, "");
+        assert_eq!(config.consumer_secret, "");
+    }
+
+    // ── Expanded tests: OAuth1Tokens fields ──
+
+    #[test]
+    fn test_oauth1_tokens_no_optional_fields() {
+        let tokens = OAuth1Tokens {
+            token: "tok".to_string(),
+            token_secret: "sec".to_string(),
+            user_id: None,
+            screen_name: None,
+        };
+        assert!(tokens.user_id.is_none());
+        assert!(tokens.screen_name.is_none());
+    }
+
+    #[test]
+    fn test_oauth1_tokens_with_optional_fields() {
+        let tokens = OAuth1Tokens {
+            token: "tok".to_string(),
+            token_secret: "sec".to_string(),
+            user_id: Some("12345".to_string()),
+            screen_name: Some("test_user".to_string()),
+        };
+        assert_eq!(tokens.user_id.as_deref(), Some("12345"));
+        assert_eq!(tokens.screen_name.as_deref(), Some("test_user"));
+    }
+
+    // ── Expanded tests: RequestToken ──
+
+    #[test]
+    fn test_request_token_debug() {
+        let rt = RequestToken {
+            token: "t".to_string(),
+            token_secret: "s".to_string(),
+            callback_confirmed: false,
+        };
+        let debug = format!("{rt:?}");
+        assert!(debug.contains("RequestToken"));
+        assert!(debug.contains("callback_confirmed"));
+    }
+
+    // ── Expanded tests: OAuth1Client debug ──
+
+    #[test]
+    fn test_oauth1_client_debug_non_exhaustive() {
+        let config = test_config();
+        let client = OAuth1Client::new(config);
+        let debug = format!("{client:?}");
+        assert!(debug.contains("OAuth1Client"));
+        // finish_non_exhaustive adds ".."
+        assert!(debug.contains(".."));
+    }
+
+    // ── Expanded tests: parse edge cases with url-encoded data ──
+
+    #[test]
+    fn test_parse_request_token_with_url_encoded_token() {
+        let body = "oauth_token=abc%20def&oauth_token_secret=sec%26ret&oauth_callback_confirmed=true";
+        let token = parse_request_token(body).unwrap();
+        assert_eq!(token.token, "abc def");
+        assert_eq!(token.token_secret, "sec&ret");
+    }
+
+    #[test]
+    fn test_parse_access_token_with_unicode_screen_name() {
+        let body = "oauth_token=t&oauth_token_secret=s&screen_name=%E3%83%86%E3%82%B9%E3%83%88";
+        let tokens = parse_access_token(body).unwrap();
+        assert_eq!(tokens.screen_name.as_deref(), Some("\u{30c6}\u{30b9}\u{30c8}")); // テスト
+    }
 }

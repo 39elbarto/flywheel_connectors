@@ -385,4 +385,103 @@ mod tests {
         let pkce = Pkce::from_verifier(verifier, PkceMethod::Plain).unwrap();
         assert_eq!(pkce.challenge(), verifier);
     }
+
+    // ── Expanded tests: verifier character validation ──
+
+    #[test]
+    fn test_pkce_from_verifier_rejects_equals() {
+        let verifier = "a".repeat(42) + "=";
+        let result = Pkce::from_verifier(&verifier, PkceMethod::S256);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_pkce_from_verifier_rejects_at_sign() {
+        let verifier = "a".repeat(42) + "@";
+        let result = Pkce::from_verifier(&verifier, PkceMethod::S256);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_pkce_from_verifier_rejects_hash() {
+        let verifier = "a".repeat(42) + "#";
+        let result = Pkce::from_verifier(&verifier, PkceMethod::S256);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_pkce_from_verifier_accepts_tilde() {
+        // ~ is a valid unreserved character
+        let verifier = "a".repeat(42) + "~";
+        let result = Pkce::from_verifier(&verifier, PkceMethod::S256);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_pkce_from_verifier_accepts_dot() {
+        let verifier = "a".repeat(42) + ".";
+        let result = Pkce::from_verifier(&verifier, PkceMethod::S256);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_pkce_from_verifier_accepts_hyphen() {
+        let verifier = "a".repeat(42) + "-";
+        let result = Pkce::from_verifier(&verifier, PkceMethod::S256);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_pkce_from_verifier_accepts_underscore() {
+        let verifier = "a".repeat(42) + "_";
+        let result = Pkce::from_verifier(&verifier, PkceMethod::S256);
+        assert!(result.is_ok());
+    }
+
+    // ── Expanded tests: different verifier lengths ──
+
+    #[test]
+    fn test_pkce_from_verifier_length_44() {
+        let verifier = "b".repeat(44);
+        let result = Pkce::from_verifier(&verifier, PkceMethod::S256);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_pkce_from_verifier_length_100() {
+        let verifier = "c".repeat(100);
+        let result = Pkce::from_verifier(&verifier, PkceMethod::S256);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_pkce_from_verifier_length_0_rejected() {
+        let result = Pkce::from_verifier("", PkceMethod::S256);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_pkce_from_verifier_length_1_rejected() {
+        let result = Pkce::from_verifier("a", PkceMethod::S256);
+        assert!(result.is_err());
+    }
+
+    // ── Expanded tests: challenge properties ──
+
+    #[test]
+    fn test_pkce_different_verifiers_produce_different_challenges() {
+        let v1 = "a".repeat(43);
+        let v2 = "b".repeat(43);
+        let p1 = Pkce::from_verifier(&v1, PkceMethod::S256).unwrap();
+        let p2 = Pkce::from_verifier(&v2, PkceMethod::S256).unwrap();
+        assert_ne!(p1.challenge(), p2.challenge());
+    }
+
+    #[test]
+    fn test_pkce_method_debug() {
+        let debug_s256 = format!("{:?}", PkceMethod::S256);
+        let debug_plain = format!("{:?}", PkceMethod::Plain);
+        assert!(debug_s256.contains("S256"));
+        assert!(debug_plain.contains("Plain"));
+    }
 }

@@ -829,4 +829,261 @@ mod tests {
         );
         assert!(store.has_valid_token("key"));
     }
+
+    // ── Expanded tests: TokenResponse serde edge cases ──
+
+    #[test]
+    fn test_token_response_expires_in_zero() {
+        let json = r#"{"access_token":"t","token_type":"Bearer","expires_in":0}"#;
+        let resp: TokenResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(resp.expires_in, Some(0));
+    }
+
+    #[test]
+    fn test_token_response_expires_in_very_large() {
+        let json = r#"{"access_token":"t","token_type":"Bearer","expires_in":999999999}"#;
+        let resp: TokenResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(resp.expires_in, Some(999_999_999));
+    }
+
+    #[test]
+    fn test_token_response_debug() {
+        let resp = mock_token_response(Some(3600));
+        let debug = format!("{resp:?}");
+        assert!(debug.contains("TokenResponse"));
+        assert!(debug.contains("test_access_token"));
+    }
+
+    #[test]
+    fn test_token_response_empty_scope() {
+        let json = r#"{"access_token":"t","token_type":"Bearer","scope":""}"#;
+        let resp: TokenResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(resp.scope, Some(String::new()));
+        // Empty scope string should yield no scopes after splitting
+        let tokens = OAuthTokens::from_response(resp);
+        assert!(tokens.scopes().is_empty());
+    }
+
+    // ── Expanded tests: OAuthTokens from_response details ──
+
+    #[test]
+    fn test_token_from_response_long_expiry() {
+        let resp = mock_token_response(Some(86400)); // 24 hours
+        let tokens = OAuthTokens::from_response(resp);
+        assert!(!tokens.is_expired());
+        assert!(!tokens.needs_refresh());
+        let ttl = tokens.time_until_expiry().unwrap();
+        // Should be close to 24 hours (within a few seconds)
+        assert!(ttl.as_secs() > 86300);
+    }
+
+    #[test]
+    fn test_token_authorization_header_custom_type() {
+        let resp = TokenResponse {
+            access_token: "my_token".into(),
+            token_type: "MAC".into(),
+            expires_in: Some(3600),
+            refresh_token: None,
+            scope: None,
+            id_token: None,
+        };
+        let tokens = OAuthTokens::from_response(resp);
+        assert_eq!(tokens.authorization_header(), "MAC my_token");
+    }
+
+    #[test]
+    fn test_token_multiple_scopes_whitespace_variations() {
+        let resp = TokenResponse {
+            access_token: "t".into(),
+            token_type: "Bearer".into(),
+            expires_in: None,
+            refresh_token: None,
+            scope: Some("read  write\tmanage".into()),
+            id_token: None,
+        };
+        let tokens = OAuthTokens::from_response(resp);
+        // split_whitespace handles multiple spaces and tabs
+        assert_eq!(tokens.scopes(), &["read", "write", "manage"]);
+    }
+
+    #[test]
+    fn test_token_update_does_not_overwrite_scopes_if_none() {
+        let mut tokens = OAuthTokens::from_response(TokenResponse {
+            access_token: "t".into(),
+            token_type: "Bearer".into(),
+            expires_in: Some(3600),
+            refresh_token: None,
+            scope: Some("original".into()),
+            id_token: None,
+        });
+        assert_eq!(tokens.scopes(), &["original"]);
+
+        tokens.update_from_response(TokenResponse {
+            access_token: "new_t".into(),
+            token_type: "Bearer".into(),
+            expires_in: Some(3600),
+            refresh_token: None,
+            scope: None, // not provided
+            id_token: None,
+        });
+        // original scopes should be preserved
+        assert_eq!(tokens.scopes(), &["original"]);
+    }
+
+    #[test]
+    fn test_token_update_overwrites_scopes_if_provided() {
+        let mut tokens = OAuthTokens::from_response(TokenResponse {
+            access_token: "t".into(),
+            token_type: "Bearer".into(),
+            expires_in: Some(3600),
+            refresh_token: None,
+            scope: Some("original".into()),
+            id_token: None,
+        });
+        tokens.update_from_response(TokenResponse {
+            access_token: "new_t".into(),
+            token_type: "Bearer".into(),
+            expires_in: Some(3600),
+            refresh_token: None,
+            scope: Some("updated".into()),
+            id_token: None,
+        });
+        assert_eq!(tokens.scopes(), &["updated"]);
+    }
+
+    #[test]
+    fn test_token_update_does_not_overwrite_id_token_if_none() {
+        let mut tokens = OAuthTokens::from_response(TokenResponse {
+            access_token: "t".into(),
+            token_type: "Bearer".into(),
+            expires_in: Some(3600),
+            refresh_token: None,
+            scope: None,
+            id_token: Some("original_id".into()),
+        });
+        tokens.update_from_response(TokenResponse {
+            access_token: "new_t".into(),
+            token_type: "Bearer".into(),
+            expires_in: Some(3600),
+            refresh_token: None,
+            scope: None,
+            id_token: None,
+        });
+        assert_eq!(tokens.id_token(), Some("original_id"));
+    }
+
+    // ── Expanded tests: TokenStore advanced scenarios ──
+
+    #[test]
+    fn test_token_store_many_keys() {
+        let store = TokenStore::new();
+        for i in 0..20 {
+            store.store(
+                &format!("user_{i}"),
+                OAuthTokens::from_response(mock_token_response(Some(3600))),
+            );
+        }
+        assert_eq!(store.keys().len(), 20);
+        assert!(store.has_valid_token("user_0"));
+        assert!(store.has_valid_token("user_19"));
+    }
+
+    #[test]
+    fn test_token_store_remove_returns_tokens() {
+        let store = TokenStore::new();
+        store.store(
+            "key",
+            OAuthTokens::from_response(mock_token_response(Some(3600))),
+        );
+        let removed = store.remove("key");
+        assert!(removed.is_some());
+        assert_eq!(removed.unwrap().access_token(), "test_access_token");
+    }
+
+    #[test]
+    fn test_token_store_update_preserves_metadata() {
+        let store = TokenStore::new();
+        let mut metadata = HashMap::new();
+        metadata.insert("provider".to_string(), "google".to_string());
+        store.store_with_metadata(
+            "key",
+            OAuthTokens::from_response(mock_token_response(Some(3600))),
+            metadata,
+        );
+
+        // Update the tokens
+        let new_tokens = OAuthTokens::from_response(TokenResponse {
+            access_token: "updated_tok".into(),
+            token_type: "Bearer".into(),
+            expires_in: Some(7200),
+            refresh_token: None,
+            scope: None,
+            id_token: None,
+        });
+        store.update("key", new_tokens).unwrap();
+
+        // Metadata should still be there
+        let (tokens, meta) = store.get_with_metadata("key").unwrap();
+        assert_eq!(tokens.access_token(), "updated_tok");
+        assert_eq!(meta.get("provider"), Some(&"google".to_string()));
+    }
+
+    #[test]
+    fn test_token_store_empty_key() {
+        let store = TokenStore::new();
+        store.store(
+            "",
+            OAuthTokens::from_response(mock_token_response(Some(3600))),
+        );
+        assert!(store.has_valid_token(""));
+        assert!(store.get("").is_some());
+    }
+
+    #[test]
+    fn test_token_store_unicode_key() {
+        let store = TokenStore::new();
+        store.store(
+            "usuario_\u{00e9}tranger",
+            OAuthTokens::from_response(mock_token_response(Some(3600))),
+        );
+        assert!(store.has_valid_token("usuario_\u{00e9}tranger"));
+    }
+
+    #[test]
+    fn test_token_store_clear_then_add() {
+        let store = TokenStore::new();
+        store.store(
+            "key1",
+            OAuthTokens::from_response(mock_token_response(Some(3600))),
+        );
+        store.clear();
+        assert!(store.keys().is_empty());
+        store.store(
+            "key2",
+            OAuthTokens::from_response(mock_token_response(Some(3600))),
+        );
+        assert_eq!(store.keys().len(), 1);
+        assert!(store.has_valid_token("key2"));
+    }
+
+    #[test]
+    fn test_token_store_debug() {
+        let store = TokenStore::new();
+        let debug = format!("{store:?}");
+        assert!(debug.contains("TokenStore"));
+    }
+
+    #[test]
+    fn test_token_needs_refresh_within_zero_threshold() {
+        let tokens = OAuthTokens::from_response(mock_token_response(Some(3600)));
+        // With zero threshold, only expired tokens need refresh
+        assert!(!tokens.needs_refresh_within(Duration::from_secs(0)));
+    }
+
+    #[test]
+    fn test_token_needs_refresh_within_huge_threshold() {
+        let tokens = OAuthTokens::from_response(mock_token_response(Some(3600)));
+        // With very large threshold, any token with expiry needs refresh
+        assert!(tokens.needs_refresh_within(Duration::from_secs(999_999)));
+    }
 }

@@ -500,4 +500,104 @@ mod tests {
         );
         assert_eq!(TokenError::Disconnected.to_string(), "token disconnected");
     }
+
+    // ---- DetectedToken clone ----
+
+    #[test]
+    fn detected_token_clone() {
+        let token = test_token();
+        let cloned = token.clone();
+        assert_eq!(token.provider, cloned.provider);
+        assert_eq!(token.slot, cloned.slot);
+        assert_eq!(token.label, cloned.label);
+        assert_eq!(token.manufacturer, cloned.manufacturer);
+        assert_eq!(token.serial, cloned.serial);
+        assert_eq!(token.mechanisms, cloned.mechanisms);
+    }
+
+    // ---- DetectedToken debug ----
+
+    #[test]
+    fn detected_token_debug() {
+        let token = test_token();
+        let debug = format!("{token:?}");
+        assert!(debug.contains("DetectedToken"));
+        assert!(debug.contains("Test Token"));
+        assert!(debug.contains("123456"));
+    }
+
+    // ---- DetectedToken with many mechanisms ----
+
+    #[test]
+    fn token_with_many_mechanisms() {
+        let mut token = test_token();
+        token.mechanisms = vec![
+            "CKM_RSA_PKCS".to_string(),
+            "CKM_ED25519".to_string(),
+            "CKM_ECDH".to_string(),
+            "CKM_AES_CBC".to_string(),
+            "CKM_X25519".to_string(),
+        ];
+        assert!(token.supports_ed25519());
+        assert!(token.supports_x25519());
+    }
+
+    // ---- Token Display with different slots ----
+
+    #[test]
+    fn token_display_different_slots() {
+        let mut token = test_token();
+        token.slot = 42;
+        let display = format!("{token}");
+        assert!(display.contains("[slot 42]"));
+    }
+
+    // ---- Token serde with empty mechanisms ----
+
+    #[test]
+    fn token_serde_roundtrip_empty_mechanisms() {
+        let mut token = test_token();
+        token.mechanisms = vec![];
+        let json = serde_json::to_string(&token).unwrap();
+        let restored: DetectedToken = serde_json::from_str(&json).unwrap();
+        assert_eq!(token, restored);
+        assert!(restored.mechanisms.is_empty());
+    }
+
+    // ---- TokenError Debug ----
+
+    #[test]
+    fn token_error_debug() {
+        let err = TokenError::InvalidPin;
+        let debug = format!("{err:?}");
+        assert!(debug.contains("InvalidPin"));
+    }
+
+    #[test]
+    fn token_error_disconnected_debug() {
+        let err = TokenError::Disconnected;
+        let debug = format!("{err:?}");
+        assert!(debug.contains("Disconnected"));
+    }
+
+    // ---- TokenError is std::error::Error ----
+
+    #[test]
+    fn token_error_is_error_trait() {
+        let err = TokenError::NoTokens;
+        let _: &dyn std::error::Error = &err;
+    }
+
+    // ---- Token with unicode label ----
+
+    #[test]
+    fn token_unicode_label() {
+        let mut token = test_token();
+        token.label = "S\u{00e9}curit\u{00e9} Token".to_string();
+        let display = format!("{token}");
+        assert!(display.contains("S\u{00e9}curit\u{00e9}"));
+        let json = serde_json::to_string(&token).unwrap();
+        let restored: DetectedToken = serde_json::from_str(&json).unwrap();
+        assert_eq!(token.label, restored.label);
+    }
 }

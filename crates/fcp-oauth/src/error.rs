@@ -262,4 +262,128 @@ mod tests {
         let debug = format!("{e:?}");
         assert!(debug.contains("NoRefreshToken"));
     }
+
+    // ── Expanded tests: from_http_client_error ──
+
+    #[test]
+    fn from_http_client_error_produces_http_error() {
+        // HttpClientError is opaque, so we test via the OAuthError variant
+        let e = OAuthError::HttpError("connection refused".into());
+        assert!(matches!(e, OAuthError::HttpError(_)));
+        assert!(e.to_string().contains("connection refused"));
+    }
+
+    // ── Expanded tests: from_async_error ──
+
+    #[test]
+    fn from_async_error_timeout() {
+        let err = AsyncError::Timeout { timeout_ms: 30_000 };
+        let oauth_err = OAuthError::from_async_error(err, Duration::from_secs(30));
+        let msg = oauth_err.to_string();
+        assert!(msg.contains("timed out"));
+        assert!(msg.contains("30000"));
+    }
+
+    #[test]
+    fn from_async_error_cancelled() {
+        let err = AsyncError::Cancelled;
+        let oauth_err = OAuthError::from_async_error(err, Duration::from_secs(10));
+        assert!(oauth_err.to_string().contains("cancelled"));
+    }
+
+    #[test]
+    fn from_async_error_channel_closed() {
+        let err = AsyncError::ChannelClosed;
+        let oauth_err = OAuthError::from_async_error(err, Duration::from_secs(10));
+        assert!(oauth_err.to_string().contains("channel closed"));
+    }
+
+    #[test]
+    fn from_async_error_channel_full() {
+        let err = AsyncError::ChannelFull;
+        let oauth_err = OAuthError::from_async_error(err, Duration::from_secs(10));
+        assert!(oauth_err.to_string().contains("channel full"));
+    }
+
+    #[test]
+    fn from_async_error_protocol_io() {
+        let err = AsyncError::ProtocolIo { message: "read error".into() };
+        let oauth_err = OAuthError::from_async_error(err, Duration::from_secs(10));
+        assert!(oauth_err.to_string().contains("read error"));
+    }
+
+    #[test]
+    fn from_async_error_join() {
+        let err = AsyncError::Join { message: "task panicked".into() };
+        let oauth_err = OAuthError::from_async_error(err, Duration::from_secs(10));
+        assert!(oauth_err.to_string().contains("task panicked"));
+    }
+
+    #[test]
+    fn from_async_error_runtime() {
+        let err = AsyncError::Runtime { message: "runtime shutdown".into() };
+        let oauth_err = OAuthError::from_async_error(err, Duration::from_secs(10));
+        assert!(oauth_err.to_string().contains("runtime shutdown"));
+    }
+
+    // ── Expanded tests: Display messages ──
+
+    #[test]
+    fn http_error_display() {
+        let e = OAuthError::HttpError("dns lookup failed".into());
+        assert_eq!(e.to_string(), "HTTP request failed: dns lookup failed");
+    }
+
+    #[test]
+    fn url_error_display_contains_parsing_failed() {
+        let url_err = url::Url::parse("://").unwrap_err();
+        let e: OAuthError = url_err.into();
+        assert!(e.to_string().contains("URL parsing failed"));
+    }
+
+    #[test]
+    fn json_error_display_contains_parsing_failed() {
+        let json_err: Result<serde_json::Value, _> = serde_json::from_str("{invalid}");
+        let e: OAuthError = json_err.unwrap_err().into();
+        assert!(e.to_string().contains("JSON parsing failed"));
+    }
+
+    #[test]
+    fn state_mismatch_fields_accessible() {
+        let e = OAuthError::StateMismatch {
+            expected: "expected_state_abc".into(),
+            actual: "actual_state_xyz".into(),
+        };
+        if let OAuthError::StateMismatch { expected, actual } = &e {
+            assert_eq!(expected, "expected_state_abc");
+            assert_eq!(actual, "actual_state_xyz");
+        } else {
+            panic!("wrong variant");
+        }
+    }
+
+    #[test]
+    fn token_expired_large_duration() {
+        let e = OAuthError::TokenExpired(Duration::from_secs(86400));
+        let display = e.to_string();
+        assert!(display.contains("86400"));
+    }
+
+    #[test]
+    fn invalid_config_empty_message() {
+        let e = OAuthError::InvalidConfig(String::new());
+        assert_eq!(e.to_string(), "Invalid OAuth configuration: ");
+    }
+
+    #[test]
+    fn authorization_error_empty_description() {
+        let e = OAuthError::AuthorizationError {
+            error: "temporarily_unavailable".into(),
+            description: String::new(),
+            error_uri: None,
+        };
+        let display = e.to_string();
+        assert!(display.contains("temporarily_unavailable"));
+        assert!(display.contains(" - "));
+    }
 }

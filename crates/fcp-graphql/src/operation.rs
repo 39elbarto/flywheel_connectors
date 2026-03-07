@@ -291,4 +291,181 @@ mod tests {
         assert!(!resp.is_ok());
         assert_eq!(resp.errors.len(), 1);
     }
+
+    // ---- GraphqlQuery additional tests ----
+
+    #[test]
+    fn query_debug() {
+        let q = GraphqlQuery::new("{ users { id } }");
+        let dbg = format!("{q:?}");
+        assert!(dbg.contains("GraphqlQuery"));
+        assert!(dbg.contains("users"));
+    }
+
+    #[test]
+    fn query_empty_string() {
+        let q = GraphqlQuery::new("");
+        assert_eq!(q.as_str(), "");
+    }
+
+    #[test]
+    fn query_unicode_content() {
+        let q = GraphqlQuery::new("{ benutzer { name } }");
+        assert_eq!(q.as_str(), "{ benutzer { name } }");
+    }
+
+    #[test]
+    fn query_multiline() {
+        let q = GraphqlQuery::new("{\n  users {\n    id\n    name\n  }\n}");
+        assert!(q.as_str().contains('\n'));
+        let json = serde_json::to_string(&q).unwrap();
+        let back: GraphqlQuery = serde_json::from_str(&json).unwrap();
+        assert_eq!(q, back);
+    }
+
+    #[test]
+    fn query_with_variables_placeholder() {
+        let q = GraphqlQuery::new("query GetUser($id: ID!) { user(id: $id) { name } }");
+        assert!(q.as_str().contains("$id"));
+    }
+
+    #[test]
+    fn query_inequality() {
+        let a = GraphqlQuery::new("{ a }");
+        let b = GraphqlQuery::new("{ b }");
+        assert_ne!(a, b);
+    }
+
+    // ---- GraphqlRequest additional tests ----
+
+    #[test]
+    fn request_debug() {
+        let req = GraphqlRequest::new(GraphqlQuery::new("{ x }"), serde_json::json!({}));
+        let dbg = format!("{req:?}");
+        assert!(dbg.contains("GraphqlRequest"));
+    }
+
+    #[test]
+    fn request_clone() {
+        let req = GraphqlRequest::new(GraphqlQuery::new("{ x }"), serde_json::json!({"a": 1}))
+            .with_operation_name("Op");
+        let cloned = req.clone();
+        assert_eq!(req.query, cloned.query);
+        assert_eq!(req.operation_name, cloned.operation_name);
+    }
+
+    #[test]
+    fn request_with_complex_variables() {
+        let vars = serde_json::json!({
+            "input": {
+                "name": "Alice",
+                "tags": ["admin", "user"],
+                "nested": {"deep": true}
+            }
+        });
+        let req = GraphqlRequest::new(
+            GraphqlQuery::new("mutation Create($input: Input!) { create(input: $input) { id } }"),
+            vars,
+        );
+        let json = serde_json::to_string(&req).unwrap();
+        let back: GraphqlRequest<serde_json::Value> = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.variables["input"]["name"], "Alice");
+        assert!(back.variables["input"]["tags"].is_array());
+    }
+
+    #[test]
+    fn request_with_null_variables() {
+        let req = GraphqlRequest::new(GraphqlQuery::new("{ ping }"), serde_json::Value::Null);
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(json.contains("null"));
+    }
+
+    // ---- GraphqlBatchItem additional tests ----
+
+    #[test]
+    fn batch_item_debug() {
+        let item = GraphqlBatchItem::new(GraphqlQuery::new("{ x }"), serde_json::json!({}));
+        let dbg = format!("{item:?}");
+        assert!(dbg.contains("GraphqlBatchItem"));
+    }
+
+    #[test]
+    fn batch_item_clone() {
+        let item = GraphqlBatchItem::new(GraphqlQuery::new("{ x }"), serde_json::json!({"k": "v"}))
+            .with_operation_name("BatchOp");
+        let cloned = item.clone();
+        assert_eq!(item.operation_name, cloned.operation_name);
+        assert_eq!(item.query, cloned.query);
+    }
+
+    #[test]
+    fn batch_item_serde_roundtrip() {
+        let item = GraphqlBatchItem::new(GraphqlQuery::new("{ users { id } }"), serde_json::json!({"limit": 10}))
+            .with_operation_name("GetUsers");
+        let json = serde_json::to_string(&item).unwrap();
+        let back: GraphqlBatchItem<serde_json::Value> = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.operation_name.as_deref(), Some("GetUsers"));
+        assert_eq!(back.variables["limit"], 10);
+    }
+
+    #[test]
+    fn batch_item_skips_none_operation_name() {
+        let item = GraphqlBatchItem::new(GraphqlQuery::new("{ x }"), serde_json::json!({}));
+        let json = serde_json::to_string(&item).unwrap();
+        assert!(!json.contains("operation_name"));
+    }
+
+    // ---- GraphqlResponse additional tests ----
+
+    #[test]
+    fn response_debug() {
+        let resp = GraphqlResponse::<serde_json::Value> {
+            data: Some(serde_json::json!({})),
+            errors: vec![],
+            extensions: None,
+        };
+        let dbg = format!("{resp:?}");
+        assert!(dbg.contains("GraphqlResponse"));
+    }
+
+    #[test]
+    fn response_clone() {
+        let resp = GraphqlResponse {
+            data: Some(serde_json::json!({"x": 1})),
+            errors: vec![],
+            extensions: Some(serde_json::json!({"trace": "abc"})),
+        };
+        let cloned = resp.clone();
+        assert_eq!(cloned.data.unwrap()["x"], 1);
+        assert!(resp.data.is_some());
+    }
+
+    #[test]
+    fn response_with_multiple_errors() {
+        let json = r#"{"errors":[{"message":"a"},{"message":"b"},{"message":"c"}]}"#;
+        let resp: GraphqlResponse<serde_json::Value> = serde_json::from_str(json).unwrap();
+        assert_eq!(resp.errors.len(), 3);
+        assert!(!resp.is_ok());
+        assert!(resp.data.is_none());
+    }
+
+    #[test]
+    fn response_extensions_only() {
+        let json = r#"{"extensions":{"requestId":"xyz-123"}}"#;
+        let resp: GraphqlResponse<serde_json::Value> = serde_json::from_str(json).unwrap();
+        assert!(resp.data.is_none());
+        assert!(resp.is_ok());
+        assert_eq!(resp.extensions.unwrap()["requestId"], "xyz-123");
+    }
+
+    #[test]
+    fn response_skips_none_extensions_in_serialization() {
+        let resp = GraphqlResponse::<serde_json::Value> {
+            data: Some(serde_json::json!({})),
+            errors: vec![],
+            extensions: None,
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        assert!(!json.contains("extensions"));
+    }
 }

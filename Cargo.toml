@@ -66,6 +66,7 @@ members = [
     "connectors/gitlab",
     "connectors/salesforce",
     "connectors/reddit",
+    "connectors/redis",
     "connectors/intercom",
     "connectors/pandadoc",
     "connectors/pulumi",

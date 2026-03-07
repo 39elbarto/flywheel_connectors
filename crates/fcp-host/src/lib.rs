@@ -19,6 +19,7 @@ mod doctor;
 mod error;
 mod resilience;
 mod rollout;
+mod supply_chain;
 
 pub use budget::*;
 pub use discovery::*;
@@ -26,3 +27,4 @@ pub use doctor::*;
 pub use error::*;
 pub use resilience::*;
 pub use rollout::*;
+pub use supply_chain::*;

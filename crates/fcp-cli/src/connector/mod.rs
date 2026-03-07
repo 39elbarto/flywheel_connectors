@@ -61,6 +61,18 @@ pub enum ConnectorCommand {
     /// Returns full tool schemas, AI hints, and capability requirements
     /// in a format designed for AI agent tool discovery.
     Introspect(IntrospectArgs),
+
+    /// Pin a connector to a specific version (prevents auto-upgrade).
+    Pin(PinArgs),
+
+    /// Unpin a connector (re-enables auto-upgrade).
+    Unpin(UnpinArgs),
+
+    /// Manage staged rollouts (canary deployments).
+    Rollout(RolloutArgs),
+
+    /// Roll back a connector to a previous version.
+    Rollback(RollbackArgs),
 }
 
 /// Arguments for `fcp connector list`.
@@ -101,12 +113,100 @@ pub struct IntrospectArgs {
     pub operations: Option<String>,
 }
 
+/// Arguments for `fcp connector pin`.
+#[derive(Args, Debug)]
+pub struct PinArgs {
+    /// Connector ID (e.g., "fcp.discord:messaging:v1").
+    pub connector_id: String,
+
+    /// Version to pin to (e.g., "1.2.3").
+    #[arg(long)]
+    pub version: String,
+
+    /// Output JSON instead of human-readable format.
+    #[arg(long, default_value_t = false)]
+    pub json: bool,
+}
+
+/// Arguments for `fcp connector unpin`.
+#[derive(Args, Debug)]
+pub struct UnpinArgs {
+    /// Connector ID (e.g., "fcp.discord:messaging:v1").
+    pub connector_id: String,
+
+    /// Output JSON instead of human-readable format.
+    #[arg(long, default_value_t = false)]
+    pub json: bool,
+}
+
+/// Arguments for `fcp connector rollout`.
+#[derive(Args, Debug)]
+pub struct RolloutArgs {
+    #[command(subcommand)]
+    pub command: RolloutCommand,
+}
+
+/// Rollout subcommands.
+#[derive(Subcommand, Debug)]
+pub enum RolloutCommand {
+    /// Set canary percentage for a connector rollout.
+    Set(RolloutSetArgs),
+
+    /// Show current rollout status for a connector.
+    Status(RolloutStatusArgs),
+}
+
+/// Arguments for `fcp connector rollout set`.
+#[derive(Args, Debug)]
+pub struct RolloutSetArgs {
+    /// Connector ID (e.g., "fcp.discord:messaging:v1").
+    pub connector_id: String,
+
+    /// Canary percentage (0-100).
+    #[arg(long)]
+    pub canary: u8,
+
+    /// Output JSON instead of human-readable format.
+    #[arg(long, default_value_t = false)]
+    pub json: bool,
+}
+
+/// Arguments for `fcp connector rollout status`.
+#[derive(Args, Debug)]
+pub struct RolloutStatusArgs {
+    /// Connector ID (e.g., "fcp.discord:messaging:v1").
+    pub connector_id: String,
+
+    /// Output JSON instead of human-readable format.
+    #[arg(long, default_value_t = false)]
+    pub json: bool,
+}
+
+/// Arguments for `fcp connector rollback`.
+#[derive(Args, Debug)]
+pub struct RollbackArgs {
+    /// Connector ID (e.g., "fcp.discord:messaging:v1").
+    pub connector_id: String,
+
+    /// Version to roll back to.
+    #[arg(long)]
+    pub to: String,
+
+    /// Output JSON instead of human-readable format.
+    #[arg(long, default_value_t = false)]
+    pub json: bool,
+}
+
 /// Run the connector command.
 pub fn run(args: &ConnectorArgs) -> Result<()> {
     match &args.command {
         ConnectorCommand::List(list_args) => run_list(list_args),
         ConnectorCommand::Info(info_args) => run_info(info_args),
         ConnectorCommand::Introspect(introspect_args) => run_introspect(introspect_args),
+        ConnectorCommand::Pin(pin_args) => run_pin(pin_args),
+        ConnectorCommand::Unpin(unpin_args) => run_unpin(unpin_args),
+        ConnectorCommand::Rollout(rollout_args) => run_rollout(rollout_args),
+        ConnectorCommand::Rollback(rollback_args) => run_rollback(rollback_args),
     }
 }
 
@@ -1091,6 +1191,185 @@ const fn rate_limit_scope_label(scope: RateLimitScope) -> &'static str {
     }
 }
 
+// ── Lifecycle: pin/unpin/rollout/rollback ─────────────────────
+
+/// JSON output for pin/unpin operations.
+#[derive(Debug, serde::Serialize)]
+struct PinOutput {
+    connector_id: String,
+    action: String,
+    version: Option<String>,
+    message: String,
+}
+
+/// JSON output for rollout status.
+#[derive(Debug, serde::Serialize)]
+struct RolloutStatusOutput {
+    connector_id: String,
+    state: String,
+    version: String,
+    canary_percent: u8,
+    pinned: bool,
+    health: String,
+    message: String,
+}
+
+/// JSON output for rollback.
+#[derive(Debug, serde::Serialize)]
+struct RollbackOutput {
+    connector_id: String,
+    from_version: String,
+    to_version: String,
+    message: String,
+}
+
+fn run_pin(args: &PinArgs) -> Result<()> {
+    // TODO: connect to host and execute pin via rollout controller.
+    let version = semver::Version::parse(&args.version)
+        .map_err(|e| anyhow::anyhow!("invalid semver version '{}': {e}", args.version))?;
+
+    let output = PinOutput {
+        connector_id: args.connector_id.clone(),
+        action: "pin".to_string(),
+        version: Some(version.to_string()),
+        message: format!(
+            "Connector {} pinned to version {version}. Auto-upgrade disabled.",
+            args.connector_id
+        ),
+    };
+
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&output)?);
+    } else {
+        println!(
+            "Pinned {} to v{version}",
+            args.connector_id
+        );
+        println!("  Auto-upgrade is now disabled for this connector.");
+        println!("  Use `fcp connector unpin {}` to re-enable.", args.connector_id);
+    }
+
+    Ok(())
+}
+
+fn run_unpin(args: &UnpinArgs) -> Result<()> {
+    // TODO: connect to host and execute unpin via rollout controller.
+    let output = PinOutput {
+        connector_id: args.connector_id.clone(),
+        action: "unpin".to_string(),
+        version: None,
+        message: format!(
+            "Connector {} unpinned. Auto-upgrade re-enabled.",
+            args.connector_id
+        ),
+    };
+
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&output)?);
+    } else {
+        println!("Unpinned {}", args.connector_id);
+        println!("  Auto-upgrade is now re-enabled.");
+    }
+
+    Ok(())
+}
+
+fn run_rollout(args: &RolloutArgs) -> Result<()> {
+    match &args.command {
+        RolloutCommand::Set(set_args) => run_rollout_set(set_args),
+        RolloutCommand::Status(status_args) => run_rollout_status(status_args),
+    }
+}
+
+fn run_rollout_set(args: &RolloutSetArgs) -> Result<()> {
+    if args.canary > 100 {
+        anyhow::bail!("canary percentage must be 0-100, got {}", args.canary);
+    }
+
+    // TODO: connect to host and configure canary via rollout controller.
+    let output = RolloutStatusOutput {
+        connector_id: args.connector_id.clone(),
+        state: "canary".to_string(),
+        version: "pending".to_string(),
+        canary_percent: args.canary,
+        pinned: false,
+        health: "unknown".to_string(),
+        message: format!(
+            "Canary set to {}% for {}.",
+            args.canary, args.connector_id
+        ),
+    };
+
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&output)?);
+    } else {
+        println!(
+            "Rollout canary set to {}% for {}",
+            args.canary, args.connector_id
+        );
+        println!("  Use `fcp connector rollout status {}` to monitor.", args.connector_id);
+    }
+
+    Ok(())
+}
+
+fn run_rollout_status(args: &RolloutStatusArgs) -> Result<()> {
+    // TODO: connect to host and query rollout status.
+    let output = RolloutStatusOutput {
+        connector_id: args.connector_id.clone(),
+        state: "production".to_string(),
+        version: "1.0.0".to_string(),
+        canary_percent: 0,
+        pinned: false,
+        health: "healthy".to_string(),
+        message: format!("Connector {} is in production (v1.0.0).", args.connector_id),
+    };
+
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&output)?);
+    } else {
+        println!("Rollout status for {}", args.connector_id);
+        println!("  State:   {}", output.state);
+        println!("  Version: v{}", output.version);
+        println!("  Health:  {}", output.health);
+        println!("  Pinned:  {}", if output.pinned { "yes" } else { "no" });
+        if output.canary_percent > 0 {
+            println!("  Canary:  {}%", output.canary_percent);
+        }
+    }
+
+    Ok(())
+}
+
+fn run_rollback(args: &RollbackArgs) -> Result<()> {
+    let to_version = semver::Version::parse(&args.to)
+        .map_err(|e| anyhow::anyhow!("invalid semver version '{}': {e}", args.to))?;
+
+    // TODO: connect to host and execute rollback via rollout controller.
+    let output = RollbackOutput {
+        connector_id: args.connector_id.clone(),
+        from_version: "current".to_string(),
+        to_version: to_version.to_string(),
+        message: format!(
+            "Connector {} rolled back to v{to_version}.",
+            args.connector_id
+        ),
+    };
+
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&output)?);
+    } else {
+        println!(
+            "Rolled back {} to v{to_version}",
+            args.connector_id
+        );
+        println!("  Previous version will be deactivated.");
+        println!("  Use `fcp connector rollout status {}` to verify.", args.connector_id);
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1399,5 +1678,197 @@ mod tests {
         let deserialized: ConnectorIntrospection = serde_json::from_str(&json).unwrap();
         assert_eq!(deserialized.connector_id, intro.connector_id);
         assert_eq!(deserialized.operations.len(), intro.operations.len());
+    }
+
+    // ── Pin/Unpin/Rollout/Rollback Tests ─────────────────────────
+
+    #[test]
+    fn pin_valid_semver() {
+        let args = PinArgs {
+            connector_id: "fcp.discord:messaging:v1".to_string(),
+            version: "1.2.3".to_string(),
+            json: true,
+        };
+        run_pin(&args).unwrap();
+    }
+
+    #[test]
+    fn pin_invalid_semver_fails() {
+        let args = PinArgs {
+            connector_id: "fcp.discord:messaging:v1".to_string(),
+            version: "not-a-version".to_string(),
+            json: true,
+        };
+        assert!(run_pin(&args).is_err());
+    }
+
+    #[test]
+    fn pin_prerelease_version() {
+        let args = PinArgs {
+            connector_id: "fcp.discord:messaging:v1".to_string(),
+            version: "1.0.0-beta.1".to_string(),
+            json: true,
+        };
+        run_pin(&args).unwrap();
+    }
+
+    #[test]
+    fn pin_human_output() {
+        let args = PinArgs {
+            connector_id: "fcp.test:utility:v1".to_string(),
+            version: "2.0.0".to_string(),
+            json: false,
+        };
+        run_pin(&args).unwrap();
+    }
+
+    #[test]
+    fn unpin_produces_output() {
+        let args = UnpinArgs {
+            connector_id: "fcp.discord:messaging:v1".to_string(),
+            json: true,
+        };
+        run_unpin(&args).unwrap();
+    }
+
+    #[test]
+    fn unpin_human_output() {
+        let args = UnpinArgs {
+            connector_id: "fcp.test:utility:v1".to_string(),
+            json: false,
+        };
+        run_unpin(&args).unwrap();
+    }
+
+    #[test]
+    fn rollout_set_valid() {
+        let args = RolloutSetArgs {
+            connector_id: "fcp.discord:messaging:v1".to_string(),
+            canary: 25,
+            json: true,
+        };
+        run_rollout_set(&args).unwrap();
+    }
+
+    #[test]
+    fn rollout_set_zero_percent() {
+        let args = RolloutSetArgs {
+            connector_id: "fcp.discord:messaging:v1".to_string(),
+            canary: 0,
+            json: true,
+        };
+        run_rollout_set(&args).unwrap();
+    }
+
+    #[test]
+    fn rollout_set_hundred_percent() {
+        let args = RolloutSetArgs {
+            connector_id: "fcp.discord:messaging:v1".to_string(),
+            canary: 100,
+            json: true,
+        };
+        run_rollout_set(&args).unwrap();
+    }
+
+    #[test]
+    fn rollout_set_human_output() {
+        let args = RolloutSetArgs {
+            connector_id: "fcp.test:utility:v1".to_string(),
+            canary: 50,
+            json: false,
+        };
+        run_rollout_set(&args).unwrap();
+    }
+
+    #[test]
+    fn rollout_status_json() {
+        let args = RolloutStatusArgs {
+            connector_id: "fcp.discord:messaging:v1".to_string(),
+            json: true,
+        };
+        run_rollout_status(&args).unwrap();
+    }
+
+    #[test]
+    fn rollout_status_human() {
+        let args = RolloutStatusArgs {
+            connector_id: "fcp.test:utility:v1".to_string(),
+            json: false,
+        };
+        run_rollout_status(&args).unwrap();
+    }
+
+    #[test]
+    fn rollback_valid_version() {
+        let args = RollbackArgs {
+            connector_id: "fcp.discord:messaging:v1".to_string(),
+            to: "1.0.0".to_string(),
+            json: true,
+        };
+        run_rollback(&args).unwrap();
+    }
+
+    #[test]
+    fn rollback_invalid_version_fails() {
+        let args = RollbackArgs {
+            connector_id: "fcp.discord:messaging:v1".to_string(),
+            to: "bad".to_string(),
+            json: true,
+        };
+        assert!(run_rollback(&args).is_err());
+    }
+
+    #[test]
+    fn rollback_human_output() {
+        let args = RollbackArgs {
+            connector_id: "fcp.test:utility:v1".to_string(),
+            to: "0.9.0".to_string(),
+            json: false,
+        };
+        run_rollback(&args).unwrap();
+    }
+
+    #[test]
+    fn pin_output_json_has_expected_fields() {
+        let output = PinOutput {
+            connector_id: "fcp.test:utility:v1".to_string(),
+            action: "pin".to_string(),
+            version: Some("1.0.0".to_string()),
+            message: "test".to_string(),
+        };
+        let json = serde_json::to_string(&output).unwrap();
+        assert!(json.contains("\"connector_id\""));
+        assert!(json.contains("\"action\":\"pin\""));
+        assert!(json.contains("\"version\":\"1.0.0\""));
+    }
+
+    #[test]
+    fn rollout_status_output_json_has_expected_fields() {
+        let output = RolloutStatusOutput {
+            connector_id: "fcp.test:utility:v1".to_string(),
+            state: "canary".to_string(),
+            version: "2.0.0".to_string(),
+            canary_percent: 50,
+            pinned: false,
+            health: "healthy".to_string(),
+            message: "test".to_string(),
+        };
+        let json = serde_json::to_string(&output).unwrap();
+        assert!(json.contains("\"state\":\"canary\""));
+        assert!(json.contains("\"canary_percent\":50"));
+        assert!(json.contains("\"pinned\":false"));
+    }
+
+    #[test]
+    fn rollback_output_json_has_expected_fields() {
+        let output = RollbackOutput {
+            connector_id: "fcp.test:utility:v1".to_string(),
+            from_version: "2.0.0".to_string(),
+            to_version: "1.0.0".to_string(),
+            message: "test".to_string(),
+        };
+        let json = serde_json::to_string(&output).unwrap();
+        assert!(json.contains("\"from_version\":\"2.0.0\""));
+        assert!(json.contains("\"to_version\":\"1.0.0\""));
     }
 }

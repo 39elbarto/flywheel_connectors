@@ -336,11 +336,14 @@ async fn host_discovery_with_subprocess_connectors() -> Result<(), Box<dyn std::
     Ok(())
 }
 
+type StderrLogs = Arc<StdMutex<Vec<String>>>;
+
 struct HttpHostProcess {
     child: Child,
     client: reqwest::Client,
     base_url: String,
-    stderr_logs: Arc<StdMutex<Vec<String>>>,
+    #[allow(dead_code)]
+    stderr_logs: StderrLogs,
     stderr_thread: Option<JoinHandle<()>>,
 }
 
@@ -413,7 +416,8 @@ struct UnixHostProcess {
     child: Child,
     client: reqwest::Client,
     base_url: String,
-    stderr_logs: Arc<StdMutex<Vec<String>>>,
+    #[allow(dead_code)]
+    stderr_logs: StderrLogs,
     stderr_thread: Option<JoinHandle<()>>,
 }
 
@@ -475,7 +479,7 @@ fn unique_unix_socket_path() -> Result<PathBuf, Box<dyn std::error::Error>> {
 
 fn spawn_stderr_capture(
     child: &mut Child,
-) -> Result<(Arc<StdMutex<Vec<String>>>, JoinHandle<()>), Box<dyn std::error::Error>> {
+) -> Result<(StderrLogs, JoinHandle<()>), Box<dyn std::error::Error>> {
     let stderr = child
         .stderr
         .take()

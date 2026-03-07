@@ -85,17 +85,31 @@ async fn lifecycle_shutdown() {
 #[fcp_async_core::runtime::test]
 async fn lifecycle_self_check_configured() {
     let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/paper/search"))
+        .and(query_param("query", "transformers"))
+        .and(query_param("fields", "paperId"))
+        .and(query_param("limit", "1"))
+        .and(query_param("offset", "0"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "total": 1,
+            "data": [{"paperId": "p1"}]
+        })))
+        .mount(&server)
+        .await;
     let c = setup_connector(&server.uri()).await;
     let check = c.handle_self_check().await.unwrap();
-    assert_eq!(check["status"], "ready");
-    assert_eq!(check["connector_id"], "fcp.semanticscholar");
+    assert_eq!(check["status"], "ok");
+    assert!(check["reason_code"].is_null());
+    assert_eq!(check["details"]["provisioning"]["auth_mode"], "api_key");
 }
 
 #[fcp_async_core::runtime::test]
 async fn lifecycle_self_check_unconfigured() {
     let c = SemanticScholarConnector::new();
     let check = c.handle_self_check().await.unwrap();
-    assert_eq!(check["status"], "unconfigured");
+    assert_eq!(check["status"], "degraded");
+    assert_eq!(check["reason_code"], "not_configured");
 }
 
 #[fcp_async_core::runtime::test]
@@ -135,11 +149,51 @@ async fn lifecycle_introspect() {
 async fn lifecycle_configure_no_key() {
     let server = MockServer::start().await;
     let mut c = SemanticScholarConnector::new();
-    c.handle_configure(json!({ "base_url": server.uri() }))
+    let result = c
+        .handle_configure(json!({ "base_url": server.uri() }))
         .await
         .unwrap();
     let h = c.handle_health().await.unwrap();
     assert_eq!(h["configured"], true);
+    assert_eq!(result["provisioning"]["auth_mode"], "public");
+    assert_eq!(result["provisioning"]["network_ok"], true);
+}
+
+#[fcp_async_core::runtime::test]
+async fn lifecycle_self_check_without_api_key_is_degraded() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/paper/search"))
+        .and(query_param("query", "transformers"))
+        .and(query_param("fields", "paperId"))
+        .and(query_param("limit", "1"))
+        .and(query_param("offset", "0"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "total": 1,
+            "data": [{"paperId": "p1"}]
+        })))
+        .mount(&server)
+        .await;
+
+    let c = setup_connector_no_key(&server.uri()).await;
+    let check = c.handle_self_check().await.unwrap();
+    assert_eq!(check["status"], "degraded");
+    assert_eq!(check["reason_code"], "public_rate_limits");
+    assert_eq!(
+        check["details"]["provisioning"]["rate_limit_profile"],
+        "public: 100 requests/5 minutes"
+    );
+}
+
+#[fcp_async_core::runtime::test]
+async fn lifecycle_self_check_rejects_invalid_network_constraints() {
+    let mut c = SemanticScholarConnector::new();
+    c.handle_configure(json!({ "base_url": "http://example.com" }))
+        .await
+        .unwrap();
+    let check = c.handle_self_check().await.unwrap();
+    assert_eq!(check["status"], "failed");
+    assert_eq!(check["reason_code"], "network_constraints_invalid");
 }
 
 // -- Paper Search --
@@ -207,6 +261,34 @@ async fn paper_search_missing_query() {
         c.handle_invoke(json!({
             "operation_id": "semanticscholar.paper.search",
             "input": {}
+        }))
+        .await
+        .is_err()
+    );
+}
+
+#[fcp_async_core::runtime::test]
+async fn paper_search_rejects_limit_above_manifest_bound() {
+    let server = MockServer::start().await;
+    let c = setup_connector(&server.uri()).await;
+    assert!(
+        c.handle_invoke(json!({
+            "operation_id": "semanticscholar.paper.search",
+            "input": {"query": "transformers", "limit": 101}
+        }))
+        .await
+        .is_err()
+    );
+}
+
+#[fcp_async_core::runtime::test]
+async fn paper_search_rejects_negative_offset() {
+    let server = MockServer::start().await;
+    let c = setup_connector(&server.uri()).await;
+    assert!(
+        c.handle_invoke(json!({
+            "operation_id": "semanticscholar.paper.search",
+            "input": {"query": "transformers", "offset": -1}
         }))
         .await
         .is_err()

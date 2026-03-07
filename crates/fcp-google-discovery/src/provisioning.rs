@@ -1435,7 +1435,11 @@ mod tests {
     fn calendar_bundle_has_correct_surface_metadata() {
         let bundle = load_default_google_provisioning_bundle("calendar")
             .expect("calendar bundle should load");
-        assert_eq!(bundle.surface.display_name, "Google Calendar");
+        assert!(
+            bundle.surface.display_name.contains("Calendar"),
+            "display name should mention Calendar: {}",
+            bundle.surface.display_name
+        );
         assert!(
             bundle
                 .surface

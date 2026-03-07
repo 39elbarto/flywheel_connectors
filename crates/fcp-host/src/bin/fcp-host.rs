@@ -29,23 +29,24 @@ use fcp_async_core::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use fcp_async_core::sync::{Mutex, RwLock};
 use fcp_async_core::task::{self, JoinHandle};
 use fcp_core::{
-    ConnectorHealth, ConnectorId, HealthSnapshot, Introspection, LifecycleError, LifecycleManager,
-    LifecycleRecord, LifecycleState, LifecycleStatus, RequestId, RolloutPolicy, SafetyTier,
-    SelfCheckReport, TransitionReason,
+    ConnectorHealth, ConnectorId, HealthSnapshot, Introspection, InvokeRequest, InvokeResponse,
+    LifecycleError, LifecycleManager, LifecycleRecord, LifecycleState, LifecycleStatus, RequestId,
+    RolloutPolicy, SafetyTier, SelfCheckReport, TransitionReason,
 };
 use fcp_host::{
     BudgetPolicyEngine, CacheMetadata, CacheValidator, ConnectorArchetype, ConnectorRegistry,
     ConnectorSummary, DiscoveryEndpoint, DiscoveryFilter, DiscoveryResponse, DoctorReport,
     DoctorRequest, DoctorService, HostHealthResponse, HostHealthStatus, IntrospectionResponse,
     PreflightRequest, PreflightResponse, RequestPriority, ResilienceError, ResilienceLayer,
-    RolloutController, RolloutObservation, RolloutOutcome, SafetyTierExt, merge_connector_health,
+    RolloutController, RolloutDecision, RolloutObservation, RolloutOutcome, SafetyTierExt,
+    merge_connector_health,
 };
 use fcp_host::{HostError, HostResult};
 use hyper::body::Incoming;
 use hyper_util::{
     server::conn::auto::Builder as HyperConnectionBuilder, service::TowerToHyperService,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tower::ServiceExt;
 use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
@@ -174,6 +175,14 @@ impl SubprocessConnector {
             .map_err(|err| HostError::RegistryError(format!("self_check parse error: {err}")))
     }
 
+    async fn invoke(&self, request: InvokeRequest) -> HostResult<InvokeResponse> {
+        let params = serde_json::to_value(request)
+            .map_err(|err| HostError::RegistryError(format!("invoke encode error: {err}")))?;
+        let result = self.rpc("invoke", params).await?;
+        serde_json::from_value(result)
+            .map_err(|err| HostError::RegistryError(format!("invoke parse error: {err}")))
+    }
+
     async fn summary_snapshot(&self) -> ConnectorSummary {
         let mut summary = self.summary.clone();
         if let Ok(introspection) = self.introspect().await {
@@ -226,6 +235,15 @@ impl SubprocessRegistry {
             version: 1,
         })
     }
+
+    async fn invoke(&self, request: InvokeRequest) -> HostResult<InvokeResponse> {
+        let connector_id = request.connector_id.clone();
+        let connector = self
+            .connectors
+            .get(&connector_id)
+            .ok_or_else(|| HostError::ConnectorNotFound(connector_id.to_string()))?;
+        connector.invoke(request).await
+    }
 }
 
 #[async_trait::async_trait]
@@ -270,13 +288,54 @@ impl ConnectorRegistry for SubprocessRegistry {
 
 struct HostLifecycleManager {
     records: RwLock<HashMap<ConnectorId, LifecycleRecord>>,
+    pinned_versions: RwLock<HashMap<ConnectorId, semver::Version>>,
 }
 
 impl HostLifecycleManager {
     fn new() -> Self {
         Self {
             records: RwLock::new(HashMap::new()),
+            pinned_versions: RwLock::new(HashMap::new()),
         }
+    }
+
+    async fn pin(&self, connector_id: &ConnectorId, version: semver::Version) {
+        self.pinned_versions
+            .write()
+            .await
+            .insert(connector_id.clone(), version);
+    }
+
+    async fn unpin(&self, connector_id: &ConnectorId) -> Option<semver::Version> {
+        self.pinned_versions.write().await.remove(connector_id)
+    }
+
+    async fn pinned_version(&self, connector_id: &ConnectorId) -> Option<semver::Version> {
+        self.pinned_versions.read().await.get(connector_id).cloned()
+    }
+
+    async fn pin_state(&self, connector_id: &ConnectorId) -> PinStateResponse {
+        PinStateResponse::new(connector_id, self.pinned_version(connector_id).await)
+    }
+
+    async fn rollout_status(
+        &self,
+        connector_id: &ConnectorId,
+    ) -> Result<RolloutStatusResponse, LifecycleError> {
+        let status = self.status(connector_id).await?;
+        let records = self.records.read().await;
+        let record = records
+            .get(connector_id)
+            .ok_or_else(|| LifecycleError::NotFound {
+                connector_id: connector_id.clone(),
+            })?;
+        let pinned_version = self.pinned_versions.read().await.get(connector_id).cloned();
+        Ok(RolloutStatusResponse {
+            status,
+            pinned: pinned_version.is_some(),
+            pinned_version,
+            canary_percent: record.canary_policy.canary_traffic_percent,
+        })
     }
 }
 
@@ -571,6 +630,58 @@ struct RolloutEvaluateRequest {
     observed_at: Option<DateTime<Utc>>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PinRequest {
+    version: semver::Version,
+}
+
+#[derive(Debug, Serialize)]
+struct PinStateResponse {
+    connector_id: String,
+    pinned: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    version: Option<semver::Version>,
+}
+
+impl PinStateResponse {
+    fn new(connector_id: &ConnectorId, version: Option<semver::Version>) -> Self {
+        Self {
+            connector_id: connector_id.to_string(),
+            pinned: version.is_some(),
+            version,
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct RolloutStatusResponse {
+    #[serde(flatten)]
+    status: LifecycleStatus,
+    pinned: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pinned_version: Option<semver::Version>,
+    canary_percent: u8,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RollbackRequest {
+    connector_id: String,
+    to_version: semver::Version,
+    #[serde(default)]
+    reason: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct RollbackResponse {
+    connector_id: String,
+    state: LifecycleState,
+    from_version: semver::Version,
+    to_version: semver::Version,
+    message: String,
+}
+
 fn parse_http_datetime(value: &str) -> Option<DateTime<Utc>> {
     chrono::DateTime::parse_from_rfc2822(value)
         .ok()
@@ -835,10 +946,21 @@ async fn async_main() -> HostResult<()> {
         .route("/doctor", post(doctor_handler))
         .route("/rpc/discover", post(discover_handler))
         .route("/rpc/introspect/{connector_id}", get(introspect_handler))
+        .route("/rpc/invoke", post(invoke_handler))
         .route("/rpc/preflight", post(preflight_handler))
         .route("/rpc/health", get(health_handler))
+        .route(
+            "/rpc/rollout/pin/{connector_id}",
+            get(rollout_pin_status_handler)
+                .put(rollout_pin_handler)
+                .delete(rollout_unpin_handler),
+        )
         .route("/rpc/rollout/schedule", post(rollout_schedule_handler))
         .route("/rpc/rollout/evaluate", post(rollout_evaluate_handler))
+        .route(
+            "/rpc/rollout/rollback",
+            post(rollout_manual_rollback_handler),
+        )
         .route("/rpc/rollout/{connector_id}", get(rollout_status_handler))
         .with_state(state);
 
@@ -995,6 +1117,88 @@ async fn preflight_handler(
     Json(response)
 }
 
+async fn invoke_handler(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<InvokeRequest>,
+) -> Result<Json<InvokeResponse>, (StatusCode, String)> {
+    request.validate_idempotency_key().map_err(|err| {
+        map_host_error(HostError::InvalidFilter(format!(
+            "invalid invoke request: {err}"
+        )))
+    })?;
+
+    let connector_id = request.connector_id.clone();
+    let operation = request.operation.clone();
+    let zone_id = request.zone_id.clone();
+    let input = request.input.clone();
+    let correlation_id = request
+        .correlation_id
+        .as_ref()
+        .map(std::string::ToString::to_string);
+    let started_at = Instant::now();
+
+    tracing::debug!(
+        event = "invoke_request",
+        connector_id = %connector_id,
+        operation = %operation,
+        correlation_id,
+        "processing invoke request"
+    );
+
+    let preflight = state
+        .discovery
+        .preflight(PreflightRequest {
+            connector_id: connector_id.clone(),
+            operation: operation.to_string(),
+            params: Some(input),
+            principal: None,
+            zone_id: Some(zone_id),
+        })
+        .await;
+    if !preflight.allowed {
+        let reason = preflight
+            .reason
+            .unwrap_or_else(|| "preflight denied invoke request".to_string());
+        tracing::warn!(
+            event = "invoke_error",
+            connector_id = %connector_id,
+            operation = %operation,
+            correlation_id,
+            reason = %reason,
+            duration_ms = started_at.elapsed().as_millis() as u64,
+            "invoke request failed preflight"
+        );
+        return Err(map_host_error(HostError::PreflightFailed(reason)));
+    }
+
+    match state.registry.invoke(request).await {
+        Ok(response) => {
+            tracing::info!(
+                event = "invoke_response",
+                connector_id = %connector_id,
+                operation = %operation,
+                correlation_id,
+                status = ?response.status,
+                duration_ms = started_at.elapsed().as_millis() as u64,
+                "invoke request complete"
+            );
+            Ok(Json(response))
+        }
+        Err(err) => {
+            tracing::warn!(
+                event = "invoke_error",
+                connector_id = %connector_id,
+                operation = %operation,
+                correlation_id,
+                error = %err,
+                duration_ms = started_at.elapsed().as_millis() as u64,
+                "invoke request failed"
+            );
+            Err(map_host_error(err))
+        }
+    }
+}
+
 async fn health_handler(State(state): State<Arc<AppState>>) -> Json<HostHealthResponse> {
     let started_at = Instant::now();
     let summaries = state.registry.list().await;
@@ -1033,6 +1237,97 @@ async fn health_handler(State(state): State<Arc<AppState>>) -> Json<HostHealthRe
         "health request complete"
     );
     Json(response)
+}
+
+async fn ensure_registered_connector(
+    state: &AppState,
+    connector_id: &ConnectorId,
+) -> Result<(), (StatusCode, String)> {
+    if state.registry.get(connector_id).await.is_some() {
+        Ok(())
+    } else {
+        Err(map_host_error(HostError::ConnectorNotFound(
+            connector_id.to_string(),
+        )))
+    }
+}
+
+async fn rollout_pin_handler(
+    State(state): State<Arc<AppState>>,
+    Path(connector_id): Path<String>,
+    Json(request): Json<PinRequest>,
+) -> Result<Json<PinStateResponse>, (StatusCode, String)> {
+    let connector_id = parse_connector_id(&connector_id)?;
+    ensure_registered_connector(&state, &connector_id).await?;
+    let started_at = Instant::now();
+    tracing::debug!(
+        event = "rollout_pin_request",
+        connector_id = %connector_id,
+        version = %request.version,
+        "processing rollout pin request"
+    );
+    state
+        .lifecycle
+        .pin(&connector_id, request.version.clone())
+        .await;
+    let response = state.lifecycle.pin_state(&connector_id).await;
+    tracing::info!(
+        event = "rollout_pin_response",
+        connector_id = %connector_id,
+        pinned = response.pinned,
+        version = ?response.version,
+        duration_ms = started_at.elapsed().as_millis() as u64,
+        "rollout pin request complete"
+    );
+    Ok(Json(response))
+}
+
+async fn rollout_pin_status_handler(
+    State(state): State<Arc<AppState>>,
+    Path(connector_id): Path<String>,
+) -> Result<Json<PinStateResponse>, (StatusCode, String)> {
+    let connector_id = parse_connector_id(&connector_id)?;
+    ensure_registered_connector(&state, &connector_id).await?;
+    let started_at = Instant::now();
+    tracing::debug!(
+        event = "rollout_pin_status_request",
+        connector_id = %connector_id,
+        "processing rollout pin status request"
+    );
+    let response = state.lifecycle.pin_state(&connector_id).await;
+    tracing::debug!(
+        event = "rollout_pin_status_response",
+        connector_id = %connector_id,
+        pinned = response.pinned,
+        version = ?response.version,
+        duration_ms = started_at.elapsed().as_millis() as u64,
+        "rollout pin status request complete"
+    );
+    Ok(Json(response))
+}
+
+async fn rollout_unpin_handler(
+    State(state): State<Arc<AppState>>,
+    Path(connector_id): Path<String>,
+) -> Result<Json<PinStateResponse>, (StatusCode, String)> {
+    let connector_id = parse_connector_id(&connector_id)?;
+    ensure_registered_connector(&state, &connector_id).await?;
+    let started_at = Instant::now();
+    tracing::debug!(
+        event = "rollout_unpin_request",
+        connector_id = %connector_id,
+        "processing rollout unpin request"
+    );
+    let removed_version = state.lifecycle.unpin(&connector_id).await;
+    let response = state.lifecycle.pin_state(&connector_id).await;
+    tracing::info!(
+        event = "rollout_unpin_response",
+        connector_id = %connector_id,
+        removed_version = ?removed_version,
+        duration_ms = started_at.elapsed().as_millis() as u64,
+        "rollout unpin request complete"
+    );
+    Ok(Json(response))
 }
 
 async fn rollout_schedule_handler(
@@ -1109,18 +1404,19 @@ async fn rollout_evaluate_handler(
     let connector_id = parse_connector_id(&connector_id)?;
     let observed_at = observed_at.unwrap_or_else(Utc::now);
     let started_at = Instant::now();
+    let effective_pinned = pinned;
     tracing::debug!(
         event = "rollout_evaluate_request",
         connector_id = %connector_id,
         invocation_succeeded,
         uptime_secs,
-        pinned,
+        pinned = effective_pinned,
         crashed,
         "processing rollout evaluate request"
     );
     let mut observation = RolloutObservation::new(invocation_succeeded, policy)
         .with_uptime_secs(uptime_secs)
-        .pinned(pinned)
+        .pinned(effective_pinned)
         .crashed(crashed)
         .observed_at(observed_at);
     if let Some(latency_ms) = latency_ms {
@@ -1128,6 +1424,11 @@ async fn rollout_evaluate_handler(
     }
     match state.rollout.evaluate(&connector_id, observation).await {
         Ok(outcome) => {
+            if matches!(outcome.decision, RolloutDecision::Rollback)
+                && let Some(target_version) = outcome.record.previous_version.clone()
+            {
+                state.lifecycle.pin(&connector_id, target_version).await;
+            }
             tracing::info!(
                 event = "rollout_evaluate_response",
                 connector_id = %connector_id,
@@ -1152,10 +1453,75 @@ async fn rollout_evaluate_handler(
     }
 }
 
+async fn rollout_manual_rollback_handler(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<RollbackRequest>,
+) -> Result<Json<RollbackResponse>, (StatusCode, String)> {
+    let RollbackRequest {
+        connector_id,
+        to_version,
+        reason,
+    } = request;
+    let connector_id = parse_connector_id(&connector_id)?;
+    ensure_registered_connector(&state, &connector_id).await?;
+    let started_at = Instant::now();
+    tracing::debug!(
+        event = "rollout_manual_rollback_request",
+        connector_id = %connector_id,
+        to_version = %to_version,
+        "processing rollout manual rollback request"
+    );
+
+    let current = state
+        .lifecycle
+        .get(&connector_id)
+        .await
+        .map_err(|e| map_host_error(map_lifecycle_host_error(e)))?
+        .ok_or_else(|| {
+            map_host_error(HostError::Unavailable(format!(
+                "connector '{connector_id}' has no rollout state to roll back"
+            )))
+        })?;
+    let from_version = current.version.clone();
+    let rollback_target = current.previous_version.clone().ok_or_else(|| {
+        map_host_error(map_lifecycle_host_error(LifecycleError::NoRollbackTarget))
+    })?;
+    if to_version != rollback_target {
+        return Err(map_host_error(HostError::InvalidFilter(format!(
+            "requested rollback target '{to_version}' does not match current rollback target '{rollback_target}'"
+        ))));
+    }
+
+    let rolled_back = state
+        .lifecycle
+        .rollback(&connector_id, reason)
+        .await
+        .map_err(|e| map_host_error(map_lifecycle_host_error(e)))?;
+    state.lifecycle.pin(&connector_id, to_version.clone()).await;
+
+    let response = RollbackResponse {
+        connector_id: connector_id.to_string(),
+        state: rolled_back.state,
+        from_version,
+        to_version: to_version.clone(),
+        message: format!("connector rolled back to v{to_version} and pinned"),
+    };
+    tracing::info!(
+        event = "rollout_manual_rollback_response",
+        connector_id = %connector_id,
+        from_version = %response.from_version,
+        to_version = %response.to_version,
+        state = %response.state,
+        duration_ms = started_at.elapsed().as_millis() as u64,
+        "rollout manual rollback request complete"
+    );
+    Ok(Json(response))
+}
+
 async fn rollout_status_handler(
     State(state): State<Arc<AppState>>,
     Path(connector_id): Path<String>,
-) -> Result<Json<LifecycleStatus>, (StatusCode, String)> {
+) -> Result<Json<RolloutStatusResponse>, (StatusCode, String)> {
     let connector_id = parse_connector_id(&connector_id)?;
     let started_at = Instant::now();
     tracing::debug!(
@@ -1163,12 +1529,13 @@ async fn rollout_status_handler(
         connector_id = %connector_id,
         "processing rollout status request"
     );
-    match state.lifecycle.status(&connector_id).await {
+    match state.lifecycle.rollout_status(&connector_id).await {
         Ok(status) => {
             tracing::debug!(
                 event = "rollout_status_response",
                 connector_id = %connector_id,
-                state = %status.state,
+                state = %status.status.state,
+                pinned = status.pinned,
                 duration_ms = started_at.elapsed().as_millis() as u64,
                 "rollout status request complete"
             );

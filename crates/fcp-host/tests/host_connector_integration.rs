@@ -27,8 +27,34 @@ use fcp_host::{
 };
 use fcp_testkit::LogCapture;
 use reqwest::header::{CACHE_CONTROL, ETAG, HeaderMap, HeaderValue, IF_NONE_MATCH, LAST_MODIFIED};
+use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
+
+#[derive(Debug, Deserialize)]
+struct PinStateResponse {
+    connector_id: String,
+    pinned: bool,
+    version: Option<semver::Version>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RolloutStatusResponse {
+    #[serde(flatten)]
+    status: LifecycleStatus,
+    pinned: bool,
+    pinned_version: Option<semver::Version>,
+    canary_percent: u8,
+}
+
+#[derive(Debug, Deserialize)]
+struct ManualRollbackResponse {
+    connector_id: String,
+    state: LifecycleState,
+    from_version: semver::Version,
+    to_version: semver::Version,
+    message: String,
+}
 
 struct AllowAllPolicy;
 
@@ -386,6 +412,49 @@ where
     T: DeserializeOwned + Send + 'static,
 {
     Ok(http_post_json_response(client, url, body, None).await?.body)
+}
+
+async fn http_put_json<B, T>(
+    client: reqwest::Client,
+    url: String,
+    body: B,
+) -> Result<T, Box<dyn std::error::Error>>
+where
+    B: serde::Serialize + Send + 'static,
+    T: DeserializeOwned + Send + 'static,
+{
+    let cx = test_cx();
+    let response = asupersync_tokio_compat::runtime::with_tokio_context(&cx, move || async move {
+        let response = client
+            .put(url)
+            .json(&body)
+            .send()
+            .await?
+            .error_for_status()?;
+        let body = response.json::<T>().await?;
+        Ok::<_, reqwest::Error>(body)
+    })
+    .await
+    .ok_or_else(|| std::io::Error::other("tokio-compat PUT JSON request cancelled"))??;
+    Ok(response)
+}
+
+async fn http_delete_json<T>(
+    client: reqwest::Client,
+    url: String,
+) -> Result<T, Box<dyn std::error::Error>>
+where
+    T: DeserializeOwned + Send + 'static,
+{
+    let cx = test_cx();
+    let response = asupersync_tokio_compat::runtime::with_tokio_context(&cx, move || async move {
+        let response = client.delete(url).send().await?.error_for_status()?;
+        let body = response.json::<T>().await?;
+        Ok::<_, reqwest::Error>(body)
+    })
+    .await
+    .ok_or_else(|| std::io::Error::other("tokio-compat DELETE JSON request cancelled"))??;
+    Ok(response)
 }
 
 struct HttpJsonResponse<T> {
@@ -902,6 +971,25 @@ async fn assert_discovery_routes(
     assert!(preflight.allowed);
     assert!(preflight.reason.is_none());
 
+    let (invoke_request, correlation_id) = build_invoke_request(connector_a_id.clone());
+    let invoke_response: InvokeResponse =
+        http_post_json(client.clone(), url("/rpc/invoke"), invoke_request).await?;
+    assert_eq!(invoke_response.status, InvokeStatus::Ok);
+    assert!(invoke_response.receipt_id.is_some());
+    assert_eq!(
+        invoke_response
+            .result
+            .as_ref()
+            .and_then(|result| result.get("echo"))
+            .and_then(|echo| echo.get("message"))
+            .and_then(Value::as_str),
+        Some("hello")
+    );
+    assert!(
+        correlation_id.to_string().len() > 10,
+        "correlation id should be propagated from the request helper"
+    );
+
     let doctor: serde_json::Value = http_post_json(
         client.clone(),
         url("/doctor"),
@@ -1220,6 +1308,129 @@ async fn fcp_host_binary_rollout_routes_rollback_and_emit_transition_logs()
 }
 
 #[fcp_async_core::runtime::test(flavor = "multi_thread")]
+async fn fcp_host_binary_pin_status_and_manual_rollback_routes_emit_logs()
+-> Result<(), Box<dyn std::error::Error>> {
+    let connector_id = ConnectorId::from_static("fcp.test.rollout-pin:utility:1.0.0");
+    let host = HttpHostProcess::spawn(vec![test_connector_config(
+        &connector_id,
+        "Rollout Pin",
+        &["test", "rollout"],
+    )])
+    .await?;
+    let url = |path: &str| format!("{}{path}", host.base_url);
+
+    let previous_version = semver::Version::new(1, 0, 0);
+    let canary_version = semver::Version::new(1, 0, 1);
+    let policy = test_rollout_policy();
+
+    let pinned: PinStateResponse = http_put_json(
+        host.client.clone(),
+        url(&format!("/rpc/rollout/pin/{}", connector_id.as_str())),
+        json!({ "version": canary_version.clone() }),
+    )
+    .await?;
+    assert_eq!(pinned.connector_id, connector_id.as_str());
+    assert!(pinned.pinned);
+    assert_eq!(pinned.version, Some(canary_version.clone()));
+
+    let pin_status: PinStateResponse = http_get_json(
+        host.client.clone(),
+        url(&format!("/rpc/rollout/pin/{}", connector_id.as_str())),
+    )
+    .await?;
+    assert!(pin_status.pinned);
+    assert_eq!(pin_status.version, Some(canary_version.clone()));
+
+    let _scheduled: RolloutOutcome = http_post_json(
+        host.client.clone(),
+        url("/rpc/rollout/schedule"),
+        json!({
+            "connector_id": connector_id.as_str(),
+            "version": canary_version.clone(),
+            "previous_version": previous_version.clone(),
+            "policy": policy.clone(),
+            "observed_at": chrono::Utc::now() - chrono::Duration::seconds(5),
+        }),
+    )
+    .await?;
+
+    let status: RolloutStatusResponse = http_get_json(
+        host.client.clone(),
+        url(&format!("/rpc/rollout/{}", connector_id.as_str())),
+    )
+    .await?;
+    assert_eq!(status.status.state, LifecycleState::Canary);
+    assert!(status.pinned);
+    assert_eq!(status.pinned_version, Some(canary_version.clone()));
+    assert_eq!(status.canary_percent, policy.canary_percent);
+
+    let rollback: ManualRollbackResponse = http_post_json(
+        host.client.clone(),
+        url("/rpc/rollout/rollback"),
+        json!({
+            "connector_id": connector_id.as_str(),
+            "to_version": previous_version.clone(),
+        }),
+    )
+    .await?;
+    assert_eq!(rollback.connector_id, connector_id.as_str());
+    assert_eq!(rollback.state, LifecycleState::RolledBack);
+    assert_eq!(rollback.from_version, canary_version.clone());
+    assert_eq!(rollback.to_version, previous_version.clone());
+    assert!(rollback.message.contains("rolled back"));
+
+    let repinned: PinStateResponse = http_get_json(
+        host.client.clone(),
+        url(&format!("/rpc/rollout/pin/{}", connector_id.as_str())),
+    )
+    .await?;
+    assert!(repinned.pinned);
+    assert_eq!(repinned.version, Some(previous_version.clone()));
+
+    let unpinned: PinStateResponse = http_delete_json(
+        host.client.clone(),
+        url(&format!("/rpc/rollout/pin/{}", connector_id.as_str())),
+    )
+    .await?;
+    assert!(!unpinned.pinned);
+    assert_eq!(unpinned.version, None);
+
+    let logs = wait_for_log_events(
+        &host.stderr_logs,
+        &[
+            "rollout_pin_request",
+            "rollout_pin_response",
+            "rollout_pin_status_request",
+            "rollout_pin_status_response",
+            "rollout_manual_rollback_request",
+            "rollout_manual_rollback_response",
+            "rollout_unpin_request",
+            "rollout_unpin_response",
+        ],
+    )
+    .await?;
+
+    assert!(logs.iter().any(|entry| {
+        entry.get("event").and_then(Value::as_str) == Some("rollout_pin_response")
+            && entry.get("connector_id").and_then(Value::as_str) == Some(connector_id.as_str())
+            && entry.get("pinned").and_then(Value::as_bool) == Some(true)
+    }));
+    assert!(logs.iter().any(|entry| {
+        entry.get("event").and_then(Value::as_str) == Some("rollout_manual_rollback_response")
+            && entry.get("connector_id").and_then(Value::as_str) == Some(connector_id.as_str())
+            && entry.get("from_version").and_then(Value::as_str) == Some("1.0.1")
+            && entry.get("to_version").and_then(Value::as_str) == Some("1.0.0")
+            && entry.get("state").and_then(Value::as_str) == Some("rolled_back")
+    }));
+    assert!(logs.iter().any(|entry| {
+        entry.get("event").and_then(Value::as_str) == Some("rollout_unpin_response")
+            && entry.get("connector_id").and_then(Value::as_str) == Some(connector_id.as_str())
+    }));
+
+    Ok(())
+}
+
+#[fcp_async_core::runtime::test(flavor = "multi_thread")]
 async fn fcp_host_binary_emits_structured_endpoint_logs() -> Result<(), Box<dyn std::error::Error>>
 {
     let connector_a_id = ConnectorId::from_static("fcp.test.log-echo:utility:1.0.0");
@@ -1246,6 +1457,8 @@ async fn fcp_host_binary_emits_structured_endpoint_logs() -> Result<(), Box<dyn 
             "discover_response",
             "introspect_request",
             "introspect_response",
+            "invoke_request",
+            "invoke_response",
             "preflight_check",
             "doctor_request",
             "doctor_response",
@@ -1276,6 +1489,17 @@ async fn fcp_host_binary_emits_structured_endpoint_logs() -> Result<(), Box<dyn 
             && entry.get("connector_id").and_then(Value::as_str) == Some(connector_a_id.as_str())
             && entry.get("operation").and_then(Value::as_str) == Some("test.echo")
             && entry.get("allowed").and_then(Value::as_bool) == Some(true)
+    }));
+    assert!(logs.iter().any(|entry| {
+        entry.get("event").and_then(Value::as_str) == Some("invoke_request")
+            && entry.get("connector_id").and_then(Value::as_str) == Some(connector_a_id.as_str())
+            && entry.get("operation").and_then(Value::as_str) == Some("test.echo")
+    }));
+    assert!(logs.iter().any(|entry| {
+        entry.get("event").and_then(Value::as_str) == Some("invoke_response")
+            && entry.get("connector_id").and_then(Value::as_str) == Some(connector_a_id.as_str())
+            && entry.get("operation").and_then(Value::as_str) == Some("test.echo")
+            && entry.get("status").and_then(Value::as_str) == Some("Ok")
     }));
     assert!(logs.iter().any(|entry| {
         entry.get("event").and_then(Value::as_str) == Some("doctor_response")

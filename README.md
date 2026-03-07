@@ -976,6 +976,7 @@ apr integrate 5 -c  # Copy integration prompt to clipboard
 |------|---------|
 | `FCP_Specification_V2.md` | Main protocol specification |
 | `docs/fcp_model_connectors_rust.md` | Rust implementation guide |
+| `docs/GOOGLE_Connector_Platform_Reference.md` | Developer/operator guide for the shared Google connector platform |
 | `.apr/workflows/fcp.yaml` | APR workflow configuration |
 | `.apr/rounds/fcp/round_N.md` | GPT Pro output for each round |
 

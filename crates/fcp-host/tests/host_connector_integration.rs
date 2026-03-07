@@ -3,12 +3,14 @@
 //! Bead: bd-219o
 
 use std::collections::HashMap;
+use std::io::{BufRead, BufReader};
 use std::net::TcpListener as StdTcpListener;
 #[cfg(unix)]
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::{Arc, Mutex as StdMutex};
+use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
 
 use fcp_async_core::sync::Mutex;
 use fcp_core::{
@@ -23,7 +25,7 @@ use fcp_host::{
     PreflightResponse,
 };
 use fcp_testkit::LogCapture;
-use serde_json::json;
+use serde_json::{Value, json};
 
 struct AllowAllPolicy;
 
@@ -338,6 +340,8 @@ struct HttpHostProcess {
     child: Child,
     client: reqwest::Client,
     base_url: String,
+    stderr_logs: Arc<StdMutex<Vec<String>>>,
+    stderr_thread: Option<JoinHandle<()>>,
 }
 
 async fn wait_for_host_readiness(
@@ -379,6 +383,7 @@ impl HttpHostProcess {
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
             .spawn()?;
+        let (stderr_logs, stderr_thread) = spawn_stderr_capture(&mut child)?;
 
         let client = reqwest::Client::new();
         wait_for_host_readiness(&mut child, &client, &base_url).await?;
@@ -387,6 +392,8 @@ impl HttpHostProcess {
             child,
             client,
             base_url,
+            stderr_logs,
+            stderr_thread: Some(stderr_thread),
         })
     }
 }
@@ -395,6 +402,9 @@ impl Drop for HttpHostProcess {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
+        if let Some(stderr_thread) = self.stderr_thread.take() {
+            let _ = stderr_thread.join();
+        }
     }
 }
 
@@ -403,6 +413,8 @@ struct UnixHostProcess {
     child: Child,
     client: reqwest::Client,
     base_url: String,
+    stderr_logs: Arc<StdMutex<Vec<String>>>,
+    stderr_thread: Option<JoinHandle<()>>,
 }
 
 #[cfg(unix)]
@@ -421,6 +433,7 @@ impl UnixHostProcess {
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
             .spawn()?;
+        let (stderr_logs, stderr_thread) = spawn_stderr_capture(&mut child)?;
 
         let client = reqwest::Client::builder()
             .unix_socket(socket_path)
@@ -431,6 +444,8 @@ impl UnixHostProcess {
             child,
             client,
             base_url,
+            stderr_logs,
+            stderr_thread: Some(stderr_thread),
         })
     }
 }
@@ -440,6 +455,9 @@ impl Drop for UnixHostProcess {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
+        if let Some(stderr_thread) = self.stderr_thread.take() {
+            let _ = stderr_thread.join();
+        }
     }
 }
 
@@ -453,6 +471,62 @@ fn unique_unix_socket_path() -> Result<PathBuf, Box<dyn std::error::Error>> {
     }
 
     Err("failed to allocate unique unix socket path".into())
+}
+
+fn spawn_stderr_capture(
+    child: &mut Child,
+) -> Result<(Arc<StdMutex<Vec<String>>>, JoinHandle<()>), Box<dyn std::error::Error>> {
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| std::io::Error::other("fcp-host stderr pipe unavailable"))?;
+    let logs = Arc::new(StdMutex::new(Vec::new()));
+    let logs_for_thread = Arc::clone(&logs);
+    let handle = std::thread::spawn(move || {
+        let reader = BufReader::new(stderr);
+        for line in reader.lines() {
+            match line {
+                Ok(line) => logs_for_thread
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push(line),
+                Err(_) => break,
+            }
+        }
+    });
+    Ok((logs, handle))
+}
+
+async fn wait_for_log_events(
+    stderr_logs: &Arc<StdMutex<Vec<String>>>,
+    events: &[&str],
+) -> Result<Vec<Value>, Box<dyn std::error::Error>> {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let raw_lines = stderr_logs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let parsed_logs: Vec<Value> = raw_lines
+            .iter()
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .collect();
+        let saw_all_events = events.iter().all(|event| {
+            parsed_logs
+                .iter()
+                .any(|entry| entry.get("event").and_then(Value::as_str) == Some(*event))
+        });
+        if saw_all_events {
+            return Ok(parsed_logs);
+        }
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "timed out waiting for log events {events:?}; raw stderr lines: {raw_lines:?}"
+            )
+            .into());
+        }
+        fcp_async_core::time::sleep(Duration::from_millis(25)).await;
+    }
 }
 
 async fn assert_discovery_routes(
@@ -583,6 +657,69 @@ async fn fcp_host_binary_exposes_discovery_routes() -> Result<(), Box<dyn std::e
         &connector_b_id,
     )
     .await?;
+
+    Ok(())
+}
+
+#[fcp_async_core::runtime::test(flavor = "multi_thread")]
+async fn fcp_host_binary_emits_structured_endpoint_logs() -> Result<(), Box<dyn std::error::Error>>
+{
+    let connector_a_id = ConnectorId::from_static("fcp.test.log-echo:utility:1.0.0");
+    let connector_b_id = ConnectorId::from_static("fcp.test.log-ping:utility:1.0.0");
+
+    let host = HttpHostProcess::spawn(vec![
+        test_connector_config(&connector_a_id, "Log Echo", &["test", "primary"]),
+        test_connector_config(&connector_b_id, "Log Ping", &["test", "secondary"]),
+    ])
+    .await?;
+
+    assert_discovery_routes(
+        &host.client,
+        &host.base_url,
+        &connector_a_id,
+        &connector_b_id,
+    )
+    .await?;
+
+    let logs = wait_for_log_events(
+        &host.stderr_logs,
+        &[
+            "discover_request",
+            "discover_response",
+            "introspect_request",
+            "introspect_response",
+            "preflight_check",
+            "doctor_request",
+            "doctor_response",
+            "health_response",
+        ],
+    )
+    .await?;
+
+    assert!(logs.iter().any(|entry| {
+        entry.get("event").and_then(Value::as_str) == Some("discover_response")
+            && entry.get("connector_count").and_then(Value::as_u64) == Some(2)
+            && entry.get("registry_version").and_then(Value::as_u64) == Some(1)
+    }));
+    assert!(logs.iter().any(|entry| {
+        entry.get("event").and_then(Value::as_str) == Some("introspect_response")
+            && entry.get("connector_id").and_then(Value::as_str) == Some(connector_a_id.as_str())
+            && entry.get("tool_count").and_then(Value::as_u64) == Some(1)
+    }));
+    assert!(logs.iter().any(|entry| {
+        entry.get("event").and_then(Value::as_str) == Some("preflight_check")
+            && entry.get("connector_id").and_then(Value::as_str) == Some(connector_a_id.as_str())
+            && entry.get("operation").and_then(Value::as_str) == Some("test.echo")
+            && entry.get("allowed").and_then(Value::as_bool) == Some(true)
+    }));
+    assert!(logs.iter().any(|entry| {
+        entry.get("event").and_then(Value::as_str) == Some("doctor_response")
+            && entry.get("overall_status").and_then(Value::as_str) == Some("Ok")
+    }));
+    assert!(logs.iter().any(|entry| {
+        entry.get("event").and_then(Value::as_str) == Some("health_response")
+            && entry.get("connector_count").and_then(Value::as_u64) == Some(2)
+    }));
 
     Ok(())
 }

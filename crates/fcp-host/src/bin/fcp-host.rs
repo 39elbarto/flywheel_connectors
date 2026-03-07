@@ -34,6 +34,7 @@ use fcp_host::{
 use fcp_host::{HostError, HostResult};
 use serde::Deserialize;
 use serde_json::json;
+use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
 
 #[derive(Debug, Deserialize)]
 struct ConnectorConfig {
@@ -541,12 +542,30 @@ fn prepare_unix_socket_path(path: &FsPath) -> HostResult<()> {
 }
 
 fn main() -> HostResult<()> {
+    init_tracing();
     match fcp_async_core::runtime::block_on_sync(async_main()) {
         Ok(result) => result,
         Err(err) => Err(HostError::Internal(format!(
             "runtime bootstrap failed: {err}"
         ))),
     }
+}
+
+fn init_tracing() {
+    tracing_subscriber::registry()
+        .with(
+            EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| EnvFilter::new("info,fcp_host=debug")),
+        )
+        .with(
+            tracing_subscriber::fmt::layer()
+                .json()
+                .flatten_event(true)
+                .with_ansi(false)
+                .with_current_span(false)
+                .with_writer(std::io::stderr),
+        )
+        .init();
 }
 
 async fn async_main() -> HostResult<()> {

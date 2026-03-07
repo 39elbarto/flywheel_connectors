@@ -15,14 +15,15 @@ use std::time::{Duration, Instant};
 use fcp_async_core::sync::Mutex;
 use fcp_core::{
     CapabilityToken, ConnectorHealth, ConnectorId, CorrelationId, HandshakeRequest, HealthSnapshot,
-    Introspection, InvokeRequest, InvokeResponse, InvokeStatus, OperationId, RequestId,
-    SelfCheckReport, ZoneId,
+    Introspection, InvokeRequest, InvokeResponse, InvokeStatus, LifecycleState, LifecycleStatus,
+    OperationId, RequestId, RollbackRules, RolloutPolicy, SelfCheckReport, SuccessThresholds,
+    ZoneId,
 };
 use fcp_e2e::{AssertionsSummary, ConnectorProcessRunner, E2eLogEntry, E2eLogger};
 use fcp_host::{
     ConnectorArchetype, ConnectorRegistry, ConnectorSummary, DiscoveryEndpoint, DiscoveryResponse,
     HostHealthResponse, HostHealthStatus, IntrospectionResponse, PolicyEngine, PreflightRequest,
-    PreflightResponse,
+    PreflightResponse, RolloutDecision, RolloutOutcome,
 };
 use fcp_testkit::LogCapture;
 use reqwest::header::{CACHE_CONTROL, ETAG, HeaderMap, HeaderValue, IF_NONE_MATCH, LAST_MODIFIED};
@@ -940,6 +941,24 @@ fn test_connector_config(
     })
 }
 
+fn test_rollout_policy() -> RolloutPolicy {
+    RolloutPolicy::builder()
+        .canary_percent(10)
+        .min_canary_duration_secs(1)
+        .success_thresholds(SuccessThresholds::new(9000, 1000, 3, 60))
+        .rollback_rules(RollbackRules::new(5000, 3, 3, 60, true))
+        .build()
+}
+
+fn test_rollout_rollback_policy() -> RolloutPolicy {
+    RolloutPolicy::builder()
+        .canary_percent(10)
+        .min_canary_duration_secs(0)
+        .success_thresholds(SuccessThresholds::new(10_000, 0, 1, 60))
+        .rollback_rules(RollbackRules::new(0, 1, 1, 60, true))
+        .build()
+}
+
 #[fcp_async_core::runtime::test(flavor = "multi_thread")]
 async fn fcp_host_binary_exposes_discovery_routes() -> Result<(), Box<dyn std::error::Error>> {
     let connector_a_id = ConnectorId::from_static("fcp.test.http-echo:utility:1.0.0");
@@ -958,6 +977,244 @@ async fn fcp_host_binary_exposes_discovery_routes() -> Result<(), Box<dyn std::e
         &connector_b_id,
     )
     .await?;
+
+    Ok(())
+}
+
+#[fcp_async_core::runtime::test(flavor = "multi_thread")]
+async fn fcp_host_binary_rollout_routes_schedule_and_promote_canary()
+-> Result<(), Box<dyn std::error::Error>> {
+    let connector_id = ConnectorId::from_static("fcp.test.rollout-http:utility:1.0.0");
+    let host = HttpHostProcess::spawn(vec![test_connector_config(
+        &connector_id,
+        "Rollout Echo",
+        &["test", "rollout"],
+    )])
+    .await?;
+    let url = |path: &str| format!("{}{path}", host.base_url);
+
+    let policy = test_rollout_policy();
+    let previous_version = semver::Version::new(1, 0, 0);
+    let canary_version = semver::Version::new(1, 0, 1);
+    let schedule_observed_at = chrono::Utc::now() - chrono::Duration::seconds(5);
+
+    let scheduled: RolloutOutcome = http_post_json(
+        host.client.clone(),
+        url("/rpc/rollout/schedule"),
+        json!({
+            "connector_id": connector_id.as_str(),
+            "version": canary_version.clone(),
+            "previous_version": previous_version.clone(),
+            "policy": policy.clone(),
+            "observed_at": schedule_observed_at,
+        }),
+    )
+    .await?;
+    assert_eq!(scheduled.decision, RolloutDecision::Scheduled);
+    assert_eq!(scheduled.record.state, LifecycleState::Canary);
+    assert_eq!(scheduled.record.version, canary_version);
+    assert_eq!(
+        scheduled.record.previous_version,
+        Some(previous_version.clone())
+    );
+    assert_eq!(scheduled.audit_event.reason_code, "canary_scheduled");
+
+    let status: LifecycleStatus = http_get_json(
+        host.client.clone(),
+        url(&format!("/rpc/rollout/{}", connector_id.as_str())),
+    )
+    .await?;
+    assert_eq!(status.state, LifecycleState::Canary);
+    assert_eq!(status.version, canary_version);
+    assert_eq!(
+        status.rollback_target_version,
+        Some(previous_version.clone())
+    );
+
+    let first: RolloutOutcome = http_post_json(
+        host.client.clone(),
+        url("/rpc/rollout/evaluate"),
+        json!({
+            "connector_id": connector_id.as_str(),
+            "invocation_succeeded": true,
+            "latency_ms": 20,
+            "uptime_secs": 120,
+            "pinned": false,
+            "crashed": false,
+            "policy": policy.clone(),
+            "observed_at": chrono::Utc::now(),
+        }),
+    )
+    .await?;
+    assert_eq!(first.decision, RolloutDecision::Hold);
+    assert_eq!(first.record.state, LifecycleState::Canary);
+    assert_eq!(first.audit_event.reason_code, "insufficient_samples");
+
+    let second: RolloutOutcome = http_post_json(
+        host.client.clone(),
+        url("/rpc/rollout/evaluate"),
+        json!({
+            "connector_id": connector_id.as_str(),
+            "invocation_succeeded": true,
+            "latency_ms": 25,
+            "uptime_secs": 120,
+            "pinned": false,
+            "crashed": false,
+            "policy": policy.clone(),
+            "observed_at": chrono::Utc::now(),
+        }),
+    )
+    .await?;
+    assert_eq!(second.decision, RolloutDecision::Hold);
+    assert_eq!(second.record.state, LifecycleState::Canary);
+    assert_eq!(second.audit_event.reason_code, "insufficient_samples");
+
+    let promoted: RolloutOutcome = http_post_json(
+        host.client.clone(),
+        url("/rpc/rollout/evaluate"),
+        json!({
+            "connector_id": connector_id.as_str(),
+            "invocation_succeeded": true,
+            "latency_ms": 30,
+            "uptime_secs": 120,
+            "pinned": false,
+            "crashed": false,
+            "policy": policy,
+            "observed_at": chrono::Utc::now(),
+        }),
+    )
+    .await?;
+    assert_eq!(promoted.decision, RolloutDecision::Promote);
+    assert_eq!(promoted.record.state, LifecycleState::Production);
+    assert_eq!(promoted.audit_event.reason_code, "promotion_thresholds_met");
+
+    let final_status: LifecycleStatus = http_get_json(
+        host.client.clone(),
+        url(&format!("/rpc/rollout/{}", connector_id.as_str())),
+    )
+    .await?;
+    assert_eq!(final_status.state, LifecycleState::Production);
+    assert_eq!(final_status.version, canary_version);
+    assert!(!final_status.auto_promote_pending);
+    assert_eq!(final_status.rollback_target_version, Some(previous_version));
+
+    Ok(())
+}
+
+#[fcp_async_core::runtime::test(flavor = "multi_thread")]
+async fn fcp_host_binary_rollout_routes_rollback_and_emit_transition_logs()
+-> Result<(), Box<dyn std::error::Error>> {
+    let connector_id = ConnectorId::from_static("fcp.test.rollout-rollback:utility:1.0.0");
+    let host = HttpHostProcess::spawn(vec![test_connector_config(
+        &connector_id,
+        "Rollout Rollback",
+        &["test", "rollout"],
+    )])
+    .await?;
+    let url = |path: &str| format!("{}{path}", host.base_url);
+
+    let policy = test_rollout_rollback_policy();
+    let previous_version = semver::Version::new(1, 0, 0);
+    let canary_version = semver::Version::new(1, 0, 1);
+
+    let scheduled: RolloutOutcome = http_post_json(
+        host.client.clone(),
+        url("/rpc/rollout/schedule"),
+        json!({
+            "connector_id": connector_id.as_str(),
+            "version": canary_version.clone(),
+            "previous_version": previous_version.clone(),
+            "policy": policy.clone(),
+            "observed_at": chrono::Utc::now() - chrono::Duration::seconds(5),
+        }),
+    )
+    .await?;
+    assert_eq!(scheduled.decision, RolloutDecision::Scheduled);
+    assert_eq!(scheduled.record.state, LifecycleState::Canary);
+    assert_eq!(scheduled.audit_event.reason_code, "canary_scheduled");
+
+    let rolled_back: RolloutOutcome = http_post_json(
+        host.client.clone(),
+        url("/rpc/rollout/evaluate"),
+        json!({
+            "connector_id": connector_id.as_str(),
+            "invocation_succeeded": false,
+            "latency_ms": 15,
+            "uptime_secs": 120,
+            "pinned": false,
+            "crashed": false,
+            "policy": policy,
+            "observed_at": chrono::Utc::now(),
+        }),
+    )
+    .await?;
+    assert_eq!(rolled_back.decision, RolloutDecision::Rollback);
+    assert_eq!(rolled_back.record.state, LifecycleState::RolledBack);
+    assert_eq!(
+        rolled_back.audit_event.reason_code,
+        "consecutive_failures_exceeded"
+    );
+    assert!(
+        rolled_back
+            .audit_event
+            .evidence_digest
+            .starts_with("blake3-256:")
+    );
+
+    let final_status: LifecycleStatus = http_get_json(
+        host.client.clone(),
+        url(&format!("/rpc/rollout/{}", connector_id.as_str())),
+    )
+    .await?;
+    assert_eq!(final_status.state, LifecycleState::RolledBack);
+    assert_eq!(final_status.version, canary_version);
+    assert_eq!(final_status.rollback_target_version, Some(previous_version));
+    assert!(!final_status.auto_rollback_pending);
+
+    let logs = wait_for_log_events(
+        &host.stderr_logs,
+        &[
+            "rollout_schedule_request",
+            "rollout_schedule_response",
+            "rollout_evaluate_request",
+            "rollout_evaluate_response",
+            "rollout_status_request",
+            "rollout_status_response",
+        ],
+    )
+    .await?;
+
+    assert!(logs.iter().any(|entry| {
+        entry.get("event").and_then(Value::as_str) == Some("rollout_schedule_response")
+            && entry.get("connector_id").and_then(Value::as_str) == Some(connector_id.as_str())
+            && entry.get("reason_code").and_then(Value::as_str) == Some("canary_scheduled")
+            && entry.get("duration_ms").and_then(Value::as_u64).is_some()
+    }));
+    assert!(logs.iter().any(|entry| {
+        entry.get("event").and_then(Value::as_str) == Some("rollout_evaluate_response")
+            && entry.get("connector_id").and_then(Value::as_str) == Some(connector_id.as_str())
+            && entry.get("reason_code").and_then(Value::as_str)
+                == Some("consecutive_failures_exceeded")
+            && entry.get("duration_ms").and_then(Value::as_u64).is_some()
+    }));
+    assert!(logs.iter().any(|entry| {
+        entry.get("message").and_then(Value::as_str) == Some("rollout decision")
+            && entry.get("connector_id").and_then(Value::as_str) == Some(connector_id.as_str())
+            && entry.get("decision").and_then(Value::as_str) == Some("scheduled")
+            && entry.get("state_before").and_then(Value::as_str) == Some("pending")
+            && entry.get("state_after").and_then(Value::as_str) == Some("canary")
+    }));
+    assert!(logs.iter().any(|entry| {
+        entry.get("message").and_then(Value::as_str) == Some("rollout decision")
+            && entry.get("connector_id").and_then(Value::as_str) == Some(connector_id.as_str())
+            && entry.get("decision").and_then(Value::as_str) == Some("rollback")
+            && entry.get("state_before").and_then(Value::as_str) == Some("canary")
+            && entry.get("state_after").and_then(Value::as_str) == Some("rolled_back")
+            && entry
+                .get("evidence_digest")
+                .and_then(Value::as_str)
+                .is_some_and(|digest| digest.starts_with("blake3-256:"))
+    }));
 
     Ok(())
 }

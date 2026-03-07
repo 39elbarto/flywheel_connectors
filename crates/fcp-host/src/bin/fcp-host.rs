@@ -26,18 +26,19 @@ use fcp_async_core::net::TcpListener;
 #[cfg(unix)]
 use fcp_async_core::net::UnixListener;
 use fcp_async_core::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
-use fcp_async_core::sync::Mutex;
+use fcp_async_core::sync::{Mutex, RwLock};
 use fcp_async_core::task::{self, JoinHandle};
 use fcp_core::{
-    ConnectorHealth, ConnectorId, HealthSnapshot, Introspection, RequestId, SafetyTier,
-    SelfCheckReport,
+    ConnectorHealth, ConnectorId, HealthSnapshot, Introspection, LifecycleError, LifecycleManager,
+    LifecycleRecord, LifecycleState, LifecycleStatus, RequestId, RolloutPolicy, SafetyTier,
+    SelfCheckReport, TransitionReason,
 };
 use fcp_host::{
     BudgetPolicyEngine, CacheMetadata, CacheValidator, ConnectorArchetype, ConnectorRegistry,
     ConnectorSummary, DiscoveryEndpoint, DiscoveryFilter, DiscoveryResponse, DoctorReport,
     DoctorRequest, DoctorService, HostHealthResponse, HostHealthStatus, IntrospectionResponse,
     PreflightRequest, PreflightResponse, RequestPriority, ResilienceError, ResilienceLayer,
-    SafetyTierExt, merge_connector_health,
+    RolloutController, RolloutObservation, RolloutOutcome, SafetyTierExt, merge_connector_health,
 };
 use fcp_host::{HostError, HostResult};
 use hyper::body::Incoming;
@@ -267,6 +268,87 @@ impl ConnectorRegistry for SubprocessRegistry {
     }
 }
 
+struct HostLifecycleManager {
+    records: RwLock<HashMap<ConnectorId, LifecycleRecord>>,
+}
+
+impl HostLifecycleManager {
+    fn new() -> Self {
+        Self {
+            records: RwLock::new(HashMap::new()),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl LifecycleManager for HostLifecycleManager {
+    async fn get(
+        &self,
+        connector_id: &ConnectorId,
+    ) -> Result<Option<LifecycleRecord>, LifecycleError> {
+        Ok(self.records.read().await.get(connector_id).cloned())
+    }
+
+    async fn save(&self, record: &LifecycleRecord) -> Result<(), LifecycleError> {
+        self.records
+            .write()
+            .await
+            .insert(record.connector_id.clone(), record.clone());
+        Ok(())
+    }
+
+    async fn promote(&self, connector_id: &ConnectorId) -> Result<LifecycleRecord, LifecycleError> {
+        let mut records = self.records.write().await;
+        let record = records
+            .get_mut(connector_id)
+            .ok_or_else(|| LifecycleError::NotFound {
+                connector_id: connector_id.clone(),
+            })?;
+        let health_score = record.health.success_rate.min(100);
+        record.transition(
+            LifecycleState::Production,
+            TransitionReason::AutoPromotion { health_score },
+        )?;
+        Ok(record.clone())
+    }
+
+    async fn rollback(
+        &self,
+        connector_id: &ConnectorId,
+        reason: Option<String>,
+    ) -> Result<LifecycleRecord, LifecycleError> {
+        let mut records = self.records.write().await;
+        let record = records
+            .get_mut(connector_id)
+            .ok_or_else(|| LifecycleError::NotFound {
+                connector_id: connector_id.clone(),
+            })?;
+        if record.previous_version.is_none() {
+            return Err(LifecycleError::NoRollbackTarget);
+        }
+        let health_score = record.health.success_rate.min(100);
+        let failure_reason = reason.unwrap_or_else(|| "rollback requested".to_string());
+        record.transition(
+            LifecycleState::RolledBack,
+            TransitionReason::AutoRollback {
+                health_score,
+                failure_reason,
+            },
+        )?;
+        Ok(record.clone())
+    }
+
+    async fn status(&self, connector_id: &ConnectorId) -> Result<LifecycleStatus, LifecycleError> {
+        let records = self.records.read().await;
+        let record = records
+            .get(connector_id)
+            .ok_or_else(|| LifecycleError::NotFound {
+                connector_id: connector_id.clone(),
+            })?;
+        Ok(LifecycleStatus::from_record(record, Utc::now(), false))
+    }
+}
+
 struct ConnectorProcessRunner {
     _child: Child,
     stdin: ChildStdin,
@@ -429,6 +511,8 @@ struct AppState {
     registry: Arc<SubprocessRegistry>,
     doctor: DoctorService<SubprocessRegistry>,
     discovery: Arc<DiscoveryEndpoint<SubprocessRegistry, BudgetPolicyEngine>>,
+    lifecycle: Arc<HostLifecycleManager>,
+    rollout: Arc<RolloutController<SubprocessRegistry, HostLifecycleManager>>,
     started_at: Instant,
 }
 
@@ -455,6 +539,36 @@ impl DiscoverPayload {
             Self::Filter(filter) => (filter, None),
         }
     }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RolloutScheduleRequest {
+    connector_id: String,
+    version: semver::Version,
+    #[serde(default)]
+    previous_version: Option<semver::Version>,
+    policy: RolloutPolicy,
+    #[serde(default)]
+    observed_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RolloutEvaluateRequest {
+    connector_id: String,
+    invocation_succeeded: bool,
+    #[serde(default)]
+    latency_ms: Option<u32>,
+    #[serde(default)]
+    uptime_secs: u64,
+    #[serde(default)]
+    pinned: bool,
+    #[serde(default)]
+    crashed: bool,
+    policy: RolloutPolicy,
+    #[serde(default)]
+    observed_at: Option<DateTime<Utc>>,
 }
 
 fn parse_http_datetime(value: &str) -> Option<DateTime<Utc>> {
@@ -703,10 +817,17 @@ async fn async_main() -> HostResult<()> {
         Arc::clone(&registry),
         Arc::new(BudgetPolicyEngine::new()),
     ));
+    let lifecycle = Arc::new(HostLifecycleManager::new());
+    let rollout = Arc::new(RolloutController::new(
+        Arc::clone(&registry),
+        Arc::clone(&lifecycle),
+    ));
     let state = Arc::new(AppState {
         registry,
         doctor,
         discovery,
+        lifecycle,
+        rollout,
         started_at: Instant::now(),
     });
 
@@ -716,6 +837,9 @@ async fn async_main() -> HostResult<()> {
         .route("/rpc/introspect/{connector_id}", get(introspect_handler))
         .route("/rpc/preflight", post(preflight_handler))
         .route("/rpc/health", get(health_handler))
+        .route("/rpc/rollout/schedule", post(rollout_schedule_handler))
+        .route("/rpc/rollout/evaluate", post(rollout_evaluate_handler))
+        .route("/rpc/rollout/{connector_id}", get(rollout_status_handler))
         .with_state(state);
 
     match bind_target {
@@ -911,6 +1035,159 @@ async fn health_handler(State(state): State<Arc<AppState>>) -> Json<HostHealthRe
     Json(response)
 }
 
+async fn rollout_schedule_handler(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<RolloutScheduleRequest>,
+) -> Result<Json<RolloutOutcome>, (StatusCode, String)> {
+    let RolloutScheduleRequest {
+        connector_id,
+        version,
+        previous_version,
+        policy,
+        observed_at,
+    } = request;
+    let connector_id = parse_connector_id(&connector_id)?;
+    let observed_at = observed_at.unwrap_or_else(Utc::now);
+    let started_at = Instant::now();
+    tracing::debug!(
+        event = "rollout_schedule_request",
+        connector_id = %connector_id,
+        version = %version,
+        previous_version = ?previous_version,
+        "processing rollout schedule request"
+    );
+    match state
+        .rollout
+        .schedule_canary(
+            &connector_id,
+            version,
+            previous_version,
+            &policy,
+            observed_at,
+        )
+        .await
+    {
+        Ok(outcome) => {
+            tracing::info!(
+                event = "rollout_schedule_response",
+                connector_id = %connector_id,
+                state = %outcome.record.state,
+                decision = ?outcome.decision,
+                reason_code = %outcome.audit_event.reason_code,
+                duration_ms = started_at.elapsed().as_millis() as u64,
+                "rollout schedule request complete"
+            );
+            Ok(Json(outcome))
+        }
+        Err(err) => {
+            tracing::warn!(
+                event = "rollout_schedule_error",
+                connector_id = %connector_id,
+                error = %err,
+                duration_ms = started_at.elapsed().as_millis() as u64,
+                "rollout schedule request failed"
+            );
+            Err(map_host_error(err))
+        }
+    }
+}
+
+async fn rollout_evaluate_handler(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<RolloutEvaluateRequest>,
+) -> Result<Json<RolloutOutcome>, (StatusCode, String)> {
+    let RolloutEvaluateRequest {
+        connector_id,
+        invocation_succeeded,
+        latency_ms,
+        uptime_secs,
+        pinned,
+        crashed,
+        policy,
+        observed_at,
+    } = request;
+    let connector_id = parse_connector_id(&connector_id)?;
+    let observed_at = observed_at.unwrap_or_else(Utc::now);
+    let started_at = Instant::now();
+    tracing::debug!(
+        event = "rollout_evaluate_request",
+        connector_id = %connector_id,
+        invocation_succeeded,
+        uptime_secs,
+        pinned,
+        crashed,
+        "processing rollout evaluate request"
+    );
+    let mut observation = RolloutObservation::new(invocation_succeeded, policy)
+        .with_uptime_secs(uptime_secs)
+        .pinned(pinned)
+        .crashed(crashed)
+        .observed_at(observed_at);
+    if let Some(latency_ms) = latency_ms {
+        observation = observation.with_latency_ms(latency_ms);
+    }
+    match state.rollout.evaluate(&connector_id, observation).await {
+        Ok(outcome) => {
+            tracing::info!(
+                event = "rollout_evaluate_response",
+                connector_id = %connector_id,
+                state = %outcome.record.state,
+                decision = ?outcome.decision,
+                reason_code = %outcome.audit_event.reason_code,
+                duration_ms = started_at.elapsed().as_millis() as u64,
+                "rollout evaluate request complete"
+            );
+            Ok(Json(outcome))
+        }
+        Err(err) => {
+            tracing::warn!(
+                event = "rollout_evaluate_error",
+                connector_id = %connector_id,
+                error = %err,
+                duration_ms = started_at.elapsed().as_millis() as u64,
+                "rollout evaluate request failed"
+            );
+            Err(map_host_error(err))
+        }
+    }
+}
+
+async fn rollout_status_handler(
+    State(state): State<Arc<AppState>>,
+    Path(connector_id): Path<String>,
+) -> Result<Json<LifecycleStatus>, (StatusCode, String)> {
+    let connector_id = parse_connector_id(&connector_id)?;
+    let started_at = Instant::now();
+    tracing::debug!(
+        event = "rollout_status_request",
+        connector_id = %connector_id,
+        "processing rollout status request"
+    );
+    match state.lifecycle.status(&connector_id).await {
+        Ok(status) => {
+            tracing::debug!(
+                event = "rollout_status_response",
+                connector_id = %connector_id,
+                state = %status.state,
+                duration_ms = started_at.elapsed().as_millis() as u64,
+                "rollout status request complete"
+            );
+            Ok(Json(status))
+        }
+        Err(err) => {
+            let host_error = map_lifecycle_host_error(err);
+            tracing::warn!(
+                event = "rollout_status_error",
+                connector_id = %connector_id,
+                error = %host_error,
+                duration_ms = started_at.elapsed().as_millis() as u64,
+                "rollout status request failed"
+            );
+            Err(map_host_error(host_error))
+        }
+    }
+}
+
 fn parse_connector_id(raw: &str) -> Result<ConnectorId, (StatusCode, String)> {
     raw.parse().map_err(|err| {
         map_host_error(HostError::InvalidFilter(format!(
@@ -959,6 +1236,15 @@ fn map_resilience_error(
             "connector '{connector_id}' method '{method}' timed out after {}ms",
             timeout.as_millis()
         )),
+    }
+}
+
+fn map_lifecycle_host_error(error: LifecycleError) -> HostError {
+    match error {
+        LifecycleError::NotFound { connector_id } => {
+            HostError::ConnectorNotFound(connector_id.to_string())
+        }
+        other => HostError::Internal(format!("lifecycle error: {other}")),
     }
 }
 
@@ -1607,10 +1893,17 @@ mod tests {
             Arc::clone(&registry),
             Arc::new(BudgetPolicyEngine::new()),
         ));
+        let lifecycle = Arc::new(HostLifecycleManager::new());
+        let rollout = Arc::new(RolloutController::new(
+            Arc::clone(&registry),
+            Arc::clone(&lifecycle),
+        ));
         let state = AppState {
             registry,
             doctor,
             discovery,
+            lifecycle,
+            rollout,
             started_at: Instant::now(),
         };
         let cloned = state.clone();

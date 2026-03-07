@@ -13,6 +13,7 @@
 #![warn(clippy::all, clippy::pedantic, clippy::nursery)]
 #![allow(clippy::module_name_repetitions)]
 
+mod batch;
 mod budget;
 mod discovery;
 mod doctor;
@@ -21,6 +22,7 @@ mod resilience;
 mod rollout;
 mod supply_chain;
 
+pub use batch::*;
 pub use budget::*;
 pub use discovery::*;
 pub use doctor::*;

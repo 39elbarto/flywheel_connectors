@@ -1779,4 +1779,241 @@ mod tests {
             .expect("compute interface hash");
         assert_eq!(computed, computed2);
     }
+
+    // --- DoctorStatus serde lowercase ---
+
+    #[test]
+    fn doctor_status_serializes_lowercase() {
+        let healthy = serde_json::to_string(&DoctorStatus::Healthy).unwrap();
+        assert_eq!(healthy, "\"healthy\"");
+        let degraded = serde_json::to_string(&DoctorStatus::Degraded).unwrap();
+        assert_eq!(degraded, "\"degraded\"");
+        let unhealthy = serde_json::to_string(&DoctorStatus::Unhealthy).unwrap();
+        assert_eq!(unhealthy, "\"unhealthy\"");
+    }
+
+    #[test]
+    fn doctor_status_deserializes_lowercase() {
+        let h: DoctorStatus = serde_json::from_str("\"healthy\"").unwrap();
+        assert_eq!(h, DoctorStatus::Healthy);
+        let d: DoctorStatus = serde_json::from_str("\"degraded\"").unwrap();
+        assert_eq!(d, DoctorStatus::Degraded);
+        let u: DoctorStatus = serde_json::from_str("\"unhealthy\"").unwrap();
+        assert_eq!(u, DoctorStatus::Unhealthy);
+    }
+
+    #[test]
+    fn doctor_status_copy_eq() {
+        let a = DoctorStatus::Healthy;
+        let b = a;
+        let _ = a; // still usable after copy
+        assert_eq!(a, b);
+        assert_ne!(DoctorStatus::Healthy, DoctorStatus::Degraded);
+    }
+
+    // --- DoctorCheck skip_serializing_if message None ---
+
+    #[test]
+    fn doctor_check_skip_serializing_message_none() {
+        let check = DoctorCheck {
+            name: "test_check".into(),
+            passed: true,
+            message: None,
+            critical: false,
+        };
+        let json = serde_json::to_string(&check).unwrap();
+        assert!(!json.contains("message"));
+    }
+
+    #[test]
+    fn doctor_check_includes_message_when_some() {
+        let check = DoctorCheck {
+            name: "test_check".into(),
+            passed: false,
+            message: Some("detail here".into()),
+            critical: true,
+        };
+        let json = serde_json::to_string(&check).unwrap();
+        assert!(json.contains("detail here"));
+    }
+
+    // --- DoctorResult roundtrip ---
+
+    #[test]
+    fn doctor_result_roundtrip() {
+        let result = DoctorResult::from_checks(vec![
+            DoctorCheck {
+                name: "alpha".into(),
+                passed: true,
+                message: Some("ok".into()),
+                critical: true,
+            },
+            DoctorCheck {
+                name: "beta".into(),
+                passed: false,
+                message: None,
+                critical: false,
+            },
+        ]);
+        let serialized = serde_json::to_string(&result).unwrap();
+        let deserialized: DoctorResult = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(deserialized.status, DoctorStatus::Degraded);
+        assert_eq!(deserialized.checks.len(), 2);
+        assert_eq!(deserialized.checks[0].name, "alpha");
+        assert!(deserialized.checks[0].passed);
+        assert!(!deserialized.checks[1].passed);
+    }
+
+    // --- DoctorResult debug and clone ---
+
+    #[test]
+    fn doctor_result_debug() {
+        let result = DoctorResult::from_checks(vec![DoctorCheck {
+            name: "check_a".into(),
+            passed: true,
+            message: None,
+            critical: false,
+        }]);
+        let dbg = format!("{result:?}");
+        assert!(dbg.contains("DoctorResult"));
+        assert!(dbg.contains("Healthy"));
+        assert!(dbg.contains("check_a"));
+    }
+
+    #[test]
+    fn doctor_result_clone() {
+        let original = DoctorResult::from_checks(vec![DoctorCheck {
+            name: "c1".into(),
+            passed: false,
+            message: Some("msg".into()),
+            critical: true,
+        }]);
+        let cloned = original.clone();
+        assert_eq!(original.status, DoctorStatus::Unhealthy);
+        assert_eq!(cloned.checks.len(), 1);
+        assert_eq!(cloned.checks[0].name, "c1");
+        assert_eq!(cloned.checks[0].message.as_deref(), Some("msg"));
+    }
+
+    // --- AnthropicConnector default impl ---
+
+    #[test]
+    fn connector_default_impl() {
+        let c = AnthropicConnector::default();
+        assert!(c.config.is_none());
+        assert!(c.client.is_none());
+        assert_eq!(c.total_cost(), 0.0);
+        assert_eq!(c.total_requests(), 0);
+        assert_eq!(c.total_errors(), 0);
+    }
+
+    // --- AnthropicConfig edge cases ---
+
+    #[test]
+    fn config_rejects_empty_trimmed_api_key() {
+        let params = json!({ "api_key": "   " });
+        let result = AnthropicConfig::from_params(&params);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(message.contains("Missing"));
+            }
+            e => panic!("Expected InvalidRequest, got: {e:?}"),
+        }
+    }
+
+    #[test]
+    fn config_rejects_non_string_credential_id() {
+        let params = json!({ "credential_id": 42 });
+        let result = AnthropicConfig::from_params(&params);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(message.contains("string"));
+            }
+            e => panic!("Expected InvalidRequest, got: {e:?}"),
+        }
+    }
+
+    #[test]
+    fn config_rejects_invalid_uuid_credential_id() {
+        let params = json!({ "credential_id": "not-a-valid-uuid" });
+        let result = AnthropicConfig::from_params(&params);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(message.contains("valid UUID"));
+            }
+            e => panic!("Expected InvalidRequest, got: {e:?}"),
+        }
+    }
+
+    #[test]
+    fn config_default_base_url_when_not_specified() {
+        let params = json!({ "api_key": "sk-test" });
+        let config = AnthropicConfig::from_params(&params).unwrap();
+        assert_eq!(config.base_url, DEFAULT_BASE_URL);
+    }
+
+    // --- DoctorResult all healthy ---
+
+    #[test]
+    fn doctor_result_all_healthy() {
+        let result = DoctorResult::from_checks(vec![
+            DoctorCheck {
+                name: "a".into(),
+                passed: true,
+                message: None,
+                critical: true,
+            },
+            DoctorCheck {
+                name: "b".into(),
+                passed: true,
+                message: None,
+                critical: false,
+            },
+        ]);
+        assert_eq!(result.status, DoctorStatus::Healthy);
+    }
+
+    // --- DoctorCheck clone and debug ---
+
+    #[test]
+    fn doctor_check_clone_and_debug() {
+        let original = DoctorCheck {
+            name: "check_clone".into(),
+            passed: true,
+            message: Some("cloned".into()),
+            critical: false,
+        };
+        let cloned = original.clone();
+        assert_eq!(original.name, "check_clone");
+        assert_eq!(cloned.name, "check_clone");
+        assert!(cloned.passed);
+        assert_eq!(cloned.message.as_deref(), Some("cloned"));
+        let dbg = format!("{cloned:?}");
+        assert!(dbg.contains("DoctorCheck"));
+    }
+
+    // --- track_cost accumulates correctly ---
+
+    #[test]
+    fn track_cost_accumulates() {
+        let connector = AnthropicConnector::new();
+        let usage = Usage {
+            input_tokens: 1_000_000,
+            output_tokens: 0,
+            cache_creation_input_tokens: 0,
+            cache_read_input_tokens: 0,
+        };
+        // ClaudeSonnet4 input: 1M * $3/M = $3.00
+        connector.track_cost(&usage, Model::ClaudeSonnet4);
+        let cost1 = connector.total_cost();
+        assert!((cost1 - 3.0).abs() < 0.01);
+
+        // Track again, should accumulate
+        connector.track_cost(&usage, Model::ClaudeSonnet4);
+        let cost2 = connector.total_cost();
+        assert!((cost2 - 6.0).abs() < 0.01);
+    }
 }

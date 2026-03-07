@@ -1037,4 +1037,42 @@ mod tests {
             assert!(!summary.is_empty(), "op {} has empty summary", op["id"]);
         }
     }
+
+    #[test]
+    fn require_str_with_float_value() {
+        let input = json!({"id": 1.23});
+        assert!(require_str(&input, "id").is_err());
+    }
+
+    #[test]
+    fn operations_all_capabilities_prefixed() {
+        let ops = operations_info();
+        for op in ops.as_array().unwrap() {
+            let cap = op["capability"].as_str().unwrap();
+            assert!(
+                cap.starts_with("n8n."),
+                "capability {cap} should start with n8n."
+            );
+        }
+    }
+
+    #[test]
+    fn doctor_result_debug() {
+        let r = DoctorResult::from_checks(vec![]);
+        let dbg = format!("{r:?}");
+        assert!(dbg.contains("DoctorResult"));
+    }
+
+    #[test]
+    fn doctor_check_debug() {
+        let c = DoctorCheck {
+            name: "test_check".into(),
+            passed: true,
+            message: None,
+            critical: false,
+        };
+        let dbg = format!("{c:?}");
+        assert!(dbg.contains("DoctorCheck"));
+        assert!(dbg.contains("test_check"));
+    }
 }

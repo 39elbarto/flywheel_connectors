@@ -1010,4 +1010,103 @@ mod tests {
         };
         assert!(!err.is_retryable());
     }
+
+    #[test]
+    fn auth_redacted_label_token() {
+        let auth = JiraAuth::Token {
+            domain: "test".into(),
+            email: "a@b.com".into(),
+            api_token: "secret".into(),
+        };
+        assert_eq!(auth.redacted_label(), "token");
+    }
+
+    #[test]
+    fn auth_redacted_label_credential_id() {
+        let auth = JiraAuth::CredentialId {
+            domain: "test".into(),
+            credential_id: CredentialId::new(),
+        };
+        assert_eq!(auth.redacted_label(), "credential_id");
+    }
+
+    #[test]
+    fn auth_is_secretless_false_for_token() {
+        let auth = JiraAuth::Token {
+            domain: "d".into(),
+            email: "e".into(),
+            api_token: "t".into(),
+        };
+        assert!(!auth.is_secretless());
+    }
+
+    #[test]
+    fn auth_is_secretless_true_for_credential() {
+        let auth = JiraAuth::CredentialId {
+            domain: "d".into(),
+            credential_id: CredentialId::new(),
+        };
+        assert!(auth.is_secretless());
+    }
+
+    #[test]
+    fn auth_domain_returns_correct_value() {
+        let auth = JiraAuth::Token {
+            domain: "mycompany".into(),
+            email: "u@e.com".into(),
+            api_token: "tok".into(),
+        };
+        assert_eq!(auth.domain(), "mycompany");
+
+        let auth2 = JiraAuth::CredentialId {
+            domain: "otherdomain".into(),
+            credential_id: CredentialId::new(),
+        };
+        assert_eq!(auth2.domain(), "otherdomain");
+    }
+
+    #[test]
+    fn auth_debug_redacts_token() {
+        let auth = JiraAuth::Token {
+            domain: "test".into(),
+            email: "user@example.com".into(),
+            api_token: "super-secret-value".into(),
+        };
+        let dbg = format!("{auth:?}");
+        assert!(dbg.contains("REDACTED"), "got: {dbg}");
+        assert!(!dbg.contains("super-secret-value"), "token leaked: {dbg}");
+        assert!(dbg.contains("Token"), "got: {dbg}");
+    }
+
+    #[test]
+    fn auth_debug_credential_shows_id() {
+        let auth = JiraAuth::CredentialId {
+            domain: "test".into(),
+            credential_id: CredentialId::new(),
+        };
+        let dbg = format!("{auth:?}");
+        assert!(dbg.contains("CredentialId"), "got: {dbg}");
+        assert!(dbg.contains("test"), "got: {dbg}");
+    }
+
+    #[test]
+    fn client_debug_contains_struct_name() {
+        let client = JiraClient::new("test", "user@example.com", "token").unwrap();
+        let dbg = format!("{client:?}");
+        assert!(dbg.contains("JiraClient"), "got: {dbg}");
+    }
+
+    #[test]
+    fn client_total_requests_initially_zero() {
+        let client = JiraClient::new("test", "user@example.com", "token").unwrap();
+        assert_eq!(client.total_requests(), 0);
+    }
+
+    #[test]
+    fn default_rest_base_and_agile_base_urls() {
+        assert!(DEFAULT_REST_BASE.contains("atlassian.net"));
+        assert!(DEFAULT_AGILE_BASE.contains("atlassian.net"));
+        assert!(DEFAULT_REST_BASE.contains("rest/api/3"));
+        assert!(DEFAULT_AGILE_BASE.contains("agile/1.0"));
+    }
 }

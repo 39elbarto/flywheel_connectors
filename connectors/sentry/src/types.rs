@@ -804,4 +804,122 @@ mod tests {
         assert_eq!(cloned.key, "env");
         assert_eq!(cloned.value, "prod");
     }
+
+    #[test]
+    fn transaction_serialize_roundtrip() {
+        let t = Transaction {
+            event_id: Some("tx-1".into()),
+            title: Some("GET /api".into()),
+            transaction: Some("/api".into()),
+            start_timestamp: Some(1000.0),
+            timestamp: Some(1001.5),
+            duration: Some(1500.0),
+            contexts: None,
+            measurements: None,
+            spans: Some(vec![json!({"op": "http"})]),
+            tags: Some(vec![EventTag {
+                key: "env".into(),
+                value: "prod".into(),
+            }]),
+        };
+        let v = serde_json::to_value(&t).unwrap();
+        assert_eq!(v["eventId"], "tx-1");
+        assert_eq!(v["duration"], 1500.0);
+        let back: Transaction = serde_json::from_value(v).unwrap();
+        assert_eq!(back.transaction.as_deref(), Some("/api"));
+    }
+
+    #[test]
+    fn issue_serialize_roundtrip() {
+        let i = Issue {
+            id: "200".into(),
+            short_id: Some("PROJ-2B".into()),
+            title: "TypeError".into(),
+            culprit: Some("app.main".into()),
+            level: Some("warning".into()),
+            status: Some("resolved".into()),
+            substatus: None,
+            issue_type: Some("error".into()),
+            first_seen: None,
+            last_seen: None,
+            count: Some("10".into()),
+            user_count: Some(5),
+            permalink: None,
+            project: None,
+            assigned_to: None,
+            is_bookmarked: Some(true),
+            is_subscribed: None,
+            has_seen: None,
+            metadata: None,
+            stats: None,
+        };
+        let v = serde_json::to_value(&i).unwrap();
+        assert_eq!(v["id"], "200");
+        assert_eq!(v["isBookmarked"], true);
+        let back: Issue = serde_json::from_value(v).unwrap();
+        assert_eq!(back.culprit.as_deref(), Some("app.main"));
+    }
+
+    #[test]
+    fn alert_rule_serialize_roundtrip() {
+        let a = AlertRule {
+            id: Some("10".into()),
+            name: "High rate".into(),
+            conditions: vec![json!({"id": "cond1"})],
+            actions: vec![json!({"id": "act1"})],
+            filters: vec![],
+            action_match: Some("all".into()),
+            filter_match: None,
+            frequency: Some(60),
+            date_created: None,
+            status: Some("active".into()),
+        };
+        let v = serde_json::to_value(&a).unwrap();
+        assert_eq!(v["name"], "High rate");
+        assert_eq!(v["frequency"], 60);
+        let back: AlertRule = serde_json::from_value(v).unwrap();
+        assert_eq!(back.conditions.len(), 1);
+        assert_eq!(back.status.as_deref(), Some("active"));
+    }
+
+    #[test]
+    fn event_serialize_roundtrip() {
+        let e = Event {
+            event_id: Some("ev-1".into()),
+            event_id_upper: None,
+            title: Some("Error".into()),
+            message: Some("something failed".into()),
+            platform: Some("javascript".into()),
+            date_created: None,
+            date_received: None,
+            event_type: Some("error".into()),
+            tags: Some(vec![EventTag {
+                key: "browser".into(),
+                value: "Firefox".into(),
+            }]),
+            entries: None,
+            contexts: None,
+            user: None,
+            sdk: None,
+            context: None,
+            errors: None,
+            fingerprints: Some(vec!["default".into()]),
+        };
+        let v = serde_json::to_value(&e).unwrap();
+        assert_eq!(v["eventId"], "ev-1");
+        assert_eq!(v["platform"], "javascript");
+        let back: Event = serde_json::from_value(v).unwrap();
+        assert_eq!(back.message.as_deref(), Some("something failed"));
+    }
+
+    #[test]
+    fn event_tag_debug_format() {
+        let t = EventTag {
+            key: "env".into(),
+            value: "staging".into(),
+        };
+        let dbg = format!("{t:?}");
+        assert!(dbg.contains("EventTag"));
+        assert!(dbg.contains("staging"));
+    }
 }

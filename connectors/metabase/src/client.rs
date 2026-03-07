@@ -347,4 +347,33 @@ mod tests {
         let client = MetabaseClient::new(MetabaseAuth::SessionToken("tok".into()), "").unwrap();
         assert_eq!(client.base_url, "");
     }
+
+    #[test]
+    fn auth_redacted_label_does_not_leak_token() {
+        let auth = MetabaseAuth::SessionToken("xyzzy-secret-session-42".into());
+        let label = auth.redacted_label();
+        assert!(!label.contains("xyzzy-secret-session-42"));
+        assert!(label.contains("redacted"));
+    }
+
+    #[test]
+    fn client_debug_does_not_leak_session_token_value() {
+        let client = MetabaseClient::new(
+            MetabaseAuth::SessionToken("super-secret-session-tok-99".into()),
+            "http://localhost:3000/api",
+        )
+        .unwrap();
+        let dbg = format!("{client:?}");
+        assert!(!dbg.contains("super-secret-session-tok-99"));
+        assert!(dbg.contains("MetabaseClient"));
+        assert!(dbg.contains("base_url"));
+    }
+
+    #[test]
+    fn auth_credential_id_redacted_label_format() {
+        let cred = MetabaseAuth::CredentialId(CredentialId::new());
+        let label = cred.redacted_label();
+        assert!(!label.contains("redacted"));
+        assert!(label.starts_with("credential_id:"));
+    }
 }

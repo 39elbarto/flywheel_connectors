@@ -960,4 +960,35 @@ mod tests {
         let input = json!({"index_name": 9.87});
         assert!(require_str(&input, "index_name").is_err());
     }
+
+    #[test]
+    fn operations_all_summaries_non_empty() {
+        let ops = operations_info();
+        for op in ops.as_array().unwrap() {
+            let summary = op["summary"].as_str().unwrap();
+            assert!(!summary.is_empty(), "op {:?} has empty summary", op["id"]);
+        }
+    }
+
+    #[test]
+    fn operations_all_capabilities_prefixed() {
+        let ops = operations_info();
+        for op in ops.as_array().unwrap() {
+            let cap = op["capability"].as_str().unwrap();
+            assert!(
+                cap.starts_with("algolia."),
+                "op {:?} capability {cap} should start with algolia.",
+                op["id"]
+            );
+        }
+    }
+
+    #[test]
+    fn doctor_status_copy_eq() {
+        let a = DoctorStatus::Healthy;
+        let b = a;
+        assert_eq!(a, b);
+        let c = DoctorStatus::Degraded;
+        assert_ne!(a, c);
+    }
 }

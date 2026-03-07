@@ -1234,4 +1234,61 @@ mod tests {
         let dbg = format!("{config:?}");
         assert!(!dbg.contains("secret_tok"));
     }
+
+    #[test]
+    fn require_str_nested_object() {
+        let input = json!({"org": {"nested": true}});
+        assert!(require_str(&input, "org").is_err());
+    }
+
+    #[test]
+    #[allow(clippy::redundant_clone)]
+    fn doctor_check_clone_and_debug() {
+        let check = DoctorCheck {
+            name: "config".into(),
+            passed: true,
+            message: Some("good".into()),
+            critical: true,
+        };
+        let cloned = check.clone();
+        assert_eq!(check.name, "config");
+        assert_eq!(cloned.message, Some("good".into()));
+        assert!(cloned.critical);
+        let dbg = format!("{cloned:?}");
+        assert!(dbg.contains("DoctorCheck"));
+    }
+
+    #[test]
+    fn operations_create_alert_rule_not_idempotent() {
+        let ops = operations_info();
+        let create_op = ops
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["id"] == "sentry.create_alert_rule")
+            .unwrap();
+        assert_eq!(create_op["idempotency"].as_str().unwrap(), "none");
+    }
+
+    #[test]
+    #[allow(clippy::redundant_clone)]
+    fn doctor_result_clone() {
+        let r = DoctorResult::from_checks(vec![DoctorCheck {
+            name: "c1".into(),
+            passed: true,
+            message: None,
+            critical: false,
+        }]);
+        let cloned = r.clone();
+        assert_eq!(r.status, DoctorStatus::Healthy);
+        assert_eq!(cloned.checks.len(), 1);
+    }
+
+    #[test]
+    fn doctor_status_debug_format() {
+        let dbg = format!("{:?}", DoctorStatus::Unhealthy);
+        assert!(dbg.contains("Unhealthy"));
+        let dbg2 = format!("{:?}", DoctorStatus::Degraded);
+        assert!(dbg2.contains("Degraded"));
+    }
 }

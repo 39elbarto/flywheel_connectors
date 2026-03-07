@@ -1016,4 +1016,75 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn require_str_with_object_value() {
+        let input = json!({"item_id": {"nested": true}});
+        assert!(require_str(&input, "item_id").is_err());
+    }
+
+    #[test]
+    fn require_str_with_array_value() {
+        let input = json!({"item_id": ["a", "b"]});
+        assert!(require_str(&input, "item_id").is_err());
+    }
+
+    #[test]
+    fn require_i64_with_boolean_value() {
+        let input = json!({"type": true});
+        assert!(require_i64(&input, "type").is_err());
+    }
+
+    #[test]
+    fn operations_all_capabilities_prefixed_with_bitwarden() {
+        let ops = operations_info();
+        for op in ops.as_array().unwrap() {
+            let cap = op["capability"].as_str().unwrap();
+            assert!(
+                cap.starts_with("bitwarden."),
+                "capability {cap} should be prefixed with bitwarden."
+            );
+        }
+    }
+
+    #[test]
+    fn doctor_result_debug() {
+        let r = DoctorResult::from_checks(vec![]);
+        let dbg = format!("{r:?}");
+        assert!(dbg.contains("DoctorResult"), "got: {dbg}");
+    }
+
+    #[test]
+    fn doctor_check_debug() {
+        let c = DoctorCheck {
+            name: "test_check".into(),
+            passed: true,
+            message: None,
+            critical: false,
+        };
+        let dbg = format!("{c:?}");
+        assert!(dbg.contains("DoctorCheck"), "got: {dbg}");
+        assert!(dbg.contains("test_check"), "got: {dbg}");
+    }
+
+    #[test]
+    fn doctor_status_copy_eq() {
+        let s1 = DoctorStatus::Healthy;
+        let s2 = s1;
+        assert_eq!(s1, s2);
+        let s3 = DoctorStatus::Unhealthy;
+        assert_ne!(s1, s3);
+    }
+
+    #[test]
+    fn config_debug_and_clone() {
+        let config = BitwardenConfig::from_params(&json!({
+            "access_token": "tok",
+        }))
+        .unwrap();
+        let dbg = format!("{config:?}");
+        assert!(dbg.contains("BitwardenConfig"), "got: {dbg}");
+        let cloned = config.clone();
+        assert_eq!(cloned.base_url, config.base_url);
+    }
 }

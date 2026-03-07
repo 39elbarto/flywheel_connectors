@@ -1207,4 +1207,40 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn require_str_object_value() {
+        assert!(require_str(&json!({"namespace": {"nested": true}}), "namespace").is_err());
+    }
+
+    #[test]
+    fn require_str_float_value() {
+        assert!(require_str(&json!({"namespace": 1.23}), "namespace").is_err());
+    }
+
+    #[test]
+    fn require_str_array_value() {
+        assert!(require_str(&json!({"namespace": ["a", "b"]}), "namespace").is_err());
+    }
+
+    #[test]
+    fn operations_all_capabilities_prefixed() {
+        for op in operations_info().as_array().unwrap() {
+            let cap = op["capability"].as_str().unwrap();
+            assert!(
+                cap.starts_with("kubernetes."),
+                "op {:?} capability {cap} should start with kubernetes.",
+                op["id"]
+            );
+        }
+    }
+
+    #[test]
+    fn doctor_status_copy_eq() {
+        let a = DoctorStatus::Healthy;
+        let b = a;
+        assert_eq!(a, b);
+        let c = DoctorStatus::Unhealthy;
+        assert_ne!(a, c);
+    }
 }

@@ -373,4 +373,31 @@ mod tests {
         let dbg = format!("{cred:?}");
         assert!(!dbg.contains("redacted"));
     }
+
+    #[test]
+    fn client_new_empty_url() {
+        let client = N8nClient::new(N8nAuth::ApiKey("key".into()), "").unwrap();
+        assert_eq!(client.base_url, "");
+    }
+
+    #[test]
+    fn auth_redacted_label_does_not_leak_credential_secret() {
+        let cred = N8nAuth::CredentialId(CredentialId::new());
+        let label = cred.redacted_label();
+        assert!(!label.contains("redacted"));
+        assert!(label.contains("credential_id:"));
+    }
+
+    #[test]
+    fn client_debug_does_not_leak_api_key_value() {
+        let client = N8nClient::new(
+            N8nAuth::ApiKey("xyzzy-super-secret-key-99".into()),
+            "https://n8n.example.com/api/v1",
+        )
+        .unwrap();
+        let dbg = format!("{client:?}");
+        assert!(!dbg.contains("xyzzy-super-secret-key-99"));
+        assert!(dbg.contains("N8nClient"));
+        assert!(dbg.contains("base_url"));
+    }
 }

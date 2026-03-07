@@ -1041,4 +1041,94 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn connector_default_impl() {
+        let c = MailchimpConnector::default();
+        assert!(c.config.is_none());
+        assert!(c.client.is_none());
+        assert!(c.session_id.is_none());
+    }
+
+    #[test]
+    fn operations_have_mailchimp_prefix() {
+        let ops = operations_info();
+        for op in ops.as_array().unwrap() {
+            assert!(
+                op["id"].as_str().unwrap().starts_with("mailchimp."),
+                "op {} missing mailchimp prefix",
+                op["id"]
+            );
+        }
+    }
+
+    #[test]
+    fn operations_all_have_capability() {
+        let ops = operations_info();
+        for op in ops.as_array().unwrap() {
+            assert!(op["capability"].as_str().is_some(), "op {} missing capability", op["id"]);
+        }
+    }
+
+    #[test]
+    fn operations_all_have_safety_tier() {
+        let ops = operations_info();
+        for op in ops.as_array().unwrap() {
+            assert!(op["safety_tier"].as_str().is_some(), "op {} missing safety_tier", op["id"]);
+        }
+    }
+
+    #[test]
+    fn operations_summaries_are_non_empty() {
+        let ops = operations_info();
+        for op in ops.as_array().unwrap() {
+            let summary = op["summary"].as_str().unwrap();
+            assert!(!summary.is_empty());
+        }
+    }
+
+    #[test]
+    fn doctor_check_with_message() {
+        let check = DoctorCheck {
+            name: "test".into(),
+            passed: true,
+            message: Some("all good".into()),
+            critical: false,
+        };
+        let json = serde_json::to_value(&check).unwrap();
+        assert_eq!(json["message"], "all good");
+    }
+
+    #[test]
+    fn doctor_result_serialize_roundtrip() {
+        let r = DoctorResult::from_checks(vec![DoctorCheck {
+            name: "c".into(),
+            passed: true,
+            message: None,
+            critical: false,
+        }]);
+        let json = serde_json::to_string(&r).unwrap();
+        let r2: DoctorResult = serde_json::from_str(&json).unwrap();
+        assert_eq!(r.status, r2.status);
+        assert_eq!(r.checks.len(), r2.checks.len());
+    }
+
+    #[test]
+    fn doctor_status_debug_format() {
+        let s = DoctorStatus::Degraded;
+        let dbg = format!("{s:?}");
+        assert!(dbg.contains("Degraded"));
+    }
+
+    #[test]
+    fn require_str_object_value_fails() {
+        let input = json!({"list_id": {"nested": "value"}});
+        assert!(require_str(&input, "list_id").is_err());
+    }
+
+    #[test]
+    fn require_str_array_value_fails() {
+        let input = json!({"list_id": [1, 2, 3]});
+        assert!(require_str(&input, "list_id").is_err());
+    }
 }

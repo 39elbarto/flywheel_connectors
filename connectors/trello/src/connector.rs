@@ -1170,4 +1170,52 @@ mod tests {
         }));
         assert!(result.is_err());
     }
+
+    #[test]
+    fn require_str_with_float_value() {
+        let input = json!({"field": 1.23});
+        assert!(require_str(&input, "field").is_err());
+    }
+
+    #[test]
+    fn require_str_with_object_value() {
+        let input = json!({"field": {"nested": "value"}});
+        assert!(require_str(&input, "field").is_err());
+    }
+
+    #[test]
+    fn operations_all_capabilities_prefixed() {
+        let ops = operations_info();
+        for op in ops.as_array().unwrap() {
+            let cap = op["capability"].as_str().unwrap();
+            assert!(
+                cap.starts_with("trello."),
+                "capability {cap} should start with trello."
+            );
+        }
+    }
+
+    #[test]
+    fn operations_all_summaries_non_empty() {
+        let ops = operations_info();
+        for op in ops.as_array().unwrap() {
+            let summary = op["summary"].as_str().unwrap();
+            assert!(!summary.is_empty(), "op {} has empty summary", op["id"]);
+        }
+    }
+
+    #[test]
+    fn operations_list_ops_strict_idempotent() {
+        let ops = operations_info();
+        for op in ops.as_array().unwrap() {
+            let id = op["id"].as_str().unwrap();
+            if id.as_bytes().ends_with(b".list") || id.as_bytes().ends_with(b".get") {
+                assert_eq!(
+                    op["idempotency"].as_str().unwrap(),
+                    "strict",
+                    "list/get op {id} should be strictly idempotent"
+                );
+            }
+        }
+    }
 }

@@ -1161,4 +1161,134 @@ mod tests {
         let dbg = format!("{check:?}");
         assert!(dbg.contains("DoctorCheck"));
     }
+
+    #[test]
+    fn doctor_result_deserialize_roundtrip() {
+        let r = DoctorResult::from_checks(vec![DoctorCheck {
+            name: "cfg".into(),
+            passed: true,
+            message: None,
+            critical: true,
+        }]);
+        let json_str = serde_json::to_string(&r).unwrap();
+        let r2: DoctorResult = serde_json::from_str(&json_str).unwrap();
+        assert_eq!(r2.status, DoctorStatus::Healthy);
+        assert_eq!(r2.checks.len(), 1);
+        assert_eq!(r2.checks[0].name, "cfg");
+    }
+
+    #[test]
+    fn doctor_status_debug_format() {
+        let s = DoctorStatus::Unhealthy;
+        let dbg = format!("{s:?}");
+        assert!(dbg.contains("Unhealthy"));
+    }
+
+    #[test]
+    #[allow(clippy::redundant_clone)]
+    fn config_clone_preserves_fields() {
+        let config = DropboxConfig::from_params(&json!({
+            "access_token": "tok_clone_test",
+            "base_url": "https://custom.dbx.com/2",
+            "content_url": "https://content.dbx.com/2",
+        }))
+        .unwrap();
+        let cloned = config.clone();
+        assert_eq!(config.base_url, cloned.base_url);
+        assert_eq!(config.content_url, cloned.content_url);
+    }
+
+    #[test]
+    fn config_debug_format() {
+        let config = DropboxConfig::from_params(&json!({
+            "access_token": "tok_debug",
+        }))
+        .unwrap();
+        let dbg = format!("{config:?}");
+        assert!(dbg.contains("DropboxConfig"));
+        assert!(dbg.contains("base_url"));
+    }
+
+    #[test]
+    fn operations_summaries_are_non_empty() {
+        let ops = operations_info();
+        for op in ops.as_array().unwrap() {
+            let summary = op["summary"].as_str().unwrap();
+            assert!(!summary.is_empty(), "op {} has empty summary", op["id"]);
+        }
+    }
+
+    #[test]
+    fn connector_new_no_session_id() {
+        let c = DropboxConnector::new();
+        assert!(c.session_id.is_none());
+    }
+
+    #[test]
+    fn doctor_check_deserialize_with_message() {
+        let v = json!({
+            "name": "handshake",
+            "passed": false,
+            "message": "not done",
+            "critical": false,
+        });
+        let check: DoctorCheck = serde_json::from_value(v).unwrap();
+        assert_eq!(check.name, "handshake");
+        assert!(!check.passed);
+        assert_eq!(check.message, Some("not done".into()));
+    }
+
+    #[test]
+    fn doctor_status_deserialize_rejects_invalid() {
+        let r: Result<DoctorStatus, _> = serde_json::from_value(json!("bogus"));
+        assert!(r.is_err());
+    }
+
+    #[test]
+    fn require_str_object_value() {
+        let input = json!({"path": {"sub": "val"}});
+        assert!(require_str(&input, "path").is_err());
+    }
+
+    #[test]
+    fn require_str_float_value() {
+        let input = json!({"path": 2.71});
+        assert!(require_str(&input, "path").is_err());
+    }
+
+    #[test]
+    fn operations_capabilities_start_with_dropbox() {
+        let ops = operations_info();
+        for op in ops.as_array().unwrap() {
+            let cap = op["capability"].as_str().unwrap();
+            assert!(
+                cap.starts_with("dropbox."),
+                "op {} capability '{}' does not start with dropbox.",
+                op["id"],
+                cap
+            );
+        }
+    }
+
+    #[test]
+    #[allow(clippy::redundant_clone)]
+    fn doctor_result_clone_preserves_checks() {
+        let r = DoctorResult::from_checks(vec![
+            DoctorCheck {
+                name: "a".into(),
+                passed: true,
+                message: None,
+                critical: true,
+            },
+            DoctorCheck {
+                name: "b".into(),
+                passed: false,
+                message: Some("warn".into()),
+                critical: false,
+            },
+        ]);
+        let cloned = r.clone();
+        assert_eq!(cloned.status, DoctorStatus::Degraded);
+        assert_eq!(cloned.checks.len(), 2);
+    }
 }

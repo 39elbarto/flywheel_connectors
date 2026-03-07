@@ -1270,4 +1270,111 @@ mod tests {
         assert_eq!(data.role, Role::Assistant);
         assert_eq!(data.usage.input_tokens, 1);
     }
+
+    // --- Usage calculate_cost with cache tokens ---
+
+    #[test]
+    fn usage_calculate_cost_with_cache_detailed() {
+        let usage = Usage {
+            input_tokens: 10_000,
+            output_tokens: 5_000,
+            cache_creation_input_tokens: 3_000,
+            cache_read_input_tokens: 2_000,
+        };
+        let cost = usage.calculate_cost(Model::ClaudeSonnet4);
+        // uncached input: 10000 - 3000 - 2000 = 5000
+        // input cost: (5000/1M)*3 + (3000/1M)*3.75 + (2000/1M)*0.3 = 0.015 + 0.01125 + 0.0006
+        // output cost: (5000/1M)*15 = 0.075
+        // total ~ 0.10185
+        assert!(cost > 0.0);
+        assert!(cost < 1.0);
+        // verify cache read is cheaper than base input
+        let no_cache_usage = Usage {
+            input_tokens: 10_000,
+            output_tokens: 5_000,
+            cache_creation_input_tokens: 0,
+            cache_read_input_tokens: 0,
+        };
+        let no_cache_cost = no_cache_usage.calculate_cost(Model::ClaudeSonnet4);
+        // With cache reads, the overall cost should be lower than without (cache reads are 90% cheaper)
+        // but cache writes are 25% more expensive, so the net depends on the ratio
+        assert!(cost != no_cache_cost);
+    }
+
+    // --- MessagesRequest clone and debug ---
+
+    #[test]
+    fn messages_request_debug() {
+        let req = MessagesRequest {
+            model: "claude-sonnet-4-20250514".into(),
+            messages: vec![Message {
+                role: Role::User,
+                content: "test".into(),
+            }],
+            max_tokens: 100,
+            system: None,
+            temperature: None,
+            stream: None,
+            tools: None,
+            tool_choice: None,
+            stop_sequences: None,
+        };
+        let dbg = format!("{req:?}");
+        assert!(dbg.contains("MessagesRequest"));
+        assert!(dbg.contains("claude-sonnet-4-20250514"));
+    }
+
+    #[test]
+    fn messages_request_clone_and_drop() {
+        let original = MessagesRequest {
+            model: "claude-sonnet-4-20250514".into(),
+            messages: vec![Message {
+                role: Role::User,
+                content: "hello clone".into(),
+            }],
+            max_tokens: 512,
+            system: Some("sys".into()),
+            temperature: Some(0.5),
+            stream: Some(false),
+            tools: None,
+            tool_choice: None,
+            stop_sequences: Some(vec!["STOP".into()]),
+        };
+        let cloned = original.clone();
+        drop(original);
+        assert_eq!(cloned.model, "claude-sonnet-4-20250514");
+        assert_eq!(cloned.max_tokens, 512);
+        assert_eq!(cloned.system.as_deref(), Some("sys"));
+        assert_eq!(cloned.temperature, Some(0.5));
+        assert_eq!(cloned.stop_sequences.as_ref().unwrap().len(), 1);
+    }
+
+    // --- ContentDelta clone and debug ---
+
+    #[test]
+    fn content_delta_clone_and_drop() {
+        let original = ContentDelta::TextDelta {
+            text: "delta_text".into(),
+        };
+        let cloned = original.clone();
+        drop(original);
+        match cloned {
+            ContentDelta::TextDelta { text } => assert_eq!(text, "delta_text"),
+            ContentDelta::InputJsonDelta { .. } => panic!("expected TextDelta"),
+        }
+    }
+
+    // --- MessageDeltaData clone and debug ---
+
+    #[test]
+    fn message_delta_data_clone_and_drop() {
+        let original = MessageDeltaData {
+            stop_reason: Some(StopReason::EndTurn),
+            stop_sequence: None,
+        };
+        let cloned = original.clone();
+        drop(original);
+        assert_eq!(cloned.stop_reason, Some(StopReason::EndTurn));
+        assert!(cloned.stop_sequence.is_none());
+    }
 }

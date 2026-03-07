@@ -1054,4 +1054,41 @@ mod tests {
         assert_eq!(deserialized.amount_due, Some(9999));
         assert_eq!(deserialized.currency.as_deref(), Some("chf"));
     }
+
+    // --- Refund roundtrip ---
+
+    #[test]
+    fn refund_roundtrip() {
+        let original = Refund {
+            id: "re_rt".into(),
+            object: "refund".into(),
+            amount: 750,
+            currency: "gbp".into(),
+            status: "succeeded".into(),
+            payment_intent: Some("pi_rt".into()),
+            created: Some(1_700_000_000),
+        };
+        let serialized = serde_json::to_string(&original).unwrap();
+        let deserialized: Refund = serde_json::from_str(&serialized).unwrap();
+        let reserialized = serde_json::to_string(&deserialized).unwrap();
+        assert_eq!(serialized, reserialized);
+        assert_eq!(deserialized.amount, 750);
+        assert_eq!(deserialized.payment_intent.as_deref(), Some("pi_rt"));
+    }
+
+    // --- DeletedResource roundtrip ---
+
+    #[test]
+    fn deleted_resource_roundtrip() {
+        let original = DeletedResource {
+            id: "cus_del_rt".into(),
+            object: "customer".into(),
+            deleted: true,
+        };
+        let serialized = serde_json::to_string(&original).unwrap();
+        let deserialized: DeletedResource = serde_json::from_str(&serialized).unwrap();
+        let reserialized = serde_json::to_string(&deserialized).unwrap();
+        assert_eq!(serialized, reserialized);
+        assert!(deserialized.deleted);
+    }
 }

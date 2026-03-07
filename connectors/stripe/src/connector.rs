@@ -2706,4 +2706,223 @@ mod tests {
         unique.dedup();
         assert_eq!(ids.len(), unique.len(), "duplicate operation IDs found");
     }
+
+    // --- DoctorStatus serde lowercase ---
+
+    #[test]
+    fn doctor_status_serializes_lowercase() {
+        let healthy = serde_json::to_string(&DoctorStatus::Healthy).unwrap();
+        assert_eq!(healthy, "\"healthy\"");
+        let degraded = serde_json::to_string(&DoctorStatus::Degraded).unwrap();
+        assert_eq!(degraded, "\"degraded\"");
+        let unhealthy = serde_json::to_string(&DoctorStatus::Unhealthy).unwrap();
+        assert_eq!(unhealthy, "\"unhealthy\"");
+    }
+
+    #[test]
+    fn doctor_status_deserializes_lowercase() {
+        let h: DoctorStatus = serde_json::from_str("\"healthy\"").unwrap();
+        assert_eq!(h, DoctorStatus::Healthy);
+        let d: DoctorStatus = serde_json::from_str("\"degraded\"").unwrap();
+        assert_eq!(d, DoctorStatus::Degraded);
+        let u: DoctorStatus = serde_json::from_str("\"unhealthy\"").unwrap();
+        assert_eq!(u, DoctorStatus::Unhealthy);
+    }
+
+    #[test]
+    fn doctor_status_copy_eq() {
+        let a = DoctorStatus::Healthy;
+        let b = a;
+        let _ = a; // still usable after copy
+        assert_eq!(a, b);
+        assert_ne!(DoctorStatus::Healthy, DoctorStatus::Degraded);
+    }
+
+    // --- DoctorCheck skip_serializing_if message None ---
+
+    #[test]
+    fn doctor_check_skip_serializing_message_none() {
+        let check = DoctorCheck {
+            name: "test_check".into(),
+            passed: true,
+            message: None,
+            critical: false,
+        };
+        let json = serde_json::to_string(&check).unwrap();
+        assert!(!json.contains("message"));
+    }
+
+    #[test]
+    fn doctor_check_includes_message_when_some() {
+        let check = DoctorCheck {
+            name: "test_check".into(),
+            passed: false,
+            message: Some("detail here".into()),
+            critical: true,
+        };
+        let json = serde_json::to_string(&check).unwrap();
+        assert!(json.contains("detail here"));
+    }
+
+    // --- DoctorResult roundtrip ---
+
+    #[test]
+    fn doctor_result_roundtrip() {
+        let result = DoctorResult::from_checks(vec![
+            DoctorCheck {
+                name: "alpha".into(),
+                passed: true,
+                message: Some("ok".into()),
+                critical: true,
+            },
+            DoctorCheck {
+                name: "beta".into(),
+                passed: false,
+                message: None,
+                critical: false,
+            },
+        ]);
+        let serialized = serde_json::to_string(&result).unwrap();
+        let deserialized: DoctorResult = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(deserialized.status, DoctorStatus::Degraded);
+        assert_eq!(deserialized.checks.len(), 2);
+        assert_eq!(deserialized.checks[0].name, "alpha");
+        assert!(deserialized.checks[0].passed);
+        assert!(!deserialized.checks[1].passed);
+    }
+
+    // --- require_str with non-string values ---
+
+    #[test]
+    fn require_str_with_integer_value_fails() {
+        let input = json!({"field": 42});
+        let result = require_str(&input, "field");
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(message.contains("field"));
+            }
+            e => panic!("Expected InvalidRequest, got: {e:?}"),
+        }
+    }
+
+    #[test]
+    fn require_str_with_array_value_fails() {
+        let input = json!({"field": [1, 2, 3]});
+        let result = require_str(&input, "field");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn require_str_with_object_value_fails() {
+        let input = json!({"field": {"nested": "value"}});
+        let result = require_str(&input, "field");
+        assert!(result.is_err());
+    }
+
+    // --- StripeConfig edge cases ---
+
+    #[test]
+    fn config_rejects_empty_trimmed_secret_key() {
+        let params = json!({ "secret_key": "   " });
+        let result = StripeConfig::from_params(&params);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(message.contains("Missing"));
+            }
+            e => panic!("Expected InvalidRequest, got: {e:?}"),
+        }
+    }
+
+    #[test]
+    fn config_rejects_invalid_credential_id_type() {
+        let params = json!({ "credential_id": 12345 });
+        let result = StripeConfig::from_params(&params);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(message.contains("string"));
+            }
+            e => panic!("Expected InvalidRequest, got: {e:?}"),
+        }
+    }
+
+    #[test]
+    fn config_rejects_webhook_tolerance_out_of_range() {
+        let params = json!({
+            "secret_key": "sk_test",
+            "webhook_tolerance_seconds": 7200
+        });
+        let result = StripeConfig::from_params(&params);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(message.contains("between 1 and 3600"));
+            }
+            e => panic!("Expected InvalidRequest, got: {e:?}"),
+        }
+    }
+
+    #[test]
+    fn config_accepts_valid_webhook_tolerance() {
+        let params = json!({
+            "secret_key": "sk_test",
+            "webhook_tolerance_seconds": 600
+        });
+        let config = StripeConfig::from_params(&params).unwrap();
+        assert_eq!(config.webhook_tolerance_seconds, 600);
+    }
+
+    #[test]
+    fn config_default_webhook_tolerance() {
+        let params = json!({ "secret_key": "sk_test" });
+        let config = StripeConfig::from_params(&params).unwrap();
+        assert_eq!(config.webhook_tolerance_seconds, DEFAULT_WEBHOOK_TOLERANCE_SECONDS);
+        assert!(config.webhook_signing_secret.is_none());
+    }
+
+    #[test]
+    fn config_custom_api_url() {
+        let params = json!({
+            "secret_key": "sk_test",
+            "api_url": "https://custom.stripe.com/v1"
+        });
+        let config = StripeConfig::from_params(&params).unwrap();
+        assert_eq!(config.api_url, "https://custom.stripe.com/v1");
+    }
+
+    // --- DoctorResult from_checks all healthy ---
+
+    #[test]
+    fn doctor_result_all_healthy() {
+        let result = DoctorResult::from_checks(vec![
+            DoctorCheck {
+                name: "a".into(),
+                passed: true,
+                message: None,
+                critical: true,
+            },
+            DoctorCheck {
+                name: "b".into(),
+                passed: true,
+                message: None,
+                critical: false,
+            },
+        ]);
+        assert_eq!(result.status, DoctorStatus::Healthy);
+    }
+
+    // --- DoctorResult from_checks critical failure ---
+
+    #[test]
+    fn doctor_result_critical_failure_is_unhealthy() {
+        let result = DoctorResult::from_checks(vec![DoctorCheck {
+            name: "critical_check".into(),
+            passed: false,
+            message: Some("broken".into()),
+            critical: true,
+        }]);
+        assert_eq!(result.status, DoctorStatus::Unhealthy);
+    }
 }

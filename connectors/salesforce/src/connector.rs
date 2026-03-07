@@ -1198,4 +1198,105 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn config_clone_preserves_base_url() {
+        let config =
+            SalesforceConfig::from_params(&json!({ "access_token": "tok", "base_url": "https://custom.sf.com" }))
+                .unwrap();
+        let cloned = config.clone();
+        assert_eq!(config.base_url, "https://custom.sf.com");
+        assert_eq!(cloned.base_url, "https://custom.sf.com");
+    }
+
+    #[test]
+    fn config_debug_does_not_leak_token() {
+        let config =
+            SalesforceConfig::from_params(&json!({ "access_token": "super-secret-value" }))
+                .unwrap();
+        let dbg = format!("{config:?}");
+        assert!(dbg.contains("SalesforceConfig"));
+        assert!(!dbg.contains("super-secret-value"));
+    }
+
+    #[test]
+    fn soql_to_output_with_done_false() {
+        let data = json!({"totalSize": 100, "done": false, "records": [{"Id": "x"}]});
+        let out = soql_to_output(&data);
+        assert_eq!(out["done"], false);
+        assert_eq!(out["total_size"], 100);
+        assert_eq!(out["records"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn operations_summaries_are_non_empty() {
+        let ops = operations_info();
+        for op in ops.as_array().unwrap() {
+            let summary = op["summary"].as_str().unwrap();
+            assert!(
+                !summary.is_empty(),
+                "op {:?} has empty summary",
+                op["id"]
+            );
+        }
+    }
+
+    #[test]
+    fn operations_capabilities_have_salesforce_prefix() {
+        let ops = operations_info();
+        for op in ops.as_array().unwrap() {
+            let cap = op["capability"].as_str().unwrap();
+            assert!(
+                cap.starts_with("salesforce."),
+                "capability {cap} missing salesforce prefix for {:?}",
+                op["id"]
+            );
+        }
+    }
+
+    #[test]
+    fn doctor_status_copy_semantics() {
+        let s = DoctorStatus::Healthy;
+        let s2 = s;
+        assert_eq!(s, s2);
+        assert_eq!(s, DoctorStatus::Healthy);
+    }
+
+    #[test]
+    fn doctor_result_deserialize_unhealthy() {
+        let v = json!({"status": "unhealthy", "checks": [{"name": "cfg", "passed": false, "critical": true}]});
+        let r: DoctorResult = serde_json::from_value(v).unwrap();
+        assert_eq!(r.status, DoctorStatus::Unhealthy);
+        assert!(!r.checks[0].passed);
+        assert!(r.checks[0].critical);
+    }
+
+    #[test]
+    fn require_str_with_boolean_value() {
+        let input = json!({ "field": true });
+        assert!(require_str(&input, "field").is_err());
+    }
+
+    #[test]
+    fn require_str_with_array_value() {
+        let input = json!({ "field": ["a", "b"] });
+        assert!(require_str(&input, "field").is_err());
+    }
+
+    #[test]
+    fn extract_string_array_null_value() {
+        let input = json!({ "fields": null });
+        assert!(extract_string_array(&input, "fields").is_none());
+    }
+
+    #[test]
+    fn soql_to_output_nested_records() {
+        let data = json!({
+            "totalSize": 1,
+            "done": true,
+            "records": [{"Id": "001", "Account": {"Name": "Acme"}}]
+        });
+        let out = soql_to_output(&data);
+        assert_eq!(out["records"][0]["Account"]["Name"], "Acme");
+    }
 }

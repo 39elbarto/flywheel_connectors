@@ -458,4 +458,45 @@ mod tests {
         let dbg = format!("{cred:?}");
         assert!(!dbg.contains("<redacted>"));
     }
+
+    #[test]
+    fn client_new_empty_url() {
+        let client = TrelloClient::new(
+            TrelloAuth::ApiKeyToken {
+                api_key: "k".into(),
+                token: "t".into(),
+            },
+            Some(""),
+        )
+        .unwrap();
+        assert_eq!(client.base_url, "");
+    }
+
+    #[test]
+    fn auth_redacted_label_does_not_leak_key_or_token() {
+        let auth = TrelloAuth::ApiKeyToken {
+            api_key: "my-super-key".into(),
+            token: "my-super-token".into(),
+        };
+        let label = auth.redacted_label();
+        assert!(!label.contains("my-super-key"));
+        assert!(!label.contains("my-super-token"));
+    }
+
+    #[test]
+    fn client_debug_does_not_leak_token_value() {
+        let client = TrelloClient::new(
+            TrelloAuth::ApiKeyToken {
+                api_key: "xyzzy-key-42".into(),
+                token: "xyzzy-token-99".into(),
+            },
+            None,
+        )
+        .unwrap();
+        let dbg = format!("{client:?}");
+        assert!(!dbg.contains("xyzzy-key-42"));
+        assert!(!dbg.contains("xyzzy-token-99"));
+        assert!(dbg.contains("TrelloClient"));
+        assert!(dbg.contains("base_url"));
+    }
 }

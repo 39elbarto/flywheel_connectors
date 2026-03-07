@@ -476,4 +476,117 @@ mod tests {
         .unwrap();
         assert_eq!(a.member_count, Some(999_999));
     }
+
+    #[test]
+    fn audience_json_string_roundtrip() {
+        let a = Audience {
+            id: "a_rt".into(),
+            name: Some("RT List".into()),
+            member_count: Some(42),
+            web_id: Some(99),
+        };
+        let st = serde_json::to_string(&a).unwrap();
+        let a2: Audience = serde_json::from_str(&st).unwrap();
+        assert_eq!(a2.id, "a_rt");
+        assert_eq!(a2.member_count, Some(42));
+        assert_eq!(a2.web_id, Some(99));
+    }
+
+    #[test]
+    fn member_json_string_roundtrip() {
+        let m = Member {
+            id: Some("m_rt".into()),
+            email_address: Some("rt@test.com".into()),
+            status: Some("subscribed".into()),
+            list_id: Some("list_rt".into()),
+            full_name: Some("RT User".into()),
+        };
+        let st = serde_json::to_string(&m).unwrap();
+        let m2: Member = serde_json::from_str(&st).unwrap();
+        assert_eq!(m2.id, Some("m_rt".into()));
+        assert_eq!(m2.full_name, Some("RT User".into()));
+    }
+
+    #[test]
+    fn campaign_json_string_roundtrip() {
+        let c = Campaign {
+            id: "c_rt".into(),
+            campaign_type: Some("regular".into()),
+            status: Some("sent".into()),
+            send_time: Some("2026-01-01T00:00:00Z".into()),
+            settings: None,
+        };
+        let st = serde_json::to_string(&c).unwrap();
+        let c2: Campaign = serde_json::from_str(&st).unwrap();
+        assert_eq!(c2.id, "c_rt");
+        assert_eq!(c2.campaign_type, Some("regular".into()));
+        assert_eq!(c2.send_time, Some("2026-01-01T00:00:00Z".into()));
+    }
+
+    #[test]
+    fn campaign_settings_json_string_roundtrip() {
+        let s = CampaignSettings {
+            subject_line: Some("Test Subject".into()),
+            from_name: Some("Test Sender".into()),
+            reply_to: Some("reply@test.com".into()),
+            title: Some("Test Title".into()),
+        };
+        let st = serde_json::to_string(&s).unwrap();
+        let s2: CampaignSettings = serde_json::from_str(&st).unwrap();
+        assert_eq!(s2.subject_line, Some("Test Subject".into()));
+        assert_eq!(s2.reply_to, Some("reply@test.com".into()));
+    }
+
+    #[test]
+    fn api_error_response_json_string_roundtrip() {
+        let json_str = r#"{"type":"https://errors.example.com","title":"Bad Request","status":400,"detail":"Invalid field","instance":"inst-1"}"#;
+        let e: ApiErrorResponse = serde_json::from_str(json_str).unwrap();
+        assert_eq!(e.title, Some("Bad Request".into()));
+        assert_eq!(e.status, Some(400));
+        assert_eq!(e.detail, Some("Invalid field".into()));
+    }
+
+    #[test]
+    fn audience_web_id_large_value() {
+        let a: Audience = serde_json::from_value(json!({
+            "id": "a_big",
+            "web_id": 999_999_999
+        }))
+        .unwrap();
+        assert_eq!(a.web_id, Some(999_999_999));
+    }
+
+    #[test]
+    fn member_all_none_fields() {
+        let m = Member {
+            id: None,
+            email_address: None,
+            status: None,
+            list_id: None,
+            full_name: None,
+        };
+        let v = serde_json::to_value(&m).unwrap();
+        assert!(v["id"].is_null());
+        assert!(v["email_address"].is_null());
+        assert!(v["full_name"].is_null());
+    }
+
+    #[test]
+    fn campaign_with_empty_settings() {
+        let c = Campaign {
+            id: "c_empty".into(),
+            campaign_type: None,
+            status: None,
+            send_time: None,
+            settings: Some(CampaignSettings {
+                subject_line: None,
+                from_name: None,
+                reply_to: None,
+                title: None,
+            }),
+        };
+        let v = serde_json::to_value(&c).unwrap();
+        assert!(v["settings"].is_object());
+        assert!(v["settings"]["subject_line"].is_null());
+    }
 }

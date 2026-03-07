@@ -497,4 +497,82 @@ mod tests {
         let v = serde_json::to_value(&t).unwrap();
         assert!(v["properties"].is_object());
     }
+
+    #[test]
+    fn track_event_properties_with_nested_object() {
+        let t = TrackEvent {
+            user_id: "u1".into(),
+            event: "checkout".into(),
+            properties: Some(json!({"cart": {"items": [1, 2, 3], "total": 29.99}})),
+        };
+        let v = serde_json::to_value(&t).unwrap();
+        assert!(v["properties"]["cart"].is_object());
+        assert_eq!(v["properties"]["cart"]["total"], 29.99);
+    }
+
+    #[test]
+    fn track_event_properties_with_null_value() {
+        let t = TrackEvent {
+            user_id: "u1".into(),
+            event: "ev".into(),
+            properties: Some(json!({"key": null})),
+        };
+        let v = serde_json::to_value(&t).unwrap();
+        assert!(v["properties"]["key"].is_null());
+    }
+
+    #[test]
+    fn api_error_response_json_string_roundtrip() {
+        let json_str = r#"{"error":{"message":"Not allowed","code":"FORBIDDEN"}}"#;
+        let e: ApiErrorResponse = serde_json::from_str(json_str).unwrap();
+        let err = e.error.unwrap();
+        assert_eq!(err.message, Some("Not allowed".into()));
+        assert_eq!(err.code, Some("FORBIDDEN".into()));
+    }
+
+    #[test]
+    fn source_with_all_none_fields_serialize() {
+        let s = Source {
+            id: "s_only_id".into(),
+            name: None,
+            slug: None,
+            enabled: None,
+        };
+        let st = serde_json::to_string(&s).unwrap();
+        assert!(st.contains("s_only_id"));
+        let s2: Source = serde_json::from_str(&st).unwrap();
+        assert_eq!(s2.id, "s_only_id");
+        assert!(s2.name.is_none());
+    }
+
+    #[test]
+    fn destination_disabled_roundtrip() {
+        let d: Destination = serde_json::from_value(json!({
+            "id": "d_disabled",
+            "enabled": false,
+            "connection_mode": "cloud",
+        }))
+        .unwrap();
+        assert_eq!(d.enabled, Some(false));
+        let v = serde_json::to_value(&d).unwrap();
+        assert_eq!(v["enabled"], false);
+    }
+
+    #[test]
+    fn track_response_serialize_false() {
+        let r = TrackResponse { success: false };
+        let v = serde_json::to_value(&r).unwrap();
+        assert_eq!(v["success"], false);
+    }
+
+    #[test]
+    fn api_error_code_only() {
+        let e: ApiErrorResponse = serde_json::from_value(json!({
+            "error": {"code": "RATE_LIMIT"}
+        }))
+        .unwrap();
+        let err = e.error.unwrap();
+        assert!(err.message.is_none());
+        assert_eq!(err.code, Some("RATE_LIMIT".into()));
+    }
 }

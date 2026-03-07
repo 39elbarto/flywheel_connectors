@@ -968,4 +968,131 @@ mod tests {
         let c = LogseqConnector::new();
         assert_eq!(c.error_count.load(Ordering::Relaxed), 0);
     }
+
+    #[test]
+    fn config_clone_preserves_base_url() {
+        let config = LogseqConfig::from_params(&json!({
+            "access_token": "tok",
+            "base_url": "http://custom:9999/api",
+        }))
+        .unwrap();
+        let cloned = config.clone();
+        assert_eq!(config.base_url, "http://custom:9999/api");
+        assert_eq!(cloned.base_url, "http://custom:9999/api");
+    }
+
+    #[test]
+    fn config_debug_does_not_leak_token() {
+        let config = LogseqConfig::from_params(&json!({
+            "access_token": "super-secret-logseq-token",
+        }))
+        .unwrap();
+        let dbg = format!("{config:?}");
+        assert!(dbg.contains("LogseqConfig"));
+        assert!(!dbg.contains("super-secret-logseq-token"));
+    }
+
+    #[test]
+    fn operations_summaries_are_non_empty() {
+        let ops = operations_info();
+        for op in ops.as_array().unwrap() {
+            let summary = op["summary"].as_str().unwrap();
+            assert!(
+                !summary.is_empty(),
+                "op {:?} has empty summary",
+                op["id"]
+            );
+        }
+    }
+
+    #[test]
+    fn operations_capabilities_have_logseq_prefix() {
+        let ops = operations_info();
+        for op in ops.as_array().unwrap() {
+            let cap = op["capability"].as_str().unwrap();
+            assert!(
+                cap.starts_with("logseq."),
+                "capability {cap} missing logseq prefix for {:?}",
+                op["id"]
+            );
+        }
+    }
+
+    #[test]
+    fn doctor_status_copy_semantics() {
+        let s = DoctorStatus::Degraded;
+        let s2 = s;
+        assert_eq!(s, s2);
+        assert_eq!(s, DoctorStatus::Degraded);
+    }
+
+    #[test]
+    fn doctor_result_deserialize_unhealthy() {
+        let v = json!({"status": "unhealthy", "checks": [{"name": "cfg", "passed": false, "critical": true}]});
+        let r: DoctorResult = serde_json::from_value(v).unwrap();
+        assert_eq!(r.status, DoctorStatus::Unhealthy);
+        assert!(!r.checks[0].passed);
+        assert!(r.checks[0].critical);
+    }
+
+    #[test]
+    fn doctor_check_clone_preserves_message() {
+        let check = DoctorCheck {
+            name: "connectivity".into(),
+            passed: false,
+            message: Some("server not reachable".into()),
+            critical: true,
+        };
+        let cloned = check.clone();
+        assert_eq!(check.name, "connectivity");
+        assert_eq!(cloned.message, Some("server not reachable".into()));
+    }
+
+    #[test]
+    fn doctor_result_clone_preserves_checks() {
+        let r = DoctorResult::from_checks(vec![
+            DoctorCheck {
+                name: "a".into(),
+                passed: true,
+                message: None,
+                critical: false,
+            },
+        ]);
+        let cloned = r.clone();
+        assert_eq!(r.status, DoctorStatus::Healthy);
+        assert_eq!(cloned.checks.len(), 1);
+        assert_eq!(cloned.checks[0].name, "a");
+    }
+
+    #[test]
+    fn require_str_with_float_value() {
+        let input = json!({"page": 1.23});
+        assert!(require_str(&input, "page").is_err());
+    }
+
+    #[test]
+    fn operations_all_ids_have_logseq_prefix() {
+        let ops = operations_info();
+        for op in ops.as_array().unwrap() {
+            let id = op["id"].as_str().unwrap();
+            assert!(
+                id.starts_with("logseq."),
+                "op id {id} missing logseq prefix"
+            );
+        }
+    }
+
+    #[test]
+    fn operations_idempotency_values_valid() {
+        let valid = ["strict", "none", "idempotent"];
+        let ops = operations_info();
+        for op in ops.as_array().unwrap() {
+            let idem = op["idempotency"].as_str().unwrap();
+            assert!(
+                valid.contains(&idem),
+                "invalid idempotency {idem} for {:?}",
+                op["id"]
+            );
+        }
+    }
 }

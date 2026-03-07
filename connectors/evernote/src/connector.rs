@@ -1002,4 +1002,63 @@ mod tests {
         .unwrap();
         assert_eq!(config.base_url, DEFAULT_BASE_URL);
     }
+
+    #[test]
+    fn require_str_with_float_value() {
+        let input = json!({"notebook_id": 1.23});
+        assert!(require_str(&input, "notebook_id").is_err());
+    }
+
+    #[test]
+    fn operations_all_capabilities_prefixed_with_evernote() {
+        let ops = operations_info();
+        for op in ops.as_array().unwrap() {
+            let cap = op["capability"].as_str().unwrap();
+            assert!(
+                cap.starts_with("evernote."),
+                "capability {cap} should be prefixed with evernote."
+            );
+        }
+    }
+
+    #[test]
+    fn doctor_result_debug() {
+        let r = DoctorResult::from_checks(vec![]);
+        let dbg = format!("{r:?}");
+        assert!(dbg.contains("DoctorResult"), "got: {dbg}");
+    }
+
+    #[test]
+    fn doctor_check_debug() {
+        let c = DoctorCheck {
+            name: "test_check".into(),
+            passed: true,
+            message: None,
+            critical: false,
+        };
+        let dbg = format!("{c:?}");
+        assert!(dbg.contains("DoctorCheck"), "got: {dbg}");
+        assert!(dbg.contains("test_check"), "got: {dbg}");
+    }
+
+    #[test]
+    fn doctor_status_copy_eq() {
+        let s1 = DoctorStatus::Healthy;
+        let s2 = s1;
+        assert_eq!(s1, s2);
+        let s3 = DoctorStatus::Unhealthy;
+        assert_ne!(s1, s3);
+    }
+
+    #[test]
+    fn config_debug_and_clone() {
+        let config = EvernoteConfig::from_params(&json!({
+            "access_token": "tok",
+        }))
+        .unwrap();
+        let dbg = format!("{config:?}");
+        assert!(dbg.contains("EvernoteConfig"), "got: {dbg}");
+        let cloned = config.clone();
+        assert_eq!(cloned.base_url, config.base_url);
+    }
 }

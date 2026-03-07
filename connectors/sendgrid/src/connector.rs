@@ -1095,4 +1095,118 @@ mod tests {
             SendGridAuth::CredentialId(_) => panic!("expected ApiKey"),
         }
     }
+
+    #[test]
+    fn doctor_result_deserialize_roundtrip() {
+        let r = DoctorResult::from_checks(vec![DoctorCheck {
+            name: "cfg".into(),
+            passed: true,
+            message: None,
+            critical: true,
+        }]);
+        let json_str = serde_json::to_string(&r).unwrap();
+        let r2: DoctorResult = serde_json::from_str(&json_str).unwrap();
+        assert_eq!(r2.status, DoctorStatus::Healthy);
+        assert_eq!(r2.checks.len(), 1);
+        assert_eq!(r2.checks[0].name, "cfg");
+    }
+
+    #[test]
+    fn doctor_status_debug_format() {
+        let s = DoctorStatus::Degraded;
+        let dbg = format!("{s:?}");
+        assert!(dbg.contains("Degraded"));
+    }
+
+    #[test]
+    #[allow(clippy::redundant_clone)]
+    fn config_clone_preserves_fields() {
+        let config = SendGridConfig::from_params(&json!({
+            "api_key": "SG.clone_test",
+            "base_url": "https://custom.sg.com/v3",
+        }))
+        .unwrap();
+        let cloned = config.clone();
+        assert_eq!(config.base_url, cloned.base_url);
+        assert!(matches!(cloned.auth, SendGridAuth::ApiKey(_)));
+    }
+
+    #[test]
+    fn config_debug_format() {
+        let config = SendGridConfig::from_params(&json!({
+            "api_key": "SG.debug_test",
+        }))
+        .unwrap();
+        let dbg = format!("{config:?}");
+        assert!(dbg.contains("SendGridConfig"));
+        assert!(dbg.contains("base_url"));
+    }
+
+    #[test]
+    fn operations_summaries_are_non_empty() {
+        let ops = operations_info();
+        for op in ops.as_array().unwrap() {
+            let summary = op["summary"].as_str().unwrap();
+            assert!(!summary.is_empty(), "op {} has empty summary", op["id"]);
+        }
+    }
+
+    #[test]
+    fn connector_new_zero_request_count() {
+        let c = SendGridConnector::new();
+        assert_eq!(c.request_count.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn connector_new_zero_error_count() {
+        let c = SendGridConnector::new();
+        assert_eq!(c.error_count.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn doctor_check_deserialize_with_message() {
+        let v = json!({
+            "name": "handshake",
+            "passed": false,
+            "message": "not done",
+            "critical": false,
+        });
+        let check: DoctorCheck = serde_json::from_value(v).unwrap();
+        assert_eq!(check.name, "handshake");
+        assert!(!check.passed);
+        assert_eq!(check.message, Some("not done".into()));
+        assert!(!check.critical);
+    }
+
+    #[test]
+    fn doctor_status_deserialize_rejects_invalid() {
+        let r: Result<DoctorStatus, _> = serde_json::from_value(json!("invalid_status"));
+        assert!(r.is_err());
+    }
+
+    #[test]
+    fn require_str_object_value() {
+        let input = json!({"field": {"nested": "value"}});
+        assert!(require_str(&input, "field").is_err());
+    }
+
+    #[test]
+    fn require_str_numeric_float_value() {
+        let input = json!({"field": 1.23});
+        assert!(require_str(&input, "field").is_err());
+    }
+
+    #[test]
+    fn operations_capabilities_are_non_empty() {
+        let ops = operations_info();
+        for op in ops.as_array().unwrap() {
+            let cap = op["capability"].as_str().unwrap();
+            assert!(!cap.is_empty(), "op {} has empty capability", op["id"]);
+            assert!(
+                cap.starts_with("sendgrid."),
+                "op {} capability does not start with sendgrid.",
+                op["id"]
+            );
+        }
+    }
 }

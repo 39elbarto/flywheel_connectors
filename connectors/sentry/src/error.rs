@@ -568,4 +568,69 @@ mod tests {
         assert!(dbg.contains("RateLimited"));
         assert!(dbg.contains("100"));
     }
+
+    #[test]
+    fn api_501_is_retryable() {
+        assert!(
+            SentryError::Api {
+                status_code: 501,
+                message: "not implemented".into()
+            }
+            .is_retryable()
+        );
+    }
+
+    #[test]
+    fn api_502_is_retryable() {
+        assert!(
+            SentryError::Api {
+                status_code: 502,
+                message: "bad gateway".into()
+            }
+            .is_retryable()
+        );
+    }
+
+    #[test]
+    fn error_display_json() {
+        let bad: Result<serde_json::Value, _> = serde_json::from_str("{invalid");
+        let err = SentryError::Json(bad.unwrap_err());
+        let display = err.to_string();
+        assert!(display.starts_with("JSON error:"));
+    }
+
+    #[test]
+    fn error_debug_forbidden() {
+        let dbg = format!("{:?}", SentryError::Forbidden);
+        assert!(dbg.contains("Forbidden"));
+    }
+
+    #[test]
+    fn error_debug_not_found() {
+        let err = SentryError::NotFound {
+            resource: "issue_xyz".into(),
+        };
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("NotFound"));
+        assert!(dbg.contains("issue_xyz"));
+    }
+
+    #[test]
+    fn not_found_fcp_error_no_retry_after() {
+        match (SentryError::NotFound {
+            resource: "proj".into(),
+        })
+        .to_fcp_error()
+        {
+            FcpError::External {
+                retry_after,
+                retryable,
+                ..
+            } => {
+                assert!(retry_after.is_none());
+                assert!(!retryable);
+            }
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
 }

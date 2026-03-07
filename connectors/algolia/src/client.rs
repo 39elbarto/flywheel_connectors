@@ -386,4 +386,25 @@ mod tests {
         let dbg = format!("{client:?}");
         assert!(dbg.contains("AlgoliaClient"));
     }
+
+    #[test]
+    fn client_empty_url() {
+        let auth = AlgoliaAuth {
+            application_id: "APP".into(),
+            api_key: "KEY".into(),
+        };
+        let client = AlgoliaClient::new(auth, Some("")).unwrap();
+        assert_eq!(client.base_url, "");
+    }
+
+    #[test]
+    fn auth_redacted_label_does_not_leak_api_key() {
+        let auth = AlgoliaAuth {
+            application_id: "APP".into(),
+            api_key: "my-super-secret-algolia-key-12345".into(),
+        };
+        let label = auth.redacted_label();
+        assert!(!label.contains("my-super-secret-algolia-key-12345"));
+        assert!(label.contains("APP"));
+    }
 }

@@ -587,4 +587,65 @@ mod tests {
         // Just verify display works
         let _ = json_err.to_string();
     }
+
+    #[test]
+    fn api_504_is_retryable() {
+        assert!(
+            ZapierError::Api {
+                status_code: 504,
+                message: "gateway timeout".into()
+            }
+            .is_retryable()
+        );
+    }
+
+    #[test]
+    fn error_debug_not_found() {
+        let err = ZapierError::NotFound {
+            resource: "zap_xyz".into(),
+        };
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("NotFound"));
+        assert!(dbg.contains("zap_xyz"));
+    }
+
+    #[test]
+    fn error_debug_rate_limited() {
+        let err = ZapierError::RateLimited {
+            retry_after_ms: 5000,
+        };
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("RateLimited"));
+        assert!(dbg.contains("5000"));
+    }
+
+    #[test]
+    fn error_debug_forbidden() {
+        let err = ZapierError::Forbidden;
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("Forbidden"));
+    }
+
+    #[test]
+    fn json_error_to_fcp_internal_contains_details() {
+        let bad: Result<serde_json::Value, _> = serde_json::from_str("not json at all");
+        match ZapierError::Json(bad.unwrap_err()).to_fcp_error() {
+            FcpError::Internal { message } => {
+                assert!(message.contains("JSON error:"));
+                assert!(!message.is_empty());
+            }
+            other => panic!("expected Internal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn api_error_display_special_chars() {
+        let err = ZapierError::Api {
+            status_code: 422,
+            message: "Field 'name' is required & must be non-empty".into(),
+        };
+        let display = err.to_string();
+        assert!(display.contains("422"));
+        assert!(display.contains('&'));
+    }
 }

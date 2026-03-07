@@ -1028,4 +1028,68 @@ mod tests {
         let c = ZapierConnector::new();
         assert!(c.session_id.is_none());
     }
+
+    #[test]
+    #[allow(clippy::redundant_clone)]
+    fn doctor_check_clone() {
+        let check = DoctorCheck {
+            name: "config".into(),
+            passed: true,
+            message: Some("ok".into()),
+            critical: true,
+        };
+        let cloned = check.clone();
+        assert_eq!(check.name, "config");
+        assert!(cloned.passed);
+        assert_eq!(cloned.message, Some("ok".into()));
+        assert!(cloned.critical);
+    }
+
+    #[test]
+    fn doctor_status_copy_trait() {
+        let s = DoctorStatus::Degraded;
+        let s2 = s;
+        assert_eq!(s, s2);
+        assert_eq!(s, DoctorStatus::Degraded);
+    }
+
+    #[test]
+    fn doctor_status_debug_format() {
+        let dbg = format!("{:?}", DoctorStatus::Unhealthy);
+        assert!(dbg.contains("Unhealthy"));
+    }
+
+    #[test]
+    fn doctor_result_unhealthy_overrides_degraded() {
+        let checks = vec![
+            DoctorCheck {
+                name: "a".into(),
+                passed: false,
+                message: None,
+                critical: false,
+            },
+            DoctorCheck {
+                name: "b".into(),
+                passed: false,
+                message: None,
+                critical: true,
+            },
+        ];
+        let r = DoctorResult::from_checks(checks);
+        assert_eq!(r.status, DoctorStatus::Unhealthy);
+    }
+
+    #[test]
+    #[allow(clippy::redundant_clone)]
+    fn doctor_result_clone() {
+        let r = DoctorResult::from_checks(vec![DoctorCheck {
+            name: "c1".into(),
+            passed: true,
+            message: None,
+            critical: false,
+        }]);
+        let cloned = r.clone();
+        assert_eq!(r.status, DoctorStatus::Healthy);
+        assert_eq!(cloned.checks.len(), 1);
+    }
 }

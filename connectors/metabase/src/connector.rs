@@ -970,4 +970,79 @@ mod tests {
         let s: DoctorStatus = serde_json::from_value(json!("unhealthy")).unwrap();
         assert_eq!(s, DoctorStatus::Unhealthy);
     }
+
+    #[test]
+    fn require_str_with_float_value() {
+        let input = json!({"card_id": 1.23});
+        assert!(require_str(&input, "card_id").is_err());
+    }
+
+    #[test]
+    fn require_str_with_object_value() {
+        let input = json!({"card_id": {"nested": "value"}});
+        assert!(require_str(&input, "card_id").is_err());
+    }
+
+    #[test]
+    fn operations_all_capabilities_prefixed() {
+        let ops = operations_info();
+        for op in ops.as_array().unwrap() {
+            let cap = op["capability"].as_str().unwrap();
+            assert!(
+                cap.starts_with("metabase."),
+                "capability {cap} should start with metabase."
+            );
+        }
+    }
+
+    #[test]
+    fn operations_all_summaries_non_empty() {
+        let ops = operations_info();
+        for op in ops.as_array().unwrap() {
+            let summary = op["summary"].as_str().unwrap();
+            assert!(!summary.is_empty(), "op {} has empty summary", op["id"]);
+        }
+    }
+
+    #[test]
+    fn doctor_status_copy_eq() {
+        let a = DoctorStatus::Degraded;
+        let b = a;
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn doctor_result_debug() {
+        let r = DoctorResult::from_checks(vec![]);
+        let dbg = format!("{r:?}");
+        assert!(dbg.contains("DoctorResult"));
+    }
+
+    #[test]
+    #[allow(clippy::redundant_clone)]
+    fn doctor_result_clone() {
+        let r = DoctorResult::from_checks(vec![DoctorCheck {
+            name: "a".into(),
+            passed: true,
+            message: None,
+            critical: false,
+        }]);
+        let cloned = r.clone();
+        assert_eq!(cloned.status, DoctorStatus::Healthy);
+        assert_eq!(cloned.checks.len(), 1);
+    }
+
+    #[test]
+    #[allow(clippy::redundant_clone)]
+    fn doctor_check_clone() {
+        let c = DoctorCheck {
+            name: "check".into(),
+            passed: false,
+            message: Some("msg".into()),
+            critical: true,
+        };
+        let cloned = c.clone();
+        assert_eq!(cloned.name, "check");
+        assert_eq!(cloned.message, Some("msg".into()));
+    }
 }

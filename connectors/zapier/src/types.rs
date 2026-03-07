@@ -502,4 +502,73 @@ mod tests {
         .unwrap();
         assert_eq!(r.data.unwrap()["count"], 42);
     }
+
+    #[test]
+    fn zap_run_debug_format() {
+        let r = ZapRun {
+            id: "r1".into(),
+            status: Some("success".into()),
+            start_time: None,
+            end_time: None,
+            zap_id: None,
+            data: None,
+        };
+        let dbg = format!("{r:?}");
+        assert!(dbg.contains("ZapRun"));
+        assert!(dbg.contains("r1"));
+    }
+
+    #[test]
+    fn execution_result_debug_format() {
+        let r = ExecutionResult {
+            status: Some("error".into()),
+            result: None,
+            action_id: None,
+            error: Some("fail".into()),
+        };
+        let dbg = format!("{r:?}");
+        assert!(dbg.contains("ExecutionResult"));
+        assert!(dbg.contains("error"));
+    }
+
+    #[test]
+    fn nla_action_with_complex_params() {
+        let a: NlaAction = serde_json::from_value(json!({
+            "id": "a1",
+            "params": {
+                "channel": {"type": "string", "required": true},
+                "body": {"type": "string", "maxLength": 1000}
+            }
+        }))
+        .unwrap();
+        let params = a.params.unwrap();
+        assert!(params["channel"]["required"].as_bool().unwrap());
+        assert_eq!(params["body"]["maxLength"], 1000);
+    }
+
+    #[test]
+    fn zap_with_empty_title() {
+        let z: Zap = serde_json::from_value(json!({
+            "id": "z1",
+            "title": ""
+        }))
+        .unwrap();
+        assert_eq!(z.title, Some(String::new()));
+    }
+
+    #[test]
+    #[allow(clippy::redundant_clone)]
+    fn api_error_response_clone_and_debug() {
+        let e = ApiErrorResponse {
+            error: Some("bad request".into()),
+            detail: None,
+            error_type: Some("validation".into()),
+        };
+        let cloned = e.clone();
+        assert_eq!(cloned.error, Some("bad request".into()));
+        assert!(cloned.detail.is_none());
+        assert_eq!(cloned.error_type, Some("validation".into()));
+        let dbg = format!("{cloned:?}");
+        assert!(dbg.contains("ApiErrorResponse"));
+    }
 }

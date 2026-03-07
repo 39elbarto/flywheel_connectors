@@ -180,7 +180,8 @@ pub trait SymbolStore: Send + Sync {
     /// Check if object can be reconstructed with diversity enforcement.
     ///
     /// Unlike `can_reconstruct`, this method also verifies that symbols come from
-    /// at least `min_source_diversity` distinct nodes when the policy requires it.
+    /// enough distinct nodes and without violating the policy's maximum source
+    /// concentration when the policy requires it.
     async fn can_reconstruct_with_policy(
         &self,
         object_id: &ObjectId,
@@ -749,6 +750,58 @@ mod tests {
                     })),
                     ..StoreLogData::default()
                 }
+            },
+        );
+    }
+
+    #[test]
+    fn can_reconstruct_with_policy_concentration() {
+        run_store_test(
+            "can_reconstruct_with_policy_concentration",
+            "verify",
+            "repair",
+            2,
+            || async {
+                let store = MemorySymbolStore::new(MemorySymbolStoreConfig::default());
+
+                let mut meta = test_object_meta();
+                meta.source_symbols = 4;
+                store.put_object_meta(meta).await.unwrap();
+
+                for (esi, source_node) in [(0, 1), (1, 1), (2, 1), (3, 2)] {
+                    let mut symbol = test_symbol(esi);
+                    symbol.meta.source_node = Some(source_node);
+                    store.put_symbol(symbol).await.unwrap();
+                }
+
+                let policy = fcp_core::ObjectPlacementPolicy {
+                    min_nodes: 1,
+                    max_node_fraction_bps: 5_000,
+                    preferred_devices: vec![],
+                    excluded_devices: vec![],
+                    target_coverage_bps: 10_000,
+                    min_source_diversity: 2,
+                };
+
+                assert!(
+                    !store
+                        .can_reconstruct_with_policy(&test_object_id(), &policy)
+                        .await
+                );
+
+                for (esi, source_node) in [(4, 2), (5, 3)] {
+                    let mut symbol = test_symbol(esi);
+                    symbol.meta.source_node = Some(source_node);
+                    store.put_symbol(symbol).await.unwrap();
+                }
+
+                assert!(
+                    store
+                        .can_reconstruct_with_policy(&test_object_id(), &policy)
+                        .await
+                );
+
+                StoreLogData::default()
             },
         );
     }

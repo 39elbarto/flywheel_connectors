@@ -173,12 +173,24 @@ impl RepairCycleUsage {
 }
 
 /// Summary of the strictest policy targets encountered in a planning cycle.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RepairPolicyTargets {
     /// Maximum target coverage requirement across tracked objects.
     pub target_coverage_bps: u32,
     /// Maximum minimum source-diversity requirement across tracked objects.
     pub min_source_diversity: u8,
+    /// Strictest source concentration ceiling across tracked objects.
+    pub max_node_fraction_bps: u16,
+}
+
+impl Default for RepairPolicyTargets {
+    fn default() -> Self {
+        Self {
+            target_coverage_bps: 0,
+            min_source_diversity: 0,
+            max_node_fraction_bps: 10_000,
+        }
+    }
 }
 
 /// Additional knobs that influence a single deterministic repair planning cycle.
@@ -457,11 +469,14 @@ impl RepairController {
     ) -> bool {
         let health = coverage.health(policy);
         let diversity_deficit = coverage.diversity_deficit(policy.min_source_diversity);
+        let concentration_deficit =
+            coverage.concentration_deficit_bps(policy.max_node_fraction_bps);
 
         match health {
             CoverageHealth::Unavailable => true,
             CoverageHealth::Degraded => {
                 diversity_deficit > 0
+                    || concentration_deficit > 0
                     || coverage.coverage_deficit_bps(policy.target_coverage_bps)
                         >= self.config.min_deficit_bps
             }
@@ -478,6 +493,8 @@ impl RepairController {
     ) -> u32 {
         let health = coverage.health(policy);
         let diversity_deficit = coverage.diversity_deficit(policy.min_source_diversity);
+        let concentration_deficit =
+            coverage.concentration_deficit_bps(policy.max_node_fraction_bps);
 
         match health {
             CoverageHealth::Unavailable => {
@@ -489,10 +506,12 @@ impl RepairController {
             CoverageHealth::Degraded => {
                 // Priority based on deficit
                 let deficit = coverage.coverage_deficit_bps(policy.target_coverage_bps);
-                if diversity_deficit > 0 {
+                if diversity_deficit > 0 || concentration_deficit > 0 {
                     #[allow(clippy::cast_possible_truncation)] // u8 -> u32 is always safe
                     {
-                        200 + (diversity_deficit as u32) * 10 + deficit / 100
+                        200 + (diversity_deficit as u32) * 10
+                            + (concentration_deficit as u32) / 100
+                            + deficit / 100
                     }
                 } else {
                     100 + deficit / 100 // 100-199 range
@@ -514,6 +533,9 @@ impl RepairController {
         }
 
         if coverage.diversity_deficit(policy.min_source_diversity) > 0 {
+            return Some(RepairReasonCode::DiversityDeficit);
+        }
+        if coverage.concentration_deficit_bps(policy.max_node_fraction_bps) > 0 {
             return Some(RepairReasonCode::DiversityDeficit);
         }
 
@@ -558,6 +580,8 @@ impl RepairController {
     ) -> RepairPlanAction {
         let coverage_symbols = coverage.symbols_needed(policy.target_coverage_bps);
         let diversity_symbols = u32::from(coverage.diversity_deficit(policy.min_source_diversity));
+        let concentration_symbols =
+            coverage.concentration_repair_symbols_needed(policy.max_node_fraction_bps);
         let hot_symbols = if matches!(reason_code, RepairReasonCode::HotObjectPreStage) {
             coverage
                 .symbols_needed(options.hot_object_min_coverage_bps)
@@ -568,6 +592,7 @@ impl RepairController {
         let max_symbols_per_repair = self.config.max_symbols_per_repair.max(1);
         let estimated_symbols = coverage_symbols
             .max(diversity_symbols)
+            .max(concentration_symbols)
             .max(hot_symbols)
             .max(1)
             .min(max_symbols_per_repair);
@@ -623,6 +648,9 @@ impl RepairController {
             policy_targets.min_source_diversity = policy_targets
                 .min_source_diversity
                 .max(policy.min_source_diversity);
+            policy_targets.max_node_fraction_bps = policy_targets
+                .max_node_fraction_bps
+                .min(policy.max_node_fraction_bps);
 
             let coverage = CoverageEvaluation::from_distribution(object_id, &dist);
             let is_hot_object = options
@@ -729,6 +757,15 @@ impl RepairController {
                     zone_id.as_ref(),
                     policy.min_source_diversity,
                     coverage.distinct_nodes,
+                );
+            }
+            if coverage.is_available
+                && coverage.concentration_deficit_bps(policy.max_node_fraction_bps) > 0
+            {
+                metrics::record_concentration_violation(
+                    zone_id.as_ref(),
+                    policy.max_node_fraction_bps,
+                    coverage.max_node_fraction_bps,
                 );
             }
 
@@ -2766,6 +2803,23 @@ mod tests {
         assert!(controller.needs_repair(&coverage, &policy));
     }
 
+    #[test]
+    fn needs_repair_concentration_but_full_coverage() {
+        let controller = RepairController::new(RepairControllerConfig::default());
+        let coverage = CoverageEvaluation {
+            object_id: ObjectId::from_bytes([52; 32]),
+            distinct_nodes: 2,
+            max_node_fraction_bps: 7500,
+            coverage_bps: 10_000,
+            is_available: true,
+            total_symbols: 4,
+            source_symbols: 4,
+        };
+        let mut policy = test_policy();
+        policy.max_node_fraction_bps = 5_000;
+        assert!(controller.needs_repair(&coverage, &policy));
+    }
+
     // ---- calculate_priority edge cases ----
 
     #[test]
@@ -2800,6 +2854,24 @@ mod tests {
         // diversity_deficit = 3 - 1 = 2
         // 200 + 2*10 + 1000/100 = 200 + 20 + 10 = 230
         assert_eq!(priority, 230);
+    }
+
+    #[test]
+    fn calculate_priority_degraded_concentration_deficit() {
+        let controller = RepairController::new(RepairControllerConfig::default());
+        let coverage = CoverageEvaluation {
+            object_id: ObjectId::from_bytes([53; 32]),
+            distinct_nodes: 2,
+            max_node_fraction_bps: 7500,
+            coverage_bps: 10_000,
+            is_available: true,
+            total_symbols: 4,
+            source_symbols: 4,
+        };
+        let mut policy = test_policy();
+        policy.max_node_fraction_bps = 5_000;
+        let priority = controller.calculate_priority(&coverage, &policy);
+        assert_eq!(priority, 225);
     }
 
     #[test]
@@ -3322,6 +3394,57 @@ mod tests {
                             "bytes": plan.budget_used.bytes,
                             "decode_ms": plan.budget_used.decode_ms
                         }
+                    })),
+                    ..StoreLogData::default()
+                }
+            },
+        );
+    }
+
+    #[test]
+    fn planner_detects_concentration_only_violation() {
+        run_store_test(
+            "planner_detects_concentration_only_violation",
+            "verify",
+            "repair_plan",
+            4,
+            || async {
+                let store = MemorySymbolStore::new(MemorySymbolStoreConfig {
+                    max_bytes: 1024 * 1024,
+                    local_node_id: 1,
+                });
+                let controller = RepairController::new(RepairControllerConfig {
+                    min_deficit_bps: 100,
+                    max_symbols_per_repair: 8,
+                    ..Default::default()
+                });
+                let zone_id = test_zone_id();
+                let object_id = ObjectId::from_bytes([0x61; 32]);
+
+                seed_planner_object(&store, object_id, 4, 4, 64, &[1, 1, 1, 2]).await;
+
+                let mut policy = test_policy();
+                policy.max_node_fraction_bps = 5_000;
+                let policies = HashMap::from([(object_id, policy)]);
+                let plan = controller
+                    .plan_zone(&zone_id, &store, &policies, &planner_options(10))
+                    .await;
+
+                assert_eq!(plan.actions.len(), 1);
+                assert_eq!(plan.actions[0].object_id, object_id);
+                assert_eq!(
+                    plan.actions[0].reason_code,
+                    RepairReasonCode::DiversityDeficit
+                );
+                assert_eq!(plan.actions[0].estimated_symbols, 2);
+                assert_eq!(plan.policy_targets.max_node_fraction_bps, 5_000);
+
+                StoreLogData {
+                    symbol_count: Some(plan.object_count_tracked as u32),
+                    details: Some(json!({
+                        "cycle_id": plan.cycle_id,
+                        "reason_codes": plan.actions.iter().map(|a| a.reason_code.as_str()).collect::<Vec<_>>(),
+                        "max_node_fraction_bps": plan.policy_targets.max_node_fraction_bps,
                     })),
                     ..StoreLogData::default()
                 }

@@ -727,6 +727,107 @@ async fn source_diversity_duplicate_esi_cannot_spoof_new_source() {
     });
 }
 
+#[fcp_async_core::runtime::test]
+async fn source_diversity_plan_requires_rebalancing_when_concentration_too_high() {
+    let store = MemorySymbolStore::new(MemorySymbolStoreConfig::default());
+    let object_n = 10;
+    let object_id = test_object_id(object_n);
+
+    let mut meta = test_object_meta(object_n);
+    meta.source_symbols = 4;
+    store.put_object_meta(meta).await.expect("put meta");
+
+    for (esi, source_node) in [(0, 40), (1, 40), (2, 40), (3, 41)] {
+        store
+            .put_symbol(test_symbol_with_source(object_n, esi, source_node))
+            .await
+            .expect("put concentrated symbol");
+    }
+
+    let policy = ObjectPlacementPolicy {
+        min_nodes: 1,
+        max_node_fraction_bps: 5_000,
+        preferred_devices: vec![],
+        excluded_devices: vec![],
+        target_coverage_bps: 10_000,
+        min_source_diversity: 2,
+    };
+
+    assert!(
+        !store.can_reconstruct_with_policy(&object_id, &policy).await,
+        "concentration violation should block policy-gated reconstruction"
+    );
+
+    let distribution = store
+        .get_distribution(&object_id)
+        .await
+        .expect("distribution");
+    let evaluation = CoverageEvaluation::from_distribution(object_id, &distribution);
+    assert!(evaluation.is_available, "coverage should satisfy K");
+    assert_eq!(evaluation.distinct_nodes, 2);
+    assert_eq!(evaluation.max_node_fraction_bps, 7_500);
+    assert_eq!(
+        evaluation.concentration_deficit_bps(policy.max_node_fraction_bps),
+        2_500
+    );
+
+    let controller = RepairController::new(RepairControllerConfig::default());
+    let policies = HashMap::from([(object_id, policy.clone())]);
+    let plan = controller
+        .plan_zone(
+            &test_zone(),
+            &store,
+            &policies,
+            &RepairPlanningOptions::default(),
+        )
+        .await;
+    assert_eq!(
+        plan.actions.len(),
+        1,
+        "one rebalance action should be planned"
+    );
+    assert_eq!(plan.actions[0].object_id, object_id);
+    assert_eq!(
+        plan.actions[0].reason_code,
+        RepairReasonCode::DiversityDeficit
+    );
+    assert_eq!(plan.actions[0].estimated_symbols, 2);
+
+    for (esi, source_node) in [(4, 41), (5, 42)] {
+        store
+            .put_symbol(test_symbol_with_source(object_n, esi, source_node))
+            .await
+            .expect("put balancing symbol");
+    }
+
+    assert!(
+        store.can_reconstruct_with_policy(&object_id, &policy).await,
+        "extra symbols from other sources should dilute concentration enough to pass"
+    );
+
+    let repaired_distribution = store
+        .get_distribution(&object_id)
+        .await
+        .expect("repaired distribution");
+    let repaired_evaluation =
+        CoverageEvaluation::from_distribution(object_id, &repaired_distribution);
+    emit_source_diversity_log(&SourceDiversityLogEntry {
+        test_name: "source_diversity_plan_requires_rebalancing_when_concentration_too_high",
+        zone_id: &test_zone(),
+        object_id,
+        distinct_sources_observed: repaired_evaluation.distinct_nodes,
+        max_concentration_bps_observed: repaired_evaluation.max_node_fraction_bps,
+        min_distinct_sources_required: policy.min_source_diversity,
+        max_concentration_bps_required: policy.max_node_fraction_bps,
+        repair_actions: &plan
+            .actions
+            .iter()
+            .map(|action| action.reason_code)
+            .collect::<Vec<_>>(),
+        result: "concentration_rebalanced",
+    });
+}
+
 // ── CoverageEvaluation + SymbolDistribution ──
 
 #[test]

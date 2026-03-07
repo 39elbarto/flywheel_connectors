@@ -203,17 +203,21 @@ impl CoverageEvaluation {
         }
     }
 
-    /// Check if diversity requirements are met for reconstruction.
+    /// Check if source-diversity requirements are met for reconstruction.
     ///
     /// Returns `true` if the object can be reconstructed while respecting the
-    /// `min_source_diversity` policy. When `min_source_diversity` is 0, this
-    /// only checks basic availability (`is_available`).
+    /// source-diversity policy. This includes both `min_source_diversity` and
+    /// `max_node_fraction_bps`. When both constraints are effectively disabled,
+    /// this only checks basic availability (`is_available`).
     #[must_use]
     pub const fn meets_diversity_for_reconstruction(
         &self,
         policy: &fcp_core::ObjectPlacementPolicy,
     ) -> bool {
         if !self.is_available {
+            return false;
+        }
+        if self.max_node_fraction_bps > policy.max_node_fraction_bps {
             return false;
         }
         if policy.min_source_diversity > 0
@@ -253,6 +257,39 @@ impl CoverageEvaluation {
             0
         } else {
             min_diversity - self.distinct_nodes as u8
+        }
+    }
+
+    /// Calculate concentration overage in basis points above the allowed maximum.
+    #[must_use]
+    pub const fn concentration_deficit_bps(&self, max_concentration_bps: u16) -> u16 {
+        self.max_node_fraction_bps
+            .saturating_sub(max_concentration_bps)
+    }
+
+    /// Estimate how many symbols must be added from other nodes to dilute concentration.
+    #[must_use]
+    pub fn concentration_repair_symbols_needed(&self, max_concentration_bps: u16) -> u32 {
+        if self.total_symbols == 0 || max_concentration_bps == 0 {
+            return 0;
+        }
+        if self.max_node_fraction_bps <= max_concentration_bps {
+            return 0;
+        }
+
+        // Recover the dominant source symbol count from the rounded basis-point share.
+        let dominant_symbols = (u64::from(self.max_node_fraction_bps)
+            .saturating_mul(u64::from(self.total_symbols))
+            .saturating_add(9_999))
+            / 10_000;
+        let max_allowed = u64::from(max_concentration_bps);
+        let numerator = dominant_symbols
+            .saturating_mul(10_000)
+            .saturating_sub(max_allowed.saturating_mul(u64::from(self.total_symbols)));
+
+        #[allow(clippy::cast_possible_truncation)]
+        {
+            ((numerator.saturating_add(max_allowed.saturating_sub(1))) / max_allowed) as u32
         }
     }
 }
@@ -561,6 +598,15 @@ mod tests {
             };
 
             assert!(!eval.meets_policy(&policy));
+            assert!(!eval.meets_diversity_for_reconstruction(&policy));
+            assert_eq!(
+                eval.concentration_deficit_bps(policy.max_node_fraction_bps),
+                2000
+            );
+            assert_eq!(
+                eval.concentration_repair_symbols_needed(policy.max_node_fraction_bps),
+                4
+            );
 
             StoreLogData {
                 object_id: Some(object_id),
@@ -1111,19 +1157,25 @@ mod tests {
 
     #[test]
     fn symbols_needed_zero_source() {
-        run_store_test("symbols_needed_zero_source", "verify", "placement", 1, || {
-            let object_id = test_object_id();
-            let dist = SymbolDistribution::new(0);
-            let eval = CoverageEvaluation::from_distribution(object_id, &dist);
+        run_store_test(
+            "symbols_needed_zero_source",
+            "verify",
+            "placement",
+            1,
+            || {
+                let object_id = test_object_id();
+                let dist = SymbolDistribution::new(0);
+                let eval = CoverageEvaluation::from_distribution(object_id, &dist);
 
-            // Zero source symbols → always 0 needed
-            assert_eq!(eval.symbols_needed(10_000), 0);
+                // Zero source symbols → always 0 needed
+                assert_eq!(eval.symbols_needed(10_000), 0);
 
-            StoreLogData {
-                details: Some(json!({"zero_source": true})),
-                ..StoreLogData::default()
-            }
-        });
+                StoreLogData {
+                    details: Some(json!({"zero_source": true})),
+                    ..StoreLogData::default()
+                }
+            },
+        );
     }
 
     #[test]

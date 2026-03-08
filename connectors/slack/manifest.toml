@@ -207,7 +207,11 @@ max_response_bytes = 10485760
 
 [provides.operations."slack.search_messages".ai_hints]
 when_to_use = "Search for messages matching a query."
-common_mistakes = []
+common_mistakes = [
+    "Using Slack search modifiers incorrectly (e.g., 'from:' expects a username, not a display name).",
+    "Not URL-encoding special characters in the query string.",
+    "Expecting real-time results — search index may lag a few seconds behind new messages.",
+]
 examples = ['{"query": "from:@user in:#general deployment"}']
 related = ["slack.get_channel_history"]
 
@@ -250,7 +254,10 @@ max_response_bytes = 5242880
 
 [provides.operations."slack.list_channels".ai_hints]
 when_to_use = "List available channels in the workspace."
-common_mistakes = []
+common_mistakes = [
+    "Forgetting to specify types parameter — defaults to public_channel only, omitting private channels.",
+    "Not handling pagination cursor for workspaces with more than 1000 channels.",
+]
 examples = ['{"types": "public_channel,private_channel"}']
 related = ["slack.get_channel_history"]
 
@@ -438,7 +445,11 @@ max_response_bytes = 1048576
 
 [provides.operations."slack.set_channel_topic".ai_hints]
 when_to_use = "Update the topic of a Slack channel."
-common_mistakes = []
+common_mistakes = [
+    "Using channel name instead of channel ID.",
+    "Exceeding the 250-character topic length limit.",
+    "Trying to set the topic on a channel where the bot lacks the required scope (channels:manage or groups:write).",
+]
 examples = ['{"channel": "C01234567", "topic": "Sprint 42 — deploy Friday"}']
 related = ["slack.list_channels"]
 
@@ -483,7 +494,10 @@ max_response_bytes = 20971520
 
 [provides.operations."slack.download_file".ai_hints]
 when_to_use = "Download a file shared in Slack."
-common_mistakes = []
+common_mistakes = [
+    "Using the file URL directly instead of the file_id — the API requires authentication via the file ID endpoint.",
+    "Not checking that the file is still available (files can be deleted or expired in free-tier workspaces).",
+]
 examples = ['{"file_id": "F01234567"}']
 related = ["slack.upload_file"]
 

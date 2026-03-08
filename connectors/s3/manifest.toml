@@ -121,7 +121,7 @@ max_response_bytes = 104857600
 
 [provides.operations."s3.get_object".ai_hints]
 when_to_use = "Download a file from an S3 bucket."
-common_mistakes = []
+common_mistakes = ["Not handling large objects — response may be truncated at max_response_bytes for very large files."]
 examples = ['{"bucket": "my-bucket", "key": "data/file.json"}']
 related = ["s3.put_object", "s3.list_objects"]
 
@@ -358,7 +358,7 @@ max_response_bytes = 65536
 
 [provides.operations."s3.head_object".ai_hints]
 when_to_use = "Check if an object exists and get metadata."
-common_mistakes = []
+common_mistakes = ["A 404 response means the key does not exist, not that the bucket is missing — check bucket existence separately."]
 examples = ['{"bucket": "my-bucket", "key": "data/file.json"}']
 related = ["s3.get_object"]
 
@@ -448,7 +448,7 @@ max_response_bytes = 5242880
 
 [provides.operations."s3.list_buckets".ai_hints]
 when_to_use = "List available S3 buckets."
-common_mistakes = []
+common_mistakes = ["This returns all buckets in the AWS account regardless of region — filter by region client-side if needed."]
 examples = ['{}']
 related = ["s3.list_objects"]
 

@@ -90,7 +90,7 @@ max_response_bytes = 10485760
 
 [provides.operations."snowflake.databases.list".ai_hints]
 when_to_use = "List available Snowflake databases."
-common_mistakes = []
+common_mistakes = ["Forgetting that database names in Snowflake are case-insensitive but stored as uppercase by default."]
 examples = ["{}"]
 related = [
     "snowflake.sql.query",
@@ -260,7 +260,7 @@ max_response_bytes = 10485760
 
 [provides.operations."snowflake.tables.list".ai_hints]
 when_to_use = "List tables in a database, optionally filtered by schema."
-common_mistakes = []
+common_mistakes = ["Omitting the schema parameter and getting tables from all schemas, including INFORMATION_SCHEMA."]
 examples = ['{"database": "ANALYTICS", "schema": "PUBLIC"}']
 related = [
     "snowflake.databases.list",
@@ -306,7 +306,7 @@ max_response_bytes = 1048576
 
 [provides.operations."snowflake.warehouses.list".ai_hints]
 when_to_use = "List available Snowflake warehouses."
-common_mistakes = []
+common_mistakes = ["Assuming listed warehouses are running — suspended warehouses will auto-resume on query but incur startup latency."]
 examples = ["{}"]
 related = ["snowflake.sql.query"]
 

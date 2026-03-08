@@ -165,7 +165,7 @@ max_response_bytes = 10485760
 
 [provides.operations."hubspot.companies.list".ai_hints]
 when_to_use = "List companies in HubSpot CRM."
-common_mistakes = []
+common_mistakes = ["Not specifying properties — only default properties are returned, omitting fields like domain or industry."]
 examples = ['{"limit": 50, "properties": ["name", "domain", "industry"]}']
 related = [
     "hubspot.contacts.list",
@@ -320,7 +320,7 @@ max_response_bytes = 1048576
 
 [provides.operations."hubspot.contacts.get".ai_hints]
 when_to_use = "Retrieve a specific contact by their HubSpot ID."
-common_mistakes = []
+common_mistakes = ["Not requesting specific properties — only default properties are returned without the properties parameter."]
 examples = ['{"contact_id": "12345", "properties": ["email", "firstname", "lastname"]}']
 related = [
     "hubspot.contacts.list",
@@ -451,7 +451,7 @@ max_response_bytes = 1048576
 
 [provides.operations."hubspot.contacts.update".ai_hints]
 when_to_use = "Update properties on an existing contact."
-common_mistakes = []
+common_mistakes = ["Using display labels instead of internal property names (e.g. use 'firstname' not 'First Name')."]
 examples = ['{"contact_id": "12345", "properties": {"phone": "+1-555-0100"}}']
 related = [
     "hubspot.contacts.get",
@@ -568,7 +568,7 @@ max_response_bytes = 10485760
 
 [provides.operations."hubspot.deals.list".ai_hints]
 when_to_use = "List deals in the CRM, optionally filtered by pipeline or stage."
-common_mistakes = []
+common_mistakes = ["Not handling pagination — max page size is 100, use the 'after' cursor for additional results."]
 examples = ['{"limit": 50, "properties": ["dealname", "amount", "dealstage", "pipeline"]}']
 related = [
     "hubspot.deals.create",
@@ -681,7 +681,7 @@ max_response_bytes = 1048576
 
 [provides.operations."hubspot.pipelines.list".ai_hints]
 when_to_use = "List available pipelines and their stages to understand the deal/ticket workflow."
-common_mistakes = []
+common_mistakes = ["Forgetting to specify object_type — pipeline stages differ between deals and tickets."]
 examples = ['{"object_type": "deals"}']
 related = [
     "hubspot.deals.list",

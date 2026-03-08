@@ -161,7 +161,7 @@ max_response_bytes = 52428800
 
 [provides.operations."arxiv.extract_references".ai_hints]
 when_to_use = "Parse the reference section of a paper to identify cited works."
-common_mistakes = []
+common_mistakes = ["Expecting structured DOI/URL links for every reference — many older papers have unresolved plain-text citations."]
 examples = ['{"arxiv_id": "1706.03762"}']
 related = [
     "arxiv.get_references",
@@ -406,7 +406,7 @@ max_response_bytes = 10485760
 
 [provides.operations."arxiv.get_new_papers".ai_hints]
 when_to_use = "Browse the latest papers in a category — like reading the daily arXiv listings."
-common_mistakes = []
+common_mistakes = ["Using an invalid category code (e.g. 'AI' instead of 'cs.AI') — call list_categories first to verify."]
 examples = ['{"category": "cs.AI", "max_results": 25}']
 related = [
     "arxiv.list_categories",
@@ -518,7 +518,7 @@ max_response_bytes = 5242880
 
 [provides.operations."arxiv.get_references".ai_hints]
 when_to_use = "Get the bibliography of a paper (backward citation graph)."
-common_mistakes = []
+common_mistakes = ["Confusing get_references (papers this paper cites) with get_citations (papers that cite this paper)."]
 examples = ['{"arxiv_id": "1706.03762"}']
 related = [
     "arxiv.get_citations",
@@ -571,7 +571,7 @@ max_response_bytes = 1048576
 
 [provides.operations."arxiv.list_categories".ai_hints]
 when_to_use = "List available arXiv categories to help users refine searches."
-common_mistakes = []
+common_mistakes = ["Confusing group names with category codes — 'cs' is a group, 'cs.AI' is a category."]
 examples = [
     "{}",
     '{"group": "cs"}',
@@ -702,7 +702,7 @@ max_response_bytes = 10485760
 
 [provides.operations."arxiv.monitor_query".ai_hints]
 when_to_use = "Monitor for new papers matching a specific search query."
-common_mistakes = []
+common_mistakes = ["Not persisting the returned cursor_ts — without it the monitor rescans from the beginning on restart."]
 examples = ['{"query": "ti:large language model AND cat:cs.CL"}']
 related = [
     "arxiv.monitor_category",
@@ -849,7 +849,7 @@ max_response_bytes = 10485760
 
 [provides.operations."arxiv.search_semantic".ai_hints]
 when_to_use = "Search using natural language descriptions rather than keyword queries."
-common_mistakes = []
+common_mistakes = ["Using arXiv query syntax (ti:, au:) instead of plain natural language — this endpoint expects free-text descriptions."]
 examples = ['{"query": "papers about using graph neural networks for drug discovery", "max_results": 10, "categories": ["cs.LG", "q-bio.QM"]}']
 related = ["arxiv.search_papers"]
 

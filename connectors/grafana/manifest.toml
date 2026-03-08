@@ -150,7 +150,10 @@ max_response_bytes = 10485760
 
 [provides.operations."grafana.alerts.list".ai_hints]
 when_to_use = "List alert rules and their current states."
-common_mistakes = []
+common_mistakes = [
+    "Filtering by state='alerting' misses rules in 'pending' state that are about to fire.",
+    "Not accounting for Grafana Unified Alerting vs legacy alerting — API endpoints differ between versions.",
+]
 examples = ['{"state": "alerting"}']
 related = ["grafana.alerts.create"]
 
@@ -209,7 +212,10 @@ max_response_bytes = 1048576
 
 [provides.operations."grafana.annotations.create".ai_hints]
 when_to_use = "Mark events on dashboards (deploys, incidents, etc.)."
-common_mistakes = []
+common_mistakes = [
+    "Not specifying time — defaults to the server's current time, which may differ from the actual event time.",
+    "Creating dashboard-scoped annotations without providing the dashboard_uid, resulting in global annotations.",
+]
 examples = ['{"text": "Deploy v2.1.0", "tags": ["deploy"]}']
 related = ["grafana.dashboards.get"]
 
@@ -319,7 +325,10 @@ max_response_bytes = 1048576
 
 [provides.operations."grafana.dashboards.delete".ai_hints]
 when_to_use = "Delete a dashboard. Cannot be undone."
-common_mistakes = []
+common_mistakes = [
+    "Deleting provisioned dashboards — they will reappear on next Grafana restart or provisioning cycle.",
+    "Not exporting the dashboard JSON first for backup before permanent deletion.",
+]
 examples = ['{"uid": "abc123def"}']
 related = ["grafana.dashboards.get"]
 
@@ -374,7 +383,10 @@ max_response_bytes = 10485760
 
 [provides.operations."grafana.dashboards.get".ai_hints]
 when_to_use = "Retrieve a specific dashboard by UID."
-common_mistakes = []
+common_mistakes = [
+    "Using the dashboard slug or numeric ID instead of the UID — the UID is the short alphanumeric identifier.",
+    "Not checking the meta.version field before updating — stale version causes save conflicts.",
+]
 examples = ['{"uid": "abc123def"}']
 related = [
     "grafana.dashboards.list",
@@ -436,7 +448,10 @@ max_response_bytes = 10485760
 
 [provides.operations."grafana.dashboards.list".ai_hints]
 when_to_use = "Search and list Grafana dashboards."
-common_mistakes = []
+common_mistakes = [
+    "Expecting full dashboard JSON in the list response — only metadata is returned; use dashboards.get for panel details.",
+    "Not using tag filters on large Grafana instances — the search endpoint can be slow with thousands of dashboards.",
+]
 examples = ['{"query": "production", "limit": 50}']
 related = ["grafana.dashboards.get"]
 
@@ -482,7 +497,10 @@ max_response_bytes = 10485760
 
 [provides.operations."grafana.datasources.list".ai_hints]
 when_to_use = "List configured datasources."
-common_mistakes = []
+common_mistakes = [
+    "Assuming datasource names are unique across organizations — use UID for reliable references.",
+    "Not checking datasource health/connectivity status before issuing queries against them.",
+]
 examples = ["{}"]
 related = ["grafana.datasources.query"]
 

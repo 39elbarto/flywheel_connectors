@@ -163,7 +163,10 @@ max_response_bytes = 1048576
 
 [provides.operations."webhook.endpoints.delete".ai_hints]
 when_to_use = "Remove a webhook endpoint. Incoming webhooks to this path will be rejected."
-common_mistakes = []
+common_mistakes = [
+    "Forgetting to unregister the webhook URL at the sending service before deleting the endpoint.",
+    "Using the endpoint path instead of endpoint_id.",
+]
 examples = ['{"endpoint_id": "ep_abc123"}']
 related = ["webhook.endpoints.list"]
 
@@ -209,7 +212,9 @@ max_response_bytes = 1048576
 
 [provides.operations."webhook.endpoints.list".ai_hints]
 when_to_use = "List configured webhook endpoints."
-common_mistakes = []
+common_mistakes = [
+    "Assuming the list reflects live registration status at the sending service — it only shows locally registered endpoints.",
+]
 examples = ["{}"]
 related = ["webhook.endpoints.create"]
 
@@ -265,7 +270,10 @@ max_response_bytes = 10485760
 
 [provides.operations."webhook.events.recent".ai_hints]
 when_to_use = "Get recent webhook events received on an endpoint."
-common_mistakes = []
+common_mistakes = [
+    "Not filtering by endpoint_id and receiving events from all endpoints mixed together.",
+    "Expecting events that failed signature validation to appear in results — they are rejected before storage.",
+]
 examples = ['{"endpoint_id": "ep_abc123", "limit": 20}']
 related = ["webhook.endpoints.list"]
 

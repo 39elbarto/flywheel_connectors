@@ -98,7 +98,7 @@ max_response_bytes = 1048576
 
 [provides.operations."semanticscholar.author.get".ai_hints]
 when_to_use = "Get details for a specific author."
-common_mistakes = []
+common_mistakes = ["Not specifying the fields parameter — only authorId and name are returned by default; request hIndex, paperCount, etc. explicitly."]
 examples = ['{"author_id": "1741101", "fields": "name,hIndex,paperCount,citationCount"}']
 related = ["semanticscholar.author.papers"]
 
@@ -151,7 +151,7 @@ max_response_bytes = 10485760
 
 [provides.operations."semanticscholar.author.papers".ai_hints]
 when_to_use = "Get all papers by a specific author."
-common_mistakes = []
+common_mistakes = ["Setting limit too high without pagination — the API caps at 1000 results per request, use offset for prolific authors."]
 examples = ['{"author_id": "1741101", "limit": 50, "fields": "title,year,citationCount"}']
 related = ["semanticscholar.author.get"]
 
@@ -204,7 +204,7 @@ max_response_bytes = 10485760
 
 [provides.operations."semanticscholar.paper.citations".ai_hints]
 when_to_use = "Get papers that cite a given paper."
-common_mistakes = []
+common_mistakes = ["Confusing citations (papers that cite this paper) with references (papers this paper cites) — use paper.references for the bibliography."]
 examples = ['{"paper_id": "649def34f8be52c8b66281af98ae884c09aef38b", "limit": 50}']
 related = [
     "semanticscholar.paper.get",
@@ -263,7 +263,7 @@ max_response_bytes = 1048576
 
 [provides.operations."semanticscholar.paper.get".ai_hints]
 when_to_use = "Get details for a specific paper by ID."
-common_mistakes = []
+common_mistakes = ["Passing a bare arXiv ID without the 'ARXIV:' prefix — use 'ARXIV:2301.08745' or the S2 corpus ID or DOI format."]
 examples = ['{"paper_id": "649def34f8be52c8b66281af98ae884c09aef38b", "fields": "title,abstract,authors,year,citationCount"}']
 related = [
     "semanticscholar.paper.search",
@@ -319,7 +319,7 @@ max_response_bytes = 10485760
 
 [provides.operations."semanticscholar.paper.recommendations".ai_hints]
 when_to_use = "Get recommended similar papers."
-common_mistakes = []
+common_mistakes = ["Expecting deterministic results — recommendations are model-based and may vary between calls for the same seed paper."]
 examples = ['{"paper_id": "649def34f8be52c8b66281af98ae884c09aef38b", "limit": 10}']
 related = ["semanticscholar.paper.search"]
 
@@ -372,7 +372,7 @@ max_response_bytes = 10485760
 
 [provides.operations."semanticscholar.paper.references".ai_hints]
 when_to_use = "Get papers referenced by a given paper."
-common_mistakes = []
+common_mistakes = ["Not requesting additional fields — only paperId and title are returned by default; add 'year,authors,citationCount' in the fields parameter."]
 examples = ['{"paper_id": "649def34f8be52c8b66281af98ae884c09aef38b", "limit": 50}']
 related = [
     "semanticscholar.paper.get",

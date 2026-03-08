@@ -100,7 +100,10 @@ max_response_bytes = 1048576
 
 [provides.operations."intercom.contacts.create".ai_hints]
 when_to_use = "Create a new contact."
-common_mistakes = []
+common_mistakes = [
+    "Not specifying the role field — Intercom requires 'lead' or 'user' and they have different lifecycle behaviors.",
+    "Creating duplicate contacts by not checking for an existing contact with the same email first.",
+]
 examples = ['{"role": "user", "email": "alice@example.com", "name": "Alice Smith"}']
 related = [
     "intercom.contacts.list",
@@ -145,7 +148,10 @@ max_response_bytes = 1048576
 
 [provides.operations."intercom.contacts.delete".ai_hints]
 when_to_use = "Delete a contact. Cannot be undone."
-common_mistakes = []
+common_mistakes = [
+    "Using an external_id or email instead of the Intercom-assigned contact_id.",
+    "Deleting a contact with open conversations — their conversation history will become orphaned.",
+]
 examples = ['{"contact_id": "abc123"}']
 related = ["intercom.contacts.list"]
 
@@ -196,7 +202,10 @@ max_response_bytes = 10485760
 
 [provides.operations."intercom.contacts.list".ai_hints]
 when_to_use = "List or search Intercom contacts."
-common_mistakes = []
+common_mistakes = [
+    "Not using cursor-based pagination for large contact lists — the default page size is 50 and max is 150.",
+    "Constructing search query objects incorrectly — the Intercom search syntax requires field/operator/value triples.",
+]
 examples = ['{"per_page": 50}']
 related = [
     "intercom.contacts.create",
@@ -246,7 +255,10 @@ max_response_bytes = 10485760
 
 [provides.operations."intercom.conversations.list".ai_hints]
 when_to_use = "List conversations."
-common_mistakes = []
+common_mistakes = [
+    "Expecting conversation body/messages in the list response — only metadata is returned; use a separate fetch for full conversation parts.",
+    "Not handling pagination — large workspaces may have thousands of conversations.",
+]
 examples = ['{"per_page": 50}']
 related = ["intercom.conversations.reply"]
 
@@ -303,7 +315,10 @@ max_response_bytes = 1048576
 
 [provides.operations."intercom.conversations.reply".ai_hints]
 when_to_use = "Reply to an existing conversation."
-common_mistakes = []
+common_mistakes = [
+    "Using message_type 'note' when intending to send a customer-visible reply — notes are internal-only.",
+    "Replying to a closed or snoozed conversation without reopening it first, which silently fails.",
+]
 examples = ['{"conversation_id": "abc123", "body": "Thanks for reaching out!", "message_type": "comment"}']
 related = ["intercom.conversations.list"]
 
@@ -346,7 +361,9 @@ max_response_bytes = 1048576
 
 [provides.operations."intercom.tags.list".ai_hints]
 when_to_use = "List available tags."
-common_mistakes = []
+common_mistakes = [
+    "Assuming tag names are unique — Intercom allows duplicate tag names; always use the tag ID for subsequent operations.",
+]
 examples = ["{}"]
 related = ["intercom.contacts.list"]
 

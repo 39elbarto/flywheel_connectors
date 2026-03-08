@@ -90,7 +90,7 @@ max_response_bytes = 10485760
 
 [provides.operations."trello.boards.list".ai_hints]
 when_to_use = "List Trello boards."
-common_mistakes = []
+common_mistakes = ["Assuming all organization boards are returned; this only returns boards the authenticated token has access to, which may exclude private boards in shared workspaces."]
 examples = ["{}"]
 related = [
     "trello.lists.get",
@@ -194,7 +194,7 @@ max_response_bytes = 1048576
 
 [provides.operations."trello.cards.delete".ai_hints]
 when_to_use = "Delete a Trello card. Cannot be undone."
-common_mistakes = []
+common_mistakes = ["Deleting a card when archiving (closing) it would suffice; use the update card API to set closed=true if you want to preserve the card's history."]
 examples = ['{"card_id": "card_abc123"}']
 related = ["trello.cards.list"]
 
@@ -243,7 +243,7 @@ max_response_bytes = 10485760
 
 [provides.operations."trello.cards.list".ai_hints]
 when_to_use = "List cards on a board, optionally filtered by list."
-common_mistakes = []
+common_mistakes = ["Archived cards are excluded by default; only open cards on the board are returned unless you explicitly request closed cards."]
 examples = ['{"board_id": "abc123"}']
 related = [
     "trello.cards.create",
@@ -292,7 +292,7 @@ max_response_bytes = 10485760
 
 [provides.operations."trello.lists.get".ai_hints]
 when_to_use = "Get lists on a Trello board."
-common_mistakes = []
+common_mistakes = ["Archived lists are not included in the response by default; only open lists are returned unless the filter parameter is set to all."]
 examples = ['{"board_id": "abc123"}']
 related = [
     "trello.boards.list",

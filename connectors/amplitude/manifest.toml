@@ -94,7 +94,7 @@ max_response_bytes = 52428800
 
 [provides.operations."amplitude.charts.query".ai_hints]
 when_to_use = "Query chart data from Amplitude by chart ID."
-common_mistakes = []
+common_mistakes = ["Using a dashboard ID instead of a chart ID — charts and dashboards have separate ID namespaces in Amplitude."]
 examples = ['{"chart_id": "abc123"}']
 related = [
     "amplitude.events.export",
@@ -143,7 +143,7 @@ max_response_bytes = 10485760
 
 [provides.operations."amplitude.cohorts.list".ai_hints]
 when_to_use = "List all cohorts in Amplitude."
-common_mistakes = []
+common_mistakes = ["Expecting cohort member details in the list response — this returns cohort metadata only; use a separate cohort membership export for user-level data."]
 examples = ["{}"]
 related = ["amplitude.events.export"]
 

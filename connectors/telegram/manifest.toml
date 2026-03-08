@@ -203,6 +203,11 @@ protocol = "https"
 
 [provides.operations."telegram.get_file".ai_hints]
 when_to_use = "Get file metadata and download URL for files attached to messages."
+common_mistakes = [
+    "Assuming the download URL is permanent — file links expire after approximately one hour.",
+    "Using a file_unique_id instead of file_id (file_unique_id cannot be used for downloads).",
+    "Not checking file_size before downloading — Telegram Bot API limits downloads to 20 MB.",
+]
 
 [provides.operations."telegram.answer_callback_query"]
 description = "Answer a callback query (button press)"

@@ -95,7 +95,7 @@ max_response_bytes = 10485760
 
 [provides.operations."segment.destinations.list".ai_hints]
 when_to_use = "List destinations connected to a Segment source."
-common_mistakes = []
+common_mistakes = ["Omitting the source_id — destinations are scoped to a source; call sources.list first to obtain valid source IDs."]
 examples = ['{"source_id": "src_abc123"}']
 related = ["segment.sources.list"]
 
@@ -142,7 +142,7 @@ max_response_bytes = 10485760
 
 [provides.operations."segment.sources.list".ai_hints]
 when_to_use = "List all sources in a Segment workspace."
-common_mistakes = []
+common_mistakes = ["Expecting the response to include write keys or connection credentials — the list returns source metadata only, not secrets."]
 examples = ["{}"]
 related = [
     "segment.destinations.list",

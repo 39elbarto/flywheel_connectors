@@ -94,7 +94,7 @@ max_response_bytes = 10485760
 
 [provides.operations."clickup.lists.list".ai_hints]
 when_to_use = "List all lists within a ClickUp space."
-common_mistakes = []
+common_mistakes = ["Passing a team_id instead of a space_id; lists belong to spaces, not directly to teams."]
 examples = ['{"space_id": "12345678"}']
 related = [
     "clickup.spaces.list",
@@ -144,7 +144,7 @@ max_response_bytes = 10485760
 
 [provides.operations."clickup.spaces.list".ai_hints]
 when_to_use = "List all spaces in a ClickUp workspace/team."
-common_mistakes = []
+common_mistakes = ["Using the workspace name instead of the numeric team_id; retrieve the team_id from the ClickUp workspace settings or API first."]
 examples = ['{"team_id": "9012345"}']
 related = [
     "clickup.lists.list",
@@ -201,7 +201,7 @@ max_response_bytes = 1048576
 
 [provides.operations."clickup.tasks.create".ai_hints]
 when_to_use = "Create a new task in a ClickUp list."
-common_mistakes = []
+common_mistakes = ["Omitting the list_id and trying to create a task directly under a space or folder; tasks must be created within a specific list."]
 examples = ['{"list_id": "900100200300", "name": "Implement login page"}']
 related = [
     "clickup.tasks.list",
@@ -248,7 +248,7 @@ max_response_bytes = 1048576
 
 [provides.operations."clickup.tasks.delete".ai_hints]
 when_to_use = "Permanently delete a task from ClickUp."
-common_mistakes = []
+common_mistakes = ["Confusing delete with closing a task; deletion is permanent and cannot be undone, whereas setting status to closed preserves the task."]
 examples = ['{"task_id": "abc123xyz"}']
 related = [
     "clickup.tasks.list",
@@ -298,7 +298,7 @@ max_response_bytes = 10485760
 
 [provides.operations."clickup.tasks.list".ai_hints]
 when_to_use = "List all tasks within a ClickUp list."
-common_mistakes = []
+common_mistakes = ["Not accounting for pagination; the API returns a limited page of tasks by default and additional pages must be fetched separately."]
 examples = ['{"list_id": "900100200300"}']
 related = [
     "clickup.lists.list",

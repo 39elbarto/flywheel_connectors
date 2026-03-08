@@ -87,7 +87,10 @@ max_response_bytes = 10485760
 
 [provides.operations."mailchimp.campaigns.list".ai_hints]
 when_to_use = "List email campaigns."
-common_mistakes = []
+common_mistakes = [
+    "Not filtering by status — all campaigns (draft, sent, paused) are returned by default.",
+    "Forgetting to include the data center prefix in the API URL (e.g., us1, us2) which is derived from the API key.",
+]
 examples = ["{}"]
 related = ["mailchimp.campaigns.send"]
 
@@ -172,7 +175,10 @@ max_response_bytes = 10485760
 
 [provides.operations."mailchimp.lists.list".ai_hints]
 when_to_use = "List Mailchimp audiences."
-common_mistakes = []
+common_mistakes = [
+    "Confusing 'lists' (audiences) with 'campaigns' — a list/audience is a collection of subscribers, not an email send.",
+    "Assuming the list_id is the audience name — always use the alphanumeric list ID returned by the API.",
+]
 examples = ["{}"]
 related = [
     "mailchimp.members.list",
@@ -270,7 +276,11 @@ max_response_bytes = 10485760
 
 [provides.operations."mailchimp.members.list".ai_hints]
 when_to_use = "List members of an audience."
-common_mistakes = []
+common_mistakes = [
+    "Not providing list_id — this is required and must be an existing audience ID, not a name.",
+    "Not handling pagination for large audiences — the default page size is 10 and max is 1000.",
+    "Including unsubscribed or cleaned members in counts without filtering by status.",
+]
 examples = ['{"list_id": "abc123"}']
 related = [
     "mailchimp.lists.list",

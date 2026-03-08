@@ -93,7 +93,7 @@ max_response_bytes = 10485760
 
 [provides.operations."bigquery.datasets.list".ai_hints]
 when_to_use = "List BigQuery datasets in a GCP project."
-common_mistakes = []
+common_mistakes = ["Using the wrong project_id when the service account has access to multiple GCP projects."]
 examples = ['{"project_id": "my-gcp-project"}']
 related = ["bigquery.tables.list"]
 
@@ -139,7 +139,7 @@ max_response_bytes = 10485760
 
 [provides.operations."bigquery.jobs.list".ai_hints]
 when_to_use = "List recent BigQuery jobs."
-common_mistakes = []
+common_mistakes = ["Expecting to see all historical jobs — only recent jobs are returned and older ones may be pruned."]
 examples = ['{"project_id": "my-gcp-project"}']
 related = ["bigquery.jobs.query"]
 
@@ -247,7 +247,7 @@ max_response_bytes = 10485760
 
 [provides.operations."bigquery.tables.list".ai_hints]
 when_to_use = "List tables in a BigQuery dataset."
-common_mistakes = []
+common_mistakes = ["Not distinguishing between TABLE, VIEW, and EXTERNAL table types in the response."]
 examples = ['{"project_id": "my-gcp-project", "dataset_id": "analytics"}']
 related = [
     "bigquery.datasets.list",

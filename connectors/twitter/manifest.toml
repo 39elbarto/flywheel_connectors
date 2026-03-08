@@ -250,7 +250,10 @@ max_response_bytes = 1048576
 
 [provides.operations."twitter.stream.rules.list".ai_hints]
 when_to_use = "View current filter rules for the tweet stream."
-common_mistakes = []
+common_mistakes = [
+    "Assuming rules are applied immediately — newly added rules may take a few seconds to propagate.",
+    "Not accounting for the 25-rule limit on the Basic tier when planning filter strategy.",
+]
 examples = ["{}"]
 related = [
     "twitter.stream.rules.add",
@@ -355,7 +358,10 @@ max_response_bytes = 1048576
 
 [provides.operations."twitter.tweet.unretweet".ai_hints]
 when_to_use = "Remove a retweet."
-common_mistakes = []
+common_mistakes = [
+    "Passing the retweet ID instead of the original tweet ID.",
+    "Trying to unretweet a tweet that was not retweeted, which returns a 404 error.",
+]
 examples = ['{"tweet_id": "1234567890"}']
 related = ["twitter.tweet.retweet"]
 
@@ -406,7 +412,10 @@ max_response_bytes = 1048576
 
 [provides.operations."twitter.tweet.like".ai_hints]
 when_to_use = "Like a tweet."
-common_mistakes = []
+common_mistakes = [
+    "Using a tweet URL instead of the numeric tweet ID.",
+    "Rapid-liking many tweets, which triggers Twitter's anti-automation rate limits (stricter than standard API limits).",
+]
 examples = ['{"tweet_id": "1234567890"}']
 related = ["twitter.tweet.unlike"]
 
@@ -457,7 +466,10 @@ max_response_bytes = 1048576
 
 [provides.operations."twitter.tweet.unlike".ai_hints]
 when_to_use = "Remove a like from a tweet."
-common_mistakes = []
+common_mistakes = [
+    "Trying to unlike a tweet that was never liked by the authenticated user, which returns an error.",
+    "Using the tweet URL instead of the numeric tweet ID.",
+]
 examples = ['{"tweet_id": "1234567890"}']
 related = ["twitter.tweet.like"]
 
@@ -580,7 +592,10 @@ max_response_bytes = 10485760
 
 [provides.operations."twitter.dm.events".ai_hints]
 when_to_use = "Read DM events in a conversation."
-common_mistakes = []
+common_mistakes = [
+    "Not providing conversation_id when only a specific thread is needed, resulting in all DM events being returned.",
+    "Forgetting that DM access requires OAuth 2.0 with the dm.read scope.",
+]
 examples = ['{"conversation_id": "123"}']
 related = ["twitter.dm.send"]
 
@@ -1270,7 +1285,10 @@ max_response_bytes = 1048576
 
 [provides.operations."twitter.user.me".ai_hints]
 when_to_use = "Get information about the currently authenticated user."
-common_mistakes = []
+common_mistakes = [
+    "Not requesting the needed user.fields expansions — the default response only includes id, name, and username.",
+    "Calling this endpoint repeatedly instead of caching the result for the session.",
+]
 examples = ["{}"]
 related = [
     "twitter.user.get",
@@ -1346,7 +1364,11 @@ max_response_bytes = 10485760
 
 [provides.operations."twitter.user.mentions".ai_hints]
 when_to_use = "Get tweets that mention a user. Defaults to the authenticated user if no user_id provided."
-common_mistakes = []
+common_mistakes = [
+    "Passing a username instead of numeric user_id.",
+    "Not handling pagination — mentions endpoint returns at most 100 results per page.",
+    "Expecting real-time results; the mentions timeline may lag by a few seconds.",
+]
 examples = [
     "{}",
     '{"user_id": "12345678901234567", "max_results": 25}',

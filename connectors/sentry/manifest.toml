@@ -692,7 +692,10 @@ max_response_bytes = 5242880
 
 [provides.operations."sentry.list_alert_rules".ai_hints]
 when_to_use = "List configured alert rules for a project."
-common_mistakes = []
+common_mistakes = [
+    "Not distinguishing between issue alert rules and metric alert rules in the response.",
+    "Assuming all rules are returned in one page — use cursor pagination for projects with many rules.",
+]
 examples = ['{"organization_slug": "my-org", "project_slug": "backend"}']
 related = [
     "sentry.create_alert_rule",
@@ -905,7 +908,10 @@ max_response_bytes = 5242880
 
 [provides.operations."sentry.list_projects".ai_hints]
 when_to_use = "List all projects in an organization. Useful for discovery before querying issues or events."
-common_mistakes = []
+common_mistakes = [
+    "Using project name instead of project slug for subsequent API calls.",
+    "Not paginating when the organization has many projects.",
+]
 examples = ['{"organization_slug": "my-org"}']
 related = [
     "sentry.list_issues",
@@ -969,7 +975,10 @@ max_response_bytes = 2097152
 
 [provides.operations."sentry.list_release_deploys".ai_hints]
 when_to_use = "List deployment environments and timestamps for a release to correlate with error spikes."
-common_mistakes = []
+common_mistakes = [
+    "Not URL-encoding the version string when it contains '+' or '@' characters.",
+    "Confusing deploy timestamps with release creation time — deploys track per-environment rollouts.",
+]
 examples = ['{"organization_slug": "my-org", "version": "backend@1.2.3"}']
 related = [
     "sentry.get_release",

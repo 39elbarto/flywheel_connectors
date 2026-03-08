@@ -155,7 +155,7 @@ max_response_bytes = 1048576
 
 [provides.operations."pandadoc.documents.delete".ai_hints]
 when_to_use = "Delete a document. Cannot be undone."
-common_mistakes = []
+common_mistakes = ["Deleting a document that has already been sent or completed will also revoke signer access; verify the document status with pandadoc.documents.get first."]
 examples = ['{"document_id": "doc_abc123"}']
 related = ["pandadoc.documents.list"]
 
@@ -211,7 +211,7 @@ max_response_bytes = 1048576
 
 [provides.operations."pandadoc.documents.get".ai_hints]
 when_to_use = "Get details for a specific document."
-common_mistakes = []
+common_mistakes = ["The document_id is a PandaDoc UUID, not the document name; use pandadoc.documents.list to look up the ID."]
 examples = ['{"document_id": "doc_abc123"}']
 related = ["pandadoc.documents.list"]
 
@@ -262,7 +262,7 @@ max_response_bytes = 10485760
 
 [provides.operations."pandadoc.documents.list".ai_hints]
 when_to_use = "List PandaDoc documents, optionally filtered by status."
-common_mistakes = []
+common_mistakes = ["The status filter values are specific strings (draft, sent, completed, viewed, waiting_approval); using arbitrary values returns empty results."]
 examples = ['{"status": "draft", "count": 20}']
 related = [
     "pandadoc.documents.get",
@@ -367,7 +367,7 @@ max_response_bytes = 10485760
 
 [provides.operations."pandadoc.templates.list".ai_hints]
 when_to_use = "List available document templates."
-common_mistakes = []
+common_mistakes = ["Only active templates are returned; archived or deleted templates will not appear in the list."]
 examples = ["{}"]
 related = ["pandadoc.documents.create"]
 

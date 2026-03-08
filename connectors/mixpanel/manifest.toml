@@ -105,7 +105,7 @@ max_response_bytes = 52428800
 
 [provides.operations."mixpanel.events.query".ai_hints]
 when_to_use = "Query Mixpanel events for a date range."
-common_mistakes = []
+common_mistakes = ["Using the wrong date format — dates must be YYYY-MM-DD, not Unix timestamps or ISO 8601 with time components."]
 examples = ['{"from_date": "2025-01-01", "to_date": "2025-01-31", "event": "signup"}']
 related = [
     "mixpanel.funnels.list",
@@ -154,7 +154,7 @@ max_response_bytes = 10485760
 
 [provides.operations."mixpanel.funnels.list".ai_hints]
 when_to_use = "List saved funnels in Mixpanel."
-common_mistakes = []
+common_mistakes = ["Expecting funnel conversion data in the list response — this returns funnel definitions only; query each funnel separately to get conversion metrics."]
 examples = ["{}"]
 related = ["mixpanel.events.query"]
 
@@ -204,7 +204,7 @@ max_response_bytes = 52428800
 
 [provides.operations."mixpanel.insights.query".ai_hints]
 when_to_use = "Run a saved Insights report in Mixpanel."
-common_mistakes = []
+common_mistakes = ["Using a report URL slug instead of the numeric bookmark_id — extract the ID from the Mixpanel report URL or list reports first."]
 examples = ['{"bookmark_id": "12345"}']
 related = [
     "mixpanel.events.query",

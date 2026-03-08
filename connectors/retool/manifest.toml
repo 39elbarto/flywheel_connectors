@@ -90,7 +90,7 @@ max_response_bytes = 10485760
 
 [provides.operations."retool.workflows.list".ai_hints]
 when_to_use = "List all Retool workflows."
-common_mistakes = []
+common_mistakes = ["Assuming all listed workflows are enabled — check the workflow status since disabled or draft workflows appear in the list but cannot be triggered."]
 examples = ["{}"]
 related = ["retool.workflows.run"]
 
@@ -140,7 +140,7 @@ max_response_bytes = 1048576
 
 [provides.operations."retool.workflows.run".ai_hints]
 when_to_use = "Trigger a Retool workflow to run."
-common_mistakes = []
+common_mistakes = ["Triggering a workflow without verifying it is enabled — disabled or draft workflows will return an error; check workflows.list first."]
 examples = ['{"workflow_id": "wf_abc123"}']
 related = ["retool.workflows.list"]
 

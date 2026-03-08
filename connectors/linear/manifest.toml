@@ -117,7 +117,7 @@ max_response_bytes = 1048576
 
 [provides.operations."linear.get_issue".ai_hints]
 when_to_use = "Look up a specific issue by ID."
-common_mistakes = []
+common_mistakes = ["Use the issue's UUID, not the human-readable identifier like 'ENG-123' — pass the UUID returned from create_issue or search_issues", "Archived issues are still retrievable but their state may show as cancelled or completed"]
 examples = ['{"issue_id": "LIN-123"}']
 related = ["linear.create_issue", "linear.update_issue"]
 
@@ -164,7 +164,7 @@ max_response_bytes = 1048576
 
 [provides.operations."linear.update_issue".ai_hints]
 when_to_use = "Update issue title, status, assignee, or other fields."
-common_mistakes = []
+common_mistakes = ["Changing status requires the state_id UUID, not a state name like 'Done' — query team workflow states first", "Reassigning an issue sends a notification to the new assignee, which cannot be suppressed"]
 examples = ['{"issue_id": "LIN-123", "state_id": "done-state-id"}']
 related = ["linear.get_issue"]
 
@@ -207,7 +207,7 @@ max_response_bytes = 10485760
 
 [provides.operations."linear.search_issues".ai_hints]
 when_to_use = "Search for issues matching a text query."
-common_mistakes = []
+common_mistakes = ["Search is full-text across title and description only — it does not filter by status, assignee, or label; use GraphQL filters for structured queries", "Results are limited to 50 by default and do not include archived issues unless explicitly requested"]
 examples = ['{"query": "login bug"}']
 related = ["linear.get_issue"]
 
@@ -248,7 +248,7 @@ max_response_bytes = 5242880
 
 [provides.operations."linear.list_teams".ai_hints]
 when_to_use = "List available teams in the workspace."
-common_mistakes = []
+common_mistakes = ["The returned team IDs are UUIDs, not the short team key like 'ENG' — use the UUID when creating issues or querying cycles"]
 examples = ['{}']
 related = ["linear.create_issue"]
 
@@ -291,7 +291,7 @@ max_response_bytes = 5242880
 
 [provides.operations."linear.list_cycles".ai_hints]
 when_to_use = "List sprints/cycles for a team."
-common_mistakes = []
+common_mistakes = ["Completed and future cycles are both returned — filter by the 'startsAt' and 'endsAt' fields to find the current active cycle", "Not all teams have cycles enabled; an empty result does not indicate an error"]
 examples = ['{"team_id": "TEAM-123"}']
 related = ["linear.list_teams"]
 
@@ -336,7 +336,7 @@ max_response_bytes = 1048576
 
 [provides.operations."linear.add_comment".ai_hints]
 when_to_use = "Comment on an issue."
-common_mistakes = []
+common_mistakes = ["Comments use Markdown formatting — plain text with special characters may render unexpectedly", "Comments cannot be edited or deleted via the API once created, and all issue subscribers are notified"]
 examples = ['{"issue_id": "LIN-123", "body": "Working on this now."}']
 related = ["linear.get_issue"]
 
@@ -377,7 +377,7 @@ max_response_bytes = 5242880
 
 [provides.operations."linear.list_projects".ai_hints]
 when_to_use = "List projects."
-common_mistakes = []
+common_mistakes = ["Projects span multiple teams — do not assume a project belongs to a single team", "Archived projects are excluded by default; the result set only includes active projects"]
 examples = ['{}']
 related = ["linear.list_teams"]
 

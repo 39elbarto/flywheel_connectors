@@ -206,7 +206,7 @@ max_response_bytes = 1048576
 
 [provides.operations."spotify.artist.get".ai_hints]
 when_to_use = "Fetch artist metadata for a known artist ID."
-common_mistakes = []
+common_mistakes = ["Passing a Spotify URI (spotify:artist:...) or URL instead of the bare artist ID string."]
 examples = ['{"artist_id": "06HL4z0CvFAxyc27GXpf02"}']
 related = ["spotify.search", "spotify.album.get", "spotify.track.get"]
 
@@ -382,7 +382,7 @@ max_response_bytes = 1048576
 
 [provides.operations."spotify.library.remove_track".ai_hints]
 when_to_use = "Remove a saved track from the user's library."
-common_mistakes = []
+common_mistakes = ["Removing a track that is not in the library — the API returns success silently, so verify with list_saved_tracks first if confirmation is needed."]
 examples = ['{"track_id": "11dFghVXANMlKmJXsNCbNl"}']
 related = ["spotify.library.list_saved_tracks", "spotify.library.save_track"]
 

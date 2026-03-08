@@ -508,7 +508,7 @@ max_response_bytes = 10485760
 
 [provides.operations."figma.get_file_styles".ai_hints]
 when_to_use = "List all published styles (colors, text styles, effects, grids) in a file."
-common_mistakes = []
+common_mistakes = ["Using this for structured design tokens — use figma.styles.list instead for normalized token output."]
 examples = ['{"file_key": "abc123DEF456"}']
 related = [
     "figma.get_file",
@@ -818,7 +818,7 @@ max_response_bytes = 2097152
 
 [provides.operations."figma.list_file_versions".ai_hints]
 when_to_use = "Retrieve version history for a Figma file."
-common_mistakes = []
+common_mistakes = ["Expecting version IDs to match the numeric version shown in the Figma UI — API version IDs are opaque strings."]
 examples = ['{"file_key": "abc123DEF456"}']
 related = ["figma.get_file"]
 
@@ -880,7 +880,7 @@ max_response_bytes = 2097152
 
 [provides.operations."figma.list_comments".ai_hints]
 when_to_use = "Retrieve all comments and replies on a Figma file."
-common_mistakes = []
+common_mistakes = ["Treating reply threads as top-level comments — replies are nested under parent_id and must be correlated."]
 examples = ['{"file_key": "abc123DEF456"}']
 related = [
     "figma.post_comment",
@@ -1183,7 +1183,7 @@ max_response_bytes = 1048576
 
 [provides.operations."figma.list_webhooks".ai_hints]
 when_to_use = "List all registered webhooks for a team to check status or find IDs."
-common_mistakes = []
+common_mistakes = ["Passing a file_key instead of team_id — webhooks are scoped to teams, not individual files."]
 examples = ['{"team_id": "12345"}']
 related = [
     "figma.create_webhook",
@@ -1233,7 +1233,7 @@ max_response_bytes = 1048576
 
 [provides.operations."figma.delete_webhook".ai_hints]
 when_to_use = "Remove a webhook subscription."
-common_mistakes = []
+common_mistakes = ["Using the team_id instead of the webhook_id — delete requires the specific webhook ID from list_webhooks."]
 examples = ['{"webhook_id": "67890"}']
 related = ["figma.list_webhooks"]
 

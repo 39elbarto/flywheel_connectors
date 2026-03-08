@@ -560,7 +560,10 @@ max_response_bytes = 2097152
 
 [provides.operations."twilio.list_recordings".ai_hints]
 when_to_use = "List call recordings. Filter by call_sid to find recordings for a specific call."
-common_mistakes = []
+common_mistakes = [
+    "Not filtering by call_sid, which returns all account recordings and can be very large.",
+    "Confusing Recording SIDs (RE prefix) with Call SIDs (CA prefix) or Message SIDs (SM prefix).",
+]
 examples = ['{"call_sid": "CAxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"}']
 related = [
     "twilio.download_recording",
@@ -767,7 +770,10 @@ max_response_bytes = 1048576
 
 [provides.operations."twilio.get_account".ai_hints]
 when_to_use = "Check account status, type, and balance."
-common_mistakes = []
+common_mistakes = [
+    "Assuming the balance field is always present — it requires the account owner's credentials, not a subaccount key.",
+    "Using this endpoint to check rate limits — Twilio rate limit headers are returned per-request, not via account info.",
+]
 examples = ["{}"]
 related = [
     "twilio.list_messages",
@@ -833,7 +839,10 @@ max_response_bytes = 2097152
 
 [provides.operations."twilio.list_phone_numbers".ai_hints]
 when_to_use = "List phone numbers on the account to find available sender numbers."
-common_mistakes = []
+common_mistakes = [
+    "Assuming all listed numbers support SMS — some numbers are voice-only; check the capabilities object.",
+    "Not handling pagination when the account owns many phone numbers.",
+]
 examples = ["{}"]
 related = [
     "twilio.send_message",

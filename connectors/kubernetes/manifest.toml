@@ -169,7 +169,10 @@ max_response_bytes = 5242880
 
 [provides.operations."kubernetes.get_configmap".ai_hints]
 when_to_use = "Read configuration data from a ConfigMap."
-common_mistakes = []
+common_mistakes = [
+    "Forgetting to specify the namespace — ConfigMaps are namespace-scoped and 'default' may not be the intended namespace.",
+    "Confusing ConfigMap data (string key-value pairs) with binaryData (base64-encoded) entries.",
+]
 examples = ['{"namespace": "production", "name": "app-config"}']
 related = [
     "kubernetes.update_configmap",
@@ -227,7 +230,10 @@ max_response_bytes = 5242880
 
 [provides.operations."kubernetes.get_deployment".ai_hints]
 when_to_use = "Retrieve details about a specific deployment."
-common_mistakes = []
+common_mistakes = [
+    "Forgetting to specify the namespace — deployments are namespace-scoped.",
+    "Confusing the deployment name with the pod name (pods have a random suffix like '-5f4b8c9-x7k2p').",
+]
 examples = ['{"namespace": "production", "name": "api-server"}']
 related = [
     "kubernetes.list_deployments",
@@ -474,7 +480,10 @@ max_response_bytes = 5242880
 
 [provides.operations."kubernetes.get_service".ai_hints]
 when_to_use = "Retrieve details about a Kubernetes service."
-common_mistakes = []
+common_mistakes = [
+    "Confusing service name with the DNS name — in-cluster DNS uses <service>.<namespace>.svc.cluster.local format.",
+    "Not specifying namespace — services are namespace-scoped and 'default' is often not the target namespace.",
+]
 examples = ['{"namespace": "production", "name": "api-server"}']
 related = ["kubernetes.list_pods"]
 
@@ -526,7 +535,10 @@ max_response_bytes = 52428800
 
 [provides.operations."kubernetes.list_deployments".ai_hints]
 when_to_use = "List all deployments in a namespace."
-common_mistakes = []
+common_mistakes = [
+    "Not using label selectors on large namespaces — listing all deployments can be slow and return excessive data.",
+    "Forgetting that StatefulSets and DaemonSets are not included — this only lists Deployment resources.",
+]
 examples = ['{"namespace": "production"}']
 related = [
     "kubernetes.get_deployment",

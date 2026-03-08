@@ -119,7 +119,7 @@ max_response_bytes = 1048576
 
 [provides.operations."stripe.get_customer".ai_hints]
 when_to_use = "Look up a customer by their Stripe ID."
-common_mistakes = []
+common_mistakes = ["Using a test-mode key (sk_test_) to look up live-mode customers or vice versa."]
 examples = ['{"customer_id": "cus_abc123"}']
 related = ["stripe.create_customer", "stripe.list_customers"]
 
@@ -355,7 +355,7 @@ max_response_bytes = 1048576
 
 [provides.operations."stripe.get_payment_intent".ai_hints]
 when_to_use = "Check status of a payment intent."
-common_mistakes = []
+common_mistakes = ["Not checking the status field — a payment_intent can be requires_action, processing, or canceled, not just succeeded."]
 examples = ['{"payment_intent_id": "pi_abc123"}']
 related = ["stripe.create_payment_intent"]
 
@@ -492,7 +492,7 @@ max_response_bytes = 1048576
 
 [provides.operations."stripe.get_subscription".ai_hints]
 when_to_use = "Check status and billing cycle details for a subscription."
-common_mistakes = []
+common_mistakes = ["Assuming the subscription is active without checking the status field (it may be past_due, canceled, or trialing)."]
 examples = ['{"subscription_id": "sub_abc123"}']
 related = ["stripe.create_subscription", "stripe.cancel_subscription"]
 
@@ -635,7 +635,7 @@ max_response_bytes = 5242880
 
 [provides.operations."stripe.list_invoices".ai_hints]
 when_to_use = "List invoices, optionally filtered by customer."
-common_mistakes = []
+common_mistakes = ["Not paginating with starting_after — only the first page is returned by default."]
 examples = ['{"customer": "cus_abc123", "limit": 10}']
 related = ["stripe.get_customer", "stripe.get_invoice"]
 
@@ -678,7 +678,7 @@ max_response_bytes = 1048576
 
 [provides.operations."stripe.get_invoice".ai_hints]
 when_to_use = "Retrieve full invoice details for reconciliation."
-common_mistakes = []
+common_mistakes = ["Confusing invoice amounts — all monetary values are in the smallest currency unit (e.g. cents for USD)."]
 examples = ['{"invoice_id": "in_abc123"}']
 related = ["stripe.list_invoices", "stripe.get_subscription"]
 
@@ -719,7 +719,7 @@ max_response_bytes = 1048576
 
 [provides.operations."stripe.get_balance".ai_hints]
 when_to_use = "Check the current account balance."
-common_mistakes = []
+common_mistakes = ["Balance amounts are per-currency — check the available and pending arrays for each currency separately."]
 examples = ['{}']
 related = ["stripe.list_invoices"]
 

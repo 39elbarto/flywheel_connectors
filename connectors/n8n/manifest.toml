@@ -95,7 +95,10 @@ max_response_bytes = 10485760
 
 [provides.operations."n8n.executions.get".ai_hints]
 when_to_use = "Retrieve details of a specific workflow execution by ID."
-common_mistakes = []
+common_mistakes = [
+    "Using the workflow ID instead of the execution ID.",
+    "Querying an execution before it has finished — check the 'finished' field in the response.",
+]
 examples = ['{"id": "50001"}']
 related = [
     "n8n.executions.list",
@@ -141,7 +144,10 @@ max_response_bytes = 10485760
 
 [provides.operations."n8n.executions.list".ai_hints]
 when_to_use = "List recent workflow executions in n8n."
-common_mistakes = []
+common_mistakes = [
+    "Expecting executions from all workflows — results may be limited to the most recent across the instance.",
+    "Not paginating when the execution history is large.",
+]
 examples = ["{}"]
 related = [
     "n8n.executions.get",
@@ -198,7 +204,10 @@ max_response_bytes = 1048576
 
 [provides.operations."n8n.workflows.activate".ai_hints]
 when_to_use = "Activate or deactivate an n8n workflow."
-common_mistakes = []
+common_mistakes = [
+    "Activating a workflow that has webhook or cron triggers without verifying its trigger configuration first.",
+    "Passing the workflow name instead of the numeric workflow ID.",
+]
 examples = ['{"id": "1001", "active": true}']
 related = [
     "n8n.workflows.get",
@@ -254,7 +263,9 @@ max_response_bytes = 10485760
 
 [provides.operations."n8n.workflows.get".ai_hints]
 when_to_use = "Retrieve details of a specific n8n workflow by ID."
-common_mistakes = []
+common_mistakes = [
+    "Using the workflow name or slug instead of the numeric workflow ID.",
+]
 examples = ['{"id": "1001"}']
 related = [
     "n8n.workflows.list",
@@ -300,7 +311,9 @@ max_response_bytes = 10485760
 
 [provides.operations."n8n.workflows.list".ai_hints]
 when_to_use = "List all workflows in the n8n instance."
-common_mistakes = []
+common_mistakes = [
+    "Assuming only active workflows are returned — inactive workflows are included in the list.",
+]
 examples = ["{}"]
 related = [
     "n8n.workflows.get",

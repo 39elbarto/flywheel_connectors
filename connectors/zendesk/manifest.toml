@@ -452,7 +452,10 @@ max_response_bytes = 2097152
 
 [provides.operations."zendesk.list_ticket_comments".ai_hints]
 when_to_use = "Retrieve the comment thread on a ticket."
-common_mistakes = []
+common_mistakes = [
+    "Using the ticket subject or external ID instead of the numeric ticket_id.",
+    "Forgetting that internal notes and public comments are both returned — check the 'public' field on each comment.",
+]
 examples = ['{"ticket_id": 12345, "sort_order": "asc"}']
 related = ["zendesk.get_ticket", "zendesk.update_ticket"]
 
@@ -569,7 +572,10 @@ max_response_bytes = 2097152
 
 [provides.operations."zendesk.get_article".ai_hints]
 when_to_use = "Retrieve a specific Help Center article by its ID."
-common_mistakes = []
+common_mistakes = [
+    "Not specifying locale for multi-language Help Centers — defaults to the Help Center's primary language.",
+    "Using the article URL slug instead of the numeric article_id.",
+]
 examples = ['{"article_id": 360001234567}']
 related = ["zendesk.search_articles"]
 

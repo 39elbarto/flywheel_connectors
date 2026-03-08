@@ -123,7 +123,7 @@ max_response_bytes = 1048576
 
 [provides.operations."github.get_issue".ai_hints]
 when_to_use = "Retrieve details about a specific issue."
-common_mistakes = []
+common_mistakes = ["Using the issue ID (numeric database ID) instead of the issue number — the API expects the human-readable issue_number shown in the UI."]
 examples = ['{"owner": "octocat", "repo": "hello-world", "issue_number": 42}']
 related = ["github.create_issue", "github.search_issues"]
 
@@ -266,7 +266,7 @@ max_response_bytes = 1048576
 
 [provides.operations."github.get_pull_request".ai_hints]
 when_to_use = "Retrieve details about a specific pull request."
-common_mistakes = []
+common_mistakes = ["Confusing the pull request number with the merge commit SHA — use the PR number from the URL, not a commit reference."]
 examples = ['{"owner": "octocat", "repo": "hello-world", "pull_number": 1}']
 related = ["github.create_pull_request", "github.merge_pull_request"]
 
@@ -360,7 +360,7 @@ max_response_bytes = 1048576
 
 [provides.operations."github.get_repo".ai_hints]
 when_to_use = "Retrieve metadata about a repository."
-common_mistakes = []
+common_mistakes = ["Using the full URL or 'owner/repo' as a single string — owner and repo must be passed as separate parameters."]
 examples = ['{"owner": "octocat", "repo": "hello-world"}']
 related = ["github.search_repos"]
 
@@ -405,7 +405,7 @@ max_response_bytes = 10485760
 
 [provides.operations."github.search_repos".ai_hints]
 when_to_use = "Search for repositories matching a query."
-common_mistakes = []
+common_mistakes = ["Not using GitHub search qualifiers (e.g., 'language:', 'org:', 'stars:') — plain text queries return noisy results without proper scoping."]
 examples = ['{"query": "language:rust stars:>1000"}']
 related = ["github.get_repo"]
 
@@ -452,7 +452,7 @@ max_response_bytes = 5242880
 
 [provides.operations."github.list_workflows".ai_hints]
 when_to_use = "List CI/CD workflows in a repository."
-common_mistakes = []
+common_mistakes = ["Confusing workflow IDs with workflow run IDs — workflow IDs identify the .yml definition, while run IDs identify a specific execution."]
 examples = ['{"owner": "octocat", "repo": "hello-world"}']
 related = ["github.trigger_workflow"]
 

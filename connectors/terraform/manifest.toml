@@ -48,6 +48,15 @@ host_allow = ["app.terraform.io", "*.terraform.io"]
 port_allow = [443]
 require_sni = true
 
+[provides.operations."terraform.init".ai_hints]
+when_to_use = "Initialize a Terraform working directory before running plan or apply."
+common_mistakes = [
+    "Running init in the wrong workspace — always verify workspace_id matches the intended environment.",
+    "Not re-running init after changing provider versions or backend configuration.",
+]
+examples = ['{"workspace_id": "ws-abc123"}']
+related = ["terraform.validate", "terraform.plan"]
+
 [provides.operations."terraform.validate"]
 description = "Validate Terraform configuration syntax and consistency"
 capability = "terraform.plan"
@@ -62,6 +71,15 @@ output_schema = { type = "object", required = ["valid", "diagnostics"] }
 host_allow = ["app.terraform.io", "*.terraform.io"]
 port_allow = [443]
 require_sni = true
+
+[provides.operations."terraform.validate".ai_hints]
+when_to_use = "Check configuration syntax and consistency before planning."
+common_mistakes = [
+    "Assuming validate catches all errors — it only checks syntax and internal consistency, not provider-side issues.",
+    "Not running init first — validate requires initialized providers and modules.",
+]
+examples = ['{"workspace_id": "ws-abc123"}']
+related = ["terraform.init", "terraform.plan"]
 
 [provides.operations."terraform.plan"]
 description = "Generate a Terraform execution plan (read-only)"
@@ -78,6 +96,16 @@ host_allow = ["app.terraform.io", "*.terraform.io"]
 port_allow = [443]
 require_sni = true
 
+[provides.operations."terraform.plan".ai_hints]
+when_to_use = "Generate an execution plan to preview changes before applying."
+common_mistakes = [
+    "Treating plan output as current state — plans are speculative and may differ at apply time if infrastructure changes.",
+    "Not reviewing resource_changes carefully — a 'replace' (destroy+create) is much more disruptive than an 'update'.",
+    "Forgetting that plan acquires a state lock — concurrent plans on the same workspace will fail.",
+]
+examples = ['{"workspace_id": "ws-abc123"}']
+related = ["terraform.show_plan", "terraform.apply"]
+
 [provides.operations."terraform.show_plan"]
 description = "Display details of a saved plan file"
 capability = "terraform.plan"
@@ -92,6 +120,15 @@ output_schema = { type = "object", required = ["plan_id", "status", "resources"]
 host_allow = ["app.terraform.io", "*.terraform.io"]
 port_allow = [443]
 require_sni = true
+
+[provides.operations."terraform.show_plan".ai_hints]
+when_to_use = "Inspect the details of a previously generated plan."
+common_mistakes = [
+    "Using a stale plan_id — plans expire and become invalid after infrastructure or configuration changes.",
+    "Not checking if the plan was generated with the current state version.",
+]
+examples = ['{"plan_id": "run-abc123"}']
+related = ["terraform.plan", "terraform.apply"]
 
 [provides.operations."terraform.detect_drift"]
 description = "Detect configuration drift against real infrastructure"
@@ -108,6 +145,15 @@ host_allow = ["app.terraform.io", "*.terraform.io"]
 port_allow = [443]
 require_sni = true
 
+[provides.operations."terraform.detect_drift".ai_hints]
+when_to_use = "Detect if real infrastructure has drifted from the Terraform state."
+common_mistakes = [
+    "Interpreting all drift as problematic — some drift is expected (e.g., auto-scaling group sizes, timestamps).",
+    "Not understanding that drift detection performs a refresh, which acquires a state lock.",
+]
+examples = ['{"workspace_id": "ws-abc123"}']
+related = ["terraform.plan", "terraform.state_list"]
+
 [provides.operations."terraform.list_modules"]
 description = "List modules used in the configuration"
 capability = "terraform.plan"
@@ -122,6 +168,15 @@ output_schema = { type = "object", required = ["modules"] }
 host_allow = ["app.terraform.io", "*.terraform.io"]
 port_allow = [443]
 require_sni = true
+
+[provides.operations."terraform.list_modules".ai_hints]
+when_to_use = "List Terraform modules used in the configuration for auditing or dependency analysis."
+common_mistakes = [
+    "Confusing registry modules (e.g., hashicorp/consul/aws) with local path modules — they have different source formats.",
+    "Not checking module version constraints — pinned versions may be outdated.",
+]
+examples = ['{"organization": "my-org"}']
+related = ["terraform.validate", "terraform.init"]
 
 # ── Dangerous apply/destroy operations ──────────────────────────────
 
@@ -140,6 +195,17 @@ host_allow = ["app.terraform.io", "*.terraform.io"]
 port_allow = [443]
 require_sni = true
 
+[provides.operations."terraform.apply".ai_hints]
+when_to_use = "Apply a previously generated plan to create, update, or destroy infrastructure resources."
+common_mistakes = [
+    "Applying without reviewing the plan first — always inspect resource_changes from terraform.plan or terraform.show_plan.",
+    "Applying a stale plan after infrastructure has changed — the plan may no longer be valid.",
+    "Not understanding that apply acquires and holds a state lock for the entire duration.",
+    "Applying to the wrong workspace — double-check run_id maps to the intended environment.",
+]
+examples = ['{"run_id": "run-abc123"}']
+related = ["terraform.plan", "terraform.show_plan"]
+
 [provides.operations."terraform.destroy"]
 description = "Destroy all resources managed by a configuration"
 capability = "terraform.apply"
@@ -154,6 +220,17 @@ output_schema = { type = "object", required = ["status", "destroyed"] }
 host_allow = ["app.terraform.io", "*.terraform.io"]
 port_allow = [443]
 require_sni = true
+
+[provides.operations."terraform.destroy".ai_hints]
+when_to_use = "Destroy all resources managed by a Terraform workspace. This is irreversible for most resources."
+common_mistakes = [
+    "Destroying production workspaces without confirming the target — this deletes ALL managed resources.",
+    "Not checking for resources with prevent_destroy lifecycle rules — destroy will fail partway through.",
+    "Forgetting that destroy acquires a state lock and may take a long time for large configurations.",
+    "Not planning a destroy first to review what will be removed.",
+]
+examples = ['{"workspace_id": "ws-abc123"}']
+related = ["terraform.plan", "terraform.state_list"]
 
 # ── State read operations ───────────────────────────────────────────
 
@@ -172,6 +249,15 @@ host_allow = ["app.terraform.io", "*.terraform.io"]
 port_allow = [443]
 require_sni = true
 
+[provides.operations."terraform.state_list".ai_hints]
+when_to_use = "List all resource addresses in the Terraform state for inventory or auditing."
+common_mistakes = [
+    "Confusing resource addresses (e.g., module.vpc.aws_subnet.main[0]) with resource IDs (provider-specific identifiers).",
+    "Assuming the state reflects current infrastructure — state may be stale if resources were modified outside Terraform.",
+]
+examples = ['{"workspace_id": "ws-abc123"}']
+related = ["terraform.state_show", "terraform.detect_drift"]
+
 [provides.operations."terraform.state_show"]
 description = "Show attributes of a single resource in state"
 capability = "terraform.state"
@@ -187,6 +273,16 @@ host_allow = ["app.terraform.io", "*.terraform.io"]
 port_allow = [443]
 require_sni = true
 
+[provides.operations."terraform.state_show".ai_hints]
+when_to_use = "Inspect the attributes of a single resource in the Terraform state."
+common_mistakes = [
+    "Using incorrect resource address syntax — module resources require the full path (e.g., module.vpc.aws_subnet.main).",
+    "Not using array index for count-based resources (e.g., aws_instance.web[0] vs aws_instance.web).",
+    "Assuming shown attributes are current — run detect_drift to verify.",
+]
+examples = ['{"workspace_id": "ws-abc123", "resource_address": "aws_instance.web[0]"}']
+related = ["terraform.state_list", "terraform.detect_drift"]
+
 [provides.operations."terraform.output"]
 description = "Read Terraform output values"
 capability = "terraform.state"
@@ -201,6 +297,15 @@ output_schema = { type = "object", required = ["outputs"] }
 host_allow = ["app.terraform.io", "*.terraform.io"]
 port_allow = [443]
 require_sni = true
+
+[provides.operations."terraform.output".ai_hints]
+when_to_use = "Read Terraform output values to retrieve computed infrastructure details (IPs, endpoints, ARNs)."
+common_mistakes = [
+    "Assuming outputs are always up to date — outputs reflect the last apply, not current infrastructure state.",
+    "Not checking for sensitive outputs — they may be redacted unless explicitly unmasked.",
+]
+examples = ['{"workspace_id": "ws-abc123"}']
+related = ["terraform.state_show", "terraform.state_list"]
 
 # ── State write operation ───────────────────────────────────────────
 
@@ -218,6 +323,17 @@ output_schema = { type = "object", required = ["status", "imported"] }
 host_allow = ["app.terraform.io", "*.terraform.io"]
 port_allow = [443]
 require_sni = true
+
+[provides.operations."terraform.import".ai_hints]
+when_to_use = "Import an existing cloud resource into Terraform state so it can be managed by Terraform."
+common_mistakes = [
+    "Using the wrong resource_id format — each provider has its own ID format (e.g., AWS ARN vs Azure resource ID vs GCP self-link).",
+    "Not writing the corresponding resource block in configuration before importing — import adds state but not config.",
+    "Importing into the wrong resource_address — double-check module path and resource name.",
+    "Not running plan after import to verify the configuration matches the imported resource's actual attributes.",
+]
+examples = ['{"workspace_id": "ws-abc123", "resource_address": "aws_instance.web", "resource_id": "i-0123456789abcdef0"}']
+related = ["terraform.state_list", "terraform.state_show", "terraform.plan"]
 
 # ── Sandbox ─────────────────────────────────────────────────────────
 

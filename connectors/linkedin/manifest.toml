@@ -149,7 +149,10 @@ max_response_bytes = 1048576
 
 [provides.operations."linkedin.posts.delete".ai_hints]
 when_to_use = "Delete a LinkedIn post. Cannot be undone."
-common_mistakes = []
+common_mistakes = [
+    "Using a post URL slug instead of the full URN (e.g., 'urn:li:share:abc123').",
+    "Attempting to delete another user's post — only posts authored by the authenticated user can be deleted.",
+]
 examples = ['{"post_id": "urn:li:share:abc123"}']
 related = ["linkedin.posts.list"]
 
@@ -196,7 +199,10 @@ max_response_bytes = 10485760
 
 [provides.operations."linkedin.posts.list".ai_hints]
 when_to_use = "List recent LinkedIn posts."
-common_mistakes = []
+common_mistakes = [
+    "Requesting more than 100 posts per page, which exceeds the LinkedIn API maximum.",
+    "Assuming the results include all post types — the API only returns posts from the authenticated member's feed by default.",
+]
 examples = ['{"count": 20}']
 related = ["linkedin.posts.create"]
 
@@ -249,7 +255,10 @@ max_response_bytes = 1048576
 
 [provides.operations."linkedin.profile.get".ai_hints]
 when_to_use = "Get the authenticated LinkedIn profile."
-common_mistakes = []
+common_mistakes = [
+    "Expecting to fetch another user's profile — this endpoint only returns the authenticated user's own profile.",
+    "Assuming all profile fields are included; request additional fields via the projection parameter if needed.",
+]
 examples = ["{}"]
 related = ["linkedin.posts.list"]
 

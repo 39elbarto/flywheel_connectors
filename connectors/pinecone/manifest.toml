@@ -295,7 +295,7 @@ max_response_bytes = 1048576
 
 [provides.operations."pinecone.describe_index".ai_hints]
 when_to_use = "Get details about a specific index: dimension, metric, pod type, replicas."
-common_mistakes = []
+common_mistakes = ["Querying an index that is still initializing and not yet ready for operations."]
 examples = ['{"index_name": "my-index"}']
 related = [
     "pinecone.list_indexes",
@@ -362,7 +362,7 @@ max_response_bytes = 1048576
 
 [provides.operations."pinecone.describe_index_stats".ai_hints]
 when_to_use = "Get vector counts per namespace and overall index utilization."
-common_mistakes = []
+common_mistakes = ["Expecting real-time counts immediately after upsert — stats may lag behind recent writes."]
 examples = ['{"index_name": "my-index"}']
 related = ["pinecone.describe_index"]
 
@@ -460,7 +460,7 @@ max_response_bytes = 1048576
 
 [provides.operations."pinecone.list_indexes".ai_hints]
 when_to_use = "List all Pinecone indexes in the project."
-common_mistakes = []
+common_mistakes = ["Not checking the index status field — indexes may be listed but not yet ready for queries."]
 examples = ["{}"]
 related = ["pinecone.describe_index"]
 

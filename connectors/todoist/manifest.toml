@@ -90,7 +90,7 @@ max_response_bytes = 10485760
 
 [provides.operations."todoist.projects.list".ai_hints]
 when_to_use = "List all Todoist projects."
-common_mistakes = []
+common_mistakes = ["Assuming sub-projects are returned as nested objects; the API returns a flat list and parent-child relationships must be resolved via the parent_id field."]
 examples = ["{}"]
 related = [
     "todoist.tasks.list",
@@ -136,7 +136,7 @@ max_response_bytes = 1048576
 
 [provides.operations."todoist.tasks.complete".ai_hints]
 when_to_use = "Mark a Todoist task as completed."
-common_mistakes = []
+common_mistakes = ["Completing a recurring task closes only the current occurrence and automatically creates the next one; it does not permanently complete the task."]
 examples = ['{"task_id": "task_abc123"}']
 related = [
     "todoist.tasks.list",
@@ -240,7 +240,7 @@ max_response_bytes = 1048576
 
 [provides.operations."todoist.tasks.delete".ai_hints]
 when_to_use = "Permanently delete a Todoist task. Cannot be undone."
-common_mistakes = []
+common_mistakes = ["Using delete when the intent is to complete the task; use todoist.tasks.complete instead to preserve the task in completed history."]
 examples = ['{"task_id": "task_abc123"}']
 related = ["todoist.tasks.list"]
 
@@ -287,7 +287,7 @@ max_response_bytes = 10485760
 
 [provides.operations."todoist.tasks.list".ai_hints]
 when_to_use = "List tasks, optionally filtered by project."
-common_mistakes = []
+common_mistakes = ["Omitting project_id returns tasks from all projects which can be a very large set; filter by project_id when you only need tasks from a specific project."]
 examples = ['{"project_id": "proj_abc123"}']
 related = [
     "todoist.projects.list",

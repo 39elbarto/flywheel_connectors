@@ -115,7 +115,7 @@ max_response_bytes = 1048576
 
 [provides.operations."notion.get_page".ai_hints]
 when_to_use = "Retrieve details of a specific Notion page."
-common_mistakes = []
+common_mistakes = ["This returns page properties only, not page content — use get_block_children to read the actual body blocks", "Page IDs can be with or without hyphens but the integration must have access to the page or a 404 is returned"]
 examples = ['{"page_id": "abc123-def456"}']
 related = ["notion.create_page", "notion.update_page"]
 
@@ -160,7 +160,7 @@ max_response_bytes = 1048576
 
 [provides.operations."notion.update_page".ai_hints]
 when_to_use = "Update properties on an existing Notion page."
-common_mistakes = []
+common_mistakes = ["Property values must match the exact Notion property type schema — for example, a 'select' property requires {select: {name: '...'}} not a plain string", "This only updates page properties, not page content — use update_block or append_blocks to modify body content"]
 examples = ['{"page_id": "abc123", "properties": {"Status": {"select": {"name": "Done"}}}}']
 related = ["notion.get_page"]
 
@@ -246,7 +246,7 @@ max_response_bytes = 1048576
 
 [provides.operations."notion.get_database".ai_hints]
 when_to_use = "Retrieve a database schema and properties."
-common_mistakes = []
+common_mistakes = ["This returns the database schema and metadata, not the rows — use query_database to retrieve entries", "Database IDs look similar to page IDs; using a page ID here returns a 404 or validation error"]
 examples = ['{"database_id": "abc123-def456"}']
 related = ["notion.query_database", "notion.update_database"]
 
@@ -342,7 +342,7 @@ max_response_bytes = 1048576
 
 [provides.operations."notion.update_database".ai_hints]
 when_to_use = "Update a database schema, title, or description."
-common_mistakes = []
+common_mistakes = ["Renaming or removing a property column can cause data loss for all existing rows that use that property", "Property type changes are restricted — you cannot change a property from 'select' to 'number' without deleting and recreating it"]
 examples = ['{"database_id": "abc123", "title": [{"text": {"content": "Updated Tasks"}}]}']
 related = ["notion.get_database"]
 
@@ -490,7 +490,7 @@ max_response_bytes = 1048576
 
 [provides.operations."notion.get_block".ai_hints]
 when_to_use = "Retrieve a specific block by its ID."
-common_mistakes = []
+common_mistakes = ["Nested blocks (e.g. items inside a toggle or bulleted list) require a separate get_block_children call — they are not included inline", "A page ID can be used as a block ID to get the page's top-level block metadata"]
 examples = ['{"block_id": "abc123"}']
 related = ["notion.get_block_children", "notion.update_block"]
 
@@ -623,7 +623,7 @@ max_response_bytes = 5242880
 
 [provides.operations."notion.get_block_children".ai_hints]
 when_to_use = "Read the content blocks of a page."
-common_mistakes = []
+common_mistakes = ["Results are paginated (max 100 per page) — check has_more and use start_cursor for subsequent pages", "Only returns direct children; nested blocks inside toggles or columns require recursive calls with each child's block_id"]
 examples = ['{"block_id": "abc123"}']
 related = ["notion.get_page", "notion.append_blocks"]
 
@@ -713,7 +713,7 @@ max_response_bytes = 1048576
 
 [provides.operations."notion.add_comment".ai_hints]
 when_to_use = "Add a comment to a Notion page."
-common_mistakes = []
+common_mistakes = ["Comments cannot be edited or deleted once posted via the API", "The parent must use page_id for top-level comments or discussion_id to reply to an existing thread — using block_id is not supported"]
 examples = ['{"parent": {"page_id": "abc123"}, "rich_text": [{"text": {"content": "Looks good!"}}]}']
 related = ["notion.list_comments"]
 
@@ -758,7 +758,7 @@ max_response_bytes = 5242880
 
 [provides.operations."notion.list_comments".ai_hints]
 when_to_use = "Read comments on a page."
-common_mistakes = []
+common_mistakes = ["The block_id parameter must be a page ID to list page-level comments — using a non-page block ID returns an empty list", "Results are paginated; check has_more and use start_cursor to retrieve all comments on pages with many discussions"]
 examples = ['{"block_id": "abc123"}']
 related = ["notion.add_comment"]
 

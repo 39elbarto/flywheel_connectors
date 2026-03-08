@@ -92,7 +92,10 @@ max_response_bytes = 10485760
 
 [provides.operations."cron.executions.list".ai_hints]
 when_to_use = "View execution history for a cron schedule."
-common_mistakes = []
+common_mistakes = [
+    "Omitting schedule_id and expecting executions across all schedules.",
+    "Not accounting for timezone differences when interpreting execution timestamps.",
+]
 examples = ['{"schedule_id": "sched_abc123", "limit": 20}']
 related = ["cron.schedules.list"]
 
@@ -206,7 +209,10 @@ max_response_bytes = 1048576
 
 [provides.operations."cron.schedules.delete".ai_hints]
 when_to_use = "Remove a cron schedule. The operation will no longer be triggered."
-common_mistakes = []
+common_mistakes = [
+    "Deleting a schedule without first checking its recent execution history for in-flight jobs.",
+    "Using schedule name instead of schedule_id.",
+]
 examples = ['{"schedule_id": "sched_abc123"}']
 related = ["cron.schedules.list"]
 
@@ -249,7 +255,9 @@ max_response_bytes = 1048576
 
 [provides.operations."cron.schedules.list".ai_hints]
 when_to_use = "List all configured cron schedules."
-common_mistakes = []
+common_mistakes = [
+    "Assuming the list includes disabled schedules by default — all schedules are returned regardless of enabled state.",
+]
 examples = ["{}"]
 related = [
     "cron.schedules.create",
@@ -298,7 +306,10 @@ max_response_bytes = 1048576
 
 [provides.operations."cron.trigger".ai_hints]
 when_to_use = "Manually trigger a schedule outside its normal cron timing."
-common_mistakes = []
+common_mistakes = [
+    "Triggering a disabled schedule without re-enabling it first.",
+    "Calling trigger repeatedly without waiting for the previous execution to complete.",
+]
 examples = ['{"schedule_id": "sched_abc123"}']
 related = [
     "cron.schedules.list",

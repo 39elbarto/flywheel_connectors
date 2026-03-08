@@ -905,7 +905,7 @@ max_response_bytes = 2097152
 
 [provides.operations."jira.list_comments".ai_hints]
 when_to_use = "Retrieve comments on an issue. Use order_by=-created for newest first."
-common_mistakes = []
+common_mistakes = ["Expecting plain text bodies — Jira Cloud REST API v3 returns comment bodies in Atlassian Document Format (ADF), not Markdown or plain text."]
 examples = ['{"issue_key": "PROJ-123", "max_results": 20, "order_by": "-created"}']
 related = [
     "jira.add_comment",

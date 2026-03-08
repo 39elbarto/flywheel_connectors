@@ -437,7 +437,10 @@ max_response_bytes = 1048576
 
 [provides.operations."homeassistant.list_areas".ai_hints]
 when_to_use = "List areas (rooms) to understand the physical layout for targeted device control."
-common_mistakes = []
+common_mistakes = [
+    "Assuming all entities are assigned to areas — many entities have no area assignment.",
+    "Using area names instead of area IDs when targeting service calls by area.",
+]
 examples = ["{}"]
 related = [
     "homeassistant.list_devices",
@@ -488,7 +491,10 @@ max_response_bytes = 10485760
 
 [provides.operations."homeassistant.list_automations".ai_hints]
 when_to_use = "List all automations to inspect their state or find a specific one."
-common_mistakes = []
+common_mistakes = [
+    "Confusing automation entity_id (automation.night_mode) with the automation's internal unique_id.",
+    "Not checking the 'state' attribute — 'on' means enabled, 'off' means disabled, 'unavailable' means broken config.",
+]
 examples = ["{}"]
 related = [
     "homeassistant.trigger_automation",
@@ -590,7 +596,10 @@ max_response_bytes = 5242880
 
 [provides.operations."homeassistant.list_scenes".ai_hints]
 when_to_use = "List available scenes to discover what can be activated."
-common_mistakes = []
+common_mistakes = [
+    "Assuming scenes are reversible — activating a scene sets entity states but does not store previous states for undo.",
+    "Not checking if scene entities reference unavailable devices before activation.",
+]
 examples = ["{}"]
 related = ["homeassistant.activate_scene"]
 
@@ -639,7 +648,10 @@ max_response_bytes = 10485760
 
 [provides.operations."homeassistant.list_services".ai_hints]
 when_to_use = "Discover available services and their parameters before calling them."
-common_mistakes = []
+common_mistakes = [
+    "Not checking service field descriptions — many services have required fields beyond domain and service name (e.g., brightness for light.turn_on).",
+    "Assuming all listed services are available for every entity in that domain — some services only apply to specific integrations.",
+]
 examples = ["{}"]
 related = ["homeassistant.call_service"]
 
@@ -870,7 +882,10 @@ max_response_bytes = 1048576
 
 [provides.operations."homeassistant.toggle_automation".ai_hints]
 when_to_use = "Enable or disable an automation without deleting it."
-common_mistakes = []
+common_mistakes = [
+    "Disabling safety-critical automations (e.g., leak detection, smoke alarm) without a plan to re-enable them.",
+    "Not verifying the automation entity_id exists — passing an invalid entity_id silently succeeds without error.",
+]
 examples = ['{"entity_id": "automation.night_mode", "enabled": false}']
 related = [
     "homeassistant.list_automations",

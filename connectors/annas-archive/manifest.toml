@@ -158,7 +158,7 @@ max_response_bytes = 1048576
 
 [provides.operations."annas.metadata".ai_hints]
 when_to_use = "Get detailed book metadata when you have the MD5 identifier."
-common_mistakes = []
+common_mistakes = ["Using an uppercase MD5 hash — the identifier must be lowercase hex (32 characters)."]
 examples = ['{"md5": "1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d"}']
 related = [
     "annas.search",
@@ -264,7 +264,7 @@ max_response_bytes = 1048576
 
 [provides.operations."annas.lookup.md5".ai_hints]
 when_to_use = "Look up a specific book when you have its MD5 hash identifier."
-common_mistakes = []
+common_mistakes = ["Confusing lookup.md5 with metadata — lookup returns search-style results while metadata returns the full detail record for a given MD5."]
 examples = ['{"md5": "1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d"}']
 related = [
     "annas.metadata",

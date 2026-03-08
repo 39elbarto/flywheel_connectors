@@ -95,7 +95,7 @@ max_response_bytes = 1048576
 
 [provides.operations."roam.blocks.create".ai_hints]
 when_to_use = "Create a new block on a page."
-common_mistakes = []
+common_mistakes = ["Content uses Roam double-bracket syntax for page references ([[Page]]); using Markdown-style links will create plain text instead of links."]
 examples = ['{"page_uid": "abc123", "content": "TODO: Review architecture"}']
 related = ["roam.blocks.list"]
 
@@ -142,7 +142,7 @@ max_response_bytes = 10485760
 
 [provides.operations."roam.blocks.list".ai_hints]
 when_to_use = "List blocks on a Roam Research page."
-common_mistakes = []
+common_mistakes = ["Blocks are returned in a nested tree structure; child blocks are inside their parent's children array, not flattened at the top level."]
 examples = ['{"page_uid": "abc123"}']
 related = [
     "roam.pages.get",
@@ -198,7 +198,7 @@ max_response_bytes = 1048576
 
 [provides.operations."roam.pages.get".ai_hints]
 when_to_use = "Get a specific page by title."
-common_mistakes = []
+common_mistakes = ["Page titles are case-sensitive; 'Daily Notes' and 'daily notes' are treated as different pages."]
 examples = ['{"title": "Daily Notes"}']
 related = [
     "roam.pages.list",
@@ -244,7 +244,7 @@ max_response_bytes = 10485760
 
 [provides.operations."roam.pages.list".ai_hints]
 when_to_use = "List all pages in the Roam Research graph."
-common_mistakes = []
+common_mistakes = ["Daily note pages are included in results; filter by title format (e.g. 'March 7th, 2026') if you only want user-created pages."]
 examples = ["{}"]
 related = [
     "roam.pages.get",

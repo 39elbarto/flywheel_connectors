@@ -94,7 +94,7 @@ max_response_bytes = 10485760
 
 [provides.operations."monday.boards.list".ai_hints]
 when_to_use = "List Monday.com boards."
-common_mistakes = []
+common_mistakes = ["Not specifying a limit parameter, which defaults to 25 boards; set limit explicitly when you need to retrieve more boards."]
 examples = ["{}"]
 related = [
     "monday.items.list",
@@ -153,7 +153,7 @@ max_response_bytes = 1048576
 
 [provides.operations."monday.items.create".ai_hints]
 when_to_use = "Create a new item on a board."
-common_mistakes = []
+common_mistakes = ["Passing column_values as plain key-value pairs instead of the Monday.com JSON-stringified column format; each column type has its own expected JSON structure."]
 examples = ['{"board_id": "123456789", "item_name": "Fix login bug"}']
 related = [
     "monday.items.list",
@@ -198,7 +198,7 @@ max_response_bytes = 1048576
 
 [provides.operations."monday.items.delete".ai_hints]
 when_to_use = "Delete an item. Cannot be undone."
-common_mistakes = []
+common_mistakes = ["Deleting a parent item also deletes all its subitems; verify the item has no subitems before deleting if you only intend to remove the parent."]
 examples = ['{"item_id": "987654321"}']
 related = ["monday.items.list"]
 
@@ -244,7 +244,7 @@ max_response_bytes = 10485760
 
 [provides.operations."monday.items.list".ai_hints]
 when_to_use = "List items on a Monday.com board."
-common_mistakes = []
+common_mistakes = ["Expecting column values to be included by default; the GraphQL API requires explicitly requesting column_values in the query fields to return them."]
 examples = ['{"board_id": "123456789"}']
 related = [
     "monday.boards.list",

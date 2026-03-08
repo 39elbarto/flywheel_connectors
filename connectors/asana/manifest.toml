@@ -94,7 +94,7 @@ max_response_bytes = 10485760
 
 [provides.operations."asana.projects.list".ai_hints]
 when_to_use = "List projects in an Asana workspace."
-common_mistakes = []
+common_mistakes = ["Passing a project GID instead of a workspace GID; the workspace parameter must be the workspace's numeric GID, not a project identifier."]
 examples = ['{"workspace": "1234567890"}']
 related = [
     "asana.workspaces.list",
@@ -152,7 +152,7 @@ max_response_bytes = 1048576
 
 [provides.operations."asana.tasks.create".ai_hints]
 when_to_use = "Create a new task."
-common_mistakes = []
+common_mistakes = ["Creating a task with only workspace and name places it in no project; add a projects or memberships field to assign it to a specific project."]
 examples = ['{"workspace": "1234567890", "name": "Fix login timeout", "notes": "Users report 30s timeouts"}']
 related = [
     "asana.tasks.list",
@@ -198,7 +198,7 @@ max_response_bytes = 1048576
 
 [provides.operations."asana.tasks.delete".ai_hints]
 when_to_use = "Delete a task. Cannot be undone."
-common_mistakes = []
+common_mistakes = ["Deleting a task also removes all of its subtasks permanently; verify the task has no subtasks you want to keep before deleting."]
 examples = ['{"task": "1234567890"}']
 related = ["asana.tasks.list"]
 
@@ -245,7 +245,7 @@ max_response_bytes = 10485760
 
 [provides.operations."asana.tasks.list".ai_hints]
 when_to_use = "List tasks in an Asana project."
-common_mistakes = []
+common_mistakes = ["Only top-level tasks in the project are returned; subtasks are not included and must be fetched separately using the parent task's GID."]
 examples = ['{"project": "1234567890"}']
 related = [
     "asana.tasks.create",
@@ -291,7 +291,7 @@ max_response_bytes = 10485760
 
 [provides.operations."asana.workspaces.list".ai_hints]
 when_to_use = "List Asana workspaces."
-common_mistakes = []
+common_mistakes = ["Confusing workspaces with organizations; both are returned by this endpoint and organizations are a type of workspace with additional features."]
 examples = ["{}"]
 related = ["asana.projects.list"]
 

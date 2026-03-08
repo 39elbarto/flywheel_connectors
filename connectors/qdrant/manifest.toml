@@ -156,7 +156,7 @@ max_response_bytes = 1048576
 
 [provides.operations."qdrant.collection_info".ai_hints]
 when_to_use = "Get details about a collection: vector size, distance metric, point count, index status."
-common_mistakes = []
+common_mistakes = ["Assuming the collection exists without checking list_collections first."]
 examples = ['{"collection_name": "my-collection"}']
 related = ["qdrant.list_collections"]
 
@@ -213,7 +213,7 @@ max_response_bytes = 1048576
 
 [provides.operations."qdrant.count".ai_hints]
 when_to_use = "Count points in a collection, optionally filtered."
-common_mistakes = []
+common_mistakes = ["Setting exact=false gives an approximation that can be significantly off for filtered counts."]
 examples = ['{"collection_name": "docs", "exact": true}']
 related = ["qdrant.scroll"]
 
@@ -490,7 +490,7 @@ max_response_bytes = 10485760
 
 [provides.operations."qdrant.get_points".ai_hints]
 when_to_use = "Retrieve specific points by their IDs."
-common_mistakes = []
+common_mistakes = ["Requesting with_vectors=true when only payload data is needed, increasing response size unnecessarily."]
 examples = ['{"collection_name": "docs", "ids": [1, 2, 3]}']
 related = ["qdrant.search"]
 
@@ -537,7 +537,7 @@ max_response_bytes = 1048576
 
 [provides.operations."qdrant.list_collections".ai_hints]
 when_to_use = "List all collections in the Qdrant instance."
-common_mistakes = []
+common_mistakes = ["Calling this repeatedly instead of caching the result when collections change infrequently."]
 examples = ["{}"]
 related = ["qdrant.collection_info"]
 
@@ -683,7 +683,7 @@ max_response_bytes = 10485760
 
 [provides.operations."qdrant.scroll".ai_hints]
 when_to_use = "Paginate through all points in a collection, optionally filtered."
-common_mistakes = []
+common_mistakes = ["Not using the next_page_offset from the response to continue pagination, causing duplicate results."]
 examples = ['{"collection_name": "docs", "limit": 100, "with_payload": true}']
 related = [
     "qdrant.search",

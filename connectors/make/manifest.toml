@@ -91,7 +91,10 @@ max_response_bytes = 10485760
 
 [provides.operations."make.executions.list".ai_hints]
 when_to_use = "List recent executions for a Make scenario."
-common_mistakes = []
+common_mistakes = [
+    "Using the scenario name instead of the numeric scenario_id.",
+    "Expecting executions from all scenarios — you must specify a single scenario_id.",
+]
 examples = ['{"scenario_id": "12345"}']
 related = [
     "make.scenarios.list",
@@ -137,7 +140,9 @@ max_response_bytes = 10485760
 
 [provides.operations."make.scenarios.list".ai_hints]
 when_to_use = "List all scenarios in a Make team."
-common_mistakes = []
+common_mistakes = [
+    "Forgetting that the team ID is configured at the connector level — scenarios from other teams are not returned.",
+]
 examples = ["{}"]
 related = [
     "make.scenarios.run",
@@ -187,7 +192,10 @@ max_response_bytes = 1048576
 
 [provides.operations."make.scenarios.run".ai_hints]
 when_to_use = "Trigger a Make scenario to run."
-common_mistakes = []
+common_mistakes = [
+    "Triggering a scenario that is turned off — it must be active in Make to accept API-triggered runs.",
+    "Running a scenario without checking remaining operations quota in the Make plan.",
+]
 examples = ['{"scenario_id": "12345"}']
 related = [
     "make.scenarios.list",

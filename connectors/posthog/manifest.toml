@@ -95,7 +95,7 @@ max_response_bytes = 52428800
 
 [provides.operations."posthog.events.query".ai_hints]
 when_to_use = "Query PostHog events using HogQL."
-common_mistakes = []
+common_mistakes = ["Writing standard SQL instead of HogQL — use PostHog-specific table names like 'events' and 'persons', and HogQL functions for property access."]
 examples = ['{"query": "SELECT event, count() FROM events GROUP BY event ORDER BY count() DESC LIMIT 10"}']
 related = [
     "posthog.insights.list",
@@ -145,7 +145,7 @@ max_response_bytes = 10485760
 
 [provides.operations."posthog.feature_flags.list".ai_hints]
 when_to_use = "List feature flags in PostHog."
-common_mistakes = []
+common_mistakes = ["Assuming all returned flags are active — check the 'active' field since archived or disabled flags are included in the list."]
 examples = ["{}"]
 related = [
     "posthog.events.query",
@@ -195,7 +195,7 @@ max_response_bytes = 10485760
 
 [provides.operations."posthog.insights.list".ai_hints]
 when_to_use = "List saved insights in PostHog."
-common_mistakes = []
+common_mistakes = ["Expecting full result data in the list response — this returns insight metadata and definitions; run each insight separately for actual analytics data."]
 examples = ["{}"]
 related = [
     "posthog.events.query",

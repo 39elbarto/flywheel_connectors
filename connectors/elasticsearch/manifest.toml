@@ -167,7 +167,7 @@ max_response_bytes = 1048576
 
 [provides.operations."elasticsearch.cluster.health".ai_hints]
 when_to_use = "Check cluster health (green/yellow/red)."
-common_mistakes = []
+common_mistakes = ["Treating yellow status as healthy — it means replicas are unassigned and data redundancy is reduced."]
 examples = ["{}"]
 related = ["elasticsearch.indices.list"]
 
@@ -228,7 +228,7 @@ max_response_bytes = 10485760
 
 [provides.operations."elasticsearch.get_document".ai_hints]
 when_to_use = "Retrieve a specific document by ID."
-common_mistakes = []
+common_mistakes = ["Using a time-based index name (e.g. logs-2026.03) without knowing which index contains the document."]
 examples = ['{"index": "logs-2026.03", "id": "abc123"}']
 related = ["elasticsearch.search"]
 
@@ -296,7 +296,7 @@ max_response_bytes = 1048576
 
 [provides.operations."elasticsearch.index_document".ai_hints]
 when_to_use = "Index a single document."
-common_mistakes = []
+common_mistakes = ["Indexing documents one at a time in a loop instead of using the bulk API for better throughput."]
 examples = ['{"index": "products", "id": "1", "document": {"name": "Widget", "price": 9.99}}']
 related = ["elasticsearch.bulk"]
 
@@ -401,7 +401,7 @@ max_response_bytes = 10485760
 
 [provides.operations."elasticsearch.indices.list".ai_hints]
 when_to_use = "List indices and their metadata."
-common_mistakes = []
+common_mistakes = ["Omitting a pattern filter on clusters with many indices, resulting in a large response payload."]
 examples = ['{"pattern": "logs-*"}']
 related = ["elasticsearch.indices.delete"]
 

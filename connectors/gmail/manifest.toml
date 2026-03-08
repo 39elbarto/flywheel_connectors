@@ -117,7 +117,7 @@ max_response_bytes = 5242880
 
 [provides.operations."gmail.get_message".ai_hints]
 when_to_use = "Read a specific email by ID."
-common_mistakes = []
+common_mistakes = ["Using a thread ID instead of a message ID — they are different identifiers in Gmail", "Not requesting the full format — the default metadata-only response omits the message body"]
 examples = ['{"message_id": "abc123"}']
 related = ["gmail.list_messages", "gmail.search_messages"]
 
@@ -205,7 +205,7 @@ max_response_bytes = 10485760
 
 [provides.operations."gmail.search_messages".ai_hints]
 when_to_use = "Search emails with Gmail query syntax."
-common_mistakes = []
+common_mistakes = ["Using plain text instead of Gmail search operators like from:, to:, subject:, is:unread", "Results are paginated and only return message IDs — you must call get_message for full content"]
 examples = ['{"query": "from:boss@company.com is:unread"}']
 related = ["gmail.get_message", "gmail.list_messages"]
 
@@ -252,7 +252,7 @@ max_response_bytes = 1048576
 
 [provides.operations."gmail.create_draft".ai_hints]
 when_to_use = "Create a draft email without sending it."
-common_mistakes = []
+common_mistakes = ["Draft body must be plain text or base64url-encoded MIME — raw HTML will not render correctly", "Each call creates a new draft; to update an existing draft, use a different API endpoint"]
 examples = ['{"to": "user@example.com", "subject": "Draft", "body": "..."}']
 related = ["gmail.send_message"]
 
@@ -299,7 +299,7 @@ max_response_bytes = 1048576
 
 [provides.operations."gmail.modify_labels".ai_hints]
 when_to_use = "Add or remove labels (like INBOX, STARRED, custom labels)."
-common_mistakes = []
+common_mistakes = ["Using label names instead of label IDs — custom labels require the label ID from list_labels", "Removing the INBOX label effectively archives the message, which may not be intended"]
 examples = ['{"message_id": "abc123", "add_labels": ["STARRED"], "remove_labels": ["UNREAD"]}']
 related = ["gmail.list_labels"]
 
@@ -340,7 +340,7 @@ max_response_bytes = 1048576
 
 [provides.operations."gmail.list_labels".ai_hints]
 when_to_use = "List all available labels."
-common_mistakes = []
+common_mistakes = ["Assuming label names are unique across system and user labels — system labels like INBOX use fixed IDs while user labels have generated IDs"]
 examples = ['{}']
 related = ["gmail.modify_labels"]
 
@@ -383,7 +383,7 @@ max_response_bytes = 1048576
 
 [provides.operations."gmail.trash_message".ai_hints]
 when_to_use = "Move an email to trash."
-common_mistakes = []
+common_mistakes = ["Trashed messages are permanently deleted after 30 days and cannot be recovered after that", "Trashing a message in a thread does not trash the entire thread — each message must be trashed individually"]
 examples = ['{"message_id": "abc123"}']
 related = ["gmail.get_message"]
 

@@ -1109,7 +1109,7 @@ max_response_bytes = 1048576
 
 [provides.operations."m365.mail.create_draft".ai_hints]
 when_to_use = "Create a draft email without sending it. Safer for review workflows."
-common_mistakes = []
+common_mistakes = ["Not specifying the mailbox user principal name — defaults to the authenticated user, which may not be the intended sender in delegated/shared mailbox scenarios."]
 examples = ['{"user_id": "me", "message": {"subject": "Draft", "body": {"contentType": "Text", "content": "Review before sending"}}}']
 related = ["m365.mail.send_message"]
 
@@ -1238,7 +1238,7 @@ max_response_bytes = 5242880
 
 [provides.operations."m365.mail.get_message".ai_hints]
 when_to_use = "Read a specific email message by ID."
-common_mistakes = []
+common_mistakes = ["Using an immutable message ID from a different mailbox or tenant — Graph API message IDs are scoped to a specific mailbox and are not portable across users."]
 examples = ['{"user_id": "me", "message_id": "AAMkAG..."}']
 related = ["m365.mail.list_messages"]
 
@@ -1781,7 +1781,7 @@ max_response_bytes = 1048576
 
 [provides.operations."m365.subscriptions.delete".ai_hints]
 when_to_use = "Remove a webhook subscription when no longer needed."
-common_mistakes = []
+common_mistakes = ["Attempting to delete an already-expired subscription — Graph API subscriptions auto-expire and return 404 after their expirationDateTime."]
 examples = ['{"subscription_id": "sub-123"}']
 related = [
     "m365.subscriptions.create",
@@ -1911,7 +1911,7 @@ max_response_bytes = 1048576
 
 [provides.operations."m365.tasks.create_task".ai_hints]
 when_to_use = "Create a task in Microsoft To Do."
-common_mistakes = []
+common_mistakes = ["Not specifying the task list ID — tasks must be created in a specific To Do list, not at the top level."]
 examples = ['{"user_id": "me", "task_list_id": "AAMkAG...", "title": "Review PR #42", "due_datetime": "2026-03-05T17:00:00Z"}']
 related = [
     "m365.tasks.list_tasks",
@@ -1964,7 +1964,7 @@ max_response_bytes = 1048576
 
 [provides.operations."m365.tasks.list_task_lists".ai_hints]
 when_to_use = "List all To Do task lists for a user."
-common_mistakes = []
+common_mistakes = ["Confusing To Do task lists with Planner plans — this operation only covers Microsoft To Do, not Planner."]
 examples = ['{"user_id": "me"}']
 related = ["m365.tasks.list_tasks"]
 

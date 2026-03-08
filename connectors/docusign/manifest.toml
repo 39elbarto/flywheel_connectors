@@ -384,7 +384,7 @@ max_response_bytes = 5242880
 
 [provides.operations."docusign.get_template".ai_hints]
 when_to_use = "Inspect a template's structure before using it to create envelopes."
-common_mistakes = []
+common_mistakes = ["Using the template name instead of the template ID — templates must be referenced by their GUID, not their display name."]
 examples = ['{"account_id": "abc-123", "template_id": "tmpl-789"}']
 related = [
     "docusign.list_templates",
@@ -534,7 +534,7 @@ max_response_bytes = 5242880
 
 [provides.operations."docusign.list_templates".ai_hints]
 when_to_use = "List available envelope templates to use when creating envelopes."
-common_mistakes = []
+common_mistakes = ["Confusing account-level templates with personal templates — results depend on the account_id and the authenticated user's template sharing permissions."]
 examples = ['{"account_id": "abc-123"}']
 related = [
     "docusign.get_template",

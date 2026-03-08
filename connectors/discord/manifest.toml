@@ -326,7 +326,10 @@ max_response_bytes = 1048576
 
 [provides.operations.get_channel.ai_hints]
 when_to_use = "Get metadata about a Discord channel."
-common_mistakes = []
+common_mistakes = [
+    "Using channel name or URL fragment instead of the numeric snowflake ID.",
+    "Not handling the case where the bot lacks VIEW_CHANNEL permission for the requested channel.",
+]
 examples = ['{"channel_id": "123456789012345678"}']
 related = ["discord.get_guild"]
 
@@ -445,7 +448,10 @@ max_response_bytes = 1048576
 
 [provides.operations.trigger_typing.ai_hints]
 when_to_use = "Show typing indicator before sending a message. Lasts 10 seconds or until a message is sent."
-common_mistakes = []
+common_mistakes = [
+    "Calling trigger_typing after sending a message — the indicator is automatically cleared on send.",
+    "Repeatedly firing typing indicators in a tight loop, which wastes rate limit budget.",
+]
 examples = ['{"channel_id": "123456789012345678"}']
 related = ["discord.send_message"]
 

@@ -1555,6 +1555,7 @@ fn prepare_cli(received_args: &[String]) -> std::result::Result<PreparedCli, Pre
     }
 }
 
+#[allow(clippy::too_many_lines)]
 fn normalize_args(
     received_args: &[String],
 ) -> std::result::Result<NormalizedArgs, DispatchOutcome> {
@@ -3006,5 +3007,686 @@ mod tests {
         assert_eq!(outcome.exit_code, CliExitCode::Validation.into());
         assert_eq!(payload["status"], "ambiguous");
         assert_eq!(payload["error"]["type"], "intent-not-ready");
+    }
+
+    // ── Intent recovery: alias auto-corrections ─────────────────────────
+
+    #[test]
+    fn execute_find_alias_resolves_to_search() {
+        let args = vec![
+            "fwc".to_owned(),
+            "--json".to_owned(),
+            "find".to_owned(),
+            "github".to_owned(),
+        ];
+        let outcome = execute(&args).expect("execution should not fail internally");
+        let payload: Value =
+            serde_json::from_str(&outcome.text).expect("json output should parse cleanly");
+
+        assert_eq!(outcome.exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["command"], "search");
+        assert_eq!(
+            payload["input_normalization"]["applied"][0]["from"],
+            "find"
+        );
+        assert_eq!(
+            payload["input_normalization"]["applied"][0]["to"],
+            "search"
+        );
+    }
+
+    #[test]
+    fn execute_call_alias_resolves_to_invoke() {
+        let args = vec![
+            "fwc".to_owned(),
+            "--json".to_owned(),
+            "call".to_owned(),
+            "github".to_owned(),
+            "issues.create".to_owned(),
+            "--input".to_owned(),
+            "{}".to_owned(),
+        ];
+        let outcome = execute(&args).expect("execution should not fail internally");
+        let payload: Value =
+            serde_json::from_str(&outcome.text).expect("json output should parse cleanly");
+
+        assert_eq!(outcome.exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["command"], "invoke");
+        assert_eq!(
+            payload["input_normalization"]["applied"][0]["from"],
+            "call"
+        );
+    }
+
+    #[test]
+    fn execute_health_alias_resolves_to_status() {
+        let args = vec![
+            "fwc".to_owned(),
+            "--json".to_owned(),
+            "health".to_owned(),
+        ];
+        let outcome = execute(&args).expect("execution should not fail internally");
+        let payload: Value =
+            serde_json::from_str(&outcome.text).expect("json output should parse cleanly");
+
+        assert_eq!(outcome.exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["command"], "status");
+    }
+
+    #[test]
+    fn execute_activate_alias_resolves_to_enable() {
+        let args = vec![
+            "fwc".to_owned(),
+            "--json".to_owned(),
+            "activate".to_owned(),
+            "github".to_owned(),
+        ];
+        let outcome = execute(&args).expect("execution should not fail internally");
+        let payload: Value =
+            serde_json::from_str(&outcome.text).expect("json output should parse cleanly");
+
+        assert_eq!(outcome.exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["command"], "enable");
+    }
+
+    #[test]
+    fn execute_upgrade_alias_resolves_to_update() {
+        let args = vec![
+            "fwc".to_owned(),
+            "--json".to_owned(),
+            "upgrade".to_owned(),
+            "slack".to_owned(),
+        ];
+        let outcome = execute(&args).expect("execution should not fail internally");
+        let payload: Value =
+            serde_json::from_str(&outcome.text).expect("json output should parse cleanly");
+
+        assert_eq!(outcome.exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["command"], "update");
+    }
+
+    #[test]
+    fn execute_preview_alias_resolves_to_simulate() {
+        let args = vec![
+            "fwc".to_owned(),
+            "--json".to_owned(),
+            "preview".to_owned(),
+            "github".to_owned(),
+            "issues.create".to_owned(),
+            "--input".to_owned(),
+            "{}".to_owned(),
+        ];
+        let outcome = execute(&args).expect("execution should not fail internally");
+        let payload: Value =
+            serde_json::from_str(&outcome.text).expect("json output should parse cleanly");
+
+        assert_eq!(outcome.exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["command"], "simulate");
+    }
+
+    #[test]
+    fn execute_tail_alias_resolves_to_logs() {
+        let args = vec![
+            "fwc".to_owned(),
+            "--json".to_owned(),
+            "tail".to_owned(),
+            "github".to_owned(),
+        ];
+        let outcome = execute(&args).expect("execution should not fail internally");
+        let payload: Value =
+            serde_json::from_str(&outcome.text).expect("json output should parse cleanly");
+
+        assert_eq!(outcome.exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["command"], "logs");
+    }
+
+    #[test]
+    fn execute_cfg_alias_resolves_to_config() {
+        let args = vec![
+            "fwc".to_owned(),
+            "--json".to_owned(),
+            "cfg".to_owned(),
+            "schema".to_owned(),
+            "github".to_owned(),
+        ];
+        let outcome = execute(&args).expect("execution should not fail internally");
+        let payload: Value =
+            serde_json::from_str(&outcome.text).expect("json output should parse cleanly");
+
+        assert_eq!(outcome.exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["command"], "config");
+    }
+
+    // ── Intent recovery: typo auto-corrections (readonly) ───────────────
+
+    #[test]
+    fn execute_shwo_typo_resolves_to_show() {
+        let args = vec![
+            "fwc".to_owned(),
+            "--json".to_owned(),
+            "shwo".to_owned(),
+            "github".to_owned(),
+        ];
+        let outcome = execute(&args).expect("execution should not fail internally");
+        let payload: Value =
+            serde_json::from_str(&outcome.text).expect("json output should parse cleanly");
+
+        assert_eq!(outcome.exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["command"], "show");
+        assert_eq!(
+            payload["input_normalization"]["applied"][0]["from"],
+            "shwo"
+        );
+        assert_eq!(
+            payload["input_normalization"]["applied"][0]["to"],
+            "show"
+        );
+    }
+
+    #[test]
+    fn execute_lsit_typo_resolves_to_list() {
+        let args = vec![
+            "fwc".to_owned(),
+            "--json".to_owned(),
+            "lsit".to_owned(),
+        ];
+        let outcome = execute(&args).expect("execution should not fail internally");
+        let payload: Value =
+            serde_json::from_str(&outcome.text).expect("json output should parse cleanly");
+
+        assert_eq!(outcome.exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["command"], "list");
+    }
+
+    #[test]
+    fn execute_schmea_typo_resolves_to_schema() {
+        let args = vec![
+            "fwc".to_owned(),
+            "--json".to_owned(),
+            "schmea".to_owned(),
+            "github".to_owned(),
+        ];
+        let outcome = execute(&args).expect("execution should not fail internally");
+        let payload: Value =
+            serde_json::from_str(&outcome.text).expect("json output should parse cleanly");
+
+        assert_eq!(outcome.exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["command"], "schema");
+    }
+
+    #[test]
+    fn execute_serach_typo_resolves_to_search() {
+        let args = vec![
+            "fwc".to_owned(),
+            "--json".to_owned(),
+            "serach".to_owned(),
+            "github".to_owned(),
+        ];
+        let outcome = execute(&args).expect("execution should not fail internally");
+        let payload: Value =
+            serde_json::from_str(&outcome.text).expect("json output should parse cleanly");
+
+        assert_eq!(outcome.exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["command"], "search");
+    }
+
+    // ── Intent recovery: mutating typos are rejected ────────────────────
+
+    #[test]
+    fn execute_enbale_typo_is_rejected_as_ambiguous() {
+        let args = vec![
+            "fwc".to_owned(),
+            "--json".to_owned(),
+            "enbale".to_owned(),
+            "github".to_owned(),
+        ];
+        let outcome = execute(&args).expect("execution should not fail internally");
+        let payload: Value =
+            serde_json::from_str(&outcome.text).expect("json output should parse cleanly");
+
+        assert_eq!(outcome.exit_code, CliExitCode::AmbiguousCorrection.into());
+        assert_eq!(payload["error"]["type"], "ambiguous-typo");
+        assert!(payload["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("enable"));
+    }
+
+    #[test]
+    fn execute_insatll_typo_is_rejected_as_ambiguous() {
+        let args = vec![
+            "fwc".to_owned(),
+            "--json".to_owned(),
+            "insatll".to_owned(),
+            "github".to_owned(),
+        ];
+        let outcome = execute(&args).expect("execution should not fail internally");
+        let payload: Value =
+            serde_json::from_str(&outcome.text).expect("json output should parse cleanly");
+
+        assert_eq!(outcome.exit_code, CliExitCode::AmbiguousCorrection.into());
+        assert_eq!(payload["error"]["type"], "ambiguous-typo");
+        assert!(payload["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("install"));
+    }
+
+    #[test]
+    fn execute_invoe_typo_is_rejected_as_ambiguous() {
+        let args = vec![
+            "fwc".to_owned(),
+            "--json".to_owned(),
+            "invoe".to_owned(),
+            "github".to_owned(),
+            "issues.create".to_owned(),
+        ];
+        let outcome = execute(&args).expect("execution should not fail internally");
+        let payload: Value =
+            serde_json::from_str(&outcome.text).expect("json output should parse cleanly");
+
+        assert_eq!(outcome.exit_code, CliExitCode::AmbiguousCorrection.into());
+        assert_eq!(payload["error"]["type"], "ambiguous-typo");
+        assert!(payload["error"]["did_you_mean"][0]
+            .as_str()
+            .unwrap()
+            .contains("invoke"));
+    }
+
+    // ── Intent recovery: dangerous shapes ───────────────────────────────
+
+    #[test]
+    fn execute_delete_shape_is_rejected() {
+        let args = vec![
+            "fwc".to_owned(),
+            "--json".to_owned(),
+            "delete".to_owned(),
+            "github".to_owned(),
+        ];
+        let outcome = execute(&args).expect("execution should not fail internally");
+        let payload: Value =
+            serde_json::from_str(&outcome.text).expect("json output should parse cleanly");
+
+        assert_eq!(outcome.exit_code, CliExitCode::AmbiguousCorrection.into());
+        assert_eq!(payload["error"]["type"], "destructive-ambiguity");
+        assert!(payload["error"]["recoverable"] == true);
+    }
+
+    #[test]
+    fn execute_remove_shape_is_rejected() {
+        let args = vec![
+            "fwc".to_owned(),
+            "--json".to_owned(),
+            "remove".to_owned(),
+            "slack".to_owned(),
+        ];
+        let outcome = execute(&args).expect("execution should not fail internally");
+        let payload: Value =
+            serde_json::from_str(&outcome.text).expect("json output should parse cleanly");
+
+        assert_eq!(payload["error"]["type"], "destructive-ambiguity");
+    }
+
+    #[test]
+    fn execute_force_flag_is_rejected() {
+        let args = vec![
+            "fwc".to_owned(),
+            "--json".to_owned(),
+            "--force".to_owned(),
+            "invoke".to_owned(),
+            "github".to_owned(),
+            "issues.create".to_owned(),
+        ];
+        let outcome = execute(&args).expect("execution should not fail internally");
+        let payload: Value =
+            serde_json::from_str(&outcome.text).expect("json output should parse cleanly");
+
+        assert_eq!(payload["error"]["type"], "unsupported-force-flag");
+    }
+
+    // ── Intent recovery: redundant prefix stripping ─────────────────────
+
+    #[test]
+    fn execute_fcp_prefix_stripped() {
+        let args = vec![
+            "fwc".to_owned(),
+            "--json".to_owned(),
+            "fcp".to_owned(),
+            "list".to_owned(),
+        ];
+        let outcome = execute(&args).expect("execution should not fail internally");
+        let payload: Value =
+            serde_json::from_str(&outcome.text).expect("json output should parse cleanly");
+
+        assert_eq!(outcome.exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["command"], "list");
+    }
+
+    #[test]
+    fn execute_flywheel_prefix_stripped() {
+        let args = vec![
+            "fwc".to_owned(),
+            "--json".to_owned(),
+            "flywheel".to_owned(),
+            "show".to_owned(),
+            "github".to_owned(),
+        ];
+        let outcome = execute(&args).expect("execution should not fail internally");
+        let payload: Value =
+            serde_json::from_str(&outcome.text).expect("json output should parse cleanly");
+
+        assert_eq!(outcome.exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["command"], "show");
+    }
+
+    #[test]
+    fn execute_service_prefix_stripped() {
+        let args = vec![
+            "fwc".to_owned(),
+            "--json".to_owned(),
+            "service".to_owned(),
+            "status".to_owned(),
+        ];
+        let outcome = execute(&args).expect("execution should not fail internally");
+        let payload: Value =
+            serde_json::from_str(&outcome.text).expect("json output should parse cleanly");
+
+        assert_eq!(outcome.exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["command"], "status");
+    }
+
+    #[test]
+    fn execute_plugin_prefix_stripped() {
+        let args = vec![
+            "fwc".to_owned(),
+            "--json".to_owned(),
+            "plugin".to_owned(),
+            "ops".to_owned(),
+            "github".to_owned(),
+        ];
+        let outcome = execute(&args).expect("execution should not fail internally");
+        let payload: Value =
+            serde_json::from_str(&outcome.text).expect("json output should parse cleanly");
+
+        assert_eq!(outcome.exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["command"], "ops");
+    }
+
+    // ── Intent recovery: config subcommand aliases ──────────────────────
+
+    #[test]
+    fn execute_config_validate_resolves_to_doctor() {
+        let args = vec![
+            "fwc".to_owned(),
+            "--json".to_owned(),
+            "config".to_owned(),
+            "validate".to_owned(),
+            "github".to_owned(),
+        ];
+        let outcome = execute(&args).expect("execution should not fail internally");
+        let payload: Value =
+            serde_json::from_str(&outcome.text).expect("json output should parse cleanly");
+
+        assert_eq!(outcome.exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["command"], "config");
+        // The config subcommand is captured inside the serialized args
+        assert_eq!(payload["captures"]["command"]["subcommand"], "doctor");
+    }
+
+    #[test]
+    fn execute_config_show_resolves_to_get() {
+        let args = vec![
+            "fwc".to_owned(),
+            "--json".to_owned(),
+            "config".to_owned(),
+            "show".to_owned(),
+            "github".to_owned(),
+        ];
+        let outcome = execute(&args).expect("execution should not fail internally");
+        let payload: Value =
+            serde_json::from_str(&outcome.text).expect("json output should parse cleanly");
+
+        assert_eq!(outcome.exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["command"], "config");
+        assert_eq!(payload["captures"]["command"]["subcommand"], "get");
+    }
+
+    #[test]
+    fn execute_config_rm_resolves_to_unset() {
+        let args = vec![
+            "fwc".to_owned(),
+            "--json".to_owned(),
+            "config".to_owned(),
+            "rm".to_owned(),
+            "github".to_owned(),
+            "auth.token".to_owned(),
+        ];
+        let outcome = execute(&args).expect("execution should not fail internally");
+        let payload: Value =
+            serde_json::from_str(&outcome.text).expect("json output should parse cleanly");
+
+        assert_eq!(outcome.exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["command"], "config");
+        assert_eq!(payload["captures"]["command"]["subcommand"], "unset");
+    }
+
+    // ── Intent recovery: task subcommand aliases ────────────────────────
+
+    #[test]
+    fn execute_task_view_resolves_to_show() {
+        // First create a capsule
+        let create_args = vec![
+            "fwc".to_owned(),
+            "--json".to_owned(),
+            "task".to_owned(),
+            "show github issues".to_owned(),
+        ];
+        let created = execute(&create_args).expect("task creation should succeed");
+        let payload: Value =
+            serde_json::from_str(&created.text).expect("json output should parse cleanly");
+        let task_id = payload["task"]["id"].as_str().unwrap().to_owned();
+
+        // Then use "view" alias
+        let args = vec![
+            "fwc".to_owned(),
+            "--json".to_owned(),
+            "task".to_owned(),
+            "view".to_owned(),
+            task_id,
+        ];
+        let outcome = execute(&args).expect("execution should not fail internally");
+        let view_payload: Value =
+            serde_json::from_str(&outcome.text).expect("json output should parse cleanly");
+
+        assert_eq!(outcome.exit_code, CliExitCode::Success.into());
+        assert_eq!(view_payload["subcommand"], "show");
+    }
+
+    #[test]
+    fn execute_task_ls_resolves_to_list() {
+        let args = vec![
+            "fwc".to_owned(),
+            "--json".to_owned(),
+            "task".to_owned(),
+            "ls".to_owned(),
+        ];
+        let outcome = execute(&args).expect("execution should not fail internally");
+        let payload: Value =
+            serde_json::from_str(&outcome.text).expect("json output should parse cleanly");
+
+        assert_eq!(outcome.exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["subcommand"], "list");
+    }
+
+    #[test]
+    fn execute_task_confirm_resolves_to_approve() {
+        let create_args = vec![
+            "fwc".to_owned(),
+            "--json".to_owned(),
+            "task".to_owned(),
+            "show github issues".to_owned(),
+        ];
+        let created = execute(&create_args).expect("task creation should succeed");
+        let payload: Value =
+            serde_json::from_str(&created.text).expect("json output should parse cleanly");
+        let task_id = payload["task"]["id"].as_str().unwrap().to_owned();
+
+        let args = vec![
+            "fwc".to_owned(),
+            "--json".to_owned(),
+            "task".to_owned(),
+            "confirm".to_owned(),
+            task_id,
+        ];
+        let outcome = execute(&args).expect("execution should not fail internally");
+        let approve_payload: Value =
+            serde_json::from_str(&outcome.text).expect("json output should parse cleanly");
+
+        assert_eq!(approve_payload["subcommand"], "approve");
+    }
+
+    // ── Intent recovery: combined corrections ───────────────────────────
+
+    #[test]
+    fn execute_connector_prefix_plus_alias_combined() {
+        let args = vec![
+            "fwc".to_owned(),
+            "--json".to_owned(),
+            "connector".to_owned(),
+            "info".to_owned(),
+            "github".to_owned(),
+        ];
+        let outcome = execute(&args).expect("execution should not fail internally");
+        let payload: Value =
+            serde_json::from_str(&outcome.text).expect("json output should parse cleanly");
+
+        assert_eq!(outcome.exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["command"], "show");
+        // Should have two corrections: prefix strip + alias canonicalization
+        assert_eq!(
+            payload["input_normalization"]["applied"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+    }
+
+    // ── Intent recovery: all error payloads have required fields ────────
+
+    #[test]
+    fn error_payloads_always_have_structured_envelope() {
+        let test_cases: Vec<Vec<String>> = vec![
+            // delete shape
+            vec!["fwc", "--json", "delete", "github"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect(),
+            // force flag
+            vec!["fwc", "--json", "--force", "list"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect(),
+            // mutating typo
+            vec!["fwc", "--json", "enbale", "github"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect(),
+            // op show ambiguity
+            vec!["fwc", "--json", "op", "show", "github"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect(),
+        ];
+
+        for args in test_cases {
+            let outcome = execute(&args).expect("execution should not fail internally");
+            let payload: Value =
+                serde_json::from_str(&outcome.text).expect("json output should parse cleanly");
+
+            assert_eq!(payload["status"], "error", "args={args:?}");
+            assert!(
+                payload["error"]["type"].is_string(),
+                "missing error.type for args={args:?}"
+            );
+            assert!(
+                payload["error"]["message"].is_string(),
+                "missing error.message for args={args:?}"
+            );
+            assert!(
+                payload["error"]["did_you_mean"].is_array(),
+                "missing error.did_you_mean for args={args:?}"
+            );
+            assert!(
+                payload["error"]["examples"].is_array(),
+                "missing error.examples for args={args:?}"
+            );
+            assert!(
+                payload["error"]["next_actions"].is_array(),
+                "missing error.next_actions for args={args:?}"
+            );
+            assert!(
+                payload["input"]["received"].is_array(),
+                "missing input.received for args={args:?}"
+            );
+        }
+    }
+
+    // ── Intent recovery: exit code contract ─────────────────────────────
+
+    #[test]
+    fn exit_code_success_for_safe_alias() {
+        let aliases = vec![
+            vec!["fwc", "--json", "info", "github"],
+            vec!["fwc", "--json", "find", "github"],
+            vec!["fwc", "--json", "health"],
+            vec!["fwc", "--json", "tail", "github"],
+        ];
+        for tokens in aliases {
+            let args: Vec<String> = tokens.into_iter().map(str::to_owned).collect();
+            let outcome = execute(&args).expect("execution should not fail internally");
+            assert_eq!(
+                outcome.exit_code,
+                CliExitCode::Success.into(),
+                "safe alias should succeed: {args:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn exit_code_success_for_safe_typo() {
+        let typos = vec![
+            vec!["fwc", "--json", "shwo", "github"],
+            vec!["fwc", "--json", "lsit"],
+            vec!["fwc", "--json", "gudie"],
+        ];
+        for tokens in typos {
+            let args: Vec<String> = tokens.into_iter().map(str::to_owned).collect();
+            let outcome = execute(&args).expect("execution should not fail internally");
+            assert_eq!(
+                outcome.exit_code,
+                CliExitCode::Success.into(),
+                "safe typo should succeed: {args:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn exit_code_ambiguous_for_mutating_typo() {
+        let typos = vec![
+            vec!["fwc", "--json", "enbale", "github"],
+            vec!["fwc", "--json", "disabel", "slack"],
+            vec!["fwc", "--json", "insatll", "github"],
+            vec!["fwc", "--json", "invoe", "github", "issues.create"],
+        ];
+        for tokens in typos {
+            let args: Vec<String> = tokens.into_iter().map(str::to_owned).collect();
+            let outcome = execute(&args).expect("execution should not fail internally");
+            assert_eq!(
+                outcome.exit_code,
+                CliExitCode::AmbiguousCorrection.into(),
+                "mutating typo should use ambiguous exit code: {args:?}"
+            );
+        }
     }
 }

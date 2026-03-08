@@ -3,7 +3,10 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use fcp_core::{BaseConnector, ConnectorId, FcpError, FcpResult};
+use fcp_core::{
+    AgentHint, BaseConnector, CapabilityId, ConnectorId, FcpError, FcpResult, IdempotencyClass,
+    OperationId, OperationInfo, RiskLevel, SafetyTier,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tracing::{info, instrument};
@@ -250,10 +253,13 @@ impl RetoolConnector {
 
     /// Handle the `introspect` method.
     pub async fn handle_introspect(&self) -> FcpResult<serde_json::Value> {
+        let ops = serde_json::to_value(operations_info()).map_err(|e| FcpError::Internal {
+            message: format!("Failed to serialize operations: {e}"),
+        })?;
         Ok(json!({
             "connector_id": "fcp.retool",
             "version": "0.1.0",
-            "operations": operations_info(),
+            "operations": ops,
         }))
     }
 
@@ -305,10 +311,7 @@ impl RetoolConnector {
             .and_then(serde_json::Value::as_str)
             .unwrap_or("");
 
-        let allowed = operations_info().as_array().is_some_and(|ops| {
-            ops.iter()
-                .any(|o| o.get("id").and_then(serde_json::Value::as_str) == Some(operation))
-        });
+        let allowed = operations_info().iter().any(|o| o.id.as_ref() == operation);
 
         Ok(json!({
             "allowed": allowed,
@@ -362,26 +365,70 @@ fn require_str<'a>(input: &'a serde_json::Value, field: &str) -> Result<&'a str,
         })
 }
 
+/// Build a single `OperationInfo` with common defaults.
+fn op_info(
+    id: &'static str,
+    summary: &str,
+    input_schema: serde_json::Value,
+    output_schema: serde_json::Value,
+    capability: &'static str,
+    risk_level: RiskLevel,
+    safety_tier: SafetyTier,
+    idempotency: IdempotencyClass,
+    ai_hints: AgentHint,
+) -> OperationInfo {
+    OperationInfo {
+        id: OperationId::from_static(id),
+        summary: summary.into(),
+        input_schema,
+        output_schema,
+        capability: CapabilityId::from_static(capability),
+        risk_level,
+        description: None,
+        rate_limit: None,
+        requires_approval: None,
+        safety_tier,
+        idempotency,
+        ai_hints,
+    }
+}
+
 /// Build the operations info for introspection.
-fn operations_info() -> serde_json::Value {
-    json!([
-        {
-            "id": "retool.workflows.list",
-            "summary": "List workflows",
-            "capability": "retool.workflows.read",
-            "risk_level": "low",
-            "safety_tier": "safe",
-            "idempotency": "strict",
-        },
-        {
-            "id": "retool.workflows.run",
-            "summary": "Trigger a workflow",
-            "capability": "retool.workflows.write",
-            "risk_level": "medium",
-            "safety_tier": "risky",
-            "idempotency": "none",
-        },
-    ])
+fn operations_info() -> Vec<OperationInfo> {
+    vec![
+        op_info(
+            "retool.workflows.list",
+            "List workflows",
+            json!({"type": "object", "required": [], "properties": {}}),
+            json!({"type": "object", "required": ["data"], "properties": {"data": {"type": "array"}}}),
+            "retool.workflows.read",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "List all Retool workflows.".into(),
+                common_mistakes: vec!["Assuming all listed workflows are enabled — check the workflow status since disabled or draft workflows appear in the list but cannot be triggered.".into()],
+                examples: vec!["{}".into()],
+                related: vec![CapabilityId::from_static("retool.workflows.run")],
+            },
+        ),
+        op_info(
+            "retool.workflows.run",
+            "Trigger a workflow",
+            json!({"type": "object", "required": ["workflow_id"], "properties": {"workflow_id": {"type": "string", "description": "Workflow ID to trigger"}}}),
+            json!({"type": "object", "required": ["data"], "properties": {"data": {"type": "object"}}}),
+            "retool.workflows.write",
+            RiskLevel::Medium,
+            SafetyTier::Risky,
+            IdempotencyClass::None,
+            AgentHint {
+                when_to_use: "Trigger a Retool workflow to run.".into(),
+                common_mistakes: vec!["Triggering a workflow without verifying it is enabled — disabled or draft workflows will return an error; check workflows.list first.".into()],
+                examples: vec![r#"{"workflow_id": "wf_abc123"}"#.into()],
+                related: vec![CapabilityId::from_static("retool.workflows.list")],
+            },
+        ),
+    ]
 }
 
 #[cfg(test)]
@@ -537,34 +584,31 @@ mod tests {
         assert!(require_str(&input, "workflow_id").is_err());
     }
 
+    /// Helper: serialize operations to JSON for tests that inspect JSON fields.
+    fn ops_json() -> serde_json::Value {
+        serde_json::to_value(operations_info()).unwrap()
+    }
+
     #[test]
     fn operations_info_has_2_operations() {
         let ops = operations_info();
-        let arr = ops.as_array().unwrap();
-        assert_eq!(arr.len(), 2);
+        assert_eq!(ops.len(), 2);
     }
 
     #[test]
     fn operations_all_have_required_fields() {
         let ops = operations_info();
-        for op in ops.as_array().unwrap() {
-            assert!(op.get("id").is_some(), "missing id");
-            assert!(op.get("summary").is_some(), "missing summary");
-            assert!(op.get("capability").is_some(), "missing capability");
-            assert!(op.get("risk_level").is_some(), "missing risk_level");
-            assert!(op.get("safety_tier").is_some(), "missing safety_tier");
+        for op in &ops {
+            assert!(!op.id.as_ref().is_empty(), "missing id");
+            assert!(!op.summary.is_empty(), "missing summary");
+            assert!(!op.capability.as_ref().is_empty(), "missing capability");
         }
     }
 
     #[test]
     fn operations_ids_are_unique() {
         let ops = operations_info();
-        let ids: Vec<&str> = ops
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter_map(|o| o["id"].as_str())
-            .collect();
+        let ids: Vec<&str> = ops.iter().map(|o| o.id.as_ref()).collect();
         let mut unique = ids.clone();
         unique.sort_unstable();
         unique.dedup();
@@ -573,42 +617,47 @@ mod tests {
 
     #[test]
     fn operations_risk_levels_valid() {
-        let valid = ["low", "medium", "high"];
         let ops = operations_info();
-        for op in ops.as_array().unwrap() {
-            let rl = op["risk_level"].as_str().unwrap();
-            assert!(valid.contains(&rl), "invalid risk_level: {rl}");
+        for op in &ops {
+            let v = serde_json::to_value(op.risk_level).unwrap();
+            let rl = v.as_str().unwrap();
+            assert!(
+                ["low", "medium", "high", "critical"].contains(&rl),
+                "invalid risk_level: {rl}"
+            );
         }
     }
 
     #[test]
     fn operations_safety_tiers_valid() {
-        let valid = ["safe", "risky", "dangerous"];
         let ops = operations_info();
-        for op in ops.as_array().unwrap() {
-            let st = op["safety_tier"].as_str().unwrap();
-            assert!(valid.contains(&st), "invalid safety_tier: {st}");
+        for op in &ops {
+            let v = serde_json::to_value(op.safety_tier).unwrap();
+            let st = v.as_str().unwrap();
+            assert!(
+                ["safe", "risky", "dangerous"].contains(&st),
+                "invalid safety_tier: {st}"
+            );
         }
     }
 
     #[test]
-    #[allow(clippy::case_sensitive_file_extension_comparisons)]
     fn read_operations_are_safe() {
         let ops = operations_info();
-        for op in ops.as_array().unwrap() {
-            let cap = op["capability"].as_str().unwrap();
-            if cap.ends_with(".read") {
+        for op in &ops {
+            let cap = op.capability.as_ref();
+            if cap.as_bytes().ends_with(b".read") {
                 assert_eq!(
-                    op["safety_tier"].as_str().unwrap(),
-                    "safe",
+                    op.safety_tier,
+                    SafetyTier::Safe,
                     "read op {} should be safe",
-                    op["id"]
+                    op.id
                 );
                 assert_eq!(
-                    op["risk_level"].as_str().unwrap(),
-                    "low",
+                    op.risk_level,
+                    RiskLevel::Low,
                     "read op {} should be low risk",
-                    op["id"]
+                    op.id
                 );
             }
         }
@@ -617,12 +666,7 @@ mod tests {
     #[test]
     fn operations_contain_expected_ids() {
         let ops = operations_info();
-        let ids: Vec<&str> = ops
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter_map(|o| o["id"].as_str())
-            .collect();
+        let ids: Vec<&str> = ops.iter().map(|o| o.id.as_ref()).collect();
         assert!(ids.contains(&"retool.workflows.list"));
         assert!(ids.contains(&"retool.workflows.run"));
     }
@@ -630,11 +674,12 @@ mod tests {
     #[test]
     fn operations_all_have_idempotency() {
         let ops = operations_info();
-        for op in ops.as_array().unwrap() {
+        for op in &ops {
+            let v = serde_json::to_value(op.idempotency).unwrap();
             assert!(
-                op.get("idempotency").is_some(),
-                "op {:?} missing idempotency",
-                op["id"]
+                v.is_string(),
+                "op {} idempotency should serialize",
+                op.id
             );
         }
     }
@@ -643,28 +688,35 @@ mod tests {
     fn operations_list_is_safe() {
         let ops = operations_info();
         let list_op = ops
-            .as_array()
-            .unwrap()
             .iter()
-            .find(|o| o["id"] == "retool.workflows.list")
+            .find(|o| o.id.as_ref() == "retool.workflows.list")
             .unwrap();
-        assert_eq!(list_op["safety_tier"], "safe");
-        assert_eq!(list_op["risk_level"], "low");
-        assert_eq!(list_op["capability"], "retool.workflows.read");
+        assert_eq!(list_op.safety_tier, SafetyTier::Safe);
+        assert_eq!(list_op.risk_level, RiskLevel::Low);
+        assert_eq!(list_op.capability.as_ref(), "retool.workflows.read");
     }
 
     #[test]
     fn operations_run_is_risky() {
         let ops = operations_info();
         let run_op = ops
-            .as_array()
-            .unwrap()
             .iter()
-            .find(|o| o["id"] == "retool.workflows.run")
+            .find(|o| o.id.as_ref() == "retool.workflows.run")
             .unwrap();
-        assert_eq!(run_op["safety_tier"], "risky");
-        assert_eq!(run_op["risk_level"], "medium");
-        assert_eq!(run_op["capability"], "retool.workflows.write");
+        assert_eq!(run_op.safety_tier, SafetyTier::Risky);
+        assert_eq!(run_op.risk_level, RiskLevel::Medium);
+        assert_eq!(run_op.capability.as_ref(), "retool.workflows.write");
+    }
+
+    #[test]
+    fn operations_serialize_to_json() {
+        let ops = ops_json();
+        let arr = ops.as_array().unwrap();
+        assert_eq!(arr.len(), 2);
+        for op in arr {
+            assert!(op.get("id").is_some());
+            assert!(op.get("summary").is_some());
+        }
     }
 
     #[test]

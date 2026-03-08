@@ -3,7 +3,10 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use fcp_core::{BaseConnector, ConnectorId, FcpError, FcpResult};
+use fcp_core::{
+    AgentHint, BaseConnector, CapabilityId, ConnectorId, FcpError, FcpResult, IdempotencyClass,
+    OperationId, OperationInfo, RiskLevel, SafetyTier,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tracing::{info, instrument};
@@ -257,7 +260,7 @@ impl ArxivConnector {
         Ok(json!({
             "connector_id": "fcp.arxiv",
             "version": "0.1.0",
-            "operations": operations_info(),
+            "operations": serde_json::to_value(operations_info()).unwrap_or_default(),
         }))
     }
 
@@ -317,10 +320,9 @@ impl ArxivConnector {
             .and_then(serde_json::Value::as_str)
             .unwrap_or("");
 
-        let allowed = operations_info().as_array().is_some_and(|ops| {
-            ops.iter()
-                .any(|o| o.get("id").and_then(serde_json::Value::as_str) == Some(operation))
-        });
+        let allowed = operations_info()
+            .iter()
+            .any(|o| o.id.as_ref() == operation);
 
         Ok(json!({
             "allowed": allowed,
@@ -514,119 +516,509 @@ fn require_str<'a>(input: &'a serde_json::Value, field: &str) -> Result<&'a str,
         })
 }
 
+#[allow(clippy::fn_params_excessive_bools)]
+fn op_info(
+    id: &'static str,
+    summary: &str,
+    input_schema: serde_json::Value,
+    output_schema: serde_json::Value,
+    capability: &'static str,
+    risk_level: RiskLevel,
+    safety_tier: SafetyTier,
+    idempotency: IdempotencyClass,
+    ai_hints: AgentHint,
+) -> OperationInfo {
+    OperationInfo {
+        id: OperationId::from_static(id),
+        summary: summary.into(),
+        input_schema,
+        output_schema,
+        capability: CapabilityId::from_static(capability),
+        risk_level,
+        description: None,
+        rate_limit: None,
+        requires_approval: None,
+        safety_tier,
+        idempotency,
+        ai_hints,
+    }
+}
+
 /// Build the operations info for introspection.
-fn operations_info() -> serde_json::Value {
-    json!([
-        {
-            "id": "arxiv.search_papers",
-            "summary": "Search arXiv for papers by keyword, title, author, or abstract",
-            "capability": "arxiv.search",
-            "risk_level": "low",
-            "safety_tier": "safe",
-            "idempotency": "strict",
-        },
-        {
-            "id": "arxiv.search_semantic",
-            "summary": "Semantic search for papers using natural language queries",
-            "capability": "arxiv.search",
-            "risk_level": "low",
-            "safety_tier": "safe",
-            "idempotency": "strict",
-        },
-        {
-            "id": "arxiv.get_paper",
-            "summary": "Get detailed metadata for a paper by arXiv ID",
-            "capability": "arxiv.read",
-            "risk_level": "low",
-            "safety_tier": "safe",
-            "idempotency": "strict",
-        },
-        {
-            "id": "arxiv.get_full_text",
-            "summary": "Get extracted plain text from a paper",
-            "capability": "arxiv.read",
-            "risk_level": "low",
-            "safety_tier": "safe",
-            "idempotency": "strict",
-        },
-        {
-            "id": "arxiv.download_pdf",
-            "summary": "Download a paper's PDF content (base64-encoded)",
-            "capability": "arxiv.read",
-            "risk_level": "low",
-            "safety_tier": "safe",
-            "idempotency": "strict",
-        },
-        {
-            "id": "arxiv.get_citations",
-            "summary": "Get papers that cite a given paper",
-            "capability": "arxiv.citations",
-            "risk_level": "low",
-            "safety_tier": "safe",
-            "idempotency": "strict",
-        },
-        {
-            "id": "arxiv.get_references",
-            "summary": "Get papers referenced by a given paper",
-            "capability": "arxiv.citations",
-            "risk_level": "low",
-            "safety_tier": "safe",
-            "idempotency": "strict",
-        },
-        {
-            "id": "arxiv.extract_references",
-            "summary": "Extract and parse reference entries from a paper",
-            "capability": "arxiv.citations",
-            "risk_level": "low",
-            "safety_tier": "safe",
-            "idempotency": "strict",
-        },
-        {
-            "id": "arxiv.get_author",
-            "summary": "Get author information and publication history",
-            "capability": "arxiv.authors",
-            "risk_level": "low",
-            "safety_tier": "safe",
-            "idempotency": "strict",
-        },
-        {
-            "id": "arxiv.list_categories",
-            "summary": "List arXiv categories and their descriptions",
-            "capability": "arxiv.categories",
-            "risk_level": "low",
-            "safety_tier": "safe",
-            "idempotency": "strict",
-        },
-        {
-            "id": "arxiv.get_new_papers",
-            "summary": "Get recently submitted papers in a category",
-            "capability": "arxiv.categories",
-            "risk_level": "low",
-            "safety_tier": "safe",
-            "idempotency": "strict",
-        },
-        {
-            "id": "arxiv.monitor_category",
-            "summary": "Stream new paper notifications for monitored categories",
-            "capability": "arxiv.monitor",
-            "risk_level": "low",
-            "safety_tier": "safe",
-            "idempotency": "strict",
-        },
-        {
-            "id": "arxiv.monitor_query",
-            "summary": "Stream new papers matching a saved search query",
-            "capability": "arxiv.monitor",
-            "risk_level": "low",
-            "safety_tier": "safe",
-            "idempotency": "strict",
-        },
-    ])
+fn operations_info() -> Vec<OperationInfo> {
+    vec![
+        op_info(
+            "arxiv.search_papers",
+            "Search arXiv for papers by keyword, title, author, or abstract",
+            json!({
+                "type": "object",
+                "required": ["query"],
+                "properties": {
+                    "query": { "type": "string", "description": "Search query (supports arXiv query syntax: ti:, au:, abs:, cat:, all:)" },
+                    "max_results": { "type": "integer", "minimum": 1, "maximum": 100, "description": "Maximum results to return (default 10, max 100)" },
+                    "sort_by": { "type": "string", "description": "Sort order: relevance, lastUpdatedDate, submittedDate" },
+                    "sort_order": { "type": "string", "description": "ascending or descending" },
+                    "start": { "type": "integer", "description": "Pagination offset" }
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["papers", "total_results"],
+                "properties": {
+                    "papers": { "type": "array" },
+                    "total_results": { "type": "integer" }
+                }
+            }),
+            "arxiv.search",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "Search for papers on arXiv. Use query syntax for targeted searches (ti: for title, au: for author, cat: for category).".into(),
+                common_mistakes: vec![
+                    "Searching with overly broad queries that return too many results.".into(),
+                    "Not using arXiv query syntax for structured searches (e.g., au:Einstein AND cat:gr-qc).".into(),
+                ],
+                examples: vec![
+                    r#"{"query": "ti:attention mechanism transformer", "max_results": 20, "sort_by": "relevance"}"#.into(),
+                    r#"{"query": "au:Vaswani AND cat:cs.CL", "max_results": 10}"#.into(),
+                ],
+                related: vec![
+                    CapabilityId::from_static("arxiv.get_paper"),
+                    CapabilityId::from_static("arxiv.search_semantic"),
+                ],
+            },
+        ),
+        op_info(
+            "arxiv.search_semantic",
+            "Semantic search for papers using natural language queries",
+            json!({
+                "type": "object",
+                "required": ["query"],
+                "properties": {
+                    "query": { "type": "string", "description": "Natural language search query" },
+                    "max_results": { "type": "integer", "minimum": 1, "maximum": 50, "description": "Maximum results (default 10)" },
+                    "categories": { "type": "array", "description": "Restrict to arXiv categories (e.g., ['cs.AI', 'cs.CL'])" }
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["papers"],
+                "properties": {
+                    "papers": { "type": "array" }
+                }
+            }),
+            "arxiv.search",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "Search using natural language descriptions rather than keyword queries.".into(),
+                common_mistakes: vec![
+                    "Using arXiv query syntax (ti:, au:) instead of plain natural language — this endpoint expects free-text descriptions.".into(),
+                ],
+                examples: vec![
+                    r#"{"query": "papers about using graph neural networks for drug discovery", "max_results": 10, "categories": ["cs.LG", "q-bio.QM"]}"#.into(),
+                ],
+                related: vec![CapabilityId::from_static("arxiv.search_papers")],
+            },
+        ),
+        op_info(
+            "arxiv.get_paper",
+            "Get detailed metadata for a paper by arXiv ID",
+            json!({
+                "type": "object",
+                "required": ["arxiv_id"],
+                "properties": {
+                    "arxiv_id": { "type": "string", "description": "arXiv paper ID (e.g., '2301.08745' or '2301.08745v2')" }
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["paper"],
+                "properties": {
+                    "paper": { "type": "object", "description": "Paper metadata: title, authors, abstract, categories, dates, DOI, comments" }
+                }
+            }),
+            "arxiv.read",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "Get full metadata for a specific paper by its arXiv ID.".into(),
+                common_mistakes: vec![
+                    "Using the full URL instead of just the ID (use '2301.08745', not 'https://arxiv.org/abs/2301.08745').".into(),
+                ],
+                examples: vec![
+                    r#"{"arxiv_id": "2301.08745"}"#.into(),
+                    r#"{"arxiv_id": "1706.03762v7"}"#.into(),
+                ],
+                related: vec![
+                    CapabilityId::from_static("arxiv.download_pdf"),
+                    CapabilityId::from_static("arxiv.get_references"),
+                    CapabilityId::from_static("arxiv.get_citations"),
+                ],
+            },
+        ),
+        op_info(
+            "arxiv.get_full_text",
+            "Get extracted plain text from a paper",
+            json!({
+                "type": "object",
+                "required": ["arxiv_id"],
+                "properties": {
+                    "arxiv_id": { "type": "string", "description": "arXiv paper ID" },
+                    "format": { "type": "string", "description": "Preferred format: text, html (default: text)" }
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["text"],
+                "properties": {
+                    "text": { "type": "string" }
+                }
+            }),
+            "arxiv.read",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "Get the text content of a paper without downloading the raw PDF.".into(),
+                common_mistakes: vec![
+                    "Expecting perfect formatting — TeX-to-text conversion is lossy.".into(),
+                ],
+                examples: vec![r#"{"arxiv_id": "1706.03762"}"#.into()],
+                related: vec![
+                    CapabilityId::from_static("arxiv.download_pdf"),
+                    CapabilityId::from_static("arxiv.get_paper"),
+                ],
+            },
+        ),
+        op_info(
+            "arxiv.download_pdf",
+            "Download a paper's PDF content (base64-encoded)",
+            json!({
+                "type": "object",
+                "required": ["arxiv_id"],
+                "properties": {
+                    "arxiv_id": { "type": "string", "description": "arXiv paper ID" }
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["content"],
+                "properties": {
+                    "content": { "type": "string", "description": "PDF content (base64-encoded)" },
+                    "size_bytes": { "type": "integer" }
+                }
+            }),
+            "arxiv.read",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "Download the full PDF of a paper for text extraction or analysis.".into(),
+                common_mistakes: vec![
+                    "Downloading many PDFs in rapid succession (respect arXiv rate limits).".into(),
+                    "Not checking paper size before download.".into(),
+                ],
+                examples: vec![r#"{"arxiv_id": "1706.03762"}"#.into()],
+                related: vec![
+                    CapabilityId::from_static("arxiv.get_paper"),
+                    CapabilityId::from_static("arxiv.extract_references"),
+                ],
+            },
+        ),
+        op_info(
+            "arxiv.get_citations",
+            "Get papers that cite a given paper",
+            json!({
+                "type": "object",
+                "required": ["arxiv_id"],
+                "properties": {
+                    "arxiv_id": { "type": "string", "description": "arXiv paper ID" },
+                    "max_results": { "type": "integer", "minimum": 1, "maximum": 500, "description": "Max citing papers to return" }
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["citations", "total"],
+                "properties": {
+                    "citations": { "type": "array" },
+                    "total": { "type": "integer" }
+                }
+            }),
+            "arxiv.citations",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "Find papers that cite a given paper (forward citation graph).".into(),
+                common_mistakes: vec![
+                    "Expecting real-time citation counts — there is a delay in indexing.".into(),
+                ],
+                examples: vec![r#"{"arxiv_id": "1706.03762", "max_results": 50}"#.into()],
+                related: vec![
+                    CapabilityId::from_static("arxiv.get_references"),
+                    CapabilityId::from_static("arxiv.get_paper"),
+                ],
+            },
+        ),
+        op_info(
+            "arxiv.get_references",
+            "Get papers referenced by a given paper",
+            json!({
+                "type": "object",
+                "required": ["arxiv_id"],
+                "properties": {
+                    "arxiv_id": { "type": "string", "description": "arXiv paper ID" }
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["references"],
+                "properties": {
+                    "references": { "type": "array" }
+                }
+            }),
+            "arxiv.citations",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "Get the bibliography of a paper (backward citation graph).".into(),
+                common_mistakes: vec![
+                    "Confusing get_references (papers this paper cites) with get_citations (papers that cite this paper).".into(),
+                ],
+                examples: vec![r#"{"arxiv_id": "1706.03762"}"#.into()],
+                related: vec![
+                    CapabilityId::from_static("arxiv.get_citations"),
+                    CapabilityId::from_static("arxiv.get_paper"),
+                ],
+            },
+        ),
+        op_info(
+            "arxiv.extract_references",
+            "Extract and parse reference entries from a paper",
+            json!({
+                "type": "object",
+                "required": ["arxiv_id"],
+                "properties": {
+                    "arxiv_id": { "type": "string" }
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["references"],
+                "properties": {
+                    "references": { "type": "array", "description": "Parsed reference entries with title, authors, year, DOI where available" }
+                }
+            }),
+            "arxiv.citations",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "Parse the reference section of a paper to identify cited works.".into(),
+                common_mistakes: vec![
+                    "Expecting structured DOI/URL links for every reference — many older papers have unresolved plain-text citations.".into(),
+                ],
+                examples: vec![r#"{"arxiv_id": "1706.03762"}"#.into()],
+                related: vec![
+                    CapabilityId::from_static("arxiv.get_references"),
+                    CapabilityId::from_static("arxiv.download_pdf"),
+                ],
+            },
+        ),
+        op_info(
+            "arxiv.get_author",
+            "Get author information and publication history",
+            json!({
+                "type": "object",
+                "required": ["author_name"],
+                "properties": {
+                    "author_name": { "type": "string", "description": "Author name to search for" },
+                    "max_papers": { "type": "integer", "minimum": 1, "maximum": 200, "description": "Max papers to include in publication list" }
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["author", "papers"],
+                "properties": {
+                    "author": { "type": "object" },
+                    "papers": { "type": "array" }
+                }
+            }),
+            "arxiv.authors",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "Look up an author's profile and publication history.".into(),
+                common_mistakes: vec![
+                    "Author names are not unique — use additional filters (categories, date ranges) to disambiguate.".into(),
+                ],
+                examples: vec![r#"{"author_name": "Ashish Vaswani", "max_papers": 50}"#.into()],
+                related: vec![CapabilityId::from_static("arxiv.search_papers")],
+            },
+        ),
+        op_info(
+            "arxiv.list_categories",
+            "List arXiv categories and their descriptions",
+            json!({
+                "type": "object",
+                "required": [],
+                "properties": {
+                    "group": { "type": "string", "description": "Filter by group (e.g., 'cs', 'math', 'physics')" }
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["categories"],
+                "properties": {
+                    "categories": { "type": "array" }
+                }
+            }),
+            "arxiv.categories",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "List available arXiv categories to help users refine searches.".into(),
+                common_mistakes: vec![
+                    "Confusing group names with category codes — 'cs' is a group, 'cs.AI' is a category.".into(),
+                ],
+                examples: vec![
+                    r#"{}"#.into(),
+                    r#"{"group": "cs"}"#.into(),
+                ],
+                related: vec![
+                    CapabilityId::from_static("arxiv.get_new_papers"),
+                    CapabilityId::from_static("arxiv.search_papers"),
+                ],
+            },
+        ),
+        op_info(
+            "arxiv.get_new_papers",
+            "Get recently submitted papers in a category",
+            json!({
+                "type": "object",
+                "required": ["category"],
+                "properties": {
+                    "category": { "type": "string", "description": "arXiv category (e.g., 'cs.AI', 'math.CO')" },
+                    "max_results": { "type": "integer", "minimum": 1, "maximum": 100, "description": "Max papers to return (default 25)" }
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["papers"],
+                "properties": {
+                    "papers": { "type": "array" }
+                }
+            }),
+            "arxiv.categories",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "Browse the latest papers in a category — like reading the daily arXiv listings.".into(),
+                common_mistakes: vec![
+                    "Using an invalid category code (e.g. 'AI' instead of 'cs.AI') — call list_categories first to verify.".into(),
+                ],
+                examples: vec![r#"{"category": "cs.AI", "max_results": 25}"#.into()],
+                related: vec![
+                    CapabilityId::from_static("arxiv.list_categories"),
+                    CapabilityId::from_static("arxiv.monitor_category"),
+                ],
+            },
+        ),
+        op_info(
+            "arxiv.monitor_category",
+            "Stream new paper notifications for monitored categories",
+            json!({
+                "type": "object",
+                "required": ["categories"],
+                "properties": {
+                    "categories": { "type": "array", "description": "List of arXiv categories to monitor" },
+                    "keyword_filter": { "type": "string", "description": "Optional keyword filter applied to titles and abstracts" },
+                    "since_ts": { "type": "string", "description": "ISO 8601 timestamp to resume from" }
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["papers"],
+                "properties": {
+                    "papers": { "type": "array" },
+                    "cursor_ts": { "type": "string", "description": "Cursor timestamp for next poll" }
+                }
+            }),
+            "arxiv.monitor",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "Set up a monitor for new papers in specific categories. Polling-backed, not real-time.".into(),
+                common_mistakes: vec![
+                    "Monitoring too many categories simultaneously (increases API load).".into(),
+                    "Not persisting cursor_ts for resumption after restarts.".into(),
+                ],
+                examples: vec![
+                    r#"{"categories": ["cs.AI", "cs.CL"], "keyword_filter": "transformer"}"#.into(),
+                ],
+                related: vec![
+                    CapabilityId::from_static("arxiv.get_new_papers"),
+                    CapabilityId::from_static("arxiv.list_categories"),
+                ],
+            },
+        ),
+        op_info(
+            "arxiv.monitor_query",
+            "Stream new papers matching a saved search query",
+            json!({
+                "type": "object",
+                "required": ["query"],
+                "properties": {
+                    "query": { "type": "string", "description": "arXiv search query to monitor" },
+                    "since_ts": { "type": "string", "description": "ISO 8601 timestamp to resume from" }
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["papers"],
+                "properties": {
+                    "papers": { "type": "array" },
+                    "cursor_ts": { "type": "string" }
+                }
+            }),
+            "arxiv.monitor",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "Monitor for new papers matching a specific search query.".into(),
+                common_mistakes: vec![
+                    "Not persisting the returned cursor_ts — without it the monitor rescans from the beginning on restart.".into(),
+                ],
+                examples: vec![
+                    r#"{"query": "ti:large language model AND cat:cs.CL"}"#.into(),
+                ],
+                related: vec![
+                    CapabilityId::from_static("arxiv.monitor_category"),
+                    CapabilityId::from_static("arxiv.search_papers"),
+                ],
+            },
+        ),
+    ]
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Helper to get operations as JSON for backward-compatible test assertions.
+    fn ops_json() -> serde_json::Value {
+        serde_json::to_value(operations_info()).unwrap()
+    }
 
     #[test]
     fn config_defaults() {
@@ -708,13 +1100,12 @@ mod tests {
     #[test]
     fn operations_info_has_13_operations() {
         let ops = operations_info();
-        let arr = ops.as_array().unwrap();
-        assert_eq!(arr.len(), 13);
+        assert_eq!(ops.len(), 13);
     }
 
     #[test]
     fn operations_all_have_required_fields() {
-        let ops = operations_info();
+        let ops = ops_json();
         for op in ops.as_array().unwrap() {
             assert!(op.get("id").is_some(), "missing id");
             assert!(op.get("summary").is_some(), "missing summary");
@@ -727,12 +1118,7 @@ mod tests {
     #[test]
     fn operations_ids_are_unique() {
         let ops = operations_info();
-        let ids: Vec<&str> = ops
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter_map(|o| o["id"].as_str())
-            .collect();
+        let ids: Vec<&str> = ops.iter().map(|o| o.id.as_ref()).collect();
         let mut unique = ids.clone();
         unique.sort_unstable();
         unique.dedup();
@@ -742,7 +1128,7 @@ mod tests {
     #[test]
     fn operations_risk_levels_valid() {
         let valid = ["low", "medium", "high"];
-        let ops = operations_info();
+        let ops = ops_json();
         for op in ops.as_array().unwrap() {
             let rl = op["risk_level"].as_str().unwrap();
             assert!(valid.contains(&rl), "invalid risk_level: {rl}");
@@ -752,7 +1138,7 @@ mod tests {
     #[test]
     fn operations_safety_tiers_valid() {
         let valid = ["safe", "risky", "dangerous"];
-        let ops = operations_info();
+        let ops = ops_json();
         for op in ops.as_array().unwrap() {
             let st = op["safety_tier"].as_str().unwrap();
             assert!(valid.contains(&st), "invalid safety_tier: {st}");
@@ -761,7 +1147,7 @@ mod tests {
 
     #[test]
     fn all_operations_are_safe() {
-        let ops = operations_info();
+        let ops = ops_json();
         for op in ops.as_array().unwrap() {
             assert_eq!(
                 op["safety_tier"].as_str().unwrap(),
@@ -780,7 +1166,7 @@ mod tests {
 
     #[test]
     fn operations_all_have_idempotency() {
-        let ops = operations_info();
+        let ops = ops_json();
         for op in ops.as_array().unwrap() {
             assert!(
                 op.get("idempotency").is_some(),
@@ -793,12 +1179,7 @@ mod tests {
     #[test]
     fn operations_contain_expected_ids() {
         let ops = operations_info();
-        let ids: Vec<&str> = ops
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter_map(|o| o["id"].as_str())
-            .collect();
+        let ids: Vec<&str> = ops.iter().map(|o| o.id.as_ref()).collect();
         assert!(ids.contains(&"arxiv.search_papers"));
         assert!(ids.contains(&"arxiv.search_semantic"));
         assert!(ids.contains(&"arxiv.get_paper"));
@@ -825,12 +1206,12 @@ mod tests {
             "arxiv.monitor",
         ];
         let ops = operations_info();
-        for op in ops.as_array().unwrap() {
-            let cap = op["capability"].as_str().unwrap();
+        for op in &ops {
+            let cap = op.capability.as_ref();
             assert!(
                 valid_caps.contains(&cap),
                 "op {} has invalid capability: {cap}",
-                op["id"]
+                op.id.as_ref()
             );
         }
     }

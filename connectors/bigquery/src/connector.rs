@@ -3,7 +3,10 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use fcp_core::{BaseConnector, ConnectorId, FcpError, FcpResult};
+use fcp_core::{
+    AgentHint, BaseConnector, CapabilityId, ConnectorId, FcpError, FcpResult, IdempotencyClass,
+    OperationId, OperationInfo, RiskLevel, SafetyTier,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tracing::{info, instrument};
@@ -257,7 +260,7 @@ impl BigQueryConnector {
         Ok(json!({
             "connector_id": "fcp.bigquery",
             "version": "0.1.0",
-            "operations": operations_info(),
+            "operations": serde_json::to_value(operations_info()).unwrap_or_default(),
         }))
     }
 
@@ -311,10 +314,7 @@ impl BigQueryConnector {
             .and_then(serde_json::Value::as_str)
             .unwrap_or("");
 
-        let allowed = operations_info().as_array().is_some_and(|ops| {
-            ops.iter()
-                .any(|o| o.get("id").and_then(serde_json::Value::as_str) == Some(operation))
-        });
+        let allowed = operations_info().iter().any(|o| o.id.as_ref() == operation);
 
         Ok(json!({
             "allowed": allowed,
@@ -406,47 +406,181 @@ fn require_str<'a>(input: &'a serde_json::Value, field: &str) -> Result<&'a str,
         })
 }
 
+/// Build a single [`OperationInfo`].
+fn op_info(
+    id: &'static str,
+    summary: &str,
+    input_schema: serde_json::Value,
+    output_schema: serde_json::Value,
+    capability: &'static str,
+    risk_level: RiskLevel,
+    safety_tier: SafetyTier,
+    idempotency: IdempotencyClass,
+    ai_hints: AgentHint,
+) -> OperationInfo {
+    OperationInfo {
+        id: OperationId::from_static(id),
+        summary: summary.into(),
+        description: None,
+        input_schema,
+        output_schema,
+        capability: CapabilityId::from_static(capability),
+        risk_level,
+        safety_tier,
+        idempotency,
+        ai_hints,
+        rate_limit: None,
+        requires_approval: None,
+    }
+}
+
 /// Build the operations info for introspection.
-fn operations_info() -> serde_json::Value {
-    json!([
-        {
-            "id": "bigquery.datasets.list",
-            "summary": "List datasets in a project",
-            "capability": "bigquery.datasets.read",
-            "risk_level": "low",
-            "safety_tier": "safe",
-            "idempotency": "strict",
-        },
-        {
-            "id": "bigquery.tables.list",
-            "summary": "List tables in a dataset",
-            "capability": "bigquery.tables.read",
-            "risk_level": "low",
-            "safety_tier": "safe",
-            "idempotency": "strict",
-        },
-        {
-            "id": "bigquery.jobs.list",
-            "summary": "List recent jobs",
-            "capability": "bigquery.jobs.read",
-            "risk_level": "low",
-            "safety_tier": "safe",
-            "idempotency": "strict",
-        },
-        {
-            "id": "bigquery.jobs.query",
-            "summary": "Run a SQL query",
-            "capability": "bigquery.jobs.write",
-            "risk_level": "high",
-            "safety_tier": "risky",
-            "idempotency": "none",
-        },
-    ])
+fn operations_info() -> Vec<OperationInfo> {
+    vec![
+        op_info(
+            "bigquery.datasets.list",
+            "List datasets in a project",
+            json!({
+                "type": "object",
+                "required": ["project_id"],
+                "properties": {
+                    "project_id": { "type": "string" }
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["datasets"],
+                "properties": {
+                    "datasets": { "type": "array" }
+                }
+            }),
+            "bigquery.datasets.read",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "List BigQuery datasets in a GCP project.".into(),
+                common_mistakes: vec![
+                    "Using the wrong project_id when the service account has access to multiple GCP projects.".into(),
+                ],
+                examples: vec![
+                    r#"{"project_id": "my-gcp-project"}"#.into(),
+                ],
+                related: vec![CapabilityId::from_static("bigquery.tables.list")],
+            },
+        ),
+        op_info(
+            "bigquery.tables.list",
+            "List tables in a dataset",
+            json!({
+                "type": "object",
+                "required": ["project_id", "dataset_id"],
+                "properties": {
+                    "project_id": { "type": "string" },
+                    "dataset_id": { "type": "string" }
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["tables"],
+                "properties": {
+                    "tables": { "type": "array" }
+                }
+            }),
+            "bigquery.tables.read",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "List tables in a BigQuery dataset.".into(),
+                common_mistakes: vec![
+                    "Not distinguishing between TABLE, VIEW, and EXTERNAL table types in the response.".into(),
+                ],
+                examples: vec![
+                    r#"{"project_id": "my-gcp-project", "dataset_id": "analytics"}"#.into(),
+                ],
+                related: vec![
+                    CapabilityId::from_static("bigquery.datasets.list"),
+                    CapabilityId::from_static("bigquery.jobs.query"),
+                ],
+            },
+        ),
+        op_info(
+            "bigquery.jobs.list",
+            "List recent jobs",
+            json!({
+                "type": "object",
+                "required": ["project_id"],
+                "properties": {
+                    "project_id": { "type": "string" }
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["jobs"],
+                "properties": {
+                    "jobs": { "type": "array" }
+                }
+            }),
+            "bigquery.jobs.read",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "List recent BigQuery jobs.".into(),
+                common_mistakes: vec![
+                    "Expecting to see all historical jobs — only recent jobs are returned and older ones may be pruned.".into(),
+                ],
+                examples: vec![
+                    r#"{"project_id": "my-gcp-project"}"#.into(),
+                ],
+                related: vec![CapabilityId::from_static("bigquery.jobs.query")],
+            },
+        ),
+        op_info(
+            "bigquery.jobs.query",
+            "Run a SQL query",
+            json!({
+                "type": "object",
+                "required": ["project_id", "query"],
+                "properties": {
+                    "project_id": { "type": "string" },
+                    "query": { "type": "string", "description": "SQL query string" },
+                    "use_legacy_sql": { "type": "boolean" }
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["rows"],
+                "properties": {
+                    "rows": { "type": "array" }
+                }
+            }),
+            "bigquery.jobs.write",
+            RiskLevel::High,
+            SafetyTier::Risky,
+            IdempotencyClass::None,
+            AgentHint {
+                when_to_use: "Run a SQL query against BigQuery.".into(),
+                common_mistakes: vec![
+                    "Using legacy SQL syntax without setting use_legacy_sql.".into(),
+                ],
+                examples: vec![
+                    r#"{"project_id": "my-gcp-project", "query": "SELECT * FROM analytics.events LIMIT 10"}"#.into(),
+                ],
+                related: vec![CapabilityId::from_static("bigquery.tables.list")],
+            },
+        ),
+    ]
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn ops_json() -> serde_json::Value {
+        serde_json::to_value(operations_info()).unwrap()
+    }
 
     #[test]
     fn config_from_valid_params() {
@@ -605,14 +739,14 @@ mod tests {
 
     #[test]
     fn operations_info_has_4_operations() {
-        let ops = operations_info();
+        let ops = ops_json();
         let arr = ops.as_array().unwrap();
         assert_eq!(arr.len(), 4);
     }
 
     #[test]
     fn operations_all_have_required_fields() {
-        let ops = operations_info();
+        let ops = ops_json();
         for op in ops.as_array().unwrap() {
             assert!(op.get("id").is_some(), "missing id");
             assert!(op.get("summary").is_some(), "missing summary");
@@ -624,7 +758,7 @@ mod tests {
 
     #[test]
     fn operations_ids_are_unique() {
-        let ops = operations_info();
+        let ops = ops_json();
         let ids: Vec<&str> = ops
             .as_array()
             .unwrap()
@@ -640,7 +774,7 @@ mod tests {
     #[test]
     fn operations_risk_levels_valid() {
         let valid = ["low", "medium", "high"];
-        let ops = operations_info();
+        let ops = ops_json();
         for op in ops.as_array().unwrap() {
             let rl = op["risk_level"].as_str().unwrap();
             assert!(valid.contains(&rl), "invalid risk_level: {rl}");
@@ -650,7 +784,7 @@ mod tests {
     #[test]
     fn operations_safety_tiers_valid() {
         let valid = ["safe", "risky", "dangerous"];
-        let ops = operations_info();
+        let ops = ops_json();
         for op in ops.as_array().unwrap() {
             let st = op["safety_tier"].as_str().unwrap();
             assert!(valid.contains(&st), "invalid safety_tier: {st}");
@@ -660,7 +794,7 @@ mod tests {
     #[test]
     #[allow(clippy::case_sensitive_file_extension_comparisons)]
     fn read_operations_are_safe() {
-        let ops = operations_info();
+        let ops = ops_json();
         for op in ops.as_array().unwrap() {
             let cap = op["capability"].as_str().unwrap();
             if cap.ends_with(".read") {
@@ -682,7 +816,7 @@ mod tests {
 
     #[test]
     fn operations_contain_expected_ids() {
-        let ops = operations_info();
+        let ops = ops_json();
         let ids: Vec<&str> = ops
             .as_array()
             .unwrap()
@@ -697,7 +831,7 @@ mod tests {
 
     #[test]
     fn operations_all_have_idempotency() {
-        let ops = operations_info();
+        let ops = ops_json();
         for op in ops.as_array().unwrap() {
             assert!(
                 op.get("idempotency").is_some(),
@@ -709,7 +843,7 @@ mod tests {
 
     #[test]
     fn operations_query_is_risky() {
-        let ops = operations_info();
+        let ops = ops_json();
         let query_op = ops
             .as_array()
             .unwrap()
@@ -722,7 +856,7 @@ mod tests {
 
     #[test]
     fn operations_query_not_idempotent() {
-        let ops = operations_info();
+        let ops = ops_json();
         let query_op = ops
             .as_array()
             .unwrap()
@@ -734,7 +868,7 @@ mod tests {
 
     #[test]
     fn operations_datasets_list_capability() {
-        let ops = operations_info();
+        let ops = ops_json();
         let op = ops
             .as_array()
             .unwrap()
@@ -746,7 +880,7 @@ mod tests {
 
     #[test]
     fn operations_tables_list_capability() {
-        let ops = operations_info();
+        let ops = ops_json();
         let op = ops
             .as_array()
             .unwrap()
@@ -758,7 +892,7 @@ mod tests {
 
     #[test]
     fn operations_jobs_list_capability() {
-        let ops = operations_info();
+        let ops = ops_json();
         let op = ops
             .as_array()
             .unwrap()
@@ -921,7 +1055,7 @@ mod tests {
 
     #[test]
     fn operations_list_ops_strict_idempotent() {
-        let ops = operations_info();
+        let ops = ops_json();
         for op in ops.as_array().unwrap() {
             let id = op["id"].as_str().unwrap();
             if id.contains("list") {
@@ -1041,7 +1175,7 @@ mod tests {
 
     #[test]
     fn operations_all_summaries_non_empty() {
-        let ops = operations_info();
+        let ops = ops_json();
         for op in ops.as_array().unwrap() {
             let summary = op["summary"].as_str().unwrap();
             assert!(!summary.is_empty(), "op {:?} has empty summary", op["id"]);
@@ -1050,7 +1184,7 @@ mod tests {
 
     #[test]
     fn operations_all_capabilities_prefixed() {
-        let ops = operations_info();
+        let ops = ops_json();
         for op in ops.as_array().unwrap() {
             let cap = op["capability"].as_str().unwrap();
             assert!(

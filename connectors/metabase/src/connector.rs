@@ -3,7 +3,10 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use fcp_core::{BaseConnector, ConnectorId, CredentialId, FcpError, FcpResult};
+use fcp_core::{
+    AgentHint, BaseConnector, CapabilityId, ConnectorId, CredentialId, FcpError, FcpResult,
+    IdempotencyClass, OperationId, OperationInfo, RiskLevel, SafetyTier,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tracing::{info, instrument};
@@ -269,10 +272,13 @@ impl MetabaseConnector {
 
     /// Handle the `introspect` method.
     pub async fn handle_introspect(&self) -> FcpResult<serde_json::Value> {
+        let ops = serde_json::to_value(operations_info()).map_err(|e| FcpError::Internal {
+            message: format!("Failed to serialize operations: {e}"),
+        })?;
         Ok(json!({
             "connector_id": "fcp.metabase",
             "version": "0.1.0",
-            "operations": operations_info(),
+            "operations": ops,
         }))
     }
 
@@ -322,10 +328,7 @@ impl MetabaseConnector {
             .and_then(serde_json::Value::as_str)
             .unwrap_or("");
 
-        let allowed = operations_info().as_array().is_some_and(|ops| {
-            ops.iter()
-                .any(|o| o.get("id").and_then(serde_json::Value::as_str) == Some(operation))
-        });
+        let allowed = operations_info().iter().any(|o| o.id.as_ref() == operation);
 
         Ok(json!({
             "allowed": allowed,
@@ -404,34 +407,92 @@ fn require_str<'a>(input: &'a serde_json::Value, field: &str) -> Result<&'a str,
         })
 }
 
+/// Build a single `OperationInfo` with common defaults.
+fn op_info(
+    id: &'static str,
+    summary: &str,
+    input_schema: serde_json::Value,
+    output_schema: serde_json::Value,
+    capability: &'static str,
+    risk_level: RiskLevel,
+    safety_tier: SafetyTier,
+    idempotency: IdempotencyClass,
+    ai_hints: AgentHint,
+) -> OperationInfo {
+    OperationInfo {
+        id: OperationId::from_static(id),
+        summary: summary.into(),
+        input_schema,
+        output_schema,
+        capability: CapabilityId::from_static(capability),
+        risk_level,
+        description: None,
+        rate_limit: None,
+        requires_approval: None,
+        safety_tier,
+        idempotency,
+        ai_hints,
+    }
+}
+
 /// Build the operations info for introspection.
-fn operations_info() -> serde_json::Value {
-    json!([
-        {
-            "id": "metabase.dashboards.list",
-            "summary": "List dashboards",
-            "capability": "metabase.dashboards.read",
-            "risk_level": "low",
-            "safety_tier": "safe",
-            "idempotency": "strict",
-        },
-        {
-            "id": "metabase.questions.list",
-            "summary": "List saved questions (cards)",
-            "capability": "metabase.questions.read",
-            "risk_level": "low",
-            "safety_tier": "safe",
-            "idempotency": "strict",
-        },
-        {
-            "id": "metabase.questions.run",
-            "summary": "Run a saved question and get results",
-            "capability": "metabase.questions.read",
-            "risk_level": "low",
-            "safety_tier": "safe",
-            "idempotency": "strict",
-        },
-    ])
+fn operations_info() -> Vec<OperationInfo> {
+    vec![
+        op_info(
+            "metabase.dashboards.list",
+            "List dashboards",
+            json!({"type": "object", "required": [], "properties": {}}),
+            json!({"type": "object", "required": ["dashboards"], "properties": {"dashboards": {"type": "array"}}}),
+            "metabase.dashboards.read",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "List all dashboards in Metabase.".into(),
+                common_mistakes: vec!["Expecting card/question data inside the dashboard list — this returns dashboard metadata only; use questions.list or questions.run for query results.".into()],
+                examples: vec!["{}".into()],
+                related: vec![CapabilityId::from_static("metabase.questions.list")],
+            },
+        ),
+        op_info(
+            "metabase.questions.list",
+            "List saved questions (cards)",
+            json!({"type": "object", "required": [], "properties": {}}),
+            json!({"type": "object", "required": ["questions"], "properties": {"questions": {"type": "array"}}}),
+            "metabase.questions.read",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "List saved questions (cards) in Metabase.".into(),
+                common_mistakes: vec!["Confusing question IDs with dashboard IDs — they are separate numeric namespaces; use the card_id from this list when calling questions.run.".into()],
+                examples: vec!["{}".into()],
+                related: vec![
+                    CapabilityId::from_static("metabase.questions.run"),
+                    CapabilityId::from_static("metabase.dashboards.list"),
+                ],
+            },
+        ),
+        op_info(
+            "metabase.questions.run",
+            "Run a saved question and get results",
+            json!({"type": "object", "required": ["card_id"], "properties": {"card_id": {"type": "string", "description": "Card (question) ID to run"}}}),
+            json!({"type": "object", "required": ["data"], "properties": {"data": {"type": "object"}}}),
+            "metabase.questions.read",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "Run a saved Metabase question and get results.".into(),
+                common_mistakes: vec!["Passing a string card_id for a question that has required filter parameters — supply the parameters object or the query will fail or return unfiltered data.".into()],
+                examples: vec![r#"{"card_id": "42"}"#.into()],
+                related: vec![
+                    CapabilityId::from_static("metabase.questions.list"),
+                    CapabilityId::from_static("metabase.dashboards.list"),
+                ],
+            },
+        ),
+    ]
 }
 
 #[cfg(test)]
@@ -595,34 +656,31 @@ mod tests {
         assert!(require_str(&input, "card_id").is_err());
     }
 
+    /// Helper: serialize operations to JSON for tests that inspect JSON fields.
+    fn ops_json() -> serde_json::Value {
+        serde_json::to_value(operations_info()).unwrap()
+    }
+
     #[test]
     fn operations_info_has_3_operations() {
         let ops = operations_info();
-        let arr = ops.as_array().unwrap();
-        assert_eq!(arr.len(), 3);
+        assert_eq!(ops.len(), 3);
     }
 
     #[test]
     fn operations_all_have_required_fields() {
         let ops = operations_info();
-        for op in ops.as_array().unwrap() {
-            assert!(op.get("id").is_some(), "missing id");
-            assert!(op.get("summary").is_some(), "missing summary");
-            assert!(op.get("capability").is_some(), "missing capability");
-            assert!(op.get("risk_level").is_some(), "missing risk_level");
-            assert!(op.get("safety_tier").is_some(), "missing safety_tier");
+        for op in &ops {
+            assert!(!op.id.as_ref().is_empty(), "missing id");
+            assert!(!op.summary.is_empty(), "missing summary");
+            assert!(!op.capability.as_ref().is_empty(), "missing capability");
         }
     }
 
     #[test]
     fn operations_ids_are_unique() {
         let ops = operations_info();
-        let ids: Vec<&str> = ops
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter_map(|o| o["id"].as_str())
-            .collect();
+        let ids: Vec<&str> = ops.iter().map(|o| o.id.as_ref()).collect();
         let mut unique = ids.clone();
         unique.sort_unstable();
         unique.dedup();
@@ -631,42 +689,47 @@ mod tests {
 
     #[test]
     fn operations_risk_levels_valid() {
-        let valid = ["low", "medium", "high"];
         let ops = operations_info();
-        for op in ops.as_array().unwrap() {
-            let rl = op["risk_level"].as_str().unwrap();
-            assert!(valid.contains(&rl), "invalid risk_level: {rl}");
+        for op in &ops {
+            let v = serde_json::to_value(op.risk_level).unwrap();
+            let rl = v.as_str().unwrap();
+            assert!(
+                ["low", "medium", "high", "critical"].contains(&rl),
+                "invalid risk_level: {rl}"
+            );
         }
     }
 
     #[test]
     fn operations_safety_tiers_valid() {
-        let valid = ["safe", "risky", "dangerous"];
         let ops = operations_info();
-        for op in ops.as_array().unwrap() {
-            let st = op["safety_tier"].as_str().unwrap();
-            assert!(valid.contains(&st), "invalid safety_tier: {st}");
+        for op in &ops {
+            let v = serde_json::to_value(op.safety_tier).unwrap();
+            let st = v.as_str().unwrap();
+            assert!(
+                ["safe", "risky", "dangerous"].contains(&st),
+                "invalid safety_tier: {st}"
+            );
         }
     }
 
     #[test]
-    #[allow(clippy::case_sensitive_file_extension_comparisons)]
     fn read_operations_are_safe() {
         let ops = operations_info();
-        for op in ops.as_array().unwrap() {
-            let cap = op["capability"].as_str().unwrap();
-            if cap.ends_with(".read") {
+        for op in &ops {
+            let cap = op.capability.as_ref();
+            if cap.as_bytes().ends_with(b".read") {
                 assert_eq!(
-                    op["safety_tier"].as_str().unwrap(),
-                    "safe",
+                    op.safety_tier,
+                    SafetyTier::Safe,
                     "read op {} should be safe",
-                    op["id"]
+                    op.id
                 );
                 assert_eq!(
-                    op["risk_level"].as_str().unwrap(),
-                    "low",
+                    op.risk_level,
+                    RiskLevel::Low,
                     "read op {} should be low risk",
-                    op["id"]
+                    op.id
                 );
             }
         }
@@ -675,12 +738,7 @@ mod tests {
     #[test]
     fn operations_contain_expected_ids() {
         let ops = operations_info();
-        let ids: Vec<&str> = ops
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter_map(|o| o["id"].as_str())
-            .collect();
+        let ids: Vec<&str> = ops.iter().map(|o| o.id.as_ref()).collect();
         assert!(ids.contains(&"metabase.dashboards.list"));
         assert!(ids.contains(&"metabase.questions.list"));
         assert!(ids.contains(&"metabase.questions.run"));
@@ -689,11 +747,12 @@ mod tests {
     #[test]
     fn operations_all_have_idempotency() {
         let ops = operations_info();
-        for op in ops.as_array().unwrap() {
+        for op in &ops {
+            let v = serde_json::to_value(op.idempotency).unwrap();
             assert!(
-                op.get("idempotency").is_some(),
-                "op {:?} missing idempotency",
-                op["id"]
+                v.is_string(),
+                "op {} idempotency should serialize",
+                op.id
             );
         }
     }
@@ -701,9 +760,9 @@ mod tests {
     #[test]
     fn operations_all_are_safe() {
         let ops = operations_info();
-        for op in ops.as_array().unwrap() {
-            assert_eq!(op["safety_tier"], "safe");
-            assert_eq!(op["risk_level"], "low");
+        for op in &ops {
+            assert_eq!(op.safety_tier, SafetyTier::Safe);
+            assert_eq!(op.risk_level, RiskLevel::Low);
         }
     }
 
@@ -711,36 +770,30 @@ mod tests {
     fn operations_dashboards_list_capability() {
         let ops = operations_info();
         let op = ops
-            .as_array()
-            .unwrap()
             .iter()
-            .find(|o| o["id"] == "metabase.dashboards.list")
+            .find(|o| o.id.as_ref() == "metabase.dashboards.list")
             .unwrap();
-        assert_eq!(op["capability"], "metabase.dashboards.read");
+        assert_eq!(op.capability.as_ref(), "metabase.dashboards.read");
     }
 
     #[test]
     fn operations_questions_list_capability() {
         let ops = operations_info();
         let op = ops
-            .as_array()
-            .unwrap()
             .iter()
-            .find(|o| o["id"] == "metabase.questions.list")
+            .find(|o| o.id.as_ref() == "metabase.questions.list")
             .unwrap();
-        assert_eq!(op["capability"], "metabase.questions.read");
+        assert_eq!(op.capability.as_ref(), "metabase.questions.read");
     }
 
     #[test]
     fn operations_questions_run_capability() {
         let ops = operations_info();
         let op = ops
-            .as_array()
-            .unwrap()
             .iter()
-            .find(|o| o["id"] == "metabase.questions.run")
+            .find(|o| o.id.as_ref() == "metabase.questions.run")
             .unwrap();
-        assert_eq!(op["capability"], "metabase.questions.read");
+        assert_eq!(op.capability.as_ref(), "metabase.questions.read");
     }
 
     #[test]
@@ -986,8 +1039,8 @@ mod tests {
     #[test]
     fn operations_all_capabilities_prefixed() {
         let ops = operations_info();
-        for op in ops.as_array().unwrap() {
-            let cap = op["capability"].as_str().unwrap();
+        for op in &ops {
+            let cap = op.capability.as_ref();
             assert!(
                 cap.starts_with("metabase."),
                 "capability {cap} should start with metabase."
@@ -998,9 +1051,20 @@ mod tests {
     #[test]
     fn operations_all_summaries_non_empty() {
         let ops = operations_info();
-        for op in ops.as_array().unwrap() {
-            let summary = op["summary"].as_str().unwrap();
-            assert!(!summary.is_empty(), "op {} has empty summary", op["id"]);
+        for op in &ops {
+            assert!(!op.summary.is_empty(), "op {} has empty summary", op.id);
+        }
+    }
+
+    #[test]
+    fn operations_serialize_to_json() {
+        let ops = ops_json();
+        let arr = ops.as_array().unwrap();
+        assert_eq!(arr.len(), 3);
+        for op in arr {
+            assert!(op.get("id").is_some());
+            assert!(op.get("summary").is_some());
+            assert!(op.get("capability").is_some());
         }
     }
 

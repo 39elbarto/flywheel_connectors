@@ -993,4 +993,956 @@ mod tests {
         let resp = ctrl.cancel(&req, fixed_now()).unwrap();
         assert_eq!(resp.outcome, CancellationOutcome::Cancelled);
     }
+
+    // ── CancelReason serialization (extended) ──
+
+    #[test]
+    fn cancel_reason_user_requested_deserialize_from_json() {
+        let json = r#"{"type":"user_requested"}"#;
+        let r: CancelReason = serde_json::from_str(json).unwrap();
+        assert_eq!(r.label(), "user_requested");
+    }
+
+    #[test]
+    fn cancel_reason_agent_abort_deserialize_from_json() {
+        let json = r#"{"type":"agent_abort","reason":"something went wrong"}"#;
+        let r: CancelReason = serde_json::from_str(json).unwrap();
+        assert_eq!(r.label(), "agent_abort");
+        if let CancelReason::AgentAbort { reason } = r {
+            assert_eq!(reason, "something went wrong");
+        } else {
+            panic!("expected AgentAbort");
+        }
+    }
+
+    #[test]
+    fn cancel_reason_timeout_approaching_deserialize_from_json() {
+        let json = r#"{"type":"timeout_approaching","remaining_ms":250}"#;
+        let r: CancelReason = serde_json::from_str(json).unwrap();
+        if let CancelReason::TimeoutApproaching { remaining_ms } = r {
+            assert_eq!(remaining_ms, 250);
+        } else {
+            panic!("expected TimeoutApproaching");
+        }
+    }
+
+    #[test]
+    fn cancel_reason_resource_limit_deserialize_from_json() {
+        let json = r#"{"type":"resource_limit","resource":"cpu","current":95,"limit":100}"#;
+        let r: CancelReason = serde_json::from_str(json).unwrap();
+        if let CancelReason::ResourceLimit {
+            resource,
+            current,
+            limit,
+        } = r
+        {
+            assert_eq!(resource, "cpu");
+            assert_eq!(current, 95);
+            assert_eq!(limit, 100);
+        } else {
+            panic!("expected ResourceLimit");
+        }
+    }
+
+    #[test]
+    fn cancel_reason_superseded_deserialize_from_json() {
+        let json = r#"{"type":"superseded","by_operation_id":"op_replacement"}"#;
+        let r: CancelReason = serde_json::from_str(json).unwrap();
+        if let CancelReason::Superseded { by_operation_id } = r {
+            assert_eq!(by_operation_id, "op_replacement");
+        } else {
+            panic!("expected Superseded");
+        }
+    }
+
+    #[test]
+    fn cancel_reason_session_closing_deserialize_from_json() {
+        let json = r#"{"type":"session_closing"}"#;
+        let r: CancelReason = serde_json::from_str(json).unwrap();
+        assert_eq!(r.label(), "session_closing");
+    }
+
+    #[test]
+    fn cancel_reason_unknown_variant_rejected() {
+        let json = r#"{"type":"cosmic_ray"}"#;
+        let result = serde_json::from_str::<CancelReason>(json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn cancel_reason_superseded_json_roundtrip() {
+        let r = CancelReason::Superseded {
+            by_operation_id: "op_v2".into(),
+        };
+        let json = serde_json::to_string(&r).unwrap();
+        let parsed: CancelReason = serde_json::from_str(&json).unwrap();
+        if let CancelReason::Superseded { by_operation_id } = parsed {
+            assert_eq!(by_operation_id, "op_v2");
+        } else {
+            panic!("expected Superseded");
+        }
+    }
+
+    // ── CleanupBehavior::Full (extended) ──
+
+    #[test]
+    fn cleanup_full_zero_timeout() {
+        let c = CleanupBehavior::Full { timeout_ms: 0 };
+        if let CleanupBehavior::Full { timeout_ms } = c {
+            assert_eq!(timeout_ms, 0);
+        } else {
+            panic!("expected Full");
+        }
+    }
+
+    #[test]
+    fn cleanup_full_json_roundtrip_with_timeout() {
+        let c = CleanupBehavior::Full { timeout_ms: 30000 };
+        let json = serde_json::to_string(&c).unwrap();
+        assert!(json.contains("30000"));
+        let parsed: CleanupBehavior = serde_json::from_str(&json).unwrap();
+        if let CleanupBehavior::Full { timeout_ms } = parsed {
+            assert_eq!(timeout_ms, 30000);
+        } else {
+            panic!("expected Full");
+        }
+    }
+
+    // ── CancellationOutcome (extended) ──
+
+    #[test]
+    fn outcome_pending_json_roundtrip() {
+        let o = CancellationOutcome::Pending;
+        let json = serde_json::to_string(&o).unwrap();
+        assert_eq!(json, "\"pending\"");
+        let parsed: CancellationOutcome = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, CancellationOutcome::Pending);
+    }
+
+    #[test]
+    fn outcome_failed_json_roundtrip() {
+        let o = CancellationOutcome::Failed;
+        let json = serde_json::to_string(&o).unwrap();
+        assert_eq!(json, "\"failed\"");
+        let parsed: CancellationOutcome = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, CancellationOutcome::Failed);
+    }
+
+    #[test]
+    fn outcome_all_variants_not_equal() {
+        let variants = [
+            CancellationOutcome::Cancelled,
+            CancellationOutcome::TooLate,
+            CancellationOutcome::Pending,
+            CancellationOutcome::Failed,
+        ];
+        for i in 0..variants.len() {
+            for j in 0..variants.len() {
+                if i == j {
+                    assert_eq!(variants[i], variants[j]);
+                } else {
+                    assert_ne!(variants[i], variants[j]);
+                }
+            }
+        }
+    }
+
+    // ── CancellationRequest (extended) ──
+
+    #[test]
+    fn request_with_return_partial_true() {
+        let req = CancellationRequest {
+            operation_id: "op_partial".into(),
+            reason: CancelReason::UserRequested,
+            cleanup: CleanupBehavior::default(),
+            return_partial: true,
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(json.contains("true"));
+        let parsed: CancellationRequest = serde_json::from_str(&json).unwrap();
+        assert!(parsed.return_partial);
+    }
+
+    #[test]
+    fn request_with_full_cleanup() {
+        let req = CancellationRequest {
+            operation_id: "op_full".into(),
+            reason: CancelReason::SessionClosing,
+            cleanup: CleanupBehavior::Full { timeout_ms: 10000 },
+            return_partial: false,
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        let parsed: CancellationRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.operation_id, "op_full");
+        assert!(matches!(
+            parsed.cleanup,
+            CleanupBehavior::Full { timeout_ms: 10000 }
+        ));
+    }
+
+    #[test]
+    fn request_with_abandon_cleanup() {
+        let req = CancellationRequest {
+            operation_id: "op_abandon".into(),
+            reason: CancelReason::AgentAbort {
+                reason: "fatal".into(),
+            },
+            cleanup: CleanupBehavior::Abandon,
+            return_partial: false,
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        let parsed: CancellationRequest = serde_json::from_str(&json).unwrap();
+        assert!(matches!(parsed.cleanup, CleanupBehavior::Abandon));
+    }
+
+    #[test]
+    fn request_with_checkpoint_cleanup() {
+        let req = CancellationRequest {
+            operation_id: "op_ckpt".into(),
+            reason: CancelReason::TimeoutApproaching { remaining_ms: 500 },
+            cleanup: CleanupBehavior::Checkpoint,
+            return_partial: true,
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        let parsed: CancellationRequest = serde_json::from_str(&json).unwrap();
+        assert!(matches!(parsed.cleanup, CleanupBehavior::Checkpoint));
+        assert!(parsed.return_partial);
+    }
+
+    #[test]
+    fn request_cleanup_defaults_when_missing() {
+        let json = r#"{"operation_id":"op_x","reason":{"type":"user_requested"}}"#;
+        let parsed: CancellationRequest = serde_json::from_str(json).unwrap();
+        assert!(matches!(parsed.cleanup, CleanupBehavior::BestEffort));
+        assert!(!parsed.return_partial);
+    }
+
+    // ── CancellationResponse (extended) ──
+
+    #[test]
+    fn response_none_fields_omitted_in_json() {
+        let resp = CancellationResponse {
+            operation_id: "op_sparse".into(),
+            outcome: CancellationOutcome::TooLate,
+            partial_result: None,
+            checkpoint: None,
+            cleanup_result: None,
+            duration_ms: 5,
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        assert!(!json.contains("partial_result"));
+        assert!(!json.contains("checkpoint"));
+        assert!(!json.contains("cleanup_result"));
+    }
+
+    #[test]
+    fn response_all_fields_populated() {
+        let resp = CancellationResponse {
+            operation_id: "op_full_resp".into(),
+            outcome: CancellationOutcome::Cancelled,
+            partial_result: Some(PartialResult {
+                completed_items: 10,
+                total_items: Some(50),
+                data: Some(serde_json::json!([1, 2, 3])),
+            }),
+            checkpoint: Some(CheckpointInfo {
+                id: "ckpt_99".into(),
+                resumable: true,
+                expires_at: Some(fixed_now()),
+                state: Some(serde_json::json!({"page": 5})),
+            }),
+            cleanup_result: Some(CleanupResult {
+                success: true,
+                cleaned: vec!["cache".into(), "temp".into()],
+                failed: vec![],
+                duration_ms: 3,
+            }),
+            duration_ms: 12,
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        let parsed: CancellationResponse = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.operation_id, "op_full_resp");
+        assert!(parsed.partial_result.is_some());
+        assert!(parsed.checkpoint.is_some());
+        assert!(parsed.cleanup_result.is_some());
+        assert_eq!(parsed.duration_ms, 12);
+    }
+
+    // ── PartialResult (extended) ──
+
+    #[test]
+    fn partial_result_large_values() {
+        let pr = PartialResult {
+            completed_items: u64::MAX,
+            total_items: Some(u64::MAX),
+            data: None,
+        };
+        let json = serde_json::to_string(&pr).unwrap();
+        let parsed: PartialResult = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.completed_items, u64::MAX);
+        assert_eq!(parsed.total_items, Some(u64::MAX));
+    }
+
+    #[test]
+    fn partial_result_completed_exceeds_total() {
+        let pr = PartialResult {
+            completed_items: 200,
+            total_items: Some(100),
+            data: None,
+        };
+        let json = serde_json::to_string(&pr).unwrap();
+        let parsed: PartialResult = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.completed_items, 200);
+        assert_eq!(parsed.total_items, Some(100));
+    }
+
+    #[test]
+    fn partial_result_with_complex_data() {
+        let pr = PartialResult {
+            completed_items: 3,
+            total_items: None,
+            data: Some(serde_json::json!({
+                "rows": [
+                    {"id": 1, "name": "alpha"},
+                    {"id": 2, "name": "beta"},
+                    {"id": 3, "name": "gamma"}
+                ],
+                "metadata": {"source": "test"}
+            })),
+        };
+        let json = serde_json::to_string(&pr).unwrap();
+        let parsed: PartialResult = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.completed_items, 3);
+        let data = parsed.data.unwrap();
+        assert!(data["rows"].is_array());
+        assert_eq!(data["rows"].as_array().unwrap().len(), 3);
+    }
+
+    // ── CheckpointInfo (extended) ──
+
+    #[test]
+    fn checkpoint_without_state() {
+        let ckpt = CheckpointInfo {
+            id: "ckpt_no_state".into(),
+            resumable: true,
+            expires_at: Some(fixed_now()),
+            state: None,
+        };
+        let json = serde_json::to_string(&ckpt).unwrap();
+        // "state" as a key should not appear, but "ckpt_no_state" contains
+        // the substring "state" in the id — check for the key specifically.
+        assert!(!json.contains("\"state\""));
+        let parsed: CheckpointInfo = serde_json::from_str(&json).unwrap();
+        assert!(parsed.state.is_none());
+    }
+
+    #[test]
+    fn checkpoint_without_expires_at() {
+        let ckpt = CheckpointInfo {
+            id: "ckpt_no_expiry".into(),
+            resumable: true,
+            expires_at: None,
+            state: Some(serde_json::json!({"cursor": 42})),
+        };
+        let json = serde_json::to_string(&ckpt).unwrap();
+        assert!(!json.contains("expires_at"));
+        let parsed: CheckpointInfo = serde_json::from_str(&json).unwrap();
+        assert!(parsed.expires_at.is_none());
+        assert!(parsed.state.is_some());
+    }
+
+    #[test]
+    fn checkpoint_non_resumable() {
+        let ckpt = CheckpointInfo {
+            id: "ckpt_final".into(),
+            resumable: false,
+            expires_at: None,
+            state: None,
+        };
+        let json = serde_json::to_string(&ckpt).unwrap();
+        let parsed: CheckpointInfo = serde_json::from_str(&json).unwrap();
+        assert!(!parsed.resumable);
+        assert!(parsed.expires_at.is_none());
+        assert!(parsed.state.is_none());
+    }
+
+    // ── CleanupResult (extended) ──
+
+    #[test]
+    fn cleanup_result_with_failed_items() {
+        let cr = CleanupResult {
+            success: false,
+            cleaned: vec!["cache".into()],
+            failed: vec!["lock_file".into(), "temp_dir".into()],
+            duration_ms: 500,
+        };
+        let json = serde_json::to_string(&cr).unwrap();
+        let parsed: CleanupResult = serde_json::from_str(&json).unwrap();
+        assert!(!parsed.success);
+        assert_eq!(parsed.cleaned.len(), 1);
+        assert_eq!(parsed.failed.len(), 2);
+        assert_eq!(parsed.failed[0], "lock_file");
+        assert_eq!(parsed.failed[1], "temp_dir");
+    }
+
+    #[test]
+    fn cleanup_result_empty_cleaned_list() {
+        let cr = CleanupResult {
+            success: false,
+            cleaned: vec![],
+            failed: vec!["everything".into()],
+            duration_ms: 100,
+        };
+        let json = serde_json::to_string(&cr).unwrap();
+        let parsed: CleanupResult = serde_json::from_str(&json).unwrap();
+        assert!(parsed.cleaned.is_empty());
+        assert_eq!(parsed.failed.len(), 1);
+    }
+
+    #[test]
+    fn cleanup_result_zero_duration() {
+        let cr = CleanupResult {
+            success: true,
+            cleaned: vec!["state".into()],
+            failed: vec![],
+            duration_ms: 0,
+        };
+        let json = serde_json::to_string(&cr).unwrap();
+        let parsed: CleanupResult = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.duration_ms, 0);
+    }
+
+    #[test]
+    fn cleanup_result_both_cleaned_and_failed() {
+        let cr = CleanupResult {
+            success: false,
+            cleaned: vec!["a".into(), "b".into(), "c".into()],
+            failed: vec!["d".into(), "e".into()],
+            duration_ms: 250,
+        };
+        let json = serde_json::to_string(&cr).unwrap();
+        let parsed: CleanupResult = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.cleaned.len(), 3);
+        assert_eq!(parsed.failed.len(), 2);
+        assert!(!parsed.success);
+    }
+
+    // ── CancellationAuditEvent (extended) ──
+
+    #[test]
+    fn audit_event_json_roundtrip_all_fields() {
+        let event = CancellationAuditEvent {
+            timestamp: fixed_now(),
+            operation_id: "op_audited".into(),
+            reason: CancelReason::ResourceLimit {
+                resource: "disk".into(),
+                current: 980,
+                limit: 1000,
+            },
+            outcome: CancellationOutcome::Cancelled,
+            duration_ms: 42,
+            had_partial_result: true,
+            had_checkpoint: true,
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        let parsed: CancellationAuditEvent = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.operation_id, "op_audited");
+        assert_eq!(parsed.outcome, CancellationOutcome::Cancelled);
+        assert_eq!(parsed.duration_ms, 42);
+        assert!(parsed.had_partial_result);
+        assert!(parsed.had_checkpoint);
+        assert_eq!(parsed.reason.label(), "resource_limit");
+    }
+
+    #[test]
+    fn audit_event_clone() {
+        let event = CancellationAuditEvent {
+            timestamp: fixed_now(),
+            operation_id: "op_clone".into(),
+            reason: CancelReason::SessionClosing,
+            outcome: CancellationOutcome::Pending,
+            duration_ms: 7,
+            had_partial_result: false,
+            had_checkpoint: false,
+        };
+        let cloned = event.clone();
+        assert_eq!(event.operation_id, "op_clone");
+        assert_eq!(cloned.outcome, CancellationOutcome::Pending);
+        assert_eq!(cloned.duration_ms, 7);
+    }
+
+    // ── CancellationController (extended) ──
+
+    #[test]
+    fn controller_track_many_cancel_some() {
+        let ctrl = CancellationController::new();
+        for i in 0..20 {
+            ctrl.track(&format!("op_{i}"));
+        }
+        assert_eq!(ctrl.tracked_count(), 20);
+
+        // Cancel only even-numbered operations.
+        for i in (0..20).step_by(2) {
+            let req = cancel_request(&format!("op_{i}"), CancelReason::UserRequested);
+            let resp = ctrl.cancel(&req, fixed_now()).unwrap();
+            assert_eq!(resp.outcome, CancellationOutcome::Cancelled);
+        }
+        // Odd operations should not be cancel-requested.
+        for i in (1..20).step_by(2) {
+            assert!(!ctrl.is_cancel_requested(&format!("op_{i}")));
+        }
+        // Even operations should be cancel-requested.
+        for i in (0..20).step_by(2) {
+            assert!(ctrl.is_cancel_requested(&format!("op_{i}")));
+        }
+        assert_eq!(ctrl.audit_events().len(), 10);
+    }
+
+    #[test]
+    fn controller_cancel_with_full_cleanup() {
+        let ctrl = CancellationController::new();
+        ctrl.track("op_full_cleanup");
+        let req = CancellationRequest {
+            operation_id: "op_full_cleanup".into(),
+            reason: CancelReason::UserRequested,
+            cleanup: CleanupBehavior::Full { timeout_ms: 3000 },
+            return_partial: false,
+        };
+        let resp = ctrl.cancel(&req, fixed_now()).unwrap();
+        assert_eq!(resp.outcome, CancellationOutcome::Cancelled);
+        // No checkpoint because cleanup is Full, not Checkpoint.
+        assert!(resp.checkpoint.is_none());
+        // Cleanup result should be present because outcome is Cancelled.
+        assert!(resp.cleanup_result.is_some());
+    }
+
+    #[test]
+    fn controller_cancel_with_abandon() {
+        let ctrl = CancellationController::new();
+        ctrl.track("op_abandon");
+        let req = CancellationRequest {
+            operation_id: "op_abandon".into(),
+            reason: CancelReason::AgentAbort {
+                reason: "critical".into(),
+            },
+            cleanup: CleanupBehavior::Abandon,
+            return_partial: false,
+        };
+        let resp = ctrl.cancel(&req, fixed_now()).unwrap();
+        assert_eq!(resp.outcome, CancellationOutcome::Cancelled);
+        // No checkpoint on Abandon.
+        assert!(resp.checkpoint.is_none());
+        assert!(resp.cleanup_result.is_some());
+    }
+
+    #[test]
+    fn controller_retrack_after_remove() {
+        let ctrl = CancellationController::new();
+        ctrl.track("op_reuse");
+        let req = cancel_request("op_reuse", CancelReason::UserRequested);
+        ctrl.cancel(&req, fixed_now()).unwrap();
+        assert!(ctrl.is_cancel_requested("op_reuse"));
+
+        ctrl.remove("op_reuse");
+        assert_eq!(ctrl.tracked_count(), 0);
+        assert!(!ctrl.is_cancel_requested("op_reuse"));
+
+        // Re-track the same ID; it should be fresh.
+        ctrl.track("op_reuse");
+        assert_eq!(ctrl.tracked_count(), 1);
+        assert!(!ctrl.is_cancel_requested("op_reuse"));
+
+        // Cancelling again should succeed (not Pending).
+        let resp = ctrl.cancel(&req, fixed_now()).unwrap();
+        assert_eq!(resp.outcome, CancellationOutcome::Cancelled);
+    }
+
+    #[test]
+    fn controller_audit_ordering_many_ops() {
+        let ctrl = CancellationController::new();
+        let ids: Vec<String> = (0..10).map(|i| format!("seq_{i}")).collect();
+        for id in &ids {
+            ctrl.track(id);
+        }
+        for id in &ids {
+            let req = cancel_request(id, CancelReason::SessionClosing);
+            ctrl.cancel(&req, fixed_now()).unwrap();
+        }
+        let events = ctrl.audit_events();
+        assert_eq!(events.len(), 10);
+        // Newest first: last cancelled should be first in audit.
+        assert_eq!(events[0].operation_id, "seq_9");
+        assert_eq!(events[9].operation_id, "seq_0");
+    }
+
+    #[test]
+    fn controller_clear_audit_then_add_more() {
+        let ctrl = CancellationController::new();
+        ctrl.track("op_a");
+        ctrl.cancel(
+            &cancel_request("op_a", CancelReason::UserRequested),
+            fixed_now(),
+        )
+        .unwrap();
+        assert_eq!(ctrl.audit_events().len(), 1);
+
+        ctrl.clear_audit_log();
+        assert!(ctrl.audit_events().is_empty());
+
+        ctrl.track("op_b");
+        ctrl.cancel(
+            &cancel_request("op_b", CancelReason::SessionClosing),
+            fixed_now(),
+        )
+        .unwrap();
+        let events = ctrl.audit_events();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].operation_id, "op_b");
+    }
+
+    #[test]
+    fn controller_track_cancel_remove_retrack_lifecycle() {
+        let ctrl = CancellationController::new();
+
+        // Phase 1: Track and cancel.
+        ctrl.track("lifecycle_op");
+        assert_eq!(ctrl.tracked_count(), 1);
+        let req = cancel_request("lifecycle_op", CancelReason::UserRequested);
+        let resp = ctrl.cancel(&req, fixed_now()).unwrap();
+        assert_eq!(resp.outcome, CancellationOutcome::Cancelled);
+        assert!(ctrl.is_cancel_requested("lifecycle_op"));
+
+        // Phase 2: Remove.
+        ctrl.remove("lifecycle_op");
+        assert_eq!(ctrl.tracked_count(), 0);
+        // Cancel after remove should error.
+        let err = ctrl.cancel(&req, fixed_now()).unwrap_err();
+        assert!(err.to_string().contains("operation not found"));
+
+        // Phase 3: Re-track.
+        ctrl.track("lifecycle_op");
+        assert!(!ctrl.is_cancel_requested("lifecycle_op"));
+
+        // Phase 4: Complete then try cancel.
+        ctrl.complete("lifecycle_op");
+        let resp2 = ctrl.cancel(&req, fixed_now()).unwrap();
+        assert_eq!(resp2.outcome, CancellationOutcome::TooLate);
+
+        // Audit should have 3 entries total (cancel, error is not audited, cancel again).
+        // The error path returns Err before recording audit, so only 2 successful cancel calls recorded.
+        assert_eq!(ctrl.audit_events().len(), 2);
+    }
+
+    // ── Edge cases ──
+
+    #[test]
+    fn empty_string_operation_id() {
+        let ctrl = CancellationController::new();
+        ctrl.track("");
+        assert_eq!(ctrl.tracked_count(), 1);
+        let req = cancel_request("", CancelReason::UserRequested);
+        let resp = ctrl.cancel(&req, fixed_now()).unwrap();
+        assert_eq!(resp.outcome, CancellationOutcome::Cancelled);
+        assert_eq!(resp.operation_id, "");
+        ctrl.remove("");
+        assert_eq!(ctrl.tracked_count(), 0);
+    }
+
+    #[test]
+    fn very_long_operation_id() {
+        let long_id = "x".repeat(10000);
+        let ctrl = CancellationController::new();
+        ctrl.track(&long_id);
+        let req = cancel_request(&long_id, CancelReason::UserRequested);
+        let resp = ctrl.cancel(&req, fixed_now()).unwrap();
+        assert_eq!(resp.outcome, CancellationOutcome::Cancelled);
+        assert_eq!(resp.operation_id, long_id);
+    }
+
+    #[test]
+    fn many_cancellations_of_same_op_after_retracks() {
+        let ctrl = CancellationController::new();
+        for _ in 0..50 {
+            ctrl.track("repeated");
+            let req = cancel_request("repeated", CancelReason::UserRequested);
+            let resp = ctrl.cancel(&req, fixed_now()).unwrap();
+            assert_eq!(resp.outcome, CancellationOutcome::Cancelled);
+            ctrl.remove("repeated");
+        }
+        assert_eq!(ctrl.tracked_count(), 0);
+        assert_eq!(ctrl.audit_events().len(), 50);
+    }
+
+    #[test]
+    fn cancel_with_superseded_preserves_by_operation_id_in_audit() {
+        let ctrl = CancellationController::new();
+        ctrl.track("old_op");
+        let req = cancel_request(
+            "old_op",
+            CancelReason::Superseded {
+                by_operation_id: "new_op_v2".into(),
+            },
+        );
+        ctrl.cancel(&req, fixed_now()).unwrap();
+        let events = ctrl.audit_events();
+        assert_eq!(events.len(), 1);
+        if let CancelReason::Superseded { by_operation_id } = &events[0].reason {
+            assert_eq!(by_operation_id, "new_op_v2");
+        } else {
+            panic!("expected Superseded reason in audit");
+        }
+    }
+
+    #[test]
+    fn cancel_pending_has_cleanup_result() {
+        let ctrl = CancellationController::new();
+        ctrl.track("op_pending");
+        let req = cancel_request("op_pending", CancelReason::UserRequested);
+        ctrl.cancel(&req, fixed_now()).unwrap(); // First: Cancelled
+        let resp = ctrl.cancel(&req, fixed_now()).unwrap(); // Second: Pending
+        assert_eq!(resp.outcome, CancellationOutcome::Pending);
+        // Pending also gets a cleanup result per the controller logic.
+        assert!(resp.cleanup_result.is_some());
+    }
+
+    #[test]
+    fn checkpoint_id_format_includes_operation_id() {
+        let ctrl = CancellationController::new();
+        ctrl.track("my_special_op");
+        let req = CancellationRequest {
+            operation_id: "my_special_op".into(),
+            reason: CancelReason::UserRequested,
+            cleanup: CleanupBehavior::Checkpoint,
+            return_partial: false,
+        };
+        let resp = ctrl.cancel(&req, fixed_now()).unwrap();
+        let ckpt = resp.checkpoint.unwrap();
+        assert_eq!(ckpt.id, "ckpt_my_special_op");
+    }
+
+    #[test]
+    fn checkpoint_expires_24h_from_now() {
+        let now = fixed_now();
+        let ctrl = CancellationController::new();
+        ctrl.track("op_expiry");
+        let req = CancellationRequest {
+            operation_id: "op_expiry".into(),
+            reason: CancelReason::UserRequested,
+            cleanup: CleanupBehavior::Checkpoint,
+            return_partial: false,
+        };
+        let resp = ctrl.cancel(&req, now).unwrap();
+        let ckpt = resp.checkpoint.unwrap();
+        let expected_expiry = now + chrono::Duration::hours(24);
+        assert_eq!(ckpt.expires_at, Some(expected_expiry));
+    }
+
+    #[test]
+    fn audit_event_not_recorded_on_error() {
+        let ctrl = CancellationController::new();
+        // No tracking — cancel should error.
+        let req = cancel_request("ghost_op", CancelReason::UserRequested);
+        let result = ctrl.cancel(&req, fixed_now());
+        assert!(result.is_err());
+        // No audit event should be recorded for errors.
+        assert!(ctrl.audit_events().is_empty());
+    }
+
+    #[test]
+    fn controller_remove_cancelled_does_not_affect_audit() {
+        let ctrl = CancellationController::new();
+        ctrl.track("op_logged");
+        ctrl.cancel(
+            &cancel_request("op_logged", CancelReason::UserRequested),
+            fixed_now(),
+        )
+        .unwrap();
+        assert_eq!(ctrl.audit_events().len(), 1);
+
+        // Removing the operation does not clear its audit entry.
+        ctrl.remove("op_logged");
+        assert_eq!(ctrl.audit_events().len(), 1);
+        assert_eq!(ctrl.audit_events()[0].operation_id, "op_logged");
+    }
+
+    #[test]
+    fn controller_complete_does_not_record_audit() {
+        let ctrl = CancellationController::new();
+        ctrl.track("op_complete_only");
+        ctrl.complete("op_complete_only");
+        // Completing without cancelling should produce no audit events.
+        assert!(ctrl.audit_events().is_empty());
+    }
+
+    #[test]
+    fn response_partial_result_is_none_from_controller() {
+        // The controller always sets partial_result to None.
+        // Callers are responsible for attaching partial results.
+        let ctrl = CancellationController::new();
+        ctrl.track("op_no_partial");
+        let req = CancellationRequest {
+            operation_id: "op_no_partial".into(),
+            reason: CancelReason::UserRequested,
+            cleanup: CleanupBehavior::default(),
+            return_partial: true, // Even with return_partial=true
+        };
+        let resp = ctrl.cancel(&req, fixed_now()).unwrap();
+        assert!(resp.partial_result.is_none());
+    }
+
+    #[test]
+    fn audit_had_partial_result_always_false_from_controller() {
+        // The controller always sets had_partial_result to false.
+        let ctrl = CancellationController::new();
+        ctrl.track("op_audit_partial");
+        let req = CancellationRequest {
+            operation_id: "op_audit_partial".into(),
+            reason: CancelReason::UserRequested,
+            cleanup: CleanupBehavior::default(),
+            return_partial: true,
+        };
+        ctrl.cancel(&req, fixed_now()).unwrap();
+        let events = ctrl.audit_events();
+        assert!(!events[0].had_partial_result);
+    }
+
+    #[test]
+    fn controller_track_overwrites_cancelled_state() {
+        let ctrl = CancellationController::new();
+        ctrl.track("op_overwrite");
+        let req = cancel_request("op_overwrite", CancelReason::UserRequested);
+        ctrl.cancel(&req, fixed_now()).unwrap();
+        assert!(ctrl.is_cancel_requested("op_overwrite"));
+
+        // Re-tracking should reset the state (overwrite).
+        ctrl.track("op_overwrite");
+        assert!(!ctrl.is_cancel_requested("op_overwrite"));
+        assert_eq!(ctrl.tracked_count(), 1);
+    }
+
+    #[test]
+    fn controller_track_overwrites_completed_state() {
+        let ctrl = CancellationController::new();
+        ctrl.track("op_reset");
+        ctrl.complete("op_reset");
+        // Cancel returns TooLate.
+        let req = cancel_request("op_reset", CancelReason::UserRequested);
+        let resp = ctrl.cancel(&req, fixed_now()).unwrap();
+        assert_eq!(resp.outcome, CancellationOutcome::TooLate);
+
+        // Re-track resets; cancel should now succeed.
+        ctrl.track("op_reset");
+        let resp2 = ctrl.cancel(&req, fixed_now()).unwrap();
+        assert_eq!(resp2.outcome, CancellationOutcome::Cancelled);
+    }
+
+    #[test]
+    fn cancel_reason_agent_abort_empty_reason() {
+        let r = CancelReason::AgentAbort {
+            reason: String::new(),
+        };
+        assert_eq!(r.label(), "agent_abort");
+        let json = serde_json::to_string(&r).unwrap();
+        let parsed: CancelReason = serde_json::from_str(&json).unwrap();
+        if let CancelReason::AgentAbort { reason } = parsed {
+            assert!(reason.is_empty());
+        } else {
+            panic!("expected AgentAbort");
+        }
+    }
+
+    #[test]
+    fn multiple_ops_different_reasons_in_audit() {
+        let ctrl = CancellationController::new();
+        ctrl.track("op_user");
+        ctrl.track("op_timeout");
+        ctrl.track("op_resource");
+
+        ctrl.cancel(
+            &cancel_request("op_user", CancelReason::UserRequested),
+            fixed_now(),
+        )
+        .unwrap();
+        ctrl.cancel(
+            &cancel_request(
+                "op_timeout",
+                CancelReason::TimeoutApproaching { remaining_ms: 100 },
+            ),
+            fixed_now(),
+        )
+        .unwrap();
+        ctrl.cancel(
+            &cancel_request(
+                "op_resource",
+                CancelReason::ResourceLimit {
+                    resource: "mem".into(),
+                    current: 95,
+                    limit: 100,
+                },
+            ),
+            fixed_now(),
+        )
+        .unwrap();
+
+        let events = ctrl.audit_events();
+        assert_eq!(events.len(), 3);
+        // Newest first.
+        assert_eq!(events[0].reason.label(), "resource_limit");
+        assert_eq!(events[1].reason.label(), "timeout_approaching");
+        assert_eq!(events[2].reason.label(), "user_requested");
+    }
+
+    #[test]
+    fn cancel_error_message_includes_operation_id() {
+        let ctrl = CancellationController::new();
+        let req = cancel_request("missing_op_xyz", CancelReason::UserRequested);
+        let err = ctrl.cancel(&req, fixed_now()).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("missing_op_xyz"));
+    }
+
+    #[test]
+    fn cleanup_result_on_pending_contains_operation_state() {
+        let ctrl = CancellationController::new();
+        ctrl.track("op_pending_cleanup");
+        let req = cancel_request("op_pending_cleanup", CancelReason::UserRequested);
+        ctrl.cancel(&req, fixed_now()).unwrap(); // Cancelled
+        let resp = ctrl.cancel(&req, fixed_now()).unwrap(); // Pending
+        let cleanup = resp.cleanup_result.unwrap();
+        assert!(cleanup.cleaned.contains(&"operation_state".to_string()));
+    }
+
+    #[test]
+    fn no_checkpoint_on_pending_even_with_checkpoint_cleanup() {
+        let ctrl = CancellationController::new();
+        ctrl.track("op_ckpt_pending");
+        let req = CancellationRequest {
+            operation_id: "op_ckpt_pending".into(),
+            reason: CancelReason::UserRequested,
+            cleanup: CleanupBehavior::Checkpoint,
+            return_partial: false,
+        };
+        // First cancel: Cancelled, should have checkpoint.
+        let resp1 = ctrl.cancel(&req, fixed_now()).unwrap();
+        assert_eq!(resp1.outcome, CancellationOutcome::Cancelled);
+        assert!(resp1.checkpoint.is_some());
+
+        // Second cancel: Pending, cancel_requested is already true.
+        // Outcome is Pending, and checkpoint is only created when outcome == Cancelled.
+        let resp2 = ctrl.cancel(&req, fixed_now()).unwrap();
+        assert_eq!(resp2.outcome, CancellationOutcome::Pending);
+        assert!(resp2.checkpoint.is_none());
+    }
+
+    #[test]
+    fn audit_timestamp_matches_provided_now() {
+        let now = Utc.with_ymd_and_hms(2025, 1, 15, 8, 30, 0).unwrap();
+        let ctrl = CancellationController::new();
+        ctrl.track("op_ts");
+        ctrl.cancel(&cancel_request("op_ts", CancelReason::UserRequested), now)
+            .unwrap();
+        let events = ctrl.audit_events();
+        assert_eq!(events[0].timestamp, now);
+    }
+
 }

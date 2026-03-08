@@ -1611,4 +1611,931 @@ mod tests {
         // 1 failed, 1 skipped, 0 completed → AllFailed.
         assert_eq!(resp.completed, 0);
     }
+
+    // ── BatchOperation extended tests ──
+
+    #[test]
+    fn batch_operation_with_zone_field_set() {
+        let mut operation = op("a", "fcp.discord.send", &[]);
+        operation.zone = Some("z:work".to_string());
+        assert_eq!(operation.zone.as_deref(), Some("z:work"));
+        assert_eq!(operation.id, "a");
+    }
+
+    #[test]
+    fn batch_operation_json_serialization_with_depends_on() {
+        let operation = op("b", "fcp.github.create", &["a", "c"]);
+        let json = serde_json::to_value(&operation).unwrap();
+        assert_eq!(json["id"], "b");
+        assert_eq!(json["tool"], "fcp.github.create");
+        assert_eq!(json["depends_on"], serde_json::json!(["a", "c"]));
+    }
+
+    #[test]
+    fn batch_operation_zone_omitted_when_none_in_json() {
+        let operation = op("a", "tool", &[]);
+        let json = serde_json::to_string(&operation).unwrap();
+        assert!(!json.contains("zone"), "zone should be skipped when None");
+    }
+
+    #[test]
+    fn batch_operation_empty_id_passes_serialization() {
+        let operation = op("", "tool", &[]);
+        let json = serde_json::to_string(&operation).unwrap();
+        let parsed: BatchOperation = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.id, "");
+    }
+
+    // ── BatchOptions extended tests ──
+
+    #[test]
+    fn batch_options_custom_timeout() {
+        let opts = BatchOptions {
+            timeout_ms: 60_000,
+            ..Default::default()
+        };
+        assert_eq!(opts.timeout_ms, 60_000);
+        assert_eq!(opts.max_parallelism, 8);
+    }
+
+    #[test]
+    fn batch_options_max_parallelism_one() {
+        let opts = BatchOptions {
+            max_parallelism: 1,
+            ..Default::default()
+        };
+        assert_eq!(opts.max_parallelism, 1);
+    }
+
+    #[test]
+    fn batch_options_all_fields_set() {
+        let opts = BatchOptions {
+            max_parallelism: 16,
+            stop_on_first_error: true,
+            timeout_ms: 120_000,
+        };
+        assert_eq!(opts.max_parallelism, 16);
+        assert!(opts.stop_on_first_error);
+        assert_eq!(opts.timeout_ms, 120_000);
+    }
+
+    #[test]
+    fn batch_options_json_roundtrip() {
+        let opts = BatchOptions {
+            max_parallelism: 4,
+            stop_on_first_error: true,
+            timeout_ms: 5000,
+        };
+        let json = serde_json::to_string(&opts).unwrap();
+        let parsed: BatchOptions = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.max_parallelism, 4);
+        assert!(parsed.stop_on_first_error);
+        assert_eq!(parsed.timeout_ms, 5000);
+    }
+
+    // ── BatchOperationError extended tests ──
+
+    #[test]
+    fn batch_operation_error_without_retry_after() {
+        let err = BatchOperationError {
+            code: "NOT_FOUND".into(),
+            message: "resource not found".into(),
+            retry_after_ms: None,
+        };
+        assert_eq!(err.code, "NOT_FOUND");
+        assert!(err.retry_after_ms.is_none());
+    }
+
+    #[test]
+    fn batch_operation_error_with_retry_after() {
+        let err = BatchOperationError {
+            code: "RATE_LIMIT".into(),
+            message: "slow down".into(),
+            retry_after_ms: Some(3000),
+        };
+        assert_eq!(err.retry_after_ms, Some(3000));
+    }
+
+    #[test]
+    fn batch_operation_error_json_roundtrip() {
+        let err = BatchOperationError {
+            code: "INTERNAL".into(),
+            message: "something broke".into(),
+            retry_after_ms: Some(10_000),
+        };
+        let json = serde_json::to_string(&err).unwrap();
+        let parsed: BatchOperationError = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.code, "INTERNAL");
+        assert_eq!(parsed.message, "something broke");
+        assert_eq!(parsed.retry_after_ms, Some(10_000));
+    }
+
+    #[test]
+    fn batch_operation_error_retry_after_omitted_when_none() {
+        let err = BatchOperationError {
+            code: "ERR".into(),
+            message: "msg".into(),
+            retry_after_ms: None,
+        };
+        let json = serde_json::to_string(&err).unwrap();
+        assert!(
+            !json.contains("retry_after_ms"),
+            "retry_after_ms should be skipped when None"
+        );
+    }
+
+    // ── OperationResult extended tests ──
+
+    #[test]
+    fn operation_result_success_with_output() {
+        let result = OperationResult {
+            id: "op1".into(),
+            status: OperationResultStatus::Success,
+            output: Some(serde_json::json!({"data": [1, 2, 3]})),
+            error: None,
+            duration_ms: 15,
+        };
+        assert_eq!(result.status, OperationResultStatus::Success);
+        assert!(result.output.is_some());
+        assert!(result.error.is_none());
+        assert_eq!(result.output.unwrap()["data"][2], 3);
+    }
+
+    #[test]
+    fn operation_result_error_with_details() {
+        let result = OperationResult {
+            id: "op2".into(),
+            status: OperationResultStatus::Error,
+            output: None,
+            error: Some(BatchOperationError {
+                code: "TIMEOUT".into(),
+                message: "request timed out".into(),
+                retry_after_ms: Some(2000),
+            }),
+            duration_ms: 30_000,
+        };
+        assert_eq!(result.status, OperationResultStatus::Error);
+        assert!(result.output.is_none());
+        let err = result.error.unwrap();
+        assert_eq!(err.code, "TIMEOUT");
+        assert_eq!(err.retry_after_ms, Some(2000));
+    }
+
+    #[test]
+    fn operation_result_skipped_with_error() {
+        let result = OperationResult {
+            id: "op3".into(),
+            status: OperationResultStatus::Skipped,
+            output: None,
+            error: Some(BatchOperationError {
+                code: "DEP_FAILED".into(),
+                message: "dependency failed".into(),
+                retry_after_ms: None,
+            }),
+            duration_ms: 0,
+        };
+        assert_eq!(result.status, OperationResultStatus::Skipped);
+        assert_eq!(result.error.as_ref().unwrap().code, "DEP_FAILED");
+    }
+
+    #[test]
+    fn operation_result_json_roundtrip_success() {
+        let result = OperationResult {
+            id: "r1".into(),
+            status: OperationResultStatus::Success,
+            output: Some(serde_json::json!({"key": "value"})),
+            error: None,
+            duration_ms: 42,
+        };
+        let json = serde_json::to_string(&result).unwrap();
+        let parsed: OperationResult = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.id, "r1");
+        assert_eq!(parsed.status, OperationResultStatus::Success);
+        assert_eq!(parsed.duration_ms, 42);
+        assert_eq!(parsed.output.unwrap()["key"], "value");
+    }
+
+    // ── ExecutionPlan extended tests ──
+
+    #[test]
+    fn execution_plan_single_wide_tier() {
+        let plan = ExecutionPlan {
+            tiers: vec![ExecutionTier {
+                operation_ids: vec![
+                    "a".into(),
+                    "b".into(),
+                    "c".into(),
+                    "d".into(),
+                    "e".into(),
+                ],
+            }],
+            total_operations: 5,
+        };
+        assert_eq!(plan.depth(), 1);
+        assert_eq!(plan.max_width(), 5);
+    }
+
+    #[test]
+    fn execution_plan_single_narrow_tier() {
+        let plan = ExecutionPlan {
+            tiers: vec![ExecutionTier {
+                operation_ids: vec!["only".into()],
+            }],
+            total_operations: 1,
+        };
+        assert_eq!(plan.depth(), 1);
+        assert_eq!(plan.max_width(), 1);
+    }
+
+    #[test]
+    fn execution_plan_many_tiers_varying_widths() {
+        let plan = ExecutionPlan {
+            tiers: vec![
+                ExecutionTier {
+                    operation_ids: vec!["a".into()],
+                },
+                ExecutionTier {
+                    operation_ids: vec!["b".into(), "c".into(), "d".into(), "e".into()],
+                },
+                ExecutionTier {
+                    operation_ids: vec!["f".into(), "g".into()],
+                },
+                ExecutionTier {
+                    operation_ids: vec!["h".into()],
+                },
+            ],
+            total_operations: 8,
+        };
+        assert_eq!(plan.depth(), 4);
+        assert_eq!(plan.max_width(), 4);
+    }
+
+    // ── Topological sorting: complex DAGs ──
+
+    #[test]
+    fn topo_complex_dag_ten_nodes() {
+        // Build a 10-node DAG:
+        //   r1, r2 (roots) → a, b → c, d → e → f → g → sink
+        let executor = BatchExecutor::new();
+        let req = simple_request(vec![
+            op("r1", "t", &[]),
+            op("r2", "t", &[]),
+            op("a", "t", &["r1"]),
+            op("b", "t", &["r2"]),
+            op("c", "t", &["a", "b"]),
+            op("d", "t", &["a"]),
+            op("e", "t", &["c", "d"]),
+            op("f", "t", &["e"]),
+            op("g", "t", &["f"]),
+            op("sink", "t", &["g"]),
+        ]);
+        let plan = executor.plan(&req).unwrap();
+        assert_eq!(plan.total_operations, 10);
+        // Verify ordering: r1/r2 first, sink last
+        let first_tier: &[String] = &plan.tiers[0].operation_ids;
+        assert!(first_tier.contains(&"r1".to_string()));
+        assert!(first_tier.contains(&"r2".to_string()));
+        let last_tier = &plan.tiers.last().unwrap().operation_ids;
+        assert!(last_tier.contains(&"sink".to_string()));
+    }
+
+    #[test]
+    fn topo_multiple_roots() {
+        let executor = BatchExecutor::new();
+        let req = simple_request(vec![
+            op("r1", "t", &[]),
+            op("r2", "t", &[]),
+            op("r3", "t", &[]),
+            op("r4", "t", &[]),
+            op("join", "t", &["r1", "r2", "r3", "r4"]),
+        ]);
+        let plan = executor.plan(&req).unwrap();
+        assert_eq!(plan.depth(), 2);
+        assert_eq!(plan.tiers[0].operation_ids.len(), 4);
+        assert_eq!(plan.tiers[1].operation_ids, vec!["join"]);
+    }
+
+    #[test]
+    fn topo_deep_chain_twenty_nodes() {
+        let executor = BatchExecutor::new();
+        let mut ops = vec![op("n0", "t", &[])];
+        for i in 1..20 {
+            ops.push(op(&format!("n{i}"), "t", &[&format!("n{}", i - 1)]));
+        }
+        let req = simple_request(ops);
+        let plan = executor.plan(&req).unwrap();
+        assert_eq!(plan.depth(), 20);
+        assert_eq!(plan.max_width(), 1);
+        assert_eq!(plan.tiers[0].operation_ids[0], "n0");
+        assert_eq!(plan.tiers[19].operation_ids[0], "n19");
+    }
+
+    #[test]
+    fn topo_forest_disconnected_components() {
+        // Three independent chains form a forest
+        let executor = BatchExecutor::new();
+        let req = simple_request(vec![
+            op("a1", "t", &[]),
+            op("a2", "t", &["a1"]),
+            op("b1", "t", &[]),
+            op("b2", "t", &["b1"]),
+            op("c1", "t", &[]),
+            op("c2", "t", &["c1"]),
+        ]);
+        let plan = executor.plan(&req).unwrap();
+        assert_eq!(plan.depth(), 2);
+        assert_eq!(plan.tiers[0].operation_ids.len(), 3);
+        assert_eq!(plan.tiers[1].operation_ids.len(), 3);
+    }
+
+    #[test]
+    fn topo_wide_middle_tier() {
+        // root → a,b,c,d,e → sink
+        let executor = BatchExecutor::new();
+        let req = simple_request(vec![
+            op("root", "t", &[]),
+            op("a", "t", &["root"]),
+            op("b", "t", &["root"]),
+            op("c", "t", &["root"]),
+            op("d", "t", &["root"]),
+            op("e", "t", &["root"]),
+            op("sink", "t", &["a", "b", "c", "d", "e"]),
+        ]);
+        let plan = executor.plan(&req).unwrap();
+        assert_eq!(plan.depth(), 3);
+        assert_eq!(plan.max_width(), 5);
+    }
+
+    // ── Cycle detection extended ──
+
+    #[test]
+    fn cycle_self_loop_detected() {
+        // Self-loop should be caught by validate before has_cycle
+        let executor = BatchExecutor::new();
+        let req = simple_request(vec![op("x", "t", &["x"])]);
+        assert!(executor.validate(&req).is_err());
+    }
+
+    #[test]
+    fn cycle_long_chain_five_nodes() {
+        // a→b→c→d→e→a
+        assert!(has_cycle(&[
+            op("a", "t", &["e"]),
+            op("b", "t", &["a"]),
+            op("c", "t", &["b"]),
+            op("d", "t", &["c"]),
+            op("e", "t", &["d"]),
+        ]));
+    }
+
+    #[test]
+    fn cycle_long_chain_seven_nodes() {
+        assert!(has_cycle(&[
+            op("n0", "t", &["n6"]),
+            op("n1", "t", &["n0"]),
+            op("n2", "t", &["n1"]),
+            op("n3", "t", &["n2"]),
+            op("n4", "t", &["n3"]),
+            op("n5", "t", &["n4"]),
+            op("n6", "t", &["n5"]),
+        ]));
+    }
+
+    #[test]
+    fn cycle_diamond_with_back_edge() {
+        // Diamond a→b,c→d, plus back-edge d→a
+        assert!(has_cycle(&[
+            op("a", "t", &["d"]),
+            op("b", "t", &["a"]),
+            op("c", "t", &["a"]),
+            op("d", "t", &["b", "c"]),
+        ]));
+    }
+
+    #[test]
+    fn no_cycle_complex_dag_with_shared_deps() {
+        // Multiple convergence points but no back-edges
+        assert!(!has_cycle(&[
+            op("a", "t", &[]),
+            op("b", "t", &[]),
+            op("c", "t", &["a", "b"]),
+            op("d", "t", &["a"]),
+            op("e", "t", &["c", "d"]),
+            op("f", "t", &["d", "b"]),
+            op("g", "t", &["e", "f"]),
+        ]));
+    }
+
+    // ── Zone validation extended ──
+
+    #[test]
+    fn zone_private_accesses_public_and_community() {
+        assert!(zone_accessible(&ZoneId::private(), &ZoneId::public()));
+        assert!(zone_accessible(&ZoneId::private(), &ZoneId::community()));
+        assert!(zone_accessible(&ZoneId::private(), &ZoneId::work()));
+    }
+
+    #[test]
+    fn zone_community_cannot_access_work() {
+        assert!(!zone_accessible(&ZoneId::community(), &ZoneId::work()));
+    }
+
+    #[test]
+    fn zone_public_cannot_access_community() {
+        assert!(!zone_accessible(&ZoneId::public(), &ZoneId::community()));
+    }
+
+    #[test]
+    fn zone_owner_accesses_project_zones() {
+        let project = "z:project:myapp".parse::<ZoneId>().unwrap();
+        assert!(zone_accessible(&ZoneId::owner(), &project));
+    }
+
+    #[test]
+    fn zone_private_accesses_project_zones() {
+        let project = "z:project:backend".parse::<ZoneId>().unwrap();
+        assert!(zone_accessible(&ZoneId::private(), &project));
+    }
+
+    #[test]
+    fn zone_project_isolation_different_projects_accessible() {
+        // Two different project zones: z:project:foo and z:project:bar
+        // Project zone agents can access other project zones per the code
+        let proj_foo = "z:project:foo".parse::<ZoneId>().unwrap();
+        let proj_bar = "z:project:bar".parse::<ZoneId>().unwrap();
+        // The code allows any z:project:* agent to access z:project:* connectors
+        assert!(zone_accessible(&proj_foo, &proj_bar));
+    }
+
+    #[test]
+    fn zone_project_cannot_access_work() {
+        let project = "z:project:myapp".parse::<ZoneId>().unwrap();
+        assert!(!zone_accessible(&project, &ZoneId::work()));
+    }
+
+    #[test]
+    fn zone_project_cannot_access_private() {
+        let project = "z:project:myapp".parse::<ZoneId>().unwrap();
+        assert!(!zone_accessible(&project, &ZoneId::private()));
+    }
+
+    #[test]
+    fn zone_project_cannot_access_owner() {
+        let project = "z:project:myapp".parse::<ZoneId>().unwrap();
+        assert!(!zone_accessible(&project, &ZoneId::owner()));
+    }
+
+    #[test]
+    fn zone_validator_with_many_tools() {
+        let mut reg = ZoneRegistry::new();
+        for i in 0..20 {
+            let zone = if i % 3 == 0 {
+                ZoneId::public()
+            } else if i % 3 == 1 {
+                ZoneId::work()
+            } else {
+                ZoneId::owner()
+            };
+            reg.register(&format!("tool{i}"), zone);
+        }
+        // Agent in work zone can access public and work, but not owner
+        let validator = BatchZoneValidator::new(ZoneId::work(), reg);
+        // Build ops for all 20 tools
+        let ops: Vec<BatchOperation> = (0..20)
+            .map(|i| op(&format!("op{i}"), &format!("tool{i}"), &[]))
+            .collect();
+        let err = validator.validate(&ops).unwrap_err();
+        let msg = err.to_string();
+        // Owner tools (i % 3 == 2) should be violations: 2, 5, 8, 11, 14, 17
+        assert!(msg.contains("op2"));
+        assert!(msg.contains("op5"));
+        assert!(msg.contains("op8"));
+    }
+
+    #[test]
+    fn zone_group_by_zone_with_projects() {
+        let mut reg = ZoneRegistry::new();
+        let proj = "z:project:alpha".parse::<ZoneId>().unwrap();
+        reg.register("proj.tool", proj);
+        reg.register("pub.tool", ZoneId::public());
+        let validator = BatchZoneValidator::new(ZoneId::work(), reg);
+        let ops = vec![
+            op("a", "proj.tool", &[]),
+            op("b", "pub.tool", &[]),
+            op("c", "proj.tool", &[]),
+        ];
+        let groups = validator.group_by_zone(&ops);
+        assert_eq!(groups["z:project:alpha"].len(), 2);
+        assert_eq!(groups["z:public"].len(), 1);
+    }
+
+    // ── Execution extended tests ──
+
+    #[test]
+    fn execute_single_op_failure() {
+        let executor = BatchExecutor::new();
+        let req = simple_request(vec![op("a", "tool", &[])]);
+        let resp = executor.execute_sync(&req, failing_handler).unwrap();
+        assert_eq!(resp.status, BatchStatus::AllFailed);
+        assert_eq!(resp.completed, 0);
+        assert_eq!(resp.failed, 1);
+        assert_eq!(resp.skipped, 0);
+    }
+
+    #[test]
+    fn execute_all_ops_same_tool() {
+        let executor = BatchExecutor::new();
+        let req = simple_request(vec![
+            op("a", "fcp.slack.send", &[]),
+            op("b", "fcp.slack.send", &[]),
+            op("c", "fcp.slack.send", &[]),
+            op("d", "fcp.slack.send", &[]),
+        ]);
+        let resp = executor
+            .execute_sync(&req, |o| Ok(serde_json::json!({"sent_by": o.id})))
+            .unwrap();
+        assert_eq!(resp.status, BatchStatus::Success);
+        assert_eq!(resp.completed, 4);
+        for result in &resp.results {
+            let output = result.output.as_ref().unwrap();
+            assert_eq!(output["sent_by"], result.id);
+        }
+    }
+
+    #[test]
+    fn execute_handler_returns_different_outputs_per_op() {
+        let executor = BatchExecutor::new();
+        let req = simple_request(vec![
+            op("fetch", "fcp.http.get", &[]),
+            op("transform", "fcp.transform", &["fetch"]),
+            op("store", "fcp.db.insert", &["transform"]),
+        ]);
+        let counter = std::sync::Mutex::new(0u32);
+        let resp = executor
+            .execute_sync(&req, |o| {
+                let mut c = counter.lock().unwrap();
+                *c += 1;
+                let step = *c;
+                drop(c);
+                Ok(serde_json::json!({
+                    "operation": o.id,
+                    "step": step,
+                    "tool": o.tool
+                }))
+            })
+            .unwrap();
+        assert_eq!(resp.status, BatchStatus::Success);
+        assert_eq!(resp.results[0].output.as_ref().unwrap()["step"], 1);
+        assert_eq!(resp.results[1].output.as_ref().unwrap()["step"], 2);
+        assert_eq!(resp.results[2].output.as_ref().unwrap()["step"], 3);
+    }
+
+    #[test]
+    fn execute_results_preserve_order_with_complex_deps() {
+        // Submission order: e, d, c, b, a — but execution order is a, b/c, d, e
+        let executor = BatchExecutor::new();
+        let req = simple_request(vec![
+            op("e", "t", &["d"]),
+            op("d", "t", &["b", "c"]),
+            op("c", "t", &["a"]),
+            op("b", "t", &["a"]),
+            op("a", "t", &[]),
+        ]);
+        let resp = executor.execute_sync(&req, |o| Ok(serde_json::json!({"id": o.id}))).unwrap();
+        // Results must be in submission order regardless of execution order
+        let ids: Vec<&str> = resp.results.iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(ids, vec!["e", "d", "c", "b", "a"]);
+    }
+
+    #[test]
+    fn execute_large_batch_fifty_independent_ops() {
+        let executor = BatchExecutor::new();
+        let ops: Vec<BatchOperation> = (0..50)
+            .map(|i| op(&format!("op{i:03}"), "tool", &[]))
+            .collect();
+        let req = simple_request(ops);
+        let resp = executor
+            .execute_sync(&req, |o| Ok(serde_json::json!({"id": o.id})))
+            .unwrap();
+        assert_eq!(resp.status, BatchStatus::Success);
+        assert_eq!(resp.completed, 50);
+        assert_eq!(resp.failed, 0);
+        assert_eq!(resp.results.len(), 50);
+    }
+
+    // ── Stop-on-first-error extended ──
+
+    #[test]
+    fn stop_on_first_error_first_tier_failure_skips_second() {
+        let executor = BatchExecutor::new();
+        let req = BatchInvokeRequest {
+            operations: vec![
+                op("fail1", "t", &[]),
+                op("ok1", "t", &["fail1"]),
+                op("ok2", "t", &["ok1"]),
+            ],
+            options: BatchOptions {
+                stop_on_first_error: true,
+                ..Default::default()
+            },
+        };
+        let resp = executor.execute_sync(&req, selective_handler).unwrap();
+        assert_eq!(resp.status, BatchStatus::Aborted);
+        assert_eq!(resp.failed, 1);
+        // ok1 and ok2 should be skipped (ok1 dep failed, ok2 in later aborted tier)
+        assert_eq!(resp.skipped, 2);
+    }
+
+    #[test]
+    fn stop_on_error_failure_in_middle_of_tier() {
+        // Tier 1: ok1, fail1, ok2 (all independent)
+        // Tier 2: ok3 (depends on ok1)
+        // fail1 triggers abort; ok3 should be skipped even though ok1 succeeded
+        let executor = BatchExecutor::new();
+        let req = BatchInvokeRequest {
+            operations: vec![
+                op("ok1", "t", &[]),
+                op("fail1", "t", &[]),
+                op("ok2", "t", &[]),
+                op("ok3", "t", &["ok1"]),
+            ],
+            options: BatchOptions {
+                stop_on_first_error: true,
+                ..Default::default()
+            },
+        };
+        let resp = executor.execute_sync(&req, selective_handler).unwrap();
+        assert_eq!(resp.status, BatchStatus::Aborted);
+        assert_eq!(resp.failed, 1);
+        // ok3 is in tier 2 and must be skipped since batch aborted
+        let ok3 = resp.results.iter().find(|r| r.id == "ok3").unwrap();
+        assert_eq!(ok3.status, OperationResultStatus::Skipped);
+    }
+
+    #[test]
+    fn stop_on_error_multiple_failures_in_same_tier() {
+        let executor = BatchExecutor::new();
+        let req = BatchInvokeRequest {
+            operations: vec![
+                op("fail1", "t", &[]),
+                op("fail2", "t", &[]),
+                op("ok1", "t", &[]),
+                op("next", "t", &["ok1"]),
+            ],
+            options: BatchOptions {
+                stop_on_first_error: true,
+                ..Default::default()
+            },
+        };
+        let resp = executor.execute_sync(&req, selective_handler).unwrap();
+        assert_eq!(resp.status, BatchStatus::Aborted);
+        // At least 1 failure; once first failure triggers abort, remaining ops
+        // in the tier may be skipped depending on execution order within the tier.
+        assert!(resp.failed >= 1);
+        // next should be skipped (in tier 2, aborted)
+        let next = resp.results.iter().find(|r| r.id == "next").unwrap();
+        assert_eq!(next.status, OperationResultStatus::Skipped);
+    }
+
+    // ── Dependency failure propagation ──
+
+    #[test]
+    fn dep_failure_chain_a_fails_b_c_skipped() {
+        // a → b → c, a fails
+        let executor = BatchExecutor::new();
+        let req = simple_request(vec![
+            op("fail_a", "t", &[]),
+            op("b", "t", &["fail_a"]),
+            op("c", "t", &["b"]),
+        ]);
+        let resp = executor.execute_sync(&req, selective_handler).unwrap();
+        assert_eq!(resp.failed, 1);
+        assert_eq!(resp.skipped, 2);
+        let b_result = resp.results.iter().find(|r| r.id == "b").unwrap();
+        assert_eq!(b_result.status, OperationResultStatus::Skipped);
+        assert_eq!(b_result.error.as_ref().unwrap().code, "DEP_FAILED");
+        let c_result = resp.results.iter().find(|r| r.id == "c").unwrap();
+        assert_eq!(c_result.status, OperationResultStatus::Skipped);
+    }
+
+    #[test]
+    fn dep_failure_diamond_a_fails_all_skipped() {
+        // a(fail) → b, c → d
+        let executor = BatchExecutor::new();
+        let req = simple_request(vec![
+            op("fail_a", "t", &[]),
+            op("b", "t", &["fail_a"]),
+            op("c", "t", &["fail_a"]),
+            op("d", "t", &["b", "c"]),
+        ]);
+        let resp = executor.execute_sync(&req, selective_handler).unwrap();
+        assert_eq!(resp.failed, 1); // only fail_a
+        assert_eq!(resp.skipped, 3); // b, c, d all skipped
+        for id in &["b", "c", "d"] {
+            let r = resp.results.iter().find(|r| r.id == *id).unwrap();
+            assert_eq!(r.status, OperationResultStatus::Skipped);
+        }
+    }
+
+    #[test]
+    fn dep_failure_partial_diamond_one_branch_succeeds() {
+        // root_ok(success), root_fail(fail) → mid depends on both → sink depends on mid
+        // mid is skipped because one dep failed
+        let executor = BatchExecutor::new();
+        let req = simple_request(vec![
+            op("ok_root", "t", &[]),
+            op("fail_root", "t", &[]),
+            op("mid", "t", &["ok_root", "fail_root"]),
+            op("sink", "t", &["mid"]),
+        ]);
+        let resp = executor.execute_sync(&req, selective_handler).unwrap();
+        assert_eq!(resp.completed, 1); // ok_root
+        assert_eq!(resp.failed, 1); // fail_root
+        assert_eq!(resp.skipped, 2); // mid, sink
+    }
+
+    // ── Edge cases extended ──
+
+    #[test]
+    fn execute_with_max_parallelism_one_sequential() {
+        let executor = BatchExecutor::new();
+        let call_order = std::sync::Mutex::new(Vec::new());
+        let req = BatchInvokeRequest {
+            operations: vec![
+                op("a", "t", &[]),
+                op("b", "t", &[]),
+                op("c", "t", &[]),
+            ],
+            options: BatchOptions {
+                max_parallelism: 1,
+                ..Default::default()
+            },
+        };
+        let resp = executor
+            .execute_sync(&req, |o| {
+                call_order.lock().unwrap().push(o.id.clone());
+                Ok(serde_json::json!({"ok": true}))
+            })
+            .unwrap();
+        assert_eq!(resp.status, BatchStatus::Success);
+        assert_eq!(resp.completed, 3);
+        // All three are independent, so they should all be in one tier
+        // (max_parallelism doesn't affect tier planning, only async dispatch)
+        let order = call_order.lock().unwrap();
+        let len = order.len();
+        drop(order);
+        assert_eq!(len, 3);
+    }
+
+    #[test]
+    fn very_long_dependency_chain_hundred_ops() {
+        let executor = BatchExecutor::new();
+        let mut ops = vec![op("op000", "t", &[])];
+        for i in 1..100 {
+            ops.push(op(
+                &format!("op{i:03}"),
+                "t",
+                &[&format!("op{:03}", i - 1)],
+            ));
+        }
+        let req = simple_request(ops);
+        let plan = executor.plan(&req).unwrap();
+        assert_eq!(plan.depth(), 100);
+        assert_eq!(plan.max_width(), 1);
+        assert_eq!(plan.total_operations, 100);
+        // Execute and verify all succeed
+        let resp = executor
+            .execute_sync(&req, |o| Ok(serde_json::json!({"id": o.id})))
+            .unwrap();
+        assert_eq!(resp.status, BatchStatus::Success);
+        assert_eq!(resp.completed, 100);
+    }
+
+    #[test]
+    fn operations_with_complex_json_inputs() {
+        let executor = BatchExecutor::new();
+        let mut op1 = op("a", "tool", &[]);
+        op1.input = serde_json::json!({
+            "deeply": {
+                "nested": {
+                    "structure": {
+                        "array": [1, "two", null, true, {"inner": "obj"}],
+                        "key": "value"
+                    }
+                }
+            },
+            "tags": ["alpha", "beta", "gamma"],
+            "count": 42,
+            "active": false,
+            "metadata": null
+        });
+        let mut op2 = op("b", "tool", &["a"]);
+        op2.input = serde_json::json!([
+            {"id": 1, "items": [10, 20, 30]},
+            {"id": 2, "items": []},
+            {"id": 3, "items": [40]}
+        ]);
+        let req = simple_request(vec![op1, op2]);
+        let resp = executor
+            .execute_sync(&req, |o| Ok(o.input.clone()))
+            .unwrap();
+        assert_eq!(resp.status, BatchStatus::Success);
+        let output_a = resp.results[0].output.as_ref().unwrap();
+        assert_eq!(output_a["deeply"]["nested"]["structure"]["array"][4]["inner"], "obj");
+        let output_b = resp.results[1].output.as_ref().unwrap();
+        assert_eq!(output_b[0]["items"][2], 30);
+        assert_eq!(output_b[1]["items"].as_array().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn batch_invoke_response_json_roundtrip_full() {
+        let resp = BatchInvokeResponse {
+            status: BatchStatus::Aborted,
+            completed: 3,
+            failed: 2,
+            skipped: 5,
+            results: vec![
+                OperationResult {
+                    id: "x".into(),
+                    status: OperationResultStatus::Skipped,
+                    output: None,
+                    error: Some(BatchOperationError {
+                        code: "BATCH_TIMEOUT".into(),
+                        message: "batch timeout exceeded".into(),
+                        retry_after_ms: None,
+                    }),
+                    duration_ms: 0,
+                },
+            ],
+            total_duration_ms: 30_000,
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        let parsed: BatchInvokeResponse = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.status, BatchStatus::Aborted);
+        assert_eq!(parsed.completed, 3);
+        assert_eq!(parsed.failed, 2);
+        assert_eq!(parsed.skipped, 5);
+        assert_eq!(parsed.results[0].error.as_ref().unwrap().code, "BATCH_TIMEOUT");
+    }
+
+    #[test]
+    fn zone_registry_many_tools() {
+        let mut reg = ZoneRegistry::new();
+        for i in 0..50 {
+            reg.register(&format!("tool.{i}"), ZoneId::public());
+        }
+        assert_eq!(reg.get_zone("tool.0").unwrap().as_str(), "z:public");
+        assert_eq!(reg.get_zone("tool.49").unwrap().as_str(), "z:public");
+        assert!(reg.get_zone("tool.50").is_none());
+    }
+
+    #[test]
+    fn execute_handler_receives_correct_tool_name() {
+        let executor = BatchExecutor::new();
+        let req = simple_request(vec![
+            op("a", "fcp.discord.send_message", &[]),
+            op("b", "fcp.github.create_issue", &["a"]),
+        ]);
+        let tools_seen = std::sync::Mutex::new(Vec::new());
+        let resp = executor
+            .execute_sync(&req, |o| {
+                tools_seen.lock().unwrap().push(o.tool.clone());
+                Ok(serde_json::json!({}))
+            })
+            .unwrap();
+        assert_eq!(resp.status, BatchStatus::Success);
+        let seen = tools_seen.lock().unwrap();
+        let first = seen[0].clone();
+        let second = seen[1].clone();
+        drop(seen);
+        assert_eq!(first, "fcp.discord.send_message");
+        assert_eq!(second, "fcp.github.create_issue");
+    }
+
+    #[test]
+    fn skipped_result_helper_without_error() {
+        let result = skipped_result("test_id".to_string(), None);
+        assert_eq!(result.id, "test_id");
+        assert_eq!(result.status, OperationResultStatus::Skipped);
+        assert!(result.output.is_none());
+        assert!(result.error.is_none());
+        assert_eq!(result.duration_ms, 0);
+    }
+
+    #[test]
+    fn skipped_result_helper_with_error() {
+        let err = dependency_failed_error();
+        let result = skipped_result("dep_skip".to_string(), Some(err));
+        assert_eq!(result.status, OperationResultStatus::Skipped);
+        assert_eq!(result.error.as_ref().unwrap().code, "DEP_FAILED");
+    }
+
+    #[test]
+    fn skipped_result_helper_with_dep_error() {
+        let err = dependency_failed_error();
+        let result = skipped_result("chained".to_string(), Some(err));
+        assert_eq!(result.status, OperationResultStatus::Skipped);
+        assert_eq!(result.error.as_ref().unwrap().code, "DEP_FAILED");
+        assert_eq!(result.error.as_ref().unwrap().message, "dependency failed");
+    }
 }

@@ -1108,6 +1108,7 @@ mod tests {
             artifacts
         }
 
+        #[allow(clippy::unused_self)]
         fn revocation_artifacts(
             &self,
             target: RevocationTarget,
@@ -1175,8 +1176,8 @@ mod tests {
                     message: artifacts.deny_message.clone(),
                 },
             )
-            .with_audit_event_id(artifacts.audit_event_id.clone())
-            .with_decision_receipt_id(artifacts.decision_receipt_id.clone())
+            .with_audit_event_id(artifacts.audit_event_id)
+            .with_decision_receipt_id(artifacts.decision_receipt_id)
         }
     }
 
@@ -1244,21 +1245,21 @@ mod tests {
         }
 
         async fn invoke(&self, req: InvokeRequest) -> fcp_core::FcpResult<InvokeResponse> {
-            let context = req.context.as_ref().ok_or(FcpError::MissingField {
+            let context = req.context.as_ref().ok_or_else(|| FcpError::MissingField {
                 field: "context".to_string(),
             })?;
             let token_id = context
                 .request_tags
                 .get("token_id")
                 .map(String::as_str)
-                .ok_or(FcpError::MissingField {
+                .ok_or_else(|| FcpError::MissingField {
                     field: "context.token_id".to_string(),
                 })?;
             let issuer = context
                 .request_tags
                 .get("issuer")
                 .map(String::as_str)
-                .ok_or(FcpError::MissingField {
+                .ok_or_else(|| FcpError::MissingField {
                     field: "context.issuer".to_string(),
                 })?;
 
@@ -1514,6 +1515,7 @@ mod tests {
         }
     }
 
+    #[allow(clippy::too_many_lines)]
     async fn run_revocation_flow_scenario(target: RevocationTarget) -> E2eReport {
         let mut connector = RevocationFlowConnector::new();
         let test_name = target.scenario_name().to_string();

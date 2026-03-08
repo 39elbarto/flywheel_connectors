@@ -553,4 +553,207 @@ mod tests {
         assert!(matches!(err, TailscaleError::LocalApiRequest(_)));
         assert!(err.to_string().contains("simulated http error"));
     }
+
+    // --- from_async_error with sub-second durations ---
+
+    #[test]
+    fn from_async_error_timeout_millis_precision() {
+        let async_err = AsyncError::Timeout { timeout_ms: 250 };
+        let err = TailscaleError::from_async_error(async_err, Duration::from_millis(250));
+        assert!(err.to_string().contains("250ms"));
+    }
+
+    #[test]
+    fn from_async_error_timeout_large_millis() {
+        let async_err = AsyncError::Timeout { timeout_ms: 60_000 };
+        let err = TailscaleError::from_async_error(async_err, Duration::from_secs(60));
+        assert!(err.to_string().contains("60000ms"));
+    }
+
+    // --- Error display with unicode content ---
+
+    #[test]
+    fn error_display_invalid_tag_unicode() {
+        let err = TailscaleError::InvalidTag("tag:caf\u{00e9}".to_string());
+        let display = err.to_string();
+        assert!(display.contains("caf\u{00e9}"));
+        assert!(display.starts_with("invalid FCP tag format"));
+    }
+
+    #[test]
+    fn error_display_peer_not_found_ipv6() {
+        let err = TailscaleError::PeerNotFound("fd7a:115c:a1e0::42".to_string());
+        assert!(err.to_string().contains("fd7a:115c:a1e0::42"));
+    }
+
+    #[test]
+    fn error_display_local_api_error_numeric_status() {
+        let err = TailscaleError::LocalApiError("404: not found".to_string());
+        assert_eq!(err.to_string(), "`LocalAPI` error: 404: not found");
+    }
+
+    #[test]
+    fn error_display_parse_error_with_json_snippet() {
+        let err = TailscaleError::ParseError("expected value at line 1 column 1".to_string());
+        assert!(err.to_string().contains("expected value"));
+    }
+
+    // --- From<io::Error> more kinds ---
+
+    #[test]
+    fn from_io_addr_in_use() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::AddrInUse, "address in use");
+        let err: TailscaleError = io_err.into();
+        assert!(matches!(err, TailscaleError::Io(_)));
+        assert!(err.to_string().contains("address in use"));
+    }
+
+    #[test]
+    fn from_io_would_block() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::WouldBlock, "would block");
+        let err: TailscaleError = io_err.into();
+        assert!(matches!(err, TailscaleError::Io(_)));
+    }
+
+    // --- From<CryptoError> additional variants ---
+
+    #[test]
+    fn from_crypto_error_signature_verification() {
+        let crypto_err = fcp_crypto::CryptoError::SignatureVerificationFailed;
+        let err: TailscaleError = crypto_err.into();
+        assert!(matches!(err, TailscaleError::Crypto(_)));
+        assert!(err.to_string().contains("crypto error"));
+    }
+
+    #[test]
+    fn from_crypto_error_aead() {
+        let crypto_err = fcp_crypto::CryptoError::AeadEncryptFailed;
+        let err: TailscaleError = crypto_err.into();
+        assert!(matches!(err, TailscaleError::Crypto(_)));
+    }
+
+    // --- source() chain for wrapper variants ---
+
+    #[test]
+    fn source_chain_io_preserves_inner() {
+        use std::error::Error;
+        let io_err = std::io::Error::other("inner detail");
+        let err = TailscaleError::Io(io_err);
+        let source = err.source().unwrap();
+        assert!(source.to_string().contains("inner detail"));
+    }
+
+    #[test]
+    fn source_chain_json_preserves_inner() {
+        use std::error::Error;
+        let json_err = serde_json::from_str::<u32>("abc").unwrap_err();
+        let expected_msg = json_err.to_string();
+        let err = TailscaleError::Json(json_err);
+        let source = err.source().unwrap();
+        assert_eq!(source.to_string(), expected_msg);
+    }
+
+    // --- Error variant pattern matching exhaustiveness ---
+
+    #[test]
+    fn all_error_variants_match() {
+        let variants: Vec<TailscaleError> = vec![
+            TailscaleError::InvalidTag("a".into()),
+            TailscaleError::InvalidZoneId("b".into()),
+            TailscaleError::NotFcpTag("c".into()),
+            TailscaleError::LocalApiRequest("d".into()),
+            TailscaleError::LocalApiError("e".into()),
+            TailscaleError::ParseError("f".into()),
+            TailscaleError::NotConnected,
+            TailscaleError::PeerNotFound("g".into()),
+            TailscaleError::InvalidAttestation,
+            TailscaleError::AttestationExpired,
+            TailscaleError::Io(std::io::Error::other("io")),
+            TailscaleError::Json(serde_json::from_str::<String>("x").unwrap_err()),
+            TailscaleError::Crypto(fcp_crypto::CryptoError::AeadDecryptFailed),
+        ];
+        for v in &variants {
+            // Every variant must have a non-empty Display
+            assert!(!v.to_string().is_empty());
+            // Every variant must have Debug
+            assert!(!format!("{v:?}").is_empty());
+        }
+        assert_eq!(variants.len(), 13);
+    }
+
+    // --- from_async_error: verify variant type is always LocalApiRequest ---
+
+    #[test]
+    fn from_async_error_all_produce_local_api_request() {
+        let cases: Vec<AsyncError> = vec![
+            AsyncError::Timeout { timeout_ms: 100 },
+            AsyncError::Cancelled,
+            AsyncError::ProtocolIo { message: "io".into() },
+            AsyncError::Join { message: "join".into() },
+            AsyncError::Runtime { message: "rt".into() },
+            AsyncError::ChannelClosed,
+            AsyncError::ChannelFull,
+        ];
+        for async_err in cases {
+            let err = TailscaleError::from_async_error(async_err, Duration::from_secs(5));
+            assert!(
+                matches!(err, TailscaleError::LocalApiRequest(_)),
+                "expected LocalApiRequest, got {err:?}"
+            );
+        }
+    }
+
+    // --- TailscaleResult with complex types ---
+
+    #[test]
+    fn tailscale_result_with_string() {
+        let result: TailscaleResult<String> = serde_json::from_str("\"hello\"")
+            .map_err(TailscaleError::from);
+        assert_eq!(result.unwrap(), "hello");
+    }
+
+    #[test]
+    fn tailscale_result_with_vec() {
+        let result: TailscaleResult<Vec<u8>> = serde_json::from_str("[1,2,3]")
+            .map_err(TailscaleError::from);
+        assert_eq!(result.unwrap().len(), 3);
+    }
+
+    #[test]
+    fn tailscale_result_with_option() {
+        let result: TailscaleResult<Option<u32>> = serde_json::from_str("null")
+            .map_err(TailscaleError::from);
+        assert!(result.unwrap().is_none());
+    }
+
+    // --- Error Display idempotency ---
+
+    #[test]
+    fn error_display_idempotent() {
+        let err = TailscaleError::NotConnected;
+        let d1 = err.to_string();
+        let d2 = err.to_string();
+        assert_eq!(d1, d2);
+    }
+
+    #[test]
+    fn error_display_local_api_request_empty() {
+        let err = TailscaleError::LocalApiRequest(String::new());
+        assert_eq!(err.to_string(), "`LocalAPI` request failed: ");
+    }
+
+    #[test]
+    fn error_display_not_fcp_tag_empty() {
+        let err = TailscaleError::NotFcpTag(String::new());
+        assert_eq!(
+            err.to_string(),
+            "tag '' does not have FCP prefix 'tag:fcp-'"
+        );
+    }
+
+    #[test]
+    fn error_display_invalid_zone_id_empty() {
+        let err = TailscaleError::InvalidZoneId(String::new());
+        assert_eq!(err.to_string(), "invalid zone ID format: ");
+    }
 }

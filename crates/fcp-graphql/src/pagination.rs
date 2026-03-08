@@ -701,4 +701,147 @@ mod tests {
         let err: PaginationError = client_err.into();
         assert!(err.to_string().contains("pagination fetch"));
     }
+
+    // ---- PageLimit edge cases ----
+
+    #[test]
+    fn page_limit_one() {
+        let limit = PageLimit::new(1);
+        assert_eq!(limit.max_items, 1);
+    }
+
+    // ---- CursorPageInfo edge cases ----
+
+    #[test]
+    fn cursor_page_info_with_empty_cursor() {
+        let info = CursorPageInfo {
+            has_next_page: true,
+            end_cursor: Some(String::new()),
+            total_count: None,
+        };
+        assert!(info.end_cursor.as_deref() == Some(""));
+    }
+
+    #[test]
+    fn cursor_page_info_large_total_count() {
+        let info = CursorPageInfo {
+            has_next_page: false,
+            end_cursor: None,
+            total_count: Some(u64::MAX),
+        };
+        assert_eq!(info.total_count, Some(u64::MAX));
+    }
+
+    #[test]
+    fn cursor_page_info_zero_total_count() {
+        let info = CursorPageInfo {
+            has_next_page: false,
+            end_cursor: None,
+            total_count: Some(0),
+        };
+        assert_eq!(info.total_count, Some(0));
+    }
+
+    // ---- OffsetPage edge cases ----
+
+    #[test]
+    fn offset_page_large_next_offset() {
+        let page: OffsetPage<i32> = OffsetPage {
+            items: vec![1],
+            next_offset: Some(u64::MAX),
+            total_count: None,
+        };
+        assert_eq!(page.next_offset, Some(u64::MAX));
+    }
+
+    #[test]
+    fn offset_page_zero_next_offset() {
+        let page: OffsetPage<i32> = OffsetPage {
+            items: vec![],
+            next_offset: Some(0),
+            total_count: None,
+        };
+        assert_eq!(page.next_offset, Some(0));
+    }
+
+    // ---- PaginationError additional tests ----
+
+    #[test]
+    fn pagination_error_limit_exceeded_display() {
+        let err = PaginationError::LimitExceeded("max 100 items".into());
+        let msg = err.to_string();
+        assert!(msg.contains("pagination limit exceeded"));
+        assert!(msg.contains("max 100 items"));
+    }
+
+    #[test]
+    fn pagination_error_from_http_error() {
+        let client_err = GraphqlClientError::Http(crate::error::HttpErrorInfo {
+            message: "timeout".into(),
+            status_code: None,
+            is_timeout: true,
+            is_connect: false,
+            is_request: false,
+        });
+        let err: PaginationError = client_err.into();
+        assert!(err.to_string().contains("pagination fetch"));
+    }
+
+    #[test]
+    fn pagination_error_from_protocol_error() {
+        let client_err = GraphqlClientError::Protocol {
+            message: "broken".into(),
+        };
+        let err: PaginationError = client_err.into();
+        assert!(err.to_string().contains("pagination fetch"));
+    }
+
+    #[test]
+    fn pagination_error_debug_client_variant() {
+        let client_err = GraphqlClientError::Json("parse error".into());
+        let err: PaginationError = client_err.into();
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("Client"));
+    }
+
+    // ---- CursorPage with different item types ----
+
+    #[test]
+    fn cursor_page_with_float_items() {
+        let page = CursorPage {
+            items: vec![1.5_f64, 2.5, 3.5],
+            page_info: CursorPageInfo {
+                has_next_page: false,
+                end_cursor: None,
+                total_count: None,
+            },
+        };
+        assert_eq!(page.items.len(), 3);
+    }
+
+    #[test]
+    fn cursor_page_with_bool_items() {
+        let page = CursorPage {
+            items: vec![true, false, true],
+            page_info: CursorPageInfo {
+                has_next_page: false,
+                end_cursor: None,
+                total_count: Some(3),
+            },
+        };
+        assert_eq!(page.items.len(), 3);
+    }
+
+    // ---- OffsetPage with different item types ----
+
+    #[test]
+    fn offset_page_with_tuple_items() {
+        let page = OffsetPage {
+            items: vec![(1, "a"), (2, "b")],
+            next_offset: None,
+            total_count: None,
+        };
+        assert_eq!(page.items[0].0, 1);
+        assert_eq!(page.items[1].1, "b");
+    }
 }

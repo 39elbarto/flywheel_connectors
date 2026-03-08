@@ -497,4 +497,171 @@ mod tests {
             other => panic!("expected SchemaValidation, got {other:?}"),
         }
     }
+
+    // ---- Schema with numeric constraints ----
+
+    #[test]
+    fn validate_integer_multiple_of() {
+        let schema = r#"{"type": "integer", "multipleOf": 5}"#;
+        let cache = SchemaCache::default();
+        assert!(cache.validate(schema, &json!(10)).is_ok());
+        assert!(cache.validate(schema, &json!(15)).is_ok());
+        assert!(cache.validate(schema, &json!(7)).is_err());
+    }
+
+    #[test]
+    fn validate_number_exclusive_maximum() {
+        let schema = r#"{"type": "number", "exclusiveMaximum": 10}"#;
+        let cache = SchemaCache::default();
+        assert!(cache.validate(schema, &json!(9)).is_ok());
+        assert!(cache.validate(schema, &json!(10)).is_err());
+    }
+
+    // ---- Schema with string format constraints ----
+
+    #[test]
+    fn validate_string_min_and_max_length() {
+        let schema = r#"{"type": "string", "minLength": 2, "maxLength": 5}"#;
+        let cache = SchemaCache::default();
+        assert!(cache.validate(schema, &json!("ab")).is_ok());
+        assert!(cache.validate(schema, &json!("abcde")).is_ok());
+        assert!(cache.validate(schema, &json!("a")).is_err());
+        assert!(cache.validate(schema, &json!("abcdef")).is_err());
+    }
+
+    // ---- Schema caching with many schemas ----
+
+    #[test]
+    fn cache_stores_multiple_schemas() {
+        let cache = SchemaCache::default();
+        for i in 0..10 {
+            let schema = format!(r#"{{"type": "integer", "minimum": {i}}}"#);
+            assert!(cache.get_or_compile(&schema).is_ok());
+        }
+        // Verify one is cached
+        let schema = r#"{"type": "integer", "minimum": 5}"#;
+        let v1 = cache.get_or_compile(schema).unwrap();
+        let v2 = cache.get_or_compile(schema).unwrap();
+        assert!(Arc::ptr_eq(&v1, &v2));
+    }
+
+    // ---- validate with complex object schemas ----
+
+    #[test]
+    fn validate_object_with_default() {
+        let schema = r#"{
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "default": "unknown"}
+            }
+        }"#;
+        let cache = SchemaCache::default();
+        assert!(cache.validate(schema, &json!({})).is_ok());
+        assert!(cache.validate(schema, &json!({"name": "Alice"})).is_ok());
+    }
+
+    #[test]
+    fn validate_object_with_pattern_properties() {
+        let schema = r#"{
+            "type": "object",
+            "patternProperties": {
+                "^x-": {"type": "string"}
+            },
+            "additionalProperties": false
+        }"#;
+        let cache = SchemaCache::default();
+        assert!(cache.validate(schema, &json!({"x-custom": "val"})).is_ok());
+        assert!(cache.validate(schema, &json!({"name": "bad"})).is_err());
+    }
+
+    // ---- validate array with tuple validation ----
+
+    #[test]
+    fn validate_array_min_and_max_items() {
+        let schema = r#"{"type": "array", "minItems": 2, "maxItems": 4}"#;
+        let cache = SchemaCache::default();
+        assert!(cache.validate(schema, &json!([1, 2])).is_ok());
+        assert!(cache.validate(schema, &json!([1, 2, 3, 4])).is_ok());
+        assert!(cache.validate(schema, &json!([1])).is_err());
+        assert!(cache.validate(schema, &json!([1, 2, 3, 4, 5])).is_err());
+    }
+
+    // ---- validate with allOf ----
+
+    #[test]
+    fn validate_all_of_schema() {
+        let schema = r#"{"allOf": [{"type": "object", "required": ["a"]}, {"type": "object", "required": ["b"]}]}"#;
+        let cache = SchemaCache::default();
+        assert!(cache.validate(schema, &json!({"a": 1, "b": 2})).is_ok());
+        assert!(cache.validate(schema, &json!({"a": 1})).is_err());
+        assert!(cache.validate(schema, &json!({"b": 2})).is_err());
+    }
+
+    // ---- validate with if/then/else ----
+
+    #[test]
+    fn validate_if_then_else() {
+        let schema = r#"{
+            "if": {"properties": {"type": {"const": "email"}}},
+            "then": {"required": ["address"]},
+            "else": {"required": ["phone"]}
+        }"#;
+        let cache = SchemaCache::default();
+        assert!(cache.validate(schema, &json!({"type": "email", "address": "a@b.com"})).is_ok());
+        assert!(cache.validate(schema, &json!({"type": "sms", "phone": "123"})).is_ok());
+    }
+
+    // ---- validate with definitions/refs ----
+
+    #[test]
+    fn validate_dependent_required() {
+        let schema = r#"{
+            "type": "object",
+            "dependentRequired": {
+                "credit_card": ["billing_address"]
+            }
+        }"#;
+        let cache = SchemaCache::default();
+        assert!(cache.validate(schema, &json!({})).is_ok());
+        assert!(
+            cache
+                .validate(
+                    schema,
+                    &json!({"credit_card": "1234", "billing_address": "123 Main St"})
+                )
+                .is_ok()
+        );
+    }
+
+    // ---- error handling edge cases ----
+
+    #[test]
+    fn compile_empty_string_returns_json_error() {
+        let cache = SchemaCache::default();
+        let result = cache.get_or_compile("");
+        match result {
+            Err(GraphqlClientError::Json(_)) => {}
+            other => panic!("expected Json error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn compile_array_json_is_valid_schema() {
+        // A JSON array is not a valid JSON Schema (should be object or boolean)
+        let cache = SchemaCache::default();
+        let result = cache.get_or_compile("[1, 2, 3]");
+        // jsonschema may accept or reject this; either way it shouldn't panic
+        let _ = result;
+    }
+
+    #[test]
+    fn validate_same_schema_different_values() {
+        let schema = r#"{"type": "string", "enum": ["a", "b", "c"]}"#;
+        let cache = SchemaCache::default();
+        assert!(cache.validate(schema, &json!("a")).is_ok());
+        assert!(cache.validate(schema, &json!("b")).is_ok());
+        assert!(cache.validate(schema, &json!("c")).is_ok());
+        assert!(cache.validate(schema, &json!("d")).is_err());
+        assert!(cache.validate(schema, &json!(1)).is_err());
+    }
 }

@@ -471,4 +471,219 @@ mod tests {
         let json = serde_json::to_string(&resp).unwrap();
         assert!(!json.contains("extensions"));
     }
+
+    // ---- GraphqlQuery from String (not &str) ----
+
+    #[test]
+    fn query_from_owned_string() {
+        let owned = String::from("mutation { createUser { id } }");
+        let q = GraphqlQuery::new(owned);
+        assert!(q.as_str().contains("createUser"));
+    }
+
+    #[test]
+    fn query_from_static_long_query() {
+        let q = GraphqlQuery::from_static(
+            "query GetUsersWithFilters($filter: FilterInput!, $limit: Int, $offset: Int) { users(filter: $filter, limit: $limit, offset: $offset) { id name email } }",
+        );
+        assert!(q.as_str().contains("FilterInput"));
+        assert!(q.as_str().contains("$limit"));
+    }
+
+    #[test]
+    fn query_with_fragment() {
+        let q = GraphqlQuery::new(
+            "fragment UserFields on User { id name } query { users { ...UserFields } }",
+        );
+        assert!(q.as_str().contains("fragment"));
+        assert!(q.as_str().contains("UserFields"));
+    }
+
+    #[test]
+    fn query_eq_same_content_different_construction() {
+        let a = GraphqlQuery::new("{ x }");
+        let b = GraphqlQuery::from_static("{ x }");
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn query_serde_preserves_whitespace() {
+        let q = GraphqlQuery::new("{\n  users  {\n    id\n  }\n}");
+        let json = serde_json::to_string(&q).unwrap();
+        let back: GraphqlQuery = serde_json::from_str(&json).unwrap();
+        assert!(back.as_str().contains('\n'));
+        assert_eq!(q, back);
+    }
+
+    // ---- GraphqlRequest edge cases ----
+
+    #[test]
+    fn request_with_empty_variables() {
+        let req = GraphqlRequest::new(
+            GraphqlQuery::new("{ ping }"),
+            serde_json::json!({}),
+        );
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(json.contains("{}"));
+    }
+
+    #[test]
+    fn request_with_array_variables() {
+        let vars = serde_json::json!({"ids": [1, 2, 3]});
+        let req = GraphqlRequest::new(GraphqlQuery::new("query($ids: [Int!]!) { byIds(ids: $ids) { id } }"), vars);
+        let json = serde_json::to_string(&req).unwrap();
+        let back: GraphqlRequest<serde_json::Value> = serde_json::from_str(&json).unwrap();
+        assert!(back.variables["ids"].is_array());
+        assert_eq!(back.variables["ids"].as_array().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn request_operation_name_overwrite() {
+        let req = GraphqlRequest::new(GraphqlQuery::new("{ x }"), serde_json::json!({}))
+            .with_operation_name("First")
+            .with_operation_name("Second");
+        assert_eq!(req.operation_name.as_deref(), Some("Second"));
+    }
+
+    #[test]
+    fn request_serde_includes_operation_name() {
+        let req = GraphqlRequest::new(GraphqlQuery::new("{ x }"), serde_json::json!({}))
+            .with_operation_name("MyOp");
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(json.contains("MyOp"));
+        assert!(json.contains("operation_name"));
+    }
+
+    // ---- GraphqlBatchItem edge cases ----
+
+    #[test]
+    fn batch_item_serde_with_complex_vars() {
+        let vars = serde_json::json!({
+            "input": {"name": "test", "tags": ["a", "b"]},
+            "limit": 50
+        });
+        let item = GraphqlBatchItem::new(GraphqlQuery::new("mutation M { m }"), vars)
+            .with_operation_name("M");
+        let json = serde_json::to_string(&item).unwrap();
+        let back: GraphqlBatchItem<serde_json::Value> = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.variables["limit"], 50);
+        assert_eq!(back.operation_name.as_deref(), Some("M"));
+    }
+
+    #[test]
+    fn batch_item_operation_name_overwrite() {
+        let item = GraphqlBatchItem::new(GraphqlQuery::new("{ x }"), serde_json::json!({}))
+            .with_operation_name("A")
+            .with_operation_name("B");
+        assert_eq!(item.operation_name.as_deref(), Some("B"));
+    }
+
+    #[test]
+    fn batch_item_with_null_variables() {
+        let item = GraphqlBatchItem::new(GraphqlQuery::new("{ x }"), serde_json::Value::Null);
+        let json = serde_json::to_string(&item).unwrap();
+        assert!(json.contains("null"));
+    }
+
+    // ---- GraphqlResponse edge cases ----
+
+    #[test]
+    fn response_data_none_no_errors_is_ok() {
+        let resp = GraphqlResponse::<serde_json::Value> {
+            data: None,
+            errors: vec![],
+            extensions: None,
+        };
+        assert!(resp.is_ok());
+    }
+
+    #[test]
+    fn response_data_some_with_errors_is_not_ok() {
+        let resp = GraphqlResponse {
+            data: Some(serde_json::json!({"partial": true})),
+            errors: vec![GraphqlError {
+                message: "partial error".into(),
+                locations: vec![],
+                path: vec![],
+                extensions: None,
+            }],
+            extensions: None,
+        };
+        assert!(!resp.is_ok());
+    }
+
+    #[test]
+    fn response_serde_with_typed_data() {
+        #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+        struct User {
+            id: String,
+            name: String,
+        }
+        let resp = GraphqlResponse {
+            data: Some(User {
+                id: "1".into(),
+                name: "Alice".into(),
+            }),
+            errors: vec![],
+            extensions: None,
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        let back: GraphqlResponse<User> = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.data.unwrap().name, "Alice");
+    }
+
+    #[test]
+    fn response_deserialized_from_server_format() {
+        let json = r#"{
+            "data": {"viewer": {"login": "test-user"}},
+            "errors": [],
+            "extensions": {"cost": {"requestedQueryCost": 1}}
+        }"#;
+        let resp: GraphqlResponse<serde_json::Value> = serde_json::from_str(json).unwrap();
+        assert!(resp.is_ok());
+        assert_eq!(resp.data.unwrap()["viewer"]["login"], "test-user");
+        assert!(resp.extensions.is_some());
+    }
+
+    #[test]
+    fn response_data_null_deserialized_as_none() {
+        let json = r#"{"data": null}"#;
+        let resp: GraphqlResponse<serde_json::Value> = serde_json::from_str(json).unwrap();
+        assert!(resp.data.is_none());
+        assert!(resp.is_ok());
+    }
+
+    #[test]
+    fn response_with_only_errors() {
+        let json = r#"{"errors":[{"message":"forbidden"}]}"#;
+        let resp: GraphqlResponse<serde_json::Value> = serde_json::from_str(json).unwrap();
+        assert!(resp.data.is_none());
+        assert!(!resp.is_ok());
+        assert_eq!(resp.errors[0].message, "forbidden");
+    }
+
+    #[test]
+    fn response_clone_preserves_errors() {
+        let resp = GraphqlResponse::<serde_json::Value> {
+            data: None,
+            errors: vec![
+                GraphqlError {
+                    message: "err1".into(),
+                    locations: vec![],
+                    path: vec![],
+                    extensions: None,
+                },
+                GraphqlError {
+                    message: "err2".into(),
+                    locations: vec![],
+                    path: vec![],
+                    extensions: None,
+                },
+            ],
+            extensions: None,
+        };
+        let cloned = resp.clone();
+        assert_eq!(resp.errors.len(), cloned.errors.len());
+        assert_eq!(resp.errors.len(), 2);
+    }
 }

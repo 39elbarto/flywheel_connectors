@@ -1154,4 +1154,376 @@ mod tests {
             other => panic!("expected External, got {other:?}"),
         }
     }
+
+    // ---- HttpErrorInfo::timeout edge cases ----
+
+    #[test]
+    fn http_error_info_timeout_zero_duration() {
+        let info = HttpErrorInfo::timeout(Duration::from_secs(0));
+        assert!(info.is_timeout);
+        assert!(info.message.contains('0'));
+        assert_eq!(info.status_code, Some(408));
+    }
+
+    #[test]
+    fn http_error_info_timeout_sub_millisecond() {
+        let info = HttpErrorInfo::timeout(Duration::from_micros(500));
+        assert!(info.is_timeout);
+        // 500 microseconds rounds to 0ms
+        assert!(info.message.contains('0'));
+    }
+
+    #[test]
+    fn http_error_info_timeout_one_ms() {
+        let info = HttpErrorInfo::timeout(Duration::from_millis(1));
+        assert!(info.message.contains("1ms"));
+    }
+
+    // ---- HttpErrorInfo serde edge cases ----
+
+    #[test]
+    fn http_error_info_all_flags_true() {
+        let info = HttpErrorInfo {
+            message: "everything bad".into(),
+            status_code: Some(503),
+            is_timeout: true,
+            is_connect: true,
+            is_request: true,
+        };
+        let json = serde_json::to_string(&info).unwrap();
+        let back: HttpErrorInfo = serde_json::from_str(&json).unwrap();
+        assert!(back.is_timeout);
+        assert!(back.is_connect);
+        assert!(back.is_request);
+        assert_eq!(info, back);
+    }
+
+    #[test]
+    fn http_error_info_all_flags_false() {
+        let info = HttpErrorInfo {
+            message: "decode error".into(),
+            status_code: None,
+            is_timeout: false,
+            is_connect: false,
+            is_request: false,
+        };
+        let json = serde_json::to_string(&info).unwrap();
+        let back: HttpErrorInfo = serde_json::from_str(&json).unwrap();
+        assert!(!back.is_timeout);
+        assert!(!back.is_connect);
+        assert!(!back.is_request);
+        assert_eq!(info, back);
+    }
+
+    #[test]
+    fn http_error_info_empty_message() {
+        let info = HttpErrorInfo {
+            message: String::new(),
+            status_code: None,
+            is_timeout: false,
+            is_connect: false,
+            is_request: false,
+        };
+        let json = serde_json::to_string(&info).unwrap();
+        let back: HttpErrorInfo = serde_json::from_str(&json).unwrap();
+        assert!(back.message.is_empty());
+    }
+
+    #[test]
+    fn http_error_info_max_status_code() {
+        let info = HttpErrorInfo {
+            message: "max status".into(),
+            status_code: Some(599),
+            is_timeout: false,
+            is_connect: false,
+            is_request: false,
+        };
+        let json = serde_json::to_string(&info).unwrap();
+        let back: HttpErrorInfo = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.status_code, Some(599));
+    }
+
+    // ---- GraphqlErrorLocation edge cases ----
+
+    #[test]
+    fn error_location_zero_values() {
+        let loc = GraphqlErrorLocation { line: 0, column: 0 };
+        let json = serde_json::to_string(&loc).unwrap();
+        let back: GraphqlErrorLocation = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.line, 0);
+        assert_eq!(back.column, 0);
+    }
+
+    #[test]
+    fn error_location_large_values() {
+        let loc = GraphqlErrorLocation {
+            line: u32::MAX,
+            column: u32::MAX,
+        };
+        let json = serde_json::to_string(&loc).unwrap();
+        let back: GraphqlErrorLocation = serde_json::from_str(&json).unwrap();
+        assert_eq!(loc, back);
+    }
+
+    // ---- GraphqlPathSegment edge cases ----
+
+    #[test]
+    fn path_segment_zero_index() {
+        let seg = GraphqlPathSegment::Index(0);
+        let json = serde_json::to_string(&seg).unwrap();
+        assert_eq!(json, "0");
+        let back: GraphqlPathSegment = serde_json::from_str(&json).unwrap();
+        assert_eq!(seg, back);
+    }
+
+    #[test]
+    fn path_segment_large_positive_index() {
+        let seg = GraphqlPathSegment::Index(i64::MAX);
+        let json = serde_json::to_string(&seg).unwrap();
+        let back: GraphqlPathSegment = serde_json::from_str(&json).unwrap();
+        assert_eq!(seg, back);
+    }
+
+    #[test]
+    fn path_segment_key_with_special_chars() {
+        let seg = GraphqlPathSegment::Key("field.with.dots".into());
+        let json = serde_json::to_string(&seg).unwrap();
+        let back: GraphqlPathSegment = serde_json::from_str(&json).unwrap();
+        assert_eq!(seg, back);
+    }
+
+    #[test]
+    fn path_segment_key_with_spaces() {
+        let seg = GraphqlPathSegment::Key("field name".into());
+        let json = serde_json::to_string(&seg).unwrap();
+        let back: GraphqlPathSegment = serde_json::from_str(&json).unwrap();
+        assert_eq!(seg, back);
+    }
+
+    // ---- GraphqlError serde edge cases ----
+
+    #[test]
+    fn graphql_error_empty_locations_and_path() {
+        let err = GraphqlError {
+            message: "err".into(),
+            locations: vec![],
+            path: vec![],
+            extensions: None,
+        };
+        let json = serde_json::to_string(&err).unwrap();
+        let back: GraphqlError = serde_json::from_str(&json).unwrap();
+        assert!(back.locations.is_empty());
+        assert!(back.path.is_empty());
+    }
+
+    #[test]
+    fn graphql_error_extensions_complex_object() {
+        let ext = serde_json::json!({
+            "code": "UNAUTHENTICATED",
+            "retryable": false,
+            "details": {"reason": "token expired", "scope": ["read", "write"]}
+        });
+        let err = GraphqlError {
+            message: "auth error".into(),
+            locations: vec![],
+            path: vec![],
+            extensions: Some(ext),
+        };
+        let json = serde_json::to_string(&err).unwrap();
+        let back: GraphqlError = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.extensions.unwrap()["code"], "UNAUTHENTICATED");
+    }
+
+    #[test]
+    fn graphql_error_with_empty_message() {
+        let err = GraphqlError {
+            message: String::new(),
+            locations: vec![],
+            path: vec![],
+            extensions: None,
+        };
+        let json = serde_json::to_string(&err).unwrap();
+        let back: GraphqlError = serde_json::from_str(&json).unwrap();
+        assert!(back.message.is_empty());
+    }
+
+    // ---- is_retryable combinations ----
+
+    #[test]
+    fn is_retryable_http_all_flags_true() {
+        let err = GraphqlClientError::Http(HttpErrorInfo {
+            message: "multi-fail".into(),
+            status_code: Some(500),
+            is_timeout: true,
+            is_connect: true,
+            is_request: true,
+        });
+        assert!(err.is_retryable());
+    }
+
+    #[test]
+    fn is_retryable_504_gateway_timeout() {
+        let err = GraphqlClientError::HttpStatus {
+            status: StatusCode::GATEWAY_TIMEOUT,
+            body: String::new(),
+            retry_after: None,
+        };
+        assert!(err.is_retryable());
+    }
+
+    #[test]
+    fn not_retryable_404_not_found() {
+        let err = GraphqlClientError::HttpStatus {
+            status: StatusCode::NOT_FOUND,
+            body: String::new(),
+            retry_after: None,
+        };
+        assert!(!err.is_retryable());
+    }
+
+    #[test]
+    fn not_retryable_422_unprocessable() {
+        let err = GraphqlClientError::HttpStatus {
+            status: StatusCode::UNPROCESSABLE_ENTITY,
+            body: "bad input".into(),
+            retry_after: None,
+        };
+        assert!(!err.is_retryable());
+    }
+
+    // ---- to_fcp_error additional edge cases ----
+
+    #[test]
+    fn to_fcp_429_very_large_retry_after() {
+        let err = GraphqlClientError::HttpStatus {
+            status: StatusCode::TOO_MANY_REQUESTS,
+            body: String::new(),
+            retry_after: Some(Duration::from_secs(86400)),
+        };
+        let fcp = err.to_fcp_error("api");
+        match fcp {
+            FcpError::RateLimited { retry_after_ms, .. } => {
+                assert_eq!(retry_after_ms, 86_400_000);
+            }
+            other => panic!("expected RateLimited, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn to_fcp_retries_exhausted_one_attempt() {
+        let err = GraphqlClientError::RetriesExhausted { attempts: 1 };
+        let fcp = err.to_fcp_error("svc");
+        match fcp {
+            FcpError::External { message, .. } => {
+                assert!(message.contains("1 attempts"));
+            }
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn to_fcp_graphql_errors_uses_first_message() {
+        let err = GraphqlClientError::GraphqlErrors {
+            errors: vec![
+                GraphqlError {
+                    message: "first error".into(),
+                    locations: vec![],
+                    path: vec![],
+                    extensions: None,
+                },
+                GraphqlError {
+                    message: "second error".into(),
+                    locations: vec![],
+                    path: vec![],
+                    extensions: None,
+                },
+            ],
+        };
+        let fcp = err.to_fcp_error("api");
+        match fcp {
+            FcpError::External { message, .. } => {
+                assert_eq!(message, "first error");
+            }
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn to_fcp_http_error_preserves_status_code() {
+        let err = GraphqlClientError::Http(HttpErrorInfo {
+            message: "fail".into(),
+            status_code: Some(502),
+            is_timeout: false,
+            is_connect: false,
+            is_request: false,
+        });
+        let fcp = err.to_fcp_error("svc");
+        match fcp {
+            FcpError::External { status_code, .. } => {
+                assert_eq!(status_code, Some(502));
+            }
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn to_fcp_http_status_has_retry_after() {
+        let err = GraphqlClientError::HttpStatus {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            body: "crash".into(),
+            retry_after: Some(Duration::from_secs(5)),
+        };
+        let fcp = err.to_fcp_error("svc");
+        match fcp {
+            FcpError::External { retry_after, .. } => {
+                assert_eq!(retry_after, Some(Duration::from_secs(5)));
+            }
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn to_fcp_schema_validation_preserves_code() {
+        let err = GraphqlClientError::SchemaValidation {
+            message: "bad".into(),
+            errors: vec!["err1".into(), "err2".into()],
+        };
+        let fcp = err.to_fcp_error("svc");
+        match fcp {
+            FcpError::InvalidRequest { code, .. } => {
+                assert_eq!(code, 1003);
+            }
+            other => panic!("expected InvalidRequest, got {other:?}"),
+        }
+    }
+
+    // ---- GraphqlClientError Display content ----
+
+    #[test]
+    fn display_http_status_with_retry_after() {
+        let err = GraphqlClientError::HttpStatus {
+            status: StatusCode::TOO_MANY_REQUESTS,
+            body: "slow down".into(),
+            retry_after: Some(Duration::from_secs(30)),
+        };
+        let s = err.to_string();
+        assert!(s.contains("429"));
+        assert!(s.contains("slow down"));
+    }
+
+    #[test]
+    fn display_retries_exhausted_large_attempts() {
+        let err = GraphqlClientError::RetriesExhausted { attempts: 999 };
+        assert!(err.to_string().contains("999 attempts"));
+    }
+
+    #[test]
+    fn display_schema_validation_full() {
+        let err = GraphqlClientError::SchemaValidation {
+            message: "type mismatch in field x".into(),
+            errors: vec!["field x wrong".into(), "field y missing".into()],
+        };
+        let s = err.to_string();
+        assert!(s.contains("type mismatch in field x"));
+    }
 }

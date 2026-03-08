@@ -418,4 +418,269 @@ mod tests {
             RetryDecision::DoNotRetry => panic!("502 should be retryable"),
         }
     }
+
+    // ---- decide: exponential backoff progression ----
+
+    #[test]
+    fn decide_backoff_third_attempt() {
+        let p = RetryPolicy {
+            max_attempts: 10,
+            base_delay: Duration::from_millis(100),
+            max_delay: Duration::from_secs(60),
+            max_jitter: Duration::ZERO,
+            strategy: RetryStrategy::Always,
+        };
+        // attempt 3 → 2^2 * 100 = 400ms
+        match p.decide(&retryable_error(), 3, true) {
+            RetryDecision::RetryAfter(d) => assert_eq!(d, Duration::from_millis(400)),
+            RetryDecision::DoNotRetry => panic!("should retry"),
+        }
+    }
+
+    #[test]
+    fn decide_backoff_fourth_attempt() {
+        let p = RetryPolicy {
+            max_attempts: 10,
+            base_delay: Duration::from_millis(100),
+            max_delay: Duration::from_secs(60),
+            max_jitter: Duration::ZERO,
+            strategy: RetryStrategy::Always,
+        };
+        // attempt 4 → 2^3 * 100 = 800ms
+        match p.decide(&retryable_error(), 4, true) {
+            RetryDecision::RetryAfter(d) => assert_eq!(d, Duration::from_millis(800)),
+            RetryDecision::DoNotRetry => panic!("should retry"),
+        }
+    }
+
+    // ---- decide: max_delay boundary cases ----
+
+    #[test]
+    fn decide_delay_exactly_at_max() {
+        let p = RetryPolicy {
+            max_attempts: 10,
+            base_delay: Duration::from_millis(500),
+            max_delay: Duration::from_millis(500),
+            max_jitter: Duration::ZERO,
+            strategy: RetryStrategy::Always,
+        };
+        // attempt 1 → 2^0 * 500 = 500ms, which equals max_delay
+        match p.decide(&retryable_error(), 1, true) {
+            RetryDecision::RetryAfter(d) => assert_eq!(d, Duration::from_millis(500)),
+            RetryDecision::DoNotRetry => panic!("should retry"),
+        }
+    }
+
+    #[test]
+    fn decide_zero_base_delay() {
+        let p = RetryPolicy {
+            max_attempts: 5,
+            base_delay: Duration::ZERO,
+            max_delay: Duration::from_secs(10),
+            max_jitter: Duration::ZERO,
+            strategy: RetryStrategy::Always,
+        };
+        // 0 * 2^n = 0
+        match p.decide(&retryable_error(), 1, true) {
+            RetryDecision::RetryAfter(d) => assert_eq!(d, Duration::ZERO),
+            RetryDecision::DoNotRetry => panic!("should retry"),
+        }
+    }
+
+    // ---- decide: 503 service unavailable ----
+
+    #[test]
+    fn decide_retryable_503_status() {
+        let p = RetryPolicy {
+            max_jitter: Duration::ZERO,
+            ..RetryPolicy::default()
+        };
+        let err = GraphqlClientError::HttpStatus {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            body: String::new(),
+            retry_after: None,
+        };
+        match p.decide(&err, 1, true) {
+            RetryDecision::RetryAfter(_) => {}
+            RetryDecision::DoNotRetry => panic!("503 should be retryable"),
+        }
+    }
+
+    // ---- decide: 504 gateway timeout ----
+
+    #[test]
+    fn decide_retryable_504_status() {
+        let p = RetryPolicy {
+            max_jitter: Duration::ZERO,
+            ..RetryPolicy::default()
+        };
+        let err = GraphqlClientError::HttpStatus {
+            status: StatusCode::GATEWAY_TIMEOUT,
+            body: String::new(),
+            retry_after: None,
+        };
+        match p.decide(&err, 1, true) {
+            RetryDecision::RetryAfter(_) => {}
+            RetryDecision::DoNotRetry => panic!("504 should be retryable"),
+        }
+    }
+
+    // ---- decide: non-retryable variants ----
+
+    #[test]
+    fn decide_non_retryable_protocol_error() {
+        let p = RetryPolicy::default();
+        let err = GraphqlClientError::Protocol {
+            message: "bad frame".into(),
+        };
+        let decision = p.decide(&err, 1, true);
+        assert_eq!(decision, RetryDecision::DoNotRetry);
+    }
+
+    #[test]
+    fn decide_non_retryable_schema_validation_error() {
+        let p = RetryPolicy::default();
+        let err = GraphqlClientError::SchemaValidation {
+            message: "invalid".into(),
+            errors: vec![],
+        };
+        let decision = p.decide(&err, 1, true);
+        assert_eq!(decision, RetryDecision::DoNotRetry);
+    }
+
+    #[test]
+    fn decide_non_retryable_retries_exhausted_error() {
+        let p = RetryPolicy::default();
+        let err = GraphqlClientError::RetriesExhausted { attempts: 3 };
+        let decision = p.decide(&err, 1, true);
+        assert_eq!(decision, RetryDecision::DoNotRetry);
+    }
+
+    #[test]
+    fn decide_non_retryable_graphql_errors() {
+        let p = RetryPolicy::default();
+        let err = GraphqlClientError::GraphqlErrors { errors: vec![] };
+        let decision = p.decide(&err, 1, true);
+        assert_eq!(decision, RetryDecision::DoNotRetry);
+    }
+
+    // ---- decide: 400 not retryable ----
+
+    #[test]
+    fn decide_non_retryable_400_status() {
+        let p = RetryPolicy::default();
+        let err = GraphqlClientError::HttpStatus {
+            status: StatusCode::BAD_REQUEST,
+            body: "bad".into(),
+            retry_after: None,
+        };
+        let decision = p.decide(&err, 1, true);
+        assert_eq!(decision, RetryDecision::DoNotRetry);
+    }
+
+    // ---- decide: jitter range bounds ----
+
+    #[test]
+    fn decide_jitter_bounded_by_max() {
+        let p = RetryPolicy {
+            max_jitter: Duration::from_millis(50),
+            base_delay: Duration::from_millis(100),
+            max_delay: Duration::from_secs(60),
+            ..RetryPolicy::default()
+        };
+        for _ in 0..20 {
+            match p.decide(&retryable_error(), 1, true) {
+                RetryDecision::RetryAfter(d) => {
+                    assert!(d >= Duration::from_millis(100));
+                    assert!(d <= Duration::from_millis(150));
+                }
+                RetryDecision::DoNotRetry => panic!("should retry"),
+            }
+        }
+    }
+
+    // ---- RetryDecision inequality ----
+
+    #[test]
+    fn retry_decision_retry_after_different_durations() {
+        let a = RetryDecision::RetryAfter(Duration::from_millis(100));
+        let b = RetryDecision::RetryAfter(Duration::from_millis(200));
+        assert_ne!(a, b);
+    }
+
+    // ---- RetryStrategy inequality ----
+
+    #[test]
+    fn retry_strategy_inequality_pairs() {
+        assert_ne!(RetryStrategy::Never, RetryStrategy::IdempotentOnly);
+        assert_ne!(RetryStrategy::IdempotentOnly, RetryStrategy::Always);
+        assert_ne!(RetryStrategy::Always, RetryStrategy::Never);
+    }
+
+    // ---- RetryPolicy custom configs ----
+
+    #[test]
+    fn retry_policy_large_max_attempts() {
+        let p = RetryPolicy {
+            max_attempts: 1000,
+            base_delay: Duration::from_millis(10),
+            max_delay: Duration::from_millis(10),
+            max_jitter: Duration::ZERO,
+            strategy: RetryStrategy::Always,
+        };
+        match p.decide(&retryable_error(), 999, true) {
+            RetryDecision::RetryAfter(d) => assert_eq!(d, Duration::from_millis(10)),
+            RetryDecision::DoNotRetry => panic!("should retry"),
+        }
+    }
+
+    #[test]
+    fn retry_policy_max_attempts_boundary() {
+        let p = RetryPolicy {
+            max_attempts: 5,
+            ..RetryPolicy::default()
+        };
+        // attempt 4 < 5: should decide to retry (if retryable)
+        let d4 = p.decide(&retryable_error(), 4, true);
+        assert_ne!(d4, RetryDecision::DoNotRetry);
+        // attempt 5 >= 5: should NOT retry
+        let d5 = p.decide(&retryable_error(), 5, true);
+        assert_eq!(d5, RetryDecision::DoNotRetry);
+    }
+
+    // ---- decide: Always strategy retries idempotent too ----
+
+    #[test]
+    fn decide_always_strategy_retries_idempotent() {
+        let p = RetryPolicy {
+            strategy: RetryStrategy::Always,
+            max_jitter: Duration::ZERO,
+            ..RetryPolicy::default()
+        };
+        match p.decide(&retryable_error(), 1, true) {
+            RetryDecision::RetryAfter(_) => {}
+            RetryDecision::DoNotRetry => panic!("should retry"),
+        }
+    }
+
+    // ---- decide: connect error is retryable ----
+
+    #[test]
+    fn decide_connect_error_is_retryable() {
+        let p = RetryPolicy {
+            max_jitter: Duration::ZERO,
+            ..RetryPolicy::default()
+        };
+        let err = GraphqlClientError::Http(HttpErrorInfo {
+            message: "connection refused".into(),
+            status_code: None,
+            is_timeout: false,
+            is_connect: true,
+            is_request: false,
+        });
+        match p.decide(&err, 1, true) {
+            RetryDecision::RetryAfter(_) => {}
+            RetryDecision::DoNotRetry => panic!("connect error should be retryable"),
+        }
+    }
 }

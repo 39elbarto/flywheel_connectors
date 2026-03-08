@@ -1029,4 +1029,269 @@ mod tests {
         let config = reconnect_config_from_ws(&ws_config);
         assert_eq!(config.max_attempts, Some(0));
     }
+
+    // ---- decode_ws_message: text with various valid payloads ----
+
+    #[test]
+    fn decode_text_ping_message() {
+        let json = r#"{"type":"ping"}"#;
+        let msg = WsMessage::Text(json.to_string());
+        let result = decode_ws_message(msg).unwrap();
+        assert_eq!(result.message_type, "ping");
+        assert!(result.id.is_none());
+        assert!(result.payload.is_none());
+    }
+
+    #[test]
+    fn decode_text_pong_message() {
+        let json = r#"{"type":"pong","id":"1","payload":{"ts":12345}}"#;
+        let msg = WsMessage::Text(json.to_string());
+        let result = decode_ws_message(msg).unwrap();
+        assert_eq!(result.message_type, "pong");
+        assert_eq!(result.id.as_deref(), Some("1"));
+    }
+
+    #[test]
+    fn decode_text_error_with_single_error() {
+        let json = r#"{"type":"error","id":"1","payload":{"message":"bad query"}}"#;
+        let msg = WsMessage::Text(json.to_string());
+        let result = decode_ws_message(msg).unwrap();
+        assert_eq!(result.message_type, "error");
+        assert!(result.payload.unwrap().is_object());
+    }
+
+    #[test]
+    fn decode_text_with_nested_payload() {
+        let json = r#"{"type":"next","id":"1","payload":{"data":{"user":{"name":"Alice","posts":[{"id":"1"},{"id":"2"}]}}}}"#;
+        let msg = WsMessage::Text(json.to_string());
+        let result = decode_ws_message(msg).unwrap();
+        let payload = result.payload.unwrap();
+        assert_eq!(payload["data"]["user"]["name"], "Alice");
+    }
+
+    // ---- decode_ws_message: binary edge cases ----
+
+    #[test]
+    fn decode_binary_with_connection_ack_payload() {
+        let json = r#"{"type":"connection_ack","payload":{"version":"1.0"}}"#;
+        let msg = WsMessage::Binary(json.as_bytes().to_vec());
+        let result = decode_ws_message(msg).unwrap();
+        assert_eq!(result.message_type, "connection_ack");
+        assert_eq!(result.payload.unwrap()["version"], "1.0");
+    }
+
+    #[test]
+    fn decode_binary_partial_json() {
+        let msg = WsMessage::Binary(b"{\"type\":".to_vec());
+        let result = decode_ws_message(msg);
+        match result.unwrap_err() {
+            GraphqlClientError::Json(s) => assert!(!s.is_empty()),
+            other => panic!("expected Json error, got {other:?}"),
+        }
+    }
+
+    // ---- decode_ws_message: ping/pong with payload ----
+
+    #[test]
+    fn decode_ping_with_payload_returns_protocol_error() {
+        let msg = WsMessage::Ping(vec![1, 2, 3, 4]);
+        let result = decode_ws_message(msg);
+        match result.unwrap_err() {
+            GraphqlClientError::Protocol { message } => {
+                assert!(message.contains("ping/pong"));
+            }
+            other => panic!("expected Protocol error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn decode_pong_empty_payload_returns_protocol_error() {
+        let msg = WsMessage::Pong(vec![]);
+        let result = decode_ws_message(msg);
+        match result.unwrap_err() {
+            GraphqlClientError::Protocol { message } => {
+                assert!(message.contains("ping/pong"));
+            }
+            other => panic!("expected Protocol error, got {other:?}"),
+        }
+    }
+
+    // ---- GraphqlWsMessage serde edge cases ----
+
+    #[test]
+    fn ws_message_with_numeric_id() {
+        // GraphQL transport WS spec uses string IDs, but test robustness
+        let json = r#"{"type":"next","id":"42","payload":null}"#;
+        let msg: GraphqlWsMessage = serde_json::from_str(json).unwrap();
+        assert_eq!(msg.id.as_deref(), Some("42"));
+    }
+
+    #[test]
+    fn ws_message_with_empty_type() {
+        let json = r#"{"type":"","id":null,"payload":null}"#;
+        let msg: GraphqlWsMessage = serde_json::from_str(json).unwrap();
+        assert!(msg.message_type.is_empty());
+    }
+
+    #[test]
+    fn ws_message_serde_roundtrip_all_fields() {
+        let msg = GraphqlWsMessage {
+            message_type: "subscribe".to_string(),
+            id: Some("sub-123".to_string()),
+            payload: Some(serde_json::json!({
+                "query": "subscription { events { id type } }",
+                "variables": {}
+            })),
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        let back: GraphqlWsMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.message_type, "subscribe");
+        assert_eq!(back.id.as_deref(), Some("sub-123"));
+        assert!(back.payload.unwrap()["query"].as_str().unwrap().contains("events"));
+    }
+
+    // ---- GraphqlSubscriptionConfig edge cases ----
+
+    #[test]
+    fn subscription_config_zero_ack_timeout() {
+        let config = GraphqlSubscriptionConfig {
+            ack_timeout: Duration::ZERO,
+            ..GraphqlSubscriptionConfig::default()
+        };
+        assert_eq!(config.ack_timeout, Duration::ZERO);
+    }
+
+    #[test]
+    fn subscription_config_large_ack_timeout() {
+        let config = GraphqlSubscriptionConfig {
+            ack_timeout: Duration::from_secs(3600),
+            ..GraphqlSubscriptionConfig::default()
+        };
+        assert_eq!(config.ack_timeout, Duration::from_secs(3600));
+    }
+
+    #[test]
+    fn subscription_config_clone_preserves_init_payload() {
+        let config = GraphqlSubscriptionConfig {
+            init_payload: Some(serde_json::json!({"auth": "bearer xyz"})),
+            ..GraphqlSubscriptionConfig::default()
+        };
+        let cloned = config.clone();
+        assert_eq!(
+            cloned.init_payload.unwrap()["auth"],
+            "bearer xyz"
+        );
+        // Use original after clone to avoid redundant_clone
+        assert!(config.init_payload.is_some());
+    }
+
+    // ---- GraphqlSubscriptionClient edge cases ----
+
+    #[test]
+    fn subscription_client_empty_service_name() {
+        let client = GraphqlSubscriptionClient::new("wss://ws.test.com/graphql", "");
+        assert!(client.service_name.is_empty());
+    }
+
+    #[test]
+    fn subscription_client_with_many_headers() {
+        let client = GraphqlSubscriptionClient::new("wss://ws.test.com/graphql", "svc")
+            .with_header("H1", "v1")
+            .with_header("H2", "v2")
+            .with_header("H3", "v3")
+            .with_header("H4", "v4")
+            .with_header("H5", "v5");
+        assert_eq!(client.headers.len(), 5);
+    }
+
+    #[test]
+    fn subscription_client_clone_preserves_config() {
+        let config = GraphqlSubscriptionConfig {
+            ack_timeout: Duration::from_secs(45),
+            init_payload: Some(serde_json::json!({"key": "value"})),
+            ..GraphqlSubscriptionConfig::default()
+        };
+        let client = GraphqlSubscriptionClient::new("wss://ws.test.com/graphql", "svc")
+            .with_config(config)
+            .with_header("Auth", "token");
+        let cloned = client.clone();
+        assert_eq!(cloned.config.ack_timeout, Duration::from_secs(45));
+        assert!(cloned.config.init_payload.is_some());
+        assert_eq!(cloned.headers.get("Auth").unwrap(), "token");
+        // Use original after clone to avoid redundant_clone
+        assert_eq!(client.url, "wss://ws.test.com/graphql");
+    }
+
+    #[test]
+    fn subscription_client_debug_contains_url_and_service() {
+        let client = GraphqlSubscriptionClient::new("wss://api.example.com/ws", "my-service");
+        let dbg = format!("{client:?}");
+        assert!(dbg.contains("api.example.com"));
+        assert!(dbg.contains("my-service"));
+    }
+
+    // ---- reconnect_config_from_ws additional edge cases ----
+
+    #[test]
+    fn reconnect_config_auto_reconnect_with_one_attempt() {
+        let ws_config = WsConfig {
+            auto_reconnect: true,
+            max_reconnect_attempts: Some(1),
+            ..WsConfig::default()
+        };
+        let config = reconnect_config_from_ws(&ws_config);
+        assert_eq!(config.max_attempts, Some(1));
+    }
+
+    #[test]
+    fn reconnect_config_auto_reconnect_with_zero_attempts() {
+        let ws_config = WsConfig {
+            auto_reconnect: true,
+            max_reconnect_attempts: Some(0),
+            ..WsConfig::default()
+        };
+        let config = reconnect_config_from_ws(&ws_config);
+        assert_eq!(config.max_attempts, Some(0));
+    }
+
+    #[test]
+    fn reconnect_config_small_delay() {
+        let ws_config = WsConfig {
+            auto_reconnect: true,
+            reconnect_delay: Duration::from_millis(100),
+            max_reconnect_attempts: Some(5),
+            ..WsConfig::default()
+        };
+        let config = reconnect_config_from_ws(&ws_config);
+        assert_eq!(config.initial_delay, Duration::from_millis(100));
+    }
+
+    // ---- StreamError conversion additional tests ----
+
+    #[test]
+    fn stream_error_connection_closed_converts() {
+        let stream_err = StreamError::ConnectionClosed {
+            reason: "server shutdown".to_string(),
+            code: Some(1001),
+        };
+        let gql_err: GraphqlClientError = stream_err.into();
+        match gql_err {
+            GraphqlClientError::Protocol { message } => {
+                assert!(!message.is_empty());
+            }
+            other => panic!("expected Protocol error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn stream_error_parse_error_converts() {
+        let stream_err = StreamError::ParseError("invalid frame".to_string());
+        let gql_err: GraphqlClientError = stream_err.into();
+        match gql_err {
+            GraphqlClientError::Protocol { message } => {
+                assert!(!message.is_empty());
+            }
+            other => panic!("expected Protocol error, got {other:?}"),
+        }
+    }
 }

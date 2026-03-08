@@ -1569,4 +1569,362 @@ mod tests {
             .verify(&owner_key.verifying_key(), &node_id, &node_keys, &tags)
             .unwrap();
     }
+
+    // --- NodeId: serde as JSON value ---
+
+    #[test]
+    fn test_node_id_serde_value_is_string() {
+        let id = NodeId::new("value-test");
+        let val: serde_json::Value = serde_json::to_value(&id).unwrap();
+        assert!(val.is_string());
+        assert_eq!(val.as_str().unwrap(), "value-test");
+    }
+
+    #[test]
+    fn test_node_id_deserialize_from_value() {
+        let val = serde_json::Value::String("from-value".to_string());
+        let id: NodeId = serde_json::from_value(val).unwrap();
+        assert_eq!(id.as_str(), "from-value");
+    }
+
+    // --- NodeId: Hash with many entries ---
+
+    #[test]
+    fn test_node_id_hash_many_entries() {
+        use std::collections::HashSet;
+        let mut set = HashSet::new();
+        for i in 0..50 {
+            set.insert(NodeId::new(format!("node-{i}")));
+        }
+        assert_eq!(set.len(), 50);
+        // Re-inserting same IDs doesn't grow set
+        for i in 0..50 {
+            set.insert(NodeId::new(format!("node-{i}")));
+        }
+        assert_eq!(set.len(), 50);
+    }
+
+    // --- NodeKeys: deterministic kid across serde roundtrip ---
+
+    #[test]
+    fn test_node_keys_kid_stable_across_serde() {
+        let (_, keys) = create_test_keys();
+        let signing_kid = keys.signing_kid();
+        let encryption_kid = keys.encryption_kid();
+        let issuance_kid = keys.issuance_kid();
+
+        let json = serde_json::to_string(&keys).unwrap();
+        let decoded: NodeKeys = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(decoded.signing_kid(), signing_kid);
+        assert_eq!(decoded.encryption_kid(), encryption_kid);
+        assert_eq!(decoded.issuance_kid(), issuance_kid);
+    }
+
+    // --- NodeKeys: JSON value shape ---
+
+    #[test]
+    fn test_node_keys_serde_value_is_object() {
+        let (_, keys) = create_test_keys();
+        let val: serde_json::Value = serde_json::to_value(&keys).unwrap();
+        assert!(val.is_object());
+        let obj = val.as_object().unwrap();
+        assert!(obj.contains_key("signing_key"));
+        assert!(obj.contains_key("encryption_key"));
+        assert!(obj.contains_key("issuance_key"));
+    }
+
+    // --- MeshIdentity: serde value shape ---
+
+    #[test]
+    fn test_mesh_identity_serde_value_is_object() {
+        let (owner_key, node_keys) = create_test_keys();
+        let identity = MeshIdentity::new(
+            NodeId::new("val-obj"),
+            "host".to_string(),
+            vec![],
+            vec![],
+            owner_key.verifying_key(),
+            node_keys,
+        );
+        let val: serde_json::Value = serde_json::to_value(&identity).unwrap();
+        assert!(val.is_object());
+        let obj = val.as_object().unwrap();
+        assert!(obj.contains_key("node_id"));
+        assert!(obj.contains_key("hostname"));
+        assert!(obj.contains_key("ips"));
+        assert!(obj.contains_key("tags"));
+    }
+
+    // --- MeshIdentity: attestation field null in JSON when absent ---
+
+    #[test]
+    fn test_mesh_identity_attestation_null_in_json() {
+        let (owner_key, node_keys) = create_test_keys();
+        let identity = MeshIdentity::new(
+            NodeId::new("null-attest"),
+            "host".to_string(),
+            vec![],
+            vec![],
+            owner_key.verifying_key(),
+            node_keys,
+        );
+        let val: serde_json::Value = serde_json::to_value(&identity).unwrap();
+        assert!(val.get("attestation").unwrap().is_null());
+    }
+
+    // --- MeshIdentity: attestation field present in JSON when set ---
+
+    #[test]
+    fn test_mesh_identity_attestation_present_in_json() {
+        let (owner_key, node_keys) = create_test_keys();
+        let node_id = NodeId::new("with-attest");
+        let tags = vec![TailscaleTag::fcp_tag("work")];
+        let attestation =
+            NodeKeyAttestation::sign(&owner_key, &node_id, &node_keys, &tags, 24).unwrap();
+        let identity = MeshIdentity::new(
+            node_id,
+            "host".to_string(),
+            vec![],
+            tags,
+            owner_key.verifying_key(),
+            node_keys,
+        )
+        .with_attestation(attestation);
+        let val: serde_json::Value = serde_json::to_value(&identity).unwrap();
+        assert!(val.get("attestation").unwrap().is_object());
+    }
+
+    // --- NodeKeyAttestation: JSON field names ---
+
+    #[test]
+    fn test_attestation_json_field_names() {
+        let (owner_key, node_keys) = create_test_keys();
+        let attestation =
+            NodeKeyAttestation::sign(&owner_key, &NodeId::new("fields"), &node_keys, &[], 24)
+                .unwrap();
+        let json = serde_json::to_string(&attestation).unwrap();
+        assert!(json.contains("issued_at"));
+        assert!(json.contains("expires_at"));
+        assert!(json.contains("signature"));
+        assert!(json.contains("signer_kid"));
+    }
+
+    // --- Attestation: verify with empty node_id ---
+
+    #[test]
+    fn test_attestation_sign_verify_empty_node_id() {
+        let (owner_key, node_keys) = create_test_keys();
+        let node_id = NodeId::new("");
+        let tags = vec![];
+        let attestation =
+            NodeKeyAttestation::sign(&owner_key, &node_id, &node_keys, &tags, 24).unwrap();
+        attestation
+            .verify(&owner_key.verifying_key(), &node_id, &node_keys, &tags)
+            .unwrap();
+    }
+
+    // --- Attestation: verify with non-fcp tags ---
+
+    #[test]
+    fn test_attestation_sign_verify_non_fcp_tags() {
+        let (owner_key, node_keys) = create_test_keys();
+        let node_id = NodeId::new("non-fcp");
+        let tags = vec![
+            TailscaleTag::new("tag:server").unwrap(),
+            TailscaleTag::new("tag:web").unwrap(),
+        ];
+        let attestation =
+            NodeKeyAttestation::sign(&owner_key, &node_id, &node_keys, &tags, 24).unwrap();
+        attestation
+            .verify(&owner_key.verifying_key(), &node_id, &node_keys, &tags)
+            .unwrap();
+    }
+
+    // --- Attestation: different owner keys produce different signer_kid ---
+
+    #[test]
+    fn test_attestation_different_owners_different_kid() {
+        let key1 = Ed25519SigningKey::generate();
+        let key2 = Ed25519SigningKey::generate();
+        let (_, node_keys) = create_test_keys();
+        let node_id = NodeId::new("kid-diff");
+
+        let a1 =
+            NodeKeyAttestation::sign(&key1, &node_id, &node_keys, &[], 24).unwrap();
+        let a2 =
+            NodeKeyAttestation::sign(&key2, &node_id, &node_keys, &[], 24).unwrap();
+
+        assert_ne!(a1.signer_kid, a2.signer_kid);
+    }
+
+    // --- MeshIdentity: fcp_tags returns references to the identity's tags ---
+
+    #[test]
+    fn test_fcp_tags_returns_references() {
+        let (owner_key, node_keys) = create_test_keys();
+        let tags = vec![TailscaleTag::fcp_tag("work")];
+        let identity = MeshIdentity::new(
+            NodeId::new("ref-test"),
+            "host".to_string(),
+            vec![],
+            tags,
+            owner_key.verifying_key(),
+            node_keys,
+        );
+        let fcp_tags = identity.fcp_tags();
+        assert_eq!(fcp_tags.len(), 1);
+        // The reference should point into identity.tags
+        assert!(std::ptr::eq(fcp_tags[0], &raw const identity.tags[0]));
+    }
+
+    // --- MeshIdentity: with_attestation is chainable ---
+
+    #[test]
+    fn test_with_attestation_chainable() {
+        let (owner_key, node_keys) = create_test_keys();
+        let node_id = NodeId::new("chain");
+        let tags = vec![];
+        let a =
+            NodeKeyAttestation::sign(&owner_key, &node_id, &node_keys, &tags, 24).unwrap();
+
+        let identity = MeshIdentity::new(
+            node_id,
+            "host".to_string(),
+            vec![],
+            tags,
+            owner_key.verifying_key(),
+            node_keys,
+        )
+        .with_attestation(a);
+        assert!(identity.attestation.is_some());
+    }
+
+    // --- NodeId: Display vs Debug are different ---
+
+    #[test]
+    fn test_node_id_display_vs_debug() {
+        let id = NodeId::new("compare");
+        let display = format!("{id}");
+        let debug = format!("{id:?}");
+        assert_eq!(display, "compare");
+        assert!(debug.contains("NodeId"));
+        assert_ne!(display, debug);
+    }
+
+    // --- MeshIdentity: verify attestation with expired zero-validity attestation ---
+
+    #[test]
+    fn test_mesh_identity_verify_expired_attestation() {
+        let (owner_key, node_keys) = create_test_keys();
+        let node_id = NodeId::new("expired");
+        let tags = vec![];
+        let attestation =
+            NodeKeyAttestation::sign(&owner_key, &node_id, &node_keys, &tags, 0).unwrap();
+
+        let identity = MeshIdentity::new(
+            node_id,
+            "host".to_string(),
+            vec![],
+            tags,
+            owner_key.verifying_key(),
+            node_keys,
+        )
+        .with_attestation(attestation);
+
+        assert!(!identity.is_attestation_valid());
+        let err = identity.verify_attestation().unwrap_err();
+        assert!(matches!(err, TailscaleError::AttestationExpired));
+    }
+
+    // --- Attestation: remaining_validity for zero-validity is negative ---
+
+    #[test]
+    fn test_attestation_zero_validity_remaining_negative() {
+        let (owner_key, node_keys) = create_test_keys();
+        let attestation =
+            NodeKeyAttestation::sign(&owner_key, &NodeId::new("neg"), &node_keys, &[], 0).unwrap();
+        let remaining = attestation.remaining_validity();
+        assert!(remaining.num_seconds() <= 0);
+    }
+
+    // --- Attestation: serde roundtrip preserves signature ---
+
+    #[test]
+    fn test_attestation_serde_preserves_signature() {
+        let (owner_key, node_keys) = create_test_keys();
+        let node_id = NodeId::new("sig-preserve");
+        let tags = vec![TailscaleTag::fcp_tag("work")];
+        let attestation =
+            NodeKeyAttestation::sign(&owner_key, &node_id, &node_keys, &tags, 24).unwrap();
+
+        let json = serde_json::to_string(&attestation).unwrap();
+        let decoded: NodeKeyAttestation = serde_json::from_str(&json).unwrap();
+
+        // The decoded attestation should still verify
+        decoded
+            .verify(&owner_key.verifying_key(), &node_id, &node_keys, &tags)
+            .unwrap();
+    }
+
+    // --- MeshIdentity: serde roundtrip with attestation still verifies ---
+
+    #[test]
+    fn test_mesh_identity_serde_roundtrip_attestation_verifies() {
+        let (owner_key, node_keys) = create_test_keys();
+        let node_id = NodeId::new("serde-verify");
+        let tags = vec![TailscaleTag::fcp_tag("owner")];
+        let attestation =
+            NodeKeyAttestation::sign(&owner_key, &node_id, &node_keys, &tags, 24).unwrap();
+
+        let identity = MeshIdentity::new(
+            node_id,
+            "host".to_string(),
+            vec!["100.64.0.1".parse().unwrap()],
+            tags,
+            owner_key.verifying_key(),
+            node_keys,
+        )
+        .with_attestation(attestation);
+
+        let json = serde_json::to_string(&identity).unwrap();
+        let decoded: MeshIdentity = serde_json::from_str(&json).unwrap();
+
+        // Decoded identity should still verify
+        decoded.verify_attestation().unwrap();
+        assert!(decoded.is_attestation_valid());
+    }
+
+    // --- NodeId: from different Into<String> types ---
+
+    #[test]
+    fn test_node_id_from_static_str() {
+        let id = NodeId::new("static");
+        assert_eq!(id.as_str(), "static");
+    }
+
+    #[test]
+    fn test_node_id_from_cow_string() {
+        let s = std::borrow::Cow::from("cow-id");
+        let id = NodeId::new(s);
+        assert_eq!(id.as_str(), "cow-id");
+    }
+
+    // --- MeshIdentity: single IPv4 address ---
+
+    #[test]
+    fn test_mesh_identity_single_ipv4() {
+        let (owner_key, node_keys) = create_test_keys();
+        let ip: IpAddr = "10.0.0.1".parse().unwrap();
+        let identity = MeshIdentity::new(
+            NodeId::new("v4-only"),
+            "host".to_string(),
+            vec![ip],
+            vec![],
+            owner_key.verifying_key(),
+            node_keys,
+        );
+        assert_eq!(identity.ips.len(), 1);
+        assert!(identity.ips[0].is_ipv4());
+    }
 }

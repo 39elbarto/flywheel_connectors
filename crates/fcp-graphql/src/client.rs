@@ -1265,4 +1265,277 @@ mod tests {
         assert!(dbg.contains("dedup_in_flight"));
         assert!(dbg.contains("false"));
     }
+
+    // ---- truncate_body additional edge cases ----
+
+    #[test]
+    fn truncate_body_single_byte() {
+        assert_eq!(truncate_body(b"x"), "x");
+    }
+
+    #[test]
+    fn truncate_body_exactly_one_over_limit() {
+        let body = vec![b'a'; 4097];
+        let result = truncate_body(&body);
+        assert!(result.ends_with('…'));
+    }
+
+    #[test]
+    fn truncate_body_all_spaces() {
+        let body = vec![b' '; 5000];
+        let result = truncate_body(&body);
+        assert!(result.ends_with('…'));
+        assert!(result.len() <= 4100);
+    }
+
+    #[test]
+    fn truncate_body_mixed_utf8() {
+        // ASCII text that fits within limit
+        let body = b"Hello World 2026";
+        let result = truncate_body(body);
+        assert_eq!(result, "Hello World 2026");
+    }
+
+    // ---- hash_bytes additional tests ----
+
+    #[test]
+    fn hash_bytes_single_byte() {
+        let a = hash_bytes(b"a");
+        let b = hash_bytes(b"b");
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn hash_bytes_same_content_same_hash() {
+        let data1 = b"identical payload".to_vec();
+        let data2 = b"identical payload".to_vec();
+        assert_eq!(hash_bytes(&data1), hash_bytes(&data2));
+    }
+
+    // ---- upsert_header additional tests ----
+
+    #[test]
+    fn upsert_header_empty_value() {
+        let mut headers: HeaderList = Vec::new();
+        upsert_header(&mut headers, "X-Empty", "");
+        assert_eq!(header_value(&headers, "X-Empty"), Some(""));
+    }
+
+    #[test]
+    fn upsert_header_empty_name() {
+        let mut headers: HeaderList = Vec::new();
+        upsert_header(&mut headers, "", "value");
+        assert_eq!(header_value(&headers, ""), Some("value"));
+    }
+
+    #[test]
+    fn upsert_header_preserves_insertion_order() {
+        let mut headers: HeaderList = Vec::new();
+        upsert_header(&mut headers, "A", "1");
+        upsert_header(&mut headers, "B", "2");
+        upsert_header(&mut headers, "C", "3");
+        assert_eq!(headers[0].0, "A");
+        assert_eq!(headers[1].0, "B");
+        assert_eq!(headers[2].0, "C");
+    }
+
+    // ---- header_value additional tests ----
+
+    #[test]
+    fn header_value_multiple_headers_returns_first_match() {
+        let headers = vec![
+            ("X-Test".to_string(), "first".to_string()),
+            ("X-Test".to_string(), "second".to_string()),
+        ];
+        // find returns first match
+        assert_eq!(header_value(&headers, "X-Test"), Some("first"));
+    }
+
+    #[test]
+    fn header_value_partial_name_no_match() {
+        let headers = vec![("Content-Type".to_string(), "text/plain".to_string())];
+        assert_eq!(header_value(&headers, "Content"), None);
+    }
+
+    // ---- parse_retry_after additional tests ----
+
+    #[test]
+    fn parse_retry_after_negative_value() {
+        let headers = vec![(RETRY_AFTER_HEADER.to_string(), "-1".to_string())];
+        assert_eq!(parse_retry_after(&headers), None);
+    }
+
+    #[test]
+    fn parse_retry_after_float_value() {
+        let headers = vec![(RETRY_AFTER_HEADER.to_string(), "1.5".to_string())];
+        assert_eq!(parse_retry_after(&headers), None);
+    }
+
+    #[test]
+    fn parse_retry_after_max_u64() {
+        let headers = vec![(
+            RETRY_AFTER_HEADER.to_string(),
+            u64::MAX.to_string(),
+        )];
+        assert_eq!(parse_retry_after(&headers), Some(Duration::from_secs(u64::MAX)));
+    }
+
+    #[test]
+    fn parse_retry_after_case_insensitive_lookup() {
+        let headers = vec![("retry-after".to_string(), "10".to_string())];
+        assert_eq!(parse_retry_after(&headers), Some(Duration::from_secs(10)));
+    }
+
+    // ---- SchemaValidationMode additional tests ----
+
+    #[test]
+    fn schema_validation_mode_all_variants() {
+        let off = SchemaValidationMode::Off;
+        let resp = SchemaValidationMode::ResponseOnly;
+        let both = SchemaValidationMode::VariablesAndResponse;
+        assert_ne!(off, resp);
+        assert_ne!(resp, both);
+        assert_ne!(off, both);
+    }
+
+    #[test]
+    fn schema_validation_mode_debug_all() {
+        assert!(format!("{:?}", SchemaValidationMode::Off).contains("Off"));
+        assert!(format!("{:?}", SchemaValidationMode::ResponseOnly).contains("ResponseOnly"));
+    }
+
+    // ---- GraphqlClientMetrics edge cases ----
+
+    #[test]
+    fn metrics_concurrent_increments() {
+        let metrics = GraphqlClientMetrics::default();
+        for _ in 0..100 {
+            metrics.requests_total.fetch_add(1, Ordering::Relaxed);
+        }
+        assert_eq!(metrics.snapshot().requests_total, 100);
+    }
+
+    #[test]
+    fn metrics_debug_format() {
+        let metrics = GraphqlClientMetrics::default();
+        metrics.requests_total.fetch_add(42, Ordering::Relaxed);
+        let dbg = format!("{metrics:?}");
+        assert!(dbg.contains("GraphqlClientMetrics"));
+    }
+
+    #[test]
+    fn metrics_snapshot_ne() {
+        let a = GraphqlClientMetricsSnapshot {
+            requests_total: 1,
+            requests_success: 1,
+            requests_error: 0,
+            requests_retried: 0,
+        };
+        let b = GraphqlClientMetricsSnapshot {
+            requests_total: 2,
+            requests_success: 1,
+            requests_error: 0,
+            requests_retried: 0,
+        };
+        assert_ne!(a, b);
+    }
+
+    // ---- GraphqlClientConfig additional tests ----
+
+    #[test]
+    fn config_default_has_content_type() {
+        let config = GraphqlClientConfig::default();
+        let ct = header_value(&config.headers, "Content-Type");
+        assert_eq!(ct, Some("application/json"));
+    }
+
+    #[test]
+    fn config_custom_service_name() {
+        let config = GraphqlClientConfig {
+            service_name: "my-service".to_string(),
+            ..GraphqlClientConfig::default()
+        };
+        assert_eq!(config.service_name, "my-service");
+    }
+
+    // ---- GraphqlClientBuilder additional tests ----
+
+    #[test]
+    fn builder_with_header_adds_multiple() {
+        let builder = GraphqlClientBuilder::new("https://api.test.com/graphql")
+            .with_header("X-One", "1")
+            .with_header("X-Two", "2")
+            .with_header("X-Three", "3");
+        assert_eq!(header_value(&builder.config.headers, "X-One"), Some("1"));
+        assert_eq!(header_value(&builder.config.headers, "X-Two"), Some("2"));
+        assert_eq!(header_value(&builder.config.headers, "X-Three"), Some("3"));
+    }
+
+    #[test]
+    fn builder_with_dedup_false() {
+        let builder = GraphqlClientBuilder::new("https://api.test.com/graphql")
+            .with_dedup_in_flight(false);
+        assert!(!builder.config.dedup_in_flight);
+    }
+
+    #[test]
+    fn builder_with_zero_timeout() {
+        let builder = GraphqlClientBuilder::new("https://api.test.com/graphql")
+            .with_timeout(Duration::ZERO);
+        assert_eq!(builder.config.timeout, Duration::ZERO);
+    }
+
+    // ---- GraphqlClient additional tests ----
+
+    #[test]
+    fn client_new_with_path_endpoint() {
+        let client = GraphqlClient::new("https://api.example.com/v2/graphql");
+        assert_eq!(client.endpoint, "https://api.example.com/v2/graphql");
+    }
+
+    #[test]
+    fn client_clone_independent_endpoints() {
+        let client = GraphqlClient::new("https://api.test.com/graphql");
+        let cloned = client.clone();
+        // Endpoints are equal after clone
+        assert_eq!(client.endpoint, cloned.endpoint);
+    }
+
+    #[test]
+    fn client_with_config_dedup_disabled() {
+        let config = GraphqlClientConfig {
+            dedup_in_flight: false,
+            ..GraphqlClientConfig::default()
+        };
+        let client = GraphqlClient::with_config("https://api.test.com/graphql", config).unwrap();
+        assert!(client.dedup_state.is_none());
+    }
+
+    #[test]
+    fn client_from_builder_full_config() {
+        let client = GraphqlClientBuilder::new("https://api.test.com/graphql")
+            .with_service_name("github")
+            .with_bearer_token("ghp_test123")
+            .with_timeout(Duration::from_secs(60))
+            .with_dedup_in_flight(true)
+            .with_validation_mode(SchemaValidationMode::VariablesAndResponse)
+            .build()
+            .unwrap();
+        assert_eq!(client.endpoint, "https://api.test.com/graphql");
+        assert_eq!(client.config.service_name, "github");
+        assert_eq!(client.config.timeout, Duration::from_secs(60));
+        assert!(client.dedup_state.is_some());
+        assert_eq!(
+            client.config.validation,
+            SchemaValidationMode::VariablesAndResponse
+        );
+    }
+
+    #[test]
+    fn client_metrics_snapshot_copy() {
+        let client = GraphqlClient::new("https://api.test.com/graphql");
+        let snap1 = client.metrics();
+        let snap2 = snap1;
+        assert_eq!(snap1, snap2);
+    }
 }

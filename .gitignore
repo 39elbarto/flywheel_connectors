@@ -108,3 +108,23 @@ test_ip.rs
 
 # Build/test artifacts directory
 artifacts/
+
+# Agent worktree and target directories
+.claude/worktrees/
+.codex-targets/
+.target-*/
+
+# UBS (Ultimate Bug Scanner) reports
+**/ubs.json
+*-ubs.txt
+wasi-ubs.txt
+
+# Clippy analysis output
+target_clippy.json
+
+# Agent-generated Python scripts (one-off fix/analysis tools)
+fix_*.py
+
+# Ephemeral test binaries and sources
+parse_test
+parse_test.rs

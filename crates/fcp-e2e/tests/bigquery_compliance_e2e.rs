@@ -12,18 +12,19 @@
 #![allow(clippy::too_many_lines)]
 
 use chrono::{Duration as ChronoDuration, Utc};
+use fcp_bigquery::connector::BigQueryConnector;
 use fcp_conformance::DynamicSuite;
 use fcp_core::{
     AgentHint, CapabilityGrant, CapabilityId, CapabilityToken, CapabilityVerifier, ConnectorId,
     ConnectorMetrics, FcpConnector, FcpError, HandshakeRequest, HandshakeResponse, HealthSnapshot,
-    IdempotencyClass, InstanceId, Introspection, InvokeRequest, InvokeResponse, InvokeStatus, OperationId, OperationInfo, RequestId,
-    RiskLevel, SafetyTier, SessionId, ShutdownRequest, SimulateRequest, SimulateResponse, SubscribeRequest,
-    SubscribeResponse, UnsubscribeRequest, ZoneId,
+    IdempotencyClass, InstanceId, Introspection, InvokeRequest, InvokeResponse, InvokeStatus,
+    OperationId, OperationInfo, RequestId, RiskLevel, SafetyTier, SessionId, ShutdownRequest,
+    SimulateRequest, SimulateResponse, SubscribeRequest, SubscribeResponse, UnsubscribeRequest,
+    ZoneId,
 };
 use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
 use fcp_e2e::{ComplianceSuite, ConnectorSuite, E2eRunner, InvokeExpectations};
 use fcp_manifest::ConnectorManifest;
-use fcp_bigquery::connector::BigQueryConnector;
 use fcp_testkit::MockApiServer;
 use serde_json::json;
 use wiremock::{
@@ -45,7 +46,6 @@ impl BigQueryConnectorAdapter {
             id: ConnectorId::from_static("bigquery"),
             instance_id: InstanceId::new(),
             verifier: None,
-
         }
     }
 }
@@ -266,10 +266,8 @@ fn bigquery_manifest_with_hash() -> String {
 }
 
 fn bigquery_manifest_toml() -> toml::Value {
-    toml::from_str(include_str!(
-        "../../../connectors/bigquery/manifest.toml"
-    ))
-    .expect("BigQuery manifest TOML")
+    toml::from_str(include_str!("../../../connectors/bigquery/manifest.toml"))
+        .expect("BigQuery manifest TOML")
 }
 
 fn bigquery_config(base_url: &str) -> serde_json::Value {
@@ -396,11 +394,7 @@ async fn bigquery_default_deny_compliance_suite_passes() {
         "bigquery.datasets.read",
         &["bigquery.datasets.list"],
     );
-    let invoke = invoke_request(
-        "bigquery.jobs.query",
-        json!({ "query": "SELECT 1" }),
-        token,
-    );
+    let invoke = invoke_request("bigquery.jobs.query", json!({ "query": "SELECT 1" }), token);
 
     let dynamic = DynamicSuite {
         config: bigquery_config(&mock.base_url()),
@@ -438,9 +432,7 @@ async fn bigquery_happy_path_compliance_suite_passes() {
     // Mount mock for GET /projects/{project_id}/datasets (list_datasets)
     Mock::given(method("GET"))
         .and(path_regex(r"^/projects/.+/datasets.*"))
-        .respond_with(
-            ResponseTemplate::new(200).set_body_json(json!({ "datasets": [] })),
-        )
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "datasets": [] })))
         .mount(mock.inner())
         .await;
 
@@ -511,9 +503,7 @@ fn bigquery_manifest_network_guard_allows_and_denies() {
         "BigQuery manifest should declare 4 operations"
     );
 
-    let expected_hosts = vec![
-        "bigquery.googleapis.com".to_string(),
-    ];
+    let expected_hosts = vec!["bigquery.googleapis.com".to_string()];
 
     for operation_name in operations.keys() {
         let host_allow = operation_host_allow_list(&manifest, operation_name);

@@ -906,10 +906,7 @@ mod tests {
     #[test]
     fn test_sanitize_sbpl_path_unicode_safe() {
         // Unicode characters that are NOT SBPL injection vectors
-        assert_eq!(
-            sanitize_sbpl_path("/tmp/données"),
-            "/tmp/données"
-        );
+        assert_eq!(sanitize_sbpl_path("/tmp/données"), "/tmp/données");
     }
 
     #[test]
@@ -1037,11 +1034,8 @@ mod tests {
         let sandbox = MacOsSandbox::new();
         let policy = test_policy();
         // System paths are read-only, write should fail
-        let result = sandbox.verify_file_access(
-            &policy,
-            Path::new("/System/Library/test.plist"),
-            true,
-        );
+        let result =
+            sandbox.verify_file_access(&policy, Path::new("/System/Library/test.plist"), true);
         assert!(result.is_err());
     }
 

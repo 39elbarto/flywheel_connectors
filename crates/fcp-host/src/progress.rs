@@ -863,8 +863,11 @@ mod tests {
     #[test]
     fn record_update_unknown_op_returns_false() {
         let ctrl = ProgressController::new();
-        let emitted =
-            ctrl.record_update("nonexistent", make_update("working", 10, Some(100)), fixed_now());
+        let emitted = ctrl.record_update(
+            "nonexistent",
+            make_update("working", 10, Some(100)),
+            fixed_now(),
+        );
         assert!(!emitted);
     }
 
@@ -931,8 +934,7 @@ mod tests {
     #[test]
     fn phase_transition_unknown_op_returns_false() {
         let ctrl = ProgressController::new();
-        let recorded =
-            ctrl.record_phase_transition("nonexistent", "uploading", &[], fixed_now());
+        let recorded = ctrl.record_phase_transition("nonexistent", "uploading", &[], fixed_now());
         assert!(!recorded);
     }
 

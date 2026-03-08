@@ -12,18 +12,19 @@
 #![allow(clippy::too_many_lines)]
 
 use chrono::{Duration as ChronoDuration, Utc};
+use fcp_clickup::connector::ClickUpConnector;
 use fcp_conformance::DynamicSuite;
 use fcp_core::{
     AgentHint, CapabilityGrant, CapabilityId, CapabilityToken, CapabilityVerifier, ConnectorId,
     ConnectorMetrics, FcpConnector, FcpError, HandshakeRequest, HandshakeResponse, HealthSnapshot,
-    IdempotencyClass, InstanceId, Introspection, InvokeRequest, InvokeResponse, InvokeStatus, OperationId, OperationInfo, RequestId,
-    RiskLevel, SafetyTier, SessionId, ShutdownRequest, SimulateRequest, SimulateResponse, SubscribeRequest,
-    SubscribeResponse, UnsubscribeRequest, ZoneId,
+    IdempotencyClass, InstanceId, Introspection, InvokeRequest, InvokeResponse, InvokeStatus,
+    OperationId, OperationInfo, RequestId, RiskLevel, SafetyTier, SessionId, ShutdownRequest,
+    SimulateRequest, SimulateResponse, SubscribeRequest, SubscribeResponse, UnsubscribeRequest,
+    ZoneId,
 };
 use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
 use fcp_e2e::{ComplianceSuite, ConnectorSuite, E2eRunner, InvokeExpectations};
 use fcp_manifest::ConnectorManifest;
-use fcp_clickup::connector::ClickUpConnector;
 use fcp_testkit::MockApiServer;
 use serde_json::json;
 use wiremock::{
@@ -45,7 +46,6 @@ impl ClickUpConnectorAdapter {
             id: ConnectorId::from_static("clickup"),
             instance_id: InstanceId::new(),
             verifier: None,
-
         }
     }
 }
@@ -267,10 +267,8 @@ fn clickup_manifest_with_hash() -> String {
 }
 
 fn clickup_manifest_toml() -> toml::Value {
-    toml::from_str(include_str!(
-        "../../../connectors/clickup/manifest.toml"
-    ))
-    .expect("ClickUp manifest TOML")
+    toml::from_str(include_str!("../../../connectors/clickup/manifest.toml"))
+        .expect("ClickUp manifest TOML")
 }
 
 fn clickup_config(base_url: &str) -> serde_json::Value {
@@ -392,11 +390,7 @@ async fn clickup_default_deny_compliance_suite_passes() {
         signing_key.verifying_key().to_bytes(),
         &["clickup.tasks.read"],
     );
-    let token = build_token(
-        &signing_key,
-        "clickup.tasks.read",
-        &["clickup.tasks.list"],
-    );
+    let token = build_token(&signing_key, "clickup.tasks.read", &["clickup.tasks.list"]);
     let invoke = invoke_request(
         "clickup.tasks.create",
         json!({ "list_id": "123", "name": "Test Task" }),
@@ -439,9 +433,7 @@ async fn clickup_happy_path_compliance_suite_passes() {
     // Mount mock for GET /list/{list_id}/task (list_tasks)
     Mock::given(method("GET"))
         .and(path_regex(r"^/list/123/task.*"))
-        .respond_with(
-            ResponseTemplate::new(200).set_body_json(json!({ "tasks": [] })),
-        )
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "tasks": [] })))
         .mount(mock.inner())
         .await;
 
@@ -451,16 +443,8 @@ async fn clickup_happy_path_compliance_suite_passes() {
         signing_key.verifying_key().to_bytes(),
         &["clickup.tasks.read"],
     );
-    let token = build_token(
-        &signing_key,
-        "clickup.tasks.read",
-        &["clickup.tasks.list"],
-    );
-    let invoke = invoke_request(
-        "clickup.tasks.list",
-        json!({ "list_id": "123" }),
-        token,
-    );
+    let token = build_token(&signing_key, "clickup.tasks.read", &["clickup.tasks.list"]);
+    let invoke = invoke_request("clickup.tasks.list", json!({ "list_id": "123" }), token);
 
     let suite = ConnectorSuite {
         test_name: "clickup_happy_path".to_string(),
@@ -512,9 +496,7 @@ fn clickup_manifest_network_guard_allows_and_denies() {
         "ClickUp manifest should declare 5 operations"
     );
 
-    let expected_hosts = vec![
-        "api.clickup.com".to_string(),
-    ];
+    let expected_hosts = vec!["api.clickup.com".to_string()];
 
     for operation_name in operations.keys() {
         let host_allow = operation_host_allow_list(&manifest, operation_name);

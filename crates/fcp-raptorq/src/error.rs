@@ -773,14 +773,8 @@ mod tests {
 
     #[test]
     fn encode_error_payload_too_large_different_fields() {
-        let a = EncodeError::PayloadTooLarge {
-            size: 100,
-            max: 50,
-        };
-        let b = EncodeError::PayloadTooLarge {
-            size: 200,
-            max: 50,
-        };
+        let a = EncodeError::PayloadTooLarge { size: 100, max: 50 };
+        let b = EncodeError::PayloadTooLarge { size: 200, max: 50 };
         assert_ne!(a, b);
     }
 
@@ -858,23 +852,15 @@ mod tests {
                 received: 0,
                 needed: 1,
             },
-            DecodeError::AdmissionDenied {
-                reason: "x".into(),
-            },
+            DecodeError::AdmissionDenied { reason: "x".into() },
             DecodeError::SymbolBufferExceeded {
                 buffered: 1,
                 limit: 0,
             },
             DecodeError::MemoryLimitExceeded { used: 1, limit: 0 },
-            DecodeError::InvalidSymbol {
-                reason: "x".into(),
-            },
-            DecodeError::InvalidTransmissionInfo {
-                reason: "x".into(),
-            },
-            DecodeError::Runtime {
-                reason: "x".into(),
-            },
+            DecodeError::InvalidSymbol { reason: "x".into() },
+            DecodeError::InvalidTransmissionInfo { reason: "x".into() },
+            DecodeError::Runtime { reason: "x".into() },
         ];
         for v in &decode_variants {
             assert!(v.source().is_none(), "DecodeError should have no source");

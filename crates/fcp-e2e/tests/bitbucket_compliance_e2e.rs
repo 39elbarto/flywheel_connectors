@@ -12,18 +12,19 @@
 #![allow(clippy::too_many_lines)]
 
 use chrono::{Duration as ChronoDuration, Utc};
+use fcp_bitbucket::connector::BitbucketConnector;
 use fcp_conformance::DynamicSuite;
 use fcp_core::{
     AgentHint, CapabilityGrant, CapabilityId, CapabilityToken, CapabilityVerifier, ConnectorId,
     ConnectorMetrics, FcpConnector, FcpError, HandshakeRequest, HandshakeResponse, HealthSnapshot,
-    IdempotencyClass, InstanceId, Introspection, InvokeRequest, InvokeResponse, InvokeStatus, OperationId, OperationInfo, RequestId,
-    RiskLevel, SafetyTier, SessionId, ShutdownRequest, SimulateRequest, SimulateResponse, SubscribeRequest,
-    SubscribeResponse, UnsubscribeRequest, ZoneId,
+    IdempotencyClass, InstanceId, Introspection, InvokeRequest, InvokeResponse, InvokeStatus,
+    OperationId, OperationInfo, RequestId, RiskLevel, SafetyTier, SessionId, ShutdownRequest,
+    SimulateRequest, SimulateResponse, SubscribeRequest, SubscribeResponse, UnsubscribeRequest,
+    ZoneId,
 };
 use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
 use fcp_e2e::{ComplianceSuite, ConnectorSuite, E2eRunner, InvokeExpectations};
 use fcp_manifest::ConnectorManifest;
-use fcp_bitbucket::connector::BitbucketConnector;
 use fcp_testkit::MockApiServer;
 use serde_json::json;
 use wiremock::{
@@ -45,7 +46,6 @@ impl BitbucketConnectorAdapter {
             id: ConnectorId::from_static("bitbucket"),
             instance_id: InstanceId::new(),
             verifier: None,
-
         }
     }
 }
@@ -235,8 +235,12 @@ impl FcpConnector for BitbucketConnectorAdapter {
 fn required_capability(operation: &str) -> fcp_core::FcpResult<CapabilityId> {
     let capability = match operation {
         "bitbucket.user.get" => "bitbucket.user.read",
-        "bitbucket.repositories.list" | "bitbucket.repositories.get" => "bitbucket.repositories.read",
-        "bitbucket.pull_requests.list" | "bitbucket.pull_requests.get" => "bitbucket.pull_requests.read",
+        "bitbucket.repositories.list" | "bitbucket.repositories.get" => {
+            "bitbucket.repositories.read"
+        }
+        "bitbucket.pull_requests.list" | "bitbucket.pull_requests.get" => {
+            "bitbucket.pull_requests.read"
+        }
         "bitbucket.pull_requests.create" => "bitbucket.pull_requests.write",
         "bitbucket.branches.list" => "bitbucket.branches.read",
         "bitbucket.commits.list" => "bitbucket.commits.read",
@@ -270,10 +274,8 @@ fn bitbucket_manifest_with_hash() -> String {
 }
 
 fn bitbucket_manifest_toml() -> toml::Value {
-    toml::from_str(include_str!(
-        "../../../connectors/bitbucket/manifest.toml"
-    ))
-    .expect("Bitbucket manifest TOML")
+    toml::from_str(include_str!("../../../connectors/bitbucket/manifest.toml"))
+        .expect("Bitbucket manifest TOML")
 }
 
 fn bitbucket_config(base_url: &str) -> serde_json::Value {
@@ -442,9 +444,7 @@ async fn bitbucket_happy_path_compliance_suite_passes() {
     // Mount mock for GET /repositories/{workspace} (list_repositories)
     Mock::given(method("GET"))
         .and(path_regex(r"^/repositories/test.*"))
-        .respond_with(
-            ResponseTemplate::new(200).set_body_json(json!({ "values": [] })),
-        )
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "values": [] })))
         .mount(mock.inner())
         .await;
 
@@ -515,9 +515,7 @@ fn bitbucket_manifest_network_guard_allows_and_denies() {
         "Bitbucket manifest should declare 5 operations"
     );
 
-    let expected_hosts = vec![
-        "api.bitbucket.org".to_string(),
-    ];
+    let expected_hosts = vec!["api.bitbucket.org".to_string()];
 
     for operation_name in operations.keys() {
         let host_allow = operation_host_allow_list(&manifest, operation_name);

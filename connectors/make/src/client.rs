@@ -84,12 +84,8 @@ impl MakeClient {
 
     fn add_auth(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
         match &self.auth {
-            MakeAuth::ApiToken(token) => {
-                req.header("Authorization", format!("Token {token}"))
-            }
-            MakeAuth::CredentialId(id) => {
-                req.header("X-FCP-Credential-Id", id.to_string())
-            }
+            MakeAuth::ApiToken(token) => req.header("Authorization", format!("Token {token}")),
+            MakeAuth::CredentialId(id) => req.header("X-FCP-Credential-Id", id.to_string()),
         }
     }
 
@@ -138,7 +134,10 @@ impl MakeClient {
             429 => Err(MakeError::RateLimited {
                 retry_after_ms: retry_after.unwrap_or(60) * 1000,
             }),
-            code => Err(MakeError::Api { status_code: code, message: detail }),
+            code => Err(MakeError::Api {
+                status_code: code,
+                message: detail,
+            }),
         }
     }
 
@@ -154,11 +153,7 @@ impl MakeClient {
     }
 
     #[instrument(skip(self, body), fields(url))]
-    async fn post(
-        &self,
-        path: &str,
-        body: &serde_json::Value,
-    ) -> MakeResult<serde_json::Value> {
+    async fn post(&self, path: &str, body: &serde_json::Value) -> MakeResult<serde_json::Value> {
         let url = format!("{}{path}", self.base_url);
         debug!(url = %url, "POST request");
         let req = self
@@ -178,15 +173,19 @@ impl MakeClient {
 
     /// Trigger a scenario run.
     pub async fn run_scenario(&self, scenario_id: &str) -> MakeResult<serde_json::Value> {
-        self.post(&format!("/scenarios/{scenario_id}/run"), &serde_json::json!({}))
-            .await
+        self.post(
+            &format!("/scenarios/{scenario_id}/run"),
+            &serde_json::json!({}),
+        )
+        .await
     }
 
     // -- Executions --
 
     /// List recent executions for a scenario.
     pub async fn list_executions(&self, scenario_id: &str) -> MakeResult<serde_json::Value> {
-        self.get(&format!("/scenarios/{scenario_id}/executions")).await
+        self.get(&format!("/scenarios/{scenario_id}/executions"))
+            .await
     }
 }
 
@@ -250,16 +249,14 @@ mod tests {
     #[test]
     fn client_new_strips_trailing_slash() {
         let client =
-            MakeClient::new(MakeAuth::ApiToken("tok".into()), Some("https://x.com/api/"))
-                .unwrap();
+            MakeClient::new(MakeAuth::ApiToken("tok".into()), Some("https://x.com/api/")).unwrap();
         assert_eq!(client.base_url, "https://x.com/api");
     }
 
     #[test]
     fn client_new_no_trailing_slash_unchanged() {
         let client =
-            MakeClient::new(MakeAuth::ApiToken("tok".into()), Some("https://x.com/api"))
-                .unwrap();
+            MakeClient::new(MakeAuth::ApiToken("tok".into()), Some("https://x.com/api")).unwrap();
         assert_eq!(client.base_url, "https://x.com/api");
     }
 
@@ -329,8 +326,7 @@ mod tests {
     #[test]
     fn client_new_multiple_trailing_slashes() {
         let client =
-            MakeClient::new(MakeAuth::ApiToken("tok".into()), Some("https://x.com///"))
-                .unwrap();
+            MakeClient::new(MakeAuth::ApiToken("tok".into()), Some("https://x.com///")).unwrap();
         assert!(!client.base_url.ends_with('/'));
     }
 }

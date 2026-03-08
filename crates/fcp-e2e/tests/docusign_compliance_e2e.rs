@@ -39,8 +39,11 @@ use fcp_docusign::connector::DocuSignConnector;
 
 fn required_capability_for_operation(operation: &str) -> &'static str {
     match operation {
-        "docusign.list_envelopes" | "docusign.get_envelope" | "docusign.download_documents"
-        | "docusign.list_templates" | "docusign.get_template"
+        "docusign.list_envelopes"
+        | "docusign.get_envelope"
+        | "docusign.download_documents"
+        | "docusign.list_templates"
+        | "docusign.get_template"
         | "docusign.stream_connect_events" => "docusign.read",
         "docusign.create_envelope" | "docusign.add_recipients" => "docusign.write",
         "docusign.send_envelope" | "docusign.void_envelope" => "docusign.send",
@@ -85,9 +88,7 @@ impl FcpConnector for DocuSignConnectorAdapter {
         self.verifier = Some(CapabilityVerifier::new(
             req.host_public_key,
             req.zone.clone(),
-            req.requested_instance_id
-                .clone()
-                .unwrap_or_default(),
+            req.requested_instance_id.clone().unwrap_or_default(),
         ));
 
         let request = serde_json::to_value(&req).map_err(|err| FcpError::Internal {
@@ -123,9 +124,7 @@ impl FcpConnector for DocuSignConnectorAdapter {
                     .unwrap_or("unknown");
                 match status {
                     "healthy" => HealthSnapshot::ready(),
-                    "not_configured" | "unconfigured" => {
-                        HealthSnapshot::degraded("not_configured")
-                    }
+                    "not_configured" | "unconfigured" => HealthSnapshot::degraded("not_configured"),
                     other => HealthSnapshot::degraded(format!("docusign_status:{other}")),
                 }
             }
@@ -410,23 +409,14 @@ async fn allow_valid_token_connector_suite_passes() {
     // Mount mock for GET /{accountId}/envelopes (base_url already includes path prefix)
     Mock::given(method("GET"))
         .and(path_regex(r"^/.*/envelopes"))
-        .respond_with(
-            ResponseTemplate::new(200).set_body_json(docusign_list_envelopes_response()),
-        )
+        .respond_with(ResponseTemplate::new(200).set_body_json(docusign_list_envelopes_response()))
         .mount(mock.inner())
         .await;
 
     let mut connector = DocuSignConnectorAdapter::new();
     let signing_key = Ed25519SigningKey::generate();
-    let handshake = handshake_request(
-        signing_key.verifying_key().to_bytes(),
-        &["docusign.read"],
-    );
-    let token = build_token(
-        &signing_key,
-        "docusign.read",
-        &["docusign.list_envelopes"],
-    );
+    let handshake = handshake_request(signing_key.verifying_key().to_bytes(), &["docusign.read"]);
+    let token = build_token(&signing_key, "docusign.read", &["docusign.list_envelopes"]);
     let invoke = invoke_request(
         "docusign.list_envelopes",
         json!({ "account_id": "12345678" }),

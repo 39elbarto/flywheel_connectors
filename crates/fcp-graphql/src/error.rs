@@ -888,7 +888,10 @@ mod tests {
 
     #[test]
     fn error_location_clone() {
-        let loc = GraphqlErrorLocation { line: 5, column: 10 };
+        let loc = GraphqlErrorLocation {
+            line: 5,
+            column: 10,
+        };
         let cloned = loc.clone();
         assert_eq!(loc, cloned);
         assert_eq!(loc.line, 5);
@@ -1001,7 +1004,10 @@ mod tests {
             message: "multi".into(),
             locations: vec![
                 GraphqlErrorLocation { line: 1, column: 5 },
-                GraphqlErrorLocation { line: 3, column: 10 },
+                GraphqlErrorLocation {
+                    line: 3,
+                    column: 10,
+                },
             ],
             path: vec![],
             extensions: None,

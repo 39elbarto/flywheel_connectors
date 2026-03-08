@@ -16,9 +16,10 @@ use fcp_conformance::DynamicSuite;
 use fcp_core::{
     AgentHint, CapabilityGrant, CapabilityId, CapabilityToken, CapabilityVerifier, ConnectorId,
     ConnectorMetrics, FcpConnector, FcpError, HandshakeRequest, HandshakeResponse, HealthSnapshot,
-    IdempotencyClass, InstanceId, Introspection, InvokeRequest, InvokeResponse, InvokeStatus, OperationId,
-    OperationInfo, RequestId, RiskLevel, SafetyTier, SessionId, ShutdownRequest, SimulateRequest, SimulateResponse, SubscribeRequest,
-    SubscribeResponse, UnsubscribeRequest, ZoneId,
+    IdempotencyClass, InstanceId, Introspection, InvokeRequest, InvokeResponse, InvokeStatus,
+    OperationId, OperationInfo, RequestId, RiskLevel, SafetyTier, SessionId, ShutdownRequest,
+    SimulateRequest, SimulateResponse, SubscribeRequest, SubscribeResponse, UnsubscribeRequest,
+    ZoneId,
 };
 use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
 use fcp_e2e::{ComplianceSuite, ConnectorSuite, E2eRunner, InvokeExpectations};
@@ -45,7 +46,6 @@ impl MongoDbConnectorAdapter {
             id: ConnectorId::from_static("mongodb"),
             instance_id: InstanceId::new(),
             verifier: None,
-
         }
     }
 }
@@ -256,10 +256,8 @@ fn mongodb_manifest_with_hash() -> String {
 }
 
 fn mongodb_manifest_toml() -> toml::Value {
-    toml::from_str(include_str!(
-        "../../../connectors/mongodb/manifest.toml"
-    ))
-    .expect("MongoDB manifest TOML")
+    toml::from_str(include_str!("../../../connectors/mongodb/manifest.toml"))
+        .expect("MongoDB manifest TOML")
 }
 
 fn mongodb_config(base_url: &str) -> serde_json::Value {
@@ -378,15 +376,8 @@ async fn mongodb_default_deny_compliance_suite_passes() {
 
     let mut connector = MongoDbConnectorAdapter::new();
     let signing_key = Ed25519SigningKey::generate();
-    let handshake = handshake_request(
-        signing_key.verifying_key().to_bytes(),
-        &["mongodb.read"],
-    );
-    let token = build_token(
-        &signing_key,
-        "mongodb.read",
-        &["mongodb.find"],
-    );
+    let handshake = handshake_request(signing_key.verifying_key().to_bytes(), &["mongodb.read"]);
+    let token = build_token(&signing_key, "mongodb.read", &["mongodb.find"]);
     // Token grants mongodb.read for mongodb.find, but we invoke mongodb.insert_one
     // which requires mongodb.write -- should be denied.
     let invoke = invoke_request(
@@ -437,15 +428,8 @@ async fn mongodb_happy_path_connector_suite_passes() {
 
     let mut connector = MongoDbConnectorAdapter::new();
     let signing_key = Ed25519SigningKey::generate();
-    let handshake = handshake_request(
-        signing_key.verifying_key().to_bytes(),
-        &["mongodb.read"],
-    );
-    let token = build_token(
-        &signing_key,
-        "mongodb.read",
-        &["mongodb.find"],
-    );
+    let handshake = handshake_request(signing_key.verifying_key().to_bytes(), &["mongodb.read"]);
+    let token = build_token(&signing_key, "mongodb.read", &["mongodb.find"]);
     let invoke = invoke_request(
         "mongodb.find",
         json!({ "database": "testdb", "collection": "users" }),

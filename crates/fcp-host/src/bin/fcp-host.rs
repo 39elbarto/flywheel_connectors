@@ -34,14 +34,17 @@ use fcp_core::{
     RolloutPolicy, SafetyTier, SelfCheckReport, TransitionReason,
 };
 use fcp_host::{
-    BudgetPolicyEngine, CacheMetadata, CacheValidator, ConnectorArchetype, ConnectorRegistry,
-    ConnectorSummary, DiscoveryEndpoint, DiscoveryFilter, DiscoveryResponse, DoctorReport,
-    DoctorRequest, DoctorService, HostHealthResponse, HostHealthStatus, IntrospectionResponse,
+    BatchExecutor, BatchInvokeRequest, BatchInvokeResponse, BatchOperation, BatchOperationError,
+    BatchOptions, BatchStatus, BudgetPolicyEngine, CacheMetadata, CacheValidator,
+    ConnectorArchetype, ConnectorRegistry, ConnectorSummary, DiscoveryEndpoint, DiscoveryFilter,
+    DiscoveryResponse, DoctorReport, DoctorRequest, DoctorService, HostHealthResponse,
+    HostHealthStatus, IntrospectionResponse, OperationResult, OperationResultStatus,
     PreflightRequest, PreflightResponse, RequestPriority, ResilienceError, ResilienceLayer,
     RolloutController, RolloutDecision, RolloutObservation, RolloutOutcome, SafetyTierExt,
     merge_connector_health,
 };
 use fcp_host::{HostError, HostResult};
+use futures_util::future::join_all;
 use hyper::body::Incoming;
 use hyper_util::{
     server::conn::auto::Builder as HyperConnectionBuilder, service::TowerToHyperService,
@@ -584,6 +587,45 @@ struct DiscoveryRequestBody {
     cache: Option<CacheValidator>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HttpBatchInvokeRequest {
+    operations: Vec<HttpBatchOperation>,
+    #[serde(default)]
+    options: BatchOptions,
+}
+
+impl HttpBatchInvokeRequest {
+    fn planning_request(&self) -> BatchInvokeRequest {
+        BatchInvokeRequest {
+            operations: self
+                .operations
+                .iter()
+                .map(|operation| BatchOperation {
+                    id: operation.id.clone(),
+                    tool: format!(
+                        "{}#{}",
+                        operation.request.connector_id, operation.request.operation
+                    ),
+                    input: serde_json::Value::Null,
+                    depends_on: operation.depends_on.clone(),
+                    zone: Some(operation.request.zone_id.to_string()),
+                })
+                .collect(),
+            options: self.options.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HttpBatchOperation {
+    id: String,
+    request: InvokeRequest,
+    #[serde(default)]
+    depends_on: Vec<String>,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
 enum DiscoverPayload {
@@ -947,6 +989,8 @@ async fn async_main() -> HostResult<()> {
         .route("/rpc/discover", post(discover_handler))
         .route("/rpc/introspect/{connector_id}", get(introspect_handler))
         .route("/rpc/invoke", post(invoke_handler))
+        .route("/rpc/batch", post(batch_invoke_handler))
+        .route("/rpc/batch-invoke", post(batch_invoke_handler))
         .route("/rpc/preflight", post(preflight_handler))
         .route("/rpc/health", get(health_handler))
         .route(
@@ -1197,6 +1241,289 @@ async fn invoke_handler(
             Err(map_host_error(err))
         }
     }
+}
+
+fn batch_timeout_error() -> BatchOperationError {
+    BatchOperationError {
+        code: "BATCH_TIMEOUT".to_string(),
+        message: "batch timeout exceeded".to_string(),
+        retry_after_ms: None,
+    }
+}
+
+fn dependency_failed_error() -> BatchOperationError {
+    BatchOperationError {
+        code: "DEP_FAILED".to_string(),
+        message: "dependency failed".to_string(),
+        retry_after_ms: None,
+    }
+}
+
+fn batch_error_from_host_error(err: HostError) -> BatchOperationError {
+    let code = match err {
+        HostError::ConnectorNotFound(_) => "CONNECTOR_NOT_FOUND",
+        HostError::InvalidFilter(_) => "INVALID_REQUEST",
+        HostError::RegistryError(_) => "CONNECTOR_ERROR",
+        HostError::PreflightFailed(_) => "PREFLIGHT_DENIED",
+        HostError::CacheError(_) => "CACHE_ERROR",
+        HostError::Unavailable(_) => "UNAVAILABLE",
+        HostError::Internal(_) => "INTERNAL_ERROR",
+    };
+
+    BatchOperationError {
+        code: code.to_string(),
+        message: err.to_string(),
+        retry_after_ms: None,
+    }
+}
+
+fn skipped_batch_result(id: String, error: Option<BatchOperationError>) -> OperationResult {
+    OperationResult {
+        id,
+        status: OperationResultStatus::Skipped,
+        output: None,
+        error,
+        duration_ms: 0,
+    }
+}
+
+fn elapsed_millis(started_at: Instant) -> u64 {
+    u64::try_from(started_at.elapsed().as_millis()).unwrap_or(u64::MAX)
+}
+
+fn dependency_failed_in_batch(
+    operation: &HttpBatchOperation,
+    results_map: &HashMap<String, OperationResult>,
+) -> bool {
+    operation.depends_on.iter().any(|dependency_id| {
+        results_map
+            .get(dependency_id.as_str())
+            .is_some_and(|result| result.status != OperationResultStatus::Success)
+    })
+}
+
+fn batch_status(aborted: bool, completed: usize, failed: usize) -> BatchStatus {
+    if aborted && failed > 0 {
+        BatchStatus::Aborted
+    } else if failed == 0 {
+        BatchStatus::Success
+    } else if completed == 0 {
+        BatchStatus::AllFailed
+    } else {
+        BatchStatus::PartialSuccess
+    }
+}
+
+fn build_batch_response(
+    request: &HttpBatchInvokeRequest,
+    mut results_map: HashMap<String, OperationResult>,
+    aborted: bool,
+    started_at: Instant,
+) -> BatchInvokeResponse {
+    let results: Vec<OperationResult> = request
+        .operations
+        .iter()
+        .map(|operation| {
+            results_map
+                .remove(operation.id.as_str())
+                .unwrap_or_else(|| skipped_batch_result(operation.id.clone(), None))
+        })
+        .collect();
+
+    let completed = results
+        .iter()
+        .filter(|result| result.status == OperationResultStatus::Success)
+        .count();
+    let failed = results
+        .iter()
+        .filter(|result| result.status == OperationResultStatus::Error)
+        .count();
+    let skipped = results
+        .iter()
+        .filter(|result| result.status == OperationResultStatus::Skipped)
+        .count();
+
+    BatchInvokeResponse {
+        status: batch_status(aborted, completed, failed),
+        completed,
+        failed,
+        skipped,
+        results,
+        total_duration_ms: elapsed_millis(started_at),
+    }
+}
+
+async fn execute_batch_operation(
+    state: Arc<AppState>,
+    operation: HttpBatchOperation,
+) -> OperationResult {
+    let started_at = Instant::now();
+    let request = operation.request;
+
+    if let Err(err) = request.validate_idempotency_key() {
+        return OperationResult {
+            id: operation.id,
+            status: OperationResultStatus::Error,
+            output: None,
+            error: Some(batch_error_from_host_error(HostError::InvalidFilter(
+                format!("invalid invoke request: {err}"),
+            ))),
+            duration_ms: elapsed_millis(started_at),
+        };
+    }
+
+    let preflight = state
+        .discovery
+        .preflight(PreflightRequest {
+            connector_id: request.connector_id.clone(),
+            operation: request.operation.to_string(),
+            params: Some(request.input.clone()),
+            principal: None,
+            zone_id: Some(request.zone_id.clone()),
+        })
+        .await;
+
+    if !preflight.allowed {
+        let reason = preflight
+            .reason
+            .unwrap_or_else(|| "preflight denied batch operation".to_string());
+        return OperationResult {
+            id: operation.id,
+            status: OperationResultStatus::Error,
+            output: None,
+            error: Some(batch_error_from_host_error(HostError::PreflightFailed(
+                reason,
+            ))),
+            duration_ms: elapsed_millis(started_at),
+        };
+    }
+
+    match state.registry.invoke(request).await {
+        Ok(response) => OperationResult {
+            id: operation.id,
+            status: OperationResultStatus::Success,
+            output: Some(
+                serde_json::to_value(&response)
+                    .unwrap_or_else(|_| json!({ "status": "serialization_error" })),
+            ),
+            error: None,
+            duration_ms: elapsed_millis(started_at),
+        },
+        Err(err) => OperationResult {
+            id: operation.id,
+            status: OperationResultStatus::Error,
+            output: None,
+            error: Some(batch_error_from_host_error(err)),
+            duration_ms: elapsed_millis(started_at),
+        },
+    }
+}
+
+async fn batch_invoke_handler(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<HttpBatchInvokeRequest>,
+) -> Result<Json<BatchInvokeResponse>, (StatusCode, String)> {
+    let started_at = Instant::now();
+    tracing::debug!(
+        event = "batch_invoke_request",
+        operation_count = request.operations.len(),
+        max_parallelism = request.options.max_parallelism,
+        stop_on_first_error = request.options.stop_on_first_error,
+        timeout_ms = request.options.timeout_ms,
+        "processing batch invoke request"
+    );
+
+    let executor = BatchExecutor::new();
+    let planning_request = request.planning_request();
+    let plan = executor.plan(&planning_request).map_err(map_host_error)?;
+    let timeout = Duration::from_millis(request.options.timeout_ms);
+    let max_parallelism = usize::try_from(request.options.max_parallelism)
+        .unwrap_or(usize::MAX)
+        .max(1);
+
+    let operation_map: HashMap<String, HttpBatchOperation> = request
+        .operations
+        .iter()
+        .cloned()
+        .map(|operation| (operation.id.clone(), operation))
+        .collect();
+    let mut results_map: HashMap<String, OperationResult> = HashMap::new();
+    let mut aborted = false;
+
+    for tier in &plan.tiers {
+        if aborted {
+            for operation_id in &tier.operation_ids {
+                results_map.insert(
+                    operation_id.clone(),
+                    skipped_batch_result(operation_id.clone(), None),
+                );
+            }
+            continue;
+        }
+
+        for chunk in tier.operation_ids.chunks(max_parallelism) {
+            if started_at.elapsed() >= timeout {
+                aborted = true;
+                let timeout_error = batch_timeout_error();
+                for operation_id in chunk {
+                    results_map.insert(
+                        operation_id.clone(),
+                        skipped_batch_result(operation_id.clone(), Some(timeout_error.clone())),
+                    );
+                }
+                continue;
+            }
+
+            let mut ready = Vec::new();
+            for operation_id in chunk {
+                let operation = operation_map
+                    .get(operation_id.as_str())
+                    .expect("planned batch operation must exist");
+                if dependency_failed_in_batch(operation, &results_map) {
+                    results_map.insert(
+                        operation_id.clone(),
+                        skipped_batch_result(operation_id.clone(), Some(dependency_failed_error())),
+                    );
+                } else {
+                    ready.push(operation.clone());
+                }
+            }
+
+            if ready.is_empty() {
+                continue;
+            }
+
+            let chunk_results = join_all(
+                ready
+                    .into_iter()
+                    .map(|operation| execute_batch_operation(Arc::clone(&state), operation)),
+            )
+            .await;
+
+            let chunk_failed = chunk_results
+                .iter()
+                .any(|result| result.status == OperationResultStatus::Error);
+            for result in chunk_results {
+                results_map.insert(result.id.clone(), result);
+            }
+            if request.options.stop_on_first_error && chunk_failed {
+                aborted = true;
+            }
+        }
+    }
+
+    let response = build_batch_response(&request, results_map, aborted, started_at);
+    tracing::info!(
+        event = "batch_invoke_response",
+        operation_count = request.operations.len(),
+        completed = response.completed,
+        failed = response.failed,
+        skipped = response.skipped,
+        status = ?response.status,
+        duration_ms = started_at.elapsed().as_millis() as u64,
+        "batch invoke request complete"
+    );
+    Ok(Json(response))
 }
 
 async fn health_handler(State(state): State<Arc<AppState>>) -> Json<HostHealthResponse> {

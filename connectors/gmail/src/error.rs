@@ -536,9 +536,7 @@ mod tests {
         assert!(err.is_retryable());
         assert_eq!(err.retry_after(), Some(Duration::from_secs(0)));
         match err.to_fcp_error() {
-            FcpError::RateLimited {
-                retry_after_ms, ..
-            } => assert_eq!(retry_after_ms, 0),
+            FcpError::RateLimited { retry_after_ms, .. } => assert_eq!(retry_after_ms, 0),
             other => panic!("expected RateLimited, got {other:?}"),
         }
     }
@@ -552,9 +550,7 @@ mod tests {
         };
         assert_eq!(err.retry_after(), Some(Duration::from_secs(3600)));
         match err.to_fcp_error() {
-            FcpError::RateLimited {
-                retry_after_ms, ..
-            } => assert_eq!(retry_after_ms, 3_600_000),
+            FcpError::RateLimited { retry_after_ms, .. } => assert_eq!(retry_after_ms, 3_600_000),
             other => panic!("expected RateLimited, got {other:?}"),
         }
     }

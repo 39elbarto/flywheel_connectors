@@ -2878,7 +2878,10 @@ mod tests {
     fn config_default_webhook_tolerance() {
         let params = json!({ "secret_key": "sk_test" });
         let config = StripeConfig::from_params(&params).unwrap();
-        assert_eq!(config.webhook_tolerance_seconds, DEFAULT_WEBHOOK_TOLERANCE_SECONDS);
+        assert_eq!(
+            config.webhook_tolerance_seconds,
+            DEFAULT_WEBHOOK_TOLERANCE_SECONDS
+        );
         assert!(config.webhook_signing_secret.is_none());
     }
 

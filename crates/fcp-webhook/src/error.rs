@@ -335,11 +335,7 @@ mod tests {
                 .source()
                 .is_none()
         );
-        assert!(
-            WebhookError::InvalidPayload("X".into())
-                .source()
-                .is_none()
-        );
+        assert!(WebhookError::InvalidPayload("X".into()).source().is_none());
     }
 
     #[test]

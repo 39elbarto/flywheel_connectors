@@ -1643,10 +1643,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(callback.error, Some("access_denied".to_string()));
-        assert_eq!(
-            callback.error_description,
-            Some("User denied".to_string())
-        );
+        assert_eq!(callback.error_description, Some("User denied".to_string()));
         assert!(callback.code.is_none());
     }
 
@@ -1661,10 +1658,9 @@ mod tests {
     #[test]
     fn test_callback_from_url_with_fragment_ignored() {
         // Fragments are not part of query string
-        let callback = AuthorizationCallback::from_url(
-            "https://localhost/callback?code=abc&state=xyz#extra",
-        )
-        .unwrap();
+        let callback =
+            AuthorizationCallback::from_url("https://localhost/callback?code=abc&state=xyz#extra")
+                .unwrap();
         assert_eq!(callback.code, Some("abc".to_string()));
     }
 

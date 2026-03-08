@@ -1381,7 +1381,10 @@ mod tests {
         assert!(result.is_err());
         match result.unwrap_err() {
             FcpError::InvalidRequest { message, .. } => {
-                assert!(message.contains("auth"), "expected auth error, got: {message}");
+                assert!(
+                    message.contains("auth"),
+                    "expected auth error, got: {message}"
+                );
             }
             e => panic!("Expected InvalidRequest, got: {e:?}"),
         }
@@ -1609,7 +1612,9 @@ mod tests {
         let input = json!({"parts": []});
         let err = require_str_array(&input, "parts").unwrap_err();
         match err {
-            FcpError::InvalidRequest { message, .. } => assert!(message.contains("must not be empty")),
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(message.contains("must not be empty"))
+            }
             e => panic!("expected InvalidRequest, got {e:?}"),
         }
     }

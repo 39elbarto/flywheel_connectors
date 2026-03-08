@@ -3339,10 +3339,8 @@ mod tests {
 
     #[test]
     fn merge_connector_health_healthy_plus_degraded() {
-        let merged = merge_connector_health(
-            ConnectorHealth::Healthy,
-            ConnectorHealth::degraded("lag"),
-        );
+        let merged =
+            merge_connector_health(ConnectorHealth::Healthy, ConnectorHealth::degraded("lag"));
         assert!(matches!(merged, ConnectorHealth::Degraded { .. }));
         if let ConnectorHealth::Degraded { reason } = &merged {
             assert!(reason.contains("lag"));

@@ -662,10 +662,7 @@ mod tests {
         ];
         for provider in non_pkce {
             let config = provider.oauth2_config("id", "sec").unwrap();
-            assert!(
-                !config.use_pkce,
-                "{provider:?} should have PKCE disabled"
-            );
+            assert!(!config.use_pkce, "{provider:?} should have PKCE disabled");
         }
     }
 

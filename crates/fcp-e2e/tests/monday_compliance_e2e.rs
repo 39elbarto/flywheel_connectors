@@ -16,9 +16,10 @@ use fcp_conformance::DynamicSuite;
 use fcp_core::{
     AgentHint, CapabilityGrant, CapabilityId, CapabilityToken, CapabilityVerifier, ConnectorId,
     ConnectorMetrics, FcpConnector, FcpError, HandshakeRequest, HandshakeResponse, HealthSnapshot,
-    IdempotencyClass, InstanceId, Introspection, InvokeRequest, InvokeResponse, InvokeStatus, OperationId,
-    OperationInfo, RequestId, RiskLevel, SafetyTier, SessionId, ShutdownRequest, SimulateRequest, SimulateResponse, SubscribeRequest,
-    SubscribeResponse, UnsubscribeRequest, ZoneId,
+    IdempotencyClass, InstanceId, Introspection, InvokeRequest, InvokeResponse, InvokeStatus,
+    OperationId, OperationInfo, RequestId, RiskLevel, SafetyTier, SessionId, ShutdownRequest,
+    SimulateRequest, SimulateResponse, SubscribeRequest, SubscribeResponse, UnsubscribeRequest,
+    ZoneId,
 };
 use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
 use fcp_e2e::{ComplianceSuite, ConnectorSuite, E2eRunner, InvokeExpectations};
@@ -45,7 +46,6 @@ impl MondayConnectorAdapter {
             id: ConnectorId::from_static("monday"),
             instance_id: InstanceId::new(),
             verifier: None,
-
         }
     }
 }
@@ -256,10 +256,8 @@ fn monday_manifest_with_hash() -> String {
 }
 
 fn monday_manifest_toml() -> toml::Value {
-    toml::from_str(include_str!(
-        "../../../connectors/monday/manifest.toml"
-    ))
-    .expect("Monday manifest TOML")
+    toml::from_str(include_str!("../../../connectors/monday/manifest.toml"))
+        .expect("Monday manifest TOML")
 }
 
 fn monday_config(base_url: &str) -> serde_json::Value {
@@ -381,11 +379,7 @@ async fn monday_default_deny_compliance_suite_passes() {
         signing_key.verifying_key().to_bytes(),
         &["monday.boards.read"],
     );
-    let token = build_token(
-        &signing_key,
-        "monday.boards.read",
-        &["monday.boards.list"],
-    );
+    let token = build_token(&signing_key, "monday.boards.read", &["monday.boards.list"]);
     let invoke = invoke_request(
         "monday.items.create",
         json!({ "board_id": "123456789", "item_name": "test item" }),
@@ -403,11 +397,7 @@ async fn monday_default_deny_compliance_suite_passes() {
         require_capability_denial: true,
         require_decision_receipt: false,
     };
-    let suite = ComplianceSuite::new(
-        "monday_default_deny",
-        monday_manifest_with_hash(),
-        dynamic,
-    );
+    let suite = ComplianceSuite::new("monday_default_deny", monday_manifest_with_hash(), dynamic);
 
     let mut runner = E2eRunner::new("fcp-e2e-monday");
     let report = runner
@@ -438,16 +428,8 @@ async fn monday_happy_path_connector_suite_passes() {
         signing_key.verifying_key().to_bytes(),
         &["monday.boards.read"],
     );
-    let token = build_token(
-        &signing_key,
-        "monday.boards.read",
-        &["monday.boards.list"],
-    );
-    let invoke = invoke_request(
-        "monday.boards.list",
-        json!({}),
-        token,
-    );
+    let token = build_token(&signing_key, "monday.boards.read", &["monday.boards.list"]);
+    let invoke = invoke_request("monday.boards.list", json!({}), token);
 
     let suite = ConnectorSuite {
         test_name: "monday_happy_path".to_string(),

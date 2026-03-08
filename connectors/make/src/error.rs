@@ -71,7 +71,10 @@ impl MakeError {
             Self::Json(e) => FcpError::Internal {
                 message: format!("JSON error: {e}"),
             },
-            Self::Api { status_code, message } => FcpError::External {
+            Self::Api {
+                status_code,
+                message,
+            } => FcpError::External {
                 service: "make".into(),
                 message: message.clone(),
                 status_code: Some(*status_code),
@@ -116,24 +119,45 @@ mod tests {
 
     #[test]
     fn rate_limited_is_retryable() {
-        assert!(MakeError::RateLimited { retry_after_ms: 5000 }.is_retryable());
+        assert!(
+            MakeError::RateLimited {
+                retry_after_ms: 5000
+            }
+            .is_retryable()
+        );
     }
 
     #[test]
     fn api_500_is_retryable() {
-        assert!(MakeError::Api { status_code: 500, message: "err".into() }.is_retryable());
+        assert!(
+            MakeError::Api {
+                status_code: 500,
+                message: "err".into()
+            }
+            .is_retryable()
+        );
     }
 
     #[test]
     fn api_503_is_retryable() {
         assert!(
-            MakeError::Api { status_code: 503, message: "unavailable".into() }.is_retryable()
+            MakeError::Api {
+                status_code: 503,
+                message: "unavailable".into()
+            }
+            .is_retryable()
         );
     }
 
     #[test]
     fn api_429_is_retryable() {
-        assert!(MakeError::Api { status_code: 429, message: "too many".into() }.is_retryable());
+        assert!(
+            MakeError::Api {
+                status_code: 429,
+                message: "too many".into()
+            }
+            .is_retryable()
+        );
     }
 
     #[test]
@@ -148,19 +172,30 @@ mod tests {
 
     #[test]
     fn not_found_not_retryable() {
-        assert!(!MakeError::NotFound { resource: "scenario".into() }.is_retryable());
+        assert!(
+            !MakeError::NotFound {
+                resource: "scenario".into()
+            }
+            .is_retryable()
+        );
     }
 
     #[test]
     fn api_400_not_retryable() {
         assert!(
-            !MakeError::Api { status_code: 400, message: "bad request".into() }.is_retryable()
+            !MakeError::Api {
+                status_code: 400,
+                message: "bad request".into()
+            }
+            .is_retryable()
         );
     }
 
     #[test]
     fn retry_after_for_rate_limited() {
-        let err = MakeError::RateLimited { retry_after_ms: 30_000 };
+        let err = MakeError::RateLimited {
+            retry_after_ms: 30_000,
+        };
         assert_eq!(err.retry_after(), Some(Duration::from_secs(30)));
     }
 
@@ -177,20 +212,35 @@ mod tests {
     #[test]
     fn retry_after_none_for_api_error() {
         assert_eq!(
-            MakeError::Api { status_code: 500, message: "err".into() }.retry_after(),
+            MakeError::Api {
+                status_code: 500,
+                message: "err".into()
+            }
+            .retry_after(),
             None
         );
     }
 
     #[test]
     fn retry_after_none_for_not_found() {
-        assert_eq!(MakeError::NotFound { resource: "x".into() }.retry_after(), None);
+        assert_eq!(
+            MakeError::NotFound {
+                resource: "x".into()
+            }
+            .retry_after(),
+            None
+        );
     }
 
     #[test]
     fn unauthorized_to_fcp_error() {
         match MakeError::Unauthorized.to_fcp_error() {
-            FcpError::External { service, status_code, retryable, .. } => {
+            FcpError::External {
+                service,
+                status_code,
+                retryable,
+                ..
+            } => {
                 assert_eq!(service, "make");
                 assert_eq!(status_code, Some(401));
                 assert!(!retryable);
@@ -202,7 +252,12 @@ mod tests {
     #[test]
     fn forbidden_to_fcp_error() {
         match MakeError::Forbidden.to_fcp_error() {
-            FcpError::External { service, status_code, retryable, .. } => {
+            FcpError::External {
+                service,
+                status_code,
+                retryable,
+                ..
+            } => {
                 assert_eq!(service, "make");
                 assert_eq!(status_code, Some(403));
                 assert!(!retryable);
@@ -213,8 +268,17 @@ mod tests {
 
     #[test]
     fn not_found_to_fcp_error() {
-        match (MakeError::NotFound { resource: "scenario_abc".into() }).to_fcp_error() {
-            FcpError::External { status_code, message, retryable, .. } => {
+        match (MakeError::NotFound {
+            resource: "scenario_abc".into(),
+        })
+        .to_fcp_error()
+        {
+            FcpError::External {
+                status_code,
+                message,
+                retryable,
+                ..
+            } => {
                 assert_eq!(status_code, Some(404));
                 assert!(message.contains("scenario_abc"));
                 assert!(!retryable);
@@ -225,8 +289,17 @@ mod tests {
 
     #[test]
     fn rate_limited_to_fcp_error() {
-        match (MakeError::RateLimited { retry_after_ms: 60_000 }).to_fcp_error() {
-            FcpError::External { status_code, retryable, retry_after, .. } => {
+        match (MakeError::RateLimited {
+            retry_after_ms: 60_000,
+        })
+        .to_fcp_error()
+        {
+            FcpError::External {
+                status_code,
+                retryable,
+                retry_after,
+                ..
+            } => {
                 assert_eq!(status_code, Some(429));
                 assert!(retryable);
                 assert_eq!(retry_after, Some(Duration::from_secs(60)));
@@ -237,8 +310,19 @@ mod tests {
 
     #[test]
     fn api_error_to_fcp_error() {
-        match (MakeError::Api { status_code: 503, message: "unavailable".into() }).to_fcp_error() {
-            FcpError::External { service, status_code, retryable, message, .. } => {
+        match (MakeError::Api {
+            status_code: 503,
+            message: "unavailable".into(),
+        })
+        .to_fcp_error()
+        {
+            FcpError::External {
+                service,
+                status_code,
+                retryable,
+                message,
+                ..
+            } => {
                 assert_eq!(service, "make");
                 assert_eq!(status_code, Some(503));
                 assert!(retryable);
@@ -259,8 +343,17 @@ mod tests {
 
     #[test]
     fn api_error_non_retryable_to_fcp_error() {
-        match (MakeError::Api { status_code: 400, message: "bad".into() }).to_fcp_error() {
-            FcpError::External { status_code, retryable, .. } => {
+        match (MakeError::Api {
+            status_code: 400,
+            message: "bad".into(),
+        })
+        .to_fcp_error()
+        {
+            FcpError::External {
+                status_code,
+                retryable,
+                ..
+            } => {
                 assert_eq!(status_code, Some(400));
                 assert!(!retryable);
             }
@@ -287,7 +380,10 @@ mod tests {
     #[test]
     fn error_display_not_found() {
         assert_eq!(
-            MakeError::NotFound { resource: "scenario".into() }.to_string(),
+            MakeError::NotFound {
+                resource: "scenario".into()
+            }
+            .to_string(),
             "Not found: scenario"
         );
     }
@@ -295,7 +391,10 @@ mod tests {
     #[test]
     fn error_display_rate_limited() {
         assert_eq!(
-            MakeError::RateLimited { retry_after_ms: 2000 }.to_string(),
+            MakeError::RateLimited {
+                retry_after_ms: 2000
+            }
+            .to_string(),
             "Rate limited, retry after 2000ms"
         );
     }
@@ -303,29 +402,57 @@ mod tests {
     #[test]
     fn error_display_api() {
         assert_eq!(
-            MakeError::Api { status_code: 500, message: "Internal".into() }.to_string(),
+            MakeError::Api {
+                status_code: 500,
+                message: "Internal".into()
+            }
+            .to_string(),
             "Make API error (500): Internal"
         );
     }
 
     #[test]
     fn api_501_is_retryable() {
-        assert!(MakeError::Api { status_code: 501, message: "not impl".into() }.is_retryable());
+        assert!(
+            MakeError::Api {
+                status_code: 501,
+                message: "not impl".into()
+            }
+            .is_retryable()
+        );
     }
 
     #[test]
     fn api_599_is_retryable() {
-        assert!(MakeError::Api { status_code: 599, message: "edge".into() }.is_retryable());
+        assert!(
+            MakeError::Api {
+                status_code: 599,
+                message: "edge".into()
+            }
+            .is_retryable()
+        );
     }
 
     #[test]
     fn api_600_not_retryable() {
-        assert!(!MakeError::Api { status_code: 600, message: "over".into() }.is_retryable());
+        assert!(
+            !MakeError::Api {
+                status_code: 600,
+                message: "over".into()
+            }
+            .is_retryable()
+        );
     }
 
     #[test]
     fn api_499_not_retryable() {
-        assert!(!MakeError::Api { status_code: 499, message: "x".into() }.is_retryable());
+        assert!(
+            !MakeError::Api {
+                status_code: 499,
+                message: "x".into()
+            }
+            .is_retryable()
+        );
     }
 
     #[test]
@@ -348,7 +475,9 @@ mod tests {
 
     #[test]
     fn retry_after_large_value() {
-        let err = MakeError::RateLimited { retry_after_ms: 3_600_000 };
+        let err = MakeError::RateLimited {
+            retry_after_ms: 3_600_000,
+        };
         assert_eq!(err.retry_after(), Some(Duration::from_secs(3600)));
     }
 
@@ -363,7 +492,12 @@ mod tests {
 
     #[test]
     fn api_non_retryable_to_fcp_has_no_retry_after() {
-        match (MakeError::Api { status_code: 400, message: "bad".into() }).to_fcp_error() {
+        match (MakeError::Api {
+            status_code: 400,
+            message: "bad".into(),
+        })
+        .to_fcp_error()
+        {
             FcpError::External { retry_after, .. } => assert!(retry_after.is_none()),
             other => panic!("expected External, got {other:?}"),
         }
@@ -371,8 +505,17 @@ mod tests {
 
     #[test]
     fn not_found_to_fcp_status_404() {
-        match (MakeError::NotFound { resource: "x".into() }).to_fcp_error() {
-            FcpError::External { status_code, retryable, service, .. } => {
+        match (MakeError::NotFound {
+            resource: "x".into(),
+        })
+        .to_fcp_error()
+        {
+            FcpError::External {
+                status_code,
+                retryable,
+                service,
+                ..
+            } => {
                 assert_eq!(status_code, Some(404));
                 assert!(!retryable);
                 assert_eq!(service, "make");
@@ -383,10 +526,21 @@ mod tests {
 
     #[test]
     fn error_debug_all_variants() {
-        let dbg_api = format!("{:?}", MakeError::Api { status_code: 500, message: "x".into() });
+        let dbg_api = format!(
+            "{:?}",
+            MakeError::Api {
+                status_code: 500,
+                message: "x".into()
+            }
+        );
         assert!(dbg_api.contains("Api"));
 
-        let dbg_rl = format!("{:?}", MakeError::RateLimited { retry_after_ms: 1000 });
+        let dbg_rl = format!(
+            "{:?}",
+            MakeError::RateLimited {
+                retry_after_ms: 1000
+            }
+        );
         assert!(dbg_rl.contains("RateLimited"));
 
         let dbg_unauth = format!("{:?}", MakeError::Unauthorized);
@@ -395,33 +549,49 @@ mod tests {
         let dbg_forbidden = format!("{:?}", MakeError::Forbidden);
         assert!(dbg_forbidden.contains("Forbidden"));
 
-        let dbg_nf = format!("{:?}", MakeError::NotFound { resource: "s".into() });
+        let dbg_nf = format!(
+            "{:?}",
+            MakeError::NotFound {
+                resource: "s".into()
+            }
+        );
         assert!(dbg_nf.contains("NotFound"));
     }
 
     #[test]
     fn rate_limited_display_contains_ms() {
-        let err = MakeError::RateLimited { retry_after_ms: 42_000 };
+        let err = MakeError::RateLimited {
+            retry_after_ms: 42_000,
+        };
         assert!(err.to_string().contains("42000"));
     }
 
     #[test]
     fn api_error_empty_message() {
-        let err = MakeError::Api { status_code: 418, message: String::new() };
+        let err = MakeError::Api {
+            status_code: 418,
+            message: String::new(),
+        };
         let s = err.to_string();
         assert!(s.contains("418"));
     }
 
     #[test]
     fn not_found_empty_resource() {
-        let err = MakeError::NotFound { resource: String::new() };
+        let err = MakeError::NotFound {
+            resource: String::new(),
+        };
         assert!(err.to_string().contains("Not found:"));
     }
 
     #[test]
     fn unauthorized_to_fcp_not_retryable() {
         match MakeError::Unauthorized.to_fcp_error() {
-            FcpError::External { retryable, retry_after, .. } => {
+            FcpError::External {
+                retryable,
+                retry_after,
+                ..
+            } => {
                 assert!(!retryable);
                 assert!(retry_after.is_none());
             }
@@ -432,7 +602,11 @@ mod tests {
     #[test]
     fn forbidden_to_fcp_not_retryable() {
         match MakeError::Forbidden.to_fcp_error() {
-            FcpError::External { retryable, retry_after, .. } => {
+            FcpError::External {
+                retryable,
+                retry_after,
+                ..
+            } => {
                 assert!(!retryable);
                 assert!(retry_after.is_none());
             }

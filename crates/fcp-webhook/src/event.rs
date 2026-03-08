@@ -913,8 +913,7 @@ mod tests {
 
     #[test]
     fn test_event_with_payload_null_explicitly() {
-        let event = WebhookEvent::new("e1", "push", "github")
-            .with_payload(serde_json::Value::Null);
+        let event = WebhookEvent::new("e1", "push", "github").with_payload(serde_json::Value::Null);
         assert!(event.payload.is_null());
     }
 
@@ -972,21 +971,15 @@ mod tests {
 
     #[test]
     fn test_subscription_matches_first_of_many_types() {
-        let sub = EventSubscription::for_types(vec![
-            "push".into(),
-            "release".into(),
-        ]);
+        let sub = EventSubscription::for_types(vec!["push".into(), "release".into()]);
         let event = WebhookEvent::new("e1", "push", "github");
         assert!(sub.matches(&event));
     }
 
     #[test]
     fn test_subscription_matches_last_of_many_types() {
-        let sub = EventSubscription::for_types(vec![
-            "issue".into(),
-            "release".into(),
-            "push".into(),
-        ]);
+        let sub =
+            EventSubscription::for_types(vec!["issue".into(), "release".into(), "push".into()]);
         let event = WebhookEvent::new("e1", "push", "github");
         assert!(sub.matches(&event));
     }

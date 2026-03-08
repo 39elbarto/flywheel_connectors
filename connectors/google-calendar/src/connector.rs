@@ -2240,7 +2240,11 @@ mod tests {
 
     #[test]
     fn doctor_status_serde_roundtrip() {
-        for s in [DoctorStatus::Healthy, DoctorStatus::Degraded, DoctorStatus::Unhealthy] {
+        for s in [
+            DoctorStatus::Healthy,
+            DoctorStatus::Degraded,
+            DoctorStatus::Unhealthy,
+        ] {
             let v = serde_json::to_value(s).unwrap();
             let back: DoctorStatus = serde_json::from_value(v).unwrap();
             assert_eq!(s, back);

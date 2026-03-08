@@ -293,9 +293,7 @@ fn audit_manifest(name: &str, manifest: &toml::Value) -> ConnectorAudit {
             // Output schema
             let has_output = op_val
                 .get("output_schema")
-                .is_some_and(|s| {
-                    s.get("properties").is_some() || s.get("required").is_some()
-                });
+                .is_some_and(|s| s.get("properties").is_some() || s.get("required").is_some());
             if has_output {
                 ops.with_output_schema += 1;
             }
@@ -340,10 +338,7 @@ fn audit_manifest(name: &str, manifest: &toml::Value) -> ConnectorAudit {
             if let Some(ai) = op_val.get("ai_hints") {
                 hints.with_hints += 1;
 
-                let wtu = ai
-                    .get("when_to_use")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
+                let wtu = ai.get("when_to_use").and_then(|v| v.as_str()).unwrap_or("");
                 if !wtu.is_empty() {
                     hints.with_when_to_use += 1;
                 }
@@ -455,15 +450,11 @@ fn audit_manifest(name: &str, manifest: &toml::Value) -> ConnectorAudit {
         .get("connector")
         .and_then(|c| c.get("archetypes"))
         .and_then(|a| a.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|v| v.as_str())
-                .collect::<Vec<_>>()
-        })
+        .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>())
         .unwrap_or_default();
-    let has_streaming_archetype = archetypes.iter().any(|a| {
-        *a == "streaming" || *a == "bidirectional" || *a == "webhook" || *a == "polling"
-    });
+    let has_streaming_archetype = archetypes
+        .iter()
+        .any(|a| *a == "streaming" || *a == "bidirectional" || *a == "webhook" || *a == "polling");
 
     let events = EventAudit {
         event_count: events_table.map_or(0, toml::map::Map::len),
@@ -1026,11 +1017,14 @@ format = "wasi"
         let audit = audit_manifest("empty", &manifest);
         assert_eq!(audit.operations.count, 0);
         assert_eq!(audit.level, ReadinessLevel::NotReady);
-        assert_eq!(audit
-            .gaps
-            .iter()
-            .filter(|g| g.description.contains("No operations"))
-            .count(), 1);
+        assert_eq!(
+            audit
+                .gaps
+                .iter()
+                .filter(|g| g.description.contains("No operations"))
+                .count(),
+            1
+        );
     }
 
     fn manifest_missing_capability() -> toml::Value {
@@ -1230,8 +1224,14 @@ replay = false
     #[test]
     fn summary_by_cohort() {
         let mut map = BTreeMap::new();
-        map.insert("github".into(), audit_manifest("github", &minimal_manifest()));
-        map.insert("gitlab".into(), audit_manifest("gitlab", &minimal_manifest()));
+        map.insert(
+            "github".into(),
+            audit_manifest("github", &minimal_manifest()),
+        );
+        map.insert(
+            "gitlab".into(),
+            audit_manifest("gitlab", &minimal_manifest()),
+        );
         map.insert("slack".into(), audit_manifest("slack", &minimal_manifest()));
 
         let summary = compute_summary(&map);
@@ -1243,8 +1243,7 @@ replay = false
 
     #[test]
     fn run_audit_on_real_connectors() {
-        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../connectors");
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../connectors");
         if !root.exists() {
             return; // Skip if not in workspace
         }
@@ -1265,8 +1264,7 @@ replay = false
 
     #[test]
     fn run_audit_github_is_ready() {
-        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../connectors");
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../connectors");
         if !root.exists() {
             return;
         }
@@ -1281,8 +1279,7 @@ replay = false
 
     #[test]
     fn run_audit_all_connectors_have_entries() {
-        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../connectors");
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../connectors");
         if !root.exists() {
             return;
         }

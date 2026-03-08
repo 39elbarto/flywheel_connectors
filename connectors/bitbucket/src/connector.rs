@@ -379,9 +379,7 @@ impl BitbucketConnector {
             .and_then(serde_json::Value::as_str)
             .unwrap_or("");
 
-        let allowed = operations_info()
-            .iter()
-            .any(|o| o.id.as_ref() == operation);
+        let allowed = operations_info().iter().any(|o| o.id.as_ref() == operation);
 
         Ok(json!({
             "allowed": allowed,
@@ -1029,7 +1027,11 @@ mod tests {
     fn operations_all_have_summaries() {
         let ops = operations_info();
         for op in &ops {
-            assert!(!op.summary.is_empty(), "op {:?} has empty summary", op.id.as_ref());
+            assert!(
+                !op.summary.is_empty(),
+                "op {:?} has empty summary",
+                op.id.as_ref()
+            );
         }
     }
 

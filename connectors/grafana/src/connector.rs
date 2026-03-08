@@ -331,9 +331,7 @@ impl GrafanaConnector {
             .and_then(|v| v.as_str())
             .unwrap_or("");
 
-        let allowed = operations_info()
-            .iter()
-            .any(|o| o.id.as_ref() == operation);
+        let allowed = operations_info().iter().any(|o| o.id.as_ref() == operation);
 
         Ok(json!({
             "allowed": allowed,
@@ -1512,7 +1510,10 @@ mod tests {
     #[test]
     fn operations_info_dashboards_create_is_risky() {
         let ops = ops_json();
-        let op = ops.as_array().unwrap().iter()
+        let op = ops
+            .as_array()
+            .unwrap()
+            .iter()
             .find(|o| o["id"] == "grafana.dashboards.create")
             .unwrap();
         assert_eq!(op["safety_tier"], "risky");
@@ -1522,7 +1523,10 @@ mod tests {
     #[test]
     fn operations_info_alerts_create_not_idempotent() {
         let ops = ops_json();
-        let op = ops.as_array().unwrap().iter()
+        let op = ops
+            .as_array()
+            .unwrap()
+            .iter()
             .find(|o| o["id"] == "grafana.alerts.create")
             .unwrap();
         assert_eq!(op["idempotency"], "none");
@@ -1533,7 +1537,10 @@ mod tests {
         let ops = ops_json();
         for op in ops.as_array().unwrap() {
             let id = op["id"].as_str().unwrap();
-            assert!(id.starts_with("grafana."), "op {id} missing grafana. prefix");
+            assert!(
+                id.starts_with("grafana."),
+                "op {id} missing grafana. prefix"
+            );
         }
     }
 
@@ -1541,7 +1548,10 @@ mod tests {
     fn require_str_error_message_contains_field() {
         let input = json!({});
         match require_str(&input, "dashboard_uid").unwrap_err() {
-            GrafanaError::Api { status_code, message } => {
+            GrafanaError::Api {
+                status_code,
+                message,
+            } => {
                 assert_eq!(status_code, 400);
                 assert!(message.contains("dashboard_uid"));
             }
@@ -1558,7 +1568,10 @@ mod tests {
     #[test]
     fn operations_info_dashboards_get_capability() {
         let ops = ops_json();
-        let op = ops.as_array().unwrap().iter()
+        let op = ops
+            .as_array()
+            .unwrap()
+            .iter()
             .find(|o| o["id"] == "grafana.dashboards.get")
             .unwrap();
         assert_eq!(op["capability"], "grafana.dashboards.read");
@@ -1567,7 +1580,10 @@ mod tests {
     #[test]
     fn operations_info_datasources_query_is_safe() {
         let ops = ops_json();
-        let op = ops.as_array().unwrap().iter()
+        let op = ops
+            .as_array()
+            .unwrap()
+            .iter()
             .find(|o| o["id"] == "grafana.datasources.query")
             .unwrap();
         assert_eq!(op["safety_tier"], "safe");
@@ -1577,7 +1593,10 @@ mod tests {
     #[test]
     fn operations_info_alerts_list_is_safe_and_strict() {
         let ops = ops_json();
-        let op = ops.as_array().unwrap().iter()
+        let op = ops
+            .as_array()
+            .unwrap()
+            .iter()
             .find(|o| o["id"] == "grafana.alerts.list")
             .unwrap();
         assert_eq!(op["safety_tier"], "safe");

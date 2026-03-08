@@ -157,10 +157,7 @@ mod tests {
     #[test]
     fn error_display_auth() {
         let err = WhisperError::Auth("invalid key".into());
-        assert_eq!(
-            err.to_string(),
-            "Whisper authentication error: invalid key"
-        );
+        assert_eq!(err.to_string(), "Whisper authentication error: invalid key");
     }
 
     #[test]
@@ -205,10 +202,7 @@ mod tests {
         let err = WhisperError::RateLimited {
             retry_after_ms: 5000,
         };
-        assert_eq!(
-            err.to_string(),
-            "Whisper rate limited (retry after 5000ms)"
-        );
+        assert_eq!(err.to_string(), "Whisper rate limited (retry after 5000ms)");
     }
 
     #[test]
@@ -455,9 +449,7 @@ mod tests {
     fn connection_to_fcp_error() {
         match WhisperError::Connection("refused".into()).to_fcp_error() {
             FcpError::External {
-                service,
-                retryable,
-                ..
+                service, retryable, ..
             } => {
                 assert_eq!(service, "whisper");
                 assert!(retryable);
@@ -470,9 +462,7 @@ mod tests {
     fn transcription_to_fcp_error() {
         match WhisperError::Transcription("decode fail".into()).to_fcp_error() {
             FcpError::External {
-                service,
-                retryable,
-                ..
+                service, retryable, ..
             } => {
                 assert_eq!(service, "whisper");
                 assert!(!retryable);
@@ -537,9 +527,7 @@ mod tests {
     fn timeout_to_fcp_error() {
         match WhisperError::Timeout("120s".into()).to_fcp_error() {
             FcpError::External {
-                service,
-                retryable,
-                ..
+                service, retryable, ..
             } => {
                 assert_eq!(service, "whisper");
                 assert!(retryable);
@@ -2073,10 +2061,7 @@ mod tests {
                 .await
                 .unwrap();
             let models = resp["models"].as_array().unwrap();
-            let ids: Vec<&str> = models
-                .iter()
-                .filter_map(|m| m["id"].as_str())
-                .collect();
+            let ids: Vec<&str> = models.iter().filter_map(|m| m["id"].as_str()).collect();
             assert!(ids.contains(&"whisper-1"));
             assert!(ids.contains(&"whisper-large-v3"));
         });
@@ -2134,7 +2119,9 @@ mod tests {
                 .iter()
                 .filter_map(|f| f["extension"].as_str())
                 .collect();
-            for expected in &["mp3", "mp4", "mpeg", "mpga", "m4a", "wav", "webm", "flac", "ogg"] {
+            for expected in &[
+                "mp3", "mp4", "mpeg", "mpga", "m4a", "wav", "webm", "flac", "ogg",
+            ] {
                 assert!(exts.contains(expected), "missing format: {expected}");
             }
         });
@@ -2162,10 +2149,7 @@ mod tests {
             let formats = resp["formats"].as_array().unwrap();
             for fmt in formats {
                 let mime = fmt["mime_type"].as_str().unwrap();
-                assert!(
-                    mime.contains('/'),
-                    "mime_type should contain '/': {mime}"
-                );
+                assert!(mime.contains('/'), "mime_type should contain '/': {mime}");
             }
         });
     }

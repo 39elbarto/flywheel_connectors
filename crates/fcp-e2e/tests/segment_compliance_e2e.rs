@@ -16,9 +16,9 @@ use fcp_conformance::DynamicSuite;
 use fcp_core::{
     AgentHint, CapabilityGrant, CapabilityId, CapabilityToken, CapabilityVerifier, ConnectorId,
     ConnectorMetrics, FcpConnector, FcpError, HandshakeRequest, HandshakeResponse, HealthSnapshot,
-    IdempotencyClass, InstanceId, Introspection, InvokeRequest, InvokeResponse, OperationId, OperationInfo, RequestId, RiskLevel, SafetyTier, SessionId,
-    ShutdownRequest, SimulateRequest, SimulateResponse, SubscribeRequest, SubscribeResponse,
-    UnsubscribeRequest, ZoneId,
+    IdempotencyClass, InstanceId, Introspection, InvokeRequest, InvokeResponse, OperationId,
+    OperationInfo, RequestId, RiskLevel, SafetyTier, SessionId, ShutdownRequest, SimulateRequest,
+    SimulateResponse, SubscribeRequest, SubscribeResponse, UnsubscribeRequest, ZoneId,
 };
 use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
 use fcp_e2e::{ComplianceSuite, ConnectorSuite, E2eRunner, InvokeExpectations};
@@ -27,8 +27,8 @@ use fcp_segment::connector::SegmentConnector;
 use fcp_testkit::MockApiServer;
 use serde_json::json;
 use wiremock::{
-    matchers::{method, path_regex},
     Mock, ResponseTemplate,
+    matchers::{method, path_regex},
 };
 
 struct SegmentConnectorAdapter {
@@ -45,7 +45,6 @@ impl SegmentConnectorAdapter {
             id: ConnectorId::from_static("segment"),
             instance_id: InstanceId::new(),
             verifier: None,
-
         }
     }
 }
@@ -265,10 +264,8 @@ fn segment_manifest_with_hash() -> String {
 }
 
 fn segment_manifest_toml() -> toml::Value {
-    toml::from_str(include_str!(
-        "../../../connectors/segment/manifest.toml"
-    ))
-    .expect("Segment manifest TOML")
+    toml::from_str(include_str!("../../../connectors/segment/manifest.toml"))
+        .expect("Segment manifest TOML")
 }
 
 fn segment_config(base_url: &str) -> serde_json::Value {
@@ -437,9 +434,7 @@ async fn segment_happy_path_compliance_suite_passes() {
     // Mount mock for GET /sources
     Mock::given(method("GET"))
         .and(path_regex(r"^/sources"))
-        .respond_with(
-            ResponseTemplate::new(200).set_body_json(json!({"data": []})),
-        )
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": []})))
         .mount(mock.inner())
         .await;
 
@@ -454,11 +449,7 @@ async fn segment_happy_path_compliance_suite_passes() {
         "segment.sources.read",
         &["segment.sources.list"],
     );
-    let invoke = invoke_request(
-        "segment.sources.list",
-        json!({}),
-        token,
-    );
+    let invoke = invoke_request("segment.sources.list", json!({}), token);
 
     let suite = ConnectorSuite {
         test_name: "segment_allow_valid_token".to_string(),

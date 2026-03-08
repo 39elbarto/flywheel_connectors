@@ -39,7 +39,10 @@ use fcp_spotify::connector::SpotifyConnector;
 
 fn required_capability_for_operation(operation: &str) -> &'static str {
     match operation {
-        "spotify.search" | "spotify.track.get" | "spotify.album.get" | "spotify.artist.get"
+        "spotify.search"
+        | "spotify.track.get"
+        | "spotify.album.get"
+        | "spotify.artist.get"
         | "spotify.playlist.get" => "spotify.read",
         "spotify.library.list_saved_tracks" => "spotify.library.read",
         "spotify.library.save_track" | "spotify.library.remove_track" => "spotify.library.write",
@@ -88,9 +91,7 @@ impl FcpConnector for SpotifyConnectorAdapter {
         self.verifier = Some(CapabilityVerifier::new(
             req.host_public_key,
             req.zone.clone(),
-            req.requested_instance_id
-                .clone()
-                .unwrap_or_default(),
+            req.requested_instance_id.clone().unwrap_or_default(),
         ));
 
         let request = serde_json::to_value(&req).map_err(|err| FcpError::Internal {
@@ -126,9 +127,7 @@ impl FcpConnector for SpotifyConnectorAdapter {
                     .unwrap_or("unknown");
                 match status {
                     "healthy" => HealthSnapshot::ready(),
-                    "not_configured" | "unconfigured" => {
-                        HealthSnapshot::degraded("not_configured")
-                    }
+                    "not_configured" | "unconfigured" => HealthSnapshot::degraded("not_configured"),
                     other => HealthSnapshot::degraded(format!("spotify_status:{other}")),
                 }
             }
@@ -148,7 +147,8 @@ impl FcpConnector for SpotifyConnectorAdapter {
         Introspection {
             operations: vec![OperationInfo {
                 id: OperationId::from_static("spotify.search"),
-                summary: "Search tracks, albums, artists, playlists, and podcast episodes".to_string(),
+                summary: "Search tracks, albums, artists, playlists, and podcast episodes"
+                    .to_string(),
                 description: None,
                 input_schema: json!({
                     "type": "object",
@@ -172,7 +172,9 @@ impl FcpConnector for SpotifyConnectorAdapter {
                 ai_hints: AgentHint {
                     when_to_use: "Find Spotify entities by text query.".to_string(),
                     common_mistakes: Vec::new(),
-                    examples: vec![r#"{"query": "kind of blue", "type": "album", "limit": 10}"#.to_string()],
+                    examples: vec![
+                        r#"{"query": "kind of blue", "type": "album", "limit": 10}"#.to_string(),
+                    ],
                     related: Vec::new(),
                 },
                 rate_limit: None,
@@ -371,11 +373,7 @@ async fn default_deny_compliance_suite_passes() {
     );
     // Token grants "spotify.playback" but invoke targets "spotify.search" -> denial
     let token = build_token(&signing_key, "spotify.playback", &["spotify.playback"]);
-    let invoke = invoke_request(
-        "spotify.search",
-        json!({ "query": "kind of blue" }),
-        token,
-    );
+    let invoke = invoke_request("spotify.search", json!({ "query": "kind of blue" }), token);
 
     let dynamic = DynamicSuite {
         config: json!({
@@ -424,20 +422,9 @@ async fn allow_valid_token_connector_suite_passes() {
 
     let mut connector = SpotifyConnectorAdapter::new();
     let signing_key = Ed25519SigningKey::generate();
-    let handshake = handshake_request(
-        signing_key.verifying_key().to_bytes(),
-        &["spotify.read"],
-    );
-    let token = build_token(
-        &signing_key,
-        "spotify.read",
-        &["spotify.search"],
-    );
-    let invoke = invoke_request(
-        "spotify.search",
-        json!({ "query": "kind of blue" }),
-        token,
-    );
+    let handshake = handshake_request(signing_key.verifying_key().to_bytes(), &["spotify.read"]);
+    let token = build_token(&signing_key, "spotify.read", &["spotify.search"]);
+    let invoke = invoke_request("spotify.search", json!({ "query": "kind of blue" }), token);
     let suite = ConnectorSuite {
         test_name: "spotify_allow_valid_token".to_string(),
         config: json!({

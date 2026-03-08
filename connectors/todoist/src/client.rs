@@ -390,11 +390,7 @@ mod tests {
 
     #[test]
     fn client_new_empty_string_url() {
-        let client = TodoistClient::new(
-            TodoistAuth::BearerToken("tok".into()),
-            Some(""),
-        )
-        .unwrap();
+        let client = TodoistClient::new(TodoistAuth::BearerToken("tok".into()), Some("")).unwrap();
         let dbg = format!("{client:?}");
         assert!(dbg.contains("TodoistClient"));
     }
@@ -410,11 +406,8 @@ mod tests {
 
     #[test]
     fn client_credential_id_auth_debug() {
-        let client = TodoistClient::new(
-            TodoistAuth::CredentialId(CredentialId::new()),
-            None,
-        )
-        .unwrap();
+        let client =
+            TodoistClient::new(TodoistAuth::CredentialId(CredentialId::new()), None).unwrap();
         let dbg = format!("{client:?}");
         assert!(dbg.contains("CredentialId"));
         assert!(dbg.contains(DEFAULT_BASE_URL));

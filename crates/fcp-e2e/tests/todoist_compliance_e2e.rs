@@ -13,19 +13,19 @@
 
 use chrono::{Duration as ChronoDuration, Utc};
 use fcp_conformance::DynamicSuite;
+use fcp_core::InvokeStatus;
 use fcp_core::{
     AgentHint, CapabilityGrant, CapabilityId, CapabilityToken, CapabilityVerifier, ConnectorId,
     ConnectorMetrics, FcpConnector, FcpError, HandshakeRequest, HandshakeResponse, HealthSnapshot,
-    IdempotencyClass, InstanceId, Introspection, InvokeRequest, InvokeResponse, OperationId, OperationInfo, RequestId, RiskLevel, SafetyTier, SessionId,
-    ShutdownRequest, SimulateRequest, SimulateResponse, SubscribeRequest, SubscribeResponse,
-    UnsubscribeRequest, ZoneId,
+    IdempotencyClass, InstanceId, Introspection, InvokeRequest, InvokeResponse, OperationId,
+    OperationInfo, RequestId, RiskLevel, SafetyTier, SessionId, ShutdownRequest, SimulateRequest,
+    SimulateResponse, SubscribeRequest, SubscribeResponse, UnsubscribeRequest, ZoneId,
 };
 use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
-use fcp_core::InvokeStatus;
 use fcp_e2e::{ComplianceSuite, ConnectorSuite, E2eRunner, InvokeExpectations};
 use fcp_manifest::ConnectorManifest;
-use fcp_todoist::connector::TodoistConnector;
 use fcp_testkit::MockApiServer;
+use fcp_todoist::connector::TodoistConnector;
 use serde_json::json;
 use wiremock::{
     Mock, ResponseTemplate,
@@ -46,7 +46,6 @@ impl TodoistConnectorAdapter {
             id: ConnectorId::from_static("todoist"),
             instance_id: InstanceId::new(),
             verifier: None,
-
         }
     }
 }
@@ -268,10 +267,8 @@ fn todoist_manifest_with_hash() -> String {
 }
 
 fn todoist_manifest_toml() -> toml::Value {
-    toml::from_str(include_str!(
-        "../../../connectors/todoist/manifest.toml"
-    ))
-    .expect("Todoist manifest TOML")
+    toml::from_str(include_str!("../../../connectors/todoist/manifest.toml"))
+        .expect("Todoist manifest TOML")
 }
 
 fn todoist_config(base_url: &str) -> serde_json::Value {
@@ -439,12 +436,10 @@ async fn todoist_allow_valid_token_connector_suite_passes() {
 
     Mock::given(method("GET"))
         .and(path_regex(r"^/projects.*"))
-        .respond_with(
-            ResponseTemplate::new(200).set_body_json(json!([
-                {"id": "proj_1", "name": "Inbox", "color": "grey"},
-                {"id": "proj_2", "name": "Work", "color": "blue"}
-            ])),
-        )
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+            {"id": "proj_1", "name": "Inbox", "color": "grey"},
+            {"id": "proj_2", "name": "Work", "color": "blue"}
+        ])))
         .mount(mock.inner())
         .await;
 
@@ -459,11 +454,7 @@ async fn todoist_allow_valid_token_connector_suite_passes() {
         "todoist.projects.read",
         &["todoist.projects.list"],
     );
-    let invoke = invoke_request(
-        "todoist.projects.list",
-        json!({}),
-        token,
-    );
+    let invoke = invoke_request("todoist.projects.list", json!({}), token);
     let suite = ConnectorSuite {
         test_name: "todoist_allow_valid_token".to_string(),
         config: todoist_config(&mock.base_url()),

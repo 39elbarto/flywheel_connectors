@@ -320,9 +320,7 @@ impl WhisperConnector {
             "whisper.transcribe" => self.invoke_transcribe(client, &input).await,
             "whisper.translate" => self.invoke_translate(client, &input).await,
             "whisper.detect_language" => self.invoke_detect_language(client, &input).await,
-            "whisper.transcribe_verbose" => {
-                self.invoke_transcribe_verbose(client, &input).await
-            }
+            "whisper.transcribe_verbose" => self.invoke_transcribe_verbose(client, &input).await,
             "whisper.list_models" => self.invoke_list_models(&input).await,
             "whisper.health" => self.invoke_health_check(client).await,
             "whisper.usage" => self.invoke_usage(&input).await,
@@ -558,7 +556,10 @@ fn validate_audio_input(input: &serde_json::Value) -> Result<(), WhisperError> {
     }
 
     // Check file size if base64 is provided (rough estimate: base64 is ~4/3 of original)
-    if let Some(b64) = input.get("audio_base64").and_then(serde_json::Value::as_str) {
+    if let Some(b64) = input
+        .get("audio_base64")
+        .and_then(serde_json::Value::as_str)
+    {
         let estimated_bytes = (b64.len() as u64) * 3 / 4;
         if estimated_bytes > MAX_FILE_SIZE_BYTES {
             return Err(WhisperError::FileTooLarge {

@@ -451,11 +451,7 @@ mod tests {
 
     #[test]
     fn client_new_empty_string_url() {
-        let client = GrafanaClient::new(
-            GrafanaAuth::BearerToken("tok".into()),
-            Some(""),
-        )
-        .unwrap();
+        let client = GrafanaClient::new(GrafanaAuth::BearerToken("tok".into()), Some("")).unwrap();
         let dbg = format!("{client:?}");
         assert!(dbg.contains("GrafanaClient"));
     }

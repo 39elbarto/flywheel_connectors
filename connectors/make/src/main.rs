@@ -77,7 +77,10 @@ async fn handle_message(connector: &mut MakeConnector, message: &str) -> serde_j
         }
     };
 
-    let method = request.get("method").and_then(serde_json::Value::as_str).unwrap_or("");
+    let method = request
+        .get("method")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
     let id = request.get("id").cloned();
     let params = request
         .get("params")

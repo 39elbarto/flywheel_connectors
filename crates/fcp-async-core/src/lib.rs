@@ -4047,7 +4047,9 @@ mod tests {
 
     #[test]
     fn deadline_at_past_instant_is_expired() {
-        let past = std::time::Instant::now().checked_sub(Duration::from_secs(1)).unwrap();
+        let past = std::time::Instant::now()
+            .checked_sub(Duration::from_secs(1))
+            .unwrap();
         let d = super::Deadline::at(past);
         assert!(d.is_expired());
         assert_eq!(d.remaining(), Duration::ZERO);
@@ -4077,7 +4079,9 @@ mod tests {
 
     #[runtime::test]
     async fn deadline_run_expired_returns_timeout() {
-        let past = std::time::Instant::now().checked_sub(Duration::from_secs(1)).unwrap();
+        let past = std::time::Instant::now()
+            .checked_sub(Duration::from_secs(1))
+            .unwrap();
         let d = super::Deadline::at(past);
         let result = d.run(std::future::pending::<()>()).await;
         assert!(matches!(result, Err(AsyncError::Timeout { .. })));
@@ -4207,9 +4211,7 @@ mod tests {
     #[runtime::test]
     async fn wait_for_shutdown_becomes_true() {
         let (tx, mut rx) = channel::watch::channel(false);
-        let handle = task::spawn(async move {
-            super::shutdown::wait_for_shutdown(&mut rx).await
-        });
+        let handle = task::spawn(async move { super::shutdown::wait_for_shutdown(&mut rx).await });
         time::sleep(Duration::from_millis(5)).await;
         tx.send(true).unwrap();
         let result = handle.await.unwrap();
@@ -4219,8 +4221,7 @@ mod tests {
     #[runtime::test]
     async fn sleep_or_shutdown_with_zero_duration() {
         let (_tx, mut rx) = channel::watch::channel(false);
-        let result =
-            super::shutdown::sleep_or_shutdown(Duration::from_millis(0), &mut rx).await;
+        let result = super::shutdown::sleep_or_shutdown(Duration::from_millis(0), &mut rx).await;
         // Zero-duration sleep should complete immediately regardless of shutdown state
         assert!(result.is_ok());
     }
@@ -4577,10 +4578,7 @@ mod tests {
     fn async_error_ne_cross_variant() {
         assert_ne!(AsyncError::Cancelled, AsyncError::ChannelFull);
         assert_ne!(AsyncError::ChannelClosed, AsyncError::Cancelled);
-        assert_ne!(
-            AsyncError::Timeout { timeout_ms: 1 },
-            AsyncError::Cancelled
-        );
+        assert_ne!(AsyncError::Timeout { timeout_ms: 1 }, AsyncError::Cancelled);
         assert_ne!(
             AsyncError::ProtocolIo {
                 message: String::new()

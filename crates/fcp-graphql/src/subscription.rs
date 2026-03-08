@@ -984,8 +984,8 @@ mod tests {
             init_payload: Some(serde_json::json!({"auth": "token"})),
             ..GraphqlSubscriptionConfig::default()
         };
-        let client = GraphqlSubscriptionClient::new("wss://ws.test.com/sub", "my_svc")
-            .with_config(config);
+        let client =
+            GraphqlSubscriptionClient::new("wss://ws.test.com/sub", "my_svc").with_config(config);
         assert_eq!(client.config.ack_timeout, Duration::from_secs(120));
         assert!(client.config.init_payload.is_some());
     }

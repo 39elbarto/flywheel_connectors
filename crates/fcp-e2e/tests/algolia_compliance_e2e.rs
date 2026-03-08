@@ -12,19 +12,19 @@
 #![allow(clippy::too_many_lines)]
 
 use chrono::{Duration as ChronoDuration, Utc};
+use fcp_algolia::connector::AlgoliaConnector;
 use fcp_conformance::DynamicSuite;
 use fcp_core::{
     AgentHint, CapabilityGrant, CapabilityId, CapabilityToken, CapabilityVerifier, ConnectorId,
     ConnectorMetrics, FcpConnector, FcpError, HandshakeRequest, HandshakeResponse, HealthSnapshot,
     IdempotencyClass, InstanceId, Introspection, InvokeRequest, InvokeResponse, InvokeStatus,
     OperationId, OperationInfo, RequestId, RiskLevel, SafetyTier, SessionId, ShutdownRequest,
-    SimulateRequest, SimulateResponse, SubscribeRequest,
-    SubscribeResponse, UnsubscribeRequest, ZoneId,
+    SimulateRequest, SimulateResponse, SubscribeRequest, SubscribeResponse, UnsubscribeRequest,
+    ZoneId,
 };
 use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
 use fcp_e2e::{ComplianceSuite, ConnectorSuite, E2eRunner, InvokeExpectations};
 use fcp_manifest::ConnectorManifest;
-use fcp_algolia::connector::AlgoliaConnector;
 use fcp_testkit::MockApiServer;
 use serde_json::json;
 use wiremock::{
@@ -46,7 +46,6 @@ impl AlgoliaConnectorAdapter {
             id: ConnectorId::from_static("algolia"),
             instance_id: InstanceId::new(),
             verifier: None,
-
         }
     }
 }
@@ -267,10 +266,8 @@ fn algolia_manifest_with_hash() -> String {
 }
 
 fn algolia_manifest_toml() -> toml::Value {
-    toml::from_str(include_str!(
-        "../../../connectors/algolia/manifest.toml"
-    ))
-    .expect("Algolia manifest TOML")
+    toml::from_str(include_str!("../../../connectors/algolia/manifest.toml"))
+        .expect("Algolia manifest TOML")
 }
 
 fn algolia_config(base_url: &str) -> serde_json::Value {
@@ -393,11 +390,7 @@ async fn algolia_default_deny_compliance_suite_passes() {
         signing_key.verifying_key().to_bytes(),
         &["algolia.search.read"],
     );
-    let token = build_token(
-        &signing_key,
-        "algolia.search.read",
-        &["algolia.search"],
-    );
+    let token = build_token(&signing_key, "algolia.search.read", &["algolia.search"]);
     let invoke = invoke_request(
         "algolia.records.delete",
         json!({ "index_name": "products", "object_id": "abc123" }),
@@ -440,9 +433,7 @@ async fn algolia_happy_path_compliance_suite_passes() {
     // Mount mock for GET /indexes (list_indices)
     Mock::given(method("GET"))
         .and(path_regex(r"^/indexes.*"))
-        .respond_with(
-            ResponseTemplate::new(200).set_body_json(json!({ "items": [] })),
-        )
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "items": [] })))
         .mount(mock.inner())
         .await;
 
@@ -457,11 +448,7 @@ async fn algolia_happy_path_compliance_suite_passes() {
         "algolia.indices.read",
         &["algolia.indices.list"],
     );
-    let invoke = invoke_request(
-        "algolia.indices.list",
-        json!({}),
-        token,
-    );
+    let invoke = invoke_request("algolia.indices.list", json!({}), token);
 
     let suite = ConnectorSuite {
         test_name: "algolia_happy_path".to_string(),
@@ -513,10 +500,7 @@ fn algolia_manifest_network_guard_allows_and_denies() {
         "Algolia manifest should declare 4 operations"
     );
 
-    let expected_hosts = vec![
-        "*.algolia.net".to_string(),
-        "*.algolianet.com".to_string(),
-    ];
+    let expected_hosts = vec!["*.algolia.net".to_string(), "*.algolianet.com".to_string()];
 
     for operation_name in operations.keys() {
         let host_allow = operation_host_allow_list(&manifest, operation_name);

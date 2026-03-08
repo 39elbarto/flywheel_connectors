@@ -253,10 +253,7 @@ async fn error_401() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/scenarios"))
-        .respond_with(
-            ResponseTemplate::new(401)
-                .set_body_json(json!({"message": "Invalid token"})),
-        )
+        .respond_with(ResponseTemplate::new(401).set_body_json(json!({"message": "Invalid token"})))
         .mount(&server)
         .await;
 
@@ -276,10 +273,7 @@ async fn error_403() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/scenarios"))
-        .respond_with(
-            ResponseTemplate::new(403)
-                .set_body_json(json!({"message": "Forbidden"})),
-        )
+        .respond_with(ResponseTemplate::new(403).set_body_json(json!({"message": "Forbidden"})))
         .mount(&server)
         .await;
 
@@ -300,8 +294,7 @@ async fn error_404() {
     Mock::given(method("GET"))
         .and(path("/scenarios/99999/executions"))
         .respond_with(
-            ResponseTemplate::new(404)
-                .set_body_json(json!({"message": "Scenario not found"})),
+            ResponseTemplate::new(404).set_body_json(json!({"message": "Scenario not found"})),
         )
         .mount(&server)
         .await;
@@ -529,7 +522,10 @@ async fn handshake_response_contains_capabilities() {
     c.handle_configure(json!({ "api_token": "test_token_123", "base_url": server.uri() }))
         .await
         .unwrap();
-    let hs = c.handle_handshake(json!({"session_id": "test"})).await.unwrap();
+    let hs = c
+        .handle_handshake(json!({"session_id": "test"}))
+        .await
+        .unwrap();
     assert_eq!(hs["connector_id"], "fcp.make");
     assert_eq!(hs["protocol_version"], "2.0");
     let caps = hs["capabilities"].as_array().unwrap();

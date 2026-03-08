@@ -16,14 +16,15 @@ use fcp_conformance::DynamicSuite;
 use fcp_core::{
     AgentHint, CapabilityGrant, CapabilityId, CapabilityToken, CapabilityVerifier, ConnectorId,
     ConnectorMetrics, FcpConnector, FcpError, HandshakeRequest, HandshakeResponse, HealthSnapshot,
-    IdempotencyClass, InstanceId, Introspection, InvokeRequest, InvokeResponse, InvokeStatus, OperationId, OperationInfo,
-    RequestId, RiskLevel, SafetyTier, SessionId, ShutdownRequest, SimulateRequest, SimulateResponse, SubscribeRequest,
-    SubscribeResponse, UnsubscribeRequest, ZoneId,
+    IdempotencyClass, InstanceId, Introspection, InvokeRequest, InvokeResponse, InvokeStatus,
+    OperationId, OperationInfo, RequestId, RiskLevel, SafetyTier, SessionId, ShutdownRequest,
+    SimulateRequest, SimulateResponse, SubscribeRequest, SubscribeResponse, UnsubscribeRequest,
+    ZoneId,
 };
 use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
 use fcp_e2e::{ComplianceSuite, ConnectorSuite, E2eRunner, InvokeExpectations};
-use fcp_manifest::ConnectorManifest;
 use fcp_mailchimp::connector::MailchimpConnector;
+use fcp_manifest::ConnectorManifest;
 use fcp_testkit::MockApiServer;
 use serde_json::json;
 use wiremock::{
@@ -45,7 +46,6 @@ impl MailchimpConnectorAdapter {
             id: ConnectorId::from_static("mailchimp"),
             instance_id: InstanceId::new(),
             verifier: None,
-
         }
     }
 }
@@ -267,10 +267,8 @@ fn mailchimp_manifest_with_hash() -> String {
 }
 
 fn mailchimp_manifest_toml() -> toml::Value {
-    toml::from_str(include_str!(
-        "../../../connectors/mailchimp/manifest.toml"
-    ))
-    .expect("Mailchimp manifest TOML")
+    toml::from_str(include_str!("../../../connectors/mailchimp/manifest.toml"))
+        .expect("Mailchimp manifest TOML")
 }
 
 fn mailchimp_config(base_url: &str) -> serde_json::Value {
@@ -454,11 +452,7 @@ async fn mailchimp_happy_path_connector_suite_passes() {
         "mailchimp.lists.read",
         &["mailchimp.lists.list"],
     );
-    let invoke = invoke_request(
-        "mailchimp.lists.list",
-        json!({}),
-        token,
-    );
+    let invoke = invoke_request("mailchimp.lists.list", json!({}), token);
 
     let suite = ConnectorSuite {
         test_name: "mailchimp_happy_path".to_string(),

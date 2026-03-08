@@ -191,8 +191,7 @@ mod tests {
 
     #[test]
     fn dataset_reference_minimal() {
-        let r: DatasetReference =
-            serde_json::from_value(json!({"datasetId": "ds1"})).unwrap();
+        let r: DatasetReference = serde_json::from_value(json!({"datasetId": "ds1"})).unwrap();
         assert_eq!(r.dataset_id, "ds1");
         assert!(r.project_id.is_none());
     }
@@ -267,8 +266,7 @@ mod tests {
 
     #[test]
     fn table_reference_minimal() {
-        let r: TableReference =
-            serde_json::from_value(json!({"tableId": "t1"})).unwrap();
+        let r: TableReference = serde_json::from_value(json!({"tableId": "t1"})).unwrap();
         assert_eq!(r.table_id, "t1");
         assert!(r.project_id.is_none());
         assert!(r.dataset_id.is_none());
@@ -347,8 +345,7 @@ mod tests {
 
     #[test]
     fn job_reference_minimal() {
-        let r: JobReference =
-            serde_json::from_value(json!({"jobId": "j1"})).unwrap();
+        let r: JobReference = serde_json::from_value(json!({"jobId": "j1"})).unwrap();
         assert_eq!(r.job_id, "j1");
         assert!(r.project_id.is_none());
     }

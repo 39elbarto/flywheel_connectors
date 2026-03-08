@@ -268,29 +268,35 @@ mod tests {
 
     #[test]
     fn error_retryable_api_500() {
-        assert!(PostgresError::Api {
-            status_code: 500,
-            message: "internal".into()
-        }
-        .is_retryable());
+        assert!(
+            PostgresError::Api {
+                status_code: 500,
+                message: "internal".into()
+            }
+            .is_retryable()
+        );
     }
 
     #[test]
     fn error_retryable_api_503() {
-        assert!(PostgresError::Api {
-            status_code: 503,
-            message: "unavailable".into()
-        }
-        .is_retryable());
+        assert!(
+            PostgresError::Api {
+                status_code: 503,
+                message: "unavailable".into()
+            }
+            .is_retryable()
+        );
     }
 
     #[test]
     fn error_retryable_api_429() {
-        assert!(PostgresError::Api {
-            status_code: 429,
-            message: "too many".into()
-        }
-        .is_retryable());
+        assert!(
+            PostgresError::Api {
+                status_code: 429,
+                message: "too many".into()
+            }
+            .is_retryable()
+        );
     }
 
     #[test]
@@ -325,20 +331,24 @@ mod tests {
 
     #[test]
     fn error_not_retryable_api_400() {
-        assert!(!PostgresError::Api {
-            status_code: 400,
-            message: "bad request".into()
-        }
-        .is_retryable());
+        assert!(
+            !PostgresError::Api {
+                status_code: 400,
+                message: "bad request".into()
+            }
+            .is_retryable()
+        );
     }
 
     #[test]
     fn error_not_retryable_api_404() {
-        assert!(!PostgresError::Api {
-            status_code: 404,
-            message: "not found".into()
-        }
-        .is_retryable());
+        assert!(
+            !PostgresError::Api {
+                status_code: 404,
+                message: "not found".into()
+            }
+            .is_retryable()
+        );
     }
 
     // ===== Error retry_after tests =====
@@ -353,26 +363,17 @@ mod tests {
 
     #[test]
     fn error_retry_after_none_for_query() {
-        assert_eq!(
-            PostgresError::Query("err".into()).retry_after(),
-            None
-        );
+        assert_eq!(PostgresError::Query("err".into()).retry_after(), None);
     }
 
     #[test]
     fn error_retry_after_none_for_connection() {
-        assert_eq!(
-            PostgresError::Connection("err".into()).retry_after(),
-            None
-        );
+        assert_eq!(PostgresError::Connection("err".into()).retry_after(), None);
     }
 
     #[test]
     fn error_retry_after_none_for_timeout() {
-        assert_eq!(
-            PostgresError::Timeout("err".into()).retry_after(),
-            None
-        );
+        assert_eq!(PostgresError::Timeout("err".into()).retry_after(), None);
     }
 
     // ===== Error to_fcp_error tests =====
@@ -714,7 +715,8 @@ mod tests {
     fn health_fully_ready() {
         let mut c = configured_connector();
         let rt = tokio_runtime();
-        rt.block_on(c.handle_handshake(json!({"session_id": "s"}))).unwrap();
+        rt.block_on(c.handle_handshake(json!({"session_id": "s"})))
+            .unwrap();
         let health = rt.block_on(c.handle_health()).unwrap();
         assert_eq!(health["status"], "healthy");
         assert_eq!(health["configured"], true);
@@ -754,7 +756,8 @@ mod tests {
     fn doctor_fully_healthy() {
         let mut c = configured_connector();
         let rt = tokio_runtime();
-        rt.block_on(c.handle_handshake(json!({"session_id": "s"}))).unwrap();
+        rt.block_on(c.handle_handshake(json!({"session_id": "s"})))
+            .unwrap();
         let doc = rt.block_on(c.handle_doctor()).unwrap();
         assert_eq!(doc["status"], "healthy");
     }
@@ -812,10 +815,7 @@ mod tests {
         let rt = tokio_runtime();
         let result = rt.block_on(c.handle_introspect()).unwrap();
         let ops = result["operations"].as_array().unwrap();
-        let ids: Vec<&str> = ops
-            .iter()
-            .map(|o| o["id"].as_str().unwrap())
-            .collect();
+        let ids: Vec<&str> = ops.iter().map(|o| o["id"].as_str().unwrap()).collect();
         assert!(ids.contains(&"pg.query"));
         assert!(ids.contains(&"pg.execute"));
         assert!(ids.contains(&"pg.explain"));
@@ -837,8 +837,16 @@ mod tests {
         let result = rt.block_on(c.handle_introspect()).unwrap();
         let ops = result["operations"].as_array().unwrap();
         for op in ops {
-            assert!(op.get("input_schema").is_some(), "Missing input_schema for {}", op["id"]);
-            assert!(op.get("output_schema").is_some(), "Missing output_schema for {}", op["id"]);
+            assert!(
+                op.get("input_schema").is_some(),
+                "Missing input_schema for {}",
+                op["id"]
+            );
+            assert!(
+                op.get("output_schema").is_some(),
+                "Missing output_schema for {}",
+                op["id"]
+            );
         }
     }
 
@@ -863,7 +871,14 @@ mod tests {
         let rt = tokio_runtime();
         let result = rt.block_on(c.handle_introspect()).unwrap();
         let ops = result["operations"].as_array().unwrap();
-        let safe_ops = ["pg.query", "pg.explain", "pg.schema.tables", "pg.schema.columns", "pg.schema.indexes", "pg.health"];
+        let safe_ops = [
+            "pg.query",
+            "pg.explain",
+            "pg.schema.tables",
+            "pg.schema.columns",
+            "pg.schema.indexes",
+            "pg.health",
+        ];
         for op in ops {
             let id = op["id"].as_str().unwrap();
             if safe_ops.contains(&id) {
@@ -914,10 +929,18 @@ mod tests {
         let c = PostgreSqlConnector::new();
         let rt = tokio_runtime();
         let all_ops = [
-            "pg.query", "pg.execute", "pg.explain", "pg.schema.tables",
-            "pg.schema.columns", "pg.schema.indexes", "pg.transaction.begin",
-            "pg.transaction.commit", "pg.transaction.rollback", "pg.batch",
-            "pg.prepared", "pg.health",
+            "pg.query",
+            "pg.execute",
+            "pg.explain",
+            "pg.schema.tables",
+            "pg.schema.columns",
+            "pg.schema.indexes",
+            "pg.transaction.begin",
+            "pg.transaction.commit",
+            "pg.transaction.rollback",
+            "pg.batch",
+            "pg.prepared",
+            "pg.health",
         ];
         for op in all_ops {
             let result = rt
@@ -951,7 +974,8 @@ mod tests {
     fn shutdown_clears_state() {
         let mut c = configured_connector();
         let rt = tokio_runtime();
-        rt.block_on(c.handle_handshake(json!({"session_id": "s"}))).unwrap();
+        rt.block_on(c.handle_handshake(json!({"session_id": "s"})))
+            .unwrap();
         let result = rt.block_on(c.handle_shutdown(json!({}))).unwrap();
         assert_eq!(result, json!({}));
         let health = rt.block_on(c.handle_health()).unwrap();
@@ -2424,8 +2448,10 @@ mod tests {
     fn reconfigure_resets_client() {
         let mut c = PostgreSqlConnector::new();
         let rt = tokio_runtime();
-        rt.block_on(c.handle_configure(json!({ "api_key": "key-1" }))).unwrap();
-        rt.block_on(c.handle_configure(json!({ "api_key": "key-2" }))).unwrap();
+        rt.block_on(c.handle_configure(json!({ "api_key": "key-1" })))
+            .unwrap();
+        rt.block_on(c.handle_configure(json!({ "api_key": "key-2" })))
+            .unwrap();
         let health = rt.block_on(c.handle_health()).unwrap();
         assert_eq!(health["configured"], true);
     }

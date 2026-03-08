@@ -12,18 +12,19 @@
 #![allow(clippy::too_many_lines)]
 
 use chrono::{Duration as ChronoDuration, Utc};
+use fcp_amplitude::connector::AmplitudeConnector;
 use fcp_conformance::DynamicSuite;
 use fcp_core::{
     AgentHint, CapabilityGrant, CapabilityId, CapabilityToken, CapabilityVerifier, ConnectorId,
     ConnectorMetrics, FcpConnector, FcpError, HandshakeRequest, HandshakeResponse, HealthSnapshot,
-    IdempotencyClass, InstanceId, Introspection, InvokeRequest, InvokeResponse, InvokeStatus, OperationId, OperationInfo, RequestId,
-    RiskLevel, SafetyTier, SessionId, ShutdownRequest, SimulateRequest, SimulateResponse, SubscribeRequest,
-    SubscribeResponse, UnsubscribeRequest, ZoneId,
+    IdempotencyClass, InstanceId, Introspection, InvokeRequest, InvokeResponse, InvokeStatus,
+    OperationId, OperationInfo, RequestId, RiskLevel, SafetyTier, SessionId, ShutdownRequest,
+    SimulateRequest, SimulateResponse, SubscribeRequest, SubscribeResponse, UnsubscribeRequest,
+    ZoneId,
 };
 use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
 use fcp_e2e::{ComplianceSuite, ConnectorSuite, E2eRunner, InvokeExpectations};
 use fcp_manifest::ConnectorManifest;
-use fcp_amplitude::connector::AmplitudeConnector;
 use fcp_testkit::MockApiServer;
 use serde_json::json;
 use wiremock::{
@@ -45,7 +46,6 @@ impl AmplitudeConnectorAdapter {
             id: ConnectorId::from_static("amplitude"),
             instance_id: InstanceId::new(),
             verifier: None,
-
         }
     }
 }
@@ -265,10 +265,8 @@ fn amplitude_manifest_with_hash() -> String {
 }
 
 fn amplitude_manifest_toml() -> toml::Value {
-    toml::from_str(include_str!(
-        "../../../connectors/amplitude/manifest.toml"
-    ))
-    .expect("Amplitude manifest TOML")
+    toml::from_str(include_str!("../../../connectors/amplitude/manifest.toml"))
+        .expect("Amplitude manifest TOML")
 }
 
 fn amplitude_config(base_url: &str) -> serde_json::Value {
@@ -438,9 +436,7 @@ async fn amplitude_happy_path_compliance_suite_passes() {
     // Mount mock for GET /cohorts (list_cohorts)
     Mock::given(method("GET"))
         .and(path_regex(r"^/cohorts.*"))
-        .respond_with(
-            ResponseTemplate::new(200).set_body_json(json!({ "cohorts": [] })),
-        )
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "cohorts": [] })))
         .mount(mock.inner())
         .await;
 
@@ -455,11 +451,7 @@ async fn amplitude_happy_path_compliance_suite_passes() {
         "amplitude.cohorts.read",
         &["amplitude.cohorts.list"],
     );
-    let invoke = invoke_request(
-        "amplitude.cohorts.list",
-        json!({}),
-        token,
-    );
+    let invoke = invoke_request("amplitude.cohorts.list", json!({}), token);
 
     let suite = ConnectorSuite {
         test_name: "amplitude_happy_path".to_string(),
@@ -511,10 +503,7 @@ fn amplitude_manifest_network_guard_allows_and_denies() {
         "Amplitude manifest should declare 3 operations"
     );
 
-    let expected_hosts = vec![
-        "amplitude.com".to_string(),
-        "*.amplitude.com".to_string(),
-    ];
+    let expected_hosts = vec!["amplitude.com".to_string(), "*.amplitude.com".to_string()];
 
     for operation_name in operations.keys() {
         let host_allow = operation_host_allow_list(&manifest, operation_name);

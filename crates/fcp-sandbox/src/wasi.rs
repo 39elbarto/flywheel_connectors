@@ -1746,7 +1746,10 @@ mod tests {
         let cloned = original.clone();
         assert_eq!(original.memory_limit_bytes, cloned.memory_limit_bytes);
         assert_eq!(original.deterministic_mode, cloned.deterministic_mode);
-        assert_eq!(original.deterministic_timestamp, cloned.deterministic_timestamp);
+        assert_eq!(
+            original.deterministic_timestamp,
+            cloned.deterministic_timestamp
+        );
         assert_eq!(original.deterministic_seed, cloned.deterministic_seed);
         assert_eq!(original.args, cloned.args);
         assert_eq!(original.inherit_stdout, cloned.inherit_stdout);

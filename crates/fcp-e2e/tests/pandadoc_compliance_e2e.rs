@@ -15,11 +15,10 @@ use chrono::{Duration as ChronoDuration, Utc};
 use fcp_conformance::DynamicSuite;
 use fcp_core::{
     AgentHint, CapabilityGrant, CapabilityId, CapabilityToken, ConnectorId, ConnectorMetrics,
-    FcpConnector, FcpError, HandshakeRequest, HandshakeResponse, HealthSnapshot,
-    IdempotencyClass, InstanceId, Introspection, InvokeRequest, InvokeResponse, InvokeStatus,
-    OperationId, OperationInfo, RequestId, RiskLevel, SafetyTier, SessionId, ShutdownRequest,
-    SimulateRequest, SimulateResponse, SubscribeRequest, SubscribeResponse, UnsubscribeRequest,
-    ZoneId,
+    FcpConnector, FcpError, HandshakeRequest, HandshakeResponse, HealthSnapshot, IdempotencyClass,
+    InstanceId, Introspection, InvokeRequest, InvokeResponse, InvokeStatus, OperationId,
+    OperationInfo, RequestId, RiskLevel, SafetyTier, SessionId, ShutdownRequest, SimulateRequest,
+    SimulateResponse, SubscribeRequest, SubscribeResponse, UnsubscribeRequest, ZoneId,
 };
 use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
 use fcp_e2e::{ComplianceSuite, ConnectorSuite, E2eRunner, InvokeExpectations};
@@ -139,9 +138,7 @@ impl FcpConnector for PandaDocConnectorAdapter {
                     when_to_use: "List PandaDoc documents, optionally filtered by status."
                         .to_string(),
                     common_mistakes: Vec::new(),
-                    examples: vec![
-                        r#"{"status": "draft", "count": 20}"#.to_string(),
-                    ],
+                    examples: vec![r#"{"status": "draft", "count": 20}"#.to_string()],
                     related: Vec::new(),
                 },
                 rate_limit: None,
@@ -320,15 +317,10 @@ fn pandadoc_documents_list_response() -> serde_json::Value {
 async fn pandadoc_default_deny_compliance_suite_passes() {
     let mut connector = PandaDocConnectorAdapter::new();
     let signing_key = Ed25519SigningKey::generate();
-    let handshake =
-        handshake_request(signing_key.verifying_key().to_bytes(), &["pandadoc.write"]);
+    let handshake = handshake_request(signing_key.verifying_key().to_bytes(), &["pandadoc.write"]);
     // Token grants "pandadoc.write" but invoke targets "pandadoc.documents.list" -> denial
     let token = build_token(&signing_key, "pandadoc.write", &["pandadoc.write"]);
-    let invoke = invoke_request(
-        "pandadoc.documents.list",
-        json!({}),
-        token,
-    );
+    let invoke = invoke_request("pandadoc.documents.list", json!({}), token);
 
     let dynamic = DynamicSuite {
         config: json!({
@@ -371,9 +363,7 @@ async fn pandadoc_allow_valid_token_connector_suite_passes() {
     // Mount mock for GET /documents
     Mock::given(method("GET"))
         .and(path_regex(r"^/documents.*"))
-        .respond_with(
-            ResponseTemplate::new(200).set_body_json(pandadoc_documents_list_response()),
-        )
+        .respond_with(ResponseTemplate::new(200).set_body_json(pandadoc_documents_list_response()))
         .mount(mock.inner())
         .await;
 
@@ -388,11 +378,7 @@ async fn pandadoc_allow_valid_token_connector_suite_passes() {
         "pandadoc.documents.list",
         &["pandadoc.documents.list"],
     );
-    let invoke = invoke_request(
-        "pandadoc.documents.list",
-        json!({}),
-        token,
-    );
+    let invoke = invoke_request("pandadoc.documents.list", json!({}), token);
     let suite = ConnectorSuite {
         test_name: "pandadoc_allow_valid_token".to_string(),
         config: json!({

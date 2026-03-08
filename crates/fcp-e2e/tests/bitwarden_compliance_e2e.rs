@@ -12,18 +12,18 @@
 #![allow(clippy::too_many_lines)]
 
 use chrono::{Duration as ChronoDuration, Utc};
+use fcp_bitwarden::connector::BitwardenConnector;
 use fcp_conformance::DynamicSuite;
 use fcp_core::{
     AgentHint, CapabilityGrant, CapabilityId, CapabilityToken, CapabilityVerifier, ConnectorId,
     ConnectorMetrics, FcpConnector, FcpError, HandshakeRequest, HandshakeResponse, HealthSnapshot,
-    IdempotencyClass, InstanceId, Introspection, InvokeRequest, InvokeResponse, OperationId, OperationInfo, RequestId, RiskLevel, SafetyTier, SessionId,
-    ShutdownRequest, SimulateRequest, SimulateResponse, SubscribeRequest, SubscribeResponse,
-    UnsubscribeRequest, ZoneId,
+    IdempotencyClass, InstanceId, Introspection, InvokeRequest, InvokeResponse, OperationId,
+    OperationInfo, RequestId, RiskLevel, SafetyTier, SessionId, ShutdownRequest, SimulateRequest,
+    SimulateResponse, SubscribeRequest, SubscribeResponse, UnsubscribeRequest, ZoneId,
 };
 use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
 use fcp_e2e::{ComplianceSuite, ConnectorSuite, E2eRunner, InvokeExpectations};
 use fcp_manifest::ConnectorManifest;
-use fcp_bitwarden::connector::BitwardenConnector;
 use serde_json::json;
 use wiremock::{
     Mock, MockServer, ResponseTemplate,
@@ -44,7 +44,6 @@ impl BitwardenConnectorAdapter {
             id: ConnectorId::from_static("bitwarden"),
             instance_id: InstanceId::new(),
             verifier: None,
-
         }
     }
 }
@@ -159,12 +158,7 @@ impl FcpConnector for BitwardenConnectorAdapter {
             message: "Bitwarden verifier not initialized; handshake required".into(),
         })?;
         let required_cap = required_capability(req.operation.as_str())?;
-        verifier.verify(
-            &req.capability_token,
-            &required_cap,
-            &req.operation,
-            &[],
-        )?;
+        verifier.verify(&req.capability_token, &required_cap, &req.operation, &[])?;
 
         let request_id = req.id.clone();
         let value = self
@@ -182,12 +176,7 @@ impl FcpConnector for BitwardenConnectorAdapter {
             message: "Bitwarden verifier not initialized; handshake required".into(),
         })?;
         let required_cap = required_capability(req.operation.as_str())?;
-        verifier.verify(
-            &req.capability_token,
-            &required_cap,
-            &req.operation,
-            &[],
-        )?;
+        verifier.verify(&req.capability_token, &required_cap, &req.operation, &[])?;
 
         let value = self
             .connector
@@ -264,10 +253,8 @@ fn bitwarden_manifest_with_hash() -> String {
 }
 
 fn bitwarden_manifest_toml() -> toml::Value {
-    toml::from_str(include_str!(
-        "../../../connectors/bitwarden/manifest.toml"
-    ))
-    .expect("Bitwarden manifest TOML")
+    toml::from_str(include_str!("../../../connectors/bitwarden/manifest.toml"))
+        .expect("Bitwarden manifest TOML")
 }
 
 fn bitwarden_config(base_url: &str) -> serde_json::Value {
@@ -501,10 +488,7 @@ fn bitwarden_manifest_network_guard_allows_and_denies() {
         "Bitwarden manifest should declare 5 operations"
     );
 
-    let expected_hosts = vec![
-        "*.bitwarden.com".to_string(),
-        "*.bitwarden.eu".to_string(),
-    ];
+    let expected_hosts = vec!["*.bitwarden.com".to_string(), "*.bitwarden.eu".to_string()];
 
     for operation_name in operations.keys() {
         let host_allow = operation_host_allow_list(&manifest, operation_name);

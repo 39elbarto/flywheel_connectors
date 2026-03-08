@@ -105,7 +105,10 @@ mod tests {
         let v = json!({"a": 1});
         for fmt in [OutputFormat::Json, OutputFormat::Jsonl, OutputFormat::Toon] {
             let text = render(v.clone(), fmt).unwrap();
-            assert!(text.ends_with('\n'), "format {fmt:?} missing trailing newline");
+            assert!(
+                text.ends_with('\n'),
+                "format {fmt:?} missing trailing newline"
+            );
         }
     }
 
@@ -203,7 +206,10 @@ mod tests {
     fn render_empty_object_json_formats() {
         for fmt in [OutputFormat::Json, OutputFormat::Jsonl] {
             let text = render(json!({}), fmt).unwrap();
-            assert!(!text.trim().is_empty(), "format {fmt:?} produced empty for {{}}");
+            assert!(
+                !text.trim().is_empty(),
+                "format {fmt:?} produced empty for {{}}"
+            );
         }
     }
 
@@ -295,7 +301,11 @@ mod tests {
         let v = json!({"key": "value"});
         let stats = token_stats(&v);
         assert!(stats.toon_json_ratio > 0.0);
-        assert!(stats.toon_json_ratio <= 2.0, "ratio {} out of range", stats.toon_json_ratio);
+        assert!(
+            stats.toon_json_ratio <= 2.0,
+            "ratio {} out of range",
+            stats.toon_json_ratio
+        );
     }
 
     #[test]
@@ -331,7 +341,10 @@ mod tests {
             .collect();
         let v = json!({"items": items, "total": 50});
         let stats = token_stats(&v);
-        assert!(stats.savings_pct > 0.0, "large payload should show TOON savings");
+        assert!(
+            stats.savings_pct > 0.0,
+            "large payload should show TOON savings"
+        );
     }
 
     // ── Error payload structure ──────────────────────────────────────────
@@ -364,7 +377,10 @@ mod tests {
         // JSONL: same data, compact
         let compact_text = render(error_payload.clone(), OutputFormat::Jsonl).unwrap();
         let reparsed_l: Value = serde_json::from_str(compact_text.trim()).unwrap();
-        assert_eq!(reparsed_l["error"]["message"], "Missing required field: connector");
+        assert_eq!(
+            reparsed_l["error"]["message"],
+            "Missing required field: connector"
+        );
 
         // TOON: contains key fields (not necessarily parseable as JSON)
         let toon_text = render(error_payload, OutputFormat::Toon).unwrap();

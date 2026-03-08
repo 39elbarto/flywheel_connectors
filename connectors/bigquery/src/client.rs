@@ -282,8 +282,7 @@ mod tests {
         let auth = BigQueryAuth {
             access_token: "tok".into(),
         };
-        let client =
-            BigQueryClient::new(auth, Some("my-project".into()), None).unwrap();
+        let client = BigQueryClient::new(auth, Some("my-project".into()), None).unwrap();
         assert_eq!(client.project_id(), Some("my-project"));
     }
 
@@ -301,8 +300,7 @@ mod tests {
         let auth = BigQueryAuth {
             access_token: "tok".into(),
         };
-        let client =
-            BigQueryClient::new(auth, Some("proj-123".into()), None).unwrap();
+        let client = BigQueryClient::new(auth, Some("proj-123".into()), None).unwrap();
         let dbg = format!("{client:?}");
         assert!(dbg.contains("proj-123"));
     }
@@ -392,8 +390,7 @@ mod tests {
         let auth = BigQueryAuth {
             access_token: "tok".into(),
         };
-        let client =
-            BigQueryClient::new(auth, None, Some("https://example.com")).unwrap();
+        let client = BigQueryClient::new(auth, None, Some("https://example.com")).unwrap();
         assert_eq!(client.base_url, "https://example.com");
     }
 }

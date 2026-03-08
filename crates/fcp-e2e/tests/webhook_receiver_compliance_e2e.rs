@@ -12,21 +12,21 @@
 #![allow(clippy::too_many_lines)]
 
 use chrono::{Duration as ChronoDuration, Utc};
+use fcp_async_core::sync::Mutex;
 use fcp_conformance::DynamicSuite;
+use fcp_core::InvokeStatus;
 use fcp_core::{
     AgentHint, CapabilityGrant, CapabilityId, CapabilityToken, CapabilityVerifier, ConnectorId,
     ConnectorMetrics, FcpConnector, FcpError, HandshakeRequest, HandshakeResponse, HealthSnapshot,
-    IdempotencyClass, InstanceId, Introspection, InvokeRequest, InvokeResponse, OperationId, OperationInfo, RequestId, RiskLevel, SafetyTier, SessionId,
-    ShutdownRequest, SimulateRequest, SimulateResponse, SubscribeRequest, SubscribeResponse,
-    UnsubscribeRequest, ZoneId,
+    IdempotencyClass, InstanceId, Introspection, InvokeRequest, InvokeResponse, OperationId,
+    OperationInfo, RequestId, RiskLevel, SafetyTier, SessionId, ShutdownRequest, SimulateRequest,
+    SimulateResponse, SubscribeRequest, SubscribeResponse, UnsubscribeRequest, ZoneId,
 };
 use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
-use fcp_core::InvokeStatus;
 use fcp_e2e::{ComplianceSuite, ConnectorSuite, E2eRunner, InvokeExpectations};
 use fcp_manifest::ConnectorManifest;
 use fcp_webhook_receiver::connector::WebhookReceiverConnector;
 use serde_json::json;
-use fcp_async_core::sync::Mutex;
 use std::sync::Arc;
 
 struct WebhookReceiverConnectorAdapter {
@@ -43,7 +43,6 @@ impl WebhookReceiverConnectorAdapter {
             id: ConnectorId::from_static("webhook-receiver"),
             instance_id: InstanceId::new(),
             verifier: None,
-
         }
     }
 }
@@ -109,9 +108,7 @@ impl FcpConnector for WebhookReceiverConnectorAdapter {
                     "healthy" => HealthSnapshot::ready(),
                     "degraded" => HealthSnapshot::degraded("not_handshaken"),
                     "unconfigured" => HealthSnapshot::degraded("not_configured"),
-                    other => {
-                        HealthSnapshot::degraded(format!("webhook_receiver_status:{other}"))
-                    }
+                    other => HealthSnapshot::degraded(format!("webhook_receiver_status:{other}")),
                 }
             }
             Err(err) => HealthSnapshot::error(err.to_string()),
@@ -456,11 +453,7 @@ async fn webhook_receiver_allow_valid_token_connector_suite_passes() {
         "webhook.endpoints.read",
         &["webhook.endpoints.list"],
     );
-    let invoke = invoke_request(
-        "webhook.endpoints.list",
-        json!({}),
-        token,
-    );
+    let invoke = invoke_request("webhook.endpoints.list", json!({}), token);
     let suite = ConnectorSuite {
         test_name: "webhook_receiver_allow_valid_token".to_string(),
         config: webhook_receiver_config(),

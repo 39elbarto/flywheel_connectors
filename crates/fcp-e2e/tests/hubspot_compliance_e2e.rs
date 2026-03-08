@@ -15,11 +15,10 @@ use chrono::{Duration as ChronoDuration, Utc};
 use fcp_conformance::DynamicSuite;
 use fcp_core::{
     AgentHint, CapabilityGrant, CapabilityId, CapabilityToken, ConnectorId, ConnectorMetrics,
-    FcpConnector, FcpError, HandshakeRequest, HandshakeResponse, HealthSnapshot,
-    IdempotencyClass, InstanceId, Introspection, InvokeRequest, InvokeResponse, InvokeStatus,
-    OperationId, OperationInfo, RequestId, RiskLevel, SafetyTier, SessionId, ShutdownRequest,
-    SimulateRequest, SimulateResponse, SubscribeRequest, SubscribeResponse, UnsubscribeRequest,
-    ZoneId,
+    FcpConnector, FcpError, HandshakeRequest, HandshakeResponse, HealthSnapshot, IdempotencyClass,
+    InstanceId, Introspection, InvokeRequest, InvokeResponse, InvokeStatus, OperationId,
+    OperationInfo, RequestId, RiskLevel, SafetyTier, SessionId, ShutdownRequest, SimulateRequest,
+    SimulateResponse, SubscribeRequest, SubscribeResponse, UnsubscribeRequest, ZoneId,
 };
 use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
 use fcp_e2e::{ComplianceSuite, ConnectorSuite, E2eRunner, InvokeExpectations};
@@ -101,9 +100,7 @@ impl FcpConnector for HubSpotConnectorAdapter {
                     .unwrap_or("unknown");
                 match status {
                     "healthy" => HealthSnapshot::ready(),
-                    "not_configured" | "unconfigured" => {
-                        HealthSnapshot::degraded("not_configured")
-                    }
+                    "not_configured" | "unconfigured" => HealthSnapshot::degraded("not_configured"),
                     other => HealthSnapshot::degraded(format!("hubspot_status:{other}")),
                 }
             }
@@ -123,8 +120,7 @@ impl FcpConnector for HubSpotConnectorAdapter {
         Introspection {
             operations: vec![OperationInfo {
                 id: OperationId::from_static("hubspot.contacts.list"),
-                summary: "List contacts with optional filtering and property selection"
-                    .to_string(),
+                summary: "List contacts with optional filtering and property selection".to_string(),
                 description: None,
                 input_schema: json!({
                     "type": "object",
@@ -333,16 +329,11 @@ fn hubspot_contacts_list_response() -> serde_json::Value {
 async fn hubspot_default_deny_compliance_suite_passes() {
     let mut connector = HubSpotConnectorAdapter::new();
     let signing_key = Ed25519SigningKey::generate();
-    let handshake =
-        handshake_request(signing_key.verifying_key().to_bytes(), &["hubspot.write"]);
+    let handshake = handshake_request(signing_key.verifying_key().to_bytes(), &["hubspot.write"]);
     // Token grants "hubspot.write" but invoke targets "hubspot.contacts.list" -> error
     // (the connector will fail because the server at localhost:9999 is unreachable)
     let token = build_token(&signing_key, "hubspot.write", &["hubspot.write"]);
-    let invoke = invoke_request(
-        "hubspot.contacts.list",
-        json!({ "limit": 10 }),
-        token,
-    );
+    let invoke = invoke_request("hubspot.contacts.list", json!({ "limit": 10 }), token);
 
     let dynamic = DynamicSuite {
         config: json!({
@@ -385,9 +376,7 @@ async fn hubspot_allow_valid_token_connector_suite_passes() {
     // Mount mock for GET /crm/v3/objects/contacts
     Mock::given(method("GET"))
         .and(path_regex(r"^/crm/v3/objects/contacts.*"))
-        .respond_with(
-            ResponseTemplate::new(200).set_body_json(hubspot_contacts_list_response()),
-        )
+        .respond_with(ResponseTemplate::new(200).set_body_json(hubspot_contacts_list_response()))
         .mount(mock.inner())
         .await;
 
@@ -402,11 +391,7 @@ async fn hubspot_allow_valid_token_connector_suite_passes() {
         "hubspot.contacts.list",
         &["hubspot.contacts.list"],
     );
-    let invoke = invoke_request(
-        "hubspot.contacts.list",
-        json!({ "limit": 10 }),
-        token,
-    );
+    let invoke = invoke_request("hubspot.contacts.list", json!({ "limit": 10 }), token);
     let suite = ConnectorSuite {
         test_name: "hubspot_allow_valid_token".to_string(),
         config: json!({

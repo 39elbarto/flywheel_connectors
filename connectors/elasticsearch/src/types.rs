@@ -810,8 +810,7 @@ mod tests {
 
     #[test]
     fn delete_index_response_serialize_roundtrip() {
-        let r: DeleteIndexResponse =
-            serde_json::from_value(json!({"acknowledged": true})).unwrap();
+        let r: DeleteIndexResponse = serde_json::from_value(json!({"acknowledged": true})).unwrap();
         let v = serde_json::to_value(&r).unwrap();
         let back: DeleteIndexResponse = serde_json::from_value(v).unwrap();
         assert!(back.acknowledged.unwrap());

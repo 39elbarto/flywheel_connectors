@@ -396,8 +396,8 @@ mod tests {
 
     #[test]
     fn test_health_response_json_value() {
-        let response = HealthResponse::healthy("2.0.0", 500)
-            .with_check("db", true, Some("connected"));
+        let response =
+            HealthResponse::healthy("2.0.0", 500).with_check("db", true, Some("connected"));
         let val: serde_json::Value = serde_json::to_value(&response).unwrap();
         assert_eq!(val["status"], "healthy");
         assert_eq!(val["version"], "2.0.0");
@@ -411,17 +411,14 @@ mod tests {
     fn test_health_response_unhealthy_check_message() {
         let response = HealthResponse::unhealthy("1.0.0", 0, "boot failure");
         assert_eq!(response.checks.len(), 1);
-        assert_eq!(
-            response.checks[0].message,
-            Some("boot failure".to_string())
-        );
+        assert_eq!(response.checks[0].message, Some("boot failure".to_string()));
         assert_eq!(response.checks[0].name, "main");
     }
 
     #[test]
     fn test_health_response_unhealthy_is_not_healthy() {
-        let response = HealthResponse::unhealthy("1.0.0", 100, "down")
-            .with_check("api", true, None);
+        let response =
+            HealthResponse::unhealthy("1.0.0", 100, "down").with_check("api", true, None);
         // status is unhealthy so overall is_healthy is false
         assert!(!response.is_healthy());
     }
@@ -467,8 +464,7 @@ mod tests {
 
     #[test]
     fn test_health_response_clone_independence() {
-        let response = HealthResponse::healthy("1.0.0", 100)
-            .with_check("db", true, None);
+        let response = HealthResponse::healthy("1.0.0", 100).with_check("db", true, None);
         let cloned = response.clone();
         assert_eq!(response.checks.len(), cloned.checks.len());
         assert_eq!(response.status, cloned.status);

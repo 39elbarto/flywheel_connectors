@@ -258,9 +258,7 @@ impl WebhookReceiverConnector {
             .and_then(serde_json::Value::as_str)
             .unwrap_or("");
 
-        let allowed = operations_info()
-            .iter()
-            .any(|o| o.id.as_ref() == operation);
+        let allowed = operations_info().iter().any(|o| o.id.as_ref() == operation);
 
         Ok(json!({
             "allowed": allowed,
@@ -478,11 +476,11 @@ fn operations_info() -> Vec<OperationInfo> {
             SafetyTier::Dangerous,
             IdempotencyClass::Strict,
             AgentHint {
-                when_to_use: "Remove a webhook endpoint. Incoming webhooks to this path will be rejected.".into(),
+                when_to_use:
+                    "Remove a webhook endpoint. Incoming webhooks to this path will be rejected."
+                        .into(),
                 common_mistakes: vec![],
-                examples: vec![
-                    r#"{"endpoint_id": "ep_abc123"}"#.into(),
-                ],
+                examples: vec![r#"{"endpoint_id": "ep_abc123"}"#.into()],
                 related: vec![CapabilityId::from_static("webhook.endpoints.list")],
             },
         ),
@@ -538,9 +536,7 @@ fn operations_info() -> Vec<OperationInfo> {
             AgentHint {
                 when_to_use: "Get recent webhook events received on an endpoint.".into(),
                 common_mistakes: vec![],
-                examples: vec![
-                    r#"{"endpoint_id": "ep_abc123", "limit": 20}"#.into(),
-                ],
+                examples: vec![r#"{"endpoint_id": "ep_abc123", "limit": 20}"#.into()],
                 related: vec![CapabilityId::from_static("webhook.endpoints.list")],
             },
         ),

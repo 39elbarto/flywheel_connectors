@@ -61,14 +61,24 @@ impl FcpConnector for TwilioConnectorAdapter {
     }
 
     async fn configure(&mut self, config: serde_json::Value) -> fcp_core::FcpResult<()> {
-        self.connector.lock().await.handle_configure(config).await.map(|_| ())
+        self.connector
+            .lock()
+            .await
+            .handle_configure(config)
+            .await
+            .map(|_| ())
     }
 
     async fn handshake(&mut self, req: HandshakeRequest) -> fcp_core::FcpResult<HandshakeResponse> {
         let req_json = serde_json::to_value(&req).map_err(|e| FcpError::Internal {
             message: format!("failed to serialize handshake request: {e}"),
         })?;
-        let resp_val = self.connector.lock().await.handle_handshake(req_json).await?;
+        let resp_val = self
+            .connector
+            .lock()
+            .await
+            .handle_handshake(req_json)
+            .await?;
         serde_json::from_value(resp_val).map_err(|e| FcpError::Internal {
             message: format!("failed to deserialize handshake response: {e}"),
         })
@@ -77,7 +87,10 @@ impl FcpConnector for TwilioConnectorAdapter {
     async fn health(&self) -> HealthSnapshot {
         match self.connector.lock().await.handle_health().await {
             Ok(val) => {
-                let status = val.get("status").and_then(|s| s.as_str()).unwrap_or("unknown");
+                let status = val
+                    .get("status")
+                    .and_then(|s| s.as_str())
+                    .unwrap_or("unknown");
                 match status {
                     "healthy" => HealthSnapshot::ready(),
                     "degraded" => HealthSnapshot::degraded("not_handshaken"),
@@ -101,7 +114,12 @@ impl FcpConnector for TwilioConnectorAdapter {
     }
 
     async fn shutdown(&mut self, _req: ShutdownRequest) -> fcp_core::FcpResult<()> {
-        self.connector.lock().await.handle_shutdown(json!({})).await.map(|_| ())
+        self.connector
+            .lock()
+            .await
+            .handle_shutdown(json!({}))
+            .await
+            .map(|_| ())
     }
 
     fn introspect(&self) -> Introspection {
@@ -134,27 +152,51 @@ impl FcpConnector for TwilioConnectorAdapter {
 
     async fn invoke(&self, req: InvokeRequest) -> fcp_core::FcpResult<InvokeResponse> {
         let request_id = req.id.clone();
-        let value = self.connector.lock().await.handle_invoke(json!({
-            "operation": req.operation.as_str(),
-            "input": req.input,
-            "capability_token": req.capability_token,
-        })).await?;
+        let value = self
+            .connector
+            .lock()
+            .await
+            .handle_invoke(json!({
+                "operation": req.operation.as_str(),
+                "input": req.input,
+                "capability_token": req.capability_token,
+            }))
+            .await?;
         Ok(InvokeResponse::ok(request_id, value))
     }
 
     async fn simulate(&self, req: SimulateRequest) -> fcp_core::FcpResult<SimulateResponse> {
-        let value = self.connector.lock().await.handle_simulate(json!({
-            "operation_id": req.operation.as_str(),
-            "input": req.input,
-        })).await?;
+        let value = self
+            .connector
+            .lock()
+            .await
+            .handle_simulate(json!({
+                "operation_id": req.operation.as_str(),
+                "input": req.input,
+            }))
+            .await?;
         Ok(SimulateResponse {
-            r#type: "simulate_response".to_string(), id: req.id,
-            would_succeed: value.get("allowed").and_then(serde_json::Value::as_bool).unwrap_or(false),
-            failure_reason: value.get("reason").and_then(serde_json::Value::as_str)
-                .filter(|_| !value.get("allowed").and_then(serde_json::Value::as_bool).unwrap_or(false))
+            r#type: "simulate_response".to_string(),
+            id: req.id,
+            would_succeed: value
+                .get("allowed")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false),
+            failure_reason: value
+                .get("reason")
+                .and_then(serde_json::Value::as_str)
+                .filter(|_| {
+                    !value
+                        .get("allowed")
+                        .and_then(serde_json::Value::as_bool)
+                        .unwrap_or(false)
+                })
                 .map(str::to_string),
-            denial_code: None, missing_capabilities: Vec::new(), estimated_cost: None,
-            availability: None, response_metadata: None,
+            denial_code: None,
+            missing_capabilities: Vec::new(),
+            estimated_cost: None,
+            availability: None,
+            response_metadata: None,
         })
     }
 

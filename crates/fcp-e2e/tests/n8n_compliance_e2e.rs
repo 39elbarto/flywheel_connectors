@@ -16,9 +16,9 @@ use fcp_conformance::DynamicSuite;
 use fcp_core::{
     AgentHint, CapabilityGrant, CapabilityId, CapabilityToken, CapabilityVerifier, ConnectorId,
     ConnectorMetrics, FcpConnector, FcpError, HandshakeRequest, HandshakeResponse, HealthSnapshot,
-    IdempotencyClass, InstanceId, Introspection, InvokeRequest, InvokeResponse, OperationId, OperationInfo, RequestId, RiskLevel, SafetyTier, SessionId,
-    ShutdownRequest, SimulateRequest, SimulateResponse, SubscribeRequest, SubscribeResponse,
-    UnsubscribeRequest, ZoneId,
+    IdempotencyClass, InstanceId, Introspection, InvokeRequest, InvokeResponse, OperationId,
+    OperationInfo, RequestId, RiskLevel, SafetyTier, SessionId, ShutdownRequest, SimulateRequest,
+    SimulateResponse, SubscribeRequest, SubscribeResponse, UnsubscribeRequest, ZoneId,
 };
 use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
 use fcp_e2e::{ComplianceSuite, ConnectorSuite, E2eRunner, InvokeExpectations};
@@ -27,8 +27,8 @@ use fcp_n8n::connector::N8nConnector;
 use fcp_testkit::MockApiServer;
 use serde_json::json;
 use wiremock::{
-    matchers::{method, path_regex},
     Mock, ResponseTemplate,
+    matchers::{method, path_regex},
 };
 
 struct N8nConnectorAdapter {
@@ -45,7 +45,6 @@ impl N8nConnectorAdapter {
             id: ConnectorId::from_static("n8n"),
             instance_id: InstanceId::new(),
             verifier: None,
-
         }
     }
 }
@@ -257,10 +256,8 @@ fn n8n_manifest_with_hash() -> String {
 }
 
 fn n8n_manifest_toml() -> toml::Value {
-    toml::from_str(include_str!(
-        "../../../connectors/n8n/manifest.toml"
-    ))
-    .expect("n8n manifest TOML")
+    toml::from_str(include_str!("../../../connectors/n8n/manifest.toml"))
+        .expect("n8n manifest TOML")
 }
 
 fn n8n_config(base_url: &str) -> serde_json::Value {
@@ -382,11 +379,7 @@ async fn n8n_default_deny_compliance_suite_passes() {
         signing_key.verifying_key().to_bytes(),
         &["n8n.workflows.read"],
     );
-    let token = build_token(
-        &signing_key,
-        "n8n.workflows.read",
-        &["n8n.workflows.list"],
-    );
+    let token = build_token(&signing_key, "n8n.workflows.read", &["n8n.workflows.list"]);
     let invoke = invoke_request(
         "n8n.workflows.activate",
         json!({ "id": "1001", "active": true }),
@@ -404,11 +397,7 @@ async fn n8n_default_deny_compliance_suite_passes() {
         require_capability_denial: true,
         require_decision_receipt: false,
     };
-    let suite = ComplianceSuite::new(
-        "n8n_default_deny",
-        n8n_manifest_with_hash(),
-        dynamic,
-    );
+    let suite = ComplianceSuite::new("n8n_default_deny", n8n_manifest_with_hash(), dynamic);
 
     let mut runner = E2eRunner::new("fcp-e2e-n8n");
     let report = runner
@@ -429,9 +418,7 @@ async fn n8n_happy_path_compliance_suite_passes() {
     // Mount mock for GET /workflows
     Mock::given(method("GET"))
         .and(path_regex(r"^/workflows"))
-        .respond_with(
-            ResponseTemplate::new(200).set_body_json(json!({"data": []})),
-        )
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": []})))
         .mount(mock.inner())
         .await;
 
@@ -441,16 +428,8 @@ async fn n8n_happy_path_compliance_suite_passes() {
         signing_key.verifying_key().to_bytes(),
         &["n8n.workflows.read"],
     );
-    let token = build_token(
-        &signing_key,
-        "n8n.workflows.read",
-        &["n8n.workflows.list"],
-    );
-    let invoke = invoke_request(
-        "n8n.workflows.list",
-        json!({}),
-        token,
-    );
+    let token = build_token(&signing_key, "n8n.workflows.read", &["n8n.workflows.list"]);
+    let invoke = invoke_request("n8n.workflows.list", json!({}), token);
 
     let suite = ConnectorSuite {
         test_name: "n8n_allow_valid_token".to_string(),

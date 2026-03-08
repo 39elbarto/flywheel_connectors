@@ -2102,7 +2102,10 @@ mod tests {
 
     #[test]
     fn test_suggestion_kind_eq() {
-        assert_eq!(CapabilitySuggestionKind::Keep, CapabilitySuggestionKind::Keep);
+        assert_eq!(
+            CapabilitySuggestionKind::Keep,
+            CapabilitySuggestionKind::Keep
+        );
         assert_ne!(
             CapabilitySuggestionKind::Keep,
             CapabilitySuggestionKind::RemoveUnused

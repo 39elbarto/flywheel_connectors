@@ -228,10 +228,7 @@ impl PostgresClient {
 
     /// List tables in the database.
     #[instrument(skip(self))]
-    pub async fn schema_tables(
-        &self,
-        schema: Option<&str>,
-    ) -> PostgresResult<serde_json::Value> {
+    pub async fn schema_tables(&self, schema: Option<&str>) -> PostgresResult<serde_json::Value> {
         let mut url = format!("{}/rest/v1/schema/tables", self.base_url);
         if let Some(s) = schema {
             url = format!("{url}?schema={s}");

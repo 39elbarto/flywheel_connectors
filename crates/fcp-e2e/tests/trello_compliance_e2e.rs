@@ -13,19 +13,19 @@
 
 use chrono::{Duration as ChronoDuration, Utc};
 use fcp_conformance::DynamicSuite;
+use fcp_core::InvokeStatus;
 use fcp_core::{
     AgentHint, CapabilityGrant, CapabilityId, CapabilityToken, CapabilityVerifier, ConnectorId,
     ConnectorMetrics, FcpConnector, FcpError, HandshakeRequest, HandshakeResponse, HealthSnapshot,
-    IdempotencyClass, InstanceId, Introspection, InvokeRequest, InvokeResponse, OperationId, OperationInfo, RequestId, RiskLevel, SafetyTier, SessionId,
-    ShutdownRequest, SimulateRequest, SimulateResponse, SubscribeRequest, SubscribeResponse,
-    UnsubscribeRequest, ZoneId,
+    IdempotencyClass, InstanceId, Introspection, InvokeRequest, InvokeResponse, OperationId,
+    OperationInfo, RequestId, RiskLevel, SafetyTier, SessionId, ShutdownRequest, SimulateRequest,
+    SimulateResponse, SubscribeRequest, SubscribeResponse, UnsubscribeRequest, ZoneId,
 };
 use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
-use fcp_core::InvokeStatus;
 use fcp_e2e::{ComplianceSuite, ConnectorSuite, E2eRunner, InvokeExpectations};
 use fcp_manifest::ConnectorManifest;
-use fcp_trello::connector::TrelloConnector;
 use fcp_testkit::MockApiServer;
+use fcp_trello::connector::TrelloConnector;
 use serde_json::json;
 use wiremock::{
     Mock, ResponseTemplate,
@@ -46,7 +46,6 @@ impl TrelloConnectorAdapter {
             id: ConnectorId::from_static("trello"),
             instance_id: InstanceId::new(),
             verifier: None,
-
         }
     }
 }
@@ -270,10 +269,8 @@ fn trello_manifest_with_hash() -> String {
 }
 
 fn trello_manifest_toml() -> toml::Value {
-    toml::from_str(include_str!(
-        "../../../connectors/trello/manifest.toml"
-    ))
-    .expect("Trello manifest TOML")
+    toml::from_str(include_str!("../../../connectors/trello/manifest.toml"))
+        .expect("Trello manifest TOML")
 }
 
 fn trello_config(base_url: &str) -> serde_json::Value {
@@ -396,11 +393,7 @@ async fn trello_default_deny_compliance_suite_passes() {
         signing_key.verifying_key().to_bytes(),
         &["trello.boards.read"],
     );
-    let token = build_token(
-        &signing_key,
-        "trello.boards.read",
-        &["trello.boards.list"],
-    );
+    let token = build_token(&signing_key, "trello.boards.read", &["trello.boards.list"]);
     let invoke = invoke_request(
         "trello.cards.delete",
         json!({ "card_id": "card_abc123" }),
@@ -418,11 +411,7 @@ async fn trello_default_deny_compliance_suite_passes() {
         require_capability_denial: true,
         require_decision_receipt: false,
     };
-    let suite = ComplianceSuite::new(
-        "trello_default_deny",
-        trello_manifest_with_hash(),
-        dynamic,
-    );
+    let suite = ComplianceSuite::new("trello_default_deny", trello_manifest_with_hash(), dynamic);
 
     let mut runner = E2eRunner::new("fcp-e2e-trello");
     let report = runner
@@ -442,12 +431,10 @@ async fn trello_allow_valid_token_connector_suite_passes() {
 
     Mock::given(method("GET"))
         .and(path_regex(r"^/members/.*/boards.*"))
-        .respond_with(
-            ResponseTemplate::new(200).set_body_json(json!([
-                {"id": "board1", "name": "My Board", "closed": false},
-                {"id": "board2", "name": "Another Board", "closed": false}
-            ])),
-        )
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+            {"id": "board1", "name": "My Board", "closed": false},
+            {"id": "board2", "name": "Another Board", "closed": false}
+        ])))
         .mount(mock.inner())
         .await;
 
@@ -457,16 +444,8 @@ async fn trello_allow_valid_token_connector_suite_passes() {
         signing_key.verifying_key().to_bytes(),
         &["trello.boards.read"],
     );
-    let token = build_token(
-        &signing_key,
-        "trello.boards.read",
-        &["trello.boards.list"],
-    );
-    let invoke = invoke_request(
-        "trello.boards.list",
-        json!({}),
-        token,
-    );
+    let token = build_token(&signing_key, "trello.boards.read", &["trello.boards.list"]);
+    let invoke = invoke_request("trello.boards.list", json!({}), token);
     let suite = ConnectorSuite {
         test_name: "trello_allow_valid_token".to_string(),
         config: trello_config(&mock.base_url()),

@@ -21,8 +21,9 @@ use fcp_core::{
 };
 use fcp_e2e::{AssertionsSummary, ConnectorProcessRunner, E2eLogEntry, E2eLogger};
 use fcp_host::{
-    ConnectorArchetype, ConnectorRegistry, ConnectorSummary, DiscoveryEndpoint, DiscoveryResponse,
-    HostHealthResponse, HostHealthStatus, IntrospectionResponse, PolicyEngine, PreflightRequest,
+    BatchInvokeResponse, BatchStatus, ConnectorArchetype, ConnectorRegistry, ConnectorSummary,
+    DiscoveryEndpoint, DiscoveryResponse, HostHealthResponse, HostHealthStatus,
+    IntrospectionResponse, OperationResultStatus, PolicyEngine, PreflightRequest,
     PreflightResponse, RolloutDecision, RolloutOutcome,
 };
 use fcp_testkit::LogCapture;
@@ -277,6 +278,18 @@ fn build_invoke_request(connector_id: ConnectorId) -> (InvokeRequest, Correlatio
         approval_tokens: Vec::new(),
     };
     (request, correlation_id)
+}
+
+fn batch_operation_json(
+    id: &str,
+    request: InvokeRequest,
+    depends_on: &[&str],
+) -> serde_json::Value {
+    json!({
+        "id": id,
+        "request": request,
+        "depends_on": depends_on,
+    })
 }
 
 #[fcp_async_core::runtime::test]
@@ -1070,6 +1083,147 @@ async fn fcp_host_binary_exposes_discovery_routes() -> Result<(), Box<dyn std::e
 }
 
 #[fcp_async_core::runtime::test(flavor = "multi_thread")]
+async fn fcp_host_binary_batch_route_executes_multiple_invokes()
+-> Result<(), Box<dyn std::error::Error>> {
+    let connector_id = ConnectorId::from_static("fcp.test.batch-http:utility:1.0.0");
+    let host = HttpHostProcess::spawn(vec![test_connector_config(
+        &connector_id,
+        "Batch Echo",
+        &["test", "batch"],
+    )])
+    .await?;
+    let url = |path: &str| format!("{}{path}", host.base_url);
+
+    let (mut first_request, _) = build_invoke_request(connector_id.clone());
+    first_request.input = json!({ "message": "first" });
+    let (mut second_request, _) = build_invoke_request(connector_id.clone());
+    second_request.input = json!({ "message": "second" });
+
+    let response: BatchInvokeResponse = http_post_json(
+        host.client.clone(),
+        url("/rpc/batch"),
+        json!({
+            "operations": [
+                batch_operation_json("op1", first_request, &[]),
+                batch_operation_json("op2", second_request, &[]),
+            ],
+            "options": {
+                "max_parallelism": 2,
+                "stop_on_first_error": false,
+                "timeout_ms": 30_000,
+            }
+        }),
+    )
+    .await?;
+
+    assert_eq!(response.status, BatchStatus::Success);
+    assert_eq!(response.completed, 2);
+    assert_eq!(response.failed, 0);
+    assert_eq!(response.skipped, 0);
+    assert_eq!(response.results.len(), 2);
+    assert_eq!(response.results[0].id, "op1");
+    assert_eq!(response.results[1].id, "op2");
+    assert_eq!(response.results[0].status, OperationResultStatus::Success);
+    assert_eq!(response.results[1].status, OperationResultStatus::Success);
+    assert_eq!(
+        response.results[0]
+            .output
+            .as_ref()
+            .and_then(|output| output.get("result"))
+            .and_then(|result| result.get("echo"))
+            .and_then(|echo| echo.get("message"))
+            .and_then(Value::as_str),
+        Some("first")
+    );
+    assert_eq!(
+        response.results[1]
+            .output
+            .as_ref()
+            .and_then(|output| output.get("result"))
+            .and_then(|result| result.get("echo"))
+            .and_then(|echo| echo.get("message"))
+            .and_then(Value::as_str),
+        Some("second")
+    );
+
+    Ok(())
+}
+
+#[fcp_async_core::runtime::test(flavor = "multi_thread")]
+async fn fcp_host_binary_batch_route_skips_dependents_after_failure()
+-> Result<(), Box<dyn std::error::Error>> {
+    let connector_id = ConnectorId::from_static("fcp.test.batch-failure:utility:1.0.0");
+    let host = HttpHostProcess::spawn(vec![test_connector_config(
+        &connector_id,
+        "Batch Failure Echo",
+        &["test", "batch"],
+    )])
+    .await?;
+    let url = |path: &str| format!("{}{path}", host.base_url);
+
+    let unknown_connector_id = ConnectorId::from_static("fcp.test.missing:utility:1.0.0");
+    let (mut failing_request, _) = build_invoke_request(unknown_connector_id);
+    failing_request.input = json!({ "message": "missing" });
+    let (mut dependent_request, _) = build_invoke_request(connector_id.clone());
+    dependent_request.input = json!({ "message": "dependent" });
+    let (mut independent_request, _) = build_invoke_request(connector_id.clone());
+    independent_request.input = json!({ "message": "independent" });
+
+    let response: BatchInvokeResponse = http_post_json(
+        host.client.clone(),
+        url("/rpc/batch"),
+        json!({
+            "operations": [
+                batch_operation_json("op1", failing_request, &[]),
+                batch_operation_json("op2", dependent_request, &["op1"]),
+                batch_operation_json("op3", independent_request, &[]),
+            ],
+            "options": {
+                "max_parallelism": 3,
+                "stop_on_first_error": false,
+                "timeout_ms": 30_000,
+            }
+        }),
+    )
+    .await?;
+
+    assert_eq!(response.status, BatchStatus::PartialSuccess);
+    assert_eq!(response.completed, 1);
+    assert_eq!(response.failed, 1);
+    assert_eq!(response.skipped, 1);
+    assert_eq!(response.results.len(), 3);
+    assert_eq!(response.results[0].status, OperationResultStatus::Error);
+    assert_eq!(response.results[1].status, OperationResultStatus::Skipped);
+    assert_eq!(response.results[2].status, OperationResultStatus::Success);
+    assert_eq!(
+        response.results[0]
+            .error
+            .as_ref()
+            .map(|error| error.code.as_str()),
+        Some("CONNECTOR_NOT_FOUND")
+    );
+    assert_eq!(
+        response.results[1]
+            .error
+            .as_ref()
+            .map(|error| error.code.as_str()),
+        Some("DEP_FAILED")
+    );
+    assert_eq!(
+        response.results[2]
+            .output
+            .as_ref()
+            .and_then(|output| output.get("result"))
+            .and_then(|result| result.get("echo"))
+            .and_then(|echo| echo.get("message"))
+            .and_then(Value::as_str),
+        Some("independent")
+    );
+
+    Ok(())
+}
+
+#[fcp_async_core::runtime::test(flavor = "multi_thread")]
 async fn fcp_host_binary_rollout_routes_schedule_and_promote_canary()
 -> Result<(), Box<dyn std::error::Error>> {
     let connector_id = ConnectorId::from_static("fcp.test.rollout-http:utility:1.0.0");
@@ -1190,6 +1344,63 @@ async fn fcp_host_binary_rollout_routes_schedule_and_promote_canary()
 }
 
 #[fcp_async_core::runtime::test(flavor = "multi_thread")]
+async fn fcp_host_binary_rollout_pin_route_pins_baseline_version()
+-> Result<(), Box<dyn std::error::Error>> {
+    let connector_id = ConnectorId::from_static("fcp.test.rollout-pin-baseline:utility:1.0.0");
+    let host = HttpHostProcess::spawn(vec![test_connector_config(
+        &connector_id,
+        "Rollout Pin Baseline",
+        &["test", "rollout"],
+    )])
+    .await?;
+    let url = |path: &str| format!("{}{path}", host.base_url);
+
+    let baseline_version = semver::Version::new(1, 0, 0);
+
+    let pinned: PinStateResponse = http_put_json(
+        host.client.clone(),
+        url(&format!("/rpc/rollout/pin/{}", connector_id.as_str())),
+        json!({ "version": baseline_version.clone() }),
+    )
+    .await?;
+    assert_eq!(pinned.connector_id, connector_id.as_str());
+    assert!(pinned.pinned);
+    assert_eq!(pinned.version, Some(baseline_version.clone()));
+
+    let pin_status: PinStateResponse = http_get_json(
+        host.client.clone(),
+        url(&format!("/rpc/rollout/pin/{}", connector_id.as_str())),
+    )
+    .await?;
+    assert!(pin_status.pinned);
+    assert_eq!(pin_status.version, Some(baseline_version));
+
+    let logs = wait_for_log_events(
+        &host.stderr_logs,
+        &[
+            "rollout_pin_request",
+            "rollout_pin_response",
+            "rollout_pin_status_request",
+            "rollout_pin_status_response",
+        ],
+    )
+    .await?;
+
+    assert!(logs.iter().any(|entry| {
+        entry.get("event").and_then(Value::as_str) == Some("rollout_pin_response")
+            && entry.get("connector_id").and_then(Value::as_str) == Some(connector_id.as_str())
+            && entry.get("pinned").and_then(Value::as_bool) == Some(true)
+    }));
+    assert!(logs.iter().any(|entry| {
+        entry.get("event").and_then(Value::as_str) == Some("rollout_pin_status_response")
+            && entry.get("connector_id").and_then(Value::as_str) == Some(connector_id.as_str())
+            && entry.get("pinned").and_then(Value::as_bool) == Some(true)
+    }));
+
+    Ok(())
+}
+
+#[fcp_async_core::runtime::test(flavor = "multi_thread")]
 async fn fcp_host_binary_rollout_routes_rollback_and_emit_transition_logs()
 -> Result<(), Box<dyn std::error::Error>> {
     let connector_id = ConnectorId::from_static("fcp.test.rollout-rollback:utility:1.0.0");
@@ -1204,6 +1415,27 @@ async fn fcp_host_binary_rollout_routes_rollback_and_emit_transition_logs()
     let policy = test_rollout_rollback_policy();
     let previous_version = semver::Version::new(1, 0, 0);
     let canary_version = semver::Version::new(1, 0, 1);
+
+    let pinned_baseline: PinStateResponse = http_put_json(
+        host.client.clone(),
+        url(&format!("/rpc/rollout/pin/{}", connector_id.as_str())),
+        json!({ "version": previous_version.clone() }),
+    )
+    .await?;
+    assert_eq!(pinned_baseline.connector_id, connector_id.as_str());
+    assert!(pinned_baseline.pinned);
+    assert_eq!(pinned_baseline.version, Some(previous_version.clone()));
+
+    let pin_status_before_rollout: PinStateResponse = http_get_json(
+        host.client.clone(),
+        url(&format!("/rpc/rollout/pin/{}", connector_id.as_str())),
+    )
+    .await?;
+    assert!(pin_status_before_rollout.pinned);
+    assert_eq!(
+        pin_status_before_rollout.version,
+        Some(previous_version.clone())
+    );
 
     let scheduled: RolloutOutcome = http_post_json(
         host.client.clone(),
@@ -1256,12 +1488,27 @@ async fn fcp_host_binary_rollout_routes_rollback_and_emit_transition_logs()
     .await?;
     assert_eq!(final_status.state, LifecycleState::RolledBack);
     assert_eq!(final_status.version, canary_version);
-    assert_eq!(final_status.rollback_target_version, Some(previous_version));
+    assert_eq!(
+        final_status.rollback_target_version,
+        Some(previous_version.clone())
+    );
     assert!(!final_status.auto_rollback_pending);
+
+    let restored_pin_status: PinStateResponse = http_get_json(
+        host.client.clone(),
+        url(&format!("/rpc/rollout/pin/{}", connector_id.as_str())),
+    )
+    .await?;
+    assert!(restored_pin_status.pinned);
+    assert_eq!(restored_pin_status.version, Some(previous_version));
 
     let logs = wait_for_log_events(
         &host.stderr_logs,
         &[
+            "rollout_pin_request",
+            "rollout_pin_response",
+            "rollout_pin_status_request",
+            "rollout_pin_status_response",
             "rollout_schedule_request",
             "rollout_schedule_response",
             "rollout_evaluate_request",
@@ -1272,6 +1519,16 @@ async fn fcp_host_binary_rollout_routes_rollback_and_emit_transition_logs()
     )
     .await?;
 
+    assert!(logs.iter().any(|entry| {
+        entry.get("event").and_then(Value::as_str) == Some("rollout_pin_response")
+            && entry.get("connector_id").and_then(Value::as_str) == Some(connector_id.as_str())
+            && entry.get("pinned").and_then(Value::as_bool) == Some(true)
+    }));
+    assert!(logs.iter().any(|entry| {
+        entry.get("event").and_then(Value::as_str) == Some("rollout_pin_status_response")
+            && entry.get("connector_id").and_then(Value::as_str) == Some(connector_id.as_str())
+            && entry.get("pinned").and_then(Value::as_bool) == Some(true)
+    }));
     assert!(logs.iter().any(|entry| {
         entry.get("event").and_then(Value::as_str) == Some("rollout_schedule_response")
             && entry.get("connector_id").and_then(Value::as_str) == Some(connector_id.as_str())

@@ -307,21 +307,27 @@ mod tests {
 
     #[test]
     fn from_async_error_protocol_io() {
-        let err = AsyncError::ProtocolIo { message: "read error".into() };
+        let err = AsyncError::ProtocolIo {
+            message: "read error".into(),
+        };
         let oauth_err = OAuthError::from_async_error(err, Duration::from_secs(10));
         assert!(oauth_err.to_string().contains("read error"));
     }
 
     #[test]
     fn from_async_error_join() {
-        let err = AsyncError::Join { message: "task panicked".into() };
+        let err = AsyncError::Join {
+            message: "task panicked".into(),
+        };
         let oauth_err = OAuthError::from_async_error(err, Duration::from_secs(10));
         assert!(oauth_err.to_string().contains("task panicked"));
     }
 
     #[test]
     fn from_async_error_runtime() {
-        let err = AsyncError::Runtime { message: "runtime shutdown".into() };
+        let err = AsyncError::Runtime {
+            message: "runtime shutdown".into(),
+        };
         let oauth_err = OAuthError::from_async_error(err, Duration::from_secs(10));
         assert!(oauth_err.to_string().contains("runtime shutdown"));
     }

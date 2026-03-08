@@ -8,10 +8,9 @@
 use chrono::{TimeZone, Utc};
 use fcp_core::{
     AttestationMaterial, AttestationMetadata, AttestationPredicateType, ConnectorId,
-    SbomComponent, SbomDependency, SbomFormat, SoftwareBillOfMaterials,
-    SupplyChainAttestation, SupplyChainSignature, SupplyChainVerificationPolicy,
-    TrustRootBinding, VerificationDecision, VerificationReasonCode,
-    SBOM_SIGNED_FIELDS, SUPPLY_CHAIN_ATTESTATION_SIGNED_FIELDS,
+    SBOM_SIGNED_FIELDS, SUPPLY_CHAIN_ATTESTATION_SIGNED_FIELDS, SbomComponent, SbomDependency,
+    SbomFormat, SoftwareBillOfMaterials, SupplyChainAttestation, SupplyChainSignature,
+    SupplyChainVerificationPolicy, TrustRootBinding, VerificationDecision, VerificationReasonCode,
 };
 use fcp_host::{GateOutcome, SupplyChainGate, SupplyChainGateConfig};
 
@@ -111,9 +110,17 @@ fn verify_happy_path_produces_allow_with_evidence() {
 
     assert!(outcome.allowed);
     assert_eq!(outcome.evidence.decision, VerificationDecision::Allow);
-    assert_eq!(outcome.evidence.reason_code, VerificationReasonCode::Verified);
+    assert_eq!(
+        outcome.evidence.reason_code,
+        VerificationReasonCode::Verified
+    );
     assert!(!outcome.evidence.steps.is_empty());
-    assert!(outcome.audit_event.evidence_digest.starts_with("blake3-256:"));
+    assert!(
+        outcome
+            .audit_event
+            .evidence_digest
+            .starts_with("blake3-256:")
+    );
     assert!(!outcome.cached);
 }
 
@@ -123,12 +130,22 @@ fn verify_deny_missing_attestation() {
     let cid = ConnectorId::from_static("fcp.test-echo:utility:1.0.0");
 
     let outcome = gate
-        .verify_at(&cid, "1.0.0", &valid_digest(), None, Some(&valid_sbom()), test_time())
+        .verify_at(
+            &cid,
+            "1.0.0",
+            &valid_digest(),
+            None,
+            Some(&valid_sbom()),
+            test_time(),
+        )
         .unwrap();
 
     assert!(!outcome.allowed);
     assert_eq!(outcome.evidence.decision, VerificationDecision::Deny);
-    assert_eq!(outcome.evidence.reason_code, VerificationReasonCode::AttestationMissing);
+    assert_eq!(
+        outcome.evidence.reason_code,
+        VerificationReasonCode::AttestationMissing
+    );
 }
 
 #[test]
@@ -143,7 +160,10 @@ fn verify_deny_missing_sbom() {
         .unwrap();
 
     assert!(!outcome.allowed);
-    assert_eq!(outcome.evidence.reason_code, VerificationReasonCode::SbomMissing);
+    assert_eq!(
+        outcome.evidence.reason_code,
+        VerificationReasonCode::SbomMissing
+    );
 }
 
 #[test]
@@ -208,7 +228,14 @@ fn verify_deny_digest_mismatch() {
     let sbom = valid_sbom();
 
     let outcome = gate
-        .verify_at(&cid, "1.0.0", &wrong_digest, Some(&att), Some(&sbom), test_time())
+        .verify_at(
+            &cid,
+            "1.0.0",
+            &wrong_digest,
+            Some(&att),
+            Some(&sbom),
+            test_time(),
+        )
         .unwrap();
 
     assert!(!outcome.allowed);
@@ -453,15 +480,9 @@ fn slsa_level_boundary_matrix() {
             .unwrap();
 
         if required_level <= 2 {
-            assert!(
-                outcome.allowed,
-                "should allow at level {required_level}"
-            );
+            assert!(outcome.allowed, "should allow at level {required_level}");
         } else {
-            assert!(
-                !outcome.allowed,
-                "should deny at level {required_level}"
-            );
+            assert!(!outcome.allowed, "should deny at level {required_level}");
         }
     }
 }

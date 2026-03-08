@@ -314,12 +314,7 @@ mod tests {
 
     #[test]
     fn key_not_found_not_retryable() {
-        assert!(
-            !RedisError::KeyNotFound {
-                key: "k".into()
-            }
-            .is_retryable()
-        );
+        assert!(!RedisError::KeyNotFound { key: "k".into() }.is_retryable());
     }
 
     #[test]
@@ -505,9 +500,7 @@ mod tests {
     fn connection_to_fcp_error() {
         match RedisError::Connection("refused".into()).to_fcp_error() {
             FcpError::External {
-                service,
-                retryable,
-                ..
+                service, retryable, ..
             } => {
                 assert_eq!(service, "redis");
                 assert!(retryable);
@@ -560,9 +553,7 @@ mod tests {
     fn timeout_to_fcp_error() {
         match RedisError::Timeout("30s".into()).to_fcp_error() {
             FcpError::External {
-                service,
-                retryable,
-                ..
+                service, retryable, ..
             } => {
                 assert_eq!(service, "redis");
                 assert!(retryable);
@@ -2331,8 +2322,7 @@ mod tests {
 
     #[test]
     fn upstash_response_with_result() {
-        let r: UpstashResponse =
-            serde_json::from_value(json!({ "result": "hello" })).unwrap();
+        let r: UpstashResponse = serde_json::from_value(json!({ "result": "hello" })).unwrap();
         assert_eq!(r.result, Some(json!("hello")));
         assert!(r.error.is_none());
     }
@@ -2349,8 +2339,7 @@ mod tests {
 
     #[test]
     fn upstash_response_null_result() {
-        let r: UpstashResponse =
-            serde_json::from_value(json!({ "result": null })).unwrap();
+        let r: UpstashResponse = serde_json::from_value(json!({ "result": null })).unwrap();
         assert!(r.result.is_none());
     }
 
@@ -2362,8 +2351,7 @@ mod tests {
 
     #[test]
     fn upstash_response_array_result() {
-        let r: UpstashResponse =
-            serde_json::from_value(json!({ "result": ["a", "b"] })).unwrap();
+        let r: UpstashResponse = serde_json::from_value(json!({ "result": ["a", "b"] })).unwrap();
         let arr = r.result.unwrap();
         assert_eq!(arr.as_array().unwrap().len(), 2);
     }
@@ -2377,8 +2365,7 @@ mod tests {
 
     #[test]
     fn upstash_response_clone() {
-        let r: UpstashResponse =
-            serde_json::from_value(json!({ "result": "val" })).unwrap();
+        let r: UpstashResponse = serde_json::from_value(json!({ "result": "val" })).unwrap();
         let cloned = r.clone();
         drop(r);
         assert_eq!(cloned.result, Some(json!("val")));
@@ -2386,8 +2373,7 @@ mod tests {
 
     #[test]
     fn upstash_response_debug() {
-        let r: UpstashResponse =
-            serde_json::from_value(json!({ "result": "val" })).unwrap();
+        let r: UpstashResponse = serde_json::from_value(json!({ "result": "val" })).unwrap();
         let dbg = format!("{r:?}");
         assert!(dbg.contains("UpstashResponse"));
     }

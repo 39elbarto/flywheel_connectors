@@ -1098,8 +1098,18 @@ mod tests {
     #[test]
     fn doctor_result_multiple_critical_failures() {
         let r = DoctorResult::from_checks(vec![
-            DoctorCheck { name: "a".into(), passed: false, message: None, critical: true },
-            DoctorCheck { name: "b".into(), passed: false, message: None, critical: true },
+            DoctorCheck {
+                name: "a".into(),
+                passed: false,
+                message: None,
+                critical: true,
+            },
+            DoctorCheck {
+                name: "b".into(),
+                passed: false,
+                message: None,
+                critical: true,
+            },
         ]);
         assert_eq!(r.status, DoctorStatus::Unhealthy);
     }
@@ -1107,7 +1117,10 @@ mod tests {
     #[test]
     fn operations_tasks_create_is_risky() {
         let ops = operations_info();
-        let op = ops.as_array().unwrap().iter()
+        let op = ops
+            .as_array()
+            .unwrap()
+            .iter()
             .find(|o| o["id"] == "todoist.tasks.create")
             .unwrap();
         assert_eq!(op["safety_tier"], "risky");
@@ -1117,7 +1130,10 @@ mod tests {
     #[test]
     fn operations_tasks_complete_is_risky() {
         let ops = operations_info();
-        let op = ops.as_array().unwrap().iter()
+        let op = ops
+            .as_array()
+            .unwrap()
+            .iter()
             .find(|o| o["id"] == "todoist.tasks.complete")
             .unwrap();
         assert_eq!(op["safety_tier"], "risky");
@@ -1127,7 +1143,10 @@ mod tests {
     #[test]
     fn operations_tasks_create_not_idempotent() {
         let ops = operations_info();
-        let op = ops.as_array().unwrap().iter()
+        let op = ops
+            .as_array()
+            .unwrap()
+            .iter()
             .find(|o| o["id"] == "todoist.tasks.create")
             .unwrap();
         assert_eq!(op["idempotency"], "none");
@@ -1136,7 +1155,10 @@ mod tests {
     #[test]
     fn operations_tasks_list_capability() {
         let ops = operations_info();
-        let op = ops.as_array().unwrap().iter()
+        let op = ops
+            .as_array()
+            .unwrap()
+            .iter()
             .find(|o| o["id"] == "todoist.tasks.list")
             .unwrap();
         assert_eq!(op["capability"], "todoist.tasks.read");
@@ -1145,7 +1167,10 @@ mod tests {
     #[test]
     fn operations_projects_list_capability() {
         let ops = operations_info();
-        let op = ops.as_array().unwrap().iter()
+        let op = ops
+            .as_array()
+            .unwrap()
+            .iter()
             .find(|o| o["id"] == "todoist.projects.list")
             .unwrap();
         assert_eq!(op["capability"], "todoist.projects.read");

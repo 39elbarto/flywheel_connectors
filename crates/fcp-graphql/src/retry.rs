@@ -330,9 +330,7 @@ mod tests {
     #[test]
     fn retry_strategy_debug() {
         assert!(format!("{:?}", RetryStrategy::Never).contains("Never"));
-        assert!(
-            format!("{:?}", RetryStrategy::IdempotentOnly).contains("IdempotentOnly")
-        );
+        assert!(format!("{:?}", RetryStrategy::IdempotentOnly).contains("IdempotentOnly"));
         assert!(format!("{:?}", RetryStrategy::Always).contains("Always"));
     }
 

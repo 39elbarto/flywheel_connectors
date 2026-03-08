@@ -1090,7 +1090,16 @@ mod tests {
 
         let event = handler.verify_and_parse(&headers, &body).unwrap();
         assert_eq!(event.id, "large_del");
-        assert!(event.payload.get("commits").unwrap().as_array().unwrap().len() == 100);
+        assert!(
+            event
+                .payload
+                .get("commits")
+                .unwrap()
+                .as_array()
+                .unwrap()
+                .len()
+                == 100
+        );
     }
 
     #[test]
@@ -1132,8 +1141,7 @@ mod tests {
 
     #[test]
     fn test_stripe_zero_tolerance() {
-        let handler =
-            StripeWebhook::new("secret").with_timestamp_tolerance(Duration::from_secs(0));
+        let handler = StripeWebhook::new("secret").with_timestamp_tolerance(Duration::from_secs(0));
         let now = Utc::now().timestamp();
         // With zero tolerance, only exact match would pass
         // Due to timing, now should match exactly

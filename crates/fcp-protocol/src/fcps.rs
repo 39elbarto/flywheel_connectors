@@ -2661,12 +2661,8 @@ mod tests {
         let header = test_header();
         let symbols = vec![test_symbol(0, 64), test_symbol(1, 64)];
         let frame = FcpsFrame { header, symbols };
-        let signed = SignedFcpsFrame::new(
-            frame,
-            TailscaleNodeId::new("dbg-node"),
-            1000,
-            &signing_key,
-        );
+        let signed =
+            SignedFcpsFrame::new(frame, TailscaleNodeId::new("dbg-node"), 1000, &signing_key);
         let dbg = format!("{signed:?}");
         assert!(dbg.contains("SignedFcpsFrame"));
     }

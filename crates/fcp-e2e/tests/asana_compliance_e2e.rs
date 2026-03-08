@@ -12,18 +12,19 @@
 #![allow(clippy::too_many_lines)]
 
 use chrono::{Duration as ChronoDuration, Utc};
+use fcp_asana::connector::AsanaConnector;
 use fcp_conformance::DynamicSuite;
 use fcp_core::{
     AgentHint, CapabilityGrant, CapabilityId, CapabilityToken, CapabilityVerifier, ConnectorId,
     ConnectorMetrics, FcpConnector, FcpError, HandshakeRequest, HandshakeResponse, HealthSnapshot,
-    IdempotencyClass, InstanceId, Introspection, InvokeRequest, InvokeResponse, InvokeStatus, OperationId, OperationInfo, RequestId,
-    RiskLevel, SafetyTier, SessionId, ShutdownRequest, SimulateRequest, SimulateResponse, SubscribeRequest,
-    SubscribeResponse, UnsubscribeRequest, ZoneId,
+    IdempotencyClass, InstanceId, Introspection, InvokeRequest, InvokeResponse, InvokeStatus,
+    OperationId, OperationInfo, RequestId, RiskLevel, SafetyTier, SessionId, ShutdownRequest,
+    SimulateRequest, SimulateResponse, SubscribeRequest, SubscribeResponse, UnsubscribeRequest,
+    ZoneId,
 };
 use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
 use fcp_e2e::{ComplianceSuite, ConnectorSuite, E2eRunner, InvokeExpectations};
 use fcp_manifest::ConnectorManifest;
-use fcp_asana::connector::AsanaConnector;
 use fcp_testkit::MockApiServer;
 use serde_json::json;
 use wiremock::{
@@ -45,7 +46,6 @@ impl AsanaConnectorAdapter {
             id: ConnectorId::from_static("asana"),
             instance_id: InstanceId::new(),
             verifier: None,
-
         }
     }
 }
@@ -267,10 +267,8 @@ fn asana_manifest_with_hash() -> String {
 }
 
 fn asana_manifest_toml() -> toml::Value {
-    toml::from_str(include_str!(
-        "../../../connectors/asana/manifest.toml"
-    ))
-    .expect("Asana manifest TOML")
+    toml::from_str(include_str!("../../../connectors/asana/manifest.toml"))
+        .expect("Asana manifest TOML")
 }
 
 fn asana_config(base_url: &str) -> serde_json::Value {
@@ -397,11 +395,7 @@ async fn asana_default_deny_compliance_suite_passes() {
         "asana.workspaces.read",
         &["asana.workspaces.list"],
     );
-    let invoke = invoke_request(
-        "asana.tasks.delete",
-        json!({ "task_gid": "12345" }),
-        token,
-    );
+    let invoke = invoke_request("asana.tasks.delete", json!({ "task_gid": "12345" }), token);
 
     let dynamic = DynamicSuite {
         config: asana_config(&mock.base_url()),
@@ -414,11 +408,7 @@ async fn asana_default_deny_compliance_suite_passes() {
         require_capability_denial: true,
         require_decision_receipt: false,
     };
-    let suite = ComplianceSuite::new(
-        "asana_default_deny",
-        asana_manifest_with_hash(),
-        dynamic,
-    );
+    let suite = ComplianceSuite::new("asana_default_deny", asana_manifest_with_hash(), dynamic);
 
     let mut runner = E2eRunner::new("fcp-e2e-asana");
     let report = runner
@@ -439,9 +429,7 @@ async fn asana_happy_path_compliance_suite_passes() {
     // Mount mock for GET /workspaces (list_workspaces)
     Mock::given(method("GET"))
         .and(path_regex(r"^/workspaces.*"))
-        .respond_with(
-            ResponseTemplate::new(200).set_body_json(json!({ "data": [] })),
-        )
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "data": [] })))
         .mount(mock.inner())
         .await;
 
@@ -456,11 +444,7 @@ async fn asana_happy_path_compliance_suite_passes() {
         "asana.workspaces.read",
         &["asana.workspaces.list"],
     );
-    let invoke = invoke_request(
-        "asana.workspaces.list",
-        json!({}),
-        token,
-    );
+    let invoke = invoke_request("asana.workspaces.list", json!({}), token);
 
     let suite = ConnectorSuite {
         test_name: "asana_happy_path".to_string(),

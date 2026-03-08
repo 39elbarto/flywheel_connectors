@@ -451,7 +451,10 @@ mod tests {
         ];
         for ns in schemas {
             let schema = test_schema(ns, "Test");
-            assert!(requires_storage(&schema), "schema {ns} should require storage");
+            assert!(
+                requires_storage(&schema),
+                "schema {ns} should require storage"
+            );
         }
     }
 
@@ -469,7 +472,10 @@ mod tests {
         ];
         for ns in schemas {
             let schema = test_schema(ns, "Test");
-            assert!(!requires_storage(&schema), "schema {ns} should be ephemeral");
+            assert!(
+                !requires_storage(&schema),
+                "schema {ns} should be ephemeral"
+            );
         }
     }
 

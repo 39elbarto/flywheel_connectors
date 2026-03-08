@@ -13,24 +13,24 @@
 
 use chrono::{Duration as ChronoDuration, Utc};
 use fcp_conformance::DynamicSuite;
+use fcp_core::InvokeStatus;
 use fcp_core::{
     AgentHint, CapabilityGrant, CapabilityId, CapabilityToken, CapabilityVerifier, ConnectorId,
     ConnectorMetrics, FcpConnector, FcpError, HandshakeRequest, HandshakeResponse, HealthSnapshot,
-    IdempotencyClass, InstanceId, Introspection, InvokeRequest, InvokeResponse, OperationId, OperationInfo, RequestId, RiskLevel, SafetyTier, SessionId,
-    ShutdownRequest, SimulateRequest, SimulateResponse, SubscribeRequest, SubscribeResponse,
-    UnsubscribeRequest, ZoneId,
+    IdempotencyClass, InstanceId, Introspection, InvokeRequest, InvokeResponse, OperationId,
+    OperationInfo, RequestId, RiskLevel, SafetyTier, SessionId, ShutdownRequest, SimulateRequest,
+    SimulateResponse, SubscribeRequest, SubscribeResponse, UnsubscribeRequest, ZoneId,
 };
 use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
-use fcp_core::InvokeStatus;
+use fcp_datadog::connector::DatadogConnector;
 use fcp_e2e::{ComplianceSuite, ConnectorSuite, E2eRunner, InvokeExpectations};
+use fcp_manifest::ConnectorManifest;
+use fcp_testkit::MockApiServer;
+use serde_json::json;
 use wiremock::{
     Mock, ResponseTemplate,
     matchers::{method, path_regex},
 };
-use fcp_manifest::ConnectorManifest;
-use fcp_datadog::connector::DatadogConnector;
-use fcp_testkit::MockApiServer;
-use serde_json::json;
 
 struct DatadogConnectorAdapter {
     connector: DatadogConnector,
@@ -46,7 +46,6 @@ impl DatadogConnectorAdapter {
             id: ConnectorId::from_static("datadog"),
             instance_id: InstanceId::new(),
             verifier: None,
-
         }
     }
 }
@@ -271,10 +270,8 @@ fn datadog_manifest_with_hash() -> String {
 }
 
 fn datadog_manifest_toml() -> toml::Value {
-    toml::from_str(include_str!(
-        "../../../connectors/datadog/manifest.toml"
-    ))
-    .expect("Datadog manifest TOML")
+    toml::from_str(include_str!("../../../connectors/datadog/manifest.toml"))
+        .expect("Datadog manifest TOML")
 }
 
 fn datadog_config(base_url: &str) -> serde_json::Value {
@@ -443,13 +440,11 @@ async fn datadog_allow_valid_token_connector_suite_passes() {
 
     Mock::given(method("GET"))
         .and(path_regex(r"^/events.*"))
-        .respond_with(
-            ResponseTemplate::new(200).set_body_json(json!({
-                "events": [
-                    {"id": 1, "title": "Test Event", "text": "event text"}
-                ]
-            })),
-        )
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "events": [
+                {"id": 1, "title": "Test Event", "text": "event text"}
+            ]
+        })))
         .mount(mock.inner())
         .await;
 
@@ -519,10 +514,7 @@ fn datadog_manifest_network_guard_allows_and_denies() {
         "Datadog manifest should declare 8 operations"
     );
 
-    let expected_hosts = vec![
-        "*.datadoghq.com".to_string(),
-        "*.datadoghq.eu".to_string(),
-    ];
+    let expected_hosts = vec!["*.datadoghq.com".to_string(), "*.datadoghq.eu".to_string()];
 
     for operation_name in operations.keys() {
         let host_allow = operation_host_allow_list(&manifest, operation_name);

@@ -919,9 +919,7 @@ mod tests {
 
     #[test]
     fn retry_after_zero_is_some() {
-        let err = NotionError::RateLimited {
-            retry_after_ms: 0,
-        };
+        let err = NotionError::RateLimited { retry_after_ms: 0 };
         assert_eq!(err.retry_after(), Some(std::time::Duration::from_millis(0)));
     }
 
@@ -986,9 +984,7 @@ mod tests {
             retry_after_ms: 3000,
         };
         match err.to_fcp_error() {
-            FcpError::RateLimited {
-                retry_after_ms, ..
-            } => {
+            FcpError::RateLimited { retry_after_ms, .. } => {
                 assert_eq!(retry_after_ms, 3000);
             }
             other => panic!("expected RateLimited, got {other:?}"),

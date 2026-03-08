@@ -1066,7 +1066,11 @@ mod tests {
     fn operations_all_have_capability() {
         let ops = operations_info();
         for op in ops.as_array().unwrap() {
-            assert!(op["capability"].as_str().is_some(), "op {} missing capability", op["id"]);
+            assert!(
+                op["capability"].as_str().is_some(),
+                "op {} missing capability",
+                op["id"]
+            );
         }
     }
 
@@ -1074,7 +1078,11 @@ mod tests {
     fn operations_all_have_safety_tier() {
         let ops = operations_info();
         for op in ops.as_array().unwrap() {
-            assert!(op["safety_tier"].as_str().is_some(), "op {} missing safety_tier", op["id"]);
+            assert!(
+                op["safety_tier"].as_str().is_some(),
+                "op {} missing safety_tier",
+                op["id"]
+            );
         }
     }
 

@@ -1131,9 +1131,7 @@ mod tests {
     #[test]
     fn test_parse_interleaved_events_and_comments() {
         let mut parser = SseParser::new();
-        let data = Bytes::from(
-            ": heartbeat\ndata: a\n\n: another heartbeat\ndata: b\n\n",
-        );
+        let data = Bytes::from(": heartbeat\ndata: a\n\n: another heartbeat\ndata: b\n\n");
         let events = parser.parse(&data);
         assert_eq!(events.len(), 2);
         assert_eq!(events[0].data, "a");

@@ -284,9 +284,7 @@ impl GitLabConnector {
             .get("operation_id")
             .and_then(|v| v.as_str())
             .unwrap_or("");
-        let allowed = operations_info()
-            .iter()
-            .any(|o| o.id.as_ref() == operation);
+        let allowed = operations_info().iter().any(|o| o.id.as_ref() == operation);
         Ok(
             json!({ "allowed": allowed, "reason": if allowed { "Operation supported" } else { "Unknown operation" } }),
         )
@@ -878,9 +876,18 @@ mod tests {
 
     #[test]
     fn doctor_status_serializes_lowercase() {
-        assert_eq!(serde_json::to_value(DoctorStatus::Healthy).unwrap(), "healthy");
-        assert_eq!(serde_json::to_value(DoctorStatus::Degraded).unwrap(), "degraded");
-        assert_eq!(serde_json::to_value(DoctorStatus::Unhealthy).unwrap(), "unhealthy");
+        assert_eq!(
+            serde_json::to_value(DoctorStatus::Healthy).unwrap(),
+            "healthy"
+        );
+        assert_eq!(
+            serde_json::to_value(DoctorStatus::Degraded).unwrap(),
+            "degraded"
+        );
+        assert_eq!(
+            serde_json::to_value(DoctorStatus::Unhealthy).unwrap(),
+            "unhealthy"
+        );
     }
 
     #[test]
@@ -1057,8 +1064,7 @@ mod tests {
 
     #[test]
     fn config_debug_and_clone() {
-        let config =
-            GitLabConfig::from_params(&json!({"private_token": "glpat-test"})).unwrap();
+        let config = GitLabConfig::from_params(&json!({"private_token": "glpat-test"})).unwrap();
         let cloned = config.clone();
         assert_eq!(config.base_url, DEFAULT_BASE_URL);
         assert_eq!(cloned.base_url, DEFAULT_BASE_URL);

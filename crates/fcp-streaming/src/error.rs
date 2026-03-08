@@ -426,14 +426,8 @@ mod tests {
 
     #[test]
     fn buffer_overflow_zero_values() {
-        let e = StreamError::BufferOverflow {
-            size: 0,
-            limit: 0,
-        };
-        assert_eq!(
-            e.to_string(),
-            "Buffer overflow: 0 bytes exceeds limit of 0"
-        );
+        let e = StreamError::BufferOverflow { size: 0, limit: 0 };
+        assert_eq!(e.to_string(), "Buffer overflow: 0 bytes exceeds limit of 0");
     }
 
     #[test]
@@ -448,9 +442,7 @@ mod tests {
 
     #[test]
     fn reconnect_limit_max_attempts() {
-        let e = StreamError::ReconnectLimitExceeded {
-            attempts: u32::MAX,
-        };
+        let e = StreamError::ReconnectLimitExceeded { attempts: u32::MAX };
         assert!(e.to_string().contains(&u32::MAX.to_string()));
     }
 

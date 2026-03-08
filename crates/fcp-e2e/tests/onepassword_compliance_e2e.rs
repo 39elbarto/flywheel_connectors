@@ -16,9 +16,9 @@ use fcp_conformance::DynamicSuite;
 use fcp_core::{
     AgentHint, CapabilityGrant, CapabilityId, CapabilityToken, CapabilityVerifier, ConnectorId,
     ConnectorMetrics, FcpConnector, FcpError, HandshakeRequest, HandshakeResponse, HealthSnapshot,
-    IdempotencyClass, InstanceId, Introspection, InvokeRequest, InvokeResponse, OperationId, OperationInfo, RequestId, RiskLevel, SafetyTier, SessionId,
-    ShutdownRequest, SimulateRequest, SimulateResponse, SubscribeRequest, SubscribeResponse,
-    UnsubscribeRequest, ZoneId,
+    IdempotencyClass, InstanceId, Introspection, InvokeRequest, InvokeResponse, OperationId,
+    OperationInfo, RequestId, RiskLevel, SafetyTier, SessionId, ShutdownRequest, SimulateRequest,
+    SimulateResponse, SubscribeRequest, SubscribeResponse, UnsubscribeRequest, ZoneId,
 };
 use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
 use fcp_e2e::{ComplianceSuite, ConnectorSuite, E2eRunner, InvokeExpectations};
@@ -27,8 +27,8 @@ use fcp_onepassword::connector::OnePasswordConnector;
 use fcp_testkit::MockApiServer;
 use serde_json::json;
 use wiremock::{
-    matchers::{method, path_regex},
     Mock, ResponseTemplate,
+    matchers::{method, path_regex},
 };
 
 struct OnePasswordConnectorAdapter {
@@ -45,7 +45,6 @@ impl OnePasswordConnectorAdapter {
             id: ConnectorId::from_static("1password"),
             instance_id: InstanceId::new(),
             verifier: None,
-
         }
     }
 }
@@ -265,10 +264,8 @@ fn onepassword_manifest_with_hash() -> String {
 }
 
 fn onepassword_manifest_toml() -> toml::Value {
-    toml::from_str(include_str!(
-        "../../../connectors/1password/manifest.toml"
-    ))
-    .expect("1Password manifest TOML")
+    toml::from_str(include_str!("../../../connectors/1password/manifest.toml"))
+        .expect("1Password manifest TOML")
 }
 
 fn onepassword_config(base_url: &str) -> serde_json::Value {
@@ -454,11 +451,7 @@ async fn onepassword_happy_path_compliance_suite_passes() {
         "1password.vaults.read",
         &["1password.vaults.list"],
     );
-    let invoke = invoke_request(
-        "1password.vaults.list",
-        json!({}),
-        token,
-    );
+    let invoke = invoke_request("1password.vaults.list", json!({}), token);
 
     let suite = ConnectorSuite {
         test_name: "onepassword_allow_valid_token".to_string(),
@@ -503,10 +496,7 @@ fn onepassword_manifest_network_guard_allows_and_denies() {
         "1Password manifest should declare 5 operations"
     );
 
-    let expected_hosts = vec![
-        "*.1password.com".to_string(),
-        "*.b5dev.com".to_string(),
-    ];
+    let expected_hosts = vec!["*.1password.com".to_string(), "*.b5dev.com".to_string()];
 
     for operation_name in operations.keys() {
         let host_allow = operation_host_allow_list(&manifest, operation_name);

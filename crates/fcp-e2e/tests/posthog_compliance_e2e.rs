@@ -16,9 +16,9 @@ use fcp_conformance::DynamicSuite;
 use fcp_core::{
     AgentHint, CapabilityGrant, CapabilityId, CapabilityToken, CapabilityVerifier, ConnectorId,
     ConnectorMetrics, FcpConnector, FcpError, HandshakeRequest, HandshakeResponse, HealthSnapshot,
-    IdempotencyClass, InstanceId, Introspection, InvokeRequest, InvokeResponse, OperationId, OperationInfo, RequestId, RiskLevel, SafetyTier, SessionId,
-    ShutdownRequest, SimulateRequest, SimulateResponse, SubscribeRequest, SubscribeResponse,
-    UnsubscribeRequest, ZoneId,
+    IdempotencyClass, InstanceId, Introspection, InvokeRequest, InvokeResponse, OperationId,
+    OperationInfo, RequestId, RiskLevel, SafetyTier, SessionId, ShutdownRequest, SimulateRequest,
+    SimulateResponse, SubscribeRequest, SubscribeResponse, UnsubscribeRequest, ZoneId,
 };
 use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
 use fcp_e2e::{ComplianceSuite, ConnectorSuite, E2eRunner, InvokeExpectations};
@@ -27,8 +27,8 @@ use fcp_posthog::connector::PostHogConnector;
 use fcp_testkit::MockApiServer;
 use serde_json::json;
 use wiremock::{
-    matchers::{method, path_regex},
     Mock, ResponseTemplate,
+    matchers::{method, path_regex},
 };
 
 struct PostHogConnectorAdapter {
@@ -45,7 +45,6 @@ impl PostHogConnectorAdapter {
             id: ConnectorId::from_static("posthog"),
             instance_id: InstanceId::new(),
             verifier: None,
-
         }
     }
 }
@@ -255,10 +254,8 @@ fn posthog_manifest_with_hash() -> String {
 }
 
 fn posthog_manifest_toml() -> toml::Value {
-    toml::from_str(include_str!(
-        "../../../connectors/posthog/manifest.toml"
-    ))
-    .expect("PostHog manifest TOML")
+    toml::from_str(include_str!("../../../connectors/posthog/manifest.toml"))
+        .expect("PostHog manifest TOML")
 }
 
 fn posthog_config(base_url: &str) -> serde_json::Value {
@@ -386,11 +383,7 @@ async fn posthog_default_deny_compliance_suite_passes() {
         "posthog.events.read",
         &["posthog.events.query"],
     );
-    let invoke = invoke_request(
-        "posthog.feature_flags.list",
-        json!({}),
-        token,
-    );
+    let invoke = invoke_request("posthog.feature_flags.list", json!({}), token);
 
     let dynamic = DynamicSuite {
         config: posthog_config(&mock.base_url()),
@@ -428,9 +421,7 @@ async fn posthog_happy_path_compliance_suite_passes() {
     // Mount mock for POST /projects/12345/query
     Mock::given(method("POST"))
         .and(path_regex(r"^/projects/.+/query"))
-        .respond_with(
-            ResponseTemplate::new(200).set_body_json(json!({"results": []})),
-        )
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"results": []})))
         .mount(mock.inner())
         .await;
 

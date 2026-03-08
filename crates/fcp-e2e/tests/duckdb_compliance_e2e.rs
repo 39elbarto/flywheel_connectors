@@ -13,24 +13,24 @@
 
 use chrono::{Duration as ChronoDuration, Utc};
 use fcp_conformance::DynamicSuite;
+use fcp_core::InvokeStatus;
 use fcp_core::{
     AgentHint, CapabilityGrant, CapabilityId, CapabilityToken, CapabilityVerifier, ConnectorId,
     ConnectorMetrics, FcpConnector, FcpError, HandshakeRequest, HandshakeResponse, HealthSnapshot,
-    IdempotencyClass, InstanceId, Introspection, InvokeRequest, InvokeResponse, OperationId, OperationInfo, RequestId, RiskLevel, SafetyTier, SessionId,
-    ShutdownRequest, SimulateRequest, SimulateResponse, SubscribeRequest, SubscribeResponse,
-    UnsubscribeRequest, ZoneId,
+    IdempotencyClass, InstanceId, Introspection, InvokeRequest, InvokeResponse, OperationId,
+    OperationInfo, RequestId, RiskLevel, SafetyTier, SessionId, ShutdownRequest, SimulateRequest,
+    SimulateResponse, SubscribeRequest, SubscribeResponse, UnsubscribeRequest, ZoneId,
 };
 use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
 use fcp_duckdb::connector::DuckDbConnector;
-use fcp_core::InvokeStatus;
 use fcp_e2e::{ComplianceSuite, ConnectorSuite, E2eRunner, InvokeExpectations};
+use fcp_manifest::ConnectorManifest;
+use fcp_testkit::MockApiServer;
+use serde_json::json;
 use wiremock::{
     Mock, ResponseTemplate,
     matchers::{method, path_regex},
 };
-use fcp_manifest::ConnectorManifest;
-use fcp_testkit::MockApiServer;
-use serde_json::json;
 
 struct DuckDbConnectorAdapter {
     connector: DuckDbConnector,
@@ -46,7 +46,6 @@ impl DuckDbConnectorAdapter {
             id: ConnectorId::from_static("duckdb"),
             instance_id: InstanceId::new(),
             verifier: None,
-
         }
     }
 }
@@ -272,10 +271,8 @@ fn duckdb_manifest_with_hash() -> String {
 }
 
 fn duckdb_manifest_toml() -> toml::Value {
-    toml::from_str(include_str!(
-        "../../../connectors/duckdb/manifest.toml"
-    ))
-    .expect("DuckDB manifest TOML")
+    toml::from_str(include_str!("../../../connectors/duckdb/manifest.toml"))
+        .expect("DuckDB manifest TOML")
 }
 
 fn duckdb_config(base_url: &str) -> serde_json::Value {
@@ -393,15 +390,8 @@ async fn duckdb_default_deny_compliance_suite_passes() {
 
     let mut connector = DuckDbConnectorAdapter::new();
     let signing_key = Ed25519SigningKey::generate();
-    let handshake = handshake_request(
-        signing_key.verifying_key().to_bytes(),
-        &["duckdb.read"],
-    );
-    let token = build_token(
-        &signing_key,
-        "duckdb.read",
-        &["duckdb.databases.list"],
-    );
+    let handshake = handshake_request(signing_key.verifying_key().to_bytes(), &["duckdb.read"]);
+    let token = build_token(&signing_key, "duckdb.read", &["duckdb.databases.list"]);
     let invoke = invoke_request(
         "duckdb.tables.list",
         json!({ "database": "analytics" }),
@@ -419,11 +409,7 @@ async fn duckdb_default_deny_compliance_suite_passes() {
         require_capability_denial: true,
         require_decision_receipt: false,
     };
-    let suite = ComplianceSuite::new(
-        "duckdb_default_deny",
-        duckdb_manifest_with_hash(),
-        dynamic,
-    );
+    let suite = ComplianceSuite::new("duckdb_default_deny", duckdb_manifest_with_hash(), dynamic);
 
     let mut runner = E2eRunner::new("fcp-e2e-duckdb");
     let report = runner
@@ -451,20 +437,9 @@ async fn duckdb_allow_valid_token_connector_suite_passes() {
 
     let mut connector = DuckDbConnectorAdapter::new();
     let signing_key = Ed25519SigningKey::generate();
-    let handshake = handshake_request(
-        signing_key.verifying_key().to_bytes(),
-        &["duckdb.read"],
-    );
-    let token = build_token(
-        &signing_key,
-        "duckdb.read",
-        &["duckdb.databases.list"],
-    );
-    let invoke = invoke_request(
-        "duckdb.databases.list",
-        json!({}),
-        token,
-    );
+    let handshake = handshake_request(signing_key.verifying_key().to_bytes(), &["duckdb.read"]);
+    let token = build_token(&signing_key, "duckdb.read", &["duckdb.databases.list"]);
+    let invoke = invoke_request("duckdb.databases.list", json!({}), token);
 
     let suite = ConnectorSuite {
         test_name: "duckdb_allow_valid_token".to_string(),
@@ -488,10 +463,15 @@ async fn duckdb_allow_valid_token_connector_suite_passes() {
         .expect("connector suite run");
 
     assert!(report.passed, "allow valid token should pass: {report:#?}");
-    let invoke_entry = report.logs.iter()
+    let invoke_entry = report
+        .logs
+        .iter()
         .find(|e| e.context.get("operation") == Some(&json!("invoke")))
         .expect("invoke log entry");
-    assert_eq!(invoke_entry.result, "pass", "invoke should pass: {invoke_entry:#?}");
+    assert_eq!(
+        invoke_entry.result, "pass",
+        "invoke should pass: {invoke_entry:#?}"
+    );
     assert_eq!(
         invoke_entry.context.get("invoke_status"),
         Some(&json!(format!("{:?}", InvokeStatus::Ok)))

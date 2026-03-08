@@ -534,9 +534,6 @@ mod tests {
         let cloned = prompts.clone();
         assert_eq!(prompts.confirmed_no_backup, cloned.confirmed_no_backup);
         assert_eq!(prompts.confirmed_data_loss, cloned.confirmed_data_loss);
-        assert_eq!(
-            prompts.expected_fingerprint,
-            cloned.expected_fingerprint
-        );
+        assert_eq!(prompts.expected_fingerprint, cloned.expected_fingerprint);
     }
 }

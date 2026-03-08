@@ -235,11 +235,7 @@ impl RedisClient {
     }
 
     /// HSET key field value [field value ...]
-    pub async fn hset(
-        &self,
-        key: &str,
-        fields: &[(&str, &str)],
-    ) -> RedisResult<serde_json::Value> {
+    pub async fn hset(&self, key: &str, fields: &[(&str, &str)]) -> RedisResult<serde_json::Value> {
         let mut args: Vec<&str> = vec!["HSET", key];
         for (f, v) in fields {
             args.push(f);
@@ -261,12 +257,7 @@ impl RedisClient {
     }
 
     /// LRANGE key start stop
-    pub async fn lrange(
-        &self,
-        key: &str,
-        start: i64,
-        stop: i64,
-    ) -> RedisResult<serde_json::Value> {
+    pub async fn lrange(&self, key: &str, start: i64, stop: i64) -> RedisResult<serde_json::Value> {
         let start_str = start.to_string();
         let stop_str = stop.to_string();
         self.execute_command(&["LRANGE", key, &start_str, &stop_str])

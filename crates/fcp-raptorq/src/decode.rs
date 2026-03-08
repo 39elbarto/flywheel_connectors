@@ -1289,12 +1289,8 @@ mod tests {
 
     #[test]
     fn admission_controller_try_acquire_all_slots() {
-        let controller = DecodeAdmissionController::with_limits(
-            3,
-            1024 * 1024,
-            Duration::from_secs(30),
-            10000,
-        );
+        let controller =
+            DecodeAdmissionController::with_limits(3, 1024 * 1024, Duration::from_secs(30), 10000);
 
         let _p1 = controller.try_acquire().unwrap();
         let _p2 = controller.try_acquire().unwrap();
@@ -1306,12 +1302,8 @@ mod tests {
 
     #[test]
     fn admission_controller_acquire_error_message() {
-        let controller = DecodeAdmissionController::with_limits(
-            2,
-            1024 * 1024,
-            Duration::from_secs(30),
-            10000,
-        );
+        let controller =
+            DecodeAdmissionController::with_limits(2, 1024 * 1024, Duration::from_secs(30), 10000);
 
         let _p1 = controller.acquire().unwrap();
         let _p2 = controller.acquire().unwrap();
@@ -1330,12 +1322,8 @@ mod tests {
 
     #[test]
     fn permit_buffer_multiple_symbols() {
-        let controller = DecodeAdmissionController::with_limits(
-            1,
-            10_000,
-            Duration::from_secs(30),
-            100,
-        );
+        let controller =
+            DecodeAdmissionController::with_limits(1, 10_000, Duration::from_secs(30), 100);
         let mut permit = controller.try_acquire().unwrap();
 
         for i in 0..10 {
@@ -1366,12 +1354,8 @@ mod tests {
 
     #[test]
     fn controller_clone_shares_active_counter() {
-        let controller = DecodeAdmissionController::with_limits(
-            4,
-            1024 * 1024,
-            Duration::from_secs(30),
-            10000,
-        );
+        let controller =
+            DecodeAdmissionController::with_limits(4, 1024 * 1024, Duration::from_secs(30), 10000);
         let cloned = controller.clone();
 
         let _p = controller.try_acquire().unwrap();

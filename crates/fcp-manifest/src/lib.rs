@@ -5091,11 +5091,11 @@ deny_ptrace = true
         let unchecked = ConnectorManifest::parse_str_unchecked(&test_manifest_toml(&placeholder))
             .expect("unchecked parse");
         let cloned = unchecked.clone();
-        assert_eq!(unchecked.connector.id.as_str(), cloned.connector.id.as_str());
         assert_eq!(
-            unchecked.connector.name,
-            cloned.connector.name
+            unchecked.connector.id.as_str(),
+            cloned.connector.id.as_str()
         );
+        assert_eq!(unchecked.connector.name, cloned.connector.name);
     }
 
     #[test]
@@ -5136,8 +5136,7 @@ deny_ptrace = true
     #[test]
     fn manifest_section_rejects_wrong_format() {
         let placeholder = format!("blake3-256:{INTERFACE_HASH_DOMAIN}:{}", "0".repeat(64));
-        let toml = test_manifest_toml(&placeholder)
-            .replace("fcp-connector-manifest", "bad-format");
+        let toml = test_manifest_toml(&placeholder).replace("fcp-connector-manifest", "bad-format");
         let err = ConnectorManifest::parse_str_unchecked(&toml);
         // Should parse but then fail validation
         if let Ok(m) = err {
@@ -5200,9 +5199,7 @@ deny_ptrace = true
         let with_hash = test_manifest_toml(&hash.to_string())
             .replace("name = \"Telegram Connector\"", "name = \"   \"");
         let err = ConnectorManifest::parse_str(&with_hash).unwrap_err();
-        assert!(
-            matches!(err, ManifestError::Invalid { field, .. } if field == "connector.name")
-        );
+        assert!(matches!(err, ManifestError::Invalid { field, .. } if field == "connector.name"));
     }
 
     #[test]
@@ -5231,12 +5228,16 @@ deny_ptrace = true
     #[test]
     fn zones_section_home_in_forbidden_rejected() {
         let placeholder = format!("blake3-256:{INTERFACE_HASH_DOMAIN}:{}", "0".repeat(64));
-        let toml = test_manifest_toml(&placeholder)
-            .replace("forbidden = [\"z:public\"]", "forbidden = [\"z:community\"]");
+        let toml = test_manifest_toml(&placeholder).replace(
+            "forbidden = [\"z:public\"]",
+            "forbidden = [\"z:community\"]",
+        );
         let m = ConnectorManifest::parse_str_unchecked(&toml).unwrap();
         let hash = m.compute_interface_hash().unwrap();
-        let with_hash = test_manifest_toml(&hash.to_string())
-            .replace("forbidden = [\"z:public\"]", "forbidden = [\"z:community\"]");
+        let with_hash = test_manifest_toml(&hash.to_string()).replace(
+            "forbidden = [\"z:public\"]",
+            "forbidden = [\"z:community\"]",
+        );
         let err = ConnectorManifest::parse_str(&with_hash).unwrap_err();
         assert!(err.to_string().contains("home zone"));
     }
@@ -6015,12 +6016,17 @@ deny_ptrace = true
 
     #[test]
     fn lint_allows_single_segment_id() {
-        assert!(lint_capability_id_no_network_addressing("storage", "capabilities.required").is_ok());
+        assert!(
+            lint_capability_id_no_network_addressing("storage", "capabilities.required").is_ok()
+        );
     }
 
     #[test]
     fn lint_allows_two_segment_id_no_tld() {
-        assert!(lint_capability_id_no_network_addressing("storage.read", "capabilities.required").is_ok());
+        assert!(
+            lint_capability_id_no_network_addressing("storage.read", "capabilities.required")
+                .is_ok()
+        );
     }
 
     #[test]
@@ -6045,30 +6051,23 @@ deny_ptrace = true
 
     #[test]
     fn lint_rejects_hostname_tld_gov() {
-        let err = lint_capability_id_no_network_addressing(
-            "api.agency.gov",
-            "capabilities.required",
-        );
+        let err =
+            lint_capability_id_no_network_addressing("api.agency.gov", "capabilities.required");
         assert!(err.is_err());
         assert!(err.unwrap_err().to_string().contains(".gov"));
     }
 
     #[test]
     fn lint_rejects_hostname_tld_mil() {
-        let err = lint_capability_id_no_network_addressing(
-            "api.base.mil",
-            "capabilities.required",
-        );
+        let err = lint_capability_id_no_network_addressing("api.base.mil", "capabilities.required");
         assert!(err.is_err());
         assert!(err.unwrap_err().to_string().contains(".mil"));
     }
 
     #[test]
     fn lint_rejects_port_65535() {
-        let err = lint_capability_id_no_network_addressing(
-            "service:65535",
-            "capabilities.required",
-        );
+        let err =
+            lint_capability_id_no_network_addressing("service:65535", "capabilities.required");
         assert!(err.is_err());
         assert!(err.unwrap_err().to_string().contains("port number"));
     }
@@ -6076,20 +6075,16 @@ deny_ptrace = true
     #[test]
     fn lint_allows_port_zero_not_flagged() {
         // Port 0 is not valid (> 0 check), so it should pass through
-        let result = lint_capability_id_no_network_addressing(
-            "service:00",
-            "capabilities.required",
-        );
+        let result =
+            lint_capability_id_no_network_addressing("service:00", "capabilities.required");
         assert!(result.is_ok());
     }
 
     #[test]
     fn lint_allows_six_digit_after_colon_not_flagged() {
         // Six digits after colon is not in the 2-5 digit port range
-        let result = lint_capability_id_no_network_addressing(
-            "service:123456",
-            "capabilities.required",
-        );
+        let result =
+            lint_capability_id_no_network_addressing("service:123456", "capabilities.required");
         assert!(result.is_ok());
     }
 
@@ -6116,7 +6111,10 @@ deny_ptrace = true
         };
         let json = serde_json::to_string(&att).unwrap();
         let deserialized: SupplyChainAttestationRef = serde_json::from_str(&json).unwrap();
-        assert_eq!(deserialized.attestation_type, AttestationType::ReproducibleBuild);
+        assert_eq!(
+            deserialized.attestation_type,
+            AttestationType::ReproducibleBuild
+        );
         assert_eq!(deserialized.object_id, oid);
     }
 
@@ -6254,7 +6252,10 @@ deny_ptrace = true
                 "[connector.state]\nmodel = \"stateless\"\nstate_schema_version = \"1\"",
                 "",
             )
-            .replace("format = \"native\"", "format = \"native\"\nsingleton_writer = true");
+            .replace(
+                "format = \"native\"",
+                "format = \"native\"\nsingleton_writer = true",
+            );
         let m = ConnectorManifest::parse_str_unchecked(&toml);
         // This should parse, the legacy flag should work
         assert!(m.is_ok());
@@ -6575,7 +6576,10 @@ deny_ptrace = true
             transparency_log_entry: None,
         };
         let cloned = section.clone();
-        assert_eq!(section.publisher_signatures.len(), cloned.publisher_signatures.len());
+        assert_eq!(
+            section.publisher_signatures.len(),
+            cloned.publisher_signatures.len()
+        );
         let dbg = format!("{section:?}");
         assert!(dbg.contains("SignaturesSection"));
     }

@@ -353,9 +353,7 @@ impl DatadogConnector {
             .and_then(|v| v.as_str())
             .unwrap_or("");
 
-        let allowed = operations_info()
-            .iter()
-            .any(|o| o.id.as_ref() == operation);
+        let allowed = operations_info().iter().any(|o| o.id.as_ref() == operation);
 
         Ok(json!({
             "allowed": allowed,
@@ -1341,7 +1339,12 @@ mod tests {
     #[test]
     fn operations_write_ops_have_higher_risk() {
         for op in ops_json().as_array().unwrap() {
-            if op["capability"].as_str().unwrap().as_bytes().ends_with(b".write") {
+            if op["capability"]
+                .as_str()
+                .unwrap()
+                .as_bytes()
+                .ends_with(b".write")
+            {
                 let rl = op["risk_level"].as_str().unwrap();
                 assert!(
                     rl == "medium" || rl == "high",
@@ -1525,7 +1528,10 @@ mod tests {
         let ops = ops_json();
         for op in ops.as_array().unwrap() {
             let id = op["id"].as_str().unwrap();
-            assert!(id.starts_with("datadog."), "op {id} should start with datadog.");
+            assert!(
+                id.starts_with("datadog."),
+                "op {id} should start with datadog."
+            );
         }
     }
 

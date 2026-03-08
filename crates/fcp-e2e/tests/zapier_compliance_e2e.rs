@@ -13,19 +13,19 @@
 
 use chrono::{Duration as ChronoDuration, Utc};
 use fcp_conformance::DynamicSuite;
+use fcp_core::InvokeStatus;
 use fcp_core::{
     AgentHint, CapabilityGrant, CapabilityId, CapabilityToken, CapabilityVerifier, ConnectorId,
     ConnectorMetrics, FcpConnector, FcpError, HandshakeRequest, HandshakeResponse, HealthSnapshot,
-    IdempotencyClass, InstanceId, Introspection, InvokeRequest, InvokeResponse, OperationId, OperationInfo, RequestId, RiskLevel, SafetyTier, SessionId,
-    ShutdownRequest, SimulateRequest, SimulateResponse, SubscribeRequest, SubscribeResponse,
-    UnsubscribeRequest, ZoneId,
+    IdempotencyClass, InstanceId, Introspection, InvokeRequest, InvokeResponse, OperationId,
+    OperationInfo, RequestId, RiskLevel, SafetyTier, SessionId, ShutdownRequest, SimulateRequest,
+    SimulateResponse, SubscribeRequest, SubscribeResponse, UnsubscribeRequest, ZoneId,
 };
 use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
-use fcp_core::InvokeStatus;
 use fcp_e2e::{ComplianceSuite, ConnectorSuite, E2eRunner, InvokeExpectations};
 use fcp_manifest::ConnectorManifest;
-use fcp_zapier::connector::ZapierConnector;
 use fcp_testkit::MockApiServer;
+use fcp_zapier::connector::ZapierConnector;
 use serde_json::json;
 use wiremock::{
     Mock, ResponseTemplate,
@@ -46,7 +46,6 @@ impl ZapierConnectorAdapter {
             id: ConnectorId::from_static("zapier"),
             instance_id: InstanceId::new(),
             verifier: None,
-
         }
     }
 }
@@ -390,11 +389,7 @@ async fn zapier_default_deny_compliance_suite_passes() {
     );
     // Token grants zapier.zaps.read capability but only for zapier.zaps.list operation.
     // Invoke targets zapier.zaps.execute which requires zapier.zaps.write -- should be denied.
-    let token = build_token(
-        &signing_key,
-        "zapier.zaps.read",
-        &["zapier.zaps.list"],
-    );
+    let token = build_token(&signing_key, "zapier.zaps.read", &["zapier.zaps.list"]);
     let invoke = invoke_request(
         "zapier.zaps.execute",
         json!({ "action_id": "act_test", "params": {} }),
@@ -412,11 +407,7 @@ async fn zapier_default_deny_compliance_suite_passes() {
         require_capability_denial: true,
         require_decision_receipt: false,
     };
-    let suite = ComplianceSuite::new(
-        "zapier_default_deny",
-        zapier_manifest_with_hash(),
-        dynamic,
-    );
+    let suite = ComplianceSuite::new("zapier_default_deny", zapier_manifest_with_hash(), dynamic);
 
     let mut runner = E2eRunner::new("fcp-e2e-zapier");
     let report = runner
@@ -436,12 +427,10 @@ async fn zapier_allow_valid_token_connector_suite_passes() {
 
     Mock::given(method("GET"))
         .and(path_regex(r"^/exposed/.*"))
-        .respond_with(
-            ResponseTemplate::new(200).set_body_json(json!([
-                {"id": "zap_1", "name": "Email to Slack", "status": "on"},
-                {"id": "zap_2", "name": "Form to Sheet", "status": "on"}
-            ])),
-        )
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+            {"id": "zap_1", "name": "Email to Slack", "status": "on"},
+            {"id": "zap_2", "name": "Form to Sheet", "status": "on"}
+        ])))
         .mount(mock.inner())
         .await;
 
@@ -451,16 +440,8 @@ async fn zapier_allow_valid_token_connector_suite_passes() {
         signing_key.verifying_key().to_bytes(),
         &["zapier.zaps.read"],
     );
-    let token = build_token(
-        &signing_key,
-        "zapier.zaps.read",
-        &["zapier.zaps.list"],
-    );
-    let invoke = invoke_request(
-        "zapier.zaps.list",
-        json!({}),
-        token,
-    );
+    let token = build_token(&signing_key, "zapier.zaps.read", &["zapier.zaps.list"]);
+    let invoke = invoke_request("zapier.zaps.list", json!({}), token);
     let suite = ConnectorSuite {
         test_name: "zapier_allow_valid_token".to_string(),
         config: zapier_config(&mock.base_url()),
@@ -511,10 +492,7 @@ fn zapier_manifest_network_guard_allows_and_denies() {
         "Zapier manifest should declare 2 operations"
     );
 
-    let expected_hosts = vec![
-        "nla.zapier.com".to_string(),
-        "api.zapier.com".to_string(),
-    ];
+    let expected_hosts = vec!["nla.zapier.com".to_string(), "api.zapier.com".to_string()];
 
     for operation_name in operations.keys() {
         let host_allow = operation_host_allow_list(&manifest, operation_name);

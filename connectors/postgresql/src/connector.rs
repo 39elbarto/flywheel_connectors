@@ -494,11 +494,7 @@ impl PostgreSqlConnector {
             .and_then(serde_json::Value::as_array)
             .map(|arr| {
                 arr.iter()
-                    .map(|v| {
-                        v.as_array()
-                            .cloned()
-                            .unwrap_or_default()
-                    })
+                    .map(|v| v.as_array().cloned().unwrap_or_default())
                     .collect::<Vec<Vec<serde_json::Value>>>()
             })
             .unwrap_or_default();

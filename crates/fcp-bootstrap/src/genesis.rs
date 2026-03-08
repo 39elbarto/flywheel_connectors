@@ -1022,7 +1022,11 @@ mod tests {
         let genesis = GenesisState::create(&signing_key.verifying_key());
         let cbor = genesis.to_cbor().unwrap();
         let restored = GenesisState::from_cbor(&cbor).unwrap();
-        for (orig, rest) in genesis.initial_zones.iter().zip(restored.initial_zones.iter()) {
+        for (orig, rest) in genesis
+            .initial_zones
+            .iter()
+            .zip(restored.initial_zones.iter())
+        {
             assert_eq!(orig.zone_id, rest.zone_id);
             assert_eq!(orig.name, rest.name);
             assert_eq!(orig.integrity_level, rest.integrity_level);

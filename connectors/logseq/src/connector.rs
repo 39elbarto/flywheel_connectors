@@ -997,11 +997,7 @@ mod tests {
         let ops = operations_info();
         for op in ops.as_array().unwrap() {
             let summary = op["summary"].as_str().unwrap();
-            assert!(
-                !summary.is_empty(),
-                "op {:?} has empty summary",
-                op["id"]
-            );
+            assert!(!summary.is_empty(), "op {:?} has empty summary", op["id"]);
         }
     }
 
@@ -1050,14 +1046,12 @@ mod tests {
 
     #[test]
     fn doctor_result_clone_preserves_checks() {
-        let r = DoctorResult::from_checks(vec![
-            DoctorCheck {
-                name: "a".into(),
-                passed: true,
-                message: None,
-                critical: false,
-            },
-        ]);
+        let r = DoctorResult::from_checks(vec![DoctorCheck {
+            name: "a".into(),
+            passed: true,
+            message: None,
+            critical: false,
+        }]);
         let cloned = r.clone();
         assert_eq!(r.status, DoctorStatus::Healthy);
         assert_eq!(cloned.checks.len(), 1);

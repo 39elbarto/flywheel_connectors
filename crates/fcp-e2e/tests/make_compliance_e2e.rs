@@ -16,14 +16,15 @@ use fcp_conformance::DynamicSuite;
 use fcp_core::{
     AgentHint, CapabilityGrant, CapabilityId, CapabilityToken, CapabilityVerifier, ConnectorId,
     ConnectorMetrics, FcpConnector, FcpError, HandshakeRequest, HandshakeResponse, HealthSnapshot,
-    IdempotencyClass, InstanceId, Introspection, InvokeRequest, InvokeResponse, InvokeStatus, OperationId,
-    OperationInfo, RequestId, RiskLevel, SafetyTier, SessionId, ShutdownRequest, SimulateRequest, SimulateResponse, SubscribeRequest,
-    SubscribeResponse, UnsubscribeRequest, ZoneId,
+    IdempotencyClass, InstanceId, Introspection, InvokeRequest, InvokeResponse, InvokeStatus,
+    OperationId, OperationInfo, RequestId, RiskLevel, SafetyTier, SessionId, ShutdownRequest,
+    SimulateRequest, SimulateResponse, SubscribeRequest, SubscribeResponse, UnsubscribeRequest,
+    ZoneId,
 };
 use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
 use fcp_e2e::{ComplianceSuite, ConnectorSuite, E2eRunner, InvokeExpectations};
-use fcp_manifest::ConnectorManifest;
 use fcp_make::connector::MakeConnector;
+use fcp_manifest::ConnectorManifest;
 use fcp_testkit::MockApiServer;
 use serde_json::json;
 use wiremock::{
@@ -45,7 +46,6 @@ impl MakeConnectorAdapter {
             id: ConnectorId::from_static("make"),
             instance_id: InstanceId::new(),
             verifier: None,
-
         }
     }
 }
@@ -255,10 +255,8 @@ fn make_manifest_with_hash() -> String {
 }
 
 fn make_manifest_toml() -> toml::Value {
-    toml::from_str(include_str!(
-        "../../../connectors/make/manifest.toml"
-    ))
-    .expect("Make manifest TOML")
+    toml::from_str(include_str!("../../../connectors/make/manifest.toml"))
+        .expect("Make manifest TOML")
 }
 
 fn make_config(base_url: &str) -> serde_json::Value {
@@ -402,11 +400,7 @@ async fn make_default_deny_compliance_suite_passes() {
         require_capability_denial: true,
         require_decision_receipt: false,
     };
-    let suite = ComplianceSuite::new(
-        "make_default_deny",
-        make_manifest_with_hash(),
-        dynamic,
-    );
+    let suite = ComplianceSuite::new("make_default_deny", make_manifest_with_hash(), dynamic);
 
     let mut runner = E2eRunner::new("fcp-e2e-make");
     let report = runner
@@ -442,11 +436,7 @@ async fn make_happy_path_connector_suite_passes() {
         "make.scenarios.read",
         &["make.scenarios.list"],
     );
-    let invoke = invoke_request(
-        "make.scenarios.list",
-        json!({}),
-        token,
-    );
+    let invoke = invoke_request("make.scenarios.list", json!({}), token);
 
     let suite = ConnectorSuite {
         test_name: "make_happy_path".to_string(),

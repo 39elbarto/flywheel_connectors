@@ -906,10 +906,7 @@ mod tests {
 
     #[test]
     fn test_timer_guard_with_multiple_labels() {
-        let guard = TimerGuard::new(
-            "guarded_metric",
-            &[("a", "1"), ("b", "2"), ("c", "3")],
-        );
+        let guard = TimerGuard::new("guarded_metric", &[("a", "1"), ("b", "2"), ("c", "3")]);
         let elapsed = guard.elapsed_seconds();
         assert!(elapsed >= 0.0);
     }

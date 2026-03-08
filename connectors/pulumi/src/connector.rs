@@ -326,9 +326,7 @@ impl PulumiConnector {
             .and_then(serde_json::Value::as_str)
             .unwrap_or("");
 
-        let allowed = operations_info()
-            .iter()
-            .any(|o| o.id.as_ref() == operation);
+        let allowed = operations_info().iter().any(|o| o.id.as_ref() == operation);
 
         Ok(json!({
             "allowed": allowed,
@@ -488,9 +486,7 @@ fn operations_info() -> Vec<OperationInfo> {
             AgentHint {
                 when_to_use: "List Pulumi stacks.".into(),
                 common_mistakes: vec![],
-                examples: vec![
-                    r#"{"organization": "myorg", "project": "myproject"}"#.into(),
-                ],
+                examples: vec![r#"{"organization": "myorg", "project": "myproject"}"#.into()],
                 related: vec![
                     CapabilityId::from_static("pulumi.stacks.get"),
                     CapabilityId::from_static("pulumi.stacks.create"),
@@ -526,7 +522,8 @@ fn operations_info() -> Vec<OperationInfo> {
                 when_to_use: "Get details for a specific stack including outputs.".into(),
                 common_mistakes: vec![],
                 examples: vec![
-                    r#"{"organization": "myorg", "project": "myproject", "stack": "production"}"#.into(),
+                    r#"{"organization": "myorg", "project": "myproject", "stack": "production"}"#
+                        .into(),
                 ],
                 related: vec![
                     CapabilityId::from_static("pulumi.stacks.list"),
@@ -563,7 +560,8 @@ fn operations_info() -> Vec<OperationInfo> {
                 when_to_use: "Create a new Pulumi stack.".into(),
                 common_mistakes: vec![],
                 examples: vec![
-                    r#"{"organization": "myorg", "project": "myproject", "stack": "staging"}"#.into(),
+                    r#"{"organization": "myorg", "project": "myproject", "stack": "staging"}"#
+                        .into(),
                 ],
                 related: vec![
                     CapabilityId::from_static("pulumi.stacks.list"),
@@ -589,12 +587,15 @@ fn operations_info() -> Vec<OperationInfo> {
             SafetyTier::Dangerous,
             IdempotencyClass::Strict,
             AgentHint {
-                when_to_use: "Delete a stack. Cannot be undone; all resources and history are removed.".into(),
+                when_to_use:
+                    "Delete a stack. Cannot be undone; all resources and history are removed."
+                        .into(),
                 common_mistakes: vec![
                     "Deleting a stack with active resources — destroy first.".into(),
                 ],
                 examples: vec![
-                    r#"{"organization": "myorg", "project": "myproject", "stack": "staging"}"#.into(),
+                    r#"{"organization": "myorg", "project": "myproject", "stack": "staging"}"#
+                        .into(),
                 ],
                 related: vec![CapabilityId::from_static("pulumi.stacks.list")],
             },
@@ -626,7 +627,8 @@ fn operations_info() -> Vec<OperationInfo> {
                 when_to_use: "Export the full state of a stack for backup or inspection.".into(),
                 common_mistakes: vec![],
                 examples: vec![
-                    r#"{"organization": "myorg", "project": "myproject", "stack": "production"}"#.into(),
+                    r#"{"organization": "myorg", "project": "myproject", "stack": "production"}"#
+                        .into(),
                 ],
                 related: vec![CapabilityId::from_static("pulumi.stacks.get")],
             },
@@ -658,7 +660,8 @@ fn operations_info() -> Vec<OperationInfo> {
                 when_to_use: "List recent deployments/updates for a stack.".into(),
                 common_mistakes: vec![],
                 examples: vec![
-                    r#"{"organization": "myorg", "project": "myproject", "stack": "production"}"#.into(),
+                    r#"{"organization": "myorg", "project": "myproject", "stack": "production"}"#
+                        .into(),
                 ],
                 related: vec![CapabilityId::from_static("pulumi.stacks.get")],
             },
@@ -1208,7 +1211,11 @@ mod tests {
     fn operations_all_summaries_non_empty() {
         let ops = operations_info();
         for op in &ops {
-            assert!(!op.summary.is_empty(), "op {} has empty summary", op.id.as_ref());
+            assert!(
+                !op.summary.is_empty(),
+                "op {} has empty summary",
+                op.id.as_ref()
+            );
         }
     }
 
@@ -1313,7 +1320,11 @@ mod tests {
     fn operations_all_have_capabilities() {
         let ops = operations_info();
         for op in &ops {
-            assert!(!op.capability.as_ref().is_empty(), "op {} has empty capability", op.id.as_ref());
+            assert!(
+                !op.capability.as_ref().is_empty(),
+                "op {} has empty capability",
+                op.id.as_ref()
+            );
         }
     }
 
@@ -1322,7 +1333,10 @@ mod tests {
         let ops = operations_info();
         for op in &ops {
             let id = op.id.as_ref();
-            assert!(id.starts_with("pulumi."), "op {id} should start with pulumi.");
+            assert!(
+                id.starts_with("pulumi."),
+                "op {id} should start with pulumi."
+            );
         }
     }
 

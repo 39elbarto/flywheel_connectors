@@ -651,7 +651,10 @@ mod tests {
         let cloned = scanner.clone();
         // Both should produce same results
         let input = r#"{"email":"user@example.com"}"#;
-        assert_eq!(scanner.scan_jsonl(input).len(), cloned.scan_jsonl(input).len());
+        assert_eq!(
+            scanner.scan_jsonl(input).len(),
+            cloned.scan_jsonl(input).len()
+        );
     }
 
     #[test]

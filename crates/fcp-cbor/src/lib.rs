@@ -3367,10 +3367,7 @@ mod tests {
         }
 
         let schema = SchemaId::new("fcp.test", "Payload", Version::new(1, 0, 0));
-        let variants = vec![
-            Payload::Number(12345),
-            Payload::Label("test".to_string()),
-        ];
+        let variants = vec![Payload::Number(12345), Payload::Label("test".to_string())];
         for val in variants {
             let bytes = CanonicalSerializer::serialize(&val, &schema).unwrap();
             let decoded: Payload = CanonicalSerializer::deserialize(&bytes, &schema).unwrap();
@@ -3564,11 +3561,7 @@ mod tests {
     #[test]
     fn schema_hash_differs_by_prerelease() {
         let a = SchemaId::new("fcp.core", "Obj", Version::new(1, 0, 0));
-        let b = SchemaId::new(
-            "fcp.core",
-            "Obj",
-            Version::parse("1.0.0-alpha").unwrap(),
-        );
+        let b = SchemaId::new("fcp.core", "Obj", Version::parse("1.0.0-alpha").unwrap());
         assert_ne!(a.hash(), b.hash());
     }
 
@@ -3718,10 +3711,7 @@ mod tests {
             (Value::Text("z".into()), Value::Integer(2.into())),
             (Value::Text("a".into()), Value::Integer(1.into())),
         ]);
-        let mut outer = Value::Map(vec![(
-            Value::Text("key".into()),
-            inner.clone(),
-        )]);
+        let mut outer = Value::Map(vec![(Value::Text("key".into()), inner.clone())]);
         canonicalize_value_in_place(&mut outer, 0).unwrap();
 
         // Verify inner map is also sorted
@@ -3896,10 +3886,7 @@ mod tests {
 
     #[test]
     fn canonicalize_single_entry_map_text_key() {
-        let mut entries = vec![(
-            Value::Text("only".into()),
-            Value::Integer(1.into()),
-        )];
+        let mut entries = vec![(Value::Text("only".into()), Value::Integer(1.into()))];
         canonicalize_map(&mut entries, 0).unwrap();
         assert_eq!(entries.len(), 1);
     }
@@ -3918,15 +3905,9 @@ mod tests {
     #[test]
     fn canonicalize_nested_maps_at_depth_limit() {
         // Build nested maps to test depth tracking
-        let mut v = Value::Map(vec![(
-            Value::Text("leaf".into()),
-            Value::Integer(1.into()),
-        )]);
+        let mut v = Value::Map(vec![(Value::Text("leaf".into()), Value::Integer(1.into()))]);
         for i in 0..10 {
-            v = Value::Map(vec![(
-                Value::Text(format!("level_{i}")),
-                v,
-            )]);
+            v = Value::Map(vec![(Value::Text(format!("level_{i}")), v)]);
         }
         // 11 levels of nesting, well within MAX_CANONICALIZATION_DEPTH
         canonicalize_value_in_place(&mut v, 0).unwrap();
@@ -4109,13 +4090,10 @@ mod tests {
     #[test]
     fn roundtrip_vec_of_vec_of_vec() {
         let schema = SchemaId::new("fcp.test", "DeepVec", Version::new(1, 0, 0));
-        let val: Vec<Vec<Vec<u8>>> = vec![
-            vec![vec![1, 2], vec![3, 4]],
-            vec![vec![5, 6], vec![7, 8]],
-        ];
+        let val: Vec<Vec<Vec<u8>>> =
+            vec![vec![vec![1, 2], vec![3, 4]], vec![vec![5, 6], vec![7, 8]]];
         let bytes = CanonicalSerializer::serialize(&val, &schema).unwrap();
-        let decoded: Vec<Vec<Vec<u8>>> =
-            CanonicalSerializer::deserialize(&bytes, &schema).unwrap();
+        let decoded: Vec<Vec<Vec<u8>>> = CanonicalSerializer::deserialize(&bytes, &schema).unwrap();
         assert_eq!(decoded, val);
     }
 
@@ -4240,8 +4218,7 @@ mod tests {
             body: "unchecked roundtrip".to_string(),
         };
         let bytes = CanonicalSerializer::serialize(&val, &schema).unwrap();
-        let decoded: Msg =
-            CanonicalSerializer::deserialize_unchecked(&bytes, &schema).unwrap();
+        let decoded: Msg = CanonicalSerializer::deserialize_unchecked(&bytes, &schema).unwrap();
         assert_eq!(decoded, val);
     }
 

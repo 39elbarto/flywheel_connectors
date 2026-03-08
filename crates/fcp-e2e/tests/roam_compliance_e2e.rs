@@ -16,9 +16,9 @@ use fcp_conformance::DynamicSuite;
 use fcp_core::{
     AgentHint, CapabilityGrant, CapabilityId, CapabilityToken, CapabilityVerifier, ConnectorId,
     ConnectorMetrics, FcpConnector, FcpError, HandshakeRequest, HandshakeResponse, HealthSnapshot,
-    IdempotencyClass, InstanceId, Introspection, InvokeRequest, InvokeResponse, OperationId, OperationInfo, RequestId, RiskLevel, SafetyTier, SessionId,
-    ShutdownRequest, SimulateRequest, SimulateResponse, SubscribeRequest, SubscribeResponse,
-    UnsubscribeRequest, ZoneId,
+    IdempotencyClass, InstanceId, Introspection, InvokeRequest, InvokeResponse, OperationId,
+    OperationInfo, RequestId, RiskLevel, SafetyTier, SessionId, ShutdownRequest, SimulateRequest,
+    SimulateResponse, SubscribeRequest, SubscribeResponse, UnsubscribeRequest, ZoneId,
 };
 use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
 use fcp_e2e::{ComplianceSuite, ConnectorSuite, E2eRunner, InvokeExpectations};
@@ -27,8 +27,8 @@ use fcp_roam::connector::RoamConnector;
 use fcp_testkit::MockApiServer;
 use serde_json::json;
 use wiremock::{
-    matchers::{method, path_regex},
     Mock, ResponseTemplate,
+    matchers::{method, path_regex},
 };
 
 struct RoamConnectorAdapter {
@@ -45,7 +45,6 @@ impl RoamConnectorAdapter {
             id: ConnectorId::from_static("roam"),
             instance_id: InstanceId::new(),
             verifier: None,
-
         }
     }
 }
@@ -385,17 +384,10 @@ async fn roam_default_deny_compliance_suite_passes() {
 
     let mut connector = RoamConnectorAdapter::new();
     let signing_key = Ed25519SigningKey::generate();
-    let handshake = handshake_request(
-        signing_key.verifying_key().to_bytes(),
-        &["roam.pages.read"],
-    );
+    let handshake = handshake_request(signing_key.verifying_key().to_bytes(), &["roam.pages.read"]);
     // Token grants roam.pages.read capability but only for roam.pages.list operation.
     // Invoke targets roam.blocks.create which requires roam.blocks.write -- should be denied.
-    let token = build_token(
-        &signing_key,
-        "roam.pages.read",
-        &["roam.pages.list"],
-    );
+    let token = build_token(&signing_key, "roam.pages.read", &["roam.pages.list"]);
     let invoke = invoke_request(
         "roam.blocks.create",
         json!({ "page_uid": "abc123", "content": "test block" }),
@@ -413,11 +405,7 @@ async fn roam_default_deny_compliance_suite_passes() {
         require_capability_denial: true,
         require_decision_receipt: false,
     };
-    let suite = ComplianceSuite::new(
-        "roam_default_deny",
-        roam_manifest_with_hash(),
-        dynamic,
-    );
+    let suite = ComplianceSuite::new("roam_default_deny", roam_manifest_with_hash(), dynamic);
 
     let mut runner = E2eRunner::new("fcp-e2e-roam");
     let report = runner
@@ -438,28 +426,15 @@ async fn roam_happy_path_compliance_suite_passes() {
     // Mount mock for POST /test-graph/q (Roam Datalog query endpoint)
     Mock::given(method("POST"))
         .and(path_regex(r"^/test-graph/q"))
-        .respond_with(
-            ResponseTemplate::new(200).set_body_json(json!({"result": []})),
-        )
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"result": []})))
         .mount(mock.inner())
         .await;
 
     let mut connector = RoamConnectorAdapter::new();
     let signing_key = Ed25519SigningKey::generate();
-    let handshake = handshake_request(
-        signing_key.verifying_key().to_bytes(),
-        &["roam.pages.read"],
-    );
-    let token = build_token(
-        &signing_key,
-        "roam.pages.read",
-        &["roam.pages.list"],
-    );
-    let invoke = invoke_request(
-        "roam.pages.list",
-        json!({}),
-        token,
-    );
+    let handshake = handshake_request(signing_key.verifying_key().to_bytes(), &["roam.pages.read"]);
+    let token = build_token(&signing_key, "roam.pages.read", &["roam.pages.list"]);
+    let invoke = invoke_request("roam.pages.list", json!({}), token);
 
     let suite = ConnectorSuite {
         test_name: "roam_allow_valid_token".to_string(),

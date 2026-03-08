@@ -8273,8 +8273,7 @@ trusted_builders = ["trusted-ci"]
         }
         let ceiling: Vec<CapabilityId> = caps.into_iter().collect();
         let policy = test_zone_policy(ceiling);
-        enforce_capability_ceiling(Some(&policy), &manifest)
-            .expect("exact match should pass");
+        enforce_capability_ceiling(Some(&policy), &manifest).expect("exact match should pass");
     }
 
     // ── ConnectorManifestObject / ConnectorBinaryObject serde ───────

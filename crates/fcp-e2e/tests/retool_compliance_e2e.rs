@@ -16,9 +16,9 @@ use fcp_conformance::DynamicSuite;
 use fcp_core::{
     AgentHint, CapabilityGrant, CapabilityId, CapabilityToken, CapabilityVerifier, ConnectorId,
     ConnectorMetrics, FcpConnector, FcpError, HandshakeRequest, HandshakeResponse, HealthSnapshot,
-    IdempotencyClass, InstanceId, Introspection, InvokeRequest, InvokeResponse, OperationId, OperationInfo, RequestId, RiskLevel, SafetyTier, SessionId,
-    ShutdownRequest, SimulateRequest, SimulateResponse, SubscribeRequest, SubscribeResponse,
-    UnsubscribeRequest, ZoneId,
+    IdempotencyClass, InstanceId, Introspection, InvokeRequest, InvokeResponse, OperationId,
+    OperationInfo, RequestId, RiskLevel, SafetyTier, SessionId, ShutdownRequest, SimulateRequest,
+    SimulateResponse, SubscribeRequest, SubscribeResponse, UnsubscribeRequest, ZoneId,
 };
 use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
 use fcp_e2e::{ComplianceSuite, ConnectorSuite, E2eRunner, InvokeExpectations};
@@ -27,8 +27,8 @@ use fcp_retool::connector::RetoolConnector;
 use fcp_testkit::MockApiServer;
 use serde_json::json;
 use wiremock::{
-    matchers::{method, path_regex},
     Mock, ResponseTemplate,
+    matchers::{method, path_regex},
 };
 
 struct RetoolConnectorAdapter {
@@ -45,7 +45,6 @@ impl RetoolConnectorAdapter {
             id: ConnectorId::from_static("retool"),
             instance_id: InstanceId::new(),
             verifier: None,
-
         }
     }
 }
@@ -264,10 +263,8 @@ fn retool_manifest_with_hash() -> String {
 }
 
 fn retool_manifest_toml() -> toml::Value {
-    toml::from_str(include_str!(
-        "../../../connectors/retool/manifest.toml"
-    ))
-    .expect("Retool manifest TOML")
+    toml::from_str(include_str!("../../../connectors/retool/manifest.toml"))
+        .expect("Retool manifest TOML")
 }
 
 fn retool_config(base_url: &str) -> serde_json::Value {
@@ -411,11 +408,7 @@ async fn retool_default_deny_compliance_suite_passes() {
         require_capability_denial: true,
         require_decision_receipt: false,
     };
-    let suite = ComplianceSuite::new(
-        "retool_default_deny",
-        retool_manifest_with_hash(),
-        dynamic,
-    );
+    let suite = ComplianceSuite::new("retool_default_deny", retool_manifest_with_hash(), dynamic);
 
     let mut runner = E2eRunner::new("fcp-e2e-retool");
     let report = runner
@@ -436,9 +429,7 @@ async fn retool_happy_path_compliance_suite_passes() {
     // Mount mock for GET /workflows
     Mock::given(method("GET"))
         .and(path_regex(r"^/workflows"))
-        .respond_with(
-            ResponseTemplate::new(200).set_body_json(json!({"data": []})),
-        )
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": []})))
         .mount(mock.inner())
         .await;
 
@@ -453,11 +444,7 @@ async fn retool_happy_path_compliance_suite_passes() {
         "retool.workflows.read",
         &["retool.workflows.list"],
     );
-    let invoke = invoke_request(
-        "retool.workflows.list",
-        json!({}),
-        token,
-    );
+    let invoke = invoke_request("retool.workflows.list", json!({}), token);
 
     let suite = ConnectorSuite {
         test_name: "retool_allow_valid_token".to_string(),

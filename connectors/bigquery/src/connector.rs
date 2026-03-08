@@ -274,7 +274,10 @@ impl BigQueryConnector {
                 message: "Missing operation_id".into(),
             })?;
 
-        let input = params.get("input").cloned().unwrap_or(serde_json::Value::Null);
+        let input = params
+            .get("input")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
 
         self.request_count.fetch_add(1, Ordering::Relaxed);
 
@@ -342,11 +345,7 @@ impl BigQueryConnector {
         input
             .get("project_id")
             .and_then(serde_json::Value::as_str)
-            .or_else(|| {
-                self.config
-                    .as_ref()
-                    .and_then(|c| c.project_id.as_deref())
-            })
+            .or_else(|| self.config.as_ref().and_then(|c| c.project_id.as_deref()))
             .ok_or_else(|| BigQueryError::Api {
                 status_code: 400,
                 message: "Missing required field: project_id (not in input or config)".into(),
@@ -937,9 +936,18 @@ mod tests {
 
     #[test]
     fn doctor_status_serializes_lowercase() {
-        assert_eq!(serde_json::to_value(DoctorStatus::Healthy).unwrap(), "healthy");
-        assert_eq!(serde_json::to_value(DoctorStatus::Degraded).unwrap(), "degraded");
-        assert_eq!(serde_json::to_value(DoctorStatus::Unhealthy).unwrap(), "unhealthy");
+        assert_eq!(
+            serde_json::to_value(DoctorStatus::Healthy).unwrap(),
+            "healthy"
+        );
+        assert_eq!(
+            serde_json::to_value(DoctorStatus::Degraded).unwrap(),
+            "degraded"
+        );
+        assert_eq!(
+            serde_json::to_value(DoctorStatus::Unhealthy).unwrap(),
+            "unhealthy"
+        );
     }
 
     #[test]

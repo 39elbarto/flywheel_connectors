@@ -725,10 +725,12 @@ mod tests {
         let policy = CompiledPolicy::from_manifest(&section, None).unwrap();
         assert!(policy.state_dir.is_none());
         // $CONNECTOR_STATE paths should be skipped when state_dir is None
-        assert!(!policy
-            .writable_paths
-            .iter()
-            .any(|p| p.display().to_string().contains("CONNECTOR_STATE")));
+        assert!(
+            !policy
+                .writable_paths
+                .iter()
+                .any(|p| p.display().to_string().contains("CONNECTOR_STATE"))
+        );
     }
 
     #[test]
@@ -780,7 +782,10 @@ mod tests {
     #[test]
     fn test_expand_path_regular_path_no_state_dir() {
         // Regular paths don't need state_dir
-        assert_eq!(expand_path("/etc/config", None), Some(PathBuf::from("/etc/config")));
+        assert_eq!(
+            expand_path("/etc/config", None),
+            Some(PathBuf::from("/etc/config"))
+        );
     }
 
     #[test]
@@ -839,12 +844,8 @@ mod tests {
     #[test]
     fn test_compiled_policy_multiple_readonly_paths() {
         let mut section = test_sandbox_section();
-        section.fs_readonly_paths = vec![
-            "/usr".into(),
-            "/lib".into(),
-            "/opt".into(),
-            "/etc".into(),
-        ];
+        section.fs_readonly_paths =
+            vec!["/usr".into(), "/lib".into(), "/opt".into(), "/etc".into()];
         let policy = CompiledPolicy::from_manifest(&section, None).unwrap();
         assert_eq!(policy.readonly_paths.len(), 4);
     }
@@ -860,8 +861,16 @@ mod tests {
         let state_dir = Some(PathBuf::from("/var/state"));
         let policy = CompiledPolicy::from_manifest(&section, state_dir).unwrap();
         assert!(policy.writable_paths.contains(&PathBuf::from("/var/state")));
-        assert!(policy.writable_paths.contains(&PathBuf::from("/var/state/cache")));
-        assert!(policy.writable_paths.contains(&PathBuf::from("/tmp/scratch")));
+        assert!(
+            policy
+                .writable_paths
+                .contains(&PathBuf::from("/var/state/cache"))
+        );
+        assert!(
+            policy
+                .writable_paths
+                .contains(&PathBuf::from("/tmp/scratch"))
+        );
     }
 
     #[test]

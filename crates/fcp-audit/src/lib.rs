@@ -1661,10 +1661,7 @@ mod tests {
         assert!(json.contains("trace_context"));
         let parsed: AuditEntry = serde_json::from_str(&json).unwrap();
         assert!(parsed.trace_context.is_some());
-        assert_eq!(
-            parsed.trace_context.as_ref().unwrap().trace_id,
-            "trace-abc"
-        );
+        assert_eq!(parsed.trace_context.as_ref().unwrap().trace_id, "trace-abc");
     }
 
     #[test]
@@ -1967,10 +1964,7 @@ mod tests {
             serde_json::to_string(&Decision::Allow).unwrap(),
             "\"allow\""
         );
-        assert_eq!(
-            serde_json::to_string(&Decision::Deny).unwrap(),
-            "\"deny\""
-        );
+        assert_eq!(serde_json::to_string(&Decision::Deny).unwrap(), "\"deny\"");
     }
 
     #[test]
@@ -2353,10 +2347,7 @@ mod tests {
 
     #[test]
     fn verify_status_serde_values() {
-        assert_eq!(
-            serde_json::to_string(&VerifyStatus::Ok).unwrap(),
-            "\"ok\""
-        );
+        assert_eq!(serde_json::to_string(&VerifyStatus::Ok).unwrap(), "\"ok\"");
         assert_eq!(
             serde_json::to_string(&VerifyStatus::Warn).unwrap(),
             "\"warn\""
@@ -2421,10 +2412,7 @@ mod tests {
         ];
         for code in critical_codes {
             let issue = VerifyIssue::new(code, "msg");
-            assert!(
-                issue.is_critical(),
-                "{code} should be critical"
-            );
+            assert!(issue.is_critical(), "{code} should be critical");
         }
     }
 
@@ -2433,10 +2421,7 @@ mod tests {
         let non_critical = ["audit.zone_mismatch", "audit.chain.empty", "custom.issue"];
         for code in non_critical {
             let issue = VerifyIssue::new(code, "msg");
-            assert!(
-                !issue.is_critical(),
-                "{code} should not be critical"
-            );
+            assert!(!issue.is_critical(), "{code} should not be critical");
         }
     }
 
@@ -2802,8 +2787,7 @@ mod tests {
 
     #[test]
     fn audit_error_is_std_error() {
-        let err: Box<dyn std::error::Error> =
-            Box::new(AuditError::ForkDetected(1));
+        let err: Box<dyn std::error::Error> = Box::new(AuditError::ForkDetected(1));
         assert!(err.to_string().contains("fork"));
     }
 

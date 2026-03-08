@@ -1024,7 +1024,10 @@ mod tests {
         let ops = operations_info();
         for op in ops.as_array().unwrap() {
             let id = op["id"].as_str().unwrap();
-            assert!(id.starts_with("1password."), "op {id} should start with 1password.");
+            assert!(
+                id.starts_with("1password."),
+                "op {id} should start with 1password."
+            );
         }
     }
 

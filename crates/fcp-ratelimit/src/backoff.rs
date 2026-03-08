@@ -989,7 +989,11 @@ mod tests {
 
     #[test]
     fn linear_backoff_initial_zero() {
-        let mut backoff = LinearBackoff::new(Duration::ZERO, Duration::from_secs(1), Duration::from_secs(10));
+        let mut backoff = LinearBackoff::new(
+            Duration::ZERO,
+            Duration::from_secs(1),
+            Duration::from_secs(10),
+        );
         assert_eq!(backoff.next_backoff(0), Duration::ZERO);
         assert_eq!(backoff.next_backoff(1), Duration::from_secs(1));
         assert_eq!(backoff.next_backoff(5), Duration::from_secs(5));
@@ -1072,8 +1076,7 @@ mod tests {
 
     #[test]
     fn retry_config_clone_preserves_max_total_time() {
-        let config = RetryConfig::new(10, NoBackoff)
-            .with_max_total_time(Duration::from_secs(120));
+        let config = RetryConfig::new(10, NoBackoff).with_max_total_time(Duration::from_secs(120));
         let cloned = config.clone();
         assert_eq!(cloned.max_total_time, Some(Duration::from_secs(120)));
         assert_eq!(cloned.max_retries, 10);
@@ -1083,8 +1086,7 @@ mod tests {
 
     #[test]
     fn retry_config_debug_contains_max_total_time() {
-        let config = RetryConfig::new(3, NoBackoff)
-            .with_max_total_time(Duration::from_secs(60));
+        let config = RetryConfig::new(3, NoBackoff).with_max_total_time(Duration::from_secs(60));
         let dbg = format!("{config:?}");
         assert!(dbg.contains("max_total_time"));
     }

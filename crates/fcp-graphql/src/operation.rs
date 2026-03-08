@@ -400,8 +400,11 @@ mod tests {
 
     #[test]
     fn batch_item_serde_roundtrip() {
-        let item = GraphqlBatchItem::new(GraphqlQuery::new("{ users { id } }"), serde_json::json!({"limit": 10}))
-            .with_operation_name("GetUsers");
+        let item = GraphqlBatchItem::new(
+            GraphqlQuery::new("{ users { id } }"),
+            serde_json::json!({"limit": 10}),
+        )
+        .with_operation_name("GetUsers");
         let json = serde_json::to_string(&item).unwrap();
         let back: GraphqlBatchItem<serde_json::Value> = serde_json::from_str(&json).unwrap();
         assert_eq!(back.operation_name.as_deref(), Some("GetUsers"));

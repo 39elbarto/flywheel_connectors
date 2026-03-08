@@ -1028,23 +1028,29 @@ mod tests {
 
     #[test]
     fn storage_used_increases_with_puts() {
-        run_store_test("storage_used_accumulates", "verify", "accounting", 2, || async {
-            let store = MemoryObjectStore::new(MemoryObjectStoreConfig::default());
+        run_store_test(
+            "storage_used_accumulates",
+            "verify",
+            "accounting",
+            2,
+            || async {
+                let store = MemoryObjectStore::new(MemoryObjectStoreConfig::default());
 
-            store.put(test_stored_object(1, b"aaaa")).await.unwrap();
-            let used1 = store.storage_used().await;
+                store.put(test_stored_object(1, b"aaaa")).await.unwrap();
+                let used1 = store.storage_used().await;
 
-            store.put(test_stored_object(2, b"bbbb")).await.unwrap();
-            let used2 = store.storage_used().await;
+                store.put(test_stored_object(2, b"bbbb")).await.unwrap();
+                let used2 = store.storage_used().await;
 
-            assert!(used2 > used1);
-            assert!(used1 > 0);
+                assert!(used2 > used1);
+                assert!(used1 > 0);
 
-            StoreLogData {
-                details: Some(json!({"used1": used1, "used2": used2})),
-                ..StoreLogData::default()
-            }
-        });
+                StoreLogData {
+                    details: Some(json!({"used1": used1, "used2": used2})),
+                    ..StoreLogData::default()
+                }
+            },
+        );
     }
 
     #[test]
@@ -1086,7 +1092,10 @@ mod tests {
                 .await
                 .unwrap();
             let meta = store.get_storage_meta(&id).await.unwrap();
-            assert!(matches!(meta.retention, RetentionClass::Lease { expires_at: 9999 }));
+            assert!(matches!(
+                meta.retention,
+                RetentionClass::Lease { expires_at: 9999 }
+            ));
 
             StoreLogData {
                 object_id: Some(id),
@@ -1130,7 +1139,10 @@ mod tests {
             let store = MemoryObjectStore::new(config);
             let obj = test_stored_object(1, b"");
             let result = store.put(obj).await;
-            assert!(matches!(result, Err(ObjectStoreError::QuotaExceeded { .. })));
+            assert!(matches!(
+                result,
+                Err(ObjectStoreError::QuotaExceeded { .. })
+            ));
 
             StoreLogData::default()
         });
@@ -1144,7 +1156,10 @@ mod tests {
             let expected_zone = obj.header.zone_id.clone();
             store.put(obj).await.unwrap();
 
-            let hdr = store.get_header(&ObjectId::from_bytes([5; 32])).await.unwrap();
+            let hdr = store
+                .get_header(&ObjectId::from_bytes([5; 32]))
+                .await
+                .unwrap();
             assert_eq!(hdr.zone_id, expected_zone);
 
             StoreLogData::default()

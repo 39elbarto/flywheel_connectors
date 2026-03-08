@@ -50,7 +50,6 @@ impl LogseqConnectorAdapter {
             id: ConnectorId::from_static("logseq"),
             instance_id: InstanceId::new(),
             verifier: None,
-
         }
     }
 }
@@ -82,7 +81,10 @@ impl FcpConnector for LogseqConnectorAdapter {
                 .capabilities_requested
                 .iter()
                 .cloned()
-                .map(|capability| CapabilityGrant { capability, operation: None })
+                .map(|capability| CapabilityGrant {
+                    capability,
+                    operation: None,
+                })
                 .collect(),
             session_id: SessionId::new(),
             manifest_hash: "sha256:logseq-e2e".to_string(),
@@ -96,7 +98,10 @@ impl FcpConnector for LogseqConnectorAdapter {
     async fn health(&self) -> HealthSnapshot {
         match self.connector.handle_health().await {
             Ok(payload) => {
-                let status = payload.get("status").and_then(serde_json::Value::as_str).unwrap_or("unknown");
+                let status = payload
+                    .get("status")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("unknown");
                 match status {
                     "healthy" => HealthSnapshot::ready(),
                     "degraded" => HealthSnapshot::degraded("not_handshaken"),
@@ -115,7 +120,9 @@ impl FcpConnector for LogseqConnectorAdapter {
         })
     }
 
-    fn metrics(&self) -> ConnectorMetrics { ConnectorMetrics::default() }
+    fn metrics(&self) -> ConnectorMetrics {
+        ConnectorMetrics::default()
+    }
 
     async fn shutdown(&mut self, _req: ShutdownRequest) -> fcp_core::FcpResult<()> {
         self.verifier = None;
@@ -155,13 +162,21 @@ impl FcpConnector for LogseqConnectorAdapter {
             message: "Logseq verifier not initialized; handshake required".into(),
         })?;
         let required_capability = required_capability(req.operation.as_str())?;
-        verifier.verify(&req.capability_token, &required_capability, &req.operation, &[])?;
+        verifier.verify(
+            &req.capability_token,
+            &required_capability,
+            &req.operation,
+            &[],
+        )?;
 
         let request_id = req.id.clone();
-        let value = self.connector.handle_invoke(json!({
-            "operation_id": req.operation.as_str(),
-            "input": req.input,
-        })).await?;
+        let value = self
+            .connector
+            .handle_invoke(json!({
+                "operation_id": req.operation.as_str(),
+                "input": req.input,
+            }))
+            .await?;
         Ok(InvokeResponse::ok(request_id, value))
     }
 
@@ -170,19 +185,37 @@ impl FcpConnector for LogseqConnectorAdapter {
             message: "Logseq verifier not initialized; handshake required".into(),
         })?;
         let required_capability = required_capability(req.operation.as_str())?;
-        verifier.verify(&req.capability_token, &required_capability, &req.operation, &[])?;
+        verifier.verify(
+            &req.capability_token,
+            &required_capability,
+            &req.operation,
+            &[],
+        )?;
 
-        let value = self.connector.handle_simulate(json!({
-            "operation_id": req.operation.as_str(),
-            "input": req.input,
-        })).await?;
+        let value = self
+            .connector
+            .handle_simulate(json!({
+                "operation_id": req.operation.as_str(),
+                "input": req.input,
+            }))
+            .await?;
 
         Ok(SimulateResponse {
             r#type: "simulate_response".to_string(),
             id: req.id,
-            would_succeed: value.get("allowed").and_then(serde_json::Value::as_bool).unwrap_or(false),
-            failure_reason: value.get("reason").and_then(serde_json::Value::as_str)
-                .filter(|_| !value.get("allowed").and_then(serde_json::Value::as_bool).unwrap_or(false))
+            would_succeed: value
+                .get("allowed")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false),
+            failure_reason: value
+                .get("reason")
+                .and_then(serde_json::Value::as_str)
+                .filter(|_| {
+                    !value
+                        .get("allowed")
+                        .and_then(serde_json::Value::as_bool)
+                        .unwrap_or(false)
+                })
                 .map(str::to_string),
             denial_code: None,
             missing_capabilities: Vec::new(),
@@ -196,7 +229,9 @@ impl FcpConnector for LogseqConnectorAdapter {
         Err(FcpError::StreamingNotSupported)
     }
 
-    async fn unsubscribe(&self, _req: UnsubscribeRequest) -> fcp_core::FcpResult<()> { Ok(()) }
+    async fn unsubscribe(&self, _req: UnsubscribeRequest) -> fcp_core::FcpResult<()> {
+        Ok(())
+    }
 }
 
 fn required_capability(operation: &str) -> fcp_core::FcpResult<CapabilityId> {
@@ -211,16 +246,23 @@ fn required_capability(operation: &str) -> fcp_core::FcpResult<CapabilityId> {
             });
         }
     };
-    capability.parse::<CapabilityId>().map_err(|err| FcpError::Internal {
-        message: format!("invalid capability id mapping for {operation}: {err}"),
-    })
+    capability
+        .parse::<CapabilityId>()
+        .map_err(|err| FcpError::Internal {
+            message: format!("invalid capability id mapping for {operation}: {err}"),
+        })
 }
 
 fn logseq_manifest_with_hash() -> String {
     let raw = include_str!("../../../connectors/logseq/manifest.toml");
     let unchecked = ConnectorManifest::parse_str_unchecked(raw).expect("unchecked manifest parse");
-    let computed = unchecked.compute_interface_hash().expect("compute interface hash");
-    raw.replace(&unchecked.manifest.interface_hash.to_string(), &computed.to_string())
+    let computed = unchecked
+        .compute_interface_hash()
+        .expect("compute interface hash");
+    raw.replace(
+        &unchecked.manifest.interface_hash.to_string(),
+        &computed.to_string(),
+    )
 }
 
 fn logseq_manifest_toml() -> toml::Value {
@@ -249,7 +291,11 @@ fn handshake_request(host_public_key: [u8; 32], capabilities: &[&str]) -> Handsh
     }
 }
 
-fn build_token(signing_key: &Ed25519SigningKey, capability: &str, operations: &[&str]) -> CapabilityToken {
+fn build_token(
+    signing_key: &Ed25519SigningKey,
+    capability: &str,
+    operations: &[&str],
+) -> CapabilityToken {
     let now = Utc::now();
     let token = CapabilityTokenBuilder::new()
         .capability_id(capability)
@@ -263,7 +309,11 @@ fn build_token(signing_key: &Ed25519SigningKey, capability: &str, operations: &[
     CapabilityToken { raw: token }
 }
 
-fn invoke_request(operation: &'static str, input: serde_json::Value, token: CapabilityToken) -> InvokeRequest {
+fn invoke_request(
+    operation: &'static str,
+    input: serde_json::Value,
+    token: CapabilityToken,
+) -> InvokeRequest {
     InvokeRequest {
         r#type: "invoke".to_string(),
         id: RequestId::from("logseq-e2e"),
@@ -272,30 +322,53 @@ fn invoke_request(operation: &'static str, input: serde_json::Value, token: Capa
         zone_id: ZoneId::work(),
         input,
         capability_token: token,
-        holder_proof: None, context: None, idempotency_key: None, lease_seq: None,
-        deadline_ms: None, correlation_id: None, provenance: None, approval_tokens: Vec::new(),
+        holder_proof: None,
+        context: None,
+        idempotency_key: None,
+        lease_seq: None,
+        deadline_ms: None,
+        correlation_id: None,
+        provenance: None,
+        approval_tokens: Vec::new(),
     }
 }
 
-fn operation_network_constraints<'a>(manifest: &'a toml::Value, operation_name: &str) -> &'a toml::value::Table {
-    manifest.get("provides").and_then(toml::Value::as_table)
-        .and_then(|p| p.get("operations")).and_then(toml::Value::as_table)
-        .and_then(|o| o.get(operation_name)).and_then(toml::Value::as_table)
-        .and_then(|op| op.get("network_constraints")).and_then(toml::Value::as_table)
+fn operation_network_constraints<'a>(
+    manifest: &'a toml::Value,
+    operation_name: &str,
+) -> &'a toml::value::Table {
+    manifest
+        .get("provides")
+        .and_then(toml::Value::as_table)
+        .and_then(|p| p.get("operations"))
+        .and_then(toml::Value::as_table)
+        .and_then(|o| o.get(operation_name))
+        .and_then(toml::Value::as_table)
+        .and_then(|op| op.get("network_constraints"))
+        .and_then(toml::Value::as_table)
         .expect("operation network_constraints")
 }
 
 fn operation_host_allow_list(manifest: &toml::Value, operation_name: &str) -> Vec<String> {
     operation_network_constraints(manifest, operation_name)
-        .get("host_allow").and_then(toml::Value::as_array)
-        .map(|hosts| hosts.iter().filter_map(toml::Value::as_str).map(str::to_string).collect())
+        .get("host_allow")
+        .and_then(toml::Value::as_array)
+        .map(|hosts| {
+            hosts
+                .iter()
+                .filter_map(toml::Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
         .expect("operation host_allow")
 }
 
 fn host_allowed(host: &str, host_allow: &[String]) -> bool {
     host_allow.iter().any(|pattern| {
         pattern == host
-            || pattern.strip_prefix("*.").is_some_and(|suffix| host.ends_with(&format!(".{suffix}")))
+            || pattern
+                .strip_prefix("*.")
+                .is_some_and(|suffix| host.ends_with(&format!(".{suffix}")))
     })
 }
 
@@ -304,21 +377,38 @@ async fn logseq_default_deny_compliance_suite_passes() {
     let mock = MockApiServer::start().await;
     let mut connector = LogseqConnectorAdapter::new();
     let signing_key = Ed25519SigningKey::generate();
-    let handshake = handshake_request(signing_key.verifying_key().to_bytes(), &["logseq.pages.read"]);
+    let handshake = handshake_request(
+        signing_key.verifying_key().to_bytes(),
+        &["logseq.pages.read"],
+    );
     let token = build_token(&signing_key, "logseq.pages.read", &["logseq.pages.list"]);
-    let invoke = invoke_request("logseq.blocks.list", json!({ "page_id": "page-abc123" }), token);
+    let invoke = invoke_request(
+        "logseq.blocks.list",
+        json!({ "page_id": "page-abc123" }),
+        token,
+    );
 
     let dynamic = DynamicSuite {
         config: logseq_config(&mock.base_url()),
-        handshake, invoke: Some(invoke), expect_invoke_error: true,
-        simulate: None, expect_simulate_would_succeed: None,
-        require_simulate_denial_details: false, require_capability_denial: true,
+        handshake,
+        invoke: Some(invoke),
+        expect_invoke_error: true,
+        simulate: None,
+        expect_simulate_would_succeed: None,
+        require_simulate_denial_details: false,
+        require_capability_denial: true,
         require_decision_receipt: false,
     };
     let suite = ComplianceSuite::new("logseq_default_deny", logseq_manifest_with_hash(), dynamic);
     let mut runner = E2eRunner::new("fcp-e2e-logseq");
-    let report = runner.run_compliance_suite(&mut connector, suite).await.expect("compliance suite run");
-    assert!(report.passed, "default deny compliance should pass: {report:#?}");
+    let report = runner
+        .run_compliance_suite(&mut connector, suite)
+        .await
+        .expect("compliance suite run");
+    assert!(
+        report.passed,
+        "default deny compliance should pass: {report:#?}"
+    );
 }
 
 #[fcp_async_core::runtime::test]
@@ -334,7 +424,10 @@ async fn logseq_happy_path_connector_suite_passes() {
 
     let mut connector = LogseqConnectorAdapter::new();
     let signing_key = Ed25519SigningKey::generate();
-    let handshake = handshake_request(signing_key.verifying_key().to_bytes(), &["logseq.pages.read"]);
+    let handshake = handshake_request(
+        signing_key.verifying_key().to_bytes(),
+        &["logseq.pages.read"],
+    );
     let token = build_token(&signing_key, "logseq.pages.read", &["logseq.pages.list"]);
     let invoke = invoke_request("logseq.pages.list", json!({}), token);
 
@@ -354,7 +447,10 @@ async fn logseq_happy_path_connector_suite_passes() {
     };
 
     let mut runner = E2eRunner::new("fcp-e2e-logseq-happy");
-    let report = runner.run_connector_suite(&mut connector, suite).await.expect("connector suite run");
+    let report = runner
+        .run_connector_suite(&mut connector, suite)
+        .await
+        .expect("connector suite run");
     assert!(report.passed, "happy path should pass: {report:#?}");
     let invoke_entry = report
         .logs
@@ -371,17 +467,27 @@ async fn logseq_happy_path_connector_suite_passes() {
 #[test]
 fn logseq_manifest_network_guard_allows_and_denies() {
     let manifest = logseq_manifest_toml();
-    let operations = manifest.get("provides").and_then(toml::Value::as_table)
-        .and_then(|p| p.get("operations")).and_then(toml::Value::as_table)
+    let operations = manifest
+        .get("provides")
+        .and_then(toml::Value::as_table)
+        .and_then(|p| p.get("operations"))
+        .and_then(toml::Value::as_table)
         .expect("operations table");
 
-    assert_eq!(operations.len(), 4, "Logseq manifest should declare 4 operations");
+    assert_eq!(
+        operations.len(),
+        4,
+        "Logseq manifest should declare 4 operations"
+    );
 
     let expected_hosts = vec!["localhost.localdomain".to_string()];
 
     for operation_name in operations.keys() {
         let host_allow = operation_host_allow_list(&manifest, operation_name);
-        assert_eq!(host_allow, expected_hosts, "operation {operation_name} should use localhost.localdomain (local-only connector)");
+        assert_eq!(
+            host_allow, expected_hosts,
+            "operation {operation_name} should use localhost.localdomain (local-only connector)"
+        );
 
         assert!(host_allowed("localhost.localdomain", &host_allow));
         assert!(!host_allowed("example.com", &host_allow));
@@ -390,11 +496,26 @@ fn logseq_manifest_network_guard_allows_and_denies() {
         // Logseq is a local-only connector: deny_localhost, deny_private_ranges, and
         // require_sni are all false (unlike cloud connectors).
         let constraints = operation_network_constraints(&manifest, operation_name);
-        assert_eq!(constraints.get("deny_localhost").and_then(toml::Value::as_bool), Some(false),
-            "operation {operation_name} must NOT deny localhost (local-only connector)");
-        assert_eq!(constraints.get("deny_private_ranges").and_then(toml::Value::as_bool), Some(false),
-            "operation {operation_name} must NOT deny private ranges (local-only connector)");
-        assert_eq!(constraints.get("require_sni").and_then(toml::Value::as_bool), Some(false),
-            "operation {operation_name} must NOT require SNI (local-only connector)");
+        assert_eq!(
+            constraints
+                .get("deny_localhost")
+                .and_then(toml::Value::as_bool),
+            Some(false),
+            "operation {operation_name} must NOT deny localhost (local-only connector)"
+        );
+        assert_eq!(
+            constraints
+                .get("deny_private_ranges")
+                .and_then(toml::Value::as_bool),
+            Some(false),
+            "operation {operation_name} must NOT deny private ranges (local-only connector)"
+        );
+        assert_eq!(
+            constraints
+                .get("require_sni")
+                .and_then(toml::Value::as_bool),
+            Some(false),
+            "operation {operation_name} must NOT require SNI (local-only connector)"
+        );
     }
 }

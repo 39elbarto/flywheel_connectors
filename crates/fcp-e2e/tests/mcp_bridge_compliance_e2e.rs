@@ -16,9 +16,10 @@ use fcp_conformance::DynamicSuite;
 use fcp_core::{
     AgentHint, CapabilityGrant, CapabilityId, CapabilityToken, CapabilityVerifier, ConnectorId,
     ConnectorMetrics, FcpConnector, FcpError, HandshakeRequest, HandshakeResponse, HealthSnapshot,
-    IdempotencyClass, InstanceId, Introspection, InvokeRequest, InvokeResponse, InvokeStatus, OperationId,
-    OperationInfo, RequestId, RiskLevel, SafetyTier, SessionId, ShutdownRequest, SimulateRequest, SimulateResponse, SubscribeRequest,
-    SubscribeResponse, UnsubscribeRequest, ZoneId,
+    IdempotencyClass, InstanceId, Introspection, InvokeRequest, InvokeResponse, InvokeStatus,
+    OperationId, OperationInfo, RequestId, RiskLevel, SafetyTier, SessionId, ShutdownRequest,
+    SimulateRequest, SimulateResponse, SubscribeRequest, SubscribeResponse, UnsubscribeRequest,
+    ZoneId,
 };
 use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
 use fcp_e2e::{ComplianceSuite, ConnectorSuite, E2eRunner, InvokeExpectations};
@@ -45,7 +46,6 @@ impl McpBridgeConnectorAdapter {
             id: ConnectorId::from_static("mcp-bridge"),
             instance_id: InstanceId::new(),
             verifier: None,
-
         }
     }
 }
@@ -266,10 +266,8 @@ fn mcp_bridge_manifest_with_hash() -> String {
 }
 
 fn mcp_bridge_manifest_toml() -> toml::Value {
-    toml::from_str(include_str!(
-        "../../../connectors/mcp-bridge/manifest.toml"
-    ))
-    .expect("MCP Bridge manifest TOML")
+    toml::from_str(include_str!("../../../connectors/mcp-bridge/manifest.toml"))
+        .expect("MCP Bridge manifest TOML")
 }
 
 fn mcp_bridge_config(base_url: &str) -> serde_json::Value {
@@ -386,17 +384,10 @@ async fn mcp_bridge_default_deny_compliance_suite_passes() {
 
     let mut connector = McpBridgeConnectorAdapter::new();
     let signing_key = Ed25519SigningKey::generate();
-    let handshake = handshake_request(
-        signing_key.verifying_key().to_bytes(),
-        &["mcp.tools.read"],
-    );
+    let handshake = handshake_request(signing_key.verifying_key().to_bytes(), &["mcp.tools.read"]);
     // Token grants mcp.tools.read capability but only for mcp.tools.list operation.
     // Invoke targets mcp.tools.call which requires mcp.tools.write -- should be denied.
-    let token = build_token(
-        &signing_key,
-        "mcp.tools.read",
-        &["mcp.tools.list"],
-    );
+    let token = build_token(&signing_key, "mcp.tools.read", &["mcp.tools.list"]);
     let invoke = invoke_request(
         "mcp.tools.call",
         json!({ "name": "read_file", "arguments": {"path": "/tmp/test"} }),
@@ -449,20 +440,9 @@ async fn mcp_bridge_happy_path_connector_suite_passes() {
 
     let mut connector = McpBridgeConnectorAdapter::new();
     let signing_key = Ed25519SigningKey::generate();
-    let handshake = handshake_request(
-        signing_key.verifying_key().to_bytes(),
-        &["mcp.tools.read"],
-    );
-    let token = build_token(
-        &signing_key,
-        "mcp.tools.read",
-        &["mcp.tools.list"],
-    );
-    let invoke = invoke_request(
-        "mcp.tools.list",
-        json!({}),
-        token,
-    );
+    let handshake = handshake_request(signing_key.verifying_key().to_bytes(), &["mcp.tools.read"]);
+    let token = build_token(&signing_key, "mcp.tools.read", &["mcp.tools.list"]);
+    let invoke = invoke_request("mcp.tools.list", json!({}), token);
 
     let suite = ConnectorSuite {
         test_name: "mcp_bridge_happy_path".to_string(),

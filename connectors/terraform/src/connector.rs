@@ -301,9 +301,7 @@ impl TerraformConnector {
             .get("operation_id")
             .and_then(serde_json::Value::as_str)
             .unwrap_or("");
-        let allowed = operations_info()
-            .iter()
-            .any(|o| o.id.as_ref() == operation);
+        let allowed = operations_info().iter().any(|o| o.id.as_ref() == operation);
         Ok(
             json!({"allowed": allowed, "reason": if allowed { "Operation supported" } else { "Unknown operation" }}),
         )

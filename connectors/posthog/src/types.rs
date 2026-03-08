@@ -539,7 +539,10 @@ mod tests {
         assert_eq!(deserialized.event, Some("$screen".into()));
         assert_eq!(deserialized.timestamp, Some("2026-06-15T09:30:00Z".into()));
         assert_eq!(deserialized.distinct_id, Some("device_abc".into()));
-        assert_eq!(deserialized.properties.unwrap()["$screen_name"], "Dashboard");
+        assert_eq!(
+            deserialized.properties.unwrap()["$screen_name"],
+            "Dashboard"
+        );
     }
 
     #[test]

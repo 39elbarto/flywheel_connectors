@@ -356,10 +356,9 @@ mod tests {
     use chrono::TimeZone;
     use fcp_core::{
         AttestationMaterial, AttestationMetadata, AttestationPredicateType, ConnectorId,
-        SbomComponent, SbomDependency, SbomFormat, SoftwareBillOfMaterials,
-        SupplyChainAttestation, SupplyChainSignature, TrustRootBinding,
-        VerificationDecision, VerificationReasonCode,
-        SBOM_SIGNED_FIELDS, SUPPLY_CHAIN_ATTESTATION_SIGNED_FIELDS,
+        SBOM_SIGNED_FIELDS, SUPPLY_CHAIN_ATTESTATION_SIGNED_FIELDS, SbomComponent, SbomDependency,
+        SbomFormat, SoftwareBillOfMaterials, SupplyChainAttestation, SupplyChainSignature,
+        TrustRootBinding, VerificationDecision, VerificationReasonCode,
     };
 
     // ── Test Helpers ─────────────────────────────────────────────
@@ -373,10 +372,7 @@ mod tests {
     }
 
     fn valid_digest() -> String {
-        format!(
-            "blake3-256:{}",
-            "a".repeat(64)
-        )
+        format!("blake3-256:{}", "a".repeat(64))
     }
 
     fn valid_attestation(digest: &str) -> SupplyChainAttestation {
@@ -563,8 +559,16 @@ mod tests {
             )
             .unwrap();
 
-        assert!(outcome.audit_event.evidence_digest.starts_with("blake3-256:"));
-        assert_eq!(outcome.audit_event.evidence_digest.len(), "blake3-256:".len() + 64);
+        assert!(
+            outcome
+                .audit_event
+                .evidence_digest
+                .starts_with("blake3-256:")
+        );
+        assert_eq!(
+            outcome.audit_event.evidence_digest.len(),
+            "blake3-256:".len() + 64
+        );
     }
 
     // ── Denial Paths ─────────────────────────────────────────────
@@ -863,10 +867,24 @@ mod tests {
         let att2 = valid_attestation(&digest2);
         let sbom = valid_sbom();
 
-        gate.verify_at(&cid, "1.0.0", &digest1, Some(&att1), Some(&sbom), test_time())
-            .unwrap();
-        gate.verify_at(&cid, "2.0.0", &digest2, Some(&att2), Some(&sbom), test_time())
-            .unwrap();
+        gate.verify_at(
+            &cid,
+            "1.0.0",
+            &digest1,
+            Some(&att1),
+            Some(&sbom),
+            test_time(),
+        )
+        .unwrap();
+        gate.verify_at(
+            &cid,
+            "2.0.0",
+            &digest2,
+            Some(&att2),
+            Some(&sbom),
+            test_time(),
+        )
+        .unwrap();
 
         assert_eq!(gate.cache_size(), 2);
     }
@@ -1414,14 +1432,7 @@ mod tests {
     fn empty_digest_string() {
         let gate = SupplyChainGate::new();
         let outcome = gate
-            .verify_at(
-                &test_connector_id(),
-                "1.0.0",
-                "",
-                None,
-                None,
-                test_time(),
-            )
+            .verify_at(&test_connector_id(), "1.0.0", "", None, None, test_time())
             .unwrap();
 
         // Should still produce a valid outcome (deny due to missing attestation).
@@ -1460,13 +1471,7 @@ mod tests {
         let gate = SupplyChainGate::with_config(config);
 
         let outcome = gate
-            .verify(
-                &test_connector_id(),
-                "1.0.0",
-                &valid_digest(),
-                None,
-                None,
-            )
+            .verify(&test_connector_id(), "1.0.0", &valid_digest(), None, None)
             .unwrap();
 
         assert!(outcome.allowed);
@@ -1485,8 +1490,12 @@ mod tests {
         let d1 = format!("blake3-256:{}", "1".repeat(64));
         let d2 = format!("blake3-256:{}", "2".repeat(64));
 
-        let o1 = gate.verify_at(&cid1, "1.0.0", &d1, None, None, test_time()).unwrap();
-        let o2 = gate.verify_at(&cid2, "2.0.0", &d2, None, None, test_time()).unwrap();
+        let o1 = gate
+            .verify_at(&cid1, "1.0.0", &d1, None, None, test_time())
+            .unwrap();
+        let o2 = gate
+            .verify_at(&cid2, "2.0.0", &d2, None, None, test_time())
+            .unwrap();
 
         assert_eq!(o1.connector_id, cid1);
         assert_eq!(o2.connector_id, cid2);

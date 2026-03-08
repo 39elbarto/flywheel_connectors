@@ -196,9 +196,7 @@ pub struct ResourceTypeDescriptor {
 pub const RESOURCE_FAMILIES: &[ResourceFamily] = &[
     ResourceFamily {
         family: "project",
-        connectors: &[
-            "github", "gitlab", "jira", "linear", "asana", "clickup",
-        ],
+        connectors: &["github", "gitlab", "jira", "linear", "asana", "clickup"],
         typical_id_shape: "slug or UUID",
         discovery_hint: "list/search projects or repositories",
     },
@@ -234,13 +232,7 @@ pub const RESOURCE_FAMILIES: &[ResourceFamily] = &[
     },
     ResourceFamily {
         family: "record",
-        connectors: &[
-            "airtable",
-            "salesforce",
-            "hubspot",
-            "bigquery",
-            "snowflake",
-        ],
+        connectors: &["airtable", "salesforce", "hubspot", "bigquery", "snowflake"],
         typical_id_shape: "record ID or external key",
         discovery_hint: "query records by field value",
     },
@@ -292,8 +284,7 @@ pub fn resolve_candidates(
         },
         1 => {
             let candidate = candidates.into_iter().next().expect("checked len == 1");
-            let next_command =
-                next_command_template.replace("{id}", &candidate.id);
+            let next_command = next_command_template.replace("{id}", &candidate.id);
             LookupOutcome::Resolved {
                 candidate,
                 next_command,
@@ -311,24 +302,17 @@ pub fn resolve_candidates(
 
             let next_commands: Vec<String> = candidates
                 .iter()
-                .map(|c| {
-                    next_command_template.replace("{id}", &c.id)
-                })
+                .map(|c| next_command_template.replace("{id}", &c.id))
                 .collect();
 
             let prompt = DisambiguationPrompt {
                 binding_key: binding_key.to_owned(),
-                question: format!(
-                    "Multiple {connector} resources match \"{query}\". Which one?"
-                ),
+                question: format!("Multiple {connector} resources match \"{query}\". Which one?"),
                 options,
                 next_commands,
             };
 
-            LookupOutcome::Ambiguous {
-                candidates,
-                prompt,
-            }
+            LookupOutcome::Ambiguous { candidates, prompt }
         }
     };
 
@@ -340,11 +324,13 @@ pub fn resolve_candidates(
 }
 
 /// Find the resource family for a connector and resource type.
-pub fn find_resource_family(connector: &str, resource_type: &str) -> Option<&'static ResourceFamily> {
-    RESOURCE_FAMILIES.iter().find(|f| {
-        f.family == resource_type
-            && f.connectors.iter().any(|c| connector.contains(c))
-    })
+pub fn find_resource_family(
+    connector: &str,
+    resource_type: &str,
+) -> Option<&'static ResourceFamily> {
+    RESOURCE_FAMILIES
+        .iter()
+        .find(|f| f.family == resource_type && f.connectors.iter().any(|c| connector.contains(c)))
 }
 
 /// Suggest discovery commands for a connector that needs identifier resolution.
@@ -353,10 +339,7 @@ pub fn suggest_discovery_commands(connector: &str, resource_type: Option<&str>) 
 
     if let Some(rt) = resource_type {
         if let Some(family) = find_resource_family(connector, rt) {
-            suggestions.push(format!(
-                "# {}: {}",
-                family.family, family.discovery_hint
-            ));
+            suggestions.push(format!("# {}: {}", family.family, family.discovery_hint));
         }
         suggestions.push(format!("fwc search {connector} --type {rt}"));
     }
@@ -613,7 +596,13 @@ mod tests {
         let json = serde_json::to_value(&model).unwrap();
         assert_eq!(json["connector"], "notion");
         assert_eq!(json["resource_types"][0]["name"], "page");
-        assert_eq!(json["resource_types"][0]["consumed_by"].as_array().unwrap().len(), 2);
+        assert_eq!(
+            json["resource_types"][0]["consumed_by"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
     }
 
     // ── RESOURCE_FAMILIES ───────────────────────────────────────────────

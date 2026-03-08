@@ -518,8 +518,7 @@ mod tests {
 
     #[test]
     fn client_new_empty_base_url() {
-        let client =
-            HubSpotClient::new(HubSpotAuth::BearerToken("tok".into()), Some("")).unwrap();
+        let client = HubSpotClient::new(HubSpotAuth::BearerToken("tok".into()), Some("")).unwrap();
         assert_eq!(client.base_url, "");
     }
 }

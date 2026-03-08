@@ -205,10 +205,7 @@ async fn datasets_list_empty() {
         .await
         .unwrap();
     // BigQuery response may have no "datasets" key when empty; the raw JSON is returned
-    assert!(
-        result.get("datasets").is_none()
-            || result["datasets"].as_array().unwrap().is_empty()
-    );
+    assert!(result.get("datasets").is_none() || result["datasets"].as_array().unwrap().is_empty());
 }
 
 #[fcp_async_core::runtime::test]
@@ -282,10 +279,7 @@ async fn tables_list_empty() {
         }))
         .await
         .unwrap();
-    assert!(
-        result.get("tables").is_none()
-            || result["tables"].as_array().unwrap().is_empty()
-    );
+    assert!(result.get("tables").is_none() || result["tables"].as_array().unwrap().is_empty());
 }
 
 #[fcp_async_core::runtime::test]
@@ -381,10 +375,7 @@ async fn jobs_list_empty() {
         }))
         .await
         .unwrap();
-    assert!(
-        result.get("jobs").is_none()
-            || result["jobs"].as_array().unwrap().is_empty()
-    );
+    assert!(result.get("jobs").is_none() || result["jobs"].as_array().unwrap().is_empty());
 }
 
 #[fcp_async_core::runtime::test]

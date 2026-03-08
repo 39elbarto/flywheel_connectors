@@ -151,9 +151,7 @@ impl FcpConnector for TerraformConnectorAdapter {
                 ai_hints: AgentHint {
                     when_to_use: "List all resources tracked in Terraform state.".to_string(),
                     common_mistakes: Vec::new(),
-                    examples: vec![
-                        r#"{"working_dir": "/infra/production"}"#.to_string(),
-                    ],
+                    examples: vec![r#"{"working_dir": "/infra/production"}"#.to_string()],
                     related: Vec::new(),
                 },
                 rate_limit: None,
@@ -171,12 +169,7 @@ impl FcpConnector for TerraformConnectorAdapter {
             message: "terraform verifier not initialized; handshake required".into(),
         })?;
         let required_cap = required_capability(req.operation.as_str())?;
-        verifier.verify(
-            &req.capability_token,
-            &required_cap,
-            &req.operation,
-            &[],
-        )?;
+        verifier.verify(&req.capability_token, &required_cap, &req.operation, &[])?;
 
         let request_id = req.id.clone();
         let value = self
@@ -194,12 +187,7 @@ impl FcpConnector for TerraformConnectorAdapter {
             message: "terraform verifier not initialized; handshake required".into(),
         })?;
         let required_cap = required_capability(req.operation.as_str())?;
-        verifier.verify(
-            &req.capability_token,
-            &required_cap,
-            &req.operation,
-            &[],
-        )?;
+        verifier.verify(&req.capability_token, &required_cap, &req.operation, &[])?;
 
         let value = self
             .connector
@@ -370,10 +358,7 @@ fn host_allowed(host: &str, host_allow: &[String]) -> bool {
 async fn terraform_default_deny_compliance_suite_passes() {
     let mut connector = TerraformConnectorAdapter::new();
     let signing_key = Ed25519SigningKey::generate();
-    let handshake = handshake_request(
-        signing_key.verifying_key().to_bytes(),
-        &["terraform.apply"],
-    );
+    let handshake = handshake_request(signing_key.verifying_key().to_bytes(), &["terraform.apply"]);
     // Token grants "terraform.apply" but invoke targets "terraform.state_list" -> denial
     let token = build_token(&signing_key, "terraform.apply", &["terraform.apply"]);
     let invoke = invoke_request(
@@ -465,15 +450,8 @@ async fn terraform_allow_valid_token_connector_suite_passes() {
 
     let mut connector = TerraformConnectorAdapter::new();
     let signing_key = Ed25519SigningKey::generate();
-    let handshake = handshake_request(
-        signing_key.verifying_key().to_bytes(),
-        &["terraform.state"],
-    );
-    let token = build_token(
-        &signing_key,
-        "terraform.state",
-        &["terraform.state_list"],
-    );
+    let handshake = handshake_request(signing_key.verifying_key().to_bytes(), &["terraform.state"]);
+    let token = build_token(&signing_key, "terraform.state", &["terraform.state_list"]);
     let invoke = invoke_request(
         "terraform.state_list",
         json!({ "working_dir": "/infra/test-ws" }),

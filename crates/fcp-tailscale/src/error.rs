@@ -431,9 +431,7 @@ mod tests {
 
     #[test]
     fn from_async_error_timeout() {
-        let async_err = AsyncError::Timeout {
-            timeout_ms: 500,
-        };
+        let async_err = AsyncError::Timeout { timeout_ms: 500 };
         let err = TailscaleError::from_async_error(async_err, Duration::from_secs(1));
         assert!(err.to_string().contains("timed out"));
         assert!(err.to_string().contains("1000ms"));
@@ -491,9 +489,7 @@ mod tests {
 
     #[test]
     fn from_async_error_timeout_zero_duration() {
-        let async_err = AsyncError::Timeout {
-            timeout_ms: 0,
-        };
+        let async_err = AsyncError::Timeout { timeout_ms: 0 };
         let err = TailscaleError::from_async_error(async_err, Duration::ZERO);
         assert!(err.to_string().contains("0ms"));
     }

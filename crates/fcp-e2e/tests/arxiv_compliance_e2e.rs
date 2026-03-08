@@ -18,9 +18,10 @@ use fcp_conformance::DynamicSuite;
 use fcp_core::{
     AgentHint, CapabilityGrant, CapabilityId, CapabilityToken, CapabilityVerifier, ConnectorId,
     ConnectorMetrics, FcpConnector, FcpError, HandshakeRequest, HandshakeResponse, HealthSnapshot,
-    IdempotencyClass, InstanceId, Introspection, InvokeRequest, InvokeResponse, InvokeStatus, OperationId, OperationInfo, RequestId,
-    RiskLevel, SafetyTier, SelfCheckReport, SessionId, ShutdownRequest, SimulateRequest, SimulateResponse,
-    SubscribeRequest, SubscribeResponse, UnsubscribeRequest, ZoneId,
+    IdempotencyClass, InstanceId, Introspection, InvokeRequest, InvokeResponse, InvokeStatus,
+    OperationId, OperationInfo, RequestId, RiskLevel, SafetyTier, SelfCheckReport, SessionId,
+    ShutdownRequest, SimulateRequest, SimulateResponse, SubscribeRequest, SubscribeResponse,
+    UnsubscribeRequest, ZoneId,
 };
 use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
 use fcp_e2e::{
@@ -47,7 +48,6 @@ impl ArxivConnectorAdapter {
             id: ConnectorId::from_static("arxiv"),
             instance_id: InstanceId::new(),
             verifier: None,
-
         }
     }
 }
@@ -516,7 +516,10 @@ async fn arxiv_default_deny_compliance_suite_passes_and_emits_reasoned_logs() {
         "verify log entry should include correlation_id"
     );
     // Dynamic findings should include the invoke denial check
-    let dynamic = verify_entry.context.get("dynamic").expect("dynamic context");
+    let dynamic = verify_entry
+        .context
+        .get("dynamic")
+        .expect("dynamic context");
     assert_eq!(
         dynamic.get("passed").and_then(serde_json::Value::as_bool),
         Some(true),

@@ -1181,15 +1181,8 @@ mod tests {
     fn frame_decode_exact_header_plus_tag_no_payload() {
         let session_id = MeshSessionId(SESSION_ID_BYTES);
         let dir = SessionDirection::InitiatorToResponder;
-        let frame = FcpcFrame::seal(
-            session_id,
-            1,
-            dir,
-            FcpcFrameFlags::default(),
-            b"",
-            &K_CTX,
-        )
-        .expect("seal empty");
+        let frame = FcpcFrame::seal(session_id, 1, dir, FcpcFrameFlags::default(), b"", &K_CTX)
+            .expect("seal empty");
         let bytes = frame.encode();
         // Decode with exact limit
         let decoded = FcpcFrame::decode_with_limit(&bytes, 0).expect("empty payload, limit 0 ok");
@@ -1217,15 +1210,8 @@ mod tests {
         }
 
         // Replay seq 2
-        let replay = FcpcFrame::seal(
-            session_id,
-            2,
-            dir,
-            FcpcFrameFlags::default(),
-            b"x",
-            &K_CTX,
-        )
-        .expect("seal");
+        let replay = FcpcFrame::seal(session_id, 2, dir, FcpcFrameFlags::default(), b"x", &K_CTX)
+            .expect("seal");
         let err = replay.check_replay(&mut window).expect_err("replay");
         assert!(matches!(err, FcpcError::ReplayRejected { seq: 2 }));
     }

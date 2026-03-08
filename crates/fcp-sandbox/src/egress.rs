@@ -3872,7 +3872,10 @@ mod tests {
         };
         let cloned = original.clone();
         assert_eq!(original.tcp_auth, cloned.tcp_auth);
-        assert_eq!(original.decision.canonical_host, cloned.decision.canonical_host);
+        assert_eq!(
+            original.decision.canonical_host,
+            cloned.decision.canonical_host
+        );
     }
 
     #[test]
@@ -4085,20 +4088,26 @@ mod tests {
         constraints.deny_localhost = false;
         constraints.deny_private_ranges = false;
         constraints.cidr_deny = vec![
-            "198.51.100.0/24".into(),  // TEST-NET-2
-            "203.0.113.0/24".into(),   // TEST-NET-3
+            "198.51.100.0/24".into(), // TEST-NET-2
+            "203.0.113.0/24".into(),  // TEST-NET-3
         ];
 
-        assert!(guard
-            .check_ip_constraints("198.51.100.50".parse().unwrap(), &constraints)
-            .is_err());
-        assert!(guard
-            .check_ip_constraints("203.0.113.50".parse().unwrap(), &constraints)
-            .is_err());
+        assert!(
+            guard
+                .check_ip_constraints("198.51.100.50".parse().unwrap(), &constraints)
+                .is_err()
+        );
+        assert!(
+            guard
+                .check_ip_constraints("203.0.113.50".parse().unwrap(), &constraints)
+                .is_err()
+        );
         // Outside both ranges
-        assert!(guard
-            .check_ip_constraints("198.51.99.1".parse().unwrap(), &constraints)
-            .is_ok());
+        assert!(
+            guard
+                .check_ip_constraints("198.51.99.1".parse().unwrap(), &constraints)
+                .is_ok()
+        );
     }
 
     #[test]
@@ -4109,12 +4118,16 @@ mod tests {
         constraints.deny_private_ranges = false;
         constraints.cidr_deny = vec!["2001:db8::/32".into()]; // Documentation range
 
-        assert!(guard
-            .check_ip_constraints("2001:db8::1".parse().unwrap(), &constraints)
-            .is_err());
-        assert!(guard
-            .check_ip_constraints("2001:db9::1".parse().unwrap(), &constraints)
-            .is_ok());
+        assert!(
+            guard
+                .check_ip_constraints("2001:db8::1".parse().unwrap(), &constraints)
+                .is_err()
+        );
+        assert!(
+            guard
+                .check_ip_constraints("2001:db9::1".parse().unwrap(), &constraints)
+                .is_ok()
+        );
     }
 
     #[test]
@@ -4126,9 +4139,11 @@ mod tests {
         constraints.cidr_deny = vec!["not-a-cidr".into(), "203.0.113.0/24".into()];
 
         // Invalid CIDR is skipped, valid one still applies
-        assert!(guard
-            .check_ip_constraints("203.0.113.1".parse().unwrap(), &constraints)
-            .is_err());
+        assert!(
+            guard
+                .check_ip_constraints("203.0.113.1".parse().unwrap(), &constraints)
+                .is_err()
+        );
     }
 
     // ── New tests: Egress request serde edge cases ──
@@ -4207,7 +4222,11 @@ mod tests {
     #[test]
     fn test_default_tls_verifier_sni_match_exact() {
         let verifier = DefaultTlsVerifier;
-        assert!(verifier.verify_sni("api.example.com", "api.example.com").is_ok());
+        assert!(
+            verifier
+                .verify_sni("api.example.com", "api.example.com")
+                .is_ok()
+        );
     }
 
     #[test]

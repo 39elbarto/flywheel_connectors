@@ -314,30 +314,15 @@ mod tests {
         let base = ObjectTransmissionInformation::new(100, 64, 1, 1, 8);
 
         // Differ in transfer_length
-        assert_ne!(
-            base,
-            ObjectTransmissionInformation::new(101, 64, 1, 1, 8)
-        );
+        assert_ne!(base, ObjectTransmissionInformation::new(101, 64, 1, 1, 8));
         // Differ in symbol_size
-        assert_ne!(
-            base,
-            ObjectTransmissionInformation::new(100, 65, 1, 1, 8)
-        );
+        assert_ne!(base, ObjectTransmissionInformation::new(100, 65, 1, 1, 8));
         // Differ in source_blocks
-        assert_ne!(
-            base,
-            ObjectTransmissionInformation::new(100, 64, 2, 1, 8)
-        );
+        assert_ne!(base, ObjectTransmissionInformation::new(100, 64, 2, 1, 8));
         // Differ in sub_blocks
-        assert_ne!(
-            base,
-            ObjectTransmissionInformation::new(100, 64, 1, 2, 8)
-        );
+        assert_ne!(base, ObjectTransmissionInformation::new(100, 64, 1, 2, 8));
         // Differ in alignment
-        assert_ne!(
-            base,
-            ObjectTransmissionInformation::new(100, 64, 1, 1, 4)
-        );
+        assert_ne!(base, ObjectTransmissionInformation::new(100, 64, 1, 1, 4));
     }
 
     #[test]

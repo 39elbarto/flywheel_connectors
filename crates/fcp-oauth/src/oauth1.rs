@@ -1222,7 +1222,8 @@ mod tests {
 
     #[test]
     fn test_parse_request_token_with_url_encoded_token() {
-        let body = "oauth_token=abc%20def&oauth_token_secret=sec%26ret&oauth_callback_confirmed=true";
+        let body =
+            "oauth_token=abc%20def&oauth_token_secret=sec%26ret&oauth_callback_confirmed=true";
         let token = parse_request_token(body).unwrap();
         assert_eq!(token.token, "abc def");
         assert_eq!(token.token_secret, "sec&ret");
@@ -1232,6 +1233,9 @@ mod tests {
     fn test_parse_access_token_with_unicode_screen_name() {
         let body = "oauth_token=t&oauth_token_secret=s&screen_name=%E3%83%86%E3%82%B9%E3%83%88";
         let tokens = parse_access_token(body).unwrap();
-        assert_eq!(tokens.screen_name.as_deref(), Some("\u{30c6}\u{30b9}\u{30c8}")); // テスト
+        assert_eq!(
+            tokens.screen_name.as_deref(),
+            Some("\u{30c6}\u{30b9}\u{30c8}")
+        ); // テスト
     }
 }

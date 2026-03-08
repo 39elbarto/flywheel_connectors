@@ -17,7 +17,7 @@ use tracing::{info, instrument};
 use crate::{
     client::{AirtableAuth, AirtableClient, DEFAULT_BASE_URL},
     error::AirtableError,
-    types::{BaseSchemaResponse, FieldSchema, SortSpec, TableSchema},
+    types::{BaseSchemaResponse, FieldSchema, SortSpec, TableSchema, ViewSchema},
 };
 
 const SCHEMA_CACHE_TTL: Duration = Duration::from_secs(300);
@@ -574,20 +574,149 @@ impl AirtableConnector {
                     },
                 ),
                 op_info(
+                    "airtable.list_views",
+                    "List saved views for a table using stable view IDs",
+                    json!({
+                        "type": "object",
+                        "required": ["base_id", "table_ref"],
+                        "properties": {
+                            "base_id": { "type": "string", "description": "Airtable base ID (starts with 'app')" },
+                            "table_ref": { "type": "string", "description": "Table ID (tbl...) or exact table name" }
+                        }
+                    }),
+                    json!({
+                        "type": "object",
+                        "required": ["table", "views"],
+                        "properties": {
+                            "table": { "type": "object", "description": "Resolved table summary" },
+                            "views": { "type": "array", "description": "Resolved views with stable IDs" }
+                        }
+                    }),
+                    "airtable.read",
+                    RiskLevel::Low,
+                    SafetyTier::Safe,
+                    IdempotencyClass::Strict,
+                    AgentHint {
+                        when_to_use: "Discover stable Airtable view IDs before querying through a curated view.".into(),
+                        common_mistakes: vec![
+                            "Guessing a view name without verifying it exists.".into(),
+                            "Using ambiguous duplicate view names instead of stable view IDs.".into(),
+                        ],
+                        examples: vec![
+                            r#"{"base_id": "appXXXXXXXXXXXXXX", "table_ref": "Tasks"}"#.into(),
+                        ],
+                        related: vec![
+                            CapabilityId::from_static("airtable.get_view"),
+                            CapabilityId::from_static("airtable.list_view_records"),
+                        ],
+                    },
+                ),
+                op_info(
+                    "airtable.get_view",
+                    "Resolve one Airtable view by stable ID or exact view name",
+                    json!({
+                        "type": "object",
+                        "required": ["base_id", "table_ref", "view_ref"],
+                        "properties": {
+                            "base_id": { "type": "string", "description": "Airtable base ID (starts with 'app')" },
+                            "table_ref": { "type": "string", "description": "Table ID (tbl...) or exact table name" },
+                            "view_ref": { "type": "string", "description": "View ID (viw...) or exact view name" }
+                        }
+                    }),
+                    json!({
+                        "type": "object",
+                        "required": ["table", "view"],
+                        "properties": {
+                            "table": { "type": "object", "description": "Resolved table summary" },
+                            "view": { "type": "object", "description": "Resolved view definition" }
+                        }
+                    }),
+                    "airtable.read",
+                    RiskLevel::Low,
+                    SafetyTier::Safe,
+                    IdempotencyClass::Strict,
+                    AgentHint {
+                        when_to_use: "Resolve one view before paginating records through it.".into(),
+                        common_mistakes: vec![
+                            "Using a fuzzy or partial view name.".into(),
+                            "Ignoring ambiguity when multiple views share the same name.".into(),
+                        ],
+                        examples: vec![
+                            r#"{"base_id": "appXXXXXXXXXXXXXX", "table_ref": "Tasks", "view_ref": "viwXXXXXXXXXXXXXX"}"#.into(),
+                            r#"{"base_id": "appXXXXXXXXXXXXXX", "table_ref": "Tasks", "view_ref": "Open Tasks"}"#.into(),
+                        ],
+                        related: vec![
+                            CapabilityId::from_static("airtable.list_views"),
+                            CapabilityId::from_static("airtable.list_view_records"),
+                        ],
+                    },
+                ),
+                op_info(
+                    "airtable.list_view_records",
+                    "List records through a saved Airtable view without broadening beyond the chosen query preset",
+                    json!({
+                        "type": "object",
+                        "required": ["base_id", "table_ref", "view_ref", "fields"],
+                        "properties": {
+                            "base_id": { "type": "string", "description": "Airtable base ID" },
+                            "table_ref": { "type": "string", "description": "Table ID (tbl...) or exact table name" },
+                            "view_ref": { "type": "string", "description": "View ID (viw...) or exact view name" },
+                            "fields": {
+                                "type": "array",
+                                "items": { "type": "string" },
+                                "description": "Explicit field IDs or exact field names to project so the connector does not broaden beyond the intended result shape"
+                            },
+                            "filter_by_formula": { "type": "string", "description": "Optional additional Airtable formula that only narrows the chosen view" },
+                            "max_records": { "type": "integer", "description": "Maximum records to return (1-100)" },
+                            "page_size": { "type": "integer", "description": "Records per page (1-100)" },
+                            "offset": { "type": "string", "description": "Pagination cursor from a previous response" }
+                        }
+                    }),
+                    json!({
+                        "type": "object",
+                        "required": ["table", "view", "records"],
+                        "properties": {
+                            "table": { "type": "object" },
+                            "view": { "type": "object" },
+                            "records": { "type": "array" },
+                            "offset": { "type": "string" }
+                        }
+                    }),
+                    "airtable.read",
+                    RiskLevel::Low,
+                    SafetyTier::Safe,
+                    IdempotencyClass::Strict,
+                    AgentHint {
+                        when_to_use: "Paginate records through a human-curated Airtable view while keeping the view's filter and sort semantics intact.".into(),
+                        common_mistakes: vec![
+                            "Omitting the fields list and accidentally broadening the returned payload.".into(),
+                            "Passing custom sort values instead of relying on the view's saved ordering.".into(),
+                            "Using invalid Airtable formulas or field IDs in filter_by_formula.".into(),
+                        ],
+                        examples: vec![
+                            r#"{"base_id": "appXXX", "table_ref": "Tasks", "view_ref": "Open Tasks", "fields": ["fldABC", "Status"], "page_size": 25}"#.into(),
+                        ],
+                        related: vec![
+                            CapabilityId::from_static("airtable.list_views"),
+                            CapabilityId::from_static("airtable.list_records"),
+                        ],
+                    },
+                ),
+                op_info(
                     "airtable.list_records",
-                    "List records from an Airtable table with filtering and sorting",
+                    "List records from an Airtable table with validated filtering, sorting, and optional view selection",
                     json!({
                         "type": "object",
                         "required": ["base_id", "table_id"],
                         "properties": {
                             "base_id": { "type": "string", "description": "Airtable base ID" },
-                            "table_id": { "type": "string", "description": "Table name or ID" },
-                            "fields": { "type": "array", "items": { "type": "string" }, "description": "Only return specified field names" },
-                            "filter_by_formula": { "type": "string", "description": "Airtable formula to filter records" },
-                            "max_records": { "type": "integer", "description": "Maximum records to return (max 100)" },
-                            "page_size": { "type": "integer", "description": "Records per page (max 100)" },
-                            "sort": { "type": "array", "items": { "type": "object" }, "description": "Fields to sort by" },
-                            "view": { "type": "string", "description": "View name or ID" },
+                            "table_id": { "type": "string", "description": "Table ID (tbl...) or exact table name" },
+                            "fields": { "type": "array", "items": { "type": "string" }, "description": "Optional field IDs or exact field names to project" },
+                            "filter_by_formula": { "type": "string", "description": "Airtable formula to filter records (field names only; control characters rejected)" },
+                            "max_records": { "type": "integer", "description": "Maximum records to return (1-100)" },
+                            "page_size": { "type": "integer", "description": "Records per page (1-100)" },
+                            "sort": { "type": "array", "items": { "type": "object" }, "description": "Optional sort fields (field IDs or exact names). If combined with view, sort overrides the view ordering." },
+                            "view": { "type": "string", "description": "Optional view ID (viw...) or exact view name used as a query preset" },
                             "offset": { "type": "string", "description": "Pagination cursor" }
                         }
                     }),
@@ -604,15 +733,18 @@ impl AirtableConnector {
                     SafetyTier::Safe,
                     IdempotencyClass::Strict,
                     AgentHint {
-                        when_to_use: "Query records from an Airtable table. Use filter_by_formula for filtering.".into(),
+                        when_to_use: "Query records from an Airtable table with validated filters and deterministic sorting.".into(),
                         common_mistakes: vec![
                             "Using SQL syntax instead of Airtable formula syntax.".into(),
+                            "Using field IDs directly inside filter_by_formula instead of Airtable field names.".into(),
                             "Not handling pagination for large datasets.".into(),
                         ],
                         examples: vec![
                             r#"{"base_id": "appXXX", "table_id": "Tasks", "filter_by_formula": "{Status} = \"Active\""}"#.into(),
+                            r#"{"base_id": "appXXX", "table_id": "Tasks", "sort": [{"field": "Priority", "direction": "desc"}], "page_size": 50}"#.into(),
                         ],
                         related: vec![
+                            CapabilityId::from_static("airtable.list_view_records"),
                             CapabilityId::from_static("airtable.get_record"),
                             CapabilityId::from_static("airtable.get_base_schema"),
                         ],
@@ -952,6 +1084,9 @@ impl AirtableConnector {
             "airtable.list_tables" => self.invoke_list_tables(input).await,
             "airtable.get_table" => self.invoke_get_table(input).await,
             "airtable.list_fields" => self.invoke_list_fields(input).await,
+            "airtable.list_views" => self.invoke_list_views(input).await,
+            "airtable.get_view" => self.invoke_get_view(input).await,
+            "airtable.list_view_records" => self.invoke_list_view_records(input).await,
             "airtable.list_records" => self.invoke_list_records(input).await,
             "airtable.get_record" => self.invoke_get_record(input).await,
             "airtable.create_record" => self.invoke_create_record(input).await,
@@ -1044,47 +1179,117 @@ impl AirtableConnector {
         Ok(json!({ "fields": fields }))
     }
 
-    async fn invoke_list_records(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
+    async fn invoke_list_views(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
+        let base_id = require_base_id(&input)?;
+        let table_ref = require_nonempty_str(&input, "table_ref")?;
+        let schema = self.get_base_schema_cached(base_id).await?;
+        let table = resolve_table(&schema.tables, table_ref)?;
+
+        Ok(json!({
+            "table": {
+                "id": table.id,
+                "name": table.name,
+            },
+            "views": table.views,
+        }))
+    }
+
+    async fn invoke_get_view(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
+        let base_id = require_base_id(&input)?;
+        let table_ref = require_nonempty_str(&input, "table_ref")?;
+        let view_ref = require_nonempty_str(&input, "view_ref")?;
+        let schema = self.get_base_schema_cached(base_id).await?;
+        let table = resolve_table(&schema.tables, table_ref)?;
+        let view = resolve_view(&table.views, view_ref)?;
+
+        Ok(json!({
+            "table": {
+                "id": table.id,
+                "name": table.name,
+            },
+            "view": view,
+        }))
+    }
+
+    async fn invoke_list_view_records(
+        &self,
+        input: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
-        let base_id = require_str(&input, "base_id")?;
-        let table_id = require_str(&input, "table_id")?;
+        let base_id = require_base_id(&input)?;
+        let table_ref = require_nonempty_str(&input, "table_ref")?;
+        let view_ref = require_nonempty_str(&input, "view_ref")?;
+        let schema = self.get_base_schema_cached(base_id).await?;
+        let table = resolve_table(&schema.tables, table_ref)?;
+        let view = resolve_view(&table.views, view_ref)?;
 
-        let fields: Option<Vec<String>> = input.get("fields").and_then(|v| {
-            v.as_array().map(|arr| {
-                arr.iter()
-                    .filter_map(|s| s.as_str().map(String::from))
-                    .collect()
-            })
-        });
-
-        let filter_by_formula = input.get("filter_by_formula").and_then(|v| v.as_str());
-        let max_records = input
-            .get("max_records")
-            .and_then(|v| v.as_u64())
-            .map(|v| v as u32);
-        let page_size = input
-            .get("page_size")
-            .and_then(|v| v.as_u64())
-            .map(|v| v as u32);
-
-        let sort: Option<Vec<SortSpec>> = input
-            .get("sort")
-            .and_then(|v| serde_json::from_value(v.clone()).ok());
-
-        let view = input.get("view").and_then(|v| v.as_str());
-        let offset = input.get("offset").and_then(|v| v.as_str());
+        let fields =
+            resolve_requested_fields(&input, table, true)?.ok_or(FcpError::InvalidRequest {
+                code: 1003,
+                message: "fields must include at least one field ID or exact field name".into(),
+            })?;
+        let filter_by_formula = parse_filter_by_formula(&input)?;
+        let max_records = parse_record_bound(&input, "max_records")?;
+        let page_size = parse_record_bound(&input, "page_size")?;
+        let offset = optional_nonempty_string(&input, "offset")?;
 
         let result = client
             .list_records(
                 base_id,
-                table_id,
+                &table.id,
+                Some(fields.as_slice()),
+                filter_by_formula.as_deref(),
+                max_records,
+                page_size,
+                None,
+                Some(&view.id),
+                offset.as_deref(),
+            )
+            .await
+            .map_err(|e: AirtableError| e.to_fcp_error())?;
+
+        let mut resp = json!({
+            "table": {
+                "id": table.id,
+                "name": table.name,
+            },
+            "view": view,
+            "records": result.records,
+        });
+        if let Some(offset) = result.offset {
+            resp["offset"] = json!(offset);
+        }
+        Ok(resp)
+    }
+
+    async fn invoke_list_records(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let base_id = require_base_id(&input)?;
+        let table_ref = require_nonempty_str(&input, "table_id")?;
+        let schema = self.get_base_schema_cached(base_id).await?;
+        let table = resolve_table(&schema.tables, table_ref)?;
+
+        let fields = resolve_requested_fields(&input, table, false)?;
+        let filter_by_formula = parse_filter_by_formula(&input)?;
+        let max_records = parse_record_bound(&input, "max_records")?;
+        let page_size = parse_record_bound(&input, "page_size")?;
+        let sort = parse_sort_specs(&input, table)?;
+        let view = optional_nonempty_string(&input, "view")?
+            .map(|view_ref| resolve_view(&table.views, &view_ref).map(|view| view.id.clone()))
+            .transpose()?;
+        let offset = optional_nonempty_string(&input, "offset")?;
+
+        let result = client
+            .list_records(
+                base_id,
+                &table.id,
                 fields.as_deref(),
-                filter_by_formula,
+                filter_by_formula.as_deref(),
                 max_records,
                 page_size,
                 sort.as_deref(),
-                view,
-                offset,
+                view.as_deref(),
+                offset.as_deref(),
             )
             .await
             .map_err(|e: AirtableError| e.to_fcp_error())?;
@@ -1342,6 +1547,26 @@ fn resolve_table<'a>(tables: &'a [TableSchema], table_ref: &str) -> FcpResult<&'
     }
 }
 
+fn resolve_view<'a>(views: &'a [ViewSchema], view_ref: &str) -> FcpResult<&'a ViewSchema> {
+    if let Some(view) = views.iter().find(|view| view.id == view_ref) {
+        return Ok(view);
+    }
+
+    let matches: Vec<&ViewSchema> = views.iter().filter(|view| view.name == view_ref).collect();
+    match matches.len() {
+        1 => Ok(matches[0]),
+        0 => Err(FcpError::ResourceNotFound {
+            resource: format!("airtable.view:{view_ref}"),
+        }),
+        _ => Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!(
+                "Ambiguous view_ref '{view_ref}': multiple views have this name; use stable view ID"
+            ),
+        }),
+    }
+}
+
 fn resolve_fields(table: &TableSchema, refs: &[serde_json::Value]) -> FcpResult<Vec<FieldSchema>> {
     refs.iter()
         .map(|field_ref| {
@@ -1379,6 +1604,161 @@ fn resolve_fields(table: &TableSchema, refs: &[serde_json::Value]) -> FcpResult<
             }
         })
         .collect()
+}
+
+fn resolve_requested_fields(
+    input: &serde_json::Value,
+    table: &TableSchema,
+    required: bool,
+) -> FcpResult<Option<Vec<String>>> {
+    let Some(field_refs) = input.get("fields") else {
+        if required {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: "Missing required field: fields".into(),
+            });
+        }
+        return Ok(None);
+    };
+
+    let refs = field_refs.as_array().ok_or(FcpError::InvalidRequest {
+        code: 1003,
+        message: "fields must be an array of strings".into(),
+    })?;
+    if refs.is_empty() {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "fields must include at least one field ID or exact field name".into(),
+        });
+    }
+
+    let resolved = resolve_fields(table, refs)?;
+    Ok(Some(resolved.into_iter().map(|field| field.name).collect()))
+}
+
+fn parse_filter_by_formula(input: &serde_json::Value) -> FcpResult<Option<String>> {
+    let Some(value) = input.get("filter_by_formula") else {
+        return Ok(None);
+    };
+
+    let formula = value.as_str().ok_or(FcpError::InvalidRequest {
+        code: 1003,
+        message: "filter_by_formula must be a string".into(),
+    })?;
+    let trimmed = formula.trim();
+    if trimmed.is_empty() {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "filter_by_formula must be a non-empty string".into(),
+        });
+    }
+    if trimmed.chars().any(char::is_control) {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message:
+                "filter_by_formula must not contain control characters; provide a single Airtable formula expression".into(),
+        });
+    }
+
+    Ok(Some(trimmed.to_string()))
+}
+
+fn parse_record_bound(input: &serde_json::Value, field: &str) -> FcpResult<Option<u32>> {
+    let Some(value) = input.get(field) else {
+        return Ok(None);
+    };
+
+    let raw = value.as_u64().ok_or(FcpError::InvalidRequest {
+        code: 1003,
+        message: format!("{field} must be an integer between 1 and 100"),
+    })?;
+    if !(1..=100).contains(&raw) {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("{field} must be between 1 and 100"),
+        });
+    }
+
+    Ok(Some(raw as u32))
+}
+
+fn optional_nonempty_string(input: &serde_json::Value, field: &str) -> FcpResult<Option<String>> {
+    let Some(value) = input.get(field) else {
+        return Ok(None);
+    };
+
+    let raw = value.as_str().ok_or(FcpError::InvalidRequest {
+        code: 1003,
+        message: format!("{field} must be a string"),
+    })?;
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("{field} must be a non-empty string"),
+        });
+    }
+
+    Ok(Some(trimmed.to_string()))
+}
+
+fn parse_sort_specs(
+    input: &serde_json::Value,
+    table: &TableSchema,
+) -> FcpResult<Option<Vec<SortSpec>>> {
+    let Some(value) = input.get("sort") else {
+        return Ok(None);
+    };
+
+    let items = value.as_array().ok_or(FcpError::InvalidRequest {
+        code: 1003,
+        message: "sort must be an array of objects".into(),
+    })?;
+    if items.len() > 3 {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "sort supports at most 3 Airtable sort clauses".into(),
+        });
+    }
+
+    items
+        .iter()
+        .map(|item| {
+            let mut spec: SortSpec =
+                serde_json::from_value(item.clone()).map_err(|error| FcpError::InvalidRequest {
+                    code: 1003,
+                    message: format!("Invalid sort specification: {error}"),
+                })?;
+            if spec.field.trim().is_empty() {
+                return Err(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "sort.field must be a non-empty string".into(),
+                });
+            }
+
+            let direction = spec.direction.to_ascii_lowercase();
+            if !matches!(direction.as_str(), "asc" | "desc") {
+                return Err(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "sort.direction must be either 'asc' or 'desc'".into(),
+                });
+            }
+
+            let field_selector = vec![serde_json::Value::String(spec.field.clone())];
+            let resolved_field = resolve_fields(table, &field_selector)?
+                .into_iter()
+                .next()
+                .ok_or(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "sort.field must reference an existing Airtable field".into(),
+                })?;
+
+            spec.field = resolved_field.name;
+            spec.direction = direction;
+            Ok(spec)
+        })
+        .collect::<FcpResult<Vec<_>>>()
+        .map(Some)
 }
 
 #[allow(clippy::fn_params_excessive_bools)]
@@ -1543,6 +1923,9 @@ mod tests {
         assert!(op_ids.contains(&"airtable.list_tables"));
         assert!(op_ids.contains(&"airtable.get_table"));
         assert!(op_ids.contains(&"airtable.list_fields"));
+        assert!(op_ids.contains(&"airtable.list_views"));
+        assert!(op_ids.contains(&"airtable.get_view"));
+        assert!(op_ids.contains(&"airtable.list_view_records"));
         assert!(op_ids.contains(&"airtable.list_records"));
         assert!(op_ids.contains(&"airtable.get_record"));
         assert!(op_ids.contains(&"airtable.create_record"));
@@ -1551,7 +1934,7 @@ mod tests {
         assert!(op_ids.contains(&"airtable.replace_record"));
         assert!(op_ids.contains(&"airtable.delete_record"));
         assert!(op_ids.contains(&"airtable.download_attachment"));
-        assert_eq!(ops.len(), 13);
+        assert_eq!(ops.len(), 16);
     }
 
     #[fcp_async_core::runtime::test]

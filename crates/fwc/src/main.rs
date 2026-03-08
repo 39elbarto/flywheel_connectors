@@ -8,6 +8,7 @@ mod identifier;
 mod intent;
 #[allow(dead_code)] // Contract types wired into host-backed commands in later beads.
 mod readiness;
+mod recovery;
 mod render;
 mod workflow;
 
@@ -1560,19 +1561,25 @@ fn normalize_args(
     let mut args = received_args.to_vec();
     let mut corrections = Vec::new();
 
+    // ── Phase 0: detect dangerous shapes before any normalization ────
+    if let Some(shape) = recovery::is_dangerous_shape(&args) {
+        return Err(dangerous_shape_dispatch(&args, &shape));
+    }
+
     let Some(command_index) = first_command_index(&args) else {
         return Ok(NormalizedArgs { args, corrections });
     };
 
-    if matches!(
-        args.get(command_index).map(String::as_str),
-        Some("connector" | "connectors")
-    ) {
+    // ── Phase 1: strip redundant namespace prefixes ─────────────────
+    if args
+        .get(command_index)
+        .is_some_and(|segment| recovery::is_redundant_prefix(segment))
+    {
         if let Some(next) = args.get(command_index + 1) {
             corrections.push(InputCorrection {
                 from: format!("{} {}", args[command_index], next),
                 to: next.clone(),
-                rationale: "Dropped the redundant connector namespace prefix because `fwc` is already connector-scoped.",
+                rationale: "Dropped the redundant namespace prefix because `fwc` is already connector-scoped.",
             });
             args.remove(command_index);
         }
@@ -1582,6 +1589,7 @@ fn normalize_args(
         return Ok(NormalizedArgs { args, corrections });
     };
 
+    // ── Phase 2: reject ambiguous `op show` shape ───────────────────
     if matches!(
         args.get(command_index).map(String::as_str),
         Some("op" | "operation" | "operations")
@@ -1592,14 +1600,34 @@ fn normalize_args(
         return Err(ambiguous_operation_show_dispatch(&args));
     }
 
-    if let Some(canonical) = canonical_command_alias(&args[command_index]) {
-        if canonical != args[command_index] {
-            corrections.push(InputCorrection {
-                from: args[command_index].clone(),
-                to: canonical.to_owned(),
-                rationale: "Canonicalized a safe discovery-style alias so downstream payloads stay consistent.",
-            });
-            canonical.clone_into(&mut args[command_index]);
+    // ── Phase 3: resolve command alias/typo ─────────────────────────
+    if let Some(resolution) = recovery::resolve_command(&args[command_index]) {
+        let safety = recovery::correction_safety(&resolution);
+        match safety {
+            recovery::CorrectionSafety::Safe => {
+                if resolution.canonical != args[command_index] {
+                    corrections.push(InputCorrection {
+                        from: args[command_index].clone(),
+                        to: resolution.canonical.to_owned(),
+                        rationale: resolution.rationale,
+                    });
+                    resolution.canonical.clone_into(&mut args[command_index]);
+                }
+            }
+            recovery::CorrectionSafety::Ambiguous => {
+                return Err(ambiguous_typo_dispatch(
+                    &args,
+                    &args[command_index],
+                    resolution.canonical,
+                ));
+            }
+            recovery::CorrectionSafety::Dangerous => {
+                return Err(dangerous_typo_dispatch(
+                    &args,
+                    &args[command_index],
+                    resolution.canonical,
+                ));
+            }
         }
     }
 
@@ -1607,23 +1635,127 @@ fn normalize_args(
         return Ok(NormalizedArgs { args, corrections });
     };
 
+    // ── Phase 4: normalize task subcommands ─────────────────────────
     if args
         .get(command_index)
         .is_some_and(|segment| segment == "task")
-        && args.get(command_index + 1).is_some_and(|segment| {
-            !segment.starts_with('-') && !workflow::task_subcommands().contains(&segment.as_str())
-        })
     {
-        let raw_intent = args[command_index + 1].clone();
-        corrections.push(InputCorrection {
-            from: intent::shell_join(&["task".to_owned(), raw_intent.clone()]),
-            to: intent::shell_join(&["task".to_owned(), "create".to_owned(), raw_intent]),
-            rationale: "Defaulted `fwc task <intent>` to `fwc task create <intent>` because intent-first workflow creation is the canonical capsule entrypoint.",
-        });
-        args.insert(command_index + 1, "create".to_owned());
+        if let Some(sub) = args.get(command_index + 1) {
+            if !sub.starts_with('-') && !workflow::task_subcommands().contains(&sub.as_str()) {
+                // Try task subcommand alias resolution first
+                if let Some(canonical) = recovery::task_subcommand_alias(sub) {
+                    corrections.push(InputCorrection {
+                        from: sub.clone(),
+                        to: canonical.to_owned(),
+                        rationale: "Canonicalized a task subcommand alias.",
+                    });
+                    canonical.clone_into(&mut args[command_index + 1]);
+                } else {
+                    // Treat unrecognized subcommand as intent for `task create`
+                    let raw_intent = args[command_index + 1].clone();
+                    corrections.push(InputCorrection {
+                        from: intent::shell_join(&["task".to_owned(), raw_intent.clone()]),
+                        to: intent::shell_join(&[
+                            "task".to_owned(),
+                            "create".to_owned(),
+                            raw_intent,
+                        ]),
+                        rationale: "Defaulted `fwc task <intent>` to `fwc task create <intent>` because intent-first workflow creation is the canonical capsule entrypoint.",
+                    });
+                    args.insert(command_index + 1, "create".to_owned());
+                }
+            }
+        }
+    }
+
+    // ── Phase 5: normalize config subcommands ───────────────────────
+    if args
+        .get(command_index)
+        .is_some_and(|segment| segment == "config")
+    {
+        if let Some(sub) = args.get(command_index + 1) {
+            if let Some(resolution) = recovery::resolve_config_subcommand(sub) {
+                corrections.push(InputCorrection {
+                    from: sub.clone(),
+                    to: resolution.canonical.to_owned(),
+                    rationale: resolution.rationale,
+                });
+                resolution
+                    .canonical
+                    .clone_into(&mut args[command_index + 1]);
+            }
+        }
     }
 
     Ok(NormalizedArgs { args, corrections })
+}
+
+fn dangerous_shape_dispatch(args: &[String], shape: &recovery::DangerousShape) -> DispatchOutcome {
+    structured_error(
+        shape.kind,
+        shape.message,
+        CliExitCode::AmbiguousCorrection,
+        true,
+        args,
+        args,
+        ErrorDetails {
+            did_you_mean: shape
+                .candidates
+                .iter()
+                .map(|candidate| format!("Did you mean `{candidate}`?"))
+                .collect(),
+            examples: shape
+                .candidates
+                .iter()
+                .map(|candidate| (*candidate).to_owned())
+                .collect(),
+            next_actions: vec!["Choose the specific command that matches your intent.".to_owned()],
+        },
+    )
+}
+
+fn ambiguous_typo_dispatch(args: &[String], typo: &str, canonical: &str) -> DispatchOutcome {
+    structured_error(
+        "ambiguous-typo",
+        format!(
+            "`{typo}` looks like a typo for the mutating command `{canonical}`. Auto-correction was blocked because `{canonical}` has side effects."
+        ),
+        CliExitCode::AmbiguousCorrection,
+        true,
+        args,
+        args,
+        ErrorDetails {
+            did_you_mean: vec![format!("Did you mean `{canonical}`?")],
+            examples: vec![format!("fwc {canonical} <connector>")],
+            next_actions: vec![
+                format!(
+                    "Retry with the exact spelling `{canonical}` if that is what you intended."
+                ),
+                "Typo corrections for mutating commands are never applied automatically."
+                    .to_owned(),
+            ],
+        },
+    )
+}
+
+fn dangerous_typo_dispatch(args: &[String], typo: &str, canonical: &str) -> DispatchOutcome {
+    structured_error(
+        "dangerous-correction",
+        format!(
+            "`{typo}` was not corrected to `{canonical}` because the target command is destructive."
+        ),
+        CliExitCode::AmbiguousCorrection,
+        false,
+        args,
+        args,
+        ErrorDetails {
+            did_you_mean: vec![format!("Did you mean `{canonical}`?")],
+            examples: vec![format!("fwc {canonical} <connector>")],
+            next_actions: vec![format!(
+                "Retry with the exact spelling `{canonical}` if that is truly what you intended."
+            )],
+        },
+    )
 }
 
 fn infer_output_format(args: &[String]) -> OutputFormat {
@@ -1669,23 +1801,6 @@ fn first_command_index(args: &[String]) -> Option<usize> {
     }
 
     None
-}
-
-fn canonical_command_alias(token: &str) -> Option<&'static str> {
-    match token {
-        "contract" => Some("guide"),
-        "workflow" => Some("plan"),
-        "why" => Some("explain"),
-        "run" => Some("do"),
-        "tasks" => Some("task"),
-        "ls" => Some("list"),
-        "info" | "inspect" | "describe" => Some("show"),
-        "operations" | "operation" | "op" => Some("ops"),
-        "spec" => Some("schema"),
-        "example" => Some("examples"),
-        "preview" | "dry-run" => Some("simulate"),
-        _ => None,
-    }
 }
 
 fn ambiguous_operation_show_dispatch(args: &[String]) -> DispatchOutcome {
@@ -2189,7 +2304,7 @@ mod tests {
             normalize_args(&["fwc", "op", "show", "github", "issues.create"].map(str::to_owned))
                 .expect_err("op show should not auto-correct");
         assert_eq!(error.exit_code, CliExitCode::AmbiguousCorrection.into());
-        assert_eq!(error.payload["error"]["type"], "ambiguous-correction");
+        assert_eq!(error.payload["error"]["type"], "ambiguous-verb-object");
     }
 
     #[test]
@@ -2224,7 +2339,7 @@ mod tests {
         let args = vec![
             "fwc".to_owned(),
             "--json".to_owned(),
-            "exmaples".to_owned(),
+            "connectorz".to_owned(),
             "slack".to_owned(),
         ];
         let outcome = execute(&args).expect("execution should not fail internally");
@@ -2233,11 +2348,31 @@ mod tests {
 
         assert_eq!(outcome.exit_code, CliExitCode::UnknownCommand.into());
         assert_eq!(payload["error"]["type"], "unknown-command");
-        assert!(
-            payload["error"]["did_you_mean"][0]
-                .as_str()
-                .unwrap()
-                .contains("examples")
+        assert!(payload["error"]["recoverable"] == true);
+    }
+
+    #[test]
+    fn execute_auto_corrects_exmaples_typo() {
+        let args = vec![
+            "fwc".to_owned(),
+            "--json".to_owned(),
+            "exmaples".to_owned(),
+            "slack".to_owned(),
+        ];
+        let outcome = execute(&args).expect("execution should not fail internally");
+        let payload: Value =
+            serde_json::from_str(&outcome.text).expect("json output should parse cleanly");
+
+        // exmaples is a typo for examples (readonly command), so auto-corrected
+        assert_eq!(outcome.exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["command"], "examples");
+        assert_eq!(
+            payload["input_normalization"]["applied"][0]["from"],
+            "exmaples"
+        );
+        assert_eq!(
+            payload["input_normalization"]["applied"][0]["to"],
+            "examples"
         );
     }
 

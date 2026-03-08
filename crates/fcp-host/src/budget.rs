@@ -1596,8 +1596,7 @@ mod tests {
         };
 
         let mut tracker = BudgetTracker::new();
-        let _ =
-            tracker.record_usage(&zone, &policy, &[UsageMetric::tokens(u64::MAX - 10)]);
+        let _ = tracker.record_usage(&zone, &policy, &[UsageMetric::tokens(u64::MAX - 10)]);
         let eval = tracker.record_usage(&zone, &policy, &[UsageMetric::tokens(20)]);
         // Should saturate at u64::MAX
         assert_eq!(eval.snapshot.budgets[0].used, u64::MAX);

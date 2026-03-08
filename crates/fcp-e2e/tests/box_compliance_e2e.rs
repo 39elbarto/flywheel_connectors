@@ -12,18 +12,19 @@
 #![allow(clippy::too_many_lines)]
 
 use chrono::{Duration as ChronoDuration, Utc};
+use fcp_box::connector::BoxConnector;
 use fcp_conformance::DynamicSuite;
 use fcp_core::{
     AgentHint, CapabilityGrant, CapabilityId, CapabilityToken, CapabilityVerifier, ConnectorId,
     ConnectorMetrics, FcpConnector, FcpError, HandshakeRequest, HandshakeResponse, HealthSnapshot,
-    IdempotencyClass, InstanceId, Introspection, InvokeRequest, InvokeResponse, InvokeStatus, OperationId, OperationInfo, RequestId,
-    RiskLevel, SafetyTier, SessionId, ShutdownRequest, SimulateRequest, SimulateResponse, SubscribeRequest,
-    SubscribeResponse, UnsubscribeRequest, ZoneId,
+    IdempotencyClass, InstanceId, Introspection, InvokeRequest, InvokeResponse, InvokeStatus,
+    OperationId, OperationInfo, RequestId, RiskLevel, SafetyTier, SessionId, ShutdownRequest,
+    SimulateRequest, SimulateResponse, SubscribeRequest, SubscribeResponse, UnsubscribeRequest,
+    ZoneId,
 };
 use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
 use fcp_e2e::{ComplianceSuite, ConnectorSuite, E2eRunner, InvokeExpectations};
 use fcp_manifest::ConnectorManifest;
-use fcp_box::connector::BoxConnector;
 use fcp_testkit::MockApiServer;
 use serde_json::json;
 use wiremock::{
@@ -45,7 +46,6 @@ impl BoxConnectorAdapter {
             id: ConnectorId::from_static("box"),
             instance_id: InstanceId::new(),
             verifier: None,
-
         }
     }
 }
@@ -386,22 +386,11 @@ async fn box_default_deny_compliance_suite_passes() {
 
     let mut connector = BoxConnectorAdapter::new();
     let signing_key = Ed25519SigningKey::generate();
-    let handshake = handshake_request(
-        signing_key.verifying_key().to_bytes(),
-        &["box.files.read"],
-    );
+    let handshake = handshake_request(signing_key.verifying_key().to_bytes(), &["box.files.read"]);
     // Token grants box.files.read capability but only for box.files.get operation.
     // Invoke targets box.files.delete which requires box.files.write -- should be denied.
-    let token = build_token(
-        &signing_key,
-        "box.files.read",
-        &["box.files.get"],
-    );
-    let invoke = invoke_request(
-        "box.files.delete",
-        json!({ "file_id": "123456789" }),
-        token,
-    );
+    let token = build_token(&signing_key, "box.files.read", &["box.files.get"]);
+    let invoke = invoke_request("box.files.delete", json!({ "file_id": "123456789" }), token);
 
     let dynamic = DynamicSuite {
         config: box_config(&mock.base_url()),
@@ -414,11 +403,7 @@ async fn box_default_deny_compliance_suite_passes() {
         require_capability_denial: true,
         require_decision_receipt: false,
     };
-    let suite = ComplianceSuite::new(
-        "box_default_deny",
-        box_manifest_with_hash(),
-        dynamic,
-    );
+    let suite = ComplianceSuite::new("box_default_deny", box_manifest_with_hash(), dynamic);
 
     let mut runner = E2eRunner::new("fcp-e2e-box");
     let report = runner
@@ -439,32 +424,19 @@ async fn box_happy_path_compliance_suite_passes() {
     // Mount mock for GET /files/{file_id} (get_file)
     Mock::given(method("GET"))
         .and(path_regex(r"^/files/123456789.*"))
-        .respond_with(
-            ResponseTemplate::new(200).set_body_json(json!({
-                "id": "123456789",
-                "type": "file",
-                "name": "test-file.txt"
-            })),
-        )
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "123456789",
+            "type": "file",
+            "name": "test-file.txt"
+        })))
         .mount(mock.inner())
         .await;
 
     let mut connector = BoxConnectorAdapter::new();
     let signing_key = Ed25519SigningKey::generate();
-    let handshake = handshake_request(
-        signing_key.verifying_key().to_bytes(),
-        &["box.files.read"],
-    );
-    let token = build_token(
-        &signing_key,
-        "box.files.read",
-        &["box.files.get"],
-    );
-    let invoke = invoke_request(
-        "box.files.get",
-        json!({ "file_id": "123456789" }),
-        token,
-    );
+    let handshake = handshake_request(signing_key.verifying_key().to_bytes(), &["box.files.read"]);
+    let token = build_token(&signing_key, "box.files.read", &["box.files.get"]);
+    let invoke = invoke_request("box.files.get", json!({ "file_id": "123456789" }), token);
 
     let suite = ConnectorSuite {
         test_name: "box_happy_path".to_string(),
@@ -516,10 +488,7 @@ fn box_manifest_network_guard_allows_and_denies() {
         "Box manifest should declare 5 operations"
     );
 
-    let expected_hosts = vec![
-        "api.box.com".to_string(),
-        "upload.box.com".to_string(),
-    ];
+    let expected_hosts = vec!["api.box.com".to_string(), "upload.box.com".to_string()];
 
     for operation_name in operations.keys() {
         let host_allow = operation_host_allow_list(&manifest, operation_name);

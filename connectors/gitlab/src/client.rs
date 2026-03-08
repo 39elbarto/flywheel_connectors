@@ -267,8 +267,7 @@ mod tests {
 
     #[test]
     fn client_new_default_url() {
-        let client =
-            GitLabClient::new(GitLabAuth::PrivateToken("tok".into()), None).unwrap();
+        let client = GitLabClient::new(GitLabAuth::PrivateToken("tok".into()), None).unwrap();
         assert_eq!(client.base_url, DEFAULT_BASE_URL);
     }
 
@@ -294,8 +293,7 @@ mod tests {
 
     #[test]
     fn client_debug_contains_base_url() {
-        let client =
-            GitLabClient::new(GitLabAuth::PrivateToken("tok".into()), None).unwrap();
+        let client = GitLabClient::new(GitLabAuth::PrivateToken("tok".into()), None).unwrap();
         let dbg = format!("{client:?}");
         assert!(dbg.contains("GitLabClient"));
         assert!(dbg.contains("base_url"));
@@ -339,21 +337,14 @@ mod tests {
 
     #[test]
     fn client_new_with_credential_id() {
-        let client = GitLabClient::new(
-            GitLabAuth::CredentialId(CredentialId::new()),
-            None,
-        )
-        .unwrap();
+        let client =
+            GitLabClient::new(GitLabAuth::CredentialId(CredentialId::new()), None).unwrap();
         assert_eq!(client.base_url, DEFAULT_BASE_URL);
     }
 
     #[test]
     fn client_new_empty_url() {
-        let client = GitLabClient::new(
-            GitLabAuth::PrivateToken("tok".into()),
-            Some(""),
-        )
-        .unwrap();
+        let client = GitLabClient::new(GitLabAuth::PrivateToken("tok".into()), Some("")).unwrap();
         assert_eq!(client.base_url, "");
     }
 

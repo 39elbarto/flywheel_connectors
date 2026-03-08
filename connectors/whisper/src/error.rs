@@ -64,10 +64,9 @@ impl WhisperError {
     #[must_use]
     pub const fn is_retryable(&self) -> bool {
         match self {
-            Self::Http(_)
-            | Self::RateLimited { .. }
-            | Self::Connection(_)
-            | Self::Timeout(_) => true,
+            Self::Http(_) | Self::RateLimited { .. } | Self::Connection(_) | Self::Timeout(_) => {
+                true
+            }
             Self::Api { status_code, .. } => matches!(status_code, 500..=599 | 429),
             _ => false,
         }

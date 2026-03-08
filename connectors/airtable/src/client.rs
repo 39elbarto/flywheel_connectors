@@ -1019,9 +1019,10 @@ mod tests {
 
     #[test]
     fn client_retry_config_large_values() {
-        let client = AirtableClient::new("tok")
-            .unwrap()
-            .with_retry_config(u32::MAX, u64::MAX, u64::MAX);
+        let client =
+            AirtableClient::new("tok")
+                .unwrap()
+                .with_retry_config(u32::MAX, u64::MAX, u64::MAX);
         assert_eq!(client.max_retries, u32::MAX);
         assert_eq!(client.initial_delay_ms, u64::MAX);
         assert_eq!(client.max_delay_ms, u64::MAX);
@@ -1055,9 +1056,7 @@ mod tests {
 
     #[test]
     fn client_with_base_url_empty_string() {
-        let client = AirtableClient::new("tok")
-            .unwrap()
-            .with_base_url("");
+        let client = AirtableClient::new("tok").unwrap().with_base_url("");
         assert_eq!(client.base_url, "");
     }
 

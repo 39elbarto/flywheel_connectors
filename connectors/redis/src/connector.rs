@@ -385,9 +385,7 @@ impl RedisConnector {
     ) -> Result<serde_json::Value, RedisError> {
         let key = require_str(input, "key")?;
         let value = require_str(input, "value")?;
-        let ttl_seconds = input
-            .get("ttl_seconds")
-            .and_then(serde_json::Value::as_u64);
+        let ttl_seconds = input.get("ttl_seconds").and_then(serde_json::Value::as_u64);
         let nx = input
             .get("nx")
             .and_then(serde_json::Value::as_bool)
@@ -479,11 +477,9 @@ impl RedisConnector {
         let fields_val = input.get("fields").ok_or_else(|| RedisError::Command {
             message: "Missing required field: fields".into(),
         })?;
-        let fields_obj = fields_val
-            .as_object()
-            .ok_or_else(|| RedisError::Command {
-                message: "fields must be an object".into(),
-            })?;
+        let fields_obj = fields_val.as_object().ok_or_else(|| RedisError::Command {
+            message: "fields must be an object".into(),
+        })?;
 
         let field_pairs: Vec<(String, String)> = fields_obj
             .iter()
@@ -579,10 +575,7 @@ fn require_str<'a>(input: &'a serde_json::Value, field: &str) -> Result<&'a str,
 }
 
 /// Extract a required string array field from input.
-fn require_str_array(
-    input: &serde_json::Value,
-    field: &str,
-) -> Result<Vec<String>, RedisError> {
+fn require_str_array(input: &serde_json::Value, field: &str) -> Result<Vec<String>, RedisError> {
     let arr = input
         .get(field)
         .and_then(serde_json::Value::as_array)

@@ -641,7 +641,10 @@ mod tests {
         let verifier = HmacSha256Verifier::new("secret");
         let sig = verifier.compute(b"test");
         // Ensure output is lowercase hex
-        assert!(sig.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit()));
+        assert!(
+            sig.chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+        );
     }
 
     #[test]

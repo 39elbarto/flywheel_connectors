@@ -1313,8 +1313,18 @@ mod tests {
             "hangoutLink": "https://meet.google.com/xyz-abc-def"
         });
         let evt: Event = serde_json::from_value(json).unwrap();
-        assert!(evt.html_link.as_deref().unwrap().contains("calendar.google.com"));
-        assert!(evt.hangout_link.as_deref().unwrap().contains("meet.google.com"));
+        assert!(
+            evt.html_link
+                .as_deref()
+                .unwrap()
+                .contains("calendar.google.com")
+        );
+        assert!(
+            evt.hangout_link
+                .as_deref()
+                .unwrap()
+                .contains("meet.google.com")
+        );
     }
 
     #[test]
@@ -1325,7 +1335,10 @@ mod tests {
             "organizer": {"email": "org@test.com", "self": true}
         });
         let evt: Event = serde_json::from_value(json).unwrap();
-        assert_eq!(evt.creator.as_ref().unwrap().email.as_deref(), Some("creator@test.com"));
+        assert_eq!(
+            evt.creator.as_ref().unwrap().email.as_deref(),
+            Some("creator@test.com")
+        );
         assert!(evt.organizer.as_ref().unwrap().self_);
     }
 

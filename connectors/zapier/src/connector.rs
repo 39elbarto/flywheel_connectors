@@ -324,9 +324,7 @@ impl ZapierConnector {
             .and_then(serde_json::Value::as_str)
             .unwrap_or("");
 
-        let allowed = operations_info()
-            .iter()
-            .any(|o| o.id.as_ref() == operation);
+        let allowed = operations_info().iter().any(|o| o.id.as_ref() == operation);
 
         Ok(json!({
             "allowed": allowed,
@@ -711,28 +709,41 @@ mod tests {
         let ops = operations_info();
         for op in &ops {
             let v = serde_json::to_value(op.idempotency).unwrap();
-            assert!(v.is_string(), "op {} idempotency should serialize", op.id.as_ref());
+            assert!(
+                v.is_string(),
+                "op {} idempotency should serialize",
+                op.id.as_ref()
+            );
         }
     }
 
     #[test]
     fn operations_list_is_strict_idempotent() {
         let ops = operations_info();
-        let list_op = ops.iter().find(|o| o.id.as_ref() == "zapier.zaps.list").unwrap();
+        let list_op = ops
+            .iter()
+            .find(|o| o.id.as_ref() == "zapier.zaps.list")
+            .unwrap();
         assert_eq!(list_op.idempotency, IdempotencyClass::Strict);
     }
 
     #[test]
     fn operations_execute_is_not_idempotent() {
         let ops = operations_info();
-        let exec_op = ops.iter().find(|o| o.id.as_ref() == "zapier.zaps.execute").unwrap();
+        let exec_op = ops
+            .iter()
+            .find(|o| o.id.as_ref() == "zapier.zaps.execute")
+            .unwrap();
         assert_eq!(exec_op.idempotency, IdempotencyClass::None);
     }
 
     #[test]
     fn operations_execute_has_required_input_fields() {
         let ops = operations_info();
-        let exec_op = ops.iter().find(|o| o.id.as_ref() == "zapier.zaps.execute").unwrap();
+        let exec_op = ops
+            .iter()
+            .find(|o| o.id.as_ref() == "zapier.zaps.execute")
+            .unwrap();
         let required = exec_op.input_schema["required"].as_array().unwrap();
         let req_strs: Vec<&str> = required.iter().filter_map(|v| v.as_str()).collect();
         assert!(req_strs.contains(&"action_id"));
@@ -742,7 +753,10 @@ mod tests {
     #[test]
     fn operations_list_has_no_required_input() {
         let ops = operations_info();
-        let list_op = ops.iter().find(|o| o.id.as_ref() == "zapier.zaps.list").unwrap();
+        let list_op = ops
+            .iter()
+            .find(|o| o.id.as_ref() == "zapier.zaps.list")
+            .unwrap();
         let required = list_op.input_schema["required"].as_array().unwrap();
         assert!(required.is_empty());
     }
@@ -750,7 +764,10 @@ mod tests {
     #[test]
     fn operations_list_output_has_zaps() {
         let ops = operations_info();
-        let list_op = ops.iter().find(|o| o.id.as_ref() == "zapier.zaps.list").unwrap();
+        let list_op = ops
+            .iter()
+            .find(|o| o.id.as_ref() == "zapier.zaps.list")
+            .unwrap();
         let required = list_op.output_schema["required"].as_array().unwrap();
         assert!(
             required
@@ -763,7 +780,10 @@ mod tests {
     #[test]
     fn operations_execute_output_has_result() {
         let ops = operations_info();
-        let exec_op = ops.iter().find(|o| o.id.as_ref() == "zapier.zaps.execute").unwrap();
+        let exec_op = ops
+            .iter()
+            .find(|o| o.id.as_ref() == "zapier.zaps.execute")
+            .unwrap();
         let required = exec_op.output_schema["required"].as_array().unwrap();
         assert!(
             required
@@ -923,9 +943,15 @@ mod tests {
     #[test]
     fn operations_capabilities_match_manifest() {
         let ops = operations_info();
-        let list_op = ops.iter().find(|o| o.id.as_ref() == "zapier.zaps.list").unwrap();
+        let list_op = ops
+            .iter()
+            .find(|o| o.id.as_ref() == "zapier.zaps.list")
+            .unwrap();
         assert_eq!(list_op.capability.as_ref(), "zapier.zaps.read");
-        let exec_op = ops.iter().find(|o| o.id.as_ref() == "zapier.zaps.execute").unwrap();
+        let exec_op = ops
+            .iter()
+            .find(|o| o.id.as_ref() == "zapier.zaps.execute")
+            .unwrap();
         assert_eq!(exec_op.capability.as_ref(), "zapier.zaps.write");
     }
 
@@ -966,7 +992,10 @@ mod tests {
     #[test]
     fn operations_execute_is_risky() {
         let ops = operations_info();
-        let exec_op = ops.iter().find(|o| o.id.as_ref() == "zapier.zaps.execute").unwrap();
+        let exec_op = ops
+            .iter()
+            .find(|o| o.id.as_ref() == "zapier.zaps.execute")
+            .unwrap();
         assert_eq!(exec_op.safety_tier, SafetyTier::Risky);
         assert_eq!(exec_op.risk_level, RiskLevel::Medium);
     }
@@ -974,7 +1003,10 @@ mod tests {
     #[test]
     fn operations_list_is_safe() {
         let ops = operations_info();
-        let list_op = ops.iter().find(|o| o.id.as_ref() == "zapier.zaps.list").unwrap();
+        let list_op = ops
+            .iter()
+            .find(|o| o.id.as_ref() == "zapier.zaps.list")
+            .unwrap();
         assert_eq!(list_op.safety_tier, SafetyTier::Safe);
         assert_eq!(list_op.risk_level, RiskLevel::Low);
     }

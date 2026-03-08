@@ -15,11 +15,10 @@ use chrono::{Duration as ChronoDuration, Utc};
 use fcp_conformance::DynamicSuite;
 use fcp_core::{
     AgentHint, CapabilityGrant, CapabilityId, CapabilityToken, ConnectorId, ConnectorMetrics,
-    FcpConnector, FcpError, HandshakeRequest, HandshakeResponse, HealthSnapshot,
-    IdempotencyClass, InstanceId, Introspection, InvokeRequest, InvokeResponse, InvokeStatus,
-    OperationId, OperationInfo, RequestId, RiskLevel, SafetyTier, SessionId, ShutdownRequest,
-    SimulateRequest, SimulateResponse, SubscribeRequest, SubscribeResponse, UnsubscribeRequest,
-    ZoneId,
+    FcpConnector, FcpError, HandshakeRequest, HandshakeResponse, HealthSnapshot, IdempotencyClass,
+    InstanceId, Introspection, InvokeRequest, InvokeResponse, InvokeStatus, OperationId,
+    OperationInfo, RequestId, RiskLevel, SafetyTier, SessionId, ShutdownRequest, SimulateRequest,
+    SimulateResponse, SubscribeRequest, SubscribeResponse, UnsubscribeRequest, ZoneId,
 };
 use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
 use fcp_e2e::{ComplianceSuite, ConnectorSuite, E2eRunner, InvokeExpectations};
@@ -101,12 +100,8 @@ impl FcpConnector for HomeAssistantConnectorAdapter {
                     .unwrap_or("unknown");
                 match status {
                     "healthy" => HealthSnapshot::ready(),
-                    "not_configured" | "unconfigured" => {
-                        HealthSnapshot::degraded("not_configured")
-                    }
-                    other => {
-                        HealthSnapshot::degraded(format!("homeassistant_status:{other}"))
-                    }
+                    "not_configured" | "unconfigured" => HealthSnapshot::degraded("not_configured"),
+                    other => HealthSnapshot::degraded(format!("homeassistant_status:{other}")),
                 }
             }
             Err(err) => HealthSnapshot::error(err.to_string()),
@@ -141,8 +136,7 @@ impl FcpConnector for HomeAssistantConnectorAdapter {
                 safety_tier: SafetyTier::Safe,
                 idempotency: IdempotencyClass::Strict,
                 ai_hints: AgentHint {
-                    when_to_use:
-                        "Get a snapshot of all entity states.".to_string(),
+                    when_to_use: "Get a snapshot of all entity states.".to_string(),
                     common_mistakes: Vec::new(),
                     examples: vec![r#"{}"#.to_string()],
                     related: Vec::new(),
@@ -378,8 +372,7 @@ async fn homeassistant_allow_valid_token_connector_suite_passes() {
     Mock::given(method("GET"))
         .and(path_regex(r"^/states.*"))
         .respond_with(
-            ResponseTemplate::new(200)
-                .set_body_json(homeassistant_list_states_response()),
+            ResponseTemplate::new(200).set_body_json(homeassistant_list_states_response()),
         )
         .mount(mock.inner())
         .await;

@@ -1300,7 +1300,10 @@ mod tests {
         // First byte is index
         assert_eq!(bytes[0], shares[0].index());
         // Remaining bytes are enc + ciphertext
-        assert_eq!(bytes.len(), 1 + sealed.sealed_box().enc.len() + sealed.sealed_box().ciphertext.len());
+        assert_eq!(
+            bytes.len(),
+            1 + sealed.sealed_box().enc.len() + sealed.sealed_box().ciphertext.len()
+        );
     }
 
     // ---- GF(2^8) sub equals add ----

@@ -152,9 +152,7 @@ impl FcpConnector for KubernetesConnectorAdapter {
                 ai_hints: AgentHint {
                     when_to_use: "List pods in a namespace.".to_string(),
                     common_mistakes: Vec::new(),
-                    examples: vec![
-                        r#"{"namespace": "default"}"#.to_string(),
-                    ],
+                    examples: vec![r#"{"namespace": "default"}"#.to_string()],
                     related: Vec::new(),
                 },
                 rate_limit: None,
@@ -172,12 +170,7 @@ impl FcpConnector for KubernetesConnectorAdapter {
             message: "kubernetes verifier not initialized; handshake required".into(),
         })?;
         let required_cap = required_capability(req.operation.as_str())?;
-        verifier.verify(
-            &req.capability_token,
-            &required_cap,
-            &req.operation,
-            &[],
-        )?;
+        verifier.verify(&req.capability_token, &required_cap, &req.operation, &[])?;
 
         let request_id = req.id.clone();
         let value = self
@@ -195,12 +188,7 @@ impl FcpConnector for KubernetesConnectorAdapter {
             message: "kubernetes verifier not initialized; handshake required".into(),
         })?;
         let required_cap = required_capability(req.operation.as_str())?;
-        verifier.verify(
-            &req.capability_token,
-            &required_cap,
-            &req.operation,
-            &[],
-        )?;
+        verifier.verify(&req.capability_token, &required_cap, &req.operation, &[])?;
 
         let value = self
             .connector
@@ -438,23 +426,14 @@ async fn kubernetes_allow_valid_token_connector_suite_passes() {
     // Mount mock for GET /api/v1/namespaces/*/pods
     Mock::given(method("GET"))
         .and(path_regex(r"^/api/v1/namespaces/.*/pods"))
-        .respond_with(
-            ResponseTemplate::new(200).set_body_json(kubernetes_list_pods_response()),
-        )
+        .respond_with(ResponseTemplate::new(200).set_body_json(kubernetes_list_pods_response()))
         .mount(mock.inner())
         .await;
 
     let mut connector = KubernetesConnectorAdapter::new();
     let signing_key = Ed25519SigningKey::generate();
-    let handshake = handshake_request(
-        signing_key.verifying_key().to_bytes(),
-        &["kubernetes.read"],
-    );
-    let token = build_token(
-        &signing_key,
-        "kubernetes.read",
-        &["kubernetes.list_pods"],
-    );
+    let handshake = handshake_request(signing_key.verifying_key().to_bytes(), &["kubernetes.read"]);
+    let token = build_token(&signing_key, "kubernetes.read", &["kubernetes.list_pods"]);
     let invoke = invoke_request(
         "kubernetes.list_pods",
         json!({ "namespace": "default" }),

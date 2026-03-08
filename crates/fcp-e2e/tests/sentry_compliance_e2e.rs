@@ -15,11 +15,10 @@ use chrono::{Duration as ChronoDuration, Utc};
 use fcp_conformance::DynamicSuite;
 use fcp_core::{
     AgentHint, CapabilityGrant, CapabilityId, CapabilityToken, ConnectorId, ConnectorMetrics,
-    FcpConnector, FcpError, HandshakeRequest, HandshakeResponse, HealthSnapshot,
-    IdempotencyClass, InstanceId, Introspection, InvokeRequest, InvokeResponse, InvokeStatus,
-    OperationId, OperationInfo, RequestId, RiskLevel, SafetyTier, SessionId, ShutdownRequest,
-    SimulateRequest, SimulateResponse, SubscribeRequest, SubscribeResponse, UnsubscribeRequest,
-    ZoneId,
+    FcpConnector, FcpError, HandshakeRequest, HandshakeResponse, HealthSnapshot, IdempotencyClass,
+    InstanceId, Introspection, InvokeRequest, InvokeResponse, InvokeStatus, OperationId,
+    OperationInfo, RequestId, RiskLevel, SafetyTier, SessionId, ShutdownRequest, SimulateRequest,
+    SimulateResponse, SubscribeRequest, SubscribeResponse, UnsubscribeRequest, ZoneId,
 };
 use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
 use fcp_e2e::{ComplianceSuite, ConnectorSuite, E2eRunner, InvokeExpectations};
@@ -99,9 +98,7 @@ impl FcpConnector for SentryConnectorAdapter {
                     .unwrap_or("unknown");
                 match status {
                     "healthy" => HealthSnapshot::ready(),
-                    "not_configured" | "unconfigured" => {
-                        HealthSnapshot::degraded("not_configured")
-                    }
+                    "not_configured" | "unconfigured" => HealthSnapshot::degraded("not_configured"),
                     other => HealthSnapshot::degraded(format!("sentry_status:{other}")),
                 }
             }
@@ -371,9 +368,7 @@ async fn sentry_allow_valid_token_connector_suite_passes() {
     // Mount mock for GET /api/0/organizations/{org}/projects/
     Mock::given(method("GET"))
         .and(path_regex(r"^/organizations/.*/projects/"))
-        .respond_with(
-            ResponseTemplate::new(200).set_body_json(sentry_list_projects_response()),
-        )
+        .respond_with(ResponseTemplate::new(200).set_body_json(sentry_list_projects_response()))
         .mount(mock.inner())
         .await;
 

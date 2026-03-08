@@ -424,8 +424,7 @@ mod tests {
 
     #[test]
     fn client_new_empty_base_url_string() {
-        let client =
-            PulumiClient::new(PulumiAuth::BearerToken("tok".into()), Some("")).unwrap();
+        let client = PulumiClient::new(PulumiAuth::BearerToken("tok".into()), Some("")).unwrap();
         assert_eq!(client.base_url, "");
     }
 

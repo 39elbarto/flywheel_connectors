@@ -505,8 +505,7 @@ mod tests {
 
     #[test]
     fn test_telemetry_error_is_std_error() {
-        let err: Box<dyn std::error::Error> =
-            Box::new(TelemetryError::Config("test".to_string()));
+        let err: Box<dyn std::error::Error> = Box::new(TelemetryError::Config("test".to_string()));
         assert!(err.to_string().contains("Configuration error"));
     }
 

@@ -334,9 +334,7 @@ impl N8nConnector {
             .and_then(serde_json::Value::as_str)
             .unwrap_or("");
 
-        let allowed = operations_info()
-            .iter()
-            .any(|o| o.id.as_ref() == operation);
+        let allowed = operations_info().iter().any(|o| o.id.as_ref() == operation);
 
         Ok(json!({
             "allowed": allowed,
@@ -874,7 +872,11 @@ mod tests {
         for op in &ops {
             // Typed struct always has idempotency; verify serialization round-trips
             let v = serde_json::to_value(op.idempotency).unwrap();
-            assert!(v.is_string(), "op {} idempotency should serialize", op.id.as_ref());
+            assert!(
+                v.is_string(),
+                "op {} idempotency should serialize",
+                op.id.as_ref()
+            );
         }
     }
 
@@ -1096,7 +1098,11 @@ mod tests {
     fn operations_summaries_non_empty() {
         let ops = operations_info();
         for op in &ops {
-            assert!(!op.summary.is_empty(), "op {} has empty summary", op.id.as_ref());
+            assert!(
+                !op.summary.is_empty(),
+                "op {} has empty summary",
+                op.id.as_ref()
+            );
         }
     }
 

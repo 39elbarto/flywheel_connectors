@@ -252,6 +252,9 @@ mod tests {
 
     #[test]
     fn default_refresh_threshold_is_five_minutes() {
-        assert_eq!(DEFAULT_REFRESH_THRESHOLD, std::time::Duration::from_secs(300));
+        assert_eq!(
+            DEFAULT_REFRESH_THRESHOLD,
+            std::time::Duration::from_secs(300)
+        );
     }
 }

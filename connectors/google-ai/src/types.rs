@@ -1381,9 +1381,7 @@ mod tests {
     #[test]
     fn embedding_large_vector() {
         let values: Vec<f64> = (0..768).map(|i| f64::from(i) * 0.001).collect();
-        let emb = Embedding {
-            values,
-        };
+        let emb = Embedding { values };
         let json_str = serde_json::to_string(&emb).unwrap();
         let back: Embedding = serde_json::from_str(&json_str).unwrap();
         assert_eq!(back.values.len(), 768);

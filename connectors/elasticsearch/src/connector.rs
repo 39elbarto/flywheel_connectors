@@ -1078,8 +1078,7 @@ mod tests {
 
     #[test]
     fn config_trims_api_key() {
-        let config =
-            ElasticsearchConfig::from_params(&json!({"api_key": "  my-key  "})).unwrap();
+        let config = ElasticsearchConfig::from_params(&json!({"api_key": "  my-key  "})).unwrap();
         match &config.auth {
             ElasticsearchAuth::ApiKey(k) => assert_eq!(k, "my-key"),
             ElasticsearchAuth::CredentialId(_) => panic!("expected ApiKey"),

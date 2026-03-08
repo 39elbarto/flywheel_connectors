@@ -1082,8 +1082,16 @@ mod tests {
 
     #[test]
     fn token_cost_ne_when_different() {
-        let a = TokenCost { base_tokens: 1, bytes_tokens: 2, compute_tokens: 3 };
-        let b = TokenCost { base_tokens: 1, bytes_tokens: 2, compute_tokens: 4 };
+        let a = TokenCost {
+            base_tokens: 1,
+            bytes_tokens: 2,
+            compute_tokens: 3,
+        };
+        let b = TokenCost {
+            base_tokens: 1,
+            bytes_tokens: 2,
+            compute_tokens: 4,
+        };
         assert_ne!(a, b);
     }
 

@@ -952,7 +952,9 @@ mod tests {
     #[test]
     fn rate_limit_headers_clone_preserves_provider_info() {
         let mut headers = RateLimitHeaders::new();
-        headers.provider_info.insert("key".to_string(), "value".to_string());
+        headers
+            .provider_info
+            .insert("key".to_string(), "value".to_string());
         let cloned = headers.clone();
         assert_eq!(cloned.provider_info.get("key"), Some(&"value".to_string()));
     }
@@ -1050,12 +1052,24 @@ mod tests {
     #[test]
     fn parse_anthropic_only_token_limits() {
         let mut headers = HashMap::new();
-        headers.insert("anthropic-ratelimit-tokens-limit".to_string(), "50000".to_string());
-        headers.insert("anthropic-ratelimit-tokens-remaining".to_string(), "49000".to_string());
+        headers.insert(
+            "anthropic-ratelimit-tokens-limit".to_string(),
+            "50000".to_string(),
+        );
+        headers.insert(
+            "anthropic-ratelimit-tokens-remaining".to_string(),
+            "49000".to_string(),
+        );
         let parsed = RateLimitHeaders::parse_anthropic(&headers);
         assert!(parsed.limit.is_none()); // No request limit header
-        assert_eq!(parsed.provider_info.get("limit_tokens"), Some(&"50000".to_string()));
-        assert_eq!(parsed.provider_info.get("remaining_tokens"), Some(&"49000".to_string()));
+        assert_eq!(
+            parsed.provider_info.get("limit_tokens"),
+            Some(&"50000".to_string())
+        );
+        assert_eq!(
+            parsed.provider_info.get("remaining_tokens"),
+            Some(&"49000".to_string())
+        );
     }
 
     #[test]

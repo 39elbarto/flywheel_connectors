@@ -6,12 +6,14 @@
 use std::time::Duration;
 
 use chrono::Utc;
-use fcp_airtable::{client::AirtableClient, connector::AirtableConnector, error::AirtableError};
+use fcp_airtable::{
+    client::AirtableClient, connector::AirtableConnector, error::AirtableError, types::SortSpec,
+};
 use fcp_core::{CapabilityToken, FcpError};
 use fcp_crypto::cose::CapabilityTokenBuilder;
 use fcp_crypto::ed25519::Ed25519SigningKey;
 use serde_json::json;
-use wiremock::matchers::{bearer_token, header, method, path};
+use wiremock::matchers::{bearer_token, header, method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 // ── Helpers ──────────────────────────────────────────────────────────
@@ -277,6 +279,54 @@ async fn client_list_records() {
     assert_eq!(result.records.len(), 2);
     assert_eq!(result.records[0].id, "rec001");
     assert_eq!(result.offset.as_deref(), Some("itr123"));
+}
+
+#[fcp_async_core::runtime::test]
+async fn client_list_records_encodes_view_filter_and_sort_params() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/appABC/tblXYZ"))
+        .and(bearer_token("test_tok"))
+        .and(query_param("fields[]", "Name"))
+        .and(query_param("filterByFormula", "{Status} = \"Active\""))
+        .and(query_param("maxRecords", "25"))
+        .and(query_param("pageSize", "10"))
+        .and(query_param("sort[0][field]", "Priority"))
+        .and(query_param("sort[0][direction]", "desc"))
+        .and(query_param("view", "viwOPEN"))
+        .and(query_param("offset", "itrNEXT"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "records": [record_json("rec001", &json!({"Name": "Alpha"}))],
+            "offset": "itrNEXT"
+        })))
+        .mount(&server)
+        .await;
+
+    let client = AirtableClient::new("test_tok")
+        .unwrap()
+        .with_base_url(server.uri());
+    let fields = vec!["Name".to_string()];
+    let sort = vec![SortSpec {
+        field: "Priority".into(),
+        direction: "desc".into(),
+    }];
+    let result = client
+        .list_records(
+            "appABC",
+            "tblXYZ",
+            Some(&fields),
+            Some("{Status} = \"Active\""),
+            Some(25),
+            Some(10),
+            Some(&sort),
+            Some("viwOPEN"),
+            Some("itrNEXT"),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(result.records.len(), 1);
+    assert_eq!(result.offset.as_deref(), Some("itrNEXT"));
 }
 
 #[fcp_async_core::runtime::test]
@@ -667,6 +717,264 @@ async fn invoke_list_fields_resolves_ids_and_names() {
 
     assert_eq!(result["fields"][0]["id"], "fldA");
     assert_eq!(result["fields"][1]["name"], "Status");
+}
+
+#[fcp_async_core::runtime::test]
+async fn invoke_list_views_through_connector() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/meta/bases/appABC123/tables"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "tables": [
+                {
+                    "id": "tblTASK",
+                    "name": "Tasks",
+                    "fields": [{ "id": "fldA", "name": "Name", "type": "singleLineText" }],
+                    "views": [
+                        { "id": "viwGRID", "name": "Grid", "type": "grid" },
+                        { "id": "viwOPEN", "name": "Open Tasks", "type": "grid" }
+                    ]
+                }
+            ]
+        })))
+        .mount(&server)
+        .await;
+
+    let mut connector = AirtableConnector::new();
+    let signing_key = Ed25519SigningKey::generate();
+    setup_handshake(&mut connector, &signing_key, &["airtable.list_views"]).await;
+    setup_configure(&mut connector, &server.uri()).await;
+
+    let token = generate_valid_token(&signing_key, "airtable.list_views");
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "airtable.list_views",
+            "input": { "base_id": "appABC123", "table_ref": "tblTASK" },
+            "capability_token": token
+        }))
+        .await
+        .unwrap();
+
+    assert_eq!(result["table"]["id"], "tblTASK");
+    assert_eq!(result["views"].as_array().unwrap().len(), 2);
+    assert_eq!(result["views"][1]["id"], "viwOPEN");
+}
+
+#[fcp_async_core::runtime::test]
+async fn invoke_get_view_rejects_ambiguous_view_name() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/meta/bases/appABC123/tables"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "tables": [
+                {
+                    "id": "tblTASK",
+                    "name": "Tasks",
+                    "fields": [{ "id": "fldA", "name": "Name", "type": "singleLineText" }],
+                    "views": [
+                        { "id": "viwONE", "name": "Grid", "type": "grid" },
+                        { "id": "viwTWO", "name": "Grid", "type": "calendar" }
+                    ]
+                }
+            ]
+        })))
+        .mount(&server)
+        .await;
+
+    let mut connector = AirtableConnector::new();
+    let signing_key = Ed25519SigningKey::generate();
+    setup_handshake(&mut connector, &signing_key, &["airtable.get_view"]).await;
+    setup_configure(&mut connector, &server.uri()).await;
+
+    let token = generate_valid_token(&signing_key, "airtable.get_view");
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "airtable.get_view",
+            "input": {
+                "base_id": "appABC123",
+                "table_ref": "tblTASK",
+                "view_ref": "Grid"
+            },
+            "capability_token": token
+        }))
+        .await;
+
+    assert!(result.is_err());
+    match result.unwrap_err() {
+        FcpError::InvalidRequest { message, .. } => {
+            assert!(message.contains("Ambiguous view_ref"));
+        }
+        other => panic!("Expected InvalidRequest, got {other:?}"),
+    }
+}
+
+#[fcp_async_core::runtime::test]
+async fn invoke_list_view_records_through_connector() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/meta/bases/appABC123/tables"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "tables": [
+                {
+                    "id": "tblTASK",
+                    "name": "Tasks",
+                    "fields": [
+                        { "id": "fldA", "name": "Name", "type": "singleLineText" },
+                        { "id": "fldB", "name": "Status", "type": "singleSelect" }
+                    ],
+                    "views": [
+                        { "id": "viwOPEN", "name": "Open Tasks", "type": "grid" }
+                    ]
+                }
+            ]
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/appABC123/tblTASK"))
+        .and(query_param("fields[]", "Name"))
+        .and(query_param("fields[]", "Status"))
+        .and(query_param("view", "viwOPEN"))
+        .and(query_param("filterByFormula", "{Status} = \"Open\""))
+        .and(query_param("pageSize", "2"))
+        .and(query_param("offset", "itr123"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "records": [
+                record_json("rec001", &json!({"Name": "Alpha", "Status": "Open"})),
+                record_json("rec002", &json!({"Name": "Beta", "Status": "Open"}))
+            ],
+            "offset": "itr456"
+        })))
+        .mount(&server)
+        .await;
+
+    let mut connector = AirtableConnector::new();
+    let signing_key = Ed25519SigningKey::generate();
+    setup_handshake(
+        &mut connector,
+        &signing_key,
+        &["airtable.list_view_records"],
+    )
+    .await;
+    setup_configure(&mut connector, &server.uri()).await;
+
+    let token = generate_valid_token(&signing_key, "airtable.list_view_records");
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "airtable.list_view_records",
+            "input": {
+                "base_id": "appABC123",
+                "table_ref": "tblTASK",
+                "view_ref": "Open Tasks",
+                "fields": ["fldA", "Status"],
+                "filter_by_formula": "{Status} = \"Open\"",
+                "page_size": 2,
+                "offset": "itr123"
+            },
+            "capability_token": token
+        }))
+        .await
+        .unwrap();
+
+    assert_eq!(result["table"]["id"], "tblTASK");
+    assert_eq!(result["view"]["id"], "viwOPEN");
+    assert_eq!(result["records"].as_array().unwrap().len(), 2);
+    assert_eq!(result["offset"], "itr456");
+}
+
+#[fcp_async_core::runtime::test]
+async fn invoke_list_view_records_requires_fields() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/meta/bases/appABC123/tables"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "tables": [
+                {
+                    "id": "tblTASK",
+                    "name": "Tasks",
+                    "fields": [{ "id": "fldA", "name": "Name", "type": "singleLineText" }],
+                    "views": [{ "id": "viwOPEN", "name": "Open Tasks", "type": "grid" }]
+                }
+            ]
+        })))
+        .mount(&server)
+        .await;
+
+    let mut connector = AirtableConnector::new();
+    let signing_key = Ed25519SigningKey::generate();
+    setup_handshake(
+        &mut connector,
+        &signing_key,
+        &["airtable.list_view_records"],
+    )
+    .await;
+    setup_configure(&mut connector, &server.uri()).await;
+
+    let token = generate_valid_token(&signing_key, "airtable.list_view_records");
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "airtable.list_view_records",
+            "input": {
+                "base_id": "appABC123",
+                "table_ref": "tblTASK",
+                "view_ref": "viwOPEN"
+            },
+            "capability_token": token
+        }))
+        .await;
+
+    assert!(result.is_err());
+    match result.unwrap_err() {
+        FcpError::InvalidRequest { message, .. } => {
+            assert!(message.contains("fields"));
+        }
+        other => panic!("Expected InvalidRequest, got {other:?}"),
+    }
+}
+
+#[fcp_async_core::runtime::test]
+async fn invoke_list_records_rejects_control_chars_in_filter_formula() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/meta/bases/appABC123/tables"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "tables": [
+                {
+                    "id": "tblTASK",
+                    "name": "Tasks",
+                    "fields": [{ "id": "fldA", "name": "Name", "type": "singleLineText" }],
+                    "views": []
+                }
+            ]
+        })))
+        .mount(&server)
+        .await;
+
+    let mut connector = AirtableConnector::new();
+    let signing_key = Ed25519SigningKey::generate();
+    setup_handshake(&mut connector, &signing_key, &["airtable.list_records"]).await;
+    setup_configure(&mut connector, &server.uri()).await;
+
+    let token = generate_valid_token(&signing_key, "airtable.list_records");
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "airtable.list_records",
+            "input": {
+                "base_id": "appABC123",
+                "table_id": "tblTASK",
+                "filter_by_formula": "{Name} = \"Alpha\"\nOR(1,1)"
+            },
+            "capability_token": token
+        }))
+        .await;
+
+    assert!(result.is_err());
+    match result.unwrap_err() {
+        FcpError::InvalidRequest { message, .. } => {
+            assert!(message.contains("control characters"));
+        }
+        other => panic!("Expected InvalidRequest, got {other:?}"),
+    }
 }
 
 #[fcp_async_core::runtime::test]

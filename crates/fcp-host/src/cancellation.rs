@@ -353,14 +353,12 @@ impl CancellationController {
 
         // Build cleanup result.
         let cleanup_result = match outcome {
-            CancellationOutcome::Cancelled | CancellationOutcome::Pending => {
-                Some(CleanupResult {
-                    success: true,
-                    cleaned: vec!["operation_state".into()],
-                    failed: vec![],
-                    duration_ms,
-                })
-            }
+            CancellationOutcome::Cancelled | CancellationOutcome::Pending => Some(CleanupResult {
+                success: true,
+                cleaned: vec!["operation_state".into()],
+                failed: vec![],
+                duration_ms,
+            }),
             _ => None,
         };
 
@@ -374,10 +372,7 @@ impl CancellationController {
             had_partial_result: false, // Set by caller when partial data exists
             had_checkpoint: checkpoint.is_some(),
         };
-        self.audit_log
-            .lock()
-            .expect("audit lock")
-            .push(audit_event);
+        self.audit_log.lock().expect("audit lock").push(audit_event);
 
         Ok(CancellationResponse {
             operation_id: request.operation_id.clone(),
@@ -535,7 +530,10 @@ mod tests {
 
     #[test]
     fn cleanup_default_is_best_effort() {
-        assert!(matches!(CleanupBehavior::default(), CleanupBehavior::BestEffort));
+        assert!(matches!(
+            CleanupBehavior::default(),
+            CleanupBehavior::BestEffort
+        ));
     }
 
     #[test]
@@ -580,7 +578,10 @@ mod tests {
 
     #[test]
     fn outcome_equality() {
-        assert_eq!(CancellationOutcome::Cancelled, CancellationOutcome::Cancelled);
+        assert_eq!(
+            CancellationOutcome::Cancelled,
+            CancellationOutcome::Cancelled
+        );
         assert_ne!(CancellationOutcome::Cancelled, CancellationOutcome::TooLate);
     }
 

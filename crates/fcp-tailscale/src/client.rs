@@ -1590,8 +1590,7 @@ mod tests {
 
     #[test]
     fn mock_peer_no_tags() {
-        let peer =
-            MockTailscaleClient::mock_peer("n1", "h1", "100.64.0.1".parse().unwrap(), &[]);
+        let peer = MockTailscaleClient::mock_peer("n1", "h1", "100.64.0.1".parse().unwrap(), &[]);
         assert!(peer.tags.is_empty());
         assert!(peer.tailscale_tags().is_empty());
     }

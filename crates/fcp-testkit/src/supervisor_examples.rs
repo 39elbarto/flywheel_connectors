@@ -965,7 +965,10 @@ mod tests {
         };
         let cloned = config.clone();
         assert_eq!(config.updates_per_poll, cloned.updates_per_poll);
-        assert_eq!(config.success_count_before_error, cloned.success_count_before_error);
+        assert_eq!(
+            config.success_count_before_error,
+            cloned.success_count_before_error
+        );
     }
 
     #[test]

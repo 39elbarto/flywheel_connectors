@@ -459,18 +459,12 @@ mod tests {
         let cache = SchemaCache::default();
         assert!(
             cache
-                .validate(
-                    schema,
-                    &json!({"level1": {"level2": {"value": 42}}})
-                )
+                .validate(schema, &json!({"level1": {"level2": {"value": 42}}}))
                 .is_ok()
         );
         assert!(
             cache
-                .validate(
-                    schema,
-                    &json!({"level1": {"level2": {}}})
-                )
+                .validate(schema, &json!({"level1": {"level2": {}}}))
                 .is_err()
         );
     }

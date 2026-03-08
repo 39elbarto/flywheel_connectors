@@ -480,9 +480,7 @@ impl CronConnector {
             .and_then(serde_json::Value::as_str)
             .unwrap_or("");
 
-        let allowed = operations_info()
-            .iter()
-            .any(|o| o.id.as_ref() == operation);
+        let allowed = operations_info().iter().any(|o| o.id.as_ref() == operation);
 
         Ok(json!({
             "allowed": allowed,
@@ -741,7 +739,8 @@ fn operations_info() -> Vec<OperationInfo> {
             SafetyTier::Risky,
             IdempotencyClass::Strict,
             AgentHint {
-                when_to_use: "Create a new timed schedule to invoke an operation periodically.".into(),
+                when_to_use: "Create a new timed schedule to invoke an operation periodically."
+                    .into(),
                 examples: vec![],
                 ..Default::default()
             },
@@ -756,7 +755,8 @@ fn operations_info() -> Vec<OperationInfo> {
             SafetyTier::Dangerous,
             IdempotencyClass::Strict,
             AgentHint {
-                when_to_use: "Remove a cron schedule. The operation will no longer be triggered.".into(),
+                when_to_use: "Remove a cron schedule. The operation will no longer be triggered."
+                    .into(),
                 examples: vec![],
                 ..Default::default()
             },
@@ -966,14 +966,21 @@ mod tests {
         let ops = operations_info();
         for op in &ops {
             let v = serde_json::to_value(op.idempotency).unwrap();
-            assert!(v.is_string(), "op {} idempotency should serialize", op.id.as_ref());
+            assert!(
+                v.is_string(),
+                "op {} idempotency should serialize",
+                op.id.as_ref()
+            );
         }
     }
 
     #[test]
     fn delete_is_dangerous() {
         let ops = operations_info();
-        let delete_op = ops.iter().find(|o| o.id.as_ref() == "cron.schedules.delete").unwrap();
+        let delete_op = ops
+            .iter()
+            .find(|o| o.id.as_ref() == "cron.schedules.delete")
+            .unwrap();
         assert_eq!(delete_op.safety_tier, SafetyTier::Dangerous);
         assert_eq!(delete_op.risk_level, RiskLevel::High);
     }
@@ -981,7 +988,10 @@ mod tests {
     #[test]
     fn trigger_is_risky() {
         let ops = operations_info();
-        let trigger_op = ops.iter().find(|o| o.id.as_ref() == "cron.trigger").unwrap();
+        let trigger_op = ops
+            .iter()
+            .find(|o| o.id.as_ref() == "cron.trigger")
+            .unwrap();
         assert_eq!(trigger_op.safety_tier, SafetyTier::Risky);
         assert_eq!(trigger_op.risk_level, RiskLevel::Medium);
     }
@@ -1694,14 +1704,21 @@ mod tests {
     fn operations_all_have_summary() {
         let ops = operations_info();
         for op in &ops {
-            assert!(!op.summary.is_empty(), "op {} has empty summary", op.id.as_ref());
+            assert!(
+                !op.summary.is_empty(),
+                "op {} has empty summary",
+                op.id.as_ref()
+            );
         }
     }
 
     #[test]
     fn operations_schedules_create_is_risky() {
         let ops = operations_info();
-        let create_op = ops.iter().find(|o| o.id.as_ref() == "cron.schedules.create").unwrap();
+        let create_op = ops
+            .iter()
+            .find(|o| o.id.as_ref() == "cron.schedules.create")
+            .unwrap();
         assert_eq!(create_op.safety_tier, SafetyTier::Risky);
         assert_eq!(create_op.risk_level, RiskLevel::Medium);
     }
@@ -1709,14 +1726,20 @@ mod tests {
     #[test]
     fn operations_schedules_list_is_strict_idempotent() {
         let ops = operations_info();
-        let list_op = ops.iter().find(|o| o.id.as_ref() == "cron.schedules.list").unwrap();
+        let list_op = ops
+            .iter()
+            .find(|o| o.id.as_ref() == "cron.schedules.list")
+            .unwrap();
         assert_eq!(list_op.idempotency, IdempotencyClass::Strict);
     }
 
     #[test]
     fn operations_trigger_idempotency_none() {
         let ops = operations_info();
-        let trigger_op = ops.iter().find(|o| o.id.as_ref() == "cron.trigger").unwrap();
+        let trigger_op = ops
+            .iter()
+            .find(|o| o.id.as_ref() == "cron.trigger")
+            .unwrap();
         assert_eq!(trigger_op.idempotency, IdempotencyClass::None);
     }
 

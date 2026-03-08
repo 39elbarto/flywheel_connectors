@@ -16,9 +16,10 @@ use fcp_conformance::DynamicSuite;
 use fcp_core::{
     AgentHint, CapabilityGrant, CapabilityId, CapabilityToken, CapabilityVerifier, ConnectorId,
     ConnectorMetrics, FcpConnector, FcpError, HandshakeRequest, HandshakeResponse, HealthSnapshot,
-    IdempotencyClass, InstanceId, Introspection, InvokeRequest, InvokeResponse, InvokeStatus, OperationId,
-    OperationInfo, RequestId, RiskLevel, SafetyTier, SessionId, ShutdownRequest, SimulateRequest, SimulateResponse, SubscribeRequest,
-    SubscribeResponse, UnsubscribeRequest, ZoneId,
+    IdempotencyClass, InstanceId, Introspection, InvokeRequest, InvokeResponse, InvokeStatus,
+    OperationId, OperationInfo, RequestId, RiskLevel, SafetyTier, SessionId, ShutdownRequest,
+    SimulateRequest, SimulateResponse, SubscribeRequest, SubscribeResponse, UnsubscribeRequest,
+    ZoneId,
 };
 use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
 use fcp_e2e::{ComplianceSuite, ConnectorSuite, E2eRunner, InvokeExpectations};
@@ -45,7 +46,6 @@ impl MetabaseConnectorAdapter {
             id: ConnectorId::from_static("metabase"),
             instance_id: InstanceId::new(),
             verifier: None,
-
         }
     }
 }
@@ -254,10 +254,8 @@ fn metabase_manifest_with_hash() -> String {
 }
 
 fn metabase_manifest_toml() -> toml::Value {
-    toml::from_str(include_str!(
-        "../../../connectors/metabase/manifest.toml"
-    ))
-    .expect("Metabase manifest TOML")
+    toml::from_str(include_str!("../../../connectors/metabase/manifest.toml"))
+        .expect("Metabase manifest TOML")
 }
 
 fn metabase_config(base_url: &str) -> serde_json::Value {
@@ -384,11 +382,7 @@ async fn metabase_default_deny_compliance_suite_passes() {
         "metabase.dashboards.read",
         &["metabase.dashboards.list"],
     );
-    let invoke = invoke_request(
-        "metabase.questions.run",
-        json!({ "card_id": "42" }),
-        token,
-    );
+    let invoke = invoke_request("metabase.questions.run", json!({ "card_id": "42" }), token);
 
     let dynamic = DynamicSuite {
         config: metabase_config(&mock.base_url()),
@@ -441,11 +435,7 @@ async fn metabase_happy_path_connector_suite_passes() {
         "metabase.dashboards.read",
         &["metabase.dashboards.list"],
     );
-    let invoke = invoke_request(
-        "metabase.dashboards.list",
-        json!({}),
-        token,
-    );
+    let invoke = invoke_request("metabase.dashboards.list", json!({}), token);
 
     let suite = ConnectorSuite {
         test_name: "metabase_happy_path".to_string(),

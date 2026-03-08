@@ -631,7 +631,10 @@ mod tests {
         let c = connector();
         let resp = c.handle_doctor().await.unwrap();
         let checks = resp["checks"].as_array().unwrap();
-        let no_auth = checks.iter().find(|c| c["name"] == "no_auth_required").unwrap();
+        let no_auth = checks
+            .iter()
+            .find(|c| c["name"] == "no_auth_required")
+            .unwrap();
         assert_eq!(no_auth["passed"], true);
         assert_eq!(no_auth["critical"], false);
     }
@@ -667,7 +670,12 @@ mod tests {
     #[fcp_async_core::runtime::test]
     async fn simulate_all_known_operations() {
         let c = connector();
-        for op in ["annas.search", "annas.metadata", "annas.lookup.isbn", "annas.lookup.md5"] {
+        for op in [
+            "annas.search",
+            "annas.metadata",
+            "annas.lookup.isbn",
+            "annas.lookup.md5",
+        ] {
             let resp = c
                 .handle_simulate(json!({"operation_id": op}))
                 .await

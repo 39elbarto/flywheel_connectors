@@ -400,11 +400,8 @@ mod tests {
 
     #[test]
     fn client_new_empty_string_url() {
-        let client = IntercomClient::new(
-            IntercomAuth::BearerToken("tok".into()),
-            Some(""),
-        )
-        .unwrap();
+        let client =
+            IntercomClient::new(IntercomAuth::BearerToken("tok".into()), Some("")).unwrap();
         let dbg = format!("{client:?}");
         assert!(dbg.contains("IntercomClient"));
     }

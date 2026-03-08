@@ -517,8 +517,7 @@ mod tests {
 
     #[test]
     fn pipeline_stage_clone() {
-        let s: PipelineStage =
-            serde_json::from_value(json!({"id": "s1", "label": "New"})).unwrap();
+        let s: PipelineStage = serde_json::from_value(json!({"id": "s1", "label": "New"})).unwrap();
         let cloned = s.clone();
         assert_eq!(cloned.id, s.id);
         assert_eq!(cloned.label, s.label);

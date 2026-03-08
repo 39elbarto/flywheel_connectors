@@ -1131,7 +1131,10 @@ mod tests {
         let ops = operations_info();
         for op in ops.as_array().unwrap() {
             let id = op["id"].as_str().unwrap();
-            assert!(id.starts_with("linkedin."), "op {id} should start with linkedin.");
+            assert!(
+                id.starts_with("linkedin."),
+                "op {id} should start with linkedin."
+            );
         }
     }
 

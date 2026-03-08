@@ -863,9 +863,7 @@ mod tests {
 
     #[test]
     fn display_rate_limited_fractional() {
-        let err = DiscordError::RateLimited {
-            retry_after: 1.234,
-        };
+        let err = DiscordError::RateLimited { retry_after: 1.234 };
         let msg = err.to_string();
         assert!(msg.contains("1.234"), "got: {msg}");
     }

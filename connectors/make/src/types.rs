@@ -313,16 +313,14 @@ mod tests {
 
     #[test]
     fn scenario_from_json_string() {
-        let s: Scenario =
-            serde_json::from_str(r#"{"id":7,"name":"FromStr"}"#).unwrap();
+        let s: Scenario = serde_json::from_str(r#"{"id":7,"name":"FromStr"}"#).unwrap();
         assert_eq!(s.id, 7);
         assert_eq!(s.name, Some("FromStr".into()));
     }
 
     #[test]
     fn execution_from_json_string() {
-        let e: Execution =
-            serde_json::from_str(r#"{"id":3,"status":"failed"}"#).unwrap();
+        let e: Execution = serde_json::from_str(r#"{"id":3,"status":"failed"}"#).unwrap();
         assert_eq!(e.id, 3);
         assert_eq!(e.status, Some("failed".into()));
     }
@@ -353,16 +351,14 @@ mod tests {
     #[test]
     fn execution_all_statuses() {
         for status in ["success", "failed", "running", "waiting", "cancelled"] {
-            let e: Execution =
-                serde_json::from_value(json!({"id": 1, "status": status})).unwrap();
+            let e: Execution = serde_json::from_value(json!({"id": 1, "status": status})).unwrap();
             assert_eq!(e.status.as_deref(), Some(status));
         }
     }
 
     #[test]
     fn scenario_is_enabled_false() {
-        let s: Scenario =
-            serde_json::from_value(json!({"id": 1, "isEnabled": false})).unwrap();
+        let s: Scenario = serde_json::from_value(json!({"id": 1, "isEnabled": false})).unwrap();
         assert_eq!(s.is_enabled, Some(false));
     }
 

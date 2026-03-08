@@ -2104,8 +2104,15 @@ mod tests {
     fn test_redaction_policy_default_all_standard_fields() {
         let policy = RedactionPolicy::default();
         let expected = [
-            "password", "api_key", "secret", "token", "authorization",
-            "credential", "private_key", "session_key", "bearer",
+            "password",
+            "api_key",
+            "secret",
+            "token",
+            "authorization",
+            "credential",
+            "private_key",
+            "session_key",
+            "bearer",
         ];
         for field in &expected {
             assert!(policy.should_redact(field), "should redact {field}");

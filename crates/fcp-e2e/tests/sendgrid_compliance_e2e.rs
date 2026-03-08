@@ -16,9 +16,9 @@ use fcp_conformance::DynamicSuite;
 use fcp_core::{
     AgentHint, CapabilityGrant, CapabilityId, CapabilityToken, CapabilityVerifier, ConnectorId,
     ConnectorMetrics, FcpConnector, FcpError, HandshakeRequest, HandshakeResponse, HealthSnapshot,
-    IdempotencyClass, InstanceId, Introspection, InvokeRequest, InvokeResponse, OperationId, OperationInfo, RequestId, RiskLevel, SafetyTier, SessionId,
-    ShutdownRequest, SimulateRequest, SimulateResponse, SubscribeRequest, SubscribeResponse,
-    UnsubscribeRequest, ZoneId,
+    IdempotencyClass, InstanceId, Introspection, InvokeRequest, InvokeResponse, OperationId,
+    OperationInfo, RequestId, RiskLevel, SafetyTier, SessionId, ShutdownRequest, SimulateRequest,
+    SimulateResponse, SubscribeRequest, SubscribeResponse, UnsubscribeRequest, ZoneId,
 };
 use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
 use fcp_e2e::{ComplianceSuite, ConnectorSuite, E2eRunner, InvokeExpectations};
@@ -27,8 +27,8 @@ use fcp_sendgrid::connector::SendGridConnector;
 use fcp_testkit::MockApiServer;
 use serde_json::json;
 use wiremock::{
-    matchers::{method, path_regex},
     Mock, ResponseTemplate,
+    matchers::{method, path_regex},
 };
 
 struct SendGridConnectorAdapter {
@@ -45,7 +45,6 @@ impl SendGridConnectorAdapter {
             id: ConnectorId::from_static("sendgrid"),
             instance_id: InstanceId::new(),
             verifier: None,
-
         }
     }
 }
@@ -270,10 +269,8 @@ fn sendgrid_manifest_with_hash() -> String {
 }
 
 fn sendgrid_manifest_toml() -> toml::Value {
-    toml::from_str(include_str!(
-        "../../../connectors/sendgrid/manifest.toml"
-    ))
-    .expect("SendGrid manifest TOML")
+    toml::from_str(include_str!("../../../connectors/sendgrid/manifest.toml"))
+        .expect("SendGrid manifest TOML")
 }
 
 fn sendgrid_config(base_url: &str) -> serde_json::Value {
@@ -442,9 +439,7 @@ async fn sendgrid_happy_path_compliance_suite_passes() {
     // Mount mock for GET /marketing/contacts
     Mock::given(method("GET"))
         .and(path_regex(r"^/marketing/contacts"))
-        .respond_with(
-            ResponseTemplate::new(200).set_body_json(json!({"result": []})),
-        )
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"result": []})))
         .mount(mock.inner())
         .await;
 
@@ -459,11 +454,7 @@ async fn sendgrid_happy_path_compliance_suite_passes() {
         "sendgrid.contacts.read",
         &["sendgrid.contacts.list"],
     );
-    let invoke = invoke_request(
-        "sendgrid.contacts.list",
-        json!({}),
-        token,
-    );
+    let invoke = invoke_request("sendgrid.contacts.list", json!({}), token);
 
     let suite = ConnectorSuite {
         test_name: "sendgrid_allow_valid_token".to_string(),

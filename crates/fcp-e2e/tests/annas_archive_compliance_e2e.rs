@@ -12,18 +12,19 @@
 #![allow(clippy::too_many_lines)]
 
 use chrono::{Duration as ChronoDuration, Utc};
+use fcp_annas_archive::connector::AnnasArchiveConnector;
 use fcp_conformance::DynamicSuite;
 use fcp_core::{
     AgentHint, CapabilityGrant, CapabilityId, CapabilityToken, CapabilityVerifier, ConnectorId,
     ConnectorMetrics, FcpConnector, FcpError, HandshakeRequest, HandshakeResponse, HealthSnapshot,
-    IdempotencyClass, InstanceId, Introspection, InvokeRequest, InvokeResponse, InvokeStatus, OperationId, OperationInfo, RequestId,
-    RiskLevel, SafetyTier, SessionId, ShutdownRequest, SimulateRequest, SimulateResponse, SubscribeRequest,
-    SubscribeResponse, UnsubscribeRequest, ZoneId,
+    IdempotencyClass, InstanceId, Introspection, InvokeRequest, InvokeResponse, InvokeStatus,
+    OperationId, OperationInfo, RequestId, RiskLevel, SafetyTier, SessionId, ShutdownRequest,
+    SimulateRequest, SimulateResponse, SubscribeRequest, SubscribeResponse, UnsubscribeRequest,
+    ZoneId,
 };
 use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
 use fcp_e2e::{ComplianceSuite, ConnectorSuite, E2eRunner, InvokeExpectations};
 use fcp_manifest::ConnectorManifest;
-use fcp_annas_archive::connector::AnnasArchiveConnector;
 use fcp_testkit::MockApiServer;
 use serde_json::json;
 use wiremock::{
@@ -45,7 +46,6 @@ impl AnnasArchiveConnectorAdapter {
             id: ConnectorId::from_static("annas-archive"),
             instance_id: InstanceId::new(),
             verifier: None,
-
         }
     }
 }
@@ -384,17 +384,10 @@ async fn annas_archive_default_deny_compliance_suite_passes() {
 
     let mut connector = AnnasArchiveConnectorAdapter::new();
     let signing_key = Ed25519SigningKey::generate();
-    let handshake = handshake_request(
-        signing_key.verifying_key().to_bytes(),
-        &["annas.search"],
-    );
+    let handshake = handshake_request(signing_key.verifying_key().to_bytes(), &["annas.search"]);
     // Token grants annas.search capability but only for annas.search operation.
     // Invoke targets annas.metadata which requires annas.read -- should be denied.
-    let token = build_token(
-        &signing_key,
-        "annas.search",
-        &["annas.search"],
-    );
+    let token = build_token(&signing_key, "annas.search", &["annas.search"]);
     let invoke = invoke_request(
         "annas.metadata",
         json!({ "md5": "1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d" }),
@@ -437,23 +430,14 @@ async fn annas_archive_happy_path_compliance_suite_passes() {
     // Mount mock for GET /search?q=... (search)
     Mock::given(method("GET"))
         .and(path_regex(r"^/search.*"))
-        .respond_with(
-            ResponseTemplate::new(200).set_body_json(json!({ "results": [] })),
-        )
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "results": [] })))
         .mount(mock.inner())
         .await;
 
     let mut connector = AnnasArchiveConnectorAdapter::new();
     let signing_key = Ed25519SigningKey::generate();
-    let handshake = handshake_request(
-        signing_key.verifying_key().to_bytes(),
-        &["annas.search"],
-    );
-    let token = build_token(
-        &signing_key,
-        "annas.search",
-        &["annas.search"],
-    );
+    let handshake = handshake_request(signing_key.verifying_key().to_bytes(), &["annas.search"]);
+    let token = build_token(&signing_key, "annas.search", &["annas.search"]);
     let invoke = invoke_request(
         "annas.search",
         json!({ "query": "machine learning" }),

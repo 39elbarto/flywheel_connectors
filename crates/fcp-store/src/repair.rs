@@ -3850,8 +3850,7 @@ mod tests {
 
     #[test]
     fn targeted_repair_request_clone() {
-        let req = TargetedRepairRequest::new(ObjectId::from_bytes([5; 32]))
-            .with_esis(vec![1, 2]);
+        let req = TargetedRepairRequest::new(ObjectId::from_bytes([5; 32])).with_esis(vec![1, 2]);
         let cloned = req.clone();
         assert_eq!(req.object_id, cloned.object_id);
         assert_eq!(req.esis, cloned.esis);

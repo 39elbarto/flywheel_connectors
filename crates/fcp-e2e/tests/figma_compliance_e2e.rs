@@ -15,12 +15,11 @@
 use chrono::{Duration as ChronoDuration, Utc};
 use fcp_conformance::DynamicSuite;
 use fcp_core::{
-    AgentHint, CapabilityId, CapabilityToken, CapabilityVerifier, ConnectorId,
-    ConnectorMetrics, FcpConnector, FcpError, HandshakeRequest, HandshakeResponse, HealthSnapshot,
-    IdempotencyClass, InstanceId, Introspection, InvokeRequest, InvokeResponse, InvokeStatus,
-    OperationId, OperationInfo, RequestId, RiskLevel, SafetyTier, ShutdownRequest,
-    SimulateRequest, SimulateResponse, SubscribeRequest, SubscribeResponse, UnsubscribeRequest,
-    ZoneId,
+    AgentHint, CapabilityId, CapabilityToken, CapabilityVerifier, ConnectorId, ConnectorMetrics,
+    FcpConnector, FcpError, HandshakeRequest, HandshakeResponse, HealthSnapshot, IdempotencyClass,
+    InstanceId, Introspection, InvokeRequest, InvokeResponse, InvokeStatus, OperationId,
+    OperationInfo, RequestId, RiskLevel, SafetyTier, ShutdownRequest, SimulateRequest,
+    SimulateResponse, SubscribeRequest, SubscribeResponse, UnsubscribeRequest, ZoneId,
 };
 use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
 use fcp_e2e::{ComplianceSuite, ConnectorSuite, E2eRunner, InvokeExpectations};
@@ -70,7 +69,11 @@ impl FcpConnector for FigmaConnectorAdapter {
             message: format!("failed to serialize handshake request: {e}"),
         })?;
         let resp_val = self.connector.handle_handshake(req_json).await?;
-        self.verifier = Some(CapabilityVerifier::new(req.host_public_key, req.zone.clone(), self.instance_id.clone()));
+        self.verifier = Some(CapabilityVerifier::new(
+            req.host_public_key,
+            req.zone.clone(),
+            self.instance_id.clone(),
+        ));
         serde_json::from_value(resp_val).map_err(|e| FcpError::Internal {
             message: format!("failed to deserialize handshake response: {e}"),
         })
@@ -140,27 +143,47 @@ impl FcpConnector for FigmaConnectorAdapter {
 
     async fn invoke(&self, req: InvokeRequest) -> fcp_core::FcpResult<InvokeResponse> {
         let request_id = req.id.clone();
-        let value = self.connector.handle_invoke(json!({
-            "operation": req.operation.as_str(),
-            "input": req.input,
-            "capability_token": req.capability_token,
-        })).await?;
+        let value = self
+            .connector
+            .handle_invoke(json!({
+                "operation": req.operation.as_str(),
+                "input": req.input,
+                "capability_token": req.capability_token,
+            }))
+            .await?;
         Ok(InvokeResponse::ok(request_id, value))
     }
 
     async fn simulate(&self, req: SimulateRequest) -> fcp_core::FcpResult<SimulateResponse> {
-        let value = self.connector.handle_simulate(json!({
-            "operation_id": req.operation.as_str(),
-            "input": req.input,
-        })).await?;
+        let value = self
+            .connector
+            .handle_simulate(json!({
+                "operation_id": req.operation.as_str(),
+                "input": req.input,
+            }))
+            .await?;
         Ok(SimulateResponse {
-            r#type: "simulate_response".to_string(), id: req.id,
-            would_succeed: value.get("allowed").and_then(serde_json::Value::as_bool).unwrap_or(false),
-            failure_reason: value.get("reason").and_then(serde_json::Value::as_str)
-                .filter(|_| !value.get("allowed").and_then(serde_json::Value::as_bool).unwrap_or(false))
+            r#type: "simulate_response".to_string(),
+            id: req.id,
+            would_succeed: value
+                .get("allowed")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false),
+            failure_reason: value
+                .get("reason")
+                .and_then(serde_json::Value::as_str)
+                .filter(|_| {
+                    !value
+                        .get("allowed")
+                        .and_then(serde_json::Value::as_bool)
+                        .unwrap_or(false)
+                })
                 .map(str::to_string),
-            denial_code: None, missing_capabilities: Vec::new(), estimated_cost: None,
-            availability: None, response_metadata: None,
+            denial_code: None,
+            missing_capabilities: Vec::new(),
+            estimated_cost: None,
+            availability: None,
+            response_metadata: None,
         })
     }
 
@@ -357,7 +380,10 @@ async fn figma_default_deny_compliance_suite_passes() {
         .await
         .expect("compliance suite run");
 
-    assert!(report.passed, "default deny compliance should pass: {report:#?}");
+    assert!(
+        report.passed,
+        "default deny compliance should pass: {report:#?}"
+    );
 }
 
 // ============================================================================
@@ -508,7 +534,10 @@ async fn figma_dangerous_delete_webhook_requires_delete_capability() {
         token,
     );
     let result = adapter.invoke(req).await;
-    assert!(result.is_err(), "delete_webhook should fail without correct capability");
+    assert!(
+        result.is_err(),
+        "delete_webhook should fail without correct capability"
+    );
 }
 
 #[fcp_async_core::runtime::test]

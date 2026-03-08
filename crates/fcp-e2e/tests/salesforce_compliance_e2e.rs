@@ -16,9 +16,9 @@ use fcp_conformance::DynamicSuite;
 use fcp_core::{
     AgentHint, CapabilityGrant, CapabilityId, CapabilityToken, CapabilityVerifier, ConnectorId,
     ConnectorMetrics, FcpConnector, FcpError, HandshakeRequest, HandshakeResponse, HealthSnapshot,
-    IdempotencyClass, InstanceId, Introspection, InvokeRequest, InvokeResponse, OperationId, OperationInfo, RequestId, RiskLevel, SafetyTier, SessionId,
-    ShutdownRequest, SimulateRequest, SimulateResponse, SubscribeRequest, SubscribeResponse,
-    UnsubscribeRequest, ZoneId,
+    IdempotencyClass, InstanceId, Introspection, InvokeRequest, InvokeResponse, OperationId,
+    OperationInfo, RequestId, RiskLevel, SafetyTier, SessionId, ShutdownRequest, SimulateRequest,
+    SimulateResponse, SubscribeRequest, SubscribeResponse, UnsubscribeRequest, ZoneId,
 };
 use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
 use fcp_e2e::{ComplianceSuite, ConnectorSuite, E2eRunner, InvokeExpectations};
@@ -27,8 +27,8 @@ use fcp_salesforce::connector::SalesforceConnector;
 use fcp_testkit::MockApiServer;
 use serde_json::json;
 use wiremock::{
-    matchers::{method, path_regex},
     Mock, ResponseTemplate,
+    matchers::{method, path_regex},
 };
 
 struct SalesforceConnectorAdapter {
@@ -45,7 +45,6 @@ impl SalesforceConnectorAdapter {
             id: ConnectorId::from_static("salesforce"),
             instance_id: InstanceId::new(),
             verifier: None,
-
         }
     }
 }
@@ -273,10 +272,8 @@ fn salesforce_manifest_with_hash() -> String {
 }
 
 fn salesforce_manifest_toml() -> toml::Value {
-    toml::from_str(include_str!(
-        "../../../connectors/salesforce/manifest.toml"
-    ))
-    .expect("Salesforce manifest TOML")
+    toml::from_str(include_str!("../../../connectors/salesforce/manifest.toml"))
+        .expect("Salesforce manifest TOML")
 }
 
 fn salesforce_config(base_url: &str) -> serde_json::Value {
@@ -446,7 +443,8 @@ async fn salesforce_happy_path_compliance_suite_passes() {
     Mock::given(method("GET"))
         .and(path_regex(r"^/services/data/v59\.0/query"))
         .respond_with(
-            ResponseTemplate::new(200).set_body_json(json!({"records": [], "totalSize": 0, "done": true})),
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"records": [], "totalSize": 0, "done": true})),
         )
         .mount(mock.inner())
         .await;
@@ -462,11 +460,7 @@ async fn salesforce_happy_path_compliance_suite_passes() {
         "salesforce.accounts.read",
         &["salesforce.accounts.list"],
     );
-    let invoke = invoke_request(
-        "salesforce.accounts.list",
-        json!({}),
-        token,
-    );
+    let invoke = invoke_request("salesforce.accounts.list", json!({}), token);
 
     let suite = ConnectorSuite {
         test_name: "salesforce_allow_valid_token".to_string(),

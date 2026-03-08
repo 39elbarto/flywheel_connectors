@@ -320,18 +320,13 @@ impl MakeConnector {
     }
 
     /// Handle the `simulate` method.
-    pub async fn handle_simulate(
-        &self,
-        params: serde_json::Value,
-    ) -> FcpResult<serde_json::Value> {
+    pub async fn handle_simulate(&self, params: serde_json::Value) -> FcpResult<serde_json::Value> {
         let operation = params
             .get("operation_id")
             .and_then(serde_json::Value::as_str)
             .unwrap_or("");
 
-        let allowed = operations_info()
-            .iter()
-            .any(|o| o.id.as_ref() == operation);
+        let allowed = operations_info().iter().any(|o| o.id.as_ref() == operation);
 
         Ok(json!({
             "allowed": allowed,
@@ -672,8 +667,18 @@ mod tests {
     #[test]
     fn doctor_result_healthy_when_all_pass() {
         let checks = vec![
-            DoctorCheck { name: "a".into(), passed: true, message: None, critical: true },
-            DoctorCheck { name: "b".into(), passed: true, message: None, critical: false },
+            DoctorCheck {
+                name: "a".into(),
+                passed: true,
+                message: None,
+                critical: true,
+            },
+            DoctorCheck {
+                name: "b".into(),
+                passed: true,
+                message: None,
+                critical: false,
+            },
         ];
         let r = DoctorResult::from_checks(checks);
         assert_eq!(r.status, DoctorStatus::Healthy);
@@ -682,7 +687,12 @@ mod tests {
     #[test]
     fn doctor_result_degraded_when_non_critical_fails() {
         let checks = vec![
-            DoctorCheck { name: "a".into(), passed: true, message: None, critical: true },
+            DoctorCheck {
+                name: "a".into(),
+                passed: true,
+                message: None,
+                critical: true,
+            },
             DoctorCheck {
                 name: "b".into(),
                 passed: false,
@@ -733,7 +743,11 @@ mod tests {
         let ops = operations_info();
         for op in &ops {
             let v = serde_json::to_value(op.idempotency).unwrap();
-            assert!(v.is_string(), "op {} idempotency should serialize", op.id.as_ref());
+            assert!(
+                v.is_string(),
+                "op {} idempotency should serialize",
+                op.id.as_ref()
+            );
         }
     }
 
@@ -776,7 +790,10 @@ mod tests {
     #[fcp_async_core::runtime::test]
     async fn configure_with_api_token() {
         let mut c = MakeConnector::new();
-        let resp = c.handle_configure(json!({"api_token": "tok_test"})).await.unwrap();
+        let resp = c
+            .handle_configure(json!({"api_token": "tok_test"}))
+            .await
+            .unwrap();
         assert_eq!(resp, json!({}));
         assert!(c.config.is_some());
         assert!(c.client.is_some());
@@ -836,7 +853,9 @@ mod tests {
     #[fcp_async_core::runtime::test]
     async fn handshake_after_configure_succeeds() {
         let mut c = MakeConnector::new();
-        c.handle_configure(json!({"api_token": "tok"})).await.unwrap();
+        c.handle_configure(json!({"api_token": "tok"}))
+            .await
+            .unwrap();
         let resp = c.handle_handshake(json!({})).await.unwrap();
         assert_eq!(resp["protocol_version"], "2.0");
         assert_eq!(resp["connector_id"], "fcp.make");
@@ -848,15 +867,21 @@ mod tests {
     #[fcp_async_core::runtime::test]
     async fn handshake_stores_session_id() {
         let mut c = MakeConnector::new();
-        c.handle_configure(json!({"api_token": "tok"})).await.unwrap();
-        c.handle_handshake(json!({"session_id": "sess-42"})).await.unwrap();
+        c.handle_configure(json!({"api_token": "tok"}))
+            .await
+            .unwrap();
+        c.handle_handshake(json!({"session_id": "sess-42"}))
+            .await
+            .unwrap();
         assert_eq!(c.session_id.as_deref(), Some("sess-42"));
     }
 
     #[fcp_async_core::runtime::test]
     async fn handshake_no_session_id() {
         let mut c = MakeConnector::new();
-        c.handle_configure(json!({"api_token": "tok"})).await.unwrap();
+        c.handle_configure(json!({"api_token": "tok"}))
+            .await
+            .unwrap();
         c.handle_handshake(json!({})).await.unwrap();
         assert!(c.session_id.is_none());
     }
@@ -875,7 +900,9 @@ mod tests {
     #[fcp_async_core::runtime::test]
     async fn health_configured_not_handshaken() {
         let mut c = MakeConnector::new();
-        c.handle_configure(json!({"api_token": "tok"})).await.unwrap();
+        c.handle_configure(json!({"api_token": "tok"}))
+            .await
+            .unwrap();
         let resp = c.handle_health().await.unwrap();
         assert_eq!(resp["status"], "degraded");
         assert_eq!(resp["configured"], true);
@@ -885,7 +912,9 @@ mod tests {
     #[fcp_async_core::runtime::test]
     async fn health_fully_ready() {
         let mut c = MakeConnector::new();
-        c.handle_configure(json!({"api_token": "tok"})).await.unwrap();
+        c.handle_configure(json!({"api_token": "tok"}))
+            .await
+            .unwrap();
         c.handle_handshake(json!({})).await.unwrap();
         let resp = c.handle_health().await.unwrap();
         assert_eq!(resp["status"], "healthy");
@@ -908,7 +937,9 @@ mod tests {
     #[fcp_async_core::runtime::test]
     async fn doctor_configured_not_handshaken() {
         let mut c = MakeConnector::new();
-        c.handle_configure(json!({"api_token": "tok"})).await.unwrap();
+        c.handle_configure(json!({"api_token": "tok"}))
+            .await
+            .unwrap();
         let resp = c.handle_doctor().await.unwrap();
         assert_eq!(resp["status"], "degraded");
     }
@@ -916,7 +947,9 @@ mod tests {
     #[fcp_async_core::runtime::test]
     async fn doctor_fully_ready() {
         let mut c = MakeConnector::new();
-        c.handle_configure(json!({"api_token": "tok"})).await.unwrap();
+        c.handle_configure(json!({"api_token": "tok"}))
+            .await
+            .unwrap();
         c.handle_handshake(json!({})).await.unwrap();
         let resp = c.handle_doctor().await.unwrap();
         assert_eq!(resp["status"], "healthy");
@@ -933,7 +966,9 @@ mod tests {
     #[fcp_async_core::runtime::test]
     async fn self_check_configured() {
         let mut c = MakeConnector::new();
-        c.handle_configure(json!({"api_token": "tok"})).await.unwrap();
+        c.handle_configure(json!({"api_token": "tok"}))
+            .await
+            .unwrap();
         let resp = c.handle_self_check().await.unwrap();
         assert_eq!(resp["status"], "ready");
     }
@@ -954,13 +989,18 @@ mod tests {
             .handle_invoke(json!({"operation_id": "make.scenarios.list"}))
             .await
             .unwrap_err();
-        assert!(matches!(err, FcpError::NotConfigured | FcpError::NotHandshaken));
+        assert!(matches!(
+            err,
+            FcpError::NotConfigured | FcpError::NotHandshaken
+        ));
     }
 
     #[fcp_async_core::runtime::test]
     async fn invoke_missing_operation_id() {
         let mut c = MakeConnector::new();
-        c.handle_configure(json!({"api_token": "tok"})).await.unwrap();
+        c.handle_configure(json!({"api_token": "tok"}))
+            .await
+            .unwrap();
         c.handle_handshake(json!({})).await.unwrap();
         let err = c.handle_invoke(json!({"input": {}})).await.unwrap_err();
         assert!(matches!(err, FcpError::InvalidRequest { .. }));
@@ -969,7 +1009,9 @@ mod tests {
     #[fcp_async_core::runtime::test]
     async fn invoke_unknown_operation() {
         let mut c = MakeConnector::new();
-        c.handle_configure(json!({"api_token": "tok"})).await.unwrap();
+        c.handle_configure(json!({"api_token": "tok"}))
+            .await
+            .unwrap();
         c.handle_handshake(json!({})).await.unwrap();
         let err = c
             .handle_invoke(json!({"operation_id": "make.nonexistent"}))
@@ -981,8 +1023,15 @@ mod tests {
     #[fcp_async_core::runtime::test]
     async fn simulate_known_operations() {
         let c = MakeConnector::new();
-        for op in ["make.scenarios.list", "make.scenarios.run", "make.executions.list"] {
-            let resp = c.handle_simulate(json!({"operation_id": op})).await.unwrap();
+        for op in [
+            "make.scenarios.list",
+            "make.scenarios.run",
+            "make.executions.list",
+        ] {
+            let resp = c
+                .handle_simulate(json!({"operation_id": op}))
+                .await
+                .unwrap();
             assert_eq!(resp["allowed"], true, "op {op} should be allowed");
         }
     }
@@ -1008,8 +1057,12 @@ mod tests {
     #[fcp_async_core::runtime::test]
     async fn shutdown_clears_state() {
         let mut c = MakeConnector::new();
-        c.handle_configure(json!({"api_token": "tok"})).await.unwrap();
-        c.handle_handshake(json!({"session_id": "s1"})).await.unwrap();
+        c.handle_configure(json!({"api_token": "tok"}))
+            .await
+            .unwrap();
+        c.handle_handshake(json!({"session_id": "s1"}))
+            .await
+            .unwrap();
         assert!(c.config.is_some());
         assert!(c.client.is_some());
 
@@ -1079,8 +1132,18 @@ mod tests {
     #[test]
     fn doctor_result_multiple_critical_failures() {
         let checks = vec![
-            DoctorCheck { name: "a".into(), passed: false, message: None, critical: true },
-            DoctorCheck { name: "b".into(), passed: false, message: None, critical: true },
+            DoctorCheck {
+                name: "a".into(),
+                passed: false,
+                message: None,
+                critical: true,
+            },
+            DoctorCheck {
+                name: "b".into(),
+                passed: false,
+                message: None,
+                critical: true,
+            },
         ];
         let r = DoctorResult::from_checks(checks);
         assert_eq!(r.status, DoctorStatus::Unhealthy);
@@ -1165,7 +1228,10 @@ mod tests {
     #[test]
     fn operations_scenarios_run_is_not_idempotent() {
         let ops = operations_info();
-        let run_op = ops.iter().find(|o| o.id.as_ref() == "make.scenarios.run").unwrap();
+        let run_op = ops
+            .iter()
+            .find(|o| o.id.as_ref() == "make.scenarios.run")
+            .unwrap();
         assert_eq!(run_op.idempotency, IdempotencyClass::None);
     }
 

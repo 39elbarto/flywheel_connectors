@@ -1201,9 +1201,10 @@ mod tests {
 
     #[test]
     fn config_clone_preserves_base_url() {
-        let config =
-            SalesforceConfig::from_params(&json!({ "access_token": "tok", "base_url": "https://custom.sf.com" }))
-                .unwrap();
+        let config = SalesforceConfig::from_params(
+            &json!({ "access_token": "tok", "base_url": "https://custom.sf.com" }),
+        )
+        .unwrap();
         let cloned = config.clone();
         assert_eq!(config.base_url, "https://custom.sf.com");
         assert_eq!(cloned.base_url, "https://custom.sf.com");
@@ -1233,11 +1234,7 @@ mod tests {
         let ops = operations_info();
         for op in ops.as_array().unwrap() {
             let summary = op["summary"].as_str().unwrap();
-            assert!(
-                !summary.is_empty(),
-                "op {:?} has empty summary",
-                op["id"]
-            );
+            assert!(!summary.is_empty(), "op {:?} has empty summary", op["id"]);
         }
     }
 

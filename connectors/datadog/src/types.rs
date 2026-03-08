@@ -744,8 +744,7 @@ mod tests {
 
     #[test]
     fn api_error_response_debug_format() {
-        let e: ApiErrorResponse =
-            serde_json::from_value(json!({"errors": ["err1"]})).unwrap();
+        let e: ApiErrorResponse = serde_json::from_value(json!({"errors": ["err1"]})).unwrap();
         let dbg = format!("{e:?}");
         assert!(dbg.contains("ApiErrorResponse"));
         assert!(dbg.contains("err1"));

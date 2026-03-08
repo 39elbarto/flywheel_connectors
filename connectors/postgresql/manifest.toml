@@ -1,0 +1,738 @@
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = []
+max_datagram_bytes = 65000
+interface_hash = "PLACEHOLDER_HASH"
+
+[connector]
+id = "fcp.postgresql"
+name = "PostgreSQL Connector"
+version = "0.1.0"
+description = "FCP connector for PostgreSQL via Supabase/PostgREST REST API (queries, schema introspection, transactions, batch execution)"
+archetypes = [
+    "knowledge",
+    "storage",
+]
+format = "wasi"
+
+[connector.state]
+model = "singleton_writer"
+state_schema_version = "1"
+migration_hint = "Stores connection configuration and session context."
+
+[zones]
+home = "z:work"
+allowed_sources = [
+    "z:owner",
+    "z:private",
+    "z:work",
+]
+allowed_targets = ["z:work"]
+forbidden = [
+    "z:public",
+    "z:community",
+]
+
+[capabilities]
+required = [
+    "network.dns",
+    "network.egress",
+    "network.tls.sni",
+    "storage.state",
+]
+optional = []
+forbidden = [
+    "system.exec",
+    "network.listen",
+    "media.upload",
+    "media.download",
+]
+
+# ---------- pg.query ----------
+
+[provides.operations."pg.query"]
+description = "Execute a parameterized SQL query (returns rows)"
+capability = "pg.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."pg.query".input_schema]
+type = "object"
+required = ["sql"]
+
+[provides.operations."pg.query".input_schema.properties.sql]
+type = "string"
+description = "SQL query to execute"
+
+[provides.operations."pg.query".input_schema.properties.params]
+type = "array"
+description = "Positional parameters for the query"
+
+[provides.operations."pg.query".input_schema.properties.timeout_ms]
+type = "integer"
+description = "Query timeout in milliseconds"
+
+[provides.operations."pg.query".output_schema]
+type = "object"
+required = ["result"]
+
+[provides.operations."pg.query".output_schema.properties.result]
+description = "Query result with rows and metadata"
+
+[provides.operations."pg.query".network_constraints]
+host_allow = ["*.example.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 120000
+max_response_bytes = 52428800
+methods = ["POST"]
+
+[provides.operations."pg.query".ai_hints]
+when_to_use = "Execute a read-only SQL query with optional parameterized values. Use for SELECT statements."
+common_mistakes = ["Forgetting to use parameterized queries ($1, $2) — never interpolate user input into SQL strings.", "Omitting timeout_ms for long-running analytical queries."]
+examples = ['{"sql": "SELECT id, name FROM users WHERE status = $1 LIMIT 100", "params": ["active"], "timeout_ms": 5000}']
+related = ["pg.explain", "pg.schema.tables"]
+
+# ---------- pg.execute ----------
+
+[provides.operations."pg.execute"]
+description = "Execute a non-returning SQL statement (returns affected_rows)"
+capability = "pg.write"
+risk_level = "medium"
+safety_tier = "moderate"
+requires_approval = "policy"
+idempotency = "none"
+
+[provides.operations."pg.execute".input_schema]
+type = "object"
+required = ["sql"]
+
+[provides.operations."pg.execute".input_schema.properties.sql]
+type = "string"
+description = "SQL statement to execute"
+
+[provides.operations."pg.execute".input_schema.properties.params]
+type = "array"
+description = "Positional parameters for the statement"
+
+[provides.operations."pg.execute".output_schema]
+type = "object"
+required = ["result"]
+
+[provides.operations."pg.execute".output_schema.properties.result]
+description = "Execution result with affected_rows"
+
+[provides.operations."pg.execute".network_constraints]
+host_allow = ["*.example.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 60000
+max_response_bytes = 1048576
+methods = ["POST"]
+
+[provides.operations."pg.execute".ai_hints]
+when_to_use = "Execute INSERT, UPDATE, DELETE, or DDL statements that do not return rows."
+common_mistakes = ["Using pg.execute for SELECT — use pg.query instead to get rows back.", "Running destructive DDL (DROP TABLE) without confirmation."]
+examples = ['{"sql": "UPDATE users SET status = $1 WHERE last_login < $2", "params": ["inactive", "2025-01-01"]}']
+related = ["pg.query", "pg.batch", "pg.transaction.begin"]
+
+# ---------- pg.explain ----------
+
+[provides.operations."pg.explain"]
+description = "Explain query plan for a SQL query"
+capability = "pg.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."pg.explain".input_schema]
+type = "object"
+required = ["sql"]
+
+[provides.operations."pg.explain".input_schema.properties.sql]
+type = "string"
+description = "SQL query to explain"
+
+[provides.operations."pg.explain".input_schema.properties.params]
+type = "array"
+description = "Positional parameters for the query"
+
+[provides.operations."pg.explain".output_schema]
+type = "object"
+required = ["plan"]
+
+[provides.operations."pg.explain".output_schema.properties.plan]
+description = "Query execution plan"
+
+[provides.operations."pg.explain".network_constraints]
+host_allow = ["*.example.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 60000
+max_response_bytes = 1048576
+methods = ["POST"]
+
+[provides.operations."pg.explain".ai_hints]
+when_to_use = "Analyze the query execution plan before running an expensive query. Use to debug slow queries."
+common_mistakes = ["Running EXPLAIN on trivial queries where the plan is obvious."]
+examples = ['{"sql": "SELECT * FROM orders WHERE customer_id = $1 AND created_at > $2", "params": ["cust_123", "2025-01-01"]}']
+related = ["pg.query"]
+
+# ---------- pg.schema.tables ----------
+
+[provides.operations."pg.schema.tables"]
+description = "List tables in a database schema"
+capability = "pg.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."pg.schema.tables".input_schema]
+type = "object"
+required = []
+
+[provides.operations."pg.schema.tables".input_schema.properties.schema]
+type = "string"
+description = "Schema name (default: public)"
+
+[provides.operations."pg.schema.tables".output_schema]
+type = "object"
+required = ["tables"]
+
+[provides.operations."pg.schema.tables".output_schema.properties.tables]
+type = "array"
+description = "List of tables with name, schema, and row_count_estimate"
+
+[provides.operations."pg.schema.tables".network_constraints]
+host_allow = ["*.example.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+methods = ["GET"]
+
+[provides.operations."pg.schema.tables".ai_hints]
+when_to_use = "Discover available tables in the database. Start here when exploring an unfamiliar schema."
+common_mistakes = ["Assuming tables are in the public schema — always check with schema parameter if unsure."]
+examples = ['{"schema": "public"}', '{}']
+related = ["pg.schema.columns", "pg.schema.indexes"]
+
+# ---------- pg.schema.columns ----------
+
+[provides.operations."pg.schema.columns"]
+description = "Get column details for a table"
+capability = "pg.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."pg.schema.columns".input_schema]
+type = "object"
+required = ["table"]
+
+[provides.operations."pg.schema.columns".input_schema.properties.table]
+type = "string"
+description = "Table name"
+
+[provides.operations."pg.schema.columns".output_schema]
+type = "object"
+required = ["columns"]
+
+[provides.operations."pg.schema.columns".output_schema.properties.columns]
+type = "array"
+description = "List of columns with name, data_type, nullable, default_value, is_primary_key"
+
+[provides.operations."pg.schema.columns".network_constraints]
+host_allow = ["*.example.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+methods = ["GET"]
+
+[provides.operations."pg.schema.columns".ai_hints]
+when_to_use = "Inspect column names, types, and constraints for a specific table before writing queries."
+common_mistakes = ["Not checking column types before inserting data — type mismatches cause runtime errors."]
+examples = ['{"table": "users"}']
+related = ["pg.schema.tables", "pg.schema.indexes"]
+
+# ---------- pg.schema.indexes ----------
+
+[provides.operations."pg.schema.indexes"]
+description = "List indexes for a table"
+capability = "pg.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."pg.schema.indexes".input_schema]
+type = "object"
+required = ["table"]
+
+[provides.operations."pg.schema.indexes".input_schema.properties.table]
+type = "string"
+description = "Table name"
+
+[provides.operations."pg.schema.indexes".output_schema]
+type = "object"
+required = ["indexes"]
+
+[provides.operations."pg.schema.indexes".output_schema.properties.indexes]
+type = "array"
+description = "List of indexes with name, table, columns, unique, type"
+
+[provides.operations."pg.schema.indexes".network_constraints]
+host_allow = ["*.example.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+methods = ["GET"]
+
+[provides.operations."pg.schema.indexes".ai_hints]
+when_to_use = "Check available indexes on a table to understand query performance characteristics."
+common_mistakes = ["Assuming an index exists — always verify before relying on indexed lookups in queries."]
+examples = ['{"table": "orders"}']
+related = ["pg.schema.tables", "pg.schema.columns"]
+
+# ---------- pg.transaction.begin ----------
+
+[provides.operations."pg.transaction.begin"]
+description = "Start a new database transaction"
+capability = "pg.write"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "none"
+
+[provides.operations."pg.transaction.begin".input_schema]
+type = "object"
+required = []
+
+[provides.operations."pg.transaction.begin".input_schema.properties.isolation_level]
+type = "string"
+description = "Isolation level: read_committed, repeatable_read, serializable"
+
+[provides.operations."pg.transaction.begin".output_schema]
+type = "object"
+required = ["result"]
+
+[provides.operations."pg.transaction.begin".output_schema.properties.result]
+description = "Transaction info including txn_id"
+
+[provides.operations."pg.transaction.begin".network_constraints]
+host_allow = ["*.example.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+methods = ["POST"]
+
+[provides.operations."pg.transaction.begin".ai_hints]
+when_to_use = "Start a transaction when you need atomicity across multiple statements. Always commit or rollback."
+common_mistakes = ["Forgetting to commit or rollback — abandoned transactions hold locks.", "Using serializable isolation when read_committed suffices — causes unnecessary contention."]
+examples = ['{"isolation_level": "read_committed"}', '{}']
+related = ["pg.transaction.commit", "pg.transaction.rollback", "pg.execute"]
+
+# ---------- pg.transaction.commit ----------
+
+[provides.operations."pg.transaction.commit"]
+description = "Commit a database transaction"
+capability = "pg.write"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "best_effort"
+
+[provides.operations."pg.transaction.commit".input_schema]
+type = "object"
+required = ["txn_id"]
+
+[provides.operations."pg.transaction.commit".input_schema.properties.txn_id]
+type = "string"
+description = "Transaction ID to commit"
+
+[provides.operations."pg.transaction.commit".output_schema]
+type = "object"
+required = ["result"]
+
+[provides.operations."pg.transaction.commit".output_schema.properties.result]
+description = "Commit confirmation"
+
+[provides.operations."pg.transaction.commit".network_constraints]
+host_allow = ["*.example.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+methods = ["POST"]
+
+[provides.operations."pg.transaction.commit".ai_hints]
+when_to_use = "Commit a previously started transaction to make all changes permanent."
+common_mistakes = ["Committing a transaction that has already been rolled back."]
+examples = ['{"txn_id": "txn_abc123"}']
+related = ["pg.transaction.begin", "pg.transaction.rollback"]
+
+# ---------- pg.transaction.rollback ----------
+
+[provides.operations."pg.transaction.rollback"]
+description = "Rollback a database transaction"
+capability = "pg.write"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "best_effort"
+
+[provides.operations."pg.transaction.rollback".input_schema]
+type = "object"
+required = ["txn_id"]
+
+[provides.operations."pg.transaction.rollback".input_schema.properties.txn_id]
+type = "string"
+description = "Transaction ID to rollback"
+
+[provides.operations."pg.transaction.rollback".output_schema]
+type = "object"
+required = ["result"]
+
+[provides.operations."pg.transaction.rollback".output_schema.properties.result]
+description = "Rollback confirmation"
+
+[provides.operations."pg.transaction.rollback".network_constraints]
+host_allow = ["*.example.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+methods = ["POST"]
+
+[provides.operations."pg.transaction.rollback".ai_hints]
+when_to_use = "Undo all changes in a transaction. Use when an error occurs mid-transaction."
+common_mistakes = ["Rolling back a transaction that has already been committed."]
+examples = ['{"txn_id": "txn_abc123"}']
+related = ["pg.transaction.begin", "pg.transaction.commit"]
+
+# ---------- pg.batch ----------
+
+[provides.operations."pg.batch"]
+description = "Execute multiple SQL statements in order"
+capability = "pg.write"
+risk_level = "medium"
+safety_tier = "moderate"
+requires_approval = "policy"
+idempotency = "none"
+
+[provides.operations."pg.batch".input_schema]
+type = "object"
+required = ["statements"]
+
+[provides.operations."pg.batch".input_schema.properties.statements]
+type = "array"
+description = "SQL statements to execute in order"
+
+[provides.operations."pg.batch".input_schema.properties.statements.items]
+type = "string"
+
+[provides.operations."pg.batch".input_schema.properties.params]
+type = "array"
+description = "Parameters for each statement"
+
+[provides.operations."pg.batch".output_schema]
+type = "object"
+required = ["results"]
+
+[provides.operations."pg.batch".output_schema.properties.results]
+description = "Results for each statement"
+
+[provides.operations."pg.batch".network_constraints]
+host_allow = ["*.example.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 120000
+max_response_bytes = 52428800
+methods = ["POST"]
+
+[provides.operations."pg.batch".ai_hints]
+when_to_use = "Execute multiple SQL statements sequentially in a single call. More efficient than separate pg.execute calls."
+common_mistakes = ["Not wrapping batch in a transaction — partial failures leave data in an inconsistent state.", "Sending too many statements in one batch — keep batches under 100 statements."]
+examples = ['{"statements": ["INSERT INTO logs (msg) VALUES ($1)", "UPDATE counters SET n = n + 1 WHERE name = $1"], "params": [["hello"], ["log_count"]]}']
+related = ["pg.execute", "pg.transaction.begin"]
+
+# ---------- pg.prepared ----------
+
+[provides.operations."pg.prepared"]
+description = "Execute a named prepared statement"
+capability = "pg.write"
+risk_level = "medium"
+safety_tier = "moderate"
+requires_approval = "policy"
+idempotency = "best_effort"
+
+[provides.operations."pg.prepared".input_schema]
+type = "object"
+required = ["name"]
+
+[provides.operations."pg.prepared".input_schema.properties.name]
+type = "string"
+description = "Name of the prepared statement"
+
+[provides.operations."pg.prepared".input_schema.properties.params]
+type = "array"
+description = "Parameters to bind"
+
+[provides.operations."pg.prepared".output_schema]
+type = "object"
+required = ["result"]
+
+[provides.operations."pg.prepared".output_schema.properties.result]
+description = "Prepared statement execution result"
+
+[provides.operations."pg.prepared".network_constraints]
+host_allow = ["*.example.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 60000
+max_response_bytes = 1048576
+methods = ["POST"]
+
+[provides.operations."pg.prepared".ai_hints]
+when_to_use = "Execute a server-side prepared statement by name. More efficient for repeated queries with different parameters."
+common_mistakes = ["Referencing a prepared statement name that does not exist on the server.", "Not providing all required parameters for the prepared statement."]
+examples = ['{"name": "get_user_by_id", "params": [42]}']
+related = ["pg.query", "pg.execute"]
+
+# ---------- pg.health ----------
+
+[provides.operations."pg.health"]
+description = "Check database connectivity and health"
+capability = "pg.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."pg.health".input_schema]
+type = "object"
+required = []
+
+[provides.operations."pg.health".output_schema]
+type = "object"
+required = ["health"]
+
+[provides.operations."pg.health".output_schema.properties.health]
+description = "Database health status"
+
+[provides.operations."pg.health".network_constraints]
+host_allow = ["*.example.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 10000
+max_response_bytes = 1048576
+methods = ["GET"]
+
+[provides.operations."pg.health".ai_hints]
+when_to_use = "Verify the database is reachable and responding before running queries."
+common_mistakes = ["Polling health too frequently — once before a batch of work is sufficient."]
+examples = ['{}']
+related = ["pg.query"]
+
+# ---------- Auth ----------
+
+[auth]
+type = "bearer"
+credential_name = "api_key"
+secretless_supported = true
+secretless_hint = "Supply credential_id for egress proxy injection instead of api_key."
+
+# ---------- Config ----------
+
+[config]
+base_url = { type = "string", default = "https://db.example.com", description = "Supabase/PostgREST REST API base URL" }
+api_key = { type = "string", secret = true, description = "API key passed as Bearer token" }
+credential_id = { type = "string", description = "Secretless credential reference (alternative to api_key)" }
+
+# ---------- Sandbox ----------
+
+[sandbox]
+profile = "strict"
+memory_mb = 512
+cpu_percent = 75
+wall_clock_timeout_ms = 300000
+fs_readonly_paths = [
+    "/usr",
+    "/lib",
+]
+fs_writable_paths = ["$CONNECTOR_STATE"]
+deny_exec = true
+deny_ptrace = true
+
+# ---------- Rate Limits ----------
+
+[[rate_limits.pools]]
+id = "pg.read"
+requests = 200
+window_ms = 60000
+burst = 20
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "pg.write"
+requests = 50
+window_ms = 60000
+burst = 10
+scope = "instance"
+
+[rate_limits.operation_pools]
+"pg.query" = ["pg.read"]
+"pg.explain" = ["pg.read"]
+"pg.schema.tables" = ["pg.read"]
+"pg.schema.columns" = ["pg.read"]
+"pg.schema.indexes" = ["pg.read"]
+"pg.health" = ["pg.read"]
+"pg.execute" = ["pg.write"]
+"pg.transaction.begin" = ["pg.write"]
+"pg.transaction.commit" = ["pg.write"]
+"pg.transaction.rollback" = ["pg.write"]
+"pg.batch" = ["pg.write"]
+"pg.prepared" = ["pg.write"]

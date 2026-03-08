@@ -1,0 +1,917 @@
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = []
+max_datagram_bytes = 65000
+interface_hash = "blake3-256:fcp.interface.v2:PLACEHOLDER_HASH"
+
+[connector]
+id = "fcp.redis"
+name = "Redis Connector"
+version = "0.1.0"
+description = "FCP connector for Redis via Upstash-compatible REST API (strings, hashes, lists, sets, TTL management)"
+archetypes = [
+    "knowledge",
+    "operational",
+]
+format = "wasi"
+
+[connector.state]
+model = "singleton_writer"
+state_schema_version = "1"
+migration_hint = "Stores REST endpoint URL and API token for Upstash-compatible Redis."
+
+[zones]
+home = "z:work"
+allowed_sources = [
+    "z:owner",
+    "z:private",
+    "z:work",
+]
+allowed_targets = ["z:work"]
+forbidden = [
+    "z:public",
+    "z:community",
+]
+
+[capabilities]
+required = [
+    "network.dns",
+    "network.egress",
+    "network.tls.sni",
+    "storage.state",
+]
+optional = []
+forbidden = [
+    "system.exec",
+    "network.listen",
+    "media.upload",
+    "media.download",
+]
+
+# ──────────────────────────────────────────────
+# redis.get — Get the value of a key
+# ──────────────────────────────────────────────
+
+[provides.operations."redis.get"]
+description = "Get the value of a key"
+capability = "redis.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."redis.get".input_schema]
+type = "object"
+required = ["key"]
+
+[provides.operations."redis.get".input_schema.properties.key]
+type = "string"
+description = "The key to get"
+
+[provides.operations."redis.get".output_schema]
+type = "object"
+
+[provides.operations."redis.get".output_schema.properties.value]
+description = "The value stored at the key, or null if not found"
+
+[provides.operations."redis.get".network_constraints]
+host_allow = ["*.upstash.io"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."redis.get".ai_hints]
+when_to_use = "Retrieve the value of a single key from Redis."
+common_mistakes = ["Assuming the key exists without checking — value is null when the key is missing."]
+examples = ['{"key": "user:1234:name"}']
+related = ["redis.set", "redis.exists"]
+
+# ──────────────────────────────────────────────
+# redis.set — Set the value of a key
+# ──────────────────────────────────────────────
+
+[provides.operations."redis.set"]
+description = "Set the value of a key with optional TTL and NX/XX flags"
+capability = "redis.write"
+risk_level = "medium"
+safety_tier = "moderate"
+requires_approval = "policy"
+idempotency = "best_effort"
+
+[provides.operations."redis.set".input_schema]
+type = "object"
+required = ["key", "value"]
+
+[provides.operations."redis.set".input_schema.properties.key]
+type = "string"
+description = "The key to set"
+
+[provides.operations."redis.set".input_schema.properties.value]
+type = "string"
+description = "The value to set"
+
+[provides.operations."redis.set".input_schema.properties.ttl_seconds]
+type = "integer"
+description = "Time-to-live in seconds"
+
+[provides.operations."redis.set".input_schema.properties.nx]
+type = "boolean"
+description = "Only set if key does not exist"
+
+[provides.operations."redis.set".input_schema.properties.xx]
+type = "boolean"
+description = "Only set if key already exists"
+
+[provides.operations."redis.set".output_schema]
+type = "object"
+
+[provides.operations."redis.set".output_schema.properties.result]
+description = "OK on success, null if NX/XX condition not met"
+
+[provides.operations."redis.set".network_constraints]
+host_allow = ["*.upstash.io"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."redis.set".ai_hints]
+when_to_use = "Store a string value at a key, optionally with a TTL or conditional NX/XX flags."
+common_mistakes = [
+    "Using both NX and XX together — they are mutually exclusive.",
+    "Forgetting to set a TTL for cache entries, leading to unbounded growth.",
+]
+examples = [
+    '{"key": "session:abc", "value": "active", "ttl_seconds": 3600}',
+    '{"key": "lock:job:42", "value": "1", "nx": true, "ttl_seconds": 60}',
+]
+related = ["redis.get", "redis.expire"]
+
+# ──────────────────────────────────────────────
+# redis.del — Delete one or more keys
+# ──────────────────────────────────────────────
+
+[provides.operations."redis.del"]
+description = "Delete one or more keys"
+capability = "redis.write"
+risk_level = "high"
+safety_tier = "moderate"
+requires_approval = "interactive"
+idempotency = "none"
+
+[provides.operations."redis.del".input_schema]
+type = "object"
+required = ["keys"]
+
+[provides.operations."redis.del".input_schema.properties.keys]
+type = "array"
+description = "The keys to delete"
+
+[provides.operations."redis.del".input_schema.properties.keys.items]
+type = "string"
+
+[provides.operations."redis.del".output_schema]
+type = "object"
+
+[provides.operations."redis.del".output_schema.properties.deleted]
+type = "integer"
+description = "Number of keys deleted"
+
+[provides.operations."redis.del".network_constraints]
+host_allow = ["*.upstash.io"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."redis.del".ai_hints]
+when_to_use = "Delete one or more keys from Redis. This is destructive and cannot be undone."
+common_mistakes = [
+    "Passing a glob pattern instead of explicit key names — DEL does not support patterns.",
+    "Deleting keys without checking their existence first.",
+]
+examples = ['{"keys": ["session:expired:1", "session:expired:2"]}']
+related = ["redis.exists", "redis.get"]
+
+# ──────────────────────────────────────────────
+# redis.exists — Check if one or more keys exist
+# ──────────────────────────────────────────────
+
+[provides.operations."redis.exists"]
+description = "Check if one or more keys exist"
+capability = "redis.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."redis.exists".input_schema]
+type = "object"
+required = ["keys"]
+
+[provides.operations."redis.exists".input_schema.properties.keys]
+type = "array"
+description = "The keys to check"
+
+[provides.operations."redis.exists".input_schema.properties.keys.items]
+type = "string"
+
+[provides.operations."redis.exists".output_schema]
+type = "object"
+
+[provides.operations."redis.exists".output_schema.properties.count]
+type = "integer"
+description = "Number of keys that exist"
+
+[provides.operations."redis.exists".network_constraints]
+host_allow = ["*.upstash.io"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."redis.exists".ai_hints]
+when_to_use = "Check whether one or more keys exist without retrieving their values."
+common_mistakes = ["Assuming count equals the number of unique keys — EXISTS counts duplicates if the same key appears multiple times."]
+examples = ['{"keys": ["user:1", "user:2", "user:3"]}']
+related = ["redis.get", "redis.del"]
+
+# ──────────────────────────────────────────────
+# redis.expire — Set a timeout on a key
+# ──────────────────────────────────────────────
+
+[provides.operations."redis.expire"]
+description = "Set a timeout on a key"
+capability = "redis.write"
+risk_level = "medium"
+safety_tier = "moderate"
+requires_approval = "policy"
+idempotency = "best_effort"
+
+[provides.operations."redis.expire".input_schema]
+type = "object"
+required = ["key", "seconds"]
+
+[provides.operations."redis.expire".input_schema.properties.key]
+type = "string"
+description = "The key to set expiry on"
+
+[provides.operations."redis.expire".input_schema.properties.seconds]
+type = "integer"
+description = "TTL in seconds"
+
+[provides.operations."redis.expire".output_schema]
+type = "object"
+
+[provides.operations."redis.expire".output_schema.properties.result]
+type = "integer"
+description = "1 if timeout was set, 0 if key does not exist"
+
+[provides.operations."redis.expire".network_constraints]
+host_allow = ["*.upstash.io"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."redis.expire".ai_hints]
+when_to_use = "Set or update the TTL on an existing key."
+common_mistakes = ["Calling EXPIRE on a key that does not exist — returns 0 silently."]
+examples = ['{"key": "cache:homepage", "seconds": 300}']
+related = ["redis.ttl", "redis.set"]
+
+# ──────────────────────────────────────────────
+# redis.ttl — Get the remaining TTL of a key
+# ──────────────────────────────────────────────
+
+[provides.operations."redis.ttl"]
+description = "Get the remaining time to live of a key"
+capability = "redis.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."redis.ttl".input_schema]
+type = "object"
+required = ["key"]
+
+[provides.operations."redis.ttl".input_schema.properties.key]
+type = "string"
+description = "The key to check"
+
+[provides.operations."redis.ttl".output_schema]
+type = "object"
+
+[provides.operations."redis.ttl".output_schema.properties.ttl]
+type = "integer"
+description = "TTL in seconds, -1 if no expiry, -2 if key does not exist"
+
+[provides.operations."redis.ttl".network_constraints]
+host_allow = ["*.upstash.io"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."redis.ttl".ai_hints]
+when_to_use = "Check how many seconds remain before a key expires."
+common_mistakes = ["Not distinguishing -1 (no expiry) from -2 (key does not exist)."]
+examples = ['{"key": "session:abc"}']
+related = ["redis.expire", "redis.exists"]
+
+# ──────────────────────────────────────────────
+# redis.incr — Atomically increment an integer key
+# ──────────────────────────────────────────────
+
+[provides.operations."redis.incr"]
+description = "Atomically increment the integer value of a key by one"
+capability = "redis.write"
+risk_level = "medium"
+safety_tier = "moderate"
+requires_approval = "policy"
+idempotency = "none"
+
+[provides.operations."redis.incr".input_schema]
+type = "object"
+required = ["key"]
+
+[provides.operations."redis.incr".input_schema.properties.key]
+type = "string"
+description = "The key to increment"
+
+[provides.operations."redis.incr".output_schema]
+type = "object"
+
+[provides.operations."redis.incr".output_schema.properties.value]
+type = "integer"
+description = "The value after incrementing"
+
+[provides.operations."redis.incr".network_constraints]
+host_allow = ["*.upstash.io"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."redis.incr".ai_hints]
+when_to_use = "Atomically increment an integer counter. Creates the key with value 1 if it does not exist."
+common_mistakes = ["Calling INCR on a key that holds a non-integer value — Redis returns an error."]
+examples = ['{"key": "page:views:homepage"}']
+related = ["redis.get", "redis.set"]
+
+# ──────────────────────────────────────────────
+# redis.hget — Get the value of a hash field
+# ──────────────────────────────────────────────
+
+[provides.operations."redis.hget"]
+description = "Get the value of a hash field"
+capability = "redis.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."redis.hget".input_schema]
+type = "object"
+required = ["key", "field"]
+
+[provides.operations."redis.hget".input_schema.properties.key]
+type = "string"
+description = "The hash key"
+
+[provides.operations."redis.hget".input_schema.properties.field]
+type = "string"
+description = "The field to get"
+
+[provides.operations."redis.hget".output_schema]
+type = "object"
+
+[provides.operations."redis.hget".output_schema.properties.value]
+description = "The value of the field, or null"
+
+[provides.operations."redis.hget".network_constraints]
+host_allow = ["*.upstash.io"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."redis.hget".ai_hints]
+when_to_use = "Read a single field from a Redis hash."
+common_mistakes = ["Confusing HGET (single field) with HGETALL (all fields)."]
+examples = ['{"key": "user:1234", "field": "email"}']
+related = ["redis.hset", "redis.hgetall"]
+
+# ──────────────────────────────────────────────
+# redis.hset — Set one or more hash fields
+# ──────────────────────────────────────────────
+
+[provides.operations."redis.hset"]
+description = "Set one or more hash fields"
+capability = "redis.write"
+risk_level = "medium"
+safety_tier = "moderate"
+requires_approval = "policy"
+idempotency = "best_effort"
+
+[provides.operations."redis.hset".input_schema]
+type = "object"
+required = ["key", "fields"]
+
+[provides.operations."redis.hset".input_schema.properties.key]
+type = "string"
+description = "The hash key"
+
+[provides.operations."redis.hset".input_schema.properties.fields]
+type = "object"
+description = "Field-value pairs to set"
+
+[provides.operations."redis.hset".output_schema]
+type = "object"
+
+[provides.operations."redis.hset".output_schema.properties.result]
+type = "integer"
+description = "Number of new fields added"
+
+[provides.operations."redis.hset".network_constraints]
+host_allow = ["*.upstash.io"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."redis.hset".ai_hints]
+when_to_use = "Set one or more fields in a hash. Creates the hash if it does not exist."
+common_mistakes = ["Passing values as non-string types — all hash values are stored as strings."]
+examples = ['{"key": "user:1234", "fields": {"name": "Alice", "email": "alice@example.com"}}']
+related = ["redis.hget", "redis.hgetall"]
+
+# ──────────────────────────────────────────────
+# redis.hgetall — Get all fields and values in a hash
+# ──────────────────────────────────────────────
+
+[provides.operations."redis.hgetall"]
+description = "Get all fields and values in a hash"
+capability = "redis.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."redis.hgetall".input_schema]
+type = "object"
+required = ["key"]
+
+[provides.operations."redis.hgetall".input_schema.properties.key]
+type = "string"
+description = "The hash key"
+
+[provides.operations."redis.hgetall".output_schema]
+type = "object"
+
+[provides.operations."redis.hgetall".output_schema.properties.fields]
+description = "All field-value pairs in the hash"
+
+[provides.operations."redis.hgetall".network_constraints]
+host_allow = ["*.upstash.io"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
+
+[provides.operations."redis.hgetall".ai_hints]
+when_to_use = "Retrieve all fields and values from a hash in one call."
+common_mistakes = ["Using HGETALL on very large hashes — can be slow and memory-intensive for hashes with thousands of fields."]
+examples = ['{"key": "user:1234"}']
+related = ["redis.hget", "redis.hset"]
+
+# ──────────────────────────────────────────────
+# redis.lpush — Prepend elements to a list
+# ──────────────────────────────────────────────
+
+[provides.operations."redis.lpush"]
+description = "Prepend one or more elements to a list"
+capability = "redis.write"
+risk_level = "medium"
+safety_tier = "moderate"
+requires_approval = "policy"
+idempotency = "none"
+
+[provides.operations."redis.lpush".input_schema]
+type = "object"
+required = ["key", "elements"]
+
+[provides.operations."redis.lpush".input_schema.properties.key]
+type = "string"
+description = "The list key"
+
+[provides.operations."redis.lpush".input_schema.properties.elements]
+type = "array"
+description = "Elements to prepend"
+
+[provides.operations."redis.lpush".input_schema.properties.elements.items]
+type = "string"
+
+[provides.operations."redis.lpush".output_schema]
+type = "object"
+
+[provides.operations."redis.lpush".output_schema.properties.length]
+type = "integer"
+description = "Length of the list after push"
+
+[provides.operations."redis.lpush".network_constraints]
+host_allow = ["*.upstash.io"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."redis.lpush".ai_hints]
+when_to_use = "Add elements to the head of a list. Creates the list if it does not exist."
+common_mistakes = ["Elements are prepended in reverse order — LPUSH key a b c results in list [c, b, a]."]
+examples = ['{"key": "queue:tasks", "elements": ["task-1", "task-2"]}']
+related = ["redis.lrange"]
+
+# ──────────────────────────────────────────────
+# redis.lrange — Get a range of elements from a list
+# ──────────────────────────────────────────────
+
+[provides.operations."redis.lrange"]
+description = "Get a range of elements from a list"
+capability = "redis.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."redis.lrange".input_schema]
+type = "object"
+required = ["key"]
+
+[provides.operations."redis.lrange".input_schema.properties.key]
+type = "string"
+description = "The list key"
+
+[provides.operations."redis.lrange".input_schema.properties.start]
+type = "integer"
+description = "Start index (default 0)"
+
+[provides.operations."redis.lrange".input_schema.properties.stop]
+type = "integer"
+description = "Stop index (default -1 for all)"
+
+[provides.operations."redis.lrange".output_schema]
+type = "object"
+
+[provides.operations."redis.lrange".output_schema.properties.values]
+type = "array"
+description = "List elements in the range"
+
+[provides.operations."redis.lrange".network_constraints]
+host_allow = ["*.upstash.io"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
+
+[provides.operations."redis.lrange".ai_hints]
+when_to_use = "Read a slice of elements from a list by index range."
+common_mistakes = [
+    "Using LRANGE 0 -1 on very large lists — can be slow and memory-intensive.",
+    "Forgetting that stop index is inclusive, unlike most language slice semantics.",
+]
+examples = [
+    '{"key": "queue:tasks", "start": 0, "stop": 9}',
+    '{"key": "recent:events"}',
+]
+related = ["redis.lpush"]
+
+# ──────────────────────────────────────────────
+# redis.sadd — Add members to a set
+# ──────────────────────────────────────────────
+
+[provides.operations."redis.sadd"]
+description = "Add one or more members to a set"
+capability = "redis.write"
+risk_level = "medium"
+safety_tier = "moderate"
+requires_approval = "policy"
+idempotency = "best_effort"
+
+[provides.operations."redis.sadd".input_schema]
+type = "object"
+required = ["key", "members"]
+
+[provides.operations."redis.sadd".input_schema.properties.key]
+type = "string"
+description = "The set key"
+
+[provides.operations."redis.sadd".input_schema.properties.members]
+type = "array"
+description = "Members to add"
+
+[provides.operations."redis.sadd".input_schema.properties.members.items]
+type = "string"
+
+[provides.operations."redis.sadd".output_schema]
+type = "object"
+
+[provides.operations."redis.sadd".output_schema.properties.added]
+type = "integer"
+description = "Number of new members added"
+
+[provides.operations."redis.sadd".network_constraints]
+host_allow = ["*.upstash.io"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."redis.sadd".ai_hints]
+when_to_use = "Add members to a set. Duplicates are ignored. Creates the set if it does not exist."
+common_mistakes = ["Expecting the return value to be the total set size — it returns only the count of newly added members."]
+examples = ['{"key": "tags:article:42", "members": ["rust", "redis", "caching"]}']
+related = ["redis.smembers"]
+
+# ──────────────────────────────────────────────
+# redis.smembers — Get all members of a set
+# ──────────────────────────────────────────────
+
+[provides.operations."redis.smembers"]
+description = "Get all members of a set"
+capability = "redis.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."redis.smembers".input_schema]
+type = "object"
+required = ["key"]
+
+[provides.operations."redis.smembers".input_schema.properties.key]
+type = "string"
+description = "The set key"
+
+[provides.operations."redis.smembers".output_schema]
+type = "object"
+
+[provides.operations."redis.smembers".output_schema.properties.members]
+type = "array"
+description = "All members of the set"
+
+[provides.operations."redis.smembers".network_constraints]
+host_allow = ["*.upstash.io"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
+
+[provides.operations."redis.smembers".ai_hints]
+when_to_use = "Retrieve all members of a set."
+common_mistakes = ["Using SMEMBERS on very large sets — consider SSCAN for sets with thousands of members."]
+examples = ['{"key": "tags:article:42"}']
+related = ["redis.sadd"]
+
+# ──────────────────────────────────────────────
+# Auth
+# ──────────────────────────────────────────────
+
+[auth]
+method = "bearer"
+credential_type = "api_token"
+secretless = true
+secretless_header = "X-FCP-Credential-Id"
+
+# ──────────────────────────────────────────────
+# Config
+# ──────────────────────────────────────────────
+
+[config]
+required = []
+optional = ["base_url"]
+
+[config.fields.api_token]
+type = "string"
+description = "Upstash Redis REST API token (Bearer auth)"
+secret = true
+
+[config.fields.credential_id]
+type = "string"
+description = "FCP credential ID for secretless auth (mutually exclusive with api_token)"
+secret = false
+
+[config.fields.base_url]
+type = "string"
+description = "Redis REST API base URL (defaults to https://redis.example.com)"
+secret = false
+
+# ──────────────────────────────────────────────
+# Sandbox
+# ──────────────────────────────────────────────
+
+[sandbox]
+profile = "strict"
+memory_mb = 256
+cpu_percent = 50
+wall_clock_timeout_ms = 300000
+fs_readonly_paths = [
+    "/usr",
+    "/lib",
+]
+fs_writable_paths = ["$CONNECTOR_STATE"]
+deny_exec = true
+deny_ptrace = true
+
+# ──────────────────────────────────────────────
+# Rate limits
+# ──────────────────────────────────────────────
+
+[[rate_limits.pools]]
+id = "redis.read"
+requests = 1000
+window_ms = 60000
+burst = 100
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "redis.write"
+requests = 500
+window_ms = 60000
+burst = 50
+scope = "instance"
+
+[rate_limits.operation_pools]
+"redis.get" = ["redis.read"]
+"redis.set" = ["redis.write"]
+"redis.del" = ["redis.write"]
+"redis.exists" = ["redis.read"]
+"redis.expire" = ["redis.write"]
+"redis.ttl" = ["redis.read"]
+"redis.incr" = ["redis.write"]
+"redis.hget" = ["redis.read"]
+"redis.hset" = ["redis.write"]
+"redis.hgetall" = ["redis.read"]
+"redis.lpush" = ["redis.write"]
+"redis.lrange" = ["redis.read"]
+"redis.sadd" = ["redis.write"]
+"redis.smembers" = ["redis.read"]

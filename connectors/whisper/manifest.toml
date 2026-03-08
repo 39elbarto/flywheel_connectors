@@ -1,0 +1,691 @@
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = []
+max_datagram_bytes = 65000
+interface_hash = "blake3-256:fcp.interface.v2:PLACEHOLDER_HASH"
+
+[connector]
+id = "fcp.whisper"
+name = "Whisper Connector"
+version = "0.1.0"
+description = "FCP connector for OpenAI Whisper API with audio transcription, translation, and language detection"
+archetypes = [
+    "operational",
+]
+format = "native"
+
+[connector.state]
+model = "stateless"
+state_schema_version = "1"
+migration_hint = "init"
+
+[zones]
+home = "z:work"
+allowed_sources = [
+    "z:owner",
+    "z:private",
+    "z:work",
+]
+allowed_targets = ["z:work"]
+forbidden = ["z:public"]
+
+[capabilities]
+required = [
+    "network.dns",
+    "network.egress",
+    "network.tls.sni",
+]
+optional = []
+forbidden = [
+    "system.exec",
+    "network.listen",
+    "storage.state",
+]
+
+# ---------------------------------------------------------------------------
+# Operation: whisper.transcribe
+# ---------------------------------------------------------------------------
+
+[provides.operations."whisper.transcribe"]
+description = "Transcribe audio to text"
+capability = "whisper.transcription"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."whisper.transcribe".rate_limit]
+max = 60
+per_ms = 60000
+
+[provides.operations."whisper.transcribe".input_schema]
+type = "object"
+
+[provides.operations."whisper.transcribe".input_schema.properties.audio_base64]
+type = "string"
+description = "Base64-encoded audio data"
+
+[provides.operations."whisper.transcribe".input_schema.properties.audio_url]
+type = "string"
+description = "URL to audio file"
+
+[provides.operations."whisper.transcribe".input_schema.properties.model]
+type = "string"
+default = "whisper-1"
+description = "Model to use (default: whisper-1)"
+
+[provides.operations."whisper.transcribe".input_schema.properties.language]
+type = "string"
+description = "Language code (ISO 639-1)"
+
+[provides.operations."whisper.transcribe".input_schema.properties.response_format]
+type = "string"
+description = "Output format (json, text, srt, verbose_json, vtt)"
+enum = [
+    "json",
+    "text",
+    "srt",
+    "verbose_json",
+    "vtt",
+]
+
+[provides.operations."whisper.transcribe".input_schema.properties.temperature]
+type = "number"
+description = "Sampling temperature (0.0-1.0)"
+minimum = 0
+maximum = 1
+
+[provides.operations."whisper.transcribe".output_schema]
+type = "object"
+
+[provides.operations."whisper.transcribe".output_schema.properties.text]
+type = "string"
+description = "Transcribed text"
+
+[provides.operations."whisper.transcribe".output_schema.properties.language]
+type = "string"
+description = "Detected language"
+
+[provides.operations."whisper.transcribe".output_schema.properties.duration_seconds]
+type = "number"
+description = "Audio duration in seconds"
+
+[provides.operations."whisper.transcribe".output_schema.properties.segments]
+type = "array"
+description = "Transcription segments"
+
+[provides.operations."whisper.transcribe".network_constraints]
+host_allow = ["api.openai.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+methods = ["POST"]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 120000
+max_response_bytes = 10485760
+
+[provides.operations."whisper.transcribe".ai_hints]
+when_to_use = "Use to convert audio files or streams to text. Supports mp3, mp4, wav, webm, flac, ogg, and more."
+common_mistakes = [
+    "Forgetting to provide either audio_base64 or audio_url.",
+    "Exceeding the 25 MB file size limit.",
+    "Passing an unsupported audio format.",
+]
+examples = [
+    '{"audio_url": "https://example.com/recording.mp3"}',
+    '{"audio_base64": "<base64-data>", "language": "en", "model": "whisper-1"}',
+]
+related = [
+    "whisper.transcribe_verbose",
+    "whisper.translate",
+    "whisper.detect_language",
+]
+
+# ---------------------------------------------------------------------------
+# Operation: whisper.translate
+# ---------------------------------------------------------------------------
+
+[provides.operations."whisper.translate"]
+description = "Translate audio to English text"
+capability = "whisper.translation"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."whisper.translate".rate_limit]
+max = 60
+per_ms = 60000
+
+[provides.operations."whisper.translate".input_schema]
+type = "object"
+
+[provides.operations."whisper.translate".input_schema.properties.audio_base64]
+type = "string"
+description = "Base64-encoded audio data"
+
+[provides.operations."whisper.translate".input_schema.properties.audio_url]
+type = "string"
+description = "URL to audio file"
+
+[provides.operations."whisper.translate".input_schema.properties.model]
+type = "string"
+default = "whisper-1"
+description = "Model to use (default: whisper-1)"
+
+[provides.operations."whisper.translate".input_schema.properties.temperature]
+type = "number"
+description = "Sampling temperature (0.0-1.0)"
+minimum = 0
+maximum = 1
+
+[provides.operations."whisper.translate".output_schema]
+type = "object"
+
+[provides.operations."whisper.translate".output_schema.properties.text]
+type = "string"
+description = "Translated English text"
+
+[provides.operations."whisper.translate".output_schema.properties.source_language]
+type = "string"
+description = "Detected source language"
+
+[provides.operations."whisper.translate".output_schema.properties.duration_seconds]
+type = "number"
+description = "Audio duration in seconds"
+
+[provides.operations."whisper.translate".network_constraints]
+host_allow = ["api.openai.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+methods = ["POST"]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 120000
+max_response_bytes = 10485760
+
+[provides.operations."whisper.translate".ai_hints]
+when_to_use = "Use to translate non-English audio directly into English text without a separate transcription step."
+common_mistakes = [
+    "Forgetting to provide either audio_base64 or audio_url.",
+    "Using this for English audio (use whisper.transcribe instead).",
+    "Exceeding the 25 MB file size limit.",
+]
+examples = [
+    '{"audio_url": "https://example.com/french_speech.mp3"}',
+    '{"audio_base64": "<base64-data>", "model": "whisper-1"}',
+]
+related = [
+    "whisper.transcribe",
+    "whisper.detect_language",
+]
+
+# ---------------------------------------------------------------------------
+# Operation: whisper.detect_language
+# ---------------------------------------------------------------------------
+
+[provides.operations."whisper.detect_language"]
+description = "Detect the language of audio"
+capability = "whisper.transcription"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."whisper.detect_language".rate_limit]
+max = 60
+per_ms = 60000
+
+[provides.operations."whisper.detect_language".input_schema]
+type = "object"
+
+[provides.operations."whisper.detect_language".input_schema.properties.audio_base64]
+type = "string"
+description = "Base64-encoded audio data"
+
+[provides.operations."whisper.detect_language".input_schema.properties.audio_url]
+type = "string"
+description = "URL to audio file"
+
+[provides.operations."whisper.detect_language".input_schema.properties.model]
+type = "string"
+default = "whisper-1"
+description = "Model to use (default: whisper-1)"
+
+[provides.operations."whisper.detect_language".output_schema]
+type = "object"
+
+[provides.operations."whisper.detect_language".output_schema.properties.language]
+type = "string"
+description = "Detected language code"
+
+[provides.operations."whisper.detect_language".output_schema.properties.confidence]
+type = "number"
+description = "Detection confidence score"
+
+[provides.operations."whisper.detect_language".network_constraints]
+host_allow = ["api.openai.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+methods = ["POST"]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 120000
+max_response_bytes = 10485760
+
+[provides.operations."whisper.detect_language".ai_hints]
+when_to_use = "Use to identify the spoken language in an audio file without performing a full transcription."
+common_mistakes = [
+    "Forgetting to provide either audio_base64 or audio_url.",
+    "Expecting full transcription output (use whisper.transcribe for that).",
+]
+examples = [
+    '{"audio_url": "https://example.com/unknown_language.mp3"}',
+]
+related = [
+    "whisper.transcribe",
+    "whisper.translate",
+]
+
+# ---------------------------------------------------------------------------
+# Operation: whisper.transcribe_verbose
+# ---------------------------------------------------------------------------
+
+[provides.operations."whisper.transcribe_verbose"]
+description = "Transcribe audio with word-level timestamps"
+capability = "whisper.transcription"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."whisper.transcribe_verbose".rate_limit]
+max = 60
+per_ms = 60000
+
+[provides.operations."whisper.transcribe_verbose".input_schema]
+type = "object"
+
+[provides.operations."whisper.transcribe_verbose".input_schema.properties.audio_base64]
+type = "string"
+description = "Base64-encoded audio data"
+
+[provides.operations."whisper.transcribe_verbose".input_schema.properties.audio_url]
+type = "string"
+description = "URL to audio file"
+
+[provides.operations."whisper.transcribe_verbose".input_schema.properties.model]
+type = "string"
+default = "whisper-1"
+description = "Model to use (default: whisper-1)"
+
+[provides.operations."whisper.transcribe_verbose".input_schema.properties.language]
+type = "string"
+description = "Language code (ISO 639-1)"
+
+[provides.operations."whisper.transcribe_verbose".input_schema.properties.temperature]
+type = "number"
+description = "Sampling temperature (0.0-1.0)"
+minimum = 0
+maximum = 1
+
+[provides.operations."whisper.transcribe_verbose".output_schema]
+type = "object"
+
+[provides.operations."whisper.transcribe_verbose".output_schema.properties.text]
+type = "string"
+description = "Transcribed text"
+
+[provides.operations."whisper.transcribe_verbose".output_schema.properties.language]
+type = "string"
+description = "Detected language"
+
+[provides.operations."whisper.transcribe_verbose".output_schema.properties.duration]
+type = "number"
+description = "Audio duration in seconds"
+
+[provides.operations."whisper.transcribe_verbose".output_schema.properties.segments]
+type = "array"
+description = "Transcription segments"
+
+[provides.operations."whisper.transcribe_verbose".output_schema.properties.words]
+type = "array"
+description = "Word-level timestamps"
+
+[provides.operations."whisper.transcribe_verbose".network_constraints]
+host_allow = ["api.openai.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+methods = ["POST"]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 120000
+max_response_bytes = 10485760
+
+[provides.operations."whisper.transcribe_verbose".ai_hints]
+when_to_use = "Use when you need word-level or segment-level timestamps for subtitles, karaoke, or alignment tasks."
+common_mistakes = [
+    "Forgetting to provide either audio_base64 or audio_url.",
+    "Using this when only the text is needed (use whisper.transcribe for simpler output).",
+    "Exceeding the 25 MB file size limit.",
+]
+examples = [
+    '{"audio_url": "https://example.com/interview.wav", "language": "en"}',
+    '{"audio_base64": "<base64-data>", "model": "whisper-1"}',
+]
+related = [
+    "whisper.transcribe",
+    "whisper.translate",
+]
+
+# ---------------------------------------------------------------------------
+# Operation: whisper.list_models
+# ---------------------------------------------------------------------------
+
+[provides.operations."whisper.list_models"]
+description = "List available Whisper models"
+capability = "whisper.info"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."whisper.list_models".input_schema]
+type = "object"
+
+[provides.operations."whisper.list_models".output_schema]
+type = "object"
+
+[provides.operations."whisper.list_models".output_schema.properties.models]
+type = "array"
+description = "Available Whisper models"
+
+[provides.operations."whisper.list_models".network_constraints]
+host_allow = ["api.openai.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+methods = ["GET"]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 120000
+max_response_bytes = 10485760
+
+[provides.operations."whisper.list_models".ai_hints]
+when_to_use = "Use to discover which Whisper models are available and their capabilities."
+common_mistakes = []
+examples = ["{}"]
+related = [
+    "whisper.transcribe",
+    "whisper.formats",
+]
+
+# ---------------------------------------------------------------------------
+# Operation: whisper.health
+# ---------------------------------------------------------------------------
+
+[provides.operations."whisper.health"]
+description = "Check API connectivity"
+capability = "whisper.info"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."whisper.health".input_schema]
+type = "object"
+
+[provides.operations."whisper.health".output_schema]
+type = "object"
+
+[provides.operations."whisper.health".output_schema.properties.status]
+type = "string"
+description = "API health status"
+
+[provides.operations."whisper.health".output_schema.properties.api_reachable]
+type = "boolean"
+description = "Whether the API is reachable"
+
+[provides.operations."whisper.health".network_constraints]
+host_allow = ["api.openai.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+methods = ["GET"]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 120000
+max_response_bytes = 10485760
+
+[provides.operations."whisper.health".ai_hints]
+when_to_use = "Use to verify that the Whisper API is reachable and the API key is valid before sending audio."
+common_mistakes = ["Relying on this for detailed diagnostics (use the doctor lifecycle method instead)."]
+examples = ["{}"]
+related = [
+    "whisper.usage",
+    "whisper.list_models",
+]
+
+# ---------------------------------------------------------------------------
+# Operation: whisper.usage
+# ---------------------------------------------------------------------------
+
+[provides.operations."whisper.usage"]
+description = "Get usage statistics"
+capability = "whisper.info"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."whisper.usage".input_schema]
+type = "object"
+
+[provides.operations."whisper.usage".output_schema]
+type = "object"
+
+[provides.operations."whisper.usage".output_schema.properties.total_requests]
+type = "integer"
+description = "Total requests made"
+
+[provides.operations."whisper.usage".output_schema.properties.total_errors]
+type = "integer"
+description = "Total errors encountered"
+
+[provides.operations."whisper.usage".network_constraints]
+host_allow = ["api.openai.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+methods = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 120000
+max_response_bytes = 10485760
+
+[provides.operations."whisper.usage".ai_hints]
+when_to_use = "Use to check how many requests and errors have occurred in the current connector session."
+common_mistakes = ["Expecting per-model or per-operation breakdowns (counters are session-wide totals)."]
+examples = ["{}"]
+related = [
+    "whisper.health",
+    "whisper.list_models",
+]
+
+# ---------------------------------------------------------------------------
+# Operation: whisper.formats
+# ---------------------------------------------------------------------------
+
+[provides.operations."whisper.formats"]
+description = "List supported audio formats"
+capability = "whisper.info"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."whisper.formats".input_schema]
+type = "object"
+
+[provides.operations."whisper.formats".output_schema]
+type = "object"
+
+[provides.operations."whisper.formats".output_schema.properties.formats]
+type = "array"
+description = "Supported audio formats"
+
+[provides.operations."whisper.formats".output_schema.properties.max_file_size_mb]
+type = "integer"
+description = "Maximum file size in MB"
+
+[provides.operations."whisper.formats".network_constraints]
+host_allow = ["api.openai.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+methods = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 120000
+max_response_bytes = 10485760
+
+[provides.operations."whisper.formats".ai_hints]
+when_to_use = "Use to check which audio file formats and sizes are accepted before uploading."
+common_mistakes = ["Assuming all audio formats are supported (only mp3, mp4, mpeg, mpga, m4a, wav, webm, flac, ogg are)."]
+examples = ["{}"]
+related = [
+    "whisper.transcribe",
+    "whisper.list_models",
+]
+
+# ---------------------------------------------------------------------------
+# Auth
+# ---------------------------------------------------------------------------
+
+[auth]
+scheme = "bearer"
+header = "Authorization"
+credential_type = "api_key"
+secretless_supported = true
+credential_id_header = "X-FCP-Credential-Id"
+
+[auth.fields.api_key]
+type = "string"
+required = true
+description = "OpenAI API key for Whisper access"
+secret = true
+
+# ---------------------------------------------------------------------------
+# Config
+# ---------------------------------------------------------------------------
+
+[config]
+type = "object"
+required = []
+
+[config.properties.api_key]
+type = "string"
+description = "OpenAI API key (alternative to credential_id)"
+secret = true
+
+[config.properties.credential_id]
+type = "string"
+description = "FCP credential ID for secretless auth via egress proxy"
+
+[config.properties.base_url]
+type = "string"
+description = "Override API base URL (default: https://api.openai.com/v1)"
+default = "https://api.openai.com/v1"
+
+# ---------------------------------------------------------------------------
+# Event capabilities and sandbox
+# ---------------------------------------------------------------------------
+
+[event_caps]
+streaming = false
+replay = false
+min_buffer_events = 10
+
+[sandbox]
+profile = "strict"
+memory_mb = 256
+cpu_percent = 50
+wall_clock_timeout_ms = 120000
+fs_readonly_paths = [
+    "/usr",
+    "/lib",
+]
+fs_writable_paths = ["$CONNECTOR_STATE"]
+deny_exec = true
+deny_ptrace = true

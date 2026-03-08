@@ -953,9 +953,9 @@ mod tests {
     use super::*;
     use fcp_core::{
         AgentHint, BaseConnector, CapabilityId, CapabilityToken, ConnectorId, EventCaps, FcpError,
-        HandshakeResponse, HealthSnapshot, InstanceId, InvokeResponse, LimitType, ObjectId,
-        OperationId, OperationInfo, RateLimit, RiskLevel, SafetyTier, SessionId, ThrottleViolation,
-        ThrottleViolationInput, ZoneId,
+        HandshakeResponse, HealthSnapshot, InstanceId, InvokeContext, InvokeResponse, LimitType,
+        ObjectId, OperationId, OperationInfo, RateLimit, RiskLevel, SafetyTier, SessionId,
+        ThrottleViolation, ThrottleViolationInput, ZoneId,
     };
     use fcp_manifest::ConnectorManifest;
     use fcp_testkit::MockApiServer;
@@ -1248,14 +1248,16 @@ mod tests {
                 field: "context".to_string(),
             })?;
             let token_id = context
+                .request_tags
                 .get("token_id")
-                .and_then(serde_json::Value::as_str)
+                .map(String::as_str)
                 .ok_or(FcpError::MissingField {
                     field: "context.token_id".to_string(),
                 })?;
             let issuer = context
+                .request_tags
                 .get("issuer")
-                .and_then(serde_json::Value::as_str)
+                .map(String::as_str)
                 .ok_or(FcpError::MissingField {
                     field: "context.issuer".to_string(),
                 })?;
@@ -1494,10 +1496,15 @@ mod tests {
             input: serde_json::json!({ "message": "hello" }),
             capability_token: issued.token.clone(),
             holder_proof: None,
-            context: Some(serde_json::json!({
-                "token_id": issued.token_id,
-                "issuer": issued.issuer,
-            })),
+            context: Some(InvokeContext {
+                request_tags: [
+                    ("token_id".to_string(), issued.token_id.clone()),
+                    ("issuer".to_string(), issued.issuer.clone()),
+                ]
+                .into_iter()
+                .collect(),
+                ..InvokeContext::default()
+            }),
             idempotency_key: None,
             lease_seq: None,
             deadline_ms: None,

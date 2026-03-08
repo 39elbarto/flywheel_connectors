@@ -4046,16 +4046,22 @@ fn airtable_full_manifest_parses_with_all_operations() {
         "create_record",
         "create_records",
         "delete_record",
+        "delete_records",
         "download_attachment",
         "get_base_schema",
         "get_record",
         "get_table",
+        "get_view",
         "list_bases",
         "list_fields",
         "list_records",
         "list_tables",
+        "list_view_records",
+        "list_views",
         "replace_record",
         "update_record",
+        "update_records",
+        "upsert_records",
     ];
     for op_name in &expected_ops {
         assert!(ops.contains_key(*op_name), "missing operation: {op_name}");

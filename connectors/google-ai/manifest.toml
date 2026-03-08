@@ -97,7 +97,10 @@ max_response_bytes = 10485760
 
 [provides.operations."google-ai.batch_embed_contents".ai_hints]
 when_to_use = "Embed multiple texts in a single batch request for efficiency."
-common_mistakes = ["Exceeding batch size limits (typically 100 items)."]
+common_mistakes = [
+    "Exceeding batch size limits (typically 100 items).",
+    "Sending too many texts in a single batch — stay under 100 texts per request to avoid timeouts.",
+]
 examples = ['{"requests": [{"content": {"parts": [{"text": "doc 1"}]}}, {"content": {"parts": [{"text": "doc 2"}]}}]}']
 related = ["google-ai.embed_content"]
 
@@ -147,7 +150,7 @@ max_response_bytes = 1048576
 
 [provides.operations."google-ai.count_tokens".ai_hints]
 when_to_use = "Count tokens before sending a generation request to estimate cost or check context limits."
-common_mistakes = []
+common_mistakes = ["Forgetting to include the system_instruction and tools in the count — these consume tokens too, so pass the same payload you plan to send to generate_content."]
 examples = ['{"contents": [{"role": "user", "parts": [{"text": "Hello"}]}]}']
 related = ["google-ai.generate_content"]
 
@@ -296,6 +299,7 @@ when_to_use = "Generate text from a Gemini model. Use for single-turn or multi-t
 common_mistakes = [
     "Passing a string instead of contents array [{role, parts}].",
     "Not specifying maxOutputTokens in generation_config — model defaults may be low.",
+    "Sending very large multi-turn contents arrays without checking token count first — use count_tokens operation to verify input fits within model limits.",
 ]
 examples = ['{"contents": [{"role": "user", "parts": [{"text": "Explain quantum computing"}]}]}']
 related = [
@@ -370,7 +374,11 @@ max_response_bytes = 52428800
 
 [provides.operations."google-ai.generate_content_stream".ai_hints]
 when_to_use = "Stream generation tokens incrementally for long outputs or real-time display."
-common_mistakes = ["Not handling partial chunks — each SSE chunk is a partial GenerateContentResponse."]
+common_mistakes = [
+    "Not handling partial chunks — each SSE chunk is a partial GenerateContentResponse.",
+    "Sending very large multi-turn contents arrays without checking token count first — use count_tokens operation to verify input fits within model limits.",
+    "Not handling streaming response chunks incrementally — each chunk contains partial candidates, not the complete generation.",
+]
 examples = ['{"model": "gemini-2.0-flash", "contents": [{"role": "user", "parts": [{"text": "Write a story"}]}]}']
 related = ["google-ai.generate_content"]
 
@@ -470,7 +478,7 @@ type = "integer"
 
 [provides.operations."google-ai.get_usage".ai_hints]
 when_to_use = "Inspect connector token usage counters for the current session."
-common_mistakes = []
+common_mistakes = ["Assuming usage totals persist across sessions — counters reset when the connector instance restarts."]
 examples = ["{}"]
 related = ["google-ai.generate_content"]
 
@@ -522,7 +530,7 @@ max_response_bytes = 1048576
 
 [provides.operations."google-ai.list_models".ai_hints]
 when_to_use = "Discover available models and their capabilities, context sizes, and supported generation methods."
-common_mistakes = []
+common_mistakes = ["Not paginating results — if next_page_token is present in the response, pass it as page_token in the next request to retrieve remaining models."]
 examples = ["{}"]
 related = ["google-ai.get_model"]
 

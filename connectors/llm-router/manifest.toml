@@ -229,6 +229,7 @@ common_mistakes = [
     "Setting budget_limit_usd too low for the selected strategy.",
     "Specifying required_capabilities that no configured provider supports.",
     "Using preferred_provider without a fallback strategy.",
+    "Not setting max_tokens when routing to different providers — each provider has different default limits which can cause unexpected truncation or high costs.",
 ]
 examples = [
     '{"messages": [{"role": "user", "content": "Summarize this text"}]}',
@@ -329,6 +330,7 @@ type = "number"
 when_to_use = "Preview cost across providers before committing to a request. Useful for budget-sensitive workflows."
 common_mistakes = [
     "Expecting exact costs — estimates are based on token counting heuristics, not provider billing.",
+    "Cost estimates are based on token counting heuristics and may not match actual provider billing — always check provider dashboards for final costs.",
 ]
 examples = [
     '{"messages": [{"role": "user", "content": "Hello"}]}',
@@ -415,7 +417,9 @@ max_response_bytes = 1048576
 
 [provides.operations."llm-router.list_providers".ai_hints]
 when_to_use = "Check available providers and their health status. Useful for operational monitoring."
-common_mistakes = []
+common_mistakes = [
+    "Caching provider health status for too long — provider availability can change rapidly, so always call this before critical routing decisions.",
+]
 examples = [
     "{}",
     '{"include_models": true}',
@@ -493,7 +497,9 @@ type = "integer"
 
 [provides.operations."llm-router.get_usage".ai_hints]
 when_to_use = "Inspect session-level token and cost usage across all routed providers."
-common_mistakes = []
+common_mistakes = [
+    "Assuming usage totals persist across sessions — counters reset when the connector restarts, so export or log usage data if historical tracking is needed.",
+]
 examples = [
     "{}",
     '{"group_by": "provider"}',
@@ -552,7 +558,9 @@ type = "array"
 
 [provides.operations."llm-router.get_budget".ai_hints]
 when_to_use = "Check remaining budget before making expensive requests."
-common_mistakes = []
+common_mistakes = [
+    "Relying solely on remaining_usd without checking enforcement mode — when enforcement is 'soft' or 'none', requests will still proceed even after the budget is exhausted.",
+]
 examples = ["{}"]
 related = [
     "llm-router.get_usage",

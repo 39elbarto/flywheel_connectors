@@ -176,6 +176,8 @@ common_mistakes = [
     "Not providing messages array.",
     "Exceeding model context length.",
     "Using wrong model name.",
+    "Accumulating long conversation histories without truncation — count tokens first and prune older messages to stay within context window.",
+    "Not consuming SSE stream chunks incrementally — each chunk contains a delta, not the full response.",
 ]
 examples = [
     '{"messages": [{"role": "user", "content": "Hello!"}]}',
@@ -325,7 +327,9 @@ type = "integer"
 
 [provides.operations.get_usage.ai_hints]
 when_to_use = "Check usage and costs for the current session. Useful for monitoring spend."
-common_mistakes = []
+common_mistakes = [
+    "Calling repeatedly in a tight loop instead of batching usage checks at natural breakpoints.",
+]
 examples = []
 related = []
 
@@ -428,6 +432,7 @@ when_to_use = "Generate vector embeddings from text for semantic search, cluster
 common_mistakes = [
     "Exceeding 8191 token input limit.",
     "Sending empty input text.",
+    "Sending text that exceeds the embedding model's token limit (8191 for text-embedding-3-small) — split long documents into chunks before embedding.",
 ]
 examples = [
     '{"input": "Hello world"}',
@@ -861,7 +866,9 @@ max_response_bytes = 10485760
 
 [provides.operations.finetune_list.ai_hints]
 when_to_use = "List fine-tuning jobs to check status of training runs."
-common_mistakes = []
+common_mistakes = [
+    "Not using pagination (after cursor) when there are many fine-tuning jobs — results are capped by the limit parameter.",
+]
 examples = [
     '{}',
     '{"limit": 10}',
@@ -1225,7 +1232,9 @@ max_response_bytes = 10485760
 
 [provides.operations.assistants_list.ai_hints]
 when_to_use = "List available assistants."
-common_mistakes = []
+common_mistakes = [
+    "Not paginating with the after cursor when you have more than 20 assistants.",
+]
 examples = ['{}', '{"limit": 10}']
 related = ["openai.assistants.get"]
 
@@ -1412,7 +1421,9 @@ max_response_bytes = 10485760
 
 [provides.operations.threads_create.ai_hints]
 when_to_use = "Create a thread for use with the Assistants API."
-common_mistakes = []
+common_mistakes = [
+    "Creating a new thread for every message instead of reusing an existing thread for multi-turn conversations.",
+]
 examples = ['{}', '{"messages": [{"role": "user", "content": "Hello"}]}']
 related = ["openai.threads.messages.create", "openai.threads.runs.create"]
 

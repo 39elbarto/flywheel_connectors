@@ -171,6 +171,7 @@ when_to_use = "Execute arbitrary JavaScript in page context. Dangerous — use o
 common_mistakes = [
     "Injecting untrusted user input into expressions (XSS risk).",
     "Returning non-serializable objects (Promises, DOM nodes).",
+    "Executing user-provided JavaScript without sanitization — always validate and sanitize inputs to prevent injection attacks.",
 ]
 examples = ['{"expression": "document.title"}']
 related = ["browser.extract_text"]
@@ -226,7 +227,7 @@ max_response_bytes = 10485760
 
 [provides.operations."browser.extract_links".ai_hints]
 when_to_use = "Extract all hyperlinks from the current page."
-common_mistakes = []
+common_mistakes = ["Extracting links before the page has fully rendered — dynamic content loaded via JavaScript may not yet be in the DOM."]
 examples = ['{"selector": "nav"}']
 related = [
     "browser.extract_text",
@@ -292,7 +293,7 @@ max_response_bytes = 10485760
 
 [provides.operations."browser.extract_text".ai_hints]
 when_to_use = "Extract text content from the currently loaded page."
-common_mistakes = []
+common_mistakes = ["Extracting text without specifying a selector — returns the entire page body which may include navigation, footers, and other noisy content."]
 examples = ['{"selector": "article"}']
 related = [
     "browser.extract_links",
@@ -500,6 +501,7 @@ when_to_use = "Navigate the browser to a URL. Always call this before extraction
 common_mistakes = [
     "Not waiting for page load before extracting content.",
     "Navigating to internal/private IPs — denied by network constraints.",
+    "Not waiting for page load completion before extracting content — use wait_for_selector after navigate to ensure DOM is ready.",
 ]
 examples = ['{"url": "https://example.com", "wait_until": "networkidle"}']
 related = [
@@ -574,7 +576,7 @@ max_response_bytes = 52428800
 
 [provides.operations."browser.render_pdf".ai_hints]
 when_to_use = "Render the current page as a PDF for archival or offline reading."
-common_mistakes = []
+common_mistakes = ["Rendering PDF before lazy-loaded content or web fonts have finished loading — use wait_for_selector or networkidle to ensure the page is fully rendered."]
 examples = ['{"format": "a4", "print_background": true}']
 related = ["browser.screenshot"]
 
@@ -654,7 +656,10 @@ max_response_bytes = 52428800
 
 [provides.operations."browser.screenshot".ai_hints]
 when_to_use = "Capture a visual screenshot of the current page or element for inspection."
-common_mistakes = ["Taking screenshots before page fully loads."]
+common_mistakes = [
+    "Taking screenshots before page fully loads.",
+    "Taking full_page screenshots of very long pages — this can produce multi-MB images that consume excessive tokens when processed by vision models.",
+]
 examples = ['{"full_page": true, "format": "png"}']
 related = [
     "browser.navigate",
@@ -1176,7 +1181,7 @@ max_response_bytes = 1048576
 
 [provides.operations."browser.wait_for_selector".ai_hints]
 when_to_use = "Wait for a dynamic element to appear before interacting with it."
-common_mistakes = []
+common_mistakes = ["Using overly broad selectors like 'div' or 'span' that match immediately on existing elements instead of waiting for the specific dynamic content."]
 examples = ['{"selector": ".results-loaded", "timeout_ms": 5000}']
 related = [
     "browser.click",

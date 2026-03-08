@@ -953,7 +953,7 @@ pub mod channel {
             /// # Errors
             /// Returns `TryRecvError::Empty` when no value is available yet and
             /// `TryRecvError::Disconnected` when all senders are gone.
-            pub fn try_recv(&self) -> Result<T, error::TryRecvError> {
+            pub fn try_recv(&mut self) -> Result<T, error::TryRecvError> {
                 self.inner
                     .try_recv()
                     .inspect(|_| {
@@ -1125,7 +1125,7 @@ pub mod channel {
             ///
             /// # Errors
             /// Returns `RecvError` when the value is not yet available or the sender was dropped.
-            pub fn try_recv(&self) -> Result<T, error::RecvError> {
+            pub fn try_recv(&mut self) -> Result<T, error::RecvError> {
                 self.inner.try_recv().map_err(|_| error::RecvError)
             }
         }
@@ -3271,14 +3271,14 @@ mod tests {
 
     #[runtime::test]
     async fn mpsc_try_recv_empty() {
-        let (_tx, rx) = channel::mpsc::channel::<u32>(4);
+        let (_tx, mut rx) = channel::mpsc::channel::<u32>(4);
         let err = rx.try_recv().expect_err("should be empty");
         assert_eq!(err, channel::mpsc::error::TryRecvError::Empty);
     }
 
     #[runtime::test]
     async fn mpsc_try_recv_disconnected() {
-        let (tx, rx) = channel::mpsc::channel::<u32>(4);
+        let (tx, mut rx) = channel::mpsc::channel::<u32>(4);
         drop(tx);
         let err = rx.try_recv().expect_err("should be disconnected");
         assert_eq!(err, channel::mpsc::error::TryRecvError::Disconnected);
@@ -3286,7 +3286,7 @@ mod tests {
 
     #[runtime::test]
     async fn mpsc_try_recv_value() {
-        let (tx, rx) = channel::mpsc::channel::<u32>(4);
+        let (tx, mut rx) = channel::mpsc::channel::<u32>(4);
         tx.send(77).await.unwrap();
         let val = rx.try_recv().expect("should have value");
         assert_eq!(val, 77);
@@ -3433,14 +3433,14 @@ mod tests {
 
     #[runtime::test]
     async fn oneshot_try_recv_not_ready() {
-        let (_tx, rx) = channel::oneshot::channel::<u32>();
+        let (_tx, mut rx) = channel::oneshot::channel::<u32>();
         let err = rx.try_recv().expect_err("not yet sent");
         assert_eq!(err, channel::oneshot::error::RecvError);
     }
 
     #[runtime::test]
     async fn oneshot_try_recv_after_send() {
-        let (tx, rx) = channel::oneshot::channel::<u32>();
+        let (tx, mut rx) = channel::oneshot::channel::<u32>();
         tx.send(42).unwrap();
         let val = rx.try_recv().expect("should have value");
         assert_eq!(val, 42);
@@ -5675,7 +5675,7 @@ mod tests {
 
     #[test]
     fn mpsc_try_recv_on_fresh_channel() {
-        let (_tx, rx) = channel::mpsc::channel::<u32>(4);
+        let (_tx, mut rx) = channel::mpsc::channel::<u32>(4);
         let err = rx.try_recv().unwrap_err();
         assert_eq!(err, channel::mpsc::error::TryRecvError::Empty);
     }

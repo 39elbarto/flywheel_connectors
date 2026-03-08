@@ -534,20 +534,36 @@ struct LogsArgs {
 
 fn main() -> ExitCode {
     let raw_args = std::env::args().collect::<Vec<_>>();
+    let fallback_format = infer_output_format(&raw_args);
+    let include_token_stats = infer_token_stats_requested(&raw_args);
     match execute(&raw_args) {
         Ok(outcome) => {
             print!("{}", outcome.text);
             outcome.exit_code
         }
         Err(error) => {
-            eprintln!("fwc: {error:#}");
-            ExitCode::from(CliExitCode::Internal as u8)
+            match render_dispatch(
+                internal_error_dispatch(&raw_args, &error),
+                fallback_format,
+                include_token_stats,
+            ) {
+                Ok(outcome) => {
+                    print!("{}", outcome.text);
+                    outcome.exit_code
+                }
+                Err(render_error) => {
+                    eprintln!("fwc: {error:#}");
+                    eprintln!("fwc: failed to render structured internal error: {render_error:#}");
+                    CliExitCode::Internal.into()
+                }
+            }
         }
     }
 }
 
 fn execute(raw_args: &[String]) -> Result<ExecutionOutcome> {
     let fallback_format = infer_output_format(raw_args);
+    let include_token_stats = infer_token_stats_requested(raw_args);
 
     match prepare_cli(raw_args) {
         Ok(prepared) => {
@@ -558,16 +574,7 @@ fn execute(raw_args: &[String]) -> Result<ExecutionOutcome> {
                 &prepared.normalized_args,
                 &prepared.corrections,
             );
-
-            if prepared.cli.token_stats {
-                let stats = token_stats(&dispatch.payload);
-                dispatch.payload["_token_stats"] = serde_json::to_value(&stats)?;
-            }
-
-            Ok(ExecutionOutcome {
-                text: render(dispatch.payload, prepared.format)?,
-                exit_code: dispatch.exit_code,
-            })
+            render_dispatch(dispatch, prepared.format, prepared.cli.token_stats)
         }
         Err(PrepareCliError::Clap(error)) => match error.kind() {
             ErrorKind::DisplayHelp | ErrorKind::DisplayVersion => Ok(ExecutionOutcome {
@@ -576,17 +583,109 @@ fn execute(raw_args: &[String]) -> Result<ExecutionOutcome> {
             }),
             _ => {
                 let dispatch = parse_failure_dispatch(raw_args, &error);
-                Ok(ExecutionOutcome {
-                    text: render(dispatch.payload, fallback_format)?,
-                    exit_code: dispatch.exit_code,
-                })
+                render_dispatch(dispatch, fallback_format, include_token_stats)
             }
         },
-        Err(PrepareCliError::Structured(dispatch)) => Ok(ExecutionOutcome {
-            text: render(dispatch.payload, fallback_format)?,
-            exit_code: dispatch.exit_code,
-        }),
+        Err(PrepareCliError::Structured(dispatch)) => {
+            render_dispatch(dispatch, fallback_format, include_token_stats)
+        }
     }
+}
+
+fn render_dispatch(
+    mut dispatch: DispatchOutcome,
+    format: OutputFormat,
+    include_token_stats: bool,
+) -> Result<ExecutionOutcome> {
+    annotate_output_contract(
+        &mut dispatch.payload,
+        format,
+        dispatch.exit_code,
+        include_token_stats,
+    );
+
+    Ok(ExecutionOutcome {
+        text: render(dispatch.payload, format)?,
+        exit_code: dispatch.exit_code.into(),
+    })
+}
+
+fn annotate_output_contract(
+    payload: &mut Value,
+    format: OutputFormat,
+    exit_code: CliExitCode,
+    include_token_stats: bool,
+) {
+    let exit = json!({
+        "code": exit_code.as_u8(),
+        "name": exit_code.label(),
+        "category": exit_code.category(),
+        "success": exit_code.is_success(),
+    });
+    let stats = include_token_stats.then(|| token_stats(payload, format));
+
+    if let Some(object) = payload.as_object_mut() {
+        object.insert(
+            "_output".to_owned(),
+            json!({
+                "default_format": OutputFormat::Toon.as_str(),
+                "selected_format": format.as_str(),
+                "newline_terminated": true,
+                "token_stats_enabled": include_token_stats,
+                "exit": exit,
+                "token_stats": stats,
+            }),
+        );
+    }
+    if let Some(error) = payload.get_mut("error").and_then(Value::as_object_mut) {
+        error.insert(
+            "exit".to_owned(),
+            json!({
+                "code": exit_code.as_u8(),
+                "name": exit_code.label(),
+                "category": exit_code.category(),
+                "success": exit_code.is_success(),
+            }),
+        );
+    }
+}
+
+fn infer_token_stats_requested(args: &[String]) -> bool {
+    args.iter().any(|arg| arg == "--token-stats")
+}
+
+fn internal_error_dispatch(args: &[String], error: &anyhow::Error) -> DispatchOutcome {
+    let mut dispatch = structured_error(
+        "internal-error",
+        "fwc hit an unexpected internal error before it could finish the request.",
+        CliExitCode::Internal,
+        false,
+        args,
+        args,
+        ErrorDetails {
+            did_you_mean: Vec::new(),
+            examples: vec!["fwc guide".to_owned(), "fwc list --format json".to_owned()],
+            next_actions: vec![
+                "Retry the command with `--format json` if you need the full structured envelope."
+                    .to_owned(),
+                "Inspect the attached debug chain before filing or triaging the failure."
+                    .to_owned(),
+            ],
+        },
+    );
+
+    if let Some(error_obj) = dispatch
+        .payload
+        .get_mut("error")
+        .and_then(Value::as_object_mut)
+    {
+        error_obj.insert(
+            "debug_chain".to_owned(),
+            json!(error.chain().map(ToString::to_string).collect::<Vec<_>>()),
+        );
+    }
+
+    dispatch
 }
 
 fn dispatch(cli: &Cli) -> Result<DispatchOutcome> {
@@ -595,9 +694,9 @@ fn dispatch(cli: &Cli) -> Result<DispatchOutcome> {
             let mut payload = catalog::guide_payload(args.command.as_deref());
             let exit_code = if payload["status"] == "unknown-command" {
                 enrich_unknown_guide_command(&mut payload, args.command.as_deref());
-                CliExitCode::UnknownCommand.into()
+                CliExitCode::UnknownCommand
             } else {
-                ExitCode::SUCCESS
+                CliExitCode::Success
             };
             DispatchOutcome { payload, exit_code }
         }
@@ -638,7 +737,7 @@ where
 {
     Ok(DispatchOutcome {
         payload: catalog::planned_payload(command, &serde_json::to_value(args)?),
-        exit_code: ExitCode::SUCCESS,
+        exit_code: CliExitCode::Success,
     })
 }
 
@@ -672,7 +771,7 @@ fn task_create_dispatch(args: &IntentArgs) -> Result<DispatchOutcome> {
             "task": task_payload_view(&task),
             "state_root": store.root_dir().display().to_string(),
         }),
-        exit_code: ExitCode::SUCCESS,
+        exit_code: CliExitCode::Success,
     })
 }
 
@@ -691,7 +790,7 @@ fn task_show_dispatch(args: &TaskIdArgs) -> Result<DispatchOutcome> {
             "task": task_payload_view(&task),
             "state_root": store.root_dir().display().to_string(),
         }),
-        exit_code: ExitCode::SUCCESS,
+        exit_code: CliExitCode::Success,
     })
 }
 
@@ -707,7 +806,7 @@ fn task_list_dispatch(args: &TaskListArgs) -> Result<DispatchOutcome> {
             "tasks": serde_json::to_value(tasks)?,
             "state_root": store.root_dir().display().to_string(),
         }),
-        exit_code: ExitCode::SUCCESS,
+        exit_code: CliExitCode::Success,
     })
 }
 
@@ -813,7 +912,7 @@ fn task_resolve_dispatch(args: &TaskResolveArgs) -> Result<DispatchOutcome> {
             "task": task_payload_view(&task),
             "state_root": store.root_dir().display().to_string(),
         }),
-        exit_code: ExitCode::SUCCESS,
+        exit_code: CliExitCode::Success,
     })
 }
 
@@ -850,7 +949,7 @@ fn task_ask_dispatch(args: &TaskIdArgs) -> Result<DispatchOutcome> {
             "task": task_payload_view(&task),
             "state_root": store.root_dir().display().to_string(),
         }),
-        exit_code: ExitCode::SUCCESS,
+        exit_code: CliExitCode::Success,
     })
 }
 
@@ -899,7 +998,7 @@ fn task_bind_dispatch(args: &TaskBindArgs) -> Result<DispatchOutcome> {
             "message": "Updated the workflow capsule bindings and recomputed its status.",
             "task": task_payload_view(&task),
         }),
-        exit_code: ExitCode::SUCCESS,
+        exit_code: CliExitCode::Success,
     })
 }
 
@@ -917,7 +1016,7 @@ fn task_approve_dispatch(args: &TaskIdArgs) -> Result<DispatchOutcome> {
             "message": "Marked the workflow capsule as approved for side-effecting execution.",
             "task": task_payload_view(&task),
         }),
-        exit_code: ExitCode::SUCCESS,
+        exit_code: CliExitCode::Success,
     })
 }
 
@@ -935,7 +1034,7 @@ fn task_advance_dispatch(args: &TaskIdArgs) -> Result<DispatchOutcome> {
                 "message": "The workflow capsule still needs resolution before it can advance safely.",
                 "task": task_payload_view(&task),
             }),
-            exit_code: CliExitCode::Validation.into(),
+            exit_code: CliExitCode::Validation,
         });
     }
 
@@ -965,7 +1064,7 @@ fn task_advance_dispatch(args: &TaskIdArgs) -> Result<DispatchOutcome> {
             "execution": execution,
             "task": task_payload_view(&task),
         }),
-        exit_code: ExitCode::SUCCESS,
+        exit_code: CliExitCode::Success,
     })
 }
 
@@ -983,7 +1082,7 @@ fn task_run_dispatch(args: &TaskIdArgs) -> Result<DispatchOutcome> {
                 "message": "The workflow capsule cannot run yet because it still needs resolution or a final answer.",
                 "task": task_payload_view(&task),
             }),
-            exit_code: CliExitCode::Validation.into(),
+            exit_code: CliExitCode::Validation,
         });
     }
     if task.has_side_effects() && !task.approval.workflow {
@@ -1046,7 +1145,7 @@ fn task_run_dispatch(args: &TaskIdArgs) -> Result<DispatchOutcome> {
             "execution": execution,
             "task": task_payload_view(&task),
         }),
-        exit_code: ExitCode::SUCCESS,
+        exit_code: CliExitCode::Success,
     })
 }
 
@@ -1116,7 +1215,7 @@ fn intent_plan_dispatch(request: &intent::IntentRequest) -> Result<DispatchOutco
             "message": "Compiled the requested intent into an explicit primitive workflow.",
             "workflow": serde_json::to_value(compiled)?,
         }),
-        exit_code: ExitCode::SUCCESS,
+        exit_code: CliExitCode::Success,
     })
 }
 
@@ -1129,7 +1228,7 @@ fn intent_explain_dispatch(request: &intent::IntentRequest) -> Result<DispatchOu
             "message": "Explained why the compiler chose this connector, template, and step sequence.",
             "analysis": serde_json::to_value(compiled)?,
         }),
-        exit_code: ExitCode::SUCCESS,
+        exit_code: CliExitCode::Success,
     })
 }
 
@@ -1157,7 +1256,7 @@ fn intent_do_dispatch(args: &DoIntentArgs) -> Result<DispatchOutcome> {
                 },
                 "workflow": serde_json::to_value(compiled)?,
             }),
-            exit_code: CliExitCode::Validation.into(),
+            exit_code: CliExitCode::Validation,
         });
     }
 
@@ -1182,7 +1281,7 @@ fn intent_do_dispatch(args: &DoIntentArgs) -> Result<DispatchOutcome> {
             "workflow": serde_json::to_value(compiled)?,
             "execution": execution,
         }),
-        exit_code: ExitCode::SUCCESS,
+        exit_code: CliExitCode::Success,
     })
 }
 
@@ -1318,7 +1417,7 @@ fn materialize_compiled_steps(
             anyhow::anyhow!("failed to parse compiled primitive `{resolved_command_line}`: {error}")
         })?;
         let primitive = dispatch(&parsed)?;
-        let primitive_succeeded = primitive.exit_code == ExitCode::SUCCESS;
+        let primitive_succeeded = primitive.exit_code == CliExitCode::Success;
         let primitive_payload = primitive.payload;
 
         executed_steps.push(json!({
@@ -1436,7 +1535,7 @@ fn missing_task_dispatch(task_id: &str) -> DispatchOutcome {
 #[derive(Debug)]
 struct DispatchOutcome {
     payload: Value,
-    exit_code: ExitCode,
+    exit_code: CliExitCode,
 }
 
 struct ExecutionOutcome {
@@ -1459,7 +1558,7 @@ enum PrepareCliError {
 
 // Reserved variants keep the exit-code contract stable as host-backed errors land.
 #[allow(dead_code)]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
 enum CliExitCode {
     Success = 0,
@@ -1476,6 +1575,43 @@ enum CliExitCode {
 impl From<CliExitCode> for ExitCode {
     fn from(value: CliExitCode) -> Self {
         Self::from(value as u8)
+    }
+}
+
+impl CliExitCode {
+    const fn as_u8(self) -> u8 {
+        self as u8
+    }
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Success => "success",
+            Self::Parse => "parse-error",
+            Self::UnknownCommand => "unknown-command",
+            Self::AmbiguousCorrection => "ambiguous-correction",
+            Self::Validation => "validation-error",
+            Self::PolicyDenied => "policy-denied",
+            Self::Connector => "connector-error",
+            Self::Transport => "transport-error",
+            Self::Internal => "internal-error",
+        }
+    }
+
+    const fn category(self) -> &'static str {
+        match self {
+            Self::Success => "success",
+            Self::Parse | Self::UnknownCommand | Self::AmbiguousCorrection | Self::Validation => {
+                "usage"
+            }
+            Self::PolicyDenied => "policy",
+            Self::Connector => "connector",
+            Self::Transport => "transport",
+            Self::Internal => "internal",
+        }
+    }
+
+    const fn is_success(self) -> bool {
+        matches!(self, Self::Success)
     }
 }
 
@@ -2157,7 +2293,7 @@ fn structured_error(
                 "normalized": normalized_args,
             },
         }),
-        exit_code: exit_code.into(),
+        exit_code,
     }
 }
 
@@ -2281,7 +2417,7 @@ mod tests {
         );
         assert_eq!(
             payload["phase"]["current_bead"],
-            "flywheel_connectors-3kbu1"
+            "flywheel_connectors-1g7z0.2"
         );
     }
 
@@ -2304,7 +2440,7 @@ mod tests {
         let error =
             normalize_args(&["fwc", "op", "show", "github", "issues.create"].map(str::to_owned))
                 .expect_err("op show should not auto-correct");
-        assert_eq!(error.exit_code, CliExitCode::AmbiguousCorrection.into());
+        assert_eq!(error.exit_code, CliExitCode::AmbiguousCorrection);
         assert_eq!(error.payload["error"]["type"], "ambiguous-verb-object");
     }
 
@@ -3025,14 +3161,8 @@ mod tests {
 
         assert_eq!(outcome.exit_code, CliExitCode::Success.into());
         assert_eq!(payload["command"], "search");
-        assert_eq!(
-            payload["input_normalization"]["applied"][0]["from"],
-            "find"
-        );
-        assert_eq!(
-            payload["input_normalization"]["applied"][0]["to"],
-            "search"
-        );
+        assert_eq!(payload["input_normalization"]["applied"][0]["from"], "find");
+        assert_eq!(payload["input_normalization"]["applied"][0]["to"], "search");
     }
 
     #[test]
@@ -3052,19 +3182,12 @@ mod tests {
 
         assert_eq!(outcome.exit_code, CliExitCode::Success.into());
         assert_eq!(payload["command"], "invoke");
-        assert_eq!(
-            payload["input_normalization"]["applied"][0]["from"],
-            "call"
-        );
+        assert_eq!(payload["input_normalization"]["applied"][0]["from"], "call");
     }
 
     #[test]
     fn execute_health_alias_resolves_to_status() {
-        let args = vec![
-            "fwc".to_owned(),
-            "--json".to_owned(),
-            "health".to_owned(),
-        ];
+        let args = vec!["fwc".to_owned(), "--json".to_owned(), "health".to_owned()];
         let outcome = execute(&args).expect("execution should not fail internally");
         let payload: Value =
             serde_json::from_str(&outcome.text).expect("json output should parse cleanly");
@@ -3173,23 +3296,13 @@ mod tests {
 
         assert_eq!(outcome.exit_code, CliExitCode::Success.into());
         assert_eq!(payload["command"], "show");
-        assert_eq!(
-            payload["input_normalization"]["applied"][0]["from"],
-            "shwo"
-        );
-        assert_eq!(
-            payload["input_normalization"]["applied"][0]["to"],
-            "show"
-        );
+        assert_eq!(payload["input_normalization"]["applied"][0]["from"], "shwo");
+        assert_eq!(payload["input_normalization"]["applied"][0]["to"], "show");
     }
 
     #[test]
     fn execute_lsit_typo_resolves_to_list() {
-        let args = vec![
-            "fwc".to_owned(),
-            "--json".to_owned(),
-            "lsit".to_owned(),
-        ];
+        let args = vec!["fwc".to_owned(), "--json".to_owned(), "lsit".to_owned()];
         let outcome = execute(&args).expect("execution should not fail internally");
         let payload: Value =
             serde_json::from_str(&outcome.text).expect("json output should parse cleanly");
@@ -3246,10 +3359,12 @@ mod tests {
 
         assert_eq!(outcome.exit_code, CliExitCode::AmbiguousCorrection.into());
         assert_eq!(payload["error"]["type"], "ambiguous-typo");
-        assert!(payload["error"]["message"]
-            .as_str()
-            .unwrap()
-            .contains("enable"));
+        assert!(
+            payload["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("enable")
+        );
     }
 
     #[test]
@@ -3266,10 +3381,12 @@ mod tests {
 
         assert_eq!(outcome.exit_code, CliExitCode::AmbiguousCorrection.into());
         assert_eq!(payload["error"]["type"], "ambiguous-typo");
-        assert!(payload["error"]["message"]
-            .as_str()
-            .unwrap()
-            .contains("install"));
+        assert!(
+            payload["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("install")
+        );
     }
 
     #[test]
@@ -3287,10 +3404,12 @@ mod tests {
 
         assert_eq!(outcome.exit_code, CliExitCode::AmbiguousCorrection.into());
         assert_eq!(payload["error"]["type"], "ambiguous-typo");
-        assert!(payload["error"]["did_you_mean"][0]
-            .as_str()
-            .unwrap()
-            .contains("invoke"));
+        assert!(
+            payload["error"]["did_you_mean"][0]
+                .as_str()
+                .unwrap()
+                .contains("invoke")
+        );
     }
 
     // ── Intent recovery: dangerous shapes ───────────────────────────────

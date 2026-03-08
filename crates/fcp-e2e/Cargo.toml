@@ -104,6 +104,7 @@ tracing = { workspace = true }
 
 [dev-dependencies]
 fcp-crypto = { workspace = true }
+fcp-telemetry = { workspace = true }
 fcp-anthropic = { path = "../../connectors/anthropic" }
 fcp-openai = { path = "../../connectors/openai" }
 fcp-slack = { path = "../../connectors/slack" }

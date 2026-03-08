@@ -3,7 +3,10 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use fcp_core::{BaseConnector, ConnectorId, CredentialId, FcpError, FcpResult};
+use fcp_core::{
+    AgentHint, BaseConnector, CapabilityId, ConnectorId, CredentialId, FcpError, FcpResult,
+    IdempotencyClass, OperationId, OperationInfo, RiskLevel, SafetyTier,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tracing::{info, instrument};
@@ -287,7 +290,7 @@ impl MongoDbConnector {
         Ok(json!({
             "connector_id": "fcp.mongodb",
             "version": "0.1.0",
-            "operations": operations_info(),
+            "operations": serde_json::to_value(operations_info()).unwrap_or_default(),
         }))
     }
 
@@ -348,10 +351,7 @@ impl MongoDbConnector {
             .and_then(serde_json::Value::as_str)
             .unwrap_or("");
 
-        let allowed = operations_info().as_array().is_some_and(|ops| {
-            ops.iter()
-                .any(|o| o.get("id").and_then(serde_json::Value::as_str) == Some(operation))
-        });
+        let allowed = operations_info().iter().any(|o| o.id.as_ref() == operation);
 
         Ok(json!({
             "allowed": allowed,
@@ -599,87 +599,354 @@ fn require_str<'a>(input: &'a serde_json::Value, field: &str) -> Result<&'a str,
         })
 }
 
+/// Build a single `OperationInfo` entry.
+#[allow(clippy::too_many_arguments)]
+fn op_info(
+    id: &'static str,
+    summary: &str,
+    input_schema: serde_json::Value,
+    output_schema: serde_json::Value,
+    capability: &'static str,
+    risk_level: RiskLevel,
+    safety_tier: SafetyTier,
+    idempotency: IdempotencyClass,
+    ai_hints: AgentHint,
+) -> OperationInfo {
+    OperationInfo {
+        id: OperationId::from_static(id),
+        summary: summary.into(),
+        input_schema,
+        output_schema,
+        capability: CapabilityId::from_static(capability),
+        risk_level,
+        description: None,
+        rate_limit: None,
+        requires_approval: None,
+        safety_tier,
+        idempotency,
+        ai_hints,
+    }
+}
+
 /// Build the operations info for introspection.
-fn operations_info() -> serde_json::Value {
-    json!([
-        {
-            "id": "mongodb.find_one",
-            "summary": "Find a single document in a collection",
-            "capability": "mongodb.read",
-            "risk_level": "low",
-            "safety_tier": "safe",
-            "idempotency": "strict",
-        },
-        {
-            "id": "mongodb.find",
-            "summary": "Find documents in a collection",
-            "capability": "mongodb.read",
-            "risk_level": "low",
-            "safety_tier": "safe",
-            "idempotency": "strict",
-        },
-        {
-            "id": "mongodb.insert_one",
-            "summary": "Insert a single document into a collection",
-            "capability": "mongodb.write",
-            "risk_level": "medium",
-            "safety_tier": "risky",
-            "idempotency": "none",
-        },
-        {
-            "id": "mongodb.insert_many",
-            "summary": "Insert multiple documents into a collection",
-            "capability": "mongodb.write",
-            "risk_level": "medium",
-            "safety_tier": "risky",
-            "idempotency": "none",
-        },
-        {
-            "id": "mongodb.update_one",
-            "summary": "Update a single document in a collection",
-            "capability": "mongodb.write",
-            "risk_level": "medium",
-            "safety_tier": "risky",
-            "idempotency": "none",
-        },
-        {
-            "id": "mongodb.update_many",
-            "summary": "Update multiple documents in a collection",
-            "capability": "mongodb.write",
-            "risk_level": "medium",
-            "safety_tier": "risky",
-            "idempotency": "none",
-        },
-        {
-            "id": "mongodb.delete_one",
-            "summary": "Delete a single document from a collection",
-            "capability": "mongodb.write",
-            "risk_level": "high",
-            "safety_tier": "dangerous",
-            "idempotency": "none",
-        },
-        {
-            "id": "mongodb.delete_many",
-            "summary": "Delete multiple documents from a collection",
-            "capability": "mongodb.write",
-            "risk_level": "high",
-            "safety_tier": "dangerous",
-            "idempotency": "none",
-        },
-        {
-            "id": "mongodb.aggregate",
-            "summary": "Run an aggregation pipeline on a collection",
-            "capability": "mongodb.read",
-            "risk_level": "low",
-            "safety_tier": "safe",
-            "idempotency": "strict",
-        },
-    ])
+fn operations_info() -> Vec<OperationInfo> {
+    vec![
+        op_info(
+            "mongodb.find_one",
+            "Find a single document in a collection",
+            json!({
+                "type": "object",
+                "required": ["database", "collection"],
+                "properties": {
+                    "database": { "type": "string" },
+                    "collection": { "type": "string" },
+                    "filter": { "description": "MongoDB query filter", "type": "object" }
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["document"],
+                "properties": { "document": { "type": "object" } }
+            }),
+            "mongodb.read",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "Find a single document matching a filter.".into(),
+                common_mistakes: vec![
+                    "Expecting multiple results — only the first match is returned.".into(),
+                ],
+                examples: vec![
+                    r#"{"database": "mydb", "collection": "users", "filter": {"email": "alice@example.com"}}"#.into(),
+                ],
+                related: vec![CapabilityId::from_static("mongodb.documents.find")],
+            },
+        ),
+        op_info(
+            "mongodb.find",
+            "Find documents in a collection",
+            json!({
+                "type": "object",
+                "required": ["database", "collection"],
+                "properties": {
+                    "database": { "type": "string" },
+                    "collection": { "type": "string" },
+                    "filter": { "description": "MongoDB query filter", "type": "object" },
+                    "limit": { "type": "integer", "maximum": 1000 }
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["documents"],
+                "properties": { "documents": { "type": "array" } }
+            }),
+            "mongodb.read",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "Query documents from a collection.".into(),
+                common_mistakes: vec![
+                    "Not specifying a limit — large collections may return too many docs.".into(),
+                ],
+                examples: vec![
+                    r#"{"database": "mydb", "collection": "users", "filter": {"status": "active"}, "limit": 100}"#.into(),
+                ],
+                related: vec![
+                    CapabilityId::from_static("mongodb.documents.insert"),
+                    CapabilityId::from_static("mongodb.documents.delete"),
+                ],
+            },
+        ),
+        op_info(
+            "mongodb.insert_one",
+            "Insert a single document into a collection",
+            json!({
+                "type": "object",
+                "required": ["database", "collection", "document"],
+                "properties": {
+                    "database": { "type": "string" },
+                    "collection": { "type": "string" },
+                    "document": { "type": "object" }
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["insertedId"],
+                "properties": { "insertedId": { "type": "string" } }
+            }),
+            "mongodb.write",
+            RiskLevel::Medium,
+            SafetyTier::Risky,
+            IdempotencyClass::None,
+            AgentHint {
+                when_to_use: "Insert a single document into a collection.".into(),
+                common_mistakes: vec![
+                    "Inserting a document with a duplicate _id value, which causes a duplicate key error.".into(),
+                ],
+                examples: vec![
+                    r#"{"database": "mydb", "collection": "users", "document": {"name": "Alice", "email": "alice@example.com"}}"#.into(),
+                ],
+                related: vec![
+                    CapabilityId::from_static("mongodb.documents.find"),
+                    CapabilityId::from_static("mongodb.documents.delete"),
+                ],
+            },
+        ),
+        op_info(
+            "mongodb.insert_many",
+            "Insert multiple documents into a collection",
+            json!({
+                "type": "object",
+                "required": ["database", "collection", "documents"],
+                "properties": {
+                    "database": { "type": "string" },
+                    "collection": { "type": "string" },
+                    "documents": { "type": "array" }
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["insertedIds"],
+                "properties": { "insertedIds": { "type": "array" } }
+            }),
+            "mongodb.write",
+            RiskLevel::Medium,
+            SafetyTier::Risky,
+            IdempotencyClass::None,
+            AgentHint {
+                when_to_use: "Insert one or more documents into a collection.".into(),
+                common_mistakes: vec![
+                    "Inserting documents with duplicate _id values, which causes a duplicate key error.".into(),
+                ],
+                examples: vec![
+                    r#"{"database": "mydb", "collection": "users", "documents": [{"name": "Alice", "email": "alice@example.com"}]}"#.into(),
+                ],
+                related: vec![
+                    CapabilityId::from_static("mongodb.documents.find"),
+                    CapabilityId::from_static("mongodb.documents.delete"),
+                ],
+            },
+        ),
+        op_info(
+            "mongodb.update_one",
+            "Update a single document in a collection",
+            json!({
+                "type": "object",
+                "required": ["database", "collection", "filter", "update"],
+                "properties": {
+                    "database": { "type": "string" },
+                    "collection": { "type": "string" },
+                    "filter": { "description": "MongoDB query filter", "type": "object" },
+                    "update": { "description": "MongoDB update expression", "type": "object" }
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["matchedCount", "modifiedCount"],
+                "properties": {
+                    "matchedCount": { "type": "integer" },
+                    "modifiedCount": { "type": "integer" }
+                }
+            }),
+            "mongodb.write",
+            RiskLevel::Medium,
+            SafetyTier::Risky,
+            IdempotencyClass::None,
+            AgentHint {
+                when_to_use: "Update a single document matching a filter.".into(),
+                common_mistakes: vec![
+                    "Forgetting to use $set or other update operators — passing a plain object replaces the document.".into(),
+                ],
+                examples: vec![
+                    r#"{"database": "mydb", "collection": "users", "filter": {"_id": "abc"}, "update": {"$set": {"name": "Bob"}}}"#.into(),
+                ],
+                related: vec![CapabilityId::from_static("mongodb.documents.find")],
+            },
+        ),
+        op_info(
+            "mongodb.update_many",
+            "Update multiple documents in a collection",
+            json!({
+                "type": "object",
+                "required": ["database", "collection", "filter", "update"],
+                "properties": {
+                    "database": { "type": "string" },
+                    "collection": { "type": "string" },
+                    "filter": { "description": "MongoDB query filter", "type": "object" },
+                    "update": { "description": "MongoDB update expression", "type": "object" }
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["matchedCount", "modifiedCount"],
+                "properties": {
+                    "matchedCount": { "type": "integer" },
+                    "modifiedCount": { "type": "integer" }
+                }
+            }),
+            "mongodb.write",
+            RiskLevel::Medium,
+            SafetyTier::Risky,
+            IdempotencyClass::None,
+            AgentHint {
+                when_to_use: "Update multiple documents matching a filter.".into(),
+                common_mistakes: vec![
+                    "Using an empty filter — this updates all documents in the collection.".into(),
+                ],
+                examples: vec![
+                    r#"{"database": "mydb", "collection": "users", "filter": {"status": "inactive"}, "update": {"$set": {"archived": true}}}"#.into(),
+                ],
+                related: vec![CapabilityId::from_static("mongodb.documents.find")],
+            },
+        ),
+        op_info(
+            "mongodb.delete_one",
+            "Delete a single document from a collection",
+            json!({
+                "type": "object",
+                "required": ["database", "collection", "filter"],
+                "properties": {
+                    "database": { "type": "string" },
+                    "collection": { "type": "string" },
+                    "filter": { "description": "MongoDB query filter for document to delete", "type": "object" }
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["deletedCount"],
+                "properties": { "deletedCount": { "type": "integer" } }
+            }),
+            "mongodb.write",
+            RiskLevel::High,
+            SafetyTier::Dangerous,
+            IdempotencyClass::None,
+            AgentHint {
+                when_to_use: "Delete a single document matching a filter. Cannot be undone.".into(),
+                common_mistakes: vec![
+                    "Using an empty filter — this deletes an arbitrary document.".into(),
+                ],
+                examples: vec![
+                    r#"{"database": "mydb", "collection": "users", "filter": {"_id": "abc"}}"#.into(),
+                ],
+                related: vec![CapabilityId::from_static("mongodb.documents.find")],
+            },
+        ),
+        op_info(
+            "mongodb.delete_many",
+            "Delete multiple documents from a collection",
+            json!({
+                "type": "object",
+                "required": ["database", "collection", "filter"],
+                "properties": {
+                    "database": { "type": "string" },
+                    "collection": { "type": "string" },
+                    "filter": { "description": "MongoDB query filter for documents to delete", "type": "object" }
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["deletedCount"],
+                "properties": { "deletedCount": { "type": "integer" } }
+            }),
+            "mongodb.write",
+            RiskLevel::High,
+            SafetyTier::Dangerous,
+            IdempotencyClass::None,
+            AgentHint {
+                when_to_use: "Delete documents matching a filter. Cannot be undone.".into(),
+                common_mistakes: vec![
+                    "Using an empty filter — this deletes all documents.".into(),
+                ],
+                examples: vec![
+                    r#"{"database": "mydb", "collection": "users", "filter": {"status": "inactive"}}"#.into(),
+                ],
+                related: vec![CapabilityId::from_static("mongodb.documents.find")],
+            },
+        ),
+        op_info(
+            "mongodb.aggregate",
+            "Run an aggregation pipeline on a collection",
+            json!({
+                "type": "object",
+                "required": ["database", "collection", "pipeline"],
+                "properties": {
+                    "database": { "type": "string" },
+                    "collection": { "type": "string" },
+                    "pipeline": { "description": "MongoDB aggregation pipeline stages", "type": "array" }
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["results"],
+                "properties": { "results": { "type": "array" } }
+            }),
+            "mongodb.read",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "Run a MongoDB aggregation pipeline.".into(),
+                common_mistakes: vec![
+                    "Unbounded pipelines without $limit stage.".into(),
+                ],
+                examples: vec![
+                    r#"{"database": "mydb", "collection": "orders", "pipeline": [{"$match": {"status": "completed"}}, {"$group": {"_id": "$product", "total": {"$sum": "$amount"}}}]}"#.into(),
+                ],
+                related: vec![CapabilityId::from_static("mongodb.documents.find")],
+            },
+        ),
+    ]
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn ops_json() -> serde_json::Value {
+        serde_json::to_value(operations_info()).unwrap()
+    }
 
     #[test]
     fn config_from_api_key() {
@@ -798,13 +1065,12 @@ mod tests {
     #[test]
     fn operations_info_has_9_operations() {
         let ops = operations_info();
-        let arr = ops.as_array().unwrap();
-        assert_eq!(arr.len(), 9);
+        assert_eq!(ops.len(), 9);
     }
 
     #[test]
     fn operations_all_have_required_fields() {
-        let ops = operations_info();
+        let ops = ops_json();
         for op in ops.as_array().unwrap() {
             assert!(op.get("id").is_some(), "missing id");
             assert!(op.get("summary").is_some(), "missing summary");
@@ -816,7 +1082,7 @@ mod tests {
 
     #[test]
     fn operations_ids_are_unique() {
-        let ops = operations_info();
+        let ops = ops_json();
         let ids: Vec<&str> = ops
             .as_array()
             .unwrap()
@@ -832,7 +1098,7 @@ mod tests {
     #[test]
     fn operations_risk_levels_valid() {
         let valid = ["low", "medium", "high"];
-        let ops = operations_info();
+        let ops = ops_json();
         for op in ops.as_array().unwrap() {
             let rl = op["risk_level"].as_str().unwrap();
             assert!(valid.contains(&rl), "invalid risk_level: {rl}");
@@ -842,7 +1108,7 @@ mod tests {
     #[test]
     fn operations_safety_tiers_valid() {
         let valid = ["safe", "risky", "dangerous"];
-        let ops = operations_info();
+        let ops = ops_json();
         for op in ops.as_array().unwrap() {
             let st = op["safety_tier"].as_str().unwrap();
             assert!(valid.contains(&st), "invalid safety_tier: {st}");
@@ -852,7 +1118,7 @@ mod tests {
     #[test]
     #[allow(clippy::case_sensitive_file_extension_comparisons)]
     fn read_operations_are_safe() {
-        let ops = operations_info();
+        let ops = ops_json();
         for op in ops.as_array().unwrap() {
             let cap = op["capability"].as_str().unwrap();
             if cap.ends_with(".read") {
@@ -874,7 +1140,7 @@ mod tests {
 
     #[test]
     fn operations_contain_expected_ids() {
-        let ops = operations_info();
+        let ops = ops_json();
         let ids: Vec<&str> = ops
             .as_array()
             .unwrap()
@@ -968,7 +1234,7 @@ mod tests {
 
     #[test]
     fn operations_all_have_idempotency() {
-        let ops = operations_info();
+        let ops = ops_json();
         for op in ops.as_array().unwrap() {
             assert!(
                 op.get("idempotency").is_some(),
@@ -994,7 +1260,7 @@ mod tests {
 
     #[test]
     fn delete_operations_are_dangerous() {
-        let ops = operations_info();
+        let ops = ops_json();
         for op in ops.as_array().unwrap() {
             let id = op["id"].as_str().unwrap();
             if id.contains("delete") {
@@ -1095,7 +1361,7 @@ mod tests {
 
     #[test]
     fn operations_read_count() {
-        let ops = operations_info();
+        let ops = ops_json();
         let count = ops
             .as_array()
             .unwrap()
@@ -1107,7 +1373,7 @@ mod tests {
 
     #[test]
     fn operations_write_count() {
-        let ops = operations_info();
+        let ops = ops_json();
         let count = ops
             .as_array()
             .unwrap()
@@ -1119,7 +1385,7 @@ mod tests {
 
     #[test]
     fn operations_summaries_non_empty() {
-        let ops = operations_info();
+        let ops = ops_json();
         for op in ops.as_array().unwrap() {
             let s = op["summary"].as_str().unwrap();
             assert!(!s.is_empty(), "empty summary for {}", op["id"]);
@@ -1128,7 +1394,7 @@ mod tests {
 
     #[test]
     fn operations_ids_follow_naming_convention() {
-        let ops = operations_info();
+        let ops = ops_json();
         for op in ops.as_array().unwrap() {
             let id = op["id"].as_str().unwrap();
             assert!(
@@ -1141,7 +1407,7 @@ mod tests {
     #[test]
     fn operations_capabilities_valid() {
         let valid = ["mongodb.read", "mongodb.write"];
-        let ops = operations_info();
+        let ops = ops_json();
         for op in ops.as_array().unwrap() {
             let cap = op["capability"].as_str().unwrap();
             assert!(valid.contains(&cap), "invalid capability: {cap}");
@@ -1151,7 +1417,7 @@ mod tests {
     #[test]
     fn operations_idempotency_values_valid() {
         let valid = ["strict", "best_effort", "none"];
-        let ops = operations_info();
+        let ops = ops_json();
         for op in ops.as_array().unwrap() {
             let v = op["idempotency"].as_str().unwrap();
             assert!(valid.contains(&v), "invalid idempotency: {v}");

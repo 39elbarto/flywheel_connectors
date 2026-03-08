@@ -3,7 +3,10 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use fcp_core::{BaseConnector, ConnectorId, CredentialId, FcpError, FcpResult, SelfCheckReport};
+use fcp_core::{
+    AgentHint, BaseConnector, CapabilityId, ConnectorId, CredentialId, FcpError, FcpResult,
+    IdempotencyClass, OperationId, OperationInfo, RiskLevel, SafetyTier, SelfCheckReport,
+};
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -394,10 +397,11 @@ impl SemanticScholarConnector {
 
     /// Handle the `introspect` method.
     pub async fn handle_introspect(&self) -> FcpResult<serde_json::Value> {
+        let ops = serde_json::to_value(operations_info()).unwrap_or_default();
         Ok(json!({
             "connector_id": "fcp.semanticscholar",
             "version": "0.1.0",
-            "operations": operations_info(),
+            "operations": ops,
         }))
     }
 
@@ -455,10 +459,7 @@ impl SemanticScholarConnector {
             .and_then(serde_json::Value::as_str)
             .unwrap_or("");
 
-        let allowed = operations_info().as_array().is_some_and(|ops| {
-            ops.iter()
-                .any(|o| o.get("id").and_then(serde_json::Value::as_str) == Some(operation))
-        });
+        let allowed = operations_info().iter().any(|o| o.id.as_ref() == operation);
 
         Ok(json!({
             "allowed": allowed,
@@ -784,66 +785,297 @@ fn is_local_test_host(host: &str) -> bool {
     matches!(host, "localhost" | "127.0.0.1" | "::1")
 }
 
+/// Build a single [`OperationInfo`].
+#[allow(clippy::too_many_arguments)]
+fn op_info(
+    id: &'static str,
+    summary: &str,
+    input_schema: serde_json::Value,
+    output_schema: serde_json::Value,
+    capability: &'static str,
+    risk_level: RiskLevel,
+    safety_tier: SafetyTier,
+    idempotency: IdempotencyClass,
+    ai_hints: AgentHint,
+) -> OperationInfo {
+    OperationInfo {
+        id: OperationId::from_static(id),
+        summary: summary.into(),
+        input_schema,
+        output_schema,
+        capability: CapabilityId::from_static(capability),
+        risk_level,
+        description: None,
+        rate_limit: None,
+        requires_approval: None,
+        safety_tier,
+        idempotency,
+        ai_hints,
+    }
+}
+
 /// Build the operations info for introspection.
-fn operations_info() -> serde_json::Value {
-    json!([
-        {
-            "id": "semanticscholar.paper.search",
-            "summary": "Search for papers by keyword",
-            "capability": "semanticscholar.papers.read",
-            "risk_level": "low",
-            "safety_tier": "safe",
-            "idempotency": "strict",
-        },
-        {
-            "id": "semanticscholar.paper.get",
-            "summary": "Get paper details by ID",
-            "capability": "semanticscholar.papers.read",
-            "risk_level": "low",
-            "safety_tier": "safe",
-            "idempotency": "strict",
-        },
-        {
-            "id": "semanticscholar.paper.citations",
-            "summary": "Get citations of a paper",
-            "capability": "semanticscholar.papers.read",
-            "risk_level": "low",
-            "safety_tier": "safe",
-            "idempotency": "strict",
-        },
-        {
-            "id": "semanticscholar.paper.references",
-            "summary": "Get references of a paper",
-            "capability": "semanticscholar.papers.read",
-            "risk_level": "low",
-            "safety_tier": "safe",
-            "idempotency": "strict",
-        },
-        {
-            "id": "semanticscholar.paper.recommendations",
-            "summary": "Get recommended papers based on a seed paper",
-            "capability": "semanticscholar.papers.read",
-            "risk_level": "low",
-            "safety_tier": "safe",
-            "idempotency": "strict",
-        },
-        {
-            "id": "semanticscholar.author.get",
-            "summary": "Get author details",
-            "capability": "semanticscholar.authors.read",
-            "risk_level": "low",
-            "safety_tier": "safe",
-            "idempotency": "strict",
-        },
-        {
-            "id": "semanticscholar.author.papers",
-            "summary": "Get papers by an author",
-            "capability": "semanticscholar.authors.read",
-            "risk_level": "low",
-            "safety_tier": "safe",
-            "idempotency": "strict",
-        },
-    ])
+fn operations_info() -> Vec<OperationInfo> {
+    vec![
+        op_info(
+            "semanticscholar.paper.search",
+            "Search for papers by keyword",
+            json!({
+                "type": "object",
+                "required": ["query"],
+                "properties": {
+                    "query": {"type": "string"},
+                    "fields": {"type": "string", "description": "Comma-separated field names"},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 100},
+                    "offset": {"type": "integer"}
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["data"],
+                "properties": {
+                    "data": {"type": "array"},
+                    "total": {"type": "integer"}
+                }
+            }),
+            "semanticscholar.papers.read",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "Search for academic papers by keyword or topic.".into(),
+                common_mistakes: vec![
+                    "Not specifying fields — only paperId and title returned by default.".into(),
+                ],
+                examples: vec![
+                    r#"{"query": "transformer attention mechanism", "limit": 10, "fields": "title,abstract,year,citationCount"}"#.into(),
+                ],
+                related: vec![
+                    CapabilityId::from_static("semanticscholar.paper.get"),
+                    CapabilityId::from_static("semanticscholar.paper.recommendations"),
+                ],
+            },
+        ),
+        op_info(
+            "semanticscholar.paper.get",
+            "Get paper details by ID (S2 paper ID, DOI, ArXiv ID, etc.)",
+            json!({
+                "type": "object",
+                "required": ["paper_id"],
+                "properties": {
+                    "paper_id": {"type": "string", "description": "S2 paper ID, DOI, ArXiv ID, etc."},
+                    "fields": {"type": "string"}
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["paperId", "title"],
+                "properties": {
+                    "paperId": {"type": "string"},
+                    "title": {"type": "string"}
+                }
+            }),
+            "semanticscholar.papers.read",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "Get details for a specific paper by ID.".into(),
+                common_mistakes: vec![
+                    "Passing a bare arXiv ID without the 'ARXIV:' prefix — use 'ARXIV:2301.08745' or the S2 corpus ID or DOI format.".into(),
+                ],
+                examples: vec![
+                    r#"{"paper_id": "649def34f8be52c8b66281af98ae884c09aef38b", "fields": "title,abstract,authors,year,citationCount"}"#.into(),
+                ],
+                related: vec![
+                    CapabilityId::from_static("semanticscholar.paper.search"),
+                    CapabilityId::from_static("semanticscholar.paper.citations"),
+                ],
+            },
+        ),
+        op_info(
+            "semanticscholar.paper.citations",
+            "Get citations of a paper",
+            json!({
+                "type": "object",
+                "required": ["paper_id"],
+                "properties": {
+                    "paper_id": {"type": "string"},
+                    "fields": {"type": "string"},
+                    "limit": {"type": "integer", "maximum": 1000}
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["data"],
+                "properties": {
+                    "data": {"type": "array"}
+                }
+            }),
+            "semanticscholar.papers.read",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "Get papers that cite a given paper.".into(),
+                common_mistakes: vec![
+                    "Confusing citations (papers that cite this paper) with references (papers this paper cites) — use paper.references for the bibliography.".into(),
+                ],
+                examples: vec![
+                    r#"{"paper_id": "649def34f8be52c8b66281af98ae884c09aef38b", "limit": 50}"#.into(),
+                ],
+                related: vec![
+                    CapabilityId::from_static("semanticscholar.paper.get"),
+                    CapabilityId::from_static("semanticscholar.paper.references"),
+                ],
+            },
+        ),
+        op_info(
+            "semanticscholar.paper.references",
+            "Get references of a paper",
+            json!({
+                "type": "object",
+                "required": ["paper_id"],
+                "properties": {
+                    "paper_id": {"type": "string"},
+                    "fields": {"type": "string"},
+                    "limit": {"type": "integer", "maximum": 1000}
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["data"],
+                "properties": {
+                    "data": {"type": "array"}
+                }
+            }),
+            "semanticscholar.papers.read",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "Get papers referenced by a given paper.".into(),
+                common_mistakes: vec![
+                    "Not requesting additional fields — only paperId and title are returned by default; add 'year,authors,citationCount' in the fields parameter.".into(),
+                ],
+                examples: vec![
+                    r#"{"paper_id": "649def34f8be52c8b66281af98ae884c09aef38b", "limit": 50}"#.into(),
+                ],
+                related: vec![
+                    CapabilityId::from_static("semanticscholar.paper.get"),
+                    CapabilityId::from_static("semanticscholar.paper.citations"),
+                ],
+            },
+        ),
+        op_info(
+            "semanticscholar.paper.recommendations",
+            "Get recommended papers based on a seed paper",
+            json!({
+                "type": "object",
+                "required": ["paper_id"],
+                "properties": {
+                    "paper_id": {"type": "string"},
+                    "fields": {"type": "string"},
+                    "limit": {"type": "integer", "maximum": 500}
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["recommendedPapers"],
+                "properties": {
+                    "recommendedPapers": {"type": "array"}
+                }
+            }),
+            "semanticscholar.papers.read",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "Get recommended similar papers.".into(),
+                common_mistakes: vec![
+                    "Expecting deterministic results — recommendations are model-based and may vary between calls for the same seed paper.".into(),
+                ],
+                examples: vec![
+                    r#"{"paper_id": "649def34f8be52c8b66281af98ae884c09aef38b", "limit": 10}"#.into(),
+                ],
+                related: vec![
+                    CapabilityId::from_static("semanticscholar.paper.search"),
+                ],
+            },
+        ),
+        op_info(
+            "semanticscholar.author.get",
+            "Get author details",
+            json!({
+                "type": "object",
+                "required": ["author_id"],
+                "properties": {
+                    "author_id": {"type": "string"},
+                    "fields": {"type": "string"}
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["authorId", "name"],
+                "properties": {
+                    "authorId": {"type": "string"},
+                    "name": {"type": "string"}
+                }
+            }),
+            "semanticscholar.authors.read",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "Get details for a specific author.".into(),
+                common_mistakes: vec![
+                    "Not specifying the fields parameter — only authorId and name are returned by default; request hIndex, paperCount, etc. explicitly.".into(),
+                ],
+                examples: vec![
+                    r#"{"author_id": "1741101", "fields": "name,hIndex,paperCount,citationCount"}"#.into(),
+                ],
+                related: vec![
+                    CapabilityId::from_static("semanticscholar.author.papers"),
+                ],
+            },
+        ),
+        op_info(
+            "semanticscholar.author.papers",
+            "Get papers by an author",
+            json!({
+                "type": "object",
+                "required": ["author_id"],
+                "properties": {
+                    "author_id": {"type": "string"},
+                    "fields": {"type": "string"},
+                    "limit": {"type": "integer", "maximum": 1000}
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["data"],
+                "properties": {
+                    "data": {"type": "array"}
+                }
+            }),
+            "semanticscholar.authors.read",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "Get all papers by a specific author.".into(),
+                common_mistakes: vec![
+                    "Setting limit too high without pagination — the API caps at 1000 results per request, use offset for prolific authors.".into(),
+                ],
+                examples: vec![
+                    r#"{"author_id": "1741101", "limit": 50, "fields": "title,year,citationCount"}"#.into(),
+                ],
+                related: vec![
+                    CapabilityId::from_static("semanticscholar.author.get"),
+                ],
+            },
+        ),
+    ]
 }
 
 #[cfg(test)]
@@ -1108,16 +1340,19 @@ mod tests {
 
     // -- operations_info tests --
 
+    fn ops_json() -> serde_json::Value {
+        serde_json::to_value(operations_info()).unwrap()
+    }
+
     #[test]
     fn operations_info_has_7_operations() {
         let ops = operations_info();
-        let arr = ops.as_array().unwrap();
-        assert_eq!(arr.len(), 7);
+        assert_eq!(ops.len(), 7);
     }
 
     #[test]
     fn operations_all_have_required_fields() {
-        let ops = operations_info();
+        let ops = ops_json();
         for op in ops.as_array().unwrap() {
             assert!(op.get("id").is_some(), "missing id");
             assert!(op.get("summary").is_some(), "missing summary");
@@ -1130,12 +1365,7 @@ mod tests {
     #[test]
     fn operations_ids_are_unique() {
         let ops = operations_info();
-        let ids: Vec<&str> = ops
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter_map(|o| o["id"].as_str())
-            .collect();
+        let ids: Vec<&str> = ops.iter().map(|o| o.id.as_ref()).collect();
         let mut unique = ids.clone();
         unique.sort_unstable();
         unique.dedup();
@@ -1144,8 +1374,8 @@ mod tests {
 
     #[test]
     fn operations_risk_levels_valid() {
+        let ops = ops_json();
         let valid = ["low", "medium", "high"];
-        let ops = operations_info();
         for op in ops.as_array().unwrap() {
             let rl = op["risk_level"].as_str().unwrap();
             assert!(valid.contains(&rl), "invalid risk_level: {rl}");
@@ -1154,8 +1384,8 @@ mod tests {
 
     #[test]
     fn operations_safety_tiers_valid() {
+        let ops = ops_json();
         let valid = ["safe", "risky", "dangerous"];
-        let ops = operations_info();
         for op in ops.as_array().unwrap() {
             let st = op["safety_tier"].as_str().unwrap();
             assert!(valid.contains(&st), "invalid safety_tier: {st}");
@@ -1165,7 +1395,7 @@ mod tests {
     #[test]
     #[allow(clippy::case_sensitive_file_extension_comparisons)]
     fn read_operations_are_safe() {
-        let ops = operations_info();
+        let ops = ops_json();
         for op in ops.as_array().unwrap() {
             let cap = op["capability"].as_str().unwrap();
             if cap.ends_with(".read") {
@@ -1188,12 +1418,7 @@ mod tests {
     #[test]
     fn operations_contain_expected_ids() {
         let ops = operations_info();
-        let ids: Vec<&str> = ops
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter_map(|o| o["id"].as_str())
-            .collect();
+        let ids: Vec<&str> = ops.iter().map(|o| o.id.as_ref()).collect();
         assert!(ids.contains(&"semanticscholar.paper.search"));
         assert!(ids.contains(&"semanticscholar.paper.get"));
         assert!(ids.contains(&"semanticscholar.paper.citations"));
@@ -1205,7 +1430,7 @@ mod tests {
 
     #[test]
     fn operations_all_have_idempotency() {
-        let ops = operations_info();
+        let ops = ops_json();
         for op in ops.as_array().unwrap() {
             assert!(
                 op.get("idempotency").is_some(),
@@ -1218,11 +1443,11 @@ mod tests {
     #[test]
     fn operations_paper_ops_use_papers_read_capability() {
         let ops = operations_info();
-        for op in ops.as_array().unwrap() {
-            let id = op["id"].as_str().unwrap();
+        for op in &ops {
+            let id = op.id.as_ref();
             if id.starts_with("semanticscholar.paper.") {
                 assert_eq!(
-                    op["capability"].as_str().unwrap(),
+                    op.capability.as_ref(),
                     "semanticscholar.papers.read",
                     "paper op {id} should use papers.read capability"
                 );
@@ -1233,11 +1458,11 @@ mod tests {
     #[test]
     fn operations_author_ops_use_authors_read_capability() {
         let ops = operations_info();
-        for op in ops.as_array().unwrap() {
-            let id = op["id"].as_str().unwrap();
+        for op in &ops {
+            let id = op.id.as_ref();
             if id.starts_with("semanticscholar.author.") {
                 assert_eq!(
-                    op["capability"].as_str().unwrap(),
+                    op.capability.as_ref(),
                     "semanticscholar.authors.read",
                     "author op {id} should use authors.read capability"
                 );
@@ -1388,33 +1613,36 @@ mod tests {
     #[test]
     fn operations_all_low_risk() {
         let ops = operations_info();
-        for op in ops.as_array().unwrap() {
-            assert_eq!(op["risk_level"].as_str().unwrap(), "low");
+        for op in &ops {
+            assert_eq!(op.risk_level, RiskLevel::Low);
         }
     }
 
     #[test]
     fn operations_all_safe() {
         let ops = operations_info();
-        for op in ops.as_array().unwrap() {
-            assert_eq!(op["safety_tier"].as_str().unwrap(), "safe");
+        for op in &ops {
+            assert_eq!(op.safety_tier, SafetyTier::Safe);
         }
     }
 
     #[test]
     fn operations_all_strict_idempotency() {
         let ops = operations_info();
-        for op in ops.as_array().unwrap() {
-            assert_eq!(op["idempotency"].as_str().unwrap(), "strict");
+        for op in &ops {
+            assert_eq!(op.idempotency, IdempotencyClass::Strict);
         }
     }
 
     #[test]
     fn operations_summaries_non_empty() {
         let ops = operations_info();
-        for op in ops.as_array().unwrap() {
-            let summary = op["summary"].as_str().unwrap();
-            assert!(!summary.is_empty(), "op {} has empty summary", op["id"]);
+        for op in &ops {
+            assert!(
+                !op.summary.is_empty(),
+                "op {} has empty summary",
+                op.id.as_ref()
+            );
         }
     }
 
@@ -1425,8 +1653,8 @@ mod tests {
             "semanticscholar.authors.read",
         ];
         let ops = operations_info();
-        for op in ops.as_array().unwrap() {
-            let cap = op["capability"].as_str().unwrap();
+        for op in &ops {
+            let cap = op.capability.as_ref();
             assert!(valid.contains(&cap), "unknown capability: {cap}");
         }
     }
@@ -1434,72 +1662,65 @@ mod tests {
     #[test]
     fn operations_paper_search_present() {
         let ops = operations_info();
-        let arr = ops.as_array().unwrap();
-        let search = arr
+        let search = ops
             .iter()
-            .find(|o| o["id"].as_str() == Some("semanticscholar.paper.search"))
+            .find(|o| o.id.as_ref() == "semanticscholar.paper.search")
             .expect("paper.search not found");
-        assert_eq!(search["capability"], "semanticscholar.papers.read");
+        assert_eq!(search.capability.as_ref(), "semanticscholar.papers.read");
     }
 
     #[test]
     fn operations_paper_get_present() {
         let ops = operations_info();
-        let arr = ops.as_array().unwrap();
-        let get = arr
+        let get = ops
             .iter()
-            .find(|o| o["id"].as_str() == Some("semanticscholar.paper.get"))
+            .find(|o| o.id.as_ref() == "semanticscholar.paper.get")
             .expect("paper.get not found");
-        assert_eq!(get["capability"], "semanticscholar.papers.read");
+        assert_eq!(get.capability.as_ref(), "semanticscholar.papers.read");
     }
 
     #[test]
     fn operations_paper_citations_present() {
         let ops = operations_info();
-        let arr = ops.as_array().unwrap();
         assert!(
-            arr.iter()
-                .any(|o| o["id"].as_str() == Some("semanticscholar.paper.citations"))
+            ops.iter()
+                .any(|o| o.id.as_ref() == "semanticscholar.paper.citations")
         );
     }
 
     #[test]
     fn operations_paper_references_present() {
         let ops = operations_info();
-        let arr = ops.as_array().unwrap();
         assert!(
-            arr.iter()
-                .any(|o| o["id"].as_str() == Some("semanticscholar.paper.references"))
+            ops.iter()
+                .any(|o| o.id.as_ref() == "semanticscholar.paper.references")
         );
     }
 
     #[test]
     fn operations_paper_recommendations_present() {
         let ops = operations_info();
-        let arr = ops.as_array().unwrap();
         assert!(
-            arr.iter()
-                .any(|o| o["id"].as_str() == Some("semanticscholar.paper.recommendations"))
+            ops.iter()
+                .any(|o| o.id.as_ref() == "semanticscholar.paper.recommendations")
         );
     }
 
     #[test]
     fn operations_author_get_present() {
         let ops = operations_info();
-        let arr = ops.as_array().unwrap();
         assert!(
-            arr.iter()
-                .any(|o| o["id"].as_str() == Some("semanticscholar.author.get"))
+            ops.iter()
+                .any(|o| o.id.as_ref() == "semanticscholar.author.get")
         );
     }
 
     #[test]
     fn operations_author_papers_present() {
         let ops = operations_info();
-        let arr = ops.as_array().unwrap();
         assert!(
-            arr.iter()
-                .any(|o| o["id"].as_str() == Some("semanticscholar.author.papers"))
+            ops.iter()
+                .any(|o| o.id.as_ref() == "semanticscholar.author.papers")
         );
     }
 

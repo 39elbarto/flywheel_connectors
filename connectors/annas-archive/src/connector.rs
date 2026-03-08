@@ -1,7 +1,10 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use fcp_core::{BaseConnector, ConnectorId, FcpError, FcpResult};
+use fcp_core::{
+    AgentHint, BaseConnector, CapabilityId, ConnectorId, FcpError, FcpResult, IdempotencyClass,
+    Introspection, OperationId, OperationInfo, RiskLevel, SafetyTier,
+};
 use serde_json::json;
 use tracing::{info, instrument};
 
@@ -140,11 +143,17 @@ impl AnnasArchiveConnector {
     }
 
     pub async fn handle_introspect(&self) -> FcpResult<serde_json::Value> {
-        Ok(json!({
-            "connector_id": "fcp.annas-archive",
-            "version": "0.1.0",
-            "operations": operations_info(),
-        }))
+        let introspection = Introspection {
+            operations: operations_info(),
+            events: vec![],
+            resource_types: vec![],
+            auth_caps: None,
+            event_caps: None,
+        };
+
+        serde_json::to_value(introspection).map_err(|e| FcpError::Internal {
+            message: format!("Failed to serialize introspection: {e}"),
+        })
     }
 
     #[instrument(skip(self, params))]
@@ -192,10 +201,7 @@ impl AnnasArchiveConnector {
             .and_then(serde_json::Value::as_str)
             .unwrap_or("");
 
-        let allowed = operations_info().as_array().is_some_and(|ops| {
-            ops.iter()
-                .any(|o| o.get("id").and_then(serde_json::Value::as_str) == Some(operation))
-        });
+        let allowed = operations_info().iter().any(|o| o.id.as_ref() == operation);
 
         Ok(json!({
             "allowed": allowed,
@@ -269,41 +275,173 @@ fn require_str<'a>(
         })
 }
 
-fn operations_info() -> serde_json::Value {
-    json!([
-        {
-            "id": "annas.search",
-            "summary": "Search books and documents by keyword",
-            "capability": "annas.search",
-            "risk_level": "low",
-            "safety_tier": "safe",
-            "idempotency": "strict",
-        },
-        {
-            "id": "annas.metadata",
-            "summary": "Get detailed metadata for a book by MD5 hash",
-            "capability": "annas.read",
-            "risk_level": "low",
-            "safety_tier": "safe",
-            "idempotency": "strict",
-        },
-        {
-            "id": "annas.lookup.isbn",
-            "summary": "Look up a book by ISBN",
-            "capability": "annas.read",
-            "risk_level": "low",
-            "safety_tier": "safe",
-            "idempotency": "strict",
-        },
-        {
-            "id": "annas.lookup.md5",
-            "summary": "Look up a book by MD5 hash",
-            "capability": "annas.read",
-            "risk_level": "low",
-            "safety_tier": "safe",
-            "idempotency": "strict",
-        },
-    ])
+/// Build a single [`OperationInfo`].
+#[allow(clippy::too_many_arguments)]
+fn op_info(
+    id: &'static str,
+    summary: &str,
+    input_schema: serde_json::Value,
+    output_schema: serde_json::Value,
+    capability: &'static str,
+    risk_level: RiskLevel,
+    safety_tier: SafetyTier,
+    idempotency: IdempotencyClass,
+    ai_hints: AgentHint,
+) -> OperationInfo {
+    OperationInfo {
+        id: OperationId::from_static(id),
+        summary: summary.into(),
+        input_schema,
+        output_schema,
+        capability: CapabilityId::from_static(capability),
+        risk_level,
+        description: None,
+        rate_limit: None,
+        requires_approval: None,
+        safety_tier,
+        idempotency,
+        ai_hints,
+    }
+}
+
+fn operations_info() -> Vec<OperationInfo> {
+    vec![
+        op_info(
+            "annas.search",
+            "Search books and documents by keyword",
+            json!({
+                "type": "object",
+                "required": ["query"],
+                "properties": {
+                    "query": {"type": "string", "description": "Search query (title, author, topic)"},
+                    "lang": {"type": "string", "description": "Language filter (e.g. en, es, de)"},
+                    "ext": {"type": "string", "description": "File extension filter (e.g. pdf, epub)"},
+                    "sort": {"type": "string", "description": "Sort order (e.g. most_relevant, newest)"}
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["results"],
+                "properties": {"results": {"type": "array"}}
+            }),
+            "annas.search",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "Search for books and documents by keyword, title, or author.".into(),
+                common_mistakes: vec![
+                    "Using overly broad queries without language or format filters.".into(),
+                ],
+                examples: vec![
+                    r#"{"query": "machine learning", "lang": "en", "ext": "pdf"}"#.into(),
+                ],
+                related: vec![
+                    CapabilityId::from_static("annas.metadata"),
+                    CapabilityId::from_static("annas.lookup.isbn"),
+                ],
+            },
+        ),
+        op_info(
+            "annas.metadata",
+            "Get detailed metadata for a book by MD5 hash",
+            json!({
+                "type": "object",
+                "required": ["md5"],
+                "properties": {
+                    "md5": {"type": "string", "description": "MD5 hash identifier of the book"}
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["book"],
+                "properties": {"book": {"type": "object"}}
+            }),
+            "annas.read",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "Get detailed book metadata when you have the MD5 identifier.".into(),
+                common_mistakes: vec![
+                    "Using an uppercase MD5 hash — the identifier must be lowercase hex (32 characters).".into(),
+                ],
+                examples: vec![
+                    r#"{"md5": "1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d"}"#.into(),
+                ],
+                related: vec![
+                    CapabilityId::from_static("annas.search"),
+                    CapabilityId::from_static("annas.lookup.md5"),
+                ],
+            },
+        ),
+        op_info(
+            "annas.lookup.isbn",
+            "Look up a book by ISBN",
+            json!({
+                "type": "object",
+                "required": ["isbn"],
+                "properties": {
+                    "isbn": {"type": "string", "description": "ISBN-10 or ISBN-13"}
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["results"],
+                "properties": {"results": {"type": "array"}}
+            }),
+            "annas.read",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "Look up a book by its ISBN number.".into(),
+                common_mistakes: vec![
+                    "Including dashes in the ISBN — provide digits only.".into(),
+                ],
+                examples: vec![
+                    r#"{"isbn": "9780134685991"}"#.into(),
+                ],
+                related: vec![
+                    CapabilityId::from_static("annas.search"),
+                    CapabilityId::from_static("annas.metadata"),
+                ],
+            },
+        ),
+        op_info(
+            "annas.lookup.md5",
+            "Look up a book by MD5 hash",
+            json!({
+                "type": "object",
+                "required": ["md5"],
+                "properties": {
+                    "md5": {"type": "string", "description": "MD5 hash identifier"}
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["book"],
+                "properties": {"book": {"type": "object"}}
+            }),
+            "annas.read",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "Look up a specific book when you have its MD5 hash identifier.".into(),
+                common_mistakes: vec![
+                    "Confusing lookup.md5 with metadata — lookup returns search-style results while metadata returns the full detail record for a given MD5.".into(),
+                ],
+                examples: vec![
+                    r#"{"md5": "1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d"}"#.into(),
+                ],
+                related: vec![
+                    CapabilityId::from_static("annas.metadata"),
+                    CapabilityId::from_static("annas.search"),
+                ],
+            },
+        ),
+    ]
 }
 
 #[cfg(test)]
@@ -473,16 +611,20 @@ mod tests {
         assert!(c.client.is_none());
     }
 
+    fn ops_json() -> serde_json::Value {
+        serde_json::to_value(operations_info()).unwrap()
+    }
+
     #[test]
     fn operations_info_count() {
         let ops = operations_info();
-        assert_eq!(ops.as_array().unwrap().len(), 4);
+        assert_eq!(ops.len(), 4);
     }
 
     #[test]
     fn operations_info_deterministic() {
-        let ops1 = operations_info();
-        let ops2 = operations_info();
+        let ops1 = ops_json();
+        let ops2 = ops_json();
         assert_eq!(ops1, ops2);
     }
 
@@ -748,12 +890,7 @@ mod tests {
     #[test]
     fn operations_info_ids_unique() {
         let ops = operations_info();
-        let ids: Vec<&str> = ops
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter_map(|o| o["id"].as_str())
-            .collect();
+        let ids: Vec<&str> = ops.iter().map(|o| o.id.as_ref()).collect();
         let mut unique = ids.clone();
         unique.sort_unstable();
         unique.dedup();
@@ -762,7 +899,7 @@ mod tests {
 
     #[test]
     fn operations_info_all_have_required_fields() {
-        let ops = operations_info();
+        let ops = ops_json();
         for op in ops.as_array().unwrap() {
             assert!(op.get("id").is_some());
             assert!(op.get("summary").is_some());
@@ -776,12 +913,7 @@ mod tests {
     #[test]
     fn operations_info_contains_expected_ids() {
         let ops = operations_info();
-        let ids: Vec<&str> = ops
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter_map(|o| o["id"].as_str())
-            .collect();
+        let ids: Vec<&str> = ops.iter().map(|o| o.id.as_ref()).collect();
         assert!(ids.contains(&"annas.search"));
         assert!(ids.contains(&"annas.metadata"));
         assert!(ids.contains(&"annas.lookup.isbn"));
@@ -841,26 +973,33 @@ mod tests {
     #[test]
     fn operations_info_all_have_summaries() {
         let ops = operations_info();
-        for op in ops.as_array().unwrap() {
-            let summary = op["summary"].as_str().unwrap();
-            assert!(!summary.is_empty(), "op {:?} has empty summary", op["id"]);
+        for op in &ops {
+            assert!(
+                !op.summary.is_empty(),
+                "op {} has empty summary",
+                op.id.as_ref()
+            );
         }
     }
 
     #[test]
     fn operations_info_all_have_capability() {
         let ops = operations_info();
-        for op in ops.as_array().unwrap() {
-            let cap = op["capability"].as_str().unwrap();
-            assert!(!cap.is_empty(), "op {:?} has empty capability", op["id"]);
+        for op in &ops {
+            let cap = op.capability.as_ref();
+            assert!(
+                !cap.is_empty(),
+                "op {} has empty capability",
+                op.id.as_ref()
+            );
         }
     }
 
     #[test]
     fn operations_info_ids_start_with_annas_prefix() {
         let ops = operations_info();
-        for op in ops.as_array().unwrap() {
-            let id = op["id"].as_str().unwrap();
+        for op in &ops {
+            let id = op.id.as_ref();
             assert!(id.starts_with("annas."), "id {id} should start with annas.");
         }
     }
@@ -868,8 +1007,8 @@ mod tests {
     #[test]
     fn operations_info_capabilities_use_annas_prefix() {
         let ops = operations_info();
-        for op in ops.as_array().unwrap() {
-            let cap = op["capability"].as_str().unwrap();
+        for op in &ops {
+            let cap = op.capability.as_ref();
             assert!(
                 cap.starts_with("annas."),
                 "capability {cap} should start with annas."
@@ -879,7 +1018,7 @@ mod tests {
 
     #[test]
     fn operations_info_idempotency_values() {
-        let ops = operations_info();
+        let ops = ops_json();
         for op in ops.as_array().unwrap() {
             let idem = op["idempotency"].as_str().unwrap();
             assert!(
@@ -891,7 +1030,7 @@ mod tests {
 
     #[test]
     fn operations_info_safety_tier_values() {
-        let ops = operations_info();
+        let ops = ops_json();
         for op in ops.as_array().unwrap() {
             let tier = op["safety_tier"].as_str().unwrap();
             assert!(
@@ -903,7 +1042,7 @@ mod tests {
 
     #[test]
     fn operations_info_risk_level_values() {
-        let ops = operations_info();
+        let ops = ops_json();
         for op in ops.as_array().unwrap() {
             let risk = op["risk_level"].as_str().unwrap();
             assert!(

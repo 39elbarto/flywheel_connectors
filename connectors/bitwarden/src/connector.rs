@@ -3,7 +3,10 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use fcp_core::{BaseConnector, ConnectorId, CredentialId, FcpError, FcpResult};
+use fcp_core::{
+    AgentHint, BaseConnector, CapabilityId, ConnectorId, CredentialId, FcpError, FcpResult,
+    IdempotencyClass, OperationId, OperationInfo, RiskLevel, SafetyTier,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tracing::{info, instrument};
@@ -270,7 +273,7 @@ impl BitwardenConnector {
         Ok(json!({
             "connector_id": "fcp.bitwarden",
             "version": "0.1.0",
-            "operations": operations_info(),
+            "operations": serde_json::to_value(operations_info()).unwrap_or_default(),
         }))
     }
 
@@ -322,10 +325,7 @@ impl BitwardenConnector {
             .and_then(serde_json::Value::as_str)
             .unwrap_or("");
 
-        let allowed = operations_info().as_array().is_some_and(|ops| {
-            ops.iter()
-                .any(|o| o.get("id").and_then(serde_json::Value::as_str) == Some(operation))
-        });
+        let allowed = operations_info().iter().any(|o| o.id.as_ref() == operation);
 
         Ok(json!({
             "allowed": allowed,
@@ -423,55 +423,137 @@ fn require_i64(input: &serde_json::Value, field: &str) -> Result<i64, BitwardenE
         })
 }
 
+/// Helper to build a single `OperationInfo`.
+#[allow(clippy::too_many_arguments)]
+fn op_info(
+    id: &'static str,
+    summary: &str,
+    input_schema: serde_json::Value,
+    output_schema: serde_json::Value,
+    capability: &'static str,
+    risk_level: RiskLevel,
+    safety_tier: SafetyTier,
+    idempotency: IdempotencyClass,
+    ai_hints: AgentHint,
+) -> OperationInfo {
+    OperationInfo {
+        id: OperationId::from_static(id),
+        summary: summary.into(),
+        input_schema,
+        output_schema,
+        capability: CapabilityId::from_static(capability),
+        risk_level,
+        description: None,
+        rate_limit: None,
+        requires_approval: None,
+        safety_tier,
+        idempotency,
+        ai_hints,
+    }
+}
+
 /// Build the operations info for introspection.
-fn operations_info() -> serde_json::Value {
-    json!([
-        {
-            "id": "bitwarden.collections.list",
-            "summary": "List collections",
-            "capability": "bitwarden.collections.read",
-            "risk_level": "low",
-            "safety_tier": "safe",
-            "idempotency": "strict",
-        },
-        {
-            "id": "bitwarden.items.list",
-            "summary": "List vault items",
-            "capability": "bitwarden.items.read",
-            "risk_level": "low",
-            "safety_tier": "safe",
-            "idempotency": "strict",
-        },
-        {
-            "id": "bitwarden.items.get",
-            "summary": "Get a single item with secret fields",
-            "capability": "bitwarden.items.read",
-            "risk_level": "medium",
-            "safety_tier": "risky",
-            "idempotency": "strict",
-        },
-        {
-            "id": "bitwarden.items.create",
-            "summary": "Create a new vault item",
-            "capability": "bitwarden.items.write",
-            "risk_level": "medium",
-            "safety_tier": "risky",
-            "idempotency": "none",
-        },
-        {
-            "id": "bitwarden.items.delete",
-            "summary": "Delete a vault item",
-            "capability": "bitwarden.items.write",
-            "risk_level": "high",
-            "safety_tier": "dangerous",
-            "idempotency": "strict",
-        },
-    ])
+fn operations_info() -> Vec<OperationInfo> {
+    vec![
+        op_info(
+            "bitwarden.collections.list",
+            "List collections",
+            json!({"type": "object", "required": []}),
+            json!({"type": "object", "required": ["data"], "properties": {"data": {"type": "array"}}}),
+            "bitwarden.collections.read",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "List available collections.".into(),
+                common_mistakes: vec![],
+                examples: vec!["{}".into()],
+                related: vec![CapabilityId::from_static("bitwarden.items.list")],
+            },
+        ),
+        op_info(
+            "bitwarden.items.list",
+            "List vault items",
+            json!({"type": "object", "required": [], "properties": {"collection_id": {"type": "string"}, "folder_id": {"type": "string"}}}),
+            json!({"type": "object", "required": ["data"], "properties": {"data": {"type": "array"}}}),
+            "bitwarden.items.read",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "List vault items (without revealing passwords).".into(),
+                common_mistakes: vec![],
+                examples: vec!["{}".into()],
+                related: vec![
+                    CapabilityId::from_static("bitwarden.items.get"),
+                    CapabilityId::from_static("bitwarden.collections.list"),
+                ],
+            },
+        ),
+        op_info(
+            "bitwarden.items.get",
+            "Get a single item with secret fields",
+            json!({"type": "object", "required": ["item_id"], "properties": {"item_id": {"type": "string"}}}),
+            json!({"type": "object", "required": ["item"], "properties": {"item": {"type": "object"}}}),
+            "bitwarden.items.read",
+            RiskLevel::Medium,
+            SafetyTier::Risky,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "Retrieve a specific item including passwords/secrets.".into(),
+                common_mistakes: vec!["Logging or caching passwords.".into()],
+                examples: vec![r#"{"item_id": "abc123"}"#.into()],
+                related: vec![CapabilityId::from_static("bitwarden.items.list")],
+            },
+        ),
+        op_info(
+            "bitwarden.items.create",
+            "Create a new vault item",
+            json!({"type": "object", "required": ["type", "name"], "properties": {"type": {"type": "integer", "description": "1=Login, 2=SecureNote, 3=Card, 4=Identity"}, "name": {"type": "string"}, "login": {"type": "object"}, "collection_ids": {"type": "array"}}}),
+            json!({"type": "object", "required": ["id"], "properties": {"id": {"type": "string"}}}),
+            "bitwarden.items.write",
+            RiskLevel::Medium,
+            SafetyTier::Risky,
+            IdempotencyClass::None,
+            AgentHint {
+                when_to_use: "Create a new vault item.".into(),
+                common_mistakes: vec![],
+                examples: vec![
+                    r#"{"type": 1, "name": "API Key", "login": {"username": "api", "password": "secret123"}}"#.into(),
+                ],
+                related: vec![
+                    CapabilityId::from_static("bitwarden.items.list"),
+                    CapabilityId::from_static("bitwarden.items.delete"),
+                ],
+            },
+        ),
+        op_info(
+            "bitwarden.items.delete",
+            "Delete a vault item",
+            json!({"type": "object", "required": ["item_id"], "properties": {"item_id": {"type": "string"}}}),
+            json!({"type": "object"}),
+            "bitwarden.items.write",
+            RiskLevel::High,
+            SafetyTier::Dangerous,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "Delete a vault item. Cannot be undone.".into(),
+                common_mistakes: vec![],
+                examples: vec![r#"{"item_id": "abc123"}"#.into()],
+                related: vec![CapabilityId::from_static("bitwarden.items.get")],
+            },
+        ),
+    ]
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Serialize `operations_info` to JSON for backward-compatible assertions.
+    fn ops_json() -> serde_json::Value {
+        serde_json::to_value(operations_info()).unwrap()
+    }
 
     #[test]
     fn config_from_access_token() {
@@ -600,31 +682,23 @@ mod tests {
     #[test]
     fn operations_info_has_5_operations() {
         let ops = operations_info();
-        let arr = ops.as_array().unwrap();
-        assert_eq!(arr.len(), 5);
+        assert_eq!(ops.len(), 5);
     }
 
     #[test]
     fn operations_all_have_required_fields() {
         let ops = operations_info();
-        for op in ops.as_array().unwrap() {
-            assert!(op.get("id").is_some(), "missing id");
-            assert!(op.get("summary").is_some(), "missing summary");
-            assert!(op.get("capability").is_some(), "missing capability");
-            assert!(op.get("risk_level").is_some(), "missing risk_level");
-            assert!(op.get("safety_tier").is_some(), "missing safety_tier");
+        for op in &ops {
+            assert!(!op.id.as_ref().is_empty(), "missing id");
+            assert!(!op.summary.is_empty(), "missing summary");
+            assert!(!op.capability.as_ref().is_empty(), "missing capability");
         }
     }
 
     #[test]
     fn operations_ids_are_unique() {
         let ops = operations_info();
-        let ids: Vec<&str> = ops
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter_map(|o| o["id"].as_str())
-            .collect();
+        let ids: Vec<&str> = ops.iter().map(|o| o.id.as_ref()).collect();
         let mut unique = ids.clone();
         unique.sort_unstable();
         unique.dedup();
@@ -633,36 +707,42 @@ mod tests {
 
     #[test]
     fn operations_risk_levels_valid() {
-        let valid = ["low", "medium", "high"];
         let ops = operations_info();
-        for op in ops.as_array().unwrap() {
-            let rl = op["risk_level"].as_str().unwrap();
-            assert!(valid.contains(&rl), "invalid risk_level: {rl}");
+        for op in &ops {
+            let v = serde_json::to_value(op.risk_level).unwrap();
+            let rl = v.as_str().unwrap();
+            assert!(
+                ["low", "medium", "high", "critical"].contains(&rl),
+                "invalid risk_level: {rl}"
+            );
         }
     }
 
     #[test]
     fn operations_safety_tiers_valid() {
-        let valid = ["safe", "risky", "dangerous"];
         let ops = operations_info();
-        for op in ops.as_array().unwrap() {
-            let st = op["safety_tier"].as_str().unwrap();
-            assert!(valid.contains(&st), "invalid safety_tier: {st}");
+        for op in &ops {
+            let v = serde_json::to_value(op.safety_tier).unwrap();
+            let st = v.as_str().unwrap();
+            assert!(
+                ["safe", "risky", "dangerous"].contains(&st),
+                "invalid safety_tier: {st}"
+            );
         }
     }
 
     #[test]
-    #[allow(clippy::case_sensitive_file_extension_comparisons)]
     fn read_operations_are_safe_or_risky() {
         let ops = operations_info();
-        for op in ops.as_array().unwrap() {
-            let cap = op["capability"].as_str().unwrap();
+        for op in &ops {
+            let cap = op.capability.as_ref();
+            #[allow(clippy::case_sensitive_file_extension_comparisons)]
             if cap.ends_with(".read") {
-                let tier = op["safety_tier"].as_str().unwrap();
                 assert!(
-                    tier == "safe" || tier == "risky",
-                    "read op {} should be safe or risky, got {tier}",
-                    op["id"]
+                    op.safety_tier == SafetyTier::Safe || op.safety_tier == SafetyTier::Risky,
+                    "read op {} should be safe or risky, got {:?}",
+                    op.id.as_ref(),
+                    op.safety_tier
                 );
             }
         }
@@ -671,12 +751,7 @@ mod tests {
     #[test]
     fn operations_contain_expected_ids() {
         let ops = operations_info();
-        let ids: Vec<&str> = ops
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter_map(|o| o["id"].as_str())
-            .collect();
+        let ids: Vec<&str> = ops.iter().map(|o| o.id.as_ref()).collect();
         assert!(ids.contains(&"bitwarden.collections.list"));
         assert!(ids.contains(&"bitwarden.items.list"));
         assert!(ids.contains(&"bitwarden.items.get"));
@@ -762,11 +837,12 @@ mod tests {
     #[test]
     fn operations_all_have_idempotency() {
         let ops = operations_info();
-        for op in ops.as_array().unwrap() {
+        for op in &ops {
+            let v = serde_json::to_value(op.idempotency).unwrap();
             assert!(
-                op.get("idempotency").is_some(),
-                "op {:?} missing idempotency",
-                op["id"]
+                v.is_string(),
+                "op {} idempotency should serialize",
+                op.id.as_ref()
             );
         }
     }
@@ -789,52 +865,44 @@ mod tests {
     fn items_get_is_risky() {
         let ops = operations_info();
         let get_op = ops
-            .as_array()
-            .unwrap()
             .iter()
-            .find(|o| o["id"].as_str() == Some("bitwarden.items.get"))
+            .find(|o| o.id.as_ref() == "bitwarden.items.get")
             .unwrap();
-        assert_eq!(get_op["safety_tier"], "risky");
-        assert_eq!(get_op["risk_level"], "medium");
+        assert_eq!(get_op.safety_tier, SafetyTier::Risky);
+        assert_eq!(get_op.risk_level, RiskLevel::Medium);
     }
 
     #[test]
     fn items_delete_is_dangerous() {
         let ops = operations_info();
         let del_op = ops
-            .as_array()
-            .unwrap()
             .iter()
-            .find(|o| o["id"].as_str() == Some("bitwarden.items.delete"))
+            .find(|o| o.id.as_ref() == "bitwarden.items.delete")
             .unwrap();
-        assert_eq!(del_op["safety_tier"], "dangerous");
-        assert_eq!(del_op["risk_level"], "high");
+        assert_eq!(del_op.safety_tier, SafetyTier::Dangerous);
+        assert_eq!(del_op.risk_level, RiskLevel::High);
     }
 
     #[test]
     fn collections_list_is_safe() {
         let ops = operations_info();
         let op = ops
-            .as_array()
-            .unwrap()
             .iter()
-            .find(|o| o["id"].as_str() == Some("bitwarden.collections.list"))
+            .find(|o| o.id.as_ref() == "bitwarden.collections.list")
             .unwrap();
-        assert_eq!(op["safety_tier"], "safe");
-        assert_eq!(op["risk_level"], "low");
+        assert_eq!(op.safety_tier, SafetyTier::Safe);
+        assert_eq!(op.risk_level, RiskLevel::Low);
     }
 
     #[test]
     fn items_list_is_safe() {
         let ops = operations_info();
         let op = ops
-            .as_array()
-            .unwrap()
             .iter()
-            .find(|o| o["id"].as_str() == Some("bitwarden.items.list"))
+            .find(|o| o.id.as_ref() == "bitwarden.items.list")
             .unwrap();
-        assert_eq!(op["safety_tier"], "safe");
-        assert_eq!(op["risk_level"], "low");
+        assert_eq!(op.safety_tier, SafetyTier::Safe);
+        assert_eq!(op.risk_level, RiskLevel::Low);
     }
 
     #[test]
@@ -848,68 +916,61 @@ mod tests {
     fn operations_items_create_has_none_idempotency() {
         let ops = operations_info();
         let create = ops
-            .as_array()
-            .unwrap()
             .iter()
-            .find(|o| o["id"] == "bitwarden.items.create")
+            .find(|o| o.id.as_ref() == "bitwarden.items.create")
             .unwrap();
-        assert_eq!(create["idempotency"], "none");
+        assert_eq!(create.idempotency, IdempotencyClass::None);
     }
 
     #[test]
     fn operations_items_delete_has_strict_idempotency() {
         let ops = operations_info();
         let delete = ops
-            .as_array()
-            .unwrap()
             .iter()
-            .find(|o| o["id"] == "bitwarden.items.delete")
+            .find(|o| o.id.as_ref() == "bitwarden.items.delete")
             .unwrap();
-        assert_eq!(delete["idempotency"], "strict");
+        assert_eq!(delete.idempotency, IdempotencyClass::Strict);
     }
 
     #[test]
     fn operations_items_create_capability() {
         let ops = operations_info();
         let op = ops
-            .as_array()
-            .unwrap()
             .iter()
-            .find(|o| o["id"] == "bitwarden.items.create")
+            .find(|o| o.id.as_ref() == "bitwarden.items.create")
             .unwrap();
-        assert_eq!(op["capability"], "bitwarden.items.write");
+        assert_eq!(op.capability.as_ref(), "bitwarden.items.write");
     }
 
     #[test]
     fn operations_items_list_capability() {
         let ops = operations_info();
         let op = ops
-            .as_array()
-            .unwrap()
             .iter()
-            .find(|o| o["id"] == "bitwarden.items.list")
+            .find(|o| o.id.as_ref() == "bitwarden.items.list")
             .unwrap();
-        assert_eq!(op["capability"], "bitwarden.items.read");
+        assert_eq!(op.capability.as_ref(), "bitwarden.items.read");
     }
 
     #[test]
     fn operations_collections_list_capability() {
         let ops = operations_info();
         let op = ops
-            .as_array()
-            .unwrap()
             .iter()
-            .find(|o| o["id"] == "bitwarden.collections.list")
+            .find(|o| o.id.as_ref() == "bitwarden.collections.list")
             .unwrap();
-        assert_eq!(op["capability"], "bitwarden.collections.read");
+        assert_eq!(op.capability.as_ref(), "bitwarden.collections.read");
     }
 
     #[test]
     fn operations_all_have_summary() {
         let ops = operations_info();
-        for op in ops.as_array().unwrap() {
-            let summary = op["summary"].as_str().unwrap();
-            assert!(!summary.is_empty(), "op {:?} has empty summary", op["id"]);
+        for op in &ops {
+            assert!(
+                !op.summary.is_empty(),
+                "op {} has empty summary",
+                op.id.as_ref()
+            );
         }
     }
 
@@ -1006,9 +1067,9 @@ mod tests {
     #[test]
     fn operations_write_ops_have_correct_capability() {
         let ops = operations_info();
-        for op in ops.as_array().unwrap() {
-            let id = op["id"].as_str().unwrap();
-            let cap = op["capability"].as_str().unwrap();
+        for op in &ops {
+            let id = op.id.as_ref();
+            let cap = op.capability.as_ref();
             if id.contains("create") || id.contains("delete") {
                 #[allow(clippy::case_sensitive_file_extension_comparisons)]
                 let is_write = cap.ends_with(".write");
@@ -1038,12 +1099,23 @@ mod tests {
     #[test]
     fn operations_all_capabilities_prefixed_with_bitwarden() {
         let ops = operations_info();
-        for op in ops.as_array().unwrap() {
-            let cap = op["capability"].as_str().unwrap();
+        for op in &ops {
+            let cap = op.capability.as_ref();
             assert!(
                 cap.starts_with("bitwarden."),
                 "capability {cap} should be prefixed with bitwarden."
             );
+        }
+    }
+
+    #[test]
+    fn operations_serializes_to_json() {
+        let json = ops_json();
+        let arr = json.as_array().unwrap();
+        assert_eq!(arr.len(), 5);
+        for op in arr {
+            assert!(op.get("id").is_some(), "missing id in JSON");
+            assert!(op.get("summary").is_some(), "missing summary in JSON");
         }
     }
 

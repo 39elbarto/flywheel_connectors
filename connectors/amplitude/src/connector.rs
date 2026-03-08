@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use fcp_core::{
     AgentHint, BaseConnector, CapabilityId, ConnectorId, FcpError, FcpResult, IdempotencyClass,
-    OperationId, OperationInfo, RiskLevel, SafetyTier,
+    Introspection, OperationId, OperationInfo, RiskLevel, SafetyTier,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -257,11 +257,106 @@ impl AmplitudeConnector {
 
     /// Handle the `introspect` method.
     pub async fn handle_introspect(&self) -> FcpResult<serde_json::Value> {
-        Ok(json!({
-            "connector_id": "fcp.amplitude",
-            "version": "0.1.0",
-            "operations": serde_json::to_value(operations_info()).unwrap_or_default(),
-        }))
+        let introspection = Introspection {
+            operations: vec![
+                OperationInfo {
+                    id: OperationId::from_static("amplitude.charts.query"),
+                    summary: "Query a chart by ID".into(),
+                    input_schema: json!({
+                        "type": "object",
+                        "required": ["chart_id"],
+                        "properties": {
+                            "chart_id": {"type": "string", "description": "Chart ID to query"}
+                        }
+                    }),
+                    output_schema: json!({
+                        "type": "object",
+                        "required": ["data"],
+                        "properties": {"data": {"type": "object"}}
+                    }),
+                    capability: CapabilityId::from_static("amplitude.charts.read"),
+                    risk_level: RiskLevel::Low,
+                    description: None,
+                    rate_limit: None,
+                    requires_approval: None,
+                    safety_tier: SafetyTier::Safe,
+                    idempotency: IdempotencyClass::Strict,
+                    ai_hints: AgentHint {
+                        when_to_use: "Query chart data from Amplitude by chart ID.".into(),
+                        common_mistakes: vec![],
+                        examples: vec![r#"{"chart_id": "abc123"}"#.into()],
+                        related: vec![
+                            CapabilityId::from_static("amplitude.events.export"),
+                            CapabilityId::from_static("amplitude.cohorts.list"),
+                        ],
+                    },
+                },
+                OperationInfo {
+                    id: OperationId::from_static("amplitude.cohorts.list"),
+                    summary: "List cohorts".into(),
+                    input_schema: json!({"type": "object", "required": []}),
+                    output_schema: json!({
+                        "type": "object",
+                        "required": ["cohorts"],
+                        "properties": {"cohorts": {"type": "array"}}
+                    }),
+                    capability: CapabilityId::from_static("amplitude.cohorts.read"),
+                    risk_level: RiskLevel::Low,
+                    description: None,
+                    rate_limit: None,
+                    requires_approval: None,
+                    safety_tier: SafetyTier::Safe,
+                    idempotency: IdempotencyClass::Strict,
+                    ai_hints: AgentHint {
+                        when_to_use: "List all cohorts in Amplitude.".into(),
+                        common_mistakes: vec![],
+                        examples: vec!["{}".into()],
+                        related: vec![CapabilityId::from_static("amplitude.events.export")],
+                    },
+                },
+                OperationInfo {
+                    id: OperationId::from_static("amplitude.events.export"),
+                    summary: "Export events for a date range".into(),
+                    input_schema: json!({
+                        "type": "object",
+                        "required": ["start", "end"],
+                        "properties": {
+                            "start": {"type": "string", "description": "Start date (YYYYMMDDTHH)"},
+                            "end": {"type": "string", "description": "End date (YYYYMMDDTHH)"}
+                        }
+                    }),
+                    output_schema: json!({
+                        "type": "object",
+                        "required": ["data"],
+                        "properties": {"data": {"type": "array"}}
+                    }),
+                    capability: CapabilityId::from_static("amplitude.events.read"),
+                    risk_level: RiskLevel::Low,
+                    description: None,
+                    rate_limit: None,
+                    requires_approval: None,
+                    safety_tier: SafetyTier::Safe,
+                    idempotency: IdempotencyClass::Strict,
+                    ai_hints: AgentHint {
+                        when_to_use: "Export raw events from Amplitude for a date range.".into(),
+                        common_mistakes: vec!["Date format must be YYYYMMDDTHH".into()],
+                        examples: vec![r#"{"start": "20250101T00", "end": "20250102T00"}"#.into()],
+                        related: vec![
+                            CapabilityId::from_static("amplitude.cohorts.list"),
+                            CapabilityId::from_static("amplitude.charts.query"),
+                        ],
+                    },
+                },
+            ],
+            events: vec![],
+            resource_types: vec![],
+            auth_caps: None,
+            event_caps: None,
+        };
+
+        serde_json::to_value(introspection).map_err(|e| FcpError::Internal {
+            message: format!("Failed to serialize introspection: {e}"),
+        })
     }
 
     /// Handle the `invoke` method.
@@ -313,7 +408,10 @@ impl AmplitudeConnector {
             .and_then(serde_json::Value::as_str)
             .unwrap_or("");
 
-        let allowed = operations_info().iter().any(|o| o.id.as_ref() == operation);
+        let allowed = operations_info().as_array().is_some_and(|ops| {
+            ops.iter()
+                .any(|o| o.get("id").and_then(serde_json::Value::as_str) == Some(operation))
+        });
 
         Ok(json!({
             "allowed": allowed,
@@ -374,137 +472,34 @@ fn require_str<'a>(input: &'a serde_json::Value, field: &str) -> Result<&'a str,
         })
 }
 
-/// Build a single [`OperationInfo`].
-fn op_info(
-    id: &'static str,
-    summary: &str,
-    input_schema: serde_json::Value,
-    output_schema: serde_json::Value,
-    capability: &'static str,
-    risk_level: RiskLevel,
-    safety_tier: SafetyTier,
-    idempotency: IdempotencyClass,
-    ai_hints: AgentHint,
-) -> OperationInfo {
-    OperationInfo {
-        id: OperationId::from_static(id),
-        summary: summary.into(),
-        description: None,
-        input_schema,
-        output_schema,
-        capability: CapabilityId::from_static(capability),
-        risk_level,
-        safety_tier,
-        idempotency,
-        ai_hints,
-        rate_limit: None,
-        requires_approval: None,
-    }
-}
-
 /// Build the operations info for introspection.
-fn operations_info() -> Vec<OperationInfo> {
-    vec![
-        op_info(
-            "amplitude.charts.query",
-            "Query a chart by ID",
-            json!({
-                "type": "object",
-                "required": ["chart_id"],
-                "properties": {
-                    "chart_id": { "type": "string", "description": "Chart ID to query" }
-                }
-            }),
-            json!({
-                "type": "object",
-                "required": ["data"],
-                "properties": {
-                    "data": { "type": "object" }
-                }
-            }),
-            "amplitude.charts.read",
-            RiskLevel::Low,
-            SafetyTier::Safe,
-            IdempotencyClass::Strict,
-            AgentHint {
-                when_to_use: "Query chart data from Amplitude by chart ID.".into(),
-                common_mistakes: vec![
-                    "Using a dashboard ID instead of a chart ID — charts and dashboards have separate ID namespaces in Amplitude.".into(),
-                ],
-                examples: vec![
-                    r#"{"chart_id": "abc123"}"#.into(),
-                ],
-                related: vec![
-                    CapabilityId::from_static("amplitude.events.export"),
-                    CapabilityId::from_static("amplitude.cohorts.list"),
-                ],
-            },
-        ),
-        op_info(
-            "amplitude.cohorts.list",
-            "List cohorts",
-            json!({
-                "type": "object",
-                "required": [],
-                "properties": {}
-            }),
-            json!({
-                "type": "object",
-                "required": ["cohorts"],
-                "properties": {
-                    "cohorts": { "type": "array" }
-                }
-            }),
-            "amplitude.cohorts.read",
-            RiskLevel::Low,
-            SafetyTier::Safe,
-            IdempotencyClass::Strict,
-            AgentHint {
-                when_to_use: "List all cohorts in Amplitude.".into(),
-                common_mistakes: vec![
-                    "Expecting cohort member details in the list response — this returns cohort metadata only; use a separate cohort membership export for user-level data.".into(),
-                ],
-                examples: vec![r#"{}"#.into()],
-                related: vec![CapabilityId::from_static("amplitude.events.export")],
-            },
-        ),
-        op_info(
-            "amplitude.events.export",
-            "Export events for a date range",
-            json!({
-                "type": "object",
-                "required": ["start", "end"],
-                "properties": {
-                    "start": { "type": "string", "description": "Start date (YYYYMMDDTHH)" },
-                    "end": { "type": "string", "description": "End date (YYYYMMDDTHH)" }
-                }
-            }),
-            json!({
-                "type": "object",
-                "required": ["data"],
-                "properties": {
-                    "data": { "type": "array" }
-                }
-            }),
-            "amplitude.events.read",
-            RiskLevel::Low,
-            SafetyTier::Safe,
-            IdempotencyClass::Strict,
-            AgentHint {
-                when_to_use: "Export raw events from Amplitude for a date range.".into(),
-                common_mistakes: vec![
-                    "Date format must be YYYYMMDDTHH".into(),
-                ],
-                examples: vec![
-                    r#"{"start": "20250101T00", "end": "20250102T00"}"#.into(),
-                ],
-                related: vec![
-                    CapabilityId::from_static("amplitude.cohorts.list"),
-                    CapabilityId::from_static("amplitude.charts.query"),
-                ],
-            },
-        ),
-    ]
+fn operations_info() -> serde_json::Value {
+    json!([
+        {
+            "id": "amplitude.charts.query",
+            "summary": "Query a chart by ID",
+            "capability": "amplitude.charts.read",
+            "risk_level": "low",
+            "safety_tier": "safe",
+            "idempotency": "strict",
+        },
+        {
+            "id": "amplitude.cohorts.list",
+            "summary": "List cohorts",
+            "capability": "amplitude.cohorts.read",
+            "risk_level": "low",
+            "safety_tier": "safe",
+            "idempotency": "strict",
+        },
+        {
+            "id": "amplitude.events.export",
+            "summary": "Export events for a date range",
+            "capability": "amplitude.events.read",
+            "risk_level": "low",
+            "safety_tier": "safe",
+            "idempotency": "strict",
+        },
+    ])
 }
 
 #[cfg(test)]

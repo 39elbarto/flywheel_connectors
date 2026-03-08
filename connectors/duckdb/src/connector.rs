@@ -3,7 +3,10 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use fcp_core::{BaseConnector, ConnectorId, CredentialId, FcpError, FcpResult};
+use fcp_core::{
+    AgentHint, BaseConnector, CapabilityId, ConnectorId, CredentialId, FcpError, FcpResult,
+    IdempotencyClass, OperationId, OperationInfo, RiskLevel, SafetyTier,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tracing::{info, instrument};
@@ -279,7 +282,7 @@ impl DuckDbConnector {
         Ok(json!({
             "connector_id": "fcp.duckdb",
             "version": "0.1.0",
-            "operations": operations_info(),
+            "operations": serde_json::to_value(operations_info()).unwrap_or_default(),
         }))
     }
 
@@ -335,10 +338,7 @@ impl DuckDbConnector {
             .and_then(serde_json::Value::as_str)
             .unwrap_or("");
 
-        let allowed = operations_info().as_array().is_some_and(|ops| {
-            ops.iter()
-                .any(|o| o.get("id").and_then(serde_json::Value::as_str) == Some(operation))
-        });
+        let allowed = operations_info().iter().any(|o| o.id.as_ref() == operation);
 
         Ok(json!({
             "allowed": allowed,
@@ -481,87 +481,278 @@ fn require_str<'a>(input: &'a serde_json::Value, field: &str) -> Result<&'a str,
         })
 }
 
+/// Build a single `OperationInfo` entry.
+#[allow(clippy::too_many_arguments)]
+fn op_info(
+    id: &'static str,
+    summary: &str,
+    input_schema: serde_json::Value,
+    output_schema: serde_json::Value,
+    capability: &'static str,
+    risk_level: RiskLevel,
+    safety_tier: SafetyTier,
+    idempotency: IdempotencyClass,
+    ai_hints: AgentHint,
+) -> OperationInfo {
+    OperationInfo {
+        id: OperationId::from_static(id),
+        summary: summary.into(),
+        input_schema,
+        output_schema,
+        capability: CapabilityId::from_static(capability),
+        risk_level,
+        description: None,
+        rate_limit: None,
+        requires_approval: None,
+        safety_tier,
+        idempotency,
+        ai_hints,
+    }
+}
+
 /// Build the operations info for introspection.
-fn operations_info() -> serde_json::Value {
-    json!([
-        {
-            "id": "duckdb.query.execute",
-            "summary": "Execute a SQL query via MotherDuck",
-            "capability": "duckdb.write",
-            "risk_level": "high",
-            "safety_tier": "risky",
-            "idempotency": "none",
-        },
-        {
-            "id": "duckdb.databases.list",
-            "summary": "List databases in MotherDuck",
-            "capability": "duckdb.read",
-            "risk_level": "low",
-            "safety_tier": "safe",
-            "idempotency": "strict",
-        },
-        {
-            "id": "duckdb.databases.get",
-            "summary": "Get details of a specific database",
-            "capability": "duckdb.read",
-            "risk_level": "low",
-            "safety_tier": "safe",
-            "idempotency": "strict",
-        },
-        {
-            "id": "duckdb.tables.list",
-            "summary": "List tables in a database",
-            "capability": "duckdb.read",
-            "risk_level": "low",
-            "safety_tier": "safe",
-            "idempotency": "strict",
-        },
-        {
-            "id": "duckdb.tables.get",
-            "summary": "Get details of a specific table",
-            "capability": "duckdb.read",
-            "risk_level": "low",
-            "safety_tier": "safe",
-            "idempotency": "strict",
-        },
-        {
-            "id": "duckdb.schemas.list",
-            "summary": "List schemas in a database",
-            "capability": "duckdb.read",
-            "risk_level": "low",
-            "safety_tier": "safe",
-            "idempotency": "strict",
-        },
-        {
-            "id": "duckdb.queries.status",
-            "summary": "Get the status of a previously submitted query",
-            "capability": "duckdb.read",
-            "risk_level": "low",
-            "safety_tier": "safe",
-            "idempotency": "strict",
-        },
-        {
-            "id": "duckdb.shares.list",
-            "summary": "List shared databases",
-            "capability": "duckdb.read",
-            "risk_level": "low",
-            "safety_tier": "safe",
-            "idempotency": "strict",
-        },
-        {
-            "id": "duckdb.shares.create",
-            "summary": "Create a database share",
-            "capability": "duckdb.write",
-            "risk_level": "medium",
-            "safety_tier": "risky",
-            "idempotency": "none",
-        },
-    ])
+fn operations_info() -> Vec<OperationInfo> {
+    vec![
+        op_info(
+            "duckdb.query.execute",
+            "Execute a SQL query via MotherDuck",
+            json!({
+                "type": "object",
+                "required": ["sql"],
+                "properties": {
+                    "sql": { "type": "string", "description": "SQL query to execute" },
+                    "database": { "type": "string" }
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["rows"],
+                "properties": { "rows": { "type": "array" } }
+            }),
+            "duckdb.write",
+            RiskLevel::High,
+            SafetyTier::Risky,
+            IdempotencyClass::None,
+            AgentHint {
+                when_to_use: "Execute a SQL query against DuckDB via MotherDuck.".into(),
+                common_mistakes: vec![
+                    "Executing destructive DDL without confirmation".into(),
+                ],
+                examples: vec![
+                    r#"{"sql": "SELECT count(*) FROM sales WHERE year = 2025"}"#.into(),
+                ],
+                related: vec![
+                    CapabilityId::from_static("duckdb.databases.list"),
+                    CapabilityId::from_static("duckdb.tables.list"),
+                ],
+            },
+        ),
+        op_info(
+            "duckdb.databases.list",
+            "List databases in MotherDuck",
+            json!({ "type": "object", "required": [] }),
+            json!({
+                "type": "object",
+                "required": ["databases"],
+                "properties": { "databases": { "type": "array" } }
+            }),
+            "duckdb.read",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "List all databases in MotherDuck.".into(),
+                common_mistakes: vec![],
+                examples: vec!["{}".into()],
+                related: vec![CapabilityId::from_static("duckdb.tables.list")],
+            },
+        ),
+        op_info(
+            "duckdb.databases.get",
+            "Get details of a specific database",
+            json!({
+                "type": "object",
+                "required": ["database"],
+                "properties": { "database": { "type": "string" } }
+            }),
+            json!({
+                "type": "object",
+                "required": ["database"],
+                "properties": { "database": { "type": "object" } }
+            }),
+            "duckdb.read",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "Get details of a specific MotherDuck database.".into(),
+                common_mistakes: vec![],
+                examples: vec![r#"{"database": "analytics"}"#.into()],
+                related: vec![CapabilityId::from_static("duckdb.databases.list")],
+            },
+        ),
+        op_info(
+            "duckdb.tables.list",
+            "List tables in a database",
+            json!({
+                "type": "object",
+                "required": ["database"],
+                "properties": { "database": { "type": "string" } }
+            }),
+            json!({
+                "type": "object",
+                "required": ["tables"],
+                "properties": { "tables": { "type": "array" } }
+            }),
+            "duckdb.read",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "List all tables in a DuckDB database.".into(),
+                common_mistakes: vec![
+                    "Expecting views and temporary tables to appear — only persistent base tables are listed.".into(),
+                ],
+                examples: vec!["{}".into()],
+                related: vec![CapabilityId::from_static("duckdb.query")],
+            },
+        ),
+        op_info(
+            "duckdb.tables.get",
+            "Get details of a specific table",
+            json!({
+                "type": "object",
+                "required": ["database", "table"],
+                "properties": {
+                    "database": { "type": "string" },
+                    "table": { "type": "string" }
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["table"],
+                "properties": { "table": { "type": "object" } }
+            }),
+            "duckdb.read",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "Get details of a specific table in a database.".into(),
+                common_mistakes: vec![],
+                examples: vec![
+                    r#"{"database": "analytics", "table": "events"}"#.into(),
+                ],
+                related: vec![CapabilityId::from_static("duckdb.tables.list")],
+            },
+        ),
+        op_info(
+            "duckdb.schemas.list",
+            "List schemas in a database",
+            json!({
+                "type": "object",
+                "required": ["database"],
+                "properties": { "database": { "type": "string" } }
+            }),
+            json!({
+                "type": "object",
+                "required": ["schemas"],
+                "properties": { "schemas": { "type": "array" } }
+            }),
+            "duckdb.read",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "List all schemas in a DuckDB database.".into(),
+                common_mistakes: vec![],
+                examples: vec![r#"{"database": "analytics"}"#.into()],
+                related: vec![CapabilityId::from_static("duckdb.tables.list")],
+            },
+        ),
+        op_info(
+            "duckdb.queries.status",
+            "Get the status of a previously submitted query",
+            json!({
+                "type": "object",
+                "required": ["query_id"],
+                "properties": { "query_id": { "type": "string" } }
+            }),
+            json!({
+                "type": "object",
+                "required": ["status"],
+                "properties": { "status": { "type": "object" } }
+            }),
+            "duckdb.read",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "Check the status of a previously submitted query.".into(),
+                common_mistakes: vec![],
+                examples: vec![r#"{"query_id": "q-12345"}"#.into()],
+                related: vec![CapabilityId::from_static("duckdb.query.execute")],
+            },
+        ),
+        op_info(
+            "duckdb.shares.list",
+            "List shared databases",
+            json!({ "type": "object", "required": [] }),
+            json!({
+                "type": "object",
+                "required": ["shares"],
+                "properties": { "shares": { "type": "array" } }
+            }),
+            "duckdb.read",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "List all shared databases in MotherDuck.".into(),
+                common_mistakes: vec![],
+                examples: vec!["{}".into()],
+                related: vec![CapabilityId::from_static("duckdb.shares.create")],
+            },
+        ),
+        op_info(
+            "duckdb.shares.create",
+            "Create a database share",
+            json!({
+                "type": "object",
+                "required": ["name", "database"],
+                "properties": {
+                    "name": { "type": "string" },
+                    "database": { "type": "string" }
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["share"],
+                "properties": { "share": { "type": "object" } }
+            }),
+            "duckdb.write",
+            RiskLevel::Medium,
+            SafetyTier::Risky,
+            IdempotencyClass::None,
+            AgentHint {
+                when_to_use: "Create a new database share in MotherDuck.".into(),
+                common_mistakes: vec![],
+                examples: vec![
+                    r#"{"name": "my_share", "database": "analytics"}"#.into(),
+                ],
+                related: vec![CapabilityId::from_static("duckdb.shares.list")],
+            },
+        ),
+    ]
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn ops_json() -> serde_json::Value {
+        serde_json::to_value(operations_info()).unwrap()
+    }
 
     #[test]
     fn config_from_service_token() {
@@ -685,13 +876,12 @@ mod tests {
     #[test]
     fn operations_info_has_9_operations() {
         let ops = operations_info();
-        let arr = ops.as_array().unwrap();
-        assert_eq!(arr.len(), 9);
+        assert_eq!(ops.len(), 9);
     }
 
     #[test]
     fn operations_all_have_required_fields() {
-        let ops = operations_info();
+        let ops = ops_json();
         for op in ops.as_array().unwrap() {
             assert!(op.get("id").is_some(), "missing id");
             assert!(op.get("summary").is_some(), "missing summary");
@@ -703,7 +893,7 @@ mod tests {
 
     #[test]
     fn operations_ids_are_unique() {
-        let ops = operations_info();
+        let ops = ops_json();
         let ids: Vec<&str> = ops
             .as_array()
             .unwrap()
@@ -719,7 +909,7 @@ mod tests {
     #[test]
     fn operations_risk_levels_valid() {
         let valid = ["low", "medium", "high"];
-        let ops = operations_info();
+        let ops = ops_json();
         for op in ops.as_array().unwrap() {
             let rl = op["risk_level"].as_str().unwrap();
             assert!(valid.contains(&rl), "invalid risk_level: {rl}");
@@ -729,7 +919,7 @@ mod tests {
     #[test]
     fn operations_safety_tiers_valid() {
         let valid = ["safe", "risky", "dangerous"];
-        let ops = operations_info();
+        let ops = ops_json();
         for op in ops.as_array().unwrap() {
             let st = op["safety_tier"].as_str().unwrap();
             assert!(valid.contains(&st), "invalid safety_tier: {st}");
@@ -739,7 +929,7 @@ mod tests {
     #[test]
     #[allow(clippy::case_sensitive_file_extension_comparisons)]
     fn read_operations_are_safe() {
-        let ops = operations_info();
+        let ops = ops_json();
         for op in ops.as_array().unwrap() {
             let cap = op["capability"].as_str().unwrap();
             if cap.ends_with(".read") {
@@ -761,7 +951,7 @@ mod tests {
 
     #[test]
     fn operations_contain_expected_ids() {
-        let ops = operations_info();
+        let ops = ops_json();
         let ids: Vec<&str> = ops
             .as_array()
             .unwrap()
@@ -855,7 +1045,7 @@ mod tests {
 
     #[test]
     fn operations_all_have_idempotency() {
-        let ops = operations_info();
+        let ops = ops_json();
         for op in ops.as_array().unwrap() {
             assert!(
                 op.get("idempotency").is_some(),
@@ -882,7 +1072,7 @@ mod tests {
     #[test]
     #[allow(clippy::case_sensitive_file_extension_comparisons)]
     fn write_operations_are_risky() {
-        let ops = operations_info();
+        let ops = ops_json();
         for op in ops.as_array().unwrap() {
             let cap = op["capability"].as_str().unwrap();
             if cap.ends_with(".write") {
@@ -974,7 +1164,7 @@ mod tests {
 
     #[test]
     fn operations_query_execute_is_risky() {
-        let ops = operations_info();
+        let ops = ops_json();
         let query_op = ops
             .as_array()
             .unwrap()
@@ -987,7 +1177,7 @@ mod tests {
 
     #[test]
     fn operations_shares_create_is_risky() {
-        let ops = operations_info();
+        let ops = ops_json();
         let share_op = ops
             .as_array()
             .unwrap()
@@ -1000,7 +1190,7 @@ mod tests {
 
     #[test]
     fn operations_databases_list_summary() {
-        let ops = operations_info();
+        let ops = ops_json();
         let db_op = ops
             .as_array()
             .unwrap()

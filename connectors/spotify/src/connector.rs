@@ -3,7 +3,10 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use fcp_core::{BaseConnector, ConnectorId, CredentialId, FcpError, FcpResult};
+use fcp_core::{
+    AgentHint, BaseConnector, CapabilityId, ConnectorId, CredentialId, FcpError, FcpResult,
+    IdempotencyClass, OperationId, OperationInfo, RiskLevel, SafetyTier,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tracing::{info, instrument};
@@ -268,7 +271,7 @@ impl SpotifyConnector {
         Ok(json!({
             "connector_id": "fcp.spotify",
             "version": "0.1.0",
-            "operations": operations_info(),
+            "operations": serde_json::to_value(operations_info()).unwrap_or_default(),
         }))
     }
 
@@ -325,10 +328,7 @@ impl SpotifyConnector {
             .and_then(serde_json::Value::as_str)
             .unwrap_or("");
 
-        let allowed = operations_info().as_array().is_some_and(|ops| {
-            ops.iter()
-                .any(|o| o.get("id").and_then(serde_json::Value::as_str) == Some(operation))
-        });
+        let allowed = operations_info().iter().any(|o| o.id.as_ref() == operation);
 
         Ok(json!({
             "allowed": allowed,
@@ -495,90 +495,367 @@ fn require_str<'a>(input: &'a serde_json::Value, field: &str) -> Result<&'a str,
         })
 }
 
+/// Build a single `OperationInfo` entry.
+#[allow(clippy::too_many_arguments)]
+fn op_info(
+    id: &'static str,
+    summary: &str,
+    input_schema: serde_json::Value,
+    output_schema: serde_json::Value,
+    capability: &'static str,
+    risk_level: RiskLevel,
+    safety_tier: SafetyTier,
+    idempotency: IdempotencyClass,
+    ai_hints: AgentHint,
+) -> OperationInfo {
+    OperationInfo {
+        id: OperationId::from_static(id),
+        summary: summary.into(),
+        description: None,
+        input_schema,
+        output_schema,
+        capability: CapabilityId::from_static(capability),
+        risk_level,
+        safety_tier,
+        idempotency,
+        ai_hints,
+        rate_limit: None,
+        requires_approval: None,
+    }
+}
+
 /// Build the operations info for introspection.
-fn operations_info() -> serde_json::Value {
-    json!([
-        {
-            "id": "spotify.profile.get",
-            "summary": "Get current user profile",
-            "capability": "spotify.read",
-            "risk_level": "low",
-            "safety_tier": "safe",
-            "idempotency": "strict",
-        },
-        {
-            "id": "spotify.search",
-            "summary": "Search tracks, albums, artists, and playlists",
-            "capability": "spotify.read",
-            "risk_level": "low",
-            "safety_tier": "safe",
-            "idempotency": "strict",
-        },
-        {
-            "id": "spotify.tracks.get",
-            "summary": "Get track metadata by ID",
-            "capability": "spotify.read",
-            "risk_level": "low",
-            "safety_tier": "safe",
-            "idempotency": "strict",
-        },
-        {
-            "id": "spotify.albums.get",
-            "summary": "Get album metadata by ID",
-            "capability": "spotify.read",
-            "risk_level": "low",
-            "safety_tier": "safe",
-            "idempotency": "strict",
-        },
-        {
-            "id": "spotify.artists.get",
-            "summary": "Get artist metadata by ID",
-            "capability": "spotify.read",
-            "risk_level": "low",
-            "safety_tier": "safe",
-            "idempotency": "strict",
-        },
-        {
-            "id": "spotify.playlists.get",
-            "summary": "Get playlist metadata by ID",
-            "capability": "spotify.read",
-            "risk_level": "low",
-            "safety_tier": "safe",
-            "idempotency": "strict",
-        },
-        {
-            "id": "spotify.playlists.list",
-            "summary": "List current user playlists",
-            "capability": "spotify.read",
-            "risk_level": "low",
-            "safety_tier": "safe",
-            "idempotency": "strict",
-        },
-        {
-            "id": "spotify.player.recently_played",
-            "summary": "Get recently played tracks",
-            "capability": "spotify.read",
-            "risk_level": "low",
-            "safety_tier": "safe",
-            "idempotency": "strict",
-        },
-        {
-            "id": "spotify.top_items",
-            "summary": "Get user top artists or tracks",
-            "capability": "spotify.read",
-            "risk_level": "low",
-            "safety_tier": "safe",
-            "idempotency": "strict",
-        },
-        {
-            "id": "spotify.recommendations.get",
-            "summary": "Get track recommendations",
-            "capability": "spotify.read",
-            "risk_level": "low",
-            "safety_tier": "safe",
-            "idempotency": "strict",
-        },
-    ])
+#[allow(clippy::too_many_lines)]
+fn operations_info() -> Vec<OperationInfo> {
+    vec![
+        op_info(
+            "spotify.profile.get",
+            "Get current user profile",
+            json!({
+                "type": "object",
+                "properties": {}
+            }),
+            json!({
+                "type": "object",
+                "required": ["profile"],
+                "properties": { "profile": { "type": "object" } }
+            }),
+            "spotify.read",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "Fetch the authenticated user's Spotify profile.".into(),
+                common_mistakes: vec![],
+                examples: vec!["{}".into()],
+                related: vec![
+                    CapabilityId::from_static("spotify.playlists.list"),
+                    CapabilityId::from_static("spotify.top_items"),
+                ],
+            },
+        ),
+        op_info(
+            "spotify.search",
+            "Search tracks, albums, artists, and playlists",
+            json!({
+                "type": "object",
+                "required": ["query"],
+                "properties": {
+                    "query": { "type": "string", "maxLength": 512 },
+                    "types": { "type": "string", "enum": ["track", "album", "artist", "playlist", "show", "episode"] },
+                    "limit": { "type": "integer", "minimum": 1, "maximum": 50 }
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["results"],
+                "properties": {
+                    "results": { "type": "object" }
+                }
+            }),
+            "spotify.read",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "Find Spotify entities by text query.".into(),
+                common_mistakes: vec![
+                    "Using lowercase country codes for market.".into(),
+                    "Forgetting type filter when expecting a single entity class.".into(),
+                ],
+                examples: vec![
+                    r#"{"query": "kind of blue", "types": "album", "limit": 10}"#.into(),
+                ],
+                related: vec![
+                    CapabilityId::from_static("spotify.tracks.get"),
+                    CapabilityId::from_static("spotify.albums.get"),
+                    CapabilityId::from_static("spotify.artists.get"),
+                ],
+            },
+        ),
+        op_info(
+            "spotify.tracks.get",
+            "Get track metadata by ID",
+            json!({
+                "type": "object",
+                "required": ["track_id"],
+                "properties": {
+                    "track_id": { "type": "string" }
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["track"],
+                "properties": { "track": { "type": "object" } }
+            }),
+            "spotify.read",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "Fetch full metadata for a known Spotify track ID.".into(),
+                common_mistakes: vec![
+                    "Passing a Spotify URL instead of a track ID.".into(),
+                ],
+                examples: vec![
+                    r#"{"track_id": "11dFghVXANMlKmJXsNCbNl"}"#.into(),
+                ],
+                related: vec![
+                    CapabilityId::from_static("spotify.search"),
+                    CapabilityId::from_static("spotify.albums.get"),
+                ],
+            },
+        ),
+        op_info(
+            "spotify.albums.get",
+            "Get album metadata by ID",
+            json!({
+                "type": "object",
+                "required": ["album_id"],
+                "properties": {
+                    "album_id": { "type": "string" }
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["album"],
+                "properties": { "album": { "type": "object" } }
+            }),
+            "spotify.read",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "Fetch album metadata for a known album ID.".into(),
+                common_mistakes: vec![
+                    "Passing a URI prefix (spotify:album:...) without stripping it.".into(),
+                ],
+                examples: vec![
+                    r#"{"album_id": "4aawyAB9vmqN3uQ7FjRGTy"}"#.into(),
+                ],
+                related: vec![
+                    CapabilityId::from_static("spotify.search"),
+                    CapabilityId::from_static("spotify.tracks.get"),
+                ],
+            },
+        ),
+        op_info(
+            "spotify.artists.get",
+            "Get artist metadata by ID",
+            json!({
+                "type": "object",
+                "required": ["artist_id"],
+                "properties": {
+                    "artist_id": { "type": "string" }
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["artist"],
+                "properties": { "artist": { "type": "object" } }
+            }),
+            "spotify.read",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "Fetch artist metadata for a known artist ID.".into(),
+                common_mistakes: vec![
+                    "Passing a Spotify URI (spotify:artist:...) or URL instead of the bare artist ID string.".into(),
+                ],
+                examples: vec![
+                    r#"{"artist_id": "06HL4z0CvFAxyc27GXpf02"}"#.into(),
+                ],
+                related: vec![
+                    CapabilityId::from_static("spotify.search"),
+                    CapabilityId::from_static("spotify.albums.get"),
+                ],
+            },
+        ),
+        op_info(
+            "spotify.playlists.get",
+            "Get playlist metadata by ID",
+            json!({
+                "type": "object",
+                "required": ["playlist_id"],
+                "properties": {
+                    "playlist_id": { "type": "string" }
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["playlist"],
+                "properties": { "playlist": { "type": "object" } }
+            }),
+            "spotify.read",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "Read playlist metadata and track references.".into(),
+                common_mistakes: vec![
+                    "Expecting all tracks when playlist is paginated.".into(),
+                ],
+                examples: vec![
+                    r#"{"playlist_id": "37i9dQZF1DXcBWIGoYBM5M"}"#.into(),
+                ],
+                related: vec![
+                    CapabilityId::from_static("spotify.search"),
+                    CapabilityId::from_static("spotify.playlists.list"),
+                ],
+            },
+        ),
+        op_info(
+            "spotify.playlists.list",
+            "List current user playlists",
+            json!({
+                "type": "object",
+                "properties": {}
+            }),
+            json!({
+                "type": "object",
+                "required": ["playlists"],
+                "properties": {
+                    "playlists": { "type": "array" }
+                }
+            }),
+            "spotify.read",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "List the current user's playlists.".into(),
+                common_mistakes: vec![
+                    "Forgetting pagination for large libraries.".into(),
+                ],
+                examples: vec!["{}".into()],
+                related: vec![
+                    CapabilityId::from_static("spotify.playlists.get"),
+                ],
+            },
+        ),
+        op_info(
+            "spotify.player.recently_played",
+            "Get recently played tracks",
+            json!({
+                "type": "object",
+                "properties": {
+                    "limit": { "type": "integer", "minimum": 1, "maximum": 50 }
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["items"],
+                "properties": {
+                    "items": { "type": "array" }
+                }
+            }),
+            "spotify.read",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "Read recently played tracks for the current user.".into(),
+                common_mistakes: vec![],
+                examples: vec![r#"{"limit": 10}"#.into()],
+                related: vec![
+                    CapabilityId::from_static("spotify.top_items"),
+                ],
+            },
+        ),
+        op_info(
+            "spotify.top_items",
+            "Get user top artists or tracks",
+            json!({
+                "type": "object",
+                "required": ["item_type"],
+                "properties": {
+                    "item_type": { "type": "string", "enum": ["artists", "tracks"] },
+                    "time_range": { "type": "string", "enum": ["short_term", "medium_term", "long_term"] },
+                    "limit": { "type": "integer", "minimum": 1, "maximum": 50 }
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["items"],
+                "properties": {
+                    "items": { "type": "array" }
+                }
+            }),
+            "spotify.read",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "Fetch the user's top artists or tracks over a given time range.".into(),
+                common_mistakes: vec![
+                    "Using an invalid time_range value.".into(),
+                ],
+                examples: vec![
+                    r#"{"item_type": "tracks", "time_range": "medium_term", "limit": 20}"#.into(),
+                ],
+                related: vec![
+                    CapabilityId::from_static("spotify.player.recently_played"),
+                ],
+            },
+        ),
+        op_info(
+            "spotify.recommendations.get",
+            "Get track recommendations",
+            json!({
+                "type": "object",
+                "properties": {
+                    "seed_artists": { "type": "string" },
+                    "seed_genres": { "type": "string" },
+                    "limit": { "type": "integer", "minimum": 1, "maximum": 100 }
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["tracks"],
+                "properties": {
+                    "tracks": { "type": "array" }
+                }
+            }),
+            "spotify.read",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "Get personalized track recommendations based on seeds.".into(),
+                common_mistakes: vec![
+                    "Not providing at least one seed (artist or genre).".into(),
+                ],
+                examples: vec![
+                    r#"{"seed_genres": "indie,rock", "limit": 20}"#.into(),
+                ],
+                related: vec![
+                    CapabilityId::from_static("spotify.search"),
+                    CapabilityId::from_static("spotify.tracks.get"),
+                ],
+            },
+        ),
+    ]
 }
 
 #[cfg(test)]
@@ -685,16 +962,19 @@ mod tests {
         assert!(require_str(&input, "track_id").is_err());
     }
 
+    /// Serialize `operations_info()` to JSON for backward-compatible test assertions.
+    fn ops_json() -> serde_json::Value {
+        serde_json::to_value(operations_info()).unwrap()
+    }
+
     #[test]
     fn operations_info_has_10_operations() {
-        let ops = operations_info();
-        let arr = ops.as_array().unwrap();
-        assert_eq!(arr.len(), 10);
+        assert_eq!(operations_info().len(), 10);
     }
 
     #[test]
     fn operations_all_have_required_fields() {
-        let ops = operations_info();
+        let ops = ops_json();
         for op in ops.as_array().unwrap() {
             assert!(op.get("id").is_some(), "missing id");
             assert!(op.get("summary").is_some(), "missing summary");
@@ -707,12 +987,7 @@ mod tests {
     #[test]
     fn operations_ids_are_unique() {
         let ops = operations_info();
-        let ids: Vec<&str> = ops
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter_map(|o| o["id"].as_str())
-            .collect();
+        let ids: Vec<&str> = ops.iter().map(|o| o.id.as_ref()).collect();
         let mut unique = ids.clone();
         unique.sort_unstable();
         unique.dedup();
@@ -721,21 +996,19 @@ mod tests {
 
     #[test]
     fn operations_risk_levels_valid() {
-        let valid = ["low", "medium", "high"];
         let ops = operations_info();
-        for op in ops.as_array().unwrap() {
-            let rl = op["risk_level"].as_str().unwrap();
-            assert!(valid.contains(&rl), "invalid risk_level: {rl}");
+        for op in &ops {
+            // All RiskLevel enum variants are valid by construction
+            let _ = op.risk_level;
         }
     }
 
     #[test]
     fn operations_safety_tiers_valid() {
-        let valid = ["safe", "risky", "dangerous"];
         let ops = operations_info();
-        for op in ops.as_array().unwrap() {
-            let st = op["safety_tier"].as_str().unwrap();
-            assert!(valid.contains(&st), "invalid safety_tier: {st}");
+        for op in &ops {
+            // All SafetyTier enum variants are valid by construction
+            let _ = op.safety_tier;
         }
     }
 
@@ -743,20 +1016,20 @@ mod tests {
     #[allow(clippy::case_sensitive_file_extension_comparisons)]
     fn read_operations_are_safe() {
         let ops = operations_info();
-        for op in ops.as_array().unwrap() {
-            let cap = op["capability"].as_str().unwrap();
+        for op in &ops {
+            let cap = op.capability.as_ref();
             if cap.ends_with(".read") {
                 assert_eq!(
-                    op["safety_tier"].as_str().unwrap(),
-                    "safe",
+                    op.safety_tier,
+                    SafetyTier::Safe,
                     "read op {} should be safe",
-                    op["id"]
+                    op.id.as_ref()
                 );
                 assert_eq!(
-                    op["risk_level"].as_str().unwrap(),
-                    "low",
+                    op.risk_level,
+                    RiskLevel::Low,
                     "read op {} should be low risk",
-                    op["id"]
+                    op.id.as_ref()
                 );
             }
         }
@@ -765,12 +1038,7 @@ mod tests {
     #[test]
     fn operations_contain_expected_ids() {
         let ops = operations_info();
-        let ids: Vec<&str> = ops
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter_map(|o| o["id"].as_str())
-            .collect();
+        let ids: Vec<&str> = ops.iter().map(|o| o.id.as_ref()).collect();
         assert!(ids.contains(&"spotify.profile.get"));
         assert!(ids.contains(&"spotify.search"));
         assert!(ids.contains(&"spotify.tracks.get"));
@@ -861,12 +1129,9 @@ mod tests {
     #[test]
     fn operations_all_have_idempotency() {
         let ops = operations_info();
-        for op in ops.as_array().unwrap() {
-            assert!(
-                op.get("idempotency").is_some(),
-                "op {:?} missing idempotency",
-                op["id"]
-            );
+        for op in &ops {
+            // IdempotencyClass is always present by construction
+            let _ = op.idempotency;
         }
     }
 
@@ -887,12 +1152,12 @@ mod tests {
     #[test]
     fn all_operations_are_read_only() {
         let ops = operations_info();
-        for op in ops.as_array().unwrap() {
+        for op in &ops {
             assert_eq!(
-                op["safety_tier"].as_str().unwrap(),
-                "safe",
+                op.safety_tier,
+                SafetyTier::Safe,
                 "op {} should be safe (read-only connector)",
-                op["id"]
+                op.id.as_ref()
             );
         }
     }
@@ -992,12 +1257,12 @@ mod tests {
     #[test]
     fn operations_all_low_risk() {
         let ops = operations_info();
-        for op in ops.as_array().unwrap() {
+        for op in &ops {
             assert_eq!(
-                op["risk_level"].as_str().unwrap(),
-                "low",
+                op.risk_level,
+                RiskLevel::Low,
                 "op {} should be low risk",
-                op["id"]
+                op.id.as_ref()
             );
         }
     }
@@ -1005,12 +1270,12 @@ mod tests {
     #[test]
     fn operations_all_strict_idempotency() {
         let ops = operations_info();
-        for op in ops.as_array().unwrap() {
+        for op in &ops {
             assert_eq!(
-                op["idempotency"].as_str().unwrap(),
-                "strict",
+                op.idempotency,
+                IdempotencyClass::Strict,
                 "op {} should have strict idempotency",
-                op["id"]
+                op.id.as_ref()
             );
         }
     }
@@ -1018,12 +1283,12 @@ mod tests {
     #[test]
     fn operations_all_spotify_read_capability() {
         let ops = operations_info();
-        for op in ops.as_array().unwrap() {
+        for op in &ops {
             assert_eq!(
-                op["capability"].as_str().unwrap(),
+                op.capability.as_ref(),
                 "spotify.read",
                 "op {} should have spotify.read capability",
-                op["id"]
+                op.id.as_ref()
             );
         }
     }

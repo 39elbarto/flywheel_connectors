@@ -3,7 +3,10 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use fcp_core::{BaseConnector, ConnectorId, CredentialId, FcpError, FcpResult};
+use fcp_core::{
+    AgentHint, BaseConnector, CapabilityId, ConnectorId, CredentialId, FcpError, FcpResult,
+    IdempotencyClass, OperationId, OperationInfo, RiskLevel, SafetyTier,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tracing::{info, instrument};
@@ -270,7 +273,7 @@ impl OnePasswordConnector {
         Ok(json!({
             "connector_id": "fcp.1password",
             "version": "0.1.0",
-            "operations": operations_info(),
+            "operations": serde_json::to_value(operations_info()).unwrap_or_default(),
         }))
     }
 
@@ -322,10 +325,7 @@ impl OnePasswordConnector {
             .and_then(serde_json::Value::as_str)
             .unwrap_or("");
 
-        let allowed = operations_info().as_array().is_some_and(|ops| {
-            ops.iter()
-                .any(|o| o.get("id").and_then(serde_json::Value::as_str) == Some(operation))
-        });
+        let allowed = operations_info().iter().any(|o| o.id.as_ref() == operation);
 
         Ok(json!({
             "allowed": allowed,
@@ -421,55 +421,141 @@ fn require_str<'a>(input: &'a serde_json::Value, field: &str) -> Result<&'a str,
         })
 }
 
+/// Helper to build a single `OperationInfo`.
+#[allow(clippy::too_many_arguments)]
+fn op_info(
+    id: &'static str,
+    summary: &str,
+    input_schema: serde_json::Value,
+    output_schema: serde_json::Value,
+    capability: &'static str,
+    risk_level: RiskLevel,
+    safety_tier: SafetyTier,
+    idempotency: IdempotencyClass,
+    ai_hints: AgentHint,
+) -> OperationInfo {
+    OperationInfo {
+        id: OperationId::from_static(id),
+        summary: summary.into(),
+        input_schema,
+        output_schema,
+        capability: CapabilityId::from_static(capability),
+        risk_level,
+        description: None,
+        rate_limit: None,
+        requires_approval: None,
+        safety_tier,
+        idempotency,
+        ai_hints,
+    }
+}
+
 /// Build the operations info for introspection.
-fn operations_info() -> serde_json::Value {
-    json!([
-        {
-            "id": "1password.vaults.list",
-            "summary": "List vaults accessible to the service account",
-            "capability": "1password.vaults.read",
-            "risk_level": "low",
-            "safety_tier": "safe",
-            "idempotency": "strict",
-        },
-        {
-            "id": "1password.items.list",
-            "summary": "List items in a vault",
-            "capability": "1password.items.read",
-            "risk_level": "low",
-            "safety_tier": "safe",
-            "idempotency": "strict",
-        },
-        {
-            "id": "1password.items.get",
-            "summary": "Get a single item with field values",
-            "capability": "1password.items.read",
-            "risk_level": "medium",
-            "safety_tier": "risky",
-            "idempotency": "strict",
-        },
-        {
-            "id": "1password.items.create",
-            "summary": "Create a new item in a vault",
-            "capability": "1password.items.write",
-            "risk_level": "medium",
-            "safety_tier": "risky",
-            "idempotency": "none",
-        },
-        {
-            "id": "1password.items.delete",
-            "summary": "Delete an item from a vault",
-            "capability": "1password.items.write",
-            "risk_level": "high",
-            "safety_tier": "dangerous",
-            "idempotency": "strict",
-        },
-    ])
+fn operations_info() -> Vec<OperationInfo> {
+    vec![
+        op_info(
+            "1password.vaults.list",
+            "List vaults accessible to the service account",
+            json!({"type": "object", "required": []}),
+            json!({"type": "object", "required": ["vaults"], "properties": {"vaults": {"type": "array"}}}),
+            "1password.vaults.read",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "List available vaults.".into(),
+                common_mistakes: vec![],
+                examples: vec!["{}".into()],
+                related: vec![CapabilityId::from_static("1password.items.list")],
+            },
+        ),
+        op_info(
+            "1password.items.list",
+            "List items in a vault",
+            json!({"type": "object", "required": ["vault_id"], "properties": {"vault_id": {"type": "string"}}}),
+            json!({"type": "object", "required": ["items"], "properties": {"items": {"type": "array"}}}),
+            "1password.items.read",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "List items in a 1Password vault (without revealing secrets).".into(),
+                common_mistakes: vec![],
+                examples: vec![r#"{"vault_id": "abc123"}"#.into()],
+                related: vec![
+                    CapabilityId::from_static("1password.vaults.list"),
+                    CapabilityId::from_static("1password.items.get"),
+                ],
+            },
+        ),
+        op_info(
+            "1password.items.get",
+            "Get a single item with field values",
+            json!({"type": "object", "required": ["vault_id", "item_id"], "properties": {"vault_id": {"type": "string"}, "item_id": {"type": "string"}}}),
+            json!({"type": "object", "required": ["item"], "properties": {"item": {"type": "object"}}}),
+            "1password.items.read",
+            RiskLevel::Medium,
+            SafetyTier::Risky,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "Retrieve a specific item including secret field values. Use with caution.".into(),
+                common_mistakes: vec![
+                    "Logging or caching secret values \u{2014} treat all field values as sensitive.".into(),
+                ],
+                examples: vec![r#"{"vault_id": "abc123", "item_id": "def456"}"#.into()],
+                related: vec![CapabilityId::from_static("1password.items.list")],
+            },
+        ),
+        op_info(
+            "1password.items.create",
+            "Create a new item in a vault",
+            json!({"type": "object", "required": ["vault_id", "category", "title"], "properties": {"vault_id": {"type": "string"}, "category": {"type": "string", "description": "LOGIN, PASSWORD, SECURE_NOTE, API_CREDENTIAL, etc."}, "title": {"type": "string"}, "fields": {"type": "array"}}}),
+            json!({"type": "object", "required": ["id"], "properties": {"id": {"type": "string"}}}),
+            "1password.items.write",
+            RiskLevel::Medium,
+            SafetyTier::Risky,
+            IdempotencyClass::None,
+            AgentHint {
+                when_to_use: "Create a new secret item in 1Password.".into(),
+                common_mistakes: vec![],
+                examples: vec![
+                    r#"{"vault_id": "abc123", "category": "API_CREDENTIAL", "title": "Stripe Key", "fields": [{"label": "api_key", "value": "sk_live_..."}]}"#.into(),
+                ],
+                related: vec![
+                    CapabilityId::from_static("1password.items.list"),
+                    CapabilityId::from_static("1password.items.delete"),
+                ],
+            },
+        ),
+        op_info(
+            "1password.items.delete",
+            "Delete an item from a vault",
+            json!({"type": "object", "required": ["vault_id", "item_id"], "properties": {"vault_id": {"type": "string"}, "item_id": {"type": "string"}}}),
+            json!({"type": "object"}),
+            "1password.items.write",
+            RiskLevel::High,
+            SafetyTier::Dangerous,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "Delete a secret item. Cannot be undone.".into(),
+                common_mistakes: vec![
+                    "Deleting items that other services depend on for credentials.".into(),
+                ],
+                examples: vec![r#"{"vault_id": "abc123", "item_id": "def456"}"#.into()],
+                related: vec![CapabilityId::from_static("1password.items.get")],
+            },
+        ),
+    ]
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Serialize `operations_info` to JSON for backward-compatible assertions.
+    fn ops_json() -> serde_json::Value {
+        serde_json::to_value(operations_info()).unwrap()
+    }
 
     #[test]
     fn config_from_access_token() {
@@ -596,31 +682,23 @@ mod tests {
     #[test]
     fn operations_info_has_5_operations() {
         let ops = operations_info();
-        let arr = ops.as_array().unwrap();
-        assert_eq!(arr.len(), 5);
+        assert_eq!(ops.len(), 5);
     }
 
     #[test]
     fn operations_all_have_required_fields() {
         let ops = operations_info();
-        for op in ops.as_array().unwrap() {
-            assert!(op.get("id").is_some(), "missing id");
-            assert!(op.get("summary").is_some(), "missing summary");
-            assert!(op.get("capability").is_some(), "missing capability");
-            assert!(op.get("risk_level").is_some(), "missing risk_level");
-            assert!(op.get("safety_tier").is_some(), "missing safety_tier");
+        for op in &ops {
+            assert!(!op.id.as_ref().is_empty(), "missing id");
+            assert!(!op.summary.is_empty(), "missing summary");
+            assert!(!op.capability.as_ref().is_empty(), "missing capability");
         }
     }
 
     #[test]
     fn operations_ids_are_unique() {
         let ops = operations_info();
-        let ids: Vec<&str> = ops
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter_map(|o| o["id"].as_str())
-            .collect();
+        let ids: Vec<&str> = ops.iter().map(|o| o.id.as_ref()).collect();
         let mut unique = ids.clone();
         unique.sort_unstable();
         unique.dedup();
@@ -629,37 +707,42 @@ mod tests {
 
     #[test]
     fn operations_risk_levels_valid() {
-        let valid = ["low", "medium", "high"];
         let ops = operations_info();
-        for op in ops.as_array().unwrap() {
-            let rl = op["risk_level"].as_str().unwrap();
-            assert!(valid.contains(&rl), "invalid risk_level: {rl}");
+        for op in &ops {
+            let v = serde_json::to_value(op.risk_level).unwrap();
+            let rl = v.as_str().unwrap();
+            assert!(
+                ["low", "medium", "high", "critical"].contains(&rl),
+                "invalid risk_level: {rl}"
+            );
         }
     }
 
     #[test]
     fn operations_safety_tiers_valid() {
-        let valid = ["safe", "risky", "dangerous"];
         let ops = operations_info();
-        for op in ops.as_array().unwrap() {
-            let st = op["safety_tier"].as_str().unwrap();
-            assert!(valid.contains(&st), "invalid safety_tier: {st}");
+        for op in &ops {
+            let v = serde_json::to_value(op.safety_tier).unwrap();
+            let st = v.as_str().unwrap();
+            assert!(
+                ["safe", "risky", "dangerous"].contains(&st),
+                "invalid safety_tier: {st}"
+            );
         }
     }
 
     #[test]
-    #[allow(clippy::case_sensitive_file_extension_comparisons)]
     fn read_operations_are_safe_or_risky() {
         let ops = operations_info();
-        for op in ops.as_array().unwrap() {
-            let cap = op["capability"].as_str().unwrap();
+        for op in &ops {
+            let cap = op.capability.as_ref();
             #[allow(clippy::case_sensitive_file_extension_comparisons)]
             if cap.ends_with(".read") {
-                let st = op["safety_tier"].as_str().unwrap();
                 assert!(
-                    st == "safe" || st == "risky",
-                    "read op {} has unexpected safety_tier: {st}",
-                    op["id"]
+                    op.safety_tier == SafetyTier::Safe || op.safety_tier == SafetyTier::Risky,
+                    "read op {} has unexpected safety_tier: {:?}",
+                    op.id.as_ref(),
+                    op.safety_tier
                 );
             }
         }
@@ -668,12 +751,7 @@ mod tests {
     #[test]
     fn operations_contain_expected_ids() {
         let ops = operations_info();
-        let ids: Vec<&str> = ops
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter_map(|o| o["id"].as_str())
-            .collect();
+        let ids: Vec<&str> = ops.iter().map(|o| o.id.as_ref()).collect();
         assert!(ids.contains(&"1password.vaults.list"));
         assert!(ids.contains(&"1password.items.list"));
         assert!(ids.contains(&"1password.items.get"));
@@ -685,75 +763,66 @@ mod tests {
     fn operations_vaults_list_is_safe() {
         let ops = operations_info();
         let vaults_list = ops
-            .as_array()
-            .unwrap()
             .iter()
-            .find(|o| o["id"] == "1password.vaults.list")
+            .find(|o| o.id.as_ref() == "1password.vaults.list")
             .unwrap();
-        assert_eq!(vaults_list["safety_tier"], "safe");
-        assert_eq!(vaults_list["risk_level"], "low");
+        assert_eq!(vaults_list.safety_tier, SafetyTier::Safe);
+        assert_eq!(vaults_list.risk_level, RiskLevel::Low);
     }
 
     #[test]
     fn operations_items_list_is_safe() {
         let ops = operations_info();
         let items_list = ops
-            .as_array()
-            .unwrap()
             .iter()
-            .find(|o| o["id"] == "1password.items.list")
+            .find(|o| o.id.as_ref() == "1password.items.list")
             .unwrap();
-        assert_eq!(items_list["safety_tier"], "safe");
-        assert_eq!(items_list["risk_level"], "low");
+        assert_eq!(items_list.safety_tier, SafetyTier::Safe);
+        assert_eq!(items_list.risk_level, RiskLevel::Low);
     }
 
     #[test]
     fn operations_items_get_is_risky() {
         let ops = operations_info();
         let items_get = ops
-            .as_array()
-            .unwrap()
             .iter()
-            .find(|o| o["id"] == "1password.items.get")
+            .find(|o| o.id.as_ref() == "1password.items.get")
             .unwrap();
-        assert_eq!(items_get["safety_tier"], "risky");
-        assert_eq!(items_get["risk_level"], "medium");
+        assert_eq!(items_get.safety_tier, SafetyTier::Risky);
+        assert_eq!(items_get.risk_level, RiskLevel::Medium);
     }
 
     #[test]
     fn operations_items_create_is_risky() {
         let ops = operations_info();
         let items_create = ops
-            .as_array()
-            .unwrap()
             .iter()
-            .find(|o| o["id"] == "1password.items.create")
+            .find(|o| o.id.as_ref() == "1password.items.create")
             .unwrap();
-        assert_eq!(items_create["safety_tier"], "risky");
-        assert_eq!(items_create["risk_level"], "medium");
+        assert_eq!(items_create.safety_tier, SafetyTier::Risky);
+        assert_eq!(items_create.risk_level, RiskLevel::Medium);
     }
 
     #[test]
     fn operations_items_delete_is_dangerous() {
         let ops = operations_info();
         let items_delete = ops
-            .as_array()
-            .unwrap()
             .iter()
-            .find(|o| o["id"] == "1password.items.delete")
+            .find(|o| o.id.as_ref() == "1password.items.delete")
             .unwrap();
-        assert_eq!(items_delete["safety_tier"], "dangerous");
-        assert_eq!(items_delete["risk_level"], "high");
+        assert_eq!(items_delete.safety_tier, SafetyTier::Dangerous);
+        assert_eq!(items_delete.risk_level, RiskLevel::High);
     }
 
     #[test]
     fn operations_all_have_idempotency() {
         let ops = operations_info();
-        for op in ops.as_array().unwrap() {
+        for op in &ops {
+            let v = serde_json::to_value(op.idempotency).unwrap();
             assert!(
-                op.get("idempotency").is_some(),
-                "op {:?} missing idempotency",
-                op["id"]
+                v.is_string(),
+                "op {} idempotency should serialize",
+                op.id.as_ref()
             );
         }
     }
@@ -761,9 +830,9 @@ mod tests {
     #[test]
     fn operations_write_ops_have_correct_capability() {
         let ops = operations_info();
-        for op in ops.as_array().unwrap() {
-            let id = op["id"].as_str().unwrap();
-            let cap = op["capability"].as_str().unwrap();
+        for op in &ops {
+            let id = op.id.as_ref();
+            let cap = op.capability.as_ref();
             if id.contains("create") || id.contains("delete") {
                 #[allow(clippy::case_sensitive_file_extension_comparisons)]
                 let is_write = cap.ends_with(".write");
@@ -862,56 +931,51 @@ mod tests {
     fn operations_items_create_has_none_idempotency() {
         let ops = operations_info();
         let create = ops
-            .as_array()
-            .unwrap()
             .iter()
-            .find(|o| o["id"] == "1password.items.create")
+            .find(|o| o.id.as_ref() == "1password.items.create")
             .unwrap();
-        assert_eq!(create["idempotency"], "none");
+        assert_eq!(create.idempotency, IdempotencyClass::None);
     }
 
     #[test]
     fn operations_items_delete_has_strict_idempotency() {
         let ops = operations_info();
         let delete = ops
-            .as_array()
-            .unwrap()
             .iter()
-            .find(|o| o["id"] == "1password.items.delete")
+            .find(|o| o.id.as_ref() == "1password.items.delete")
             .unwrap();
-        assert_eq!(delete["idempotency"], "strict");
+        assert_eq!(delete.idempotency, IdempotencyClass::Strict);
     }
 
     #[test]
     fn operations_vaults_list_has_correct_capability() {
         let ops = operations_info();
         let vl = ops
-            .as_array()
-            .unwrap()
             .iter()
-            .find(|o| o["id"] == "1password.vaults.list")
+            .find(|o| o.id.as_ref() == "1password.vaults.list")
             .unwrap();
-        assert_eq!(vl["capability"], "1password.vaults.read");
+        assert_eq!(vl.capability.as_ref(), "1password.vaults.read");
     }
 
     #[test]
     fn operations_items_get_has_correct_capability() {
         let ops = operations_info();
         let ig = ops
-            .as_array()
-            .unwrap()
             .iter()
-            .find(|o| o["id"] == "1password.items.get")
+            .find(|o| o.id.as_ref() == "1password.items.get")
             .unwrap();
-        assert_eq!(ig["capability"], "1password.items.read");
+        assert_eq!(ig.capability.as_ref(), "1password.items.read");
     }
 
     #[test]
     fn operations_all_have_summary() {
         let ops = operations_info();
-        for op in ops.as_array().unwrap() {
-            let summary = op["summary"].as_str().unwrap();
-            assert!(!summary.is_empty(), "op {:?} has empty summary", op["id"]);
+        for op in &ops {
+            assert!(
+                !op.summary.is_empty(),
+                "op {} has empty summary",
+                op.id.as_ref()
+            );
         }
     }
 
@@ -1013,21 +1077,36 @@ mod tests {
     #[test]
     fn operations_all_have_capabilities() {
         let ops = operations_info();
-        for op in ops.as_array().unwrap() {
-            let cap = op["capability"].as_str().unwrap();
-            assert!(!cap.is_empty(), "op {:?} has empty capability", op["id"]);
+        for op in &ops {
+            let cap = op.capability.as_ref();
+            assert!(
+                !cap.is_empty(),
+                "op {} has empty capability",
+                op.id.as_ref()
+            );
         }
     }
 
     #[test]
     fn operations_ids_all_start_with_1password() {
         let ops = operations_info();
-        for op in ops.as_array().unwrap() {
-            let id = op["id"].as_str().unwrap();
+        for op in &ops {
+            let id = op.id.as_ref();
             assert!(
                 id.starts_with("1password."),
                 "op {id} should start with 1password."
             );
+        }
+    }
+
+    #[test]
+    fn operations_serializes_to_json() {
+        let json = ops_json();
+        let arr = json.as_array().unwrap();
+        assert_eq!(arr.len(), 5);
+        for op in arr {
+            assert!(op.get("id").is_some(), "missing id in JSON");
+            assert!(op.get("summary").is_some(), "missing summary in JSON");
         }
     }
 

@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use fcp_core::{
     AgentHint, BaseConnector, CapabilityId, ConnectorId, FcpError, FcpResult, IdempotencyClass,
-    OperationId, OperationInfo, RiskLevel, SafetyTier,
+    Introspection, OperationId, OperationInfo, RiskLevel, SafetyTier,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -257,12 +257,140 @@ impl AlgoliaConnector {
     }
 
     /// Handle the `introspect` method.
+    #[allow(clippy::too_many_lines)]
     pub async fn handle_introspect(&self) -> FcpResult<serde_json::Value> {
-        Ok(json!({
-            "connector_id": "fcp.algolia",
-            "version": "0.1.0",
-            "operations": serde_json::to_value(operations_info()).unwrap_or_default(),
-        }))
+        let introspection = Introspection {
+            operations: vec![
+                OperationInfo {
+                    id: OperationId::from_static("algolia.search"),
+                    summary: "Search an index".into(),
+                    input_schema: json!({
+                        "type": "object",
+                        "required": ["index_name", "query"],
+                        "properties": {
+                            "index_name": {"type": "string"},
+                            "query": {"type": "string"},
+                            "hits_per_page": {"type": "integer", "maximum": 1000}
+                        }
+                    }),
+                    output_schema: json!({
+                        "type": "object",
+                        "required": ["hits"],
+                        "properties": {"hits": {"type": "array"}}
+                    }),
+                    capability: CapabilityId::from_static("algolia.search.read"),
+                    risk_level: RiskLevel::Low,
+                    description: None,
+                    rate_limit: None,
+                    requires_approval: None,
+                    safety_tier: SafetyTier::Safe,
+                    idempotency: IdempotencyClass::Strict,
+                    ai_hints: AgentHint {
+                        when_to_use: "Search for records in an Algolia index.".into(),
+                        common_mistakes: vec![],
+                        examples: vec![
+                            r#"{"index_name": "products", "query": "laptop", "hits_per_page": 20}"#
+                                .into(),
+                        ],
+                        related: vec![
+                            CapabilityId::from_static("algolia.indices.list"),
+                            CapabilityId::from_static("algolia.records.get"),
+                        ],
+                    },
+                },
+                OperationInfo {
+                    id: OperationId::from_static("algolia.indices.list"),
+                    summary: "List indices".into(),
+                    input_schema: json!({"type": "object", "required": []}),
+                    output_schema: json!({
+                        "type": "object",
+                        "required": ["items"],
+                        "properties": {"items": {"type": "array"}}
+                    }),
+                    capability: CapabilityId::from_static("algolia.indices.read"),
+                    risk_level: RiskLevel::Low,
+                    description: None,
+                    rate_limit: None,
+                    requires_approval: None,
+                    safety_tier: SafetyTier::Safe,
+                    idempotency: IdempotencyClass::Strict,
+                    ai_hints: AgentHint {
+                        when_to_use: "List Algolia search indices.".into(),
+                        common_mistakes: vec![],
+                        examples: vec!["{}".into()],
+                        related: vec![CapabilityId::from_static("algolia.search")],
+                    },
+                },
+                OperationInfo {
+                    id: OperationId::from_static("algolia.records.get"),
+                    summary: "Get a record by objectID".into(),
+                    input_schema: json!({
+                        "type": "object",
+                        "required": ["index_name", "object_id"],
+                        "properties": {
+                            "index_name": {"type": "string"},
+                            "object_id": {"type": "string"}
+                        }
+                    }),
+                    output_schema: json!({
+                        "type": "object",
+                        "required": ["objectID"],
+                        "properties": {"objectID": {"type": "string"}}
+                    }),
+                    capability: CapabilityId::from_static("algolia.records.read"),
+                    risk_level: RiskLevel::Low,
+                    description: None,
+                    rate_limit: None,
+                    requires_approval: None,
+                    safety_tier: SafetyTier::Safe,
+                    idempotency: IdempotencyClass::Strict,
+                    ai_hints: AgentHint {
+                        when_to_use: "Get a specific record by its objectID.".into(),
+                        common_mistakes: vec![],
+                        examples: vec![
+                            r#"{"index_name": "products", "object_id": "abc123"}"#.into(),
+                        ],
+                        related: vec![CapabilityId::from_static("algolia.search")],
+                    },
+                },
+                OperationInfo {
+                    id: OperationId::from_static("algolia.records.delete"),
+                    summary: "Delete a record".into(),
+                    input_schema: json!({
+                        "type": "object",
+                        "required": ["index_name", "object_id"],
+                        "properties": {
+                            "index_name": {"type": "string"},
+                            "object_id": {"type": "string"}
+                        }
+                    }),
+                    output_schema: json!({"type": "object"}),
+                    capability: CapabilityId::from_static("algolia.records.write"),
+                    risk_level: RiskLevel::High,
+                    description: None,
+                    rate_limit: None,
+                    requires_approval: None,
+                    safety_tier: SafetyTier::Dangerous,
+                    idempotency: IdempotencyClass::Strict,
+                    ai_hints: AgentHint {
+                        when_to_use: "Delete a record from an index. Cannot be undone.".into(),
+                        common_mistakes: vec![],
+                        examples: vec![
+                            r#"{"index_name": "products", "object_id": "abc123"}"#.into(),
+                        ],
+                        related: vec![CapabilityId::from_static("algolia.records.get")],
+                    },
+                },
+            ],
+            events: vec![],
+            resource_types: vec![],
+            auth_caps: None,
+            event_caps: None,
+        };
+
+        serde_json::to_value(introspection).map_err(|e| FcpError::Internal {
+            message: format!("Failed to serialize introspection: {e}"),
+        })
     }
 
     /// Handle the `invoke` method.
@@ -312,9 +440,10 @@ impl AlgoliaConnector {
             .and_then(serde_json::Value::as_str)
             .unwrap_or("");
 
-        let allowed = operations_info()
-            .iter()
-            .any(|o| o.id.as_ref() == operation);
+        let allowed = operations_info().as_array().is_some_and(|ops| {
+            ops.iter()
+                .any(|o| o.get("id").and_then(serde_json::Value::as_str) == Some(operation))
+        });
 
         Ok(json!({
             "allowed": allowed,
@@ -393,173 +522,47 @@ fn require_str<'a>(input: &'a serde_json::Value, field: &str) -> Result<&'a str,
         })
 }
 
-/// Build a single [`OperationInfo`] from the given parameters.
-fn op_info(
-    id: &'static str,
-    summary: &str,
-    input_schema: serde_json::Value,
-    output_schema: serde_json::Value,
-    capability: &'static str,
-    risk_level: RiskLevel,
-    safety_tier: SafetyTier,
-    idempotency: IdempotencyClass,
-    ai_hints: AgentHint,
-) -> OperationInfo {
-    OperationInfo {
-        id: OperationId::from_static(id),
-        summary: summary.into(),
-        input_schema,
-        output_schema,
-        capability: CapabilityId::from_static(capability),
-        risk_level,
-        description: None,
-        rate_limit: None,
-        requires_approval: None,
-        safety_tier,
-        idempotency,
-        ai_hints,
-    }
-}
-
 /// Build the operations info for introspection.
-fn operations_info() -> Vec<OperationInfo> {
-    vec![
-        op_info(
-            "algolia.search",
-            "Search an index",
-            json!({
-                "type": "object",
-                "required": ["index_name", "query"],
-                "properties": {
-                    "index_name": { "type": "string" },
-                    "query": { "type": "string" },
-                    "hits_per_page": { "type": "integer", "maximum": 1000 }
-                }
-            }),
-            json!({
-                "type": "object",
-                "required": ["hits"],
-                "properties": {
-                    "hits": { "type": "array" }
-                }
-            }),
-            "algolia.search.read",
-            RiskLevel::Low,
-            SafetyTier::Safe,
-            IdempotencyClass::Strict,
-            AgentHint {
-                when_to_use: "Search for records in an Algolia index.".into(),
-                common_mistakes: vec![
-                    "Passing raw filter expressions in the query string instead of using the separate filters parameter.".into(),
-                ],
-                examples: vec![
-                    r#"{"index_name": "products", "query": "laptop", "hits_per_page": 20}"#.into(),
-                ],
-                related: vec![
-                    CapabilityId::from_static("algolia.indices.list"),
-                    CapabilityId::from_static("algolia.records.get"),
-                ],
-            },
-        ),
-        op_info(
-            "algolia.indices.list",
-            "List indices",
-            json!({
-                "type": "object",
-                "required": []
-            }),
-            json!({
-                "type": "object",
-                "required": ["items"],
-                "properties": {
-                    "items": { "type": "array" }
-                }
-            }),
-            "algolia.indices.read",
-            RiskLevel::Low,
-            SafetyTier::Safe,
-            IdempotencyClass::Strict,
-            AgentHint {
-                when_to_use: "List Algolia search indices.".into(),
-                common_mistakes: vec![
-                    "Not distinguishing between primary and replica indices in the results.".into(),
-                ],
-                examples: vec!["{}".into()],
-                related: vec![CapabilityId::from_static("algolia.search")],
-            },
-        ),
-        op_info(
-            "algolia.records.get",
-            "Get a record by objectID",
-            json!({
-                "type": "object",
-                "required": ["index_name", "object_id"],
-                "properties": {
-                    "index_name": { "type": "string" },
-                    "object_id": { "type": "string" }
-                }
-            }),
-            json!({
-                "type": "object",
-                "required": ["objectID"],
-                "properties": {
-                    "objectID": { "type": "string" }
-                }
-            }),
-            "algolia.records.read",
-            RiskLevel::Low,
-            SafetyTier::Safe,
-            IdempotencyClass::Strict,
-            AgentHint {
-                when_to_use: "Get a specific record by its objectID.".into(),
-                common_mistakes: vec![
-                    "Using a search-only API key which lacks the getObject permission required for direct record retrieval.".into(),
-                ],
-                examples: vec![
-                    r#"{"index_name": "products", "object_id": "abc123"}"#.into(),
-                ],
-                related: vec![CapabilityId::from_static("algolia.search")],
-            },
-        ),
-        op_info(
-            "algolia.records.delete",
-            "Delete a record",
-            json!({
-                "type": "object",
-                "required": ["index_name", "object_id"],
-                "properties": {
-                    "index_name": { "type": "string" },
-                    "object_id": { "type": "string" }
-                }
-            }),
-            json!({
-                "type": "object"
-            }),
-            "algolia.records.write",
-            RiskLevel::High,
-            SafetyTier::Dangerous,
-            IdempotencyClass::Strict,
-            AgentHint {
-                when_to_use: "Delete a record from an index. Cannot be undone.".into(),
-                common_mistakes: vec![
-                    "Deleting from a replica index instead of the primary — replicas are read-only and the request will fail.".into(),
-                ],
-                examples: vec![
-                    r#"{"index_name": "products", "object_id": "abc123"}"#.into(),
-                ],
-                related: vec![CapabilityId::from_static("algolia.records.get")],
-            },
-        ),
-    ]
+fn operations_info() -> serde_json::Value {
+    json!([
+        {
+            "id": "algolia.search",
+            "summary": "Search an index",
+            "capability": "algolia.search.read",
+            "risk_level": "low",
+            "safety_tier": "safe",
+            "idempotency": "strict",
+        },
+        {
+            "id": "algolia.indices.list",
+            "summary": "List indices",
+            "capability": "algolia.indices.read",
+            "risk_level": "low",
+            "safety_tier": "safe",
+            "idempotency": "strict",
+        },
+        {
+            "id": "algolia.records.get",
+            "summary": "Get a record by objectID",
+            "capability": "algolia.records.read",
+            "risk_level": "low",
+            "safety_tier": "safe",
+            "idempotency": "strict",
+        },
+        {
+            "id": "algolia.records.delete",
+            "summary": "Delete a record",
+            "capability": "algolia.records.write",
+            "risk_level": "high",
+            "safety_tier": "dangerous",
+            "idempotency": "strict",
+        },
+    ])
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn ops_json() -> serde_json::Value {
-        serde_json::to_value(operations_info()).unwrap()
-    }
 
     #[test]
     fn config_from_valid_params() {
@@ -737,12 +740,13 @@ mod tests {
     #[test]
     fn operations_info_has_4_operations() {
         let ops = operations_info();
-        assert_eq!(ops.len(), 4);
+        let arr = ops.as_array().unwrap();
+        assert_eq!(arr.len(), 4);
     }
 
     #[test]
     fn operations_all_have_required_fields() {
-        let ops = ops_json();
+        let ops = operations_info();
         for op in ops.as_array().unwrap() {
             assert!(op.get("id").is_some(), "missing id");
             assert!(op.get("summary").is_some(), "missing summary");
@@ -754,7 +758,7 @@ mod tests {
 
     #[test]
     fn operations_ids_are_unique() {
-        let ops = ops_json();
+        let ops = operations_info();
         let ids: Vec<&str> = ops
             .as_array()
             .unwrap()
@@ -770,7 +774,7 @@ mod tests {
     #[test]
     fn operations_risk_levels_valid() {
         let valid = ["low", "medium", "high"];
-        let ops = ops_json();
+        let ops = operations_info();
         for op in ops.as_array().unwrap() {
             let rl = op["risk_level"].as_str().unwrap();
             assert!(valid.contains(&rl), "invalid risk_level: {rl}");
@@ -780,7 +784,7 @@ mod tests {
     #[test]
     fn operations_safety_tiers_valid() {
         let valid = ["safe", "risky", "dangerous"];
-        let ops = ops_json();
+        let ops = operations_info();
         for op in ops.as_array().unwrap() {
             let st = op["safety_tier"].as_str().unwrap();
             assert!(valid.contains(&st), "invalid safety_tier: {st}");
@@ -790,7 +794,7 @@ mod tests {
     #[test]
     #[allow(clippy::case_sensitive_file_extension_comparisons)]
     fn read_operations_are_safe() {
-        let ops = ops_json();
+        let ops = operations_info();
         for op in ops.as_array().unwrap() {
             let cap = op["capability"].as_str().unwrap();
             if cap.ends_with(".read") {
@@ -812,7 +816,7 @@ mod tests {
 
     #[test]
     fn operations_contain_expected_ids() {
-        let ops = ops_json();
+        let ops = operations_info();
         let ids: Vec<&str> = ops
             .as_array()
             .unwrap()
@@ -827,7 +831,7 @@ mod tests {
 
     #[test]
     fn operations_all_have_idempotency() {
-        let ops = ops_json();
+        let ops = operations_info();
         for op in ops.as_array().unwrap() {
             assert!(
                 op.get("idempotency").is_some(),
@@ -839,7 +843,7 @@ mod tests {
 
     #[test]
     fn operations_delete_is_dangerous() {
-        let ops = ops_json();
+        let ops = operations_info();
         let delete_op = ops
             .as_array()
             .unwrap()
@@ -852,7 +856,7 @@ mod tests {
 
     #[test]
     fn operations_search_capability() {
-        let ops = ops_json();
+        let ops = operations_info();
         let search_op = ops
             .as_array()
             .unwrap()
@@ -1041,7 +1045,7 @@ mod tests {
     #[test]
     #[allow(clippy::case_sensitive_file_extension_comparisons)]
     fn write_operations_not_safe() {
-        let ops = ops_json();
+        let ops = operations_info();
         for op in ops.as_array().unwrap() {
             let cap = op["capability"].as_str().unwrap();
             if cap.ends_with(".write") {
@@ -1053,7 +1057,7 @@ mod tests {
 
     #[test]
     fn operations_records_delete_is_dangerous() {
-        let ops = ops_json();
+        let ops = operations_info();
         let del_op = ops
             .as_array()
             .unwrap()
@@ -1066,7 +1070,7 @@ mod tests {
 
     #[test]
     fn operations_search_summary() {
-        let ops = ops_json();
+        let ops = operations_info();
         let search_op = ops
             .as_array()
             .unwrap()
@@ -1090,7 +1094,7 @@ mod tests {
 
     #[test]
     fn operations_all_summaries_non_empty() {
-        let ops = ops_json();
+        let ops = operations_info();
         for op in ops.as_array().unwrap() {
             let summary = op["summary"].as_str().unwrap();
             assert!(!summary.is_empty(), "op {:?} has empty summary", op["id"]);
@@ -1099,7 +1103,7 @@ mod tests {
 
     #[test]
     fn operations_all_capabilities_prefixed() {
-        let ops = ops_json();
+        let ops = operations_info();
         for op in ops.as_array().unwrap() {
             let cap = op["capability"].as_str().unwrap();
             assert!(

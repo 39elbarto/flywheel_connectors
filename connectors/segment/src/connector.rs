@@ -3,7 +3,10 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use fcp_core::{BaseConnector, ConnectorId, CredentialId, FcpError, FcpResult};
+use fcp_core::{
+    AgentHint, BaseConnector, CapabilityId, ConnectorId, CredentialId, FcpError, FcpResult,
+    IdempotencyClass, OperationId, OperationInfo, RiskLevel, SafetyTier,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tracing::{info, instrument};
@@ -270,7 +273,7 @@ impl SegmentConnector {
         Ok(json!({
             "connector_id": "fcp.segment",
             "version": "0.1.0",
-            "operations": operations_info(),
+            "operations": serde_json::to_value(operations_info()).unwrap_or_default(),
         }))
     }
 
@@ -320,10 +323,7 @@ impl SegmentConnector {
             .and_then(serde_json::Value::as_str)
             .unwrap_or("");
 
-        let allowed = operations_info().as_array().is_some_and(|ops| {
-            ops.iter()
-                .any(|o| o.get("id").and_then(serde_json::Value::as_str) == Some(operation))
-        });
+        let allowed = operations_info().iter().any(|o| o.id.as_ref() == operation);
 
         Ok(json!({
             "allowed": allowed,
@@ -404,39 +404,133 @@ fn require_str<'a>(input: &'a serde_json::Value, field: &str) -> Result<&'a str,
         })
 }
 
+/// Construct a single [`OperationInfo`].
+#[allow(clippy::too_many_arguments)]
+fn op_info(
+    id: &'static str,
+    summary: &str,
+    input_schema: serde_json::Value,
+    output_schema: serde_json::Value,
+    capability: &'static str,
+    risk_level: RiskLevel,
+    safety_tier: SafetyTier,
+    idempotency: IdempotencyClass,
+    ai_hints: AgentHint,
+) -> OperationInfo {
+    OperationInfo {
+        id: OperationId::from_static(id),
+        summary: summary.into(),
+        input_schema,
+        output_schema,
+        capability: CapabilityId::from_static(capability),
+        risk_level,
+        description: None,
+        rate_limit: None,
+        requires_approval: None,
+        safety_tier,
+        idempotency,
+        ai_hints,
+    }
+}
+
 /// Build the operations info for introspection.
-fn operations_info() -> serde_json::Value {
-    json!([
-        {
-            "id": "segment.sources.list",
-            "summary": "List sources in a workspace",
-            "capability": "segment.sources.read",
-            "risk_level": "low",
-            "safety_tier": "safe",
-            "idempotency": "strict",
-        },
-        {
-            "id": "segment.destinations.list",
-            "summary": "List destinations for a source",
-            "capability": "segment.destinations.read",
-            "risk_level": "low",
-            "safety_tier": "safe",
-            "idempotency": "strict",
-        },
-        {
-            "id": "segment.track",
-            "summary": "Send a track event",
-            "capability": "segment.track.write",
-            "risk_level": "medium",
-            "safety_tier": "risky",
-            "idempotency": "none",
-        },
-    ])
+fn operations_info() -> Vec<OperationInfo> {
+    vec![
+        op_info(
+            "segment.sources.list",
+            "List sources in a workspace",
+            json!({"type": "object", "required": []}),
+            json!({
+                "type": "object",
+                "required": ["sources"],
+                "properties": {"sources": {"type": "array"}}
+            }),
+            "segment.sources.read",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "List all sources in a Segment workspace.".into(),
+                common_mistakes: vec![],
+                examples: vec!["{}".into()],
+                related: vec![
+                    CapabilityId::from_static("segment.destinations.list"),
+                    CapabilityId::from_static("segment.track"),
+                ],
+            },
+        ),
+        op_info(
+            "segment.destinations.list",
+            "List destinations for a source",
+            json!({
+                "type": "object",
+                "required": ["source_id"],
+                "properties": {
+                    "source_id": {"type": "string", "description": "Source ID"}
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["destinations"],
+                "properties": {"destinations": {"type": "array"}}
+            }),
+            "segment.destinations.read",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "List destinations connected to a Segment source.".into(),
+                common_mistakes: vec![],
+                examples: vec![r#"{"source_id": "src_abc123"}"#.into()],
+                related: vec![
+                    CapabilityId::from_static("segment.sources.list"),
+                ],
+            },
+        ),
+        op_info(
+            "segment.track",
+            "Send a track event",
+            json!({
+                "type": "object",
+                "required": ["event", "user_id"],
+                "properties": {
+                    "event": {"type": "string", "description": "Event name"},
+                    "user_id": {"type": "string", "description": "User ID"},
+                    "properties": {"type": "object", "description": "Event properties"}
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["success"],
+                "properties": {"success": {"type": "boolean"}}
+            }),
+            "segment.track.write",
+            RiskLevel::Medium,
+            SafetyTier::Risky,
+            IdempotencyClass::None,
+            AgentHint {
+                when_to_use: "Send a tracking event to Segment.".into(),
+                common_mistakes: vec![
+                    "Forgetting to include user_id".into(),
+                ],
+                examples: vec![
+                    r#"{"event": "Item Purchased", "user_id": "user_123", "properties": {"price": 9.99}}"#.into(),
+                ],
+                related: vec![
+                    CapabilityId::from_static("segment.sources.list"),
+                ],
+            },
+        ),
+    ]
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn ops_json() -> serde_json::Value {
+        serde_json::to_value(operations_info()).unwrap()
+    }
 
     #[test]
     fn config_from_api_token() {
@@ -540,14 +634,14 @@ mod tests {
 
     #[test]
     fn operations_info_has_3_operations() {
-        let ops = operations_info();
+        let ops = ops_json();
         let arr = ops.as_array().unwrap();
         assert_eq!(arr.len(), 3);
     }
 
     #[test]
     fn operations_all_have_required_fields() {
-        let ops = operations_info();
+        let ops = ops_json();
         for op in ops.as_array().unwrap() {
             assert!(op.get("id").is_some(), "missing id");
             assert!(op.get("summary").is_some(), "missing summary");
@@ -559,7 +653,7 @@ mod tests {
 
     #[test]
     fn operations_ids_are_unique() {
-        let ops = operations_info();
+        let ops = ops_json();
         let ids: Vec<&str> = ops
             .as_array()
             .unwrap()
@@ -575,7 +669,7 @@ mod tests {
     #[test]
     fn operations_risk_levels_valid() {
         let valid = ["low", "medium", "high"];
-        let ops = operations_info();
+        let ops = ops_json();
         for op in ops.as_array().unwrap() {
             let rl = op["risk_level"].as_str().unwrap();
             assert!(valid.contains(&rl), "invalid risk_level: {rl}");
@@ -585,7 +679,7 @@ mod tests {
     #[test]
     fn operations_safety_tiers_valid() {
         let valid = ["safe", "risky", "dangerous"];
-        let ops = operations_info();
+        let ops = ops_json();
         for op in ops.as_array().unwrap() {
             let st = op["safety_tier"].as_str().unwrap();
             assert!(valid.contains(&st), "invalid safety_tier: {st}");
@@ -594,7 +688,7 @@ mod tests {
 
     #[test]
     fn read_operations_are_safe() {
-        let ops = operations_info();
+        let ops = ops_json();
         for op in ops.as_array().unwrap() {
             let cap = op["capability"].as_str().unwrap();
             if cap.split('.').next_back() == Some("read") {
@@ -616,7 +710,7 @@ mod tests {
 
     #[test]
     fn operations_contain_expected_ids() {
-        let ops = operations_info();
+        let ops = ops_json();
         let ids: Vec<&str> = ops
             .as_array()
             .unwrap()
@@ -704,7 +798,7 @@ mod tests {
 
     #[test]
     fn operations_all_have_idempotency() {
-        let ops = operations_info();
+        let ops = ops_json();
         for op in ops.as_array().unwrap() {
             assert!(
                 op.get("idempotency").is_some(),
@@ -730,7 +824,7 @@ mod tests {
 
     #[test]
     fn track_operation_is_risky() {
-        let ops = operations_info();
+        let ops = ops_json();
         let track = ops
             .as_array()
             .unwrap()
@@ -743,7 +837,7 @@ mod tests {
 
     #[test]
     fn sources_list_operation_is_safe() {
-        let ops = operations_info();
+        let ops = ops_json();
         let sources = ops
             .as_array()
             .unwrap()
@@ -756,7 +850,7 @@ mod tests {
 
     #[test]
     fn destinations_list_operation_is_safe() {
-        let ops = operations_info();
+        let ops = ops_json();
         let dests = ops
             .as_array()
             .unwrap()
@@ -918,7 +1012,7 @@ mod tests {
 
     #[test]
     fn operations_sources_list_capability() {
-        let ops = operations_info();
+        let ops = ops_json();
         let sl = ops
             .as_array()
             .unwrap()
@@ -930,7 +1024,7 @@ mod tests {
 
     #[test]
     fn operations_destinations_list_capability() {
-        let ops = operations_info();
+        let ops = ops_json();
         let dl = ops
             .as_array()
             .unwrap()
@@ -942,7 +1036,7 @@ mod tests {
 
     #[test]
     fn operations_track_capability() {
-        let ops = operations_info();
+        let ops = ops_json();
         let t = ops
             .as_array()
             .unwrap()
@@ -954,7 +1048,7 @@ mod tests {
 
     #[test]
     fn operations_read_ops_are_strict_idempotent() {
-        let ops = operations_info();
+        let ops = ops_json();
         for op in ops.as_array().unwrap() {
             let cap = op["capability"].as_str().unwrap();
             if cap.split('.').next_back() == Some("read") {
@@ -969,7 +1063,7 @@ mod tests {
 
     #[test]
     fn operations_track_idempotency_is_none() {
-        let ops = operations_info();
+        let ops = ops_json();
         let t = ops
             .as_array()
             .unwrap()
@@ -1035,7 +1129,7 @@ mod tests {
 
     #[test]
     fn write_operations_not_safe() {
-        let ops = operations_info();
+        let ops = ops_json();
         for op in ops.as_array().unwrap() {
             let cap = op["capability"].as_str().unwrap();
             if cap.split('.').next_back() == Some("write") {
@@ -1059,7 +1153,7 @@ mod tests {
 
     #[test]
     fn operations_have_segment_prefix() {
-        let ops = operations_info();
+        let ops = ops_json();
         for op in ops.as_array().unwrap() {
             assert!(
                 op["id"].as_str().unwrap().starts_with("segment."),
@@ -1071,7 +1165,7 @@ mod tests {
 
     #[test]
     fn operations_all_have_capability() {
-        let ops = operations_info();
+        let ops = ops_json();
         for op in ops.as_array().unwrap() {
             assert!(
                 op["capability"].as_str().is_some(),
@@ -1083,7 +1177,7 @@ mod tests {
 
     #[test]
     fn operations_all_have_safety_tier() {
-        let ops = operations_info();
+        let ops = ops_json();
         for op in ops.as_array().unwrap() {
             assert!(
                 op["safety_tier"].as_str().is_some(),
@@ -1095,7 +1189,7 @@ mod tests {
 
     #[test]
     fn operations_summaries_are_non_empty() {
-        let ops = operations_info();
+        let ops = ops_json();
         for op in ops.as_array().unwrap() {
             let summary = op["summary"].as_str().unwrap();
             assert!(!summary.is_empty());

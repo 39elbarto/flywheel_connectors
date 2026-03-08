@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use fcp_core::{
     AgentHint, BaseConnector, CapabilityId, ConnectorId, CredentialId, FcpError, FcpResult,
-    IdempotencyClass, OperationId, OperationInfo, RiskLevel, SafetyTier,
+    IdempotencyClass, Introspection, OperationId, OperationInfo, RiskLevel, SafetyTier,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -274,11 +274,264 @@ impl ElasticsearchConnector {
 
     /// Handle the `introspect` method.
     pub async fn handle_introspect(&self) -> FcpResult<serde_json::Value> {
-        Ok(json!({
-            "connector_id": "fcp.elasticsearch",
-            "version": "0.1.0",
-            "operations": serde_json::to_value(operations_info()).unwrap_or_default(),
-        }))
+        let introspection = Introspection {
+            operations: vec![
+                OperationInfo {
+                    id: OperationId::from_static("elasticsearch.search"),
+                    summary: "Search documents across one or more indices".into(),
+                    input_schema: json!({
+                        "type": "object",
+                        "required": ["index"],
+                        "properties": {
+                            "index": { "type": "string", "description": "Index name or pattern" },
+                            "query": { "type": "object", "description": "Elasticsearch query DSL" },
+                            "size": { "type": "integer", "minimum": 0, "maximum": 10000 },
+                            "from": { "type": "integer" },
+                            "sort": { "type": "array" }
+                        }
+                    }),
+                    output_schema: json!({
+                        "type": "object",
+                        "required": ["hits"],
+                        "properties": {
+                            "hits": { "type": "object" },
+                            "took": { "type": "integer" }
+                        }
+                    }),
+                    capability: CapabilityId::from_static("elasticsearch.search.read"),
+                    risk_level: RiskLevel::Low,
+                    description: None,
+                    rate_limit: None,
+                    requires_approval: None,
+                    safety_tier: SafetyTier::Safe,
+                    idempotency: IdempotencyClass::Strict,
+                    ai_hints: AgentHint {
+                        when_to_use: "Search documents using Elasticsearch query DSL.".into(),
+                        common_mistakes: vec![
+                            "Not specifying size — defaults to 10 results.".into(),
+                            "Using match_all without size limit on large indices.".into(),
+                        ],
+                        examples: vec![
+                            r#"{"index": "logs-*", "query": {"match": {"message": "error"}}, "size": 100}"#.into(),
+                        ],
+                        related: vec![
+                            CapabilityId::from_static("elasticsearch.get_document"),
+                            CapabilityId::from_static("elasticsearch.index_document"),
+                        ],
+                    },
+                },
+                OperationInfo {
+                    id: OperationId::from_static("elasticsearch.get_document"),
+                    summary: "Get a single document by ID".into(),
+                    input_schema: json!({
+                        "type": "object",
+                        "required": ["index", "id"],
+                        "properties": {
+                            "index": { "type": "string" },
+                            "id": { "type": "string" }
+                        }
+                    }),
+                    output_schema: json!({
+                        "type": "object",
+                        "required": ["_source"],
+                        "properties": {
+                            "_id": { "type": "string" },
+                            "_source": { "type": "object" }
+                        }
+                    }),
+                    capability: CapabilityId::from_static("elasticsearch.search.read"),
+                    risk_level: RiskLevel::Low,
+                    description: None,
+                    rate_limit: None,
+                    requires_approval: None,
+                    safety_tier: SafetyTier::Safe,
+                    idempotency: IdempotencyClass::Strict,
+                    ai_hints: AgentHint {
+                        when_to_use: "Retrieve a specific document by ID.".into(),
+                        common_mistakes: vec![],
+                        examples: vec![
+                            r#"{"index": "logs-2026.03", "id": "abc123"}"#.into(),
+                        ],
+                        related: vec![CapabilityId::from_static("elasticsearch.search")],
+                    },
+                },
+                OperationInfo {
+                    id: OperationId::from_static("elasticsearch.index_document"),
+                    summary: "Index (create or update) a single document".into(),
+                    input_schema: json!({
+                        "type": "object",
+                        "required": ["index", "document"],
+                        "properties": {
+                            "index": { "type": "string" },
+                            "id": { "type": "string", "description": "Document ID (auto-generated if omitted)" },
+                            "document": { "type": "object" }
+                        }
+                    }),
+                    output_schema: json!({
+                        "type": "object",
+                        "required": ["_id", "result"],
+                        "properties": {
+                            "_id": { "type": "string" },
+                            "result": { "type": "string" }
+                        }
+                    }),
+                    capability: CapabilityId::from_static("elasticsearch.index.write"),
+                    risk_level: RiskLevel::Medium,
+                    description: None,
+                    rate_limit: None,
+                    requires_approval: None,
+                    safety_tier: SafetyTier::Risky,
+                    idempotency: IdempotencyClass::Strict,
+                    ai_hints: AgentHint {
+                        when_to_use: "Index a single document.".into(),
+                        common_mistakes: vec![],
+                        examples: vec![
+                            r#"{"index": "products", "id": "1", "document": {"name": "Widget", "price": 9.99}}"#.into(),
+                        ],
+                        related: vec![CapabilityId::from_static("elasticsearch.bulk")],
+                    },
+                },
+                OperationInfo {
+                    id: OperationId::from_static("elasticsearch.bulk"),
+                    summary: "Bulk index, update, or delete documents".into(),
+                    input_schema: json!({
+                        "type": "object",
+                        "required": ["operations"],
+                        "properties": {
+                            "operations": { "type": "array", "description": "Array of bulk action objects" }
+                        }
+                    }),
+                    output_schema: json!({
+                        "type": "object",
+                        "required": ["items", "errors"],
+                        "properties": {
+                            "errors": { "type": "boolean" },
+                            "items": { "type": "array" },
+                            "took": { "type": "integer" }
+                        }
+                    }),
+                    capability: CapabilityId::from_static("elasticsearch.index.write"),
+                    risk_level: RiskLevel::Medium,
+                    description: None,
+                    rate_limit: None,
+                    requires_approval: None,
+                    safety_tier: SafetyTier::Risky,
+                    idempotency: IdempotencyClass::None,
+                    ai_hints: AgentHint {
+                        when_to_use: "Perform bulk indexing, updating, or deleting of documents.".into(),
+                        common_mistakes: vec![
+                            "Sending too many operations in one request — use batches of 1000-5000.".into(),
+                        ],
+                        examples: vec![
+                            r#"{"operations": [{"index": {"_index": "products", "_id": "1"}}, {"name": "Widget"}]}"#.into(),
+                        ],
+                        related: vec![CapabilityId::from_static("elasticsearch.index_document")],
+                    },
+                },
+                OperationInfo {
+                    id: OperationId::from_static("elasticsearch.indices.list"),
+                    summary: "List indices".into(),
+                    input_schema: json!({
+                        "type": "object",
+                        "required": [],
+                        "properties": {
+                            "pattern": { "type": "string", "description": "Index name pattern (e.g. logs-*)" }
+                        }
+                    }),
+                    output_schema: json!({
+                        "type": "object",
+                        "required": ["indices"],
+                        "properties": {
+                            "indices": { "type": "array" }
+                        }
+                    }),
+                    capability: CapabilityId::from_static("elasticsearch.indices.read"),
+                    risk_level: RiskLevel::Low,
+                    description: None,
+                    rate_limit: None,
+                    requires_approval: None,
+                    safety_tier: SafetyTier::Safe,
+                    idempotency: IdempotencyClass::Strict,
+                    ai_hints: AgentHint {
+                        when_to_use: "List indices and their metadata.".into(),
+                        common_mistakes: vec![],
+                        examples: vec![r#"{"pattern": "logs-*"}"#.into()],
+                        related: vec![CapabilityId::from_static("elasticsearch.indices.delete")],
+                    },
+                },
+                OperationInfo {
+                    id: OperationId::from_static("elasticsearch.indices.delete"),
+                    summary: "Delete an index".into(),
+                    input_schema: json!({
+                        "type": "object",
+                        "required": ["index"],
+                        "properties": {
+                            "index": { "type": "string" }
+                        }
+                    }),
+                    output_schema: json!({
+                        "type": "object",
+                        "required": ["acknowledged"],
+                        "properties": {
+                            "acknowledged": { "type": "boolean" }
+                        }
+                    }),
+                    capability: CapabilityId::from_static("elasticsearch.indices.write"),
+                    risk_level: RiskLevel::High,
+                    description: None,
+                    rate_limit: None,
+                    requires_approval: None,
+                    safety_tier: SafetyTier::Dangerous,
+                    idempotency: IdempotencyClass::Strict,
+                    ai_hints: AgentHint {
+                        when_to_use: "Delete an index and all its documents. Cannot be undone.".into(),
+                        common_mistakes: vec![
+                            "Deleting indices with active aliases.".into(),
+                        ],
+                        examples: vec![r#"{"index": "old-logs-2024"}"#.into()],
+                        related: vec![CapabilityId::from_static("elasticsearch.indices.list")],
+                    },
+                },
+                OperationInfo {
+                    id: OperationId::from_static("elasticsearch.cluster.health"),
+                    summary: "Get cluster health status".into(),
+                    input_schema: json!({
+                        "type": "object",
+                        "required": []
+                    }),
+                    output_schema: json!({
+                        "type": "object",
+                        "required": ["cluster_name", "status"],
+                        "properties": {
+                            "cluster_name": { "type": "string" },
+                            "status": { "type": "string" },
+                            "number_of_nodes": { "type": "integer" }
+                        }
+                    }),
+                    capability: CapabilityId::from_static("elasticsearch.cluster.read"),
+                    risk_level: RiskLevel::Low,
+                    description: None,
+                    rate_limit: None,
+                    requires_approval: None,
+                    safety_tier: SafetyTier::Safe,
+                    idempotency: IdempotencyClass::Strict,
+                    ai_hints: AgentHint {
+                        when_to_use: "Check cluster health (green/yellow/red).".into(),
+                        common_mistakes: vec![],
+                        examples: vec!["{}".into()],
+                        related: vec![CapabilityId::from_static("elasticsearch.indices.list")],
+                    },
+                },
+            ],
+            events: vec![],
+            resource_types: vec![],
+            auth_caps: None,
+            event_caps: None,
+        };
+
+        serde_json::to_value(introspection).map_err(|e| FcpError::Internal {
+            message: format!("Failed to serialize introspection: {e}"),
+        })
     }
 
     /// Handle the `invoke` method.
@@ -330,9 +583,10 @@ impl ElasticsearchConnector {
             .and_then(|v| v.as_str())
             .unwrap_or("");
 
-        let allowed = operations_info()
-            .iter()
-            .any(|o| o.id.as_ref() == operation);
+        let allowed = operations_info().as_array().is_some_and(|ops| {
+            ops.iter()
+                .any(|o| o.get("id").and_then(|v| v.as_str()) == Some(operation))
+        });
 
         Ok(json!({
             "allowed": allowed,
@@ -460,280 +714,71 @@ fn require_i64(input: &serde_json::Value, field: &str) -> Result<i64, Elasticsea
         })
 }
 
-/// Build a single [`OperationInfo`] from the given parameters.
-fn op_info(
-    id: &'static str,
-    summary: &str,
-    input_schema: serde_json::Value,
-    output_schema: serde_json::Value,
-    capability: &'static str,
-    risk_level: RiskLevel,
-    safety_tier: SafetyTier,
-    idempotency: IdempotencyClass,
-    ai_hints: AgentHint,
-) -> OperationInfo {
-    OperationInfo {
-        id: OperationId::from_static(id),
-        summary: summary.into(),
-        input_schema,
-        output_schema,
-        capability: CapabilityId::from_static(capability),
-        risk_level,
-        description: None,
-        rate_limit: None,
-        requires_approval: None,
-        safety_tier,
-        idempotency,
-        ai_hints,
-    }
-}
-
 /// Build the operations info for introspection.
-fn operations_info() -> Vec<OperationInfo> {
-    vec![
-        op_info(
-            "elasticsearch.search",
-            "Search documents across one or more indices",
-            json!({
-                "type": "object",
-                "required": ["index"],
-                "properties": {
-                    "index": { "type": "string", "description": "Index name or pattern" },
-                    "query": { "type": "object", "description": "Elasticsearch query DSL" },
-                    "size": { "type": "integer", "minimum": 0, "maximum": 10000 },
-                    "from": { "type": "integer" },
-                    "sort": { "type": "array" }
-                }
-            }),
-            json!({
-                "type": "object",
-                "required": ["hits"],
-                "properties": {
-                    "hits": { "type": "object" },
-                    "took": { "type": "integer" }
-                }
-            }),
-            "elasticsearch.search.read",
-            RiskLevel::Low,
-            SafetyTier::Safe,
-            IdempotencyClass::Strict,
-            AgentHint {
-                when_to_use: "Search documents using Elasticsearch query DSL.".into(),
-                common_mistakes: vec![
-                    "Not specifying size — defaults to 10 results.".into(),
-                    "Using match_all without size limit on large indices.".into(),
-                ],
-                examples: vec![
-                    r#"{"index": "logs-*", "query": {"match": {"message": "error"}}, "size": 100}"#.into(),
-                ],
-                related: vec![
-                    CapabilityId::from_static("elasticsearch.get_document"),
-                    CapabilityId::from_static("elasticsearch.index_document"),
-                ],
-            },
-        ),
-        op_info(
-            "elasticsearch.get_document",
-            "Get a single document by ID",
-            json!({
-                "type": "object",
-                "required": ["index", "id"],
-                "properties": {
-                    "index": { "type": "string" },
-                    "id": { "type": "string" }
-                }
-            }),
-            json!({
-                "type": "object",
-                "required": ["_source"],
-                "properties": {
-                    "_id": { "type": "string" },
-                    "_source": { "type": "object" }
-                }
-            }),
-            "elasticsearch.search.read",
-            RiskLevel::Low,
-            SafetyTier::Safe,
-            IdempotencyClass::Strict,
-            AgentHint {
-                when_to_use: "Retrieve a specific document by ID.".into(),
-                common_mistakes: vec![
-                    "Using a time-based index name (e.g. logs-2026.03) without knowing which index contains the document.".into(),
-                ],
-                examples: vec![
-                    r#"{"index": "logs-2026.03", "id": "abc123"}"#.into(),
-                ],
-                related: vec![CapabilityId::from_static("elasticsearch.search")],
-            },
-        ),
-        op_info(
-            "elasticsearch.index_document",
-            "Index (create or update) a single document",
-            json!({
-                "type": "object",
-                "required": ["index", "document"],
-                "properties": {
-                    "index": { "type": "string" },
-                    "id": { "type": "string", "description": "Document ID (auto-generated if omitted)" },
-                    "document": { "type": "object" }
-                }
-            }),
-            json!({
-                "type": "object",
-                "required": ["_id", "result"],
-                "properties": {
-                    "_id": { "type": "string" },
-                    "result": { "type": "string" }
-                }
-            }),
-            "elasticsearch.index.write",
-            RiskLevel::Medium,
-            SafetyTier::Risky,
-            IdempotencyClass::Strict,
-            AgentHint {
-                when_to_use: "Index a single document.".into(),
-                common_mistakes: vec![
-                    "Indexing documents one at a time in a loop instead of using the bulk API for better throughput.".into(),
-                ],
-                examples: vec![
-                    r#"{"index": "products", "id": "1", "document": {"name": "Widget", "price": 9.99}}"#.into(),
-                ],
-                related: vec![CapabilityId::from_static("elasticsearch.bulk")],
-            },
-        ),
-        op_info(
-            "elasticsearch.bulk",
-            "Bulk index, update, or delete documents",
-            json!({
-                "type": "object",
-                "required": ["operations"],
-                "properties": {
-                    "operations": { "type": "array", "description": "Array of bulk action objects" }
-                }
-            }),
-            json!({
-                "type": "object",
-                "required": ["items", "errors"],
-                "properties": {
-                    "items": { "type": "array" },
-                    "errors": { "type": "boolean" },
-                    "took": { "type": "integer" }
-                }
-            }),
-            "elasticsearch.index.write",
-            RiskLevel::Medium,
-            SafetyTier::Risky,
-            IdempotencyClass::None,
-            AgentHint {
-                when_to_use: "Perform bulk indexing, updating, or deleting of documents.".into(),
-                common_mistakes: vec![
-                    "Sending too many operations in one request — use batches of 1000-5000.".into(),
-                ],
-                examples: vec![
-                    r#"{"operations": [{"index": {"_index": "products", "_id": "1"}}, {"name": "Widget"}]}"#.into(),
-                ],
-                related: vec![CapabilityId::from_static("elasticsearch.index_document")],
-            },
-        ),
-        op_info(
-            "elasticsearch.indices.list",
-            "List indices",
-            json!({
-                "type": "object",
-                "required": [],
-                "properties": {
-                    "pattern": { "type": "string", "description": "Index name pattern (e.g. logs-*)" }
-                }
-            }),
-            json!({
-                "type": "object",
-                "required": ["indices"],
-                "properties": {
-                    "indices": { "type": "array" }
-                }
-            }),
-            "elasticsearch.indices.read",
-            RiskLevel::Low,
-            SafetyTier::Safe,
-            IdempotencyClass::Strict,
-            AgentHint {
-                when_to_use: "List indices and their metadata.".into(),
-                common_mistakes: vec![
-                    "Omitting a pattern filter on clusters with many indices, resulting in a large response payload.".into(),
-                ],
-                examples: vec![r#"{"pattern": "logs-*"}"#.into()],
-                related: vec![CapabilityId::from_static("elasticsearch.indices.delete")],
-            },
-        ),
-        op_info(
-            "elasticsearch.indices.delete",
-            "Delete an index",
-            json!({
-                "type": "object",
-                "required": ["index"],
-                "properties": {
-                    "index": { "type": "string" }
-                }
-            }),
-            json!({
-                "type": "object",
-                "required": ["acknowledged"],
-                "properties": {
-                    "acknowledged": { "type": "boolean" }
-                }
-            }),
-            "elasticsearch.indices.write",
-            RiskLevel::High,
-            SafetyTier::Dangerous,
-            IdempotencyClass::Strict,
-            AgentHint {
-                when_to_use: "Delete an index and all its documents. Cannot be undone.".into(),
-                common_mistakes: vec![
-                    "Deleting indices with active aliases.".into(),
-                ],
-                examples: vec![r#"{"index": "old-logs-2024"}"#.into()],
-                related: vec![CapabilityId::from_static("elasticsearch.indices.list")],
-            },
-        ),
-        op_info(
-            "elasticsearch.cluster.health",
-            "Get cluster health status",
-            json!({
-                "type": "object",
-                "required": []
-            }),
-            json!({
-                "type": "object",
-                "required": ["cluster_name", "status"],
-                "properties": {
-                    "cluster_name": { "type": "string" },
-                    "status": { "type": "string" },
-                    "number_of_nodes": { "type": "integer" }
-                }
-            }),
-            "elasticsearch.cluster.read",
-            RiskLevel::Low,
-            SafetyTier::Safe,
-            IdempotencyClass::Strict,
-            AgentHint {
-                when_to_use: "Check cluster health (green/yellow/red).".into(),
-                common_mistakes: vec![
-                    "Treating yellow status as healthy — it means replicas are unassigned and data redundancy is reduced.".into(),
-                ],
-                examples: vec!["{}".into()],
-                related: vec![CapabilityId::from_static("elasticsearch.indices.list")],
-            },
-        ),
-    ]
+fn operations_info() -> serde_json::Value {
+    json!([
+        {
+            "id": "elasticsearch.search",
+            "summary": "Search documents across one or more indices",
+            "capability": "elasticsearch.search.read",
+            "risk_level": "low",
+            "safety_tier": "safe",
+            "idempotency": "strict",
+        },
+        {
+            "id": "elasticsearch.get_document",
+            "summary": "Get a single document by ID",
+            "capability": "elasticsearch.search.read",
+            "risk_level": "low",
+            "safety_tier": "safe",
+            "idempotency": "strict",
+        },
+        {
+            "id": "elasticsearch.index_document",
+            "summary": "Index (create or update) a single document",
+            "capability": "elasticsearch.index.write",
+            "risk_level": "medium",
+            "safety_tier": "risky",
+            "idempotency": "strict",
+        },
+        {
+            "id": "elasticsearch.bulk",
+            "summary": "Bulk index, update, or delete documents",
+            "capability": "elasticsearch.index.write",
+            "risk_level": "medium",
+            "safety_tier": "risky",
+            "idempotency": "none",
+        },
+        {
+            "id": "elasticsearch.indices.list",
+            "summary": "List indices",
+            "capability": "elasticsearch.indices.read",
+            "risk_level": "low",
+            "safety_tier": "safe",
+            "idempotency": "strict",
+        },
+        {
+            "id": "elasticsearch.indices.delete",
+            "summary": "Delete an index",
+            "capability": "elasticsearch.indices.write",
+            "risk_level": "high",
+            "safety_tier": "dangerous",
+            "idempotency": "strict",
+        },
+        {
+            "id": "elasticsearch.cluster.health",
+            "summary": "Get cluster health status",
+            "capability": "elasticsearch.cluster.read",
+            "risk_level": "low",
+            "safety_tier": "safe",
+            "idempotency": "strict",
+        },
+    ])
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn ops_json() -> serde_json::Value {
-        serde_json::to_value(operations_info()).unwrap()
-    }
 
     // ── ElasticsearchConfig::from_params ────────────────────────────
 
@@ -860,12 +905,13 @@ mod tests {
     #[test]
     fn operations_info_has_7_operations() {
         let ops = operations_info();
-        assert_eq!(ops.len(), 7);
+        let arr = ops.as_array().unwrap();
+        assert_eq!(arr.len(), 7);
     }
 
     #[test]
     fn operations_all_have_required_fields() {
-        let ops = ops_json();
+        let ops = operations_info();
         for op in ops.as_array().unwrap() {
             assert!(op.get("id").is_some(), "missing id");
             assert!(op.get("summary").is_some(), "missing summary");

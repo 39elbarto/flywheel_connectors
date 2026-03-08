@@ -5,7 +5,7 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:PLACEHOLDER_HASH"
+interface_hash = "blake3-256:fcp.interface.v2:0000000000000000000000000000000000000000000000000000000000000000"
 
 [connector]
 id = "fcp.redis"
@@ -109,7 +109,7 @@ related = ["redis.set", "redis.exists"]
 description = "Set the value of a key with optional TTL and NX/XX flags"
 capability = "redis.write"
 risk_level = "medium"
-safety_tier = "moderate"
+safety_tier = "risky"
 requires_approval = "policy"
 idempotency = "best_effort"
 
@@ -181,7 +181,7 @@ related = ["redis.get", "redis.expire"]
 description = "Delete one or more keys"
 capability = "redis.write"
 risk_level = "high"
-safety_tier = "moderate"
+safety_tier = "risky"
 requires_approval = "interactive"
 idempotency = "none"
 
@@ -292,7 +292,7 @@ related = ["redis.get", "redis.del"]
 description = "Set a timeout on a key"
 capability = "redis.write"
 risk_level = "medium"
-safety_tier = "moderate"
+safety_tier = "risky"
 requires_approval = "policy"
 idempotency = "best_effort"
 
@@ -398,7 +398,7 @@ related = ["redis.expire", "redis.exists"]
 description = "Atomically increment the integer value of a key by one"
 capability = "redis.write"
 risk_level = "medium"
-safety_tier = "moderate"
+safety_tier = "risky"
 requires_approval = "policy"
 idempotency = "none"
 
@@ -503,7 +503,7 @@ related = ["redis.hset", "redis.hgetall"]
 description = "Set one or more hash fields"
 capability = "redis.write"
 risk_level = "medium"
-safety_tier = "moderate"
+safety_tier = "risky"
 requires_approval = "policy"
 idempotency = "best_effort"
 
@@ -608,7 +608,7 @@ related = ["redis.hget", "redis.hset"]
 description = "Prepend one or more elements to a list"
 capability = "redis.write"
 risk_level = "medium"
-safety_tier = "moderate"
+safety_tier = "risky"
 requires_approval = "policy"
 idempotency = "none"
 
@@ -731,7 +731,7 @@ related = ["redis.lpush"]
 description = "Add one or more members to a set"
 capability = "redis.write"
 risk_level = "medium"
-safety_tier = "moderate"
+safety_tier = "risky"
 requires_approval = "policy"
 idempotency = "best_effort"
 
@@ -831,39 +831,6 @@ when_to_use = "Retrieve all members of a set."
 common_mistakes = ["Using SMEMBERS on very large sets — consider SSCAN for sets with thousands of members."]
 examples = ['{"key": "tags:article:42"}']
 related = ["redis.sadd"]
-
-# ──────────────────────────────────────────────
-# Auth
-# ──────────────────────────────────────────────
-
-[auth]
-method = "bearer"
-credential_type = "api_token"
-secretless = true
-secretless_header = "X-FCP-Credential-Id"
-
-# ──────────────────────────────────────────────
-# Config
-# ──────────────────────────────────────────────
-
-[config]
-required = []
-optional = ["base_url"]
-
-[config.fields.api_token]
-type = "string"
-description = "Upstash Redis REST API token (Bearer auth)"
-secret = true
-
-[config.fields.credential_id]
-type = "string"
-description = "FCP credential ID for secretless auth (mutually exclusive with api_token)"
-secret = false
-
-[config.fields.base_url]
-type = "string"
-description = "Redis REST API base URL (defaults to https://redis.example.com)"
-secret = false
 
 # ──────────────────────────────────────────────
 # Sandbox

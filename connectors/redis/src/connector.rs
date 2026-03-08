@@ -3,7 +3,10 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use fcp_core::{BaseConnector, ConnectorId, CredentialId, FcpError, FcpResult};
+use fcp_core::{
+    AgentHint, BaseConnector, CapabilityId, ConnectorId, CredentialId, FcpError, FcpResult,
+    IdempotencyClass, OperationId, OperationInfo, RiskLevel, SafetyTier,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tracing::{info, instrument};
@@ -281,7 +284,7 @@ impl RedisConnector {
         Ok(json!({
             "connector_id": "fcp.redis",
             "version": "0.1.0",
-            "operations": operations_info(),
+            "operations": serde_json::to_value(operations_info()).unwrap_or_default(),
         }))
     }
 
@@ -342,10 +345,7 @@ impl RedisConnector {
             .and_then(serde_json::Value::as_str)
             .unwrap_or("");
 
-        let allowed = operations_info().as_array().is_some_and(|ops| {
-            ops.iter()
-                .any(|o| o.get("id").and_then(serde_json::Value::as_str) == Some(operation))
-        });
+        let allowed = operations_info().iter().any(|o| o.id.as_ref() == operation);
 
         Ok(json!({
             "allowed": allowed,
@@ -594,338 +594,205 @@ fn require_str_array(input: &serde_json::Value, field: &str) -> Result<Vec<Strin
         .collect()
 }
 
+/// Construct a single [`OperationInfo`].
+#[allow(clippy::too_many_arguments)]
+fn op_info(
+    id: &'static str,
+    summary: &str,
+    input_schema: serde_json::Value,
+    output_schema: serde_json::Value,
+    capability: &'static str,
+    risk_level: RiskLevel,
+    safety_tier: SafetyTier,
+    idempotency: IdempotencyClass,
+    ai_hints: AgentHint,
+) -> OperationInfo {
+    OperationInfo {
+        id: OperationId::from_static(id),
+        summary: summary.into(),
+        input_schema,
+        output_schema,
+        capability: CapabilityId::from_static(capability),
+        risk_level,
+        description: None,
+        rate_limit: None,
+        requires_approval: None,
+        safety_tier,
+        idempotency,
+        ai_hints,
+    }
+}
+
 /// Build the operations info for introspection.
-fn operations_info() -> serde_json::Value {
-    json!([
-        {
-            "id": "redis.get",
-            "summary": "Get the value of a key",
-            "capability": "redis.read",
-            "risk_level": "low",
-            "safety_tier": "safe",
-            "idempotency": "strict",
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "key": { "type": "string", "description": "The key to get" }
-                },
-                "required": ["key"]
+fn operations_info() -> Vec<OperationInfo> {
+    vec![
+        op_info(
+            "redis.get", "Get the value of a key",
+            json!({"type":"object","required":["key"],"properties":{"key":{"type":"string","description":"The key to get"}}}),
+            json!({"type":"object","properties":{"value":{"description":"The value stored at the key, or null if not found"}}}),
+            "redis.read", RiskLevel::Low, SafetyTier::Safe, IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "Retrieve the value of a single key from Redis.".into(),
+                common_mistakes: vec!["Assuming the key exists without checking — value is null when the key is missing.".into()],
+                examples: vec![r#"{"key": "user:1234:name"}"#.into()],
+                related: vec![CapabilityId::from_static("redis.set"), CapabilityId::from_static("redis.exists")],
             },
-            "output_schema": {
-                "type": "object",
-                "properties": {
-                    "value": { "description": "The value stored at the key, or null if not found" }
-                }
-            }
-        },
-        {
-            "id": "redis.set",
-            "summary": "Set the value of a key with optional TTL and NX/XX flags",
-            "capability": "redis.write",
-            "risk_level": "medium",
-            "safety_tier": "moderate",
-            "idempotency": "best_effort",
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "key": { "type": "string", "description": "The key to set" },
-                    "value": { "type": "string", "description": "The value to set" },
-                    "ttl_seconds": { "type": "integer", "description": "Time-to-live in seconds" },
-                    "nx": { "type": "boolean", "description": "Only set if key does not exist" },
-                    "xx": { "type": "boolean", "description": "Only set if key already exists" }
-                },
-                "required": ["key", "value"]
+        ),
+        op_info(
+            "redis.set", "Set the value of a key with optional TTL and NX/XX flags",
+            json!({"type":"object","required":["key","value"],"properties":{"key":{"type":"string","description":"The key to set"},"value":{"type":"string","description":"The value to set"},"ttl_seconds":{"type":"integer","description":"Time-to-live in seconds"},"nx":{"type":"boolean","description":"Only set if key does not exist"},"xx":{"type":"boolean","description":"Only set if key already exists"}}}),
+            json!({"type":"object","properties":{"result":{"description":"OK on success, null if NX/XX condition not met"}}}),
+            "redis.write", RiskLevel::Medium, SafetyTier::Risky, IdempotencyClass::BestEffort,
+            AgentHint {
+                when_to_use: "Store a string value at a key, optionally with a TTL or conditional NX/XX flags.".into(),
+                common_mistakes: vec!["Using both NX and XX together — they are mutually exclusive.".into(), "Forgetting to set a TTL for cache entries, leading to unbounded growth.".into()],
+                examples: vec![r#"{"key": "session:abc", "value": "active", "ttl_seconds": 3600}"#.into(), r#"{"key": "lock:job:42", "value": "1", "nx": true, "ttl_seconds": 60}"#.into()],
+                related: vec![CapabilityId::from_static("redis.get"), CapabilityId::from_static("redis.expire")],
             },
-            "output_schema": {
-                "type": "object",
-                "properties": {
-                    "result": { "description": "OK on success, null if NX/XX condition not met" }
-                }
-            }
-        },
-        {
-            "id": "redis.del",
-            "summary": "Delete one or more keys",
-            "capability": "redis.write",
-            "risk_level": "high",
-            "safety_tier": "moderate",
-            "idempotency": "none",
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "keys": {
-                        "type": "array",
-                        "items": { "type": "string" },
-                        "description": "The keys to delete"
-                    }
-                },
-                "required": ["keys"]
+        ),
+        op_info(
+            "redis.del", "Delete one or more keys",
+            json!({"type":"object","required":["keys"],"properties":{"keys":{"type":"array","description":"The keys to delete"}}}),
+            json!({"type":"object","properties":{"deleted":{"type":"integer","description":"Number of keys deleted"}}}),
+            "redis.write", RiskLevel::High, SafetyTier::Risky, IdempotencyClass::None,
+            AgentHint {
+                when_to_use: "Delete one or more keys from Redis. This is destructive and cannot be undone.".into(),
+                common_mistakes: vec!["Passing a glob pattern instead of explicit key names — DEL does not support patterns.".into(), "Deleting keys without checking their existence first.".into()],
+                examples: vec![r#"{"keys": ["session:expired:1", "session:expired:2"]}"#.into()],
+                related: vec![CapabilityId::from_static("redis.exists"), CapabilityId::from_static("redis.get")],
             },
-            "output_schema": {
-                "type": "object",
-                "properties": {
-                    "deleted": { "type": "integer", "description": "Number of keys deleted" }
-                }
-            }
-        },
-        {
-            "id": "redis.exists",
-            "summary": "Check if one or more keys exist",
-            "capability": "redis.read",
-            "risk_level": "low",
-            "safety_tier": "safe",
-            "idempotency": "strict",
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "keys": {
-                        "type": "array",
-                        "items": { "type": "string" },
-                        "description": "The keys to check"
-                    }
-                },
-                "required": ["keys"]
+        ),
+        op_info(
+            "redis.exists", "Check if one or more keys exist",
+            json!({"type":"object","required":["keys"],"properties":{"keys":{"type":"array","description":"The keys to check"}}}),
+            json!({"type":"object","properties":{"count":{"type":"integer","description":"Number of keys that exist"}}}),
+            "redis.read", RiskLevel::Low, SafetyTier::Safe, IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "Check whether one or more keys exist without retrieving their values.".into(),
+                common_mistakes: vec!["Assuming count equals the number of unique keys — EXISTS counts duplicates if the same key appears multiple times.".into()],
+                examples: vec![r#"{"keys": ["user:1", "user:2", "user:3"]}"#.into()],
+                related: vec![CapabilityId::from_static("redis.get"), CapabilityId::from_static("redis.del")],
             },
-            "output_schema": {
-                "type": "object",
-                "properties": {
-                    "count": { "type": "integer", "description": "Number of keys that exist" }
-                }
-            }
-        },
-        {
-            "id": "redis.expire",
-            "summary": "Set a timeout on a key",
-            "capability": "redis.write",
-            "risk_level": "medium",
-            "safety_tier": "moderate",
-            "idempotency": "best_effort",
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "key": { "type": "string", "description": "The key to set expiry on" },
-                    "seconds": { "type": "integer", "description": "TTL in seconds" }
-                },
-                "required": ["key", "seconds"]
+        ),
+        op_info(
+            "redis.expire", "Set a timeout on a key",
+            json!({"type":"object","required":["key","seconds"],"properties":{"key":{"type":"string","description":"The key to set expiry on"},"seconds":{"type":"integer","description":"TTL in seconds"}}}),
+            json!({"type":"object","properties":{"result":{"type":"integer","description":"1 if timeout was set, 0 if key does not exist"}}}),
+            "redis.write", RiskLevel::Medium, SafetyTier::Risky, IdempotencyClass::BestEffort,
+            AgentHint {
+                when_to_use: "Set or update the TTL on an existing key.".into(),
+                common_mistakes: vec!["Calling EXPIRE on a key that does not exist — returns 0 silently.".into()],
+                examples: vec![r#"{"key": "cache:homepage", "seconds": 300}"#.into()],
+                related: vec![CapabilityId::from_static("redis.ttl"), CapabilityId::from_static("redis.set")],
             },
-            "output_schema": {
-                "type": "object",
-                "properties": {
-                    "result": { "type": "integer", "description": "1 if timeout was set, 0 if key does not exist" }
-                }
-            }
-        },
-        {
-            "id": "redis.ttl",
-            "summary": "Get the remaining time to live of a key",
-            "capability": "redis.read",
-            "risk_level": "low",
-            "safety_tier": "safe",
-            "idempotency": "strict",
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "key": { "type": "string", "description": "The key to check" }
-                },
-                "required": ["key"]
+        ),
+        op_info(
+            "redis.ttl", "Get the remaining time to live of a key",
+            json!({"type":"object","required":["key"],"properties":{"key":{"type":"string","description":"The key to check"}}}),
+            json!({"type":"object","properties":{"ttl":{"type":"integer","description":"TTL in seconds, -1 if no expiry, -2 if key does not exist"}}}),
+            "redis.read", RiskLevel::Low, SafetyTier::Safe, IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "Check how many seconds remain before a key expires.".into(),
+                common_mistakes: vec!["Not distinguishing -1 (no expiry) from -2 (key does not exist).".into()],
+                examples: vec![r#"{"key": "session:abc"}"#.into()],
+                related: vec![CapabilityId::from_static("redis.expire"), CapabilityId::from_static("redis.exists")],
             },
-            "output_schema": {
-                "type": "object",
-                "properties": {
-                    "ttl": { "type": "integer", "description": "TTL in seconds, -1 if no expiry, -2 if key does not exist" }
-                }
-            }
-        },
-        {
-            "id": "redis.incr",
-            "summary": "Atomically increment the integer value of a key by one",
-            "capability": "redis.write",
-            "risk_level": "medium",
-            "safety_tier": "moderate",
-            "idempotency": "none",
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "key": { "type": "string", "description": "The key to increment" }
-                },
-                "required": ["key"]
+        ),
+        op_info(
+            "redis.incr", "Atomically increment the integer value of a key by one",
+            json!({"type":"object","required":["key"],"properties":{"key":{"type":"string","description":"The key to increment"}}}),
+            json!({"type":"object","properties":{"value":{"type":"integer","description":"The value after incrementing"}}}),
+            "redis.write", RiskLevel::Medium, SafetyTier::Risky, IdempotencyClass::None,
+            AgentHint {
+                when_to_use: "Atomically increment an integer counter. Creates the key with value 1 if it does not exist.".into(),
+                common_mistakes: vec!["Calling INCR on a key that holds a non-integer value — Redis returns an error.".into()],
+                examples: vec![r#"{"key": "page:views:homepage"}"#.into()],
+                related: vec![CapabilityId::from_static("redis.get"), CapabilityId::from_static("redis.set")],
             },
-            "output_schema": {
-                "type": "object",
-                "properties": {
-                    "value": { "type": "integer", "description": "The value after incrementing" }
-                }
-            }
-        },
-        {
-            "id": "redis.hget",
-            "summary": "Get the value of a hash field",
-            "capability": "redis.read",
-            "risk_level": "low",
-            "safety_tier": "safe",
-            "idempotency": "strict",
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "key": { "type": "string", "description": "The hash key" },
-                    "field": { "type": "string", "description": "The field to get" }
-                },
-                "required": ["key", "field"]
+        ),
+        op_info(
+            "redis.hget", "Get the value of a hash field",
+            json!({"type":"object","required":["key","field"],"properties":{"key":{"type":"string","description":"The hash key"},"field":{"type":"string","description":"The field to get"}}}),
+            json!({"type":"object","properties":{"value":{"description":"The value of the field, or null"}}}),
+            "redis.read", RiskLevel::Low, SafetyTier::Safe, IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "Read a single field from a Redis hash.".into(),
+                common_mistakes: vec!["Confusing HGET (single field) with HGETALL (all fields).".into()],
+                examples: vec![r#"{"key": "user:1234", "field": "email"}"#.into()],
+                related: vec![CapabilityId::from_static("redis.hset"), CapabilityId::from_static("redis.hgetall")],
             },
-            "output_schema": {
-                "type": "object",
-                "properties": {
-                    "value": { "description": "The value of the field, or null" }
-                }
-            }
-        },
-        {
-            "id": "redis.hset",
-            "summary": "Set one or more hash fields",
-            "capability": "redis.write",
-            "risk_level": "medium",
-            "safety_tier": "moderate",
-            "idempotency": "best_effort",
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "key": { "type": "string", "description": "The hash key" },
-                    "fields": {
-                        "type": "object",
-                        "description": "Field-value pairs to set"
-                    }
-                },
-                "required": ["key", "fields"]
+        ),
+        op_info(
+            "redis.hset", "Set one or more hash fields",
+            json!({"type":"object","required":["key","fields"],"properties":{"key":{"type":"string","description":"The hash key"},"fields":{"type":"object","description":"Field-value pairs to set"}}}),
+            json!({"type":"object","properties":{"result":{"type":"integer","description":"Number of new fields added"}}}),
+            "redis.write", RiskLevel::Medium, SafetyTier::Risky, IdempotencyClass::BestEffort,
+            AgentHint {
+                when_to_use: "Set one or more fields in a hash. Creates the hash if it does not exist.".into(),
+                common_mistakes: vec!["Passing values as non-string types — all hash values are stored as strings.".into()],
+                examples: vec![r#"{"key": "user:1234", "fields": {"name": "Alice", "email": "alice@example.com"}}"#.into()],
+                related: vec![CapabilityId::from_static("redis.hget"), CapabilityId::from_static("redis.hgetall")],
             },
-            "output_schema": {
-                "type": "object",
-                "properties": {
-                    "result": { "type": "integer", "description": "Number of new fields added" }
-                }
-            }
-        },
-        {
-            "id": "redis.hgetall",
-            "summary": "Get all fields and values in a hash",
-            "capability": "redis.read",
-            "risk_level": "low",
-            "safety_tier": "safe",
-            "idempotency": "strict",
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "key": { "type": "string", "description": "The hash key" }
-                },
-                "required": ["key"]
+        ),
+        op_info(
+            "redis.hgetall", "Get all fields and values in a hash",
+            json!({"type":"object","required":["key"],"properties":{"key":{"type":"string","description":"The hash key"}}}),
+            json!({"type":"object","properties":{"fields":{"description":"All field-value pairs in the hash"}}}),
+            "redis.read", RiskLevel::Low, SafetyTier::Safe, IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "Retrieve all fields and values from a hash in one call.".into(),
+                common_mistakes: vec!["Using HGETALL on very large hashes — can be slow and memory-intensive for hashes with thousands of fields.".into()],
+                examples: vec![r#"{"key": "user:1234"}"#.into()],
+                related: vec![CapabilityId::from_static("redis.hget"), CapabilityId::from_static("redis.hset")],
             },
-            "output_schema": {
-                "type": "object",
-                "properties": {
-                    "fields": { "description": "All field-value pairs in the hash" }
-                }
-            }
-        },
-        {
-            "id": "redis.lpush",
-            "summary": "Prepend one or more elements to a list",
-            "capability": "redis.write",
-            "risk_level": "medium",
-            "safety_tier": "moderate",
-            "idempotency": "none",
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "key": { "type": "string", "description": "The list key" },
-                    "elements": {
-                        "type": "array",
-                        "items": { "type": "string" },
-                        "description": "Elements to prepend"
-                    }
-                },
-                "required": ["key", "elements"]
+        ),
+        op_info(
+            "redis.lpush", "Prepend one or more elements to a list",
+            json!({"type":"object","required":["key","elements"],"properties":{"key":{"type":"string","description":"The list key"},"elements":{"type":"array","description":"Elements to prepend"}}}),
+            json!({"type":"object","properties":{"length":{"type":"integer","description":"Length of the list after push"}}}),
+            "redis.write", RiskLevel::Medium, SafetyTier::Risky, IdempotencyClass::None,
+            AgentHint {
+                when_to_use: "Add elements to the head of a list. Creates the list if it does not exist.".into(),
+                common_mistakes: vec!["Elements are prepended in reverse order — LPUSH key a b c results in list [c, b, a].".into()],
+                examples: vec![r#"{"key": "queue:tasks", "elements": ["task-1", "task-2"]}"#.into()],
+                related: vec![CapabilityId::from_static("redis.lrange")],
             },
-            "output_schema": {
-                "type": "object",
-                "properties": {
-                    "length": { "type": "integer", "description": "Length of the list after push" }
-                }
-            }
-        },
-        {
-            "id": "redis.lrange",
-            "summary": "Get a range of elements from a list",
-            "capability": "redis.read",
-            "risk_level": "low",
-            "safety_tier": "safe",
-            "idempotency": "strict",
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "key": { "type": "string", "description": "The list key" },
-                    "start": { "type": "integer", "description": "Start index (default 0)" },
-                    "stop": { "type": "integer", "description": "Stop index (default -1 for all)" }
-                },
-                "required": ["key"]
+        ),
+        op_info(
+            "redis.lrange", "Get a range of elements from a list",
+            json!({"type":"object","required":["key"],"properties":{"key":{"type":"string","description":"The list key"},"start":{"type":"integer","description":"Start index (default 0)"},"stop":{"type":"integer","description":"Stop index (default -1 for all)"}}}),
+            json!({"type":"object","properties":{"values":{"type":"array","description":"List elements in the range"}}}),
+            "redis.read", RiskLevel::Low, SafetyTier::Safe, IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "Read a slice of elements from a list by index range.".into(),
+                common_mistakes: vec!["Using LRANGE 0 -1 on very large lists — can be slow and memory-intensive.".into(), "Forgetting that stop index is inclusive, unlike most language slice semantics.".into()],
+                examples: vec![r#"{"key": "queue:tasks", "start": 0, "stop": 9}"#.into(), r#"{"key": "recent:events"}"#.into()],
+                related: vec![CapabilityId::from_static("redis.lpush")],
             },
-            "output_schema": {
-                "type": "object",
-                "properties": {
-                    "values": {
-                        "type": "array",
-                        "description": "List elements in the range"
-                    }
-                }
-            }
-        },
-        {
-            "id": "redis.sadd",
-            "summary": "Add one or more members to a set",
-            "capability": "redis.write",
-            "risk_level": "medium",
-            "safety_tier": "moderate",
-            "idempotency": "best_effort",
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "key": { "type": "string", "description": "The set key" },
-                    "members": {
-                        "type": "array",
-                        "items": { "type": "string" },
-                        "description": "Members to add"
-                    }
-                },
-                "required": ["key", "members"]
+        ),
+        op_info(
+            "redis.sadd", "Add one or more members to a set",
+            json!({"type":"object","required":["key","members"],"properties":{"key":{"type":"string","description":"The set key"},"members":{"type":"array","description":"Members to add"}}}),
+            json!({"type":"object","properties":{"added":{"type":"integer","description":"Number of new members added"}}}),
+            "redis.write", RiskLevel::Medium, SafetyTier::Risky, IdempotencyClass::BestEffort,
+            AgentHint {
+                when_to_use: "Add members to a set. Duplicates are ignored. Creates the set if it does not exist.".into(),
+                common_mistakes: vec!["Expecting the return value to be the total set size — it returns only the count of newly added members.".into()],
+                examples: vec![r#"{"key": "tags:article:42", "members": ["rust", "redis", "caching"]}"#.into()],
+                related: vec![CapabilityId::from_static("redis.smembers")],
             },
-            "output_schema": {
-                "type": "object",
-                "properties": {
-                    "added": { "type": "integer", "description": "Number of new members added" }
-                }
-            }
-        },
-        {
-            "id": "redis.smembers",
-            "summary": "Get all members of a set",
-            "capability": "redis.read",
-            "risk_level": "low",
-            "safety_tier": "safe",
-            "idempotency": "strict",
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "key": { "type": "string", "description": "The set key" }
-                },
-                "required": ["key"]
+        ),
+        op_info(
+            "redis.smembers", "Get all members of a set",
+            json!({"type":"object","required":["key"],"properties":{"key":{"type":"string","description":"The set key"}}}),
+            json!({"type":"object","properties":{"members":{"type":"array","description":"All members of the set"}}}),
+            "redis.read", RiskLevel::Low, SafetyTier::Safe, IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "Retrieve all members of a set.".into(),
+                common_mistakes: vec!["Using SMEMBERS on very large sets — consider SSCAN for sets with thousands of members.".into()],
+                examples: vec![r#"{"key": "tags:article:42"}"#.into()],
+                related: vec![CapabilityId::from_static("redis.sadd")],
             },
-            "output_schema": {
-                "type": "object",
-                "properties": {
-                    "members": {
-                        "type": "array",
-                        "description": "All members of the set"
-                    }
-                }
-            }
-        }
-    ])
+        ),
+    ]
 }

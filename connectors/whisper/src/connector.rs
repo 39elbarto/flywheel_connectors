@@ -3,7 +3,10 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use fcp_core::{BaseConnector, ConnectorId, CredentialId, FcpError, FcpResult};
+use fcp_core::{
+    AgentHint, BaseConnector, CapabilityId, ConnectorId, CredentialId, FcpError, FcpResult,
+    IdempotencyClass, OperationId, OperationInfo, RiskLevel, SafetyTier,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tracing::{info, instrument};
@@ -291,7 +294,7 @@ impl WhisperConnector {
         Ok(json!({
             "connector_id": "fcp.whisper",
             "version": "0.1.0",
-            "operations": operations_info(),
+            "operations": serde_json::to_value(operations_info()).unwrap_or_default(),
         }))
     }
 
@@ -346,10 +349,7 @@ impl WhisperConnector {
             .and_then(serde_json::Value::as_str)
             .unwrap_or("");
 
-        let allowed = operations_info().as_array().is_some_and(|ops| {
-            ops.iter()
-                .any(|o| o.get("id").and_then(serde_json::Value::as_str) == Some(operation))
-        });
+        let allowed = operations_info().iter().any(|o| o.id.as_ref() == operation);
 
         Ok(json!({
             "allowed": allowed,
@@ -572,187 +572,193 @@ fn validate_audio_input(input: &serde_json::Value) -> Result<(), WhisperError> {
     Ok(())
 }
 
+/// Construct a single [`OperationInfo`].
+#[allow(clippy::too_many_arguments)]
+fn op_info(
+    id: &'static str,
+    summary: &str,
+    input_schema: serde_json::Value,
+    output_schema: serde_json::Value,
+    capability: &'static str,
+    risk_level: RiskLevel,
+    safety_tier: SafetyTier,
+    idempotency: IdempotencyClass,
+    ai_hints: AgentHint,
+) -> OperationInfo {
+    OperationInfo {
+        id: OperationId::from_static(id),
+        summary: summary.into(),
+        input_schema,
+        output_schema,
+        capability: CapabilityId::from_static(capability),
+        risk_level,
+        description: None,
+        rate_limit: None,
+        requires_approval: None,
+        safety_tier,
+        idempotency,
+        ai_hints,
+    }
+}
+
 /// Build the operations info for introspection.
-fn operations_info() -> serde_json::Value {
-    json!([
-        {
-            "id": "whisper.transcribe",
-            "summary": "Transcribe audio to text",
-            "capability": "whisper.transcription",
-            "risk_level": "low",
-            "safety_tier": "safe",
-            "idempotency": "strict",
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "audio_base64": { "type": "string", "description": "Base64-encoded audio data" },
-                    "audio_url": { "type": "string", "description": "URL to audio file" },
-                    "model": { "type": "string", "description": "Model to use (default: whisper-1)" },
-                    "language": { "type": "string", "description": "Language code (ISO 639-1)" },
-                    "response_format": { "type": "string", "description": "Output format (json, text, srt, verbose_json, vtt)" },
-                    "temperature": { "type": "number", "description": "Sampling temperature (0.0-1.0)" }
-                }
+fn operations_info() -> Vec<OperationInfo> {
+    vec![
+        op_info(
+            "whisper.transcribe", "Transcribe audio to text",
+            json!({"type":"object","properties":{"audio_base64":{"type":"string","description":"Base64-encoded audio data"},"audio_url":{"type":"string","description":"URL to audio file"},"model":{"type":"string","description":"Model to use (default: whisper-1)"},"language":{"type":"string","description":"Language code (ISO 639-1)"},"response_format":{"type":"string","description":"Output format (json, text, srt, verbose_json, vtt)"},"temperature":{"type":"number","description":"Sampling temperature (0.0-1.0)"}}}),
+            json!({"type":"object","properties":{"text":{"type":"string","description":"Transcribed text"},"language":{"type":"string","description":"Detected language"},"duration_seconds":{"type":"number","description":"Audio duration in seconds"},"segments":{"type":"array","description":"Transcription segments"}}}),
+            "whisper.transcription", RiskLevel::Low, SafetyTier::Safe, IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "Use to convert audio files or streams to text. Supports mp3, mp4, wav, webm, flac, ogg, and more.".into(),
+                common_mistakes: vec![
+                    "Forgetting to provide either audio_base64 or audio_url.".into(),
+                    "Exceeding the 25 MB file size limit.".into(),
+                    "Passing an unsupported audio format.".into(),
+                ],
+                examples: vec![
+                    r#"{"audio_url": "https://example.com/recording.mp3"}"#.into(),
+                    r#"{"audio_base64": "<base64-data>", "language": "en", "model": "whisper-1"}"#.into(),
+                ],
+                related: vec![
+                    CapabilityId::from_static("whisper.transcribe_verbose"),
+                    CapabilityId::from_static("whisper.translate"),
+                    CapabilityId::from_static("whisper.detect_language"),
+                ],
             },
-            "output_schema": {
-                "type": "object",
-                "properties": {
-                    "text": { "type": "string", "description": "Transcribed text" },
-                    "language": { "type": "string", "description": "Detected language" },
-                    "duration_seconds": { "type": "number", "description": "Audio duration in seconds" },
-                    "segments": { "type": "array", "description": "Transcription segments" }
-                }
-            }
-        },
-        {
-            "id": "whisper.translate",
-            "summary": "Translate audio to English text",
-            "capability": "whisper.translation",
-            "risk_level": "low",
-            "safety_tier": "safe",
-            "idempotency": "strict",
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "audio_base64": { "type": "string", "description": "Base64-encoded audio data" },
-                    "audio_url": { "type": "string", "description": "URL to audio file" },
-                    "model": { "type": "string", "description": "Model to use (default: whisper-1)" },
-                    "temperature": { "type": "number", "description": "Sampling temperature (0.0-1.0)" }
-                }
+        ),
+        op_info(
+            "whisper.translate", "Translate audio to English text",
+            json!({"type":"object","properties":{"audio_base64":{"type":"string","description":"Base64-encoded audio data"},"audio_url":{"type":"string","description":"URL to audio file"},"model":{"type":"string","description":"Model to use (default: whisper-1)"},"temperature":{"type":"number","description":"Sampling temperature (0.0-1.0)"}}}),
+            json!({"type":"object","properties":{"text":{"type":"string","description":"Translated English text"},"source_language":{"type":"string","description":"Detected source language"},"duration_seconds":{"type":"number","description":"Audio duration in seconds"}}}),
+            "whisper.translation", RiskLevel::Low, SafetyTier::Safe, IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "Use to translate non-English audio directly into English text without a separate transcription step.".into(),
+                common_mistakes: vec![
+                    "Forgetting to provide either audio_base64 or audio_url.".into(),
+                    "Using this for English audio (use whisper.transcribe instead).".into(),
+                    "Exceeding the 25 MB file size limit.".into(),
+                ],
+                examples: vec![
+                    r#"{"audio_url": "https://example.com/french_speech.mp3"}"#.into(),
+                    r#"{"audio_base64": "<base64-data>", "model": "whisper-1"}"#.into(),
+                ],
+                related: vec![
+                    CapabilityId::from_static("whisper.transcribe"),
+                    CapabilityId::from_static("whisper.detect_language"),
+                ],
             },
-            "output_schema": {
-                "type": "object",
-                "properties": {
-                    "text": { "type": "string", "description": "Translated English text" },
-                    "source_language": { "type": "string", "description": "Detected source language" },
-                    "duration_seconds": { "type": "number", "description": "Audio duration in seconds" }
-                }
-            }
-        },
-        {
-            "id": "whisper.detect_language",
-            "summary": "Detect the language of audio",
-            "capability": "whisper.transcription",
-            "risk_level": "low",
-            "safety_tier": "safe",
-            "idempotency": "strict",
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "audio_base64": { "type": "string", "description": "Base64-encoded audio data" },
-                    "audio_url": { "type": "string", "description": "URL to audio file" },
-                    "model": { "type": "string", "description": "Model to use (default: whisper-1)" }
-                }
+        ),
+        op_info(
+            "whisper.detect_language", "Detect the language of audio",
+            json!({"type":"object","properties":{"audio_base64":{"type":"string","description":"Base64-encoded audio data"},"audio_url":{"type":"string","description":"URL to audio file"},"model":{"type":"string","description":"Model to use (default: whisper-1)"}}}),
+            json!({"type":"object","properties":{"language":{"type":"string","description":"Detected language code"},"confidence":{"type":"number","description":"Detection confidence score"}}}),
+            "whisper.transcription", RiskLevel::Low, SafetyTier::Safe, IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "Use to identify the spoken language in an audio file without performing a full transcription.".into(),
+                common_mistakes: vec![
+                    "Forgetting to provide either audio_base64 or audio_url.".into(),
+                    "Expecting full transcription output (use whisper.transcribe for that).".into(),
+                ],
+                examples: vec![
+                    r#"{"audio_url": "https://example.com/unknown_language.mp3"}"#.into(),
+                ],
+                related: vec![
+                    CapabilityId::from_static("whisper.transcribe"),
+                    CapabilityId::from_static("whisper.translate"),
+                ],
             },
-            "output_schema": {
-                "type": "object",
-                "properties": {
-                    "language": { "type": "string", "description": "Detected language code" },
-                    "confidence": { "type": "number", "description": "Detection confidence score" }
-                }
-            }
-        },
-        {
-            "id": "whisper.transcribe_verbose",
-            "summary": "Transcribe audio with word-level timestamps",
-            "capability": "whisper.transcription",
-            "risk_level": "low",
-            "safety_tier": "safe",
-            "idempotency": "strict",
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "audio_base64": { "type": "string", "description": "Base64-encoded audio data" },
-                    "audio_url": { "type": "string", "description": "URL to audio file" },
-                    "model": { "type": "string", "description": "Model to use (default: whisper-1)" },
-                    "language": { "type": "string", "description": "Language code (ISO 639-1)" },
-                    "temperature": { "type": "number", "description": "Sampling temperature (0.0-1.0)" }
-                }
+        ),
+        op_info(
+            "whisper.transcribe_verbose", "Transcribe audio with word-level timestamps",
+            json!({"type":"object","properties":{"audio_base64":{"type":"string","description":"Base64-encoded audio data"},"audio_url":{"type":"string","description":"URL to audio file"},"model":{"type":"string","description":"Model to use (default: whisper-1)"},"language":{"type":"string","description":"Language code (ISO 639-1)"},"temperature":{"type":"number","description":"Sampling temperature (0.0-1.0)"}}}),
+            json!({"type":"object","properties":{"text":{"type":"string","description":"Transcribed text"},"language":{"type":"string","description":"Detected language"},"duration":{"type":"number","description":"Audio duration in seconds"},"segments":{"type":"array","description":"Transcription segments"},"words":{"type":"array","description":"Word-level timestamps"}}}),
+            "whisper.transcription", RiskLevel::Low, SafetyTier::Safe, IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "Use when you need word-level or segment-level timestamps for subtitles, karaoke, or alignment tasks.".into(),
+                common_mistakes: vec![
+                    "Forgetting to provide either audio_base64 or audio_url.".into(),
+                    "Using this when only the text is needed (use whisper.transcribe for simpler output).".into(),
+                    "Exceeding the 25 MB file size limit.".into(),
+                ],
+                examples: vec![
+                    r#"{"audio_url": "https://example.com/interview.wav", "language": "en"}"#.into(),
+                    r#"{"audio_base64": "<base64-data>", "model": "whisper-1"}"#.into(),
+                ],
+                related: vec![
+                    CapabilityId::from_static("whisper.transcribe"),
+                    CapabilityId::from_static("whisper.translate"),
+                ],
             },
-            "output_schema": {
-                "type": "object",
-                "properties": {
-                    "text": { "type": "string", "description": "Transcribed text" },
-                    "language": { "type": "string", "description": "Detected language" },
-                    "duration": { "type": "number", "description": "Audio duration in seconds" },
-                    "segments": { "type": "array", "description": "Transcription segments" },
-                    "words": { "type": "array", "description": "Word-level timestamps" }
-                }
-            }
-        },
-        {
-            "id": "whisper.list_models",
-            "summary": "List available Whisper models",
-            "capability": "whisper.info",
-            "risk_level": "low",
-            "safety_tier": "safe",
-            "idempotency": "strict",
-            "input_schema": {
-                "type": "object",
-                "properties": {}
+        ),
+        op_info(
+            "whisper.list_models", "List available Whisper models",
+            json!({"type":"object"}),
+            json!({"type":"object","properties":{"models":{"type":"array","description":"Available Whisper models"}}}),
+            "whisper.info", RiskLevel::Low, SafetyTier::Safe, IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "Use to discover which Whisper models are available and their capabilities.".into(),
+                common_mistakes: vec![
+                    "Assuming all OpenAI models are returned — only Whisper-family audio models are listed.".into(),
+                    "Expecting model pricing or rate limit details in the response (check OpenAI billing dashboard instead).".into(),
+                ],
+                examples: vec![r"{}".into()],
+                related: vec![
+                    CapabilityId::from_static("whisper.transcribe"),
+                    CapabilityId::from_static("whisper.formats"),
+                ],
             },
-            "output_schema": {
-                "type": "object",
-                "properties": {
-                    "models": { "type": "array", "description": "Available Whisper models" }
-                }
-            }
-        },
-        {
-            "id": "whisper.health",
-            "summary": "Check API connectivity",
-            "capability": "whisper.info",
-            "risk_level": "low",
-            "safety_tier": "safe",
-            "idempotency": "strict",
-            "input_schema": {
-                "type": "object",
-                "properties": {}
+        ),
+        op_info(
+            "whisper.health", "Check API connectivity",
+            json!({"type":"object"}),
+            json!({"type":"object","properties":{"status":{"type":"string","description":"API health status"},"api_reachable":{"type":"boolean","description":"Whether the API is reachable"}}}),
+            "whisper.info", RiskLevel::Low, SafetyTier::Safe, IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "Use to verify that the Whisper API is reachable and the API key is valid before sending audio.".into(),
+                common_mistakes: vec![
+                    "Relying on this for detailed diagnostics (use the doctor lifecycle method instead).".into(),
+                ],
+                examples: vec![r"{}".into()],
+                related: vec![
+                    CapabilityId::from_static("whisper.usage"),
+                    CapabilityId::from_static("whisper.list_models"),
+                ],
             },
-            "output_schema": {
-                "type": "object",
-                "properties": {
-                    "status": { "type": "string", "description": "API health status" },
-                    "api_reachable": { "type": "boolean", "description": "Whether the API is reachable" }
-                }
-            }
-        },
-        {
-            "id": "whisper.usage",
-            "summary": "Get usage statistics",
-            "capability": "whisper.info",
-            "risk_level": "low",
-            "safety_tier": "safe",
-            "idempotency": "strict",
-            "input_schema": {
-                "type": "object",
-                "properties": {}
+        ),
+        op_info(
+            "whisper.usage", "Get usage statistics",
+            json!({"type":"object"}),
+            json!({"type":"object","properties":{"total_requests":{"type":"integer","description":"Total requests made"},"total_errors":{"type":"integer","description":"Total errors encountered"}}}),
+            "whisper.info", RiskLevel::Low, SafetyTier::Safe, IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "Use to check how many requests and errors have occurred in the current connector session.".into(),
+                common_mistakes: vec![
+                    "Expecting per-model or per-operation breakdowns (counters are session-wide totals).".into(),
+                ],
+                examples: vec![r"{}".into()],
+                related: vec![
+                    CapabilityId::from_static("whisper.health"),
+                    CapabilityId::from_static("whisper.list_models"),
+                ],
             },
-            "output_schema": {
-                "type": "object",
-                "properties": {
-                    "total_requests": { "type": "integer", "description": "Total requests made" },
-                    "total_errors": { "type": "integer", "description": "Total errors encountered" }
-                }
-            }
-        },
-        {
-            "id": "whisper.formats",
-            "summary": "List supported audio formats",
-            "capability": "whisper.info",
-            "risk_level": "low",
-            "safety_tier": "safe",
-            "idempotency": "strict",
-            "input_schema": {
-                "type": "object",
-                "properties": {}
+        ),
+        op_info(
+            "whisper.formats", "List supported audio formats",
+            json!({"type":"object"}),
+            json!({"type":"object","properties":{"formats":{"type":"array","description":"Supported audio formats"},"max_file_size_mb":{"type":"integer","description":"Maximum file size in MB"}}}),
+            "whisper.info", RiskLevel::Low, SafetyTier::Safe, IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "Use to check which audio file formats and sizes are accepted before uploading.".into(),
+                common_mistakes: vec![
+                    "Assuming all audio formats are supported (only mp3, mp4, mpeg, mpga, m4a, wav, webm, flac, ogg are).".into(),
+                ],
+                examples: vec![r"{}".into()],
+                related: vec![
+                    CapabilityId::from_static("whisper.transcribe"),
+                    CapabilityId::from_static("whisper.list_models"),
+                ],
             },
-            "output_schema": {
-                "type": "object",
-                "properties": {
-                    "formats": { "type": "array", "description": "Supported audio formats" },
-                    "max_file_size_mb": { "type": "integer", "description": "Maximum file size in MB" }
-                }
-            }
-        }
-    ])
+        ),
+    ]
 }

@@ -5,7 +5,7 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "PLACEHOLDER_HASH"
+interface_hash = "blake3-256:fcp.interface.v2:0000000000000000000000000000000000000000000000000000000000000000"
 
 [connector]
 id = "fcp.postgresql"
@@ -101,7 +101,7 @@ max_redirects = 3
 connect_timeout_ms = 10000
 total_timeout_ms = 120000
 max_response_bytes = 52428800
-methods = ["POST"]
+
 
 [provides.operations."pg.query".ai_hints]
 when_to_use = "Execute a read-only SQL query with optional parameterized values. Use for SELECT statements."
@@ -115,7 +115,7 @@ related = ["pg.explain", "pg.schema.tables"]
 description = "Execute a non-returning SQL statement (returns affected_rows)"
 capability = "pg.write"
 risk_level = "medium"
-safety_tier = "moderate"
+safety_tier = "risky"
 requires_approval = "policy"
 idempotency = "none"
 
@@ -155,7 +155,7 @@ max_redirects = 3
 connect_timeout_ms = 10000
 total_timeout_ms = 60000
 max_response_bytes = 1048576
-methods = ["POST"]
+
 
 [provides.operations."pg.execute".ai_hints]
 when_to_use = "Execute INSERT, UPDATE, DELETE, or DDL statements that do not return rows."
@@ -209,7 +209,7 @@ max_redirects = 3
 connect_timeout_ms = 10000
 total_timeout_ms = 60000
 max_response_bytes = 1048576
-methods = ["POST"]
+
 
 [provides.operations."pg.explain".ai_hints]
 when_to_use = "Analyze the query execution plan before running an expensive query. Use to debug slow queries."
@@ -260,7 +260,7 @@ max_redirects = 3
 connect_timeout_ms = 10000
 total_timeout_ms = 30000
 max_response_bytes = 1048576
-methods = ["GET"]
+
 
 [provides.operations."pg.schema.tables".ai_hints]
 when_to_use = "Discover available tables in the database. Start here when exploring an unfamiliar schema."
@@ -311,7 +311,7 @@ max_redirects = 3
 connect_timeout_ms = 10000
 total_timeout_ms = 30000
 max_response_bytes = 1048576
-methods = ["GET"]
+
 
 [provides.operations."pg.schema.columns".ai_hints]
 when_to_use = "Inspect column names, types, and constraints for a specific table before writing queries."
@@ -362,7 +362,7 @@ max_redirects = 3
 connect_timeout_ms = 10000
 total_timeout_ms = 30000
 max_response_bytes = 1048576
-methods = ["GET"]
+
 
 [provides.operations."pg.schema.indexes".ai_hints]
 when_to_use = "Check available indexes on a table to understand query performance characteristics."
@@ -412,7 +412,7 @@ max_redirects = 3
 connect_timeout_ms = 10000
 total_timeout_ms = 30000
 max_response_bytes = 1048576
-methods = ["POST"]
+
 
 [provides.operations."pg.transaction.begin".ai_hints]
 when_to_use = "Start a transaction when you need atomicity across multiple statements. Always commit or rollback."
@@ -462,7 +462,7 @@ max_redirects = 3
 connect_timeout_ms = 10000
 total_timeout_ms = 30000
 max_response_bytes = 1048576
-methods = ["POST"]
+
 
 [provides.operations."pg.transaction.commit".ai_hints]
 when_to_use = "Commit a previously started transaction to make all changes permanent."
@@ -512,7 +512,7 @@ max_redirects = 3
 connect_timeout_ms = 10000
 total_timeout_ms = 30000
 max_response_bytes = 1048576
-methods = ["POST"]
+
 
 [provides.operations."pg.transaction.rollback".ai_hints]
 when_to_use = "Undo all changes in a transaction. Use when an error occurs mid-transaction."
@@ -526,7 +526,7 @@ related = ["pg.transaction.begin", "pg.transaction.commit"]
 description = "Execute multiple SQL statements in order"
 capability = "pg.write"
 risk_level = "medium"
-safety_tier = "moderate"
+safety_tier = "risky"
 requires_approval = "policy"
 idempotency = "none"
 
@@ -569,7 +569,7 @@ max_redirects = 3
 connect_timeout_ms = 10000
 total_timeout_ms = 120000
 max_response_bytes = 52428800
-methods = ["POST"]
+
 
 [provides.operations."pg.batch".ai_hints]
 when_to_use = "Execute multiple SQL statements sequentially in a single call. More efficient than separate pg.execute calls."
@@ -583,7 +583,7 @@ related = ["pg.execute", "pg.transaction.begin"]
 description = "Execute a named prepared statement"
 capability = "pg.write"
 risk_level = "medium"
-safety_tier = "moderate"
+safety_tier = "risky"
 requires_approval = "policy"
 idempotency = "best_effort"
 
@@ -623,7 +623,7 @@ max_redirects = 3
 connect_timeout_ms = 10000
 total_timeout_ms = 60000
 max_response_bytes = 1048576
-methods = ["POST"]
+
 
 [provides.operations."pg.prepared".ai_hints]
 when_to_use = "Execute a server-side prepared statement by name. More efficient for repeated queries with different parameters."
@@ -669,28 +669,13 @@ max_redirects = 3
 connect_timeout_ms = 10000
 total_timeout_ms = 10000
 max_response_bytes = 1048576
-methods = ["GET"]
+
 
 [provides.operations."pg.health".ai_hints]
 when_to_use = "Verify the database is reachable and responding before running queries."
 common_mistakes = ["Polling health too frequently — once before a batch of work is sufficient."]
 examples = ['{}']
 related = ["pg.query"]
-
-# ---------- Auth ----------
-
-[auth]
-type = "bearer"
-credential_name = "api_key"
-secretless_supported = true
-secretless_hint = "Supply credential_id for egress proxy injection instead of api_key."
-
-# ---------- Config ----------
-
-[config]
-base_url = { type = "string", default = "https://db.example.com", description = "Supabase/PostgREST REST API base URL" }
-api_key = { type = "string", secret = true, description = "API key passed as Bearer token" }
-credential_id = { type = "string", description = "Secretless credential reference (alternative to api_key)" }
 
 # ---------- Sandbox ----------
 

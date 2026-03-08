@@ -5,7 +5,7 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:PLACEHOLDER_HASH"
+interface_hash = "blake3-256:fcp.interface.v2:0000000000000000000000000000000000000000000000000000000000000000"
 
 [connector]
 id = "fcp.whisper"
@@ -122,7 +122,7 @@ host_allow = ["api.openai.com"]
 port_allow = [443]
 ip_allow = []
 cidr_deny = []
-methods = ["POST"]
+
 deny_localhost = true
 deny_private_ranges = true
 deny_tailnet_ranges = true
@@ -211,7 +211,7 @@ host_allow = ["api.openai.com"]
 port_allow = [443]
 ip_allow = []
 cidr_deny = []
-methods = ["POST"]
+
 deny_localhost = true
 deny_private_ranges = true
 deny_tailnet_ranges = true
@@ -289,7 +289,7 @@ host_allow = ["api.openai.com"]
 port_allow = [443]
 ip_allow = []
 cidr_deny = []
-methods = ["POST"]
+
 deny_localhost = true
 deny_private_ranges = true
 deny_tailnet_ranges = true
@@ -387,7 +387,7 @@ host_allow = ["api.openai.com"]
 port_allow = [443]
 ip_allow = []
 cidr_deny = []
-methods = ["POST"]
+
 deny_localhost = true
 deny_private_ranges = true
 deny_tailnet_ranges = true
@@ -444,7 +444,7 @@ host_allow = ["api.openai.com"]
 port_allow = [443]
 ip_allow = []
 cidr_deny = []
-methods = ["GET"]
+
 deny_localhost = true
 deny_private_ranges = true
 deny_tailnet_ranges = true
@@ -501,7 +501,7 @@ host_allow = ["api.openai.com"]
 port_allow = [443]
 ip_allow = []
 cidr_deny = []
-methods = ["GET"]
+
 deny_localhost = true
 deny_private_ranges = true
 deny_tailnet_ranges = true
@@ -555,7 +555,7 @@ host_allow = ["api.openai.com"]
 port_allow = [443]
 ip_allow = []
 cidr_deny = []
-methods = []
+
 deny_localhost = true
 deny_private_ranges = true
 deny_tailnet_ranges = true
@@ -609,7 +609,7 @@ host_allow = ["api.openai.com"]
 port_allow = [443]
 ip_allow = []
 cidr_deny = []
-methods = []
+
 deny_localhost = true
 deny_private_ranges = true
 deny_tailnet_ranges = true
@@ -631,54 +631,6 @@ related = [
     "whisper.transcribe",
     "whisper.list_models",
 ]
-
-# ---------------------------------------------------------------------------
-# Auth
-# ---------------------------------------------------------------------------
-
-[auth]
-scheme = "bearer"
-header = "Authorization"
-credential_type = "api_key"
-secretless_supported = true
-credential_id_header = "X-FCP-Credential-Id"
-
-[auth.fields.api_key]
-type = "string"
-required = true
-description = "OpenAI API key for Whisper access"
-secret = true
-
-# ---------------------------------------------------------------------------
-# Config
-# ---------------------------------------------------------------------------
-
-[config]
-type = "object"
-required = []
-
-[config.properties.api_key]
-type = "string"
-description = "OpenAI API key (alternative to credential_id)"
-secret = true
-
-[config.properties.credential_id]
-type = "string"
-description = "FCP credential ID for secretless auth via egress proxy"
-
-[config.properties.base_url]
-type = "string"
-description = "Override API base URL (default: https://api.openai.com/v1)"
-default = "https://api.openai.com/v1"
-
-# ---------------------------------------------------------------------------
-# Event capabilities and sandbox
-# ---------------------------------------------------------------------------
-
-[event_caps]
-streaming = false
-replay = false
-min_buffer_events = 10
 
 [sandbox]
 profile = "strict"

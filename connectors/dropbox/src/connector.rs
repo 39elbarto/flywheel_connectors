@@ -3,7 +3,10 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use fcp_core::{BaseConnector, ConnectorId, CredentialId, FcpError, FcpResult};
+use fcp_core::{
+    AgentHint, BaseConnector, CapabilityId, ConnectorId, CredentialId, FcpError, FcpResult,
+    IdempotencyClass, OperationId, OperationInfo, RiskLevel, SafetyTier,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tracing::{info, instrument};
@@ -285,7 +288,7 @@ impl DropboxConnector {
         Ok(json!({
             "connector_id": "fcp.dropbox",
             "version": "0.1.0",
-            "operations": operations_info(),
+            "operations": serde_json::to_value(operations_info()).unwrap_or_default(),
         }))
     }
 
@@ -342,10 +345,7 @@ impl DropboxConnector {
             .and_then(serde_json::Value::as_str)
             .unwrap_or("");
 
-        let allowed = operations_info().as_array().is_some_and(|ops| {
-            ops.iter()
-                .any(|o| o.get("id").and_then(serde_json::Value::as_str) == Some(operation))
-        });
+        let allowed = operations_info().iter().any(|o| o.id.as_ref() == operation);
 
         Ok(json!({
             "allowed": allowed,
@@ -468,95 +468,315 @@ fn require_str<'a>(input: &'a serde_json::Value, field: &str) -> Result<&'a str,
         })
 }
 
+/// Build a single [`OperationInfo`].
+#[allow(clippy::too_many_arguments)]
+fn op_info(
+    id: &'static str,
+    summary: &str,
+    input_schema: serde_json::Value,
+    output_schema: serde_json::Value,
+    capability: &'static str,
+    risk_level: RiskLevel,
+    safety_tier: SafetyTier,
+    idempotency: IdempotencyClass,
+    ai_hints: AgentHint,
+) -> OperationInfo {
+    OperationInfo {
+        id: OperationId::from_static(id),
+        summary: summary.into(),
+        input_schema,
+        output_schema,
+        capability: CapabilityId::from_static(capability),
+        risk_level,
+        description: None,
+        rate_limit: None,
+        requires_approval: None,
+        safety_tier,
+        idempotency,
+        ai_hints,
+    }
+}
+
 /// Build the operations info for introspection.
-fn operations_info() -> serde_json::Value {
-    json!([
-        {
-            "id": "dropbox.files.list",
-            "summary": "List files and folders in a path",
-            "capability": "dropbox.files.read",
-            "risk_level": "low",
-            "safety_tier": "safe",
-            "idempotency": "strict",
-        },
-        {
-            "id": "dropbox.files.list_continue",
-            "summary": "Continue listing files using a cursor",
-            "capability": "dropbox.files.read",
-            "risk_level": "low",
-            "safety_tier": "safe",
-            "idempotency": "strict",
-        },
-        {
-            "id": "dropbox.files.get_metadata",
-            "summary": "Get metadata for a file or folder",
-            "capability": "dropbox.files.read",
-            "risk_level": "low",
-            "safety_tier": "safe",
-            "idempotency": "strict",
-        },
-        {
-            "id": "dropbox.files.create_folder",
-            "summary": "Create a new folder",
-            "capability": "dropbox.files.write",
-            "risk_level": "medium",
-            "safety_tier": "risky",
-            "idempotency": "none",
-        },
-        {
-            "id": "dropbox.files.delete",
-            "summary": "Delete a file or folder",
-            "capability": "dropbox.files.write",
-            "risk_level": "high",
-            "safety_tier": "dangerous",
-            "idempotency": "none",
-        },
-        {
-            "id": "dropbox.files.move",
-            "summary": "Move a file or folder",
-            "capability": "dropbox.files.write",
-            "risk_level": "medium",
-            "safety_tier": "risky",
-            "idempotency": "none",
-        },
-        {
-            "id": "dropbox.files.copy",
-            "summary": "Copy a file or folder",
-            "capability": "dropbox.files.write",
-            "risk_level": "medium",
-            "safety_tier": "risky",
-            "idempotency": "none",
-        },
-        {
-            "id": "dropbox.files.search",
-            "summary": "Search for files by name or content",
-            "capability": "dropbox.files.read",
-            "risk_level": "low",
-            "safety_tier": "safe",
-            "idempotency": "strict",
-        },
-        {
-            "id": "dropbox.account.get_space_usage",
-            "summary": "Get space usage for the current account",
-            "capability": "dropbox.account.read",
-            "risk_level": "low",
-            "safety_tier": "safe",
-            "idempotency": "strict",
-        },
-        {
-            "id": "dropbox.account.get_current",
-            "summary": "Get current account information",
-            "capability": "dropbox.account.read",
-            "risk_level": "low",
-            "safety_tier": "safe",
-            "idempotency": "strict",
-        },
-    ])
+fn operations_info() -> Vec<OperationInfo> {
+    vec![
+        op_info(
+            "dropbox.files.list",
+            "List files and folders in a path",
+            json!({
+                "type": "object",
+                "required": ["path"],
+                "properties": {
+                    "path": {"type": "string", "description": "Folder path (empty string for root)"}
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["entries"],
+                "properties": {"entries": {"type": "array"}}
+            }),
+            "dropbox.files.read",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "List files and folders at a Dropbox path.".into(),
+                common_mistakes: vec![
+                    "Using / instead of empty string for root.".into(),
+                ],
+                examples: vec![r#"{"path": "/Documents"}"#.into()],
+                related: vec![
+                    CapabilityId::from_static("dropbox.files.get_metadata"),
+                    CapabilityId::from_static("dropbox.files.delete"),
+                ],
+            },
+        ),
+        op_info(
+            "dropbox.files.list_continue",
+            "Continue listing files using a cursor",
+            json!({
+                "type": "object",
+                "required": ["cursor"],
+                "properties": {
+                    "cursor": {"type": "string", "description": "Pagination cursor from a previous list call"}
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["entries"],
+                "properties": {"entries": {"type": "array"}}
+            }),
+            "dropbox.files.read",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "Continue paginating through a folder listing.".into(),
+                common_mistakes: vec![
+                    "Using an expired cursor; cursors are only valid for a short time.".into(),
+                ],
+                examples: vec![r#"{"cursor": "abc123..."}"#.into()],
+                related: vec![
+                    CapabilityId::from_static("dropbox.files.list"),
+                ],
+            },
+        ),
+        op_info(
+            "dropbox.files.get_metadata",
+            "Get metadata for a file or folder",
+            json!({
+                "type": "object",
+                "required": ["path"],
+                "properties": {
+                    "path": {"type": "string"}
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["name", "path_display"],
+                "properties": {
+                    "name": {"type": "string"},
+                    "path_display": {"type": "string"}
+                }
+            }),
+            "dropbox.files.read",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "Get metadata for a specific file or folder.".into(),
+                common_mistakes: vec![
+                    "Passing a Dropbox shared link URL instead of a file path; use the full path like /Documents/file.txt.".into(),
+                ],
+                examples: vec![r#"{"path": "/Documents/report.pdf"}"#.into()],
+                related: vec![
+                    CapabilityId::from_static("dropbox.files.list"),
+                ],
+            },
+        ),
+        op_info(
+            "dropbox.files.create_folder",
+            "Create a new folder",
+            json!({
+                "type": "object",
+                "required": ["path"],
+                "properties": {
+                    "path": {"type": "string", "description": "Full path of the folder to create"}
+                }
+            }),
+            json!({"type": "object"}),
+            "dropbox.files.write",
+            RiskLevel::Medium,
+            SafetyTier::Risky,
+            IdempotencyClass::None,
+            AgentHint {
+                when_to_use: "Create a new folder at a specified path.".into(),
+                common_mistakes: vec![
+                    "Paths must start with a forward slash.".into(),
+                ],
+                examples: vec![r#"{"path": "/Documents/NewFolder"}"#.into()],
+                related: vec![
+                    CapabilityId::from_static("dropbox.files.list"),
+                ],
+            },
+        ),
+        op_info(
+            "dropbox.files.delete",
+            "Delete a file or folder",
+            json!({
+                "type": "object",
+                "required": ["path"],
+                "properties": {
+                    "path": {"type": "string"}
+                }
+            }),
+            json!({"type": "object"}),
+            "dropbox.files.write",
+            RiskLevel::High,
+            SafetyTier::Dangerous,
+            IdempotencyClass::None,
+            AgentHint {
+                when_to_use: "Delete a file or folder. Moves to trash (recoverable for 30 days).".into(),
+                common_mistakes: vec![
+                    "Paths must start with a forward slash and are case-insensitive; passing a relative path without a leading slash will fail.".into(),
+                ],
+                examples: vec![r#"{"path": "/Documents/old_report.pdf"}"#.into()],
+                related: vec![
+                    CapabilityId::from_static("dropbox.files.list"),
+                ],
+            },
+        ),
+        op_info(
+            "dropbox.files.move",
+            "Move a file or folder",
+            json!({
+                "type": "object",
+                "required": ["from_path", "to_path"],
+                "properties": {
+                    "from_path": {"type": "string", "description": "Source path"},
+                    "to_path": {"type": "string", "description": "Destination path"}
+                }
+            }),
+            json!({"type": "object"}),
+            "dropbox.files.write",
+            RiskLevel::Medium,
+            SafetyTier::Risky,
+            IdempotencyClass::None,
+            AgentHint {
+                when_to_use: "Move a file or folder to a new location.".into(),
+                common_mistakes: vec![
+                    "Both paths must start with a forward slash.".into(),
+                ],
+                examples: vec![r#"{"from_path": "/old/file.txt", "to_path": "/new/file.txt"}"#.into()],
+                related: vec![
+                    CapabilityId::from_static("dropbox.files.copy"),
+                    CapabilityId::from_static("dropbox.files.list"),
+                ],
+            },
+        ),
+        op_info(
+            "dropbox.files.copy",
+            "Copy a file or folder",
+            json!({
+                "type": "object",
+                "required": ["from_path", "to_path"],
+                "properties": {
+                    "from_path": {"type": "string", "description": "Source path"},
+                    "to_path": {"type": "string", "description": "Destination path"}
+                }
+            }),
+            json!({"type": "object"}),
+            "dropbox.files.write",
+            RiskLevel::Medium,
+            SafetyTier::Risky,
+            IdempotencyClass::None,
+            AgentHint {
+                when_to_use: "Copy a file or folder to a new location.".into(),
+                common_mistakes: vec![
+                    "Both paths must start with a forward slash.".into(),
+                ],
+                examples: vec![r#"{"from_path": "/file.txt", "to_path": "/copy_of_file.txt"}"#.into()],
+                related: vec![
+                    CapabilityId::from_static("dropbox.files.move"),
+                    CapabilityId::from_static("dropbox.files.list"),
+                ],
+            },
+        ),
+        op_info(
+            "dropbox.files.search",
+            "Search for files by name or content",
+            json!({
+                "type": "object",
+                "required": ["query"],
+                "properties": {
+                    "query": {"type": "string", "description": "Search query string"}
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["matches"],
+                "properties": {"matches": {"type": "array"}}
+            }),
+            "dropbox.files.read",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "Search for files by name or content.".into(),
+                common_mistakes: vec![],
+                examples: vec![r#"{"query": "budget report"}"#.into()],
+                related: vec![
+                    CapabilityId::from_static("dropbox.files.list"),
+                    CapabilityId::from_static("dropbox.files.get_metadata"),
+                ],
+            },
+        ),
+        op_info(
+            "dropbox.account.get_space_usage",
+            "Get space usage for the current account",
+            json!({"type": "object", "required": []}),
+            json!({"type": "object"}),
+            "dropbox.account.read",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "Check how much storage space is used and available.".into(),
+                common_mistakes: vec![],
+                examples: vec!["{}".into()],
+                related: vec![
+                    CapabilityId::from_static("dropbox.account.get_current"),
+                ],
+            },
+        ),
+        op_info(
+            "dropbox.account.get_current",
+            "Get current account information",
+            json!({"type": "object", "required": []}),
+            json!({"type": "object"}),
+            "dropbox.account.read",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "Get information about the currently authenticated account.".into(),
+                common_mistakes: vec![],
+                examples: vec!["{}".into()],
+                related: vec![
+                    CapabilityId::from_static("dropbox.account.get_space_usage"),
+                ],
+            },
+        ),
+    ]
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn ops_json() -> serde_json::Value {
+        serde_json::to_value(operations_info()).unwrap()
+    }
 
     #[test]
     fn config_from_access_token() {
@@ -722,14 +942,14 @@ mod tests {
 
     #[test]
     fn operations_info_has_10_operations() {
-        let ops = operations_info();
+        let ops = ops_json();
         let arr = ops.as_array().unwrap();
         assert_eq!(arr.len(), 10);
     }
 
     #[test]
     fn operations_all_have_required_fields() {
-        let ops = operations_info();
+        let ops = ops_json();
         for op in ops.as_array().unwrap() {
             assert!(op.get("id").is_some(), "missing id");
             assert!(op.get("summary").is_some(), "missing summary");
@@ -741,7 +961,7 @@ mod tests {
 
     #[test]
     fn operations_ids_are_unique() {
-        let ops = operations_info();
+        let ops = ops_json();
         let ids: Vec<&str> = ops
             .as_array()
             .unwrap()
@@ -757,7 +977,7 @@ mod tests {
     #[test]
     fn operations_risk_levels_valid() {
         let valid = ["low", "medium", "high"];
-        let ops = operations_info();
+        let ops = ops_json();
         for op in ops.as_array().unwrap() {
             let rl = op["risk_level"].as_str().unwrap();
             assert!(valid.contains(&rl), "invalid risk_level: {rl}");
@@ -767,7 +987,7 @@ mod tests {
     #[test]
     fn operations_safety_tiers_valid() {
         let valid = ["safe", "risky", "dangerous"];
-        let ops = operations_info();
+        let ops = ops_json();
         for op in ops.as_array().unwrap() {
             let st = op["safety_tier"].as_str().unwrap();
             assert!(valid.contains(&st), "invalid safety_tier: {st}");
@@ -777,7 +997,7 @@ mod tests {
     #[test]
     #[allow(clippy::case_sensitive_file_extension_comparisons)]
     fn read_operations_are_safe() {
-        let ops = operations_info();
+        let ops = ops_json();
         for op in ops.as_array().unwrap() {
             let cap = op["capability"].as_str().unwrap();
             if cap.ends_with(".read") {
@@ -799,7 +1019,7 @@ mod tests {
 
     #[test]
     fn operations_contain_expected_ids() {
-        let ops = operations_info();
+        let ops = ops_json();
         let ids: Vec<&str> = ops
             .as_array()
             .unwrap()
@@ -820,7 +1040,7 @@ mod tests {
 
     #[test]
     fn operations_all_have_idempotency() {
-        let ops = operations_info();
+        let ops = ops_json();
         for op in ops.as_array().unwrap() {
             assert!(
                 op.get("idempotency").is_some(),
@@ -832,7 +1052,7 @@ mod tests {
 
     #[test]
     fn operations_files_list_is_strict_idempotent() {
-        let ops = operations_info();
+        let ops = ops_json();
         let op = ops
             .as_array()
             .unwrap()
@@ -844,7 +1064,7 @@ mod tests {
 
     #[test]
     fn operations_files_delete_is_dangerous() {
-        let ops = operations_info();
+        let ops = ops_json();
         let del_op = ops
             .as_array()
             .unwrap()
@@ -857,7 +1077,7 @@ mod tests {
 
     #[test]
     fn operations_account_capability_correct() {
-        let ops = operations_info();
+        let ops = ops_json();
         let account_op = ops
             .as_array()
             .unwrap()
@@ -869,7 +1089,7 @@ mod tests {
 
     #[test]
     fn operations_files_read_capability_correct() {
-        let ops = operations_info();
+        let ops = ops_json();
         let list_op = ops
             .as_array()
             .unwrap()
@@ -889,7 +1109,7 @@ mod tests {
 
     #[test]
     fn operations_delete_capability_correct() {
-        let ops = operations_info();
+        let ops = ops_json();
         let del_op = ops
             .as_array()
             .unwrap()
@@ -902,7 +1122,7 @@ mod tests {
     #[test]
     #[allow(clippy::case_sensitive_file_extension_comparisons)]
     fn operations_write_ops_are_not_safe() {
-        let ops = operations_info();
+        let ops = ops_json();
         for op in ops.as_array().unwrap() {
             let cap = op["capability"].as_str().unwrap();
             if cap.ends_with(".write") {
@@ -1103,7 +1323,7 @@ mod tests {
 
     #[test]
     fn operations_files_move_capability() {
-        let ops = operations_info();
+        let ops = ops_json();
         let mv = ops
             .as_array()
             .unwrap()
@@ -1115,7 +1335,7 @@ mod tests {
 
     #[test]
     fn operations_files_copy_capability() {
-        let ops = operations_info();
+        let ops = ops_json();
         let cp = ops
             .as_array()
             .unwrap()
@@ -1127,7 +1347,7 @@ mod tests {
 
     #[test]
     fn operations_search_capability() {
-        let ops = operations_info();
+        let ops = ops_json();
         let search = ops
             .as_array()
             .unwrap()
@@ -1140,7 +1360,7 @@ mod tests {
 
     #[test]
     fn operations_space_usage_capability() {
-        let ops = operations_info();
+        let ops = ops_json();
         let sp = ops
             .as_array()
             .unwrap()
@@ -1211,7 +1431,7 @@ mod tests {
 
     #[test]
     fn operations_summaries_are_non_empty() {
-        let ops = operations_info();
+        let ops = ops_json();
         for op in ops.as_array().unwrap() {
             let summary = op["summary"].as_str().unwrap();
             assert!(!summary.is_empty(), "op {} has empty summary", op["id"]);
@@ -1258,7 +1478,7 @@ mod tests {
 
     #[test]
     fn operations_capabilities_start_with_dropbox() {
-        let ops = operations_info();
+        let ops = ops_json();
         for op in ops.as_array().unwrap() {
             let cap = op["capability"].as_str().unwrap();
             assert!(

@@ -3,7 +3,10 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use fcp_core::{BaseConnector, ConnectorId, FcpError, FcpResult};
+use fcp_core::{
+    AgentHint, BaseConnector, CapabilityId, ConnectorId, FcpError, FcpResult, IdempotencyClass,
+    OperationId, OperationInfo, RiskLevel, SafetyTier,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tracing::{info, instrument};
@@ -246,7 +249,7 @@ impl McpBridgeConnector {
         Ok(json!({
             "connector_id": "fcp.mcp-bridge",
             "version": "0.1.0",
-            "operations": operations_info(),
+            "operations": serde_json::to_value(operations_info()).unwrap_or_default(),
         }))
     }
 
@@ -301,10 +304,7 @@ impl McpBridgeConnector {
             .and_then(serde_json::Value::as_str)
             .unwrap_or("");
 
-        let allowed = operations_info().as_array().is_some_and(|ops| {
-            ops.iter()
-                .any(|o| o.get("id").and_then(serde_json::Value::as_str) == Some(operation))
-        });
+        let allowed = operations_info().iter().any(|o| o.id.as_ref() == operation);
 
         Ok(json!({
             "allowed": allowed,
@@ -398,55 +398,141 @@ fn require_str<'a>(input: &'a serde_json::Value, field: &str) -> Result<&'a str,
         })
 }
 
+/// Helper to build a single `OperationInfo`.
+#[allow(clippy::too_many_arguments)]
+fn op_info(
+    id: &'static str,
+    summary: &str,
+    input_schema: serde_json::Value,
+    output_schema: serde_json::Value,
+    capability: &'static str,
+    risk_level: RiskLevel,
+    safety_tier: SafetyTier,
+    idempotency: IdempotencyClass,
+    ai_hints: AgentHint,
+) -> OperationInfo {
+    OperationInfo {
+        id: OperationId::from_static(id),
+        summary: summary.into(),
+        input_schema,
+        output_schema,
+        capability: CapabilityId::from_static(capability),
+        risk_level,
+        description: None,
+        rate_limit: None,
+        requires_approval: None,
+        safety_tier,
+        idempotency,
+        ai_hints,
+    }
+}
+
 /// Build the operations info for introspection.
-fn operations_info() -> serde_json::Value {
-    json!([
-        {
-            "id": "mcp.tools.list",
-            "summary": "List available tools from the MCP server",
-            "capability": "mcp.tools.read",
-            "risk_level": "low",
-            "safety_tier": "safe",
-            "idempotency": "strict",
-        },
-        {
-            "id": "mcp.tools.call",
-            "summary": "Call a tool on the MCP server",
-            "capability": "mcp.tools.write",
-            "risk_level": "high",
-            "safety_tier": "risky",
-            "idempotency": "none",
-        },
-        {
-            "id": "mcp.resources.list",
-            "summary": "List available resources from the MCP server",
-            "capability": "mcp.resources.read",
-            "risk_level": "low",
-            "safety_tier": "safe",
-            "idempotency": "strict",
-        },
-        {
-            "id": "mcp.resources.read",
-            "summary": "Read a resource by URI from the MCP server",
-            "capability": "mcp.resources.read",
-            "risk_level": "low",
-            "safety_tier": "safe",
-            "idempotency": "strict",
-        },
-        {
-            "id": "mcp.prompts.list",
-            "summary": "List available prompts from the MCP server",
-            "capability": "mcp.prompts.read",
-            "risk_level": "low",
-            "safety_tier": "safe",
-            "idempotency": "strict",
-        },
-    ])
+fn operations_info() -> Vec<OperationInfo> {
+    vec![
+        op_info(
+            "mcp.tools.list",
+            "List available tools from the MCP server",
+            json!({"type": "object", "required": []}),
+            json!({"type": "object", "required": ["tools"], "properties": {"tools": {"type": "array"}}}),
+            "mcp.tools.read",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "List tools exposed by a connected MCP server.".into(),
+                common_mistakes: vec!["Caching the tool list indefinitely — MCP servers may add or remove tools dynamically, so re-list periodically".into()],
+                examples: vec!["{}".into()],
+                related: vec![
+                    CapabilityId::from_static("mcp.tools.call"),
+                    CapabilityId::from_static("mcp.resources.list"),
+                ],
+            },
+        ),
+        op_info(
+            "mcp.tools.call",
+            "Call a tool on the MCP server",
+            json!({"type": "object", "required": ["name", "arguments"], "properties": {"name": {"type": "string", "description": "Tool name"}, "arguments": {"type": "object", "description": "Tool arguments"}}}),
+            json!({"type": "object", "required": ["content"], "properties": {"content": {"type": "array"}}}),
+            "mcp.tools.write",
+            RiskLevel::High,
+            SafetyTier::Risky,
+            IdempotencyClass::None,
+            AgentHint {
+                when_to_use: "Invoke an MCP tool by name with arguments.".into(),
+                common_mistakes: vec![
+                    "Passing arguments as a string instead of an object.".into(),
+                    "Not validating tool arguments against the tool's input schema before calling — use tools.list first to retrieve schemas".into(),
+                ],
+                examples: vec![r#"{"name": "read_file", "arguments": {"path": "/tmp/data.txt"}}"#.into()],
+                related: vec![CapabilityId::from_static("mcp.tools.list")],
+            },
+        ),
+        op_info(
+            "mcp.resources.list",
+            "List available resources from the MCP server",
+            json!({"type": "object", "required": []}),
+            json!({"type": "object", "required": ["resources"], "properties": {"resources": {"type": "array"}}}),
+            "mcp.resources.read",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "List resources exposed by an MCP server.".into(),
+                common_mistakes: vec!["Not accounting for paginated results — some MCP servers return partial resource lists and require a cursor for subsequent pages".into()],
+                examples: vec!["{}".into()],
+                related: vec![
+                    CapabilityId::from_static("mcp.resources.read"),
+                    CapabilityId::from_static("mcp.tools.list"),
+                ],
+            },
+        ),
+        op_info(
+            "mcp.resources.read",
+            "Read a resource by URI from the MCP server",
+            json!({"type": "object", "required": ["uri"], "properties": {"uri": {"type": "string", "description": "Resource URI"}}}),
+            json!({"type": "object", "required": ["contents"], "properties": {"contents": {"type": "array"}}}),
+            "mcp.resources.read",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "Read content from an MCP resource by URI.".into(),
+                common_mistakes: vec!["Assuming all resources return text content — some resources return binary data or structured JSON depending on the MCP server implementation".into()],
+                examples: vec![r#"{"uri": "file:///tmp/data.txt"}"#.into()],
+                related: vec![CapabilityId::from_static("mcp.resources.list")],
+            },
+        ),
+        op_info(
+            "mcp.prompts.list",
+            "List available prompts from the MCP server",
+            json!({"type": "object", "required": []}),
+            json!({"type": "object", "required": ["prompts"], "properties": {"prompts": {"type": "array"}}}),
+            "mcp.prompts.read",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "List prompts exposed by an MCP server.".into(),
+                common_mistakes: vec!["Assuming prompt names are stable across server restarts — always re-list prompts before referencing them by name".into()],
+                examples: vec!["{}".into()],
+                related: vec![
+                    CapabilityId::from_static("mcp.tools.list"),
+                    CapabilityId::from_static("mcp.resources.list"),
+                ],
+            },
+        ),
+    ]
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Serialize `operations_info` to JSON for backward-compatible assertions.
+    fn ops_json() -> serde_json::Value {
+        serde_json::to_value(operations_info()).unwrap()
+    }
 
     #[test]
     fn config_from_valid_params() {
@@ -592,14 +678,14 @@ mod tests {
 
     #[test]
     fn operations_info_has_5_operations() {
-        let ops = operations_info();
+        let ops = ops_json();
         let arr = ops.as_array().unwrap();
         assert_eq!(arr.len(), 5);
     }
 
     #[test]
     fn operations_all_have_required_fields() {
-        let ops = operations_info();
+        let ops = ops_json();
         for op in ops.as_array().unwrap() {
             assert!(op.get("id").is_some(), "missing id");
             assert!(op.get("summary").is_some(), "missing summary");
@@ -611,7 +697,7 @@ mod tests {
 
     #[test]
     fn operations_ids_are_unique() {
-        let ops = operations_info();
+        let ops = ops_json();
         let ids: Vec<&str> = ops
             .as_array()
             .unwrap()
@@ -627,7 +713,7 @@ mod tests {
     #[test]
     fn operations_risk_levels_valid() {
         let valid = ["low", "medium", "high"];
-        let ops = operations_info();
+        let ops = ops_json();
         for op in ops.as_array().unwrap() {
             let rl = op["risk_level"].as_str().unwrap();
             assert!(valid.contains(&rl), "invalid risk_level: {rl}");
@@ -637,7 +723,7 @@ mod tests {
     #[test]
     fn operations_safety_tiers_valid() {
         let valid = ["safe", "risky", "dangerous"];
-        let ops = operations_info();
+        let ops = ops_json();
         for op in ops.as_array().unwrap() {
             let st = op["safety_tier"].as_str().unwrap();
             assert!(valid.contains(&st), "invalid safety_tier: {st}");
@@ -647,7 +733,7 @@ mod tests {
     #[test]
     #[allow(clippy::case_sensitive_file_extension_comparisons)]
     fn read_operations_are_safe() {
-        let ops = operations_info();
+        let ops = ops_json();
         for op in ops.as_array().unwrap() {
             let cap = op["capability"].as_str().unwrap();
             if cap.ends_with(".read") {
@@ -669,7 +755,7 @@ mod tests {
 
     #[test]
     fn operations_contain_expected_ids() {
-        let ops = operations_info();
+        let ops = ops_json();
         let ids: Vec<&str> = ops
             .as_array()
             .unwrap()
@@ -685,7 +771,7 @@ mod tests {
 
     #[test]
     fn operations_all_have_idempotency() {
-        let ops = operations_info();
+        let ops = ops_json();
         for op in ops.as_array().unwrap() {
             assert!(
                 op.get("idempotency").is_some(),
@@ -697,7 +783,7 @@ mod tests {
 
     #[test]
     fn operations_tools_call_is_risky() {
-        let ops = operations_info();
+        let ops = ops_json();
         let call_op = ops
             .as_array()
             .unwrap()
@@ -710,7 +796,7 @@ mod tests {
 
     #[test]
     fn operations_tools_list_capability() {
-        let ops = operations_info();
+        let ops = ops_json();
         let list_op = ops
             .as_array()
             .unwrap()
@@ -722,7 +808,7 @@ mod tests {
 
     #[test]
     fn operations_tools_call_has_no_idempotency() {
-        let ops = operations_info();
+        let ops = ops_json();
         let call_op = ops
             .as_array()
             .unwrap()
@@ -945,7 +1031,7 @@ mod tests {
 
     #[test]
     fn operations_summaries_non_empty() {
-        let ops = operations_info();
+        let ops = ops_json();
         for op in ops.as_array().unwrap() {
             let summary = op["summary"].as_str().unwrap();
             assert!(!summary.is_empty(), "op {} has empty summary", op["id"]);
@@ -954,7 +1040,7 @@ mod tests {
 
     #[test]
     fn operations_resources_read_capability() {
-        let ops = operations_info();
+        let ops = ops_json();
         let r_op = ops
             .as_array()
             .unwrap()
@@ -966,7 +1052,7 @@ mod tests {
 
     #[test]
     fn operations_prompts_list_capability() {
-        let ops = operations_info();
+        let ops = ops_json();
         let p_op = ops
             .as_array()
             .unwrap()

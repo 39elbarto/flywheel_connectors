@@ -3,7 +3,10 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use fcp_core::{BaseConnector, ConnectorId, CredentialId, FcpError, FcpResult};
+use fcp_core::{
+    AgentHint, BaseConnector, CapabilityId, ConnectorId, CredentialId, FcpError, FcpResult,
+    IdempotencyClass, OperationId, OperationInfo, RiskLevel, SafetyTier,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tracing::{info, instrument};
@@ -270,7 +273,7 @@ impl TodoistConnector {
         Ok(json!({
             "connector_id": "fcp.todoist",
             "version": "0.1.0",
-            "operations": operations_info(),
+            "operations": serde_json::to_value(operations_info()).unwrap_or_default(),
         }))
     }
 
@@ -322,10 +325,7 @@ impl TodoistConnector {
             .and_then(serde_json::Value::as_str)
             .unwrap_or("");
 
-        let allowed = operations_info().as_array().is_some_and(|ops| {
-            ops.iter()
-                .any(|o| o.get("id").and_then(serde_json::Value::as_str) == Some(operation))
-        });
+        let allowed = operations_info().iter().any(|o| o.id.as_ref() == operation);
 
         Ok(json!({
             "allowed": allowed,
@@ -415,55 +415,141 @@ fn require_str<'a>(input: &'a serde_json::Value, field: &str) -> Result<&'a str,
         })
 }
 
+/// Build a single [`OperationInfo`] entry.
+#[allow(clippy::too_many_arguments)]
+fn op_info(
+    id: &'static str,
+    summary: &str,
+    input_schema: serde_json::Value,
+    output_schema: serde_json::Value,
+    capability: &'static str,
+    risk_level: RiskLevel,
+    safety_tier: SafetyTier,
+    idempotency: IdempotencyClass,
+    ai_hints: AgentHint,
+) -> OperationInfo {
+    OperationInfo {
+        id: OperationId::from_static(id),
+        summary: summary.into(),
+        input_schema,
+        output_schema,
+        capability: CapabilityId::from_static(capability),
+        risk_level,
+        description: None,
+        rate_limit: None,
+        requires_approval: None,
+        safety_tier,
+        idempotency,
+        ai_hints,
+    }
+}
+
 /// Build the operations info for introspection.
-fn operations_info() -> serde_json::Value {
-    json!([
-        {
-            "id": "todoist.projects.list",
-            "summary": "List all projects",
-            "capability": "todoist.projects.read",
-            "risk_level": "low",
-            "safety_tier": "safe",
-            "idempotency": "strict",
-        },
-        {
-            "id": "todoist.tasks.list",
-            "summary": "List tasks, optionally filtered by project",
-            "capability": "todoist.tasks.read",
-            "risk_level": "low",
-            "safety_tier": "safe",
-            "idempotency": "strict",
-        },
-        {
-            "id": "todoist.tasks.create",
-            "summary": "Create a new task",
-            "capability": "todoist.tasks.write",
-            "risk_level": "medium",
-            "safety_tier": "risky",
-            "idempotency": "none",
-        },
-        {
-            "id": "todoist.tasks.complete",
-            "summary": "Mark a task as complete",
-            "capability": "todoist.tasks.write",
-            "risk_level": "medium",
-            "safety_tier": "risky",
-            "idempotency": "strict",
-        },
-        {
-            "id": "todoist.tasks.delete",
-            "summary": "Delete a task",
-            "capability": "todoist.tasks.write",
-            "risk_level": "high",
-            "safety_tier": "dangerous",
-            "idempotency": "strict",
-        },
-    ])
+fn operations_info() -> Vec<OperationInfo> {
+    vec![
+        op_info(
+            "todoist.projects.list",
+            "List all projects",
+            json!({"type": "object", "required": []}),
+            json!({"type": "object", "required": ["projects"], "properties": {"projects": {"type": "array"}}}),
+            "todoist.projects.read",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "List all Todoist projects.".into(),
+                common_mistakes: vec!["Assuming sub-projects are returned as nested objects; the API returns a flat list and parent-child relationships must be resolved via the parent_id field.".into()],
+                examples: vec!["{}".into()],
+                related: vec![
+                    CapabilityId::from_static("todoist.tasks.list"),
+                    CapabilityId::from_static("todoist.tasks.create"),
+                ],
+            },
+        ),
+        op_info(
+            "todoist.tasks.list",
+            "List tasks, optionally filtered by project",
+            json!({"type": "object", "required": [], "properties": {"project_id": {"type": "string", "description": "Filter tasks by project ID"}}}),
+            json!({"type": "object", "required": ["tasks"], "properties": {"tasks": {"type": "array"}}}),
+            "todoist.tasks.read",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "List tasks, optionally filtered by project.".into(),
+                common_mistakes: vec!["Omitting project_id returns tasks from all projects which can be a very large set; filter by project_id when you only need tasks from a specific project.".into()],
+                examples: vec![r#"{"project_id": "proj_abc123"}"#.into()],
+                related: vec![
+                    CapabilityId::from_static("todoist.projects.list"),
+                    CapabilityId::from_static("todoist.tasks.create"),
+                    CapabilityId::from_static("todoist.tasks.complete"),
+                ],
+            },
+        ),
+        op_info(
+            "todoist.tasks.create",
+            "Create a new task",
+            json!({"type": "object", "required": ["content"], "properties": {"content": {"type": "string", "description": "Task title/content"}, "project_id": {"type": "string", "description": "Project to add task to"}, "due_string": {"type": "string", "description": "Natural language due date"}}}),
+            json!({"type": "object", "required": ["id"], "properties": {"id": {"type": "string"}}}),
+            "todoist.tasks.write",
+            RiskLevel::Medium,
+            SafetyTier::Risky,
+            IdempotencyClass::None,
+            AgentHint {
+                when_to_use: "Create a new task in Todoist.".into(),
+                common_mistakes: vec!["Forgetting to set project_id, which defaults to Inbox".into()],
+                examples: vec![r#"{"content": "Review PR #42", "project_id": "proj_abc123", "due_string": "tomorrow"}"#.into()],
+                related: vec![
+                    CapabilityId::from_static("todoist.tasks.list"),
+                    CapabilityId::from_static("todoist.tasks.complete"),
+                ],
+            },
+        ),
+        op_info(
+            "todoist.tasks.complete",
+            "Mark a task as complete",
+            json!({"type": "object", "required": ["task_id"], "properties": {"task_id": {"type": "string", "description": "Task ID to complete"}}}),
+            json!({"type": "object"}),
+            "todoist.tasks.write",
+            RiskLevel::Medium,
+            SafetyTier::Risky,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "Mark a Todoist task as completed.".into(),
+                common_mistakes: vec!["Completing a recurring task closes only the current occurrence and automatically creates the next one; it does not permanently complete the task.".into()],
+                examples: vec![r#"{"task_id": "task_abc123"}"#.into()],
+                related: vec![
+                    CapabilityId::from_static("todoist.tasks.list"),
+                    CapabilityId::from_static("todoist.tasks.create"),
+                ],
+            },
+        ),
+        op_info(
+            "todoist.tasks.delete",
+            "Delete a task",
+            json!({"type": "object", "required": ["task_id"], "properties": {"task_id": {"type": "string", "description": "Task ID to delete"}}}),
+            json!({"type": "object"}),
+            "todoist.tasks.write",
+            RiskLevel::High,
+            SafetyTier::Dangerous,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "Permanently delete a Todoist task. Cannot be undone.".into(),
+                common_mistakes: vec!["Using delete when the intent is to complete the task; use todoist.tasks.complete instead to preserve the task in completed history.".into()],
+                examples: vec![r#"{"task_id": "task_abc123"}"#.into()],
+                related: vec![CapabilityId::from_static("todoist.tasks.list")],
+            },
+        ),
+    ]
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn ops_json() -> serde_json::Value {
+        serde_json::to_value(operations_info()).unwrap()
+    }
 
     #[test]
     fn config_from_api_token() {
@@ -567,14 +653,14 @@ mod tests {
 
     #[test]
     fn operations_info_has_5_operations() {
-        let ops = operations_info();
+        let ops = ops_json();
         let arr = ops.as_array().unwrap();
         assert_eq!(arr.len(), 5);
     }
 
     #[test]
     fn operations_all_have_required_fields() {
-        let ops = operations_info();
+        let ops = ops_json();
         for op in ops.as_array().unwrap() {
             assert!(op.get("id").is_some(), "missing id");
             assert!(op.get("summary").is_some(), "missing summary");
@@ -586,7 +672,7 @@ mod tests {
 
     #[test]
     fn operations_ids_are_unique() {
-        let ops = operations_info();
+        let ops = ops_json();
         let ids: Vec<&str> = ops
             .as_array()
             .unwrap()
@@ -602,7 +688,7 @@ mod tests {
     #[test]
     fn operations_risk_levels_valid() {
         let valid = ["low", "medium", "high"];
-        let ops = operations_info();
+        let ops = ops_json();
         for op in ops.as_array().unwrap() {
             let rl = op["risk_level"].as_str().unwrap();
             assert!(valid.contains(&rl), "invalid risk_level: {rl}");
@@ -612,7 +698,7 @@ mod tests {
     #[test]
     fn operations_safety_tiers_valid() {
         let valid = ["safe", "risky", "dangerous"];
-        let ops = operations_info();
+        let ops = ops_json();
         for op in ops.as_array().unwrap() {
             let st = op["safety_tier"].as_str().unwrap();
             assert!(valid.contains(&st), "invalid safety_tier: {st}");
@@ -621,7 +707,7 @@ mod tests {
 
     #[test]
     fn read_operations_are_safe() {
-        let ops = operations_info();
+        let ops = ops_json();
         for op in ops.as_array().unwrap() {
             let cap = op["capability"].as_str().unwrap();
             #[allow(clippy::case_sensitive_file_extension_comparisons)]
@@ -644,7 +730,7 @@ mod tests {
 
     #[test]
     fn operations_contain_expected_ids() {
-        let ops = operations_info();
+        let ops = ops_json();
         let ids: Vec<&str> = ops
             .as_array()
             .unwrap()
@@ -734,7 +820,7 @@ mod tests {
 
     #[test]
     fn operations_all_have_idempotency() {
-        let ops = operations_info();
+        let ops = ops_json();
         for op in ops.as_array().unwrap() {
             assert!(
                 op.get("idempotency").is_some(),
@@ -950,7 +1036,7 @@ mod tests {
 
     #[test]
     fn operations_projects_list_safe() {
-        let ops = operations_info();
+        let ops = ops_json();
         let op = ops
             .as_array()
             .unwrap()
@@ -963,7 +1049,7 @@ mod tests {
 
     #[test]
     fn operations_tasks_delete_dangerous() {
-        let ops = operations_info();
+        let ops = ops_json();
         let op = ops
             .as_array()
             .unwrap()
@@ -977,7 +1063,7 @@ mod tests {
     #[test]
     fn operations_valid_idempotency_values() {
         let valid = ["strict", "best_effort", "none"];
-        let ops = operations_info();
+        let ops = ops_json();
         for op in ops.as_array().unwrap() {
             let idem = op["idempotency"].as_str().unwrap();
             assert!(
@@ -990,7 +1076,7 @@ mod tests {
 
     #[test]
     fn operations_all_prefixed_todoist() {
-        let ops = operations_info();
+        let ops = ops_json();
         for op in ops.as_array().unwrap() {
             let id = op["id"].as_str().unwrap();
             assert!(
@@ -1116,7 +1202,7 @@ mod tests {
 
     #[test]
     fn operations_tasks_create_is_risky() {
-        let ops = operations_info();
+        let ops = ops_json();
         let op = ops
             .as_array()
             .unwrap()
@@ -1129,7 +1215,7 @@ mod tests {
 
     #[test]
     fn operations_tasks_complete_is_risky() {
-        let ops = operations_info();
+        let ops = ops_json();
         let op = ops
             .as_array()
             .unwrap()
@@ -1142,7 +1228,7 @@ mod tests {
 
     #[test]
     fn operations_tasks_create_not_idempotent() {
-        let ops = operations_info();
+        let ops = ops_json();
         let op = ops
             .as_array()
             .unwrap()
@@ -1154,7 +1240,7 @@ mod tests {
 
     #[test]
     fn operations_tasks_list_capability() {
-        let ops = operations_info();
+        let ops = ops_json();
         let op = ops
             .as_array()
             .unwrap()
@@ -1166,7 +1252,7 @@ mod tests {
 
     #[test]
     fn operations_projects_list_capability() {
-        let ops = operations_info();
+        let ops = ops_json();
         let op = ops
             .as_array()
             .unwrap()

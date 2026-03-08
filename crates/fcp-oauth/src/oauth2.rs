@@ -482,9 +482,10 @@ impl OAuth2Client {
         headers: Vec<(String, String)>,
         body: Vec<u8>,
     ) -> OAuthResult<HttpResponse> {
+        let cx = asupersync::Cx::current().unwrap_or_else(asupersync::Cx::for_testing);
         match time::timeout(
             self.config.timeout,
-            self.http_client.request(method, url, headers, body),
+            self.http_client.request(&cx, method, url, headers, body),
         )
         .await
         {

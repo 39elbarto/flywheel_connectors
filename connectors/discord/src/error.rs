@@ -86,6 +86,12 @@ impl From<HttpClientError> for DiscordHttpErrorInfo {
                 is_timeout: false,
                 is_connect: true,
             },
+            HttpClientError::Cancelled => Self {
+                message: "request cancelled".to_string(),
+                status_code: None,
+                is_timeout: false,
+                is_connect: false,
+            },
         }
     }
 }

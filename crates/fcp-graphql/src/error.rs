@@ -122,6 +122,13 @@ impl From<HttpClientError> for HttpErrorInfo {
                 is_connect: true,
                 is_request: false,
             },
+            HttpClientError::Cancelled => Self {
+                message: "request cancelled".to_string(),
+                status_code: None,
+                is_timeout: false,
+                is_connect: false,
+                is_request: true,
+            },
         }
     }
 }

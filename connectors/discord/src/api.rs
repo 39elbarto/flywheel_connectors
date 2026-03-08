@@ -215,8 +215,9 @@ impl DiscordApiClient {
             body.to_vec()
         });
 
+        let cx = asupersync::Cx::current().unwrap_or_else(asupersync::Cx::for_testing);
         match ctx
-            .run(self.client.request(method, url, headers, request_body))
+            .run(self.client.request(&cx, method, url, headers, request_body))
             .await
         {
             Ok(Ok(response)) => Ok(response),

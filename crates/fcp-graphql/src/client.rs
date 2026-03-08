@@ -525,9 +525,11 @@ impl GraphqlClient {
     }
 
     async fn send_once(&self, body_bytes: &[u8]) -> Result<Vec<u8>, GraphqlClientError> {
+        let cx = asupersync::Cx::current().unwrap_or_else(asupersync::Cx::for_testing);
         let response = match time::timeout(
             self.config.timeout,
             self.http.request(
+                &cx,
                 Method::Post,
                 &self.endpoint,
                 self.config.headers.clone(),

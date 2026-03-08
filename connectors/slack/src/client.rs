@@ -460,9 +460,10 @@ impl SlackClient {
             headers.push(("Content-Type".to_string(), JSON_CONTENT_TYPE.to_string()));
         }
 
+        let cx = asupersync::Cx::current().unwrap_or_else(asupersync::Cx::for_testing);
         match time::timeout(
             self.request_timeout,
-            self.client.request(method, url, headers, body),
+            self.client.request(&cx, method, url, headers, body),
         )
         .await
         {

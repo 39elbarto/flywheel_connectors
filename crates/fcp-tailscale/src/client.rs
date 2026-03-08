@@ -260,10 +260,11 @@ impl LocalApiClient {
     async fn get<T: for<'de> Deserialize<'de>>(&self, path: &str) -> TailscaleResult<T> {
         let url = format!("{}{path}", self.base_url);
 
+        let cx = asupersync::Cx::current().unwrap_or_else(asupersync::Cx::for_testing);
         let response = match time::timeout(
             self.request_timeout,
             self.client
-                .request(Method::Get, &url, Vec::new(), Vec::new()),
+                .request(&cx, Method::Get, &url, Vec::new(), Vec::new()),
         )
         .await
         {

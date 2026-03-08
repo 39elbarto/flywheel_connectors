@@ -372,9 +372,10 @@ impl SseClient {
                 .map(|(key, value)| (key.clone(), value.clone())),
         );
 
+        let cx = asupersync::Cx::current().unwrap_or_else(asupersync::Cx::for_testing);
         let request =
             self.http_client
-                .request_streaming(Method::Get, &self.url, headers, Vec::new());
+                .request_streaming(&cx, Method::Get, &self.url, headers, Vec::new());
         let response = if let Some(timeout) = self.config.timeout {
             match time::timeout(timeout, request).await {
                 Ok(Ok(response)) => response,

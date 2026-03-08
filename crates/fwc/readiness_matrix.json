@@ -1,18 +1,19 @@
 {
-  "generated_at": "2026-03-08T01:35:00Z",
+  "generated_at": "2026-03-08T22:30:00Z",
   "generator": "SunnyMoose (claude-code, opus-4.6)",
   "bead": "flywheel_connectors-1g7z0.12",
   "summary": {
     "total_connectors": 83,
-    "tier_1_ready": 26,
-    "tier_2_manifest_only": 50,
-    "tier_3_no_manifest": 3,
-    "tier_4_structural": 4,
-    "manifests_present": 80,
-    "manifests_missing": 3,
-    "rust_has_input_schema": 30,
-    "rust_has_agent_hints": 26,
-    "rust_raw_json_only": 53
+    "tier_1_ready": 83,
+    "tier_2_manifest_only": 0,
+    "tier_3_no_manifest": 0,
+    "tier_4_structural": 0,
+    "manifests_present": 83,
+    "manifests_missing": 0,
+    "rust_has_input_schema": 83,
+    "rust_has_agent_hints": 83,
+    "rust_raw_json_only": 0,
+    "migration_status": "COMPLETE — all 83 connectors now use typed Vec<OperationInfo> with full schemas and AgentHint"
   },
   "readiness_tiers": {
     "tier_1_ready": {

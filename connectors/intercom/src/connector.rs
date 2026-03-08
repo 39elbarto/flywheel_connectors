@@ -3,7 +3,10 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use fcp_core::{BaseConnector, ConnectorId, CredentialId, FcpError, FcpResult};
+use fcp_core::{
+    AgentHint, BaseConnector, CapabilityId, ConnectorId, CredentialId, FcpError, FcpResult,
+    IdempotencyClass, Introspection, OperationId, OperationInfo, RiskLevel, SafetyTier,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tracing::{info, instrument};
@@ -269,11 +272,203 @@ impl IntercomConnector {
 
     /// Handle the `introspect` method.
     pub async fn handle_introspect(&self) -> FcpResult<serde_json::Value> {
-        Ok(json!({
-            "connector_id": "fcp.intercom",
-            "version": "0.1.0",
-            "operations": operations_info(),
-        }))
+        let introspection = Introspection {
+            operations: vec![
+                OperationInfo {
+                    id: OperationId::from_static("intercom.contacts.list"),
+                    summary: "List or search contacts".into(),
+                    input_schema: json!({
+                        "type": "object",
+                        "required": [],
+                        "properties": {
+                            "per_page": {"type": "integer", "maximum": 150},
+                            "query": {"type": "object", "description": "Search query object"}
+                        }
+                    }),
+                    output_schema: json!({
+                        "type": "object",
+                        "required": ["data"],
+                        "properties": {"data": {"type": "array"}}
+                    }),
+                    capability: CapabilityId::from_static("intercom.contacts.read"),
+                    risk_level: RiskLevel::Low,
+                    description: None,
+                    rate_limit: None,
+                    requires_approval: None,
+                    safety_tier: SafetyTier::Safe,
+                    idempotency: IdempotencyClass::Strict,
+                    ai_hints: AgentHint {
+                        when_to_use: "List or search Intercom contacts.".into(),
+                        common_mistakes: vec![],
+                        examples: vec![r#"{"per_page": 50}"#.into()],
+                        related: vec![
+                            CapabilityId::from_static("intercom.contacts.create"),
+                            CapabilityId::from_static("intercom.conversations.list"),
+                        ],
+                    },
+                },
+                OperationInfo {
+                    id: OperationId::from_static("intercom.contacts.create"),
+                    summary: "Create a contact (lead or user)".into(),
+                    input_schema: json!({
+                        "type": "object",
+                        "required": ["role"],
+                        "properties": {
+                            "role": {"type": "string", "description": "lead or user"},
+                            "email": {"type": "string"},
+                            "name": {"type": "string"}
+                        }
+                    }),
+                    output_schema: json!({
+                        "type": "object",
+                        "required": ["id"],
+                        "properties": {"id": {"type": "string"}}
+                    }),
+                    capability: CapabilityId::from_static("intercom.contacts.write"),
+                    risk_level: RiskLevel::Medium,
+                    description: None,
+                    rate_limit: None,
+                    requires_approval: None,
+                    safety_tier: SafetyTier::Risky,
+                    idempotency: IdempotencyClass::None,
+                    ai_hints: AgentHint {
+                        when_to_use: "Create a new contact.".into(),
+                        common_mistakes: vec![],
+                        examples: vec![
+                            r#"{"role": "user", "email": "alice@example.com", "name": "Alice Smith"}"#.into(),
+                        ],
+                        related: vec![
+                            CapabilityId::from_static("intercom.contacts.list"),
+                            CapabilityId::from_static("intercom.contacts.delete"),
+                        ],
+                    },
+                },
+                OperationInfo {
+                    id: OperationId::from_static("intercom.contacts.delete"),
+                    summary: "Delete a contact".into(),
+                    input_schema: json!({
+                        "type": "object",
+                        "required": ["contact_id"],
+                        "properties": {"contact_id": {"type": "string"}}
+                    }),
+                    output_schema: json!({"type": "object"}),
+                    capability: CapabilityId::from_static("intercom.contacts.write"),
+                    risk_level: RiskLevel::High,
+                    description: None,
+                    rate_limit: None,
+                    requires_approval: None,
+                    safety_tier: SafetyTier::Dangerous,
+                    idempotency: IdempotencyClass::Strict,
+                    ai_hints: AgentHint {
+                        when_to_use: "Delete a contact. Cannot be undone.".into(),
+                        common_mistakes: vec![],
+                        examples: vec![r#"{"contact_id": "abc123"}"#.into()],
+                        related: vec![
+                            CapabilityId::from_static("intercom.contacts.list"),
+                        ],
+                    },
+                },
+                OperationInfo {
+                    id: OperationId::from_static("intercom.conversations.list"),
+                    summary: "List conversations".into(),
+                    input_schema: json!({
+                        "type": "object",
+                        "required": [],
+                        "properties": {
+                            "per_page": {"type": "integer", "maximum": 150}
+                        }
+                    }),
+                    output_schema: json!({
+                        "type": "object",
+                        "required": ["conversations"],
+                        "properties": {"conversations": {"type": "array"}}
+                    }),
+                    capability: CapabilityId::from_static("intercom.conversations.read"),
+                    risk_level: RiskLevel::Low,
+                    description: None,
+                    rate_limit: None,
+                    requires_approval: None,
+                    safety_tier: SafetyTier::Safe,
+                    idempotency: IdempotencyClass::Strict,
+                    ai_hints: AgentHint {
+                        when_to_use: "List conversations.".into(),
+                        common_mistakes: vec![],
+                        examples: vec![r#"{"per_page": 50}"#.into()],
+                        related: vec![
+                            CapabilityId::from_static("intercom.conversations.reply"),
+                        ],
+                    },
+                },
+                OperationInfo {
+                    id: OperationId::from_static("intercom.conversations.reply"),
+                    summary: "Reply to a conversation".into(),
+                    input_schema: json!({
+                        "type": "object",
+                        "required": ["conversation_id", "body", "message_type"],
+                        "properties": {
+                            "conversation_id": {"type": "string"},
+                            "body": {"type": "string"},
+                            "message_type": {"type": "string", "description": "comment or note"}
+                        }
+                    }),
+                    output_schema: json!({
+                        "type": "object",
+                        "required": ["id"],
+                        "properties": {"id": {"type": "string"}}
+                    }),
+                    capability: CapabilityId::from_static("intercom.conversations.write"),
+                    risk_level: RiskLevel::Medium,
+                    description: None,
+                    rate_limit: None,
+                    requires_approval: None,
+                    safety_tier: SafetyTier::Risky,
+                    idempotency: IdempotencyClass::None,
+                    ai_hints: AgentHint {
+                        when_to_use: "Reply to an existing conversation.".into(),
+                        common_mistakes: vec![],
+                        examples: vec![
+                            r#"{"conversation_id": "abc123", "body": "Thanks for reaching out!", "message_type": "comment"}"#.into(),
+                        ],
+                        related: vec![
+                            CapabilityId::from_static("intercom.conversations.list"),
+                        ],
+                    },
+                },
+                OperationInfo {
+                    id: OperationId::from_static("intercom.tags.list"),
+                    summary: "List all tags".into(),
+                    input_schema: json!({"type": "object", "required": []}),
+                    output_schema: json!({
+                        "type": "object",
+                        "required": ["data"],
+                        "properties": {"data": {"type": "array"}}
+                    }),
+                    capability: CapabilityId::from_static("intercom.tags.read"),
+                    risk_level: RiskLevel::Low,
+                    description: None,
+                    rate_limit: None,
+                    requires_approval: None,
+                    safety_tier: SafetyTier::Safe,
+                    idempotency: IdempotencyClass::Strict,
+                    ai_hints: AgentHint {
+                        when_to_use: "List available tags.".into(),
+                        common_mistakes: vec![],
+                        examples: vec!["{}".into()],
+                        related: vec![
+                            CapabilityId::from_static("intercom.contacts.list"),
+                        ],
+                    },
+                },
+            ],
+            events: vec![],
+            resource_types: vec![],
+            auth_caps: None,
+            event_caps: None,
+        };
+
+        serde_json::to_value(introspection).map_err(|e| FcpError::Internal {
+            message: format!("Failed to serialize introspection: {e}"),
+        })
     }
 
     /// Handle the `invoke` method.
@@ -834,11 +1029,7 @@ mod tests {
 
     #[test]
     fn doctor_status_serde_roundtrip() {
-        for status in [
-            DoctorStatus::Healthy,
-            DoctorStatus::Degraded,
-            DoctorStatus::Unhealthy,
-        ] {
+        for status in [DoctorStatus::Healthy, DoctorStatus::Degraded, DoctorStatus::Unhealthy] {
             let s = serde_json::to_string(&status).unwrap();
             let back: DoctorStatus = serde_json::from_str(&s).unwrap();
             assert_eq!(back, status);
@@ -901,18 +1092,8 @@ mod tests {
     #[test]
     fn doctor_result_multiple_critical_failures() {
         let r = DoctorResult::from_checks(vec![
-            DoctorCheck {
-                name: "a".into(),
-                passed: false,
-                message: None,
-                critical: true,
-            },
-            DoctorCheck {
-                name: "b".into(),
-                passed: false,
-                message: None,
-                critical: true,
-            },
+            DoctorCheck { name: "a".into(), passed: false, message: None, critical: true },
+            DoctorCheck { name: "b".into(), passed: false, message: None, critical: true },
         ]);
         assert_eq!(r.status, DoctorStatus::Unhealthy);
     }
@@ -920,18 +1101,8 @@ mod tests {
     #[test]
     fn doctor_result_unhealthy_overrides_degraded() {
         let r = DoctorResult::from_checks(vec![
-            DoctorCheck {
-                name: "a".into(),
-                passed: false,
-                message: None,
-                critical: true,
-            },
-            DoctorCheck {
-                name: "b".into(),
-                passed: false,
-                message: None,
-                critical: false,
-            },
+            DoctorCheck { name: "a".into(), passed: false, message: None, critical: true },
+            DoctorCheck { name: "b".into(), passed: false, message: None, critical: false },
         ]);
         assert_eq!(r.status, DoctorStatus::Unhealthy);
     }
@@ -952,10 +1123,7 @@ mod tests {
     #[test]
     fn operations_contacts_create_is_risky() {
         let ops = operations_info();
-        let op = ops
-            .as_array()
-            .unwrap()
-            .iter()
+        let op = ops.as_array().unwrap().iter()
             .find(|o| o["id"] == "intercom.contacts.create")
             .unwrap();
         assert_eq!(op["safety_tier"], "risky");
@@ -965,10 +1133,7 @@ mod tests {
     #[test]
     fn operations_contacts_delete_is_dangerous() {
         let ops = operations_info();
-        let op = ops
-            .as_array()
-            .unwrap()
-            .iter()
+        let op = ops.as_array().unwrap().iter()
             .find(|o| o["id"] == "intercom.contacts.delete")
             .unwrap();
         assert_eq!(op["safety_tier"], "dangerous");
@@ -978,10 +1143,7 @@ mod tests {
     #[test]
     fn operations_conversations_reply_not_idempotent() {
         let ops = operations_info();
-        let op = ops
-            .as_array()
-            .unwrap()
-            .iter()
+        let op = ops.as_array().unwrap().iter()
             .find(|o| o["id"] == "intercom.conversations.reply")
             .unwrap();
         assert_eq!(op["idempotency"], "none");
@@ -990,10 +1152,7 @@ mod tests {
     #[test]
     fn operations_tags_list_is_safe() {
         let ops = operations_info();
-        let op = ops
-            .as_array()
-            .unwrap()
-            .iter()
+        let op = ops.as_array().unwrap().iter()
             .find(|o| o["id"] == "intercom.tags.list")
             .unwrap();
         assert_eq!(op["safety_tier"], "safe");
@@ -1006,10 +1165,7 @@ mod tests {
         let ops = operations_info();
         for op in ops.as_array().unwrap() {
             let id = op["id"].as_str().unwrap();
-            assert!(
-                id.starts_with("intercom."),
-                "op {id} missing intercom. prefix"
-            );
+            assert!(id.starts_with("intercom."), "op {id} missing intercom. prefix");
         }
     }
 
@@ -1035,10 +1191,7 @@ mod tests {
     fn require_str_error_message_content() {
         let input = json!({});
         match require_str(&input, "contact_id").unwrap_err() {
-            IntercomError::Api {
-                status_code,
-                message,
-            } => {
+            IntercomError::Api { status_code, message } => {
                 assert_eq!(status_code, 400);
                 assert!(message.contains("contact_id"));
             }

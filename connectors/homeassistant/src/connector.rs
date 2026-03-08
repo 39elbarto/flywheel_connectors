@@ -3,7 +3,10 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use fcp_core::{BaseConnector, ConnectorId, CredentialId, FcpError, FcpResult};
+use fcp_core::{
+    AgentHint, BaseConnector, CapabilityId, ConnectorId, CredentialId, FcpError, FcpResult,
+    IdempotencyClass, Introspection, OperationId, OperationInfo, RiskLevel, SafetyTier,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tracing::{info, instrument};
@@ -269,11 +272,16 @@ impl HomeAssistantConnector {
 
     /// Handle the `introspect` method.
     pub async fn handle_introspect(&self) -> FcpResult<serde_json::Value> {
-        Ok(json!({
-            "connector_id": "fcp.homeassistant",
-            "version": "0.1.0",
-            "operations": operations_info(),
-        }))
+        let introspection = Introspection {
+            operations: typed_operations(),
+            events: vec![],
+            resource_types: vec![],
+            auth_caps: None,
+            event_caps: None,
+        };
+        serde_json::to_value(introspection).map_err(|e| FcpError::Internal {
+            message: format!("Failed to serialize introspection: {e}"),
+        })
     }
 
     /// Handle the `invoke` method.
@@ -344,10 +352,9 @@ impl HomeAssistantConnector {
             .and_then(serde_json::Value::as_str)
             .unwrap_or("");
 
-        let allowed = operations_info().as_array().is_some_and(|ops| {
-            ops.iter()
-                .any(|o| o.get("id").and_then(serde_json::Value::as_str) == Some(operation))
-        });
+        let allowed = typed_operations()
+            .iter()
+            .any(|o| o.id.as_ref() == operation);
 
         Ok(json!({
             "allowed": allowed,
@@ -619,130 +626,640 @@ fn require_str<'a>(
         })
 }
 
-/// Build the operations info for introspection.
+/// Build typed operation info for introspection with full `AgentHint` metadata.
+fn typed_operations() -> Vec<OperationInfo> {
+    vec![
+        // -- Read operations --
+        OperationInfo {
+            id: OperationId::from_static("homeassistant.list_states"),
+            summary: "List current states of all entities".into(),
+            description: None,
+            input_schema: json!({"type": "object"}),
+            output_schema: json!({
+                "type": "object",
+                "required": ["states"],
+                "properties": {
+                    "states": {
+                        "type": "array",
+                        "description": "Array of all entity state objects",
+                        "items": {"type": "object"}
+                    }
+                }
+            }),
+            capability: CapabilityId::from_static("homeassistant.read"),
+            risk_level: RiskLevel::Low,
+            safety_tier: SafetyTier::Safe,
+            idempotency: IdempotencyClass::Strict,
+            ai_hints: AgentHint {
+                when_to_use: "Get a snapshot of all entity states. Can be large on installations with many devices.".into(),
+                common_mistakes: vec![
+                    "Calling this repeatedly instead of using event subscriptions for real-time updates.".into(),
+                ],
+                examples: vec!["{}".into()],
+                related: vec![
+                    CapabilityId::from_static("homeassistant.get_state"),
+                    CapabilityId::from_static("homeassistant.subscribe_events"),
+                ],
+            },
+            rate_limit: None,
+            requires_approval: None,
+        },
+        OperationInfo {
+            id: OperationId::from_static("homeassistant.get_state"),
+            summary: "Get the current state of an entity".into(),
+            description: None,
+            input_schema: json!({
+                "type": "object",
+                "required": ["entity_id"],
+                "properties": {
+                    "entity_id": {
+                        "type": "string",
+                        "description": "Entity ID (e.g., 'light.living_room', 'sensor.temperature')"
+                    }
+                }
+            }),
+            output_schema: json!({
+                "type": "object",
+                "required": ["state"],
+                "properties": {
+                    "state": {
+                        "type": "object",
+                        "description": "Entity state object with state value, attributes, last_changed, last_updated"
+                    }
+                }
+            }),
+            capability: CapabilityId::from_static("homeassistant.read"),
+            risk_level: RiskLevel::Low,
+            safety_tier: SafetyTier::Safe,
+            idempotency: IdempotencyClass::Strict,
+            ai_hints: AgentHint {
+                when_to_use: "Read the current state and attributes of a single entity.".into(),
+                common_mistakes: vec![
+                    "Using friendly name instead of entity_id (e.g., 'Living Room Light' vs 'light.living_room').".into(),
+                ],
+                examples: vec![
+                    r#"{"entity_id": "light.living_room"}"#.into(),
+                ],
+                related: vec![
+                    CapabilityId::from_static("homeassistant.list_states"),
+                    CapabilityId::from_static("homeassistant.set_state"),
+                ],
+            },
+            rate_limit: None,
+            requires_approval: None,
+        },
+        OperationInfo {
+            id: OperationId::from_static("homeassistant.list_services"),
+            summary: "List all available services grouped by domain".into(),
+            description: None,
+            input_schema: json!({"type": "object"}),
+            output_schema: json!({
+                "type": "object",
+                "required": ["services"],
+                "properties": {
+                    "services": {
+                        "type": "array",
+                        "description": "Services grouped by domain with field descriptions",
+                        "items": {"type": "object"}
+                    }
+                }
+            }),
+            capability: CapabilityId::from_static("homeassistant.read"),
+            risk_level: RiskLevel::Low,
+            safety_tier: SafetyTier::Safe,
+            idempotency: IdempotencyClass::Strict,
+            ai_hints: AgentHint {
+                when_to_use: "Discover available services and their parameters before calling them.".into(),
+                common_mistakes: vec![],
+                examples: vec!["{}".into()],
+                related: vec![
+                    CapabilityId::from_static("homeassistant.call_service"),
+                ],
+            },
+            rate_limit: None,
+            requires_approval: None,
+        },
+        OperationInfo {
+            id: OperationId::from_static("homeassistant.list_areas"),
+            summary: "List all areas (rooms/zones) in the area registry".into(),
+            description: None,
+            input_schema: json!({"type": "object"}),
+            output_schema: json!({
+                "type": "object",
+                "required": ["areas"],
+                "properties": {
+                    "areas": {
+                        "type": "array",
+                        "items": {"type": "object"}
+                    }
+                }
+            }),
+            capability: CapabilityId::from_static("homeassistant.read"),
+            risk_level: RiskLevel::Low,
+            safety_tier: SafetyTier::Safe,
+            idempotency: IdempotencyClass::Strict,
+            ai_hints: AgentHint {
+                when_to_use: "List areas (rooms) to understand the physical layout for targeted device control.".into(),
+                common_mistakes: vec![],
+                examples: vec!["{}".into()],
+                related: vec![
+                    CapabilityId::from_static("homeassistant.list_devices"),
+                    CapabilityId::from_static("homeassistant.call_service"),
+                ],
+            },
+            rate_limit: None,
+            requires_approval: None,
+        },
+        OperationInfo {
+            id: OperationId::from_static("homeassistant.list_devices"),
+            summary: "List all devices in the device registry".into(),
+            description: None,
+            input_schema: json!({"type": "object"}),
+            output_schema: json!({
+                "type": "object",
+                "required": ["devices"],
+                "properties": {
+                    "devices": {
+                        "type": "array",
+                        "items": {"type": "object"}
+                    }
+                }
+            }),
+            capability: CapabilityId::from_static("homeassistant.read"),
+            risk_level: RiskLevel::Low,
+            safety_tier: SafetyTier::Safe,
+            idempotency: IdempotencyClass::Strict,
+            ai_hints: AgentHint {
+                when_to_use: "List physical devices registered in Home Assistant for discovery or integration status checking.".into(),
+                common_mistakes: vec![
+                    "Confusing devices (physical hardware) with entities (state objects).".into(),
+                ],
+                examples: vec!["{}".into()],
+                related: vec![
+                    CapabilityId::from_static("homeassistant.list_states"),
+                    CapabilityId::from_static("homeassistant.list_areas"),
+                ],
+            },
+            rate_limit: None,
+            requires_approval: None,
+        },
+        OperationInfo {
+            id: OperationId::from_static("homeassistant.list_automations"),
+            summary: "List all automations with their current enabled/disabled state".into(),
+            description: None,
+            input_schema: json!({"type": "object"}),
+            output_schema: json!({
+                "type": "object",
+                "required": ["automations"],
+                "properties": {
+                    "automations": {
+                        "type": "array",
+                        "items": {"type": "object"}
+                    }
+                }
+            }),
+            capability: CapabilityId::from_static("homeassistant.read"),
+            risk_level: RiskLevel::Low,
+            safety_tier: SafetyTier::Safe,
+            idempotency: IdempotencyClass::Strict,
+            ai_hints: AgentHint {
+                when_to_use: "List all automations to inspect their state or find a specific one.".into(),
+                common_mistakes: vec![],
+                examples: vec!["{}".into()],
+                related: vec![
+                    CapabilityId::from_static("homeassistant.trigger_automation"),
+                    CapabilityId::from_static("homeassistant.toggle_automation"),
+                ],
+            },
+            rate_limit: None,
+            requires_approval: None,
+        },
+        OperationInfo {
+            id: OperationId::from_static("homeassistant.list_scenes"),
+            summary: "List all scenes".into(),
+            description: None,
+            input_schema: json!({"type": "object"}),
+            output_schema: json!({
+                "type": "object",
+                "required": ["scenes"],
+                "properties": {
+                    "scenes": {
+                        "type": "array",
+                        "items": {"type": "object"}
+                    }
+                }
+            }),
+            capability: CapabilityId::from_static("homeassistant.read"),
+            risk_level: RiskLevel::Low,
+            safety_tier: SafetyTier::Safe,
+            idempotency: IdempotencyClass::Strict,
+            ai_hints: AgentHint {
+                when_to_use: "List available scenes to discover what can be activated.".into(),
+                common_mistakes: vec![],
+                examples: vec!["{}".into()],
+                related: vec![
+                    CapabilityId::from_static("homeassistant.activate_scene"),
+                ],
+            },
+            rate_limit: None,
+            requires_approval: None,
+        },
+        OperationInfo {
+            id: OperationId::from_static("homeassistant.get_history"),
+            summary: "Get state history for entities over a time period".into(),
+            description: None,
+            input_schema: json!({
+                "type": "object",
+                "required": ["timestamp"],
+                "properties": {
+                    "timestamp": {
+                        "type": "string",
+                        "description": "ISO 8601 start timestamp for history query"
+                    },
+                    "end_time": {
+                        "type": "string",
+                        "description": "ISO 8601 end timestamp (default: now)"
+                    },
+                    "filter_entity_id": {
+                        "type": "string",
+                        "description": "Comma-separated entity IDs to filter"
+                    },
+                    "minimal_response": {
+                        "type": "boolean",
+                        "description": "Return minimal state change data (no attributes)"
+                    },
+                    "significant_changes_only": {
+                        "type": "boolean",
+                        "description": "Only return significant state changes (skip attribute-only changes)"
+                    }
+                }
+            }),
+            output_schema: json!({
+                "type": "object",
+                "required": ["history"],
+                "properties": {
+                    "history": {
+                        "type": "array",
+                        "description": "Array of arrays, one per entity, containing state change records",
+                        "items": {"type": "array"}
+                    }
+                }
+            }),
+            capability: CapabilityId::from_static("homeassistant.read"),
+            risk_level: RiskLevel::Low,
+            safety_tier: SafetyTier::Safe,
+            idempotency: IdempotencyClass::Strict,
+            ai_hints: AgentHint {
+                when_to_use: "Query historical state changes for entities over a time range.".into(),
+                common_mistakes: vec![
+                    "Requesting unbounded history (no end_time) for many entities \u{2014} can be very large.".into(),
+                    "Not using minimal_response for large queries.".into(),
+                    "Not filtering by entity_id on busy installations.".into(),
+                ],
+                examples: vec![
+                    r#"{"timestamp": "2026-03-01T00:00:00Z", "filter_entity_id": "sensor.temperature,sensor.humidity", "minimal_response": true}"#.into(),
+                ],
+                related: vec![
+                    CapabilityId::from_static("homeassistant.get_statistics"),
+                    CapabilityId::from_static("homeassistant.get_state"),
+                ],
+            },
+            rate_limit: None,
+            requires_approval: None,
+        },
+        OperationInfo {
+            id: OperationId::from_static("homeassistant.get_statistics"),
+            summary: "Get long-term statistics for entities (hourly/daily/monthly aggregations)".into(),
+            description: None,
+            input_schema: json!({
+                "type": "object",
+                "required": ["start_time", "statistic_ids"],
+                "properties": {
+                    "start_time": {
+                        "type": "string",
+                        "description": "ISO 8601 start timestamp"
+                    },
+                    "statistic_ids": {
+                        "type": "string",
+                        "description": "Comma-separated statistic IDs (usually entity_id-based)"
+                    },
+                    "end_time": {
+                        "type": "string",
+                        "description": "ISO 8601 end timestamp"
+                    },
+                    "period": {
+                        "type": "string",
+                        "description": "Aggregation period",
+                        "enum": ["5minute", "hour", "day", "week", "month"]
+                    }
+                }
+            }),
+            output_schema: json!({
+                "type": "object",
+                "required": ["statistics"],
+                "properties": {
+                    "statistics": {
+                        "type": "object",
+                        "description": "Statistics data grouped by statistic_id"
+                    }
+                }
+            }),
+            capability: CapabilityId::from_static("homeassistant.read"),
+            risk_level: RiskLevel::Low,
+            safety_tier: SafetyTier::Safe,
+            idempotency: IdempotencyClass::Strict,
+            ai_hints: AgentHint {
+                when_to_use: "Query long-term aggregated statistics (mean, min, max, sum) for sensors and other entities.".into(),
+                common_mistakes: vec![
+                    "Using get_history for long time ranges instead of get_statistics (statistics are much more efficient).".into(),
+                    "Not all entities have long-term statistics \u{2014} check statistic_ids first.".into(),
+                ],
+                examples: vec![
+                    r#"{"start_time": "2026-02-01T00:00:00Z", "statistic_ids": "sensor:energy_consumption", "period": "day"}"#.into(),
+                ],
+                related: vec![
+                    CapabilityId::from_static("homeassistant.get_history"),
+                    CapabilityId::from_static("homeassistant.get_state"),
+                ],
+            },
+            rate_limit: None,
+            requires_approval: None,
+        },
+        OperationInfo {
+            id: OperationId::from_static("homeassistant.subscribe_events"),
+            summary: "Subscribe to Home Assistant events via WebSocket (state changes, service calls, automations)".into(),
+            description: None,
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "event_type": {
+                        "type": "string",
+                        "description": "Filter to specific event type (e.g., 'state_changed', 'call_service', 'automation_triggered'). Omit to receive all events."
+                    }
+                }
+            }),
+            output_schema: json!({
+                "type": "object",
+                "required": ["event"],
+                "properties": {
+                    "event": {
+                        "type": "object",
+                        "description": "Event payload with event_type, data, origin, time_fired, context"
+                    }
+                }
+            }),
+            capability: CapabilityId::from_static("homeassistant.read"),
+            risk_level: RiskLevel::Low,
+            safety_tier: SafetyTier::Safe,
+            idempotency: IdempotencyClass::Strict,
+            ai_hints: AgentHint {
+                when_to_use: "Stream real-time events from Home Assistant via WebSocket. Use event_type filter to reduce volume.".into(),
+                common_mistakes: vec![
+                    "Subscribing to all events on a busy installation (can be thousands per minute).".into(),
+                    "Not handling WebSocket reconnection and subscription ID reuse.".into(),
+                ],
+                examples: vec![
+                    r#"{"event_type": "state_changed"}"#.into(),
+                    r#"{"event_type": "automation_triggered"}"#.into(),
+                ],
+                related: vec![
+                    CapabilityId::from_static("homeassistant.get_state"),
+                    CapabilityId::from_static("homeassistant.list_states"),
+                ],
+            },
+            rate_limit: None,
+            requires_approval: None,
+        },
+        // -- Write operations --
+        OperationInfo {
+            id: OperationId::from_static("homeassistant.set_state"),
+            summary: "Directly set the state of an entity (use service calls for physical devices)".into(),
+            description: None,
+            input_schema: json!({
+                "type": "object",
+                "required": ["entity_id", "state"],
+                "properties": {
+                    "entity_id": {
+                        "type": "string",
+                        "description": "Entity ID"
+                    },
+                    "state": {
+                        "type": "string",
+                        "description": "New state value"
+                    },
+                    "attributes": {
+                        "type": "object",
+                        "description": "Optional attributes to set alongside the state"
+                    }
+                }
+            }),
+            output_schema: json!({
+                "type": "object",
+                "required": ["state"],
+                "properties": {
+                    "state": {"type": "object"}
+                }
+            }),
+            capability: CapabilityId::from_static("homeassistant.write"),
+            risk_level: RiskLevel::Medium,
+            safety_tier: SafetyTier::Risky,
+            idempotency: IdempotencyClass::Strict,
+            ai_hints: AgentHint {
+                when_to_use: "Directly set an entity state. Prefer call_service for physical device control.".into(),
+                common_mistakes: vec![
+                    "Using set_state to control physical devices instead of call_service.".into(),
+                    "Overwriting attributes by not including existing attributes.".into(),
+                ],
+                examples: vec![
+                    r#"{"entity_id": "input_boolean.guest_mode", "state": "on"}"#.into(),
+                ],
+                related: vec![
+                    CapabilityId::from_static("homeassistant.get_state"),
+                    CapabilityId::from_static("homeassistant.call_service"),
+                ],
+            },
+            rate_limit: None,
+            requires_approval: None,
+        },
+        // -- Control operations --
+        OperationInfo {
+            id: OperationId::from_static("homeassistant.call_service"),
+            summary: "Call a Home Assistant service (turn on/off lights, lock doors, set thermostats, etc.)".into(),
+            description: None,
+            input_schema: json!({
+                "type": "object",
+                "required": ["domain", "service"],
+                "properties": {
+                    "domain": {
+                        "type": "string",
+                        "description": "Service domain (e.g., 'light', 'switch', 'climate', 'lock', 'cover')"
+                    },
+                    "service": {
+                        "type": "string",
+                        "description": "Service name (e.g., 'turn_on', 'turn_off', 'toggle', 'set_temperature')"
+                    },
+                    "service_data": {
+                        "type": "object",
+                        "description": "Service-specific parameters (e.g., brightness, temperature, color)"
+                    },
+                    "target": {
+                        "type": "object",
+                        "description": "Target entities, areas, or devices"
+                    }
+                }
+            }),
+            output_schema: json!({
+                "type": "object",
+                "required": ["result"],
+                "properties": {
+                    "result": {
+                        "type": "array",
+                        "description": "Service call result (may be empty for fire-and-forget services)",
+                        "items": {"type": "object"}
+                    }
+                }
+            }),
+            capability: CapabilityId::from_static("homeassistant.control"),
+            risk_level: RiskLevel::High,
+            safety_tier: SafetyTier::Risky,
+            idempotency: IdempotencyClass::BestEffort,
+            ai_hints: AgentHint {
+                when_to_use: "Control physical devices by calling Home Assistant services. This is the primary way to interact with devices.".into(),
+                common_mistakes: vec![
+                    "Using set_state instead of call_service for physical devices.".into(),
+                    "Not specifying target when the service requires entity_id, area_id, or device_id.".into(),
+                    "Calling services on unavailable entities.".into(),
+                ],
+                examples: vec![
+                    r#"{"domain": "light", "service": "turn_on", "service_data": {"brightness_pct": 75}, "target": {"entity_id": "light.living_room"}}"#.into(),
+                    r#"{"domain": "climate", "service": "set_temperature", "service_data": {"temperature": 22}, "target": {"entity_id": "climate.thermostat"}}"#.into(),
+                ],
+                related: vec![
+                    CapabilityId::from_static("homeassistant.list_services"),
+                    CapabilityId::from_static("homeassistant.get_state"),
+                ],
+            },
+            rate_limit: None,
+            requires_approval: None,
+        },
+        OperationInfo {
+            id: OperationId::from_static("homeassistant.trigger_automation"),
+            summary: "Manually trigger an automation".into(),
+            description: None,
+            input_schema: json!({
+                "type": "object",
+                "required": ["entity_id"],
+                "properties": {
+                    "entity_id": {
+                        "type": "string",
+                        "description": "Automation entity ID (e.g., 'automation.night_mode')"
+                    },
+                    "skip_condition": {
+                        "type": "boolean",
+                        "description": "Skip the automation's condition check and force-run actions"
+                    }
+                }
+            }),
+            output_schema: json!({"type": "object"}),
+            capability: CapabilityId::from_static("homeassistant.control"),
+            risk_level: RiskLevel::High,
+            safety_tier: SafetyTier::Risky,
+            idempotency: IdempotencyClass::None,
+            ai_hints: AgentHint {
+                when_to_use: "Manually run an automation. Use skip_condition=true to bypass trigger conditions.".into(),
+                common_mistakes: vec![
+                    "Triggering automations that are disabled (enable first).".into(),
+                    "Not checking automation conditions before triggering with skip_condition=true.".into(),
+                ],
+                examples: vec![
+                    r#"{"entity_id": "automation.night_mode", "skip_condition": false}"#.into(),
+                ],
+                related: vec![
+                    CapabilityId::from_static("homeassistant.list_automations"),
+                    CapabilityId::from_static("homeassistant.toggle_automation"),
+                ],
+            },
+            rate_limit: None,
+            requires_approval: None,
+        },
+        OperationInfo {
+            id: OperationId::from_static("homeassistant.toggle_automation"),
+            summary: "Enable or disable an automation".into(),
+            description: None,
+            input_schema: json!({
+                "type": "object",
+                "required": ["entity_id", "enabled"],
+                "properties": {
+                    "entity_id": {
+                        "type": "string",
+                        "description": "Automation entity ID"
+                    },
+                    "enabled": {
+                        "type": "boolean",
+                        "description": "true to enable, false to disable"
+                    }
+                }
+            }),
+            output_schema: json!({"type": "object"}),
+            capability: CapabilityId::from_static("homeassistant.control"),
+            risk_level: RiskLevel::Medium,
+            safety_tier: SafetyTier::Risky,
+            idempotency: IdempotencyClass::Strict,
+            ai_hints: AgentHint {
+                when_to_use: "Enable or disable an automation without deleting it.".into(),
+                common_mistakes: vec![],
+                examples: vec![
+                    r#"{"entity_id": "automation.night_mode", "enabled": false}"#.into(),
+                ],
+                related: vec![
+                    CapabilityId::from_static("homeassistant.list_automations"),
+                    CapabilityId::from_static("homeassistant.trigger_automation"),
+                ],
+            },
+            rate_limit: None,
+            requires_approval: None,
+        },
+        OperationInfo {
+            id: OperationId::from_static("homeassistant.activate_scene"),
+            summary: "Activate a scene (apply a predefined set of entity states)".into(),
+            description: None,
+            input_schema: json!({
+                "type": "object",
+                "required": ["entity_id"],
+                "properties": {
+                    "entity_id": {
+                        "type": "string",
+                        "description": "Scene entity ID (e.g., 'scene.movie_night')"
+                    }
+                }
+            }),
+            output_schema: json!({"type": "object"}),
+            capability: CapabilityId::from_static("homeassistant.control"),
+            risk_level: RiskLevel::High,
+            safety_tier: SafetyTier::Risky,
+            idempotency: IdempotencyClass::BestEffort,
+            ai_hints: AgentHint {
+                when_to_use: "Activate a scene to set multiple entities to predefined states at once.".into(),
+                common_mistakes: vec![
+                    "Activating scenes that control security-sensitive devices (locks, alarms) without confirmation.".into(),
+                ],
+                examples: vec![
+                    r#"{"entity_id": "scene.movie_night"}"#.into(),
+                ],
+                related: vec![
+                    CapabilityId::from_static("homeassistant.list_scenes"),
+                    CapabilityId::from_static("homeassistant.call_service"),
+                ],
+            },
+            rate_limit: None,
+            requires_approval: None,
+        },
+    ]
+}
+
+/// Build the operations info for introspection as JSON (used by tests).
 fn operations_info() -> serde_json::Value {
-    json!([
-        {
-            "id": "homeassistant.list_states",
-            "summary": "List current states of all entities",
-            "capability": "homeassistant.read",
-            "risk_level": "low",
-            "safety_tier": "safe",
-            "idempotency": "strict",
-        },
-        {
-            "id": "homeassistant.get_state",
-            "summary": "Get the current state of an entity",
-            "capability": "homeassistant.read",
-            "risk_level": "low",
-            "safety_tier": "safe",
-            "idempotency": "strict",
-        },
-        {
-            "id": "homeassistant.set_state",
-            "summary": "Directly set the state of an entity",
-            "capability": "homeassistant.write",
-            "risk_level": "medium",
-            "safety_tier": "risky",
-            "idempotency": "strict",
-        },
-        {
-            "id": "homeassistant.call_service",
-            "summary": "Call a Home Assistant service",
-            "capability": "homeassistant.control",
-            "risk_level": "high",
-            "safety_tier": "risky",
-            "idempotency": "best_effort",
-        },
-        {
-            "id": "homeassistant.list_services",
-            "summary": "List all available services grouped by domain",
-            "capability": "homeassistant.read",
-            "risk_level": "low",
-            "safety_tier": "safe",
-            "idempotency": "strict",
-        },
-        {
-            "id": "homeassistant.list_areas",
-            "summary": "List all areas (rooms/zones)",
-            "capability": "homeassistant.read",
-            "risk_level": "low",
-            "safety_tier": "safe",
-            "idempotency": "strict",
-        },
-        {
-            "id": "homeassistant.list_devices",
-            "summary": "List all devices in the device registry",
-            "capability": "homeassistant.read",
-            "risk_level": "low",
-            "safety_tier": "safe",
-            "idempotency": "strict",
-        },
-        {
-            "id": "homeassistant.list_automations",
-            "summary": "List all automations with enabled/disabled state",
-            "capability": "homeassistant.read",
-            "risk_level": "low",
-            "safety_tier": "safe",
-            "idempotency": "strict",
-        },
-        {
-            "id": "homeassistant.trigger_automation",
-            "summary": "Manually trigger an automation",
-            "capability": "homeassistant.control",
-            "risk_level": "high",
-            "safety_tier": "risky",
-            "idempotency": "none",
-        },
-        {
-            "id": "homeassistant.toggle_automation",
-            "summary": "Enable or disable an automation",
-            "capability": "homeassistant.control",
-            "risk_level": "medium",
-            "safety_tier": "risky",
-            "idempotency": "strict",
-        },
-        {
-            "id": "homeassistant.list_scenes",
-            "summary": "List all scenes",
-            "capability": "homeassistant.read",
-            "risk_level": "low",
-            "safety_tier": "safe",
-            "idempotency": "strict",
-        },
-        {
-            "id": "homeassistant.activate_scene",
-            "summary": "Activate a scene",
-            "capability": "homeassistant.control",
-            "risk_level": "high",
-            "safety_tier": "risky",
-            "idempotency": "best_effort",
-        },
-        {
-            "id": "homeassistant.get_history",
-            "summary": "Get state history for entities over a time period",
-            "capability": "homeassistant.read",
-            "risk_level": "low",
-            "safety_tier": "safe",
-            "idempotency": "strict",
-        },
-        {
-            "id": "homeassistant.get_statistics",
-            "summary": "Get long-term statistics for entities",
-            "capability": "homeassistant.read",
-            "risk_level": "low",
-            "safety_tier": "safe",
-            "idempotency": "strict",
-        },
-        {
-            "id": "homeassistant.subscribe_events",
-            "summary": "Subscribe to Home Assistant events via WebSocket",
-            "capability": "homeassistant.read",
-            "risk_level": "low",
-            "safety_tier": "safe",
-            "idempotency": "strict",
-        },
-    ])
+    serde_json::to_value(typed_operations()).unwrap_or_else(|_| json!([]))
 }
 
 #[cfg(test)]

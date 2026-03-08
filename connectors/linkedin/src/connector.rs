@@ -5,7 +5,10 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use fcp_core::{BaseConnector, ConnectorId, CredentialId, FcpError, FcpResult};
+use fcp_core::{
+    AgentHint, BaseConnector, CapabilityId, ConnectorId, CredentialId, FcpError, FcpResult,
+    IdempotencyClass, Introspection, OperationId, OperationInfo, RiskLevel, SafetyTier,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tracing::{info, instrument};
@@ -273,11 +276,356 @@ impl LinkedInConnector {
 
     /// Handle the `introspect` method.
     pub async fn handle_introspect(&self) -> FcpResult<serde_json::Value> {
-        Ok(json!({
-            "connector_id": "fcp.linkedin",
-            "version": "0.1.0",
-            "operations": operations_info(),
-        }))
+        let introspection = Introspection {
+            operations: vec![
+                OperationInfo {
+                    id: OperationId::from_static("linkedin.profile.get"),
+                    summary: "Get the authenticated user's profile".into(),
+                    input_schema: json!({
+                        "type": "object",
+                        "required": [],
+                        "properties": {}
+                    }),
+                    output_schema: json!({
+                        "type": "object",
+                        "required": ["id", "localizedFirstName", "localizedLastName"],
+                        "properties": {
+                            "id": { "type": "string" },
+                            "localizedFirstName": { "type": "string" },
+                            "localizedLastName": { "type": "string" }
+                        }
+                    }),
+                    capability: CapabilityId::from_static("linkedin.profile.read"),
+                    risk_level: RiskLevel::Low,
+                    description: None,
+                    rate_limit: None,
+                    requires_approval: None,
+                    safety_tier: SafetyTier::Safe,
+                    idempotency: IdempotencyClass::Strict,
+                    ai_hints: AgentHint {
+                        when_to_use: "Get the authenticated LinkedIn profile.".into(),
+                        common_mistakes: vec![],
+                        examples: vec!["{}".into()],
+                        related: vec![CapabilityId::from_static("linkedin.posts.read")],
+                    },
+                },
+                OperationInfo {
+                    id: OperationId::from_static("linkedin.profile.get_by_id"),
+                    summary: "Get a profile by person ID".into(),
+                    input_schema: json!({
+                        "type": "object",
+                        "required": ["person_id"],
+                        "properties": {
+                            "person_id": { "type": "string", "description": "LinkedIn person ID" }
+                        }
+                    }),
+                    output_schema: json!({
+                        "type": "object",
+                        "properties": {
+                            "id": { "type": "string" },
+                            "localizedFirstName": { "type": "string" },
+                            "localizedLastName": { "type": "string" }
+                        }
+                    }),
+                    capability: CapabilityId::from_static("linkedin.profile.read"),
+                    risk_level: RiskLevel::Low,
+                    description: None,
+                    rate_limit: None,
+                    requires_approval: None,
+                    safety_tier: SafetyTier::Safe,
+                    idempotency: IdempotencyClass::Strict,
+                    ai_hints: AgentHint {
+                        when_to_use: "Look up a LinkedIn profile by their person ID.".into(),
+                        common_mistakes: vec![
+                            "Using a vanity URL slug instead of the person ID".into(),
+                        ],
+                        examples: vec![r#"{"person_id": "abc123"}"#.into()],
+                        related: vec![CapabilityId::from_static("linkedin.profile.read")],
+                    },
+                },
+                OperationInfo {
+                    id: OperationId::from_static("linkedin.connections.list"),
+                    summary: "List the authenticated user's connections".into(),
+                    input_schema: json!({
+                        "type": "object",
+                        "required": [],
+                        "properties": {}
+                    }),
+                    output_schema: json!({
+                        "type": "object",
+                        "required": ["elements"],
+                        "properties": {
+                            "elements": { "type": "array" }
+                        }
+                    }),
+                    capability: CapabilityId::from_static("linkedin.connections.read"),
+                    risk_level: RiskLevel::Low,
+                    description: None,
+                    rate_limit: None,
+                    requires_approval: None,
+                    safety_tier: SafetyTier::Safe,
+                    idempotency: IdempotencyClass::Strict,
+                    ai_hints: AgentHint {
+                        when_to_use: "List the authenticated user's LinkedIn connections.".into(),
+                        common_mistakes: vec![
+                            "Expecting full profile data for each connection".into(),
+                        ],
+                        examples: vec!["{}".into()],
+                        related: vec![CapabilityId::from_static("linkedin.profile.read")],
+                    },
+                },
+                OperationInfo {
+                    id: OperationId::from_static("linkedin.company.get"),
+                    summary: "Get a company/organization by ID".into(),
+                    input_schema: json!({
+                        "type": "object",
+                        "required": ["company_id"],
+                        "properties": {
+                            "company_id": { "type": "string", "description": "LinkedIn company/organization ID" }
+                        }
+                    }),
+                    output_schema: json!({
+                        "type": "object",
+                        "properties": {
+                            "id": { "type": "string" },
+                            "name": { "type": "string" },
+                            "description": { "type": "string" }
+                        }
+                    }),
+                    capability: CapabilityId::from_static("linkedin.company.read"),
+                    risk_level: RiskLevel::Low,
+                    description: None,
+                    rate_limit: None,
+                    requires_approval: None,
+                    safety_tier: SafetyTier::Safe,
+                    idempotency: IdempotencyClass::Strict,
+                    ai_hints: AgentHint {
+                        when_to_use: "Retrieve details about a LinkedIn company or organization."
+                            .into(),
+                        common_mistakes: vec![
+                            "Using the company vanity name instead of the numeric ID".into(),
+                        ],
+                        examples: vec![r#"{"company_id": "1234567"}"#.into()],
+                        related: vec![CapabilityId::from_static("linkedin.company.read")],
+                    },
+                },
+                OperationInfo {
+                    id: OperationId::from_static("linkedin.company.followers"),
+                    summary: "Get follower statistics for a company".into(),
+                    input_schema: json!({
+                        "type": "object",
+                        "required": ["company_id"],
+                        "properties": {
+                            "company_id": { "type": "string", "description": "LinkedIn company/organization ID" }
+                        }
+                    }),
+                    output_schema: json!({
+                        "type": "object",
+                        "properties": {
+                            "followerCount": { "type": "integer" }
+                        }
+                    }),
+                    capability: CapabilityId::from_static("linkedin.company.read"),
+                    risk_level: RiskLevel::Low,
+                    description: None,
+                    rate_limit: None,
+                    requires_approval: None,
+                    safety_tier: SafetyTier::Safe,
+                    idempotency: IdempotencyClass::Strict,
+                    ai_hints: AgentHint {
+                        when_to_use: "Get follower count and statistics for a LinkedIn company."
+                            .into(),
+                        common_mistakes: vec![],
+                        examples: vec![r#"{"company_id": "1234567"}"#.into()],
+                        related: vec![CapabilityId::from_static("linkedin.company.read")],
+                    },
+                },
+                OperationInfo {
+                    id: OperationId::from_static("linkedin.posts.create"),
+                    summary: "Create a new LinkedIn post".into(),
+                    input_schema: json!({
+                        "type": "object",
+                        "required": ["author", "text"],
+                        "properties": {
+                            "author": {
+                                "type": "string",
+                                "description": "URN of the author (e.g. urn:li:person:abc123)"
+                            },
+                            "text": { "type": "string" },
+                            "visibility": {
+                                "type": "string",
+                                "description": "PUBLIC or CONNECTIONS"
+                            }
+                        }
+                    }),
+                    output_schema: json!({
+                        "type": "object",
+                        "required": ["id"],
+                        "properties": {
+                            "id": { "type": "string" }
+                        }
+                    }),
+                    capability: CapabilityId::from_static("linkedin.posts.write"),
+                    risk_level: RiskLevel::High,
+                    description: None,
+                    rate_limit: None,
+                    requires_approval: None,
+                    safety_tier: SafetyTier::Risky,
+                    idempotency: IdempotencyClass::None,
+                    ai_hints: AgentHint {
+                        when_to_use:
+                            "Create a LinkedIn post. Visible to connections or public.".into(),
+                        common_mistakes: vec![
+                            "Posting without specifying visibility.".into(),
+                        ],
+                        examples: vec![
+                            r#"{"author": "urn:li:person:abc123", "text": "Excited to announce...", "visibility": "PUBLIC"}"#.into(),
+                        ],
+                        related: vec![
+                            CapabilityId::from_static("linkedin.posts.read"),
+                            CapabilityId::from_static("linkedin.posts.write"),
+                        ],
+                    },
+                },
+                OperationInfo {
+                    id: OperationId::from_static("linkedin.posts.delete"),
+                    summary: "Delete a LinkedIn post".into(),
+                    input_schema: json!({
+                        "type": "object",
+                        "required": ["post_urn"],
+                        "properties": {
+                            "post_urn": { "type": "string", "description": "URN of the post to delete" }
+                        }
+                    }),
+                    output_schema: json!({
+                        "type": "object",
+                        "properties": {}
+                    }),
+                    capability: CapabilityId::from_static("linkedin.posts.write"),
+                    risk_level: RiskLevel::High,
+                    description: None,
+                    rate_limit: None,
+                    requires_approval: None,
+                    safety_tier: SafetyTier::Dangerous,
+                    idempotency: IdempotencyClass::None,
+                    ai_hints: AgentHint {
+                        when_to_use: "Delete a LinkedIn post. Cannot be undone.".into(),
+                        common_mistakes: vec![],
+                        examples: vec![r#"{"post_urn": "urn:li:share:abc123"}"#.into()],
+                        related: vec![CapabilityId::from_static("linkedin.posts.read")],
+                    },
+                },
+                OperationInfo {
+                    id: OperationId::from_static("linkedin.posts.get"),
+                    summary: "Get a LinkedIn post by URN".into(),
+                    input_schema: json!({
+                        "type": "object",
+                        "required": ["post_urn"],
+                        "properties": {
+                            "post_urn": { "type": "string", "description": "URN of the post" }
+                        }
+                    }),
+                    output_schema: json!({
+                        "type": "object",
+                        "properties": {
+                            "id": { "type": "string" },
+                            "author": { "type": "string" },
+                            "text": { "type": "string" }
+                        }
+                    }),
+                    capability: CapabilityId::from_static("linkedin.posts.read"),
+                    risk_level: RiskLevel::Low,
+                    description: None,
+                    rate_limit: None,
+                    requires_approval: None,
+                    safety_tier: SafetyTier::Safe,
+                    idempotency: IdempotencyClass::Strict,
+                    ai_hints: AgentHint {
+                        when_to_use: "Retrieve a specific LinkedIn post by its URN.".into(),
+                        common_mistakes: vec![
+                            "Using a post ID instead of the full URN".into(),
+                        ],
+                        examples: vec![r#"{"post_urn": "urn:li:share:abc123"}"#.into()],
+                        related: vec![CapabilityId::from_static("linkedin.posts.read")],
+                    },
+                },
+                OperationInfo {
+                    id: OperationId::from_static("linkedin.analytics.shares"),
+                    summary: "Get share statistics for an organizational entity".into(),
+                    input_schema: json!({
+                        "type": "object",
+                        "required": ["share_urn"],
+                        "properties": {
+                            "share_urn": { "type": "string", "description": "URN of the share to get statistics for" }
+                        }
+                    }),
+                    output_schema: json!({
+                        "type": "object",
+                        "properties": {
+                            "totalShareStatistics": { "type": "object" }
+                        }
+                    }),
+                    capability: CapabilityId::from_static("linkedin.analytics.read"),
+                    risk_level: RiskLevel::Low,
+                    description: None,
+                    rate_limit: None,
+                    requires_approval: None,
+                    safety_tier: SafetyTier::Safe,
+                    idempotency: IdempotencyClass::Strict,
+                    ai_hints: AgentHint {
+                        when_to_use: "Get engagement statistics for a LinkedIn share.".into(),
+                        common_mistakes: vec![
+                            "Using a post URN instead of a share URN".into(),
+                        ],
+                        examples: vec![
+                            r#"{"share_urn": "urn:li:share:abc123"}"#.into(),
+                        ],
+                        related: vec![CapabilityId::from_static("linkedin.posts.read")],
+                    },
+                },
+                OperationInfo {
+                    id: OperationId::from_static("linkedin.search.companies"),
+                    summary: "Search for companies by keywords".into(),
+                    input_schema: json!({
+                        "type": "object",
+                        "required": ["keywords"],
+                        "properties": {
+                            "keywords": { "type": "string", "description": "Search keywords" }
+                        }
+                    }),
+                    output_schema: json!({
+                        "type": "object",
+                        "required": ["elements"],
+                        "properties": {
+                            "elements": { "type": "array" }
+                        }
+                    }),
+                    capability: CapabilityId::from_static("linkedin.search.read"),
+                    risk_level: RiskLevel::Low,
+                    description: None,
+                    rate_limit: None,
+                    requires_approval: None,
+                    safety_tier: SafetyTier::Safe,
+                    idempotency: IdempotencyClass::Strict,
+                    ai_hints: AgentHint {
+                        when_to_use: "Search for LinkedIn companies by keyword.".into(),
+                        common_mistakes: vec![
+                            "Using overly broad keywords that return too many results".into(),
+                        ],
+                        examples: vec![r#"{"keywords": "artificial intelligence"}"#.into()],
+                        related: vec![CapabilityId::from_static("linkedin.company.read")],
+                    },
+                },
+            ],
+            events: vec![],
+            resource_types: vec![],
+            auth_caps: None,
+            event_caps: None,
+        };
+
+        serde_json::to_value(introspection).map_err(|e| FcpError::Internal {
+            message: format!("Failed to serialize introspection: {e}"),
+        })
     }
 
     /// Handle the `invoke` method.
@@ -1131,10 +1479,7 @@ mod tests {
         let ops = operations_info();
         for op in ops.as_array().unwrap() {
             let id = op["id"].as_str().unwrap();
-            assert!(
-                id.starts_with("linkedin."),
-                "op {id} should start with linkedin."
-            );
+            assert!(id.starts_with("linkedin."), "op {id} should start with linkedin.");
         }
     }
 

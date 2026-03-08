@@ -578,11 +578,11 @@ pub struct ConnectorEntry {
 /// Sorted alphabetically by name. Each entry records the connector's cohort,
 /// operation count, metadata quality tier, and manifest presence.
 ///
-/// **Typed** connectors (27): Use `OperationInfo` structs with `AgentHint`
+/// **Typed** connectors (33): Use `OperationInfo` structs with `AgentHint`
 /// objects providing `when_to_use`, `common_mistakes`, `examples`, and
 /// `related` fields. These are fully fwc-ready.
 ///
-/// **JSON** connectors (55): Use raw `serde_json::Value` in `operations_info()`.
+/// **JSON** connectors (49): Use raw `serde_json::Value` in `operations_info()`.
 /// They have `input_schema`, `output_schema`, `risk_level`, `safety_tier`,
 /// and `idempotency` but lack typed `AgentHint` metadata. These are
 /// partially ready — they work but discovery UX is degraded.
@@ -823,8 +823,8 @@ pub static CONNECTOR_INVENTORY: &[ConnectorEntry] = &[
         name: "homeassistant",
         cohort: ConnectorCohort::Automation,
         operation_count: 15,
-        metadata_tier: MetadataTier::Json,
-        has_agent_hints: false,
+        metadata_tier: MetadataTier::Typed,
+        has_agent_hints: true,
         has_manifest: true,
     },
     ConnectorEntry {
@@ -839,8 +839,8 @@ pub static CONNECTOR_INVENTORY: &[ConnectorEntry] = &[
         name: "intercom",
         cohort: ConnectorCohort::Social,
         operation_count: 6,
-        metadata_tier: MetadataTier::Json,
-        has_agent_hints: false,
+        metadata_tier: MetadataTier::Typed,
+        has_agent_hints: true,
         has_manifest: true,
     },
     ConnectorEntry {
@@ -870,9 +870,9 @@ pub static CONNECTOR_INVENTORY: &[ConnectorEntry] = &[
     ConnectorEntry {
         name: "linkedin",
         cohort: ConnectorCohort::Social,
-        operation_count: 4,
-        metadata_tier: MetadataTier::Json,
-        has_agent_hints: false,
+        operation_count: 10,
+        metadata_tier: MetadataTier::Typed,
+        has_agent_hints: true,
         has_manifest: true,
     },
     ConnectorEntry {
@@ -895,8 +895,8 @@ pub static CONNECTOR_INVENTORY: &[ConnectorEntry] = &[
         name: "mailchimp",
         cohort: ConnectorCohort::Social,
         operation_count: 5,
-        metadata_tier: MetadataTier::Json,
-        has_agent_hints: false,
+        metadata_tier: MetadataTier::Typed,
+        has_agent_hints: true,
         has_manifest: true,
     },
     ConnectorEntry {
@@ -1039,8 +1039,8 @@ pub static CONNECTOR_INVENTORY: &[ConnectorEntry] = &[
         name: "reddit",
         cohort: ConnectorCohort::Community,
         operation_count: 9,
-        metadata_tier: MetadataTier::Json,
-        has_agent_hints: false,
+        metadata_tier: MetadataTier::Typed,
+        has_agent_hints: true,
         has_manifest: true,
     },
     ConnectorEntry {
@@ -1102,9 +1102,9 @@ pub static CONNECTOR_INVENTORY: &[ConnectorEntry] = &[
     ConnectorEntry {
         name: "sendgrid",
         cohort: ConnectorCohort::Messaging,
-        operation_count: 5,
-        metadata_tier: MetadataTier::Json,
-        has_agent_hints: false,
+        operation_count: 10,
+        metadata_tier: MetadataTier::Typed,
+        has_agent_hints: true,
         has_manifest: true,
     },
     ConnectorEntry {
@@ -3714,7 +3714,7 @@ mod tests {
             .iter()
             .filter(|e| e.metadata_tier == MetadataTier::Typed)
             .count();
-        assert_eq!(typed_count, 27);
+        assert_eq!(typed_count, 33);
     }
 
     #[test]
@@ -3723,6 +3723,6 @@ mod tests {
             .iter()
             .filter(|e| e.metadata_tier == MetadataTier::Json)
             .count();
-        assert_eq!(json_count, 55);
+        assert_eq!(json_count, 49);
     }
 }

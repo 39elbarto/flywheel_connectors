@@ -5,7 +5,10 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use fcp_core::{BaseConnector, ConnectorId, CredentialId, FcpError, FcpResult};
+use fcp_core::{
+    AgentHint, BaseConnector, CapabilityId, ConnectorId, CredentialId, FcpError, FcpResult,
+    IdempotencyClass, Introspection, OperationId, OperationInfo, RiskLevel, SafetyTier,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tracing::{info, instrument};
@@ -270,11 +273,158 @@ impl MailchimpConnector {
 
     /// Handle the `introspect` method.
     pub async fn handle_introspect(&self) -> FcpResult<serde_json::Value> {
-        Ok(json!({
-            "connector_id": "fcp.mailchimp",
-            "version": "0.1.0",
-            "operations": operations_info(),
-        }))
+        let introspection = Introspection {
+            operations: vec![
+                OperationInfo {
+                    id: OperationId::from_static("mailchimp.lists.list"),
+                    summary: "List audiences".into(),
+                    input_schema: json!({"type": "object", "required": []}),
+                    output_schema: json!({
+                        "type": "object",
+                        "required": ["lists"],
+                        "properties": {"lists": {"type": "array"}}
+                    }),
+                    capability: CapabilityId::from_static("mailchimp.lists.read"),
+                    risk_level: RiskLevel::Low,
+                    description: None,
+                    rate_limit: None,
+                    requires_approval: None,
+                    safety_tier: SafetyTier::Safe,
+                    idempotency: IdempotencyClass::Strict,
+                    ai_hints: AgentHint {
+                        when_to_use: "List Mailchimp audiences.".into(),
+                        common_mistakes: vec![],
+                        examples: vec!["{}".into()],
+                        related: vec![
+                            CapabilityId::from_static("mailchimp.members.list"),
+                            CapabilityId::from_static("mailchimp.campaigns.list"),
+                        ],
+                    },
+                },
+                OperationInfo {
+                    id: OperationId::from_static("mailchimp.members.list"),
+                    summary: "List members of an audience".into(),
+                    input_schema: json!({
+                        "type": "object",
+                        "required": ["list_id"],
+                        "properties": {"list_id": {"type": "string"}}
+                    }),
+                    output_schema: json!({
+                        "type": "object",
+                        "required": ["members"],
+                        "properties": {"members": {"type": "array"}}
+                    }),
+                    capability: CapabilityId::from_static("mailchimp.members.read"),
+                    risk_level: RiskLevel::Low,
+                    description: None,
+                    rate_limit: None,
+                    requires_approval: None,
+                    safety_tier: SafetyTier::Safe,
+                    idempotency: IdempotencyClass::Strict,
+                    ai_hints: AgentHint {
+                        when_to_use: "List members of an audience.".into(),
+                        common_mistakes: vec![],
+                        examples: vec![r#"{"list_id": "abc123"}"#.into()],
+                        related: vec![
+                            CapabilityId::from_static("mailchimp.lists.list"),
+                            CapabilityId::from_static("mailchimp.members.delete"),
+                        ],
+                    },
+                },
+                OperationInfo {
+                    id: OperationId::from_static("mailchimp.members.delete"),
+                    summary: "Delete a member from an audience".into(),
+                    input_schema: json!({
+                        "type": "object",
+                        "required": ["list_id", "subscriber_hash"],
+                        "properties": {
+                            "list_id": {"type": "string"},
+                            "subscriber_hash": {"type": "string", "description": "MD5 hash of lowercase email address"}
+                        }
+                    }),
+                    output_schema: json!({"type": "object"}),
+                    capability: CapabilityId::from_static("mailchimp.members.write"),
+                    risk_level: RiskLevel::High,
+                    description: None,
+                    rate_limit: None,
+                    requires_approval: None,
+                    safety_tier: SafetyTier::Dangerous,
+                    idempotency: IdempotencyClass::Strict,
+                    ai_hints: AgentHint {
+                        when_to_use: "Permanently delete a member. Cannot be undone.".into(),
+                        common_mistakes: vec![
+                            "Using email directly instead of MD5 hash.".into(),
+                        ],
+                        examples: vec![
+                            r#"{"list_id": "abc123", "subscriber_hash": "d41d8cd98f00b204e9800998ecf8427e"}"#.into(),
+                        ],
+                        related: vec![
+                            CapabilityId::from_static("mailchimp.members.list"),
+                        ],
+                    },
+                },
+                OperationInfo {
+                    id: OperationId::from_static("mailchimp.campaigns.list"),
+                    summary: "List campaigns".into(),
+                    input_schema: json!({"type": "object", "required": []}),
+                    output_schema: json!({
+                        "type": "object",
+                        "required": ["campaigns"],
+                        "properties": {"campaigns": {"type": "array"}}
+                    }),
+                    capability: CapabilityId::from_static("mailchimp.campaigns.read"),
+                    risk_level: RiskLevel::Low,
+                    description: None,
+                    rate_limit: None,
+                    requires_approval: None,
+                    safety_tier: SafetyTier::Safe,
+                    idempotency: IdempotencyClass::Strict,
+                    ai_hints: AgentHint {
+                        when_to_use: "List email campaigns.".into(),
+                        common_mistakes: vec![],
+                        examples: vec!["{}".into()],
+                        related: vec![
+                            CapabilityId::from_static("mailchimp.campaigns.send"),
+                        ],
+                    },
+                },
+                OperationInfo {
+                    id: OperationId::from_static("mailchimp.campaigns.send"),
+                    summary: "Send a campaign".into(),
+                    input_schema: json!({
+                        "type": "object",
+                        "required": ["campaign_id"],
+                        "properties": {"campaign_id": {"type": "string"}}
+                    }),
+                    output_schema: json!({"type": "object"}),
+                    capability: CapabilityId::from_static("mailchimp.campaigns.write"),
+                    risk_level: RiskLevel::High,
+                    description: None,
+                    rate_limit: None,
+                    requires_approval: None,
+                    safety_tier: SafetyTier::Dangerous,
+                    idempotency: IdempotencyClass::None,
+                    ai_hints: AgentHint {
+                        when_to_use: "Send a campaign to all recipients.".into(),
+                        common_mistakes: vec![
+                            "Sending a campaign that is not in ready state.".into(),
+                        ],
+                        examples: vec![r#"{"campaign_id": "abc123"}"#.into()],
+                        related: vec![
+                            CapabilityId::from_static("mailchimp.campaigns.list"),
+                        ],
+                    },
+                },
+            ],
+            events: vec![],
+            resource_types: vec![],
+            auth_caps: None,
+            event_caps: None,
+        };
+
+        serde_json::to_value(introspection).map_err(|e| FcpError::Internal {
+            message: format!("Failed to serialize introspection: {e}"),
+        })
     }
 
     /// Handle the `invoke` method.
@@ -1066,11 +1216,7 @@ mod tests {
     fn operations_all_have_capability() {
         let ops = operations_info();
         for op in ops.as_array().unwrap() {
-            assert!(
-                op["capability"].as_str().is_some(),
-                "op {} missing capability",
-                op["id"]
-            );
+            assert!(op["capability"].as_str().is_some(), "op {} missing capability", op["id"]);
         }
     }
 
@@ -1078,11 +1224,7 @@ mod tests {
     fn operations_all_have_safety_tier() {
         let ops = operations_info();
         for op in ops.as_array().unwrap() {
-            assert!(
-                op["safety_tier"].as_str().is_some(),
-                "op {} missing safety_tier",
-                op["id"]
-            );
+            assert!(op["safety_tier"].as_str().is_some(), "op {} missing safety_tier", op["id"]);
         }
     }
 

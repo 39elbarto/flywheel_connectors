@@ -3,7 +3,10 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use fcp_core::{BaseConnector, ConnectorId, CredentialId, FcpError, FcpResult};
+use fcp_core::{
+    AgentHint, BaseConnector, CapabilityId, ConnectorId, CredentialId, FcpError, FcpResult,
+    IdempotencyClass, Introspection, OperationId, OperationInfo, RiskLevel, SafetyTier,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tracing::{info, instrument};
@@ -241,9 +244,397 @@ impl RedditConnector {
     }
 
     pub async fn handle_introspect(&self) -> FcpResult<serde_json::Value> {
-        Ok(
-            json!({ "connector_id": "fcp.reddit", "version": "0.1.0", "operations": operations_info() }),
-        )
+        let introspection = Introspection {
+            operations: vec![
+                OperationInfo {
+                    id: OperationId::from_static("reddit.search_posts"),
+                    summary: "Search Reddit posts using query text and optional subreddit filters".into(),
+                    description: None,
+                    input_schema: json!({
+                        "type": "object",
+                        "required": ["query"],
+                        "properties": {
+                            "query": { "type": "string", "description": "Search text, matching Reddit search syntax.", "minLength": 1, "maxLength": 512 },
+                            "subreddit": { "type": "string", "description": "Optional subreddit name without r/ prefix.", "pattern": "^[A-Za-z0-9_]{2,21}$" },
+                            "sort": { "type": "string", "description": "Sort mode for search results.", "enum": ["relevance", "hot", "new", "top", "comments"], "default": "relevance" },
+                            "time_range": { "type": "string", "description": "Time window for ranking.", "enum": ["hour", "day", "week", "month", "year", "all"], "default": "all" },
+                            "limit": { "type": "integer", "description": "Maximum posts to return.", "minimum": 1, "maximum": 100, "default": 25 },
+                            "after": { "type": "string", "description": "Pagination cursor returned by a prior call." }
+                        }
+                    }),
+                    output_schema: json!({
+                        "type": "object",
+                        "required": ["posts"],
+                        "properties": {
+                            "posts": { "type": "array", "description": "Reddit post summaries.", "items": { "type": "object" } },
+                            "next_after": { "type": "string", "description": "Pagination cursor for next page." }
+                        }
+                    }),
+                    capability: CapabilityId::from_static("reddit.search"),
+                    risk_level: RiskLevel::Low,
+                    safety_tier: SafetyTier::Safe,
+                    idempotency: IdempotencyClass::Strict,
+                    rate_limit: None,
+                    requires_approval: None,
+                    ai_hints: AgentHint {
+                        when_to_use: "Use this for keyword discovery across Reddit.".into(),
+                        common_mistakes: vec![
+                            "Passing subreddit names with the r/ prefix.".into(),
+                            "Using large limits without handling pagination.".into(),
+                        ],
+                        examples: vec![
+                            r#"{"query":"agentic coding", "subreddit":"rust", "sort":"new", "limit":20}"#.into(),
+                        ],
+                        related: vec![
+                            CapabilityId::from_static("reddit.list_subreddit_new"),
+                            CapabilityId::from_static("reddit.get_post_thread"),
+                        ],
+                    },
+                },
+                OperationInfo {
+                    id: OperationId::from_static("reddit.list_subreddit_new"),
+                    summary: "List newest posts from a subreddit".into(),
+                    description: None,
+                    input_schema: json!({
+                        "type": "object",
+                        "required": ["subreddit"],
+                        "properties": {
+                            "subreddit": { "type": "string", "description": "Subreddit name without r/ prefix.", "pattern": "^[A-Za-z0-9_]{2,21}$" },
+                            "limit": { "type": "integer", "description": "Maximum posts to return.", "minimum": 1, "maximum": 100, "default": 25 },
+                            "after": { "type": "string", "description": "Pagination cursor from a prior response." }
+                        }
+                    }),
+                    output_schema: json!({
+                        "type": "object",
+                        "required": ["posts"],
+                        "properties": {
+                            "posts": { "type": "array" },
+                            "next_after": { "type": "string" }
+                        }
+                    }),
+                    capability: CapabilityId::from_static("reddit.read"),
+                    risk_level: RiskLevel::Low,
+                    safety_tier: SafetyTier::Safe,
+                    idempotency: IdempotencyClass::Strict,
+                    rate_limit: None,
+                    requires_approval: None,
+                    ai_hints: AgentHint {
+                        when_to_use: "Use this for incremental ingestion from one subreddit.".into(),
+                        common_mistakes: vec![
+                            "Forgetting to store and replay the `next_after` cursor.".into(),
+                        ],
+                        examples: vec![
+                            r#"{"subreddit":"machinelearning", "limit":25}"#.into(),
+                        ],
+                        related: vec![
+                            CapabilityId::from_static("reddit.stream_subreddit_new"),
+                            CapabilityId::from_static("reddit.search_posts"),
+                        ],
+                    },
+                },
+                OperationInfo {
+                    id: OperationId::from_static("reddit.get_post_thread"),
+                    summary: "Fetch a post and its comment tree".into(),
+                    description: None,
+                    input_schema: json!({
+                        "type": "object",
+                        "required": ["post_fullname"],
+                        "properties": {
+                            "post_fullname": { "type": "string", "description": "Thing fullname, typically prefixed with t3_.", "pattern": "^t3_[A-Za-z0-9]+$" },
+                            "sort": { "type": "string", "description": "Comment sort mode.", "enum": ["confidence", "top", "new", "controversial", "old", "qa"], "default": "confidence" },
+                            "comment_limit": { "type": "integer", "description": "Maximum comments to include.", "minimum": 1, "maximum": 500, "default": 100 }
+                        }
+                    }),
+                    output_schema: json!({
+                        "type": "object",
+                        "required": ["post", "comments"],
+                        "properties": {
+                            "post": { "type": "object" },
+                            "comments": { "type": "array" }
+                        }
+                    }),
+                    capability: CapabilityId::from_static("reddit.read"),
+                    risk_level: RiskLevel::Low,
+                    safety_tier: SafetyTier::Safe,
+                    idempotency: IdempotencyClass::Strict,
+                    rate_limit: None,
+                    requires_approval: None,
+                    ai_hints: AgentHint {
+                        when_to_use: "Use this for full context around one post.".into(),
+                        common_mistakes: vec![
+                            "Passing a bare post ID instead of a fullname (t3_...).".into(),
+                        ],
+                        examples: vec![
+                            r#"{"post_fullname":"t3_1abcde", "sort":"top", "comment_limit":50}"#.into(),
+                        ],
+                        related: vec![
+                            CapabilityId::from_static("reddit.search_posts"),
+                            CapabilityId::from_static("reddit.list_subreddit_new"),
+                        ],
+                    },
+                },
+                OperationInfo {
+                    id: OperationId::from_static("reddit.create_post"),
+                    summary: "Submit a new Reddit post".into(),
+                    description: None,
+                    input_schema: json!({
+                        "type": "object",
+                        "required": ["subreddit", "kind", "title"],
+                        "properties": {
+                            "subreddit": { "type": "string", "description": "Target subreddit name.", "pattern": "^[A-Za-z0-9_]{2,21}$" },
+                            "kind": { "type": "string", "description": "Post type.", "enum": ["self", "link"] },
+                            "title": { "type": "string", "description": "Post title.", "minLength": 1, "maxLength": 300 },
+                            "text": { "type": "string", "description": "Body for self-posts." },
+                            "url": { "type": "string", "description": "URL for link posts.", "format": "uri" },
+                            "nsfw": { "type": "boolean", "description": "Mark post NSFW." },
+                            "spoiler": { "type": "boolean", "description": "Mark post as spoiler." },
+                            "idempotency_key": { "type": "string", "description": "Client-provided key used to suppress duplicate submissions.", "maxLength": 128 }
+                        }
+                    }),
+                    output_schema: json!({
+                        "type": "object",
+                        "required": ["fullname", "permalink"],
+                        "properties": {
+                            "fullname": { "type": "string" },
+                            "permalink": { "type": "string" }
+                        }
+                    }),
+                    capability: CapabilityId::from_static("reddit.post"),
+                    risk_level: RiskLevel::High,
+                    safety_tier: SafetyTier::Dangerous,
+                    idempotency: IdempotencyClass::BestEffort,
+                    rate_limit: None,
+                    requires_approval: None,
+                    ai_hints: AgentHint {
+                        when_to_use: "Use this to publish a new post after explicit human confirmation.".into(),
+                        common_mistakes: vec![
+                            "Providing `text` for a link post without `url`.".into(),
+                            "Posting to a subreddit where the account lacks permission.".into(),
+                        ],
+                        examples: vec![
+                            r#"{"subreddit":"agentflywheel", "kind":"self", "title":"Release notes", "text":"..."}"#.into(),
+                        ],
+                        related: vec![
+                            CapabilityId::from_static("reddit.create_comment"),
+                            CapabilityId::from_static("reddit.send_message"),
+                        ],
+                    },
+                },
+                OperationInfo {
+                    id: OperationId::from_static("reddit.create_comment"),
+                    summary: "Add a comment to a post or comment".into(),
+                    description: None,
+                    input_schema: json!({
+                        "type": "object",
+                        "required": ["parent_fullname", "text"],
+                        "properties": {
+                            "parent_fullname": { "type": "string", "description": "Thing fullname, usually t3_... (post) or t1_... (comment).", "pattern": "^t[13]_[A-Za-z0-9]+$" },
+                            "text": { "type": "string", "description": "Comment markdown text.", "minLength": 1, "maxLength": 10000 },
+                            "idempotency_key": { "type": "string", "description": "Client key used to avoid duplicate comments.", "maxLength": 128 }
+                        }
+                    }),
+                    output_schema: json!({
+                        "type": "object",
+                        "required": ["fullname"],
+                        "properties": {
+                            "fullname": { "type": "string" }
+                        }
+                    }),
+                    capability: CapabilityId::from_static("reddit.comment"),
+                    risk_level: RiskLevel::Medium,
+                    safety_tier: SafetyTier::Risky,
+                    idempotency: IdempotencyClass::BestEffort,
+                    rate_limit: None,
+                    requires_approval: None,
+                    ai_hints: AgentHint {
+                        when_to_use: "Use to reply to posts/comments with approval-gated write behavior.".into(),
+                        common_mistakes: vec![
+                            "Using post IDs instead of fullnames.".into(),
+                            "Submitting duplicate comments during retries.".into(),
+                        ],
+                        examples: vec![
+                            r#"{"parent_fullname":"t3_1abcde", "text":"Nice write-up.", "idempotency_key":"cmt-001"}"#.into(),
+                        ],
+                        related: vec![
+                            CapabilityId::from_static("reddit.get_post_thread"),
+                            CapabilityId::from_static("reddit.create_post"),
+                        ],
+                    },
+                },
+                OperationInfo {
+                    id: OperationId::from_static("reddit.send_message"),
+                    summary: "Send a private message through Reddit messaging".into(),
+                    description: None,
+                    input_schema: json!({
+                        "type": "object",
+                        "required": ["recipient", "subject", "message"],
+                        "properties": {
+                            "recipient": { "type": "string", "description": "Reddit username without u/ prefix.", "pattern": "^[A-Za-z0-9_-]{3,20}$" },
+                            "subject": { "type": "string", "description": "Message subject.", "minLength": 1, "maxLength": 100 },
+                            "message": { "type": "string", "description": "Message body.", "minLength": 1, "maxLength": 10000 },
+                            "idempotency_key": { "type": "string", "description": "Client key used to avoid duplicate sends.", "maxLength": 128 }
+                        }
+                    }),
+                    output_schema: json!({
+                        "type": "object",
+                        "required": ["sent"],
+                        "properties": {
+                            "sent": { "type": "boolean" }
+                        }
+                    }),
+                    capability: CapabilityId::from_static("reddit.message"),
+                    risk_level: RiskLevel::High,
+                    safety_tier: SafetyTier::Dangerous,
+                    idempotency: IdempotencyClass::BestEffort,
+                    rate_limit: None,
+                    requires_approval: None,
+                    ai_hints: AgentHint {
+                        when_to_use: "Use this for direct user communication when an explicit human decision approved it.".into(),
+                        common_mistakes: vec![
+                            "Using a display name instead of exact Reddit username.".into(),
+                        ],
+                        examples: vec![
+                            r#"{"recipient":"example_user", "subject":"Follow-up", "message":"Thanks for your report."}"#.into(),
+                        ],
+                        related: vec![
+                            CapabilityId::from_static("reddit.create_comment"),
+                        ],
+                    },
+                },
+                OperationInfo {
+                    id: OperationId::from_static("reddit.mod_remove"),
+                    summary: "Remove a post/comment via moderator privileges".into(),
+                    description: None,
+                    input_schema: json!({
+                        "type": "object",
+                        "required": ["thing_fullname"],
+                        "properties": {
+                            "thing_fullname": { "type": "string", "description": "Thing fullname to moderate, such as t3_... or t1_....", "pattern": "^t[13]_[A-Za-z0-9]+$" },
+                            "spam": { "type": "boolean", "description": "Mark removed content as spam." },
+                            "mod_note": { "type": "string", "description": "Optional moderation note.", "maxLength": 500 }
+                        }
+                    }),
+                    output_schema: json!({
+                        "type": "object",
+                        "required": ["removed"],
+                        "properties": {
+                            "removed": { "type": "boolean" }
+                        }
+                    }),
+                    capability: CapabilityId::from_static("reddit.moderate"),
+                    risk_level: RiskLevel::High,
+                    safety_tier: SafetyTier::Dangerous,
+                    idempotency: IdempotencyClass::Strict,
+                    rate_limit: None,
+                    requires_approval: None,
+                    ai_hints: AgentHint {
+                        when_to_use: "Use only for moderation workflows where dangerous actions are explicitly approved.".into(),
+                        common_mistakes: vec![
+                            "Removing the wrong thing due to truncated IDs.".into(),
+                        ],
+                        examples: vec![
+                            r#"{"thing_fullname":"t1_xy12ab", "spam":false, "mod_note":"Rule 2 violation"}"#.into(),
+                        ],
+                        related: vec![
+                            CapabilityId::from_static("reddit.get_post_thread"),
+                        ],
+                    },
+                },
+                OperationInfo {
+                    id: OperationId::from_static("reddit.download_media"),
+                    summary: "Download media referenced by Reddit posts from explicitly allowed media hosts".into(),
+                    description: None,
+                    input_schema: json!({
+                        "type": "object",
+                        "required": ["url"],
+                        "properties": {
+                            "url": { "type": "string", "description": "Media URL hosted on an explicitly allowlisted Reddit media domain.", "format": "uri" },
+                            "max_bytes": { "type": "integer", "description": "Optional hard cap for downloaded content.", "minimum": 1024, "maximum": 26214400, "default": 10485760 }
+                        }
+                    }),
+                    output_schema: json!({
+                        "type": "object",
+                        "required": ["content_type", "bytes"],
+                        "properties": {
+                            "content_type": { "type": "string" },
+                            "bytes": { "type": "integer" },
+                            "sha256": { "type": "string" }
+                        }
+                    }),
+                    capability: CapabilityId::from_static("reddit.media.read"),
+                    risk_level: RiskLevel::Low,
+                    safety_tier: SafetyTier::Safe,
+                    idempotency: IdempotencyClass::Strict,
+                    rate_limit: None,
+                    requires_approval: None,
+                    ai_hints: AgentHint {
+                        when_to_use: "Use only when media artifacts are required for downstream processing.".into(),
+                        common_mistakes: vec![
+                            "Attempting to fetch arbitrary external URLs.".into(),
+                            "Not enforcing max_bytes for large videos.".into(),
+                        ],
+                        examples: vec![
+                            r#"{"url":"https://i.redd.it/example123.png", "max_bytes":5242880}"#.into(),
+                        ],
+                        related: vec![
+                            CapabilityId::from_static("reddit.get_post_thread"),
+                            CapabilityId::from_static("reddit.search_posts"),
+                        ],
+                    },
+                },
+                OperationInfo {
+                    id: OperationId::from_static("reddit.stream_subreddit_new"),
+                    summary: "Poll new subreddit posts and emit streaming event batches".into(),
+                    description: None,
+                    input_schema: json!({
+                        "type": "object",
+                        "required": ["subreddit"],
+                        "properties": {
+                            "subreddit": { "type": "string", "description": "Subreddit name to poll.", "pattern": "^[A-Za-z0-9_]{2,21}$" },
+                            "batch_limit": { "type": "integer", "description": "Maximum events to emit per polling cycle.", "minimum": 1, "maximum": 100, "default": 25 },
+                            "poll_interval_ms": { "type": "integer", "description": "Polling interval in milliseconds.", "minimum": 5000, "maximum": 300000, "default": 30000 },
+                            "checkpoint_key": { "type": "string", "description": "State key for persisted checkpoint cursor.", "maxLength": 128, "default": "subreddit:new" }
+                        }
+                    }),
+                    output_schema: json!({
+                        "type": "object",
+                        "required": ["events", "next_checkpoint"],
+                        "properties": {
+                            "events": { "type": "array" },
+                            "next_checkpoint": { "type": "string" }
+                        }
+                    }),
+                    capability: CapabilityId::from_static("reddit.stream"),
+                    risk_level: RiskLevel::Medium,
+                    safety_tier: SafetyTier::Risky,
+                    idempotency: IdempotencyClass::None,
+                    rate_limit: None,
+                    requires_approval: None,
+                    ai_hints: AgentHint {
+                        when_to_use: "Use for incremental event ingestion from subreddit feeds.".into(),
+                        common_mistakes: vec![
+                            "Too-short polling intervals that trigger API throttling.".into(),
+                            "Not persisting checkpoint keys across restarts.".into(),
+                        ],
+                        examples: vec![
+                            r#"{"subreddit":"agentflywheel", "poll_interval_ms":30000, "batch_limit":20}"#.into(),
+                        ],
+                        related: vec![
+                            CapabilityId::from_static("reddit.list_subreddit_new"),
+                            CapabilityId::from_static("reddit.search_posts"),
+                        ],
+                    },
+                },
+            ],
+            events: vec![],
+            resource_types: vec![],
+            auth_caps: None,
+            event_caps: None,
+        };
+
+        serde_json::to_value(introspection).map_err(|e| FcpError::Internal {
+            message: format!("Failed to serialize introspection: {e}"),
+        })
     }
 
     #[instrument(skip(self, params))]

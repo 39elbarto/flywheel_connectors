@@ -90,7 +90,6 @@ zapier = []
 redis = []
 postgresql = []
 whisper = []
-__host_resilience_wip = []
 
 [dependencies]
 fcp-core = { workspace = true }

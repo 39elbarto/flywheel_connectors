@@ -1613,7 +1613,7 @@ mod tests {
         let err = require_str_array(&input, "parts").unwrap_err();
         match err {
             FcpError::InvalidRequest { message, .. } => {
-                assert!(message.contains("must not be empty"))
+                assert!(message.contains("must not be empty"));
             }
             e => panic!("expected InvalidRequest, got {e:?}"),
         }

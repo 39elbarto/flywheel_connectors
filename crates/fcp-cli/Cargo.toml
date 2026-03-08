@@ -45,6 +45,7 @@ fcp-raptorq = { path = "../fcp-raptorq" }
 fcp-registry = { path = "../fcp-registry" }
 fcp-sandbox = { path = "../fcp-sandbox" }
 fcp-store = { path = "../fcp-store" }
+fcp-telemetry = { path = "../fcp-telemetry" }
 ed25519-dalek.workspace = true
 
 [dev-dependencies]

@@ -4,6 +4,7 @@
 //! - `fcp audit` - Audit chain operations for incident response
 //! - `fcp budget` - Usage budget status per zone
 //! - `fcp bench` - Performance benchmarking suite
+//! - `fcp capabilities` - Capability usage analytics and recommendations
 //! - `fcp connector` - Connector discovery and introspection
 //! - `fcp context` - Manage mesh contexts for multi-mesh operation
 //! - `fcp explain` - Operation decision explanations
@@ -19,6 +20,7 @@
 mod audit;
 mod bench;
 mod budget;
+mod capabilities;
 mod connector;
 mod context;
 mod doctor;
@@ -89,6 +91,11 @@ enum Commands {
     ///
     /// Shows current usage vs budget and enforcement mode for each zone.
     Budget(budget::BudgetArgs),
+
+    /// Capability usage analytics and least-privilege recommendations.
+    ///
+    /// Report usage, suggest minimal capability grants, and export raw aggregates.
+    Capabilities(capabilities::CapabilitiesArgs),
 
     /// Connector discovery and introspection.
     ///
@@ -274,6 +281,7 @@ fn main() -> Result<()> {
         Commands::Audit(args) => audit::run(args),
         Commands::Bench(args) => bench::run(args),
         Commands::Budget(args) => budget::run(&args),
+        Commands::Capabilities(args) => capabilities::run(&args),
         Commands::Connector(args) => connector::run(&args),
         Commands::Context(args) => context::run(&args),
         Commands::Doctor(args) => doctor::run(&args, stdin_input.as_ref()),

@@ -2234,4 +2234,1196 @@ mod tests {
         assert_eq!(e.error_rate_bps, 2000);
         assert_eq!(e.samples, 10);
     }
+
+    // ── RolloutDecision serde roundtrip for each variant ──────────────
+
+    #[test]
+    fn decision_serde_scheduled_json_value() {
+        let j = serde_json::to_value(RolloutDecision::Scheduled).unwrap();
+        assert_eq!(j, serde_json::json!("scheduled"));
+    }
+
+    #[test]
+    fn decision_serde_hold_json_value() {
+        let j = serde_json::to_value(RolloutDecision::Hold).unwrap();
+        assert_eq!(j, serde_json::json!("hold"));
+    }
+
+    #[test]
+    fn decision_serde_promote_json_value() {
+        let j = serde_json::to_value(RolloutDecision::Promote).unwrap();
+        assert_eq!(j, serde_json::json!("promote"));
+    }
+
+    #[test]
+    fn decision_serde_rollback_json_value() {
+        let j = serde_json::to_value(RolloutDecision::Rollback).unwrap();
+        assert_eq!(j, serde_json::json!("rollback"));
+    }
+
+    #[test]
+    fn decision_invalid_serde_string_rejected() {
+        let result = serde_json::from_value::<RolloutDecision>(serde_json::json!("unknown"));
+        assert!(result.is_err());
+    }
+
+    // ── RolloutDecision Clone / Copy / Debug / Eq ─────────────────────
+
+    #[test]
+    fn decision_clone_and_copy() {
+        let d = RolloutDecision::Promote;
+        let cloned = d;
+        assert_eq!(d, cloned);
+    }
+
+    #[test]
+    fn decision_debug_format() {
+        let s = format!("{:?}", RolloutDecision::Rollback);
+        assert!(s.contains("Rollback"));
+    }
+
+    #[test]
+    fn decision_ne_different_variants() {
+        assert_ne!(RolloutDecision::Hold, RolloutDecision::Promote);
+        assert_ne!(RolloutDecision::Scheduled, RolloutDecision::Rollback);
+    }
+
+    // ── RolloutControllerConfig edge cases ────────────────────────────
+
+    #[test]
+    fn config_zero_uptime_threshold() {
+        let c = RolloutControllerConfig {
+            min_uptime_secs_for_promotion: 0,
+            allow_unsupported_self_check_promotion: true,
+            crash_loop_threshold: 1,
+            crash_loop_window_secs: 1,
+        };
+        assert_eq!(c.min_uptime_secs_for_promotion, 0);
+    }
+
+    #[test]
+    fn config_large_values() {
+        let c = RolloutControllerConfig {
+            min_uptime_secs_for_promotion: u64::MAX,
+            allow_unsupported_self_check_promotion: false,
+            crash_loop_threshold: usize::MAX,
+            crash_loop_window_secs: i64::MAX,
+        };
+        assert_eq!(c.min_uptime_secs_for_promotion, u64::MAX);
+        assert_eq!(c.crash_loop_threshold, usize::MAX);
+    }
+
+    #[test]
+    fn config_debug_format() {
+        let c = RolloutControllerConfig::default();
+        let s = format!("{c:?}");
+        assert!(s.contains("RolloutControllerConfig"));
+        assert!(s.contains("60"));
+    }
+
+    // ── RolloutObservation builder edge cases ─────────────────────────
+
+    #[test]
+    fn observation_failed_invocation_defaults() {
+        let o = RolloutObservation::new(false, rollout_policy());
+        assert!(!o.invocation_succeeded);
+        assert!(o.latency_ms.is_none());
+        assert_eq!(o.uptime_secs, 0);
+        assert!(!o.pinned);
+        assert!(!o.crashed);
+    }
+
+    #[test]
+    fn observation_zero_latency() {
+        let o = RolloutObservation::new(true, rollout_policy()).with_latency_ms(0);
+        assert_eq!(o.latency_ms, Some(0));
+    }
+
+    #[test]
+    fn observation_max_latency() {
+        let o = RolloutObservation::new(true, rollout_policy()).with_latency_ms(u32::MAX);
+        assert_eq!(o.latency_ms, Some(u32::MAX));
+    }
+
+    #[test]
+    fn observation_max_uptime() {
+        let o = RolloutObservation::new(true, rollout_policy()).with_uptime_secs(u64::MAX);
+        assert_eq!(o.uptime_secs, u64::MAX);
+    }
+
+    #[test]
+    fn observation_clone_preserves_fields() {
+        let now = Utc::now();
+        let original = RolloutObservation::new(true, rollout_policy())
+            .with_latency_ms(99)
+            .with_uptime_secs(500)
+            .pinned(true)
+            .crashed(true)
+            .observed_at(now);
+        let cloned = original.clone();
+        assert_eq!(original.latency_ms, cloned.latency_ms);
+        assert_eq!(original.uptime_secs, cloned.uptime_secs);
+        assert_eq!(original.pinned, cloned.pinned);
+        assert_eq!(original.crashed, cloned.crashed);
+        assert_eq!(original.observed_at, cloned.observed_at);
+    }
+
+    #[test]
+    fn observation_debug_format() {
+        let o = RolloutObservation::new(true, rollout_policy());
+        let s = format!("{o:?}");
+        assert!(s.contains("RolloutObservation"));
+    }
+
+    // ── percent_from_bps_ceil edge cases ──────────────────────────────
+
+    #[test]
+    fn bps_ceil_single_bps() {
+        assert_eq!(percent_from_bps_ceil(1), 1);
+    }
+
+    #[test]
+    fn bps_ceil_99_bps() {
+        assert_eq!(percent_from_bps_ceil(99), 1);
+    }
+
+    #[test]
+    fn bps_ceil_101_bps() {
+        assert_eq!(percent_from_bps_ceil(101), 2);
+    }
+
+    #[test]
+    fn bps_ceil_exact_boundaries() {
+        for i in 0u16..=100 {
+            let bps = i * 100;
+            assert_eq!(percent_from_bps_ceil(bps), u8::try_from(i).unwrap());
+        }
+    }
+
+    #[test]
+    fn bps_ceil_u16_max_clamps_to_100() {
+        assert_eq!(percent_from_bps_ceil(u16::MAX), 100);
+    }
+
+    // ── success_rate_bps / error_rate_bps detailed tests ──────────────
+
+    #[test]
+    fn rate_bps_all_successes() {
+        let mut r = LifecycleRecord::new(connector_id(), semver::Version::new(1, 0, 0));
+        for _ in 0..100 {
+            r.update_health(true, Some(10));
+        }
+        assert_eq!(success_rate_bps(&r), 10_000);
+        assert_eq!(error_rate_bps(&r), 0);
+    }
+
+    #[test]
+    fn rate_bps_all_failures() {
+        let mut r = LifecycleRecord::new(connector_id(), semver::Version::new(1, 0, 0));
+        for _ in 0..100 {
+            r.update_health(false, Some(100));
+        }
+        assert_eq!(success_rate_bps(&r), 0);
+        assert_eq!(error_rate_bps(&r), 10_000);
+    }
+
+    #[test]
+    fn rate_bps_single_success() {
+        let mut r = LifecycleRecord::new(connector_id(), semver::Version::new(1, 0, 0));
+        r.update_health(true, Some(10));
+        assert_eq!(success_rate_bps(&r), 10_000);
+        assert_eq!(error_rate_bps(&r), 0);
+    }
+
+    #[test]
+    fn rate_bps_single_failure() {
+        let mut r = LifecycleRecord::new(connector_id(), semver::Version::new(1, 0, 0));
+        r.update_health(false, Some(10));
+        assert_eq!(success_rate_bps(&r), 0);
+        assert_eq!(error_rate_bps(&r), 10_000);
+    }
+
+    #[test]
+    fn rate_bps_half_and_half() {
+        let mut r = LifecycleRecord::new(connector_id(), semver::Version::new(1, 0, 0));
+        for _ in 0..50 {
+            r.update_health(true, Some(10));
+        }
+        for _ in 0..50 {
+            r.update_health(false, Some(10));
+        }
+        assert_eq!(success_rate_bps(&r), 5000);
+        assert_eq!(error_rate_bps(&r), 5000);
+    }
+
+    // ── health_score_percent edge cases ───────────────────────────────
+
+    #[test]
+    fn health_score_mid_range() {
+        assert_eq!(health_score_percent(50), 50);
+    }
+
+    #[test]
+    fn health_score_one() {
+        assert_eq!(health_score_percent(1), 1);
+    }
+
+    #[test]
+    fn health_score_99() {
+        assert_eq!(health_score_percent(99), 99);
+    }
+
+    #[test]
+    fn health_score_101_clamps() {
+        assert_eq!(health_score_percent(101), 100);
+    }
+
+    // ── connector_health_fields edge cases ────────────────────────────
+
+    #[test]
+    fn health_fields_degraded_empty_reason() {
+        let (s, r) = connector_health_fields(&ConnectorHealth::Degraded {
+            reason: String::new(),
+        });
+        assert_eq!(s, "degraded");
+        assert_eq!(r.as_deref(), Some(""));
+    }
+
+    #[test]
+    fn health_fields_unavailable_empty_reason() {
+        let (s, r) = connector_health_fields(&ConnectorHealth::Unavailable {
+            reason: String::new(),
+            since: Utc::now(),
+        });
+        assert_eq!(s, "unavailable");
+        assert_eq!(r.as_deref(), Some(""));
+    }
+
+    #[test]
+    fn health_reason_degraded_returns_some() {
+        let r = connector_health_reason(&ConnectorHealth::Degraded {
+            reason: "latency".into(),
+        });
+        assert_eq!(r.as_deref(), Some("latency"));
+    }
+
+    #[test]
+    fn health_reason_unavailable_returns_some() {
+        let r = connector_health_reason(&ConnectorHealth::Unavailable {
+            reason: "crash".into(),
+            since: Utc::now(),
+        });
+        assert_eq!(r.as_deref(), Some("crash"));
+    }
+
+    // ── self_check_status_label all variants ──────────────────────────
+
+    #[test]
+    fn self_check_label_degraded() {
+        let mut report = SelfCheckReport::ok();
+        report.status = SelfCheckStatus::Degraded;
+        assert_eq!(self_check_status_label(&report), "degraded");
+    }
+
+    // ── explain_self_check with details ───────────────────────────────
+
+    #[test]
+    fn explain_self_check_unsupported_fallback() {
+        let mut r = SelfCheckReport::unsupported();
+        r.message = None;
+        r.reason_code = None;
+        let msg = explain_self_check(&r);
+        assert!(msg.contains("unsupported"));
+    }
+
+    #[test]
+    fn explain_self_check_ok_no_message_no_code() {
+        let r = SelfCheckReport::ok();
+        let msg = explain_self_check(&r);
+        assert!(msg.contains("ok"));
+    }
+
+    // ── map_lifecycle_error additional variants ───────────────────────
+
+    #[test]
+    fn lifecycle_error_invalid_transition() {
+        let err = map_lifecycle_error(LifecycleError::InvalidTransition {
+            from: LifecycleState::Pending,
+            to: LifecycleState::Production,
+        });
+        assert!(matches!(err, HostError::Internal(_)));
+    }
+
+    #[test]
+    fn lifecycle_error_invalid_policy() {
+        let err = map_lifecycle_error(LifecycleError::InvalidPolicy {
+            reason: "bad policy".to_string(),
+        });
+        assert!(matches!(err, HostError::Internal(_)));
+        if let HostError::Internal(msg) = err {
+            assert!(msg.contains("bad policy"));
+        }
+    }
+
+    // ── canary_reason detailed checks ─────────────────────────────────
+
+    #[test]
+    fn canary_reason_new_version_contains_versions() {
+        let reason = canary_reason(
+            Some(&semver::Version::new(1, 0, 0)),
+            &semver::Version::new(2, 0, 0),
+        );
+        if let TransitionReason::NewVersion {
+            from_version,
+            to_version,
+        } = reason
+        {
+            assert_eq!(from_version, "1.0.0");
+            assert_eq!(to_version, "2.0.0");
+        } else {
+            panic!("expected NewVersion variant");
+        }
+    }
+
+    #[test]
+    fn canary_reason_same_versions() {
+        let reason = canary_reason(
+            Some(&semver::Version::new(1, 0, 0)),
+            &semver::Version::new(1, 0, 0),
+        );
+        if let TransitionReason::NewVersion {
+            from_version,
+            to_version,
+        } = reason
+        {
+            assert_eq!(from_version, to_version);
+        } else {
+            panic!("expected NewVersion variant");
+        }
+    }
+
+    // ── to_canary_policy detailed checks ──────────────────────────────
+
+    #[test]
+    fn canary_policy_max_duration_uses_largest_window() {
+        let policy = RolloutPolicy::builder()
+            .canary_percent(10)
+            .min_canary_duration_secs(60)
+            .success_thresholds(fcp_core::SuccessThresholds::new(9500, 500, 5, 600))
+            .rollback_rules(fcp_core::RollbackRules::new(2000, 3, 3, 900, true))
+            .build();
+        let cp = to_canary_policy(&policy);
+        // max_canary_duration_secs = max(60, 600, 900) = 900
+        assert_eq!(cp.max_canary_duration_secs, 900);
+    }
+
+    #[test]
+    fn canary_policy_promotion_threshold_ceil() {
+        let policy = RolloutPolicy::builder()
+            .canary_percent(5)
+            .min_canary_duration_secs(60)
+            .success_thresholds(fcp_core::SuccessThresholds::new(9550, 500, 5, 300))
+            .rollback_rules(fcp_core::RollbackRules::new(2000, 3, 3, 300, true))
+            .build();
+        let cp = to_canary_policy(&policy);
+        // 9550 bps / 100 = 95.5 -> ceil = 96
+        assert_eq!(cp.promotion_threshold, 96);
+    }
+
+    #[test]
+    fn canary_policy_zero_canary_percent() {
+        let policy = RolloutPolicy::builder()
+            .canary_percent(0)
+            .min_canary_duration_secs(60)
+            .success_thresholds(fcp_core::SuccessThresholds::new(9500, 500, 5, 300))
+            .rollback_rules(fcp_core::RollbackRules::new(2000, 3, 3, 300, true))
+            .build();
+        let cp = to_canary_policy(&policy);
+        assert_eq!(cp.canary_traffic_percent, 0);
+    }
+
+    // ── canary_elapsed_secs edge cases ────────────────────────────────
+
+    #[test]
+    fn canary_elapsed_immediately_after_transition() {
+        let r = make_canary_record();
+        let elapsed = canary_elapsed_secs(&r, r.state_changed_at);
+        assert_eq!(elapsed, Some(0));
+    }
+
+    #[test]
+    fn canary_elapsed_in_past_returns_zero() {
+        let r = make_canary_record();
+        let past = r.state_changed_at - chrono::Duration::seconds(100);
+        let elapsed = canary_elapsed_secs(&r, past);
+        assert_eq!(elapsed, Some(0));
+    }
+
+    // ── RolloutEvidence serde roundtrip detailed ──────────────────────
+
+    #[test]
+    fn evidence_all_fields_roundtrip() {
+        let now = Utc::now();
+        let mut r = make_canary_record();
+        for _ in 0..5 {
+            r.update_health(true, Some(20));
+        }
+        for _ in 0..5 {
+            r.update_health(false, Some(200));
+        }
+        let e = build_evidence(&BuildEvidenceInput {
+            record: &r,
+            state_before: LifecycleState::Canary,
+            decision: RolloutDecision::Rollback,
+            reason_code: "error_rate_exceeded",
+            message: "error rate too high",
+            pinned: true,
+            crash_loop_detected: true,
+            failure_streak: 5,
+            self_check: &SelfCheckReport::failed("db", "database down"),
+            connector_health: &ConnectorHealth::Unavailable {
+                reason: "gone".into(),
+                since: now,
+            },
+            uptime_secs: 999,
+            policy: &rollout_policy(),
+            observed_at: now,
+        });
+        let json_str = serde_json::to_string_pretty(&e).unwrap();
+        let deserialized: RolloutEvidence = serde_json::from_str(&json_str).unwrap();
+        assert_eq!(deserialized.decision, RolloutDecision::Rollback);
+        assert_eq!(deserialized.reason_code, "error_rate_exceeded");
+        assert_eq!(deserialized.message, "error rate too high");
+        assert!(deserialized.pinned);
+        assert!(deserialized.crash_loop_detected);
+        assert_eq!(deserialized.failure_streak, 5);
+        assert_eq!(deserialized.self_check_status, SelfCheckStatus::Failed);
+        assert_eq!(deserialized.self_check_reason_code.as_deref(), Some("db"));
+        assert_eq!(deserialized.connector_health_status, "unavailable");
+        assert_eq!(
+            deserialized.connector_health_reason.as_deref(),
+            Some("gone")
+        );
+        assert_eq!(deserialized.uptime_secs, 999);
+        assert_eq!(deserialized.samples, 10);
+        assert_eq!(deserialized.success_rate_bps, 5000);
+        assert_eq!(deserialized.error_rate_bps, 5000);
+    }
+
+    #[test]
+    fn evidence_digest_starts_with_blake3_prefix() {
+        let r = make_canary_record();
+        let e = build_evidence(&BuildEvidenceInput {
+            record: &r,
+            state_before: LifecycleState::Canary,
+            decision: RolloutDecision::Hold,
+            reason_code: "test",
+            message: "test",
+            pinned: false,
+            crash_loop_detected: false,
+            failure_streak: 0,
+            self_check: &SelfCheckReport::ok(),
+            connector_health: &ConnectorHealth::healthy(),
+            uptime_secs: 60,
+            policy: &rollout_policy(),
+            observed_at: Utc::now(),
+        });
+        let digest = e.digest();
+        assert!(digest.starts_with("blake3-256:"));
+        // blake3-256 hex digest is 64 chars after prefix
+        let hex_part = digest.strip_prefix("blake3-256:").unwrap();
+        assert_eq!(hex_part.len(), 64);
+    }
+
+    #[test]
+    fn evidence_clone_preserves_digest() {
+        let r = make_canary_record();
+        let original = build_evidence(&BuildEvidenceInput {
+            record: &r,
+            state_before: LifecycleState::Canary,
+            decision: RolloutDecision::Hold,
+            reason_code: "test",
+            message: "test",
+            pinned: false,
+            crash_loop_detected: false,
+            failure_streak: 0,
+            self_check: &SelfCheckReport::ok(),
+            connector_health: &ConnectorHealth::healthy(),
+            uptime_secs: 60,
+            policy: &rollout_policy(),
+            observed_at: Utc::now(),
+        });
+        let cloned = original.clone();
+        assert_eq!(original.digest(), cloned.digest());
+        assert_eq!(original.reason_code, cloned.reason_code);
+    }
+
+    // ── RolloutAuditEvent serde roundtrip ─────────────────────────────
+
+    #[test]
+    fn audit_event_full_roundtrip() {
+        let now = Utc::now();
+        let evt = RolloutAuditEvent {
+            connector_id: connector_id(),
+            state_before: LifecycleState::Canary,
+            state_after: LifecycleState::Production,
+            decision: RolloutDecision::Promote,
+            reason_code: "promotion_thresholds_met".to_string(),
+            message: "canary met thresholds".to_string(),
+            observed_at: now,
+            evidence_digest: "blake3-256:abc123".to_string(),
+        };
+        let j = serde_json::to_value(&evt).unwrap();
+        let d: RolloutAuditEvent = serde_json::from_value(j).unwrap();
+        assert_eq!(evt.connector_id, d.connector_id);
+        assert_eq!(evt.state_before, d.state_before);
+        assert_eq!(evt.state_after, d.state_after);
+        assert_eq!(evt.decision, d.decision);
+        assert_eq!(evt.reason_code, d.reason_code);
+        assert_eq!(evt.message, d.message);
+        assert_eq!(evt.evidence_digest, d.evidence_digest);
+    }
+
+    #[test]
+    fn audit_event_debug_format() {
+        let evt = RolloutAuditEvent {
+            connector_id: connector_id(),
+            state_before: LifecycleState::Pending,
+            state_after: LifecycleState::Canary,
+            decision: RolloutDecision::Scheduled,
+            reason_code: "canary_scheduled".to_string(),
+            message: "test".to_string(),
+            observed_at: Utc::now(),
+            evidence_digest: "blake3-256:test".to_string(),
+        };
+        let s = format!("{evt:?}");
+        assert!(s.contains("RolloutAuditEvent"));
+        assert!(s.contains("canary_scheduled"));
+    }
+
+    #[test]
+    fn audit_event_clone_eq() {
+        let evt = RolloutAuditEvent {
+            connector_id: connector_id(),
+            state_before: LifecycleState::Canary,
+            state_after: LifecycleState::RolledBack,
+            decision: RolloutDecision::Rollback,
+            reason_code: "crash_loop".to_string(),
+            message: "crashed".to_string(),
+            observed_at: Utc::now(),
+            evidence_digest: "blake3-256:xyz".to_string(),
+        };
+        let cloned = evt.clone();
+        assert_eq!(evt, cloned);
+    }
+
+    // ── RolloutOutcome serde roundtrip ────────────────────────────────
+
+    #[test]
+    fn outcome_serde_roundtrip() {
+        let r = make_canary_record();
+        let now = Utc::now();
+        let e = build_evidence(&BuildEvidenceInput {
+            record: &r,
+            state_before: LifecycleState::Canary,
+            decision: RolloutDecision::Hold,
+            reason_code: "test",
+            message: "test",
+            pinned: false,
+            crash_loop_detected: false,
+            failure_streak: 0,
+            self_check: &SelfCheckReport::ok(),
+            connector_health: &ConnectorHealth::healthy(),
+            uptime_secs: 60,
+            policy: &rollout_policy(),
+            observed_at: now,
+        });
+        let ae = build_audit_event(
+            &connector_id(),
+            LifecycleState::Canary,
+            LifecycleState::Canary,
+            RolloutDecision::Hold,
+            &e,
+        );
+        let outcome = RolloutOutcome {
+            record: r,
+            decision: RolloutDecision::Hold,
+            audit_event: ae,
+            evidence: e,
+        };
+        let j = serde_json::to_string(&outcome).unwrap();
+        let d: RolloutOutcome = serde_json::from_str(&j).unwrap();
+        assert_eq!(d.decision, RolloutDecision::Hold);
+    }
+
+    #[test]
+    fn outcome_debug_format() {
+        let r = make_canary_record();
+        let e = build_evidence(&BuildEvidenceInput {
+            record: &r,
+            state_before: LifecycleState::Canary,
+            decision: RolloutDecision::Hold,
+            reason_code: "t",
+            message: "t",
+            pinned: false,
+            crash_loop_detected: false,
+            failure_streak: 0,
+            self_check: &SelfCheckReport::ok(),
+            connector_health: &ConnectorHealth::healthy(),
+            uptime_secs: 60,
+            policy: &rollout_policy(),
+            observed_at: Utc::now(),
+        });
+        let ae = build_audit_event(
+            &connector_id(),
+            LifecycleState::Canary,
+            LifecycleState::Canary,
+            RolloutDecision::Hold,
+            &e,
+        );
+        let outcome = RolloutOutcome {
+            record: r,
+            decision: RolloutDecision::Hold,
+            audit_event: ae,
+            evidence: e,
+        };
+        let s = format!("{outcome:?}");
+        assert!(s.contains("RolloutOutcome"));
+    }
+
+    // ── evaluate_decision: insufficient samples hold ──────────────────
+
+    #[test]
+    fn eval_insufficient_samples_holds() {
+        let r = make_canary_record();
+        // No samples recorded at all — below min_samples threshold
+        let canary_start = r.state_changed_at;
+        let later = canary_start + chrono::Duration::seconds(200);
+        let p = evaluate_decision(
+            &r,
+            &ConnectorHealth::healthy(),
+            &SelfCheckReport::ok(),
+            0,
+            false,
+            &RolloutObservation::new(true, rollout_policy())
+                .with_uptime_secs(200)
+                .observed_at(later),
+            &RolloutControllerConfig::default(),
+        );
+        assert_eq!(p.decision, RolloutDecision::Hold);
+        assert_eq!(p.reason_code, "insufficient_samples");
+    }
+
+    // ── evaluate_decision: canary_duration_not_met ────────────────────
+
+    #[test]
+    fn eval_canary_duration_not_met_holds() {
+        let mut r = make_canary_record();
+        for _ in 0..10 {
+            r.update_health(true, Some(10));
+        }
+        // Observation time is very close to canary start
+        let p = evaluate_decision(
+            &r,
+            &ConnectorHealth::healthy(),
+            &SelfCheckReport::ok(),
+            0,
+            false,
+            &RolloutObservation::new(true, rollout_policy())
+                .with_uptime_secs(200)
+                .observed_at(r.state_changed_at + chrono::Duration::seconds(5)),
+            &RolloutControllerConfig::default(),
+        );
+        assert_eq!(p.decision, RolloutDecision::Hold);
+        assert_eq!(p.reason_code, "canary_duration_not_met");
+    }
+
+    // ── evaluate_decision: promotion when all thresholds met ──────────
+
+    #[test]
+    fn eval_promotion_thresholds_met() {
+        let mut r = make_canary_record();
+        for _ in 0..10 {
+            r.update_health(true, Some(10));
+        }
+        let later = r.state_changed_at + chrono::Duration::seconds(300);
+        let p = evaluate_decision(
+            &r,
+            &ConnectorHealth::healthy(),
+            &SelfCheckReport::ok(),
+            0,
+            false,
+            &RolloutObservation::new(true, rollout_policy())
+                .with_uptime_secs(200)
+                .observed_at(later),
+            &RolloutControllerConfig::default(),
+        );
+        assert_eq!(p.decision, RolloutDecision::Promote);
+        assert_eq!(p.reason_code, "promotion_thresholds_met");
+    }
+
+    // ── evaluate_decision: thresholds not met (mixed results) ─────────
+
+    #[test]
+    fn eval_promotion_thresholds_not_met_mixed_results() {
+        let mut r = make_canary_record();
+        // 7 success, 3 failure = 70% success < 95% threshold
+        for _ in 0..7 {
+            r.update_health(true, Some(10));
+        }
+        for _ in 0..3 {
+            r.update_health(false, Some(10));
+        }
+        let later = r.state_changed_at + chrono::Duration::seconds(300);
+        let p = evaluate_decision(
+            &r,
+            &ConnectorHealth::healthy(),
+            &SelfCheckReport::ok(),
+            0,
+            false,
+            &RolloutObservation::new(true, rollout_policy())
+                .with_uptime_secs(200)
+                .observed_at(later),
+            &RolloutControllerConfig::default(),
+        );
+        // Not enough for promotion, but error rate 3000bps > 2000bps rollback threshold
+        assert_eq!(p.decision, RolloutDecision::Rollback);
+        assert_eq!(p.reason_code, "error_rate_exceeded");
+    }
+
+    // ── evaluate_decision: consecutive failures below threshold ────────
+
+    #[test]
+    fn eval_consecutive_failures_below_threshold_holds() {
+        let mut r = make_canary_record();
+        for _ in 0..5 {
+            r.update_health(true, Some(10));
+        }
+        // failure_streak = 2, threshold is 3
+        let later = r.state_changed_at + chrono::Duration::seconds(300);
+        let p = evaluate_decision(
+            &r,
+            &ConnectorHealth::healthy(),
+            &SelfCheckReport::ok(),
+            2,
+            false,
+            &RolloutObservation::new(true, rollout_policy())
+                .with_uptime_secs(200)
+                .observed_at(later),
+            &RolloutControllerConfig::default(),
+        );
+        // 100% success rate, should promote
+        assert_eq!(p.decision, RolloutDecision::Promote);
+    }
+
+    // ── evaluate_decision: auto_rollback disabled ─────────────────────
+
+    #[test]
+    fn eval_no_auto_rollback_despite_failures() {
+        let mut r = make_canary_record();
+        for _ in 0..5 {
+            r.update_health(false, Some(100));
+        }
+        let policy = RolloutPolicy::builder()
+            .canary_percent(5)
+            .min_canary_duration_secs(120)
+            .success_thresholds(fcp_core::SuccessThresholds::new(9500, 500, 3, 300))
+            .rollback_rules(fcp_core::RollbackRules::new(2000, 3, 3, 300, false))
+            .build();
+        let later = r.state_changed_at + chrono::Duration::seconds(300);
+        let p = evaluate_decision(
+            &r,
+            &ConnectorHealth::healthy(),
+            &SelfCheckReport::ok(),
+            5,
+            false,
+            &RolloutObservation::new(false, policy)
+                .with_uptime_secs(200)
+                .observed_at(later),
+            &RolloutControllerConfig::default(),
+        );
+        // auto_rollback is false, so no rollback from error rate or consecutive failures
+        // But promotion thresholds not met either (0% success rate)
+        assert_eq!(p.decision, RolloutDecision::Hold);
+        assert_eq!(p.reason_code, "promotion_thresholds_not_met");
+    }
+
+    // ── evaluate_decision priority: rollback > hold > promote ─────────
+
+    #[test]
+    fn eval_rollback_priority_over_hold_pinned() {
+        let r = make_canary_record();
+        // Self-check failed triggers rollback even if pinned
+        let p = evaluate_decision(
+            &r,
+            &ConnectorHealth::healthy(),
+            &SelfCheckReport::failed("x", "y"),
+            0,
+            false,
+            &RolloutObservation::new(true, rollout_policy())
+                .with_uptime_secs(200)
+                .pinned(true),
+            &RolloutControllerConfig::default(),
+        );
+        assert_eq!(p.decision, RolloutDecision::Rollback);
+        assert_eq!(p.reason_code, "self_check_failed");
+    }
+
+    #[test]
+    fn eval_crash_loop_priority_over_degraded() {
+        let r = make_canary_record();
+        let p = evaluate_decision(
+            &r,
+            &ConnectorHealth::Degraded {
+                reason: "slow".into(),
+            },
+            &SelfCheckReport::ok(),
+            0,
+            true,
+            &RolloutObservation::new(true, rollout_policy())
+                .with_uptime_secs(200),
+            &RolloutControllerConfig::default(),
+        );
+        assert_eq!(p.decision, RolloutDecision::Rollback);
+        assert_eq!(p.reason_code, "crash_loop_detected");
+    }
+
+    // ── transition_to_canary for each starting state ──────────────────
+
+    #[test]
+    fn transition_from_pending_to_canary() {
+        let mut r = LifecycleRecord::new(connector_id(), semver::Version::new(1, 0, 0));
+        let now = Utc::now();
+        transition_to_canary(
+            &mut r,
+            &connector_id(),
+            &semver::Version::new(1, 0, 0),
+            semver::Version::new(1, 0, 0),
+            now,
+        )
+        .unwrap();
+        assert_eq!(r.state, LifecycleState::Canary);
+    }
+
+    #[test]
+    fn transition_from_installing_to_canary() {
+        let mut r = LifecycleRecord::new(connector_id(), semver::Version::new(1, 0, 0));
+        r.transition(
+            LifecycleState::Installing,
+            TransitionReason::InstallComplete,
+        )
+        .unwrap();
+        let now = Utc::now();
+        transition_to_canary(
+            &mut r,
+            &connector_id(),
+            &semver::Version::new(1, 0, 0),
+            semver::Version::new(1, 0, 0),
+            now,
+        )
+        .unwrap();
+        assert_eq!(r.state, LifecycleState::Canary);
+    }
+
+    #[test]
+    fn transition_from_canary_stays_canary() {
+        let mut r = make_canary_record();
+        let now = Utc::now();
+        transition_to_canary(
+            &mut r,
+            &connector_id(),
+            &semver::Version::new(1, 0, 0),
+            semver::Version::new(1, 0, 0),
+            now,
+        )
+        .unwrap();
+        assert_eq!(r.state, LifecycleState::Canary);
+        assert_eq!(r.state_changed_at, now);
+    }
+
+    #[test]
+    fn transition_from_production_to_canary() {
+        let mut r = make_canary_record();
+        r.transition(
+            LifecycleState::Production,
+            TransitionReason::AutoPromotion { health_score: 99 },
+        )
+        .unwrap();
+        let now = Utc::now();
+        transition_to_canary(
+            &mut r,
+            &connector_id(),
+            &semver::Version::new(2, 0, 0),
+            semver::Version::new(1, 0, 0),
+            now,
+        )
+        .unwrap();
+        assert_eq!(r.state, LifecycleState::Canary);
+    }
+
+    #[test]
+    fn transition_from_rolled_back_to_canary() {
+        let mut r = make_canary_record();
+        r.transition(
+            LifecycleState::RolledBack,
+            TransitionReason::ManualRollback { reason: None },
+        )
+        .unwrap();
+        let now = Utc::now();
+        transition_to_canary(
+            &mut r,
+            &connector_id(),
+            &semver::Version::new(2, 0, 0),
+            semver::Version::new(1, 0, 0),
+            now,
+        )
+        .unwrap();
+        assert_eq!(r.state, LifecycleState::Canary);
+    }
+
+    #[test]
+    fn transition_from_uninstalled_errors() {
+        let mut r = make_canary_record();
+        r.transition(
+            LifecycleState::Production,
+            TransitionReason::AutoPromotion { health_score: 99 },
+        )
+        .unwrap();
+        r.transition(
+            LifecycleState::Uninstalled,
+            TransitionReason::Disabled {
+                reason: "cleanup".into(),
+            },
+        )
+        .unwrap();
+        let now = Utc::now();
+        let result = transition_to_canary(
+            &mut r,
+            &connector_id(),
+            &semver::Version::new(2, 0, 0),
+            semver::Version::new(1, 0, 0),
+            now,
+        );
+        assert!(result.is_err());
+    }
+
+    // ── build_evidence with various self_check statuses ───────────────
+
+    #[test]
+    fn evidence_with_degraded_self_check() {
+        let r = make_canary_record();
+        let sc = SelfCheckReport::degraded("slow_db", "database is slow");
+        let e = build_evidence(&BuildEvidenceInput {
+            record: &r,
+            state_before: LifecycleState::Canary,
+            decision: RolloutDecision::Hold,
+            reason_code: "self_check_degraded",
+            message: "degraded",
+            pinned: false,
+            crash_loop_detected: false,
+            failure_streak: 0,
+            self_check: &sc,
+            connector_health: &ConnectorHealth::healthy(),
+            uptime_secs: 60,
+            policy: &rollout_policy(),
+            observed_at: Utc::now(),
+        });
+        assert_eq!(e.self_check_status, SelfCheckStatus::Degraded);
+        assert_eq!(e.self_check_reason_code.as_deref(), Some("slow_db"));
+    }
+
+    #[test]
+    fn evidence_with_unsupported_self_check() {
+        let r = make_canary_record();
+        let e = build_evidence(&BuildEvidenceInput {
+            record: &r,
+            state_before: LifecycleState::Canary,
+            decision: RolloutDecision::Hold,
+            reason_code: "test",
+            message: "test",
+            pinned: false,
+            crash_loop_detected: false,
+            failure_streak: 0,
+            self_check: &SelfCheckReport::unsupported(),
+            connector_health: &ConnectorHealth::healthy(),
+            uptime_secs: 60,
+            policy: &rollout_policy(),
+            observed_at: Utc::now(),
+        });
+        assert_eq!(e.self_check_status, SelfCheckStatus::Unsupported);
+        assert!(e.self_check_reason_code.is_some());
+    }
+
+    // ── build_audit_event fields ──────────────────────────────────────
+
+    #[test]
+    fn audit_event_captures_state_transitions() {
+        let r = make_canary_record();
+        let e = build_evidence(&BuildEvidenceInput {
+            record: &r,
+            state_before: LifecycleState::Pending,
+            decision: RolloutDecision::Scheduled,
+            reason_code: "canary_scheduled",
+            message: "scheduled",
+            pinned: false,
+            crash_loop_detected: false,
+            failure_streak: 0,
+            self_check: &SelfCheckReport::ok(),
+            connector_health: &ConnectorHealth::healthy(),
+            uptime_secs: 0,
+            policy: &rollout_policy(),
+            observed_at: Utc::now(),
+        });
+        let ae = build_audit_event(
+            &connector_id(),
+            LifecycleState::Pending,
+            LifecycleState::Canary,
+            RolloutDecision::Scheduled,
+            &e,
+        );
+        assert_eq!(ae.state_before, LifecycleState::Pending);
+        assert_eq!(ae.state_after, LifecycleState::Canary);
+        assert_eq!(ae.decision, RolloutDecision::Scheduled);
+        assert_eq!(ae.reason_code, "canary_scheduled");
+        assert!(!ae.evidence_digest.is_empty());
+    }
+
+    // ── Evidence policy thresholds ────────────────────────────────────
+
+    #[test]
+    fn evidence_captures_policy_thresholds() {
+        let r = make_canary_record();
+        let policy = rollout_policy();
+        let e = build_evidence(&BuildEvidenceInput {
+            record: &r,
+            state_before: LifecycleState::Canary,
+            decision: RolloutDecision::Hold,
+            reason_code: "test",
+            message: "test",
+            pinned: false,
+            crash_loop_detected: false,
+            failure_streak: 0,
+            self_check: &SelfCheckReport::ok(),
+            connector_health: &ConnectorHealth::healthy(),
+            uptime_secs: 60,
+            policy: &policy,
+            observed_at: Utc::now(),
+        });
+        assert_eq!(e.promotion_threshold_bps, 9500);
+        assert_eq!(e.promotion_max_error_bps, 500);
+        assert_eq!(e.promotion_min_samples, 5);
+        assert_eq!(e.rollback_max_error_bps, 2000);
+        assert_eq!(e.rollback_max_consecutive_failures, 3);
+        assert_eq!(e.rollback_min_samples, 3);
+        assert!(e.auto_rollback);
+    }
+
+    // ── Canary expiry in evidence ─────────────────────────────────────
+
+    #[test]
+    fn evidence_canary_elapsed_and_expires() {
+        let r = make_canary_record();
+        let later = r.state_changed_at + chrono::Duration::seconds(60);
+        let e = build_evidence(&BuildEvidenceInput {
+            record: &r,
+            state_before: LifecycleState::Canary,
+            decision: RolloutDecision::Hold,
+            reason_code: "test",
+            message: "test",
+            pinned: false,
+            crash_loop_detected: false,
+            failure_streak: 0,
+            self_check: &SelfCheckReport::ok(),
+            connector_health: &ConnectorHealth::healthy(),
+            uptime_secs: 60,
+            policy: &rollout_policy(),
+            observed_at: later,
+        });
+        assert_eq!(e.canary_elapsed_secs, Some(60));
+        assert!(e.canary_expires_in_secs.is_some());
+    }
+
+    // ── Evidence for non-canary state ─────────────────────────────────
+
+    #[test]
+    fn evidence_non_canary_no_elapsed() {
+        let r = LifecycleRecord::new(connector_id(), semver::Version::new(1, 0, 0));
+        let e = build_evidence(&BuildEvidenceInput {
+            record: &r,
+            state_before: LifecycleState::Pending,
+            decision: RolloutDecision::Hold,
+            reason_code: "state_not_canary",
+            message: "not canary",
+            pinned: false,
+            crash_loop_detected: false,
+            failure_streak: 0,
+            self_check: &SelfCheckReport::ok(),
+            connector_health: &ConnectorHealth::healthy(),
+            uptime_secs: 0,
+            policy: &rollout_policy(),
+            observed_at: Utc::now(),
+        });
+        assert!(e.canary_elapsed_secs.is_none());
+        assert!(e.canary_expires_in_secs.is_none());
+    }
+
+    // ── Multiple lifecycle states in evaluate_decision ─────────────────
+
+    #[test]
+    fn eval_pending_state_holds() {
+        let r = LifecycleRecord::new(connector_id(), semver::Version::new(1, 0, 0));
+        let p = evaluate_decision(
+            &r,
+            &ConnectorHealth::healthy(),
+            &SelfCheckReport::ok(),
+            0,
+            false,
+            &RolloutObservation::new(true, rollout_policy()).with_uptime_secs(200),
+            &RolloutControllerConfig::default(),
+        );
+        assert_eq!(p.decision, RolloutDecision::Hold);
+        assert_eq!(p.reason_code, "state_not_canary");
+    }
+
+    #[test]
+    fn eval_production_state_holds() {
+        let mut r = make_canary_record();
+        r.transition(
+            LifecycleState::Production,
+            TransitionReason::AutoPromotion { health_score: 99 },
+        )
+        .unwrap();
+        let p = evaluate_decision(
+            &r,
+            &ConnectorHealth::healthy(),
+            &SelfCheckReport::ok(),
+            0,
+            false,
+            &RolloutObservation::new(true, rollout_policy()).with_uptime_secs(200),
+            &RolloutControllerConfig::default(),
+        );
+        assert_eq!(p.decision, RolloutDecision::Hold);
+        assert_eq!(p.reason_code, "state_not_canary");
+    }
+
+    #[test]
+    fn eval_rolled_back_state_holds() {
+        let mut r = make_canary_record();
+        r.transition(
+            LifecycleState::RolledBack,
+            TransitionReason::ManualRollback { reason: None },
+        )
+        .unwrap();
+        let p = evaluate_decision(
+            &r,
+            &ConnectorHealth::healthy(),
+            &SelfCheckReport::ok(),
+            0,
+            false,
+            &RolloutObservation::new(true, rollout_policy()).with_uptime_secs(200),
+            &RolloutControllerConfig::default(),
+        );
+        assert_eq!(p.decision, RolloutDecision::Hold);
+        assert_eq!(p.reason_code, "state_not_canary");
+    }
 }

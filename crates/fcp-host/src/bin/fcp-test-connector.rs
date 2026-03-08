@@ -8,7 +8,8 @@
 #![forbid(unsafe_code)]
 
 use std::io::{BufRead, Write};
-use std::time::Instant;
+use std::thread;
+use std::time::{Duration, Instant};
 
 use fcp_core::{
     AgentHint, ApprovalMode, CapabilityId, ConnectorId, EventCaps, FcpError, HandshakeRequest,
@@ -145,6 +146,14 @@ impl TestConnector {
                     req.connector_id.as_str()
                 ),
             });
+        }
+
+        if let Some(delay_ms) = req
+            .input
+            .get("delay_ms")
+            .and_then(serde_json::Value::as_u64)
+        {
+            thread::sleep(Duration::from_millis(delay_ms));
         }
 
         let mut response = InvokeResponse::ok(req.id, json!({ "echo": req.input }));

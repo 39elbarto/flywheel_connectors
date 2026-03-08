@@ -36,12 +36,12 @@ use fcp_core::{
 use fcp_host::{
     BatchExecutor, BatchInvokeRequest, BatchInvokeResponse, BatchOperation, BatchOperationError,
     BatchOptions, BatchStatus, BudgetPolicyEngine, CacheMetadata, CacheValidator,
-    ConnectorArchetype, ConnectorRegistry, ConnectorSummary, DiscoveryEndpoint, DiscoveryFilter,
-    DiscoveryResponse, DoctorReport, DoctorRequest, DoctorService, HostHealthResponse,
-    HostHealthStatus, IntrospectionResponse, OperationResult, OperationResultStatus,
-    PreflightRequest, PreflightResponse, RequestPriority, ResilienceError, ResilienceLayer,
-    RolloutController, RolloutDecision, RolloutObservation, RolloutOutcome, SafetyTierExt,
-    merge_connector_health,
+    CancellationController, CancellationRequest, CancellationResponse, ConnectorArchetype,
+    ConnectorRegistry, ConnectorSummary, DiscoveryEndpoint, DiscoveryFilter, DiscoveryResponse,
+    DoctorReport, DoctorRequest, DoctorService, HostHealthResponse, HostHealthStatus,
+    IntrospectionResponse, OperationResult, OperationResultStatus, PreflightRequest,
+    PreflightResponse, RequestPriority, ResilienceError, ResilienceLayer, RolloutController,
+    RolloutDecision, RolloutObservation, RolloutOutcome, SafetyTierExt, merge_connector_health,
 };
 use fcp_host::{HostError, HostResult};
 use futures_util::future::join_all;
@@ -573,6 +573,7 @@ struct AppState {
     registry: Arc<SubprocessRegistry>,
     doctor: DoctorService<SubprocessRegistry>,
     discovery: Arc<DiscoveryEndpoint<SubprocessRegistry, BudgetPolicyEngine>>,
+    cancellation: Arc<CancellationController>,
     lifecycle: Arc<HostLifecycleManager>,
     rollout: Arc<RolloutController<SubprocessRegistry, HostLifecycleManager>>,
     started_at: Instant,
@@ -975,10 +976,12 @@ async fn async_main() -> HostResult<()> {
         Arc::clone(&registry),
         Arc::clone(&lifecycle),
     ));
+    let cancellation = Arc::new(CancellationController::new());
     let state = Arc::new(AppState {
         registry,
         doctor,
         discovery,
+        cancellation,
         lifecycle,
         rollout,
         started_at: Instant::now(),
@@ -989,6 +992,8 @@ async fn async_main() -> HostResult<()> {
         .route("/rpc/discover", post(discover_handler))
         .route("/rpc/introspect/{connector_id}", get(introspect_handler))
         .route("/rpc/invoke", post(invoke_handler))
+        .route("/rpc/cancel", post(cancel_handler))
+        .route("/rpc/operations/cancel", post(cancel_handler))
         .route("/rpc/batch", post(batch_invoke_handler))
         .route("/rpc/batch-invoke", post(batch_invoke_handler))
         .route("/rpc/preflight", post(preflight_handler))
@@ -1161,6 +1166,36 @@ async fn preflight_handler(
     Json(response)
 }
 
+async fn cancel_handler(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<CancellationRequest>,
+) -> Result<Json<CancellationResponse>, (StatusCode, String)> {
+    let operation_id = request.operation_id.clone();
+    let started_at = Instant::now();
+    tracing::debug!(
+        event = "cancel_request",
+        operation_id = %operation_id,
+        reason = %request.reason.label(),
+        cleanup = ?request.cleanup,
+        return_partial = request.return_partial,
+        "processing cancellation request"
+    );
+
+    let response = state
+        .cancellation
+        .cancel(&request, Utc::now())
+        .map_err(map_host_error)?;
+
+    tracing::info!(
+        event = "cancel_response",
+        operation_id = %operation_id,
+        outcome = ?response.outcome,
+        duration_ms = started_at.elapsed().as_millis() as u64,
+        "cancellation request complete"
+    );
+    Ok(Json(response))
+}
+
 async fn invoke_handler(
     State(state): State<Arc<AppState>>,
     Json(request): Json<InvokeRequest>,
@@ -1179,12 +1214,14 @@ async fn invoke_handler(
         .correlation_id
         .as_ref()
         .map(std::string::ToString::to_string);
+    let operation_id = request.id.to_string();
     let started_at = Instant::now();
 
     tracing::debug!(
         event = "invoke_request",
         connector_id = %connector_id,
         operation = %operation,
+        operation_id = %operation_id,
         correlation_id,
         "processing invoke request"
     );
@@ -1207,6 +1244,7 @@ async fn invoke_handler(
             event = "invoke_error",
             connector_id = %connector_id,
             operation = %operation,
+            operation_id = %operation_id,
             correlation_id,
             reason = %reason,
             duration_ms = started_at.elapsed().as_millis() as u64,
@@ -1215,12 +1253,17 @@ async fn invoke_handler(
         return Err(map_host_error(HostError::PreflightFailed(reason)));
     }
 
-    match state.registry.invoke(request).await {
+    state.cancellation.track(&operation_id);
+    let invoke_result = state.registry.invoke(request).await;
+    state.cancellation.complete(&operation_id);
+
+    match invoke_result {
         Ok(response) => {
             tracing::info!(
                 event = "invoke_response",
                 connector_id = %connector_id,
                 operation = %operation,
+                operation_id = %operation_id,
                 correlation_id,
                 status = ?response.status,
                 duration_ms = started_at.elapsed().as_millis() as u64,
@@ -1233,6 +1276,7 @@ async fn invoke_handler(
                 event = "invoke_error",
                 connector_id = %connector_id,
                 operation = %operation,
+                operation_id = %operation_id,
                 correlation_id,
                 error = %err,
                 duration_ms = started_at.elapsed().as_millis() as u64,
@@ -2596,6 +2640,7 @@ mod tests {
             registry,
             doctor,
             discovery,
+            cancellation: Arc::new(CancellationController::new()),
             lifecycle,
             rollout,
             started_at: Instant::now(),

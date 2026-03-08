@@ -21,7 +21,8 @@ use fcp_core::{
 };
 use fcp_e2e::{AssertionsSummary, ConnectorProcessRunner, E2eLogEntry, E2eLogger};
 use fcp_host::{
-    BatchInvokeResponse, BatchStatus, ConnectorArchetype, ConnectorRegistry, ConnectorSummary,
+    BatchInvokeResponse, BatchStatus, CancelReason, CancellationOutcome, CancellationRequest,
+    CancellationResponse, CleanupBehavior, ConnectorArchetype, ConnectorRegistry, ConnectorSummary,
     DiscoveryEndpoint, DiscoveryResponse, HostHealthResponse, HostHealthStatus,
     IntrospectionResponse, OperationResultStatus, PolicyEngine, PreflightRequest,
     PreflightResponse, RolloutDecision, RolloutOutcome,
@@ -1219,6 +1220,152 @@ async fn fcp_host_binary_batch_route_skips_dependents_after_failure()
             .and_then(Value::as_str),
         Some("independent")
     );
+
+    Ok(())
+}
+
+#[fcp_async_core::runtime::test(flavor = "multi_thread")]
+async fn fcp_host_binary_cancel_route_cancels_in_flight_invoke()
+-> Result<(), Box<dyn std::error::Error>> {
+    let connector_id = ConnectorId::from_static("fcp.test.cancel-http:utility:1.0.0");
+    let host = HttpHostProcess::spawn(vec![test_connector_config(
+        &connector_id,
+        "Cancel Echo",
+        &["test", "cancel"],
+    )])
+    .await?;
+    let url = |path: &str| format!("{}{path}", host.base_url);
+
+    let (mut invoke_request, _) = build_invoke_request(connector_id.clone());
+    invoke_request.input = json!({
+        "message": "slow",
+        "delay_ms": 300_u64,
+    });
+    let operation_id = invoke_request.id.to_string();
+
+    let invoke_task = fcp_async_core::task::spawn({
+        let client = host.client.clone();
+        let invoke_url = url("/rpc/invoke");
+        async move {
+            http_post_json::<_, InvokeResponse>(client, invoke_url, invoke_request)
+                .await
+                .map_err(|err| err.to_string())
+        }
+    });
+
+    let logs = wait_for_log_events(&host.stderr_logs, &["invoke_request"]).await?;
+    assert!(logs.iter().any(|entry| {
+        entry.get("event").and_then(Value::as_str) == Some("invoke_request")
+            && entry.get("connector_id").and_then(Value::as_str) == Some(connector_id.as_str())
+            && entry.get("operation_id").and_then(Value::as_str) == Some(operation_id.as_str())
+    }));
+
+    fcp_async_core::time::sleep(Duration::from_millis(50)).await;
+
+    let cancel_response: CancellationResponse = http_post_json(
+        host.client.clone(),
+        url("/rpc/operations/cancel"),
+        CancellationRequest {
+            operation_id: operation_id.clone(),
+            reason: CancelReason::UserRequested,
+            cleanup: CleanupBehavior::BestEffort,
+            return_partial: true,
+        },
+    )
+    .await?;
+
+    assert_eq!(cancel_response.operation_id, operation_id);
+    assert_eq!(cancel_response.outcome, CancellationOutcome::Cancelled);
+    assert!(cancel_response.partial_result.is_none());
+    assert!(cancel_response.checkpoint.is_none());
+    assert!(cancel_response.cleanup_result.is_some());
+
+    let invoke_response = invoke_task
+        .await
+        .map_err(std::io::Error::other)?
+        .map_err(std::io::Error::other)?;
+    assert_eq!(invoke_response.status, InvokeStatus::Ok);
+
+    let logs = wait_for_log_events(
+        &host.stderr_logs,
+        &[
+            "invoke_request",
+            "cancel_request",
+            "cancel_response",
+            "invoke_response",
+        ],
+    )
+    .await?;
+    assert!(logs.iter().any(|entry| {
+        entry.get("event").and_then(Value::as_str) == Some("cancel_request")
+            && entry.get("operation_id").and_then(Value::as_str) == Some(operation_id.as_str())
+    }));
+    assert!(logs.iter().any(|entry| {
+        entry.get("event").and_then(Value::as_str) == Some("cancel_response")
+            && entry.get("operation_id").and_then(Value::as_str) == Some(operation_id.as_str())
+            && entry.get("outcome").and_then(Value::as_str) == Some("Cancelled")
+    }));
+    assert!(logs.iter().any(|entry| {
+        entry.get("event").and_then(Value::as_str) == Some("invoke_response")
+            && entry.get("operation_id").and_then(Value::as_str) == Some(operation_id.as_str())
+            && entry.get("status").and_then(Value::as_str) == Some("Ok")
+    }));
+
+    Ok(())
+}
+
+#[fcp_async_core::runtime::test(flavor = "multi_thread")]
+async fn fcp_host_binary_cancel_route_returns_too_late_for_completed_invoke()
+-> Result<(), Box<dyn std::error::Error>> {
+    let connector_id = ConnectorId::from_static("fcp.test.cancel-too-late:utility:1.0.0");
+    let host = HttpHostProcess::spawn(vec![test_connector_config(
+        &connector_id,
+        "Cancel Too Late Echo",
+        &["test", "cancel"],
+    )])
+    .await?;
+    let url = |path: &str| format!("{}{path}", host.base_url);
+
+    let (invoke_request, _) = build_invoke_request(connector_id.clone());
+    let operation_id = invoke_request.id.to_string();
+
+    let invoke_response: InvokeResponse =
+        http_post_json(host.client.clone(), url("/rpc/invoke"), invoke_request).await?;
+    assert_eq!(invoke_response.status, InvokeStatus::Ok);
+
+    let cancel_response: CancellationResponse = http_post_json(
+        host.client.clone(),
+        url("/rpc/cancel"),
+        CancellationRequest {
+            operation_id: operation_id.clone(),
+            reason: CancelReason::UserRequested,
+            cleanup: CleanupBehavior::BestEffort,
+            return_partial: false,
+        },
+    )
+    .await?;
+
+    assert_eq!(cancel_response.operation_id, operation_id);
+    assert_eq!(cancel_response.outcome, CancellationOutcome::TooLate);
+    assert!(cancel_response.partial_result.is_none());
+    assert!(cancel_response.checkpoint.is_none());
+    assert!(cancel_response.cleanup_result.is_none());
+
+    let logs = wait_for_log_events(
+        &host.stderr_logs,
+        &[
+            "invoke_request",
+            "invoke_response",
+            "cancel_request",
+            "cancel_response",
+        ],
+    )
+    .await?;
+    assert!(logs.iter().any(|entry| {
+        entry.get("event").and_then(Value::as_str) == Some("cancel_response")
+            && entry.get("operation_id").and_then(Value::as_str) == Some(operation_id.as_str())
+            && entry.get("outcome").and_then(Value::as_str) == Some("TooLate")
+    }));
 
     Ok(())
 }

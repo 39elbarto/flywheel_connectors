@@ -570,7 +570,9 @@ mod tests {
     #[test]
     fn guide_unknown_command_has_known_commands_list() {
         let p = guide_payload(Some("nonexistent-xyzzy"));
-        let known = p["known_commands"].as_array().expect("known_commands array");
+        let known = p["known_commands"]
+            .as_array()
+            .expect("known_commands array");
         assert_eq!(known.len(), COMMANDS.len());
     }
 
@@ -626,7 +628,10 @@ mod tests {
     fn planned_unknown_command_has_known_commands() {
         let p = planned_payload("does-not-exist", &json!({}));
         assert!(p["known_commands"].is_array());
-        assert_eq!(p["known_commands"].as_array().unwrap().len(), COMMANDS.len());
+        assert_eq!(
+            p["known_commands"].as_array().unwrap().len(),
+            COMMANDS.len()
+        );
     }
 
     #[test]

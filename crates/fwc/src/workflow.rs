@@ -1708,8 +1708,7 @@ mod tests {
 
     #[test]
     fn validate_binding_entries_rejects_empty_input() {
-        let error =
-            validate_binding_entries(&[]).expect_err("empty input should fail");
+        let error = validate_binding_entries(&[]).expect_err("empty input should fail");
         assert!(error.to_string().contains("at least one"));
     }
 
@@ -1744,15 +1743,15 @@ mod tests {
 
     #[test]
     fn validate_binding_entries_rejects_empty_key() {
-        let error = validate_binding_entries(&["=value".to_owned()])
-            .expect_err("empty key should fail");
+        let error =
+            validate_binding_entries(&["=value".to_owned()]).expect_err("empty key should fail");
         assert!(error.to_string().contains("non-empty key and value"));
     }
 
     #[test]
     fn validate_binding_entries_rejects_empty_value() {
-        let error = validate_binding_entries(&["key=".to_owned()])
-            .expect_err("empty value should fail");
+        let error =
+            validate_binding_entries(&["key=".to_owned()]).expect_err("empty value should fail");
         assert!(error.to_string().contains("non-empty key and value"));
     }
 
@@ -1765,27 +1764,22 @@ mod tests {
 
     #[test]
     fn validate_binding_entries_allows_equals_in_value() {
-        let bindings =
-            validate_binding_entries(&["key=a=b=c".to_owned()])
-                .expect("equals inside value should be allowed");
+        let bindings = validate_binding_entries(&["key=a=b=c".to_owned()])
+            .expect("equals inside value should be allowed");
         assert_eq!(bindings[0], ("key".to_owned(), "a=b=c".to_owned()));
     }
 
     #[test]
     fn validate_binding_entries_payload_json_alone_is_ok() {
-        let bindings = validate_binding_entries(&[
-            "payload_json={\"title\":\"hello\"}".to_owned(),
-        ])
-        .expect("payload_json alone should succeed");
+        let bindings = validate_binding_entries(&["payload_json={\"title\":\"hello\"}".to_owned()])
+            .expect("payload_json alone should succeed");
         assert_eq!(bindings[0].0, "payload_json");
     }
 
     #[test]
     fn validate_binding_entries_payload_file_alone_is_ok() {
-        let bindings = validate_binding_entries(&[
-            "payload_file=body.json".to_owned(),
-        ])
-        .expect("payload_file alone should succeed");
+        let bindings = validate_binding_entries(&["payload_file=body.json".to_owned()])
+            .expect("payload_file alone should succeed");
         assert_eq!(bindings[0].0, "payload_file");
     }
 
@@ -1804,9 +1798,7 @@ mod tests {
 
         // Add a draft binding via resolution
         let patch = ResolutionPatch {
-            draft_bindings: BTreeMap::from([
-                ("repo".to_owned(), "draft-repo".to_owned()),
-            ]),
+            draft_bindings: BTreeMap::from([("repo".to_owned(), "draft-repo".to_owned())]),
             identifier_candidates: Vec::new(),
             evidence: vec!["test evidence".to_owned()],
         };
@@ -1841,9 +1833,10 @@ mod tests {
 
         // Draft payload_json via resolution
         let patch = ResolutionPatch {
-            draft_bindings: BTreeMap::from([
-                ("payload_json".to_owned(), "{\"title\":\"test\"}".to_owned()),
-            ]),
+            draft_bindings: BTreeMap::from([(
+                "payload_json".to_owned(),
+                "{\"title\":\"test\"}".to_owned(),
+            )]),
             identifier_candidates: Vec::new(),
             evidence: vec!["drafted payload".to_owned()],
         };
@@ -1899,9 +1892,7 @@ mod tests {
             .expect("task should be created");
 
         let patch = ResolutionPatch {
-            draft_bindings: BTreeMap::from([
-                ("draft_key".to_owned(), "draft_val".to_owned()),
-            ]),
+            draft_bindings: BTreeMap::from([("draft_key".to_owned(), "draft_val".to_owned())]),
             identifier_candidates: Vec::new(),
             evidence: vec!["evidence".to_owned()],
         };
@@ -2100,10 +2091,8 @@ mod tests {
             })
             .expect("task should be created");
 
-        let actual_status = task.capsule_status.clone();
-
         let matched = store
-            .list(50, Some(&actual_status))
+            .list(50, Some(&task.capsule_status))
             .expect("list should succeed");
         assert_eq!(matched.len(), 1);
 
@@ -2146,9 +2135,7 @@ mod tests {
     #[test]
     fn load_non_existent_returns_none() {
         let store = store();
-        let result = store
-            .load("w:nonexistent")
-            .expect("load should not error");
+        let result = store.load("w:nonexistent").expect("load should not error");
         assert!(result.is_none());
     }
 
@@ -2364,7 +2351,10 @@ mod tests {
             .expect("resolution should persist")
             .expect("task should exist");
 
-        let last = applied.task.last_resolution().expect("should have resolution");
+        let last = applied
+            .task
+            .last_resolution()
+            .expect("should have resolution");
         assert_eq!(last.trigger, "resolve");
         assert_eq!(last.mode, "single-pass");
     }
@@ -2508,10 +2498,7 @@ mod tests {
             .iter()
             .find(|o| o.id == task.id)
             .expect("task should be in list");
-        assert_eq!(
-            overview.last_execution_status.as_deref(),
-            Some("simulated")
-        );
+        assert_eq!(overview.last_execution_status.as_deref(), Some("simulated"));
     }
 
     #[test]

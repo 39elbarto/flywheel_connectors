@@ -417,7 +417,7 @@ pub fn evaluate_introspection(
     let has_auth_caps = !introspection["auth_caps"].is_null();
 
     let config = ConfigReadiness {
-        accepts_config: true, // all connectors accept config
+        accepts_config: true,             // all connectors accept config
         has_config_schema: has_auth_caps, // proxy: auth_caps implies config awareness
         secrets_marked: false,            // requires manifest inspection
         defaults_documented: false,       // requires manifest inspection
@@ -425,12 +425,12 @@ pub fn evaluate_introspection(
     };
 
     let lifecycle = LifecycleReadiness {
-        has_health: true,             // trait requires it
+        has_health: true,              // trait requires it
         reports_lifecycle_state: true, // BaseConnector provides it
-        events_declared: true, // event declaration is optional; all connectors pass
-        has_rate_limits: true,        // trait requires rate_limits()
-        has_metrics: true,            // trait requires metrics()
-        has_shutdown: true,           // trait requires shutdown()
+        events_declared: true,         // event declaration is optional; all connectors pass
+        has_rate_limits: true,         // trait requires rate_limits()
+        has_metrics: true,             // trait requires metrics()
+        has_shutdown: true,            // trait requires shutdown()
     };
 
     let areas = ReadinessAreas {
@@ -489,10 +489,7 @@ pub fn evaluate_introspection(
 
     let level = if gaps.iter().any(|g| g.severity == GapSeverity::Blocking) {
         ReadinessLevel::NotReady
-    } else if gaps
-        .iter()
-        .any(|g| g.severity == GapSeverity::Degraded)
-    {
+    } else if gaps.iter().any(|g| g.severity == GapSeverity::Degraded) {
         ReadinessLevel::PartiallyReady
     } else {
         ReadinessLevel::Ready
@@ -679,8 +676,13 @@ mod tests {
         );
 
         assert_eq!(verdict.level, ReadinessLevel::NotReady);
-        assert!(verdict.gaps.iter().any(|g| g.category == GapCategory::OperationMetadata
-            && g.severity == GapSeverity::Blocking));
+        assert!(
+            verdict
+                .gaps
+                .iter()
+                .any(|g| g.category == GapCategory::OperationMetadata
+                    && g.severity == GapSeverity::Blocking)
+        );
     }
 
     #[test]
@@ -713,11 +715,13 @@ mod tests {
         );
 
         assert_eq!(verdict.level, ReadinessLevel::PartiallyReady);
-        assert!(verdict
-            .gaps
-            .iter()
-            .any(|g| g.category == GapCategory::OperationMetadata
-                && g.description.contains("input_schema")));
+        assert!(
+            verdict
+                .gaps
+                .iter()
+                .any(|g| g.category == GapCategory::OperationMetadata
+                    && g.description.contains("input_schema"))
+        );
     }
 
     #[test]
@@ -748,8 +752,13 @@ mod tests {
 
         // Missing ai_hints is cosmetic, not blocking.
         assert_eq!(verdict.level, ReadinessLevel::Ready);
-        assert!(verdict.gaps.iter().any(|g| g.category == GapCategory::AgentHints
-            && g.severity == GapSeverity::Cosmetic));
+        assert!(
+            verdict
+                .gaps
+                .iter()
+                .any(|g| g.category == GapCategory::AgentHints
+                    && g.severity == GapSeverity::Cosmetic)
+        );
     }
 
     #[test]
@@ -1281,7 +1290,12 @@ mod tests {
 
         // All fields are complete except examples → only cosmetic gap
         assert_eq!(verdict.level, ReadinessLevel::Ready);
-        assert!(verdict.gaps.iter().all(|g| g.severity == GapSeverity::Cosmetic));
+        assert!(
+            verdict
+                .gaps
+                .iter()
+                .all(|g| g.severity == GapSeverity::Cosmetic)
+        );
         assert!(
             verdict
                 .gaps
@@ -2548,12 +2562,7 @@ mod tests {
         assert_eq!(verdict.areas.operations.operations_with_examples, 2);
         assert_eq!(verdict.areas.operations.operation_count, 3);
         // Gap for incomplete examples
-        assert!(
-            verdict
-                .gaps
-                .iter()
-                .any(|g| g.description.contains("2/3"))
-        );
+        assert!(verdict.gaps.iter().any(|g| g.description.contains("2/3")));
     }
 
     // ── evaluate_introspection: operation missing only output_schema ──

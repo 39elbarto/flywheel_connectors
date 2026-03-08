@@ -491,4 +491,116 @@ mod tests {
         assert!(ok_val.is_ok());
         assert!(err_val.is_err());
     }
+
+    // ── StreamError: From conversions ───────────────────────────────────
+
+    #[test]
+    fn io_error_from_connection_aborted() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::ConnectionAborted, "aborted");
+        let stream_err: StreamError = io_err.into();
+        assert!(matches!(stream_err, StreamError::IoError(_)));
+        assert!(stream_err.to_string().contains("aborted"));
+    }
+
+    #[test]
+    fn io_error_preserves_error_kind_in_source() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::WouldBlock, "would block");
+        let stream_err = StreamError::IoError(io_err);
+        let source = std::error::Error::source(&stream_err);
+        assert!(source.is_some());
+        let inner = source.unwrap().downcast_ref::<std::io::Error>().unwrap();
+        assert_eq!(inner.kind(), std::io::ErrorKind::WouldBlock);
+    }
+
+    // ── StreamError: Display with special characters ────────────────────
+
+    #[test]
+    fn connection_failed_with_newlines() {
+        let e = StreamError::ConnectionFailed("line1\nline2".into());
+        let display = e.to_string();
+        assert!(display.contains("line1\nline2"));
+    }
+
+    #[test]
+    fn http_error_empty_message() {
+        let e = StreamError::HttpError {
+            status: 500,
+            message: String::new(),
+        };
+        assert_eq!(e.to_string(), "HTTP error: 500 - ");
+    }
+
+    #[test]
+    fn websocket_error_empty_message() {
+        let e = StreamError::WebSocketError(String::new());
+        assert_eq!(e.to_string(), "WebSocket error: ");
+    }
+
+    #[test]
+    fn sse_error_empty_message() {
+        let e = StreamError::SseError(String::new());
+        assert_eq!(e.to_string(), "SSE error: ");
+    }
+
+    // ── StreamError: Debug contains variant-specific data ───────────────
+
+    #[test]
+    fn parse_error_debug_contains_message() {
+        let e = StreamError::ParseError("unexpected token".into());
+        let debug = format!("{e:?}");
+        assert!(debug.contains("ParseError"));
+        assert!(debug.contains("unexpected token"));
+    }
+
+    #[test]
+    fn invalid_state_debug_contains_state() {
+        let e = StreamError::InvalidState("half-closed".into());
+        let debug = format!("{e:?}");
+        assert!(debug.contains("InvalidState"));
+        assert!(debug.contains("half-closed"));
+    }
+
+    // ── StreamError: source chain ───────────────────────────────────────
+
+    #[test]
+    fn timeout_source_is_none() {
+        let e = StreamError::Timeout(Duration::from_secs(5));
+        assert!(std::error::Error::source(&e).is_none());
+    }
+
+    #[test]
+    fn http_error_source_is_none() {
+        let e = StreamError::HttpError {
+            status: 503,
+            message: "unavailable".into(),
+        };
+        assert!(std::error::Error::source(&e).is_none());
+    }
+
+    #[test]
+    fn buffer_overflow_source_is_none() {
+        let e = StreamError::BufferOverflow {
+            size: 100,
+            limit: 50,
+        };
+        assert!(std::error::Error::source(&e).is_none());
+    }
+
+    #[test]
+    fn reconnect_limit_source_is_none() {
+        let e = StreamError::ReconnectLimitExceeded { attempts: 3 };
+        assert!(std::error::Error::source(&e).is_none());
+    }
+
+    #[test]
+    fn websocket_error_source_is_none() {
+        let e = StreamError::WebSocketError("err".into());
+        assert!(std::error::Error::source(&e).is_none());
+    }
+
+    #[test]
+    fn sse_error_source_is_none() {
+        let e = StreamError::SseError("err".into());
+        assert!(std::error::Error::source(&e).is_none());
+    }
 }

@@ -700,4 +700,273 @@ mod tests {
         assert_eq!(req.path, cloned.path);
         assert_eq!(req.body, cloned.body);
     }
+
+    // ── RecordedRequest: additional edge cases ───────────────────────
+
+    #[test]
+    fn recorded_request_with_all_fields_populated() {
+        let req = RecordedRequest {
+            method: "PUT".to_string(),
+            path: "/api/update/42".to_string(),
+            query: Some("version=2&force=true".to_string()),
+            body: Some(r#"{"status":"active"}"#.to_string()),
+            headers: vec![
+                ("Authorization".to_string(), "Bearer tok-123".to_string()),
+                ("Content-Type".to_string(), "application/json".to_string()),
+            ],
+        };
+        assert_eq!(req.method, "PUT");
+        assert!(req.query.as_ref().unwrap().contains("version=2"));
+        assert_eq!(req.headers.len(), 2);
+    }
+
+    #[test]
+    fn recorded_request_clone_preserves_headers() {
+        let req = RecordedRequest {
+            method: "DELETE".to_string(),
+            path: "/api/item/7".to_string(),
+            query: None,
+            body: None,
+            headers: vec![
+                ("X-Custom".to_string(), "val".to_string()),
+            ],
+        };
+        let cloned = req.clone();
+        assert_eq!(req.headers.len(), cloned.headers.len());
+        assert_eq!(req.headers[0].0, cloned.headers[0].0);
+        assert_eq!(req.headers[0].1, cloned.headers[0].1);
+    }
+
+    #[test]
+    fn recorded_request_empty_body_and_query() {
+        let req = RecordedRequest {
+            method: "GET".to_string(),
+            path: "/".to_string(),
+            query: None,
+            body: None,
+            headers: vec![],
+        };
+        assert!(req.query.is_none());
+        assert!(req.body.is_none());
+        assert!(req.headers.is_empty());
+    }
+
+    #[test]
+    fn recorded_request_debug_contains_path() {
+        let req = RecordedRequest {
+            method: "PATCH".to_string(),
+            path: "/api/patch-target".to_string(),
+            query: None,
+            body: None,
+            headers: vec![],
+        };
+        let dbg = format!("{req:?}");
+        assert!(dbg.contains("PATCH"));
+        assert!(dbg.contains("/api/patch-target"));
+    }
+
+    #[test]
+    fn recorded_request_clone_with_empty_query_string() {
+        let req = RecordedRequest {
+            method: "GET".to_string(),
+            path: "/search".to_string(),
+            query: Some(String::new()),
+            body: None,
+            headers: vec![],
+        };
+        let cloned = req.clone();
+        assert_eq!(req.query, cloned.query);
+        assert!(cloned.query.as_ref().unwrap().is_empty());
+    }
+
+    // ── MockApiServer: additional HTTP tests ─────────────────────────
+
+    #[fcp_async_core::runtime::test]
+    async fn mock_server_expect_error_403_forbidden() {
+        let mock = MockApiServer::start().await;
+        mock.expect_error(
+            "/api/forbidden",
+            403,
+            serde_json::json!({"error": "Forbidden"}),
+        )
+        .await;
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .get(format!("{}/api/forbidden", mock.base_url()))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 403);
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(body["error"], "Forbidden");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn mock_server_expect_error_404_not_found() {
+        let mock = MockApiServer::start().await;
+        mock.expect_error(
+            "/api/missing",
+            404,
+            serde_json::json!({"error": "Not Found"}),
+        )
+        .await;
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .get(format!("{}/api/missing", mock.base_url()))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 404);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn mock_server_expect_error_503_service_unavailable() {
+        let mock = MockApiServer::start().await;
+        mock.expect_error(
+            "/api/down",
+            503,
+            serde_json::json!({"error": "Service Unavailable"}),
+        )
+        .await;
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .get(format!("{}/api/down", mock.base_url()))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 503);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn mock_server_multiple_paths() {
+        let mock = MockApiServer::start().await;
+        mock.expect_get("/api/a", serde_json::json!({"path": "a"}))
+            .await;
+        mock.expect_get("/api/b", serde_json::json!({"path": "b"}))
+            .await;
+
+        let client = reqwest::Client::new();
+        let resp_a = client
+            .get(format!("{}/api/a", mock.base_url()))
+            .send()
+            .await
+            .unwrap();
+        let body_a: serde_json::Value = resp_a.json().await.unwrap();
+        assert_eq!(body_a["path"], "a");
+
+        let resp_b = client
+            .get(format!("{}/api/b", mock.base_url()))
+            .send()
+            .await
+            .unwrap();
+        let body_b: serde_json::Value = resp_b.json().await.unwrap();
+        assert_eq!(body_b["path"], "b");
+
+        mock.assert_request_count(2).await;
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn mock_server_post_json_body_response() {
+        let mock = MockApiServer::start().await;
+        mock.expect_post("/api/items", serde_json::json!({"created": true, "id": 99}))
+            .await;
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(format!("{}/api/items", mock.base_url()))
+            .json(&serde_json::json!({"name": "widget"}))
+            .send()
+            .await
+            .unwrap();
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(body["created"], true);
+        assert_eq!(body["id"], 99);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn mock_server_reset_clears_request_count() {
+        let mock = MockApiServer::start().await;
+        mock.expect_get("/api/ping", serde_json::json!({})).await;
+
+        let client = reqwest::Client::new();
+        client
+            .get(format!("{}/api/ping", mock.base_url()))
+            .send()
+            .await
+            .unwrap();
+
+        mock.assert_request_count(1).await;
+        mock.reset().await;
+        mock.assert_no_requests().await;
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn mock_server_base_url_contains_port() {
+        let mock = MockApiServer::start().await;
+        let url = mock.base_url();
+        let port = mock.address().port();
+        assert!(url.contains(&port.to_string()));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn mock_server_expect_with_header_wrong_value_returns_404() {
+        let mock = MockApiServer::start().await;
+        mock.expect_with_header(
+            "/api/auth",
+            "X-Api-Key",
+            "correct-key",
+            serde_json::json!({"ok": true}),
+        )
+        .await;
+
+        let client = reqwest::Client::new();
+        // Wrong header value => no match => 404
+        let resp = client
+            .get(format!("{}/api/auth", mock.base_url()))
+            .header("X-Api-Key", "wrong-key")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 404);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn scenario_builder_multiple_mocks() {
+        let server = MockScenarioBuilder::new()
+            .await
+            .with_mock(
+                Mock::given(method("GET"))
+                    .and(path("/one"))
+                    .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"n": 1}))),
+            )
+            .with_mock(
+                Mock::given(method("GET"))
+                    .and(path("/two"))
+                    .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"n": 2}))),
+            )
+            .build()
+            .await;
+
+        let client = reqwest::Client::new();
+        let r1 = client
+            .get(format!("{}/one", server.base_url()))
+            .send()
+            .await
+            .unwrap();
+        let b1: serde_json::Value = r1.json().await.unwrap();
+        assert_eq!(b1["n"], 1);
+
+        let r2 = client
+            .get(format!("{}/two", server.base_url()))
+            .send()
+            .await
+            .unwrap();
+        let b2: serde_json::Value = r2.json().await.unwrap();
+        assert_eq!(b2["n"], 2);
+
+        server.assert_request_count(2).await;
+    }
 }

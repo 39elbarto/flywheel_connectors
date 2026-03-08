@@ -882,4 +882,172 @@ mod tests {
         assert_eq!(harness.operations().len(), 1);
         assert_eq!(harness.operations()[0].operation, "health");
     }
+
+    // ---- Additional RecordedOperation edge case tests ----
+
+    #[test]
+    fn recorded_operation_with_large_input() {
+        let large_json = serde_json::json!({
+            "items": (0..50).map(|i| serde_json::json!({"id": i})).collect::<Vec<_>>()
+        });
+        let op = RecordedOperation {
+            operation: "bulk_op".to_string(),
+            input: Some(large_json),
+            result: Ok(serde_json::json!({"count": 50})),
+            duration_ms: 200,
+            timestamp: chrono::Utc::now(),
+        };
+        assert_eq!(
+            op.input.as_ref().unwrap()["items"].as_array().unwrap().len(),
+            50
+        );
+    }
+
+    #[test]
+    fn recorded_operation_result_ok_null() {
+        let op = RecordedOperation {
+            operation: "void_op".to_string(),
+            input: None,
+            result: Ok(serde_json::Value::Null),
+            duration_ms: 0,
+            timestamp: chrono::Utc::now(),
+        };
+        assert!(op.result.is_ok());
+        assert!(op.result.unwrap().is_null());
+    }
+
+    #[test]
+    fn recorded_operation_result_err_preserves_full_message() {
+        let msg = "Connection refused: 127.0.0.1:5432 - authentication failed for user 'admin'";
+        let op = RecordedOperation {
+            operation: "db_connect".to_string(),
+            input: None,
+            result: Err(msg.to_string()),
+            duration_ms: 15,
+            timestamp: chrono::Utc::now(),
+        };
+        assert_eq!(op.result.unwrap_err(), msg);
+    }
+
+    // ---- Additional HarnessStats edge case tests ----
+
+    #[test]
+    fn harness_stats_high_duration_values() {
+        let stats = HarnessStats {
+            total_operations: 1,
+            successes: 1,
+            failures: 0,
+            total_duration_ms: u64::MAX,
+            avg_duration_ms: u64::MAX,
+            max_duration_ms: u64::MAX,
+        };
+        assert_eq!(stats.total_duration_ms, u64::MAX);
+        assert_eq!(stats.max_duration_ms, u64::MAX);
+    }
+
+    #[test]
+    fn harness_stats_successes_plus_failures_equals_total() {
+        let stats = HarnessStats {
+            total_operations: 15,
+            successes: 9,
+            failures: 6,
+            total_duration_ms: 1500,
+            avg_duration_ms: 100,
+            max_duration_ms: 250,
+        };
+        assert_eq!(stats.successes + stats.failures, stats.total_operations);
+    }
+
+    // ---- Additional ConnectorTestHarness tests ----
+
+    #[fcp_async_core::runtime::test]
+    async fn harness_configure_does_not_set_handshaken() {
+        let mut harness = ConnectorTestHarness::new(StubConnector::ok());
+        harness.configure_default().await.unwrap();
+        assert!(harness.is_configured());
+        assert!(!harness.is_handshaken());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn harness_stats_after_failure() {
+        let mut harness = ConnectorTestHarness::new(StubConnector::failing());
+        let _ = harness.configure(serde_json::json!({})).await;
+        let stats = harness.stats();
+        assert_eq!(stats.total_operations, 1);
+        assert_eq!(stats.successes, 0);
+        assert_eq!(stats.failures, 1);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn harness_last_operation_after_health_is_health() {
+        let mut harness = ConnectorTestHarness::new(StubConnector::ok());
+        harness.configure_default().await.unwrap();
+        harness.health().await;
+        let last = harness.last_operation().unwrap();
+        assert_eq!(last.operation, "health");
+        assert!(last.result.is_ok());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn harness_operations_ordering_preserved() {
+        let mut harness = ConnectorTestHarness::new(StubConnector::ok());
+        harness.configure_default().await.unwrap();
+        let _ = harness.introspect();
+        harness.health().await;
+
+        let ops: Vec<&str> = harness
+            .operations()
+            .iter()
+            .map(|o| o.operation.as_str())
+            .collect();
+        assert_eq!(ops, ["configure", "introspect", "health"]);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn harness_connector_ref_stable() {
+        let harness = ConnectorTestHarness::new(StubConnector::ok());
+        let c = harness.connector();
+        // StubConnector has configure_should_fail = false
+        assert!(!c.configure_should_fail);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn harness_connector_mut_can_toggle_flag() {
+        let mut harness = ConnectorTestHarness::new(StubConnector::ok());
+        harness.connector_mut().configure_should_fail = true;
+        let result = harness.configure_default().await;
+        assert!(result.is_err());
+        assert!(!harness.is_configured());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn harness_clear_preserves_configured_state() {
+        let mut harness = ConnectorTestHarness::new(StubConnector::ok());
+        harness.configure_default().await.unwrap();
+        assert!(harness.is_configured());
+        harness.clear_operations();
+        assert!(harness.operations().is_empty());
+        // configured flag should still be true
+        assert!(harness.is_configured());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn harness_stats_avg_duration_is_reasonable() {
+        let mut harness = ConnectorTestHarness::new(StubConnector::ok());
+        harness.configure_default().await.unwrap();
+        harness.health().await;
+        let stats = harness.stats();
+        // avg should be <= total
+        assert!(stats.avg_duration_ms <= stats.total_duration_ms);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn harness_introspect_records_ok_result() {
+        let mut harness = ConnectorTestHarness::new(StubConnector::ok());
+        let _ = harness.introspect();
+        let last = harness.last_operation().unwrap();
+        assert_eq!(last.operation, "introspect");
+        assert!(last.result.is_ok());
+        assert!(last.input.is_none());
+    }
 }

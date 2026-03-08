@@ -1139,4 +1139,185 @@ mod tests {
         let connector = FakePollingConnector::new(api).with_config(config);
         assert_eq!(connector.processed_count(), 0);
     }
+
+    // ---- Additional FakePollingApi tests ----
+
+    #[test]
+    fn fake_polling_api_consecutive_polls_increment_ids() {
+        let api = FakePollingApi::always_success(2);
+        if let PollResult::Success(first) = api.poll(None) {
+            if let PollResult::Success(second) = api.poll(None) {
+                // Second batch IDs should be higher than first batch
+                assert!(second[0].id > first[1].id);
+            } else {
+                panic!("expected second success");
+            }
+        } else {
+            panic!("expected first success");
+        }
+    }
+
+    #[test]
+    fn fake_polling_api_reset_resets_update_ids() {
+        let api = FakePollingApi::always_success(1);
+        api.poll(None);
+        api.reset();
+        if let PollResult::Success(updates) = api.poll(None) {
+            assert_eq!(updates[0].id, 1, "after reset, ids should start from 1");
+        } else {
+            panic!("expected success");
+        }
+    }
+
+    #[test]
+    fn fake_polling_api_fail_after_zero_always_fails() {
+        let api = FakePollingApi::fail_after(0, FakePollingError::Timeout);
+        // Every poll should fail
+        assert!(matches!(
+            api.poll(None),
+            PollResult::RecoverableError { .. }
+        ));
+        assert!(matches!(
+            api.poll(None),
+            PollResult::RecoverableError { .. }
+        ));
+    }
+
+    #[test]
+    fn fake_polling_api_rate_limited_default_retry_after() {
+        let api = FakePollingApi::new(FakePollingApiConfig {
+            success_count_before_error: Some(0),
+            inject_error: Some(FakePollingError::RateLimited),
+            rate_limit_retry_after_ms: None, // no retry_after configured
+            ..Default::default()
+        });
+        let result = api.poll(None);
+        // Should default to 1000ms when not configured
+        assert!(matches!(
+            result,
+            PollResult::RecoverableError {
+                retry_after_ms: Some(1000),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn fake_polling_api_no_error_injected_past_threshold() {
+        // When success_count_before_error is set but inject_error is None
+        let api = FakePollingApi::new(FakePollingApiConfig {
+            updates_per_poll: 1,
+            success_count_before_error: Some(1),
+            inject_error: None,
+            rate_limit_retry_after_ms: None,
+        });
+        // First poll succeeds
+        assert!(matches!(api.poll(None), PollResult::Success(_)));
+        // Past threshold, with no error injected, should return empty
+        let result = api.poll(None);
+        assert!(matches!(result, PollResult::Success(items) if items.is_empty()));
+    }
+
+    // ---- Additional FakeUpdate tests ----
+
+    #[test]
+    fn fake_update_payload_contains_id() {
+        let update = FakeUpdate {
+            id: 42,
+            payload: "update-42".to_string(),
+        };
+        assert!(update.payload.contains(&update.id.to_string()));
+    }
+
+    // ---- Additional FakeStreamingSession tests ----
+
+    #[test]
+    fn fake_streaming_session_debug_format() {
+        let session = FakeStreamingSession::new();
+        let dbg = format!("{session:?}");
+        assert!(dbg.contains("FakeStreamingSession"));
+    }
+
+    #[test]
+    fn fake_streaming_session_add_events_updates_sequence() {
+        let mut session = FakeStreamingSession::new();
+        session.add_event(FakeStreamEvent {
+            seq: 0,
+            event_type: "a".to_string(),
+            payload: serde_json::json!(null),
+        });
+        assert_eq!(session.sequence(), 1);
+        session.add_event(FakeStreamEvent {
+            seq: 1,
+            event_type: "b".to_string(),
+            payload: serde_json::json!(null),
+        });
+        assert_eq!(session.sequence(), 2);
+        assert_eq!(session.event_count(), 2);
+    }
+
+    #[test]
+    fn fake_streaming_session_resume_token_set_and_clear() {
+        let mut session = FakeStreamingSession::new();
+        assert!(session.resume_token().is_none());
+        session.set_resume_token("tok-1".to_string());
+        assert_eq!(session.resume_token(), Some("tok-1".to_string()));
+        session.set_resume_token("tok-2".to_string());
+        assert_eq!(session.resume_token(), Some("tok-2".to_string()));
+        session.clear_resume_token();
+        assert!(session.resume_token().is_none());
+    }
+
+    #[test]
+    fn fake_streaming_session_persist_idempotent() {
+        let session = FakeStreamingSession::new();
+        session.persist().unwrap();
+        session.persist().unwrap();
+        assert!(session.persist_called());
+    }
+
+    #[test]
+    fn fake_streaming_session_restore_idempotent() {
+        let mut session = FakeStreamingSession::new();
+        session.restore().unwrap();
+        session.restore().unwrap();
+        assert!(session.restore_called());
+    }
+
+    #[test]
+    fn fake_streaming_session_heartbeat_sent_before_ack() {
+        let mut session = FakeStreamingSession::new();
+        let t1 = std::time::Instant::now();
+        session.record_heartbeat_sent(t1);
+        assert!(session.last_heartbeat_sent().is_some());
+        assert!(session.last_heartbeat_ack().is_none());
+    }
+
+    // ---- FakeStreamEvent additional tests ----
+
+    #[test]
+    fn fake_stream_event_with_complex_payload() {
+        let event = FakeStreamEvent {
+            seq: 10,
+            event_type: "data".to_string(),
+            payload: serde_json::json!({
+                "users": [{"id": 1}, {"id": 2}],
+                "count": 2
+            }),
+        };
+        assert_eq!(event.payload["count"], 2);
+        assert_eq!(event.payload["users"].as_array().unwrap().len(), 2);
+    }
+
+    // ---- FakeCursorStoreConnector tests ----
+
+    #[test]
+    fn fake_cursor_store_connector_backend_shared() {
+        let api = FakePollingApi::always_success(1);
+        let connector = FakeCursorStoreConnector::new(api);
+        let b1 = connector.backend();
+        let b2 = connector.backend();
+        // Both should point to the same backend (Arc)
+        assert!(Arc::ptr_eq(&b1, &b2));
+    }
 }

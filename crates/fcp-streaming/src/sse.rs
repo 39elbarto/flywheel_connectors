@@ -1229,4 +1229,148 @@ mod tests {
         let config = SseConfig::new().with_max_reconnect_attempts(0);
         assert_eq!(config.max_reconnect_attempts, Some(0));
     }
+
+    // ── SseParser: incremental multi-field parsing ──────────────────────
+
+    #[test]
+    fn test_parse_incremental_event_type_then_data() {
+        let mut parser = SseParser::new();
+        assert!(parser.parse(&Bytes::from("event: up")).is_empty());
+        assert!(parser.parse(&Bytes::from("date\n")).is_empty());
+        let events = parser.parse(&Bytes::from("data: payload\n\n"));
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].event, Some("update".to_string()));
+        assert_eq!(events[0].data, "payload");
+    }
+
+    #[test]
+    fn test_parse_incremental_id_across_chunks() {
+        let mut parser = SseParser::new();
+        assert!(parser.parse(&Bytes::from("id: abc")).is_empty());
+        assert!(parser.parse(&Bytes::from("123\n")).is_empty());
+        let events = parser.parse(&Bytes::from("data: test\n\n"));
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].id, Some("abc123".to_string()));
+    }
+
+    // ── SseParser: retry field edge cases ───────────────────────────────
+
+    #[test]
+    fn test_parse_retry_negative_ignored() {
+        let mut parser = SseParser::new();
+        let data = Bytes::from("retry: -100\ndata: test\n\n");
+        let events = parser.parse(&data);
+        assert_eq!(events.len(), 1);
+        // Negative values can't parse as u64, so retry is None
+        assert_eq!(events[0].retry, None);
+    }
+
+    #[test]
+    fn test_parse_retry_float_ignored() {
+        let mut parser = SseParser::new();
+        let data = Bytes::from("retry: 1.5\ndata: test\n\n");
+        let events = parser.parse(&data);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].retry, None);
+    }
+
+    #[test]
+    fn test_parse_retry_empty_ignored() {
+        let mut parser = SseParser::new();
+        let data = Bytes::from("retry:\ndata: test\n\n");
+        let events = parser.parse(&data);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].retry, None);
+    }
+
+    // ── SseParser: last_event_id updates ────────────────────────────────
+
+    #[test]
+    fn test_last_event_id_not_updated_without_id_field() {
+        let mut parser = SseParser::new();
+        // First event sets ID
+        parser.parse(&Bytes::from("id: first\ndata: a\n\n"));
+        assert_eq!(parser.last_event_id(), Some("first"));
+
+        // Second event has no ID; last_event_id stays
+        parser.parse(&Bytes::from("data: b\n\n"));
+        assert_eq!(parser.last_event_id(), Some("first"));
+    }
+
+    #[test]
+    fn test_last_event_id_updated_to_empty() {
+        let mut parser = SseParser::new();
+        parser.parse(&Bytes::from("id: abc\ndata: a\n\n"));
+        assert_eq!(parser.last_event_id(), Some("abc"));
+
+        // Empty id: field sets event_id to empty string
+        parser.parse(&Bytes::from("id:\ndata: b\n\n"));
+        assert_eq!(parser.last_event_id(), Some(""));
+    }
+
+    // ── SseParser: data_bytes_len reset after dispatch ──────────────────
+
+    #[test]
+    fn test_parse_data_bytes_reset_after_dispatch() {
+        let mut parser = SseParser::new();
+        // First event with some data
+        let events = parser.parse(&Bytes::from("data: hello world\n\n"));
+        assert_eq!(events.len(), 1);
+
+        // Second event should accept data fine (counter was reset)
+        let events = parser.parse(&Bytes::from("data: another message\n\n"));
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].data, "another message");
+    }
+
+    // ── SseEvent: PartialEq edge cases ──────────────────────────────────
+
+    #[test]
+    fn test_sse_event_ne_different_id() {
+        let a = SseEvent::new("data").with_id("1");
+        let b = SseEvent::new("data").with_id("2");
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn test_sse_event_ne_different_event_type() {
+        let a = SseEvent::new("data").with_event("msg");
+        let b = SseEvent::new("data").with_event("err");
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn test_sse_event_eq_both_with_retry() {
+        let mut a = SseEvent::new("data");
+        a.retry = Some(1000);
+        let mut b = SseEvent::new("data");
+        b.retry = Some(1000);
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn test_sse_event_ne_different_retry() {
+        let mut a = SseEvent::new("data");
+        a.retry = Some(1000);
+        let mut b = SseEvent::new("data");
+        b.retry = Some(2000);
+        assert_ne!(a, b);
+    }
+
+    // ── SseClient: URL handling ─────────────────────────────────────────
+
+    #[test]
+    fn test_sse_client_url_with_query_params() {
+        let client = SseClient::new("https://example.com/events?token=abc&channel=test");
+        assert_eq!(
+            client.url(),
+            "https://example.com/events?token=abc&channel=test"
+        );
+    }
+
+    #[test]
+    fn test_sse_client_url_with_fragment() {
+        let client = SseClient::new("https://example.com/events#section");
+        assert_eq!(client.url(), "https://example.com/events#section");
+    }
 }

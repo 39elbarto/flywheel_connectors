@@ -77,4 +77,19 @@ mod tests {
     fn buffer_size_is_power_of_two() {
         assert!(DEFAULT_BUFFER_SIZE.is_power_of_two());
     }
+
+    #[test]
+    fn default_buffer_size_nonzero() {
+        assert_ne!(DEFAULT_BUFFER_SIZE, 0);
+    }
+
+    #[test]
+    fn default_reconnect_delay_nonzero() {
+        assert!(DEFAULT_RECONNECT_DELAY > std::time::Duration::ZERO);
+    }
+
+    #[test]
+    fn max_reconnect_delay_at_least_one_second() {
+        assert!(MAX_RECONNECT_DELAY >= std::time::Duration::from_secs(1));
+    }
 }

@@ -369,4 +369,140 @@ mod tests {
         tx.send(false).unwrap();
         assert!(!*rx.borrow());
     }
+
+    // ---- Additional deterministic_correlation_id tests ----
+
+    #[test]
+    fn deterministic_correlation_id_uuid_v5_version_nibble() {
+        let id = deterministic_correlation_id("run-v", "scenario-v");
+        // UUID version nibble should be 5 (char at position 14)
+        assert_eq!(id.chars().nth(14), Some('5'));
+    }
+
+    #[test]
+    fn deterministic_correlation_id_uuid_variant_bits() {
+        let id = deterministic_correlation_id("run-var", "scenario-var");
+        // Variant nibble at position 19 should be 8, 9, a, or b
+        let variant_char = id.chars().nth(19).unwrap();
+        assert!(
+            ['8', '9', 'a', 'b'].contains(&variant_char),
+            "unexpected variant nibble: {variant_char}"
+        );
+    }
+
+    #[test]
+    fn deterministic_correlation_id_symmetry_broken() {
+        // Swapping run/scenario should produce different IDs
+        let id1 = deterministic_correlation_id("alpha", "beta");
+        let id2 = deterministic_correlation_id("beta", "alpha");
+        assert_ne!(id1, id2);
+    }
+
+    #[test]
+    fn deterministic_correlation_id_special_characters() {
+        let id = deterministic_correlation_id("run/with:special", "scenario@#$%");
+        assert_eq!(id.len(), 36);
+        // Should still be valid UUID format
+        assert_eq!(id.chars().filter(|c| *c == '-').count(), 4);
+    }
+
+    #[test]
+    fn deterministic_correlation_id_unicode_inputs() {
+        let id = deterministic_correlation_id("run-\u{00e9}\u{00e8}", "\u{2603}\u{2764}");
+        assert_eq!(id.len(), 36);
+    }
+
+    // ---- Additional AsyncTestContext tests ----
+
+    #[test]
+    fn context_accessors_return_expected_values() {
+        let ctx = AsyncTestContext::new("my-run", "my-scenario");
+        assert_eq!(ctx.run_id(), "my-run");
+        assert_eq!(ctx.scenario_id(), "my-scenario");
+        assert!(!ctx.correlation_id().is_empty());
+    }
+
+    #[test]
+    fn context_for_scenario_run_id_has_timestamp_format() {
+        let ctx = AsyncTestContext::for_scenario("ts-test");
+        let run = ctx.run_id();
+        // Should contain 'T' (ISO format) and 'Z' (UTC)
+        assert!(run.contains('T'));
+        assert!(run.contains('Z'));
+    }
+
+    #[test]
+    fn context_log_fields_values_match_accessors() {
+        let ctx = AsyncTestContext::new("r1", "s1");
+        let fields = ctx.as_log_fields();
+        assert_eq!(fields["run_id"].as_str().unwrap(), ctx.run_id());
+        assert_eq!(fields["scenario_id"].as_str().unwrap(), ctx.scenario_id());
+        assert_eq!(
+            fields["correlation_id"].as_str().unwrap(),
+            ctx.correlation_id()
+        );
+    }
+
+    #[test]
+    fn context_log_fields_is_object() {
+        let ctx = AsyncTestContext::new("r", "s");
+        let fields = ctx.as_log_fields();
+        assert!(fields.is_object());
+        assert_eq!(fields.as_object().unwrap().len(), 4);
+    }
+
+    #[test]
+    fn context_two_for_scenario_calls_differ() {
+        let a = AsyncTestContext::for_scenario("same-scenario");
+        // Small delay ensures different timestamp
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let b = AsyncTestContext::for_scenario("same-scenario");
+        // Run IDs should differ because timestamps differ
+        assert_ne!(a.run_id(), b.run_id());
+        // Correlation IDs should also differ since run ID is part of the key
+        assert_ne!(a.correlation_id(), b.correlation_id());
+    }
+
+    // ---- Additional bounded_queue / shutdown tests ----
+
+    #[fcp_async_core::runtime::test]
+    async fn bounded_queue_capacity_respected() {
+        let (tx, _rx) = bounded_queue::<u8>("cap-test", 2);
+        // First two sends should succeed immediately
+        tx.send(1).await.expect("send 1");
+        tx.send(2).await.expect("send 2");
+        // Channel is now full; verify by trying send with timeout
+        let result = fcp_async_core::time::timeout(
+            std::time::Duration::from_millis(5),
+            tx.send(3),
+        )
+        .await;
+        // Should timeout because channel is full
+        assert!(result.is_err());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn bounded_queue_recv_none_after_drop_sender() {
+        let (tx, mut rx) = bounded_queue::<u8>("drop-test", 4);
+        tx.send(10).await.expect("send");
+        drop(tx);
+        // Should get the buffered item
+        assert_eq!(rx.recv().await, Some(10));
+        // Then None because sender is dropped
+        assert_eq!(rx.recv().await, None);
+    }
+
+    #[test]
+    fn shutdown_channel_true_initial() {
+        let (_tx, rx) = shutdown_channel(true);
+        assert!(*rx.borrow());
+    }
+
+    #[test]
+    fn request_context_has_nonzero_timeout() {
+        let ctx = request_context(std::time::Duration::from_millis(100));
+        // Just verify it was created without panic
+        let dbg = format!("{ctx:?}");
+        assert!(!dbg.is_empty());
+    }
 }

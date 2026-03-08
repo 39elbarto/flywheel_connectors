@@ -713,4 +713,123 @@ mod tests {
         // Should not have double newlines
         assert!(!raw.contains("\n\n"));
     }
+
+    // ---- Additional LogCapture validation tests ----
+
+    #[test]
+    fn log_capture_validate_multiple_valid_entries() {
+        let capture = LogCapture::new();
+        for i in 0..3 {
+            let entry = json!({
+                "timestamp": Utc::now().to_rfc3339(),
+                "test_name": format!("test_{i}"),
+                "module": "fcp-testkit",
+                "phase": "execute",
+                "correlation_id": "00000000-0000-4000-8000-000000000000",
+                "result": "pass",
+                "duration_ms": i,
+                "assertions": { "passed": 1, "failed": 0 }
+            });
+            capture.push_value(&entry).unwrap();
+        }
+        capture.assert_valid();
+    }
+
+    #[test]
+    fn log_capture_push_value_with_nested_objects() {
+        let capture = LogCapture::new();
+        let val = json!({
+            "outer": {
+                "inner": {
+                    "deep": [1, 2, 3]
+                }
+            }
+        });
+        capture.push_value(&val).unwrap();
+        let parsed: serde_json::Value =
+            serde_json::from_str(capture.jsonl().trim()).unwrap();
+        assert_eq!(parsed["outer"]["inner"]["deep"][1], 2);
+    }
+
+    #[test]
+    fn log_capture_push_value_null() {
+        let capture = LogCapture::new();
+        capture.push_value(&json!(null)).unwrap();
+        let jsonl = capture.jsonl();
+        assert_eq!(jsonl.trim(), "null");
+    }
+
+    #[test]
+    fn log_capture_push_value_array() {
+        let capture = LogCapture::new();
+        capture.push_value(&json!([1, 2, 3])).unwrap();
+        let jsonl = capture.jsonl();
+        assert!(jsonl.contains("[1,2,3]"));
+    }
+
+    #[test]
+    fn log_capture_clear_multiple_times() {
+        let capture = LogCapture::new();
+        capture.push_line("a");
+        capture.clear();
+        assert!(capture.jsonl().is_empty());
+        capture.push_line("b");
+        capture.clear();
+        assert!(capture.jsonl().is_empty());
+    }
+
+    // ---- Additional TracingCapture tests ----
+
+    #[test]
+    fn tracing_capture_new_no_errors_no_warnings() {
+        let capture = super::TracingCapture::new();
+        capture.assert_no_errors();
+        capture.assert_no_warnings();
+    }
+
+    #[test]
+    fn tracing_capture_events_returns_empty_vec_initially() {
+        let capture = super::TracingCapture::new();
+        let events = capture.events();
+        assert!(events.is_empty());
+        assert_eq!(events.len(), 0);
+    }
+
+    // ---- CapturedEvent additional tests ----
+
+    #[test]
+    fn captured_event_various_levels() {
+        for level in &["TRACE", "DEBUG", "INFO", "WARN", "ERROR"] {
+            let event = super::CapturedEvent {
+                level: level.to_string(),
+                message: "test msg".to_string(),
+                target: "test_target".to_string(),
+            };
+            assert_eq!(event.level, *level);
+        }
+    }
+
+    #[test]
+    fn captured_event_empty_message() {
+        let event = super::CapturedEvent {
+            level: "INFO".to_string(),
+            message: String::new(),
+            target: "t".to_string(),
+        };
+        assert!(event.message.is_empty());
+    }
+
+    #[test]
+    fn captured_event_clone_independence() {
+        let original = super::CapturedEvent {
+            level: "WARN".to_string(),
+            message: "original msg".to_string(),
+            target: "orig".to_string(),
+        };
+        let cloned = original.clone();
+        // Verify they are equal
+        assert_eq!(original.level, cloned.level);
+        assert_eq!(original.message, cloned.message);
+        assert_eq!(original.target, cloned.target);
+    }
 }

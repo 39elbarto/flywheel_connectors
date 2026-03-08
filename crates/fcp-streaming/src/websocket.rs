@@ -1529,4 +1529,142 @@ mod tests {
         let url = WsUrl::parse("ws://example.com/ws").unwrap();
         assert_eq!(socket_addr(&url), "example.com:80");
     }
+
+    // ── WsMessage: is_close on non-close variants ──────────────────────
+
+    #[test]
+    fn ws_message_text_is_not_close() {
+        let msg = WsMessage::text("hello");
+        assert!(!msg.is_close());
+    }
+
+    #[test]
+    fn ws_message_binary_is_not_close() {
+        let msg = WsMessage::binary(vec![1, 2, 3]);
+        assert!(!msg.is_close());
+    }
+
+    #[test]
+    fn ws_message_ping_is_not_close() {
+        let msg = WsMessage::Ping(vec![]);
+        assert!(!msg.is_close());
+    }
+
+    #[test]
+    fn ws_message_pong_is_not_close() {
+        let msg = WsMessage::Pong(vec![]);
+        assert!(!msg.is_close());
+    }
+
+    // ── WsMessage: text with special content ────────────────────────────
+
+    #[test]
+    fn ws_message_text_with_newlines() {
+        let msg = WsMessage::text("line1\nline2\nline3");
+        assert_eq!(msg.as_text(), Some("line1\nline2\nline3"));
+    }
+
+    #[test]
+    fn ws_message_text_with_null_bytes() {
+        let msg = WsMessage::text("before\0after");
+        assert_eq!(msg.as_text(), Some("before\0after"));
+    }
+
+    // ── WsMessage: binary with specific patterns ────────────────────────
+
+    #[test]
+    fn ws_message_binary_all_zeros() {
+        let data = vec![0_u8; 256];
+        let msg = WsMessage::binary(data.clone());
+        assert_eq!(msg.as_binary(), Some(data.as_slice()));
+    }
+
+    #[test]
+    fn ws_message_binary_all_0xff() {
+        let data = vec![0xFF_u8; 128];
+        let msg = WsMessage::binary(data.clone());
+        assert_eq!(msg.as_binary(), Some(data.as_slice()));
+    }
+
+    // ── WsCloseFrame: well-known codes ──────────────────────────────────
+
+    #[test]
+    fn ws_close_frame_protocol_error_code() {
+        let frame = WsCloseFrame::new(1002, "protocol error");
+        assert_eq!(frame.code, 1002);
+        assert_eq!(frame.reason, "protocol error");
+    }
+
+    #[test]
+    fn ws_close_frame_unsupported_data_code() {
+        let frame = WsCloseFrame::new(1003, "unsupported data");
+        assert_eq!(frame.code, 1003);
+    }
+
+    #[test]
+    fn ws_close_frame_abnormal_closure_code() {
+        let frame = WsCloseFrame::new(1006, "abnormal closure");
+        assert_eq!(frame.code, 1006);
+    }
+
+    // ── WsConfig: pong_timeout setter ───────────────────────────────────
+
+    #[test]
+    fn ws_config_pong_timeout_default() {
+        let config = WsConfig::default();
+        assert_eq!(config.pong_timeout, Duration::from_secs(10));
+    }
+
+    #[test]
+    fn ws_config_reconnect_delay_default() {
+        let config = WsConfig::default();
+        assert_eq!(config.reconnect_delay, Duration::from_secs(1));
+    }
+
+    #[test]
+    fn ws_config_max_reconnect_attempts_default() {
+        let config = WsConfig::default();
+        assert_eq!(config.max_reconnect_attempts, Some(10));
+    }
+
+    // ── websocket_error: additional WsError variants ────────────────────
+
+    #[test]
+    fn websocket_error_payload_zero_max() {
+        let err = WsError::PayloadTooLarge { size: 100, max: 0 };
+        let stream_err = websocket_error(err);
+        assert!(matches!(
+            stream_err,
+            StreamError::BufferOverflow {
+                size: 100,
+                limit: 0
+            }
+        ));
+    }
+
+    // ── WsCloseFrame: From<CloseReason> with different codes ────────────
+
+    #[test]
+    fn ws_close_frame_from_close_reason_going_away() {
+        let reason = CloseReason::with_text(CloseCode::GoingAway, "leaving");
+        let frame: WsCloseFrame = reason.into();
+        assert_eq!(frame.code, 1001);
+        assert_eq!(frame.reason, "leaving");
+    }
+
+    #[test]
+    fn ws_close_frame_into_close_reason_empty_reason() {
+        let frame = WsCloseFrame::new(1000, "");
+        let reason: CloseReason = frame.into();
+        // Empty reason results in text being None
+        assert!(reason.text.is_none());
+    }
+
+    #[test]
+    fn ws_close_frame_into_close_reason_with_text() {
+        let frame = WsCloseFrame::new(1000, "goodbye");
+        let reason: CloseReason = frame.into();
+        assert_eq!(reason.text.as_deref(), Some("goodbye"));
+        assert_eq!(reason.raw_code, Some(1000));
+    }
 }

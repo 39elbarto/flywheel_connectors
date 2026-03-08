@@ -1280,7 +1280,7 @@ replay = false
     }
 
     #[test]
-    fn run_audit_missing_manifest_connectors() {
+    fn run_audit_all_connectors_have_entries() {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../connectors");
         if !root.exists() {
@@ -1288,11 +1288,16 @@ replay = false
         }
 
         let matrix = run_audit(&root).unwrap();
-        assert!(matrix.missing_manifest >= 3); // redis, postgresql, whisper
-
-        for name in &["redis", "postgresql", "whisper"] {
-            if let Some(audit) = matrix.connectors.get(*name) {
-                assert!(!audit.has_manifest);
+        // Every connector dir appears in the matrix
+        assert_eq!(matrix.connectors.len(), matrix.total_connectors);
+        // Manifest counts add up
+        assert_eq!(
+            matrix.with_manifest + matrix.missing_manifest,
+            matrix.total_connectors,
+        );
+        // Any connector without a manifest is NotReady
+        for audit in matrix.connectors.values() {
+            if !audit.has_manifest {
                 assert_eq!(audit.level, ReadinessLevel::NotReady);
             }
         }

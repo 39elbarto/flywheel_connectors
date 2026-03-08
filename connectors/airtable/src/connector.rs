@@ -856,6 +856,87 @@ impl AirtableConnector {
                     },
                 ),
                 op_info(
+                    "airtable.update_records",
+                    "Update multiple Airtable records in one batch PATCH request (max 10)",
+                    json!({
+                        "type": "object",
+                        "required": ["base_id", "table_id", "records"],
+                        "properties": {
+                            "base_id": { "type": "string", "description": "Airtable base ID" },
+                            "table_id": { "type": "string", "description": "Table name or ID" },
+                            "records": { "type": "array", "description": "Array of record patches with id + fields (max 10)", "maxItems": 10 },
+                            "typecast": { "type": "boolean", "description": "If true, try to convert string values" }
+                        }
+                    }),
+                    json!({
+                        "type": "object",
+                        "required": ["records"],
+                        "properties": {
+                            "records": { "type": "array" }
+                        }
+                    }),
+                    "airtable.write",
+                    RiskLevel::Medium,
+                    SafetyTier::Risky,
+                    IdempotencyClass::Strict,
+                    AgentHint {
+                        when_to_use: "Patch multiple existing Airtable records efficiently while keeping record identities stable.".into(),
+                        common_mistakes: vec![
+                            "Omitting the record id for one of the batch items.".into(),
+                            "Sending more than 10 records in a single request.".into(),
+                        ],
+                        examples: vec![r#"{"base_id": "appXXX", "table_id": "Tasks", "records": [{"id": "recA", "fields": {"Status": "Done"}}]}"#.into()],
+                        related: vec![
+                            CapabilityId::from_static("airtable.update_record"),
+                            CapabilityId::from_static("airtable.upsert_records"),
+                        ],
+                    },
+                ),
+                op_info(
+                    "airtable.upsert_records",
+                    "Upsert multiple Airtable records using merge fields for retry-safe workflows",
+                    json!({
+                        "type": "object",
+                        "required": ["base_id", "table_id", "records", "fields_to_merge_on"],
+                        "properties": {
+                            "base_id": { "type": "string", "description": "Airtable base ID" },
+                            "table_id": { "type": "string", "description": "Table name or ID" },
+                            "records": { "type": "array", "description": "Array of records with fields payloads (max 10)", "maxItems": 10 },
+                            "fields_to_merge_on": {
+                                "type": "array",
+                                "items": { "type": "string" },
+                                "description": "Field IDs or exact field names used to match existing Airtable records"
+                            },
+                            "typecast": { "type": "boolean", "description": "If true, try to convert string values" }
+                        }
+                    }),
+                    json!({
+                        "type": "object",
+                        "required": ["records", "createdRecords", "updatedRecords"],
+                        "properties": {
+                            "records": { "type": "array" },
+                            "createdRecords": { "type": "array" },
+                            "updatedRecords": { "type": "array" }
+                        }
+                    }),
+                    "airtable.write",
+                    RiskLevel::Medium,
+                    SafetyTier::Risky,
+                    IdempotencyClass::Strict,
+                    AgentHint {
+                        when_to_use: "Create-or-update Airtable records when retries must stay deterministic.".into(),
+                        common_mistakes: vec![
+                            "Using merge fields that do not exist in the table schema.".into(),
+                            "Assuming upsert is safe without stable merge keys.".into(),
+                        ],
+                        examples: vec![r#"{"base_id": "appXXX", "table_id": "Tasks", "fields_to_merge_on": ["External ID"], "records": [{"fields": {"External ID": "ext-1", "Name": "Alpha"}}]}"#.into()],
+                        related: vec![
+                            CapabilityId::from_static("airtable.create_records"),
+                            CapabilityId::from_static("airtable.update_records"),
+                        ],
+                    },
+                ),
+                op_info(
                     "airtable.update_record",
                     "Update an existing record in an Airtable table (PATCH)",
                     json!({
@@ -961,6 +1042,46 @@ impl AirtableConnector {
                         ],
                         examples: vec![r#"{"base_id": "appXXX", "table_id": "Tasks", "record_id": "recYYY"}"#.into()],
                         related: vec![CapabilityId::from_static("airtable.get_record")],
+                    },
+                ),
+                op_info(
+                    "airtable.delete_records",
+                    "Delete multiple Airtable records in one request (irreversible, max 10)",
+                    json!({
+                        "type": "object",
+                        "required": ["base_id", "table_id", "record_ids"],
+                        "properties": {
+                            "base_id": { "type": "string", "description": "Airtable base ID" },
+                            "table_id": { "type": "string", "description": "Table name or ID" },
+                            "record_ids": {
+                                "type": "array",
+                                "items": { "type": "string" },
+                                "description": "Record IDs to delete (max 10)"
+                            }
+                        }
+                    }),
+                    json!({
+                        "type": "object",
+                        "required": ["records"],
+                        "properties": {
+                            "records": { "type": "array" }
+                        }
+                    }),
+                    "airtable.delete",
+                    RiskLevel::High,
+                    SafetyTier::Dangerous,
+                    IdempotencyClass::Strict,
+                    AgentHint {
+                        when_to_use: "Remove a bounded set of Airtable records after explicit confirmation.".into(),
+                        common_mistakes: vec![
+                            "Sending more than 10 record IDs in one destructive batch.".into(),
+                            "Deleting records that are still referenced by linked-record fields.".into(),
+                        ],
+                        examples: vec![r#"{"base_id": "appXXX", "table_id": "Tasks", "record_ids": ["recA", "recB"]}"#.into()],
+                        related: vec![
+                            CapabilityId::from_static("airtable.delete_record"),
+                            CapabilityId::from_static("airtable.get_record"),
+                        ],
                     },
                 ),
                 op_info(
@@ -1091,9 +1212,12 @@ impl AirtableConnector {
             "airtable.get_record" => self.invoke_get_record(input).await,
             "airtable.create_record" => self.invoke_create_record(input).await,
             "airtable.create_records" => self.invoke_create_records(input).await,
+            "airtable.update_records" => self.invoke_update_records(input).await,
+            "airtable.upsert_records" => self.invoke_upsert_records(input).await,
             "airtable.update_record" => self.invoke_update_record(input).await,
             "airtable.replace_record" => self.invoke_replace_record(input).await,
             "airtable.delete_record" => self.invoke_delete_record(input).await,
+            "airtable.delete_records" => self.invoke_delete_records(input).await,
             "airtable.download_attachment" => self.invoke_download_attachment(input).await,
             _ => Err(FcpError::OperationNotGranted {
                 operation: operation.into(),
@@ -1362,6 +1486,55 @@ impl AirtableConnector {
         Ok(json!({ "records": result.records }))
     }
 
+    async fn invoke_update_records(
+        &self,
+        input: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let base_id = require_base_id(&input)?;
+        let table_ref = require_nonempty_str(&input, "table_id")?;
+        let schema = self.get_base_schema_cached(base_id).await?;
+        let table = resolve_table(&schema.tables, table_ref)?;
+        let records = parse_record_payloads(&input, true)?;
+        let typecast = input.get("typecast").and_then(|v| v.as_bool());
+
+        let result = client
+            .update_records(base_id, &table.id, &records, typecast)
+            .await
+            .map_err(|e: AirtableError| e.to_fcp_error())?;
+
+        Ok(json!({ "records": result.records }))
+    }
+
+    async fn invoke_upsert_records(
+        &self,
+        input: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let base_id = require_base_id(&input)?;
+        let table_ref = require_nonempty_str(&input, "table_id")?;
+        let schema = self.get_base_schema_cached(base_id).await?;
+        let table = resolve_table(&schema.tables, table_ref)?;
+        let records = parse_record_payloads(&input, false)?;
+        let fields_to_merge_on = parse_fields_to_merge_on(&input, table)?;
+        let typecast = input.get("typecast").and_then(|v| v.as_bool());
+
+        let result = client
+            .upsert_records(
+                base_id,
+                &table.id,
+                &records,
+                fields_to_merge_on.as_slice(),
+                typecast,
+            )
+            .await
+            .map_err(|e: AirtableError| e.to_fcp_error())?;
+
+        serde_json::to_value(result).map_err(|e| FcpError::Internal {
+            message: format!("Failed to serialize result: {e}"),
+        })
+    }
+
     async fn invoke_update_record(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
         let base_id = require_str(&input, "base_id")?;
@@ -1414,6 +1587,27 @@ impl AirtableConnector {
 
         let result = client
             .delete_record(base_id, table_id, record_id)
+            .await
+            .map_err(|e: AirtableError| e.to_fcp_error())?;
+
+        serde_json::to_value(result).map_err(|e| FcpError::Internal {
+            message: format!("Failed to serialize result: {e}"),
+        })
+    }
+
+    async fn invoke_delete_records(
+        &self,
+        input: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let base_id = require_base_id(&input)?;
+        let table_ref = require_nonempty_str(&input, "table_id")?;
+        let schema = self.get_base_schema_cached(base_id).await?;
+        let table = resolve_table(&schema.tables, table_ref)?;
+        let record_ids = parse_record_ids(&input, "record_ids")?;
+
+        let result = client
+            .delete_records(base_id, &table.id, record_ids.as_slice())
             .await
             .map_err(|e: AirtableError| e.to_fcp_error())?;
 
@@ -1682,6 +1876,62 @@ fn parse_record_bound(input: &serde_json::Value, field: &str) -> FcpResult<Optio
     Ok(Some(raw as u32))
 }
 
+fn parse_record_payloads(
+    input: &serde_json::Value,
+    require_ids: bool,
+) -> FcpResult<Vec<serde_json::Value>> {
+    let records = input
+        .get("records")
+        .and_then(|value| value.as_array())
+        .ok_or(FcpError::InvalidRequest {
+            code: 1003,
+            message: "Missing required field: records (must be an array)".into(),
+        })?;
+    if records.is_empty() || records.len() > 10 {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "records must contain between 1 and 10 items".into(),
+        });
+    }
+
+    records
+        .iter()
+        .enumerate()
+        .map(|(index, record)| {
+            let object = record.as_object().ok_or(FcpError::InvalidRequest {
+                code: 1003,
+                message: format!("records[{index}] must be an object"),
+            })?;
+            if require_ids {
+                let id = object.get("id").and_then(|value| value.as_str()).ok_or(
+                    FcpError::InvalidRequest {
+                        code: 1003,
+                        message: format!("records[{index}].id must be a non-empty string"),
+                    },
+                )?;
+                if id.trim().is_empty() {
+                    return Err(FcpError::InvalidRequest {
+                        code: 1003,
+                        message: format!("records[{index}].id must be a non-empty string"),
+                    });
+                }
+            }
+
+            if !object
+                .get("fields")
+                .is_some_and(serde_json::Value::is_object)
+            {
+                return Err(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: format!("records[{index}].fields must be an object"),
+                });
+            }
+
+            Ok(record.clone())
+        })
+        .collect()
+}
+
 fn optional_nonempty_string(input: &serde_json::Value, field: &str) -> FcpResult<Option<String>> {
     let Some(value) = input.get(field) else {
         return Ok(None);
@@ -1700,6 +1950,42 @@ fn optional_nonempty_string(input: &serde_json::Value, field: &str) -> FcpResult
     }
 
     Ok(Some(trimmed.to_string()))
+}
+
+fn parse_record_ids(input: &serde_json::Value, field: &str) -> FcpResult<Vec<String>> {
+    let values =
+        input
+            .get(field)
+            .and_then(|value| value.as_array())
+            .ok_or(FcpError::InvalidRequest {
+                code: 1003,
+                message: format!("Missing required field: {field} (must be an array)"),
+            })?;
+    if values.is_empty() || values.len() > 10 {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("{field} must contain between 1 and 10 record IDs"),
+        });
+    }
+
+    values
+        .iter()
+        .enumerate()
+        .map(|(index, value)| {
+            let record_id = value.as_str().ok_or(FcpError::InvalidRequest {
+                code: 1003,
+                message: format!("{field}[{index}] must be a non-empty string"),
+            })?;
+            let trimmed = record_id.trim();
+            if trimmed.is_empty() {
+                return Err(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: format!("{field}[{index}] must be a non-empty string"),
+                });
+            }
+            Ok(trimmed.to_string())
+        })
+        .collect()
 }
 
 fn parse_sort_specs(
@@ -1759,6 +2045,28 @@ fn parse_sort_specs(
         })
         .collect::<FcpResult<Vec<_>>>()
         .map(Some)
+}
+
+fn parse_fields_to_merge_on(
+    input: &serde_json::Value,
+    table: &TableSchema,
+) -> FcpResult<Vec<String>> {
+    let field_refs = input
+        .get("fields_to_merge_on")
+        .and_then(|value| value.as_array())
+        .ok_or(FcpError::InvalidRequest {
+            code: 1003,
+            message: "Missing required field: fields_to_merge_on (must be an array)".into(),
+        })?;
+    if field_refs.is_empty() {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "fields_to_merge_on must contain at least one Airtable field".into(),
+        });
+    }
+
+    let resolved = resolve_fields(table, field_refs)?;
+    Ok(resolved.into_iter().map(|field| field.name).collect())
 }
 
 #[allow(clippy::fn_params_excessive_bools)]
@@ -1930,11 +2238,14 @@ mod tests {
         assert!(op_ids.contains(&"airtable.get_record"));
         assert!(op_ids.contains(&"airtable.create_record"));
         assert!(op_ids.contains(&"airtable.create_records"));
+        assert!(op_ids.contains(&"airtable.update_records"));
+        assert!(op_ids.contains(&"airtable.upsert_records"));
         assert!(op_ids.contains(&"airtable.update_record"));
         assert!(op_ids.contains(&"airtable.replace_record"));
         assert!(op_ids.contains(&"airtable.delete_record"));
+        assert!(op_ids.contains(&"airtable.delete_records"));
         assert!(op_ids.contains(&"airtable.download_attachment"));
-        assert_eq!(ops.len(), 16);
+        assert_eq!(ops.len(), 19);
     }
 
     #[fcp_async_core::runtime::test]

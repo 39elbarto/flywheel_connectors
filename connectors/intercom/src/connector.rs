@@ -1029,7 +1029,11 @@ mod tests {
 
     #[test]
     fn doctor_status_serde_roundtrip() {
-        for status in [DoctorStatus::Healthy, DoctorStatus::Degraded, DoctorStatus::Unhealthy] {
+        for status in [
+            DoctorStatus::Healthy,
+            DoctorStatus::Degraded,
+            DoctorStatus::Unhealthy,
+        ] {
             let s = serde_json::to_string(&status).unwrap();
             let back: DoctorStatus = serde_json::from_str(&s).unwrap();
             assert_eq!(back, status);
@@ -1092,8 +1096,18 @@ mod tests {
     #[test]
     fn doctor_result_multiple_critical_failures() {
         let r = DoctorResult::from_checks(vec![
-            DoctorCheck { name: "a".into(), passed: false, message: None, critical: true },
-            DoctorCheck { name: "b".into(), passed: false, message: None, critical: true },
+            DoctorCheck {
+                name: "a".into(),
+                passed: false,
+                message: None,
+                critical: true,
+            },
+            DoctorCheck {
+                name: "b".into(),
+                passed: false,
+                message: None,
+                critical: true,
+            },
         ]);
         assert_eq!(r.status, DoctorStatus::Unhealthy);
     }
@@ -1101,8 +1115,18 @@ mod tests {
     #[test]
     fn doctor_result_unhealthy_overrides_degraded() {
         let r = DoctorResult::from_checks(vec![
-            DoctorCheck { name: "a".into(), passed: false, message: None, critical: true },
-            DoctorCheck { name: "b".into(), passed: false, message: None, critical: false },
+            DoctorCheck {
+                name: "a".into(),
+                passed: false,
+                message: None,
+                critical: true,
+            },
+            DoctorCheck {
+                name: "b".into(),
+                passed: false,
+                message: None,
+                critical: false,
+            },
         ]);
         assert_eq!(r.status, DoctorStatus::Unhealthy);
     }
@@ -1123,7 +1147,10 @@ mod tests {
     #[test]
     fn operations_contacts_create_is_risky() {
         let ops = operations_info();
-        let op = ops.as_array().unwrap().iter()
+        let op = ops
+            .as_array()
+            .unwrap()
+            .iter()
             .find(|o| o["id"] == "intercom.contacts.create")
             .unwrap();
         assert_eq!(op["safety_tier"], "risky");
@@ -1133,7 +1160,10 @@ mod tests {
     #[test]
     fn operations_contacts_delete_is_dangerous() {
         let ops = operations_info();
-        let op = ops.as_array().unwrap().iter()
+        let op = ops
+            .as_array()
+            .unwrap()
+            .iter()
             .find(|o| o["id"] == "intercom.contacts.delete")
             .unwrap();
         assert_eq!(op["safety_tier"], "dangerous");
@@ -1143,7 +1173,10 @@ mod tests {
     #[test]
     fn operations_conversations_reply_not_idempotent() {
         let ops = operations_info();
-        let op = ops.as_array().unwrap().iter()
+        let op = ops
+            .as_array()
+            .unwrap()
+            .iter()
             .find(|o| o["id"] == "intercom.conversations.reply")
             .unwrap();
         assert_eq!(op["idempotency"], "none");
@@ -1152,7 +1185,10 @@ mod tests {
     #[test]
     fn operations_tags_list_is_safe() {
         let ops = operations_info();
-        let op = ops.as_array().unwrap().iter()
+        let op = ops
+            .as_array()
+            .unwrap()
+            .iter()
             .find(|o| o["id"] == "intercom.tags.list")
             .unwrap();
         assert_eq!(op["safety_tier"], "safe");
@@ -1165,7 +1201,10 @@ mod tests {
         let ops = operations_info();
         for op in ops.as_array().unwrap() {
             let id = op["id"].as_str().unwrap();
-            assert!(id.starts_with("intercom."), "op {id} missing intercom. prefix");
+            assert!(
+                id.starts_with("intercom."),
+                "op {id} missing intercom. prefix"
+            );
         }
     }
 
@@ -1191,7 +1230,10 @@ mod tests {
     fn require_str_error_message_content() {
         let input = json!({});
         match require_str(&input, "contact_id").unwrap_err() {
-            IntercomError::Api { status_code, message } => {
+            IntercomError::Api {
+                status_code,
+                message,
+            } => {
                 assert_eq!(status_code, 400);
                 assert!(message.contains("contact_id"));
             }

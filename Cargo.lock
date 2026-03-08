@@ -2514,6 +2514,7 @@ dependencies = [
  "fcp-google-calendar",
  "fcp-grafana",
  "fcp-homeassistant",
+ "fcp-host",
  "fcp-hubspot",
  "fcp-intercom",
  "fcp-jira",

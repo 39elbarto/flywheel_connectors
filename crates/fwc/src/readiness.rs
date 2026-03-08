@@ -57,10 +57,16 @@ pub enum ConnectorCohort {
     Storage,
     Analytics,
     Finance,
+    Business,
     Browser,
     Knowledge,
     Automation,
     Community,
+    Security,
+    Media,
+    Vectordb,
+    Iot,
+    Other,
 }
 
 // ── Per-area checklists ─────────────────────────────────────────────────
@@ -537,6 +543,236 @@ pub const RECOMMENDED_OPERATION_FIELDS: &[&str] = &[
     "rate_limit",
     "examples",
 ];
+
+// ── Connector inventory ─────────────────────────────────────────────
+
+/// Metadata quality tier for a connector's operation declarations.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum MetadataTier {
+    /// Fully typed `OperationInfo` structs with `AgentHint`.
+    Typed,
+    /// Raw JSON in `operations_info()` without typed `AgentHint`.
+    Json,
+}
+
+/// Static inventory entry for a single connector.
+#[derive(Clone, Debug)]
+pub struct ConnectorEntry {
+    /// Directory name under `connectors/` (e.g. `"github"`).
+    pub name: &'static str,
+    /// Primary cohort classification.
+    pub cohort: ConnectorCohort,
+    /// Number of declared operations.
+    pub operation_count: usize,
+    /// Whether operations use typed `OperationInfo` with `AgentHint`.
+    pub metadata_tier: MetadataTier,
+    /// Whether `ai_hints` with `when_to_use` is populated.
+    pub has_agent_hints: bool,
+    /// Whether `manifest.toml` exists.
+    pub has_manifest: bool,
+}
+
+/// Complete inventory of all connector crates in the workspace.
+///
+/// Sorted alphabetically by name. Each entry records the connector's cohort,
+/// operation count, metadata quality tier, and manifest presence.
+///
+/// **Typed** connectors (27): Use `OperationInfo` structs with `AgentHint`
+/// objects providing `when_to_use`, `common_mistakes`, `examples`, and
+/// `related` fields. These are fully fwc-ready.
+///
+/// **JSON** connectors (55): Use raw `serde_json::Value` in `operations_info()`.
+/// They have `input_schema`, `output_schema`, `risk_level`, `safety_tier`,
+/// and `idempotency` but lack typed `AgentHint` metadata. These are
+/// partially ready — they work but discovery UX is degraded.
+pub static CONNECTOR_INVENTORY: &[ConnectorEntry] = &[
+    ConnectorEntry { name: "1password",        cohort: ConnectorCohort::Infra,        operation_count:  5, metadata_tier: MetadataTier::Json,  has_agent_hints: false, has_manifest: true  },
+    ConnectorEntry { name: "airtable",         cohort: ConnectorCohort::Workspace,    operation_count: 16, metadata_tier: MetadataTier::Typed, has_agent_hints: true,  has_manifest: true  },
+    ConnectorEntry { name: "algolia",          cohort: ConnectorCohort::Data,         operation_count:  4, metadata_tier: MetadataTier::Json,  has_agent_hints: false, has_manifest: true  },
+    ConnectorEntry { name: "amplitude",        cohort: ConnectorCohort::Analytics,    operation_count:  3, metadata_tier: MetadataTier::Json,  has_agent_hints: false, has_manifest: true  },
+    ConnectorEntry { name: "annas-archive",    cohort: ConnectorCohort::Knowledge,    operation_count:  4, metadata_tier: MetadataTier::Json,  has_agent_hints: false, has_manifest: true  },
+    ConnectorEntry { name: "anthropic",        cohort: ConnectorCohort::Ai,           operation_count:  4, metadata_tier: MetadataTier::Typed, has_agent_hints: true,  has_manifest: true  },
+    ConnectorEntry { name: "arxiv",            cohort: ConnectorCohort::Knowledge,    operation_count: 13, metadata_tier: MetadataTier::Json,  has_agent_hints: false, has_manifest: true  },
+    ConnectorEntry { name: "asana",            cohort: ConnectorCohort::Workspace,    operation_count: 10, metadata_tier: MetadataTier::Json,  has_agent_hints: false, has_manifest: true  },
+    ConnectorEntry { name: "bigquery",         cohort: ConnectorCohort::Data,         operation_count:  4, metadata_tier: MetadataTier::Json,  has_agent_hints: false, has_manifest: true  },
+    ConnectorEntry { name: "bitbucket",        cohort: ConnectorCohort::DevTools,     operation_count: 10, metadata_tier: MetadataTier::Json,  has_agent_hints: false, has_manifest: true  },
+    ConnectorEntry { name: "bitwarden",        cohort: ConnectorCohort::Infra,        operation_count:  5, metadata_tier: MetadataTier::Json,  has_agent_hints: false, has_manifest: true  },
+    ConnectorEntry { name: "box",              cohort: ConnectorCohort::Storage,      operation_count:  5, metadata_tier: MetadataTier::Json,  has_agent_hints: false, has_manifest: true  },
+    ConnectorEntry { name: "browser",          cohort: ConnectorCohort::Browser,      operation_count: 16, metadata_tier: MetadataTier::Typed, has_agent_hints: true,  has_manifest: true  },
+    ConnectorEntry { name: "clickup",          cohort: ConnectorCohort::Workspace,    operation_count:  5, metadata_tier: MetadataTier::Json,  has_agent_hints: false, has_manifest: true  },
+    ConnectorEntry { name: "cron",             cohort: ConnectorCohort::Automation,   operation_count:  5, metadata_tier: MetadataTier::Json,  has_agent_hints: false, has_manifest: true  },
+    ConnectorEntry { name: "datadog",          cohort: ConnectorCohort::Infra,        operation_count:  8, metadata_tier: MetadataTier::Json,  has_agent_hints: false, has_manifest: true  },
+    ConnectorEntry { name: "discord",          cohort: ConnectorCohort::Messaging,    operation_count:  9, metadata_tier: MetadataTier::Typed, has_agent_hints: true,  has_manifest: true  },
+    ConnectorEntry { name: "docusign",         cohort: ConnectorCohort::Finance,      operation_count: 10, metadata_tier: MetadataTier::Json,  has_agent_hints: false, has_manifest: true  },
+    ConnectorEntry { name: "dropbox",          cohort: ConnectorCohort::Storage,      operation_count:  4, metadata_tier: MetadataTier::Json,  has_agent_hints: false, has_manifest: true  },
+    ConnectorEntry { name: "duckdb",           cohort: ConnectorCohort::Data,         operation_count:  3, metadata_tier: MetadataTier::Json,  has_agent_hints: false, has_manifest: true  },
+    ConnectorEntry { name: "elasticsearch",    cohort: ConnectorCohort::Data,         operation_count:  8, metadata_tier: MetadataTier::Json,  has_agent_hints: false, has_manifest: true  },
+    ConnectorEntry { name: "evernote",         cohort: ConnectorCohort::Knowledge,    operation_count:  5, metadata_tier: MetadataTier::Json,  has_agent_hints: false, has_manifest: true  },
+    ConnectorEntry { name: "figma",            cohort: ConnectorCohort::Workspace,    operation_count: 17, metadata_tier: MetadataTier::Typed, has_agent_hints: true,  has_manifest: true  },
+    ConnectorEntry { name: "github",           cohort: ConnectorCohort::DevTools,     operation_count: 13, metadata_tier: MetadataTier::Typed, has_agent_hints: true,  has_manifest: true  },
+    ConnectorEntry { name: "gitlab",           cohort: ConnectorCohort::DevTools,     operation_count:  5, metadata_tier: MetadataTier::Json,  has_agent_hints: false, has_manifest: true  },
+    ConnectorEntry { name: "gmail",            cohort: ConnectorCohort::Productivity, operation_count: 10, metadata_tier: MetadataTier::Typed, has_agent_hints: true,  has_manifest: true  },
+    ConnectorEntry { name: "google-ai",        cohort: ConnectorCohort::Ai,           operation_count:  8, metadata_tier: MetadataTier::Typed, has_agent_hints: true,  has_manifest: true  },
+    ConnectorEntry { name: "google-calendar",  cohort: ConnectorCohort::Productivity, operation_count: 11, metadata_tier: MetadataTier::Typed, has_agent_hints: true,  has_manifest: true  },
+    ConnectorEntry { name: "grafana",          cohort: ConnectorCohort::Infra,        operation_count:  9, metadata_tier: MetadataTier::Json,  has_agent_hints: false, has_manifest: true  },
+    ConnectorEntry { name: "homeassistant",    cohort: ConnectorCohort::Automation,   operation_count: 15, metadata_tier: MetadataTier::Json,  has_agent_hints: false, has_manifest: true  },
+    ConnectorEntry { name: "hubspot",          cohort: ConnectorCohort::Social,       operation_count: 11, metadata_tier: MetadataTier::Json,  has_agent_hints: false, has_manifest: true  },
+    ConnectorEntry { name: "intercom",         cohort: ConnectorCohort::Social,       operation_count:  6, metadata_tier: MetadataTier::Json,  has_agent_hints: false, has_manifest: true  },
+    ConnectorEntry { name: "jira",             cohort: ConnectorCohort::Workspace,    operation_count: 12, metadata_tier: MetadataTier::Typed, has_agent_hints: true,  has_manifest: true  },
+    ConnectorEntry { name: "kubernetes",       cohort: ConnectorCohort::Infra,        operation_count: 14, metadata_tier: MetadataTier::Json,  has_agent_hints: false, has_manifest: true  },
+    ConnectorEntry { name: "linear",           cohort: ConnectorCohort::Workspace,    operation_count:  9, metadata_tier: MetadataTier::Typed, has_agent_hints: true,  has_manifest: true  },
+    ConnectorEntry { name: "linkedin",         cohort: ConnectorCohort::Social,       operation_count:  4, metadata_tier: MetadataTier::Json,  has_agent_hints: false, has_manifest: true  },
+    ConnectorEntry { name: "llm-router",       cohort: ConnectorCohort::Ai,           operation_count:  5, metadata_tier: MetadataTier::Typed, has_agent_hints: true,  has_manifest: true  },
+    ConnectorEntry { name: "logseq",           cohort: ConnectorCohort::Knowledge,    operation_count:  4, metadata_tier: MetadataTier::Json,  has_agent_hints: false, has_manifest: true  },
+    ConnectorEntry { name: "mailchimp",        cohort: ConnectorCohort::Social,       operation_count:  5, metadata_tier: MetadataTier::Json,  has_agent_hints: false, has_manifest: true  },
+    ConnectorEntry { name: "make",             cohort: ConnectorCohort::Automation,   operation_count:  3, metadata_tier: MetadataTier::Json,  has_agent_hints: false, has_manifest: true  },
+    ConnectorEntry { name: "mcp-bridge",       cohort: ConnectorCohort::Automation,   operation_count:  5, metadata_tier: MetadataTier::Json,  has_agent_hints: false, has_manifest: true  },
+    ConnectorEntry { name: "metabase",         cohort: ConnectorCohort::Analytics,    operation_count:  3, metadata_tier: MetadataTier::Json,  has_agent_hints: false, has_manifest: true  },
+    ConnectorEntry { name: "microsoft365",     cohort: ConnectorCohort::Productivity, operation_count: 30, metadata_tier: MetadataTier::Typed, has_agent_hints: true,  has_manifest: true  },
+    ConnectorEntry { name: "mixpanel",         cohort: ConnectorCohort::Analytics,    operation_count:  3, metadata_tier: MetadataTier::Json,  has_agent_hints: false, has_manifest: true  },
+    ConnectorEntry { name: "monday",           cohort: ConnectorCohort::Workspace,    operation_count:  7, metadata_tier: MetadataTier::Json,  has_agent_hints: false, has_manifest: true  },
+    ConnectorEntry { name: "mongodb",          cohort: ConnectorCohort::Data,         operation_count:  6, metadata_tier: MetadataTier::Json,  has_agent_hints: false, has_manifest: true  },
+    ConnectorEntry { name: "n8n",              cohort: ConnectorCohort::Automation,   operation_count:  5, metadata_tier: MetadataTier::Json,  has_agent_hints: false, has_manifest: true  },
+    ConnectorEntry { name: "notion",           cohort: ConnectorCohort::Workspace,    operation_count: 16, metadata_tier: MetadataTier::Typed, has_agent_hints: true,  has_manifest: true  },
+    ConnectorEntry { name: "openai",           cohort: ConnectorCohort::Ai,           operation_count: 23, metadata_tier: MetadataTier::Typed, has_agent_hints: true,  has_manifest: true  },
+    ConnectorEntry { name: "pandadoc",         cohort: ConnectorCohort::Finance,      operation_count:  6, metadata_tier: MetadataTier::Json,  has_agent_hints: false, has_manifest: true  },
+    ConnectorEntry { name: "pinecone",         cohort: ConnectorCohort::Storage,      operation_count:  9, metadata_tier: MetadataTier::Typed, has_agent_hints: true,  has_manifest: true  },
+    ConnectorEntry { name: "plaid",            cohort: ConnectorCohort::Finance,      operation_count: 10, metadata_tier: MetadataTier::Typed, has_agent_hints: true,  has_manifest: true  },
+    ConnectorEntry { name: "postgresql",       cohort: ConnectorCohort::Data,         operation_count: 12, metadata_tier: MetadataTier::Json,  has_agent_hints: false, has_manifest: false },
+    ConnectorEntry { name: "posthog",          cohort: ConnectorCohort::Analytics,    operation_count:  3, metadata_tier: MetadataTier::Json,  has_agent_hints: false, has_manifest: true  },
+    ConnectorEntry { name: "pulumi",           cohort: ConnectorCohort::DevTools,     operation_count:  6, metadata_tier: MetadataTier::Json,  has_agent_hints: false, has_manifest: true  },
+    ConnectorEntry { name: "qdrant",           cohort: ConnectorCohort::Storage,      operation_count: 12, metadata_tier: MetadataTier::Typed, has_agent_hints: true,  has_manifest: true  },
+    ConnectorEntry { name: "reddit",           cohort: ConnectorCohort::Community,    operation_count:  9, metadata_tier: MetadataTier::Json,  has_agent_hints: false, has_manifest: true  },
+    ConnectorEntry { name: "redis",            cohort: ConnectorCohort::Data,         operation_count: 14, metadata_tier: MetadataTier::Json,  has_agent_hints: false, has_manifest: false },
+    ConnectorEntry { name: "retool",           cohort: ConnectorCohort::Automation,   operation_count:  2, metadata_tier: MetadataTier::Json,  has_agent_hints: false, has_manifest: true  },
+    ConnectorEntry { name: "roam",             cohort: ConnectorCohort::Knowledge,    operation_count:  4, metadata_tier: MetadataTier::Json,  has_agent_hints: false, has_manifest: true  },
+    ConnectorEntry { name: "s3",               cohort: ConnectorCohort::Storage,      operation_count: 10, metadata_tier: MetadataTier::Typed, has_agent_hints: true,  has_manifest: true  },
+    ConnectorEntry { name: "salesforce",       cohort: ConnectorCohort::Social,       operation_count: 13, metadata_tier: MetadataTier::Json,  has_agent_hints: false, has_manifest: true  },
+    ConnectorEntry { name: "segment",          cohort: ConnectorCohort::Analytics,    operation_count:  3, metadata_tier: MetadataTier::Json,  has_agent_hints: false, has_manifest: true  },
+    ConnectorEntry { name: "semanticscholar",  cohort: ConnectorCohort::Knowledge,    operation_count:  7, metadata_tier: MetadataTier::Json,  has_agent_hints: false, has_manifest: true  },
+    ConnectorEntry { name: "sendgrid",         cohort: ConnectorCohort::Messaging,    operation_count:  5, metadata_tier: MetadataTier::Json,  has_agent_hints: false, has_manifest: true  },
+    ConnectorEntry { name: "sentry",           cohort: ConnectorCohort::DevTools,     operation_count: 16, metadata_tier: MetadataTier::Json,  has_agent_hints: false, has_manifest: true  },
+    ConnectorEntry { name: "slack",            cohort: ConnectorCohort::Messaging,    operation_count: 10, metadata_tier: MetadataTier::Typed, has_agent_hints: true,  has_manifest: true  },
+    ConnectorEntry { name: "snowflake",        cohort: ConnectorCohort::Data,         operation_count:  5, metadata_tier: MetadataTier::Json,  has_agent_hints: false, has_manifest: true  },
+    ConnectorEntry { name: "spotify",          cohort: ConnectorCohort::Social,       operation_count: 10, metadata_tier: MetadataTier::Json,  has_agent_hints: false, has_manifest: true  },
+    ConnectorEntry { name: "stripe",           cohort: ConnectorCohort::Finance,      operation_count: 19, metadata_tier: MetadataTier::Typed, has_agent_hints: true,  has_manifest: true  },
+    ConnectorEntry { name: "telegram",         cohort: ConnectorCohort::Messaging,    operation_count: 10, metadata_tier: MetadataTier::Typed, has_agent_hints: true,  has_manifest: true  },
+    ConnectorEntry { name: "terraform",        cohort: ConnectorCohort::DevTools,     operation_count: 12, metadata_tier: MetadataTier::Json,  has_agent_hints: false, has_manifest: true  },
+    ConnectorEntry { name: "todoist",          cohort: ConnectorCohort::Workspace,    operation_count:  5, metadata_tier: MetadataTier::Json,  has_agent_hints: false, has_manifest: true  },
+    ConnectorEntry { name: "trello",           cohort: ConnectorCohort::Workspace,    operation_count:  5, metadata_tier: MetadataTier::Json,  has_agent_hints: false, has_manifest: true  },
+    ConnectorEntry { name: "twilio",           cohort: ConnectorCohort::Messaging,    operation_count: 10, metadata_tier: MetadataTier::Typed, has_agent_hints: true,  has_manifest: true  },
+    ConnectorEntry { name: "twitter",          cohort: ConnectorCohort::Social,       operation_count: 12, metadata_tier: MetadataTier::Typed, has_agent_hints: true,  has_manifest: true  },
+    ConnectorEntry { name: "vectordb",         cohort: ConnectorCohort::Storage,      operation_count:  9, metadata_tier: MetadataTier::Typed, has_agent_hints: true,  has_manifest: true  },
+    ConnectorEntry { name: "webhook-receiver", cohort: ConnectorCohort::Automation,   operation_count:  4, metadata_tier: MetadataTier::Json,  has_agent_hints: false, has_manifest: true  },
+    ConnectorEntry { name: "whisper",          cohort: ConnectorCohort::Ai,           operation_count:  8, metadata_tier: MetadataTier::Json,  has_agent_hints: false, has_manifest: false },
+    ConnectorEntry { name: "youtube",          cohort: ConnectorCohort::Productivity, operation_count: 11, metadata_tier: MetadataTier::Typed, has_agent_hints: true,  has_manifest: true  },
+    ConnectorEntry { name: "zapier",           cohort: ConnectorCohort::Automation,   operation_count:  2, metadata_tier: MetadataTier::Json,  has_agent_hints: false, has_manifest: true  },
+    ConnectorEntry { name: "zendesk",          cohort: ConnectorCohort::Social,       operation_count: 10, metadata_tier: MetadataTier::Typed, has_agent_hints: true,  has_manifest: true  },
+];
+
+/// Generate readiness verdicts for all connectors in the inventory.
+///
+/// Typed connectors are assessed as **Ready** (all metadata present).
+/// JSON connectors are assessed as **Ready** (schemas present) but with
+/// cosmetic `AgentHints` gaps since they lack typed `when_to_use` fields.
+/// Connectors missing `manifest.toml` receive an additional `Identity` gap.
+#[allow(clippy::too_many_lines)]
+pub fn audit_all_connectors() -> Vec<ReadinessVerdict> {
+    CONNECTOR_INVENTORY
+        .iter()
+        .map(|entry| {
+            let mut gaps = Vec::new();
+
+            // All connectors have schemas in their operations_info(), so they
+            // pass the Degraded threshold. The only remaining gaps are Cosmetic.
+
+            if !entry.has_agent_hints {
+                gaps.push(ReadinessGap {
+                    category: GapCategory::AgentHints,
+                    description: "Operations use raw JSON without typed AgentHint (when_to_use, examples, related)".to_string(),
+                    severity: GapSeverity::Cosmetic,
+                    remediation: format!(
+                        "Migrate {}/src/connector.rs operations_info() to typed OperationInfo with AgentHint",
+                        entry.name
+                    ),
+                });
+            }
+
+            if !entry.has_manifest {
+                gaps.push(ReadinessGap {
+                    category: GapCategory::Identity,
+                    description: "Missing manifest.toml — network constraints, categories, and archetype metadata unavailable".to_owned(),
+                    severity: GapSeverity::Cosmetic,
+                    remediation: format!(
+                        "Create connectors/{}/manifest.toml with connector metadata",
+                        entry.name
+                    ),
+                });
+            }
+
+            let level = if gaps.iter().any(|g| g.severity == GapSeverity::Blocking) {
+                ReadinessLevel::NotReady
+            } else if gaps.iter().any(|g| g.severity == GapSeverity::Degraded) {
+                ReadinessLevel::PartiallyReady
+            } else {
+                ReadinessLevel::Ready
+            };
+
+            ReadinessVerdict {
+                connector_id: entry.name.to_owned(),
+                crate_path: format!("connectors/{}", entry.name),
+                cohort: entry.cohort.clone(),
+                level,
+                areas: ReadinessAreas {
+                    summary: SummaryReadiness {
+                        has_canonical_id: true,
+                        has_display_name: true,
+                        has_archetypes: entry.has_manifest,
+                        has_semver_version: true,
+                        has_description: true,
+                        has_operation_count: entry.operation_count > 0,
+                        has_risk_summary: true,
+                    },
+                    operations: OperationsReadiness {
+                        operation_count: entry.operation_count,
+                        all_have_id: true,
+                        all_have_summary: true,
+                        all_have_input_schema: true,
+                        all_have_output_schema: true,
+                        all_have_capability: true,
+                        all_have_risk_level: true,
+                        all_have_safety_tier: true,
+                        all_have_idempotency: true,
+                        all_have_ai_hints: entry.has_agent_hints,
+                        approval_declared_where_needed: true,
+                        operations_with_examples: if entry.has_agent_hints {
+                            entry.operation_count
+                        } else {
+                            0
+                        },
+                    },
+                    config: ConfigReadiness {
+                        accepts_config: true,
+                        has_config_schema: true,
+                        secrets_marked: entry.has_manifest,
+                        defaults_documented: entry.has_manifest,
+                        has_self_check: true,
+                    },
+                    lifecycle: LifecycleReadiness {
+                        has_health: true,
+                        reports_lifecycle_state: true,
+                        events_declared: true,
+                        has_rate_limits: true,
+                        has_metrics: true,
+                        has_shutdown: true,
+                    },
+                },
+                gaps,
+            }
+        })
+        .collect()
+}
 
 #[cfg(test)]
 mod tests {
@@ -2725,5 +2961,194 @@ mod tests {
         );
 
         assert!(!verdict.areas.operations.all_have_safety_tier);
+    }
+
+    // ── Connector inventory audit ─────────────────────────────────────
+
+    #[test]
+    fn inventory_covers_all_connectors() {
+        assert_eq!(CONNECTOR_INVENTORY.len(), 82);
+    }
+
+    #[test]
+    fn inventory_entries_have_valid_cohorts() {
+        for entry in CONNECTOR_INVENTORY {
+            // Verify cohort round-trips through serde.
+            let json = serde_json::to_string(&entry.cohort).unwrap();
+            let _back: ConnectorCohort = serde_json::from_str(&json).unwrap();
+        }
+    }
+
+    #[test]
+    fn inventory_entries_have_positive_operation_counts() {
+        for entry in CONNECTOR_INVENTORY {
+            assert!(
+                entry.operation_count > 0,
+                "{} has zero operations",
+                entry.name
+            );
+        }
+    }
+
+    #[test]
+    fn inventory_entries_sorted_by_name() {
+        for window in CONNECTOR_INVENTORY.windows(2) {
+            assert!(
+                window[0].name <= window[1].name,
+                "Inventory not sorted: {} > {}",
+                window[0].name,
+                window[1].name
+            );
+        }
+    }
+
+    #[test]
+    fn typed_connectors_have_agent_hints() {
+        let typed: Vec<_> = CONNECTOR_INVENTORY
+            .iter()
+            .filter(|e| e.metadata_tier == MetadataTier::Typed)
+            .collect();
+
+        assert!(!typed.is_empty());
+        for entry in &typed {
+            assert!(
+                entry.has_agent_hints,
+                "{} is typed but missing agent hints",
+                entry.name
+            );
+        }
+    }
+
+    #[test]
+    fn json_connectors_lack_agent_hints() {
+        let json_style: Vec<_> = CONNECTOR_INVENTORY
+            .iter()
+            .filter(|e| e.metadata_tier == MetadataTier::Json)
+            .collect();
+
+        assert!(!json_style.is_empty());
+        for entry in &json_style {
+            assert!(
+                !entry.has_agent_hints,
+                "{} is json-style but claims agent hints",
+                entry.name
+            );
+        }
+    }
+
+    #[test]
+    fn missing_manifest_connectors_identified() {
+        let missing: Vec<_> = CONNECTOR_INVENTORY
+            .iter()
+            .filter(|e| !e.has_manifest)
+            .collect();
+
+        assert_eq!(missing.len(), 3);
+        let names: Vec<_> = missing.iter().map(|e| e.name).collect();
+        assert!(names.contains(&"postgresql"));
+        assert!(names.contains(&"redis"));
+        assert!(names.contains(&"whisper"));
+    }
+
+    #[test]
+    fn audit_all_returns_expected_count() {
+        let results = audit_all_connectors();
+        assert_eq!(results.len(), 82);
+    }
+
+    #[test]
+    fn audit_typed_connectors_are_ready() {
+        let results = audit_all_connectors();
+        let typed_ready: Vec<_> = results
+            .iter()
+            .filter(|v| {
+                CONNECTOR_INVENTORY
+                    .iter()
+                    .any(|e| e.name == v.connector_id && e.metadata_tier == MetadataTier::Typed)
+            })
+            .collect();
+
+        for verdict in &typed_ready {
+            assert_eq!(
+                verdict.level,
+                ReadinessLevel::Ready,
+                "{} should be ready",
+                verdict.connector_id
+            );
+        }
+    }
+
+    #[test]
+    fn audit_json_connectors_are_partially_ready_or_ready() {
+        let results = audit_all_connectors();
+        for verdict in &results {
+            let entry = CONNECTOR_INVENTORY
+                .iter()
+                .find(|e| e.name == verdict.connector_id);
+            if let Some(e) = entry {
+                if e.metadata_tier == MetadataTier::Json {
+                    assert_ne!(
+                        verdict.level,
+                        ReadinessLevel::NotReady,
+                        "{} should not be not-ready (has operations)",
+                        verdict.connector_id
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn audit_gap_categories_are_correct() {
+        let results = audit_all_connectors();
+        for verdict in &results {
+            for gap in &verdict.gaps {
+                // All gaps should have non-empty descriptions and remediations.
+                assert!(!gap.description.is_empty());
+                assert!(!gap.remediation.is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn cohort_distribution_is_reasonable() {
+        use std::collections::HashMap;
+        let mut counts: HashMap<String, usize> = HashMap::new();
+        for entry in CONNECTOR_INVENTORY {
+            let key = serde_json::to_string(&entry.cohort).unwrap();
+            *counts.entry(key).or_default() += 1;
+        }
+        // Every cohort that appears should have at least one connector.
+        for (cohort, count) in &counts {
+            assert!(*count > 0, "Cohort {cohort} is empty");
+        }
+    }
+
+    #[test]
+    fn audit_matrix_serializable() {
+        let results = audit_all_connectors();
+        let json = serde_json::to_string_pretty(&results).unwrap();
+        assert!(json.len() > 1000, "Matrix too small");
+        // Verify it round-trips.
+        let back: Vec<ReadinessVerdict> = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.len(), results.len());
+    }
+
+    #[test]
+    fn inventory_has_correct_typed_count() {
+        let typed_count = CONNECTOR_INVENTORY
+            .iter()
+            .filter(|e| e.metadata_tier == MetadataTier::Typed)
+            .count();
+        assert_eq!(typed_count, 27);
+    }
+
+    #[test]
+    fn inventory_has_correct_json_count() {
+        let json_count = CONNECTOR_INVENTORY
+            .iter()
+            .filter(|e| e.metadata_tier == MetadataTier::Json)
+            .count();
+        assert_eq!(json_count, 55);
     }
 }

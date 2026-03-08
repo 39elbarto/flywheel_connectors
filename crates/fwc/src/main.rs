@@ -1,5 +1,7 @@
 #![deny(unsafe_code)]
 
+#[allow(dead_code)] // Audit types used by later CLI commands.
+mod audit;
 mod catalog;
 #[allow(dead_code)] // Discovery types wired into host-backed commands in later beads.
 mod identifier;

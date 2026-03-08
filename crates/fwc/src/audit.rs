@@ -1,0 +1,1539 @@
+//! Connector metadata gap audit and readiness matrix.
+//!
+//! Scans every connector crate's `manifest.toml` against the fwc readiness
+//! contract and produces a deterministic, machine-readable matrix of metadata
+//! completeness.  Later cohort beads reference this matrix to drive remediation.
+
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+
+use serde::Serialize;
+
+use crate::readiness::{ConnectorCohort, GapCategory, GapSeverity, ReadinessGap, ReadinessLevel};
+
+// ── Audit matrix types ────────────────────────────────────────────────────
+
+/// Full audit matrix across all connectors in the workspace.
+#[derive(Clone, Debug, Serialize)]
+pub struct AuditMatrix {
+    /// Timestamp of the audit run (ISO-8601).
+    pub generated_at: String,
+    /// Number of connector directories scanned.
+    pub total_connectors: usize,
+    /// Number of connectors with a `manifest.toml`.
+    pub with_manifest: usize,
+    /// Number of connectors missing a `manifest.toml` entirely.
+    pub missing_manifest: usize,
+    /// Per-connector audit results, keyed by connector directory name.
+    pub connectors: BTreeMap<String, ConnectorAudit>,
+    /// Aggregate statistics across all connectors.
+    pub summary: AuditSummary,
+}
+
+/// Audit result for a single connector.
+#[derive(Clone, Debug, Serialize)]
+pub struct ConnectorAudit {
+    /// Connector directory name (e.g. `"github"`).
+    pub name: String,
+    /// Crate path relative to workspace root.
+    pub crate_path: String,
+    /// Connector id from manifest (e.g. `"fcp.github"`), if present.
+    pub connector_id: Option<String>,
+    /// Assigned cohort category.
+    pub cohort: ConnectorCohort,
+    /// Overall readiness level.
+    pub level: ReadinessLevel,
+    /// Whether a `manifest.toml` exists.
+    pub has_manifest: bool,
+    /// Operation metadata audit.
+    pub operations: OperationsAudit,
+    /// Config schema audit.
+    pub config: ConfigAudit,
+    /// Agent hint coverage.
+    pub agent_hints: AgentHintAudit,
+    /// Event/stream metadata audit.
+    pub events: EventAudit,
+    /// Rate limit declaration audit.
+    pub rate_limits: RateLimitAudit,
+    /// Network constraints audit.
+    pub network: NetworkAudit,
+    /// Specific gaps found.
+    pub gaps: Vec<ReadinessGap>,
+}
+
+/// Operation metadata completeness for a connector.
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct OperationsAudit {
+    /// Total operations declared in manifest.
+    pub count: usize,
+    /// Operations with non-empty description.
+    pub with_description: usize,
+    /// Operations with `input_schema` containing properties.
+    pub with_input_properties: usize,
+    /// Operations with `output_schema` containing properties or required.
+    pub with_output_schema: usize,
+    /// Operations with `capability` declared.
+    pub with_capability: usize,
+    /// Operations with `risk_level` set.
+    pub with_risk_level: usize,
+    /// Operations with `safety_tier` set.
+    pub with_safety_tier: usize,
+    /// Operations with `idempotency` set.
+    pub with_idempotency: usize,
+    /// Operations with `requires_approval` set.
+    pub with_approval: usize,
+    /// Completeness ratio (0.0–1.0).
+    pub completeness: f64,
+}
+
+/// Config schema completeness.
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct ConfigAudit {
+    /// Whether `connector.state` section exists.
+    pub has_state_config: bool,
+    /// Whether `migration_hint` is non-trivial.
+    pub has_migration_hint: bool,
+}
+
+/// Agent hint (`ai_hints`) coverage.
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct AgentHintAudit {
+    /// Operations with `ai_hints` section.
+    pub with_hints: usize,
+    /// Operations with non-empty `when_to_use`.
+    pub with_when_to_use: usize,
+    /// Operations with at least one example.
+    pub with_examples: usize,
+    /// Operations with at least one `common_mistake` entry.
+    pub with_common_mistakes: usize,
+    /// Operations with at least one related operation.
+    pub with_related: usize,
+    /// Coverage ratio: operations with hints / total operations.
+    pub coverage: f64,
+}
+
+/// Event/stream metadata audit.
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct EventAudit {
+    /// Number of events declared.
+    pub event_count: usize,
+    /// Whether `event_caps` section exists.
+    pub has_event_caps: bool,
+    /// Archetypes that imply event support.
+    pub has_streaming_archetype: bool,
+}
+
+/// Rate limit declaration audit.
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct RateLimitAudit {
+    /// Number of rate limit pools declared.
+    pub pool_count: usize,
+    /// Whether operation-to-pool mappings exist.
+    pub has_operation_pools: bool,
+}
+
+/// Network constraint audit.
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct NetworkAudit {
+    /// Operations with `network_constraints` section.
+    pub with_constraints: usize,
+    /// Operations with non-empty `host_allow`.
+    pub with_host_allow: usize,
+    /// Operations with `port_allow`.
+    pub with_port_allow: usize,
+    /// Coverage ratio.
+    pub coverage: f64,
+}
+
+/// Aggregate summary statistics.
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct AuditSummary {
+    /// Connectors at each readiness level.
+    pub ready: usize,
+    pub partially_ready: usize,
+    pub not_ready: usize,
+    /// Connectors by cohort.
+    pub by_cohort: BTreeMap<String, usize>,
+    /// Total operations across all connectors.
+    pub total_operations: usize,
+    /// Total gaps found.
+    pub total_gaps: usize,
+    /// Gaps by severity.
+    pub blocking_gaps: usize,
+    pub degraded_gaps: usize,
+    pub cosmetic_gaps: usize,
+    /// Mean operation metadata completeness (0.0–1.0).
+    pub mean_operation_completeness: f64,
+    /// Mean agent hint coverage (0.0–1.0).
+    pub mean_hint_coverage: f64,
+}
+
+// ── Cohort assignment ─────────────────────────────────────────────────────
+
+/// Assign a connector to its cohort based on directory name.
+fn assign_cohort(name: &str) -> ConnectorCohort {
+    match name {
+        // Messaging & social
+        "slack" | "discord" | "telegram" | "twilio" | "sendgrid" | "mailchimp" | "intercom" => {
+            ConnectorCohort::Messaging
+        }
+        "twitter" | "reddit" | "linkedin" => ConnectorCohort::Social,
+
+        // Developer tools
+        "github" | "gitlab" | "bitbucket" | "sentry" | "grafana" | "datadog" => {
+            ConnectorCohort::DevTools
+        }
+
+        // Productivity & workspace
+        "notion" | "asana" | "trello" | "todoist" | "clickup" | "monday" | "figma" => {
+            ConnectorCohort::Productivity
+        }
+        "jira" | "linear" => ConnectorCohort::Productivity,
+        "microsoft365" | "google-calendar" | "gmail" => ConnectorCohort::Workspace,
+
+        // Cloud storage
+        "s3" | "dropbox" | "box" => ConnectorCohort::Storage,
+
+        // Knowledge & research
+        "arxiv" | "semanticscholar" | "logseq" | "roam" | "evernote" | "wikipedia" => {
+            ConnectorCohort::Knowledge
+        }
+
+        // AI & LLM
+        "openai" | "anthropic" | "google-ai" | "llm-router" | "whisper" => ConnectorCohort::Ai,
+
+        // Data & analytics
+        "elasticsearch" | "bigquery" | "snowflake" | "duckdb" | "mongodb" | "postgresql"
+        | "redis" => ConnectorCohort::Data,
+        "posthog" | "mixpanel" | "amplitude" | "segment" => ConnectorCohort::Analytics,
+
+        // Security & identity
+        "1password" | "bitwarden" => ConnectorCohort::Security,
+
+        // Business & finance
+        "stripe" | "plaid" | "salesforce" | "hubspot" | "docusign" | "pandadoc" => {
+            ConnectorCohort::Business
+        }
+
+        // Infrastructure & automation
+        "kubernetes" | "terraform" | "pulumi" => ConnectorCohort::Infra,
+        "zapier" | "make" | "n8n" | "retool" | "metabase" | "cron" | "webhook-receiver"
+        | "mcp-bridge" => ConnectorCohort::Automation,
+
+        // Media & content
+        "youtube" | "spotify" => ConnectorCohort::Media,
+
+        // Browser & search
+        "browser" | "algolia" | "annas-archive" => ConnectorCohort::Browser,
+
+        // Vector databases
+        "pinecone" | "qdrant" | "vectordb" => ConnectorCohort::Vectordb,
+
+        // Home & IoT
+        "homeassistant" => ConnectorCohort::Iot,
+
+        // Fallback
+        _ => ConnectorCohort::Other,
+    }
+}
+
+// ── Manifest parsing and audit ────────────────────────────────────────────
+
+/// Parse a manifest TOML and audit its metadata completeness.
+#[allow(clippy::too_many_lines)]
+fn audit_manifest(name: &str, manifest: &toml::Value) -> ConnectorAudit {
+    let connector_id = manifest
+        .get("connector")
+        .and_then(|c| c.get("id"))
+        .and_then(|v| v.as_str())
+        .map(String::from);
+
+    let cohort = assign_cohort(name);
+    let mut gaps: Vec<ReadinessGap> = Vec::new();
+
+    // ── Operations audit ──
+    let ops_table = manifest
+        .get("provides")
+        .and_then(|p| p.get("operations"))
+        .and_then(|o| o.as_table());
+
+    let mut ops = OperationsAudit::default();
+    let mut hints = AgentHintAudit::default();
+    let mut network = NetworkAudit::default();
+
+    if let Some(operations) = ops_table {
+        ops.count = operations.len();
+
+        for (op_id, op_val) in operations {
+            // Description
+            let desc = op_val
+                .get("description")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if desc.is_empty() {
+                gaps.push(ReadinessGap {
+                    category: GapCategory::OperationMetadata,
+                    severity: GapSeverity::Blocking,
+                    description: format!("{op_id}: missing description"),
+                    remediation: "Add a non-empty description to this operation".into(),
+                });
+            } else {
+                ops.with_description += 1;
+            }
+
+            // Input schema properties
+            let has_input_props = op_val
+                .get("input_schema")
+                .and_then(|s| s.get("properties"))
+                .is_some_and(|p| p.as_table().is_some_and(|t| !t.is_empty()));
+            if has_input_props {
+                ops.with_input_properties += 1;
+            }
+
+            // Output schema
+            let has_output = op_val
+                .get("output_schema")
+                .is_some_and(|s| {
+                    s.get("properties").is_some() || s.get("required").is_some()
+                });
+            if has_output {
+                ops.with_output_schema += 1;
+            }
+
+            // Capability
+            if op_val
+                .get("capability")
+                .and_then(|v| v.as_str())
+                .is_some_and(|s| !s.is_empty())
+            {
+                ops.with_capability += 1;
+            } else {
+                gaps.push(ReadinessGap {
+                    category: GapCategory::OperationMetadata,
+                    severity: GapSeverity::Blocking,
+                    description: format!("{op_id}: missing capability"),
+                    remediation: "Add a capability declaration to this operation".into(),
+                });
+            }
+
+            // Risk level
+            if op_val.get("risk_level").is_some() {
+                ops.with_risk_level += 1;
+            }
+
+            // Safety tier
+            if op_val.get("safety_tier").is_some() {
+                ops.with_safety_tier += 1;
+            }
+
+            // Idempotency
+            if op_val.get("idempotency").is_some() {
+                ops.with_idempotency += 1;
+            }
+
+            // Requires approval
+            if op_val.get("requires_approval").is_some() {
+                ops.with_approval += 1;
+            }
+
+            // AI hints
+            if let Some(ai) = op_val.get("ai_hints") {
+                hints.with_hints += 1;
+
+                let wtu = ai
+                    .get("when_to_use")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                if !wtu.is_empty() {
+                    hints.with_when_to_use += 1;
+                }
+
+                let examples = ai
+                    .get("examples")
+                    .and_then(|v| v.as_array())
+                    .map_or(0, Vec::len);
+                if examples > 0 {
+                    hints.with_examples += 1;
+                }
+
+                let mistakes = ai
+                    .get("common_mistakes")
+                    .and_then(|v| v.as_array())
+                    .map_or(0, Vec::len);
+                if mistakes > 0 {
+                    hints.with_common_mistakes += 1;
+                }
+
+                let related = ai
+                    .get("related")
+                    .and_then(|v| v.as_array())
+                    .map_or(0, Vec::len);
+                if related > 0 {
+                    hints.with_related += 1;
+                }
+            } else {
+                gaps.push(ReadinessGap {
+                    category: GapCategory::AgentHints,
+                    severity: GapSeverity::Degraded,
+                    description: format!("{op_id}: missing ai_hints section"),
+                    remediation: "Add ai_hints with when_to_use and examples".into(),
+                });
+            }
+
+            // Network constraints
+            if let Some(nc) = op_val.get("network_constraints") {
+                network.with_constraints += 1;
+
+                let host_allow = nc
+                    .get("host_allow")
+                    .and_then(|v| v.as_array())
+                    .map_or(0, Vec::len);
+                if host_allow > 0 {
+                    network.with_host_allow += 1;
+                }
+
+                let port_allow = nc
+                    .get("port_allow")
+                    .and_then(|v| v.as_array())
+                    .map_or(0, Vec::len);
+                if port_allow > 0 {
+                    network.with_port_allow += 1;
+                }
+            }
+        }
+
+        // Compute ratios
+        if ops.count > 0 {
+            #[allow(clippy::cast_precision_loss)]
+            let total_checks = ops.count as f64 * 8.0; // 8 checked fields per op
+            #[allow(clippy::cast_precision_loss)]
+            let passed = (ops.with_description
+                + ops.with_input_properties
+                + ops.with_output_schema
+                + ops.with_capability
+                + ops.with_risk_level
+                + ops.with_safety_tier
+                + ops.with_idempotency
+                + ops.with_approval) as f64;
+            ops.completeness = passed / total_checks;
+
+            #[allow(clippy::cast_precision_loss)]
+            {
+                hints.coverage = hints.with_hints as f64 / ops.count as f64;
+                network.coverage = network.with_constraints as f64 / ops.count as f64;
+            }
+        }
+    } else {
+        gaps.push(ReadinessGap {
+            category: GapCategory::OperationMetadata,
+            severity: GapSeverity::Blocking,
+            description: "No operations declared in manifest".into(),
+            remediation: "Add [provides.operations.*] sections to manifest.toml".into(),
+        });
+    }
+
+    // ── Config audit ──
+    let config = ConfigAudit {
+        has_state_config: manifest
+            .get("connector")
+            .and_then(|c| c.get("state"))
+            .is_some(),
+        has_migration_hint: manifest
+            .get("connector")
+            .and_then(|c| c.get("state"))
+            .and_then(|s| s.get("migration_hint"))
+            .and_then(|v| v.as_str())
+            .is_some_and(|s| !s.is_empty() && s != "init"),
+    };
+
+    // ── Events audit ──
+    let events_table = manifest
+        .get("provides")
+        .and_then(|p| p.get("events"))
+        .and_then(|e| e.as_table());
+    let archetypes = manifest
+        .get("connector")
+        .and_then(|c| c.get("archetypes"))
+        .and_then(|a| a.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let has_streaming_archetype = archetypes.iter().any(|a| {
+        *a == "streaming" || *a == "bidirectional" || *a == "webhook" || *a == "polling"
+    });
+
+    let events = EventAudit {
+        event_count: events_table.map_or(0, toml::map::Map::len),
+        has_event_caps: manifest.get("event_caps").is_some(),
+        has_streaming_archetype,
+    };
+
+    // ── Rate limits audit ──
+    let pools = manifest
+        .get("rate_limits")
+        .and_then(|r| r.get("pools"))
+        .and_then(|p| p.as_array())
+        .map_or(0, Vec::len);
+    let has_op_pools = manifest
+        .get("rate_limits")
+        .and_then(|r| r.get("operation_pools"))
+        .is_some();
+    let rate_limits = RateLimitAudit {
+        pool_count: pools,
+        has_operation_pools: has_op_pools,
+    };
+
+    // ── Determine overall level ──
+    let has_blocking = gaps.iter().any(|g| g.severity == GapSeverity::Blocking);
+    let has_degraded = gaps.iter().any(|g| g.severity == GapSeverity::Degraded);
+    let level = if has_blocking {
+        ReadinessLevel::NotReady
+    } else if has_degraded || ops.completeness < 0.9 || hints.coverage < 0.8 {
+        ReadinessLevel::PartiallyReady
+    } else {
+        ReadinessLevel::Ready
+    };
+
+    ConnectorAudit {
+        name: name.to_string(),
+        crate_path: format!("connectors/{name}"),
+        connector_id,
+        cohort,
+        level,
+        has_manifest: true,
+        operations: ops,
+        config,
+        agent_hints: hints,
+        events,
+        rate_limits,
+        network,
+        gaps,
+    }
+}
+
+/// Create an audit entry for a connector with no manifest.
+fn audit_missing_manifest(name: &str) -> ConnectorAudit {
+    let cohort = assign_cohort(name);
+    ConnectorAudit {
+        name: name.to_string(),
+        crate_path: format!("connectors/{name}"),
+        connector_id: None,
+        cohort,
+        level: ReadinessLevel::NotReady,
+        has_manifest: false,
+        operations: OperationsAudit::default(),
+        config: ConfigAudit::default(),
+        agent_hints: AgentHintAudit::default(),
+        events: EventAudit::default(),
+        rate_limits: RateLimitAudit::default(),
+        network: NetworkAudit::default(),
+        gaps: vec![ReadinessGap {
+            category: GapCategory::Identity,
+            severity: GapSeverity::Blocking,
+            description: "No manifest.toml found".into(),
+            remediation: "Create a manifest.toml with connector identity and operations".into(),
+        }],
+    }
+}
+
+/// Compute aggregate summary from individual audits.
+fn compute_summary(audits: &BTreeMap<String, ConnectorAudit>) -> AuditSummary {
+    let mut summary = AuditSummary::default();
+    let mut completeness_sum = 0.0_f64;
+    let mut coverage_sum = 0.0_f64;
+
+    for audit in audits.values() {
+        match audit.level {
+            ReadinessLevel::Ready => summary.ready += 1,
+            ReadinessLevel::PartiallyReady => summary.partially_ready += 1,
+            ReadinessLevel::NotReady => summary.not_ready += 1,
+        }
+
+        let cohort_key = format!("{:?}", audit.cohort).to_lowercase();
+        *summary.by_cohort.entry(cohort_key).or_insert(0) += 1;
+
+        summary.total_operations += audit.operations.count;
+        summary.total_gaps += audit.gaps.len();
+        summary.blocking_gaps += audit
+            .gaps
+            .iter()
+            .filter(|g| g.severity == GapSeverity::Blocking)
+            .count();
+        summary.degraded_gaps += audit
+            .gaps
+            .iter()
+            .filter(|g| g.severity == GapSeverity::Degraded)
+            .count();
+        summary.cosmetic_gaps += audit
+            .gaps
+            .iter()
+            .filter(|g| g.severity == GapSeverity::Cosmetic)
+            .count();
+
+        completeness_sum += audit.operations.completeness;
+        coverage_sum += audit.agent_hints.coverage;
+    }
+
+    #[allow(clippy::cast_precision_loss)]
+    if !audits.is_empty() {
+        let count = audits.len() as f64;
+        summary.mean_operation_completeness = completeness_sum / count;
+        summary.mean_hint_coverage = coverage_sum / count;
+    }
+
+    summary
+}
+
+/// Run the full audit across all connector directories under `connectors_root`.
+///
+/// # Errors
+///
+/// Returns an error if the connectors root directory cannot be read.
+pub fn run_audit(connectors_root: &Path) -> anyhow::Result<AuditMatrix> {
+    let mut connectors = BTreeMap::new();
+    let mut total = 0_usize;
+    let mut with_manifest = 0_usize;
+    let mut missing_manifest = 0_usize;
+
+    let mut entries: Vec<PathBuf> = std::fs::read_dir(connectors_root)?
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .filter(|p| p.is_dir())
+        .collect();
+    entries.sort();
+
+    for dir in &entries {
+        let Some(name) = dir.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        total += 1;
+
+        let manifest_path = dir.join("manifest.toml");
+        if manifest_path.exists() {
+            with_manifest += 1;
+            let content = std::fs::read_to_string(&manifest_path)?;
+            let manifest: toml::Value = toml::from_str(&content)?;
+            let audit = audit_manifest(name, &manifest);
+            connectors.insert(name.to_string(), audit);
+        } else {
+            missing_manifest += 1;
+            connectors.insert(name.to_string(), audit_missing_manifest(name));
+        }
+    }
+
+    let summary = compute_summary(&connectors);
+
+    Ok(AuditMatrix {
+        generated_at: chrono::Utc::now().to_rfc3339(),
+        total_connectors: total,
+        with_manifest,
+        missing_manifest,
+        connectors,
+        summary,
+    })
+}
+
+// ── Tests ─────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── Cohort assignment ──
+
+    #[test]
+    fn cohort_messaging() {
+        assert_eq!(assign_cohort("slack"), ConnectorCohort::Messaging);
+        assert_eq!(assign_cohort("discord"), ConnectorCohort::Messaging);
+        assert_eq!(assign_cohort("telegram"), ConnectorCohort::Messaging);
+        assert_eq!(assign_cohort("twilio"), ConnectorCohort::Messaging);
+    }
+
+    #[test]
+    fn cohort_social() {
+        assert_eq!(assign_cohort("twitter"), ConnectorCohort::Social);
+        assert_eq!(assign_cohort("reddit"), ConnectorCohort::Social);
+        assert_eq!(assign_cohort("linkedin"), ConnectorCohort::Social);
+    }
+
+    #[test]
+    fn cohort_devtools() {
+        assert_eq!(assign_cohort("github"), ConnectorCohort::DevTools);
+        assert_eq!(assign_cohort("gitlab"), ConnectorCohort::DevTools);
+        assert_eq!(assign_cohort("sentry"), ConnectorCohort::DevTools);
+    }
+
+    #[test]
+    fn cohort_productivity() {
+        assert_eq!(assign_cohort("notion"), ConnectorCohort::Productivity);
+        assert_eq!(assign_cohort("jira"), ConnectorCohort::Productivity);
+        assert_eq!(assign_cohort("todoist"), ConnectorCohort::Productivity);
+    }
+
+    #[test]
+    fn cohort_ai() {
+        assert_eq!(assign_cohort("openai"), ConnectorCohort::Ai);
+        assert_eq!(assign_cohort("anthropic"), ConnectorCohort::Ai);
+        assert_eq!(assign_cohort("whisper"), ConnectorCohort::Ai);
+    }
+
+    #[test]
+    fn cohort_data() {
+        assert_eq!(assign_cohort("elasticsearch"), ConnectorCohort::Data);
+        assert_eq!(assign_cohort("redis"), ConnectorCohort::Data);
+        assert_eq!(assign_cohort("postgresql"), ConnectorCohort::Data);
+    }
+
+    #[test]
+    fn cohort_analytics() {
+        assert_eq!(assign_cohort("amplitude"), ConnectorCohort::Analytics);
+        assert_eq!(assign_cohort("mixpanel"), ConnectorCohort::Analytics);
+    }
+
+    #[test]
+    fn cohort_infra() {
+        assert_eq!(assign_cohort("kubernetes"), ConnectorCohort::Infra);
+        assert_eq!(assign_cohort("terraform"), ConnectorCohort::Infra);
+    }
+
+    #[test]
+    fn cohort_automation() {
+        assert_eq!(assign_cohort("zapier"), ConnectorCohort::Automation);
+        assert_eq!(assign_cohort("n8n"), ConnectorCohort::Automation);
+        assert_eq!(assign_cohort("cron"), ConnectorCohort::Automation);
+    }
+
+    #[test]
+    fn cohort_storage() {
+        assert_eq!(assign_cohort("s3"), ConnectorCohort::Storage);
+        assert_eq!(assign_cohort("dropbox"), ConnectorCohort::Storage);
+    }
+
+    #[test]
+    fn cohort_security() {
+        assert_eq!(assign_cohort("1password"), ConnectorCohort::Security);
+        assert_eq!(assign_cohort("bitwarden"), ConnectorCohort::Security);
+    }
+
+    #[test]
+    fn cohort_business() {
+        assert_eq!(assign_cohort("stripe"), ConnectorCohort::Business);
+        assert_eq!(assign_cohort("salesforce"), ConnectorCohort::Business);
+    }
+
+    #[test]
+    fn cohort_unknown_is_other() {
+        assert_eq!(assign_cohort("unknown-xyz"), ConnectorCohort::Other);
+    }
+
+    // ── Missing manifest ──
+
+    #[test]
+    fn missing_manifest_is_not_ready() {
+        let audit = audit_missing_manifest("redis");
+        assert_eq!(audit.level, ReadinessLevel::NotReady);
+        assert!(!audit.has_manifest);
+        assert_eq!(audit.gaps.len(), 1);
+        assert_eq!(audit.gaps[0].severity, GapSeverity::Blocking);
+        assert_eq!(audit.gaps[0].category, GapCategory::Identity);
+    }
+
+    #[test]
+    fn missing_manifest_preserves_name_and_path() {
+        let audit = audit_missing_manifest("postgresql");
+        assert_eq!(audit.name, "postgresql");
+        assert_eq!(audit.crate_path, "connectors/postgresql");
+        assert!(audit.connector_id.is_none());
+    }
+
+    // ── Manifest parsing ──
+
+    fn minimal_manifest() -> toml::Value {
+        let s = r#"
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+
+[connector]
+id = "fcp.test"
+name = "Test Connector"
+version = "0.1.0"
+description = "A test connector"
+archetypes = ["operational"]
+format = "wasi"
+
+[connector.state]
+model = "singleton_writer"
+state_schema_version = "1"
+migration_hint = "init"
+
+[zones]
+home = "z:work"
+allowed_sources = ["z:owner"]
+allowed_targets = ["z:work"]
+forbidden = []
+
+[capabilities]
+required = ["network.dns"]
+optional = []
+forbidden = []
+
+[provides.operations."test.get_item"]
+description = "Get an item"
+capability = "test.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."test.get_item".input_schema]
+type = "object"
+required = ["id"]
+[provides.operations."test.get_item".input_schema.properties.id]
+type = "string"
+
+[provides.operations."test.get_item".output_schema]
+type = "object"
+required = ["item"]
+[provides.operations."test.get_item".output_schema.properties.item]
+type = "object"
+
+[provides.operations."test.get_item".network_constraints]
+host_allow = ["api.test.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+
+[provides.operations."test.get_item".ai_hints]
+when_to_use = "Get an item by ID."
+common_mistakes = ["Using wrong ID format"]
+examples = ['{"id": "abc123"}']
+related = ["test.list_items"]
+"#;
+        toml::from_str(s).unwrap()
+    }
+
+    #[test]
+    fn full_manifest_is_ready() {
+        let manifest = minimal_manifest();
+        let audit = audit_manifest("test", &manifest);
+        assert_eq!(audit.level, ReadinessLevel::Ready);
+        assert!(audit.has_manifest);
+        assert_eq!(audit.connector_id.as_deref(), Some("fcp.test"));
+    }
+
+    #[test]
+    fn operations_count_matches() {
+        let manifest = minimal_manifest();
+        let audit = audit_manifest("test", &manifest);
+        assert_eq!(audit.operations.count, 1);
+        assert_eq!(audit.operations.with_description, 1);
+        assert_eq!(audit.operations.with_capability, 1);
+        assert_eq!(audit.operations.with_risk_level, 1);
+        assert_eq!(audit.operations.with_safety_tier, 1);
+    }
+
+    #[test]
+    fn input_properties_detected() {
+        let manifest = minimal_manifest();
+        let audit = audit_manifest("test", &manifest);
+        assert_eq!(audit.operations.with_input_properties, 1);
+    }
+
+    #[test]
+    fn output_schema_detected() {
+        let manifest = minimal_manifest();
+        let audit = audit_manifest("test", &manifest);
+        assert_eq!(audit.operations.with_output_schema, 1);
+    }
+
+    #[test]
+    fn ai_hints_detected() {
+        let manifest = minimal_manifest();
+        let audit = audit_manifest("test", &manifest);
+        assert_eq!(audit.agent_hints.with_hints, 1);
+        assert_eq!(audit.agent_hints.with_when_to_use, 1);
+        assert_eq!(audit.agent_hints.with_examples, 1);
+        assert_eq!(audit.agent_hints.with_common_mistakes, 1);
+        assert_eq!(audit.agent_hints.with_related, 1);
+        assert!((audit.agent_hints.coverage - 1.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn network_constraints_detected() {
+        let manifest = minimal_manifest();
+        let audit = audit_manifest("test", &manifest);
+        assert_eq!(audit.network.with_constraints, 1);
+        assert_eq!(audit.network.with_host_allow, 1);
+        assert_eq!(audit.network.with_port_allow, 1);
+    }
+
+    #[test]
+    fn config_state_detected() {
+        let manifest = minimal_manifest();
+        let audit = audit_manifest("test", &manifest);
+        assert!(audit.config.has_state_config);
+    }
+
+    #[test]
+    fn migration_hint_init_is_not_meaningful() {
+        let manifest = minimal_manifest();
+        let audit = audit_manifest("test", &manifest);
+        // "init" is the default, not a real migration hint
+        assert!(!audit.config.has_migration_hint);
+    }
+
+    // ── Gap detection ──
+
+    fn manifest_missing_description() -> toml::Value {
+        let s = r#"
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+
+[connector]
+id = "fcp.bad"
+name = "Bad"
+version = "0.1.0"
+description = "Bad connector"
+archetypes = ["operational"]
+format = "wasi"
+
+[provides.operations."bad.op"]
+description = ""
+capability = "bad.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."bad.op".input_schema]
+type = "object"
+[provides.operations."bad.op".output_schema]
+type = "object"
+
+[provides.operations."bad.op".network_constraints]
+host_allow = ["api.bad.com"]
+port_allow = [443]
+
+[provides.operations."bad.op".ai_hints]
+when_to_use = "Do bad things"
+common_mistakes = []
+examples = []
+related = []
+"#;
+        toml::from_str(s).unwrap()
+    }
+
+    #[test]
+    fn empty_description_creates_blocking_gap() {
+        let manifest = manifest_missing_description();
+        let audit = audit_manifest("bad", &manifest);
+        assert_eq!(audit.operations.with_description, 0);
+        let desc_gaps: Vec<_> = audit
+            .gaps
+            .iter()
+            .filter(|g| g.description.contains("description"))
+            .collect();
+        assert_eq!(desc_gaps.len(), 1);
+        assert_eq!(desc_gaps[0].severity, GapSeverity::Blocking);
+    }
+
+    fn manifest_no_hints() -> toml::Value {
+        let s = r#"
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+
+[connector]
+id = "fcp.nohints"
+name = "NoHints"
+version = "0.1.0"
+description = "No hints connector"
+archetypes = ["operational"]
+format = "wasi"
+
+[provides.operations."nohints.op"]
+description = "An operation"
+capability = "nohints.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."nohints.op".input_schema]
+type = "object"
+required = ["id"]
+[provides.operations."nohints.op".input_schema.properties.id]
+type = "string"
+
+[provides.operations."nohints.op".output_schema]
+type = "object"
+required = ["result"]
+
+[provides.operations."nohints.op".network_constraints]
+host_allow = ["api.nohints.com"]
+port_allow = [443]
+"#;
+        toml::from_str(s).unwrap()
+    }
+
+    #[test]
+    fn missing_ai_hints_creates_degraded_gap() {
+        let manifest = manifest_no_hints();
+        let audit = audit_manifest("nohints", &manifest);
+        assert_eq!(audit.agent_hints.with_hints, 0);
+        let hint_gaps: Vec<_> = audit
+            .gaps
+            .iter()
+            .filter(|g| g.category == GapCategory::AgentHints)
+            .collect();
+        assert_eq!(hint_gaps.len(), 1);
+        assert_eq!(hint_gaps[0].severity, GapSeverity::Degraded);
+    }
+
+    #[test]
+    fn missing_hints_makes_partially_ready() {
+        let manifest = manifest_no_hints();
+        let audit = audit_manifest("nohints", &manifest);
+        // Degraded gap → PartiallyReady
+        assert_eq!(audit.level, ReadinessLevel::PartiallyReady);
+    }
+
+    fn manifest_no_ops() -> toml::Value {
+        let s = r#"
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+
+[connector]
+id = "fcp.empty"
+name = "Empty"
+version = "0.1.0"
+description = "Empty connector"
+archetypes = ["operational"]
+format = "wasi"
+"#;
+        toml::from_str(s).unwrap()
+    }
+
+    #[test]
+    fn no_operations_creates_blocking_gap() {
+        let manifest = manifest_no_ops();
+        let audit = audit_manifest("empty", &manifest);
+        assert_eq!(audit.operations.count, 0);
+        assert_eq!(audit.level, ReadinessLevel::NotReady);
+        assert_eq!(audit
+            .gaps
+            .iter()
+            .filter(|g| g.description.contains("No operations"))
+            .count(), 1);
+    }
+
+    fn manifest_missing_capability() -> toml::Value {
+        let s = r#"
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+
+[connector]
+id = "fcp.nocap"
+name = "NoCap"
+version = "0.1.0"
+description = "No cap connector"
+archetypes = ["operational"]
+format = "wasi"
+
+[provides.operations."nocap.op"]
+description = "An operation"
+risk_level = "low"
+safety_tier = "safe"
+
+[provides.operations."nocap.op".input_schema]
+type = "object"
+[provides.operations."nocap.op".output_schema]
+type = "object"
+
+[provides.operations."nocap.op".ai_hints]
+when_to_use = "Do something"
+common_mistakes = []
+examples = ['{}']
+related = []
+
+[provides.operations."nocap.op".network_constraints]
+host_allow = ["api.nocap.com"]
+port_allow = [443]
+"#;
+        toml::from_str(s).unwrap()
+    }
+
+    #[test]
+    fn missing_capability_creates_blocking_gap() {
+        let manifest = manifest_missing_capability();
+        let audit = audit_manifest("nocap", &manifest);
+        assert_eq!(audit.operations.with_capability, 0);
+        let cap_gaps: Vec<_> = audit
+            .gaps
+            .iter()
+            .filter(|g| g.description.contains("capability"))
+            .collect();
+        assert_eq!(cap_gaps.len(), 1);
+        assert_eq!(cap_gaps[0].severity, GapSeverity::Blocking);
+    }
+
+    // ── Completeness ratios ──
+
+    #[test]
+    fn full_manifest_completeness_is_one() {
+        let manifest = minimal_manifest();
+        let audit = audit_manifest("test", &manifest);
+        assert!((audit.operations.completeness - 1.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn hint_coverage_zero_when_no_hints() {
+        let manifest = manifest_no_hints();
+        let audit = audit_manifest("nohints", &manifest);
+        assert!(audit.agent_hints.coverage.abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn network_coverage_one_when_all_have_constraints() {
+        let manifest = minimal_manifest();
+        let audit = audit_manifest("test", &manifest);
+        assert!((audit.network.coverage - 1.0).abs() < f64::EPSILON);
+    }
+
+    // ── Event detection ──
+
+    fn manifest_with_streaming() -> toml::Value {
+        let s = r#"
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+
+[connector]
+id = "fcp.streamer"
+name = "Streamer"
+version = "0.1.0"
+description = "Streaming connector"
+archetypes = ["operational", "streaming"]
+format = "wasi"
+
+[event_caps]
+streaming = true
+replay = false
+
+[provides.operations."streamer.listen"]
+description = "Listen for events"
+capability = "streamer.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."streamer.listen".input_schema]
+type = "object"
+required = ["channel"]
+[provides.operations."streamer.listen".input_schema.properties.channel]
+type = "string"
+
+[provides.operations."streamer.listen".output_schema]
+type = "object"
+required = ["events"]
+
+[provides.operations."streamer.listen".network_constraints]
+host_allow = ["api.streamer.com"]
+port_allow = [443]
+
+[provides.operations."streamer.listen".ai_hints]
+when_to_use = "Listen for streaming events."
+common_mistakes = []
+examples = ['{"channel": "main"}']
+related = []
+
+[provides.events."streamer.message"]
+description = "New message event"
+streaming = true
+replay = false
+"#;
+        toml::from_str(s).unwrap()
+    }
+
+    #[test]
+    fn streaming_archetype_detected() {
+        let manifest = manifest_with_streaming();
+        let audit = audit_manifest("streamer", &manifest);
+        assert!(audit.events.has_streaming_archetype);
+        assert!(audit.events.has_event_caps);
+        assert_eq!(audit.events.event_count, 1);
+    }
+
+    #[test]
+    fn non_streaming_has_no_event_caps() {
+        let manifest = minimal_manifest();
+        let audit = audit_manifest("test", &manifest);
+        assert!(!audit.events.has_streaming_archetype);
+        assert!(!audit.events.has_event_caps);
+        assert_eq!(audit.events.event_count, 0);
+    }
+
+    // ── Summary computation ──
+
+    #[test]
+    fn summary_counts_levels() {
+        let mut map = BTreeMap::new();
+        map.insert("a".into(), audit_manifest("a", &minimal_manifest()));
+        map.insert("b".into(), audit_missing_manifest("b"));
+        map.insert("c".into(), audit_manifest("c", &manifest_no_hints()));
+
+        let summary = compute_summary(&map);
+        assert_eq!(summary.ready, 1);
+        assert_eq!(summary.partially_ready, 1);
+        assert_eq!(summary.not_ready, 1);
+    }
+
+    #[test]
+    fn summary_total_operations() {
+        let mut map = BTreeMap::new();
+        map.insert("a".into(), audit_manifest("a", &minimal_manifest()));
+        map.insert("b".into(), audit_manifest("b", &minimal_manifest()));
+
+        let summary = compute_summary(&map);
+        assert_eq!(summary.total_operations, 2); // 1 op each
+    }
+
+    #[test]
+    fn summary_gap_counts() {
+        let mut map = BTreeMap::new();
+        map.insert("a".into(), audit_missing_manifest("a")); // 1 blocking
+        map.insert("b".into(), audit_manifest("b", &manifest_no_hints())); // 1 degraded
+
+        let summary = compute_summary(&map);
+        assert_eq!(summary.blocking_gaps, 1);
+        assert_eq!(summary.degraded_gaps, 1);
+    }
+
+    #[test]
+    fn summary_mean_completeness() {
+        let mut map = BTreeMap::new();
+        map.insert("a".into(), audit_manifest("a", &minimal_manifest()));
+        map.insert("b".into(), audit_manifest("b", &minimal_manifest()));
+
+        let summary = compute_summary(&map);
+        assert!((summary.mean_operation_completeness - 1.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn summary_by_cohort() {
+        let mut map = BTreeMap::new();
+        map.insert("github".into(), audit_manifest("github", &minimal_manifest()));
+        map.insert("gitlab".into(), audit_manifest("gitlab", &minimal_manifest()));
+        map.insert("slack".into(), audit_manifest("slack", &minimal_manifest()));
+
+        let summary = compute_summary(&map);
+        assert_eq!(summary.by_cohort.get("devtools"), Some(&2));
+        assert_eq!(summary.by_cohort.get("messaging"), Some(&1));
+    }
+
+    // ── Filesystem audit ──
+
+    #[test]
+    fn run_audit_on_real_connectors() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../connectors");
+        if !root.exists() {
+            return; // Skip if not in workspace
+        }
+
+        let matrix = run_audit(&root).unwrap();
+        // We have at least 80 connectors
+        assert!(matrix.total_connectors >= 80);
+        // At least 78 should have manifests
+        assert!(matrix.with_manifest >= 78);
+        // Every connector should appear in the map
+        assert_eq!(matrix.connectors.len(), matrix.total_connectors);
+        // Summary levels should sum to total
+        assert_eq!(
+            matrix.summary.ready + matrix.summary.partially_ready + matrix.summary.not_ready,
+            matrix.total_connectors,
+        );
+    }
+
+    #[test]
+    fn run_audit_github_is_ready() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../connectors");
+        if !root.exists() {
+            return;
+        }
+
+        let matrix = run_audit(&root).unwrap();
+        let github = matrix.connectors.get("github").expect("github not found");
+        assert!(github.has_manifest);
+        assert_eq!(github.connector_id.as_deref(), Some("fcp.github"));
+        assert_eq!(github.cohort, ConnectorCohort::DevTools);
+        assert!(github.operations.count >= 10);
+    }
+
+    #[test]
+    fn run_audit_missing_manifest_connectors() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../connectors");
+        if !root.exists() {
+            return;
+        }
+
+        let matrix = run_audit(&root).unwrap();
+        assert!(matrix.missing_manifest >= 3); // redis, postgresql, whisper
+
+        for name in &["redis", "postgresql", "whisper"] {
+            if let Some(audit) = matrix.connectors.get(*name) {
+                assert!(!audit.has_manifest);
+                assert_eq!(audit.level, ReadinessLevel::NotReady);
+            }
+        }
+    }
+
+    #[test]
+    fn run_audit_nonexistent_dir() {
+        let result = run_audit(Path::new("/nonexistent/path"));
+        assert!(result.is_err());
+    }
+
+    // ── Serialization ──
+
+    #[test]
+    fn audit_matrix_serializes_to_json() {
+        let mut connectors = BTreeMap::new();
+        connectors.insert("test".into(), audit_manifest("test", &minimal_manifest()));
+
+        let matrix = AuditMatrix {
+            generated_at: "2026-03-08T00:00:00Z".into(),
+            total_connectors: 1,
+            with_manifest: 1,
+            missing_manifest: 0,
+            connectors,
+            summary: AuditSummary::default(),
+        };
+
+        let json = serde_json::to_string_pretty(&matrix).unwrap();
+        assert!(json.contains("test"));
+        assert!(json.contains("generated_at"));
+    }
+
+    #[test]
+    fn connector_audit_serializes_all_fields() {
+        let audit = audit_manifest("test", &minimal_manifest());
+        let json = serde_json::to_string(&audit).unwrap();
+        assert!(json.contains("operations"));
+        assert!(json.contains("agent_hints"));
+        assert!(json.contains("network"));
+        assert!(json.contains("rate_limits"));
+        assert!(json.contains("config"));
+        assert!(json.contains("events"));
+        assert!(json.contains("gaps"));
+    }
+
+    // ── Multiple operations ──
+
+    fn manifest_multi_ops() -> toml::Value {
+        let s = r#"
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+
+[connector]
+id = "fcp.multi"
+name = "Multi"
+version = "0.1.0"
+description = "Multi-op connector"
+archetypes = ["operational"]
+format = "wasi"
+
+[provides.operations."multi.read"]
+description = "Read something"
+capability = "multi.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."multi.read".input_schema]
+type = "object"
+required = ["id"]
+[provides.operations."multi.read".input_schema.properties.id]
+type = "string"
+[provides.operations."multi.read".output_schema]
+type = "object"
+required = ["data"]
+[provides.operations."multi.read".network_constraints]
+host_allow = ["api.multi.com"]
+port_allow = [443]
+[provides.operations."multi.read".ai_hints]
+when_to_use = "Read a resource."
+common_mistakes = []
+examples = ['{"id": "123"}']
+related = ["multi.write"]
+
+[provides.operations."multi.write"]
+description = "Write something"
+capability = "multi.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "none"
+
+[provides.operations."multi.write".input_schema]
+type = "object"
+required = ["id", "data"]
+[provides.operations."multi.write".input_schema.properties.id]
+type = "string"
+[provides.operations."multi.write".input_schema.properties.data]
+type = "object"
+[provides.operations."multi.write".output_schema]
+type = "object"
+required = ["result"]
+[provides.operations."multi.write".network_constraints]
+host_allow = ["api.multi.com"]
+port_allow = [443]
+[provides.operations."multi.write".ai_hints]
+when_to_use = "Write a resource."
+common_mistakes = ["Forgetting data field"]
+examples = ['{"id": "123", "data": {"key": "value"}}']
+related = ["multi.read"]
+
+[provides.operations."multi.delete"]
+description = "Delete something"
+capability = "multi.write"
+risk_level = "high"
+safety_tier = "dangerous"
+requires_approval = "interactive"
+idempotency = "best_effort"
+
+[provides.operations."multi.delete".input_schema]
+type = "object"
+required = ["id"]
+[provides.operations."multi.delete".input_schema.properties.id]
+type = "string"
+[provides.operations."multi.delete".output_schema]
+type = "object"
+required = ["deleted"]
+[provides.operations."multi.delete".network_constraints]
+host_allow = ["api.multi.com"]
+port_allow = [443]
+[provides.operations."multi.delete".ai_hints]
+when_to_use = "Delete a resource permanently."
+common_mistakes = ["Not verifying the ID before deletion"]
+examples = ['{"id": "123"}']
+related = ["multi.read"]
+"#;
+        toml::from_str(s).unwrap()
+    }
+
+    #[test]
+    fn multi_op_manifest_counts_correctly() {
+        let manifest = manifest_multi_ops();
+        let audit = audit_manifest("multi", &manifest);
+        assert_eq!(audit.operations.count, 3);
+        assert_eq!(audit.operations.with_description, 3);
+        assert_eq!(audit.operations.with_capability, 3);
+        assert_eq!(audit.operations.with_risk_level, 3);
+        assert_eq!(audit.operations.with_safety_tier, 3);
+        assert_eq!(audit.operations.with_idempotency, 3);
+        assert_eq!(audit.operations.with_approval, 3);
+    }
+
+    #[test]
+    fn multi_op_all_have_hints() {
+        let manifest = manifest_multi_ops();
+        let audit = audit_manifest("multi", &manifest);
+        assert_eq!(audit.agent_hints.with_hints, 3);
+        assert_eq!(audit.agent_hints.with_when_to_use, 3);
+        assert_eq!(audit.agent_hints.with_examples, 3);
+    }
+
+    #[test]
+    fn multi_op_completeness_is_one() {
+        let manifest = manifest_multi_ops();
+        let audit = audit_manifest("multi", &manifest);
+        assert!((audit.operations.completeness - 1.0).abs() < f64::EPSILON);
+        assert_eq!(audit.level, ReadinessLevel::Ready);
+    }
+
+    #[test]
+    fn multi_op_all_have_network() {
+        let manifest = manifest_multi_ops();
+        let audit = audit_manifest("multi", &manifest);
+        assert_eq!(audit.network.with_constraints, 3);
+        assert!((audit.network.coverage - 1.0).abs() < f64::EPSILON);
+    }
+
+    // ── Rate limit detection ──
+
+    fn manifest_with_rate_limits() -> toml::Value {
+        let s = r#"
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+
+[connector]
+id = "fcp.rated"
+name = "Rated"
+version = "0.1.0"
+description = "Rate-limited connector"
+archetypes = ["operational"]
+format = "wasi"
+
+[provides.operations."rated.op"]
+description = "A rate-limited operation"
+capability = "rated.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+[provides.operations."rated.op".input_schema]
+type = "object"
+[provides.operations."rated.op".output_schema]
+type = "object"
+[provides.operations."rated.op".network_constraints]
+host_allow = ["api.rated.com"]
+port_allow = [443]
+[provides.operations."rated.op".ai_hints]
+when_to_use = "A rated operation."
+common_mistakes = []
+examples = ['{}']
+related = []
+
+[[rate_limits.pools]]
+id = "rated.read"
+requests = 100
+window_ms = 60000
+burst = 10
+scope = "instance"
+
+[rate_limits.operation_pools]
+"rated.op" = ["rated.read"]
+"#;
+        toml::from_str(s).unwrap()
+    }
+
+    #[test]
+    fn rate_limits_detected() {
+        let manifest = manifest_with_rate_limits();
+        let audit = audit_manifest("rated", &manifest);
+        assert_eq!(audit.rate_limits.pool_count, 1);
+        assert!(audit.rate_limits.has_operation_pools);
+    }
+
+    #[test]
+    fn no_rate_limits_is_zero() {
+        let manifest = minimal_manifest();
+        let audit = audit_manifest("test", &manifest);
+        assert_eq!(audit.rate_limits.pool_count, 0);
+        assert!(!audit.rate_limits.has_operation_pools);
+    }
+}

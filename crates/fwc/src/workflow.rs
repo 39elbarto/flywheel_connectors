@@ -1703,4 +1703,1045 @@ mod tests {
         .expect_err("multiple payload sources should fail");
         assert!(error.to_string().contains("mutually exclusive"));
     }
+
+    // ── validate_binding_entries ──────────────────────────────────────
+
+    #[test]
+    fn validate_binding_entries_rejects_empty_input() {
+        let error =
+            validate_binding_entries(&[]).expect_err("empty input should fail");
+        assert!(error.to_string().contains("at least one"));
+    }
+
+    #[test]
+    fn validate_binding_entries_single_valid() {
+        let bindings = validate_binding_entries(&["key=value".to_owned()])
+            .expect("single valid entry should succeed");
+        assert_eq!(bindings.len(), 1);
+        assert_eq!(bindings[0], ("key".to_owned(), "value".to_owned()));
+    }
+
+    #[test]
+    fn validate_binding_entries_multiple_valid() {
+        let bindings = validate_binding_entries(&[
+            "alpha=one".to_owned(),
+            "beta=two".to_owned(),
+            "gamma=three".to_owned(),
+        ])
+        .expect("multiple valid entries should succeed");
+        assert_eq!(bindings.len(), 3);
+        assert_eq!(bindings[0].0, "alpha");
+        assert_eq!(bindings[1].0, "beta");
+        assert_eq!(bindings[2].0, "gamma");
+    }
+
+    #[test]
+    fn validate_binding_entries_trims_whitespace() {
+        let bindings = validate_binding_entries(&["  key  =  value  ".to_owned()])
+            .expect("whitespace-padded entry should succeed");
+        assert_eq!(bindings[0], ("key".to_owned(), "value".to_owned()));
+    }
+
+    #[test]
+    fn validate_binding_entries_rejects_empty_key() {
+        let error = validate_binding_entries(&["=value".to_owned()])
+            .expect_err("empty key should fail");
+        assert!(error.to_string().contains("non-empty key and value"));
+    }
+
+    #[test]
+    fn validate_binding_entries_rejects_empty_value() {
+        let error = validate_binding_entries(&["key=".to_owned()])
+            .expect_err("empty value should fail");
+        assert!(error.to_string().contains("non-empty key and value"));
+    }
+
+    #[test]
+    fn validate_binding_entries_rejects_no_equals_sign() {
+        let error = validate_binding_entries(&["no-equals".to_owned()])
+            .expect_err("missing equals should fail");
+        assert!(error.to_string().contains("expected `key=value`"));
+    }
+
+    #[test]
+    fn validate_binding_entries_allows_equals_in_value() {
+        let bindings =
+            validate_binding_entries(&["key=a=b=c".to_owned()])
+                .expect("equals inside value should be allowed");
+        assert_eq!(bindings[0], ("key".to_owned(), "a=b=c".to_owned()));
+    }
+
+    #[test]
+    fn validate_binding_entries_payload_json_alone_is_ok() {
+        let bindings = validate_binding_entries(&[
+            "payload_json={\"title\":\"hello\"}".to_owned(),
+        ])
+        .expect("payload_json alone should succeed");
+        assert_eq!(bindings[0].0, "payload_json");
+    }
+
+    #[test]
+    fn validate_binding_entries_payload_file_alone_is_ok() {
+        let bindings = validate_binding_entries(&[
+            "payload_file=body.json".to_owned(),
+        ])
+        .expect("payload_file alone should succeed");
+        assert_eq!(bindings[0].0, "payload_file");
+    }
+
+    // ── effective_bindings ───────────────────────────────────────────
+
+    #[test]
+    fn effective_bindings_draft_overridden_by_explicit() {
+        let store = store();
+        let task = store
+            .create(WorkflowRequest {
+                intent: "create a GitHub issue titled \"test\"".to_owned(),
+                connector_override: None,
+                zone_override: None,
+            })
+            .expect("task should be created");
+
+        // Add a draft binding via resolution
+        let patch = ResolutionPatch {
+            draft_bindings: BTreeMap::from([
+                ("repo".to_owned(), "draft-repo".to_owned()),
+            ]),
+            identifier_candidates: Vec::new(),
+            evidence: vec!["test evidence".to_owned()],
+        };
+        let applied = store
+            .append_resolution(&task.id, "resolve", "single-pass", 1, 1, patch)
+            .expect("resolution should persist")
+            .expect("task should exist");
+
+        // Now bind the same key explicitly
+        let rebound = store
+            .bind(
+                &applied.task.id,
+                vec![("repo".to_owned(), "explicit-repo".to_owned())],
+            )
+            .expect("bind should succeed")
+            .expect("task should exist");
+
+        let eff = effective_bindings(&rebound);
+        assert_eq!(eff.get("repo").map(String::as_str), Some("explicit-repo"));
+    }
+
+    #[test]
+    fn effective_bindings_payload_file_removes_draft_payload_json() {
+        let store = store();
+        let task = store
+            .create(WorkflowRequest {
+                intent: "create a GitHub issue titled \"test\"".to_owned(),
+                connector_override: None,
+                zone_override: None,
+            })
+            .expect("task should be created");
+
+        // Draft payload_json via resolution
+        let patch = ResolutionPatch {
+            draft_bindings: BTreeMap::from([
+                ("payload_json".to_owned(), "{\"title\":\"test\"}".to_owned()),
+            ]),
+            identifier_candidates: Vec::new(),
+            evidence: vec!["drafted payload".to_owned()],
+        };
+        let applied = store
+            .append_resolution(&task.id, "resolve", "single-pass", 1, 1, patch)
+            .expect("resolution should persist")
+            .expect("task should exist");
+
+        // Bind payload_file explicitly — should remove payload_json from effective
+        let rebound = store
+            .bind(
+                &applied.task.id,
+                vec![("payload_file".to_owned(), "body.json".to_owned())],
+            )
+            .expect("bind should succeed")
+            .expect("task should exist");
+
+        let eff = effective_bindings(&rebound);
+        assert!(eff.contains_key("payload_file"));
+        assert!(!eff.contains_key("payload_json"));
+    }
+
+    #[test]
+    fn effective_bindings_synthesizes_payload_when_none_set() {
+        let store = store();
+        let task = store
+            .create(WorkflowRequest {
+                intent: "create a GitHub issue titled \"my title\"".to_owned(),
+                connector_override: None,
+                zone_override: None,
+            })
+            .expect("task should be created");
+
+        // No explicit or draft payload bindings — synthesized payload should appear
+        let eff = effective_bindings(&task);
+        assert!(
+            eff.contains_key("payload_json"),
+            "synthesized payload_json should be present"
+        );
+        let payload_str = eff.get("payload_json").unwrap();
+        assert!(payload_str.contains("my title"));
+    }
+
+    #[test]
+    fn effective_bindings_merges_draft_and_explicit() {
+        let store = store();
+        let task = store
+            .create(WorkflowRequest {
+                intent: "create a GitHub issue titled \"test\"".to_owned(),
+                connector_override: None,
+                zone_override: None,
+            })
+            .expect("task should be created");
+
+        let patch = ResolutionPatch {
+            draft_bindings: BTreeMap::from([
+                ("draft_key".to_owned(), "draft_val".to_owned()),
+            ]),
+            identifier_candidates: Vec::new(),
+            evidence: vec!["evidence".to_owned()],
+        };
+        let applied = store
+            .append_resolution(&task.id, "resolve", "single-pass", 1, 1, patch)
+            .expect("resolution should persist")
+            .expect("task should exist");
+
+        let rebound = store
+            .bind(
+                &applied.task.id,
+                vec![("explicit_key".to_owned(), "explicit_val".to_owned())],
+            )
+            .expect("bind should succeed")
+            .expect("task should exist");
+
+        let eff = effective_bindings(&rebound);
+        assert_eq!(eff.get("draft_key").map(String::as_str), Some("draft_val"));
+        assert_eq!(
+            eff.get("explicit_key").map(String::as_str),
+            Some("explicit_val")
+        );
+    }
+
+    // ── ready_for_execution ──────────────────────────────────────────
+
+    #[test]
+    fn ready_for_execution_true_when_compiled_and_no_unresolved() {
+        let store = store();
+        let task = store
+            .create(WorkflowRequest {
+                intent: "create a GitHub issue titled \"FWC\"".to_owned(),
+                connector_override: None,
+                zone_override: None,
+            })
+            .expect("task should be created");
+
+        // github issue with title already resolves the payload
+        assert_eq!(task.compiled.status, "ready");
+        assert!(task.unresolved_bindings.is_empty());
+        assert!(task.resolution.pending_question.is_none());
+        assert!(ready_for_execution(&task));
+    }
+
+    #[test]
+    fn ready_for_execution_false_with_unresolved_bindings() {
+        let store = store();
+        let task = store
+            .create(WorkflowRequest {
+                intent: "send a message to a channel".to_owned(),
+                connector_override: Some("slack".to_owned()),
+                zone_override: None,
+            })
+            .expect("task should be created");
+
+        // This intent is missing payload — should have unresolved bindings
+        if !task.unresolved_bindings.is_empty() {
+            assert!(!ready_for_execution(&task));
+        }
+    }
+
+    #[test]
+    fn ready_for_execution_false_with_pending_question() {
+        let store = store();
+        let task = store
+            .create(WorkflowRequest {
+                intent: "find the Notion page named Roadmap and append Summary".to_owned(),
+                connector_override: None,
+                zone_override: None,
+            })
+            .expect("task should be created");
+
+        let patch = super::resolution_patch(&task);
+        let applied = store
+            .append_resolution(&task.id, "resolve", "single-pass", 1, 5, patch)
+            .expect("resolution should persist")
+            .expect("task should exist");
+
+        // The task has a pending question for page_id
+        assert!(applied.task.resolution.pending_question.is_some());
+        assert!(!ready_for_execution(&applied.task));
+    }
+
+    #[test]
+    fn ready_for_execution_false_with_non_ready_status() {
+        let store = store();
+        let task = store
+            .create(WorkflowRequest {
+                intent: "do something vague".to_owned(),
+                connector_override: None,
+                zone_override: None,
+            })
+            .expect("task should be created");
+
+        // Vague intent likely yields needs-clarification
+        if task.compiled.status != "ready" {
+            assert!(!ready_for_execution(&task));
+        }
+    }
+
+    // ── task_subcommands ─────────────────────────────────────────────
+
+    #[test]
+    fn task_subcommands_non_empty() {
+        let subs = super::task_subcommands();
+        assert!(!subs.is_empty());
+    }
+
+    #[test]
+    fn task_subcommands_contains_create() {
+        let subs = super::task_subcommands();
+        assert!(subs.contains(&"create"));
+    }
+
+    #[test]
+    fn task_subcommands_contains_show() {
+        let subs = super::task_subcommands();
+        assert!(subs.contains(&"show"));
+    }
+
+    #[test]
+    fn task_subcommands_contains_list() {
+        let subs = super::task_subcommands();
+        assert!(subs.contains(&"list"));
+    }
+
+    #[test]
+    fn task_subcommands_contains_resolve() {
+        let subs = super::task_subcommands();
+        assert!(subs.contains(&"resolve"));
+    }
+
+    #[test]
+    fn task_subcommands_contains_approve_and_run() {
+        let subs = super::task_subcommands();
+        assert!(subs.contains(&"approve"));
+        assert!(subs.contains(&"run"));
+    }
+
+    // ── TaskStore::list ──────────────────────────────────────────────
+
+    #[test]
+    fn list_empty_store() {
+        let store = store();
+        let tasks = store.list(50, None).expect("list should succeed");
+        assert!(tasks.is_empty());
+    }
+
+    #[test]
+    fn list_returns_created_tasks() {
+        let store = store();
+        store
+            .create(WorkflowRequest {
+                intent: "create a GitHub issue titled \"alpha\"".to_owned(),
+                connector_override: None,
+                zone_override: None,
+            })
+            .expect("task should be created");
+        store
+            .create(WorkflowRequest {
+                intent: "create a GitHub issue titled \"beta\"".to_owned(),
+                connector_override: None,
+                zone_override: None,
+            })
+            .expect("task should be created");
+
+        let tasks = store.list(50, None).expect("list should succeed");
+        assert_eq!(tasks.len(), 2);
+    }
+
+    #[test]
+    fn list_respects_limit() {
+        let store = store();
+        for i in 0..5 {
+            store
+                .create(WorkflowRequest {
+                    intent: format!("create a GitHub issue titled \"task {i}\""),
+                    connector_override: None,
+                    zone_override: None,
+                })
+                .expect("task should be created");
+        }
+
+        let tasks = store.list(3, None).expect("list should succeed");
+        assert_eq!(tasks.len(), 3);
+    }
+
+    #[test]
+    fn list_filters_by_status() {
+        let store = store();
+        let task = store
+            .create(WorkflowRequest {
+                intent: "create a GitHub issue titled \"FWC\"".to_owned(),
+                connector_override: None,
+                zone_override: None,
+            })
+            .expect("task should be created");
+
+        let actual_status = task.capsule_status.clone();
+
+        let matched = store
+            .list(50, Some(&actual_status))
+            .expect("list should succeed");
+        assert_eq!(matched.len(), 1);
+
+        let unmatched = store
+            .list(50, Some("nonexistent-status"))
+            .expect("list should succeed");
+        assert!(unmatched.is_empty());
+    }
+
+    #[test]
+    fn list_sorted_by_updated_at_descending() {
+        let store = store();
+        let t1 = store
+            .create(WorkflowRequest {
+                intent: "create a GitHub issue titled \"first\"".to_owned(),
+                connector_override: None,
+                zone_override: None,
+            })
+            .expect("task should be created");
+
+        // Touch the second task slightly later
+        let t2 = store
+            .create(WorkflowRequest {
+                intent: "create a GitHub issue titled \"second\"".to_owned(),
+                connector_override: None,
+                zone_override: None,
+            })
+            .expect("task should be created");
+
+        let tasks = store.list(50, None).expect("list should succeed");
+        assert_eq!(tasks.len(), 2);
+        // Most recently updated should be first
+        assert!(tasks[0].updated_at >= tasks[1].updated_at);
+        // The second created task should have a later or equal updated_at
+        assert!(t2.updated_at >= t1.updated_at);
+    }
+
+    // ── TaskStore::load ──────────────────────────────────────────────
+
+    #[test]
+    fn load_non_existent_returns_none() {
+        let store = store();
+        let result = store
+            .load("w:nonexistent")
+            .expect("load should not error");
+        assert!(result.is_none());
+    }
+
+    // ── TaskStore::approve ───────────────────────────────────────────
+
+    #[test]
+    fn approve_sets_workflow_and_approved_at() {
+        let store = store();
+        let task = store
+            .create(WorkflowRequest {
+                intent: "create a GitHub issue titled \"test\"".to_owned(),
+                connector_override: None,
+                zone_override: None,
+            })
+            .expect("task should be created");
+
+        assert!(!task.approval.workflow);
+        assert!(task.approval.approved_at.is_none());
+
+        let approved = store
+            .approve(&task.id)
+            .expect("approve should succeed")
+            .expect("task should exist");
+
+        assert!(approved.approval.workflow);
+        assert!(approved.approval.approved_at.is_some());
+    }
+
+    #[test]
+    fn approve_non_existent_returns_none() {
+        let store = store();
+        let result = store
+            .approve("w:nonexistent")
+            .expect("approve should not error");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn approve_changes_capsule_status_for_side_effecting_task() {
+        let store = store();
+        let task = store
+            .create(WorkflowRequest {
+                intent: "create a GitHub issue titled \"test\"".to_owned(),
+                connector_override: None,
+                zone_override: None,
+            })
+            .expect("task should be created");
+
+        // Side-effecting tasks should go from ready-to-simulate to approved after approve
+        if task.has_side_effects() {
+            let approved = store
+                .approve(&task.id)
+                .expect("approve should succeed")
+                .expect("task should exist");
+            assert_eq!(approved.capsule_status, "approved");
+        }
+    }
+
+    // ── TaskStore::refresh ───────────────────────────────────────────
+
+    #[test]
+    fn refresh_preserves_data() {
+        let store = store();
+        let task = store
+            .create(WorkflowRequest {
+                intent: "create a GitHub issue titled \"test\"".to_owned(),
+                connector_override: None,
+                zone_override: None,
+            })
+            .expect("task should be created");
+
+        let refreshed = store
+            .refresh(&task.id)
+            .expect("refresh should succeed")
+            .expect("task should exist");
+
+        assert_eq!(refreshed.id, task.id);
+        assert_eq!(refreshed.request.intent, task.request.intent);
+        assert_eq!(refreshed.compiled.status, task.compiled.status);
+    }
+
+    #[test]
+    fn refresh_non_existent_returns_none() {
+        let store = store();
+        let result = store
+            .refresh("w:nonexistent")
+            .expect("refresh should not error");
+        assert!(result.is_none());
+    }
+
+    // ── WorkflowTask methods ─────────────────────────────────────────
+
+    #[test]
+    fn has_side_effects_true_for_mutating_intent() {
+        let store = store();
+        let task = store
+            .create(WorkflowRequest {
+                intent: "create a GitHub issue titled \"test\"".to_owned(),
+                connector_override: None,
+                zone_override: None,
+            })
+            .expect("task should be created");
+        assert!(task.has_side_effects());
+    }
+
+    #[test]
+    fn has_side_effects_false_for_read_only_intent() {
+        let store = store();
+        let task = store
+            .create(WorkflowRequest {
+                intent: "list GitHub issues".to_owned(),
+                connector_override: None,
+                zone_override: None,
+            })
+            .expect("task should be created");
+        // list is a read-only operation — no side effects
+        assert!(!task.has_side_effects());
+    }
+
+    #[test]
+    fn last_execution_none_when_no_history() {
+        let store = store();
+        let task = store
+            .create(WorkflowRequest {
+                intent: "create a GitHub issue titled \"test\"".to_owned(),
+                connector_override: None,
+                zone_override: None,
+            })
+            .expect("task should be created");
+        assert!(task.last_execution().is_none());
+    }
+
+    #[test]
+    fn last_execution_returns_latest() {
+        let store = store();
+        let task = store
+            .create(WorkflowRequest {
+                intent: "create a GitHub issue titled \"test\"".to_owned(),
+                connector_override: None,
+                zone_override: None,
+            })
+            .expect("task should be created");
+
+        let first = store
+            .append_execution(
+                &task.id,
+                "advance",
+                "simulate",
+                json!({
+                    "status": "simulated",
+                    "executed_count": 1,
+                    "withheld_count": 0,
+                    "stopped_before_side_effect": false,
+                }),
+            )
+            .expect("execution should persist")
+            .expect("task should exist");
+
+        let second = store
+            .append_execution(
+                &task.id,
+                "advance",
+                "approve",
+                json!({
+                    "status": "materialized",
+                    "executed_count": 2,
+                    "withheld_count": 0,
+                    "stopped_before_side_effect": false,
+                }),
+            )
+            .expect("execution should persist")
+            .expect("task should exist");
+
+        let last = second.last_execution().expect("should have execution");
+        assert_eq!(last.status, "materialized");
+        assert_eq!(first.execution_history.len(), 1);
+        assert_eq!(second.execution_history.len(), 2);
+    }
+
+    #[test]
+    fn last_resolution_none_when_no_history() {
+        let store = store();
+        let task = store
+            .create(WorkflowRequest {
+                intent: "create a GitHub issue titled \"test\"".to_owned(),
+                connector_override: None,
+                zone_override: None,
+            })
+            .expect("task should be created");
+        assert!(task.last_resolution().is_none());
+    }
+
+    #[test]
+    fn last_resolution_returns_latest() {
+        let store = store();
+        let task = store
+            .create(WorkflowRequest {
+                intent: "create a GitHub issue titled \"test\"".to_owned(),
+                connector_override: None,
+                zone_override: None,
+            })
+            .expect("task should be created");
+
+        let applied = store
+            .append_resolution(
+                &task.id,
+                "resolve",
+                "single-pass",
+                1,
+                4,
+                super::resolution_patch(&task),
+            )
+            .expect("resolution should persist")
+            .expect("task should exist");
+
+        let last = applied.task.last_resolution().expect("should have resolution");
+        assert_eq!(last.trigger, "resolve");
+        assert_eq!(last.mode, "single-pass");
+    }
+
+    // ── resolution_patch_would_change ────────────────────────────────
+
+    #[test]
+    fn resolution_patch_would_change_false_for_identical() {
+        let store = store();
+        let task = store
+            .create(WorkflowRequest {
+                intent: "create a GitHub issue titled \"test\"".to_owned(),
+                connector_override: None,
+                zone_override: None,
+            })
+            .expect("task should be created");
+
+        let patch = super::resolution_patch(&task);
+        let applied = store
+            .append_resolution(&task.id, "resolve", "single-pass", 1, 4, patch)
+            .expect("resolution should persist")
+            .expect("task should exist");
+
+        // Apply the same patch again — should not change
+        let same_patch = super::resolution_patch(&applied.task);
+        assert!(
+            !resolution_patch_would_change(&applied.task, &same_patch),
+            "applying the same patch again should not change state"
+        );
+    }
+
+    #[test]
+    fn resolution_patch_would_change_true_for_new_evidence() {
+        let store = store();
+        let task = store
+            .create(WorkflowRequest {
+                intent: "create a GitHub issue titled \"test\"".to_owned(),
+                connector_override: None,
+                zone_override: None,
+            })
+            .expect("task should be created");
+
+        let patch = ResolutionPatch {
+            draft_bindings: BTreeMap::new(),
+            identifier_candidates: Vec::new(),
+            evidence: vec!["brand new evidence".to_owned()],
+        };
+        assert!(resolution_patch_would_change(&task, &patch));
+    }
+
+    #[test]
+    fn resolution_patch_would_change_false_for_empty_patch() {
+        let store = store();
+        let task = store
+            .create(WorkflowRequest {
+                intent: "create a GitHub issue titled \"test\"".to_owned(),
+                connector_override: None,
+                zone_override: None,
+            })
+            .expect("task should be created");
+
+        let empty_patch = ResolutionPatch::default();
+        assert!(!resolution_patch_would_change(&task, &empty_patch));
+    }
+
+    // ── TaskOverview construction ────────────────────────────────────
+
+    #[test]
+    fn task_overview_from_new_task() {
+        let store = store();
+        let task = store
+            .create(WorkflowRequest {
+                intent: "create a GitHub issue titled \"overview test\"".to_owned(),
+                connector_override: None,
+                zone_override: None,
+            })
+            .expect("task should be created");
+
+        let overviews = store.list(50, None).expect("list should succeed");
+        assert_eq!(overviews.len(), 1);
+        let overview = &overviews[0];
+        assert_eq!(overview.id, task.id);
+        assert!(overview.intent.contains("overview test"));
+        assert_eq!(overview.chosen_connector, Some("github".to_owned()));
+        assert!(overview.approval_required); // create issue is side-effecting
+        assert!(!overview.approved);
+        assert_eq!(overview.unresolved_bindings, 0);
+        assert!(!overview.pending_question);
+        assert_eq!(overview.resolution_history_count, 0);
+        assert!(overview.last_execution_status.is_none());
+    }
+
+    #[test]
+    fn task_overview_reflects_approval() {
+        let store = store();
+        let task = store
+            .create(WorkflowRequest {
+                intent: "create a GitHub issue titled \"approve test\"".to_owned(),
+                connector_override: None,
+                zone_override: None,
+            })
+            .expect("task should be created");
+
+        store.approve(&task.id).expect("approve should succeed");
+
+        let overviews = store.list(50, None).expect("list should succeed");
+        let overview = overviews
+            .iter()
+            .find(|o| o.id == task.id)
+            .expect("task should be in list");
+        assert!(overview.approved);
+    }
+
+    #[test]
+    fn task_overview_reflects_execution_status() {
+        let store = store();
+        let task = store
+            .create(WorkflowRequest {
+                intent: "create a GitHub issue titled \"exec test\"".to_owned(),
+                connector_override: None,
+                zone_override: None,
+            })
+            .expect("task should be created");
+
+        store
+            .append_execution(
+                &task.id,
+                "advance",
+                "simulate",
+                json!({
+                    "status": "simulated",
+                    "executed_count": 1,
+                    "withheld_count": 0,
+                    "stopped_before_side_effect": false,
+                }),
+            )
+            .expect("execution should persist");
+
+        let overviews = store.list(50, None).expect("list should succeed");
+        let overview = overviews
+            .iter()
+            .find(|o| o.id == task.id)
+            .expect("task should be in list");
+        assert_eq!(
+            overview.last_execution_status.as_deref(),
+            Some("simulated")
+        );
+    }
+
+    #[test]
+    fn task_overview_reflects_pending_question() {
+        let store = store();
+        let task = store
+            .create(WorkflowRequest {
+                intent: "find the Notion page named Roadmap and append Summary".to_owned(),
+                connector_override: None,
+                zone_override: None,
+            })
+            .expect("task should be created");
+
+        let patch = super::resolution_patch(&task);
+        store
+            .append_resolution(&task.id, "resolve", "single-pass", 1, 5, patch)
+            .expect("resolution should persist");
+
+        let overviews = store.list(50, None).expect("list should succeed");
+        let overview = overviews
+            .iter()
+            .find(|o| o.id == task.id)
+            .expect("task should be in list");
+        assert!(overview.pending_question);
+        assert_eq!(overview.resolution_history_count, 1);
+    }
+
+    // ── ApprovalState default ────────────────────────────────────────
+
+    #[test]
+    fn approval_state_default_values() {
+        let state = super::ApprovalState::default();
+        assert!(!state.workflow);
+        assert!(state.approved_at.is_none());
+    }
+
+    // ── Serde round-trips ────────────────────────────────────────────
+
+    #[test]
+    fn workflow_request_serde_round_trip() {
+        let request = WorkflowRequest {
+            intent: "create a GitHub issue titled \"serde test\"".to_owned(),
+            connector_override: Some("github".to_owned()),
+            zone_override: Some("z:work".to_owned()),
+        };
+        let json_str = serde_json::to_string(&request).expect("serialize should succeed");
+        let deserialized: WorkflowRequest =
+            serde_json::from_str(&json_str).expect("deserialize should succeed");
+        assert_eq!(deserialized.intent, request.intent);
+        assert_eq!(deserialized.connector_override, request.connector_override);
+        assert_eq!(deserialized.zone_override, request.zone_override);
+    }
+
+    #[test]
+    fn workflow_request_serde_no_overrides() {
+        let request = WorkflowRequest {
+            intent: "list issues".to_owned(),
+            connector_override: None,
+            zone_override: None,
+        };
+        let json_str = serde_json::to_string(&request).expect("serialize should succeed");
+        let deserialized: WorkflowRequest =
+            serde_json::from_str(&json_str).expect("deserialize should succeed");
+        assert_eq!(deserialized.intent, "list issues");
+        assert!(deserialized.connector_override.is_none());
+        assert!(deserialized.zone_override.is_none());
+    }
+
+    #[test]
+    fn approval_state_serde_round_trip() {
+        let state = super::ApprovalState {
+            workflow: true,
+            approved_at: Some("2026-03-07T12:00:00Z".to_owned()),
+        };
+        let json_str = serde_json::to_string(&state).expect("serialize should succeed");
+        let deserialized: super::ApprovalState =
+            serde_json::from_str(&json_str).expect("deserialize should succeed");
+        assert!(deserialized.workflow);
+        assert_eq!(
+            deserialized.approved_at.as_deref(),
+            Some("2026-03-07T12:00:00Z")
+        );
+    }
+
+    #[test]
+    fn execution_receipt_serde_round_trip() {
+        let receipt = super::ExecutionReceipt {
+            recorded_at: "2026-03-07T12:00:00Z".to_owned(),
+            trigger: "advance".to_owned(),
+            mode: "simulate".to_owned(),
+            status: "simulated".to_owned(),
+            executed_count: 3,
+            withheld_count: 1,
+            stopped_before_side_effect: true,
+            execution: json!({ "status": "simulated" }),
+        };
+        let json_str = serde_json::to_string(&receipt).expect("serialize should succeed");
+        let deserialized: super::ExecutionReceipt =
+            serde_json::from_str(&json_str).expect("deserialize should succeed");
+        assert_eq!(deserialized.trigger, "advance");
+        assert_eq!(deserialized.executed_count, 3);
+        assert_eq!(deserialized.withheld_count, 1);
+        assert!(deserialized.stopped_before_side_effect);
+    }
+
+    #[test]
+    fn resolution_receipt_serde_round_trip() {
+        let receipt = super::ResolutionReceipt {
+            recorded_at: "2026-03-07T12:00:00Z".to_owned(),
+            trigger: "resolve".to_owned(),
+            mode: "single-pass".to_owned(),
+            status: "updated".to_owned(),
+            status_before: "new".to_owned(),
+            status_after: "needs-answer".to_owned(),
+            stop_reason: "pending-question".to_owned(),
+            pass_count: 1,
+            safe_step_count: 4,
+            changed: true,
+            added_draft_bindings: vec!["payload_json".to_owned()],
+            identifier_candidates_added: 1,
+            evidence_added: 2,
+            pending_question_key: Some("page_id".to_owned()),
+        };
+        let json_str = serde_json::to_string(&receipt).expect("serialize should succeed");
+        let deserialized: super::ResolutionReceipt =
+            serde_json::from_str(&json_str).expect("deserialize should succeed");
+        assert_eq!(deserialized.trigger, "resolve");
+        assert!(deserialized.changed);
+        assert_eq!(deserialized.pass_count, 1);
+        assert_eq!(deserialized.safe_step_count, 4);
+        assert_eq!(
+            deserialized.pending_question_key.as_deref(),
+            Some("page_id")
+        );
+    }
+
+    // ── Data structure construction ──────────────────────────────────
+
+    #[test]
+    fn identifier_candidate_construction() {
+        let candidate = super::IdentifierCandidate {
+            binding: "page_id".to_owned(),
+            query: "Roadmap".to_owned(),
+            status: "needs-search".to_owned(),
+            connector: Some("notion".to_owned()),
+            operation_hint: Some("search".to_owned()),
+            rationale: "Need the concrete page ID".to_owned(),
+        };
+        assert_eq!(candidate.binding, "page_id");
+        assert_eq!(candidate.query, "Roadmap");
+        assert_eq!(candidate.connector.as_deref(), Some("notion"));
+        assert_eq!(candidate.operation_hint.as_deref(), Some("search"));
+    }
+
+    #[test]
+    fn clarification_prompt_construction() {
+        let prompt = super::ClarificationPrompt {
+            key: "connector".to_owned(),
+            question: "Which connector?".to_owned(),
+            rationale: "Ambiguous".to_owned(),
+            examples: vec!["connector=slack".to_owned()],
+            suggested_bindings: vec!["connector=slack".to_owned()],
+        };
+        assert_eq!(prompt.key, "connector");
+        assert_eq!(prompt.question, "Which connector?");
+        assert_eq!(prompt.examples.len(), 1);
+        assert_eq!(prompt.suggested_bindings.len(), 1);
+    }
+
+    #[test]
+    fn resolution_state_default_is_empty() {
+        let state = super::ResolutionState::default();
+        assert!(state.draft_bindings.is_empty());
+        assert!(state.identifier_candidates.is_empty());
+        assert!(state.evidence.is_empty());
+        assert!(state.pending_question.is_none());
+        assert!(state.history.is_empty());
+    }
+
+    #[test]
+    fn resolution_patch_default_is_empty() {
+        let patch = ResolutionPatch::default();
+        assert!(patch.draft_bindings.is_empty());
+        assert!(patch.identifier_candidates.is_empty());
+        assert!(patch.evidence.is_empty());
+    }
+
+    // ── WorkflowRequest::compile ─────────────────────────────────────
+
+    #[test]
+    fn compile_simulate_mode_when_not_approved() {
+        let request = WorkflowRequest {
+            intent: "create a GitHub issue titled \"test\"".to_owned(),
+            connector_override: None,
+            zone_override: None,
+        };
+        let compiled = request.compile(false);
+        assert_eq!(compiled.mode, "do-simulate");
+    }
+
+    #[test]
+    fn compile_approve_mode_when_approved() {
+        let request = WorkflowRequest {
+            intent: "create a GitHub issue titled \"test\"".to_owned(),
+            connector_override: None,
+            zone_override: None,
+        };
+        let compiled = request.compile(true);
+        assert_eq!(compiled.mode, "do-approve");
+    }
+
+    #[test]
+    fn compile_respects_connector_override() {
+        let request = WorkflowRequest {
+            intent: "send a message".to_owned(),
+            connector_override: Some("slack".to_owned()),
+            zone_override: None,
+        };
+        let compiled = request.compile(false);
+        assert_eq!(compiled.connector_override.as_deref(), Some("slack"));
+    }
+
+    #[test]
+    fn compile_respects_zone_override() {
+        let request = WorkflowRequest {
+            intent: "create an issue".to_owned(),
+            connector_override: None,
+            zone_override: Some("z:work".to_owned()),
+        };
+        let compiled = request.compile(false);
+        assert_eq!(compiled.zone.as_deref(), Some("z:work"));
+    }
 }

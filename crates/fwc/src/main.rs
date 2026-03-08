@@ -1,7 +1,11 @@
 #![deny(unsafe_code)]
 
 mod catalog;
+#[allow(dead_code)] // Discovery types wired into host-backed commands in later beads.
+mod identifier;
 mod intent;
+#[allow(dead_code)] // Contract types wired into host-backed commands in later beads.
+mod readiness;
 mod render;
 mod workflow;
 
@@ -14,7 +18,7 @@ use clap::{Args, Parser, Subcommand, ValueEnum, error::ErrorKind};
 use serde::Serialize;
 use serde_json::{Value, json};
 
-use crate::render::{OutputFormat, render};
+use crate::render::{OutputFormat, render, token_stats};
 
 const ABOUT: &str =
     "Standalone Flywheel connector console with TOON-first, progressive-disclosure output.";
@@ -65,6 +69,10 @@ struct Cli {
     /// Shortcut for `--format json`.
     #[arg(long, global = true, default_value_t = false)]
     json: bool,
+
+    /// Include token-efficiency statistics comparing TOON vs JSON byte counts.
+    #[arg(long, global = true, default_value_t = false)]
+    token_stats: bool,
 
     /// Host endpoint or socket path for future host-backed execution.
     #[arg(long, global = true)]
@@ -547,6 +555,11 @@ fn execute(raw_args: &[String]) -> Result<ExecutionOutcome> {
                 &prepared.normalized_args,
                 &prepared.corrections,
             );
+
+            if prepared.cli.token_stats {
+                let stats = token_stats(&dispatch.payload);
+                dispatch.payload["_token_stats"] = serde_json::to_value(&stats)?;
+            }
 
             Ok(ExecutionOutcome {
                 text: render(dispatch.payload, prepared.format)?,

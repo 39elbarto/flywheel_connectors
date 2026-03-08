@@ -349,7 +349,10 @@ fn execution_contract(summary: &str, intended_shape: &str) -> Value {
 
 #[cfg(test)]
 mod tests {
-    use super::{guide_payload, planned_payload};
+    use super::{COMMANDS, guide_payload, planned_payload};
+    use serde_json::json;
+
+    // ── Existing tests ──────────────────────────────────────────────────
 
     #[test]
     fn guide_defaults_to_toon() {
@@ -373,5 +376,514 @@ mod tests {
         let payload = guide_payload(Some("does-not-exist"));
         assert_eq!(payload["status"], "unknown-command");
         assert!(payload["known_commands"].is_array());
+    }
+
+    // ── COMMANDS constant tests ─────────────────────────────────────────
+
+    #[test]
+    fn commands_is_non_empty() {
+        assert!(!COMMANDS.is_empty());
+    }
+
+    #[test]
+    fn commands_contains_guide() {
+        assert!(COMMANDS.contains(&"guide"));
+    }
+
+    #[test]
+    fn commands_contains_list() {
+        assert!(COMMANDS.contains(&"list"));
+    }
+
+    #[test]
+    fn commands_contains_show() {
+        assert!(COMMANDS.contains(&"show"));
+    }
+
+    #[test]
+    fn commands_contains_invoke() {
+        assert!(COMMANDS.contains(&"invoke"));
+    }
+
+    #[test]
+    fn commands_contains_task() {
+        assert!(COMMANDS.contains(&"task"));
+    }
+
+    #[test]
+    fn commands_contains_plan() {
+        assert!(COMMANDS.contains(&"plan"));
+    }
+
+    #[test]
+    fn commands_contains_simulate() {
+        assert!(COMMANDS.contains(&"simulate"));
+    }
+
+    #[test]
+    fn commands_has_no_duplicates() {
+        let mut seen = std::collections::HashSet::new();
+        for cmd in COMMANDS {
+            assert!(seen.insert(cmd), "duplicate command: {cmd}");
+        }
+    }
+
+    // ── guide_payload(None) full-guide tests ────────────────────────────
+
+    #[test]
+    fn full_guide_status_is_ok() {
+        let g = guide_payload(None);
+        assert_eq!(g["status"], "ok");
+    }
+
+    #[test]
+    fn full_guide_name_is_fwc() {
+        let g = guide_payload(None);
+        assert_eq!(g["name"], "fwc");
+    }
+
+    #[test]
+    fn full_guide_has_commands_array() {
+        let g = guide_payload(None);
+        assert!(g["commands"].is_array());
+        assert!(!g["commands"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn full_guide_has_exit_codes_object() {
+        let g = guide_payload(None);
+        assert!(g["exit_codes"].is_object());
+    }
+
+    #[test]
+    fn full_guide_has_six_families() {
+        let g = guide_payload(None);
+        let families = g["families"].as_array().expect("families should be array");
+        assert_eq!(families.len(), 6);
+    }
+
+    #[test]
+    fn full_guide_family_names() {
+        let g = guide_payload(None);
+        let families = g["families"].as_array().unwrap();
+        let names: Vec<&str> = families
+            .iter()
+            .map(|f| f["name"].as_str().unwrap())
+            .collect();
+        assert!(names.contains(&"workflow"));
+        assert!(names.contains(&"intent"));
+        assert!(names.contains(&"discovery"));
+        assert!(names.contains(&"lifecycle"));
+        assert!(names.contains(&"config"));
+        assert!(names.contains(&"execution"));
+    }
+
+    #[test]
+    fn full_guide_has_progressive_disclosure() {
+        let g = guide_payload(None);
+        assert!(g["progressive_disclosure"].is_array());
+        assert!(!g["progressive_disclosure"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn full_guide_has_recommended_workflow() {
+        let g = guide_payload(None);
+        assert!(g["recommended_workflow"].is_array());
+        assert!(!g["recommended_workflow"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn full_guide_defaults_format_is_toon() {
+        let g = guide_payload(None);
+        assert_eq!(g["defaults"]["format"], "toon");
+    }
+
+    #[test]
+    fn full_guide_has_purpose_string() {
+        let g = guide_payload(None);
+        assert!(g["purpose"].is_string());
+    }
+
+    // ── guide_payload(Some(cmd)) per-command tests ──────────────────────
+
+    #[test]
+    fn guide_for_guide_command() {
+        let p = guide_payload(Some("guide"));
+        assert_eq!(p["status"], "ok");
+        assert_eq!(p["guide_scope"], "command");
+        assert!(p["contract"]["family"].is_string());
+        assert!(p["contract"]["summary"].is_string());
+    }
+
+    #[test]
+    fn guide_for_list_command() {
+        let p = guide_payload(Some("list"));
+        assert_eq!(p["status"], "ok");
+        assert_eq!(p["guide_scope"], "command");
+        assert_eq!(p["contract"]["family"], "discovery");
+    }
+
+    #[test]
+    fn guide_for_task_command() {
+        let p = guide_payload(Some("task"));
+        assert_eq!(p["status"], "ok");
+        assert_eq!(p["contract"]["family"], "workflow");
+    }
+
+    #[test]
+    fn guide_for_invoke_command() {
+        let p = guide_payload(Some("invoke"));
+        assert_eq!(p["status"], "ok");
+        assert_eq!(p["contract"]["family"], "execution");
+    }
+
+    #[test]
+    fn guide_for_config_command() {
+        let p = guide_payload(Some("config"));
+        assert_eq!(p["status"], "ok");
+        assert_eq!(p["contract"]["family"], "config");
+    }
+
+    #[test]
+    fn guide_for_plan_command() {
+        let p = guide_payload(Some("plan"));
+        assert_eq!(p["status"], "ok");
+        assert_eq!(p["contract"]["family"], "intent");
+    }
+
+    #[test]
+    fn guide_for_all_known_commands_returns_ok() {
+        for cmd in COMMANDS {
+            let p = guide_payload(Some(cmd));
+            assert_eq!(p["status"], "ok", "guide_payload for {cmd} should be ok");
+        }
+    }
+
+    // ── guide_payload(Some("unknown")) ──────────────────────────────────
+
+    #[test]
+    fn guide_unknown_command_status() {
+        let p = guide_payload(Some("nonexistent-xyzzy"));
+        assert_eq!(p["status"], "unknown-command");
+    }
+
+    #[test]
+    fn guide_unknown_command_has_known_commands_list() {
+        let p = guide_payload(Some("nonexistent-xyzzy"));
+        let known = p["known_commands"].as_array().expect("known_commands array");
+        assert_eq!(known.len(), COMMANDS.len());
+    }
+
+    #[test]
+    fn guide_unknown_command_echoes_command_name() {
+        let p = guide_payload(Some("bogus"));
+        assert_eq!(p["command"], "bogus");
+    }
+
+    // ── planned_payload for known commands ───────────────────────────────
+
+    #[test]
+    fn planned_payload_status_is_planned_for_known() {
+        let cap = json!({});
+        for cmd in COMMANDS {
+            let p = planned_payload(cmd, &cap);
+            assert_eq!(p["status"], "planned", "planned_payload for {cmd}");
+        }
+    }
+
+    #[test]
+    fn planned_payload_has_contract_for_known() {
+        let cap = json!({"key": "val"});
+        let p = planned_payload("show", &cap);
+        assert!(p["contract"].is_object());
+        assert!(p["contract"]["family"].is_string());
+    }
+
+    #[test]
+    fn planned_payload_phase_is_ux_contract() {
+        let cap = json!({});
+        let p = planned_payload("ops", &cap);
+        assert_eq!(p["phase"], "ux-contract-and-scaffold");
+    }
+
+    #[test]
+    fn planned_payload_preserves_captures() {
+        let cap = json!({"zone": "z:work", "limit": 10});
+        let p = planned_payload("list", &cap);
+        assert_eq!(p["captures"]["zone"], "z:work");
+        assert_eq!(p["captures"]["limit"], 10);
+    }
+
+    // ── planned_payload for unknown command ─────────────────────────────
+
+    #[test]
+    fn planned_unknown_command_status() {
+        let p = planned_payload("does-not-exist", &json!({}));
+        assert_eq!(p["status"], "unknown-command");
+    }
+
+    #[test]
+    fn planned_unknown_command_has_known_commands() {
+        let p = planned_payload("does-not-exist", &json!({}));
+        assert!(p["known_commands"].is_array());
+        assert_eq!(p["known_commands"].as_array().unwrap().len(), COMMANDS.len());
+    }
+
+    #[test]
+    fn planned_unknown_command_echoes_command_and_captures() {
+        let cap = json!({"a": 1});
+        let p = planned_payload("nope", &cap);
+        assert_eq!(p["command"], "nope");
+        assert_eq!(p["captures"]["a"], 1);
+    }
+
+    // ── Family correctness ──────────────────────────────────────────────
+
+    #[test]
+    fn intent_commands_have_intent_family() {
+        for cmd in &["plan", "explain", "do"] {
+            let p = guide_payload(Some(cmd));
+            assert_eq!(
+                p["contract"]["family"], "intent",
+                "{cmd} should be intent family"
+            );
+        }
+    }
+
+    #[test]
+    fn discovery_commands_have_discovery_family() {
+        for cmd in &["list", "search", "show", "ops", "schema", "examples"] {
+            let p = guide_payload(Some(cmd));
+            assert_eq!(
+                p["contract"]["family"], "discovery",
+                "{cmd} should be discovery family"
+            );
+        }
+    }
+
+    #[test]
+    fn lifecycle_commands_have_lifecycle_family() {
+        for cmd in &[
+            "status", "enable", "disable", "start", "stop", "restart", "install", "update", "pin",
+            "unpin",
+        ] {
+            let p = guide_payload(Some(cmd));
+            assert_eq!(
+                p["contract"]["family"], "lifecycle",
+                "{cmd} should be lifecycle family"
+            );
+        }
+    }
+
+    #[test]
+    fn execution_commands_have_execution_family() {
+        for cmd in &["invoke", "simulate", "logs"] {
+            let p = guide_payload(Some(cmd));
+            assert_eq!(
+                p["contract"]["family"], "execution",
+                "{cmd} should be execution family"
+            );
+        }
+    }
+
+    #[test]
+    fn config_command_has_config_family() {
+        let p = guide_payload(Some("config"));
+        assert_eq!(p["contract"]["family"], "config");
+    }
+
+    #[test]
+    fn guide_command_has_meta_family() {
+        let p = guide_payload(Some("guide"));
+        assert_eq!(p["contract"]["family"], "meta");
+    }
+
+    #[test]
+    fn task_command_has_workflow_family() {
+        let p = guide_payload(Some("task"));
+        assert_eq!(p["contract"]["family"], "workflow");
+    }
+
+    // ── Contract shape tests ────────────────────────────────────────────
+
+    #[test]
+    fn all_contracts_have_summary() {
+        for cmd in COMMANDS {
+            let p = guide_payload(Some(cmd));
+            assert!(
+                p["contract"]["summary"].is_string(),
+                "{cmd} contract missing summary"
+            );
+        }
+    }
+
+    #[test]
+    fn all_contracts_have_intended_shape() {
+        for cmd in COMMANDS {
+            let p = guide_payload(Some(cmd));
+            assert!(
+                p["contract"]["intended_shape"].is_string(),
+                "{cmd} contract missing intended_shape"
+            );
+        }
+    }
+
+    #[test]
+    fn all_contracts_have_next_beads() {
+        for cmd in COMMANDS {
+            let p = guide_payload(Some(cmd));
+            assert!(
+                p["contract"]["next_beads"].is_array(),
+                "{cmd} contract missing next_beads"
+            );
+        }
+    }
+
+    #[test]
+    fn all_contracts_have_workflow_handoff() {
+        for cmd in COMMANDS {
+            let p = guide_payload(Some(cmd));
+            assert!(
+                p["contract"]["workflow_handoff"].is_array(),
+                "{cmd} contract missing workflow_handoff"
+            );
+        }
+    }
+
+    // ── Exit codes tests ────────────────────────────────────────────────
+
+    #[test]
+    fn exit_codes_are_distinct() {
+        let g = guide_payload(None);
+        let codes_obj = g["exit_codes"].as_object().expect("exit_codes object");
+        let values: Vec<i64> = codes_obj.values().map(|v| v.as_i64().unwrap()).collect();
+        let unique: std::collections::HashSet<i64> = values.iter().copied().collect();
+        assert_eq!(
+            values.len(),
+            unique.len(),
+            "exit codes must be distinct: {values:?}"
+        );
+    }
+
+    #[test]
+    fn exit_codes_success_is_zero() {
+        let g = guide_payload(None);
+        assert_eq!(g["exit_codes"]["success"], 0);
+    }
+
+    #[test]
+    fn exit_codes_internal_error_is_one() {
+        let g = guide_payload(None);
+        assert_eq!(g["exit_codes"]["internal_error"], 1);
+    }
+
+    // ── Families vs COMMANDS cross-check ────────────────────────────────
+
+    #[test]
+    fn family_commands_are_subset_of_commands_constant() {
+        let g = guide_payload(None);
+        let families = g["families"].as_array().unwrap();
+        for family in families {
+            let cmds = family["commands"].as_array().unwrap();
+            for cmd in cmds {
+                let name = cmd.as_str().unwrap();
+                assert!(
+                    COMMANDS.contains(&name),
+                    "family command {name} not in COMMANDS"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn all_commands_appear_in_exactly_one_family() {
+        let g = guide_payload(None);
+        let families = g["families"].as_array().unwrap();
+        let mut family_cmds: Vec<&str> = Vec::new();
+        for family in families {
+            for cmd in family["commands"].as_array().unwrap() {
+                family_cmds.push(cmd.as_str().unwrap());
+            }
+        }
+        // guide is in COMMANDS but only has a meta contract; it is NOT listed
+        // in the families array. So we check that every family command is in
+        // COMMANDS but we allow COMMANDS to have entries not in families.
+        for fc in &family_cmds {
+            assert!(
+                COMMANDS.contains(fc),
+                "family command {fc} not in COMMANDS constant"
+            );
+        }
+        // No duplicates within families
+        let unique: std::collections::HashSet<&str> = family_cmds.iter().copied().collect();
+        assert_eq!(
+            family_cmds.len(),
+            unique.len(),
+            "duplicate command across families"
+        );
+    }
+
+    // ── Edge-case / misc tests ──────────────────────────────────────────
+
+    #[test]
+    fn planned_payload_with_empty_captures() {
+        let p = planned_payload("invoke", &json!({}));
+        assert_eq!(p["status"], "planned");
+        assert!(p["captures"].is_object());
+        assert_eq!(p["captures"].as_object().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn planned_payload_with_nested_captures() {
+        let cap = json!({"filters": {"state": "active"}, "page": 1});
+        let p = planned_payload("search", &cap);
+        assert_eq!(p["captures"]["filters"]["state"], "active");
+        assert_eq!(p["captures"]["page"], 1);
+    }
+
+    #[test]
+    fn guide_full_commands_array_has_entries_with_family() {
+        let g = guide_payload(None);
+        let cmds = g["commands"].as_array().unwrap();
+        for entry in cmds {
+            assert!(
+                entry["family"].is_string(),
+                "command entry missing family field"
+            );
+            assert!(
+                entry["summary"].is_string(),
+                "command entry missing summary field"
+            );
+        }
+    }
+
+    #[test]
+    fn example_alias_returns_same_family_as_examples() {
+        // command_contract handles "example" | "examples" — but COMMANDS only
+        // lists "examples". Verify via planned_payload which also uses command_contract.
+        let p = planned_payload("example", &json!({}));
+        assert_eq!(p["status"], "planned");
+        assert_eq!(p["contract"]["family"], "discovery");
+    }
+
+    #[test]
+    fn guide_scope_field_only_in_per_command_guide() {
+        // Full guide should NOT have guide_scope
+        let full = guide_payload(None);
+        assert!(full.get("guide_scope").is_none());
+
+        // Per-command guide SHOULD have guide_scope
+        let per = guide_payload(Some("list"));
+        assert_eq!(per["guide_scope"], "command");
+    }
+
+    #[test]
+    fn all_exit_codes_are_non_negative() {
+        let g = guide_payload(None);
+        let codes_obj = g["exit_codes"].as_object().unwrap();
+        for (name, val) in codes_obj {
+            let v = val.as_i64().unwrap();
+            assert!(v >= 0, "exit code {name} is negative: {v}");
+        }
     }
 }

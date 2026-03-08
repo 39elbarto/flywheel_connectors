@@ -219,6 +219,7 @@ fn report_from_decision_receipt(receipt: &DecisionReceipt) -> ExplainReport {
             })
             .collect(),
         explanation: receipt.explanation.clone(),
+        recovery_hint: None,
         zone_id: receipt.header.zone_id.to_string(),
         signed_by: SignerInfo {
             node_id: receipt.signature.node_id.to_string(),
@@ -242,6 +243,7 @@ fn report_from_operation_receipt(receipt: &OperationReceipt) -> ExplainReport {
         reason_description: reason_code_description("FCP-0000").to_string(),
         evidence: Vec::new(),
         explanation: None,
+        recovery_hint: None,
         zone_id: receipt.header.zone_id.to_string(),
         signed_by: SignerInfo {
             node_id: receipt.signature.node_id.to_string(),
@@ -264,6 +266,7 @@ fn report_from_invoke_response(response: &InvokeResponse) -> ExplainReport {
             reason_description: reason_code_description("FCP-0000").to_string(),
             evidence: Vec::new(),
             explanation: None,
+            recovery_hint: None,
             zone_id: "unknown".to_string(),
             signed_by: SignerInfo {
                 node_id: "unknown".to_string(),
@@ -305,6 +308,7 @@ fn report_from_error_response(
         reason_description: reason_code_description(&response.code).to_string(),
         evidence: Vec::new(),
         explanation: Some(response.message),
+        recovery_hint: response.ai_recovery_hint,
         zone_id: "unknown".to_string(),
         signed_by: SignerInfo {
             node_id: "unknown".to_string(),
@@ -336,6 +340,7 @@ fn create_demo_allow_receipt(request_id: &str) -> ExplainReport {
             },
         ],
         explanation: None,
+        recovery_hint: None,
         zone_id: "z:work".to_string(),
         signed_by: SignerInfo {
             node_id: "node-mesh-1".to_string(),
@@ -375,6 +380,7 @@ fn create_demo_deny_revoked_receipt(request_id: &str) -> ExplainReport {
         explanation: Some(
             "Token was revoked by zone administrator due to credential rotation".to_string(),
         ),
+        recovery_hint: Some("Request a fresh capability token after revocation sync completes".to_string()),
         zone_id: "z:work".to_string(),
         signed_by: SignerInfo {
             node_id: "node-mesh-1".to_string(),
@@ -409,6 +415,7 @@ fn create_demo_deny_zone_violation_receipt(request_id: &str) -> ExplainReport {
             "Cross-zone access denied: z:external cannot invoke operations in z:sensitive"
                 .to_string(),
         ),
+        recovery_hint: Some("Reissue the request with a token scoped to the target zone".to_string()),
         zone_id: "z:sensitive".to_string(),
         signed_by: SignerInfo {
             node_id: "node-mesh-2".to_string(),
@@ -495,6 +502,14 @@ fn print_human_readable(report: &ExplainReport) {
         println!();
     }
 
+    if let Some(ref recovery_hint) = report.recovery_hint {
+        println!("Recovery Hint:");
+        for line in textwrap::wrap(recovery_hint, 70) {
+            println!("  {line}");
+        }
+        println!();
+    }
+
     // Evidence
     if !report.evidence.is_empty() {
         println!("Evidence ({} items):", report.evidence.len());
@@ -553,6 +568,7 @@ fn truncate_id(id: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
 
     #[test]
     fn validate_object_id_valid() {
@@ -619,11 +635,57 @@ mod tests {
     }
 
     #[test]
+    fn load_receipt_from_json_error_response_preserves_recovery_hint() {
+        let path = temp_receipt_path("json-error-response");
+        let response = FcpErrorResponse {
+            code: "FCP-3001".to_string(),
+            message: "Capability denied - insufficient permissions".to_string(),
+            retryable: false,
+            retry_after_ms: None,
+            details: Some(serde_json::json!({
+                "required_capability": "invoke:fcp.test-echo:echo"
+            })),
+            ai_recovery_hint: Some(
+                "Obtain a capability token granting invoke:fcp.test-echo:echo".to_string(),
+            ),
+        };
+        let json = serde_json::to_vec(&response).expect("serialize error response");
+        std::fs::write(&path, json).expect("write receipt fixture");
+
+        let report = load_receipt_from_file(&path).expect("decode explain report");
+        assert_eq!(report.decision, DecisionOutcome::Deny);
+        assert_eq!(report.reason_code, "FCP-3001");
+        assert_eq!(
+            report.explanation.as_deref(),
+            Some("Capability denied - insufficient permissions")
+        );
+        assert_eq!(
+            report.recovery_hint.as_deref(),
+            Some("Obtain a capability token granting invoke:fcp.test-echo:echo")
+        );
+        assert_eq!(
+            report.reason_description,
+            "Capability denied - insufficient permissions"
+        );
+    }
+
+    #[test]
     fn load_receipt_not_found() {
         let request_id = format!("{}9999", "0".repeat(60));
         let result = load_decision_receipt(&request_id, None);
         assert!(result.is_err());
         let error = result.unwrap_err();
         assert_eq!(error.code, "FCP-6001");
+    }
+
+    fn temp_receipt_path(stem: &str) -> PathBuf {
+        let mut path = std::env::temp_dir();
+        let unique = format!(
+            "fcp-explain-{stem}-{}-{}.json",
+            std::process::id(),
+            current_timestamp()
+        );
+        path.push(unique);
+        path
     }
 }

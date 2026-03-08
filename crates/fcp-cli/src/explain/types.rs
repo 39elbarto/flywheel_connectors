@@ -42,6 +42,10 @@ pub struct ExplainReport {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub explanation: Option<String>,
 
+    /// Optional agent-facing recovery hint sourced from denial responses.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recovery_hint: Option<String>,
+
     /// Zone where the decision was made.
     pub zone_id: String,
 
@@ -364,6 +368,7 @@ mod tests {
                 },
             ],
             explanation: Some("Demo revocation recorded".to_string()),
+            recovery_hint: Some("Rotate the token and request a fresh capability grant".to_string()),
             zone_id: "z:work".to_string(),
             signed_by: SignerInfo {
                 node_id: "node-demo".to_string(),
@@ -378,12 +383,17 @@ mod tests {
         assert!(json.contains("\"decision\": \"deny\""));
         assert!(json.contains("\"reason_code\": \"FCP-4030\""));
         assert!(json.contains("\"evidence_type\": \"capability_token\""));
+        assert!(json.contains("\"recovery_hint\": \"Rotate the token and request a fresh capability grant\""));
 
         // Verify roundtrip
         let parsed: ExplainReport = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.decision, DecisionOutcome::Deny);
         assert_eq!(parsed.reason_code, "FCP-4030");
         assert_eq!(parsed.evidence.len(), 2);
+        assert_eq!(
+            parsed.recovery_hint.as_deref(),
+            Some("Rotate the token and request a fresh capability grant")
+        );
     }
 
     #[test]
@@ -573,6 +583,7 @@ mod tests {
             reason_description: "all good".into(),
             evidence: vec![],
             explanation: None,
+            recovery_hint: None,
             zone_id: "z:test".into(),
             signed_by: SignerInfo {
                 node_id: "node:a".into(),
@@ -584,11 +595,13 @@ mod tests {
         assert!(!json.contains("operation_id"));
         assert!(!json.contains("retry_after_ms"));
         assert!(!json.contains("explanation"));
+        assert!(!json.contains("recovery_hint"));
         // Roundtrip
         let back: ExplainReport = serde_json::from_str(&json).unwrap();
         assert_eq!(back.decision, DecisionOutcome::Allow);
         assert!(back.operation_id.is_none());
         assert!(back.evidence.is_empty());
+        assert!(back.recovery_hint.is_none());
     }
 
     #[test]
@@ -605,6 +618,7 @@ mod tests {
             reason_description: "internal error".into(),
             evidence: vec![],
             explanation: None,
+            recovery_hint: None,
             zone_id: "z:x".into(),
             signed_by: SignerInfo {
                 node_id: "n".into(),

@@ -157,7 +157,7 @@ track_for_scenario() {
     request_response_user_flow|polling_user_flow|webhook_delivery_flow|happy_path|denial_path|revocation_flow|taint_approval)
       printf '%s' "user_journey"
       ;;
-    integration_gate|unit_gate|coverage_gate_publication|cross_component_revalidation|fuzz_adversarial_revalidation|unified_validation_report|failure_journey_forensic_bundle|reliability_soak_adversarial_load|runtime_tuning_calibration|performance_reliability_gate|canary_scenario_matrix|rollback_drill_consistency|rehearsal_automation|go_nogo_decision_gate|final_cutover_gate)
+    integration_gate|unit_gate|coverage_gate_publication|cross_component_revalidation|fuzz_adversarial_revalidation|unified_validation_report|failure_journey_forensic_bundle|reliability_soak_adversarial_load|runtime_tuning_calibration|performance_reliability_gate|connector_rollout_flow|canary_scenario_matrix|rollback_drill_consistency|rehearsal_automation|go_nogo_decision_gate|final_cutover_gate)
       printf '%s' "quality_gates"
       ;;
     streaming_*|sse_reconnect_ordering|bidirectional_cancel_chain|cancellation_flow)
@@ -577,6 +577,7 @@ SCENARIOS=(
   "reliability_soak_adversarial_load|e2e_reliability_soak_adversarial_load.sh|Reliability soak adversarial load stability|true"
   "runtime_tuning_calibration|e2e_runtime_tuning_calibration.sh|Runtime tuning risk-bounded calibration|true"
   "performance_reliability_gate|e2e_performance_reliability_gate.sh|Performance reliability gate config freeze|true"
+  "connector_rollout_flow|connector_rollout_flow.sh|Connector staged rollout and automatic rollback audit flow|true"
   "canary_scenario_matrix|e2e_canary_scenario_matrix.sh|Canary scenario matrix abort thresholds|true"
   "rollback_drill_consistency|e2e_rollback_drill_consistency.sh|Rollback drill state consistency recovery|true"
   "rehearsal_automation|e2e_rehearsal_automation.sh|Rehearsal automation artifact log enforcement|true"

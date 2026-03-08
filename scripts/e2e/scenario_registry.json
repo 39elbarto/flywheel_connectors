@@ -1,6 +1,6 @@
 {
   "schema_version": "asupersync-e2e-scenario-registry/v1",
-  "registry_version": 15,
+  "registry_version": 16,
   "program_epic": "flywheel_connectors-235t",
   "owner_bead": "flywheel_connectors-235t.26.6.1",
   "governance_rules": {
@@ -568,6 +568,16 @@
       "archetype": "cli_process",
       "failure_class": "gate_verdict_regression",
       "user_impact_category": "performance"
+    },
+    {
+      "key": "connector_rollout_flow",
+      "scenario_id": "asupersync.e2e.connector_rollout_flow",
+      "script": "scripts/e2e/connector_rollout_flow.sh",
+      "required": true,
+      "contract_id": "contract.connector_rollout_rollback_audit_restore",
+      "archetype": "cli_process",
+      "failure_class": "rollout_rollback_audit_restore_regression",
+      "user_impact_category": "availability"
     },
     {
       "key": "canary_scenario_matrix",

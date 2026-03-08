@@ -948,6 +948,8 @@ fn log_introspection(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use super::*;
     use fcp_core::{
         AgentHint, BaseConnector, CapabilityId, CapabilityToken, ConnectorId, EventCaps, FcpError,
@@ -982,6 +984,313 @@ mod tests {
                     "fcp.dummy:request_response:0.1.0",
                 )),
             }
+        }
+    }
+
+    #[derive(Debug, Clone)]
+    struct IssuedCapabilityToken {
+        token: CapabilityToken,
+        token_id: String,
+        issuer: String,
+    }
+
+    #[derive(Debug, Clone)]
+    struct RevocationArtifacts {
+        reason_code: String,
+        numeric_code: u16,
+        decision_receipt_id: ObjectId,
+        audit_event_id: ObjectId,
+        revocation_id: ObjectId,
+        decision_receipt: serde_json::Value,
+        audit_event: serde_json::Value,
+        propagation_time_ms: u64,
+        deny_message: String,
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    enum RevocationTarget {
+        CapabilityToken,
+        IssuerKey,
+    }
+
+    impl RevocationTarget {
+        const fn step_name(self) -> &'static str {
+            match self {
+                Self::CapabilityToken => "revoke_token",
+                Self::IssuerKey => "revoke_issuer",
+            }
+        }
+
+        const fn reason_code(self) -> &'static str {
+            match self {
+                Self::CapabilityToken => "FCP-2201",
+                Self::IssuerKey => "FCP-2202",
+            }
+        }
+
+        const fn numeric_code(self) -> u16 {
+            match self {
+                Self::CapabilityToken => 2201,
+                Self::IssuerKey => 2202,
+            }
+        }
+
+        const fn target_type(self) -> &'static str {
+            match self {
+                Self::CapabilityToken => "capability_token",
+                Self::IssuerKey => "issuer_key",
+            }
+        }
+
+        const fn deny_message(self) -> &'static str {
+            match self {
+                Self::CapabilityToken => "Capability token revoked",
+                Self::IssuerKey => "Issuer key revoked",
+            }
+        }
+
+        const fn scenario_name(self) -> &'static str {
+            match self {
+                Self::CapabilityToken => "capability_revocation_flow",
+                Self::IssuerKey => "issuer_revocation_flow",
+            }
+        }
+    }
+
+    #[derive(Debug)]
+    struct RevocationFlowConnector {
+        base: BaseConnector,
+        issued_counter: u32,
+        token_revocations: HashMap<String, RevocationArtifacts>,
+        issuer_revocations: HashMap<String, RevocationArtifacts>,
+    }
+
+    impl RevocationFlowConnector {
+        fn new() -> Self {
+            Self {
+                base: BaseConnector::new(ConnectorId::from_static(
+                    "fcp.revocation:request_response:0.1.0",
+                )),
+                issued_counter: 0,
+                token_revocations: HashMap::new(),
+                issuer_revocations: HashMap::new(),
+            }
+        }
+
+        fn issue_token(&mut self, issuer: &str) -> IssuedCapabilityToken {
+            self.issued_counter += 1;
+            IssuedCapabilityToken {
+                token: CapabilityToken::test_token(),
+                token_id: format!("token-{:02}", self.issued_counter),
+                issuer: issuer.to_string(),
+            }
+        }
+
+        fn revoke_token(
+            &mut self,
+            issued: &IssuedCapabilityToken,
+            reason: &str,
+        ) -> RevocationArtifacts {
+            let artifacts = self.revocation_artifacts(
+                RevocationTarget::CapabilityToken,
+                &issued.token_id,
+                reason,
+            );
+            self.token_revocations
+                .insert(issued.token_id.clone(), artifacts.clone());
+            artifacts
+        }
+
+        fn revoke_issuer(&mut self, issuer: &str, reason: &str) -> RevocationArtifacts {
+            let artifacts = self.revocation_artifacts(RevocationTarget::IssuerKey, issuer, reason);
+            self.issuer_revocations
+                .insert(issuer.to_string(), artifacts.clone());
+            artifacts
+        }
+
+        fn revocation_artifacts(
+            &self,
+            target: RevocationTarget,
+            target_id: &str,
+            reason: &str,
+        ) -> RevocationArtifacts {
+            let revocation_id = object_id_from_label(&format!(
+                "revocation:{}:{}",
+                target.target_type(),
+                target_id
+            ));
+            let decision_receipt_id =
+                object_id_from_label(&format!("decision:{}:{}", target.target_type(), target_id));
+            let audit_event_id =
+                object_id_from_label(&format!("audit:{}:{}", target.target_type(), target_id));
+            let revocation_id_string = revocation_id.to_string();
+            let audit_event_id_string = audit_event_id.to_string();
+            let decision_receipt_id_string = decision_receipt_id.to_string();
+
+            RevocationArtifacts {
+                reason_code: target.reason_code().to_string(),
+                numeric_code: target.numeric_code(),
+                decision_receipt_id,
+                audit_event_id,
+                revocation_id,
+                decision_receipt: serde_json::json!({
+                    "decision": "deny",
+                    "reason_code": target.reason_code(),
+                    "evidence": [revocation_id_string],
+                    "explanation": target.deny_message(),
+                }),
+                audit_event: serde_json::json!({
+                    "type": "RevocationEvent",
+                    "event_name": "revocation.issued",
+                    "target_type": target.target_type(),
+                    "target_id": target_id,
+                    "reason": reason,
+                    "revoked_by": "owner",
+                    "timestamp": "2026-03-08T00:00:00Z",
+                    "audit_event_id": audit_event_id_string,
+                    "decision_receipt_id": decision_receipt_id_string,
+                    "revocation_id": revocation_id_string,
+                }),
+                propagation_time_ms: 150,
+                deny_message: target.deny_message().to_string(),
+            }
+        }
+
+        fn success_receipt_id(token_id: &str) -> ObjectId {
+            object_id_from_label(&format!("receipt:{token_id}"))
+        }
+
+        fn success_audit_event_id(token_id: &str) -> ObjectId {
+            object_id_from_label(&format!("audit:allow:{token_id}"))
+        }
+
+        fn denied_response(
+            req_id: fcp_core::RequestId,
+            artifacts: &RevocationArtifacts,
+        ) -> InvokeResponse {
+            InvokeResponse::error(
+                req_id,
+                FcpError::Unauthorized {
+                    code: artifacts.numeric_code,
+                    message: artifacts.deny_message.clone(),
+                },
+            )
+            .with_audit_event_id(artifacts.audit_event_id.clone())
+            .with_decision_receipt_id(artifacts.decision_receipt_id.clone())
+        }
+    }
+
+    #[fcp_core::async_trait]
+    impl FcpConnector for RevocationFlowConnector {
+        fn id(&self) -> &fcp_core::ConnectorId {
+            &self.base.id
+        }
+
+        async fn configure(&mut self, _config: serde_json::Value) -> fcp_core::FcpResult<()> {
+            self.base.set_configured(true);
+            Ok(())
+        }
+
+        async fn handshake(
+            &mut self,
+            _req: HandshakeRequest,
+        ) -> fcp_core::FcpResult<HandshakeResponse> {
+            self.base.set_handshaken(true);
+            Ok(HandshakeResponse {
+                status: "accepted".to_string(),
+                capabilities_granted: vec![],
+                session_id: SessionId::new(),
+                manifest_hash: "sha256:revocation".to_string(),
+                nonce: [2u8; 32],
+                event_caps: None,
+                auth_caps: None,
+                op_catalog_hash: None,
+            })
+        }
+
+        async fn health(&self) -> HealthSnapshot {
+            HealthSnapshot::ready()
+        }
+
+        fn metrics(&self) -> fcp_core::ConnectorMetrics {
+            self.base.metrics()
+        }
+
+        async fn shutdown(&mut self, _req: fcp_core::ShutdownRequest) -> fcp_core::FcpResult<()> {
+            Ok(())
+        }
+
+        fn introspect(&self) -> Introspection {
+            Introspection {
+                operations: vec![OperationInfo {
+                    id: OperationId::from_static("dummy.echo"),
+                    summary: "Echo with revocation gate".to_string(),
+                    description: None,
+                    input_schema: serde_json::json!({"type": "object"}),
+                    output_schema: serde_json::json!({"type": "object"}),
+                    capability: CapabilityId::from_static("dummy.echo"),
+                    risk_level: RiskLevel::Low,
+                    safety_tier: SafetyTier::Safe,
+                    idempotency: fcp_core::IdempotencyClass::None,
+                    ai_hints: AgentHint::default(),
+                    rate_limit: None,
+                    requires_approval: None,
+                }],
+                events: vec![],
+                resource_types: vec![],
+                auth_caps: None,
+                event_caps: None,
+            }
+        }
+
+        async fn invoke(&self, req: InvokeRequest) -> fcp_core::FcpResult<InvokeResponse> {
+            let context = req.context.as_ref().ok_or(FcpError::MissingField {
+                field: "context".to_string(),
+            })?;
+            let token_id = context
+                .get("token_id")
+                .and_then(serde_json::Value::as_str)
+                .ok_or(FcpError::MissingField {
+                    field: "context.token_id".to_string(),
+                })?;
+            let issuer = context
+                .get("issuer")
+                .and_then(serde_json::Value::as_str)
+                .ok_or(FcpError::MissingField {
+                    field: "context.issuer".to_string(),
+                })?;
+
+            if let Some(artifacts) = self.issuer_revocations.get(issuer) {
+                return Ok(Self::denied_response(req.id, artifacts));
+            }
+            if let Some(artifacts) = self.token_revocations.get(token_id) {
+                return Ok(Self::denied_response(req.id, artifacts));
+            }
+
+            Ok(InvokeResponse::ok(
+                req.id,
+                serde_json::json!({ "ok": true, "token_id": token_id }),
+            )
+            .with_receipt_id(Self::success_receipt_id(token_id))
+            .with_audit_event_id(Self::success_audit_event_id(token_id)))
+        }
+
+        async fn simulate(
+            &self,
+            req: fcp_core::SimulateRequest,
+        ) -> fcp_core::FcpResult<fcp_core::SimulateResponse> {
+            Ok(fcp_core::SimulateResponse::allowed(req.id))
+        }
+
+        async fn subscribe(
+            &self,
+            _req: fcp_core::SubscribeRequest,
+        ) -> fcp_core::FcpResult<fcp_core::SubscribeResponse> {
+            Err(FcpError::StreamingNotSupported)
+        }
+
+        async fn unsubscribe(&self, _req: fcp_core::UnsubscribeRequest) -> fcp_core::FcpResult<()> {
+            Ok(())
         }
     }
 
@@ -1171,6 +1480,230 @@ mod tests {
         )
     }
 
+    fn object_id_from_label(label: &str) -> ObjectId {
+        ObjectId::from_unscoped_bytes(label.as_bytes())
+    }
+
+    fn revocation_invoke_request(issued: &IssuedCapabilityToken) -> InvokeRequest {
+        InvokeRequest {
+            r#type: "invoke".to_string(),
+            id: fcp_core::RequestId::from(format!("req-{}", issued.token_id)),
+            connector_id: ConnectorId::from_static("fcp.revocation:request_response:0.1.0"),
+            operation: OperationId::from_static("dummy.echo"),
+            zone_id: ZoneId::work(),
+            input: serde_json::json!({ "message": "hello" }),
+            capability_token: issued.token.clone(),
+            holder_proof: None,
+            context: Some(serde_json::json!({
+                "token_id": issued.token_id,
+                "issuer": issued.issuer,
+            })),
+            idempotency_key: None,
+            lease_seq: None,
+            deadline_ms: None,
+            correlation_id: None,
+            provenance: None,
+            approval_tokens: vec![],
+        }
+    }
+
+    async fn run_revocation_flow_scenario(target: RevocationTarget) -> E2eReport {
+        let mut connector = RevocationFlowConnector::new();
+        let test_name = target.scenario_name().to_string();
+        let module = "fcp-e2e";
+        let start = Instant::now();
+        let correlation_id = CorrelationId::new().to_string();
+        let mut logger = E2eLogger::new();
+        let mut assertions_passed = 0_u32;
+        let mut assertions_failed = 0_u32;
+
+        let config_result = timed_async(|| connector.configure(serde_json::json!({})))
+            .await
+            .map_value(|()| serde_json::json!({}));
+        let mut passed = log_result(
+            &mut logger,
+            &test_name,
+            module,
+            "setup",
+            &correlation_id,
+            "configure",
+            config_result,
+            false,
+            &mut assertions_passed,
+            &mut assertions_failed,
+        );
+
+        let handshake_result = timed_async(|| connector.handshake(test_handshake()))
+            .await
+            .map_value(|resp| serde_json::json!({ "status": resp.status }));
+        passed &= log_result(
+            &mut logger,
+            &test_name,
+            module,
+            "setup",
+            &correlation_id,
+            "handshake",
+            handshake_result,
+            false,
+            &mut assertions_passed,
+            &mut assertions_failed,
+        );
+
+        let health = timed_async_value(|| connector.health()).await;
+        passed &= log_health(
+            &mut logger,
+            &test_name,
+            module,
+            &correlation_id,
+            health,
+            &mut assertions_passed,
+            &mut assertions_failed,
+        );
+
+        let introspect = timed_sync(|| connector.introspect());
+        passed &= log_introspection(
+            &mut logger,
+            &test_name,
+            module,
+            &correlation_id,
+            introspect,
+            &mut assertions_passed,
+            &mut assertions_failed,
+        );
+
+        let issued = connector.issue_token("test-issuer");
+        logger.push(E2eLogEntry::new(
+            "info",
+            test_name.clone(),
+            module,
+            "setup",
+            correlation_id.clone(),
+            "pass",
+            0,
+            AssertionsSummary::new(assertions_passed, assertions_failed),
+            serde_json::json!({
+                "step": "issue_token",
+                "token_id": issued.token_id.clone(),
+                "issuer": issued.issuer.clone(),
+                "operations": ["dummy.echo"],
+                "zone_id": ZoneId::work(),
+            }),
+        ));
+
+        let allow_request = revocation_invoke_request(&issued);
+        let allow_result = timed_async(|| connector.invoke(allow_request)).await;
+        passed &= log_invoke_result(
+            &mut logger,
+            &test_name,
+            module,
+            &correlation_id,
+            allow_result,
+            InvokeExpectations {
+                expect_error: false,
+                expect_decision_receipt: false,
+                expect_audit_event: true,
+                expect_receipt: true,
+                expected_reason_code: None,
+                rate_limit_pool: None,
+            },
+            &mut assertions_passed,
+            &mut assertions_failed,
+        );
+
+        let revocation = match target {
+            RevocationTarget::CapabilityToken => {
+                connector.revoke_token(&issued, "Testing revocation")
+            }
+            RevocationTarget::IssuerKey => {
+                connector.revoke_issuer(&issued.issuer, "Testing issuer revocation")
+            }
+        };
+        let revocation_id = revocation.revocation_id.to_string();
+        let decision_receipt_id = revocation.decision_receipt_id.to_string();
+        let audit_event_id = revocation.audit_event_id.to_string();
+        logger.push(E2eLogEntry::new(
+            "info",
+            test_name.clone(),
+            module,
+            "verify",
+            correlation_id.clone(),
+            "pass",
+            revocation.propagation_time_ms,
+            AssertionsSummary::new(assertions_passed, assertions_failed),
+            serde_json::json!({
+                "step": target.step_name(),
+                "token_id": issued.token_id.clone(),
+                "issuer": issued.issuer.clone(),
+                "reason_code": revocation.reason_code.clone(),
+                "revocation_id": revocation_id.clone(),
+                "propagation_time_ms": revocation.propagation_time_ms,
+                "audit_event": revocation.audit_event.clone(),
+            }),
+        ));
+
+        let deny_request = revocation_invoke_request(&issued);
+        let deny_result = timed_async(|| connector.invoke(deny_request)).await;
+        passed &= log_invoke_result(
+            &mut logger,
+            &test_name,
+            module,
+            &correlation_id,
+            deny_result,
+            InvokeExpectations {
+                expect_error: true,
+                expect_decision_receipt: true,
+                expect_audit_event: true,
+                expect_receipt: false,
+                expected_reason_code: Some(revocation.reason_code.clone()),
+                rate_limit_pool: None,
+            },
+            &mut assertions_passed,
+            &mut assertions_failed,
+        );
+
+        logger.push(E2eLogEntry::new(
+            "info",
+            test_name.clone(),
+            module,
+            "verify",
+            correlation_id.clone(),
+            "pass",
+            0,
+            AssertionsSummary::new(assertions_passed, assertions_failed),
+            serde_json::json!({
+                "step": "verify_decision_receipt_references_revocation",
+                "token_id": issued.token_id.clone(),
+                "issuer": issued.issuer.clone(),
+                "decision_receipt_id": decision_receipt_id,
+                "audit_event_id": audit_event_id,
+                "decision_receipt": revocation.decision_receipt.clone(),
+                "audit_event": revocation.audit_event.clone(),
+                "evidence": {
+                    "revocation_id": revocation_id,
+                },
+            }),
+        ));
+
+        logger.push(E2eLogEntry::new(
+            if passed { "info" } else { "error" },
+            test_name.clone(),
+            module,
+            "teardown",
+            correlation_id,
+            if passed { "pass" } else { "fail" },
+            start.elapsed().as_millis() as u64,
+            AssertionsSummary::new(assertions_passed, assertions_failed),
+            serde_json::json!({}),
+        ));
+
+        E2eReport {
+            test_name,
+            passed,
+            duration_ms: start.elapsed().as_millis() as u64,
+            logs: logger.drain(),
+        }
+    }
+
     #[fcp_async_core::runtime::test]
     async fn runs_minimal_suite() {
         let mut connector = DummyConnector::new();
@@ -1228,6 +1761,78 @@ mod tests {
         assert_eq!(
             invoke_entry.context.get("decision_receipt_id"),
             Some(&serde_json::json!(expected_receipt))
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn logs_capability_revocation_flow() {
+        let report = run_revocation_flow_scenario(RevocationTarget::CapabilityToken).await;
+
+        assert!(report.passed, "capability revocation flow should pass");
+        let revoke_entry = report
+            .logs
+            .iter()
+            .find(|entry| entry.context.get("step") == Some(&serde_json::json!("revoke_token")))
+            .expect("revoke token log entry");
+        assert_eq!(
+            revoke_entry.context.get("reason_code"),
+            Some(&serde_json::json!("FCP-2201"))
+        );
+
+        let verification_entry = report
+            .logs
+            .iter()
+            .find(|entry| {
+                entry.context.get("step")
+                    == Some(&serde_json::json!(
+                        "verify_decision_receipt_references_revocation"
+                    ))
+            })
+            .expect("decision receipt verification log entry");
+        let revocation_id = verification_entry
+            .context
+            .pointer("/evidence/revocation_id")
+            .and_then(serde_json::Value::as_str)
+            .expect("revocation evidence id");
+        let decision_evidence = verification_entry
+            .context
+            .pointer("/decision_receipt/evidence/0")
+            .and_then(serde_json::Value::as_str)
+            .expect("decision receipt evidence");
+        assert_eq!(decision_evidence, revocation_id);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn logs_issuer_revocation_flow() {
+        let report = run_revocation_flow_scenario(RevocationTarget::IssuerKey).await;
+
+        assert!(report.passed, "issuer revocation flow should pass");
+        let revoke_entry = report
+            .logs
+            .iter()
+            .find(|entry| entry.context.get("step") == Some(&serde_json::json!("revoke_issuer")))
+            .expect("revoke issuer log entry");
+        assert_eq!(
+            revoke_entry.context.get("reason_code"),
+            Some(&serde_json::json!("FCP-2202"))
+        );
+
+        let verification_entry = report
+            .logs
+            .iter()
+            .find(|entry| {
+                entry.context.get("step")
+                    == Some(&serde_json::json!(
+                        "verify_decision_receipt_references_revocation"
+                    ))
+            })
+            .expect("decision receipt verification log entry");
+        assert_eq!(
+            verification_entry
+                .context
+                .pointer("/audit_event/target_type")
+                .and_then(serde_json::Value::as_str),
+            Some("issuer_key")
         );
     }
 

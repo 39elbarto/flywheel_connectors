@@ -3594,20 +3594,18 @@ mod tests {
     }
 
     #[test]
-    fn json_connectors_lack_agent_hints() {
+    fn all_connectors_are_typed() {
         let json_style: Vec<_> = CONNECTOR_INVENTORY
             .iter()
             .filter(|e| e.metadata_tier == MetadataTier::Json)
             .collect();
 
-        assert!(!json_style.is_empty());
-        for entry in &json_style {
-            assert!(
-                !entry.has_agent_hints,
-                "{} is json-style but claims agent hints",
-                entry.name
-            );
-        }
+        assert!(
+            json_style.is_empty(),
+            "expected 0 Json connectors, found {}: {:?}",
+            json_style.len(),
+            json_style.iter().map(|e| e.name).collect::<Vec<_>>()
+        );
     }
 
     #[test]

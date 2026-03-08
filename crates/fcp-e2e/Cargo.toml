@@ -87,6 +87,9 @@ todoist = []
 trello = []
 webhook_receiver = []
 zapier = []
+redis = []
+postgresql = []
+whisper = []
 
 [dependencies]
 fcp-core = { workspace = true }
@@ -180,6 +183,9 @@ fcp-todoist = { path = "../../connectors/todoist" }
 fcp-trello = { path = "../../connectors/trello" }
 fcp-webhook-receiver = { path = "../../connectors/webhook-receiver" }
 fcp-zapier = { path = "../../connectors/zapier" }
+fcp-redis = { path = "../../connectors/redis" }
+fcp-postgresql = { path = "../../connectors/postgresql" }
+fcp-whisper = { path = "../../connectors/whisper" }
 pretty_assertions = { workspace = true }
 reqwest = { workspace = true }
 fcp-manifest = { workspace = true }

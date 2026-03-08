@@ -1553,4 +1553,694 @@ mod tests {
         assert_eq!(b, c);
         assert_eq!(a, OverallStatus::Warn);
     }
+
+    // ── NEW: OverallStatus serialize-to-Value roundtrip ──
+
+    #[test]
+    fn overall_status_ok_to_value_roundtrip() {
+        let val = serde_json::to_value(OverallStatus::Ok).unwrap();
+        assert_eq!(val.as_str(), Some("OK"));
+    }
+
+    #[test]
+    fn overall_status_warn_to_value_roundtrip() {
+        let val = serde_json::to_value(OverallStatus::Warn).unwrap();
+        assert_eq!(val.as_str(), Some("WARN"));
+    }
+
+    #[test]
+    fn overall_status_fail_to_value_roundtrip() {
+        let val = serde_json::to_value(OverallStatus::Fail).unwrap();
+        assert_eq!(val.as_str(), Some("FAIL"));
+    }
+
+    // ── NEW: FreshnessLevel serialize-to-Value roundtrip ──
+
+    #[test]
+    fn freshness_level_fresh_to_value() {
+        let val = serde_json::to_value(FreshnessLevel::Fresh).unwrap();
+        assert_eq!(val.as_str(), Some("fresh"));
+    }
+
+    #[test]
+    fn freshness_level_stale_to_value() {
+        let val = serde_json::to_value(FreshnessLevel::Stale).unwrap();
+        assert_eq!(val.as_str(), Some("stale"));
+    }
+
+    #[test]
+    fn freshness_level_too_stale_to_value() {
+        let val = serde_json::to_value(FreshnessLevel::TooStale).unwrap();
+        assert_eq!(val.as_str(), Some("too_stale"));
+    }
+
+    #[test]
+    fn freshness_level_missing_to_value() {
+        let val = serde_json::to_value(FreshnessLevel::Missing).unwrap();
+        assert_eq!(val.as_str(), Some("missing"));
+    }
+
+    // ── NEW: CheckStatus serialize-to-Value roundtrip ──
+
+    #[test]
+    fn check_status_ok_to_value() {
+        let val = serde_json::to_value(CheckStatus::Ok).unwrap();
+        assert_eq!(val.as_str(), Some("OK"));
+    }
+
+    #[test]
+    fn check_status_warn_to_value() {
+        let val = serde_json::to_value(CheckStatus::Warn).unwrap();
+        assert_eq!(val.as_str(), Some("WARN"));
+    }
+
+    #[test]
+    fn check_status_fail_to_value() {
+        let val = serde_json::to_value(CheckStatus::Fail).unwrap();
+        assert_eq!(val.as_str(), Some("FAIL"));
+    }
+
+    // ── NEW: CheckSeverity serialize-to-Value roundtrip ──
+
+    #[test]
+    fn check_severity_info_to_value() {
+        let val = serde_json::to_value(CheckSeverity::Info).unwrap();
+        assert_eq!(val.as_str(), Some("info"));
+    }
+
+    #[test]
+    fn check_severity_warning_to_value() {
+        let val = serde_json::to_value(CheckSeverity::Warning).unwrap();
+        assert_eq!(val.as_str(), Some("warning"));
+    }
+
+    #[test]
+    fn check_severity_critical_to_value() {
+        let val = serde_json::to_value(CheckSeverity::Critical).unwrap();
+        assert_eq!(val.as_str(), Some("critical"));
+    }
+
+    // ── NEW: OverallStatus inequality combinations ──
+
+    #[test]
+    fn overall_status_all_pairs_inequality() {
+        let variants = [OverallStatus::Ok, OverallStatus::Warn, OverallStatus::Fail];
+        for (i, a) in variants.iter().enumerate() {
+            for (j, b) in variants.iter().enumerate() {
+                if i == j {
+                    assert_eq!(a, b);
+                } else {
+                    assert_ne!(a, b);
+                }
+            }
+        }
+    }
+
+    // ── NEW: CheckStatus inequality combinations ──
+
+    #[test]
+    fn check_status_all_pairs_inequality() {
+        let variants = [CheckStatus::Ok, CheckStatus::Warn, CheckStatus::Fail];
+        for (i, a) in variants.iter().enumerate() {
+            for (j, b) in variants.iter().enumerate() {
+                if i == j {
+                    assert_eq!(a, b);
+                } else {
+                    assert_ne!(a, b);
+                }
+            }
+        }
+    }
+
+    // ── NEW: CheckSeverity inequality combinations ──
+
+    #[test]
+    fn check_severity_all_pairs_inequality() {
+        let variants = [
+            CheckSeverity::Info,
+            CheckSeverity::Warning,
+            CheckSeverity::Critical,
+        ];
+        for (i, a) in variants.iter().enumerate() {
+            for (j, b) in variants.iter().enumerate() {
+                if i == j {
+                    assert_eq!(a, b);
+                } else {
+                    assert_ne!(a, b);
+                }
+            }
+        }
+    }
+
+    // ── NEW: FreshnessLevel inequality combinations ──
+
+    #[test]
+    fn freshness_level_all_pairs_inequality() {
+        let variants = [
+            FreshnessLevel::Fresh,
+            FreshnessLevel::Stale,
+            FreshnessLevel::TooStale,
+            FreshnessLevel::Missing,
+        ];
+        for (i, a) in variants.iter().enumerate() {
+            for (j, b) in variants.iter().enumerate() {
+                if i == j {
+                    assert_eq!(a, b);
+                } else {
+                    assert_ne!(a, b);
+                }
+            }
+        }
+    }
+
+    // ── NEW: DoctorRequest edge cases ──
+
+    #[test]
+    fn doctor_request_missing_zone_id_fails() {
+        let result = serde_json::from_str::<DoctorRequest>(r"{}");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn doctor_request_extra_fields_ignored() {
+        let json = r#"{"zone_id": "z:test", "unknown_field": 42}"#;
+        let req: DoctorRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.zone_id, "z:test");
+    }
+
+    #[test]
+    fn doctor_request_self_check_defaults_false() {
+        let json = r#"{"zone_id": "z:test", "connectors": ["a"]}"#;
+        let req: DoctorRequest = serde_json::from_str(json).unwrap();
+        assert!(!req.self_check);
+    }
+
+    #[test]
+    fn doctor_request_connectors_defaults_empty() {
+        let json = r#"{"zone_id": "z:test", "self_check": true}"#;
+        let req: DoctorRequest = serde_json::from_str(json).unwrap();
+        assert!(req.connectors.is_empty());
+        assert!(req.self_check);
+    }
+
+    #[test]
+    fn doctor_request_clone_preserves_fields() {
+        let req = DoctorRequest {
+            zone_id: "z:cloned".to_string(),
+            connectors: vec!["conn1".to_string(), "conn2".to_string()],
+            self_check: true,
+        };
+        let cloned = req.clone();
+        assert_eq!(req.zone_id, cloned.zone_id);
+        assert_eq!(req.connectors, cloned.connectors);
+        assert_eq!(req.self_check, cloned.self_check);
+    }
+
+    #[test]
+    fn doctor_request_debug_output() {
+        let req = DoctorRequest {
+            zone_id: "z:dbg".to_string(),
+            connectors: vec![],
+            self_check: false,
+        };
+        let dbg = format!("{req:?}");
+        assert!(dbg.contains("DoctorRequest"));
+        assert!(dbg.contains("z:dbg"));
+    }
+
+    // ── NEW: DoctorReport with non-default freshness values ──
+
+    #[test]
+    fn doctor_report_stale_checkpoint_serialization() {
+        let mut report = DoctorReport::baseline("z:stale");
+        report.checkpoint.freshness = FreshnessLevel::Stale;
+        let json = serde_json::to_value(&report).unwrap();
+        assert_eq!(json["checkpoint"]["freshness"], "stale");
+    }
+
+    #[test]
+    fn doctor_report_too_stale_revocation_serialization() {
+        let mut report = DoctorReport::baseline("z:too-stale");
+        report.revocation.freshness = FreshnessLevel::TooStale;
+        let json = serde_json::to_value(&report).unwrap();
+        assert_eq!(json["revocation"]["freshness"], "too_stale");
+    }
+
+    #[test]
+    fn doctor_report_missing_audit_serialization() {
+        let mut report = DoctorReport::baseline("z:missing");
+        report.audit.freshness = FreshnessLevel::Missing;
+        let json = serde_json::to_value(&report).unwrap();
+        assert_eq!(json["audit"]["freshness"], "missing");
+    }
+
+    // ── NEW: DoctorReport degraded mode and store coverage ──
+
+    #[test]
+    fn doctor_report_degraded_mode_active_serialization() {
+        let mut report = DoctorReport::baseline("z:degraded");
+        report.degraded_mode.is_degraded = true;
+        let json = serde_json::to_value(&report).unwrap();
+        assert_eq!(json["degraded_mode"]["is_degraded"], true);
+    }
+
+    #[test]
+    fn doctor_report_store_unhealthy_serialization() {
+        let mut report = DoctorReport::baseline("z:unhealthy-store");
+        report.store_coverage.store_healthy = false;
+        let json = serde_json::to_value(&report).unwrap();
+        assert_eq!(json["store_coverage"]["store_healthy"], false);
+    }
+
+    // ── NEW: DoctorReport with checks vec serialization ──
+
+    #[test]
+    fn doctor_report_empty_checks_serialized_as_array() {
+        let report = DoctorReport::baseline("z:empty-checks");
+        let json = serde_json::to_value(&report).unwrap();
+        assert!(json["checks"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn doctor_report_multiple_checks_count_preserved() {
+        let mut report = DoctorReport::baseline("z:multi");
+        for i in 0u64..5 {
+            report.checks.push(CheckResult {
+                name: format!("check_{i}"),
+                status: CheckStatus::Ok,
+                severity: CheckSeverity::Info,
+                message: format!("msg_{i}"),
+            });
+        }
+        let json = serde_json::to_value(&report).unwrap();
+        assert_eq!(json["checks"].as_array().unwrap().len(), 5);
+    }
+
+    // ── NEW: overall_status_from_self_checks edge cases ──
+
+    #[test]
+    fn overall_status_single_ok() {
+        let checks = [ConnectorSelfCheck {
+            connector_id: "sole".to_string(),
+            report: SelfCheckReport::ok(),
+        }];
+        assert_eq!(overall_status_from_self_checks(&checks), OverallStatus::Ok);
+    }
+
+    #[test]
+    fn overall_status_single_degraded() {
+        let checks = [ConnectorSelfCheck {
+            connector_id: "sole".to_string(),
+            report: SelfCheckReport::degraded("deg", "degraded"),
+        }];
+        assert_eq!(
+            overall_status_from_self_checks(&checks),
+            OverallStatus::Warn
+        );
+    }
+
+    #[test]
+    fn overall_status_single_failed() {
+        let checks = [ConnectorSelfCheck {
+            connector_id: "sole".to_string(),
+            report: SelfCheckReport::failed("err", "failed"),
+        }];
+        assert_eq!(
+            overall_status_from_self_checks(&checks),
+            OverallStatus::Fail
+        );
+    }
+
+    #[test]
+    fn overall_status_fail_first_entry() {
+        let checks = [
+            ConnectorSelfCheck {
+                connector_id: "first".to_string(),
+                report: SelfCheckReport::failed("err", "failed"),
+            },
+            ConnectorSelfCheck {
+                connector_id: "second".to_string(),
+                report: SelfCheckReport::ok(),
+            },
+        ];
+        assert_eq!(
+            overall_status_from_self_checks(&checks),
+            OverallStatus::Fail
+        );
+    }
+
+    #[test]
+    fn overall_status_degraded_middle_entry() {
+        let checks = [
+            ConnectorSelfCheck {
+                connector_id: "first".to_string(),
+                report: SelfCheckReport::ok(),
+            },
+            ConnectorSelfCheck {
+                connector_id: "middle".to_string(),
+                report: SelfCheckReport::degraded("slow", "slow"),
+            },
+            ConnectorSelfCheck {
+                connector_id: "last".to_string(),
+                report: SelfCheckReport::ok(),
+            },
+        ];
+        assert_eq!(
+            overall_status_from_self_checks(&checks),
+            OverallStatus::Warn
+        );
+    }
+
+    #[test]
+    fn overall_status_all_degraded() {
+        let checks: Vec<ConnectorSelfCheck> = (0u64..3)
+            .map(|i| ConnectorSelfCheck {
+                connector_id: format!("d_{i}"),
+                report: SelfCheckReport::degraded("slow", "slow"),
+            })
+            .collect();
+        assert_eq!(
+            overall_status_from_self_checks(&checks),
+            OverallStatus::Warn
+        );
+    }
+
+    #[test]
+    fn overall_status_all_failed() {
+        let checks: Vec<ConnectorSelfCheck> = (0u64..3)
+            .map(|i| ConnectorSelfCheck {
+                connector_id: format!("f_{i}"),
+                report: SelfCheckReport::failed("err", "fail"),
+            })
+            .collect();
+        assert_eq!(
+            overall_status_from_self_checks(&checks),
+            OverallStatus::Fail
+        );
+    }
+
+    // ── NEW: with_self_checks overrides baseline status ──
+
+    #[test]
+    fn with_self_checks_overrides_baseline_ok_to_fail() {
+        let baseline = DoctorReport::baseline("z:override");
+        assert_eq!(baseline.overall_status, OverallStatus::Ok);
+        let checks = vec![ConnectorSelfCheck {
+            connector_id: "bad".to_string(),
+            report: SelfCheckReport::failed("err", "fail"),
+        }];
+        let report = baseline.with_self_checks(checks);
+        assert_eq!(report.overall_status, OverallStatus::Fail);
+    }
+
+    #[test]
+    fn with_self_checks_overrides_baseline_ok_to_warn() {
+        let baseline = DoctorReport::baseline("z:override-warn");
+        let checks = vec![ConnectorSelfCheck {
+            connector_id: "slow".to_string(),
+            report: SelfCheckReport::degraded("lag", "high latency"),
+        }];
+        let report = baseline.with_self_checks(checks);
+        assert_eq!(report.overall_status, OverallStatus::Warn);
+    }
+
+    #[test]
+    fn with_self_checks_preserves_other_report_fields() {
+        let mut baseline = DoctorReport::baseline("z:preserve");
+        baseline.checkpoint.freshness = FreshnessLevel::Stale;
+        baseline.degraded_mode.is_degraded = true;
+        let checks = vec![ConnectorSelfCheck {
+            connector_id: "c".to_string(),
+            report: SelfCheckReport::ok(),
+        }];
+        let report = baseline.with_self_checks(checks);
+        assert_eq!(report.checkpoint.freshness, FreshnessLevel::Stale);
+        assert!(report.degraded_mode.is_degraded);
+        assert_eq!(report.zone_id, "z:preserve");
+    }
+
+    // ── NEW: DoctorReport clone with checks ──
+
+    #[test]
+    fn doctor_report_clone_with_checks_and_self_checks() {
+        let mut report = DoctorReport::baseline("z:full-clone");
+        report.checks.push(CheckResult {
+            name: "mem".to_string(),
+            status: CheckStatus::Warn,
+            severity: CheckSeverity::Warning,
+            message: "low mem".to_string(),
+        });
+        let checks = vec![ConnectorSelfCheck {
+            connector_id: "sc".to_string(),
+            report: SelfCheckReport::degraded("slow", "slow"),
+        }];
+        let report = report.with_self_checks(checks);
+        let cloned = report.clone();
+        assert_eq!(report.checks.len(), cloned.checks.len());
+        assert_eq!(
+            report.connector_self_checks.len(),
+            cloned.connector_self_checks.len()
+        );
+        assert_eq!(report.checks[0].name, cloned.checks[0].name);
+        assert_eq!(
+            report.connector_self_checks[0].connector_id,
+            cloned.connector_self_checks[0].connector_id
+        );
+    }
+
+    // ── NEW: ConnectorSelfCheck with unsupported status ──
+
+    #[test]
+    fn connector_self_check_unsupported_report() {
+        let check = ConnectorSelfCheck {
+            connector_id: "unsup:conn:1.0.0".to_string(),
+            report: SelfCheckReport::unsupported(),
+        };
+        assert_eq!(check.report.status, SelfCheckStatus::Unsupported);
+        let json = serde_json::to_string(&check).unwrap();
+        assert!(json.contains("unsupported"));
+    }
+
+    #[test]
+    fn overall_status_unsupported_treated_as_ok() {
+        let checks = [ConnectorSelfCheck {
+            connector_id: "unsup".to_string(),
+            report: SelfCheckReport::unsupported(),
+        }];
+        // Unsupported is neither Failed nor Degraded, so overall should be Ok
+        assert_eq!(overall_status_from_self_checks(&checks), OverallStatus::Ok);
+    }
+
+    // ── NEW: SelfCheckReport reason_code and message fields ──
+
+    #[test]
+    fn self_check_ok_has_no_reason_code() {
+        let report = SelfCheckReport::ok();
+        assert!(report.reason_code.is_none());
+        assert!(report.message.is_none());
+    }
+
+    #[test]
+    fn self_check_failed_has_reason_and_message() {
+        let report = SelfCheckReport::failed("auth_error", "token expired");
+        assert_eq!(report.reason_code.as_deref(), Some("auth_error"));
+        assert_eq!(report.message.as_deref(), Some("token expired"));
+    }
+
+    #[test]
+    fn self_check_degraded_has_reason_and_message() {
+        let report = SelfCheckReport::degraded("high_latency", "response time > 2s");
+        assert_eq!(report.reason_code.as_deref(), Some("high_latency"));
+        assert_eq!(report.message.as_deref(), Some("response time > 2s"));
+    }
+
+    // ── NEW: DoctorReport JSON structure validation ──
+
+    #[test]
+    fn doctor_report_json_has_all_top_level_keys() {
+        let report = DoctorReport::baseline("z:keys");
+        let json = serde_json::to_value(&report).unwrap();
+        let obj = json.as_object().unwrap();
+        let expected_keys = [
+            "schema_version",
+            "generated_at",
+            "zone_id",
+            "overall_status",
+            "checkpoint",
+            "revocation",
+            "audit",
+            "transport_policy",
+            "store_coverage",
+            "degraded_mode",
+            "checks",
+        ];
+        for key in &expected_keys {
+            assert!(obj.contains_key(*key), "missing key: {key}");
+        }
+    }
+
+    #[test]
+    fn doctor_report_json_no_self_checks_key_when_empty() {
+        let report = DoctorReport::baseline("z:no-sc");
+        let json = serde_json::to_value(&report).unwrap();
+        let obj = json.as_object().unwrap();
+        assert!(!obj.contains_key("connector_self_checks"));
+    }
+
+    #[test]
+    fn doctor_report_json_has_self_checks_key_when_present() {
+        let checks = vec![ConnectorSelfCheck {
+            connector_id: "sc".to_string(),
+            report: SelfCheckReport::ok(),
+        }];
+        let report = DoctorReport::baseline("z:with-sc").with_self_checks(checks);
+        let json = serde_json::to_value(&report).unwrap();
+        let obj = json.as_object().unwrap();
+        assert!(obj.contains_key("connector_self_checks"));
+    }
+
+    // ── NEW: TransportPolicyStatus all combinations ──
+
+    #[test]
+    fn transport_policy_all_false_serialization() {
+        let t = TransportPolicyStatus {
+            allow_lan: false,
+            allow_derp: false,
+            allow_funnel: false,
+        };
+        let json = serde_json::to_value(&t).unwrap();
+        assert_eq!(json["allow_lan"], false);
+        assert_eq!(json["allow_derp"], false);
+        assert_eq!(json["allow_funnel"], false);
+    }
+
+    #[test]
+    fn transport_policy_only_derp_serialization() {
+        let t = TransportPolicyStatus {
+            allow_lan: false,
+            allow_derp: true,
+            allow_funnel: false,
+        };
+        let json = serde_json::to_value(&t).unwrap();
+        assert_eq!(json["allow_lan"], false);
+        assert_eq!(json["allow_derp"], true);
+        assert_eq!(json["allow_funnel"], false);
+    }
+
+    #[test]
+    fn transport_policy_only_funnel_serialization() {
+        let t = TransportPolicyStatus {
+            allow_lan: false,
+            allow_derp: false,
+            allow_funnel: true,
+        };
+        let json = serde_json::to_value(&t).unwrap();
+        assert_eq!(json["allow_funnel"], true);
+    }
+
+    // ── NEW: CheckResult with empty and long strings ──
+
+    #[test]
+    fn check_result_empty_name_and_message() {
+        let result = CheckResult {
+            name: String::new(),
+            status: CheckStatus::Ok,
+            severity: CheckSeverity::Info,
+            message: String::new(),
+        };
+        let json = serde_json::to_value(&result).unwrap();
+        assert_eq!(json["name"], "");
+        assert_eq!(json["message"], "");
+    }
+
+    #[test]
+    fn check_result_long_message() {
+        let long_msg = "x".repeat(10_000);
+        let result = CheckResult {
+            name: "long_check".to_string(),
+            status: CheckStatus::Warn,
+            severity: CheckSeverity::Warning,
+            message: long_msg,
+        };
+        let json = serde_json::to_value(&result).unwrap();
+        assert_eq!(json["message"].as_str().unwrap().len(), 10_000);
+    }
+
+    // ── NEW: DoctorReport baseline with special zone_id values ──
+
+    #[test]
+    fn baseline_report_long_zone_id() {
+        let long_zone = format!("z:{}", "a".repeat(1000));
+        let report = DoctorReport::baseline(&long_zone);
+        assert_eq!(report.zone_id, long_zone);
+    }
+
+    #[test]
+    fn baseline_report_zone_id_with_special_chars() {
+        let zone = "z:test-zone_123.prod";
+        let report = DoctorReport::baseline(zone);
+        assert_eq!(report.zone_id, zone);
+    }
+
+    // ── NEW: DoctorReport generated_at is recent ──
+
+    #[test]
+    fn baseline_report_generated_at_is_recent() {
+        let before = Utc::now();
+        let report = DoctorReport::baseline("z:time");
+        let after = Utc::now();
+        assert!(report.generated_at >= before);
+        assert!(report.generated_at <= after);
+    }
+
+    // ── NEW: DEFAULT_SELF_CHECK_TIMEOUT value ──
+
+    #[test]
+    fn default_self_check_timeout_is_five_seconds() {
+        assert_eq!(DEFAULT_SELF_CHECK_TIMEOUT, Duration::from_secs(5));
+    }
+
+    // ── NEW: DoctorService clone ──
+
+    #[test]
+    fn doctor_service_default_timeout() {
+        let registry = Arc::new(TestRegistry::always_ok());
+        let service = DoctorService::new(Arc::clone(&registry));
+        assert_eq!(service.self_check_timeout, Duration::from_secs(5));
+    }
+
+    // ── NEW: DoctorService custom timeout preserved ──
+
+    #[test]
+    fn doctor_service_custom_timeout_preserved() {
+        let registry = Arc::new(TestRegistry::always_ok());
+        let service = DoctorService::with_timeout(Arc::clone(&registry), Duration::from_millis(500));
+        assert_eq!(service.self_check_timeout, Duration::from_millis(500));
+    }
+
+    #[test]
+    fn doctor_service_zero_timeout() {
+        let registry = Arc::new(TestRegistry::always_ok());
+        let service = DoctorService::with_timeout(Arc::clone(&registry), Duration::ZERO);
+        assert_eq!(service.self_check_timeout, Duration::ZERO);
+    }
+
+    #[test]
+    fn doctor_service_large_timeout() {
+        let registry = Arc::new(TestRegistry::always_ok());
+        let timeout = Duration::from_secs(30);
+        let service = DoctorService::with_timeout(Arc::clone(&registry), timeout);
+        assert_eq!(service.self_check_timeout, timeout);
+    }
+
+    // ── NEW: Schema version format ──
+
+    #[test]
+    fn schema_version_matches_expected_format() {
+        let parts: Vec<&str> = DoctorReport::SCHEMA_VERSION.split('.').collect();
+        assert_eq!(parts.len(), 3);
+        for part in &parts {
+            assert!(part.parse::<u32>().is_ok());
+        }
+    }
 }

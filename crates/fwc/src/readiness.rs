@@ -578,11 +578,11 @@ pub struct ConnectorEntry {
 /// Sorted alphabetically by name. Each entry records the connector's cohort,
 /// operation count, metadata quality tier, and manifest presence.
 ///
-/// **Typed** connectors (33): Use `OperationInfo` structs with `AgentHint`
+/// **Typed** connectors (53): Use `OperationInfo` structs with `AgentHint`
 /// objects providing `when_to_use`, `common_mistakes`, `examples`, and
 /// `related` fields. These are fully fwc-ready.
 ///
-/// **JSON** connectors (49): Use raw `serde_json::Value` in `operations_info()`.
+/// **JSON** connectors (29): Use raw `serde_json::Value` in `operations_info()`.
 /// They have `input_schema`, `output_schema`, `risk_level`, `safety_tier`,
 /// and `idempotency` but lack typed `AgentHint` metadata. These are
 /// partially ready — they work but discovery UX is degraded.
@@ -591,8 +591,8 @@ pub static CONNECTOR_INVENTORY: &[ConnectorEntry] = &[
         name: "1password",
         cohort: ConnectorCohort::Infra,
         operation_count: 5,
-        metadata_tier: MetadataTier::Json,
-        has_agent_hints: false,
+        metadata_tier: MetadataTier::Typed,
+        has_agent_hints: true,
         has_manifest: true,
     },
     ConnectorEntry {
@@ -607,24 +607,24 @@ pub static CONNECTOR_INVENTORY: &[ConnectorEntry] = &[
         name: "algolia",
         cohort: ConnectorCohort::Data,
         operation_count: 4,
-        metadata_tier: MetadataTier::Json,
-        has_agent_hints: false,
+        metadata_tier: MetadataTier::Typed,
+        has_agent_hints: true,
         has_manifest: true,
     },
     ConnectorEntry {
         name: "amplitude",
         cohort: ConnectorCohort::Analytics,
         operation_count: 3,
-        metadata_tier: MetadataTier::Json,
-        has_agent_hints: false,
+        metadata_tier: MetadataTier::Typed,
+        has_agent_hints: true,
         has_manifest: true,
     },
     ConnectorEntry {
         name: "annas-archive",
         cohort: ConnectorCohort::Knowledge,
         operation_count: 4,
-        metadata_tier: MetadataTier::Json,
-        has_agent_hints: false,
+        metadata_tier: MetadataTier::Typed,
+        has_agent_hints: true,
         has_manifest: true,
     },
     ConnectorEntry {
@@ -639,8 +639,8 @@ pub static CONNECTOR_INVENTORY: &[ConnectorEntry] = &[
         name: "arxiv",
         cohort: ConnectorCohort::Knowledge,
         operation_count: 13,
-        metadata_tier: MetadataTier::Json,
-        has_agent_hints: false,
+        metadata_tier: MetadataTier::Typed,
+        has_agent_hints: true,
         has_manifest: true,
     },
     ConnectorEntry {
@@ -655,8 +655,8 @@ pub static CONNECTOR_INVENTORY: &[ConnectorEntry] = &[
         name: "bigquery",
         cohort: ConnectorCohort::Data,
         operation_count: 4,
-        metadata_tier: MetadataTier::Json,
-        has_agent_hints: false,
+        metadata_tier: MetadataTier::Typed,
+        has_agent_hints: true,
         has_manifest: true,
     },
     ConnectorEntry {
@@ -671,8 +671,8 @@ pub static CONNECTOR_INVENTORY: &[ConnectorEntry] = &[
         name: "bitwarden",
         cohort: ConnectorCohort::Infra,
         operation_count: 5,
-        metadata_tier: MetadataTier::Json,
-        has_agent_hints: false,
+        metadata_tier: MetadataTier::Typed,
+        has_agent_hints: true,
         has_manifest: true,
     },
     ConnectorEntry {
@@ -743,16 +743,16 @@ pub static CONNECTOR_INVENTORY: &[ConnectorEntry] = &[
         name: "duckdb",
         cohort: ConnectorCohort::Data,
         operation_count: 3,
-        metadata_tier: MetadataTier::Json,
-        has_agent_hints: false,
+        metadata_tier: MetadataTier::Typed,
+        has_agent_hints: true,
         has_manifest: true,
     },
     ConnectorEntry {
         name: "elasticsearch",
         cohort: ConnectorCohort::Data,
         operation_count: 8,
-        metadata_tier: MetadataTier::Json,
-        has_agent_hints: false,
+        metadata_tier: MetadataTier::Typed,
+        has_agent_hints: true,
         has_manifest: true,
     },
     ConnectorEntry {
@@ -831,8 +831,8 @@ pub static CONNECTOR_INVENTORY: &[ConnectorEntry] = &[
         name: "hubspot",
         cohort: ConnectorCohort::Social,
         operation_count: 11,
-        metadata_tier: MetadataTier::Json,
-        has_agent_hints: false,
+        metadata_tier: MetadataTier::Typed,
+        has_agent_hints: true,
         has_manifest: true,
     },
     ConnectorEntry {
@@ -919,8 +919,8 @@ pub static CONNECTOR_INVENTORY: &[ConnectorEntry] = &[
         name: "metabase",
         cohort: ConnectorCohort::Analytics,
         operation_count: 3,
-        metadata_tier: MetadataTier::Json,
-        has_agent_hints: false,
+        metadata_tier: MetadataTier::Typed,
+        has_agent_hints: true,
         has_manifest: true,
     },
     ConnectorEntry {
@@ -935,8 +935,8 @@ pub static CONNECTOR_INVENTORY: &[ConnectorEntry] = &[
         name: "mixpanel",
         cohort: ConnectorCohort::Analytics,
         operation_count: 3,
-        metadata_tier: MetadataTier::Json,
-        has_agent_hints: false,
+        metadata_tier: MetadataTier::Typed,
+        has_agent_hints: true,
         has_manifest: true,
     },
     ConnectorEntry {
@@ -951,8 +951,8 @@ pub static CONNECTOR_INVENTORY: &[ConnectorEntry] = &[
         name: "mongodb",
         cohort: ConnectorCohort::Data,
         operation_count: 6,
-        metadata_tier: MetadataTier::Json,
-        has_agent_hints: false,
+        metadata_tier: MetadataTier::Typed,
+        has_agent_hints: true,
         has_manifest: true,
     },
     ConnectorEntry {
@@ -1015,8 +1015,8 @@ pub static CONNECTOR_INVENTORY: &[ConnectorEntry] = &[
         name: "posthog",
         cohort: ConnectorCohort::Analytics,
         operation_count: 3,
-        metadata_tier: MetadataTier::Json,
-        has_agent_hints: false,
+        metadata_tier: MetadataTier::Typed,
+        has_agent_hints: true,
         has_manifest: true,
     },
     ConnectorEntry {
@@ -1055,8 +1055,8 @@ pub static CONNECTOR_INVENTORY: &[ConnectorEntry] = &[
         name: "retool",
         cohort: ConnectorCohort::Automation,
         operation_count: 2,
-        metadata_tier: MetadataTier::Json,
-        has_agent_hints: false,
+        metadata_tier: MetadataTier::Typed,
+        has_agent_hints: true,
         has_manifest: true,
     },
     ConnectorEntry {
@@ -1079,24 +1079,24 @@ pub static CONNECTOR_INVENTORY: &[ConnectorEntry] = &[
         name: "salesforce",
         cohort: ConnectorCohort::Social,
         operation_count: 13,
-        metadata_tier: MetadataTier::Json,
-        has_agent_hints: false,
+        metadata_tier: MetadataTier::Typed,
+        has_agent_hints: true,
         has_manifest: true,
     },
     ConnectorEntry {
         name: "segment",
         cohort: ConnectorCohort::Analytics,
         operation_count: 3,
-        metadata_tier: MetadataTier::Json,
-        has_agent_hints: false,
+        metadata_tier: MetadataTier::Typed,
+        has_agent_hints: true,
         has_manifest: true,
     },
     ConnectorEntry {
         name: "semanticscholar",
         cohort: ConnectorCohort::Knowledge,
         operation_count: 7,
-        metadata_tier: MetadataTier::Json,
-        has_agent_hints: false,
+        metadata_tier: MetadataTier::Typed,
+        has_agent_hints: true,
         has_manifest: true,
     },
     ConnectorEntry {
@@ -1127,16 +1127,16 @@ pub static CONNECTOR_INVENTORY: &[ConnectorEntry] = &[
         name: "snowflake",
         cohort: ConnectorCohort::Data,
         operation_count: 5,
-        metadata_tier: MetadataTier::Json,
-        has_agent_hints: false,
+        metadata_tier: MetadataTier::Typed,
+        has_agent_hints: true,
         has_manifest: true,
     },
     ConnectorEntry {
         name: "spotify",
         cohort: ConnectorCohort::Social,
         operation_count: 10,
-        metadata_tier: MetadataTier::Json,
-        has_agent_hints: false,
+        metadata_tier: MetadataTier::Typed,
+        has_agent_hints: true,
         has_manifest: true,
     },
     ConnectorEntry {
@@ -3714,7 +3714,7 @@ mod tests {
             .iter()
             .filter(|e| e.metadata_tier == MetadataTier::Typed)
             .count();
-        assert_eq!(typed_count, 33);
+        assert_eq!(typed_count, 53);
     }
 
     #[test]
@@ -3723,6 +3723,6 @@ mod tests {
             .iter()
             .filter(|e| e.metadata_tier == MetadataTier::Json)
             .count();
-        assert_eq!(json_count, 49);
+        assert_eq!(json_count, 29);
     }
 }

@@ -13,7 +13,7 @@ use fcp_core::{CapabilityToken, FcpError};
 use fcp_crypto::cose::CapabilityTokenBuilder;
 use fcp_crypto::ed25519::Ed25519SigningKey;
 use serde_json::json;
-use wiremock::matchers::{bearer_token, header, method, path, query_param};
+use wiremock::matchers::{bearer_token, body_json, header, method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 // ── Helpers ──────────────────────────────────────────────────────────
@@ -481,6 +481,111 @@ async fn client_create_records_batch() {
 }
 
 #[fcp_async_core::runtime::test]
+async fn client_update_records_batch() {
+    let server = MockServer::start().await;
+    Mock::given(method("PATCH"))
+        .and(path("/appABC/tblXYZ"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "records": [
+                record_json("recU1", &json!({"Status": "Done"})),
+                record_json("recU2", &json!({"Status": "Done"}))
+            ]
+        })))
+        .mount(&server)
+        .await;
+
+    let client = AirtableClient::new("test_tok")
+        .unwrap()
+        .with_base_url(server.uri());
+    let result = client
+        .update_records(
+            "appABC",
+            "tblXYZ",
+            &[
+                json!({"id": "recU1", "fields": {"Status": "Done"}}),
+                json!({"id": "recU2", "fields": {"Status": "Done"}}),
+            ],
+            Some(true),
+        )
+        .await
+        .unwrap();
+    assert_eq!(result.records.len(), 2);
+}
+
+#[fcp_async_core::runtime::test]
+async fn client_upsert_records_batch() {
+    let server = MockServer::start().await;
+    Mock::given(method("PATCH"))
+        .and(path("/appABC/tblXYZ"))
+        .and(body_json(json!({
+            "records": [
+                { "fields": { "External ID": "ext-1", "Name": "Alpha" } }
+            ],
+            "performUpsert": {
+                "fieldsToMergeOn": ["External ID"]
+            },
+            "typecast": true
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "records": [
+                record_json("recUPS", &json!({"External ID": "ext-1", "Name": "Alpha"}))
+            ],
+            "createdRecords": ["recUPS"],
+            "updatedRecords": []
+        })))
+        .mount(&server)
+        .await;
+
+    let client = AirtableClient::new("test_tok")
+        .unwrap()
+        .with_base_url(server.uri());
+    let result = client
+        .upsert_records(
+            "appABC",
+            "tblXYZ",
+            &[json!({"fields": {"External ID": "ext-1", "Name": "Alpha"}})],
+            &[String::from("External ID")],
+            Some(true),
+        )
+        .await
+        .unwrap();
+    assert_eq!(result.records.len(), 1);
+    assert_eq!(result.created_records, vec!["recUPS"]);
+    assert!(result.updated_records.is_empty());
+}
+
+#[fcp_async_core::runtime::test]
+async fn client_delete_records_batch() {
+    let server = MockServer::start().await;
+    Mock::given(method("DELETE"))
+        .and(path("/appABC/tblXYZ"))
+        .and(query_param("records[]", "recDEL1"))
+        .and(query_param("records[]", "recDEL2"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "records": [
+                { "id": "recDEL1", "deleted": true },
+                { "id": "recDEL2", "deleted": true }
+            ]
+        })))
+        .mount(&server)
+        .await;
+
+    let client = AirtableClient::new("test_tok")
+        .unwrap()
+        .with_base_url(server.uri());
+    let result = client
+        .delete_records(
+            "appABC",
+            "tblXYZ",
+            &[String::from("recDEL1"), String::from("recDEL2")],
+        )
+        .await
+        .unwrap();
+    assert_eq!(result.records.len(), 2);
+    assert!(result.records.iter().all(|record| record.deleted));
+}
+
+#[fcp_async_core::runtime::test]
 async fn client_rate_limit_no_retry() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -557,7 +662,21 @@ async fn invoke_list_bases_through_connector() {
 async fn invoke_get_record_through_connector() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
-        .and(path("/appABC/tblXYZ/rec001"))
+        .and(path("/meta/bases/appABC123/tables"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "tables": [
+                {
+                    "id": "tblXYZ",
+                    "name": "Tasks",
+                    "fields": [{ "id": "fldNAME", "name": "Name", "type": "singleLineText" }],
+                    "views": []
+                }
+            ]
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/appABC123/tblXYZ/rec001"))
         .respond_with(
             ResponseTemplate::new(200)
                 .set_body_json(record_json("rec001", &json!({"Name": "Test"}))),
@@ -576,8 +695,8 @@ async fn invoke_get_record_through_connector() {
         .handle_invoke(json!({
             "operation": "airtable.get_record",
             "input": {
-                "base_id": "appABC",
-                "table_id": "tblXYZ",
+                "base_id": "appABC123",
+                "table_id": "Tasks",
                 "record_id": "rec001"
             },
             "capability_token": token
@@ -1034,8 +1153,22 @@ async fn discovery_ops_reuse_schema_cache_within_ttl() {
 #[fcp_async_core::runtime::test]
 async fn invoke_create_record_through_connector() {
     let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/meta/bases/appABC123/tables"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "tables": [
+                {
+                    "id": "tblXYZ",
+                    "name": "Tasks",
+                    "fields": [{ "id": "fldNAME", "name": "Name", "type": "singleLineText" }],
+                    "views": []
+                }
+            ]
+        })))
+        .mount(&server)
+        .await;
     Mock::given(method("POST"))
-        .and(path("/appABC/tblXYZ"))
+        .and(path("/appABC123/tblXYZ"))
         .respond_with(
             ResponseTemplate::new(200)
                 .set_body_json(record_json("recNEW", &json!({"Name": "Created"}))),
@@ -1054,8 +1187,8 @@ async fn invoke_create_record_through_connector() {
         .handle_invoke(json!({
             "operation": "airtable.create_record",
             "input": {
-                "base_id": "appABC",
-                "table_id": "tblXYZ",
+                "base_id": "appABC123",
+                "table_id": "Tasks",
                 "fields": { "Name": "Created" }
             },
             "capability_token": token
@@ -1067,10 +1200,85 @@ async fn invoke_create_record_through_connector() {
 }
 
 #[fcp_async_core::runtime::test]
+async fn invoke_create_records_through_connector() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/meta/bases/appABC123/tables"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "tables": [
+                {
+                    "id": "tblXYZ",
+                    "name": "Tasks",
+                    "fields": [{ "id": "fldNAME", "name": "Name", "type": "singleLineText" }],
+                    "views": []
+                }
+            ]
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/appABC123/tblXYZ"))
+        .and(body_json(json!({
+            "records": [
+                { "fields": { "Name": "Created A" } },
+                { "fields": { "Name": "Created B" } }
+            ]
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "records": [
+                record_json("recA", &json!({"Name": "Created A"})),
+                record_json("recB", &json!({"Name": "Created B"}))
+            ]
+        })))
+        .mount(&server)
+        .await;
+
+    let mut connector = AirtableConnector::new();
+    let signing_key = Ed25519SigningKey::generate();
+
+    setup_handshake(&mut connector, &signing_key, &["airtable.create_records"]).await;
+    setup_configure(&mut connector, &server.uri()).await;
+
+    let token = generate_valid_token(&signing_key, "airtable.create_records");
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "airtable.create_records",
+            "input": {
+                "base_id": "appABC123",
+                "table_id": "Tasks",
+                "records": [
+                    { "fields": { "Name": "Created A" } },
+                    { "fields": { "Name": "Created B" } }
+                ]
+            },
+            "capability_token": token
+        }))
+        .await
+        .unwrap();
+
+    assert_eq!(result["records"].as_array().unwrap().len(), 2);
+    assert_eq!(result["records"][0]["id"], "recA");
+}
+
+#[fcp_async_core::runtime::test]
 async fn invoke_delete_record_through_connector() {
     let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/meta/bases/appABC123/tables"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "tables": [
+                {
+                    "id": "tblXYZ",
+                    "name": "Tasks",
+                    "fields": [{ "id": "fldNAME", "name": "Name", "type": "singleLineText" }],
+                    "views": []
+                }
+            ]
+        })))
+        .mount(&server)
+        .await;
     Mock::given(method("DELETE"))
-        .and(path("/appABC/tblXYZ/recDEL"))
+        .and(path("/appABC123/tblXYZ/recDEL"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "id": "recDEL",
             "deleted": true
@@ -1089,8 +1297,8 @@ async fn invoke_delete_record_through_connector() {
         .handle_invoke(json!({
             "operation": "airtable.delete_record",
             "input": {
-                "base_id": "appABC",
-                "table_id": "tblXYZ",
+                "base_id": "appABC123",
+                "table_id": "Tasks",
                 "record_id": "recDEL"
             },
             "capability_token": token
@@ -1099,6 +1307,226 @@ async fn invoke_delete_record_through_connector() {
         .unwrap();
 
     assert_eq!(result["deleted"], true);
+}
+
+#[fcp_async_core::runtime::test]
+async fn invoke_update_records_through_connector() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/meta/bases/appABC123/tables"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "tables": [
+                {
+                    "id": "tblTASK",
+                    "name": "Tasks",
+                    "fields": [{ "id": "fldSTAT", "name": "Status", "type": "singleSelect" }],
+                    "views": []
+                }
+            ]
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("PATCH"))
+        .and(path("/appABC123/tblTASK"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "records": [
+                record_json("recU1", &json!({"Status": "Done"})),
+                record_json("recU2", &json!({"Status": "Done"}))
+            ]
+        })))
+        .mount(&server)
+        .await;
+
+    let mut connector = AirtableConnector::new();
+    let signing_key = Ed25519SigningKey::generate();
+    setup_handshake(&mut connector, &signing_key, &["airtable.update_records"]).await;
+    setup_configure(&mut connector, &server.uri()).await;
+
+    let token = generate_valid_token(&signing_key, "airtable.update_records");
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "airtable.update_records",
+            "input": {
+                "base_id": "appABC123",
+                "table_id": "Tasks",
+                "records": [
+                    {"id": "recU1", "fields": {"Status": "Done"}},
+                    {"id": "recU2", "fields": {"Status": "Done"}}
+                ],
+                "typecast": true
+            },
+            "capability_token": token
+        }))
+        .await
+        .unwrap();
+
+    assert_eq!(result["records"].as_array().unwrap().len(), 2);
+}
+
+#[fcp_async_core::runtime::test]
+async fn invoke_upsert_records_through_connector() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/meta/bases/appABC123/tables"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "tables": [
+                {
+                    "id": "tblTASK",
+                    "name": "Tasks",
+                    "fields": [
+                        { "id": "fldEXT", "name": "External ID", "type": "singleLineText" },
+                        { "id": "fldNAME", "name": "Name", "type": "singleLineText" }
+                    ],
+                    "views": []
+                }
+            ]
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("PATCH"))
+        .and(path("/appABC123/tblTASK"))
+        .and(body_json(json!({
+            "records": [
+                { "fields": { "External ID": "ext-1", "Name": "Alpha" } }
+            ],
+            "performUpsert": {
+                "fieldsToMergeOn": ["External ID"]
+            },
+            "typecast": true
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "records": [
+                record_json("recUPS", &json!({"External ID": "ext-1", "Name": "Alpha"}))
+            ],
+            "createdRecords": ["recUPS"],
+            "updatedRecords": []
+        })))
+        .mount(&server)
+        .await;
+
+    let mut connector = AirtableConnector::new();
+    let signing_key = Ed25519SigningKey::generate();
+    setup_handshake(&mut connector, &signing_key, &["airtable.upsert_records"]).await;
+    setup_configure(&mut connector, &server.uri()).await;
+
+    let token = generate_valid_token(&signing_key, "airtable.upsert_records");
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "airtable.upsert_records",
+            "input": {
+                "base_id": "appABC123",
+                "table_id": "Tasks",
+                "fields_to_merge_on": ["fldEXT"],
+                "records": [
+                    {"fields": {"External ID": "ext-1", "Name": "Alpha"}}
+                ],
+                "typecast": true
+            },
+            "capability_token": token
+        }))
+        .await
+        .unwrap();
+
+    assert_eq!(result["createdRecords"][0], "recUPS");
+    assert_eq!(result["records"].as_array().unwrap().len(), 1);
+}
+
+#[fcp_async_core::runtime::test]
+async fn invoke_delete_records_through_connector() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/meta/bases/appABC123/tables"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "tables": [
+                {
+                    "id": "tblTASK",
+                    "name": "Tasks",
+                    "fields": [{ "id": "fldNAME", "name": "Name", "type": "singleLineText" }],
+                    "views": []
+                }
+            ]
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("DELETE"))
+        .and(path("/appABC123/tblTASK"))
+        .and(query_param("records[]", "recDEL1"))
+        .and(query_param("records[]", "recDEL2"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "records": [
+                { "id": "recDEL1", "deleted": true },
+                { "id": "recDEL2", "deleted": true }
+            ]
+        })))
+        .mount(&server)
+        .await;
+
+    let mut connector = AirtableConnector::new();
+    let signing_key = Ed25519SigningKey::generate();
+    setup_handshake(&mut connector, &signing_key, &["airtable.delete_records"]).await;
+    setup_configure(&mut connector, &server.uri()).await;
+
+    let token = generate_valid_token(&signing_key, "airtable.delete_records");
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "airtable.delete_records",
+            "input": {
+                "base_id": "appABC123",
+                "table_id": "Tasks",
+                "record_ids": ["recDEL1", "recDEL2"]
+            },
+            "capability_token": token
+        }))
+        .await
+        .unwrap();
+
+    assert_eq!(result["records"].as_array().unwrap().len(), 2);
+}
+
+#[fcp_async_core::runtime::test]
+async fn invoke_upsert_records_requires_merge_fields() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/meta/bases/appABC123/tables"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "tables": [
+                {
+                    "id": "tblTASK",
+                    "name": "Tasks",
+                    "fields": [{ "id": "fldEXT", "name": "External ID", "type": "singleLineText" }],
+                    "views": []
+                }
+            ]
+        })))
+        .mount(&server)
+        .await;
+
+    let mut connector = AirtableConnector::new();
+    let signing_key = Ed25519SigningKey::generate();
+    setup_handshake(&mut connector, &signing_key, &["airtable.upsert_records"]).await;
+    setup_configure(&mut connector, &server.uri()).await;
+
+    let token = generate_valid_token(&signing_key, "airtable.upsert_records");
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "airtable.upsert_records",
+            "input": {
+                "base_id": "appABC123",
+                "table_id": "Tasks",
+                "fields_to_merge_on": [],
+                "records": [{"fields": {"External ID": "ext-1"}}]
+            },
+            "capability_token": token
+        }))
+        .await;
+
+    assert!(result.is_err());
+    match result.unwrap_err() {
+        FcpError::InvalidRequest { message, .. } => {
+            assert!(message.contains("fields_to_merge_on"));
+        }
+        other => panic!("Expected InvalidRequest, got {other:?}"),
+    }
 }
 
 #[fcp_async_core::runtime::test]

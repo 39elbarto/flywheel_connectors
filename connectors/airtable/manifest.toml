@@ -5,7 +5,7 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:fb9abca921750747090944398a3fd1a118989224e6aa8f9abfc88c2586535ab1"
+interface_hash = "blake3-256:fcp.interface.v2:6e9b3cd17f8f1ffa80b79a916a6bf32990e25674f57c7e7e2697ae114d7dc0f2"
 
 [connector]
 id = "fcp.airtable"
@@ -205,6 +205,180 @@ common_mistakes = ["Exceeding 10 record limit per batch."]
 examples = ['{"base_id": "appXXX", "table_id": "Tasks", "records": [{"fields": {"Name": "Task 1"}}, {"fields": {"Name": "Task 2"}}]}']
 related = ["airtable.create_record"]
 
+[provides.operations.update_records]
+description = "Update multiple Airtable records in one batch PATCH request (max 10)"
+capability = "airtable.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "strict"
+
+[provides.operations.update_records.rate_limit]
+max = 50
+per_ms = 60000
+
+[provides.operations.update_records.input_schema]
+required = ["base_id", "table_id", "records"]
+type = "object"
+
+[provides.operations.update_records.input_schema.properties.base_id]
+description = "Airtable base ID"
+pattern = "^app[a-zA-Z0-9]+$"
+type = "string"
+
+[provides.operations.update_records.input_schema.properties.table_id]
+description = "Table name or ID"
+type = "string"
+
+[provides.operations.update_records.input_schema.properties.records]
+description = "Array of record patches with id + fields (max 10)"
+maxItems = 10
+type = "array"
+
+[provides.operations.update_records.input_schema.properties.records.items]
+type = "object"
+
+[provides.operations.update_records.input_schema.properties.typecast]
+description = "If true, Airtable will try to convert string values to appropriate types"
+type = "boolean"
+
+[provides.operations.update_records.output_schema]
+required = ["records"]
+type = "object"
+
+[provides.operations.update_records.output_schema.properties.records]
+description = "Updated records"
+type = "array"
+
+[provides.operations.update_records.network_constraints]
+host_allow = ["api.airtable.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 60000
+max_response_bytes = 2097152
+
+[provides.operations.update_records.ai_hints]
+when_to_use = "Patch multiple existing Airtable records efficiently while keeping record identities stable."
+common_mistakes = [
+    "Omitting the record id for one of the batch items.",
+    "Sending more than 10 records in a single request.",
+]
+examples = ['{"base_id": "appXXX", "table_id": "Tasks", "records": [{"id": "recA", "fields": {"Status": "Done"}}]}']
+related = [
+    "airtable.update_record",
+    "airtable.upsert_records",
+]
+
+[provides.operations.upsert_records]
+description = "Upsert multiple Airtable records using merge fields for retry-safe workflows"
+capability = "airtable.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "strict"
+
+[provides.operations.upsert_records.rate_limit]
+max = 50
+per_ms = 60000
+
+[provides.operations.upsert_records.input_schema]
+required = [
+    "base_id",
+    "table_id",
+    "records",
+    "fields_to_merge_on",
+]
+type = "object"
+
+[provides.operations.upsert_records.input_schema.properties.base_id]
+description = "Airtable base ID"
+pattern = "^app[a-zA-Z0-9]+$"
+type = "string"
+
+[provides.operations.upsert_records.input_schema.properties.table_id]
+description = "Table name or ID"
+type = "string"
+
+[provides.operations.upsert_records.input_schema.properties.records]
+description = "Array of records with fields payloads (max 10)"
+maxItems = 10
+type = "array"
+
+[provides.operations.upsert_records.input_schema.properties.records.items]
+type = "object"
+
+[provides.operations.upsert_records.input_schema.properties.fields_to_merge_on]
+description = "Field IDs or exact field names used to match existing Airtable records"
+type = "array"
+
+[provides.operations.upsert_records.input_schema.properties.fields_to_merge_on.items]
+type = "string"
+
+[provides.operations.upsert_records.input_schema.properties.typecast]
+description = "If true, Airtable will try to convert string values to appropriate types"
+type = "boolean"
+
+[provides.operations.upsert_records.output_schema]
+required = [
+    "records",
+    "createdRecords",
+    "updatedRecords",
+]
+type = "object"
+
+[provides.operations.upsert_records.output_schema.properties.records]
+description = "Upserted records"
+type = "array"
+
+[provides.operations.upsert_records.output_schema.properties.createdRecords]
+description = "Record IDs created by the upsert"
+type = "array"
+
+[provides.operations.upsert_records.output_schema.properties.updatedRecords]
+description = "Record IDs updated by the upsert"
+type = "array"
+
+[provides.operations.upsert_records.network_constraints]
+host_allow = ["api.airtable.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 60000
+max_response_bytes = 2097152
+
+[provides.operations.upsert_records.ai_hints]
+when_to_use = "Create-or-update Airtable records when retries must stay deterministic."
+common_mistakes = [
+    "Using merge fields that do not exist in the table schema.",
+    "Assuming upsert is safe without stable merge keys.",
+]
+examples = ['{"base_id": "appXXX", "table_id": "Tasks", "fields_to_merge_on": ["External ID"], "records": [{"fields": {"External ID": "ext-1", "Name": "Alpha"}}]}']
+related = [
+    "airtable.create_records",
+    "airtable.update_records",
+]
+
 [provides.operations.delete_record]
 description = "Delete a record from an Airtable table (irreversible)"
 capability = "airtable.delete"
@@ -278,6 +452,81 @@ common_mistakes = [
 ]
 examples = ['{"base_id": "appXXX", "table_id": "Tasks", "record_id": "recYYY"}']
 related = ["airtable.get_record"]
+
+[provides.operations.delete_records]
+description = "Delete multiple Airtable records in one request (irreversible, max 10)"
+capability = "airtable.delete"
+risk_level = "high"
+safety_tier = "dangerous"
+requires_approval = "interactive"
+idempotency = "strict"
+
+[provides.operations.delete_records.rate_limit]
+max = 30
+per_ms = 60000
+
+[provides.operations.delete_records.input_schema]
+required = [
+    "base_id",
+    "table_id",
+    "record_ids",
+]
+type = "object"
+
+[provides.operations.delete_records.input_schema.properties.base_id]
+description = "Airtable base ID"
+pattern = "^app[a-zA-Z0-9]+$"
+type = "string"
+
+[provides.operations.delete_records.input_schema.properties.table_id]
+description = "Table name or ID"
+type = "string"
+
+[provides.operations.delete_records.input_schema.properties.record_ids]
+description = "Record IDs to delete (max 10)"
+maxItems = 10
+type = "array"
+
+[provides.operations.delete_records.input_schema.properties.record_ids.items]
+type = "string"
+
+[provides.operations.delete_records.output_schema]
+required = ["records"]
+type = "object"
+
+[provides.operations.delete_records.output_schema.properties.records]
+description = "Deleted record confirmations"
+type = "array"
+
+[provides.operations.delete_records.network_constraints]
+host_allow = ["api.airtable.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations.delete_records.ai_hints]
+when_to_use = "Remove a bounded set of Airtable records after explicit confirmation."
+common_mistakes = [
+    "Sending more than 10 record IDs in one destructive batch.",
+    "Deleting records that are still referenced by linked-record fields.",
+]
+examples = ['{"base_id": "appXXX", "table_id": "Tasks", "record_ids": ["recA", "recB"]}']
+related = [
+    "airtable.delete_record",
+    "airtable.get_record",
+]
 
 [provides.operations.download_attachment]
 description = "Download an attachment file from an Airtable record"
@@ -1335,6 +1584,8 @@ scope = "instance"
 create_record = ["airtable.write"]
 update_record = ["airtable.write"]
 create_records = ["airtable.write"]
+update_records = ["airtable.write"]
+upsert_records = ["airtable.write"]
 get_base_schema = ["airtable.read"]
 list_tables = ["airtable.read"]
 get_table = ["airtable.read"]
@@ -1348,3 +1599,4 @@ get_record = ["airtable.read"]
 list_bases = ["airtable.read"]
 download_attachment = ["airtable.read"]
 delete_record = ["airtable.delete"]
+delete_records = ["airtable.delete"]

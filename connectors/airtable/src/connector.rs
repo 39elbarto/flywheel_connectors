@@ -1427,12 +1427,11 @@ impl AirtableConnector {
 
     async fn invoke_get_record(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
-        let base_id = require_str(&input, "base_id")?;
-        let table_id = require_str(&input, "table_id")?;
-        let record_id = require_str(&input, "record_id")?;
+        let (base_id, table_id) = self.require_table_id(&input).await?;
+        let record_id = require_nonempty_str(&input, "record_id")?;
 
         let record = client
-            .get_record(base_id, table_id, record_id)
+            .get_record(&base_id, &table_id, record_id)
             .await
             .map_err(|e: AirtableError| e.to_fcp_error())?;
 
@@ -1443,16 +1442,12 @@ impl AirtableConnector {
 
     async fn invoke_create_record(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
-        let base_id = require_str(&input, "base_id")?;
-        let table_id = require_str(&input, "table_id")?;
-        let fields = input.get("fields").ok_or(FcpError::InvalidRequest {
-            code: 1003,
-            message: "Missing required field: fields".into(),
-        })?;
+        let (base_id, table_id) = self.require_table_id(&input).await?;
+        let fields = require_fields_object(&input)?;
         let typecast = input.get("typecast").and_then(|v| v.as_bool());
 
         let record = client
-            .create_record(base_id, table_id, fields, typecast)
+            .create_record(&base_id, &table_id, fields, typecast)
             .await
             .map_err(|e: AirtableError| e.to_fcp_error())?;
 
@@ -1466,20 +1461,12 @@ impl AirtableConnector {
         input: serde_json::Value,
     ) -> FcpResult<serde_json::Value> {
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
-        let base_id = require_str(&input, "base_id")?;
-        let table_id = require_str(&input, "table_id")?;
-        let records =
-            input
-                .get("records")
-                .and_then(|v| v.as_array())
-                .ok_or(FcpError::InvalidRequest {
-                    code: 1003,
-                    message: "Missing required field: records (must be an array)".into(),
-                })?;
+        let (base_id, table_id) = self.require_table_id(&input).await?;
+        let records = parse_record_payloads(&input, false)?;
         let typecast = input.get("typecast").and_then(|v| v.as_bool());
 
         let result = client
-            .create_records(base_id, table_id, records, typecast)
+            .create_records(&base_id, &table_id, &records, typecast)
             .await
             .map_err(|e: AirtableError| e.to_fcp_error())?;
 
@@ -1537,17 +1524,13 @@ impl AirtableConnector {
 
     async fn invoke_update_record(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
-        let base_id = require_str(&input, "base_id")?;
-        let table_id = require_str(&input, "table_id")?;
-        let record_id = require_str(&input, "record_id")?;
-        let fields = input.get("fields").ok_or(FcpError::InvalidRequest {
-            code: 1003,
-            message: "Missing required field: fields".into(),
-        })?;
+        let (base_id, table_id) = self.require_table_id(&input).await?;
+        let record_id = require_nonempty_str(&input, "record_id")?;
+        let fields = require_fields_object(&input)?;
         let typecast = input.get("typecast").and_then(|v| v.as_bool());
 
         let record = client
-            .update_record(base_id, table_id, record_id, fields, typecast)
+            .update_record(&base_id, &table_id, record_id, fields, typecast)
             .await
             .map_err(|e: AirtableError| e.to_fcp_error())?;
 
@@ -1561,16 +1544,12 @@ impl AirtableConnector {
         input: serde_json::Value,
     ) -> FcpResult<serde_json::Value> {
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
-        let base_id = require_str(&input, "base_id")?;
-        let table_id = require_str(&input, "table_id")?;
-        let record_id = require_str(&input, "record_id")?;
-        let fields = input.get("fields").ok_or(FcpError::InvalidRequest {
-            code: 1003,
-            message: "Missing required field: fields".into(),
-        })?;
+        let (base_id, table_id) = self.require_table_id(&input).await?;
+        let record_id = require_nonempty_str(&input, "record_id")?;
+        let fields = require_fields_object(&input)?;
 
         let record = client
-            .replace_record(base_id, table_id, record_id, fields)
+            .replace_record(&base_id, &table_id, record_id, fields)
             .await
             .map_err(|e: AirtableError| e.to_fcp_error())?;
 
@@ -1581,12 +1560,11 @@ impl AirtableConnector {
 
     async fn invoke_delete_record(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
-        let base_id = require_str(&input, "base_id")?;
-        let table_id = require_str(&input, "table_id")?;
-        let record_id = require_str(&input, "record_id")?;
+        let (base_id, table_id) = self.require_table_id(&input).await?;
+        let record_id = require_nonempty_str(&input, "record_id")?;
 
         let result = client
-            .delete_record(base_id, table_id, record_id)
+            .delete_record(&base_id, &table_id, record_id)
             .await
             .map_err(|e: AirtableError| e.to_fcp_error())?;
 
@@ -1662,6 +1640,14 @@ impl AirtableConnector {
         Ok(schema)
     }
 
+    async fn require_table_id(&self, input: &serde_json::Value) -> FcpResult<(String, String)> {
+        let base_id = require_base_id(input)?.to_string();
+        let table_ref = require_nonempty_str(input, "table_id")?;
+        let schema = self.get_base_schema_cached(&base_id).await?;
+        let table = resolve_table(&schema.tables, table_ref)?;
+        Ok((base_id, table.id.clone()))
+    }
+
     /// Handle shutdown.
     ///
     /// # Errors
@@ -1716,6 +1702,20 @@ fn require_base_id(input: &serde_json::Value) -> FcpResult<&str> {
         });
     }
     Ok(base_id)
+}
+
+fn require_fields_object(input: &serde_json::Value) -> FcpResult<&serde_json::Value> {
+    let fields = input.get("fields").ok_or(FcpError::InvalidRequest {
+        code: 1003,
+        message: "Missing required field: fields".into(),
+    })?;
+    if !fields.is_object() {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "fields must be an object".into(),
+        });
+    }
+    Ok(fields)
 }
 
 fn resolve_table<'a>(tables: &'a [TableSchema], table_ref: &str) -> FcpResult<&'a TableSchema> {

@@ -14,7 +14,8 @@ use crate::{
     error::{AirtableError, AirtableResult},
     types::{
         AirtableApiError, AttachmentDownload, BaseSchemaResponse, CreateRecordsResponse,
-        DeleteRecordResponse, ListBasesResponse, ListRecordsResponse, Record, SortSpec,
+        DeleteRecordResponse, DeleteRecordsResponse, ListBasesResponse, ListRecordsResponse,
+        Record, SortSpec, UpsertRecordsResponse,
     },
 };
 
@@ -275,6 +276,46 @@ impl AirtableClient {
         self.post_json(&path, &body).await
     }
 
+    /// Update multiple records (batch PATCH, max 10).
+    #[instrument(skip(self, records))]
+    pub async fn update_records(
+        &self,
+        base_id: &str,
+        table_id: &str,
+        records: &[serde_json::Value],
+        typecast: Option<bool>,
+    ) -> AirtableResult<CreateRecordsResponse> {
+        let path = format!("/{base_id}/{table_id}");
+        let mut body = serde_json::json!({ "records": records });
+        if let Some(tc) = typecast {
+            body["typecast"] = serde_json::Value::Bool(tc);
+        }
+        self.patch_json(&path, &body).await
+    }
+
+    /// Upsert multiple records using merge fields (batch PATCH, max 10).
+    #[instrument(skip(self, records, fields_to_merge_on))]
+    pub async fn upsert_records(
+        &self,
+        base_id: &str,
+        table_id: &str,
+        records: &[serde_json::Value],
+        fields_to_merge_on: &[String],
+        typecast: Option<bool>,
+    ) -> AirtableResult<UpsertRecordsResponse> {
+        let path = format!("/{base_id}/{table_id}");
+        let mut body = serde_json::json!({
+            "records": records,
+            "performUpsert": {
+                "fieldsToMergeOn": fields_to_merge_on,
+            },
+        });
+        if let Some(tc) = typecast {
+            body["typecast"] = serde_json::Value::Bool(tc);
+        }
+        self.patch_json(&path, &body).await
+    }
+
     /// Update a record (PATCH - partial update).
     #[instrument(skip(self, fields))]
     pub async fn update_record(
@@ -317,6 +358,22 @@ impl AirtableClient {
     ) -> AirtableResult<DeleteRecordResponse> {
         let path = format!("/{base_id}/{table_id}/{record_id}");
         self.delete(&path).await
+    }
+
+    /// Delete multiple records (batch DELETE, max 10).
+    #[instrument(skip(self, record_ids))]
+    pub async fn delete_records(
+        &self,
+        base_id: &str,
+        table_id: &str,
+        record_ids: &[String],
+    ) -> AirtableResult<DeleteRecordsResponse> {
+        let path = format!("/{base_id}/{table_id}");
+        let params: Vec<(&str, String)> = record_ids
+            .iter()
+            .map(|record_id| ("records[]", record_id.clone()))
+            .collect();
+        self.delete_with_params(&path, &params).await
     }
 
     // ── Attachment operations ───────────────────────────────────────
@@ -502,7 +559,37 @@ impl AirtableClient {
     }
 
     async fn delete<T: serde::de::DeserializeOwned>(&self, path: &str) -> AirtableResult<T> {
-        let url = format!("{}{path}", self.base_url);
+        self.delete_with_url(path, &format!("{}{path}", self.base_url))
+            .await
+    }
+
+    async fn delete_with_params<T: serde::de::DeserializeOwned>(
+        &self,
+        path: &str,
+        params: &[(&str, String)],
+    ) -> AirtableResult<T> {
+        let mut url = format!("{}{path}", self.base_url);
+        if !params.is_empty() {
+            url.push('?');
+            for (i, (key, value)) in params.iter().enumerate() {
+                if i > 0 {
+                    url.push('&');
+                }
+                let encoded = percent_encoding::utf8_percent_encode(
+                    value,
+                    percent_encoding::NON_ALPHANUMERIC,
+                );
+                let _ = write!(url, "{key}={encoded}");
+            }
+        }
+        self.delete_with_url(path, &url).await
+    }
+
+    async fn delete_with_url<T: serde::de::DeserializeOwned>(
+        &self,
+        path: &str,
+        url: &str,
+    ) -> AirtableResult<T> {
         self.total_requests.fetch_add(1, Ordering::Relaxed);
 
         let mut attempt = 0;
@@ -510,7 +597,7 @@ impl AirtableClient {
 
         loop {
             attempt += 1;
-            let response = self.apply_auth(self.client.delete(&url)).send().await;
+            let response = self.apply_auth(self.client.delete(url)).send().await;
 
             match response {
                 Ok(resp) => {
@@ -742,6 +829,102 @@ mod tests {
             .unwrap();
         assert!(result.deleted);
         assert_eq!(result.id, "recDEL");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_update_records() {
+        let server = MockServer::start().await;
+        Mock::given(method("PATCH"))
+            .and(path("/appABC/tblXYZ"))
+            .and(bearer_token("test_token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "records": [
+                    { "id": "recA", "fields": { "Status": "Done" } },
+                    { "id": "recB", "fields": { "Status": "Done" } }
+                ]
+            })))
+            .mount(&server)
+            .await;
+
+        let client = AirtableClient::new("test_token")
+            .unwrap()
+            .with_base_url(server.uri());
+        let records = vec![
+            serde_json::json!({ "id": "recA", "fields": { "Status": "Done" } }),
+            serde_json::json!({ "id": "recB", "fields": { "Status": "Done" } }),
+        ];
+        let result = client
+            .update_records("appABC", "tblXYZ", &records, Some(true))
+            .await
+            .unwrap();
+        assert_eq!(result.records.len(), 2);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_upsert_records() {
+        let server = MockServer::start().await;
+        Mock::given(method("PATCH"))
+            .and(path("/appABC/tblXYZ"))
+            .and(bearer_token("test_token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "records": [
+                    { "id": "recA", "fields": { "External ID": "ext-1" } }
+                ],
+                "createdRecords": ["recA"],
+                "updatedRecords": []
+            })))
+            .mount(&server)
+            .await;
+
+        let client = AirtableClient::new("test_token")
+            .unwrap()
+            .with_base_url(server.uri());
+        let records = vec![serde_json::json!({
+            "fields": { "External ID": "ext-1", "Name": "Alpha" }
+        })];
+        let result = client
+            .upsert_records(
+                "appABC",
+                "tblXYZ",
+                &records,
+                &[String::from("External ID")],
+                Some(true),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.records.len(), 1);
+        assert_eq!(result.created_records, vec!["recA"]);
+        assert!(result.updated_records.is_empty());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_delete_records() {
+        let server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .and(path("/appABC/tblXYZ"))
+            .and(bearer_token("test_token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "records": [
+                    { "id": "recA", "deleted": true },
+                    { "id": "recB", "deleted": true }
+                ]
+            })))
+            .mount(&server)
+            .await;
+
+        let client = AirtableClient::new("test_token")
+            .unwrap()
+            .with_base_url(server.uri());
+        let result = client
+            .delete_records(
+                "appABC",
+                "tblXYZ",
+                &[String::from("recA"), String::from("recB")],
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.records.len(), 2);
+        assert!(result.records.iter().all(|record| record.deleted));
     }
 
     #[fcp_async_core::runtime::test]

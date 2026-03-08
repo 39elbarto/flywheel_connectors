@@ -87,9 +87,19 @@ pub struct ListRecordsResponse {
 }
 
 /// Response for creating multiple records.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateRecordsResponse {
     pub records: Vec<Record>,
+}
+
+/// Response for upserting multiple records.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpsertRecordsResponse {
+    pub records: Vec<Record>,
+    #[serde(default, rename = "createdRecords")]
+    pub created_records: Vec<String>,
+    #[serde(default, rename = "updatedRecords")]
+    pub updated_records: Vec<String>,
 }
 
 /// Response for deleting a record.
@@ -97,6 +107,12 @@ pub struct CreateRecordsResponse {
 pub struct DeleteRecordResponse {
     pub id: String,
     pub deleted: bool,
+}
+
+/// Response for deleting multiple records.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeleteRecordsResponse {
+    pub records: Vec<DeleteRecordResponse>,
 }
 
 // ── Sort types ─────────────────────────────────────────────────────
@@ -391,10 +407,31 @@ mod tests {
     }
 
     #[test]
+    fn upsert_records_response() {
+        let json = json!({
+            "records": [{"id": "rec1", "fields": {"Name": "A"}}],
+            "createdRecords": ["rec1"],
+            "updatedRecords": []
+        });
+        let resp: UpsertRecordsResponse = serde_json::from_value(json).unwrap();
+        assert_eq!(resp.records.len(), 1);
+        assert_eq!(resp.created_records, vec!["rec1"]);
+        assert!(resp.updated_records.is_empty());
+    }
+
+    #[test]
     fn delete_record_response_roundtrip() {
         let json = json!({"id": "rec1", "deleted": false});
         let resp: DeleteRecordResponse = serde_json::from_value(json).unwrap();
         assert!(!resp.deleted);
+    }
+
+    #[test]
+    fn delete_records_response_roundtrip() {
+        let json = json!({"records": [{"id": "rec1", "deleted": true}]});
+        let resp: DeleteRecordsResponse = serde_json::from_value(json).unwrap();
+        assert_eq!(resp.records.len(), 1);
+        assert!(resp.records[0].deleted);
     }
 
     #[test]
@@ -636,6 +673,19 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::redundant_clone)]
+    fn upsert_records_response_clone() {
+        let resp = UpsertRecordsResponse {
+            records: vec![],
+            created_records: vec!["recA".into()],
+            updated_records: vec!["recB".into()],
+        };
+        let cloned = resp.clone();
+        assert_eq!(cloned.created_records, vec!["recA"]);
+        assert_eq!(cloned.updated_records, vec!["recB"]);
+    }
+
+    #[test]
     fn create_records_response_debug() {
         let resp = CreateRecordsResponse {
             records: vec![Record {
@@ -646,6 +696,21 @@ mod tests {
         };
         let dbg = format!("{resp:?}");
         assert!(dbg.contains("CreateRecordsResponse"));
+    }
+
+    #[test]
+    fn upsert_records_response_debug() {
+        let resp = UpsertRecordsResponse {
+            records: vec![Record {
+                id: "rec1".into(),
+                fields: json!({}),
+                created_time: None,
+            }],
+            created_records: vec!["rec1".into()],
+            updated_records: vec![],
+        };
+        let dbg = format!("{resp:?}");
+        assert!(dbg.contains("UpsertRecordsResponse"));
     }
 
     #[test]
@@ -669,6 +734,18 @@ mod tests {
         let dbg = format!("{resp:?}");
         assert!(dbg.contains("DeleteRecordResponse"));
         assert!(dbg.contains("rec1"));
+    }
+
+    #[test]
+    fn delete_records_response_debug() {
+        let resp = DeleteRecordsResponse {
+            records: vec![DeleteRecordResponse {
+                id: "rec1".into(),
+                deleted: true,
+            }],
+        };
+        let dbg = format!("{resp:?}");
+        assert!(dbg.contains("DeleteRecordsResponse"));
     }
 
     #[test]
@@ -882,6 +959,37 @@ mod tests {
         let back: DeleteRecordResponse = serde_json::from_value(json).unwrap();
         assert_eq!(back.id, "recDEL");
         assert!(back.deleted);
+    }
+
+    #[test]
+    fn upsert_records_response_serialize_roundtrip() {
+        let resp = UpsertRecordsResponse {
+            records: vec![Record {
+                id: "recUPS".into(),
+                fields: json!({"External ID": "ext-1"}),
+                created_time: None,
+            }],
+            created_records: vec!["recUPS".into()],
+            updated_records: vec!["recOLD".into()],
+        };
+        let json = serde_json::to_value(&resp).unwrap();
+        let back: UpsertRecordsResponse = serde_json::from_value(json).unwrap();
+        assert_eq!(back.created_records, vec!["recUPS"]);
+        assert_eq!(back.updated_records, vec!["recOLD"]);
+    }
+
+    #[test]
+    fn delete_records_response_serialize_roundtrip() {
+        let resp = DeleteRecordsResponse {
+            records: vec![DeleteRecordResponse {
+                id: "recDEL".into(),
+                deleted: true,
+            }],
+        };
+        let json = serde_json::to_value(&resp).unwrap();
+        let back: DeleteRecordsResponse = serde_json::from_value(json).unwrap();
+        assert_eq!(back.records[0].id, "recDEL");
+        assert!(back.records[0].deleted);
     }
 
     #[test]

@@ -113,13 +113,13 @@ pub fn guide_payload(command: Option<&str>) -> Value {
                     }
                 ],
                 "phase": {
-                    "current_bead": "flywheel_connectors-3kbu1",
-                    "current_scope": "Ship self-resolving workflow capsules so intent-derived jobs can persist drafts, identifier candidates, and the smallest remaining clarification question before execution.",
+                    "current_bead": "flywheel_connectors-1g7z0.2",
+                    "current_scope": "Finalize the output contract so every `fwc` command emits deterministic TOON/JSON payloads, explicit exit semantics, and optional token-efficiency telemetry that agents can rely on.",
                     "follow_on_beads": [
-                        "flywheel_connectors-3kbu1",
-                        "flywheel_connectors-1g7z0.22",
+                        "flywheel_connectors-1g7z0.2",
+                        "flywheel_connectors-1g7z0.25",
+                        "flywheel_connectors-1g7z0.18",
                         "flywheel_connectors-1g7z0.23",
-                        "flywheel_connectors-1g7z0.24",
                         "flywheel_connectors-1g7z0.6"
                     ],
                 },
@@ -307,7 +307,7 @@ fn workflow_contract(summary: &str, intended_shape: &str) -> Value {
         "family": "workflow",
         "summary": summary,
         "intended_shape": intended_shape,
-        "next_beads": ["flywheel_connectors-3kbu1", "flywheel_connectors-1g7z0.22", "flywheel_connectors-1g7z0.23", "flywheel_connectors-1g7z0.24"],
+        "next_beads": ["flywheel_connectors-1g7z0.2", "flywheel_connectors-1g7z0.25", "flywheel_connectors-1g7z0.18", "flywheel_connectors-1g7z0.23"],
         "workflow_handoff": [
             "Use `fwc task \"<intent>\"` to create the capsule in one shot.",
             "Use `fwc task resolve <task-id> --until ready` to persist draft bindings, identifier candidates, and the smallest remaining question.",

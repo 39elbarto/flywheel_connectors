@@ -366,7 +366,8 @@ pub fn closest_matches<'a>(
     max_distance: usize,
     limit: usize,
 ) -> Vec<&'a str> {
-    #[allow(clippy::suspicious_operation_groupings)] // Intentional: match prefix in either direction
+    #[allow(clippy::suspicious_operation_groupings)]
+    // Intentional: match prefix in either direction
     let mut matches = candidates
         .iter()
         .map(|candidate| (*candidate, levenshtein(value, candidate)))
@@ -434,10 +435,7 @@ pub fn is_dangerous_shape(args: &[String]) -> Option<DangerousShape> {
 
     // `fwc delete <connector>` — no delete command, could mean disable/stop/uninstall
     if !positional.is_empty()
-        && matches!(
-            positional[0],
-            "delete" | "remove" | "uninstall" | "destroy"
-        )
+        && matches!(positional[0], "delete" | "remove" | "uninstall" | "destroy")
     {
         return Some(DangerousShape {
             kind: "destructive-ambiguity",

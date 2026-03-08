@@ -1,21 +1,52 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-SCRIPT_NAME="e2e_revocation_flow"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+SCRIPT_NAME="revocation_flow"
 SEED="0xDEADBEEF"
-ZONE="z:work"
-CONNECTOR="fcp.test-echo"
 OUT_DIR="${OUT_DIR:-./out/${SCRIPT_NAME}}"
 LOG_JSONL="${LOG_JSONL:-${OUT_DIR}/${SCRIPT_NAME}.jsonl}"
+TARGET_DIR="${REVOCATION_FLOW_TARGET_DIR:-/tmp/fcp-revocation-flow}"
 
-TOKEN_ID=""
-PROPAGATION_MS=""
+CAPABILITY_FLOW_TEST="logs_capability_revocation_flow"
+ISSUER_FLOW_TEST="logs_issuer_revocation_flow"
+CAPABILITY_PROPAGATION_TEST="scenario_capability_revocation"
+ISSUER_PROPAGATION_TEST="scenario_issuer_key_revocation"
+EXPLAIN_REVOKED_TEST="load_demo_deny_revoked_receipt"
+
+CAPABILITY_FLOW_LOG="${OUT_DIR}/${CAPABILITY_FLOW_TEST}.log"
+ISSUER_FLOW_LOG="${OUT_DIR}/${ISSUER_FLOW_TEST}.log"
+CAPABILITY_PROPAGATION_LOG="${OUT_DIR}/${CAPABILITY_PROPAGATION_TEST}.log"
+ISSUER_PROPAGATION_LOG="${OUT_DIR}/${ISSUER_PROPAGATION_TEST}.log"
+EXPLAIN_REVOKED_LOG="${OUT_DIR}/${EXPLAIN_REVOKED_TEST}.log"
+VERIFICATION_SUMMARY="${OUT_DIR}/revocation_flow_contract_summary.json"
+
+STEP_CONTEXT="null"
+STEP_MODULE="unknown"
+STEP_TEST="unknown"
 
 require_cmd() {
   if ! command -v "$1" >/dev/null 2>&1; then
     echo "Missing required command: $1" >&2
     exit 1
   fi
+}
+
+run_cargo() {
+  if command -v rch >/dev/null 2>&1; then
+    rch exec -- cargo "$@"
+    return $?
+  fi
+  cargo "$@"
+}
+
+run_fcp_e2e() {
+  if command -v fcp-e2e >/dev/null 2>&1; then
+    fcp-e2e "$@"
+    return $?
+  fi
+  run_cargo run --target-dir "${TARGET_DIR}" -q -p fcp-e2e --bin fcp-e2e -- "$@"
 }
 
 now_ms() {
@@ -52,24 +83,6 @@ correlation_id_for_step() {
     "${hex:0:8}" "${hex:8:4}" "${hex:12:4}" "${hex:16:4}" "${hex:20:12}"
 }
 
-json_or_null() {
-  local value="$1"
-  if [[ -z "${value}" ]]; then
-    printf 'null'
-  else
-    printf '"%s"' "${value}"
-  fi
-}
-
-json_number_or_null() {
-  local value="$1"
-  if [[ -z "${value}" ]]; then
-    printf 'null'
-  else
-    printf '%s' "${value}"
-  fi
-}
-
 log_step() {
   local step="$1"
   local step_number="$2"
@@ -78,19 +91,25 @@ log_step() {
   local artifacts_json="$5"
   local timestamp
   local correlation_id
-  local token_json
-  local propagation_json
   local details
 
   timestamp="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
   correlation_id="$(correlation_id_for_step "${step_number}")"
-  token_json="$(json_or_null "${TOKEN_ID}")"
-  propagation_json="$(json_number_or_null "${PROPAGATION_MS}")"
-  details="{\"token_id\":${token_json},\"propagation_time_ms\":${propagation_json}}"
+  details="$(jq -cn \
+    --arg module "${STEP_MODULE}" \
+    --arg test_name "${STEP_TEST}" \
+    --arg seed "${SEED}" \
+    --argjson extra "${STEP_CONTEXT:-null}" \
+    '($extra | if type == "object" then . else {} end) + {
+      module: $module,
+      test_name: $test_name,
+      seed: $seed
+    }')"
 
   mkdir -p "$(dirname "${LOG_JSONL}")"
-  printf '{"timestamp":"%s","script":"%s","step":"%s","step_number":%s,"correlation_id":"%s","duration_ms":%s,"result":"%s","artifacts":%s,"details":%s}\n' \
-    "${timestamp}" "${SCRIPT_NAME}" "${step}" "${step_number}" "${correlation_id}" "${duration_ms}" "${result}" "${artifacts_json}" "${details}" >> "${LOG_JSONL}"
+  printf '{"timestamp":"%s","log_version":"v2","script":"%s","step":"%s","step_number":%s,"correlation_id":"%s","duration_ms":%s,"result":"%s","artifacts":%s,"details":%s}\n' \
+    "${timestamp}" "${SCRIPT_NAME}" "${step}" "${step_number}" "${correlation_id}" \
+    "${duration_ms}" "${result}" "${artifacts_json}" "${details}" >> "${LOG_JSONL}"
 }
 
 run_step() {
@@ -100,6 +119,10 @@ run_step() {
   shift 3
 
   local start_ms end_ms duration_ms rc
+  STEP_CONTEXT="null"
+  STEP_MODULE="unknown"
+  STEP_TEST="unknown"
+
   start_ms="$(now_ms)"
   set +e
   "$@"
@@ -116,101 +139,244 @@ run_step() {
   fi
 }
 
-step_setup() {
-  fcp-harness init --nodes=3 --deterministic --seed "${SEED}"
-  fcp install "${CONNECTOR}" --zone "${ZONE}"
+run_exact_lib_test() {
+  local package="$1"
+  local test_name="$2"
+  local log_path="$3"
+
+  mkdir -p "$(dirname "${log_path}")"
+  (
+    cd "${REPO_ROOT}"
+    run_cargo test --target-dir "${TARGET_DIR}" -p "${package}" "${test_name}" --lib -- --exact --nocapture
+  ) > "${log_path}" 2>&1
 }
 
-step_create_token() {
-  fcp-harness create-token \
-    --connector="${CONNECTOR}" \
-    --operations=echo \
-    --zone="${ZONE}" \
-    --output="${OUT_DIR}/token.cbor"
+run_exact_integration_test() {
+  local package="$1"
+  local integration_test="$2"
+  local test_name="$3"
+  local log_path="$4"
 
-  TOKEN_ID="$(jq -r '.token_id' "${OUT_DIR}/token.cbor")"
-  if [[ -z "${TOKEN_ID}" || "${TOKEN_ID}" == "null" ]]; then
-    echo "Missing token_id in ${OUT_DIR}/token.cbor" >&2
-    exit 1
-  fi
+  mkdir -p "$(dirname "${log_path}")"
+  (
+    cd "${REPO_ROOT}"
+    run_cargo test --target-dir "${TARGET_DIR}" -p "${package}" --test "${integration_test}" "${test_name}" -- --exact --nocapture
+  ) > "${log_path}" 2>&1
 }
 
-step_initial_invoke() {
-  fcp-harness invoke \
-    --connector="${CONNECTOR}" \
-    --operation=echo \
-    --token="${OUT_DIR}/token.cbor" \
-    --expect-success
+run_exact_bin_test() {
+  local package="$1"
+  local bin_name="$2"
+  local test_name="$3"
+  local log_path="$4"
+
+  mkdir -p "$(dirname "${log_path}")"
+  (
+    cd "${REPO_ROOT}"
+    run_cargo test --target-dir "${TARGET_DIR}" -p "${package}" --bin "${bin_name}" "${test_name}" -- --exact --nocapture
+  ) > "${log_path}" 2>&1
 }
 
-step_revoke() {
-  local start_ms end_ms
-  start_ms="$(now_ms)"
-  fcp-harness revoke \
-    --token-id="${TOKEN_ID}" \
-    --reason="Testing revocation"
-  fcp-harness wait-revocation \
-    --token-id="${TOKEN_ID}" \
-    --timeout=5s
-  end_ms="$(now_ms)"
-  PROPAGATION_MS=$((end_ms - start_ms))
+step_verify_capability_token_revocation_flow() {
+  STEP_MODULE="fcp-e2e::connector_suite"
+  STEP_TEST="${CAPABILITY_FLOW_TEST}"
+  STEP_CONTEXT="$(jq -cn \
+    --arg package "fcp-e2e" \
+    --arg test_name "${CAPABILITY_FLOW_TEST}" \
+    --arg log_path "${CAPABILITY_FLOW_LOG}" \
+    '{
+      mode: "cargo_test",
+      package: $package,
+      target: "lib",
+      assertions: [
+        "issue -> use -> revoke -> denial succeeds deterministically for a capability token",
+        "denied invoke reports stable reason code FCP-2201",
+        "decision receipt evidence references the revocation object"
+      ],
+      log_path: $log_path,
+      test_name: $test_name
+    }')"
+  run_exact_lib_test "fcp-e2e" "${CAPABILITY_FLOW_TEST}" "${CAPABILITY_FLOW_LOG}"
 }
 
-step_invoke_revoked() {
-  fcp-harness invoke \
-    --connector="${CONNECTOR}" \
-    --operation=echo \
-    --token="${OUT_DIR}/token.cbor" \
-    --expect-failure=FCP-2201 \
-    --output="${OUT_DIR}/revoked_denial.cbor"
-
-  fcp explain --receipt="${OUT_DIR}/revoked_denial.cbor" --output="${OUT_DIR}/revoked_decision.json"
-  jq -e '.reason_code == "FCP-2201"' "${OUT_DIR}/revoked_decision.json" >/dev/null
-  jq -e '.evidence.revocation_id' "${OUT_DIR}/revoked_decision.json" >/dev/null
+step_verify_issuer_key_revocation_flow() {
+  STEP_MODULE="fcp-e2e::connector_suite"
+  STEP_TEST="${ISSUER_FLOW_TEST}"
+  STEP_CONTEXT="$(jq -cn \
+    --arg package "fcp-e2e" \
+    --arg test_name "${ISSUER_FLOW_TEST}" \
+    --arg log_path "${ISSUER_FLOW_LOG}" \
+    '{
+      mode: "cargo_test",
+      package: $package,
+      target: "lib",
+      assertions: [
+        "issue -> use -> revoke issuer -> denial succeeds deterministically",
+        "denied invoke reports stable reason code FCP-2202",
+        "audit linkage records issuer_key as the revoked target type"
+      ],
+      log_path: $log_path,
+      test_name: $test_name
+    }')"
+  run_exact_lib_test "fcp-e2e" "${ISSUER_FLOW_TEST}" "${ISSUER_FLOW_LOG}"
 }
 
-step_audit_verify() {
-  fcp audit tail --zone "${ZONE}" --filter=type=RevocationEvent --limit=1
+step_verify_capability_revocation_propagation() {
+  STEP_MODULE="fcp-conformance::integration_scenarios"
+  STEP_TEST="${CAPABILITY_PROPAGATION_TEST}"
+  STEP_CONTEXT="$(jq -cn \
+    --arg package "fcp-conformance" \
+    --arg integration_test "integration_scenarios" \
+    --arg test_name "${CAPABILITY_PROPAGATION_TEST}" \
+    --arg log_path "${CAPABILITY_PROPAGATION_LOG}" \
+    '{
+      mode: "cargo_test",
+      package: $package,
+      integration_test: $integration_test,
+      assertions: [
+        "mesh admission rejects a previously-authenticated peer after revocation",
+        "revocation enforcement is reflected in structured scenario logs"
+      ],
+      log_path: $log_path,
+      test_name: $test_name
+    }')"
+  run_exact_integration_test "fcp-conformance" "integration_scenarios" "${CAPABILITY_PROPAGATION_TEST}" "${CAPABILITY_PROPAGATION_LOG}"
 }
 
-step_issuer_revocation() {
-  fcp-harness create-token \
-    --issuer=test-issuer \
-    --connector="${CONNECTOR}" \
-    --operations=echo \
-    --zone="${ZONE}" \
-    --output="${OUT_DIR}/issuer_token.cbor"
-
-  fcp-harness invoke \
-    --connector="${CONNECTOR}" \
-    --operation=echo \
-    --token="${OUT_DIR}/issuer_token.cbor" \
-    --expect-success
-
-  fcp-harness revoke-issuer --issuer=test-issuer
-
-  fcp-harness invoke \
-    --connector="${CONNECTOR}" \
-    --operation=echo \
-    --token="${OUT_DIR}/issuer_token.cbor" \
-    --expect-failure=FCP-2202
+step_verify_issuer_revocation_propagation() {
+  STEP_MODULE="fcp-conformance::integration_scenarios"
+  STEP_TEST="${ISSUER_PROPAGATION_TEST}"
+  STEP_CONTEXT="$(jq -cn \
+    --arg package "fcp-conformance" \
+    --arg integration_test "integration_scenarios" \
+    --arg test_name "${ISSUER_PROPAGATION_TEST}" \
+    --arg log_path "${ISSUER_PROPAGATION_LOG}" \
+    '{
+      mode: "cargo_test",
+      package: $package,
+      integration_test: $integration_test,
+      assertions: [
+        "peer registrations are removed after issuer revocation",
+        "issuer revocation shows up in structured scenario logs"
+      ],
+      log_path: $log_path,
+      test_name: $test_name
+    }')"
+  run_exact_integration_test "fcp-conformance" "integration_scenarios" "${ISSUER_PROPAGATION_TEST}" "${ISSUER_PROPAGATION_LOG}"
 }
 
-require_cmd fcp-harness
-require_cmd fcp
-require_cmd fcp-e2e
+step_verify_explain_revoked_receipt() {
+  STEP_MODULE="fcp-cli::explain"
+  STEP_TEST="${EXPLAIN_REVOKED_TEST}"
+  STEP_CONTEXT="$(jq -cn \
+    --arg package "fcp-cli" \
+    --arg test_name "${EXPLAIN_REVOKED_TEST}" \
+    --arg log_path "${EXPLAIN_REVOKED_LOG}" \
+    '{
+      mode: "cargo_test",
+      package: $package,
+      target: "bin:fcp",
+      assertions: [
+        "revoked decision receipts remain explainable through the CLI demo path",
+        "explain output preserves a stable revoked-token reason code"
+      ],
+      log_path: $log_path,
+      test_name: $test_name
+    }')"
+  run_exact_bin_test "fcp-cli" "fcp" "${EXPLAIN_REVOKED_TEST}" "${EXPLAIN_REVOKED_LOG}"
+}
+
+step_emit_contract_summary() {
+  STEP_MODULE="revocation_flow.contract"
+  STEP_TEST="revocation_flow_contract_summary"
+
+  [[ -s "${CAPABILITY_FLOW_LOG}" ]]
+  [[ -s "${ISSUER_FLOW_LOG}" ]]
+  [[ -s "${CAPABILITY_PROPAGATION_LOG}" ]]
+  [[ -s "${ISSUER_PROPAGATION_LOG}" ]]
+  [[ -s "${EXPLAIN_REVOKED_LOG}" ]]
+
+  grep -Eq "test result: ok\\." "${CAPABILITY_FLOW_LOG}"
+  grep -Eq "test result: ok\\." "${ISSUER_FLOW_LOG}"
+  grep -Eq "test result: ok\\." "${CAPABILITY_PROPAGATION_LOG}"
+  grep -Eq "test result: ok\\." "${ISSUER_PROPAGATION_LOG}"
+  grep -Eq "test result: ok\\." "${EXPLAIN_REVOKED_LOG}"
+
+  jq -n \
+    --arg capability_flow_test "${CAPABILITY_FLOW_TEST}" \
+    --arg issuer_flow_test "${ISSUER_FLOW_TEST}" \
+    --arg capability_prop_test "${CAPABILITY_PROPAGATION_TEST}" \
+    --arg issuer_prop_test "${ISSUER_PROPAGATION_TEST}" \
+    --arg explain_revoked_test "${EXPLAIN_REVOKED_TEST}" \
+    --arg capability_flow_log "${CAPABILITY_FLOW_LOG}" \
+    --arg issuer_flow_log "${ISSUER_FLOW_LOG}" \
+    --arg capability_prop_log "${CAPABILITY_PROPAGATION_LOG}" \
+    --arg issuer_prop_log "${ISSUER_PROPAGATION_LOG}" \
+    --arg explain_revoked_log "${EXPLAIN_REVOKED_LOG}" \
+    '{
+      contract_id: "contract.revocation_flow",
+      scenario: "revocation_flow",
+      verified_assertions: [
+        "capability-token revocation converts a previously-successful invoke into a denied invoke with reason code FCP-2201",
+        "issuer-key revocation converts a previously-successful invoke into a denied invoke with reason code FCP-2202",
+        "decision receipt evidence references the revocation object and audit linkage is preserved",
+        "revocation propagation is exercised in the deterministic multi-node conformance harness",
+        "revoked receipts remain explainable through the CLI explain surface"
+      ],
+      source_tests: [
+        {
+          package: "fcp-e2e",
+          target: "lib",
+          test_name: $capability_flow_test,
+          log_path: $capability_flow_log
+        },
+        {
+          package: "fcp-e2e",
+          target: "lib",
+          test_name: $issuer_flow_test,
+          log_path: $issuer_flow_log
+        },
+        {
+          package: "fcp-conformance",
+          target: "integration:integration_scenarios",
+          test_name: $capability_prop_test,
+          log_path: $capability_prop_log
+        },
+        {
+          package: "fcp-conformance",
+          target: "integration:integration_scenarios",
+          test_name: $issuer_prop_test,
+          log_path: $issuer_prop_log
+        },
+        {
+          package: "fcp-cli",
+          target: "bin:fcp",
+          test_name: $explain_revoked_test,
+          log_path: $explain_revoked_log
+        }
+      ]
+    }' > "${VERIFICATION_SUMMARY}"
+
+  STEP_CONTEXT="$(jq -cn \
+    --arg summary_path "${VERIFICATION_SUMMARY}" \
+    '{
+      mode: "summary",
+      verification_summary: $summary_path
+    }')"
+}
+
+require_cmd cargo
 require_cmd jq
 
 mkdir -p "${OUT_DIR}"
 
-run_step "setup" 1 "[]" step_setup
-run_step "create_token" 2 "[\"${OUT_DIR}/token.cbor\"]" step_create_token
-run_step "initial_invoke" 3 "[]" step_initial_invoke
-run_step "revoke_token" 4 "[]" step_revoke
-run_step "invoke_revoked" 5 "[\"${OUT_DIR}/revoked_denial.cbor\",\"${OUT_DIR}/revoked_decision.json\"]" step_invoke_revoked
-run_step "audit_verify" 6 "[]" step_audit_verify
-run_step "issuer_revocation" 7 "[\"${OUT_DIR}/issuer_token.cbor\"]" step_issuer_revocation
+run_step "verify_capability_token_revocation_flow" 1 "[\"${CAPABILITY_FLOW_LOG}\"]" step_verify_capability_token_revocation_flow
+run_step "verify_issuer_key_revocation_flow" 2 "[\"${ISSUER_FLOW_LOG}\"]" step_verify_issuer_key_revocation_flow
+run_step "verify_capability_revocation_propagation" 3 "[\"${CAPABILITY_PROPAGATION_LOG}\"]" step_verify_capability_revocation_propagation
+run_step "verify_issuer_revocation_propagation" 4 "[\"${ISSUER_PROPAGATION_LOG}\"]" step_verify_issuer_revocation_propagation
+run_step "verify_explain_revoked_receipt" 5 "[\"${EXPLAIN_REVOKED_LOG}\"]" step_verify_explain_revoked_receipt
+run_step "emit_contract_summary" 6 "[\"${VERIFICATION_SUMMARY}\"]" step_emit_contract_summary
 
-fcp-e2e --validate-log "${LOG_JSONL}"
+run_fcp_e2e --validate-log "${LOG_JSONL}"
 
 echo "${SCRIPT_NAME} complete. Logs: ${LOG_JSONL}"

@@ -3,12 +3,22 @@ use clap::ValueEnum;
 use serde::Serialize;
 use serde_json::Value;
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, ValueEnum)]
 pub enum OutputFormat {
     Json,
     Jsonl,
     #[default]
     Toon,
+}
+
+impl OutputFormat {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Json => "json",
+            Self::Jsonl => "jsonl",
+            Self::Toon => "toon",
+        }
+    }
 }
 
 /// Render a JSON value according to the chosen output format.
@@ -31,12 +41,24 @@ pub fn render(value: Value, format: OutputFormat) -> Result<String> {
 /// Token-efficiency statistics comparing TOON vs JSON representations.
 #[derive(Clone, Debug, Serialize)]
 pub struct TokenStats {
+    /// The format selected for the current render.
+    pub selected_format: &'static str,
+    /// Byte length of the selected output format.
+    pub selected_bytes: usize,
+    /// The most byte-efficient format for this payload.
+    pub recommended_format: &'static str,
+    /// Byte length of the recommended output format.
+    pub recommended_bytes: usize,
     /// Byte length of the TOON-encoded output.
     pub toon_bytes: usize,
     /// Byte length of the pretty-printed JSON output.
     pub json_bytes: usize,
     /// Byte length of the compact (JSONL) output.
     pub jsonl_bytes: usize,
+    /// Byte savings of TOON vs pretty JSON.
+    pub toon_json_saved_bytes: i64,
+    /// Byte savings of TOON vs compact JSONL.
+    pub toon_jsonl_saved_bytes: i64,
     /// TOON-to-JSON byte ratio (lower is better for TOON).
     pub toon_json_ratio: f64,
     /// Approximate TOON savings vs JSON as a percentage.
@@ -44,7 +66,7 @@ pub struct TokenStats {
 }
 
 /// Compute token-efficiency statistics for a value across all output formats.
-pub fn token_stats(value: &Value) -> TokenStats {
+pub fn token_stats(value: &Value, selected_format: OutputFormat) -> TokenStats {
     let toon_out = toon::encode(value.clone(), None);
     let pretty_out = serde_json::to_string_pretty(value).unwrap_or_default();
     let compact_out = serde_json::to_string(value).unwrap_or_default();
@@ -52,6 +74,19 @@ pub fn token_stats(value: &Value) -> TokenStats {
     let toon_len = toon_out.len();
     let pretty_len = pretty_out.len();
     let compact_len = compact_out.len();
+    let selected_bytes = match selected_format {
+        OutputFormat::Json => pretty_len,
+        OutputFormat::Jsonl => compact_len,
+        OutputFormat::Toon => toon_len,
+    };
+    let recommended = [
+        (OutputFormat::Toon, toon_len),
+        (OutputFormat::Jsonl, compact_len),
+        (OutputFormat::Json, pretty_len),
+    ]
+    .into_iter()
+    .min_by_key(|(_, len)| *len)
+    .unwrap_or((OutputFormat::Toon, toon_len));
 
     #[allow(clippy::cast_precision_loss)]
     let toon_json_ratio = if pretty_len > 0 {
@@ -62,11 +97,25 @@ pub fn token_stats(value: &Value) -> TokenStats {
     let savings_pct = (1.0 - toon_json_ratio) * 100.0;
 
     TokenStats {
+        selected_format: selected_format.as_str(),
+        selected_bytes,
+        recommended_format: recommended.0.as_str(),
+        recommended_bytes: recommended.1,
         toon_bytes: toon_len,
         json_bytes: pretty_len,
         jsonl_bytes: compact_len,
+        toon_json_saved_bytes: signed_len_delta(pretty_len, toon_len),
+        toon_jsonl_saved_bytes: signed_len_delta(compact_len, toon_len),
         toon_json_ratio,
         savings_pct,
+    }
+}
+
+fn signed_len_delta(lhs: usize, rhs: usize) -> i64 {
+    match (i64::try_from(lhs), i64::try_from(rhs)) {
+        (Ok(lhs), Ok(rhs)) => lhs - rhs,
+        _ if lhs >= rhs => i64::MAX,
+        _ => i64::MIN,
     }
 }
 
@@ -286,7 +335,7 @@ mod tests {
             ],
             "metadata": {"format": "toon", "version": "1.0"}
         });
-        let stats = token_stats(&v);
+        let stats = token_stats(&v, OutputFormat::Toon);
         assert!(
             stats.toon_bytes < stats.json_bytes,
             "TOON ({}) should be shorter than JSON ({})",
@@ -294,35 +343,41 @@ mod tests {
             stats.json_bytes,
         );
         assert!(stats.savings_pct > 0.0);
+        assert_eq!(stats.selected_format, "toon");
+        assert_eq!(stats.selected_bytes, stats.toon_bytes);
     }
 
     #[test]
     fn token_stats_ratio_is_bounded() {
         let v = json!({"key": "value"});
-        let stats = token_stats(&v);
+        let stats = token_stats(&v, OutputFormat::Json);
         assert!(stats.toon_json_ratio > 0.0);
         assert!(
             stats.toon_json_ratio <= 2.0,
             "ratio {} out of range",
             stats.toon_json_ratio
         );
+        assert_eq!(stats.selected_format, "json");
+        assert_eq!(stats.selected_bytes, stats.json_bytes);
     }
 
     #[test]
     fn token_stats_jsonl_is_shorter_than_pretty_json() {
         let v = json!({"a": 1, "b": [1, 2, 3], "c": {"d": "e"}});
-        let stats = token_stats(&v);
+        let stats = token_stats(&v, OutputFormat::Jsonl);
         assert!(
             stats.jsonl_bytes < stats.json_bytes,
             "JSONL ({}) should be shorter than JSON ({})",
             stats.jsonl_bytes,
             stats.json_bytes,
         );
+        assert_eq!(stats.selected_format, "jsonl");
+        assert_eq!(stats.selected_bytes, stats.jsonl_bytes);
     }
 
     #[test]
     fn token_stats_empty_object() {
-        let stats = token_stats(&json!({}));
+        let stats = token_stats(&json!({}), OutputFormat::Toon);
         // TOON may elide empty objects (0 bytes); JSON always has "{}".
         assert!(stats.json_bytes > 0);
         assert!(stats.jsonl_bytes > 0);
@@ -340,11 +395,20 @@ mod tests {
             })
             .collect();
         let v = json!({"items": items, "total": 50});
-        let stats = token_stats(&v);
+        let stats = token_stats(&v, OutputFormat::Toon);
         assert!(
             stats.savings_pct > 0.0,
             "large payload should show TOON savings"
         );
+    }
+
+    #[test]
+    fn token_stats_reports_recommended_format() {
+        let v = json!({"a": 1, "b": 2, "c": [1, 2, 3]});
+        let stats = token_stats(&v, OutputFormat::Toon);
+        assert!(!stats.recommended_format.is_empty());
+        assert!(stats.recommended_bytes <= stats.json_bytes);
+        assert!(stats.recommended_bytes <= stats.jsonl_bytes.max(stats.toon_bytes));
     }
 
     // ── Error payload structure ──────────────────────────────────────────

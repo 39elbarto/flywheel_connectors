@@ -1000,4 +1000,228 @@ mod tests {
         set.insert(tag3);
         assert_eq!(set.len(), 3);
     }
+
+    // --- TailscaleTag: serde JSON value shape ---
+
+    #[test]
+    fn test_tag_serde_json_is_string() {
+        let tag = TailscaleTag::fcp_tag("owner");
+        let val: serde_json::Value = serde_json::to_value(&tag).unwrap();
+        assert!(val.is_string());
+        assert_eq!(val.as_str().unwrap(), "tag:fcp-owner");
+    }
+
+    #[test]
+    fn test_tag_deserialize_from_string_value() {
+        let val = serde_json::Value::String("tag:fcp-public".to_string());
+        let tag: TailscaleTag = serde_json::from_value(val).unwrap();
+        assert_eq!(tag.as_str(), "tag:fcp-public");
+    }
+
+    // --- TailscaleTag: is_fcp_tag boundary ---
+
+    #[test]
+    fn test_tag_fcp_prefix_partial_not_fcp() {
+        // "tag:fcp" without trailing hyphen is NOT an fcp tag
+        let tag = TailscaleTag::new("tag:fcp").unwrap();
+        assert!(!tag.is_fcp_tag());
+        assert!(tag.fcp_suffix().is_none());
+    }
+
+    #[test]
+    fn test_tag_fcp_prefix_case_sensitivity() {
+        let tag = TailscaleTag::new("tag:FCP-work").unwrap();
+        assert!(!tag.is_fcp_tag());
+    }
+
+    // --- ZoneTagMapping: validate_zone_id with tab/newline ---
+
+    #[test]
+    fn test_invalid_zone_id_with_tab() {
+        assert!(!ZoneTagMapping::is_valid_zone_id("z:my\tzone"));
+    }
+
+    #[test]
+    fn test_invalid_zone_id_with_newline() {
+        assert!(!ZoneTagMapping::is_valid_zone_id("z:my\nzone"));
+    }
+
+    #[test]
+    fn test_invalid_zone_id_with_hash() {
+        assert!(!ZoneTagMapping::is_valid_zone_id("z:zone#1"));
+    }
+
+    #[test]
+    fn test_invalid_zone_id_with_plus() {
+        assert!(!ZoneTagMapping::is_valid_zone_id("z:zone+1"));
+    }
+
+    // --- ZoneTagMapping: validate_zone_id returns borrowed str on success ---
+
+    #[test]
+    fn test_validate_zone_id_returns_same_reference() {
+        let zone_id = "z:my-zone";
+        let result = ZoneTagMapping::validate_zone_id(zone_id).unwrap();
+        assert!(std::ptr::eq(result, zone_id));
+    }
+
+    // --- ZoneTagMapping: roundtrip with all standard zones via try_ variants ---
+
+    #[test]
+    fn test_standard_zones_roundtrip_via_try_variants() {
+        for zone in ZoneTagMapping::standard_zones() {
+            let tag = ZoneTagMapping::try_zone_to_tag(zone).unwrap();
+            let recovered = ZoneTagMapping::try_tag_to_zone(&tag).unwrap();
+            assert_eq!(&recovered, zone);
+        }
+    }
+
+    // --- ZoneAclGenerator: rule src always has exactly one entry ---
+
+    #[test]
+    fn test_zone_acl_rule_src_always_single() {
+        let acl_gen = ZoneAclGenerator::default();
+        for zone in ZoneTagMapping::standard_zones() {
+            let rule = acl_gen.zone_access_rule(zone).unwrap();
+            assert_eq!(rule.src.len(), 1);
+        }
+    }
+
+    // --- ZoneAclGenerator: dst entries have correct format ---
+
+    #[test]
+    fn test_zone_acl_rule_dst_format() {
+        let acl_gen = ZoneAclGenerator::new(3000, 3001);
+        let rule = acl_gen.zone_access_rule("z:community").unwrap();
+        assert_eq!(rule.dst[0], "tag:fcp-community:3000");
+        assert_eq!(rule.dst[1], "tag:fcp-community:3001");
+    }
+
+    // --- ZoneAclRule: serde roundtrip preserves all fields ---
+
+    #[test]
+    fn test_zone_acl_rule_serde_roundtrip_full() {
+        let rule = ZoneAclRule {
+            action: "accept".to_string(),
+            src: vec!["tag:fcp-work".to_string(), "tag:fcp-owner".to_string()],
+            dst: vec![
+                "tag:fcp-work:4200".to_string(),
+                "tag:fcp-work:4201".to_string(),
+                "tag:fcp-owner:4200".to_string(),
+            ],
+        };
+        let json = serde_json::to_string(&rule).unwrap();
+        let decoded: ZoneAclRule = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.action, "accept");
+        assert_eq!(decoded.src.len(), 2);
+        assert_eq!(decoded.dst.len(), 3);
+    }
+
+    // --- ZoneAclRule: JSON field names ---
+
+    #[test]
+    fn test_zone_acl_rule_json_field_names() {
+        let acl_gen = ZoneAclGenerator::default();
+        let rule = acl_gen.zone_access_rule("z:work").unwrap();
+        let json = serde_json::to_string(&rule).unwrap();
+        assert!(json.contains("\"action\""));
+        assert!(json.contains("\"src\""));
+        assert!(json.contains("\"dst\""));
+    }
+
+    // --- ZoneAclGenerator: all_zone_rules order matches standard_zones ---
+
+    #[test]
+    fn test_all_zone_rules_order() {
+        let acl_gen = ZoneAclGenerator::default();
+        let rules = acl_gen.all_zone_rules().unwrap();
+        let zones = ZoneTagMapping::standard_zones();
+        assert_eq!(rules.len(), zones.len());
+        for (rule, zone) in rules.iter().zip(zones.iter()) {
+            let expected_tag = ZoneTagMapping::zone_to_tag(zone).unwrap();
+            assert_eq!(rule.src[0], expected_tag.to_string());
+        }
+    }
+
+    // --- TailscaleTag: from_str-like construction ---
+
+    #[test]
+    fn test_tag_new_from_string_ref() {
+        let s = String::from("tag:dynamic");
+        let tag = TailscaleTag::new(&s).unwrap();
+        assert_eq!(tag.as_str(), "tag:dynamic");
+    }
+
+    #[test]
+    fn test_tag_new_from_owned_string() {
+        let tag = TailscaleTag::new(String::from("tag:owned")).unwrap();
+        assert_eq!(tag.as_str(), "tag:owned");
+    }
+
+    // --- TailscaleTag: Display format for fcp_tag with hyphenated suffix ---
+
+    #[test]
+    fn test_tag_display_hyphenated_suffix() {
+        let tag = TailscaleTag::fcp_tag("my-custom-zone");
+        assert_eq!(format!("{tag}"), "tag:fcp-my-custom-zone");
+    }
+
+    // --- ZoneTagMapping: zone_to_tag with special characters in suffix ---
+
+    #[test]
+    fn test_zone_to_tag_with_special_chars() {
+        // zone_to_tag only validates prefix, not suffix content
+        let tag = ZoneTagMapping::zone_to_tag("z:123-abc").unwrap();
+        assert_eq!(tag.as_str(), "tag:fcp-123-abc");
+    }
+
+    // --- ZoneTagMapping: is_valid_zone_id with numeric-only ---
+
+    #[test]
+    fn test_valid_zone_id_long_numeric() {
+        assert!(ZoneTagMapping::is_valid_zone_id("z:00000000"));
+    }
+
+    #[test]
+    fn test_valid_zone_id_mixed_alpha_digit_hyphen() {
+        assert!(ZoneTagMapping::is_valid_zone_id("z:a1-b2-c3"));
+    }
+
+    // --- ZoneAclGenerator: const constructor ---
+
+    #[test]
+    fn test_zone_acl_generator_const_new() {
+        const GEN: ZoneAclGenerator = ZoneAclGenerator::new(7000, 7001);
+        assert_eq!(GEN.symbol_port, 7000);
+        assert_eq!(GEN.control_port, 7001);
+    }
+
+    // --- TailscaleTag: fcp_tag with digits and hyphens ---
+
+    #[test]
+    fn test_fcp_tag_digit_hyphen_suffix() {
+        let tag = TailscaleTag::fcp_tag("zone-42-beta");
+        assert_eq!(tag.as_str(), "tag:fcp-zone-42-beta");
+        assert!(tag.is_fcp_tag());
+        assert_eq!(tag.fcp_suffix(), Some("zone-42-beta"));
+    }
+
+    // --- ZoneTagMapping: try_tag_to_zone error type ---
+
+    #[test]
+    fn test_try_tag_to_zone_error_is_not_fcp_tag() {
+        let tag = TailscaleTag::new("tag:infra").unwrap();
+        let err = ZoneTagMapping::try_tag_to_zone(&tag).unwrap_err();
+        let debug = format!("{err:?}");
+        assert!(debug.contains("NotFcpTag"));
+    }
+
+    // --- ZoneTagMapping: try_zone_to_tag error type ---
+
+    #[test]
+    fn test_try_zone_to_tag_error_is_invalid_zone_id() {
+        let err = ZoneTagMapping::try_zone_to_tag("badzone").unwrap_err();
+        let debug = format!("{err:?}");
+        assert!(debug.contains("InvalidZoneId"));
+    }
 }

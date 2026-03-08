@@ -1014,4 +1014,204 @@ mod tests {
         assert!(rt.last_attempt_at.is_some());
         assert!(rt.next_retry_at.is_some());
     }
+
+    // ── Batch 4: SunnyMoose additional test expansion ──
+
+    #[test]
+    fn test_event_get_root_primitive() {
+        let event = WebhookEvent::new("e1", "test", "p")
+            .with_payload(serde_json::json!("a plain string"));
+        // Root is a string, so get("") tries key "" which won't work on a string
+        assert!(event.get("anything").is_none());
+        // But the raw payload is accessible
+        assert_eq!(event.payload.as_str(), Some("a plain string"));
+    }
+
+    #[test]
+    fn test_event_get_with_dots_in_key_name() {
+        // If a key literally contains a dot, the path traversal will split on it
+        let event = WebhookEvent::new("e1", "test", "p")
+            .with_payload(serde_json::json!({"a.b": "value"}));
+        // "a.b" splits to ["a", "b"] so this won't find the literal key "a.b"
+        assert!(event.get("a.b").is_none());
+    }
+
+    #[test]
+    fn test_event_matches_type_partial_wildcard() {
+        let event = WebhookEvent::new("e1", "issue.opened.draft", "gh");
+        assert!(event.matches_type("issue.*"));
+        assert!(event.matches_type("issue.opened.*"));
+        assert!(!event.matches_type("issue.closed.*"));
+    }
+
+    #[test]
+    fn test_event_matches_type_single_star_literal() {
+        // Pattern "*" (just the star) always matches
+        let event = WebhookEvent::new("e1", "anything", "p");
+        assert!(event.matches_type("*"));
+    }
+
+    #[test]
+    fn test_event_matches_type_trailing_dot_pattern() {
+        let event = WebhookEvent::new("e1", "push", "gh");
+        // "push." does not match "push" (exact match fails, no wildcard)
+        assert!(!event.matches_type("push."));
+    }
+
+    #[test]
+    fn test_event_serde_empty_headers_and_metadata() {
+        let json_str = r#"{"id":"e1","event_type":"test","timestamp":"2026-01-01T00:00:00Z","provider":"p","payload":null}"#;
+        let event: WebhookEvent = serde_json::from_str(json_str).unwrap();
+        assert_eq!(event.id, "e1");
+        assert!(event.headers.is_empty());
+        assert_eq!(event.metadata.attempt, 0);
+        assert_eq!(event.metadata.status, DeliveryStatus::Pending);
+    }
+
+    #[test]
+    fn test_event_serde_preserves_timestamp() {
+        let event = WebhookEvent::new("e1", "push", "gh");
+        let ts = event.timestamp;
+        let json = serde_json::to_string(&event).unwrap();
+        let rt: WebhookEvent = serde_json::from_str(&json).unwrap();
+        assert_eq!(rt.timestamp, ts);
+    }
+
+    #[test]
+    fn test_delivery_status_serde_unknown_variant_fails() {
+        let result: Result<DeliveryStatus, _> = serde_json::from_str(r#""unknown_status""#);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_event_subscription_for_types_preserves_order() {
+        let types = vec!["c".to_string(), "a".to_string(), "b".to_string()];
+        let sub = EventSubscription::for_types(types.clone());
+        assert_eq!(sub.event_types, types);
+    }
+
+    #[test]
+    fn test_event_subscription_with_provider_replaces() {
+        let sub = EventSubscription::all()
+            .with_provider("github")
+            .with_provider("stripe");
+        assert_eq!(sub.provider, Some("stripe".to_string()));
+    }
+
+    #[test]
+    fn test_event_get_i64_string_value() {
+        let event = WebhookEvent::new("e1", "test", "p")
+            .with_payload(serde_json::json!({"num_str": "42"}));
+        // String "42" is not an i64
+        assert_eq!(event.get_i64("num_str"), None);
+    }
+
+    #[test]
+    fn test_event_get_str_number_value() {
+        let event = WebhookEvent::new("e1", "test", "p")
+            .with_payload(serde_json::json!({"count": 42}));
+        // Number 42 is not a string
+        assert_eq!(event.get_str("count"), None);
+    }
+
+    #[test]
+    fn test_event_header_returns_first_case_match() {
+        // If headers have multiple entries differing only in case, find returns the first one
+        let mut headers = HashMap::new();
+        headers.insert("x-key".to_string(), "lower".to_string());
+        // HashMap doesn't preserve insertion order, but we can test that lookup works
+        let event = WebhookEvent::new("e1", "test", "p").with_headers(headers);
+        assert_eq!(event.header("X-KEY"), Some("lower"));
+    }
+
+    #[test]
+    fn test_event_metadata_custom_nested_json() {
+        let mut custom = HashMap::new();
+        custom.insert(
+            "nested".into(),
+            serde_json::json!({"a": {"b": [1, 2, 3]}}),
+        );
+        let meta = EventMetadata {
+            custom,
+            ..EventMetadata::default()
+        };
+        let json = serde_json::to_string(&meta).unwrap();
+        let rt: EventMetadata = serde_json::from_str(&json).unwrap();
+        let nested = rt.custom.get("nested").unwrap();
+        assert!(nested.get("a").unwrap().get("b").unwrap().is_array());
+    }
+
+    #[test]
+    fn test_event_subscription_matches_wildcard_prefix_empty_provider() {
+        let sub = EventSubscription::for_types(vec!["*".to_string()]);
+        // With no provider filter, should match any provider
+        assert!(sub.matches(&WebhookEvent::new("e1", "any", "")));
+        assert!(sub.matches(&WebhookEvent::new("e2", "any", "github")));
+    }
+
+    #[test]
+    fn test_event_with_taint_then_default_taint() {
+        let event = WebhookEvent::new("e1", "push", "gh")
+            .with_taint_flag(TaintFlag::WebhookInjected)
+            .with_default_webhook_taint();
+        // Should have both flags (additive)
+        assert!(
+            event
+                .metadata
+                .taint_flags
+                .contains(TaintFlag::WebhookInjected)
+        );
+        assert!(event.metadata.taint_flags.contains(TaintFlag::PublicInput));
+    }
+
+    #[test]
+    fn test_event_get_i64_negative() {
+        let event = WebhookEvent::new("e1", "test", "p")
+            .with_payload(serde_json::json!({"val": -999}));
+        assert_eq!(event.get_i64("val"), Some(-999));
+    }
+
+    #[test]
+    fn test_event_get_i64_zero() {
+        let event =
+            WebhookEvent::new("e1", "test", "p").with_payload(serde_json::json!({"val": 0}));
+        assert_eq!(event.get_i64("val"), Some(0));
+    }
+
+    #[test]
+    fn test_event_payload_object_in_array() {
+        let event = WebhookEvent::new("e1", "test", "p")
+            .with_payload(serde_json::json!({"items": [{"id": 1}, {"id": 2}]}));
+        let items = event.get("items").unwrap().as_array().unwrap();
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].get("id").unwrap().as_i64(), Some(1));
+    }
+
+    #[test]
+    fn test_event_metadata_serde_with_taint_flags() {
+        let mut meta = EventMetadata::default();
+        meta.taint_flags.insert(TaintFlag::WebhookInjected);
+        meta.taint_flags.insert(TaintFlag::PublicInput);
+        let json = serde_json::to_string(&meta).unwrap();
+        let rt: EventMetadata = serde_json::from_str(&json).unwrap();
+        assert!(rt.taint_flags.contains(TaintFlag::WebhookInjected));
+        assert!(rt.taint_flags.contains(TaintFlag::PublicInput));
+    }
+
+    #[test]
+    fn test_event_subscription_empty_provider_string() {
+        let sub = EventSubscription::all().with_provider("");
+        let event = WebhookEvent::new("e1", "push", "");
+        assert!(sub.matches(&event));
+        // Non-empty provider should not match
+        let event2 = WebhookEvent::new("e2", "push", "github");
+        assert!(!sub.matches(&event2));
+    }
+
+    #[test]
+    fn test_delivery_status_clone() {
+        let status = DeliveryStatus::Failed;
+        let cloned = status;
+        assert_eq!(status, cloned);
+    }
 }

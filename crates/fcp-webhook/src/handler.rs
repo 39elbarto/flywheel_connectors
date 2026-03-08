@@ -1042,4 +1042,246 @@ mod tests {
         assert!(!config.ip_allowlist.contains(&"1.1.1.1".to_string()));
         assert!(config.ip_allowlist.contains(&"2.2.2.2".to_string()));
     }
+
+    // ── Batch 4: SunnyMoose additional test expansion ──
+
+    #[test]
+    fn test_webhook_config_large_max_payload_size() {
+        let config = WebhookConfig::new().with_max_payload_size(usize::MAX);
+        assert_eq!(config.max_payload_size, usize::MAX);
+    }
+
+    #[test]
+    fn test_webhook_config_retry_delay_default() {
+        let config = WebhookConfig::default();
+        assert_eq!(config.retry_delay, Duration::from_secs(60));
+    }
+
+    #[test]
+    fn test_webhook_config_chained_builder_all_fields() {
+        let config = WebhookConfig::new()
+            .with_max_payload_size(2048)
+            .with_idempotency(true)
+            .with_idempotency_ttl(Duration::from_secs(7200))
+            .with_ip_allowlist(vec!["10.0.0.1".into(), "10.0.0.2".into()])
+            .with_max_retries(10);
+        assert_eq!(config.max_payload_size, 2048);
+        assert!(config.idempotency_enabled);
+        assert_eq!(config.idempotency_ttl, Duration::from_secs(7200));
+        assert_eq!(config.ip_allowlist.len(), 2);
+        assert_eq!(config.max_retries, 10);
+    }
+
+    #[test]
+    fn test_handler_verify_empty_body_passes_size_check() {
+        let verifier = HmacSha256Verifier::new("secret");
+        let handler = WebhookHandler::new(verifier.clone(), "test");
+        let sig = verifier.compute(b"");
+        // Empty body should pass size check and signature check
+        assert!(handler.verify(b"", &sig).is_ok());
+    }
+
+    #[test]
+    fn test_handler_check_ip_empty_string() {
+        let verifier = HmacSha256Verifier::new("secret");
+        let config = WebhookConfig::new().with_ip_allowlist(vec![String::new()]);
+        let handler = WebhookHandler::with_config(verifier, "test", config);
+        // Empty string in allowlist matches empty string IP
+        assert!(handler.check_ip("").is_ok());
+        assert!(handler.check_ip("1.2.3.4").is_err());
+    }
+
+    #[test]
+    fn test_handler_record_event_then_check() {
+        let verifier = HmacSha256Verifier::new("secret");
+        let handler = WebhookHandler::new(verifier, "test");
+        handler.record_event("unique_id_abc");
+        assert!(matches!(
+            handler.check_replay("unique_id_abc"),
+            Err(WebhookError::ReplayDetected { .. })
+        ));
+    }
+
+    #[test]
+    fn test_handler_claim_multiple_different_events() {
+        let verifier = HmacSha256Verifier::new("secret");
+        let handler = WebhookHandler::new(verifier, "test");
+        assert!(handler.claim_event("a").is_ok());
+        assert!(handler.claim_event("b").is_ok());
+        assert!(handler.claim_event("c").is_ok());
+        // Replays should fail
+        assert!(handler.claim_event("a").is_err());
+        assert!(handler.claim_event("b").is_err());
+        assert!(handler.claim_event("c").is_err());
+    }
+
+    #[test]
+    fn test_dead_letter_queue_push_sets_dead_lettered_on_all() {
+        let dlq = DeadLetterQueue::new(10);
+        for i in 0..5 {
+            let event = crate::WebhookEvent::new(format!("evt_{i}"), "test", "p");
+            dlq.push(event);
+        }
+        let all = dlq.all();
+        for event in &all {
+            assert_eq!(event.metadata.status, DeliveryStatus::DeadLettered);
+        }
+    }
+
+    #[test]
+    fn test_dead_letter_queue_remove_first_element() {
+        let dlq = DeadLetterQueue::new(10);
+        dlq.push(crate::WebhookEvent::new("first", "test", "p"));
+        dlq.push(crate::WebhookEvent::new("second", "test", "p"));
+        let removed = dlq.remove("first").unwrap();
+        assert_eq!(removed.id, "first");
+        assert_eq!(dlq.len(), 1);
+        assert_eq!(dlq.all()[0].id, "second");
+    }
+
+    #[test]
+    fn test_dead_letter_queue_remove_last_element() {
+        let dlq = DeadLetterQueue::new(10);
+        dlq.push(crate::WebhookEvent::new("first", "test", "p"));
+        dlq.push(crate::WebhookEvent::new("last", "test", "p"));
+        let removed = dlq.remove("last").unwrap();
+        assert_eq!(removed.id, "last");
+        assert_eq!(dlq.len(), 1);
+        assert_eq!(dlq.all()[0].id, "first");
+    }
+
+    #[test]
+    fn test_dead_letter_queue_eviction_order() {
+        let dlq = DeadLetterQueue::new(3);
+        dlq.push(crate::WebhookEvent::new("1", "test", "p"));
+        dlq.push(crate::WebhookEvent::new("2", "test", "p"));
+        dlq.push(crate::WebhookEvent::new("3", "test", "p"));
+        // Should evict "1"
+        dlq.push(crate::WebhookEvent::new("4", "test", "p"));
+        let all = dlq.all();
+        assert_eq!(all.len(), 3);
+        assert_eq!(all[0].id, "2");
+        assert_eq!(all[1].id, "3");
+        assert_eq!(all[2].id, "4");
+        // Evict "2"
+        dlq.push(crate::WebhookEvent::new("5", "test", "p"));
+        let all = dlq.all();
+        assert_eq!(all[0].id, "3");
+        assert_eq!(all[1].id, "4");
+        assert_eq!(all[2].id, "5");
+    }
+
+    #[test]
+    fn test_event_router_subscribe_returns_in_order() {
+        let mut router = EventRouter::new();
+        router.subscribe(EventSubscription::all(), "first");
+        router.subscribe(EventSubscription::all(), "second");
+        router.subscribe(EventSubscription::all(), "third");
+        let event = crate::WebhookEvent::new("e1", "push", "gh");
+        let handlers = router.route(&event);
+        assert_eq!(handlers, vec!["first", "second", "third"]);
+    }
+
+    #[test]
+    fn test_event_router_provider_only_filter() {
+        let mut router = EventRouter::new();
+        router.subscribe(
+            EventSubscription::all().with_provider("stripe"),
+            "stripe_handler",
+        );
+        let gh_event = crate::WebhookEvent::new("e1", "push", "github");
+        assert!(router.route(&gh_event).is_empty());
+        let stripe_event = crate::WebhookEvent::new("e2", "charge.created", "stripe");
+        assert_eq!(router.route(&stripe_event), vec!["stripe_handler"]);
+    }
+
+    #[test]
+    fn test_event_router_type_and_provider_filter() {
+        let mut router = EventRouter::new();
+        router.subscribe(
+            EventSubscription::for_types(vec!["push".into()]).with_provider("github"),
+            "gh_push",
+        );
+        // Correct type, wrong provider
+        assert!(
+            router
+                .route(&crate::WebhookEvent::new("e1", "push", "gitlab"))
+                .is_empty()
+        );
+        // Wrong type, correct provider
+        assert!(
+            router
+                .route(&crate::WebhookEvent::new("e2", "release", "github"))
+                .is_empty()
+        );
+        // Both match
+        assert_eq!(
+            router.route(&crate::WebhookEvent::new("e3", "push", "github")),
+            vec!["gh_push"]
+        );
+    }
+
+    #[test]
+    fn test_dead_letter_queue_clear_then_push() {
+        let dlq = DeadLetterQueue::new(5);
+        dlq.push(crate::WebhookEvent::new("1", "test", "p"));
+        dlq.push(crate::WebhookEvent::new("2", "test", "p"));
+        dlq.clear();
+        assert!(dlq.is_empty());
+        dlq.push(crate::WebhookEvent::new("3", "test", "p"));
+        assert_eq!(dlq.len(), 1);
+        assert_eq!(dlq.all()[0].id, "3");
+    }
+
+    #[test]
+    fn test_handler_with_config_uses_custom_config() {
+        let verifier = HmacSha256Verifier::new("secret");
+        let config = WebhookConfig::new()
+            .with_max_payload_size(512)
+            .with_max_retries(7);
+        let handler = WebhookHandler::with_config(verifier, "custom_provider", config);
+        assert_eq!(handler.provider(), "custom_provider");
+        assert_eq!(handler.config().max_payload_size, 512);
+        assert_eq!(handler.config().max_retries, 7);
+    }
+
+    #[test]
+    fn test_handler_verify_signature_error_not_size_error() {
+        let verifier = HmacSha256Verifier::new("secret");
+        let config = WebhookConfig::new().with_max_payload_size(1000);
+        let handler = WebhookHandler::with_config(verifier, "test", config);
+        // Body within size limit but bad sig
+        let result = handler.verify(b"small body", "bad_sig");
+        assert!(result.is_err());
+        assert!(!matches!(result, Err(WebhookError::PayloadTooLarge { .. })));
+    }
+
+    #[test]
+    fn test_event_router_default() {
+        let router = EventRouter::default();
+        let event = crate::WebhookEvent::new("e1", "push", "gh");
+        assert!(router.route(&event).is_empty());
+    }
+
+    #[test]
+    fn test_dead_letter_queue_default() {
+        let dlq = DeadLetterQueue::default();
+        assert!(dlq.is_empty());
+        assert_eq!(dlq.len(), 0);
+    }
+
+    #[test]
+    fn test_replay_cleanup_preserves_recent_events() {
+        let verifier = HmacSha256Verifier::new("secret");
+        let config = WebhookConfig::new()
+            .with_idempotency(true)
+            .with_idempotency_ttl(Duration::from_secs(3600));
+        let handler = WebhookHandler::with_config(verifier, "test", config);
+        handler.record_event("recent_event");
+        // Event was just recorded, should not be cleaned up
+        assert!(matches!(
+            handler.check_replay("recent_event"),
+            Err(WebhookError::ReplayDetected { .. })
+        ));
+    }
 }

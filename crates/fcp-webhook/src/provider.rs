@@ -1261,4 +1261,324 @@ mod tests {
         assert_eq!(ts, 123);
         assert_eq!(sigs, vec!["abc"]);
     }
+
+    // ── Batch 4: SunnyMoose additional test expansion ──
+
+    #[test]
+    fn test_github_empty_body_valid_json() {
+        let handler = GitHubWebhook::new("secret");
+        let body = b"{}";
+        let signature = format!("sha256={}", handler.verifier.compute(body));
+        let mut headers = HashMap::new();
+        headers.insert("x-hub-signature-256".to_string(), signature);
+        headers.insert("x-github-event".to_string(), "ping".to_string());
+        headers.insert("x-github-delivery".to_string(), "d1".to_string());
+
+        let event = handler.verify_and_parse(&headers, body).unwrap();
+        assert_eq!(event.id, "d1");
+        assert_eq!(event.event_type, "ping");
+        assert_eq!(event.payload, serde_json::json!({}));
+    }
+
+    #[test]
+    fn test_github_array_body() {
+        let handler = GitHubWebhook::new("secret");
+        let body = b"[1,2,3]";
+        let signature = format!("sha256={}", handler.verifier.compute(body));
+        let mut headers = HashMap::new();
+        headers.insert("x-hub-signature-256".to_string(), signature);
+        headers.insert("x-github-event".to_string(), "push".to_string());
+        headers.insert("x-github-delivery".to_string(), "d2".to_string());
+
+        let event = handler.verify_and_parse(&headers, body).unwrap();
+        assert!(event.payload.is_array());
+    }
+
+    #[test]
+    fn test_stripe_parse_signature_only_timestamp_no_sig() {
+        let result = StripeWebhook::parse_stripe_signature("t=999");
+        assert!(matches!(result, Err(WebhookError::InvalidPayload(_))));
+    }
+
+    #[test]
+    fn test_stripe_parse_signature_only_sig_no_timestamp() {
+        let result = StripeWebhook::parse_stripe_signature("v1=abc");
+        assert!(matches!(result, Err(WebhookError::InvalidPayload(_))));
+    }
+
+    #[test]
+    fn test_stripe_parse_signature_empty_string() {
+        let result = StripeWebhook::parse_stripe_signature("");
+        assert!(matches!(result, Err(WebhookError::InvalidPayload(_))));
+    }
+
+    #[test]
+    fn test_stripe_parse_signature_non_numeric_timestamp() {
+        let result = StripeWebhook::parse_stripe_signature("t=abc,v1=sig");
+        assert!(matches!(result, Err(WebhookError::InvalidPayload(_))));
+    }
+
+    #[test]
+    fn test_stripe_validate_timestamp_current() {
+        let handler = StripeWebhook::new("secret");
+        let now = Utc::now().timestamp();
+        assert!(handler.validate_timestamp(now).is_ok());
+    }
+
+    #[test]
+    fn test_stripe_validate_timestamp_far_future() {
+        let handler =
+            StripeWebhook::new("secret").with_timestamp_tolerance(Duration::from_secs(60));
+        let far_future = Utc::now().timestamp() + 1_000_000;
+        assert!(matches!(
+            handler.validate_timestamp(far_future),
+            Err(WebhookError::TimestampValidation { .. })
+        ));
+    }
+
+    #[test]
+    fn test_stripe_validate_timestamp_within_tolerance() {
+        let handler =
+            StripeWebhook::new("secret").with_timestamp_tolerance(Duration::from_secs(300));
+        let recent = Utc::now().timestamp() - 100;
+        assert!(handler.validate_timestamp(recent).is_ok());
+    }
+
+    #[test]
+    fn test_linear_invalid_signature() {
+        let handler = LinearWebhook::new("secret");
+        let body = br#"{"type":"Issue"}"#;
+        let mut headers = HashMap::new();
+        headers.insert("linear-signature".to_string(), "deadbeef".to_string());
+        let result = handler.verify_and_parse(&headers, body);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_linear_defaults_type_to_unknown() {
+        let handler = LinearWebhook::new("secret");
+        let body = br#"{"data": {"id": 1}}"#;
+        let signature = handler.verifier.compute(body);
+        let mut headers = HashMap::new();
+        headers.insert("linear-signature".to_string(), signature);
+
+        let event = handler.verify_and_parse(&headers, body).unwrap();
+        assert_eq!(event.event_type, "unknown");
+    }
+
+    #[test]
+    fn test_slack_preserves_headers() {
+        let signing_secret = "test-secret";
+        let handler = SlackWebhook::new(signing_secret);
+        let body = br#"{"type":"event_callback"}"#;
+
+        let timestamp = Utc::now().timestamp();
+        let base_string = format!("v0:{timestamp}:{}", String::from_utf8_lossy(body));
+        let verifier = HmacSha256Verifier::new(signing_secret);
+        let computed = verifier.compute(base_string.as_bytes());
+
+        let mut headers = HashMap::new();
+        headers.insert("x-slack-signature".to_string(), format!("v0={computed}"));
+        headers.insert(
+            "x-slack-request-timestamp".to_string(),
+            timestamp.to_string(),
+        );
+        headers.insert("content-type".to_string(), "application/json".to_string());
+
+        let event = handler.verify_and_parse(&headers, body).unwrap();
+        assert_eq!(event.headers.len(), 3);
+    }
+
+    #[test]
+    fn test_slack_defaults_event_type_unknown() {
+        let signing_secret = "test-secret";
+        let handler = SlackWebhook::new(signing_secret);
+        let body = br#"{"data":"no type field here"}"#;
+
+        let timestamp = Utc::now().timestamp();
+        let base_string = format!("v0:{timestamp}:{}", String::from_utf8_lossy(body));
+        let verifier = HmacSha256Verifier::new(signing_secret);
+        let computed = verifier.compute(base_string.as_bytes());
+
+        let mut headers = HashMap::new();
+        headers.insert("x-slack-signature".to_string(), format!("v0={computed}"));
+        headers.insert(
+            "x-slack-request-timestamp".to_string(),
+            timestamp.to_string(),
+        );
+
+        let event = handler.verify_and_parse(&headers, body).unwrap();
+        assert_eq!(event.event_type, "unknown");
+    }
+
+    #[test]
+    fn test_slack_auto_generates_event_id() {
+        let signing_secret = "test-secret";
+        let handler = SlackWebhook::new(signing_secret);
+        let body = br#"{"type":"event_callback"}"#; // No event_id field
+
+        let timestamp = Utc::now().timestamp();
+        let base_string = format!("v0:{timestamp}:{}", String::from_utf8_lossy(body));
+        let verifier = HmacSha256Verifier::new(signing_secret);
+        let computed = verifier.compute(base_string.as_bytes());
+
+        let mut headers = HashMap::new();
+        headers.insert("x-slack-signature".to_string(), format!("v0={computed}"));
+        headers.insert(
+            "x-slack-request-timestamp".to_string(),
+            timestamp.to_string(),
+        );
+
+        let event = handler.verify_and_parse(&headers, body).unwrap();
+        // Auto-generated UUID should be non-empty
+        assert!(!event.id.is_empty());
+    }
+
+    #[test]
+    fn test_slack_invalid_json_body() {
+        let signing_secret = "test-secret";
+        let handler = SlackWebhook::new(signing_secret);
+        let body = b"not-json";
+
+        let timestamp = Utc::now().timestamp();
+        let base_string = format!("v0:{timestamp}:{}", String::from_utf8_lossy(body));
+        let verifier = HmacSha256Verifier::new(signing_secret);
+        let computed = verifier.compute(base_string.as_bytes());
+
+        let mut headers = HashMap::new();
+        headers.insert("x-slack-signature".to_string(), format!("v0={computed}"));
+        headers.insert(
+            "x-slack-request-timestamp".to_string(),
+            timestamp.to_string(),
+        );
+
+        let result = handler.verify_and_parse(&headers, body);
+        assert!(matches!(result, Err(WebhookError::JsonError(_))));
+    }
+
+    #[test]
+    fn test_slack_wrong_signature_fails() {
+        let handler = SlackWebhook::new("correct_secret");
+        let body = br#"{"type":"event_callback"}"#;
+
+        let timestamp = Utc::now().timestamp();
+        let base_string = format!("v0:{timestamp}:{}", String::from_utf8_lossy(body));
+        let wrong_verifier = HmacSha256Verifier::new("wrong_secret");
+        let computed = wrong_verifier.compute(base_string.as_bytes());
+
+        let mut headers = HashMap::new();
+        headers.insert("x-slack-signature".to_string(), format!("v0={computed}"));
+        headers.insert(
+            "x-slack-request-timestamp".to_string(),
+            timestamp.to_string(),
+        );
+
+        let result = handler.verify_and_parse(&headers, body);
+        assert!(matches!(result, Err(WebhookError::InvalidSignature)));
+    }
+
+    #[test]
+    fn test_webhook_provider_all_display_values_unique() {
+        let displays: Vec<String> = [
+            WebhookProvider::GitHub,
+            WebhookProvider::Stripe,
+            WebhookProvider::Slack,
+            WebhookProvider::Linear,
+            WebhookProvider::Discord,
+            WebhookProvider::Custom,
+        ]
+        .iter()
+        .map(std::string::ToString::to_string)
+        .collect();
+
+        for (i, a) in displays.iter().enumerate() {
+            for (j, b) in displays.iter().enumerate() {
+                if i != j {
+                    assert_ne!(a, b);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_stripe_preserves_headers() {
+        let handler = StripeWebhook::new("secret");
+        let body = br#"{"id":"evt_1","type":"test"}"#;
+        let timestamp = Utc::now().timestamp();
+        let signed_payload = format!("{timestamp}.{}", String::from_utf8_lossy(body));
+        let verifier = HmacSha256Verifier::new("secret");
+        let sig = verifier.compute(signed_payload.as_bytes());
+
+        let mut headers = HashMap::new();
+        headers.insert(
+            "stripe-signature".to_string(),
+            format!("t={timestamp},v1={sig}"),
+        );
+        headers.insert("content-type".to_string(), "application/json".to_string());
+
+        let event = handler.verify_and_parse(&headers, body).unwrap();
+        assert_eq!(event.headers.len(), 2);
+    }
+
+    #[test]
+    fn test_linear_preserves_headers() {
+        let handler = LinearWebhook::new("secret");
+        let body = br#"{"type":"Issue","webhookId":"wh_1"}"#;
+        let signature = handler.verifier.compute(body);
+
+        let mut headers = HashMap::new();
+        headers.insert("linear-signature".to_string(), signature);
+        headers.insert("content-type".to_string(), "application/json".to_string());
+        headers.insert("x-custom".to_string(), "value".to_string());
+
+        let event = handler.verify_and_parse(&headers, body).unwrap();
+        assert_eq!(event.headers.len(), 3);
+    }
+
+    #[test]
+    fn test_github_webhook_wrong_secret() {
+        let handler = GitHubWebhook::new("correct");
+        let body = br#"{"action":"test"}"#;
+        let wrong_verifier = HmacSha256Verifier::new("wrong");
+        let signature = format!("sha256={}", wrong_verifier.compute(body));
+
+        let mut headers = HashMap::new();
+        headers.insert("x-hub-signature-256".to_string(), signature);
+        headers.insert("x-github-event".to_string(), "push".to_string());
+
+        let result = handler.verify_and_parse(&headers, body);
+        assert!(matches!(result, Err(WebhookError::InvalidSignature)));
+    }
+
+    #[test]
+    fn test_stripe_parse_negative_timestamp() {
+        let result = StripeWebhook::parse_stripe_signature("t=-1,v1=abc");
+        assert!(result.is_ok());
+        let (ts, _) = result.unwrap();
+        assert_eq!(ts, -1);
+    }
+
+    #[test]
+    fn test_stripe_parse_zero_timestamp() {
+        let (ts, sigs) = StripeWebhook::parse_stripe_signature("t=0,v1=sig").unwrap();
+        assert_eq!(ts, 0);
+        assert_eq!(sigs, vec!["sig"]);
+    }
+
+    #[test]
+    fn test_stripe_multiple_v1_one_correct() {
+        let handler = StripeWebhook::new("secret");
+        let body = br#"{"id":"evt_1","type":"test"}"#;
+        let timestamp = Utc::now().timestamp();
+        let signed_payload = format!("{timestamp}.{}", String::from_utf8_lossy(body));
+        let verifier = HmacSha256Verifier::new("secret");
+        let correct_sig = verifier.compute(signed_payload.as_bytes());
+        let sig_header = format!("t={timestamp},v1=wrong_sig,v1={correct_sig}");
+
+        let mut headers = HashMap::new();
+        headers.insert("stripe-signature".to_string(), sig_header);
+
+        let event = handler.verify_and_parse(&headers, body).unwrap();
+        assert_eq!(event.id, "evt_1");
+    }
 }

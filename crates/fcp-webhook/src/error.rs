@@ -347,4 +347,149 @@ mod tests {
         let display = e.to_string();
         assert!(display.contains("bytes exceeds limit of"));
     }
+
+    // ── Batch 4: SunnyMoose additional test expansion ──
+
+    #[test]
+    fn error_send_and_sync() {
+        fn assert_send<T: Send>() {}
+        fn assert_sync<T: Sync>() {}
+        assert_send::<WebhookError>();
+        assert_sync::<WebhookError>();
+    }
+
+    #[test]
+    fn timestamp_validation_negative_timestamp() {
+        let e = WebhookError::TimestampValidation {
+            reason: "negative".into(),
+            timestamp: Some(-1),
+            current_time: 1_000_000,
+            tolerance: Duration::from_secs(60),
+        };
+        let display = e.to_string();
+        assert!(display.contains("negative"));
+    }
+
+    #[test]
+    fn timestamp_validation_zero_current_time() {
+        let e = WebhookError::TimestampValidation {
+            reason: "epoch".into(),
+            timestamp: Some(0),
+            current_time: 0,
+            tolerance: Duration::from_secs(1),
+        };
+        assert_eq!(e.to_string(), "Timestamp validation failed: epoch");
+    }
+
+    #[test]
+    fn replay_detected_empty_event_id() {
+        let e = WebhookError::ReplayDetected {
+            event_id: String::new(),
+        };
+        assert_eq!(
+            e.to_string(),
+            "Replay detected: event  already processed"
+        );
+    }
+
+    #[test]
+    fn payload_too_large_equal_size_and_limit() {
+        let e = WebhookError::PayloadTooLarge {
+            size: 100,
+            limit: 100,
+        };
+        assert_eq!(
+            e.to_string(),
+            "Payload too large: 100 bytes exceeds limit of 100"
+        );
+    }
+
+    #[test]
+    fn invalid_payload_long_message() {
+        let msg = "x".repeat(5000);
+        let e = WebhookError::InvalidPayload(msg.clone());
+        let display = e.to_string();
+        assert!(display.contains(&msg));
+    }
+
+    #[test]
+    fn delivery_failed_multiline_message() {
+        let e = WebhookError::DeliveryFailed("line1\nline2\nline3".into());
+        let display = e.to_string();
+        assert!(display.contains("line1\nline2\nline3"));
+    }
+
+    #[test]
+    fn unsupported_event_type_special_chars() {
+        let e = WebhookError::UnsupportedEventType("push:issue.*.opened[0]".into());
+        let display = e.to_string();
+        assert!(display.contains("push:issue.*.opened[0]"));
+    }
+
+    #[test]
+    fn ip_not_allowed_cidr_format() {
+        let e = WebhookError::IpNotAllowed("192.168.0.0/24".into());
+        assert!(e.to_string().contains("192.168.0.0/24"));
+    }
+
+    #[test]
+    fn error_debug_all_variants() {
+        let variants: Vec<WebhookError> = vec![
+            WebhookError::InvalidSignature,
+            WebhookError::MissingSignature("h".into()),
+            WebhookError::TimestampValidation {
+                reason: "r".into(),
+                timestamp: Some(1),
+                current_time: 2,
+                tolerance: Duration::from_secs(3),
+            },
+            WebhookError::ReplayDetected {
+                event_id: "e".into(),
+            },
+            WebhookError::PayloadTooLarge {
+                size: 10,
+                limit: 5,
+            },
+            WebhookError::InvalidPayload("p".into()),
+            WebhookError::UnsupportedEventType("u".into()),
+            WebhookError::ProviderNotConfigured("c".into()),
+            WebhookError::IpNotAllowed("i".into()),
+            WebhookError::DeliveryFailed("d".into()),
+        ];
+        for variant in variants {
+            let debug = format!("{variant:?}");
+            assert!(!debug.is_empty());
+        }
+    }
+
+    #[test]
+    fn error_source_for_replay_detected_is_none() {
+        use std::error::Error;
+        let e = WebhookError::ReplayDetected {
+            event_id: "evt".into(),
+        };
+        assert!(e.source().is_none());
+    }
+
+    #[test]
+    fn error_source_for_payload_too_large_is_none() {
+        use std::error::Error;
+        let e = WebhookError::PayloadTooLarge {
+            size: 10,
+            limit: 5,
+        };
+        assert!(e.source().is_none());
+    }
+
+    #[test]
+    fn error_source_for_timestamp_validation_is_none() {
+        use std::error::Error;
+        let e = WebhookError::TimestampValidation {
+            reason: "r".into(),
+            timestamp: None,
+            current_time: 0,
+            tolerance: Duration::from_secs(0),
+        };
+        assert!(e.source().is_none());
+    }
 }

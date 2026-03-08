@@ -3,7 +3,10 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use fcp_core::{BaseConnector, ConnectorId, CredentialId, FcpError, FcpResult};
+use fcp_core::{
+    AgentHint, BaseConnector, CapabilityId, ConnectorId, CredentialId, FcpError, FcpResult,
+    IdempotencyClass, OperationId, OperationInfo, RiskLevel, SafetyTier,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tracing::{info, instrument};
@@ -270,7 +273,7 @@ impl PulumiConnector {
         Ok(json!({
             "connector_id": "fcp.pulumi",
             "version": "0.1.0",
-            "operations": operations_info(),
+            "operations": serde_json::to_value(operations_info()).unwrap_or_default(),
         }))
     }
 
@@ -323,10 +326,9 @@ impl PulumiConnector {
             .and_then(serde_json::Value::as_str)
             .unwrap_or("");
 
-        let allowed = operations_info().as_array().is_some_and(|ops| {
-            ops.iter()
-                .any(|o| o.get("id").and_then(serde_json::Value::as_str) == Some(operation))
-        });
+        let allowed = operations_info()
+            .iter()
+            .any(|o| o.id.as_ref() == operation);
 
         Ok(json!({
             "allowed": allowed,
@@ -428,58 +430,240 @@ fn require_str<'a>(input: &'a serde_json::Value, field: &str) -> Result<&'a str,
         })
 }
 
+/// Build a single [`OperationInfo`].
+#[allow(clippy::fn_params_excessive_bools)]
+#[allow(clippy::too_many_arguments)]
+fn op_info(
+    id: &'static str,
+    summary: &str,
+    input_schema: serde_json::Value,
+    output_schema: serde_json::Value,
+    capability: &'static str,
+    risk_level: RiskLevel,
+    safety_tier: SafetyTier,
+    idempotency: IdempotencyClass,
+    ai_hints: AgentHint,
+) -> OperationInfo {
+    OperationInfo {
+        id: OperationId::from_static(id),
+        summary: summary.into(),
+        input_schema,
+        output_schema,
+        capability: CapabilityId::from_static(capability),
+        risk_level,
+        description: None,
+        rate_limit: None,
+        requires_approval: None,
+        safety_tier,
+        idempotency,
+        ai_hints,
+    }
+}
+
 /// Build the operations info for introspection.
-fn operations_info() -> serde_json::Value {
-    json!([
-        {
-            "id": "pulumi.stacks.list",
-            "summary": "List stacks in an organization",
-            "capability": "pulumi.stacks.read",
-            "risk_level": "low",
-            "safety_tier": "safe",
-            "idempotency": "strict",
-        },
-        {
-            "id": "pulumi.stacks.get",
-            "summary": "Get stack details including outputs",
-            "capability": "pulumi.stacks.read",
-            "risk_level": "low",
-            "safety_tier": "safe",
-            "idempotency": "strict",
-        },
-        {
-            "id": "pulumi.stacks.create",
-            "summary": "Create a new stack",
-            "capability": "pulumi.stacks.write",
-            "risk_level": "medium",
-            "safety_tier": "risky",
-            "idempotency": "strict",
-        },
-        {
-            "id": "pulumi.stacks.delete",
-            "summary": "Delete a stack",
-            "capability": "pulumi.stacks.write",
-            "risk_level": "high",
-            "safety_tier": "dangerous",
-            "idempotency": "strict",
-        },
-        {
-            "id": "pulumi.stacks.export",
-            "summary": "Export stack state as a deployment checkpoint",
-            "capability": "pulumi.stacks.read",
-            "risk_level": "low",
-            "safety_tier": "safe",
-            "idempotency": "strict",
-        },
-        {
-            "id": "pulumi.deployments.list",
-            "summary": "List recent deployments for a stack",
-            "capability": "pulumi.deployments.read",
-            "risk_level": "low",
-            "safety_tier": "safe",
-            "idempotency": "strict",
-        },
-    ])
+fn operations_info() -> Vec<OperationInfo> {
+    vec![
+        op_info(
+            "pulumi.stacks.list",
+            "List stacks in an organization",
+            json!({
+                "type": "object",
+                "required": [],
+                "properties": {
+                    "organization": { "type": "string" },
+                    "project": { "type": "string" }
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["stacks"],
+                "properties": {
+                    "stacks": { "type": "array" }
+                }
+            }),
+            "pulumi.stacks.read",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "List Pulumi stacks.".into(),
+                common_mistakes: vec![],
+                examples: vec![
+                    r#"{"organization": "myorg", "project": "myproject"}"#.into(),
+                ],
+                related: vec![
+                    CapabilityId::from_static("pulumi.stacks.get"),
+                    CapabilityId::from_static("pulumi.stacks.create"),
+                ],
+            },
+        ),
+        op_info(
+            "pulumi.stacks.get",
+            "Get stack details including outputs",
+            json!({
+                "type": "object",
+                "required": ["organization", "project", "stack"],
+                "properties": {
+                    "organization": { "type": "string" },
+                    "project": { "type": "string" },
+                    "stack": { "type": "string" }
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["orgName", "projectName", "stackName"],
+                "properties": {
+                    "orgName": { "type": "string" },
+                    "projectName": { "type": "string" },
+                    "stackName": { "type": "string" }
+                }
+            }),
+            "pulumi.stacks.read",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "Get details for a specific stack including outputs.".into(),
+                common_mistakes: vec![],
+                examples: vec![
+                    r#"{"organization": "myorg", "project": "myproject", "stack": "production"}"#.into(),
+                ],
+                related: vec![
+                    CapabilityId::from_static("pulumi.stacks.list"),
+                    CapabilityId::from_static("pulumi.stacks.export"),
+                ],
+            },
+        ),
+        op_info(
+            "pulumi.stacks.create",
+            "Create a new stack",
+            json!({
+                "type": "object",
+                "required": ["organization", "project", "stack"],
+                "properties": {
+                    "organization": { "type": "string" },
+                    "project": { "type": "string" },
+                    "stack": { "type": "string" }
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["orgName", "projectName", "stackName"],
+                "properties": {
+                    "orgName": { "type": "string" },
+                    "projectName": { "type": "string" },
+                    "stackName": { "type": "string" }
+                }
+            }),
+            "pulumi.stacks.write",
+            RiskLevel::Medium,
+            SafetyTier::Risky,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "Create a new Pulumi stack.".into(),
+                common_mistakes: vec![],
+                examples: vec![
+                    r#"{"organization": "myorg", "project": "myproject", "stack": "staging"}"#.into(),
+                ],
+                related: vec![
+                    CapabilityId::from_static("pulumi.stacks.list"),
+                    CapabilityId::from_static("pulumi.stacks.delete"),
+                ],
+            },
+        ),
+        op_info(
+            "pulumi.stacks.delete",
+            "Delete a stack",
+            json!({
+                "type": "object",
+                "required": ["organization", "project", "stack"],
+                "properties": {
+                    "organization": { "type": "string" },
+                    "project": { "type": "string" },
+                    "stack": { "type": "string" }
+                }
+            }),
+            json!({ "type": "object" }),
+            "pulumi.stacks.write",
+            RiskLevel::High,
+            SafetyTier::Dangerous,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "Delete a stack. Cannot be undone; all resources and history are removed.".into(),
+                common_mistakes: vec![
+                    "Deleting a stack with active resources — destroy first.".into(),
+                ],
+                examples: vec![
+                    r#"{"organization": "myorg", "project": "myproject", "stack": "staging"}"#.into(),
+                ],
+                related: vec![CapabilityId::from_static("pulumi.stacks.list")],
+            },
+        ),
+        op_info(
+            "pulumi.stacks.export",
+            "Export stack state as a deployment checkpoint",
+            json!({
+                "type": "object",
+                "required": ["organization", "project", "stack"],
+                "properties": {
+                    "organization": { "type": "string" },
+                    "project": { "type": "string" },
+                    "stack": { "type": "string" }
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["deployment"],
+                "properties": {
+                    "deployment": { "type": "object" }
+                }
+            }),
+            "pulumi.stacks.read",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "Export the full state of a stack for backup or inspection.".into(),
+                common_mistakes: vec![],
+                examples: vec![
+                    r#"{"organization": "myorg", "project": "myproject", "stack": "production"}"#.into(),
+                ],
+                related: vec![CapabilityId::from_static("pulumi.stacks.get")],
+            },
+        ),
+        op_info(
+            "pulumi.deployments.list",
+            "List recent deployments for a stack",
+            json!({
+                "type": "object",
+                "required": ["organization", "project", "stack"],
+                "properties": {
+                    "organization": { "type": "string" },
+                    "project": { "type": "string" },
+                    "stack": { "type": "string" }
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["updates"],
+                "properties": {
+                    "updates": { "type": "array" }
+                }
+            }),
+            "pulumi.deployments.read",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "List recent deployments/updates for a stack.".into(),
+                common_mistakes: vec![],
+                examples: vec![
+                    r#"{"organization": "myorg", "project": "myproject", "stack": "production"}"#.into(),
+                ],
+                related: vec![CapabilityId::from_static("pulumi.stacks.get")],
+            },
+        ),
+    ]
 }
 
 #[cfg(test)]
@@ -589,31 +773,23 @@ mod tests {
     #[test]
     fn operations_info_has_6_operations() {
         let ops = operations_info();
-        let arr = ops.as_array().unwrap();
-        assert_eq!(arr.len(), 6);
+        assert_eq!(ops.len(), 6);
     }
 
     #[test]
     fn operations_all_have_required_fields() {
         let ops = operations_info();
-        for op in ops.as_array().unwrap() {
-            assert!(op.get("id").is_some(), "missing id");
-            assert!(op.get("summary").is_some(), "missing summary");
-            assert!(op.get("capability").is_some(), "missing capability");
-            assert!(op.get("risk_level").is_some(), "missing risk_level");
-            assert!(op.get("safety_tier").is_some(), "missing safety_tier");
+        for op in &ops {
+            assert!(!op.id.as_ref().is_empty(), "missing id");
+            assert!(!op.summary.is_empty(), "missing summary");
+            assert!(!op.capability.as_ref().is_empty(), "missing capability");
         }
     }
 
     #[test]
     fn operations_ids_are_unique() {
         let ops = operations_info();
-        let ids: Vec<&str> = ops
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter_map(|o| o["id"].as_str())
-            .collect();
+        let ids: Vec<&str> = ops.iter().map(|o| o.id.as_ref()).collect();
         let mut unique = ids.clone();
         unique.sort_unstable();
         unique.dedup();
@@ -622,42 +798,40 @@ mod tests {
 
     #[test]
     fn operations_risk_levels_valid() {
-        let valid = ["low", "medium", "high"];
         let ops = operations_info();
-        for op in ops.as_array().unwrap() {
-            let rl = op["risk_level"].as_str().unwrap();
-            assert!(valid.contains(&rl), "invalid risk_level: {rl}");
+        for op in &ops {
+            // RiskLevel is an enum, so it's always valid by construction
+            let _ = op.risk_level;
         }
     }
 
     #[test]
     fn operations_safety_tiers_valid() {
-        let valid = ["safe", "risky", "dangerous"];
         let ops = operations_info();
-        for op in ops.as_array().unwrap() {
-            let st = op["safety_tier"].as_str().unwrap();
-            assert!(valid.contains(&st), "invalid safety_tier: {st}");
+        for op in &ops {
+            // SafetyTier is an enum, so it's always valid by construction
+            let _ = op.safety_tier;
         }
     }
 
     #[test]
     fn read_operations_are_safe() {
         let ops = operations_info();
-        for op in ops.as_array().unwrap() {
-            let cap = op["capability"].as_str().unwrap();
+        for op in &ops {
+            let cap = op.capability.as_ref();
             #[allow(clippy::case_sensitive_file_extension_comparisons)]
             if cap.ends_with(".read") {
                 assert_eq!(
-                    op["safety_tier"].as_str().unwrap(),
-                    "safe",
+                    op.safety_tier,
+                    SafetyTier::Safe,
                     "read op {} should be safe",
-                    op["id"]
+                    op.id.as_ref()
                 );
                 assert_eq!(
-                    op["risk_level"].as_str().unwrap(),
-                    "low",
+                    op.risk_level,
+                    RiskLevel::Low,
                     "read op {} should be low risk",
-                    op["id"]
+                    op.id.as_ref()
                 );
             }
         }
@@ -666,12 +840,7 @@ mod tests {
     #[test]
     fn operations_contain_expected_ids() {
         let ops = operations_info();
-        let ids: Vec<&str> = ops
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter_map(|o| o["id"].as_str())
-            .collect();
+        let ids: Vec<&str> = ops.iter().map(|o| o.id.as_ref()).collect();
         assert!(ids.contains(&"pulumi.stacks.list"));
         assert!(ids.contains(&"pulumi.stacks.get"));
         assert!(ids.contains(&"pulumi.stacks.create"));
@@ -683,12 +852,7 @@ mod tests {
     #[test]
     fn operations_capabilities_match_manifest() {
         let ops = operations_info();
-        let caps: Vec<&str> = ops
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter_map(|o| o["capability"].as_str())
-            .collect();
+        let caps: Vec<&str> = ops.iter().map(|o| o.capability.as_ref()).collect();
         assert!(caps.contains(&"pulumi.stacks.read"));
         assert!(caps.contains(&"pulumi.stacks.write"));
         assert!(caps.contains(&"pulumi.deployments.read"));
@@ -903,49 +1067,40 @@ mod tests {
     fn operations_delete_is_dangerous() {
         let ops = operations_info();
         let delete_op = ops
-            .as_array()
-            .unwrap()
             .iter()
-            .find(|o| o["id"] == "pulumi.stacks.delete")
+            .find(|o| o.id.as_ref() == "pulumi.stacks.delete")
             .unwrap();
-        assert_eq!(delete_op["safety_tier"], "dangerous");
-        assert_eq!(delete_op["risk_level"], "high");
+        assert_eq!(delete_op.safety_tier, SafetyTier::Dangerous);
+        assert_eq!(delete_op.risk_level, RiskLevel::High);
     }
 
     #[test]
     fn operations_create_is_risky() {
         let ops = operations_info();
         let create_op = ops
-            .as_array()
-            .unwrap()
             .iter()
-            .find(|o| o["id"] == "pulumi.stacks.create")
+            .find(|o| o.id.as_ref() == "pulumi.stacks.create")
             .unwrap();
-        assert_eq!(create_op["safety_tier"], "risky");
-        assert_eq!(create_op["risk_level"], "medium");
+        assert_eq!(create_op.safety_tier, SafetyTier::Risky);
+        assert_eq!(create_op.risk_level, RiskLevel::Medium);
     }
 
     #[test]
     fn operations_export_capability() {
         let ops = operations_info();
         let export_op = ops
-            .as_array()
-            .unwrap()
             .iter()
-            .find(|o| o["id"] == "pulumi.stacks.export")
+            .find(|o| o.id.as_ref() == "pulumi.stacks.export")
             .unwrap();
-        assert_eq!(export_op["capability"], "pulumi.stacks.read");
+        assert_eq!(export_op.capability.as_ref(), "pulumi.stacks.read");
     }
 
     #[test]
     fn operations_all_have_idempotency() {
         let ops = operations_info();
-        for op in ops.as_array().unwrap() {
-            assert!(
-                op.get("idempotency").is_some(),
-                "op {:?} missing idempotency",
-                op["id"]
-            );
+        for op in &ops {
+            // IdempotencyClass is a typed enum, always present by construction
+            let _ = op.idempotency;
         }
     }
 
@@ -1052,9 +1207,8 @@ mod tests {
     #[test]
     fn operations_all_summaries_non_empty() {
         let ops = operations_info();
-        for op in ops.as_array().unwrap() {
-            let summary = op["summary"].as_str().unwrap();
-            assert!(!summary.is_empty(), "op {:?} has empty summary", op["id"]);
+        for op in &ops {
+            assert!(!op.summary.is_empty(), "op {} has empty summary", op.id.as_ref());
         }
     }
 
@@ -1062,26 +1216,22 @@ mod tests {
     fn operations_list_is_safe_and_low() {
         let ops = operations_info();
         let list_op = ops
-            .as_array()
-            .unwrap()
             .iter()
-            .find(|o| o["id"] == "pulumi.stacks.list")
+            .find(|o| o.id.as_ref() == "pulumi.stacks.list")
             .unwrap();
-        assert_eq!(list_op["safety_tier"], "safe");
-        assert_eq!(list_op["risk_level"], "low");
+        assert_eq!(list_op.safety_tier, SafetyTier::Safe);
+        assert_eq!(list_op.risk_level, RiskLevel::Low);
     }
 
     #[test]
     fn operations_get_is_safe_and_low() {
         let ops = operations_info();
         let get_op = ops
-            .as_array()
-            .unwrap()
             .iter()
-            .find(|o| o["id"] == "pulumi.stacks.get")
+            .find(|o| o.id.as_ref() == "pulumi.stacks.get")
             .unwrap();
-        assert_eq!(get_op["safety_tier"], "safe");
-        assert_eq!(get_op["risk_level"], "low");
+        assert_eq!(get_op.safety_tier, SafetyTier::Safe);
+        assert_eq!(get_op.risk_level, RiskLevel::Low);
     }
 
     #[test]
@@ -1162,28 +1312,26 @@ mod tests {
     #[test]
     fn operations_all_have_capabilities() {
         let ops = operations_info();
-        for op in ops.as_array().unwrap() {
-            let cap = op["capability"].as_str().unwrap();
-            assert!(!cap.is_empty(), "op {:?} has empty capability", op["id"]);
+        for op in &ops {
+            assert!(!op.capability.as_ref().is_empty(), "op {} has empty capability", op.id.as_ref());
         }
     }
 
     #[test]
     fn operations_ids_all_start_with_pulumi() {
         let ops = operations_info();
-        for op in ops.as_array().unwrap() {
-            let id = op["id"].as_str().unwrap();
+        for op in &ops {
+            let id = op.id.as_ref();
             assert!(id.starts_with("pulumi."), "op {id} should start with pulumi.");
         }
     }
 
     #[test]
     fn operations_all_risk_levels_valid() {
-        let valid = ["low", "medium", "high"];
+        // RiskLevel is a typed enum, always valid by construction
         let ops = operations_info();
-        for op in ops.as_array().unwrap() {
-            let rl = op["risk_level"].as_str().unwrap();
-            assert!(valid.contains(&rl), "invalid risk_level: {rl}");
+        for op in &ops {
+            let _ = op.risk_level;
         }
     }
 }

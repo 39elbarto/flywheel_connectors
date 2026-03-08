@@ -17,6 +17,7 @@
     clippy::or_fun_call,
     clippy::redundant_closure_for_method_calls,
     clippy::struct_field_names,
+    clippy::too_many_arguments,
     clippy::too_many_lines,
     clippy::trivially_copy_pass_by_ref,
     clippy::unreadable_literal,

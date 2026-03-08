@@ -3,7 +3,10 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use fcp_core::{BaseConnector, ConnectorId, CredentialId, FcpError, FcpResult};
+use fcp_core::{
+    AgentHint, BaseConnector, CapabilityId, ConnectorId, CredentialId, FcpError, FcpResult,
+    IdempotencyClass, OperationId, OperationInfo, RiskLevel, SafetyTier,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tracing::{info, instrument};
@@ -274,7 +277,7 @@ impl SentryConnector {
         Ok(json!({
             "connector_id": "fcp.sentry",
             "version": "0.1.0",
-            "operations": operations_info(),
+            "operations": serde_json::to_value(operations_info()).unwrap_or_default(),
         }))
     }
 
@@ -336,10 +339,9 @@ impl SentryConnector {
             .and_then(|v| v.as_str())
             .unwrap_or("");
 
-        let allowed = operations_info().as_array().is_some_and(|ops| {
-            ops.iter()
-                .any(|o| o.get("id").and_then(|v| v.as_str()) == Some(operation))
-        });
+        let allowed = operations_info()
+            .iter()
+            .any(|o| o.id.as_ref() == operation);
 
         Ok(json!({
             "allowed": allowed,
@@ -606,138 +608,639 @@ fn require_str<'a>(input: &'a serde_json::Value, field: &str) -> Result<&'a str,
         })
 }
 
+/// Build a single [`OperationInfo`] entry.
+#[allow(clippy::fn_params_excessive_bools)]
+fn op_info(
+    id: &'static str,
+    summary: &str,
+    input_schema: serde_json::Value,
+    output_schema: serde_json::Value,
+    capability: &'static str,
+    risk_level: RiskLevel,
+    safety_tier: SafetyTier,
+    idempotency: IdempotencyClass,
+    ai_hints: AgentHint,
+) -> OperationInfo {
+    OperationInfo {
+        id: OperationId::from_static(id),
+        summary: summary.into(),
+        input_schema,
+        output_schema,
+        capability: CapabilityId::from_static(capability),
+        risk_level,
+        description: None,
+        rate_limit: None,
+        requires_approval: None,
+        safety_tier,
+        idempotency,
+        ai_hints,
+    }
+}
+
 /// Build the operations info for introspection.
-fn operations_info() -> serde_json::Value {
-    json!([
-        {
-            "id": "sentry.list_projects",
-            "summary": "List projects in an organization",
-            "capability": "sentry.read",
-            "risk_level": "low",
-            "safety_tier": "safe",
-            "idempotency": "strict",
-        },
-        {
-            "id": "sentry.list_issues",
-            "summary": "List/search issues in a project",
-            "capability": "sentry.read",
-            "risk_level": "low",
-            "safety_tier": "safe",
-            "idempotency": "strict",
-        },
-        {
-            "id": "sentry.get_issue",
-            "summary": "Get a single issue by ID",
-            "capability": "sentry.read",
-            "risk_level": "low",
-            "safety_tier": "safe",
-            "idempotency": "strict",
-        },
-        {
-            "id": "sentry.update_issue",
-            "summary": "Update issue status/assignment",
-            "capability": "sentry.write",
-            "risk_level": "medium",
-            "safety_tier": "risky",
-            "idempotency": "strict",
-        },
-        {
-            "id": "sentry.delete_issue",
-            "summary": "Permanently delete an issue",
-            "capability": "sentry.admin",
-            "risk_level": "high",
-            "safety_tier": "dangerous",
-            "idempotency": "strict",
-        },
-        {
-            "id": "sentry.list_issue_events",
-            "summary": "List events for an issue",
-            "capability": "sentry.read",
-            "risk_level": "low",
-            "safety_tier": "safe",
-            "idempotency": "strict",
-        },
-        {
-            "id": "sentry.get_event",
-            "summary": "Get full event with stacktrace",
-            "capability": "sentry.read",
-            "risk_level": "low",
-            "safety_tier": "safe",
-            "idempotency": "strict",
-        },
-        {
-            "id": "sentry.get_transaction",
-            "summary": "Get a performance transaction event",
-            "capability": "sentry.read",
-            "risk_level": "low",
-            "safety_tier": "safe",
-            "idempotency": "strict",
-        },
-        {
-            "id": "sentry.list_releases",
-            "summary": "List releases for an organization",
-            "capability": "sentry.read",
-            "risk_level": "low",
-            "safety_tier": "safe",
-            "idempotency": "strict",
-        },
-        {
-            "id": "sentry.get_release",
-            "summary": "Get release details",
-            "capability": "sentry.read",
-            "risk_level": "low",
-            "safety_tier": "safe",
-            "idempotency": "strict",
-        },
-        {
-            "id": "sentry.list_release_deploys",
-            "summary": "List deploys for a release",
-            "capability": "sentry.read",
-            "risk_level": "low",
-            "safety_tier": "safe",
-            "idempotency": "strict",
-        },
-        {
-            "id": "sentry.discover_query",
-            "summary": "Run a Discover analytics query",
-            "capability": "sentry.read",
-            "risk_level": "low",
-            "safety_tier": "safe",
-            "idempotency": "strict",
-        },
-        {
-            "id": "sentry.list_alert_rules",
-            "summary": "List alert rules for a project",
-            "capability": "sentry.read",
-            "risk_level": "low",
-            "safety_tier": "safe",
-            "idempotency": "strict",
-        },
-        {
-            "id": "sentry.create_alert_rule",
-            "summary": "Create an alert rule",
-            "capability": "sentry.alerts",
-            "risk_level": "medium",
-            "safety_tier": "risky",
-            "idempotency": "none",
-        },
-        {
-            "id": "sentry.update_alert_rule",
-            "summary": "Update an alert rule",
-            "capability": "sentry.alerts",
-            "risk_level": "medium",
-            "safety_tier": "risky",
-            "idempotency": "strict",
-        },
-        {
-            "id": "sentry.delete_alert_rule",
-            "summary": "Delete an alert rule",
-            "capability": "sentry.admin",
-            "risk_level": "high",
-            "safety_tier": "dangerous",
-            "idempotency": "strict",
-        },
-    ])
+fn operations_info() -> Vec<OperationInfo> {
+    vec![
+        op_info(
+            "sentry.list_projects",
+            "List projects in an organization",
+            json!({
+                "type": "object",
+                "required": ["organization_slug"],
+                "properties": {
+                    "organization_slug": { "type": "string", "description": "Sentry organization slug" },
+                    "cursor": { "type": "string", "description": "Pagination cursor" }
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["projects"],
+                "properties": {
+                    "projects": { "type": "array", "items": { "type": "object" } }
+                }
+            }),
+            "sentry.read",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "List all projects in an organization. Useful for discovery before querying issues or events.".into(),
+                common_mistakes: vec![],
+                examples: vec![
+                    r#"{"organization_slug": "my-org"}"#.into(),
+                ],
+                related: vec![
+                    CapabilityId::from_static("sentry.list_issues"),
+                    CapabilityId::from_static("sentry.discover_query"),
+                ],
+            },
+        ),
+        op_info(
+            "sentry.list_issues",
+            "List/search issues in a project",
+            json!({
+                "type": "object",
+                "required": ["organization_slug", "project_slug"],
+                "properties": {
+                    "organization_slug": { "type": "string", "description": "Sentry organization slug" },
+                    "project_slug": { "type": "string", "description": "Sentry project slug" },
+                    "query": { "type": "string", "description": "Search query (Sentry search syntax)" },
+                    "sort": { "type": "string", "enum": ["date", "new", "priority", "freq", "user"] },
+                    "cursor": { "type": "string", "description": "Pagination cursor from Link header" }
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["issues"],
+                "properties": {
+                    "issues": { "type": "array", "description": "List of issue objects", "items": { "type": "object" } }
+                }
+            }),
+            "sentry.read",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "List or search issues in a Sentry project. Supports Sentry search syntax for filtering.".into(),
+                common_mistakes: vec![
+                    "Using Jira/GitHub search syntax instead of Sentry search syntax.".into(),
+                    "Not using cursor-based pagination for large result sets.".into(),
+                ],
+                examples: vec![
+                    r#"{"organization_slug": "my-org", "project_slug": "backend", "query": "is:unresolved level:error", "sort": "priority"}"#.into(),
+                ],
+                related: vec![
+                    CapabilityId::from_static("sentry.get_issue"),
+                    CapabilityId::from_static("sentry.list_issue_events"),
+                ],
+            },
+        ),
+        op_info(
+            "sentry.get_issue",
+            "Get a single issue by ID",
+            json!({
+                "type": "object",
+                "required": ["issue_id"],
+                "properties": {
+                    "issue_id": { "type": "string", "description": "Sentry issue ID (numeric)" }
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["issue"],
+                "properties": {
+                    "issue": { "type": "object", "description": "Full issue object with stats, tags, assignee, status" }
+                }
+            }),
+            "sentry.read",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "Retrieve full details for a specific Sentry issue.".into(),
+                common_mistakes: vec![
+                    "Confusing issue ID (numeric) with short ID (e.g., PROJECT-123).".into(),
+                ],
+                examples: vec![
+                    r#"{"issue_id": "1234567890"}"#.into(),
+                ],
+                related: vec![
+                    CapabilityId::from_static("sentry.list_issues"),
+                    CapabilityId::from_static("sentry.list_issue_events"),
+                    CapabilityId::from_static("sentry.update_issue"),
+                ],
+            },
+        ),
+        op_info(
+            "sentry.update_issue",
+            "Update issue status/assignment",
+            json!({
+                "type": "object",
+                "required": ["issue_id"],
+                "properties": {
+                    "issue_id": { "type": "string", "description": "Sentry issue ID" },
+                    "status": { "type": "string", "enum": ["resolved", "unresolved", "ignored"] },
+                    "substatus": { "type": "string", "description": "Issue substatus" },
+                    "assignedTo": { "type": "string", "description": "Assign to user (email or 'team:slug')" },
+                    "hasSeen": { "type": "boolean" },
+                    "isBookmarked": { "type": "boolean" },
+                    "isSubscribed": { "type": "boolean" }
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["issue"],
+                "properties": {
+                    "issue": { "type": "object", "description": "Updated issue object" }
+                }
+            }),
+            "sentry.write",
+            RiskLevel::Medium,
+            SafetyTier::Risky,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "Update issue status (resolve, ignore), assignment, or bookmark state.".into(),
+                common_mistakes: vec![
+                    "Using user display name instead of email or 'team:slug' for assignedTo.".into(),
+                    "Setting status=resolved without specifying substatus for conditional resolution.".into(),
+                ],
+                examples: vec![
+                    r#"{"issue_id": "1234567890", "status": "resolved"}"#.into(),
+                    r#"{"issue_id": "1234567890", "assignedTo": "alice@example.com"}"#.into(),
+                ],
+                related: vec![
+                    CapabilityId::from_static("sentry.get_issue"),
+                    CapabilityId::from_static("sentry.list_issues"),
+                ],
+            },
+        ),
+        op_info(
+            "sentry.delete_issue",
+            "Permanently delete an issue",
+            json!({
+                "type": "object",
+                "required": ["issue_id"],
+                "properties": {
+                    "issue_id": { "type": "string", "description": "Sentry issue ID" }
+                }
+            }),
+            json!({ "type": "object" }),
+            "sentry.admin",
+            RiskLevel::High,
+            SafetyTier::Dangerous,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "Permanently delete an issue and all its events. This cannot be undone.".into(),
+                common_mistakes: vec![
+                    "Deleting issues that should be resolved or ignored instead.".into(),
+                    "Not confirming with the user before permanent deletion.".into(),
+                ],
+                examples: vec![
+                    r#"{"issue_id": "1234567890"}"#.into(),
+                ],
+                related: vec![
+                    CapabilityId::from_static("sentry.update_issue"),
+                    CapabilityId::from_static("sentry.get_issue"),
+                ],
+            },
+        ),
+        op_info(
+            "sentry.list_issue_events",
+            "List events for an issue",
+            json!({
+                "type": "object",
+                "required": ["issue_id"],
+                "properties": {
+                    "issue_id": { "type": "string", "description": "Sentry issue ID" },
+                    "cursor": { "type": "string", "description": "Pagination cursor" },
+                    "full": { "type": "boolean", "description": "Include full event payloads (default: false)" }
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["events"],
+                "properties": {
+                    "events": { "type": "array", "items": { "type": "object" } }
+                }
+            }),
+            "sentry.read",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "List individual error events for a grouped issue.".into(),
+                common_mistakes: vec![
+                    "Setting full=true for large event lists (slow and large responses).".into(),
+                ],
+                examples: vec![
+                    r#"{"issue_id": "1234567890", "full": false}"#.into(),
+                ],
+                related: vec![
+                    CapabilityId::from_static("sentry.get_event"),
+                    CapabilityId::from_static("sentry.get_issue"),
+                ],
+            },
+        ),
+        op_info(
+            "sentry.get_event",
+            "Get full event with stacktrace",
+            json!({
+                "type": "object",
+                "required": ["organization_slug", "project_slug", "event_id"],
+                "properties": {
+                    "organization_slug": { "type": "string", "description": "Sentry organization slug" },
+                    "project_slug": { "type": "string", "description": "Sentry project slug" },
+                    "event_id": { "type": "string", "description": "Event ID (UUID)" }
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["event"],
+                "properties": {
+                    "event": { "type": "object", "description": "Full event with stacktrace, contexts, tags, breadcrumbs, and user info" }
+                }
+            }),
+            "sentry.read",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "Retrieve full event details including stacktrace, breadcrumbs, and context for debugging.".into(),
+                common_mistakes: vec![
+                    "Using issue ID instead of event ID (UUID).".into(),
+                    "Not specifying both organization_slug and project_slug.".into(),
+                ],
+                examples: vec![
+                    r#"{"organization_slug": "my-org", "project_slug": "backend", "event_id": "a1b2c3d4e5f6"}"#.into(),
+                ],
+                related: vec![
+                    CapabilityId::from_static("sentry.list_issue_events"),
+                    CapabilityId::from_static("sentry.get_issue"),
+                ],
+            },
+        ),
+        op_info(
+            "sentry.get_transaction",
+            "Get a performance transaction event",
+            json!({
+                "type": "object",
+                "required": ["organization_slug", "project_slug", "event_id"],
+                "properties": {
+                    "organization_slug": { "type": "string", "description": "Sentry organization slug" },
+                    "project_slug": { "type": "string", "description": "Sentry project slug" },
+                    "event_id": { "type": "string", "description": "Transaction event ID (UUID)" }
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["event"],
+                "properties": {
+                    "event": { "type": "object", "description": "Transaction event with spans, measurements, and trace context" }
+                }
+            }),
+            "sentry.read",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "Retrieve a specific performance transaction with span waterfall and measurements.".into(),
+                common_mistakes: vec![
+                    "Confusing error event IDs with transaction event IDs.".into(),
+                ],
+                examples: vec![
+                    r#"{"organization_slug": "my-org", "project_slug": "backend", "event_id": "a1b2c3d4e5f6"}"#.into(),
+                ],
+                related: vec![
+                    CapabilityId::from_static("sentry.discover_query"),
+                    CapabilityId::from_static("sentry.get_event"),
+                ],
+            },
+        ),
+        op_info(
+            "sentry.list_releases",
+            "List releases for an organization",
+            json!({
+                "type": "object",
+                "required": ["organization_slug"],
+                "properties": {
+                    "organization_slug": { "type": "string", "description": "Sentry organization slug" },
+                    "project_slug": { "type": "string", "description": "Filter to a specific project" },
+                    "query": { "type": "string", "description": "Search releases by version string" },
+                    "cursor": { "type": "string", "description": "Pagination cursor" }
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["releases"],
+                "properties": {
+                    "releases": { "type": "array", "items": { "type": "object" } }
+                }
+            }),
+            "sentry.read",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "List releases to correlate errors with deploys.".into(),
+                common_mistakes: vec![
+                    "Not filtering by project when the organization has many projects.".into(),
+                ],
+                examples: vec![
+                    r#"{"organization_slug": "my-org", "project_slug": "backend"}"#.into(),
+                ],
+                related: vec![
+                    CapabilityId::from_static("sentry.get_release"),
+                    CapabilityId::from_static("sentry.list_release_deploys"),
+                ],
+            },
+        ),
+        op_info(
+            "sentry.get_release",
+            "Get release details",
+            json!({
+                "type": "object",
+                "required": ["organization_slug", "version"],
+                "properties": {
+                    "organization_slug": { "type": "string", "description": "Sentry organization slug" },
+                    "version": { "type": "string", "description": "Release version identifier" }
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["release"],
+                "properties": {
+                    "release": { "type": "object", "description": "Release with commits, authors, new/resolved issue counts, and deploy info" }
+                }
+            }),
+            "sentry.read",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "Get full release details to inspect commits, authors, and issue regression data.".into(),
+                common_mistakes: vec![
+                    "URL-encoding issues with version strings containing special characters (e.g., '+').".into(),
+                ],
+                examples: vec![
+                    r#"{"organization_slug": "my-org", "version": "backend@1.2.3"}"#.into(),
+                ],
+                related: vec![
+                    CapabilityId::from_static("sentry.list_releases"),
+                    CapabilityId::from_static("sentry.list_release_deploys"),
+                ],
+            },
+        ),
+        op_info(
+            "sentry.list_release_deploys",
+            "List deploys for a release",
+            json!({
+                "type": "object",
+                "required": ["organization_slug", "version"],
+                "properties": {
+                    "organization_slug": { "type": "string", "description": "Sentry organization slug" },
+                    "version": { "type": "string", "description": "Release version identifier" }
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["deploys"],
+                "properties": {
+                    "deploys": { "type": "array", "items": { "type": "object" } }
+                }
+            }),
+            "sentry.read",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "List deployment environments and timestamps for a release to correlate with error spikes.".into(),
+                common_mistakes: vec![],
+                examples: vec![
+                    r#"{"organization_slug": "my-org", "version": "backend@1.2.3"}"#.into(),
+                ],
+                related: vec![
+                    CapabilityId::from_static("sentry.get_release"),
+                    CapabilityId::from_static("sentry.list_releases"),
+                ],
+            },
+        ),
+        op_info(
+            "sentry.discover_query",
+            "Run a Discover analytics query",
+            json!({
+                "type": "object",
+                "required": ["organization_slug", "query", "fields"],
+                "properties": {
+                    "organization_slug": { "type": "string", "description": "Sentry organization slug" },
+                    "query": { "type": "string", "description": "Discover search query" },
+                    "fields": { "type": "array", "items": { "type": "string" }, "description": "Fields to return" },
+                    "statsPeriod": { "type": "string", "description": "Relative time period (e.g., '24h', '7d')" },
+                    "start": { "type": "string", "description": "ISO 8601 start time" },
+                    "end": { "type": "string", "description": "ISO 8601 end time" },
+                    "sort": { "type": "string", "description": "Sort field with optional - prefix for descending" },
+                    "per_page": { "type": "integer", "minimum": 1, "maximum": 100 }
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["data"],
+                "properties": {
+                    "data": { "type": "array", "description": "Query result rows", "items": { "type": "object" } },
+                    "meta": { "type": "object", "description": "Field type metadata" }
+                }
+            }),
+            "sentry.read",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "Run Discover (Snuba) queries for performance data, transaction aggregations, or custom event analytics.".into(),
+                common_mistakes: vec![
+                    "Not specifying statsPeriod or start/end for time-bounded queries.".into(),
+                    "Using SQL syntax instead of Sentry Discover query syntax.".into(),
+                    "Requesting too many fields with high-cardinality groupings.".into(),
+                ],
+                examples: vec![
+                    r#"{"organization_slug": "my-org", "query": "event.type:transaction transaction:/api/users", "fields": ["transaction", "p95()", "count()", "failure_rate()"], "statsPeriod": "24h", "sort": "-p95()"}"#.into(),
+                ],
+                related: vec![
+                    CapabilityId::from_static("sentry.get_transaction"),
+                    CapabilityId::from_static("sentry.list_issues"),
+                ],
+            },
+        ),
+        op_info(
+            "sentry.list_alert_rules",
+            "List alert rules for a project",
+            json!({
+                "type": "object",
+                "required": ["organization_slug", "project_slug"],
+                "properties": {
+                    "organization_slug": { "type": "string", "description": "Sentry organization slug" },
+                    "project_slug": { "type": "string", "description": "Sentry project slug" }
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["rules"],
+                "properties": {
+                    "rules": { "type": "array", "items": { "type": "object" } }
+                }
+            }),
+            "sentry.read",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "List configured alert rules for a project.".into(),
+                common_mistakes: vec![],
+                examples: vec![
+                    r#"{"organization_slug": "my-org", "project_slug": "backend"}"#.into(),
+                ],
+                related: vec![
+                    CapabilityId::from_static("sentry.create_alert_rule"),
+                    CapabilityId::from_static("sentry.update_alert_rule"),
+                ],
+            },
+        ),
+        op_info(
+            "sentry.create_alert_rule",
+            "Create an alert rule",
+            json!({
+                "type": "object",
+                "required": ["organization_slug", "project_slug", "name", "conditions", "actions"],
+                "properties": {
+                    "organization_slug": { "type": "string", "description": "Sentry organization slug" },
+                    "project_slug": { "type": "string", "description": "Sentry project slug" },
+                    "name": { "type": "string", "description": "Alert rule name" },
+                    "conditions": { "type": "array", "items": { "type": "object" } },
+                    "actions": { "type": "array", "items": { "type": "object" } },
+                    "filters": { "type": "array", "items": { "type": "object" } },
+                    "action_match": { "type": "string", "enum": ["all", "any", "none"] },
+                    "frequency": { "type": "integer", "minimum": 5, "description": "Rate limit in minutes" }
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["rule"],
+                "properties": {
+                    "rule": { "type": "object" }
+                }
+            }),
+            "sentry.alerts",
+            RiskLevel::Medium,
+            SafetyTier::Risky,
+            IdempotencyClass::None,
+            AgentHint {
+                when_to_use: "Create a new alert rule to be notified about specific error conditions.".into(),
+                common_mistakes: vec![
+                    "Mixing up issue alert conditions with metric alert trigger syntax.".into(),
+                    "Not specifying frequency, resulting in alert storms.".into(),
+                    "Using incorrect condition IDs (they differ between SaaS and self-hosted).".into(),
+                ],
+                examples: vec![
+                    r#"{"organization_slug": "my-org", "project_slug": "backend", "name": "High error rate", "conditions": [{"id": "sentry.rules.conditions.first_seen_event.FirstSeenEventCondition"}], "actions": [{"id": "sentry.mail.actions.NotifyEmailAction", "targetType": "IssueOwners"}], "action_match": "any", "frequency": 30}"#.into(),
+                ],
+                related: vec![
+                    CapabilityId::from_static("sentry.list_alert_rules"),
+                    CapabilityId::from_static("sentry.update_alert_rule"),
+                    CapabilityId::from_static("sentry.delete_alert_rule"),
+                ],
+            },
+        ),
+        op_info(
+            "sentry.update_alert_rule",
+            "Update an alert rule",
+            json!({
+                "type": "object",
+                "required": ["organization_slug", "project_slug", "rule_id"],
+                "properties": {
+                    "organization_slug": { "type": "string", "description": "Sentry organization slug" },
+                    "project_slug": { "type": "string", "description": "Sentry project slug" },
+                    "rule_id": { "type": "string", "description": "Alert rule ID" },
+                    "name": { "type": "string", "description": "Updated rule name" },
+                    "conditions": { "type": "array", "items": { "type": "object" } },
+                    "actions": { "type": "array", "items": { "type": "object" } },
+                    "frequency": { "type": "integer", "minimum": 5 }
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["rule"],
+                "properties": {
+                    "rule": { "type": "object" }
+                }
+            }),
+            "sentry.alerts",
+            RiskLevel::Medium,
+            SafetyTier::Risky,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "Modify an existing alert rule. Sends the full rule definition (not a partial patch).".into(),
+                common_mistakes: vec![
+                    "Sending partial updates — the API replaces the full rule definition.".into(),
+                    "Not fetching the current rule first before modifying.".into(),
+                ],
+                examples: vec![
+                    r#"{"organization_slug": "my-org", "project_slug": "backend", "rule_id": "12345", "name": "Updated rule name", "frequency": 60}"#.into(),
+                ],
+                related: vec![
+                    CapabilityId::from_static("sentry.list_alert_rules"),
+                    CapabilityId::from_static("sentry.create_alert_rule"),
+                ],
+            },
+        ),
+        op_info(
+            "sentry.delete_alert_rule",
+            "Delete an alert rule",
+            json!({
+                "type": "object",
+                "required": ["organization_slug", "project_slug", "rule_id"],
+                "properties": {
+                    "organization_slug": { "type": "string", "description": "Sentry organization slug" },
+                    "project_slug": { "type": "string", "description": "Sentry project slug" },
+                    "rule_id": { "type": "string", "description": "Alert rule ID to delete" }
+                }
+            }),
+            json!({ "type": "object" }),
+            "sentry.admin",
+            RiskLevel::High,
+            SafetyTier::Dangerous,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "Permanently delete an alert rule. Cannot be undone.".into(),
+                common_mistakes: vec![
+                    "Deleting rules that should be disabled instead (no disable API — consider updating conditions).".into(),
+                ],
+                examples: vec![
+                    r#"{"organization_slug": "my-org", "project_slug": "backend", "rule_id": "12345"}"#.into(),
+                ],
+                related: vec![
+                    CapabilityId::from_static("sentry.list_alert_rules"),
+                    CapabilityId::from_static("sentry.create_alert_rule"),
+                ],
+            },
+        ),
+    ]
 }
 
 #[cfg(test)]
@@ -852,16 +1355,21 @@ mod tests {
 
     // ── operations_info ──────────────────────────────────────────────
 
+    /// Helper: serialize `operations_info` to JSON for test assertions.
+    fn ops_json() -> serde_json::Value {
+        serde_json::to_value(operations_info()).unwrap()
+    }
+
     #[test]
     fn operations_info_has_16_operations() {
-        let ops = operations_info();
+        let ops = ops_json();
         let arr = ops.as_array().unwrap();
         assert_eq!(arr.len(), 16);
     }
 
     #[test]
     fn operations_all_have_required_fields() {
-        let ops = operations_info();
+        let ops = ops_json();
         for op in ops.as_array().unwrap() {
             assert!(op.get("id").is_some(), "missing id");
             assert!(op.get("summary").is_some(), "missing summary");
@@ -873,7 +1381,7 @@ mod tests {
 
     #[test]
     fn operations_ids_are_unique() {
-        let ops = operations_info();
+        let ops = ops_json();
         let ids: Vec<&str> = ops
             .as_array()
             .unwrap()
@@ -889,7 +1397,7 @@ mod tests {
     #[test]
     fn operations_risk_levels_valid() {
         let valid = ["low", "medium", "high"];
-        let ops = operations_info();
+        let ops = ops_json();
         for op in ops.as_array().unwrap() {
             let rl = op["risk_level"].as_str().unwrap();
             assert!(valid.contains(&rl), "invalid risk_level: {rl}");
@@ -898,7 +1406,7 @@ mod tests {
 
     #[test]
     fn read_operations_are_safe() {
-        let ops = operations_info();
+        let ops = ops_json();
         for op in ops.as_array().unwrap() {
             let cap = op["capability"].as_str().unwrap();
             if cap == "sentry.read" {
@@ -987,7 +1495,7 @@ mod tests {
 
     #[test]
     fn operations_all_have_idempotency() {
-        let ops = operations_info();
+        let ops = ops_json();
         for op in ops.as_array().unwrap() {
             assert!(
                 op.get("idempotency").is_some(),
@@ -1000,7 +1508,7 @@ mod tests {
     #[test]
     fn operations_safety_tiers_valid() {
         let valid = ["safe", "risky", "dangerous"];
-        let ops = operations_info();
+        let ops = ops_json();
         for op in ops.as_array().unwrap() {
             let tier = op["safety_tier"].as_str().unwrap();
             assert!(
@@ -1157,7 +1665,7 @@ mod tests {
 
     #[test]
     fn operations_contain_expected_ids() {
-        let ops = operations_info();
+        let ops = ops_json();
         let ids: Vec<&str> = ops
             .as_array()
             .unwrap()
@@ -1176,7 +1684,7 @@ mod tests {
 
     #[test]
     fn operations_delete_is_dangerous() {
-        for op in operations_info().as_array().unwrap() {
+        for op in ops_json().as_array().unwrap() {
             if op["id"].as_str().unwrap().contains("delete") {
                 assert_eq!(
                     op["safety_tier"], "dangerous",
@@ -1189,7 +1697,7 @@ mod tests {
 
     #[test]
     fn operations_admin_capability_for_dangerous_ops() {
-        for op in operations_info().as_array().unwrap() {
+        for op in ops_json().as_array().unwrap() {
             if op["safety_tier"] == "dangerous" {
                 assert_eq!(
                     op["capability"], "sentry.admin",
@@ -1260,7 +1768,7 @@ mod tests {
 
     #[test]
     fn operations_create_alert_rule_not_idempotent() {
-        let ops = operations_info();
+        let ops = ops_json();
         let create_op = ops
             .as_array()
             .unwrap()

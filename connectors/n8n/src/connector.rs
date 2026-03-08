@@ -3,7 +3,10 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use fcp_core::{BaseConnector, ConnectorId, CredentialId, FcpError, FcpResult};
+use fcp_core::{
+    AgentHint, BaseConnector, CapabilityId, ConnectorId, CredentialId, FcpError, FcpResult,
+    IdempotencyClass, OperationId, OperationInfo, RiskLevel, SafetyTier,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tracing::{info, instrument};
@@ -273,10 +276,13 @@ impl N8nConnector {
 
     /// Handle the `introspect` method.
     pub async fn handle_introspect(&self) -> FcpResult<serde_json::Value> {
+        let ops = serde_json::to_value(operations_info()).map_err(|e| FcpError::Internal {
+            message: format!("Failed to serialize operations: {e}"),
+        })?;
         Ok(json!({
             "connector_id": "fcp.n8n",
             "version": "0.1.0",
-            "operations": operations_info(),
+            "operations": ops,
         }))
     }
 
@@ -328,10 +334,9 @@ impl N8nConnector {
             .and_then(serde_json::Value::as_str)
             .unwrap_or("");
 
-        let allowed = operations_info().as_array().is_some_and(|ops| {
-            ops.iter()
-                .any(|o| o.get("id").and_then(serde_json::Value::as_str) == Some(operation))
-        });
+        let allowed = operations_info()
+            .iter()
+            .any(|o| o.id.as_ref() == operation);
 
         Ok(json!({
             "allowed": allowed,
@@ -418,50 +423,115 @@ fn require_str<'a>(input: &'a serde_json::Value, field: &str) -> Result<&'a str,
         })
 }
 
+/// Build a single [`OperationInfo`].
+#[allow(clippy::fn_params_excessive_bools)]
+#[allow(clippy::too_many_arguments)]
+fn op_info(
+    id: &'static str,
+    summary: &str,
+    input_schema: serde_json::Value,
+    output_schema: serde_json::Value,
+    capability: &'static str,
+    risk_level: RiskLevel,
+    safety_tier: SafetyTier,
+    idempotency: IdempotencyClass,
+    ai_hints: AgentHint,
+) -> OperationInfo {
+    OperationInfo {
+        id: OperationId::from_static(id),
+        summary: summary.into(),
+        input_schema,
+        output_schema,
+        capability: CapabilityId::from_static(capability),
+        risk_level,
+        description: None,
+        rate_limit: None,
+        requires_approval: None,
+        safety_tier,
+        idempotency,
+        ai_hints,
+    }
+}
+
 /// Build the operations info for introspection.
-fn operations_info() -> serde_json::Value {
-    json!([
-        {
-            "id": "n8n.workflows.list",
-            "summary": "List all workflows in the n8n instance",
-            "capability": "n8n.workflows.read",
-            "risk_level": "low",
-            "safety_tier": "safe",
-            "idempotency": "strict",
-        },
-        {
-            "id": "n8n.workflows.get",
-            "summary": "Get a specific workflow by ID",
-            "capability": "n8n.workflows.read",
-            "risk_level": "low",
-            "safety_tier": "safe",
-            "idempotency": "strict",
-        },
-        {
-            "id": "n8n.workflows.activate",
-            "summary": "Activate or deactivate an n8n workflow",
-            "capability": "n8n.workflows.write",
-            "risk_level": "medium",
-            "safety_tier": "risky",
-            "idempotency": "none",
-        },
-        {
-            "id": "n8n.executions.list",
-            "summary": "List recent workflow executions",
-            "capability": "n8n.executions.read",
-            "risk_level": "low",
-            "safety_tier": "safe",
-            "idempotency": "strict",
-        },
-        {
-            "id": "n8n.executions.get",
-            "summary": "Get details of a specific execution",
-            "capability": "n8n.executions.read",
-            "risk_level": "low",
-            "safety_tier": "safe",
-            "idempotency": "strict",
-        },
-    ])
+fn operations_info() -> Vec<OperationInfo> {
+    vec![
+        op_info(
+            "n8n.workflows.list",
+            "List all workflows in the n8n instance",
+            json!({"type": "object", "required": [], "properties": {}}),
+            json!({"type": "object", "required": ["data"], "properties": {"data": {"type": "array"}}}),
+            "n8n.workflows.read",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "List all workflows in the n8n instance.".into(),
+                examples: vec![],
+                ..Default::default()
+            },
+        ),
+        op_info(
+            "n8n.workflows.get",
+            "Get a specific workflow by ID",
+            json!({"type": "object", "required": ["id"], "properties": {"id": {"type": "string", "description": "Workflow identifier"}}}),
+            json!({"type": "object", "required": ["id", "name"], "properties": {"id": {"type": "string"}, "name": {"type": "string"}}}),
+            "n8n.workflows.read",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "Retrieve details of a specific n8n workflow by ID.".into(),
+                examples: vec![],
+                ..Default::default()
+            },
+        ),
+        op_info(
+            "n8n.workflows.activate",
+            "Activate or deactivate an n8n workflow",
+            json!({"type": "object", "required": ["id", "active"], "properties": {"id": {"type": "string", "description": "Workflow identifier"}, "active": {"type": "boolean", "description": "Whether to activate (true) or deactivate (false)"}}}),
+            json!({"type": "object", "required": ["id"], "properties": {"id": {"type": "string"}}}),
+            "n8n.workflows.write",
+            RiskLevel::Medium,
+            SafetyTier::Risky,
+            IdempotencyClass::None,
+            AgentHint {
+                when_to_use: "Activate or deactivate an n8n workflow.".into(),
+                examples: vec![],
+                ..Default::default()
+            },
+        ),
+        op_info(
+            "n8n.executions.list",
+            "List recent workflow executions",
+            json!({"type": "object", "required": [], "properties": {}}),
+            json!({"type": "object", "required": ["data"], "properties": {"data": {"type": "array"}}}),
+            "n8n.executions.read",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "List recent workflow executions in n8n.".into(),
+                examples: vec![],
+                ..Default::default()
+            },
+        ),
+        op_info(
+            "n8n.executions.get",
+            "Get details of a specific execution",
+            json!({"type": "object", "required": ["id"], "properties": {"id": {"type": "string", "description": "Execution identifier"}}}),
+            json!({"type": "object", "required": ["id", "finished"], "properties": {"id": {"type": "string"}, "finished": {"type": "boolean"}}}),
+            "n8n.executions.read",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "Retrieve details of a specific workflow execution by ID.".into(),
+                examples: vec![],
+                ..Default::default()
+            },
+        ),
+    ]
 }
 
 #[cfg(test)]
@@ -618,31 +688,23 @@ mod tests {
     #[test]
     fn operations_info_has_5_operations() {
         let ops = operations_info();
-        let arr = ops.as_array().unwrap();
-        assert_eq!(arr.len(), 5);
+        assert_eq!(ops.len(), 5);
     }
 
     #[test]
     fn operations_all_have_required_fields() {
         let ops = operations_info();
-        for op in ops.as_array().unwrap() {
-            assert!(op.get("id").is_some(), "missing id");
-            assert!(op.get("summary").is_some(), "missing summary");
-            assert!(op.get("capability").is_some(), "missing capability");
-            assert!(op.get("risk_level").is_some(), "missing risk_level");
-            assert!(op.get("safety_tier").is_some(), "missing safety_tier");
+        for op in &ops {
+            assert!(!op.id.as_ref().is_empty(), "missing id");
+            assert!(!op.summary.is_empty(), "missing summary");
+            assert!(!op.capability.as_ref().is_empty(), "missing capability");
         }
     }
 
     #[test]
     fn operations_ids_are_unique() {
         let ops = operations_info();
-        let ids: Vec<&str> = ops
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter_map(|o| o["id"].as_str())
-            .collect();
+        let ids: Vec<&str> = ops.iter().map(|o| o.id.as_ref()).collect();
         let mut unique = ids.clone();
         unique.sort_unstable();
         unique.dedup();
@@ -651,42 +713,50 @@ mod tests {
 
     #[test]
     fn operations_risk_levels_valid() {
-        let valid = ["low", "medium", "high"];
+        // All RiskLevel variants are valid by construction with typed enums.
         let ops = operations_info();
-        for op in ops.as_array().unwrap() {
-            let rl = op["risk_level"].as_str().unwrap();
-            assert!(valid.contains(&rl), "invalid risk_level: {rl}");
+        for op in &ops {
+            // Just ensure serialization works
+            let v = serde_json::to_value(op.risk_level).unwrap();
+            let rl = v.as_str().unwrap();
+            assert!(
+                ["low", "medium", "high", "critical"].contains(&rl),
+                "invalid risk_level: {rl}"
+            );
         }
     }
 
     #[test]
     fn operations_safety_tiers_valid() {
-        let valid = ["safe", "risky", "dangerous"];
         let ops = operations_info();
-        for op in ops.as_array().unwrap() {
-            let st = op["safety_tier"].as_str().unwrap();
-            assert!(valid.contains(&st), "invalid safety_tier: {st}");
+        for op in &ops {
+            let v = serde_json::to_value(op.safety_tier).unwrap();
+            let st = v.as_str().unwrap();
+            assert!(
+                ["safe", "risky", "dangerous"].contains(&st),
+                "invalid safety_tier: {st}"
+            );
         }
     }
 
     #[test]
     fn read_operations_are_safe() {
         let ops = operations_info();
-        for op in ops.as_array().unwrap() {
-            let cap = op["capability"].as_str().unwrap();
+        for op in &ops {
+            let cap = op.capability.as_ref();
             #[allow(clippy::case_sensitive_file_extension_comparisons)]
             if cap.ends_with(".read") {
                 assert_eq!(
-                    op["safety_tier"].as_str().unwrap(),
-                    "safe",
+                    op.safety_tier,
+                    SafetyTier::Safe,
                     "read op {} should be safe",
-                    op["id"]
+                    op.id.as_ref()
                 );
                 assert_eq!(
-                    op["risk_level"].as_str().unwrap(),
-                    "low",
+                    op.risk_level,
+                    RiskLevel::Low,
                     "read op {} should be low risk",
-                    op["id"]
+                    op.id.as_ref()
                 );
             }
         }
@@ -695,12 +765,7 @@ mod tests {
     #[test]
     fn operations_contain_expected_ids() {
         let ops = operations_info();
-        let ids: Vec<&str> = ops
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter_map(|o| o["id"].as_str())
-            .collect();
+        let ids: Vec<&str> = ops.iter().map(|o| o.id.as_ref()).collect();
         assert!(ids.contains(&"n8n.workflows.list"));
         assert!(ids.contains(&"n8n.workflows.get"));
         assert!(ids.contains(&"n8n.workflows.activate"));
@@ -711,15 +776,15 @@ mod tests {
     #[test]
     fn operations_write_ops_are_risky() {
         let ops = operations_info();
-        for op in ops.as_array().unwrap() {
-            let cap = op["capability"].as_str().unwrap();
+        for op in &ops {
+            let cap = op.capability.as_ref();
             #[allow(clippy::case_sensitive_file_extension_comparisons)]
             if cap.ends_with(".write") {
                 assert_ne!(
-                    op["safety_tier"].as_str().unwrap(),
-                    "safe",
+                    op.safety_tier,
+                    SafetyTier::Safe,
                     "write op {} should not be safe",
-                    op["id"]
+                    op.id.as_ref()
                 );
             }
         }
@@ -806,12 +871,10 @@ mod tests {
     #[test]
     fn operations_all_have_idempotency() {
         let ops = operations_info();
-        for op in ops.as_array().unwrap() {
-            assert!(
-                op.get("idempotency").is_some(),
-                "op {:?} missing idempotency",
-                op["id"]
-            );
+        for op in &ops {
+            // Typed struct always has idempotency; verify serialization round-trips
+            let v = serde_json::to_value(op.idempotency).unwrap();
+            assert!(v.is_string(), "op {} idempotency should serialize", op.id.as_ref());
         }
     }
 
@@ -840,9 +903,9 @@ mod tests {
             ("n8n.executions.get", "n8n.executions.read"),
         ];
         for (op_id, expected_cap) in &expected_caps {
-            let found = ops.as_array().unwrap().iter().any(|o| {
-                o["id"].as_str() == Some(op_id) && o["capability"].as_str() == Some(expected_cap)
-            });
+            let found = ops
+                .iter()
+                .any(|o| o.id.as_ref() == *op_id && o.capability.as_ref() == *expected_cap);
             assert!(
                 found,
                 "operation {op_id} should have capability {expected_cap}"
@@ -1032,9 +1095,8 @@ mod tests {
     #[test]
     fn operations_summaries_non_empty() {
         let ops = operations_info();
-        for op in ops.as_array().unwrap() {
-            let summary = op["summary"].as_str().unwrap();
-            assert!(!summary.is_empty(), "op {} has empty summary", op["id"]);
+        for op in &ops {
+            assert!(!op.summary.is_empty(), "op {} has empty summary", op.id.as_ref());
         }
     }
 
@@ -1047,8 +1109,8 @@ mod tests {
     #[test]
     fn operations_all_capabilities_prefixed() {
         let ops = operations_info();
-        for op in ops.as_array().unwrap() {
-            let cap = op["capability"].as_str().unwrap();
+        for op in &ops {
+            let cap = op.capability.as_ref();
             assert!(
                 cap.starts_with("n8n."),
                 "capability {cap} should start with n8n."

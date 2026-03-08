@@ -3,7 +3,10 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use fcp_core::{BaseConnector, ConnectorId, CredentialId, FcpError, FcpResult};
+use fcp_core::{
+    AgentHint, BaseConnector, CapabilityId, ConnectorId, CredentialId, FcpError, FcpResult,
+    IdempotencyClass, OperationId, OperationInfo, RiskLevel, SafetyTier,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tracing::{info, instrument};
@@ -273,7 +276,7 @@ impl GrafanaConnector {
         Ok(json!({
             "connector_id": "fcp.grafana",
             "version": "0.1.0",
-            "operations": operations_info(),
+            "operations": serde_json::to_value(operations_info()).unwrap_or_default(),
         }))
     }
 
@@ -328,10 +331,9 @@ impl GrafanaConnector {
             .and_then(|v| v.as_str())
             .unwrap_or("");
 
-        let allowed = operations_info().as_array().is_some_and(|ops| {
-            ops.iter()
-                .any(|o| o.get("id").and_then(|v| v.as_str()) == Some(operation))
-        });
+        let allowed = operations_info()
+            .iter()
+            .any(|o| o.id.as_ref() == operation);
 
         Ok(json!({
             "allowed": allowed,
@@ -518,82 +520,325 @@ fn require_str<'a>(input: &'a serde_json::Value, field: &str) -> Result<&'a str,
         })
 }
 
+/// Build a single [`OperationInfo`] entry.
+#[allow(clippy::fn_params_excessive_bools)]
+fn op_info(
+    id: &'static str,
+    summary: &str,
+    input_schema: serde_json::Value,
+    output_schema: serde_json::Value,
+    capability: &'static str,
+    risk_level: RiskLevel,
+    safety_tier: SafetyTier,
+    idempotency: IdempotencyClass,
+    ai_hints: AgentHint,
+) -> OperationInfo {
+    OperationInfo {
+        id: OperationId::from_static(id),
+        summary: summary.into(),
+        input_schema,
+        output_schema,
+        capability: CapabilityId::from_static(capability),
+        risk_level,
+        description: None,
+        rate_limit: None,
+        requires_approval: None,
+        safety_tier,
+        idempotency,
+        ai_hints,
+    }
+}
+
 /// Build the operations info for introspection.
-fn operations_info() -> serde_json::Value {
-    json!([
-        {
-            "id": "grafana.dashboards.list",
-            "summary": "Search dashboards",
-            "capability": "grafana.dashboards.read",
-            "risk_level": "low",
-            "safety_tier": "safe",
-            "idempotency": "strict",
-        },
-        {
-            "id": "grafana.dashboards.get",
-            "summary": "Get a dashboard by UID",
-            "capability": "grafana.dashboards.read",
-            "risk_level": "low",
-            "safety_tier": "safe",
-            "idempotency": "strict",
-        },
-        {
-            "id": "grafana.dashboards.create",
-            "summary": "Create or update a dashboard",
-            "capability": "grafana.dashboards.write",
-            "risk_level": "medium",
-            "safety_tier": "risky",
-            "idempotency": "strict",
-        },
-        {
-            "id": "grafana.dashboards.delete",
-            "summary": "Delete a dashboard by UID",
-            "capability": "grafana.dashboards.write",
-            "risk_level": "high",
-            "safety_tier": "dangerous",
-            "idempotency": "strict",
-        },
-        {
-            "id": "grafana.datasources.list",
-            "summary": "List all datasources",
-            "capability": "grafana.datasources.read",
-            "risk_level": "low",
-            "safety_tier": "safe",
-            "idempotency": "strict",
-        },
-        {
-            "id": "grafana.datasources.query",
-            "summary": "Query a datasource (PromQL, LogQL, etc.)",
-            "capability": "grafana.datasources.read",
-            "risk_level": "low",
-            "safety_tier": "safe",
-            "idempotency": "strict",
-        },
-        {
-            "id": "grafana.alerts.list",
-            "summary": "List alert rules",
-            "capability": "grafana.alerts.read",
-            "risk_level": "low",
-            "safety_tier": "safe",
-            "idempotency": "strict",
-        },
-        {
-            "id": "grafana.alerts.create",
-            "summary": "Create an alert rule",
-            "capability": "grafana.alerts.write",
-            "risk_level": "medium",
-            "safety_tier": "risky",
-            "idempotency": "none",
-        },
-        {
-            "id": "grafana.annotations.create",
-            "summary": "Create an annotation on a dashboard or globally",
-            "capability": "grafana.annotations.write",
-            "risk_level": "low",
-            "safety_tier": "safe",
-            "idempotency": "none",
-        },
-    ])
+fn operations_info() -> Vec<OperationInfo> {
+    vec![
+        op_info(
+            "grafana.dashboards.list",
+            "Search dashboards",
+            json!({
+                "type": "object",
+                "required": [],
+                "properties": {
+                    "query": { "type": "string", "description": "Search query" },
+                    "tag": { "type": "array", "description": "Filter by tags" },
+                    "limit": { "type": "integer", "minimum": 1, "maximum": 5000 }
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["dashboards"],
+                "properties": {
+                    "dashboards": { "type": "array" }
+                }
+            }),
+            "grafana.dashboards.read",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "Search and list Grafana dashboards.".into(),
+                common_mistakes: vec![],
+                examples: vec![
+                    r#"{"query": "production", "limit": 50}"#.into(),
+                ],
+                related: vec![CapabilityId::from_static("grafana.dashboards.get")],
+            },
+        ),
+        op_info(
+            "grafana.dashboards.get",
+            "Get a dashboard by UID",
+            json!({
+                "type": "object",
+                "required": ["uid"],
+                "properties": {
+                    "uid": { "type": "string" }
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["dashboard", "meta"],
+                "properties": {
+                    "dashboard": { "type": "object" },
+                    "meta": { "type": "object" }
+                }
+            }),
+            "grafana.dashboards.read",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "Retrieve a specific dashboard by UID.".into(),
+                common_mistakes: vec![],
+                examples: vec![
+                    r#"{"uid": "abc123def"}"#.into(),
+                ],
+                related: vec![
+                    CapabilityId::from_static("grafana.dashboards.list"),
+                    CapabilityId::from_static("grafana.dashboards.create"),
+                ],
+            },
+        ),
+        op_info(
+            "grafana.dashboards.create",
+            "Create or update a dashboard",
+            json!({
+                "type": "object",
+                "required": ["dashboard"],
+                "properties": {
+                    "dashboard": { "type": "object", "description": "Dashboard JSON model" },
+                    "folder_uid": { "type": "string" },
+                    "overwrite": { "type": "boolean" }
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["uid", "url"],
+                "properties": {
+                    "uid": { "type": "string" },
+                    "url": { "type": "string" }
+                }
+            }),
+            "grafana.dashboards.write",
+            RiskLevel::Medium,
+            SafetyTier::Risky,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "Create or update a Grafana dashboard.".into(),
+                common_mistakes: vec![
+                    "Not setting overwrite=true when updating — will fail if dashboard exists.".into(),
+                ],
+                examples: vec![
+                    r#"{"dashboard": {"title": "API Metrics", "panels": []}, "overwrite": true}"#.into(),
+                ],
+                related: vec![
+                    CapabilityId::from_static("grafana.dashboards.get"),
+                    CapabilityId::from_static("grafana.dashboards.delete"),
+                ],
+            },
+        ),
+        op_info(
+            "grafana.dashboards.delete",
+            "Delete a dashboard by UID",
+            json!({
+                "type": "object",
+                "required": ["uid"],
+                "properties": {
+                    "uid": { "type": "string" }
+                }
+            }),
+            json!({ "type": "object" }),
+            "grafana.dashboards.write",
+            RiskLevel::High,
+            SafetyTier::Dangerous,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "Delete a dashboard. Cannot be undone.".into(),
+                common_mistakes: vec![],
+                examples: vec![
+                    r#"{"uid": "abc123def"}"#.into(),
+                ],
+                related: vec![CapabilityId::from_static("grafana.dashboards.get")],
+            },
+        ),
+        op_info(
+            "grafana.datasources.list",
+            "List all datasources",
+            json!({
+                "type": "object",
+                "required": []
+            }),
+            json!({
+                "type": "object",
+                "required": ["datasources"],
+                "properties": {
+                    "datasources": { "type": "array" }
+                }
+            }),
+            "grafana.datasources.read",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "List configured datasources.".into(),
+                common_mistakes: vec![],
+                examples: vec![
+                    r"{}".into(),
+                ],
+                related: vec![CapabilityId::from_static("grafana.datasources.query")],
+            },
+        ),
+        op_info(
+            "grafana.datasources.query",
+            "Query a datasource (PromQL, LogQL, etc.)",
+            json!({
+                "type": "object",
+                "required": ["datasource_uid", "query"],
+                "properties": {
+                    "datasource_uid": { "type": "string" },
+                    "query": { "type": "string", "description": "PromQL, LogQL, or other datasource-specific query" },
+                    "from_ts": { "type": "string" },
+                    "to_ts": { "type": "string" }
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["results"],
+                "properties": {
+                    "results": { "type": "object" }
+                }
+            }),
+            "grafana.datasources.read",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "Query a datasource with PromQL, LogQL, or other query language.".into(),
+                common_mistakes: vec![
+                    "Not specifying time range — defaults may return too much or too little data.".into(),
+                ],
+                examples: vec![
+                    r#"{"datasource_uid": "prometheus", "query": "rate(http_requests_total[5m])", "from_ts": "now-1h", "to_ts": "now"}"#.into(),
+                ],
+                related: vec![CapabilityId::from_static("grafana.datasources.list")],
+            },
+        ),
+        op_info(
+            "grafana.alerts.list",
+            "List alert rules",
+            json!({
+                "type": "object",
+                "required": [],
+                "properties": {
+                    "state": { "type": "string", "description": "Filter by state: alerting, pending, normal, etc." },
+                    "limit": { "type": "integer" }
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["rules"],
+                "properties": {
+                    "rules": { "type": "array" }
+                }
+            }),
+            "grafana.alerts.read",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "List alert rules and their current states.".into(),
+                common_mistakes: vec![],
+                examples: vec![
+                    r#"{"state": "alerting"}"#.into(),
+                ],
+                related: vec![CapabilityId::from_static("grafana.alerts.create")],
+            },
+        ),
+        op_info(
+            "grafana.alerts.create",
+            "Create an alert rule",
+            json!({
+                "type": "object",
+                "required": ["rule"],
+                "properties": {
+                    "rule": { "type": "object", "description": "Alert rule definition" }
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["uid"],
+                "properties": {
+                    "uid": { "type": "string" }
+                }
+            }),
+            "grafana.alerts.write",
+            RiskLevel::Medium,
+            SafetyTier::Risky,
+            IdempotencyClass::None,
+            AgentHint {
+                when_to_use: "Create a new alert rule.".into(),
+                common_mistakes: vec![
+                    "Not specifying notification channels for the alert.".into(),
+                ],
+                examples: vec![
+                    r#"{"rule": {"title": "High Error Rate", "condition": "A", "data": []}}"#.into(),
+                ],
+                related: vec![CapabilityId::from_static("grafana.alerts.list")],
+            },
+        ),
+        op_info(
+            "grafana.annotations.create",
+            "Create an annotation on a dashboard or globally",
+            json!({
+                "type": "object",
+                "required": ["text"],
+                "properties": {
+                    "text": { "type": "string" },
+                    "dashboard_uid": { "type": "string" },
+                    "tags": { "type": "array" },
+                    "time": { "type": "integer", "description": "Epoch ms" }
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["id"],
+                "properties": {
+                    "id": { "type": "integer" }
+                }
+            }),
+            "grafana.annotations.write",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::None,
+            AgentHint {
+                when_to_use: "Mark events on dashboards (deploys, incidents, etc.).".into(),
+                common_mistakes: vec![],
+                examples: vec![
+                    r#"{"text": "Deploy v2.1.0", "tags": ["deploy"]}"#.into(),
+                ],
+                related: vec![CapabilityId::from_static("grafana.dashboards.get")],
+            },
+        ),
+    ]
 }
 
 #[cfg(test)]
@@ -843,15 +1088,20 @@ mod tests {
 
     // ── operations_info ─────────────────────────────────────────
 
+    /// Helper: serialize `operations_info` to JSON for test assertions.
+    fn ops_json() -> serde_json::Value {
+        serde_json::to_value(operations_info()).unwrap()
+    }
+
     #[test]
     fn operations_info_count() {
-        let ops = operations_info();
+        let ops = ops_json();
         assert_eq!(ops.as_array().unwrap().len(), 9);
     }
 
     #[test]
     fn operations_info_required_fields() {
-        let ops = operations_info();
+        let ops = ops_json();
         for op in ops.as_array().unwrap() {
             assert!(
                 op.get("id").and_then(|v| v.as_str()).is_some(),
@@ -882,7 +1132,7 @@ mod tests {
 
     #[test]
     fn operations_info_unique_ids() {
-        let ops = operations_info();
+        let ops = ops_json();
         let ids: Vec<&str> = ops
             .as_array()
             .unwrap()
@@ -898,7 +1148,7 @@ mod tests {
     #[test]
     fn operations_info_valid_risk_levels() {
         let valid = ["low", "medium", "high", "critical"];
-        let ops = operations_info();
+        let ops = ops_json();
         for op in ops.as_array().unwrap() {
             let rl = op["risk_level"].as_str().unwrap();
             assert!(valid.contains(&rl), "invalid risk_level: {rl}");
@@ -907,7 +1157,7 @@ mod tests {
 
     #[test]
     fn operations_info_read_ops_are_safe() {
-        let ops = operations_info();
+        let ops = ops_json();
         for op in ops.as_array().unwrap() {
             let cap = op["capability"].as_str().unwrap();
             let tier = op["safety_tier"].as_str().unwrap();
@@ -923,7 +1173,7 @@ mod tests {
 
     #[test]
     fn operations_info_has_expected_ops() {
-        let ops = operations_info();
+        let ops = ops_json();
         let ids: Vec<&str> = ops
             .as_array()
             .unwrap()
@@ -943,7 +1193,7 @@ mod tests {
 
     #[test]
     fn operations_delete_is_dangerous() {
-        let ops = operations_info();
+        let ops = ops_json();
         let delete_op = ops
             .as_array()
             .unwrap()
@@ -1101,7 +1351,7 @@ mod tests {
     #[test]
     fn operations_info_idempotency_values_valid() {
         let valid = ["strict", "none", "idempotent"];
-        let ops = operations_info();
+        let ops = ops_json();
         for op in ops.as_array().unwrap() {
             let idemp = op["idempotency"].as_str().unwrap();
             assert!(
@@ -1114,7 +1364,7 @@ mod tests {
 
     #[test]
     fn operations_info_annotations_create_is_not_idempotent() {
-        let ops = operations_info();
+        let ops = ops_json();
         let ann_op = ops
             .as_array()
             .unwrap()
@@ -1126,7 +1376,7 @@ mod tests {
 
     #[test]
     fn operations_info_datasources_list_capability() {
-        let ops = operations_info();
+        let ops = ops_json();
         let ds_op = ops
             .as_array()
             .unwrap()
@@ -1252,7 +1502,7 @@ mod tests {
     #[test]
     fn operations_info_safety_tiers_valid() {
         let valid = ["safe", "risky", "dangerous"];
-        let ops = operations_info();
+        let ops = ops_json();
         for op in ops.as_array().unwrap() {
             let st = op["safety_tier"].as_str().unwrap();
             assert!(valid.contains(&st), "invalid safety_tier: {st}");
@@ -1261,7 +1511,7 @@ mod tests {
 
     #[test]
     fn operations_info_dashboards_create_is_risky() {
-        let ops = operations_info();
+        let ops = ops_json();
         let op = ops.as_array().unwrap().iter()
             .find(|o| o["id"] == "grafana.dashboards.create")
             .unwrap();
@@ -1271,7 +1521,7 @@ mod tests {
 
     #[test]
     fn operations_info_alerts_create_not_idempotent() {
-        let ops = operations_info();
+        let ops = ops_json();
         let op = ops.as_array().unwrap().iter()
             .find(|o| o["id"] == "grafana.alerts.create")
             .unwrap();
@@ -1280,7 +1530,7 @@ mod tests {
 
     #[test]
     fn operations_info_all_prefixed_grafana() {
-        let ops = operations_info();
+        let ops = ops_json();
         for op in ops.as_array().unwrap() {
             let id = op["id"].as_str().unwrap();
             assert!(id.starts_with("grafana."), "op {id} missing grafana. prefix");
@@ -1307,7 +1557,7 @@ mod tests {
 
     #[test]
     fn operations_info_dashboards_get_capability() {
-        let ops = operations_info();
+        let ops = ops_json();
         let op = ops.as_array().unwrap().iter()
             .find(|o| o["id"] == "grafana.dashboards.get")
             .unwrap();
@@ -1316,7 +1566,7 @@ mod tests {
 
     #[test]
     fn operations_info_datasources_query_is_safe() {
-        let ops = operations_info();
+        let ops = ops_json();
         let op = ops.as_array().unwrap().iter()
             .find(|o| o["id"] == "grafana.datasources.query")
             .unwrap();
@@ -1326,7 +1576,7 @@ mod tests {
 
     #[test]
     fn operations_info_alerts_list_is_safe_and_strict() {
-        let ops = operations_info();
+        let ops = ops_json();
         let op = ops.as_array().unwrap().iter()
             .find(|o| o["id"] == "grafana.alerts.list")
             .unwrap();

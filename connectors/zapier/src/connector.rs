@@ -3,7 +3,10 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use fcp_core::{BaseConnector, ConnectorId, CredentialId, FcpError, FcpResult};
+use fcp_core::{
+    AgentHint, BaseConnector, CapabilityId, ConnectorId, CredentialId, FcpError, FcpResult,
+    IdempotencyClass, OperationId, OperationInfo, RiskLevel, SafetyTier,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tracing::{info, instrument};
@@ -266,10 +269,13 @@ impl ZapierConnector {
 
     /// Handle the `introspect` method.
     pub async fn handle_introspect(&self) -> FcpResult<serde_json::Value> {
+        let ops = serde_json::to_value(operations_info()).map_err(|e| FcpError::Internal {
+            message: format!("Failed to serialize operations: {e}"),
+        })?;
         Ok(json!({
             "connector_id": "fcp.zapier",
             "version": "0.1.0",
-            "operations": operations_info(),
+            "operations": ops,
         }))
     }
 
@@ -318,10 +324,9 @@ impl ZapierConnector {
             .and_then(serde_json::Value::as_str)
             .unwrap_or("");
 
-        let allowed = operations_info().as_array().is_some_and(|ops| {
-            ops.iter()
-                .any(|o| o.get("id").and_then(serde_json::Value::as_str) == Some(operation))
-        });
+        let allowed = operations_info()
+            .iter()
+            .any(|o| o.id.as_ref() == operation);
 
         Ok(json!({
             "allowed": allowed,
@@ -381,53 +386,93 @@ fn require_str<'a>(input: &'a serde_json::Value, field: &str) -> Result<&'a str,
         })
 }
 
+/// Build a single [`OperationInfo`].
+#[allow(clippy::fn_params_excessive_bools)]
+#[allow(clippy::too_many_arguments)]
+fn op_info(
+    id: &'static str,
+    summary: &str,
+    input_schema: serde_json::Value,
+    output_schema: serde_json::Value,
+    capability: &'static str,
+    risk_level: RiskLevel,
+    safety_tier: SafetyTier,
+    idempotency: IdempotencyClass,
+    ai_hints: AgentHint,
+) -> OperationInfo {
+    OperationInfo {
+        id: OperationId::from_static(id),
+        summary: summary.into(),
+        input_schema,
+        output_schema,
+        capability: CapabilityId::from_static(capability),
+        risk_level,
+        description: None,
+        rate_limit: None,
+        requires_approval: None,
+        safety_tier,
+        idempotency,
+        ai_hints,
+    }
+}
+
 /// Build the operations info for introspection.
-fn operations_info() -> serde_json::Value {
-    json!([
-        {
-            "id": "zapier.zaps.list",
-            "summary": "List zaps for the authenticated user",
-            "capability": "zapier.zaps.read",
-            "risk_level": "low",
-            "safety_tier": "safe",
-            "idempotency": "strict",
-            "input_schema": {
+fn operations_info() -> Vec<OperationInfo> {
+    vec![
+        op_info(
+            "zapier.zaps.list",
+            "List zaps for the authenticated user",
+            json!({
                 "type": "object",
                 "required": [],
                 "properties": {}
-            },
-            "output_schema": {
+            }),
+            json!({
                 "type": "object",
                 "required": ["zaps"],
                 "properties": {
                     "zaps": {"type": "array"}
                 }
-            }
-        },
-        {
-            "id": "zapier.zaps.execute",
-            "summary": "Execute a zap action",
-            "capability": "zapier.zaps.write",
-            "risk_level": "medium",
-            "safety_tier": "risky",
-            "idempotency": "none",
-            "input_schema": {
+            }),
+            "zapier.zaps.read",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "List all zaps for the authenticated Zapier user.".into(),
+                examples: vec![],
+                ..Default::default()
+            },
+        ),
+        op_info(
+            "zapier.zaps.execute",
+            "Execute a zap action",
+            json!({
                 "type": "object",
                 "required": ["action_id", "params"],
                 "properties": {
                     "action_id": {"type": "string", "description": "NLA action ID"},
                     "params": {"type": "object", "description": "Action parameters"}
                 }
-            },
-            "output_schema": {
+            }),
+            json!({
                 "type": "object",
                 "required": ["result"],
                 "properties": {
                     "result": {"type": "object"}
                 }
-            }
-        },
-    ])
+            }),
+            "zapier.zaps.write",
+            RiskLevel::Medium,
+            SafetyTier::Risky,
+            IdempotencyClass::None,
+            AgentHint {
+                when_to_use: "Execute a Zapier NLA action.".into(),
+                examples: vec![],
+                ..Default::default()
+            },
+        ),
+    ]
 }
 
 #[cfg(test)]
@@ -564,43 +609,30 @@ mod tests {
     #[test]
     fn operations_info_has_2_operations() {
         let ops = operations_info();
-        let arr = ops.as_array().unwrap();
-        assert_eq!(arr.len(), 2);
+        assert_eq!(ops.len(), 2);
     }
 
     #[test]
     fn operations_all_have_required_fields() {
         let ops = operations_info();
-        for op in ops.as_array().unwrap() {
-            assert!(op.get("id").is_some(), "missing id");
-            assert!(op.get("summary").is_some(), "missing summary");
-            assert!(op.get("capability").is_some(), "missing capability");
-            assert!(op.get("risk_level").is_some(), "missing risk_level");
-            assert!(op.get("safety_tier").is_some(), "missing safety_tier");
+        for op in &ops {
+            assert!(!op.id.as_ref().is_empty(), "missing id");
+            assert!(!op.summary.is_empty(), "missing summary");
+            assert!(!op.capability.as_ref().is_empty(), "missing capability");
         }
     }
 
     #[test]
     fn operations_all_have_schemas() {
         let ops = operations_info();
-        for op in ops.as_array().unwrap() {
-            assert!(
-                op.get("input_schema").is_some(),
-                "missing input_schema for {:?}",
-                op["id"]
-            );
-            assert!(
-                op.get("output_schema").is_some(),
-                "missing output_schema for {:?}",
-                op["id"]
-            );
+        for op in &ops {
             assert_eq!(
-                op["input_schema"]["type"].as_str().unwrap(),
+                op.input_schema["type"].as_str().unwrap(),
                 "object",
                 "input_schema type should be object"
             );
             assert_eq!(
-                op["output_schema"]["type"].as_str().unwrap(),
+                op.output_schema["type"].as_str().unwrap(),
                 "object",
                 "output_schema type should be object"
             );
@@ -610,12 +642,7 @@ mod tests {
     #[test]
     fn operations_ids_are_unique() {
         let ops = operations_info();
-        let ids: Vec<&str> = ops
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter_map(|o| o["id"].as_str())
-            .collect();
+        let ids: Vec<&str> = ops.iter().map(|o| o.id.as_ref()).collect();
         let mut unique = ids.clone();
         unique.sort_unstable();
         unique.dedup();
@@ -624,42 +651,48 @@ mod tests {
 
     #[test]
     fn operations_risk_levels_valid() {
-        let valid = ["low", "medium", "high"];
         let ops = operations_info();
-        for op in ops.as_array().unwrap() {
-            let rl = op["risk_level"].as_str().unwrap();
-            assert!(valid.contains(&rl), "invalid risk_level: {rl}");
+        for op in &ops {
+            let v = serde_json::to_value(op.risk_level).unwrap();
+            let rl = v.as_str().unwrap();
+            assert!(
+                ["low", "medium", "high", "critical"].contains(&rl),
+                "invalid risk_level: {rl}"
+            );
         }
     }
 
     #[test]
     fn operations_safety_tiers_valid() {
-        let valid = ["safe", "risky", "dangerous"];
         let ops = operations_info();
-        for op in ops.as_array().unwrap() {
-            let st = op["safety_tier"].as_str().unwrap();
-            assert!(valid.contains(&st), "invalid safety_tier: {st}");
+        for op in &ops {
+            let v = serde_json::to_value(op.safety_tier).unwrap();
+            let st = v.as_str().unwrap();
+            assert!(
+                ["safe", "risky", "dangerous"].contains(&st),
+                "invalid safety_tier: {st}"
+            );
         }
     }
 
     #[test]
     fn read_operations_are_safe() {
         let ops = operations_info();
-        for op in ops.as_array().unwrap() {
-            let cap = op["capability"].as_str().unwrap();
+        for op in &ops {
+            let cap = op.capability.as_ref();
             #[allow(clippy::case_sensitive_file_extension_comparisons)]
             if cap.ends_with(".read") {
                 assert_eq!(
-                    op["safety_tier"].as_str().unwrap(),
-                    "safe",
+                    op.safety_tier,
+                    SafetyTier::Safe,
                     "read op {} should be safe",
-                    op["id"]
+                    op.id.as_ref()
                 );
                 assert_eq!(
-                    op["risk_level"].as_str().unwrap(),
-                    "low",
+                    op.risk_level,
+                    RiskLevel::Low,
                     "read op {} should be low risk",
-                    op["id"]
+                    op.id.as_ref()
                 );
             }
         }
@@ -668,12 +701,7 @@ mod tests {
     #[test]
     fn operations_contain_expected_ids() {
         let ops = operations_info();
-        let ids: Vec<&str> = ops
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter_map(|o| o["id"].as_str())
-            .collect();
+        let ids: Vec<&str> = ops.iter().map(|o| o.id.as_ref()).collect();
         assert!(ids.contains(&"zapier.zaps.list"));
         assert!(ids.contains(&"zapier.zaps.execute"));
     }
@@ -681,49 +709,31 @@ mod tests {
     #[test]
     fn operations_all_have_idempotency() {
         let ops = operations_info();
-        for op in ops.as_array().unwrap() {
-            assert!(
-                op.get("idempotency").is_some(),
-                "op {:?} missing idempotency",
-                op["id"]
-            );
+        for op in &ops {
+            let v = serde_json::to_value(op.idempotency).unwrap();
+            assert!(v.is_string(), "op {} idempotency should serialize", op.id.as_ref());
         }
     }
 
     #[test]
     fn operations_list_is_strict_idempotent() {
         let ops = operations_info();
-        let list_op = ops
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|o| o["id"] == "zapier.zaps.list")
-            .unwrap();
-        assert_eq!(list_op["idempotency"].as_str().unwrap(), "strict");
+        let list_op = ops.iter().find(|o| o.id.as_ref() == "zapier.zaps.list").unwrap();
+        assert_eq!(list_op.idempotency, IdempotencyClass::Strict);
     }
 
     #[test]
     fn operations_execute_is_not_idempotent() {
         let ops = operations_info();
-        let exec_op = ops
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|o| o["id"] == "zapier.zaps.execute")
-            .unwrap();
-        assert_eq!(exec_op["idempotency"].as_str().unwrap(), "none");
+        let exec_op = ops.iter().find(|o| o.id.as_ref() == "zapier.zaps.execute").unwrap();
+        assert_eq!(exec_op.idempotency, IdempotencyClass::None);
     }
 
     #[test]
     fn operations_execute_has_required_input_fields() {
         let ops = operations_info();
-        let exec_op = ops
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|o| o["id"] == "zapier.zaps.execute")
-            .unwrap();
-        let required = exec_op["input_schema"]["required"].as_array().unwrap();
+        let exec_op = ops.iter().find(|o| o.id.as_ref() == "zapier.zaps.execute").unwrap();
+        let required = exec_op.input_schema["required"].as_array().unwrap();
         let req_strs: Vec<&str> = required.iter().filter_map(|v| v.as_str()).collect();
         assert!(req_strs.contains(&"action_id"));
         assert!(req_strs.contains(&"params"));
@@ -732,26 +742,16 @@ mod tests {
     #[test]
     fn operations_list_has_no_required_input() {
         let ops = operations_info();
-        let list_op = ops
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|o| o["id"] == "zapier.zaps.list")
-            .unwrap();
-        let required = list_op["input_schema"]["required"].as_array().unwrap();
+        let list_op = ops.iter().find(|o| o.id.as_ref() == "zapier.zaps.list").unwrap();
+        let required = list_op.input_schema["required"].as_array().unwrap();
         assert!(required.is_empty());
     }
 
     #[test]
     fn operations_list_output_has_zaps() {
         let ops = operations_info();
-        let list_op = ops
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|o| o["id"] == "zapier.zaps.list")
-            .unwrap();
-        let required = list_op["output_schema"]["required"].as_array().unwrap();
+        let list_op = ops.iter().find(|o| o.id.as_ref() == "zapier.zaps.list").unwrap();
+        let required = list_op.output_schema["required"].as_array().unwrap();
         assert!(
             required
                 .iter()
@@ -763,13 +763,8 @@ mod tests {
     #[test]
     fn operations_execute_output_has_result() {
         let ops = operations_info();
-        let exec_op = ops
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|o| o["id"] == "zapier.zaps.execute")
-            .unwrap();
-        let required = exec_op["output_schema"]["required"].as_array().unwrap();
+        let exec_op = ops.iter().find(|o| o.id.as_ref() == "zapier.zaps.execute").unwrap();
+        let required = exec_op.output_schema["required"].as_array().unwrap();
         assert!(
             required
                 .iter()
@@ -911,15 +906,15 @@ mod tests {
     #[test]
     fn operations_write_ops_are_not_safe() {
         let ops = operations_info();
-        for op in ops.as_array().unwrap() {
-            let cap = op["capability"].as_str().unwrap();
+        for op in &ops {
+            let cap = op.capability.as_ref();
             #[allow(clippy::case_sensitive_file_extension_comparisons)]
             if cap.ends_with(".write") {
                 assert_ne!(
-                    op["safety_tier"].as_str().unwrap(),
-                    "safe",
+                    op.safety_tier,
+                    SafetyTier::Safe,
                     "write op {} should not be safe",
-                    op["id"]
+                    op.id.as_ref()
                 );
             }
         }
@@ -928,20 +923,10 @@ mod tests {
     #[test]
     fn operations_capabilities_match_manifest() {
         let ops = operations_info();
-        let list_op = ops
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|o| o["id"] == "zapier.zaps.list")
-            .unwrap();
-        assert_eq!(list_op["capability"].as_str().unwrap(), "zapier.zaps.read");
-        let exec_op = ops
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|o| o["id"] == "zapier.zaps.execute")
-            .unwrap();
-        assert_eq!(exec_op["capability"].as_str().unwrap(), "zapier.zaps.write");
+        let list_op = ops.iter().find(|o| o.id.as_ref() == "zapier.zaps.list").unwrap();
+        assert_eq!(list_op.capability.as_ref(), "zapier.zaps.read");
+        let exec_op = ops.iter().find(|o| o.id.as_ref() == "zapier.zaps.execute").unwrap();
+        assert_eq!(exec_op.capability.as_ref(), "zapier.zaps.write");
     }
 
     #[test]
@@ -981,27 +966,17 @@ mod tests {
     #[test]
     fn operations_execute_is_risky() {
         let ops = operations_info();
-        let exec_op = ops
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|o| o["id"] == "zapier.zaps.execute")
-            .unwrap();
-        assert_eq!(exec_op["safety_tier"], "risky");
-        assert_eq!(exec_op["risk_level"], "medium");
+        let exec_op = ops.iter().find(|o| o.id.as_ref() == "zapier.zaps.execute").unwrap();
+        assert_eq!(exec_op.safety_tier, SafetyTier::Risky);
+        assert_eq!(exec_op.risk_level, RiskLevel::Medium);
     }
 
     #[test]
     fn operations_list_is_safe() {
         let ops = operations_info();
-        let list_op = ops
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|o| o["id"] == "zapier.zaps.list")
-            .unwrap();
-        assert_eq!(list_op["safety_tier"], "safe");
-        assert_eq!(list_op["risk_level"], "low");
+        let list_op = ops.iter().find(|o| o.id.as_ref() == "zapier.zaps.list").unwrap();
+        assert_eq!(list_op.safety_tier, SafetyTier::Safe);
+        assert_eq!(list_op.risk_level, RiskLevel::Low);
     }
 
     #[test]

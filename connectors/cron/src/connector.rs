@@ -7,7 +7,10 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use chrono::Utc;
-use fcp_core::{BaseConnector, ConnectorId, FcpError, FcpResult};
+use fcp_core::{
+    AgentHint, BaseConnector, CapabilityId, ConnectorId, FcpError, FcpResult, IdempotencyClass,
+    OperationId, OperationInfo, RiskLevel, SafetyTier,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tracing::{info, instrument};
@@ -420,10 +423,13 @@ impl CronConnector {
 
     /// Handle the `introspect` method.
     pub async fn handle_introspect(&self) -> FcpResult<serde_json::Value> {
+        let ops = serde_json::to_value(operations_info()).map_err(|e| FcpError::Internal {
+            message: format!("Failed to serialize operations: {e}"),
+        })?;
         Ok(json!({
             "connector_id": "fcp.cron",
             "version": "0.1.0",
-            "operations": operations_info(),
+            "operations": ops,
         }))
     }
 
@@ -474,10 +480,9 @@ impl CronConnector {
             .and_then(serde_json::Value::as_str)
             .unwrap_or("");
 
-        let allowed = operations_info().as_array().is_some_and(|ops| {
-            ops.iter()
-                .any(|o| o.get("id").and_then(serde_json::Value::as_str) == Some(operation))
-        });
+        let allowed = operations_info()
+            .iter()
+            .any(|o| o.id.as_ref() == operation);
 
         Ok(json!({
             "allowed": allowed,
@@ -669,50 +674,131 @@ impl CronConnector {
     }
 }
 
+/// Build a single [`OperationInfo`].
+#[allow(clippy::fn_params_excessive_bools, clippy::too_many_arguments)]
+fn op_info(
+    id: &'static str,
+    summary: &str,
+    input_schema: serde_json::Value,
+    output_schema: serde_json::Value,
+    capability: &'static str,
+    risk_level: RiskLevel,
+    safety_tier: SafetyTier,
+    idempotency: IdempotencyClass,
+    ai_hints: AgentHint,
+) -> OperationInfo {
+    OperationInfo {
+        id: OperationId::from_static(id),
+        summary: summary.into(),
+        input_schema,
+        output_schema,
+        capability: CapabilityId::from_static(capability),
+        risk_level,
+        description: None,
+        rate_limit: None,
+        requires_approval: None,
+        safety_tier,
+        idempotency,
+        ai_hints,
+    }
+}
+
 /// Build the operations info for introspection.
-fn operations_info() -> serde_json::Value {
-    json!([
-        {
-            "id": "cron.schedules.list",
-            "summary": "List configured cron schedules",
-            "capability": "cron.schedules.read",
-            "risk_level": "low",
-            "safety_tier": "safe",
-            "idempotency": "strict",
-        },
-        {
-            "id": "cron.schedules.create",
-            "summary": "Create a new cron schedule",
-            "capability": "cron.schedules.write",
-            "risk_level": "medium",
-            "safety_tier": "risky",
-            "idempotency": "strict",
-        },
-        {
-            "id": "cron.schedules.delete",
-            "summary": "Delete a cron schedule",
-            "capability": "cron.schedules.write",
-            "risk_level": "high",
-            "safety_tier": "dangerous",
-            "idempotency": "strict",
-        },
-        {
-            "id": "cron.trigger",
-            "summary": "Manually trigger a schedule immediately",
-            "capability": "cron.schedules.write",
-            "risk_level": "medium",
-            "safety_tier": "risky",
-            "idempotency": "none",
-        },
-        {
-            "id": "cron.executions.list",
-            "summary": "List recent execution history for a schedule",
-            "capability": "cron.executions.read",
-            "risk_level": "low",
-            "safety_tier": "safe",
-            "idempotency": "strict",
-        },
-    ])
+fn operations_info() -> Vec<OperationInfo> {
+    vec![
+        op_info(
+            "cron.schedules.list",
+            "List configured cron schedules",
+            json!({"type": "object", "required": [], "properties": {}}),
+            json!({"type": "object", "required": ["schedules"], "properties": {"schedules": {"type": "array"}}}),
+            "cron.schedules.read",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "List all configured cron schedules.".into(),
+                examples: vec![],
+                ..Default::default()
+            },
+        ),
+        op_info(
+            "cron.schedules.create",
+            "Create a new cron schedule",
+            json!({
+                "type": "object",
+                "required": ["name", "expression", "target_operation"],
+                "properties": {
+                    "name": {"type": "string", "description": "Human-readable name for the schedule"},
+                    "expression": {"type": "string", "description": "Cron expression (e.g. '*/5 * * * *' for every 5 minutes)"},
+                    "target_operation": {"type": "string", "description": "FCP operation ID to invoke on trigger"},
+                    "payload": {"type": "object", "description": "Static payload to pass to the target operation"},
+                    "enabled": {"type": "boolean"}
+                }
+            }),
+            json!({"type": "object", "required": ["schedule_id"], "properties": {"schedule_id": {"type": "string"}}}),
+            "cron.schedules.write",
+            RiskLevel::Medium,
+            SafetyTier::Risky,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "Create a new timed schedule to invoke an operation periodically.".into(),
+                examples: vec![],
+                ..Default::default()
+            },
+        ),
+        op_info(
+            "cron.schedules.delete",
+            "Delete a cron schedule",
+            json!({"type": "object", "required": ["schedule_id"], "properties": {"schedule_id": {"type": "string"}}}),
+            json!({"type": "object", "properties": {}}),
+            "cron.schedules.write",
+            RiskLevel::High,
+            SafetyTier::Dangerous,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "Remove a cron schedule. The operation will no longer be triggered.".into(),
+                examples: vec![],
+                ..Default::default()
+            },
+        ),
+        op_info(
+            "cron.trigger",
+            "Manually trigger a schedule immediately",
+            json!({"type": "object", "required": ["schedule_id"], "properties": {"schedule_id": {"type": "string"}}}),
+            json!({"type": "object", "required": ["execution_id"], "properties": {"execution_id": {"type": "string"}}}),
+            "cron.schedules.write",
+            RiskLevel::Medium,
+            SafetyTier::Risky,
+            IdempotencyClass::None,
+            AgentHint {
+                when_to_use: "Manually trigger a schedule outside its normal cron timing.".into(),
+                examples: vec![],
+                ..Default::default()
+            },
+        ),
+        op_info(
+            "cron.executions.list",
+            "List recent execution history for a schedule",
+            json!({
+                "type": "object",
+                "required": [],
+                "properties": {
+                    "schedule_id": {"type": "string"},
+                    "limit": {"type": "integer", "maximum": 100}
+                }
+            }),
+            json!({"type": "object", "required": ["executions"], "properties": {"executions": {"type": "array"}}}),
+            "cron.executions.read",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "View execution history for a cron schedule.".into(),
+                examples: vec![],
+                ..Default::default()
+            },
+        ),
+    ]
 }
 
 #[cfg(test)]
@@ -792,31 +878,23 @@ mod tests {
     #[test]
     fn operations_info_has_5_operations() {
         let ops = operations_info();
-        let arr = ops.as_array().unwrap();
-        assert_eq!(arr.len(), 5);
+        assert_eq!(ops.len(), 5);
     }
 
     #[test]
     fn operations_all_have_required_fields() {
         let ops = operations_info();
-        for op in ops.as_array().unwrap() {
-            assert!(op.get("id").is_some(), "missing id");
-            assert!(op.get("summary").is_some(), "missing summary");
-            assert!(op.get("capability").is_some(), "missing capability");
-            assert!(op.get("risk_level").is_some(), "missing risk_level");
-            assert!(op.get("safety_tier").is_some(), "missing safety_tier");
+        for op in &ops {
+            assert!(!op.id.as_ref().is_empty(), "missing id");
+            assert!(!op.summary.is_empty(), "missing summary");
+            assert!(!op.capability.as_ref().is_empty(), "missing capability");
         }
     }
 
     #[test]
     fn operations_ids_are_unique() {
         let ops = operations_info();
-        let ids: Vec<&str> = ops
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter_map(|o| o["id"].as_str())
-            .collect();
+        let ids: Vec<&str> = ops.iter().map(|o| o.id.as_ref()).collect();
         let mut unique = ids.clone();
         unique.sort_unstable();
         unique.dedup();
@@ -825,42 +903,48 @@ mod tests {
 
     #[test]
     fn operations_risk_levels_valid() {
-        let valid = ["low", "medium", "high"];
         let ops = operations_info();
-        for op in ops.as_array().unwrap() {
-            let rl = op["risk_level"].as_str().unwrap();
-            assert!(valid.contains(&rl), "invalid risk_level: {rl}");
+        for op in &ops {
+            let v = serde_json::to_value(op.risk_level).unwrap();
+            let rl = v.as_str().unwrap();
+            assert!(
+                ["low", "medium", "high", "critical"].contains(&rl),
+                "invalid risk_level: {rl}"
+            );
         }
     }
 
     #[test]
     fn operations_safety_tiers_valid() {
-        let valid = ["safe", "risky", "dangerous"];
         let ops = operations_info();
-        for op in ops.as_array().unwrap() {
-            let st = op["safety_tier"].as_str().unwrap();
-            assert!(valid.contains(&st), "invalid safety_tier: {st}");
+        for op in &ops {
+            let v = serde_json::to_value(op.safety_tier).unwrap();
+            let st = v.as_str().unwrap();
+            assert!(
+                ["safe", "risky", "dangerous"].contains(&st),
+                "invalid safety_tier: {st}"
+            );
         }
     }
 
     #[test]
     fn read_operations_are_safe() {
         let ops = operations_info();
-        for op in ops.as_array().unwrap() {
-            let cap = op["capability"].as_str().unwrap();
+        for op in &ops {
+            let cap = op.capability.as_ref();
             #[allow(clippy::case_sensitive_file_extension_comparisons)]
             if cap.ends_with(".read") {
                 assert_eq!(
-                    op["safety_tier"].as_str().unwrap(),
-                    "safe",
+                    op.safety_tier,
+                    SafetyTier::Safe,
                     "read op {} should be safe",
-                    op["id"]
+                    op.id.as_ref()
                 );
                 assert_eq!(
-                    op["risk_level"].as_str().unwrap(),
-                    "low",
+                    op.risk_level,
+                    RiskLevel::Low,
                     "read op {} should be low risk",
-                    op["id"]
+                    op.id.as_ref()
                 );
             }
         }
@@ -869,12 +953,7 @@ mod tests {
     #[test]
     fn operations_contain_expected_ids() {
         let ops = operations_info();
-        let ids: Vec<&str> = ops
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter_map(|o| o["id"].as_str())
-            .collect();
+        let ids: Vec<&str> = ops.iter().map(|o| o.id.as_ref()).collect();
         assert!(ids.contains(&"cron.schedules.list"));
         assert!(ids.contains(&"cron.schedules.create"));
         assert!(ids.contains(&"cron.schedules.delete"));
@@ -885,39 +964,26 @@ mod tests {
     #[test]
     fn operations_all_have_idempotency() {
         let ops = operations_info();
-        for op in ops.as_array().unwrap() {
-            assert!(
-                op.get("idempotency").is_some(),
-                "op {:?} missing idempotency",
-                op["id"]
-            );
+        for op in &ops {
+            let v = serde_json::to_value(op.idempotency).unwrap();
+            assert!(v.is_string(), "op {} idempotency should serialize", op.id.as_ref());
         }
     }
 
     #[test]
     fn delete_is_dangerous() {
         let ops = operations_info();
-        let delete_op = ops
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|o| o["id"] == "cron.schedules.delete")
-            .unwrap();
-        assert_eq!(delete_op["safety_tier"], "dangerous");
-        assert_eq!(delete_op["risk_level"], "high");
+        let delete_op = ops.iter().find(|o| o.id.as_ref() == "cron.schedules.delete").unwrap();
+        assert_eq!(delete_op.safety_tier, SafetyTier::Dangerous);
+        assert_eq!(delete_op.risk_level, RiskLevel::High);
     }
 
     #[test]
     fn trigger_is_risky() {
         let ops = operations_info();
-        let trigger_op = ops
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|o| o["id"] == "cron.trigger")
-            .unwrap();
-        assert_eq!(trigger_op["safety_tier"], "risky");
-        assert_eq!(trigger_op["risk_level"], "medium");
+        let trigger_op = ops.iter().find(|o| o.id.as_ref() == "cron.trigger").unwrap();
+        assert_eq!(trigger_op.safety_tier, SafetyTier::Risky);
+        assert_eq!(trigger_op.risk_level, RiskLevel::Medium);
     }
 
     // -- Doctor --
@@ -1627,47 +1693,31 @@ mod tests {
     #[test]
     fn operations_all_have_summary() {
         let ops = operations_info();
-        for op in ops.as_array().unwrap() {
-            let summary = op["summary"].as_str().unwrap();
-            assert!(!summary.is_empty(), "op {:?} has empty summary", op["id"]);
+        for op in &ops {
+            assert!(!op.summary.is_empty(), "op {} has empty summary", op.id.as_ref());
         }
     }
 
     #[test]
     fn operations_schedules_create_is_risky() {
         let ops = operations_info();
-        let create_op = ops
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|o| o["id"] == "cron.schedules.create")
-            .unwrap();
-        assert_eq!(create_op["safety_tier"], "risky");
-        assert_eq!(create_op["risk_level"], "medium");
+        let create_op = ops.iter().find(|o| o.id.as_ref() == "cron.schedules.create").unwrap();
+        assert_eq!(create_op.safety_tier, SafetyTier::Risky);
+        assert_eq!(create_op.risk_level, RiskLevel::Medium);
     }
 
     #[test]
     fn operations_schedules_list_is_strict_idempotent() {
         let ops = operations_info();
-        let list_op = ops
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|o| o["id"] == "cron.schedules.list")
-            .unwrap();
-        assert_eq!(list_op["idempotency"], "strict");
+        let list_op = ops.iter().find(|o| o.id.as_ref() == "cron.schedules.list").unwrap();
+        assert_eq!(list_op.idempotency, IdempotencyClass::Strict);
     }
 
     #[test]
     fn operations_trigger_idempotency_none() {
         let ops = operations_info();
-        let trigger_op = ops
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|o| o["id"] == "cron.trigger")
-            .unwrap();
-        assert_eq!(trigger_op["idempotency"], "none");
+        let trigger_op = ops.iter().find(|o| o.id.as_ref() == "cron.trigger").unwrap();
+        assert_eq!(trigger_op.idempotency, IdempotencyClass::None);
     }
 
     // -- Connector accessors / state --

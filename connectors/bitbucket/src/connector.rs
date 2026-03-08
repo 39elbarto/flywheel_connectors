@@ -3,7 +3,10 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use fcp_core::{BaseConnector, ConnectorId, CredentialId, FcpError, FcpResult};
+use fcp_core::{
+    AgentHint, BaseConnector, CapabilityId, ConnectorId, CredentialId, FcpError, FcpResult,
+    IdempotencyClass, OperationId, OperationInfo, RiskLevel, SafetyTier,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tracing::{info, instrument};
@@ -317,7 +320,7 @@ impl BitbucketConnector {
         Ok(json!({
             "connector_id": "fcp.bitbucket",
             "version": "0.1.0",
-            "operations": operations_info(),
+            "operations": serde_json::to_value(operations_info()).unwrap_or_default(),
         }))
     }
 
@@ -376,10 +379,9 @@ impl BitbucketConnector {
             .and_then(serde_json::Value::as_str)
             .unwrap_or("");
 
-        let allowed = operations_info().as_array().is_some_and(|ops| {
-            ops.iter()
-                .any(|o| o.get("id").and_then(serde_json::Value::as_str) == Some(operation))
-        });
+        let allowed = operations_info()
+            .iter()
+            .any(|o| o.id.as_ref() == operation);
 
         Ok(json!({
             "allowed": allowed,
@@ -547,89 +549,335 @@ fn require_str<'a>(input: &'a serde_json::Value, field: &str) -> Result<&'a str,
 }
 
 /// Build the operations info for introspection.
-fn operations_info() -> serde_json::Value {
-    json!([
-        {
-            "id": "bitbucket.user.get",
-            "summary": "Get the authenticated user",
-            "capability": "bitbucket.user.read",
-            "risk_level": "low",
-            "safety_tier": "safe",
-            "idempotency": "strict",
+fn operations_info() -> Vec<OperationInfo> {
+    vec![
+        OperationInfo {
+            id: OperationId::from_static("bitbucket.user.get"),
+            summary: "Get the authenticated user".into(),
+            input_schema: json!({
+                "type": "object",
+                "required": [],
+                "properties": {}
+            }),
+            output_schema: json!({
+                "type": "object",
+                "required": ["user"],
+                "properties": {
+                    "user": { "type": "object" }
+                }
+            }),
+            capability: CapabilityId::from_static("bitbucket.user.read"),
+            risk_level: RiskLevel::Low,
+            safety_tier: SafetyTier::Safe,
+            idempotency: IdempotencyClass::Strict,
+            ai_hints: AgentHint {
+                when_to_use: "Get the currently authenticated Bitbucket user.".into(),
+                common_mistakes: vec![],
+                examples: vec![r"{}".into()],
+                related: vec![CapabilityId::from_static("bitbucket.workspaces.list")],
+            },
+            description: None,
+            rate_limit: None,
+            requires_approval: None,
         },
-        {
-            "id": "bitbucket.repositories.list",
-            "summary": "List repositories in a workspace",
-            "capability": "bitbucket.repositories.read",
-            "risk_level": "low",
-            "safety_tier": "safe",
-            "idempotency": "strict",
+        OperationInfo {
+            id: OperationId::from_static("bitbucket.repositories.list"),
+            summary: "List repositories in a workspace".into(),
+            input_schema: json!({
+                "type": "object",
+                "required": ["workspace"],
+                "properties": {
+                    "workspace": { "type": "string", "description": "Workspace slug" }
+                }
+            }),
+            output_schema: json!({
+                "type": "object",
+                "required": ["repositories"],
+                "properties": {
+                    "repositories": { "type": "array" }
+                }
+            }),
+            capability: CapabilityId::from_static("bitbucket.repositories.read"),
+            risk_level: RiskLevel::Low,
+            safety_tier: SafetyTier::Safe,
+            idempotency: IdempotencyClass::Strict,
+            ai_hints: AgentHint {
+                when_to_use: "List repositories in a Bitbucket workspace.".into(),
+                common_mistakes: vec![],
+                examples: vec![r#"{"workspace": "myteam"}"#.into()],
+                related: vec![
+                    CapabilityId::from_static("bitbucket.pull_requests.list"),
+                    CapabilityId::from_static("bitbucket.issues.list"),
+                ],
+            },
+            description: None,
+            rate_limit: None,
+            requires_approval: None,
         },
-        {
-            "id": "bitbucket.repositories.get",
-            "summary": "Get a repository by workspace and slug",
-            "capability": "bitbucket.repositories.read",
-            "risk_level": "low",
-            "safety_tier": "safe",
-            "idempotency": "strict",
+        OperationInfo {
+            id: OperationId::from_static("bitbucket.repositories.get"),
+            summary: "Get a repository by workspace and slug".into(),
+            input_schema: json!({
+                "type": "object",
+                "required": ["workspace", "repo_slug"],
+                "properties": {
+                    "workspace": { "type": "string" },
+                    "repo_slug": { "type": "string" }
+                }
+            }),
+            output_schema: json!({
+                "type": "object",
+                "required": ["repository"],
+                "properties": {
+                    "repository": { "type": "object" }
+                }
+            }),
+            capability: CapabilityId::from_static("bitbucket.repositories.read"),
+            risk_level: RiskLevel::Low,
+            safety_tier: SafetyTier::Safe,
+            idempotency: IdempotencyClass::Strict,
+            ai_hints: AgentHint {
+                when_to_use: "Get details about a specific Bitbucket repository.".into(),
+                common_mistakes: vec![],
+                examples: vec![r#"{"workspace": "myteam", "repo_slug": "backend"}"#.into()],
+                related: vec![CapabilityId::from_static("bitbucket.repositories.list")],
+            },
+            description: None,
+            rate_limit: None,
+            requires_approval: None,
         },
-        {
-            "id": "bitbucket.pull_requests.list",
-            "summary": "List pull requests in a repository",
-            "capability": "bitbucket.pull_requests.read",
-            "risk_level": "low",
-            "safety_tier": "safe",
-            "idempotency": "strict",
+        OperationInfo {
+            id: OperationId::from_static("bitbucket.pull_requests.list"),
+            summary: "List pull requests in a repository".into(),
+            input_schema: json!({
+                "type": "object",
+                "required": ["workspace", "repo_slug"],
+                "properties": {
+                    "workspace": { "type": "string" },
+                    "repo_slug": { "type": "string" }
+                }
+            }),
+            output_schema: json!({
+                "type": "object",
+                "required": ["pull_requests"],
+                "properties": {
+                    "pull_requests": { "type": "array" }
+                }
+            }),
+            capability: CapabilityId::from_static("bitbucket.pull_requests.read"),
+            risk_level: RiskLevel::Low,
+            safety_tier: SafetyTier::Safe,
+            idempotency: IdempotencyClass::Strict,
+            ai_hints: AgentHint {
+                when_to_use: "List pull requests in a repository.".into(),
+                common_mistakes: vec![],
+                examples: vec![r#"{"workspace": "myteam", "repo_slug": "backend"}"#.into()],
+                related: vec![
+                    CapabilityId::from_static("bitbucket.repos.list"),
+                    CapabilityId::from_static("bitbucket.pull_requests.create"),
+                ],
+            },
+            description: None,
+            rate_limit: None,
+            requires_approval: None,
         },
-        {
-            "id": "bitbucket.pull_requests.get",
-            "summary": "Get a specific pull request",
-            "capability": "bitbucket.pull_requests.read",
-            "risk_level": "low",
-            "safety_tier": "safe",
-            "idempotency": "strict",
+        OperationInfo {
+            id: OperationId::from_static("bitbucket.pull_requests.get"),
+            summary: "Get a specific pull request".into(),
+            input_schema: json!({
+                "type": "object",
+                "required": ["workspace", "repo_slug", "pr_id"],
+                "properties": {
+                    "workspace": { "type": "string" },
+                    "repo_slug": { "type": "string" },
+                    "pr_id": { "type": "string" }
+                }
+            }),
+            output_schema: json!({
+                "type": "object",
+                "required": ["pull_request"],
+                "properties": {
+                    "pull_request": { "type": "object" }
+                }
+            }),
+            capability: CapabilityId::from_static("bitbucket.pull_requests.read"),
+            risk_level: RiskLevel::Low,
+            safety_tier: SafetyTier::Safe,
+            idempotency: IdempotencyClass::Strict,
+            ai_hints: AgentHint {
+                when_to_use: "Get details about a specific pull request.".into(),
+                common_mistakes: vec![],
+                examples: vec![
+                    r#"{"workspace": "myteam", "repo_slug": "backend", "pr_id": "42"}"#.into(),
+                ],
+                related: vec![CapabilityId::from_static("bitbucket.pull_requests.list")],
+            },
+            description: None,
+            rate_limit: None,
+            requires_approval: None,
         },
-        {
-            "id": "bitbucket.pull_requests.create",
-            "summary": "Create a new pull request",
-            "capability": "bitbucket.pull_requests.write",
-            "risk_level": "medium",
-            "safety_tier": "risky",
-            "idempotency": "none",
+        OperationInfo {
+            id: OperationId::from_static("bitbucket.pull_requests.create"),
+            summary: "Create a new pull request".into(),
+            input_schema: json!({
+                "type": "object",
+                "required": ["workspace", "repo_slug", "title", "source_branch"],
+                "properties": {
+                    "workspace": { "type": "string" },
+                    "repo_slug": { "type": "string" },
+                    "title": { "type": "string" },
+                    "source_branch": { "type": "string" }
+                }
+            }),
+            output_schema: json!({
+                "type": "object",
+                "required": ["id"],
+                "properties": {
+                    "id": { "type": "integer" }
+                }
+            }),
+            capability: CapabilityId::from_static("bitbucket.pull_requests.write"),
+            risk_level: RiskLevel::Medium,
+            safety_tier: SafetyTier::Risky,
+            idempotency: IdempotencyClass::None,
+            ai_hints: AgentHint {
+                when_to_use: "Create a new pull request.".into(),
+                common_mistakes: vec![],
+                examples: vec![
+                    r#"{"workspace": "myteam", "repo_slug": "backend", "title": "Fix login bug", "source_branch": "fix/login"}"#.into(),
+                ],
+                related: vec![CapabilityId::from_static("bitbucket.pull_requests.list")],
+            },
+            description: None,
+            rate_limit: None,
+            requires_approval: None,
         },
-        {
-            "id": "bitbucket.branches.list",
-            "summary": "List branches in a repository",
-            "capability": "bitbucket.branches.read",
-            "risk_level": "low",
-            "safety_tier": "safe",
-            "idempotency": "strict",
+        OperationInfo {
+            id: OperationId::from_static("bitbucket.branches.list"),
+            summary: "List branches in a repository".into(),
+            input_schema: json!({
+                "type": "object",
+                "required": ["workspace", "repo_slug"],
+                "properties": {
+                    "workspace": { "type": "string" },
+                    "repo_slug": { "type": "string" }
+                }
+            }),
+            output_schema: json!({
+                "type": "object",
+                "required": ["branches"],
+                "properties": {
+                    "branches": { "type": "array" }
+                }
+            }),
+            capability: CapabilityId::from_static("bitbucket.branches.read"),
+            risk_level: RiskLevel::Low,
+            safety_tier: SafetyTier::Safe,
+            idempotency: IdempotencyClass::Strict,
+            ai_hints: AgentHint {
+                when_to_use: "List branches in a Bitbucket repository.".into(),
+                common_mistakes: vec![],
+                examples: vec![r#"{"workspace": "myteam", "repo_slug": "backend"}"#.into()],
+                related: vec![CapabilityId::from_static("bitbucket.repositories.list")],
+            },
+            description: None,
+            rate_limit: None,
+            requires_approval: None,
         },
-        {
-            "id": "bitbucket.commits.list",
-            "summary": "List commits in a repository",
-            "capability": "bitbucket.commits.read",
-            "risk_level": "low",
-            "safety_tier": "safe",
-            "idempotency": "strict",
+        OperationInfo {
+            id: OperationId::from_static("bitbucket.commits.list"),
+            summary: "List commits in a repository".into(),
+            input_schema: json!({
+                "type": "object",
+                "required": ["workspace", "repo_slug"],
+                "properties": {
+                    "workspace": { "type": "string" },
+                    "repo_slug": { "type": "string" }
+                }
+            }),
+            output_schema: json!({
+                "type": "object",
+                "required": ["commits"],
+                "properties": {
+                    "commits": { "type": "array" }
+                }
+            }),
+            capability: CapabilityId::from_static("bitbucket.commits.read"),
+            risk_level: RiskLevel::Low,
+            safety_tier: SafetyTier::Safe,
+            idempotency: IdempotencyClass::Strict,
+            ai_hints: AgentHint {
+                when_to_use: "List commits in a Bitbucket repository.".into(),
+                common_mistakes: vec![],
+                examples: vec![r#"{"workspace": "myteam", "repo_slug": "backend"}"#.into()],
+                related: vec![CapabilityId::from_static("bitbucket.repositories.list")],
+            },
+            description: None,
+            rate_limit: None,
+            requires_approval: None,
         },
-        {
-            "id": "bitbucket.pipelines.list",
-            "summary": "List pipelines in a repository",
-            "capability": "bitbucket.pipelines.read",
-            "risk_level": "low",
-            "safety_tier": "safe",
-            "idempotency": "strict",
+        OperationInfo {
+            id: OperationId::from_static("bitbucket.pipelines.list"),
+            summary: "List pipelines in a repository".into(),
+            input_schema: json!({
+                "type": "object",
+                "required": ["workspace", "repo_slug"],
+                "properties": {
+                    "workspace": { "type": "string" },
+                    "repo_slug": { "type": "string" }
+                }
+            }),
+            output_schema: json!({
+                "type": "object",
+                "required": ["pipelines"],
+                "properties": {
+                    "pipelines": { "type": "array" }
+                }
+            }),
+            capability: CapabilityId::from_static("bitbucket.pipelines.read"),
+            risk_level: RiskLevel::Low,
+            safety_tier: SafetyTier::Safe,
+            idempotency: IdempotencyClass::Strict,
+            ai_hints: AgentHint {
+                when_to_use: "List CI/CD pipelines.".into(),
+                common_mistakes: vec![],
+                examples: vec![r#"{"workspace": "myteam", "repo_slug": "backend"}"#.into()],
+                related: vec![CapabilityId::from_static("bitbucket.repos.list")],
+            },
+            description: None,
+            rate_limit: None,
+            requires_approval: None,
         },
-        {
-            "id": "bitbucket.workspaces.list",
-            "summary": "List workspaces accessible by the authenticated user",
-            "capability": "bitbucket.workspaces.read",
-            "risk_level": "low",
-            "safety_tier": "safe",
-            "idempotency": "strict",
+        OperationInfo {
+            id: OperationId::from_static("bitbucket.workspaces.list"),
+            summary: "List workspaces accessible by the authenticated user".into(),
+            input_schema: json!({
+                "type": "object",
+                "required": [],
+                "properties": {}
+            }),
+            output_schema: json!({
+                "type": "object",
+                "required": ["workspaces"],
+                "properties": {
+                    "workspaces": { "type": "array" }
+                }
+            }),
+            capability: CapabilityId::from_static("bitbucket.workspaces.read"),
+            risk_level: RiskLevel::Low,
+            safety_tier: SafetyTier::Safe,
+            idempotency: IdempotencyClass::Strict,
+            ai_hints: AgentHint {
+                when_to_use: "List Bitbucket workspaces accessible by the authenticated user.".into(),
+                common_mistakes: vec![],
+                examples: vec![r"{}".into()],
+                related: vec![CapabilityId::from_static("bitbucket.repositories.list")],
+            },
+            description: None,
+            rate_limit: None,
+            requires_approval: None,
         },
-    ])
+    ]
 }
 
 #[cfg(test)]
@@ -774,32 +1022,21 @@ mod tests {
 
     #[test]
     fn operations_info_has_10_operations() {
-        let ops = operations_info();
-        let arr = ops.as_array().unwrap();
-        assert_eq!(arr.len(), 10);
+        assert_eq!(operations_info().len(), 10);
     }
 
     #[test]
-    fn operations_all_have_required_fields() {
+    fn operations_all_have_summaries() {
         let ops = operations_info();
-        for op in ops.as_array().unwrap() {
-            assert!(op.get("id").is_some(), "missing id");
-            assert!(op.get("summary").is_some(), "missing summary");
-            assert!(op.get("capability").is_some(), "missing capability");
-            assert!(op.get("risk_level").is_some(), "missing risk_level");
-            assert!(op.get("safety_tier").is_some(), "missing safety_tier");
+        for op in &ops {
+            assert!(!op.summary.is_empty(), "op {:?} has empty summary", op.id.as_ref());
         }
     }
 
     #[test]
     fn operations_ids_are_unique() {
         let ops = operations_info();
-        let ids: Vec<&str> = ops
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter_map(|o| o["id"].as_str())
-            .collect();
+        let ids: Vec<&str> = ops.iter().map(|o| o.id.as_ref()).collect();
         let mut unique = ids.clone();
         unique.sort_unstable();
         unique.dedup();
@@ -808,21 +1045,19 @@ mod tests {
 
     #[test]
     fn operations_risk_levels_valid() {
-        let valid = ["low", "medium", "high"];
         let ops = operations_info();
-        for op in ops.as_array().unwrap() {
-            let rl = op["risk_level"].as_str().unwrap();
-            assert!(valid.contains(&rl), "invalid risk_level: {rl}");
+        for op in &ops {
+            // All RiskLevel enum variants are valid by construction
+            let _ = op.risk_level;
         }
     }
 
     #[test]
     fn operations_safety_tiers_valid() {
-        let valid = ["safe", "risky", "dangerous"];
         let ops = operations_info();
-        for op in ops.as_array().unwrap() {
-            let st = op["safety_tier"].as_str().unwrap();
-            assert!(valid.contains(&st), "invalid safety_tier: {st}");
+        for op in &ops {
+            // All SafetyTier enum variants are valid by construction
+            let _ = op.safety_tier;
         }
     }
 
@@ -830,20 +1065,20 @@ mod tests {
     #[allow(clippy::case_sensitive_file_extension_comparisons)]
     fn read_operations_are_safe() {
         let ops = operations_info();
-        for op in ops.as_array().unwrap() {
-            let cap = op["capability"].as_str().unwrap();
+        for op in &ops {
+            let cap = op.capability.as_ref();
             if cap.ends_with(".read") {
                 assert_eq!(
-                    op["safety_tier"].as_str().unwrap(),
-                    "safe",
+                    op.safety_tier,
+                    SafetyTier::Safe,
                     "read op {} should be safe",
-                    op["id"]
+                    op.id.as_ref()
                 );
                 assert_eq!(
-                    op["risk_level"].as_str().unwrap(),
-                    "low",
+                    op.risk_level,
+                    RiskLevel::Low,
                     "read op {} should be low risk",
-                    op["id"]
+                    op.id.as_ref()
                 );
             }
         }
@@ -852,12 +1087,7 @@ mod tests {
     #[test]
     fn operations_contain_expected_ids() {
         let ops = operations_info();
-        let ids: Vec<&str> = ops
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter_map(|o| o["id"].as_str())
-            .collect();
+        let ids: Vec<&str> = ops.iter().map(|o| o.id.as_ref()).collect();
         assert!(ids.contains(&"bitbucket.user.get"));
         assert!(ids.contains(&"bitbucket.repositories.list"));
         assert!(ids.contains(&"bitbucket.repositories.get"));
@@ -938,12 +1168,9 @@ mod tests {
     #[test]
     fn operations_all_have_idempotency() {
         let ops = operations_info();
-        for op in ops.as_array().unwrap() {
-            assert!(
-                op.get("idempotency").is_some(),
-                "op {:?} missing idempotency",
-                op["id"]
-            );
+        for op in &ops {
+            // IdempotencyClass is always present by construction in typed OperationInfo
+            let _ = op.idempotency;
         }
     }
 
@@ -1085,11 +1312,15 @@ mod tests {
     #[test]
     fn operations_write_ops_not_safe() {
         let ops = operations_info();
-        for op in ops.as_array().unwrap() {
-            let cap = op["capability"].as_str().unwrap();
+        for op in &ops {
+            let cap = op.capability.as_ref();
             if cap.contains("write") {
-                let tier = op["safety_tier"].as_str().unwrap();
-                assert_ne!(tier, "safe", "write op {} should not be safe", op["id"]);
+                assert_ne!(
+                    op.safety_tier,
+                    SafetyTier::Safe,
+                    "write op {} should not be safe",
+                    op.id.as_ref()
+                );
             }
         }
     }
@@ -1098,25 +1329,21 @@ mod tests {
     fn operations_create_pr_is_risky() {
         let ops = operations_info();
         let create_op = ops
-            .as_array()
-            .unwrap()
             .iter()
-            .find(|o| o["id"] == "bitbucket.pull_requests.create")
+            .find(|o| o.id.as_ref() == "bitbucket.pull_requests.create")
             .unwrap();
-        assert_eq!(create_op["safety_tier"], "risky");
-        assert_eq!(create_op["risk_level"], "medium");
+        assert_eq!(create_op.safety_tier, SafetyTier::Risky);
+        assert_eq!(create_op.risk_level, RiskLevel::Medium);
     }
 
     #[test]
     fn operations_user_get_summary() {
         let ops = operations_info();
         let user_op = ops
-            .as_array()
-            .unwrap()
             .iter()
-            .find(|o| o["id"] == "bitbucket.user.get")
+            .find(|o| o.id.as_ref() == "bitbucket.user.get")
             .unwrap();
-        assert!(user_op["summary"].as_str().unwrap().len() > 5);
+        assert!(user_op.summary.len() > 5);
     }
 
     #[test]

@@ -3,7 +3,10 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use fcp_core::{BaseConnector, ConnectorId, CredentialId, FcpError, FcpResult};
+use fcp_core::{
+    AgentHint, BaseConnector, CapabilityId, ConnectorId, CredentialId, FcpError, FcpResult,
+    IdempotencyClass, OperationId, OperationInfo, RiskLevel, SafetyTier,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tracing::{info, instrument};
@@ -243,9 +246,11 @@ impl TerraformConnector {
     }
 
     pub async fn handle_introspect(&self) -> FcpResult<serde_json::Value> {
-        Ok(
-            json!({"connector_id": "fcp.terraform", "version": "0.1.0", "operations": operations_info()}),
-        )
+        Ok(json!({
+            "connector_id": "fcp.terraform",
+            "version": "0.1.0",
+            "operations": serde_json::to_value(operations_info()).unwrap_or_default(),
+        }))
     }
 
     #[instrument(skip(self, params))]
@@ -296,10 +301,9 @@ impl TerraformConnector {
             .get("operation_id")
             .and_then(serde_json::Value::as_str)
             .unwrap_or("");
-        let allowed = operations_info().as_array().is_some_and(|ops| {
-            ops.iter()
-                .any(|o| o.get("id").and_then(serde_json::Value::as_str) == Some(operation))
-        });
+        let allowed = operations_info()
+            .iter()
+            .any(|o| o.id.as_ref() == operation);
         Ok(
             json!({"allowed": allowed, "reason": if allowed { "Operation supported" } else { "Unknown operation" }}),
         )
@@ -719,26 +723,296 @@ fn require_str<'a>(input: &'a serde_json::Value, field: &str) -> Result<&'a str,
         })
 }
 
-fn operations_info() -> serde_json::Value {
-    json!([
-        {"id": "terraform.init", "summary": "Initialize a Terraform working directory", "capability": "terraform.plan", "risk_level": "low", "safety_tier": "safe", "idempotency": "strict"},
-        {"id": "terraform.validate", "summary": "Validate Terraform configuration syntax and consistency", "capability": "terraform.plan", "risk_level": "low", "safety_tier": "safe", "idempotency": "strict"},
-        {"id": "terraform.plan", "summary": "Generate a Terraform execution plan", "capability": "terraform.plan", "risk_level": "low", "safety_tier": "safe", "idempotency": "strict"},
-        {"id": "terraform.show_plan", "summary": "Display details of a saved plan file", "capability": "terraform.plan", "risk_level": "low", "safety_tier": "safe", "idempotency": "strict"},
-        {"id": "terraform.apply", "summary": "Apply a previously generated plan", "capability": "terraform.apply", "risk_level": "high", "safety_tier": "dangerous", "idempotency": "best_effort"},
-        {"id": "terraform.destroy", "summary": "Destroy all resources managed by a configuration", "capability": "terraform.apply", "risk_level": "high", "safety_tier": "dangerous", "idempotency": "best_effort"},
-        {"id": "terraform.state_list", "summary": "List all resources in the Terraform state", "capability": "terraform.state", "risk_level": "low", "safety_tier": "safe", "idempotency": "strict"},
-        {"id": "terraform.state_show", "summary": "Show attributes of a single resource in state", "capability": "terraform.state", "risk_level": "low", "safety_tier": "safe", "idempotency": "strict"},
-        {"id": "terraform.output", "summary": "Read Terraform output values", "capability": "terraform.state", "risk_level": "low", "safety_tier": "safe", "idempotency": "strict"},
-        {"id": "terraform.import", "summary": "Import an existing resource into Terraform state", "capability": "terraform.state_write", "risk_level": "medium", "safety_tier": "risky", "idempotency": "strict"},
-        {"id": "terraform.detect_drift", "summary": "Detect configuration drift against real infrastructure", "capability": "terraform.plan", "risk_level": "low", "safety_tier": "safe", "idempotency": "strict"},
-        {"id": "terraform.list_modules", "summary": "List modules used in the configuration", "capability": "terraform.plan", "risk_level": "low", "safety_tier": "safe", "idempotency": "strict"},
-    ])
+fn operations_info() -> Vec<OperationInfo> {
+    vec![
+        op_info(
+            "terraform.init",
+            "Initialize a Terraform working directory",
+            json!({ "type": "object", "required": ["workspace_id"] }),
+            json!({ "type": "object", "required": ["status"] }),
+            "terraform.plan",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "Initialize a Terraform workspace before planning or applying.".into(),
+                common_mistakes: vec![],
+                examples: vec![r#"{"workspace_id": "ws-abc123"}"#.into()],
+                related: vec![
+                    CapabilityId::from_static("terraform.validate"),
+                    CapabilityId::from_static("terraform.plan"),
+                ],
+            },
+        ),
+        op_info(
+            "terraform.validate",
+            "Validate Terraform configuration syntax and consistency",
+            json!({ "type": "object", "required": ["workspace_id"] }),
+            json!({ "type": "object", "required": ["valid", "diagnostics"] }),
+            "terraform.plan",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "Check configuration syntax and consistency before planning.".into(),
+                common_mistakes: vec![],
+                examples: vec![r#"{"workspace_id": "ws-abc123"}"#.into()],
+                related: vec![
+                    CapabilityId::from_static("terraform.init"),
+                    CapabilityId::from_static("terraform.plan"),
+                ],
+            },
+        ),
+        op_info(
+            "terraform.plan",
+            "Generate a Terraform execution plan",
+            json!({ "type": "object", "required": ["workspace_id"] }),
+            json!({ "type": "object", "required": ["plan_id", "status", "resource_changes"] }),
+            "terraform.plan",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "Generate an execution plan to preview infrastructure changes.".into(),
+                common_mistakes: vec![
+                    "Applying without reviewing the plan output first".into(),
+                ],
+                examples: vec![r#"{"workspace_id": "ws-abc123"}"#.into()],
+                related: vec![
+                    CapabilityId::from_static("terraform.show_plan"),
+                    CapabilityId::from_static("terraform.apply"),
+                ],
+            },
+        ),
+        op_info(
+            "terraform.show_plan",
+            "Display details of a saved plan file",
+            json!({ "type": "object", "required": ["plan_id"] }),
+            json!({ "type": "object", "required": ["plan_id", "status", "resources"] }),
+            "terraform.plan",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "View the details of a previously generated plan.".into(),
+                common_mistakes: vec![],
+                examples: vec![r#"{"plan_id": "plan-abc123"}"#.into()],
+                related: vec![
+                    CapabilityId::from_static("terraform.plan"),
+                    CapabilityId::from_static("terraform.apply"),
+                ],
+            },
+        ),
+        op_info(
+            "terraform.apply",
+            "Apply a previously generated plan",
+            json!({ "type": "object", "required": ["run_id"] }),
+            json!({ "type": "object", "required": ["status", "applied"] }),
+            "terraform.apply",
+            RiskLevel::High,
+            SafetyTier::Dangerous,
+            IdempotencyClass::BestEffort,
+            AgentHint {
+                when_to_use: "Apply a plan to modify real infrastructure. Requires prior approval."
+                    .into(),
+                common_mistakes: vec![
+                    "Applying without reviewing the plan first".into(),
+                    "Applying an outdated plan after infrastructure has changed".into(),
+                ],
+                examples: vec![r#"{"run_id": "run-abc123"}"#.into()],
+                related: vec![
+                    CapabilityId::from_static("terraform.plan"),
+                    CapabilityId::from_static("terraform.destroy"),
+                ],
+            },
+        ),
+        op_info(
+            "terraform.destroy",
+            "Destroy all resources managed by a configuration",
+            json!({ "type": "object", "required": ["workspace_id"] }),
+            json!({ "type": "object", "required": ["status", "destroyed"] }),
+            "terraform.apply",
+            RiskLevel::High,
+            SafetyTier::Dangerous,
+            IdempotencyClass::BestEffort,
+            AgentHint {
+                when_to_use: "Tear down all infrastructure managed by a workspace.".into(),
+                common_mistakes: vec![
+                    "Destroying production resources unintentionally".into(),
+                    "Not checking for dependent resources in other workspaces".into(),
+                ],
+                examples: vec![r#"{"workspace_id": "ws-abc123"}"#.into()],
+                related: vec![
+                    CapabilityId::from_static("terraform.apply"),
+                    CapabilityId::from_static("terraform.state_list"),
+                ],
+            },
+        ),
+        op_info(
+            "terraform.state_list",
+            "List all resources in the Terraform state",
+            json!({ "type": "object", "required": ["workspace_id"] }),
+            json!({ "type": "object", "required": ["resources"] }),
+            "terraform.state",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "List all managed resources in the current Terraform state.".into(),
+                common_mistakes: vec![],
+                examples: vec![r#"{"workspace_id": "ws-abc123"}"#.into()],
+                related: vec![
+                    CapabilityId::from_static("terraform.state_show"),
+                    CapabilityId::from_static("terraform.output"),
+                ],
+            },
+        ),
+        op_info(
+            "terraform.state_show",
+            "Show attributes of a single resource in state",
+            json!({ "type": "object", "required": ["workspace_id", "resource_address"] }),
+            json!({ "type": "object", "required": ["resource"] }),
+            "terraform.state",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "Inspect the current attributes of a specific managed resource.".into(),
+                common_mistakes: vec![
+                    "Using incorrect resource address format".into(),
+                ],
+                examples: vec![
+                    r#"{"workspace_id": "ws-abc123", "resource_address": "aws_instance.web"}"#
+                        .into(),
+                ],
+                related: vec![
+                    CapabilityId::from_static("terraform.state_list"),
+                    CapabilityId::from_static("terraform.detect_drift"),
+                ],
+            },
+        ),
+        op_info(
+            "terraform.output",
+            "Read Terraform output values",
+            json!({ "type": "object", "required": ["workspace_id"] }),
+            json!({ "type": "object", "required": ["outputs"] }),
+            "terraform.state",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "Read output values from a Terraform workspace.".into(),
+                common_mistakes: vec![],
+                examples: vec![r#"{"workspace_id": "ws-abc123"}"#.into()],
+                related: vec![
+                    CapabilityId::from_static("terraform.state_list"),
+                    CapabilityId::from_static("terraform.state_show"),
+                ],
+            },
+        ),
+        op_info(
+            "terraform.import",
+            "Import an existing resource into Terraform state",
+            json!({ "type": "object", "required": ["workspace_id", "resource_address", "resource_id"] }),
+            json!({ "type": "object", "required": ["status", "imported"] }),
+            "terraform.state_write",
+            RiskLevel::Medium,
+            SafetyTier::Risky,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "Bring an existing infrastructure resource under Terraform management."
+                    .into(),
+                common_mistakes: vec![
+                    "Importing without a matching resource block in configuration".into(),
+                    "Using wrong resource ID format for the provider".into(),
+                ],
+                examples: vec![
+                    r#"{"workspace_id": "ws-abc123", "resource_address": "aws_instance.web", "resource_id": "i-1234567890abcdef0"}"#
+                        .into(),
+                ],
+                related: vec![
+                    CapabilityId::from_static("terraform.state_list"),
+                    CapabilityId::from_static("terraform.state_show"),
+                ],
+            },
+        ),
+        op_info(
+            "terraform.detect_drift",
+            "Detect configuration drift against real infrastructure",
+            json!({ "type": "object", "required": ["workspace_id"] }),
+            json!({ "type": "object", "required": ["drifted", "changes"] }),
+            "terraform.plan",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "Check if real infrastructure has drifted from the Terraform state."
+                    .into(),
+                common_mistakes: vec![],
+                examples: vec![r#"{"workspace_id": "ws-abc123"}"#.into()],
+                related: vec![
+                    CapabilityId::from_static("terraform.plan"),
+                    CapabilityId::from_static("terraform.state_show"),
+                ],
+            },
+        ),
+        op_info(
+            "terraform.list_modules",
+            "List modules used in the configuration",
+            json!({ "type": "object", "required": ["organization"] }),
+            json!({ "type": "object", "required": ["modules"] }),
+            "terraform.plan",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "List all modules registered in the organization's private registry."
+                    .into(),
+                common_mistakes: vec![],
+                examples: vec![r#"{"organization": "my-org"}"#.into()],
+                related: vec![CapabilityId::from_static("terraform.init")],
+            },
+        ),
+    ]
+}
+
+#[allow(clippy::fn_params_excessive_bools)]
+#[allow(clippy::too_many_arguments)]
+fn op_info(
+    id: &'static str,
+    summary: &str,
+    input_schema: serde_json::Value,
+    output_schema: serde_json::Value,
+    capability: &'static str,
+    risk_level: RiskLevel,
+    safety_tier: SafetyTier,
+    idempotency: IdempotencyClass,
+    ai_hints: AgentHint,
+) -> OperationInfo {
+    OperationInfo {
+        id: OperationId::from_static(id),
+        summary: summary.into(),
+        input_schema,
+        output_schema,
+        capability: CapabilityId::from_static(capability),
+        risk_level,
+        description: None,
+        rate_limit: None,
+        requires_approval: None,
+        safety_tier,
+        idempotency,
+        ai_hints,
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Serialize `operations_info()` to JSON for backward-compatible test assertions.
+    fn operations_info_json() -> serde_json::Value {
+        serde_json::to_value(operations_info()).unwrap()
+    }
 
     #[test]
     fn config_from_api_token() {
@@ -820,11 +1094,11 @@ mod tests {
     }
     #[test]
     fn ops_count() {
-        assert_eq!(operations_info().as_array().unwrap().len(), 12);
+        assert_eq!(operations_info().len(), 12);
     }
     #[test]
     fn ops_all_have_fields() {
-        for op in operations_info().as_array().unwrap() {
+        for op in operations_info_json().as_array().unwrap() {
             assert!(op.get("id").is_some());
             assert!(op.get("summary").is_some());
             assert!(op.get("capability").is_some());
@@ -834,7 +1108,7 @@ mod tests {
     }
     #[test]
     fn ops_unique_ids() {
-        let ops = operations_info();
+        let ops = operations_info_json();
         let mut ids: Vec<&str> = ops
             .as_array()
             .unwrap()
@@ -848,13 +1122,13 @@ mod tests {
     }
     #[test]
     fn ops_valid_risk() {
-        for op in operations_info().as_array().unwrap() {
+        for op in operations_info_json().as_array().unwrap() {
             assert!(["low", "medium", "high"].contains(&op["risk_level"].as_str().unwrap()));
         }
     }
     #[test]
     fn ops_valid_safety() {
-        for op in operations_info().as_array().unwrap() {
+        for op in operations_info_json().as_array().unwrap() {
             assert!(["safe", "risky", "dangerous"].contains(&op["safety_tier"].as_str().unwrap()));
         }
     }
@@ -871,7 +1145,7 @@ mod tests {
             "terraform.detect_drift",
             "terraform.list_modules",
         ];
-        for op in operations_info().as_array().unwrap() {
+        for op in operations_info_json().as_array().unwrap() {
             let id = op["id"].as_str().unwrap();
             if safe.contains(&id) {
                 assert_eq!(op["safety_tier"].as_str().unwrap(), "safe");
@@ -881,7 +1155,7 @@ mod tests {
     }
     #[test]
     fn ops_dangerous_high_risk() {
-        for op in operations_info().as_array().unwrap() {
+        for op in operations_info_json().as_array().unwrap() {
             if op["safety_tier"].as_str() == Some("dangerous") {
                 assert_eq!(op["risk_level"].as_str().unwrap(), "high");
             }
@@ -889,7 +1163,7 @@ mod tests {
     }
     #[test]
     fn ops_contain_all_ids() {
-        let binding = operations_info();
+        let binding = operations_info_json();
         let ids: Vec<&str> = binding
             .as_array()
             .unwrap()
@@ -915,7 +1189,7 @@ mod tests {
     }
     #[test]
     fn ops_caps_match() {
-        let binding = operations_info();
+        let binding = operations_info_json();
         let cs: Vec<(&str, &str)> = binding
             .as_array()
             .unwrap()
@@ -997,7 +1271,7 @@ mod tests {
     }
     #[test]
     fn ops_all_have_idempotency() {
-        for op in operations_info().as_array().unwrap() {
+        for op in operations_info_json().as_array().unwrap() {
             assert!(op.get("idempotency").is_some());
         }
     }
@@ -1017,7 +1291,7 @@ mod tests {
     }
     #[test]
     fn ops_apply_destroy_best_effort() {
-        for op in operations_info().as_array().unwrap() {
+        for op in operations_info_json().as_array().unwrap() {
             let id = op["id"].as_str().unwrap();
             if id == "terraform.apply" || id == "terraform.destroy" {
                 assert_eq!(op["idempotency"].as_str().unwrap(), "best_effort");
@@ -1038,7 +1312,7 @@ mod tests {
             "terraform.list_modules",
             "terraform.import",
         ];
-        for op in operations_info().as_array().unwrap() {
+        for op in operations_info_json().as_array().unwrap() {
             let id = op["id"].as_str().unwrap();
             if s.contains(&id) {
                 assert_eq!(op["idempotency"].as_str().unwrap(), "strict");
@@ -1127,7 +1401,7 @@ mod tests {
 
     #[test]
     fn ops_summaries_non_empty() {
-        for op in operations_info().as_array().unwrap() {
+        for op in operations_info_json().as_array().unwrap() {
             let s = op["summary"].as_str().unwrap();
             assert!(!s.is_empty(), "empty summary for {}", op["id"]);
         }
@@ -1135,7 +1409,7 @@ mod tests {
 
     #[test]
     fn ops_ids_follow_naming_convention() {
-        for op in operations_info().as_array().unwrap() {
+        for op in operations_info_json().as_array().unwrap() {
             let id = op["id"].as_str().unwrap();
             assert!(
                 id.starts_with("terraform."),
@@ -1146,7 +1420,7 @@ mod tests {
 
     #[test]
     fn ops_plan_capability_count() {
-        let count = operations_info()
+        let count = operations_info_json()
             .as_array()
             .unwrap()
             .iter()
@@ -1158,7 +1432,7 @@ mod tests {
 
     #[test]
     fn ops_state_capability_count() {
-        let count = operations_info()
+        let count = operations_info_json()
             .as_array()
             .unwrap()
             .iter()
@@ -1170,7 +1444,7 @@ mod tests {
 
     #[test]
     fn ops_apply_capability_count() {
-        let count = operations_info()
+        let count = operations_info_json()
             .as_array()
             .unwrap()
             .iter()
@@ -1182,7 +1456,7 @@ mod tests {
 
     #[test]
     fn ops_import_is_risky() {
-        for op in operations_info().as_array().unwrap() {
+        for op in operations_info_json().as_array().unwrap() {
             if op["id"].as_str() == Some("terraform.import") {
                 assert_eq!(op["safety_tier"].as_str().unwrap(), "risky");
                 assert_eq!(op["risk_level"].as_str().unwrap(), "medium");

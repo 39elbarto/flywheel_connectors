@@ -3,7 +3,10 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use fcp_core::{BaseConnector, ConnectorId, CredentialId, FcpError, FcpResult};
+use fcp_core::{
+    AgentHint, BaseConnector, CapabilityId, ConnectorId, CredentialId, FcpError, FcpResult,
+    IdempotencyClass, OperationId, OperationInfo, RiskLevel, SafetyTier,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tracing::{info, instrument};
@@ -237,7 +240,7 @@ impl GitLabConnector {
 
     pub async fn handle_introspect(&self) -> FcpResult<serde_json::Value> {
         Ok(
-            json!({ "connector_id": "fcp.gitlab", "version": "0.1.0", "operations": operations_info() }),
+            json!({ "connector_id": "fcp.gitlab", "version": "0.1.0", "operations": serde_json::to_value(operations_info()).unwrap_or_default() }),
         )
     }
 
@@ -281,10 +284,9 @@ impl GitLabConnector {
             .get("operation_id")
             .and_then(|v| v.as_str())
             .unwrap_or("");
-        let allowed = operations_info().as_array().is_some_and(|ops| {
-            ops.iter()
-                .any(|o| o.get("id").and_then(|v| v.as_str()) == Some(operation))
-        });
+        let allowed = operations_info()
+            .iter()
+            .any(|o| o.id.as_ref() == operation);
         Ok(
             json!({ "allowed": allowed, "reason": if allowed { "Operation supported" } else { "Unknown operation" } }),
         )
@@ -369,14 +371,177 @@ fn require_str<'a>(input: &'a serde_json::Value, field: &str) -> Result<&'a str,
         })
 }
 
-fn operations_info() -> serde_json::Value {
-    json!([
-        { "id": "gitlab.projects.list", "summary": "List projects", "capability": "gitlab.projects.read", "risk_level": "low", "safety_tier": "safe", "idempotency": "strict" },
-        { "id": "gitlab.issues.list", "summary": "List issues in a project", "capability": "gitlab.issues.read", "risk_level": "low", "safety_tier": "safe", "idempotency": "strict" },
-        { "id": "gitlab.issues.create", "summary": "Create an issue", "capability": "gitlab.issues.write", "risk_level": "medium", "safety_tier": "risky", "idempotency": "none" },
-        { "id": "gitlab.merge_requests.list", "summary": "List merge requests", "capability": "gitlab.merge_requests.read", "risk_level": "low", "safety_tier": "safe", "idempotency": "strict" },
-        { "id": "gitlab.pipelines.list", "summary": "List pipelines", "capability": "gitlab.pipelines.read", "risk_level": "low", "safety_tier": "safe", "idempotency": "strict" },
-    ])
+fn operations_info() -> Vec<OperationInfo> {
+    vec![
+        OperationInfo {
+            id: OperationId::from_static("gitlab.projects.list"),
+            summary: "List projects".into(),
+            input_schema: json!({
+                "type": "object",
+                "required": [],
+                "properties": {
+                    "per_page": { "type": "integer", "maximum": 100 }
+                }
+            }),
+            output_schema: json!({
+                "type": "object",
+                "required": ["projects"],
+                "properties": {
+                    "projects": { "type": "array" }
+                }
+            }),
+            capability: CapabilityId::from_static("gitlab.projects.read"),
+            risk_level: RiskLevel::Low,
+            safety_tier: SafetyTier::Safe,
+            idempotency: IdempotencyClass::Strict,
+            ai_hints: AgentHint {
+                when_to_use: "List GitLab projects.".into(),
+                common_mistakes: vec![],
+                examples: vec![r"{}".into()],
+                related: vec![
+                    CapabilityId::from_static("gitlab.issues.list"),
+                    CapabilityId::from_static("gitlab.merge_requests.list"),
+                ],
+            },
+            description: None,
+            rate_limit: None,
+            requires_approval: None,
+        },
+        OperationInfo {
+            id: OperationId::from_static("gitlab.issues.list"),
+            summary: "List issues in a project".into(),
+            input_schema: json!({
+                "type": "object",
+                "required": ["project_id"],
+                "properties": {
+                    "project_id": { "type": "string" }
+                }
+            }),
+            output_schema: json!({
+                "type": "object",
+                "required": ["issues"],
+                "properties": {
+                    "issues": { "type": "array" }
+                }
+            }),
+            capability: CapabilityId::from_static("gitlab.issues.read"),
+            risk_level: RiskLevel::Low,
+            safety_tier: SafetyTier::Safe,
+            idempotency: IdempotencyClass::Strict,
+            ai_hints: AgentHint {
+                when_to_use: "List issues in a project.".into(),
+                common_mistakes: vec![],
+                examples: vec![r#"{"project_id": "12345"}"#.into()],
+                related: vec![
+                    CapabilityId::from_static("gitlab.issues.create"),
+                    CapabilityId::from_static("gitlab.projects.list"),
+                ],
+            },
+            description: None,
+            rate_limit: None,
+            requires_approval: None,
+        },
+        OperationInfo {
+            id: OperationId::from_static("gitlab.issues.create"),
+            summary: "Create an issue".into(),
+            input_schema: json!({
+                "type": "object",
+                "required": ["project_id", "title"],
+                "properties": {
+                    "project_id": { "type": "string" },
+                    "title": { "type": "string" },
+                    "description": { "type": "string" }
+                }
+            }),
+            output_schema: json!({
+                "type": "object",
+                "required": ["iid"],
+                "properties": {
+                    "iid": { "type": "integer" }
+                }
+            }),
+            capability: CapabilityId::from_static("gitlab.issues.write"),
+            risk_level: RiskLevel::Medium,
+            safety_tier: SafetyTier::Risky,
+            idempotency: IdempotencyClass::None,
+            ai_hints: AgentHint {
+                when_to_use: "Create a new issue.".into(),
+                common_mistakes: vec![],
+                examples: vec![
+                    r#"{"project_id": "12345", "title": "Fix login timeout", "description": "Users report timeouts after 30s"}"#.into(),
+                ],
+                related: vec![CapabilityId::from_static("gitlab.issues.list")],
+            },
+            description: None,
+            rate_limit: None,
+            requires_approval: None,
+        },
+        OperationInfo {
+            id: OperationId::from_static("gitlab.merge_requests.list"),
+            summary: "List merge requests".into(),
+            input_schema: json!({
+                "type": "object",
+                "required": ["project_id"],
+                "properties": {
+                    "project_id": { "type": "string" }
+                }
+            }),
+            output_schema: json!({
+                "type": "object",
+                "required": ["merge_requests"],
+                "properties": {
+                    "merge_requests": { "type": "array" }
+                }
+            }),
+            capability: CapabilityId::from_static("gitlab.merge_requests.read"),
+            risk_level: RiskLevel::Low,
+            safety_tier: SafetyTier::Safe,
+            idempotency: IdempotencyClass::Strict,
+            ai_hints: AgentHint {
+                when_to_use: "List merge requests in a project.".into(),
+                common_mistakes: vec![],
+                examples: vec![r#"{"project_id": "12345"}"#.into()],
+                related: vec![
+                    CapabilityId::from_static("gitlab.projects.list"),
+                    CapabilityId::from_static("gitlab.pipelines.list"),
+                ],
+            },
+            description: None,
+            rate_limit: None,
+            requires_approval: None,
+        },
+        OperationInfo {
+            id: OperationId::from_static("gitlab.pipelines.list"),
+            summary: "List pipelines".into(),
+            input_schema: json!({
+                "type": "object",
+                "required": ["project_id"],
+                "properties": {
+                    "project_id": { "type": "string" }
+                }
+            }),
+            output_schema: json!({
+                "type": "object",
+                "required": ["pipelines"],
+                "properties": {
+                    "pipelines": { "type": "array" }
+                }
+            }),
+            capability: CapabilityId::from_static("gitlab.pipelines.read"),
+            risk_level: RiskLevel::Low,
+            safety_tier: SafetyTier::Safe,
+            idempotency: IdempotencyClass::Strict,
+            ai_hints: AgentHint {
+                when_to_use: "List CI/CD pipelines.".into(),
+                common_mistakes: vec![],
+                examples: vec![r#"{"project_id": "12345"}"#.into()],
+                related: vec![CapabilityId::from_static("gitlab.merge_requests.list")],
+            },
+            description: None,
+            rate_limit: None,
+            requires_approval: None,
+        },
+    ]
 }
 
 #[cfg(test)]
@@ -616,18 +781,13 @@ mod tests {
 
     #[test]
     fn operations_info_has_5_operations() {
-        assert_eq!(operations_info().as_array().unwrap().len(), 5);
+        assert_eq!(operations_info().len(), 5);
     }
 
     #[test]
     fn operations_ids_are_unique() {
         let ops = operations_info();
-        let ids: Vec<&str> = ops
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter_map(|o| o["id"].as_str())
-            .collect();
+        let ids: Vec<&str> = ops.iter().map(|o| o.id.as_ref()).collect();
         let mut unique = ids.clone();
         unique.sort_unstable();
         unique.dedup();
@@ -637,78 +797,53 @@ mod tests {
     #[test]
     fn read_operations_are_safe() {
         let ops = operations_info();
-        for op in ops.as_array().unwrap() {
-            let cap = op["capability"].as_str().unwrap();
+        for op in &ops {
+            let cap = op.capability.as_ref();
             if cap.to_ascii_lowercase().ends_with(".read") {
                 assert_eq!(
-                    op["safety_tier"].as_str().unwrap(),
-                    "safe",
+                    op.safety_tier,
+                    SafetyTier::Safe,
                     "read op {} should be safe",
-                    op["id"]
+                    op.id.as_ref()
                 );
             }
         }
     }
 
     #[test]
-    fn all_operations_have_required_fields() {
-        let required = [
-            "id",
-            "summary",
-            "capability",
-            "risk_level",
-            "safety_tier",
-            "idempotency",
-        ];
+    fn all_operations_have_summaries() {
         let ops = operations_info();
-        for op in ops.as_array().unwrap() {
-            for field in &required {
-                assert!(
-                    op.get(field).is_some(),
-                    "op {:?} missing field {field}",
-                    op["id"]
-                );
-            }
+        for op in &ops {
+            assert!(
+                !op.summary.is_empty(),
+                "op {:?} has empty summary",
+                op.id.as_ref()
+            );
         }
     }
 
     #[test]
     fn operations_have_valid_risk_levels() {
-        let valid = ["low", "medium", "high", "critical"];
         let ops = operations_info();
-        for op in ops.as_array().unwrap() {
-            let level = op["risk_level"].as_str().unwrap();
-            assert!(
-                valid.contains(&level),
-                "invalid risk_level {level} for {:?}",
-                op["id"]
-            );
+        for op in &ops {
+            // All RiskLevel enum variants are valid by construction
+            let _ = op.risk_level;
         }
     }
 
     #[test]
     fn operations_have_valid_safety_tiers() {
-        let valid = ["safe", "risky", "dangerous"];
         let ops = operations_info();
-        for op in ops.as_array().unwrap() {
-            let tier = op["safety_tier"].as_str().unwrap();
-            assert!(
-                valid.contains(&tier),
-                "invalid safety_tier {tier} for {:?}",
-                op["id"]
-            );
+        for op in &ops {
+            // All SafetyTier enum variants are valid by construction
+            let _ = op.safety_tier;
         }
     }
 
     #[test]
     fn operations_contain_expected_ids() {
         let ops = operations_info();
-        let ids: Vec<&str> = ops
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter_map(|o| o["id"].as_str())
-            .collect();
+        let ids: Vec<&str> = ops.iter().map(|o| o.id.as_ref()).collect();
         let expected = [
             "gitlab.projects.list",
             "gitlab.issues.list",
@@ -839,12 +974,12 @@ mod tests {
     #[test]
     fn operations_list_ops_are_strict_idempotent() {
         let ops = operations_info();
-        for op in ops.as_array().unwrap() {
-            let id = op["id"].as_str().unwrap();
+        for op in &ops {
+            let id = op.id.as_ref();
             if id.contains("list") {
                 assert_eq!(
-                    op["idempotency"].as_str().unwrap(),
-                    "strict",
+                    op.idempotency,
+                    IdempotencyClass::Strict,
                     "list op {id} should be strict idempotent"
                 );
             }
@@ -854,12 +989,12 @@ mod tests {
     #[test]
     fn operations_create_is_not_idempotent() {
         let ops = operations_info();
-        for op in ops.as_array().unwrap() {
-            let id = op["id"].as_str().unwrap();
+        for op in &ops {
+            let id = op.id.as_ref();
             if id.contains("create") {
                 assert_eq!(
-                    op["idempotency"].as_str().unwrap(),
-                    "none",
+                    op.idempotency,
+                    IdempotencyClass::None,
                     "create op {id} should not be idempotent"
                 );
             }
@@ -869,17 +1004,20 @@ mod tests {
     #[test]
     fn operations_all_summaries_non_empty() {
         let ops = operations_info();
-        for op in ops.as_array().unwrap() {
-            let summary = op["summary"].as_str().unwrap();
-            assert!(!summary.is_empty(), "op {:?} has empty summary", op["id"]);
+        for op in &ops {
+            assert!(
+                !op.summary.is_empty(),
+                "op {:?} has empty summary",
+                op.id.as_ref()
+            );
         }
     }
 
     #[test]
     fn operations_all_capabilities_prefixed() {
         let ops = operations_info();
-        for op in ops.as_array().unwrap() {
-            let cap = op["capability"].as_str().unwrap();
+        for op in &ops {
+            let cap = op.capability.as_ref();
             assert!(
                 cap.starts_with("gitlab."),
                 "capability {cap} should start with gitlab."
@@ -951,9 +1089,9 @@ mod tests {
     #[allow(clippy::case_sensitive_file_extension_comparisons)]
     fn operations_write_ops_have_correct_capability() {
         let ops = operations_info();
-        for op in ops.as_array().unwrap() {
-            let id = op["id"].as_str().unwrap();
-            let cap = op["capability"].as_str().unwrap();
+        for op in &ops {
+            let id = op.id.as_ref();
+            let cap = op.capability.as_ref();
             if id.contains("create") {
                 assert!(cap.ends_with(".write"), "write op {id} has cap {cap}");
             }
@@ -963,12 +1101,12 @@ mod tests {
     #[test]
     fn operations_create_is_risky() {
         let ops = operations_info();
-        for op in ops.as_array().unwrap() {
-            let id = op["id"].as_str().unwrap();
+        for op in &ops {
+            let id = op.id.as_ref();
             if id.contains("create") {
                 assert_eq!(
-                    op["safety_tier"].as_str().unwrap(),
-                    "risky",
+                    op.safety_tier,
+                    SafetyTier::Risky,
                     "create op {id} should be risky"
                 );
             }

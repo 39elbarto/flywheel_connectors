@@ -3,7 +3,10 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use fcp_core::{BaseConnector, ConnectorId, CredentialId, FcpError, FcpResult};
+use fcp_core::{
+    AgentHint, BaseConnector, CapabilityId, ConnectorId, CredentialId, FcpError, FcpResult,
+    IdempotencyClass, OperationId, OperationInfo, RiskLevel, SafetyTier,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tracing::{info, instrument};
@@ -262,7 +265,7 @@ impl KubernetesConnector {
         Ok(json!({
             "connector_id": "fcp.kubernetes",
             "version": "0.1.0",
-            "operations": operations_info(),
+            "operations": serde_json::to_value(operations_info()).unwrap_or_default(),
         }))
     }
 
@@ -321,10 +324,9 @@ impl KubernetesConnector {
             .and_then(serde_json::Value::as_str)
             .unwrap_or("");
 
-        let allowed = operations_info().as_array().is_some_and(|ops| {
-            ops.iter()
-                .any(|o| o.get("id").and_then(serde_json::Value::as_str) == Some(operation))
-        });
+        let allowed = operations_info()
+            .iter()
+            .any(|o| o.id.as_ref() == operation);
 
         Ok(json!({
             "allowed": allowed,
@@ -578,28 +580,515 @@ fn require_str<'a>(input: &'a serde_json::Value, field: &str) -> Result<&'a str,
         })
 }
 
-fn operations_info() -> serde_json::Value {
-    json!([
-        {"id": "kubernetes.list_pods", "summary": "List pods in a namespace", "capability": "kubernetes.read", "risk_level": "low", "safety_tier": "safe", "idempotency": "strict"},
-        {"id": "kubernetes.get_pod", "summary": "Get a pod by name", "capability": "kubernetes.read", "risk_level": "low", "safety_tier": "safe", "idempotency": "strict"},
-        {"id": "kubernetes.delete_pod", "summary": "Delete a pod", "capability": "kubernetes.admin", "risk_level": "high", "safety_tier": "dangerous", "idempotency": "best_effort"},
-        {"id": "kubernetes.get_pod_logs", "summary": "Retrieve logs from a pod", "capability": "kubernetes.read", "risk_level": "low", "safety_tier": "safe", "idempotency": "strict"},
-        {"id": "kubernetes.stream_pod_logs", "summary": "Stream live logs from a pod", "capability": "kubernetes.read", "risk_level": "low", "safety_tier": "safe", "idempotency": "strict"},
-        {"id": "kubernetes.list_deployments", "summary": "List deployments in a namespace", "capability": "kubernetes.read", "risk_level": "low", "safety_tier": "safe", "idempotency": "strict"},
-        {"id": "kubernetes.get_deployment", "summary": "Get a deployment by name", "capability": "kubernetes.read", "risk_level": "low", "safety_tier": "safe", "idempotency": "strict"},
-        {"id": "kubernetes.scale_deployment", "summary": "Scale a deployment", "capability": "kubernetes.write", "risk_level": "high", "safety_tier": "risky", "idempotency": "best_effort"},
-        {"id": "kubernetes.rollout_restart", "summary": "Trigger a rolling restart", "capability": "kubernetes.write", "risk_level": "high", "safety_tier": "risky", "idempotency": "none"},
-        {"id": "kubernetes.get_service", "summary": "Get a service by name", "capability": "kubernetes.read", "risk_level": "low", "safety_tier": "safe", "idempotency": "strict"},
-        {"id": "kubernetes.get_configmap", "summary": "Get a ConfigMap by name", "capability": "kubernetes.read", "risk_level": "low", "safety_tier": "safe", "idempotency": "strict"},
-        {"id": "kubernetes.update_configmap", "summary": "Update a ConfigMap", "capability": "kubernetes.write", "risk_level": "medium", "safety_tier": "risky", "idempotency": "best_effort"},
-        {"id": "kubernetes.get_secret", "summary": "Get a Secret by name (redacted by default)", "capability": "kubernetes.secrets", "risk_level": "high", "safety_tier": "risky", "idempotency": "strict"},
-        {"id": "kubernetes.watch_events", "summary": "Watch events in a namespace", "capability": "kubernetes.read", "risk_level": "low", "safety_tier": "safe", "idempotency": "strict"},
-    ])
+fn operations_info() -> Vec<OperationInfo> {
+    vec![
+        op_info(
+            "kubernetes.list_pods",
+            "List pods in a namespace",
+            json!({
+                "type": "object",
+                "required": ["namespace"],
+                "properties": {
+                    "namespace": { "type": "string" },
+                    "label_selector": { "type": "string" },
+                    "field_selector": { "type": "string" }
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["pods"],
+                "properties": { "pods": { "type": "array" } }
+            }),
+            "kubernetes.read",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "List pods in a namespace, optionally filtered by labels.".into(),
+                common_mistakes: vec!["Not using label selectors on large namespaces".into()],
+                examples: vec![
+                    r#"{"namespace": "production", "label_selector": "app=api-server"}"#.into(),
+                ],
+                related: vec![
+                    CapabilityId::from_static("kubernetes.get_pod"),
+                    CapabilityId::from_static("kubernetes.get_deployment"),
+                ],
+            },
+        ),
+        op_info(
+            "kubernetes.get_pod",
+            "Get a pod by name",
+            json!({
+                "type": "object",
+                "required": ["namespace", "name"],
+                "properties": {
+                    "namespace": { "type": "string" },
+                    "name": { "type": "string" }
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["pod"],
+                "properties": { "pod": { "type": "object" } }
+            }),
+            "kubernetes.read",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "Retrieve details about a specific pod.".into(),
+                common_mistakes: vec![
+                    "Forgetting to specify namespace (defaults to 'default')".into(),
+                ],
+                examples: vec![
+                    r#"{"namespace": "production", "name": "api-server-5f4b8c9-x7k2p"}"#.into(),
+                ],
+                related: vec![
+                    CapabilityId::from_static("kubernetes.list_pods"),
+                    CapabilityId::from_static("kubernetes.get_pod_logs"),
+                ],
+            },
+        ),
+        op_info(
+            "kubernetes.delete_pod",
+            "Delete a pod",
+            json!({
+                "type": "object",
+                "required": ["namespace", "name"],
+                "properties": {
+                    "namespace": { "type": "string" },
+                    "name": { "type": "string" },
+                    "grace_period_seconds": { "type": "integer" }
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["deleted"],
+                "properties": { "deleted": { "type": "boolean" } }
+            }),
+            "kubernetes.admin",
+            RiskLevel::High,
+            SafetyTier::Dangerous,
+            IdempotencyClass::BestEffort,
+            AgentHint {
+                when_to_use: "Force-delete a pod to trigger rescheduling.".into(),
+                common_mistakes: vec![
+                    "Deleting pods managed by a Deployment (they respawn)".into(),
+                    "Using grace_period_seconds=0 on stateful pods".into(),
+                ],
+                examples: vec![
+                    r#"{"namespace": "production", "name": "api-server-5f4b8c9-x7k2p"}"#.into(),
+                ],
+                related: vec![
+                    CapabilityId::from_static("kubernetes.get_pod"),
+                    CapabilityId::from_static("kubernetes.scale_deployment"),
+                ],
+            },
+        ),
+        op_info(
+            "kubernetes.get_pod_logs",
+            "Retrieve logs from a pod",
+            json!({
+                "type": "object",
+                "required": ["namespace", "name"],
+                "properties": {
+                    "namespace": { "type": "string" },
+                    "name": { "type": "string" },
+                    "container": { "type": "string" },
+                    "tail_lines": { "type": "integer" },
+                    "since_seconds": { "type": "integer" }
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["logs"],
+                "properties": { "logs": { "type": "string" } }
+            }),
+            "kubernetes.read",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "Read container logs from a pod.".into(),
+                common_mistakes: vec![
+                    "Not specifying container in multi-container pods".into(),
+                    "Requesting unbounded logs on high-throughput pods".into(),
+                ],
+                examples: vec![
+                    r#"{"namespace": "production", "name": "api-server-5f4b8c9-x7k2p", "tail_lines": 100}"#.into(),
+                ],
+                related: vec![
+                    CapabilityId::from_static("kubernetes.get_pod"),
+                    CapabilityId::from_static("kubernetes.stream_pod_logs"),
+                ],
+            },
+        ),
+        op_info(
+            "kubernetes.stream_pod_logs",
+            "Stream live logs from a pod",
+            json!({
+                "type": "object",
+                "required": ["namespace", "name"],
+                "properties": {
+                    "namespace": { "type": "string" },
+                    "name": { "type": "string" },
+                    "container": { "type": "string" },
+                    "tail_lines": { "type": "integer" }
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["log_line"],
+                "properties": { "log_line": { "type": "string" } }
+            }),
+            "kubernetes.read",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "Follow live log output from a pod container.".into(),
+                common_mistakes: vec![
+                    "Not specifying container in multi-container pods".into(),
+                ],
+                examples: vec![
+                    r#"{"namespace": "production", "name": "api-server-5f4b8c9-x7k2p", "tail_lines": 50}"#.into(),
+                ],
+                related: vec![
+                    CapabilityId::from_static("kubernetes.get_pod_logs"),
+                    CapabilityId::from_static("kubernetes.watch_events"),
+                ],
+            },
+        ),
+        op_info(
+            "kubernetes.list_deployments",
+            "List deployments in a namespace",
+            json!({
+                "type": "object",
+                "required": ["namespace"],
+                "properties": {
+                    "namespace": { "type": "string" },
+                    "label_selector": { "type": "string" }
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["deployments"],
+                "properties": { "deployments": { "type": "array" } }
+            }),
+            "kubernetes.read",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "List all deployments in a namespace.".into(),
+                common_mistakes: vec![],
+                examples: vec![r#"{"namespace": "production"}"#.into()],
+                related: vec![
+                    CapabilityId::from_static("kubernetes.get_deployment"),
+                    CapabilityId::from_static("kubernetes.scale_deployment"),
+                ],
+            },
+        ),
+        op_info(
+            "kubernetes.get_deployment",
+            "Get a deployment by name",
+            json!({
+                "type": "object",
+                "required": ["namespace", "name"],
+                "properties": {
+                    "namespace": { "type": "string" },
+                    "name": { "type": "string" }
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["deployment"],
+                "properties": { "deployment": { "type": "object" } }
+            }),
+            "kubernetes.read",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "Retrieve details about a specific deployment.".into(),
+                common_mistakes: vec![],
+                examples: vec![
+                    r#"{"namespace": "production", "name": "api-server"}"#.into(),
+                ],
+                related: vec![
+                    CapabilityId::from_static("kubernetes.list_deployments"),
+                    CapabilityId::from_static("kubernetes.scale_deployment"),
+                ],
+            },
+        ),
+        op_info(
+            "kubernetes.scale_deployment",
+            "Scale a deployment",
+            json!({
+                "type": "object",
+                "required": ["namespace", "name", "replicas"],
+                "properties": {
+                    "namespace": { "type": "string" },
+                    "name": { "type": "string" },
+                    "replicas": { "type": "integer" }
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["deployment"],
+                "properties": { "deployment": { "type": "object" } }
+            }),
+            "kubernetes.write",
+            RiskLevel::High,
+            SafetyTier::Risky,
+            IdempotencyClass::BestEffort,
+            AgentHint {
+                when_to_use: "Scale a deployment up or down.".into(),
+                common_mistakes: vec![
+                    "Scaling to 0 unintentionally".into(),
+                    "Not checking HPA before manual scaling".into(),
+                ],
+                examples: vec![
+                    r#"{"namespace": "production", "name": "api-server", "replicas": 3}"#.into(),
+                ],
+                related: vec![
+                    CapabilityId::from_static("kubernetes.get_deployment"),
+                    CapabilityId::from_static("kubernetes.rollout_restart"),
+                ],
+            },
+        ),
+        op_info(
+            "kubernetes.rollout_restart",
+            "Trigger a rolling restart",
+            json!({
+                "type": "object",
+                "required": ["namespace", "name"],
+                "properties": {
+                    "namespace": { "type": "string" },
+                    "name": { "type": "string" }
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["deployment"],
+                "properties": { "deployment": { "type": "object" } }
+            }),
+            "kubernetes.write",
+            RiskLevel::High,
+            SafetyTier::Risky,
+            IdempotencyClass::None,
+            AgentHint {
+                when_to_use: "Restart all pods in a deployment with zero downtime.".into(),
+                common_mistakes: vec!["Restarting during an active rollout".into()],
+                examples: vec![
+                    r#"{"namespace": "production", "name": "api-server"}"#.into(),
+                ],
+                related: vec![
+                    CapabilityId::from_static("kubernetes.scale_deployment"),
+                    CapabilityId::from_static("kubernetes.get_deployment"),
+                ],
+            },
+        ),
+        op_info(
+            "kubernetes.get_service",
+            "Get a service by name",
+            json!({
+                "type": "object",
+                "required": ["namespace", "name"],
+                "properties": {
+                    "namespace": { "type": "string" },
+                    "name": { "type": "string" }
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["service"],
+                "properties": { "service": { "type": "object" } }
+            }),
+            "kubernetes.read",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "Retrieve details about a Kubernetes service.".into(),
+                common_mistakes: vec![],
+                examples: vec![
+                    r#"{"namespace": "production", "name": "api-server"}"#.into(),
+                ],
+                related: vec![CapabilityId::from_static("kubernetes.list_pods")],
+            },
+        ),
+        op_info(
+            "kubernetes.get_configmap",
+            "Get a ConfigMap by name",
+            json!({
+                "type": "object",
+                "required": ["namespace", "name"],
+                "properties": {
+                    "namespace": { "type": "string" },
+                    "name": { "type": "string" }
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["configmap"],
+                "properties": { "configmap": { "type": "object" } }
+            }),
+            "kubernetes.read",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "Read configuration data from a ConfigMap.".into(),
+                common_mistakes: vec![],
+                examples: vec![
+                    r#"{"namespace": "production", "name": "app-config"}"#.into(),
+                ],
+                related: vec![
+                    CapabilityId::from_static("kubernetes.update_configmap"),
+                    CapabilityId::from_static("kubernetes.get_secret"),
+                ],
+            },
+        ),
+        op_info(
+            "kubernetes.update_configmap",
+            "Update a ConfigMap",
+            json!({
+                "type": "object",
+                "required": ["namespace", "name", "data"],
+                "properties": {
+                    "namespace": { "type": "string" },
+                    "name": { "type": "string" },
+                    "data": { "type": "object" }
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["configmap"],
+                "properties": { "configmap": { "type": "object" } }
+            }),
+            "kubernetes.write",
+            RiskLevel::Medium,
+            SafetyTier::Risky,
+            IdempotencyClass::BestEffort,
+            AgentHint {
+                when_to_use: "Update configuration data in a ConfigMap.".into(),
+                common_mistakes: vec![
+                    "Overwriting all data instead of merging".into(),
+                    "Not restarting pods that consume the ConfigMap".into(),
+                ],
+                examples: vec![
+                    r#"{"namespace": "production", "name": "app-config", "data": {"LOG_LEVEL": "debug"}}"#.into(),
+                ],
+                related: vec![
+                    CapabilityId::from_static("kubernetes.get_configmap"),
+                    CapabilityId::from_static("kubernetes.rollout_restart"),
+                ],
+            },
+        ),
+        op_info(
+            "kubernetes.get_secret",
+            "Get a Secret by name (redacted by default)",
+            json!({
+                "type": "object",
+                "required": ["namespace", "name"],
+                "properties": {
+                    "namespace": { "type": "string" },
+                    "name": { "type": "string" },
+                    "unmask": { "type": "boolean" }
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["secret"],
+                "properties": { "secret": { "type": "object" } }
+            }),
+            "kubernetes.secrets",
+            RiskLevel::High,
+            SafetyTier::Risky,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "Read a Kubernetes secret (metadata only by default).".into(),
+                common_mistakes: vec![
+                    "Logging or exposing secret data".into(),
+                    "Not setting unmask=false for audit-only reads".into(),
+                ],
+                examples: vec![
+                    r#"{"namespace": "production", "name": "db-credentials"}"#.into(),
+                ],
+                related: vec![CapabilityId::from_static("kubernetes.get_configmap")],
+            },
+        ),
+        op_info(
+            "kubernetes.watch_events",
+            "Watch events in a namespace",
+            json!({
+                "type": "object",
+                "required": ["namespace"],
+                "properties": {
+                    "namespace": { "type": "string" },
+                    "field_selector": { "type": "string" },
+                    "resource_version": { "type": "string" }
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["events"],
+                "properties": { "events": { "type": "array" } }
+            }),
+            "kubernetes.read",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "Stream cluster events for monitoring or debugging.".into(),
+                common_mistakes: vec![
+                    "Not handling resourceVersion for reconnection".into(),
+                ],
+                examples: vec![r#"{"namespace": "production"}"#.into()],
+                related: vec![CapabilityId::from_static("kubernetes.stream_pod_logs")],
+            },
+        ),
+    ]
+}
+
+#[allow(clippy::fn_params_excessive_bools)]
+#[allow(clippy::too_many_arguments)]
+fn op_info(
+    id: &'static str,
+    summary: &str,
+    input_schema: serde_json::Value,
+    output_schema: serde_json::Value,
+    capability: &'static str,
+    risk_level: RiskLevel,
+    safety_tier: SafetyTier,
+    idempotency: IdempotencyClass,
+    ai_hints: AgentHint,
+) -> OperationInfo {
+    OperationInfo {
+        id: OperationId::from_static(id),
+        summary: summary.into(),
+        input_schema,
+        output_schema,
+        capability: CapabilityId::from_static(capability),
+        risk_level,
+        description: None,
+        rate_limit: None,
+        requires_approval: None,
+        safety_tier,
+        idempotency,
+        ai_hints,
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Serialize `operations_info()` to JSON for backward-compatible test assertions.
+    fn operations_info_json() -> serde_json::Value {
+        serde_json::to_value(operations_info()).unwrap()
+    }
 
     #[test]
     fn config_from_bearer_token() {
@@ -697,12 +1186,12 @@ mod tests {
 
     #[test]
     fn operations_info_has_14_operations() {
-        assert_eq!(operations_info().as_array().unwrap().len(), 14);
+        assert_eq!(operations_info().len(), 14);
     }
 
     #[test]
     fn operations_all_have_required_fields() {
-        for op in operations_info().as_array().unwrap() {
+        for op in operations_info_json().as_array().unwrap() {
             assert!(op.get("id").is_some());
             assert!(op.get("summary").is_some());
             assert!(op.get("capability").is_some());
@@ -713,7 +1202,7 @@ mod tests {
 
     #[test]
     fn operations_ids_are_unique() {
-        let ops = operations_info();
+        let ops = operations_info_json();
         let ids: Vec<&str> = ops
             .as_array()
             .unwrap()
@@ -729,7 +1218,7 @@ mod tests {
     #[test]
     fn operations_risk_levels_valid() {
         let valid = ["low", "medium", "high"];
-        for op in operations_info().as_array().unwrap() {
+        for op in operations_info_json().as_array().unwrap() {
             let rl = op["risk_level"].as_str().unwrap();
             assert!(valid.contains(&rl), "invalid risk_level: {rl}");
         }
@@ -738,7 +1227,7 @@ mod tests {
     #[test]
     fn operations_safety_tiers_valid() {
         let valid = ["safe", "risky", "dangerous"];
-        for op in operations_info().as_array().unwrap() {
+        for op in operations_info_json().as_array().unwrap() {
             let st = op["safety_tier"].as_str().unwrap();
             assert!(valid.contains(&st), "invalid safety_tier: {st}");
         }
@@ -746,7 +1235,7 @@ mod tests {
 
     #[test]
     fn read_operations_are_safe() {
-        for op in operations_info().as_array().unwrap() {
+        for op in operations_info_json().as_array().unwrap() {
             if op["capability"].as_str().unwrap() == "kubernetes.read" {
                 assert_eq!(op["safety_tier"], "safe");
                 assert_eq!(op["risk_level"], "low");
@@ -756,7 +1245,7 @@ mod tests {
 
     #[test]
     fn operations_contain_all_manifest_ids() {
-        let ops = operations_info();
+        let ops = operations_info_json();
         let ids: Vec<&str> = ops
             .as_array()
             .unwrap()
@@ -785,7 +1274,7 @@ mod tests {
 
     #[test]
     fn operations_all_have_idempotency() {
-        for op in operations_info().as_array().unwrap() {
+        for op in operations_info_json().as_array().unwrap() {
             assert!(op.get("idempotency").is_some());
         }
     }
@@ -878,7 +1367,7 @@ mod tests {
 
     #[test]
     fn delete_pod_is_dangerous() {
-        let ops = operations_info();
+        let ops = operations_info_json();
         let op = ops
             .as_array()
             .unwrap()
@@ -892,7 +1381,7 @@ mod tests {
 
     #[test]
     fn scale_deployment_is_risky() {
-        let ops = operations_info();
+        let ops = operations_info_json();
         let op = ops
             .as_array()
             .unwrap()
@@ -905,7 +1394,7 @@ mod tests {
 
     #[test]
     fn get_secret_uses_secrets_capability() {
-        let ops = operations_info();
+        let ops = operations_info_json();
         let op = ops
             .as_array()
             .unwrap()
@@ -918,7 +1407,7 @@ mod tests {
 
     #[test]
     fn rollout_restart_uses_write_capability() {
-        let ops = operations_info();
+        let ops = operations_info_json();
         let op = ops
             .as_array()
             .unwrap()
@@ -931,7 +1420,7 @@ mod tests {
 
     #[test]
     fn update_configmap_is_risky() {
-        let ops = operations_info();
+        let ops = operations_info_json();
         let op = ops
             .as_array()
             .unwrap()
@@ -944,7 +1433,7 @@ mod tests {
 
     #[test]
     fn watch_events_is_safe() {
-        let ops = operations_info();
+        let ops = operations_info_json();
         let op = ops
             .as_array()
             .unwrap()
@@ -964,7 +1453,7 @@ mod tests {
 
     #[test]
     fn operations_list_pods_capability() {
-        let ops = operations_info();
+        let ops = operations_info_json();
         let op = ops
             .as_array()
             .unwrap()
@@ -976,7 +1465,7 @@ mod tests {
 
     #[test]
     fn operations_get_pod_capability() {
-        let ops = operations_info();
+        let ops = operations_info_json();
         let op = ops
             .as_array()
             .unwrap()
@@ -988,7 +1477,7 @@ mod tests {
 
     #[test]
     fn operations_get_configmap_capability() {
-        let ops = operations_info();
+        let ops = operations_info_json();
         let op = ops
             .as_array()
             .unwrap()
@@ -1000,7 +1489,7 @@ mod tests {
 
     #[test]
     fn operations_update_configmap_capability() {
-        let ops = operations_info();
+        let ops = operations_info_json();
         let op = ops
             .as_array()
             .unwrap()
@@ -1012,7 +1501,7 @@ mod tests {
 
     #[test]
     fn operations_get_service_capability() {
-        let ops = operations_info();
+        let ops = operations_info_json();
         let op = ops
             .as_array()
             .unwrap()
@@ -1024,7 +1513,7 @@ mod tests {
 
     #[test]
     fn operations_all_have_summary() {
-        for op in operations_info().as_array().unwrap() {
+        for op in operations_info_json().as_array().unwrap() {
             let summary = op["summary"].as_str().unwrap();
             assert!(!summary.is_empty(), "op {:?} has empty summary", op["id"]);
         }
@@ -1111,7 +1600,7 @@ mod tests {
 
     #[test]
     fn operations_get_pod_logs_capability() {
-        let ops = operations_info();
+        let ops = operations_info_json();
         let op = ops
             .as_array()
             .unwrap()
@@ -1124,7 +1613,7 @@ mod tests {
 
     #[test]
     fn operations_stream_pod_logs_capability() {
-        let ops = operations_info();
+        let ops = operations_info_json();
         let op = ops
             .as_array()
             .unwrap()
@@ -1136,7 +1625,7 @@ mod tests {
 
     #[test]
     fn operations_list_deployments_capability() {
-        let ops = operations_info();
+        let ops = operations_info_json();
         let op = ops
             .as_array()
             .unwrap()
@@ -1148,7 +1637,7 @@ mod tests {
 
     #[test]
     fn operations_get_deployment_capability() {
-        let ops = operations_info();
+        let ops = operations_info_json();
         let op = ops
             .as_array()
             .unwrap()
@@ -1160,7 +1649,7 @@ mod tests {
 
     #[test]
     fn operations_scale_deployment_idempotency() {
-        let ops = operations_info();
+        let ops = operations_info_json();
         let op = ops
             .as_array()
             .unwrap()
@@ -1172,7 +1661,7 @@ mod tests {
 
     #[test]
     fn operations_delete_pod_idempotency() {
-        let ops = operations_info();
+        let ops = operations_info_json();
         let op = ops
             .as_array()
             .unwrap()
@@ -1184,7 +1673,7 @@ mod tests {
 
     #[test]
     fn operations_watch_events_capability() {
-        let ops = operations_info();
+        let ops = operations_info_json();
         let op = ops
             .as_array()
             .unwrap()
@@ -1196,7 +1685,7 @@ mod tests {
 
     #[test]
     fn operations_write_ops_have_correct_capability() {
-        for op in operations_info().as_array().unwrap() {
+        for op in operations_info_json().as_array().unwrap() {
             let id = op["id"].as_str().unwrap();
             let cap = op["capability"].as_str().unwrap();
             if id.contains("scale") || id.contains("rollout") || id.contains("update") {
@@ -1225,7 +1714,7 @@ mod tests {
 
     #[test]
     fn operations_all_capabilities_prefixed() {
-        for op in operations_info().as_array().unwrap() {
+        for op in operations_info_json().as_array().unwrap() {
             let cap = op["capability"].as_str().unwrap();
             assert!(
                 cap.starts_with("kubernetes."),

@@ -3,7 +3,10 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use fcp_core::{BaseConnector, ConnectorId, CredentialId, FcpError, FcpResult};
+use fcp_core::{
+    AgentHint, BaseConnector, CapabilityId, ConnectorId, CredentialId, FcpError, FcpResult,
+    IdempotencyClass, OperationId, OperationInfo, RiskLevel, SafetyTier,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tracing::{info, instrument};
@@ -296,7 +299,7 @@ impl DatadogConnector {
         Ok(json!({
             "connector_id": "fcp.datadog",
             "version": "0.1.0",
-            "operations": operations_info(),
+            "operations": serde_json::to_value(operations_info()).unwrap_or_default(),
         }))
     }
 
@@ -350,10 +353,9 @@ impl DatadogConnector {
             .and_then(|v| v.as_str())
             .unwrap_or("");
 
-        let allowed = operations_info().as_array().is_some_and(|ops| {
-            ops.iter()
-                .any(|o| o.get("id").and_then(|v| v.as_str()) == Some(operation))
-        });
+        let allowed = operations_info()
+            .iter()
+            .any(|o| o.id.as_ref() == operation);
 
         Ok(json!({
             "allowed": allowed,
@@ -502,74 +504,302 @@ fn require_i64(input: &serde_json::Value, field: &str) -> Result<i64, DatadogErr
         })
 }
 
+/// Build a single [`OperationInfo`] entry.
+#[allow(clippy::fn_params_excessive_bools)]
+fn op_info(
+    id: &'static str,
+    summary: &str,
+    input_schema: serde_json::Value,
+    output_schema: serde_json::Value,
+    capability: &'static str,
+    risk_level: RiskLevel,
+    safety_tier: SafetyTier,
+    idempotency: IdempotencyClass,
+    ai_hints: AgentHint,
+) -> OperationInfo {
+    OperationInfo {
+        id: OperationId::from_static(id),
+        summary: summary.into(),
+        input_schema,
+        output_schema,
+        capability: CapabilityId::from_static(capability),
+        risk_level,
+        description: None,
+        rate_limit: None,
+        requires_approval: None,
+        safety_tier,
+        idempotency,
+        ai_hints,
+    }
+}
+
 /// Build the operations info for introspection.
-fn operations_info() -> serde_json::Value {
-    json!([
-        {
-            "id": "datadog.events.create",
-            "summary": "Post an event",
-            "capability": "datadog.events.write",
-            "risk_level": "medium",
-            "safety_tier": "safe",
-            "idempotency": "none",
-        },
-        {
-            "id": "datadog.events.list",
-            "summary": "List events in a time range",
-            "capability": "datadog.events.read",
-            "risk_level": "low",
-            "safety_tier": "safe",
-            "idempotency": "strict",
-        },
-        {
-            "id": "datadog.logs.search",
-            "summary": "Search logs",
-            "capability": "datadog.logs.read",
-            "risk_level": "low",
-            "safety_tier": "safe",
-            "idempotency": "strict",
-        },
-        {
-            "id": "datadog.metrics.query",
-            "summary": "Query time-series metrics",
-            "capability": "datadog.metrics.read",
-            "risk_level": "low",
-            "safety_tier": "safe",
-            "idempotency": "strict",
-        },
-        {
-            "id": "datadog.metrics.submit",
-            "summary": "Submit custom metrics",
-            "capability": "datadog.metrics.write",
-            "risk_level": "medium",
-            "safety_tier": "risky",
-            "idempotency": "none",
-        },
-        {
-            "id": "datadog.monitors.create",
-            "summary": "Create a monitor",
-            "capability": "datadog.monitors.write",
-            "risk_level": "medium",
-            "safety_tier": "risky",
-            "idempotency": "none",
-        },
-        {
-            "id": "datadog.monitors.delete",
-            "summary": "Delete a monitor",
-            "capability": "datadog.monitors.write",
-            "risk_level": "high",
-            "safety_tier": "dangerous",
-            "idempotency": "strict",
-        },
-        {
-            "id": "datadog.monitors.list",
-            "summary": "List monitors",
-            "capability": "datadog.monitors.read",
-            "risk_level": "low",
-            "safety_tier": "safe",
-            "idempotency": "strict",
-        },
-    ])
+fn operations_info() -> Vec<OperationInfo> {
+    vec![
+        op_info(
+            "datadog.events.create",
+            "Post an event",
+            json!({
+                "type": "object",
+                "required": ["title", "text"],
+                "properties": {
+                    "title": { "type": "string" },
+                    "text": { "type": "string" },
+                    "priority": { "type": "string" },
+                    "alert_type": { "type": "string" },
+                    "tags": { "type": "array" }
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["event"],
+                "properties": {
+                    "event": { "type": "object" }
+                }
+            }),
+            "datadog.events.write",
+            RiskLevel::Medium,
+            SafetyTier::Safe,
+            IdempotencyClass::None,
+            AgentHint {
+                when_to_use: "Post an event to Datadog (deploys, incidents, etc.).".into(),
+                common_mistakes: vec![],
+                examples: vec![
+                    r#"{"title": "Deploy v2.1.0", "text": "Deployed to production", "tags": ["env:production"]}"#.into(),
+                ],
+                related: vec![CapabilityId::from_static("datadog.events.list")],
+            },
+        ),
+        op_info(
+            "datadog.events.list",
+            "List events in a time range",
+            json!({
+                "type": "object",
+                "required": ["start", "end"],
+                "properties": {
+                    "start": { "type": "integer" },
+                    "end": { "type": "integer" },
+                    "priority": { "type": "string" },
+                    "sources": { "type": "string" },
+                    "tags": { "type": "string" }
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["events"],
+                "properties": {
+                    "events": { "type": "array" }
+                }
+            }),
+            "datadog.events.read",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "List events in a time range.".into(),
+                common_mistakes: vec![],
+                examples: vec![
+                    r#"{"start": 1709251200, "end": 1709337600, "tags": "env:production"}"#.into(),
+                ],
+                related: vec![CapabilityId::from_static("datadog.events.create")],
+            },
+        ),
+        op_info(
+            "datadog.logs.search",
+            "Search logs",
+            json!({
+                "type": "object",
+                "required": ["query"],
+                "properties": {
+                    "query": { "type": "string" },
+                    "from_ts": { "type": "string" },
+                    "to_ts": { "type": "string" },
+                    "limit": { "type": "integer", "maximum": 1000 }
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["logs"],
+                "properties": {
+                    "logs": { "type": "array" }
+                }
+            }),
+            "datadog.logs.read",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "Search and retrieve logs from Datadog.".into(),
+                common_mistakes: vec![
+                    "Not specifying time range — can be very slow on large volumes.".into(),
+                ],
+                examples: vec![
+                    r#"{"query": "service:api status:error", "from_ts": "now-1h", "to_ts": "now", "limit": 100}"#.into(),
+                ],
+                related: vec![CapabilityId::from_static("datadog.metrics.query")],
+            },
+        ),
+        op_info(
+            "datadog.metrics.query",
+            "Query time-series metrics",
+            json!({
+                "type": "object",
+                "required": ["query", "from_ts", "to_ts"],
+                "properties": {
+                    "query": { "type": "string", "description": "Datadog metrics query" },
+                    "from_ts": { "type": "integer", "description": "Start epoch seconds" },
+                    "to_ts": { "type": "integer", "description": "End epoch seconds" }
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["series"],
+                "properties": {
+                    "series": { "type": "array" }
+                }
+            }),
+            "datadog.metrics.read",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "Query time-series metrics from Datadog.".into(),
+                common_mistakes: vec![
+                    "Querying too wide a time range — Datadog limits points per query.".into(),
+                ],
+                examples: vec![
+                    r#"{"query": "avg:system.cpu.user{*}", "from_ts": 1709251200, "to_ts": 1709337600}"#.into(),
+                ],
+                related: vec![CapabilityId::from_static("datadog.metrics.submit")],
+            },
+        ),
+        op_info(
+            "datadog.metrics.submit",
+            "Submit custom metrics",
+            json!({
+                "type": "object",
+                "required": ["series"],
+                "properties": {
+                    "series": { "type": "array", "description": "Array of metric series to submit" }
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["status"],
+                "properties": {
+                    "status": { "type": "string" }
+                }
+            }),
+            "datadog.metrics.write",
+            RiskLevel::Medium,
+            SafetyTier::Risky,
+            IdempotencyClass::None,
+            AgentHint {
+                when_to_use: "Submit custom metrics to Datadog.".into(),
+                common_mistakes: vec![
+                    "Submitting metrics with future timestamps — they will be rejected.".into(),
+                ],
+                examples: vec![
+                    r#"{"series": [{"metric": "custom.latency", "points": [[1709251200, 42.0]], "type": "gauge"}]}"#.into(),
+                ],
+                related: vec![CapabilityId::from_static("datadog.metrics.query")],
+            },
+        ),
+        op_info(
+            "datadog.monitors.create",
+            "Create a monitor",
+            json!({
+                "type": "object",
+                "required": ["name", "type", "query"],
+                "properties": {
+                    "name": { "type": "string" },
+                    "type": { "type": "string", "description": "metric alert, service check, event alert, etc." },
+                    "query": { "type": "string" },
+                    "message": { "type": "string" },
+                    "tags": { "type": "array" }
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["id"],
+                "properties": {
+                    "id": { "type": "integer" }
+                }
+            }),
+            "datadog.monitors.write",
+            RiskLevel::Medium,
+            SafetyTier::Risky,
+            IdempotencyClass::None,
+            AgentHint {
+                when_to_use: "Create a new monitor.".into(),
+                common_mistakes: vec![
+                    "Not specifying notification channels in the message field.".into(),
+                ],
+                examples: vec![
+                    r#"{"name": "High CPU", "type": "metric alert", "query": "avg(last_5m):avg:system.cpu.user{*} > 90"}"#.into(),
+                ],
+                related: vec![
+                    CapabilityId::from_static("datadog.monitors.list"),
+                    CapabilityId::from_static("datadog.monitors.delete"),
+                ],
+            },
+        ),
+        op_info(
+            "datadog.monitors.delete",
+            "Delete a monitor",
+            json!({
+                "type": "object",
+                "required": ["monitor_id"],
+                "properties": {
+                    "monitor_id": { "type": "integer" }
+                }
+            }),
+            json!({ "type": "object" }),
+            "datadog.monitors.write",
+            RiskLevel::High,
+            SafetyTier::Dangerous,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "Delete a monitor. Cannot be undone.".into(),
+                common_mistakes: vec![],
+                examples: vec![
+                    r#"{"monitor_id": 12345}"#.into(),
+                ],
+                related: vec![CapabilityId::from_static("datadog.monitors.list")],
+            },
+        ),
+        op_info(
+            "datadog.monitors.list",
+            "List monitors",
+            json!({
+                "type": "object",
+                "required": [],
+                "properties": {
+                    "tags": { "type": "string" },
+                    "monitor_tags": { "type": "string" }
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["monitors"],
+                "properties": {
+                    "monitors": { "type": "array" }
+                }
+            }),
+            "datadog.monitors.read",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "List monitors and their current status.".into(),
+                common_mistakes: vec![],
+                examples: vec![
+                    r#"{"tags": "env:production"}"#.into(),
+                ],
+                related: vec![CapabilityId::from_static("datadog.monitors.create")],
+            },
+        ),
+    ]
 }
 
 #[cfg(test)]
@@ -716,14 +946,19 @@ mod tests {
 
     // ── operations_info ──────────────────────────────────────────────
 
+    /// Helper: serialize `operations_info` to JSON for test assertions.
+    fn ops_json() -> serde_json::Value {
+        serde_json::to_value(operations_info()).unwrap()
+    }
+
     #[test]
     fn operations_count() {
-        assert_eq!(operations_info().as_array().unwrap().len(), 8);
+        assert_eq!(ops_json().as_array().unwrap().len(), 8);
     }
 
     #[test]
     fn operations_have_required_fields() {
-        for op in operations_info().as_array().unwrap() {
+        for op in ops_json().as_array().unwrap() {
             assert!(op.get("id").is_some());
             assert!(op.get("summary").is_some());
             assert!(op.get("capability").is_some());
@@ -734,7 +969,7 @@ mod tests {
 
     #[test]
     fn operations_ids_unique() {
-        let ops = operations_info();
+        let ops = ops_json();
         let ids: Vec<&str> = ops
             .as_array()
             .unwrap()
@@ -749,7 +984,7 @@ mod tests {
 
     #[test]
     fn operations_valid_risk_levels() {
-        for op in operations_info().as_array().unwrap() {
+        for op in ops_json().as_array().unwrap() {
             let rl = op["risk_level"].as_str().unwrap();
             assert!(["low", "medium", "high"].contains(&rl), "invalid: {rl}");
         }
@@ -758,7 +993,7 @@ mod tests {
     #[test]
     #[allow(clippy::case_sensitive_file_extension_comparisons)]
     fn read_ops_are_safe() {
-        for op in operations_info().as_array().unwrap() {
+        for op in ops_json().as_array().unwrap() {
             if op["capability"].as_str().unwrap().ends_with(".read") {
                 assert_eq!(op["safety_tier"], "safe", "{}", op["id"]);
                 assert_eq!(op["risk_level"], "low", "{}", op["id"]);
@@ -943,7 +1178,7 @@ mod tests {
 
     #[test]
     fn operations_contain_expected_ids() {
-        let ops = operations_info();
+        let ops = ops_json();
         let ids: Vec<&str> = ops
             .as_array()
             .unwrap()
@@ -962,7 +1197,7 @@ mod tests {
 
     #[test]
     fn operations_all_have_idempotency() {
-        for op in operations_info().as_array().unwrap() {
+        for op in ops_json().as_array().unwrap() {
             assert!(
                 op.get("idempotency").is_some(),
                 "op {:?} missing idempotency",
@@ -974,7 +1209,7 @@ mod tests {
     #[test]
     fn operations_safety_tiers_valid() {
         let valid = ["safe", "risky", "dangerous"];
-        for op in operations_info().as_array().unwrap() {
+        for op in ops_json().as_array().unwrap() {
             let st = op["safety_tier"].as_str().unwrap();
             assert!(valid.contains(&st), "invalid safety_tier: {st}");
         }
@@ -982,7 +1217,7 @@ mod tests {
 
     #[test]
     fn operations_delete_is_dangerous() {
-        for op in operations_info().as_array().unwrap() {
+        for op in ops_json().as_array().unwrap() {
             if op["id"].as_str().unwrap().contains("delete") {
                 assert_eq!(
                     op["safety_tier"], "dangerous",
@@ -1105,7 +1340,7 @@ mod tests {
 
     #[test]
     fn operations_write_ops_have_higher_risk() {
-        for op in operations_info().as_array().unwrap() {
+        for op in ops_json().as_array().unwrap() {
             if op["capability"].as_str().unwrap().as_bytes().ends_with(b".write") {
                 let rl = op["risk_level"].as_str().unwrap();
                 assert!(
@@ -1120,7 +1355,7 @@ mod tests {
     #[test]
     fn operations_idempotency_values_valid() {
         let valid = ["none", "strict", "idempotent"];
-        for op in operations_info().as_array().unwrap() {
+        for op in ops_json().as_array().unwrap() {
             let id_val = op["idempotency"].as_str().unwrap();
             assert!(
                 valid.contains(&id_val),
@@ -1268,7 +1503,7 @@ mod tests {
 
     #[test]
     fn operations_all_capabilities_non_empty() {
-        let ops = operations_info();
+        let ops = ops_json();
         for op in ops.as_array().unwrap() {
             let cap = op["capability"].as_str().unwrap();
             assert!(!cap.is_empty(), "op {:?} has empty capability", op["id"]);
@@ -1278,7 +1513,7 @@ mod tests {
     #[test]
     fn operations_risk_levels_valid() {
         let valid = ["low", "medium", "high"];
-        let ops = operations_info();
+        let ops = ops_json();
         for op in ops.as_array().unwrap() {
             let rl = op["risk_level"].as_str().unwrap();
             assert!(valid.contains(&rl), "invalid risk_level: {rl}");
@@ -1287,7 +1522,7 @@ mod tests {
 
     #[test]
     fn operations_ids_all_start_with_datadog() {
-        let ops = operations_info();
+        let ops = ops_json();
         for op in ops.as_array().unwrap() {
             let id = op["id"].as_str().unwrap();
             assert!(id.starts_with("datadog."), "op {id} should start with datadog.");

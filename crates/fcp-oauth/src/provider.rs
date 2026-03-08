@@ -723,4 +723,163 @@ mod tests {
             Some(&"consent".to_string())
         );
     }
+
+    // ── Expanded: provider config propagation ──
+
+    #[test]
+    fn test_all_providers_set_client_id() {
+        let providers = [
+            OAuthProvider::Google,
+            OAuthProvider::GitHub,
+            OAuthProvider::Twitter,
+            OAuthProvider::Slack,
+            OAuthProvider::Notion,
+            OAuthProvider::Linear,
+            OAuthProvider::Discord,
+            OAuthProvider::Spotify,
+            OAuthProvider::Microsoft,
+            OAuthProvider::Dropbox,
+        ];
+        for provider in providers {
+            let config = provider.oauth2_config("my_client_id", "my_secret").unwrap();
+            assert_eq!(
+                config.client_id, "my_client_id",
+                "{provider:?} should propagate client_id"
+            );
+            assert_eq!(
+                config.client_secret,
+                Some("my_secret".to_string()),
+                "{provider:?} should propagate client_secret"
+            );
+        }
+    }
+
+    #[test]
+    fn test_twitter_legacy_propagates_consumer_credentials() {
+        let config = OAuthProvider::TwitterLegacy
+            .oauth1_config("my_ck", "my_cs")
+            .unwrap();
+        assert_eq!(config.consumer_key, "my_ck");
+        assert_eq!(config.consumer_secret, "my_cs");
+    }
+
+    #[test]
+    fn test_provider_debug_all_variants() {
+        let all = [
+            OAuthProvider::Google,
+            OAuthProvider::GitHub,
+            OAuthProvider::Twitter,
+            OAuthProvider::TwitterLegacy,
+            OAuthProvider::Slack,
+            OAuthProvider::Notion,
+            OAuthProvider::Linear,
+            OAuthProvider::Discord,
+            OAuthProvider::Spotify,
+            OAuthProvider::Microsoft,
+            OAuthProvider::Dropbox,
+        ];
+        for provider in all {
+            let debug = format!("{provider:?}");
+            assert!(!debug.is_empty());
+        }
+    }
+
+    #[test]
+    fn test_provider_copy_semantics() {
+        let p = OAuthProvider::Slack;
+        let copy = p;
+        assert_eq!(p, copy);
+    }
+
+    #[test]
+    fn test_provider_endpoints_empty_urls() {
+        let endpoints = ProviderEndpoints::new("", "");
+        assert_eq!(endpoints.authorization_url, "");
+        assert_eq!(endpoints.token_url, "");
+    }
+
+    #[test]
+    fn test_provider_endpoints_builder_chaining_order_independent() {
+        let ep1 = ProviderEndpoints::new("https://a/auth", "https://a/tok")
+            .with_revocation_url("https://a/revoke")
+            .with_userinfo_url("https://a/user");
+        let ep2 = ProviderEndpoints::new("https://a/auth", "https://a/tok")
+            .with_userinfo_url("https://a/user")
+            .with_revocation_url("https://a/revoke");
+        assert_eq!(ep1.revocation_url, ep2.revocation_url);
+        assert_eq!(ep1.userinfo_url, ep2.userinfo_url);
+    }
+
+    #[test]
+    fn test_google_authorization_url_exact() {
+        let config = OAuthProvider::Google.oauth2_config("id", "sec").unwrap();
+        assert_eq!(
+            config.authorization_url,
+            "https://accounts.google.com/o/oauth2/v2/auth"
+        );
+    }
+
+    #[test]
+    fn test_google_token_url_exact() {
+        let config = OAuthProvider::Google.oauth2_config("id", "sec").unwrap();
+        assert_eq!(config.token_url, "https://oauth2.googleapis.com/token");
+    }
+
+    #[test]
+    fn test_github_authorization_url_exact() {
+        let config = OAuthProvider::GitHub.oauth2_config("id", "sec").unwrap();
+        assert_eq!(
+            config.authorization_url,
+            "https://github.com/login/oauth/authorize"
+        );
+    }
+
+    #[test]
+    fn test_github_token_url_exact() {
+        let config = OAuthProvider::GitHub.oauth2_config("id", "sec").unwrap();
+        assert_eq!(
+            config.token_url,
+            "https://github.com/login/oauth/access_token"
+        );
+    }
+
+    #[test]
+    fn test_spotify_urls_exact() {
+        let config = OAuthProvider::Spotify.oauth2_config("id", "sec").unwrap();
+        assert_eq!(
+            config.authorization_url,
+            "https://accounts.spotify.com/authorize"
+        );
+        assert_eq!(config.token_url, "https://accounts.spotify.com/api/token");
+    }
+
+    #[test]
+    fn test_discord_urls_exact() {
+        let config = OAuthProvider::Discord.oauth2_config("id", "sec").unwrap();
+        assert_eq!(
+            config.authorization_url,
+            "https://discord.com/oauth2/authorize"
+        );
+        assert_eq!(config.token_url, "https://discord.com/api/oauth2/token");
+    }
+
+    #[test]
+    fn test_microsoft_urls_contain_common_tenant() {
+        let config = OAuthProvider::Microsoft.oauth2_config("id", "sec").unwrap();
+        assert!(config.authorization_url.contains("/common/"));
+        assert!(config.token_url.contains("/common/"));
+    }
+
+    #[test]
+    fn test_dropbox_urls_exact() {
+        let config = OAuthProvider::Dropbox.oauth2_config("id", "sec").unwrap();
+        assert_eq!(
+            config.authorization_url,
+            "https://www.dropbox.com/oauth2/authorize"
+        );
+        assert_eq!(
+            config.token_url,
+            "https://api.dropboxapi.com/oauth2/token"
+        );
+    }
 }

@@ -257,4 +257,111 @@ mod tests {
             std::time::Duration::from_secs(300)
         );
     }
+
+    // ── Expanded: GrantType serde edge cases ──
+
+    #[test]
+    fn grant_type_serde_empty_string_rejected() {
+        let result: Result<GrantType, _> = serde_json::from_str("\"\"");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn grant_type_serde_partial_match_rejected() {
+        let result: Result<GrantType, _> = serde_json::from_str("\"authorization\"");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn grant_type_serde_case_sensitive() {
+        let result: Result<GrantType, _> = serde_json::from_str("\"Authorization_Code\"");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn grant_type_serde_array_rejected() {
+        let result: Result<GrantType, _> = serde_json::from_str("[\"authorization_code\"]");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn grant_type_serde_bool_rejected() {
+        let result: Result<GrantType, _> = serde_json::from_str("true");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn grant_type_display_not_empty() {
+        for gt in [
+            GrantType::AuthorizationCode,
+            GrantType::ClientCredentials,
+            GrantType::RefreshToken,
+            GrantType::DeviceCode,
+        ] {
+            assert!(!gt.to_string().is_empty());
+        }
+    }
+
+    #[test]
+    fn response_mode_all_variants_display_not_empty() {
+        for mode in [
+            ResponseMode::Query,
+            ResponseMode::Fragment,
+            ResponseMode::FormPost,
+        ] {
+            assert!(!mode.to_string().is_empty());
+        }
+    }
+
+    #[test]
+    fn grant_type_copy_semantics() {
+        let gt = GrantType::ClientCredentials;
+        let copy1 = gt;
+        let copy2 = gt;
+        assert_eq!(copy1, copy2);
+        assert_eq!(gt, copy1);
+    }
+
+    #[test]
+    fn response_mode_copy_semantics() {
+        let mode = ResponseMode::FormPost;
+        let copy1 = mode;
+        let copy2 = mode;
+        assert_eq!(copy1, copy2);
+        assert_eq!(mode, copy1);
+    }
+
+    #[test]
+    fn grant_type_all_variants_not_equal_to_each_other() {
+        let variants = [
+            GrantType::AuthorizationCode,
+            GrantType::ClientCredentials,
+            GrantType::RefreshToken,
+            GrantType::DeviceCode,
+        ];
+        for i in 0..variants.len() {
+            for j in (i + 1)..variants.len() {
+                assert_ne!(variants[i], variants[j]);
+            }
+        }
+    }
+
+    #[test]
+    fn response_mode_all_variants_not_equal_to_each_other() {
+        let variants = [
+            ResponseMode::Query,
+            ResponseMode::Fragment,
+            ResponseMode::FormPost,
+        ];
+        for i in 0..variants.len() {
+            for j in (i + 1)..variants.len() {
+                assert_ne!(variants[i], variants[j]);
+            }
+        }
+    }
+
+    #[test]
+    fn default_refresh_threshold_is_positive() {
+        assert!(DEFAULT_REFRESH_THRESHOLD.as_secs() > 0);
+    }
 }

@@ -1086,4 +1086,261 @@ mod tests {
         // With very large threshold, any token with expiry needs refresh
         assert!(tokens.needs_refresh_within(Duration::from_secs(999_999)));
     }
+
+    // ── Expanded: token lifecycle edge cases ──
+
+    #[test]
+    fn test_token_from_response_no_optional_fields() {
+        let resp = TokenResponse {
+            access_token: "minimal_tok".into(),
+            token_type: "Bearer".into(),
+            expires_in: None,
+            refresh_token: None,
+            scope: None,
+            id_token: None,
+        };
+        let tokens = OAuthTokens::from_response(resp);
+        assert_eq!(tokens.access_token(), "minimal_tok");
+        assert_eq!(tokens.token_type(), "Bearer");
+        assert!(tokens.refresh_token().is_none());
+        assert!(tokens.scopes().is_empty());
+        assert!(tokens.id_token().is_none());
+        assert!(!tokens.is_expired());
+        assert!(!tokens.needs_refresh());
+    }
+
+    #[test]
+    fn test_token_authorization_header_empty_type() {
+        let resp = TokenResponse {
+            access_token: "tok".into(),
+            token_type: String::new(),
+            expires_in: None,
+            refresh_token: None,
+            scope: None,
+            id_token: None,
+        };
+        let tokens = OAuthTokens::from_response(resp);
+        assert_eq!(tokens.authorization_header(), " tok");
+    }
+
+    #[test]
+    fn test_token_multiple_whitespace_in_scope() {
+        let resp = TokenResponse {
+            access_token: "t".into(),
+            token_type: "Bearer".into(),
+            expires_in: None,
+            refresh_token: None,
+            scope: Some("  read   write   admin  ".into()),
+            id_token: None,
+        };
+        let tokens = OAuthTokens::from_response(resp);
+        assert_eq!(tokens.scopes(), &["read", "write", "admin"]);
+    }
+
+    #[test]
+    fn test_token_update_replaces_access_token_type() {
+        let mut tokens = OAuthTokens::from_response(mock_token_response(Some(3600)));
+        assert_eq!(tokens.token_type(), "Bearer");
+
+        tokens.update_from_response(TokenResponse {
+            access_token: "new".into(),
+            token_type: "MAC".into(),
+            expires_in: Some(1800),
+            refresh_token: None,
+            scope: None,
+            id_token: None,
+        });
+        assert_eq!(tokens.token_type(), "MAC");
+        assert_eq!(tokens.access_token(), "new");
+    }
+
+    #[test]
+    fn test_token_update_replaces_expiry() {
+        let mut tokens = OAuthTokens::from_response(mock_token_response(Some(3600)));
+        assert!(!tokens.is_expired());
+
+        tokens.update_from_response(TokenResponse {
+            access_token: "new".into(),
+            token_type: "Bearer".into(),
+            expires_in: Some(0),
+            refresh_token: None,
+            scope: None,
+            id_token: None,
+        });
+        assert!(tokens.is_expired());
+    }
+
+    #[test]
+    fn test_token_time_until_expiry_long_lived() {
+        let tokens = OAuthTokens::from_response(mock_token_response(Some(86400)));
+        let ttl = tokens.time_until_expiry().unwrap();
+        assert!(ttl.as_secs() > 86000);
+        assert!(ttl.as_secs() <= 86400);
+    }
+
+    #[test]
+    fn test_token_serialize_contains_all_fields() {
+        let mut resp = mock_token_response(Some(3600));
+        resp.id_token = Some("id_jwt".into());
+        let tokens = OAuthTokens::from_response(resp);
+        let json = serde_json::to_string(&tokens).unwrap();
+        assert!(json.contains("access_token"));
+        assert!(json.contains("token_type"));
+        assert!(json.contains("scopes"));
+        assert!(json.contains("id_token"));
+        assert!(json.contains("issued_at"));
+    }
+
+    #[test]
+    fn test_token_response_missing_access_token_rejected() {
+        let json = r#"{"token_type":"Bearer"}"#;
+        let result: Result<TokenResponse, _> = serde_json::from_str(json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_token_response_missing_token_type_rejected() {
+        let json = r#"{"access_token":"tok"}"#;
+        let result: Result<TokenResponse, _> = serde_json::from_str(json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_token_response_extra_fields_ignored() {
+        let json = r#"{"access_token":"t","token_type":"Bearer","custom_field":"val"}"#;
+        let resp: TokenResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(resp.access_token, "t");
+    }
+
+    // ── Expanded: TokenStore operations ──
+
+    #[test]
+    fn test_token_store_store_and_remove_multiple() {
+        let store = TokenStore::new();
+        for i in 0..10 {
+            store.store(
+                &format!("key_{i}"),
+                OAuthTokens::from_response(mock_token_response(Some(3600))),
+            );
+        }
+        assert_eq!(store.keys().len(), 10);
+
+        for i in 0..5 {
+            let _ = store.remove(&format!("key_{i}"));
+        }
+        assert_eq!(store.keys().len(), 5);
+        assert!(!store.has_valid_token("key_0"));
+        assert!(store.has_valid_token("key_5"));
+    }
+
+    #[test]
+    fn test_token_store_overwrite_preserves_key_count() {
+        let store = TokenStore::new();
+        store.store(
+            "key",
+            OAuthTokens::from_response(mock_token_response(Some(3600))),
+        );
+        store.store(
+            "key",
+            OAuthTokens::from_response(mock_token_response(Some(7200))),
+        );
+        assert_eq!(store.keys().len(), 1);
+    }
+
+    #[test]
+    fn test_token_store_metadata_empty_map() {
+        let store = TokenStore::new();
+        store.store_with_metadata(
+            "key",
+            OAuthTokens::from_response(mock_token_response(Some(3600))),
+            HashMap::new(),
+        );
+        let (_, meta) = store.get_with_metadata("key").unwrap();
+        assert!(meta.is_empty());
+    }
+
+    #[test]
+    fn test_token_store_metadata_multiple_entries() {
+        let store = TokenStore::new();
+        let mut metadata = HashMap::new();
+        metadata.insert("provider".to_string(), "google".to_string());
+        metadata.insert("tenant".to_string(), "org-123".to_string());
+        metadata.insert("region".to_string(), "us-east-1".to_string());
+        store.store_with_metadata(
+            "key",
+            OAuthTokens::from_response(mock_token_response(Some(3600))),
+            metadata,
+        );
+        let (_, meta) = store.get_with_metadata("key").unwrap();
+        assert_eq!(meta.len(), 3);
+        assert_eq!(meta.get("tenant"), Some(&"org-123".to_string()));
+    }
+
+    #[test]
+    fn test_token_store_update_error_message_contains_key() {
+        let store = TokenStore::new();
+        let tokens = OAuthTokens::from_response(mock_token_response(Some(3600)));
+        let err = store.update("missing_key", tokens).unwrap_err();
+        assert!(err.to_string().contains("missing_key"));
+    }
+
+    #[test]
+    fn test_token_store_keys_order_independent() {
+        let store = TokenStore::new();
+        store.store(
+            "b",
+            OAuthTokens::from_response(mock_token_response(Some(3600))),
+        );
+        store.store(
+            "a",
+            OAuthTokens::from_response(mock_token_response(Some(3600))),
+        );
+        let keys = store.keys();
+        assert_eq!(keys.len(), 2);
+        assert!(keys.contains(&"a".to_string()));
+        assert!(keys.contains(&"b".to_string()));
+    }
+
+    #[test]
+    fn test_token_store_remove_returns_correct_token() {
+        let store = TokenStore::new();
+        let resp = TokenResponse {
+            access_token: "specific_tok".into(),
+            token_type: "Bearer".into(),
+            expires_in: Some(3600),
+            refresh_token: None,
+            scope: None,
+            id_token: None,
+        };
+        store.store("key", OAuthTokens::from_response(resp));
+        let removed = store.remove("key").unwrap();
+        assert_eq!(removed.access_token(), "specific_tok");
+    }
+
+    #[test]
+    fn test_token_store_get_returns_clone_not_reference() {
+        let store = TokenStore::new();
+        store.store(
+            "key",
+            OAuthTokens::from_response(mock_token_response(Some(3600))),
+        );
+        let t1 = store.get("key").unwrap();
+        let t2 = store.get("key").unwrap();
+        // Both should have the same access token
+        assert_eq!(t1.access_token(), t2.access_token());
+    }
+
+    #[test]
+    fn test_token_needs_refresh_within_no_expiry() {
+        let tokens = OAuthTokens::from_response(mock_token_response(None));
+        assert!(!tokens.needs_refresh_within(Duration::from_secs(999_999)));
+    }
+
+    #[test]
+    fn test_token_debug_shows_scopes() {
+        let tokens = OAuthTokens::from_response(mock_token_response(Some(3600)));
+        let debug = format!("{tokens:?}");
+        assert!(debug.contains("read"));
+        assert!(debug.contains("write"));
+    }
 }

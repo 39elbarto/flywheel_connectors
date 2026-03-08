@@ -1238,4 +1238,187 @@ mod tests {
             Some("\u{30c6}\u{30b9}\u{30c8}")
         ); // テスト
     }
+
+    // ── Expanded: signature determinism ──
+
+    #[test]
+    fn test_signature_same_inputs_same_output() {
+        let config = OAuth1Config::new(
+            "fixed_key",
+            "fixed_secret",
+            "https://example.com/request",
+            "https://example.com/auth",
+            "https://example.com/access",
+        );
+        let client = OAuth1Client::new(config);
+        let mut params = BTreeMap::new();
+        params.insert("oauth_nonce".to_string(), "fixed_nonce".to_string());
+        params.insert("oauth_timestamp".to_string(), "1234567890".to_string());
+
+        let sig1 = client
+            .calculate_signature("GET", "https://api.example.com/data", &params, "tsecret")
+            .unwrap();
+        let sig2 = client
+            .calculate_signature("GET", "https://api.example.com/data", &params, "tsecret")
+            .unwrap();
+        assert_eq!(sig1, sig2);
+    }
+
+    #[test]
+    fn test_signature_different_secrets_different_output() {
+        let config1 = OAuth1Config::new(
+            "key",
+            "secret_one",
+            "https://e.com/r",
+            "https://e.com/a",
+            "https://e.com/t",
+        );
+        let config2 = OAuth1Config::new(
+            "key",
+            "secret_two",
+            "https://e.com/r",
+            "https://e.com/a",
+            "https://e.com/t",
+        );
+        let c1 = OAuth1Client::new(config1);
+        let c2 = OAuth1Client::new(config2);
+        let params = BTreeMap::new();
+
+        let sig1 = c1
+            .calculate_signature("GET", "https://api.example.com/r", &params, "")
+            .unwrap();
+        let sig2 = c2
+            .calculate_signature("GET", "https://api.example.com/r", &params, "")
+            .unwrap();
+        assert_ne!(sig1, sig2);
+    }
+
+    #[test]
+    fn test_signature_different_urls_different_output() {
+        let config = test_config();
+        let client = OAuth1Client::new(config);
+        let params = BTreeMap::new();
+
+        let sig1 = client
+            .calculate_signature("GET", "https://api.example.com/a", &params, "")
+            .unwrap();
+        let sig2 = client
+            .calculate_signature("GET", "https://api.example.com/b", &params, "")
+            .unwrap();
+        assert_ne!(sig1, sig2);
+    }
+
+    #[test]
+    fn test_signature_different_token_secrets_different_output() {
+        let config = test_config();
+        let client = OAuth1Client::new(config);
+        let params = BTreeMap::new();
+
+        let sig1 = client
+            .calculate_signature("GET", "https://api.example.com/r", &params, "secret_a")
+            .unwrap();
+        let sig2 = client
+            .calculate_signature("GET", "https://api.example.com/r", &params, "secret_b")
+            .unwrap();
+        assert_ne!(sig1, sig2);
+    }
+
+    #[test]
+    fn test_signature_is_valid_base64() {
+        let config = test_config();
+        let client = OAuth1Client::new(config);
+        let params = BTreeMap::new();
+
+        let sig = client
+            .calculate_signature("POST", "https://api.example.com/r", &params, "sec")
+            .unwrap();
+        // HMAC-SHA1 -> 20 bytes -> base64 = 28 chars
+        assert_eq!(sig.len(), 28);
+        assert!(
+            sig.chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '/' || c == '=')
+        );
+    }
+
+    #[test]
+    fn test_sign_request_invalid_url_returns_error() {
+        let config = test_config();
+        let client = OAuth1Client::new(config);
+        let tokens = OAuth1Tokens {
+            token: "t".to_string(),
+            token_secret: "s".to_string(),
+            user_id: None,
+            screen_name: None,
+        };
+        let extra = BTreeMap::new();
+        let result = client.sign_request("GET", "not-a-url", &tokens, &extra);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_request_token_callback_confirmed_case_sensitive() {
+        // "True" (capitalized) should NOT be treated as confirmed
+        let body = "oauth_token=t&oauth_token_secret=s&oauth_callback_confirmed=True";
+        let token = parse_request_token(body).unwrap();
+        assert!(!token.callback_confirmed);
+    }
+
+    #[test]
+    fn test_parse_request_token_with_extra_fields() {
+        let body = "oauth_token=t&oauth_token_secret=s&oauth_callback_confirmed=true&extra=val";
+        let token = parse_request_token(body).unwrap();
+        assert_eq!(token.token, "t");
+        assert_eq!(token.token_secret, "s");
+        assert!(token.callback_confirmed);
+    }
+
+    #[test]
+    fn test_parse_access_token_empty_user_id() {
+        let body = "oauth_token=t&oauth_token_secret=s&user_id=";
+        let tokens = parse_access_token(body).unwrap();
+        assert_eq!(tokens.user_id, Some(String::new()));
+    }
+
+    #[test]
+    fn test_parse_access_token_empty_screen_name() {
+        let body = "oauth_token=t&oauth_token_secret=s&screen_name=";
+        let tokens = parse_access_token(body).unwrap();
+        assert_eq!(tokens.screen_name, Some(String::new()));
+    }
+
+    #[test]
+    fn test_percent_encode_url_complete() {
+        let encoded = percent_encode("https://api.example.com/resource?key=value&other=test");
+        assert_eq!(
+            encoded,
+            "https%3A%2F%2Fapi.example.com%2Fresource%3Fkey%3Dvalue%26other%3Dtest"
+        );
+    }
+
+    #[test]
+    fn test_percent_encode_single_digit() {
+        assert_eq!(percent_encode("0"), "0");
+        assert_eq!(percent_encode("9"), "9");
+    }
+
+    #[test]
+    fn test_oauth1_client_clone() {
+        let config = test_config();
+        let client = OAuth1Client::new(config);
+        let cloned = client.clone();
+        assert_eq!(cloned.config().consumer_key, "consumer_key");
+        // Use original after clone
+        assert_eq!(client.config().consumer_key, "consumer_key");
+    }
+
+    #[test]
+    fn test_oauth1_config_with_callback_replaces_none() {
+        let config = OAuth1Config::new("k", "s", "https://e/r", "https://e/a", "https://e/t");
+        assert!(config.callback_url.is_none());
+        let config = config.with_callback("https://myapp.com/cb");
+        assert_eq!(
+            config.callback_url,
+            Some("https://myapp.com/cb".to_string())
+        );
+    }
 }

@@ -1729,4 +1729,211 @@ mod tests {
         assert_eq!(client.config().default_scopes, vec!["admin"]);
         assert_eq!(client.config().auth_style, AuthStyle::Basic);
     }
+
+    // ── Expanded: config field defaults and combinations ──
+
+    #[test]
+    fn test_config_with_scopes_replaces_previous() {
+        let config = test_config()
+            .with_scopes(vec!["a".into()])
+            .with_scopes(vec!["b".into(), "c".into()]);
+        assert_eq!(config.default_scopes, vec!["b", "c"]);
+    }
+
+    #[test]
+    fn test_config_with_redirect_uri_replaces_previous() {
+        let config = test_config()
+            .with_redirect_uri("https://first.com")
+            .with_redirect_uri("https://second.com");
+        assert_eq!(
+            config.redirect_uri,
+            Some("https://second.com".to_string())
+        );
+    }
+
+    #[test]
+    fn test_config_pkce_toggle() {
+        let config = test_config().with_pkce(true).with_pkce(false).with_pkce(true);
+        assert!(config.use_pkce);
+    }
+
+    #[test]
+    fn test_config_response_mode_all_variants() {
+        for mode in [
+            ResponseMode::Query,
+            ResponseMode::Fragment,
+            ResponseMode::FormPost,
+        ] {
+            let config = test_config().with_response_mode(mode);
+            assert_eq!(config.response_mode, mode);
+        }
+    }
+
+    #[test]
+    fn test_config_auth_style_all_variants() {
+        for style in [AuthStyle::Basic, AuthStyle::Post] {
+            let config = test_config().with_auth_style(style);
+            assert_eq!(config.auth_style, style);
+        }
+    }
+
+    #[test]
+    fn test_public_client_with_redirect_uri() {
+        let config = OAuth2Config::public_client(
+            "pub_id",
+            "https://auth.example.com/authorize",
+            "https://auth.example.com/token",
+        )
+        .with_redirect_uri("https://localhost:8080/cb");
+        assert!(config.client_secret.is_none());
+        assert_eq!(
+            config.redirect_uri,
+            Some("https://localhost:8080/cb".to_string())
+        );
+    }
+
+    #[test]
+    fn test_public_client_with_scopes() {
+        let config = OAuth2Config::public_client(
+            "pub_id",
+            "https://auth.example.com/authorize",
+            "https://auth.example.com/token",
+        )
+        .with_scopes(vec!["openid".into(), "profile".into()]);
+        assert_eq!(config.default_scopes, vec!["openid", "profile"]);
+    }
+
+    // ── Expanded: authorization URL details ──
+
+    #[test]
+    fn test_authorization_url_starts_with_base() {
+        let client = OAuth2Client::new(test_config()).unwrap();
+        let (url, _) = client.authorization_url(&[]).unwrap();
+        assert!(url.starts_with("https://auth.example.com/authorize?"));
+    }
+
+    #[test]
+    fn test_authorization_url_with_pkce_contains_challenge() {
+        let client = OAuth2Client::new(test_config()).unwrap();
+        let (url, _, pkce) = client.authorization_url_with_pkce(&["read"]).unwrap();
+        // The challenge value itself should appear in the URL
+        assert!(url.contains(pkce.challenge()));
+    }
+
+    #[test]
+    fn test_authorization_url_query_mode_no_response_mode_param() {
+        let config = test_config().with_response_mode(ResponseMode::Query);
+        let client = OAuth2Client::new(config).unwrap();
+        let (url, _) = client.authorization_url(&[]).unwrap();
+        assert!(!url.contains("response_mode"));
+    }
+
+    // ── Expanded: callback validation edge cases ──
+
+    #[test]
+    fn test_callback_validate_with_empty_state() {
+        let callback = AuthorizationCallback {
+            code: Some("code".into()),
+            state: Some(String::new()),
+            error: None,
+            error_description: None,
+            error_uri: None,
+        };
+        // Empty state should match empty expected state
+        let code = callback.validate("").unwrap();
+        assert_eq!(code, "code");
+    }
+
+    #[test]
+    fn test_callback_validate_state_whitespace_matters() {
+        let callback = AuthorizationCallback {
+            code: Some("code".into()),
+            state: Some("state ".into()),
+            error: None,
+            error_description: None,
+            error_uri: None,
+        };
+        let result = callback.validate("state");
+        assert!(matches!(result, Err(OAuthError::StateMismatch { .. })));
+    }
+
+    #[test]
+    fn test_callback_from_query_preserves_special_chars() {
+        let callback =
+            AuthorizationCallback::from_query("code=abc%3Ddef&state=x%26y").unwrap();
+        assert_eq!(callback.code, Some("abc=def".to_string()));
+        assert_eq!(callback.state, Some("x&y".to_string()));
+    }
+
+    #[test]
+    fn test_callback_from_url_with_port() {
+        let callback = AuthorizationCallback::from_url(
+            "https://localhost:8443/callback?code=c&state=s",
+        )
+        .unwrap();
+        assert_eq!(callback.code, Some("c".to_string()));
+        assert_eq!(callback.state, Some("s".to_string()));
+    }
+
+    #[test]
+    fn test_callback_serde_all_fields() {
+        let callback = AuthorizationCallback {
+            code: Some("c".into()),
+            state: Some("s".into()),
+            error: Some("e".into()),
+            error_description: Some("d".into()),
+            error_uri: Some("https://err.com".into()),
+        };
+        let json = serde_json::to_string(&callback).unwrap();
+        let rt: AuthorizationCallback = serde_json::from_str(&json).unwrap();
+        assert_eq!(rt.code, Some("c".to_string()));
+        assert_eq!(rt.error, Some("e".to_string()));
+        assert_eq!(rt.error_uri, Some("https://err.com".to_string()));
+    }
+
+    #[test]
+    fn test_callback_serde_null_fields() {
+        let json = r#"{"code":null,"state":null,"error":null,"error_description":null,"error_uri":null}"#;
+        let callback: AuthorizationCallback = serde_json::from_str(json).unwrap();
+        assert!(callback.code.is_none());
+        assert!(callback.state.is_none());
+        assert!(callback.error.is_none());
+    }
+
+    #[test]
+    fn test_callback_serde_empty_json_object() {
+        let json = "{}";
+        let callback: AuthorizationCallback = serde_json::from_str(json).unwrap();
+        assert!(callback.code.is_none());
+        assert!(callback.state.is_none());
+    }
+
+    // ── Expanded: AuthStyle display and traits ──
+
+    #[test]
+    fn test_auth_style_display_all() {
+        assert_eq!(format!("{}", AuthStyle::Basic), "basic");
+        assert_eq!(format!("{}", AuthStyle::Post), "post");
+    }
+
+    #[test]
+    fn test_auth_style_ne() {
+        assert_ne!(AuthStyle::Basic, AuthStyle::Post);
+        assert_ne!(AuthStyle::Post, AuthStyle::Basic);
+    }
+
+    // ── Expanded: generate_state properties ──
+
+    #[test]
+    fn test_generate_state_no_padding() {
+        let state = generate_state();
+        assert!(!state.contains('='));
+    }
+
+    #[test]
+    fn test_generate_state_no_plus_no_slash() {
+        let state = generate_state();
+        assert!(!state.contains('+'));
+        assert!(!state.contains('/'));
+    }
 }

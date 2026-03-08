@@ -484,4 +484,140 @@ mod tests {
         assert!(debug_s256.contains("S256"));
         assert!(debug_plain.contains("Plain"));
     }
+
+    // ── Expanded: verifier entropy ──
+
+    #[test]
+    fn test_pkce_ten_generations_all_unique() {
+        let verifiers: Vec<String> = (0..10).map(|_| Pkce::new().verifier().to_string()).collect();
+        for i in 0..verifiers.len() {
+            for j in (i + 1)..verifiers.len() {
+                assert_ne!(verifiers[i], verifiers[j], "duplicate at {i} and {j}");
+            }
+        }
+    }
+
+    #[test]
+    fn test_pkce_s256_challenge_length_always_43() {
+        for _ in 0..5 {
+            let pkce = Pkce::new();
+            assert_eq!(pkce.challenge().len(), 43);
+        }
+    }
+
+    #[test]
+    fn test_pkce_plain_challenge_length_matches_verifier() {
+        let pkce = Pkce::with_method(PkceMethod::Plain);
+        assert_eq!(pkce.challenge().len(), pkce.verifier().len());
+    }
+
+    #[test]
+    fn test_pkce_from_verifier_all_digits() {
+        let verifier = "0123456789012345678901234567890123456789012";
+        assert_eq!(verifier.len(), 43);
+        let pkce = Pkce::from_verifier(verifier, PkceMethod::S256).unwrap();
+        assert_eq!(pkce.verifier(), verifier);
+    }
+
+    #[test]
+    fn test_pkce_from_verifier_all_uppercase() {
+        let verifier = "A".repeat(43);
+        let pkce = Pkce::from_verifier(&verifier, PkceMethod::S256).unwrap();
+        assert_eq!(pkce.verifier(), verifier);
+    }
+
+    #[test]
+    fn test_pkce_from_verifier_all_lowercase() {
+        let verifier = "z".repeat(43);
+        let pkce = Pkce::from_verifier(&verifier, PkceMethod::S256).unwrap();
+        assert_eq!(pkce.verifier(), verifier);
+    }
+
+    #[test]
+    fn test_pkce_from_verifier_mixed_valid_chars() {
+        let verifier = "aB3-._~aB3-._~aB3-._~aB3-._~aB3-._~aB3-._~z";
+        assert!(verifier.len() >= 43);
+        let pkce = Pkce::from_verifier(verifier, PkceMethod::S256).unwrap();
+        assert_eq!(pkce.verifier(), verifier);
+    }
+
+    #[test]
+    fn test_pkce_from_verifier_rejects_backslash() {
+        let verifier = "a".repeat(42) + "\\";
+        let result = Pkce::from_verifier(&verifier, PkceMethod::S256);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_pkce_from_verifier_rejects_curly_brace() {
+        let verifier = "a".repeat(42) + "{";
+        let result = Pkce::from_verifier(&verifier, PkceMethod::S256);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_pkce_from_verifier_rejects_pipe() {
+        let verifier = "a".repeat(42) + "|";
+        let result = Pkce::from_verifier(&verifier, PkceMethod::S256);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_pkce_from_verifier_rejects_percent() {
+        let verifier = "a".repeat(42) + "%";
+        let result = Pkce::from_verifier(&verifier, PkceMethod::S256);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_pkce_from_verifier_error_message_contains_length() {
+        let result = Pkce::from_verifier("short", PkceMethod::S256);
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("43-128"));
+        assert!(err_msg.contains('5'));
+    }
+
+    #[test]
+    fn test_pkce_new_method_is_s256() {
+        let pkce = Pkce::new();
+        assert_eq!(pkce.method(), PkceMethod::S256);
+    }
+
+    #[test]
+    fn test_pkce_with_method_plain_returns_plain() {
+        let pkce = Pkce::with_method(PkceMethod::Plain);
+        assert_eq!(pkce.method(), PkceMethod::Plain);
+    }
+
+    #[test]
+    fn test_pkce_with_method_s256_returns_s256() {
+        let pkce = Pkce::with_method(PkceMethod::S256);
+        assert_eq!(pkce.method(), PkceMethod::S256);
+    }
+
+    #[test]
+    fn test_pkce_clone_preserves_all_fields() {
+        let pkce = Pkce::with_method(PkceMethod::Plain);
+        let cloned = pkce.clone();
+        assert_eq!(pkce.verifier(), cloned.verifier());
+        assert_eq!(pkce.challenge(), cloned.challenge());
+        assert_eq!(pkce.method(), cloned.method());
+        // Use originals after clone
+        assert!(!pkce.verifier().is_empty());
+        assert!(!cloned.verifier().is_empty());
+    }
+
+    #[test]
+    fn test_pkce_from_verifier_length_127() {
+        let verifier = "x".repeat(127);
+        let result = Pkce::from_verifier(&verifier, PkceMethod::S256);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_pkce_from_verifier_length_128_boundary() {
+        let verifier = "y".repeat(128);
+        let pkce = Pkce::from_verifier(&verifier, PkceMethod::S256).unwrap();
+        assert_eq!(pkce.verifier().len(), 128);
+    }
 }

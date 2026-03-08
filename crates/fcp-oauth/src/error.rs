@@ -392,4 +392,126 @@ mod tests {
         assert!(display.contains("temporarily_unavailable"));
         assert!(display.contains(" - "));
     }
+
+    // ── Expanded: error variant field access ──
+
+    #[test]
+    fn authorization_error_all_fields_populated() {
+        let e = OAuthError::AuthorizationError {
+            error: "invalid_request".into(),
+            description: "The request is missing a required parameter".into(),
+            error_uri: Some("https://tools.ietf.org/html/rfc6749#section-4.1.2.1".into()),
+        };
+        let display = e.to_string();
+        assert!(display.contains("invalid_request"));
+        assert!(display.contains("The request is missing a required parameter"));
+    }
+
+    #[test]
+    fn state_mismatch_empty_strings() {
+        let e = OAuthError::StateMismatch {
+            expected: String::new(),
+            actual: String::new(),
+        };
+        let display = e.to_string();
+        assert!(display.contains("expected"));
+        assert!(display.contains("got"));
+    }
+
+    #[test]
+    fn token_expired_subsecond_duration() {
+        let e = OAuthError::TokenExpired(Duration::from_millis(500));
+        let display = e.to_string();
+        // Duration debug format shows milliseconds
+        assert!(display.contains("500"));
+    }
+
+    #[test]
+    fn token_not_found_empty_key() {
+        let e = OAuthError::TokenNotFound(String::new());
+        assert_eq!(e.to_string(), "Token not found for key: ");
+    }
+
+    #[test]
+    fn pkce_error_long_message() {
+        let msg = "x".repeat(500);
+        let e = OAuthError::PkceError(msg.clone());
+        assert!(e.to_string().contains(&msg));
+    }
+
+    #[test]
+    fn http_error_empty_message() {
+        let e = OAuthError::HttpError(String::new());
+        assert_eq!(e.to_string(), "HTTP request failed: ");
+    }
+
+    #[test]
+    fn refresh_failed_with_json_body() {
+        let e = OAuthError::RefreshFailed(r#"{"error":"invalid_grant"}"#.into());
+        assert!(e.to_string().contains("invalid_grant"));
+    }
+
+    #[test]
+    fn invalid_token_response_unicode_content() {
+        let e = OAuthError::InvalidTokenResponse("missing \u{00e9}l\u{00e9}ment".into());
+        assert!(e.to_string().contains("\u{00e9}l\u{00e9}ment"));
+    }
+
+    #[test]
+    fn signature_error_with_details() {
+        let e = OAuthError::SignatureError("HMAC key length invalid: expected 32, got 0".into());
+        let display = e.to_string();
+        assert!(display.contains("HMAC key length"));
+        assert!(display.contains("OAuth 1.0a"));
+    }
+
+    #[test]
+    fn unsupported_provider_unicode_name() {
+        let e = OAuthError::UnsupportedProvider("\u{5fae}\u{4fe1}".into());
+        assert!(e.to_string().contains("\u{5fae}\u{4fe1}"));
+    }
+
+    #[test]
+    fn from_async_error_timeout_zero_ms() {
+        let err = AsyncError::Timeout { timeout_ms: 0 };
+        let oauth_err = OAuthError::from_async_error(err, Duration::from_secs(0));
+        assert!(oauth_err.to_string().contains("timed out"));
+        assert!(oauth_err.to_string().contains("0ms"));
+    }
+
+    #[test]
+    fn from_async_error_timeout_large_duration() {
+        let err = AsyncError::Timeout {
+            timeout_ms: 300_000,
+        };
+        let oauth_err = OAuthError::from_async_error(err, Duration::from_secs(300));
+        assert!(oauth_err.to_string().contains("300000"));
+    }
+
+    #[test]
+    fn json_error_source_chain() {
+        let json_err: Result<serde_json::Value, _> = serde_json::from_str("{bad");
+        let e: OAuthError = json_err.unwrap_err().into();
+        // std::error::Error source should return Some for JsonError
+        assert!(std::error::Error::source(&e).is_some());
+    }
+
+    #[test]
+    fn url_error_source_chain() {
+        let url_err = url::Url::parse("://").unwrap_err();
+        let e: OAuthError = url_err.into();
+        assert!(std::error::Error::source(&e).is_some());
+    }
+
+    #[test]
+    fn no_refresh_token_has_no_source() {
+        let e = OAuthError::NoRefreshToken;
+        assert!(std::error::Error::source(&e).is_none());
+    }
+
+    #[test]
+    fn invalid_config_has_no_source() {
+        let e = OAuthError::InvalidConfig("test".into());
+        assert!(std::error::Error::source(&e).is_none());
+    }
 }

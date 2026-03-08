@@ -561,7 +561,10 @@ fn operations_info() -> Vec<OperationInfo> {
             IdempotencyClass::None,
             AgentHint {
                 when_to_use: "Post an event to Datadog (deploys, incidents, etc.).".into(),
-                common_mistakes: vec![],
+                common_mistakes: vec![
+                    "Not including tags for filtering — events without tags are hard to correlate with services.".into(),
+                    "Using invalid alert_type values (must be one of: error, warning, info, success).".into(),
+                ],
                 examples: vec![
                     r#"{"title": "Deploy v2.1.0", "text": "Deployed to production", "tags": ["env:production"]}"#.into(),
                 ],
@@ -595,7 +598,10 @@ fn operations_info() -> Vec<OperationInfo> {
             IdempotencyClass::Strict,
             AgentHint {
                 when_to_use: "List events in a time range.".into(),
-                common_mistakes: vec![],
+                common_mistakes: vec![
+                    "Passing ISO 8601 timestamps instead of epoch seconds for start/end parameters.".into(),
+                    "Querying too wide a time range — Datadog limits event lookback to 32 days.".into(),
+                ],
                 examples: vec![
                     r#"{"start": 1709251200, "end": 1709337600, "tags": "env:production"}"#.into(),
                 ],
@@ -759,7 +765,10 @@ fn operations_info() -> Vec<OperationInfo> {
             IdempotencyClass::Strict,
             AgentHint {
                 when_to_use: "Delete a monitor. Cannot be undone.".into(),
-                common_mistakes: vec![],
+                common_mistakes: vec![
+                    "Deleting monitors that should be muted or disabled instead — muting preserves the monitor definition.".into(),
+                    "Not checking if the monitor is referenced by composite monitors before deletion.".into(),
+                ],
                 examples: vec![
                     r#"{"monitor_id": 12345}"#.into(),
                 ],
@@ -790,7 +799,10 @@ fn operations_info() -> Vec<OperationInfo> {
             IdempotencyClass::Strict,
             AgentHint {
                 when_to_use: "List monitors and their current status.".into(),
-                common_mistakes: vec![],
+                common_mistakes: vec![
+                    "Not filtering by tags or monitor_tags — large organizations can have thousands of monitors.".into(),
+                    "Assuming the response includes full monitor details — use the individual get endpoint for thresholds and notification settings.".into(),
+                ],
                 examples: vec![
                     r#"{"tags": "env:production"}"#.into(),
                 ],

@@ -465,15 +465,15 @@ fn operations_info() -> Vec<OperationInfo> {
                 "type": "object",
                 "required": ["file_id"],
                 "properties": {
-                    "file_id": {"type": "string", "description": "Box file identifier"}
+                    "file_id": { "type": "string", "description": "Box file identifier" }
                 }
             }),
             json!({
                 "type": "object",
                 "required": ["id", "name"],
                 "properties": {
-                    "id": {"type": "string"},
-                    "name": {"type": "string"}
+                    "id": { "type": "string" },
+                    "name": { "type": "string" }
                 }
             }),
             "box.files.read",
@@ -500,15 +500,15 @@ fn operations_info() -> Vec<OperationInfo> {
                 "type": "object",
                 "required": ["folder_id", "name"],
                 "properties": {
-                    "folder_id": {"type": "string", "description": "Target folder ID for the upload"},
-                    "name": {"type": "string", "description": "Name for the uploaded file"}
+                    "folder_id": { "type": "string", "description": "Target folder ID for the upload" },
+                    "name": { "type": "string", "description": "Name for the uploaded file" }
                 }
             }),
             json!({
                 "type": "object",
                 "required": ["id"],
                 "properties": {
-                    "id": {"type": "string"}
+                    "id": { "type": "string" }
                 }
             }),
             "box.files.write",
@@ -534,14 +534,14 @@ fn operations_info() -> Vec<OperationInfo> {
                 "type": "object",
                 "required": ["file_id"],
                 "properties": {
-                    "file_id": {"type": "string", "description": "Box file identifier to delete"}
+                    "file_id": { "type": "string", "description": "Box file identifier to delete" }
                 }
             }),
-            json!({"type": "object", "required": []}),
+            json!({ "type": "object" }),
             "box.files.write",
             RiskLevel::High,
             SafetyTier::Dangerous,
-            IdempotencyClass::None,
+            IdempotencyClass::Strict,
             AgentHint {
                 when_to_use: "Permanently delete a file from Box.".into(),
                 common_mistakes: vec![
@@ -561,14 +561,14 @@ fn operations_info() -> Vec<OperationInfo> {
                 "type": "object",
                 "required": ["folder_id"],
                 "properties": {
-                    "folder_id": {"type": "string", "description": "Folder ID (0 for root)"}
+                    "folder_id": { "type": "string", "description": "Folder ID (0 for root)" }
                 }
             }),
             json!({
                 "type": "object",
                 "required": ["entries"],
                 "properties": {
-                    "entries": {"type": "array"}
+                    "entries": { "type": "array" }
                 }
             }),
             "box.folders.read",
@@ -594,14 +594,14 @@ fn operations_info() -> Vec<OperationInfo> {
                 "type": "object",
                 "required": ["file_id"],
                 "properties": {
-                    "file_id": {"type": "string", "description": "Box file identifier"}
+                    "file_id": { "type": "string", "description": "Box file identifier" }
                 }
             }),
             json!({
                 "type": "object",
                 "required": ["entries"],
                 "properties": {
-                    "entries": {"type": "array"}
+                    "entries": { "type": "array" }
                 }
             }),
             "box.sharing.read",
@@ -626,10 +626,6 @@ fn operations_info() -> Vec<OperationInfo> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn ops_json() -> serde_json::Value {
-        serde_json::to_value(operations_info()).unwrap()
-    }
 
     #[test]
     fn config_from_access_token() {
@@ -765,32 +761,24 @@ mod tests {
 
     #[test]
     fn operations_info_has_5_operations() {
-        let ops = ops_json();
-        let arr = ops.as_array().unwrap();
-        assert_eq!(arr.len(), 5);
+        let ops = operations_info();
+        assert_eq!(ops.len(), 5);
     }
 
     #[test]
     fn operations_all_have_required_fields() {
-        let ops = ops_json();
-        for op in ops.as_array().unwrap() {
-            assert!(op.get("id").is_some(), "missing id");
-            assert!(op.get("summary").is_some(), "missing summary");
-            assert!(op.get("capability").is_some(), "missing capability");
-            assert!(op.get("risk_level").is_some(), "missing risk_level");
-            assert!(op.get("safety_tier").is_some(), "missing safety_tier");
+        let ops = operations_info();
+        for op in &ops {
+            assert!(!op.id.as_ref().is_empty(), "missing id");
+            assert!(!op.summary.is_empty(), "missing summary");
+            assert!(!op.capability.as_ref().is_empty(), "missing capability");
         }
     }
 
     #[test]
     fn operations_ids_are_unique() {
-        let ops = ops_json();
-        let ids: Vec<&str> = ops
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter_map(|o| o["id"].as_str())
-            .collect();
+        let ops = operations_info();
+        let ids: Vec<&str> = ops.iter().map(|o| o.id.as_ref()).collect();
         let mut unique = ids.clone();
         unique.sort_unstable();
         unique.dedup();
@@ -798,57 +786,9 @@ mod tests {
     }
 
     #[test]
-    fn operations_risk_levels_valid() {
-        let valid = ["low", "medium", "high"];
-        let ops = ops_json();
-        for op in ops.as_array().unwrap() {
-            let rl = op["risk_level"].as_str().unwrap();
-            assert!(valid.contains(&rl), "invalid risk_level: {rl}");
-        }
-    }
-
-    #[test]
-    fn operations_safety_tiers_valid() {
-        let valid = ["safe", "risky", "dangerous"];
-        let ops = ops_json();
-        for op in ops.as_array().unwrap() {
-            let st = op["safety_tier"].as_str().unwrap();
-            assert!(valid.contains(&st), "invalid safety_tier: {st}");
-        }
-    }
-
-    #[test]
-    #[allow(clippy::case_sensitive_file_extension_comparisons)]
-    fn read_operations_are_safe() {
-        let ops = ops_json();
-        for op in ops.as_array().unwrap() {
-            let cap = op["capability"].as_str().unwrap();
-            if cap.ends_with(".read") {
-                assert_eq!(
-                    op["safety_tier"].as_str().unwrap(),
-                    "safe",
-                    "read op {} should be safe",
-                    op["id"]
-                );
-                assert_eq!(
-                    op["risk_level"].as_str().unwrap(),
-                    "low",
-                    "read op {} should be low risk",
-                    op["id"]
-                );
-            }
-        }
-    }
-
-    #[test]
     fn operations_contain_expected_ids() {
-        let ops = ops_json();
-        let ids: Vec<&str> = ops
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter_map(|o| o["id"].as_str())
-            .collect();
+        let ops = operations_info();
+        let ids: Vec<&str> = ops.iter().map(|o| o.id.as_ref()).collect();
         assert!(ids.contains(&"box.files.get"));
         assert!(ids.contains(&"box.files.upload"));
         assert!(ids.contains(&"box.files.delete"));
@@ -857,76 +797,85 @@ mod tests {
     }
 
     #[test]
-    fn operations_all_have_idempotency() {
-        let ops = ops_json();
-        for op in ops.as_array().unwrap() {
+    fn operations_files_get_is_strict_idempotent() {
+        let ops = operations_info();
+        let get_op = ops.iter().find(|o| o.id.as_ref() == "box.files.get").unwrap();
+        assert!(matches!(get_op.idempotency, IdempotencyClass::Strict));
+    }
+
+    #[test]
+    fn operations_files_upload_is_not_idempotent() {
+        let ops = operations_info();
+        let up_op = ops.iter().find(|o| o.id.as_ref() == "box.files.upload").unwrap();
+        assert!(matches!(up_op.idempotency, IdempotencyClass::None));
+    }
+
+    #[test]
+    fn operations_files_delete_is_dangerous() {
+        let ops = operations_info();
+        let del_op = ops.iter().find(|o| o.id.as_ref() == "box.files.delete").unwrap();
+        assert!(matches!(del_op.safety_tier, SafetyTier::Dangerous));
+        assert!(matches!(del_op.risk_level, RiskLevel::High));
+    }
+
+    #[test]
+    fn operations_sharing_capability_correct() {
+        let ops = operations_info();
+        let share_op = ops.iter().find(|o| o.id.as_ref() == "box.sharing.list").unwrap();
+        assert_eq!(share_op.capability.as_ref(), "box.sharing.read");
+    }
+
+    #[test]
+    fn operations_folders_list_capability_correct() {
+        let ops = operations_info();
+        let folder_op = ops.iter().find(|o| o.id.as_ref() == "box.folders.list").unwrap();
+        assert_eq!(folder_op.capability.as_ref(), "box.folders.read");
+    }
+
+    #[test]
+    #[allow(clippy::case_sensitive_file_extension_comparisons)]
+    fn read_operations_are_safe() {
+        let ops = operations_info();
+        for op in &ops {
+            let cap = op.capability.as_ref();
+            if cap.ends_with(".read") {
+                assert!(
+                    matches!(op.safety_tier, SafetyTier::Safe),
+                    "read op {} should be safe",
+                    op.id.as_ref()
+                );
+                assert!(
+                    matches!(op.risk_level, RiskLevel::Low),
+                    "read op {} should be low risk",
+                    op.id.as_ref()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn operations_have_ai_hints() {
+        let ops = operations_info();
+        for op in &ops {
             assert!(
-                op.get("idempotency").is_some(),
-                "op {:?} missing idempotency",
-                op["id"]
+                !op.ai_hints.when_to_use.is_empty(),
+                "op {} missing when_to_use hint",
+                op.id.as_ref()
             );
         }
     }
 
     #[test]
-    fn operations_files_get_is_strict_idempotent() {
-        let ops = ops_json();
-        let get_op = ops
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|o| o["id"] == "box.files.get")
-            .unwrap();
-        assert_eq!(get_op["idempotency"], "strict");
-    }
-
-    #[test]
-    fn operations_files_upload_is_not_idempotent() {
-        let ops = ops_json();
-        let up_op = ops
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|o| o["id"] == "box.files.upload")
-            .unwrap();
-        assert_eq!(up_op["idempotency"], "none");
-    }
-
-    #[test]
-    fn operations_files_delete_is_dangerous() {
-        let ops = ops_json();
-        let del_op = ops
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|o| o["id"] == "box.files.delete")
-            .unwrap();
-        assert_eq!(del_op["safety_tier"], "dangerous");
-        assert_eq!(del_op["risk_level"], "high");
-    }
-
-    #[test]
-    fn operations_sharing_capability_correct() {
-        let ops = ops_json();
-        let share_op = ops
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|o| o["id"] == "box.sharing.list")
-            .unwrap();
-        assert_eq!(share_op["capability"], "box.sharing.read");
-    }
-
-    #[test]
-    fn operations_folders_list_capability_correct() {
-        let ops = ops_json();
-        let folder_op = ops
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|o| o["id"] == "box.folders.list")
-            .unwrap();
-        assert_eq!(folder_op["capability"], "box.folders.read");
+    fn operations_serializes_to_json() {
+        let ops = operations_info();
+        let val = serde_json::to_value(&ops).unwrap();
+        let arr = val.as_array().unwrap();
+        assert_eq!(arr.len(), 5);
+        for op in arr {
+            assert!(op.get("id").is_some());
+            assert!(op.get("summary").is_some());
+            assert!(op.get("ai_hints").is_some());
+        }
     }
 
     #[test]
@@ -1145,17 +1094,16 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::case_sensitive_file_extension_comparisons)]
     fn operations_write_ops_are_not_safe() {
-        let ops = ops_json();
-        for op in ops.as_array().unwrap() {
-            let cap = op["capability"].as_str().unwrap();
-            #[allow(clippy::case_sensitive_file_extension_comparisons)]
+        let ops = operations_info();
+        for op in &ops {
+            let cap = op.capability.as_ref();
             if cap.ends_with(".write") {
-                assert_ne!(
-                    op["safety_tier"].as_str().unwrap(),
-                    "safe",
+                assert!(
+                    !matches!(op.safety_tier, SafetyTier::Safe),
                     "write op {} should not be safe",
-                    op["id"]
+                    op.id.as_ref()
                 );
             }
         }
@@ -1182,26 +1130,16 @@ mod tests {
 
     #[test]
     fn operations_files_upload_is_risky() {
-        let ops = ops_json();
-        let up_op = ops
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|o| o["id"] == "box.files.upload")
-            .unwrap();
-        assert_eq!(up_op["safety_tier"], "risky");
-        assert_eq!(up_op["risk_level"], "medium");
+        let ops = operations_info();
+        let up_op = ops.iter().find(|o| o.id.as_ref() == "box.files.upload").unwrap();
+        assert!(matches!(up_op.safety_tier, SafetyTier::Risky));
+        assert!(matches!(up_op.risk_level, RiskLevel::Medium));
     }
 
     #[test]
     fn operations_files_get_capability_correct() {
-        let ops = ops_json();
-        let get_op = ops
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|o| o["id"] == "box.files.get")
-            .unwrap();
-        assert_eq!(get_op["capability"], "box.files.read");
+        let ops = operations_info();
+        let get_op = ops.iter().find(|o| o.id.as_ref() == "box.files.get").unwrap();
+        assert_eq!(get_op.capability.as_ref(), "box.files.read");
     }
 }

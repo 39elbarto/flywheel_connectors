@@ -507,13 +507,15 @@ fn operations_info() -> Vec<OperationInfo> {
                 "type": "object",
                 "required": ["path"],
                 "properties": {
-                    "path": {"type": "string", "description": "Folder path (empty string for root)"}
+                    "path": { "type": "string", "description": "Folder path (empty string for root)" }
                 }
             }),
             json!({
                 "type": "object",
                 "required": ["entries"],
-                "properties": {"entries": {"type": "array"}}
+                "properties": {
+                    "entries": { "type": "array" }
+                }
             }),
             "dropbox.files.read",
             RiskLevel::Low,
@@ -538,24 +540,26 @@ fn operations_info() -> Vec<OperationInfo> {
                 "type": "object",
                 "required": ["cursor"],
                 "properties": {
-                    "cursor": {"type": "string", "description": "Pagination cursor from a previous list call"}
+                    "cursor": { "type": "string", "description": "Pagination cursor from a previous list call" }
                 }
             }),
             json!({
                 "type": "object",
                 "required": ["entries"],
-                "properties": {"entries": {"type": "array"}}
+                "properties": {
+                    "entries": { "type": "array" }
+                }
             }),
             "dropbox.files.read",
             RiskLevel::Low,
             SafetyTier::Safe,
             IdempotencyClass::Strict,
             AgentHint {
-                when_to_use: "Continue paginating through a folder listing.".into(),
+                when_to_use: "Continue paginating through a large folder listing.".into(),
                 common_mistakes: vec![
-                    "Using an expired cursor; cursors are only valid for a short time.".into(),
+                    "Reusing an expired cursor; cursors are only valid for a short time after the initial list call.".into(),
                 ],
-                examples: vec![r#"{"cursor": "abc123..."}"#.into()],
+                examples: vec![r#"{"cursor": "ZtkX9_EHj3x7PMkVuFIhwKYXEpwpLMyy..."}"#.into()],
                 related: vec![
                     CapabilityId::from_static("dropbox.files.list"),
                 ],
@@ -568,15 +572,15 @@ fn operations_info() -> Vec<OperationInfo> {
                 "type": "object",
                 "required": ["path"],
                 "properties": {
-                    "path": {"type": "string"}
+                    "path": { "type": "string" }
                 }
             }),
             json!({
                 "type": "object",
                 "required": ["name", "path_display"],
                 "properties": {
-                    "name": {"type": "string"},
-                    "path_display": {"type": "string"}
+                    "name": { "type": "string" },
+                    "path_display": { "type": "string" }
                 }
             }),
             "dropbox.files.read",
@@ -601,22 +605,29 @@ fn operations_info() -> Vec<OperationInfo> {
                 "type": "object",
                 "required": ["path"],
                 "properties": {
-                    "path": {"type": "string", "description": "Full path of the folder to create"}
+                    "path": { "type": "string", "description": "Path for the new folder" }
                 }
             }),
-            json!({"type": "object"}),
+            json!({
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string" },
+                    "path_display": { "type": "string" }
+                }
+            }),
             "dropbox.files.write",
             RiskLevel::Medium,
             SafetyTier::Risky,
             IdempotencyClass::None,
             AgentHint {
-                when_to_use: "Create a new folder at a specified path.".into(),
+                when_to_use: "Create a new folder at the given path.".into(),
                 common_mistakes: vec![
-                    "Paths must start with a forward slash.".into(),
+                    "Attempting to create a folder that already exists; Dropbox returns a conflict error.".into(),
                 ],
-                examples: vec![r#"{"path": "/Documents/NewFolder"}"#.into()],
+                examples: vec![r#"{"path": "/Documents/New Folder"}"#.into()],
                 related: vec![
                     CapabilityId::from_static("dropbox.files.list"),
+                    CapabilityId::from_static("dropbox.files.delete"),
                 ],
             },
         ),
@@ -627,10 +638,10 @@ fn operations_info() -> Vec<OperationInfo> {
                 "type": "object",
                 "required": ["path"],
                 "properties": {
-                    "path": {"type": "string"}
+                    "path": { "type": "string" }
                 }
             }),
-            json!({"type": "object"}),
+            json!({ "type": "object" }),
             "dropbox.files.write",
             RiskLevel::High,
             SafetyTier::Dangerous,
@@ -653,21 +664,27 @@ fn operations_info() -> Vec<OperationInfo> {
                 "type": "object",
                 "required": ["from_path", "to_path"],
                 "properties": {
-                    "from_path": {"type": "string", "description": "Source path"},
-                    "to_path": {"type": "string", "description": "Destination path"}
+                    "from_path": { "type": "string", "description": "Source path" },
+                    "to_path": { "type": "string", "description": "Destination path" }
                 }
             }),
-            json!({"type": "object"}),
+            json!({
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string" },
+                    "path_display": { "type": "string" }
+                }
+            }),
             "dropbox.files.write",
             RiskLevel::Medium,
             SafetyTier::Risky,
             IdempotencyClass::None,
             AgentHint {
-                when_to_use: "Move a file or folder to a new location.".into(),
+                when_to_use: "Move a file or folder from one path to another.".into(),
                 common_mistakes: vec![
-                    "Both paths must start with a forward slash.".into(),
+                    "Providing a destination path that already exists without handling the conflict.".into(),
                 ],
-                examples: vec![r#"{"from_path": "/old/file.txt", "to_path": "/new/file.txt"}"#.into()],
+                examples: vec![r#"{"from_path": "/Documents/old.pdf", "to_path": "/Archive/old.pdf"}"#.into()],
                 related: vec![
                     CapabilityId::from_static("dropbox.files.copy"),
                     CapabilityId::from_static("dropbox.files.list"),
@@ -681,21 +698,27 @@ fn operations_info() -> Vec<OperationInfo> {
                 "type": "object",
                 "required": ["from_path", "to_path"],
                 "properties": {
-                    "from_path": {"type": "string", "description": "Source path"},
-                    "to_path": {"type": "string", "description": "Destination path"}
+                    "from_path": { "type": "string", "description": "Source path" },
+                    "to_path": { "type": "string", "description": "Destination path" }
                 }
             }),
-            json!({"type": "object"}),
+            json!({
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string" },
+                    "path_display": { "type": "string" }
+                }
+            }),
             "dropbox.files.write",
             RiskLevel::Medium,
             SafetyTier::Risky,
             IdempotencyClass::None,
             AgentHint {
-                when_to_use: "Copy a file or folder to a new location.".into(),
+                when_to_use: "Copy a file or folder from one path to another.".into(),
                 common_mistakes: vec![
-                    "Both paths must start with a forward slash.".into(),
+                    "Providing a destination path that already exists without handling the conflict.".into(),
                 ],
-                examples: vec![r#"{"from_path": "/file.txt", "to_path": "/copy_of_file.txt"}"#.into()],
+                examples: vec![r#"{"from_path": "/Documents/report.pdf", "to_path": "/Backup/report.pdf"}"#.into()],
                 related: vec![
                     CapabilityId::from_static("dropbox.files.move"),
                     CapabilityId::from_static("dropbox.files.list"),
@@ -709,22 +732,25 @@ fn operations_info() -> Vec<OperationInfo> {
                 "type": "object",
                 "required": ["query"],
                 "properties": {
-                    "query": {"type": "string", "description": "Search query string"}
+                    "query": { "type": "string", "description": "Search query string" }
                 }
             }),
             json!({
                 "type": "object",
-                "required": ["matches"],
-                "properties": {"matches": {"type": "array"}}
+                "properties": {
+                    "matches": { "type": "array" }
+                }
             }),
             "dropbox.files.read",
             RiskLevel::Low,
             SafetyTier::Safe,
             IdempotencyClass::Strict,
             AgentHint {
-                when_to_use: "Search for files by name or content.".into(),
-                common_mistakes: vec![],
-                examples: vec![r#"{"query": "budget report"}"#.into()],
+                when_to_use: "Search for files by name or content across the Dropbox account.".into(),
+                common_mistakes: vec![
+                    "Expecting instant results; Dropbox search may take time to index recent changes.".into(),
+                ],
+                examples: vec![r#"{"query": "quarterly report"}"#.into()],
                 related: vec![
                     CapabilityId::from_static("dropbox.files.list"),
                     CapabilityId::from_static("dropbox.files.get_metadata"),
@@ -734,8 +760,14 @@ fn operations_info() -> Vec<OperationInfo> {
         op_info(
             "dropbox.account.get_space_usage",
             "Get space usage for the current account",
-            json!({"type": "object", "required": []}),
-            json!({"type": "object"}),
+            json!({ "type": "object" }),
+            json!({
+                "type": "object",
+                "properties": {
+                    "used": { "type": "integer" },
+                    "allocation": { "type": "object" }
+                }
+            }),
             "dropbox.account.read",
             RiskLevel::Low,
             SafetyTier::Safe,
@@ -752,14 +784,21 @@ fn operations_info() -> Vec<OperationInfo> {
         op_info(
             "dropbox.account.get_current",
             "Get current account information",
-            json!({"type": "object", "required": []}),
-            json!({"type": "object"}),
+            json!({ "type": "object" }),
+            json!({
+                "type": "object",
+                "properties": {
+                    "account_id": { "type": "string" },
+                    "name": { "type": "object" },
+                    "email": { "type": "string" }
+                }
+            }),
             "dropbox.account.read",
             RiskLevel::Low,
             SafetyTier::Safe,
             IdempotencyClass::Strict,
             AgentHint {
-                when_to_use: "Get information about the currently authenticated account.".into(),
+                when_to_use: "Get the current authenticated account information.".into(),
                 common_mistakes: vec![],
                 examples: vec!["{}".into()],
                 related: vec![
@@ -773,10 +812,6 @@ fn operations_info() -> Vec<OperationInfo> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn ops_json() -> serde_json::Value {
-        serde_json::to_value(operations_info()).unwrap()
-    }
 
     #[test]
     fn config_from_access_token() {
@@ -942,32 +977,24 @@ mod tests {
 
     #[test]
     fn operations_info_has_10_operations() {
-        let ops = ops_json();
-        let arr = ops.as_array().unwrap();
-        assert_eq!(arr.len(), 10);
+        let ops = operations_info();
+        assert_eq!(ops.len(), 10);
     }
 
     #[test]
     fn operations_all_have_required_fields() {
-        let ops = ops_json();
-        for op in ops.as_array().unwrap() {
-            assert!(op.get("id").is_some(), "missing id");
-            assert!(op.get("summary").is_some(), "missing summary");
-            assert!(op.get("capability").is_some(), "missing capability");
-            assert!(op.get("risk_level").is_some(), "missing risk_level");
-            assert!(op.get("safety_tier").is_some(), "missing safety_tier");
+        let ops = operations_info();
+        for op in &ops {
+            assert!(!op.id.as_ref().is_empty(), "missing id");
+            assert!(!op.summary.is_empty(), "missing summary");
+            assert!(!op.capability.as_ref().is_empty(), "missing capability");
         }
     }
 
     #[test]
     fn operations_ids_are_unique() {
-        let ops = ops_json();
-        let ids: Vec<&str> = ops
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter_map(|o| o["id"].as_str())
-            .collect();
+        let ops = operations_info();
+        let ids: Vec<&str> = ops.iter().map(|o| o.id.as_ref()).collect();
         let mut unique = ids.clone();
         unique.sort_unstable();
         unique.dedup();
@@ -975,43 +1002,21 @@ mod tests {
     }
 
     #[test]
-    fn operations_risk_levels_valid() {
-        let valid = ["low", "medium", "high"];
-        let ops = ops_json();
-        for op in ops.as_array().unwrap() {
-            let rl = op["risk_level"].as_str().unwrap();
-            assert!(valid.contains(&rl), "invalid risk_level: {rl}");
-        }
-    }
-
-    #[test]
-    fn operations_safety_tiers_valid() {
-        let valid = ["safe", "risky", "dangerous"];
-        let ops = ops_json();
-        for op in ops.as_array().unwrap() {
-            let st = op["safety_tier"].as_str().unwrap();
-            assert!(valid.contains(&st), "invalid safety_tier: {st}");
-        }
-    }
-
-    #[test]
     #[allow(clippy::case_sensitive_file_extension_comparisons)]
     fn read_operations_are_safe() {
-        let ops = ops_json();
-        for op in ops.as_array().unwrap() {
-            let cap = op["capability"].as_str().unwrap();
+        let ops = operations_info();
+        for op in &ops {
+            let cap = op.capability.as_ref();
             if cap.ends_with(".read") {
-                assert_eq!(
-                    op["safety_tier"].as_str().unwrap(),
-                    "safe",
+                assert!(
+                    matches!(op.safety_tier, SafetyTier::Safe),
                     "read op {} should be safe",
-                    op["id"]
+                    op.id.as_ref()
                 );
-                assert_eq!(
-                    op["risk_level"].as_str().unwrap(),
-                    "low",
+                assert!(
+                    matches!(op.risk_level, RiskLevel::Low),
                     "read op {} should be low risk",
-                    op["id"]
+                    op.id.as_ref()
                 );
             }
         }
@@ -1019,13 +1024,8 @@ mod tests {
 
     #[test]
     fn operations_contain_expected_ids() {
-        let ops = ops_json();
-        let ids: Vec<&str> = ops
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter_map(|o| o["id"].as_str())
-            .collect();
+        let ops = operations_info();
+        let ids: Vec<&str> = ops.iter().map(|o| o.id.as_ref()).collect();
         assert!(ids.contains(&"dropbox.files.list"));
         assert!(ids.contains(&"dropbox.files.list_continue"));
         assert!(ids.contains(&"dropbox.files.get_metadata"));
@@ -1039,100 +1039,82 @@ mod tests {
     }
 
     #[test]
-    fn operations_all_have_idempotency() {
-        let ops = ops_json();
-        for op in ops.as_array().unwrap() {
-            assert!(
-                op.get("idempotency").is_some(),
-                "op {:?} missing idempotency",
-                op["id"]
-            );
-        }
-    }
-
-    #[test]
     fn operations_files_list_is_strict_idempotent() {
-        let ops = ops_json();
-        let op = ops
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|o| o["id"] == "dropbox.files.list")
-            .unwrap();
-        assert_eq!(op["idempotency"], "strict");
+        let ops = operations_info();
+        let op = ops.iter().find(|o| o.id.as_ref() == "dropbox.files.list").unwrap();
+        assert!(matches!(op.idempotency, IdempotencyClass::Strict));
     }
 
     #[test]
     fn operations_files_delete_is_dangerous() {
-        let ops = ops_json();
-        let del_op = ops
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|o| o["id"] == "dropbox.files.delete")
-            .unwrap();
-        assert_eq!(del_op["safety_tier"], "dangerous");
-        assert_eq!(del_op["risk_level"], "high");
+        let ops = operations_info();
+        let del_op = ops.iter().find(|o| o.id.as_ref() == "dropbox.files.delete").unwrap();
+        assert!(matches!(del_op.safety_tier, SafetyTier::Dangerous));
+        assert!(matches!(del_op.risk_level, RiskLevel::High));
     }
 
     #[test]
     fn operations_account_capability_correct() {
-        let ops = ops_json();
-        let account_op = ops
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|o| o["id"] == "dropbox.account.get_current")
-            .unwrap();
-        assert_eq!(account_op["capability"], "dropbox.account.read");
+        let ops = operations_info();
+        let account_op = ops.iter().find(|o| o.id.as_ref() == "dropbox.account.get_current").unwrap();
+        assert_eq!(account_op.capability.as_ref(), "dropbox.account.read");
     }
 
     #[test]
     fn operations_files_read_capability_correct() {
-        let ops = ops_json();
-        let list_op = ops
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|o| o["id"] == "dropbox.files.list")
-            .unwrap();
-        assert_eq!(list_op["capability"], "dropbox.files.read");
+        let ops = operations_info();
+        let list_op = ops.iter().find(|o| o.id.as_ref() == "dropbox.files.list").unwrap();
+        assert_eq!(list_op.capability.as_ref(), "dropbox.files.read");
 
-        let meta_op = ops
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|o| o["id"] == "dropbox.files.get_metadata")
-            .unwrap();
-        assert_eq!(meta_op["capability"], "dropbox.files.read");
+        let meta_op = ops.iter().find(|o| o.id.as_ref() == "dropbox.files.get_metadata").unwrap();
+        assert_eq!(meta_op.capability.as_ref(), "dropbox.files.read");
     }
 
     #[test]
     fn operations_delete_capability_correct() {
-        let ops = ops_json();
-        let del_op = ops
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|o| o["id"] == "dropbox.files.delete")
-            .unwrap();
-        assert_eq!(del_op["capability"], "dropbox.files.write");
+        let ops = operations_info();
+        let del_op = ops.iter().find(|o| o.id.as_ref() == "dropbox.files.delete").unwrap();
+        assert_eq!(del_op.capability.as_ref(), "dropbox.files.write");
     }
 
     #[test]
     #[allow(clippy::case_sensitive_file_extension_comparisons)]
     fn operations_write_ops_are_not_safe() {
-        let ops = ops_json();
-        for op in ops.as_array().unwrap() {
-            let cap = op["capability"].as_str().unwrap();
+        let ops = operations_info();
+        for op in &ops {
+            let cap = op.capability.as_ref();
             if cap.ends_with(".write") {
-                assert_ne!(
-                    op["safety_tier"].as_str().unwrap(),
-                    "safe",
+                assert!(
+                    !matches!(op.safety_tier, SafetyTier::Safe),
                     "write op {} should not be safe",
-                    op["id"]
+                    op.id.as_ref()
                 );
             }
+        }
+    }
+
+    #[test]
+    fn operations_have_ai_hints() {
+        let ops = operations_info();
+        for op in &ops {
+            assert!(
+                !op.ai_hints.when_to_use.is_empty(),
+                "op {} missing when_to_use hint",
+                op.id.as_ref()
+            );
+        }
+    }
+
+    #[test]
+    fn operations_serializes_to_json() {
+        let ops = operations_info();
+        let val = serde_json::to_value(&ops).unwrap();
+        let arr = val.as_array().unwrap();
+        assert_eq!(arr.len(), 10);
+        for op in arr {
+            assert!(op.get("id").is_some());
+            assert!(op.get("summary").is_some());
+            assert!(op.get("ai_hints").is_some());
         }
     }
 
@@ -1323,51 +1305,31 @@ mod tests {
 
     #[test]
     fn operations_files_move_capability() {
-        let ops = ops_json();
-        let mv = ops
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|o| o["id"] == "dropbox.files.move")
-            .unwrap();
-        assert_eq!(mv["capability"], "dropbox.files.write");
+        let ops = operations_info();
+        let mv = ops.iter().find(|o| o.id.as_ref() == "dropbox.files.move").unwrap();
+        assert_eq!(mv.capability.as_ref(), "dropbox.files.write");
     }
 
     #[test]
     fn operations_files_copy_capability() {
-        let ops = ops_json();
-        let cp = ops
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|o| o["id"] == "dropbox.files.copy")
-            .unwrap();
-        assert_eq!(cp["capability"], "dropbox.files.write");
+        let ops = operations_info();
+        let cp = ops.iter().find(|o| o.id.as_ref() == "dropbox.files.copy").unwrap();
+        assert_eq!(cp.capability.as_ref(), "dropbox.files.write");
     }
 
     #[test]
     fn operations_search_capability() {
-        let ops = ops_json();
-        let search = ops
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|o| o["id"] == "dropbox.files.search")
-            .unwrap();
-        assert_eq!(search["capability"], "dropbox.files.read");
-        assert_eq!(search["safety_tier"], "safe");
+        let ops = operations_info();
+        let search = ops.iter().find(|o| o.id.as_ref() == "dropbox.files.search").unwrap();
+        assert_eq!(search.capability.as_ref(), "dropbox.files.read");
+        assert!(matches!(search.safety_tier, SafetyTier::Safe));
     }
 
     #[test]
     fn operations_space_usage_capability() {
-        let ops = ops_json();
-        let sp = ops
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|o| o["id"] == "dropbox.account.get_space_usage")
-            .unwrap();
-        assert_eq!(sp["capability"], "dropbox.account.read");
+        let ops = operations_info();
+        let sp = ops.iter().find(|o| o.id.as_ref() == "dropbox.account.get_space_usage").unwrap();
+        assert_eq!(sp.capability.as_ref(), "dropbox.account.read");
     }
 
     #[test]
@@ -1431,10 +1393,9 @@ mod tests {
 
     #[test]
     fn operations_summaries_are_non_empty() {
-        let ops = ops_json();
-        for op in ops.as_array().unwrap() {
-            let summary = op["summary"].as_str().unwrap();
-            assert!(!summary.is_empty(), "op {} has empty summary", op["id"]);
+        let ops = operations_info();
+        for op in &ops {
+            assert!(!op.summary.is_empty(), "op {} has empty summary", op.id.as_ref());
         }
     }
 
@@ -1478,13 +1439,13 @@ mod tests {
 
     #[test]
     fn operations_capabilities_start_with_dropbox() {
-        let ops = ops_json();
-        for op in ops.as_array().unwrap() {
-            let cap = op["capability"].as_str().unwrap();
+        let ops = operations_info();
+        for op in &ops {
+            let cap = op.capability.as_ref();
             assert!(
                 cap.starts_with("dropbox."),
                 "op {} capability '{}' does not start with dropbox.",
-                op["id"],
+                op.id.as_ref(),
                 cap
             );
         }

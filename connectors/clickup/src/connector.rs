@@ -271,10 +271,12 @@ impl ClickUpConnector {
 
     /// Handle the `introspect` method.
     pub async fn handle_introspect(&self) -> FcpResult<serde_json::Value> {
+        let ops = typed_operations_info();
+        let ops_value = serde_json::to_value(&ops).unwrap_or_else(|_| json!([]));
         Ok(json!({
             "connector_id": "fcp.clickup",
             "version": "0.1.0",
-            "operations": serde_json::to_value(operations_info()).unwrap_or_default(),
+            "operations": ops_value,
         }))
     }
 
@@ -326,7 +328,10 @@ impl ClickUpConnector {
             .and_then(serde_json::Value::as_str)
             .unwrap_or("");
 
-        let allowed = operations_info().iter().any(|o| o.id.as_ref() == operation);
+        let allowed = operations_info().as_array().is_some_and(|ops| {
+            ops.iter()
+                .any(|o| o.get("id").and_then(serde_json::Value::as_str) == Some(operation))
+        });
 
         Ok(json!({
             "allowed": allowed,
@@ -417,7 +422,7 @@ fn require_str<'a>(input: &'a serde_json::Value, field: &str) -> Result<&'a str,
         })
 }
 
-/// Build a single [`OperationInfo`] entry.
+/// Build a single typed `OperationInfo`.
 #[allow(clippy::too_many_arguments)]
 fn op_info(
     id: &'static str,
@@ -446,8 +451,8 @@ fn op_info(
     }
 }
 
-/// Build the operations info for introspection.
-fn operations_info() -> Vec<OperationInfo> {
+/// Build typed operations info for introspection.
+fn typed_operations_info() -> Vec<OperationInfo> {
     vec![
         op_info(
             "clickup.spaces.list",
@@ -461,7 +466,7 @@ fn operations_info() -> Vec<OperationInfo> {
             AgentHint {
                 when_to_use: "List all spaces in a ClickUp workspace/team.".into(),
                 common_mistakes: vec!["Using the workspace name instead of the numeric team_id; retrieve the team_id from the ClickUp workspace settings or API first.".into()],
-                examples: vec![r#"{"team_id": "9012345"}"#.into()],
+                examples: vec!["{\"team_id\": \"9012345\"}".into()],
                 related: vec![
                     CapabilityId::from_static("clickup.lists.list"),
                     CapabilityId::from_static("clickup.tasks.list"),
@@ -480,7 +485,7 @@ fn operations_info() -> Vec<OperationInfo> {
             AgentHint {
                 when_to_use: "List all lists within a ClickUp space.".into(),
                 common_mistakes: vec!["Passing a team_id instead of a space_id; lists belong to spaces, not directly to teams.".into()],
-                examples: vec![r#"{"space_id": "12345678"}"#.into()],
+                examples: vec!["{\"space_id\": \"12345678\"}".into()],
                 related: vec![
                     CapabilityId::from_static("clickup.spaces.list"),
                     CapabilityId::from_static("clickup.tasks.list"),
@@ -499,7 +504,7 @@ fn operations_info() -> Vec<OperationInfo> {
             AgentHint {
                 when_to_use: "List all tasks within a ClickUp list.".into(),
                 common_mistakes: vec!["Not accounting for pagination; the API returns a limited page of tasks by default and additional pages must be fetched separately.".into()],
-                examples: vec![r#"{"list_id": "900100200300"}"#.into()],
+                examples: vec!["{\"list_id\": \"900100200300\"}".into()],
                 related: vec![
                     CapabilityId::from_static("clickup.lists.list"),
                     CapabilityId::from_static("clickup.tasks.create"),
@@ -518,7 +523,7 @@ fn operations_info() -> Vec<OperationInfo> {
             AgentHint {
                 when_to_use: "Create a new task in a ClickUp list.".into(),
                 common_mistakes: vec!["Omitting the list_id and trying to create a task directly under a space or folder; tasks must be created within a specific list.".into()],
-                examples: vec![r#"{"list_id": "900100200300", "name": "Implement login page"}"#.into()],
+                examples: vec!["{\"list_id\": \"900100200300\", \"name\": \"Implement login page\"}".into()],
                 related: vec![
                     CapabilityId::from_static("clickup.tasks.list"),
                     CapabilityId::from_static("clickup.tasks.delete"),
@@ -529,7 +534,7 @@ fn operations_info() -> Vec<OperationInfo> {
             "clickup.tasks.delete",
             "Delete a task",
             json!({"type": "object", "required": ["task_id"], "properties": {"task_id": {"type": "string", "description": "ClickUp task identifier to delete"}}}),
-            json!({"type": "object", "required": []}),
+            json!({"type": "object"}),
             "clickup.tasks.write",
             RiskLevel::High,
             SafetyTier::Dangerous,
@@ -537,7 +542,7 @@ fn operations_info() -> Vec<OperationInfo> {
             AgentHint {
                 when_to_use: "Permanently delete a task from ClickUp.".into(),
                 common_mistakes: vec!["Confusing delete with closing a task; deletion is permanent and cannot be undone, whereas setting status to closed preserves the task.".into()],
-                examples: vec![r#"{"task_id": "abc123xyz"}"#.into()],
+                examples: vec!["{\"task_id\": \"abc123xyz\"}".into()],
                 related: vec![
                     CapabilityId::from_static("clickup.tasks.list"),
                     CapabilityId::from_static("clickup.tasks.create"),
@@ -547,13 +552,55 @@ fn operations_info() -> Vec<OperationInfo> {
     ]
 }
 
+/// Build the operations info for introspection (JSON format, used by simulate).
+fn operations_info() -> serde_json::Value {
+    json!([
+        {
+            "id": "clickup.spaces.list",
+            "summary": "List spaces in a workspace",
+            "capability": "clickup.spaces.read",
+            "risk_level": "low",
+            "safety_tier": "safe",
+            "idempotency": "strict",
+        },
+        {
+            "id": "clickup.lists.list",
+            "summary": "List lists in a space",
+            "capability": "clickup.lists.read",
+            "risk_level": "low",
+            "safety_tier": "safe",
+            "idempotency": "strict",
+        },
+        {
+            "id": "clickup.tasks.list",
+            "summary": "List tasks in a list",
+            "capability": "clickup.tasks.read",
+            "risk_level": "low",
+            "safety_tier": "safe",
+            "idempotency": "strict",
+        },
+        {
+            "id": "clickup.tasks.create",
+            "summary": "Create a new task in a list",
+            "capability": "clickup.tasks.write",
+            "risk_level": "medium",
+            "safety_tier": "risky",
+            "idempotency": "none",
+        },
+        {
+            "id": "clickup.tasks.delete",
+            "summary": "Delete a task",
+            "capability": "clickup.tasks.write",
+            "risk_level": "high",
+            "safety_tier": "dangerous",
+            "idempotency": "none",
+        },
+    ])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn ops_json() -> serde_json::Value {
-        serde_json::to_value(operations_info()).unwrap()
-    }
 
     #[test]
     fn config_from_api_token() {
@@ -657,14 +704,14 @@ mod tests {
 
     #[test]
     fn operations_info_has_5_operations() {
-        let ops = ops_json();
+        let ops = operations_info();
         let arr = ops.as_array().unwrap();
         assert_eq!(arr.len(), 5);
     }
 
     #[test]
     fn operations_all_have_required_fields() {
-        let ops = ops_json();
+        let ops = operations_info();
         for op in ops.as_array().unwrap() {
             assert!(op.get("id").is_some(), "missing id");
             assert!(op.get("summary").is_some(), "missing summary");
@@ -676,7 +723,7 @@ mod tests {
 
     #[test]
     fn operations_ids_are_unique() {
-        let ops = ops_json();
+        let ops = operations_info();
         let ids: Vec<&str> = ops
             .as_array()
             .unwrap()
@@ -692,7 +739,7 @@ mod tests {
     #[test]
     fn operations_risk_levels_valid() {
         let valid = ["low", "medium", "high"];
-        let ops = ops_json();
+        let ops = operations_info();
         for op in ops.as_array().unwrap() {
             let rl = op["risk_level"].as_str().unwrap();
             assert!(valid.contains(&rl), "invalid risk_level: {rl}");
@@ -702,7 +749,7 @@ mod tests {
     #[test]
     fn operations_safety_tiers_valid() {
         let valid = ["safe", "risky", "dangerous"];
-        let ops = ops_json();
+        let ops = operations_info();
         for op in ops.as_array().unwrap() {
             let st = op["safety_tier"].as_str().unwrap();
             assert!(valid.contains(&st), "invalid safety_tier: {st}");
@@ -711,7 +758,7 @@ mod tests {
 
     #[test]
     fn read_operations_are_safe() {
-        let ops = ops_json();
+        let ops = operations_info();
         for op in ops.as_array().unwrap() {
             let cap = op["capability"].as_str().unwrap();
             #[allow(clippy::case_sensitive_file_extension_comparisons)]
@@ -734,7 +781,7 @@ mod tests {
 
     #[test]
     fn operations_contain_expected_ids() {
-        let ops = ops_json();
+        let ops = operations_info();
         let ids: Vec<&str> = ops
             .as_array()
             .unwrap()
@@ -824,7 +871,7 @@ mod tests {
 
     #[test]
     fn operations_all_have_idempotency() {
-        let ops = ops_json();
+        let ops = operations_info();
         for op in ops.as_array().unwrap() {
             assert!(
                 op.get("idempotency").is_some(),
@@ -945,7 +992,7 @@ mod tests {
 
     #[test]
     fn operations_delete_is_dangerous() {
-        for op in ops_json().as_array().unwrap() {
+        for op in operations_info().as_array().unwrap() {
             if op["id"].as_str().unwrap().contains("delete") {
                 assert_eq!(op["safety_tier"], "dangerous");
                 assert_eq!(op["risk_level"], "high");
@@ -956,7 +1003,7 @@ mod tests {
     #[test]
     #[allow(clippy::case_sensitive_file_extension_comparisons)]
     fn operations_write_ops_have_correct_capability() {
-        for op in ops_json().as_array().unwrap() {
+        for op in operations_info().as_array().unwrap() {
             let id = op["id"].as_str().unwrap();
             let cap = op["capability"].as_str().unwrap();
             if id.contains("create") || id.contains("delete") {
@@ -1031,7 +1078,7 @@ mod tests {
 
     #[test]
     fn operations_list_ops_are_strict_idempotent() {
-        let ops = ops_json();
+        let ops = operations_info();
         for op in ops.as_array().unwrap() {
             let id = op["id"].as_str().unwrap();
             if id.contains("list") {
@@ -1046,7 +1093,7 @@ mod tests {
 
     #[test]
     fn operations_create_is_not_idempotent() {
-        let ops = ops_json();
+        let ops = operations_info();
         for op in ops.as_array().unwrap() {
             let id = op["id"].as_str().unwrap();
             if id.contains("create") {
@@ -1061,7 +1108,7 @@ mod tests {
 
     #[test]
     fn operations_delete_is_not_idempotent() {
-        let ops = ops_json();
+        let ops = operations_info();
         for op in ops.as_array().unwrap() {
             let id = op["id"].as_str().unwrap();
             if id.contains("delete") {
@@ -1125,7 +1172,7 @@ mod tests {
 
     #[test]
     fn operations_all_summaries_non_empty() {
-        let ops = ops_json();
+        let ops = operations_info();
         for op in ops.as_array().unwrap() {
             let summary = op["summary"].as_str().unwrap();
             assert!(!summary.is_empty(), "op {:?} has empty summary", op["id"]);
@@ -1134,7 +1181,7 @@ mod tests {
 
     #[test]
     fn operations_all_capabilities_prefixed() {
-        let ops = ops_json();
+        let ops = operations_info();
         for op in ops.as_array().unwrap() {
             let cap = op["capability"].as_str().unwrap();
             assert!(

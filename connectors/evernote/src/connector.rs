@@ -270,10 +270,11 @@ impl EvernoteConnector {
 
     /// Handle the `introspect` method.
     pub async fn handle_introspect(&self) -> FcpResult<serde_json::Value> {
+        let ops = typed_operations_info();
         Ok(json!({
             "connector_id": "fcp.evernote",
             "version": "0.1.0",
-            "operations": serde_json::to_value(operations_info()).unwrap_or_default(),
+            "operations": serde_json::to_value(&ops).unwrap_or_default(),
         }))
     }
 
@@ -325,7 +326,10 @@ impl EvernoteConnector {
             .and_then(serde_json::Value::as_str)
             .unwrap_or("");
 
-        let allowed = operations_info().iter().any(|o| o.id.as_ref() == operation);
+        let allowed = operations_info().as_array().is_some_and(|ops| {
+            ops.iter()
+                .any(|o| o.get("id").and_then(serde_json::Value::as_str) == Some(operation))
+        });
 
         Ok(json!({
             "allowed": allowed,
@@ -409,141 +413,115 @@ fn require_str<'a>(input: &'a serde_json::Value, field: &str) -> Result<&'a str,
         })
 }
 
-/// Helper to build a single `OperationInfo`.
-#[allow(clippy::too_many_arguments)]
-fn op_info(
-    id: &'static str,
-    summary: &str,
-    input_schema: serde_json::Value,
-    output_schema: serde_json::Value,
-    capability: &'static str,
-    risk_level: RiskLevel,
-    safety_tier: SafetyTier,
-    idempotency: IdempotencyClass,
-    ai_hints: AgentHint,
-) -> OperationInfo {
-    OperationInfo {
-        id: OperationId::from_static(id),
-        summary: summary.into(),
-        input_schema,
-        output_schema,
-        capability: CapabilityId::from_static(capability),
-        risk_level,
-        description: None,
-        rate_limit: None,
-        requires_approval: None,
-        safety_tier,
-        idempotency,
-        ai_hints,
-    }
+/// Build typed operations info for introspection.
+fn typed_operations_info() -> Vec<OperationInfo> {
+    vec![
+        OperationInfo {
+            id: OperationId::from_static("evernote.notebooks.list"),
+            summary: "List all notebooks for the authenticated user".into(),
+            description: None,
+            input_schema: json!({"type": "object", "properties": {}}),
+            output_schema: json!({"type": "object", "properties": {"notebooks": {"type": "array"}}}),
+            capability: CapabilityId::from_static("evernote.notebooks.read"),
+            risk_level: RiskLevel::Low,
+            safety_tier: SafetyTier::Safe,
+            idempotency: IdempotencyClass::Strict,
+            ai_hints: AgentHint {
+                when_to_use: "Use to discover available notebooks before listing notes".into(),
+                common_mistakes: vec![],
+                examples: vec![],
+                related: vec![CapabilityId::from_static("evernote.notebooks.read")],
+            },
+            rate_limit: None,
+            requires_approval: None,
+        },
+        OperationInfo {
+            id: OperationId::from_static("evernote.notes.list"),
+            summary: "List notes in a notebook".into(),
+            description: None,
+            input_schema: json!({"type": "object", "properties": {"notebook_id": {"type": "string"}}, "required": ["notebook_id"]}),
+            output_schema: json!({"type": "object", "properties": {"notes": {"type": "array"}}}),
+            capability: CapabilityId::from_static("evernote.notes.read"),
+            risk_level: RiskLevel::Low,
+            safety_tier: SafetyTier::Safe,
+            idempotency: IdempotencyClass::Strict,
+            ai_hints: AgentHint {
+                when_to_use: "Use to list notes in a specific notebook".into(),
+                common_mistakes: vec!["Forgetting to provide notebook_id".into()],
+                examples: vec![],
+                related: vec![CapabilityId::from_static("evernote.notes.read")],
+            },
+            rate_limit: None,
+            requires_approval: None,
+        },
+        OperationInfo {
+            id: OperationId::from_static("evernote.notes.get"),
+            summary: "Retrieve a note by ID".into(),
+            description: None,
+            input_schema: json!({"type": "object", "properties": {"note_id": {"type": "string"}}, "required": ["note_id"]}),
+            output_schema: json!({"type": "object", "properties": {"note": {"type": "object"}}}),
+            capability: CapabilityId::from_static("evernote.notes.read"),
+            risk_level: RiskLevel::Low,
+            safety_tier: SafetyTier::Safe,
+            idempotency: IdempotencyClass::Strict,
+            ai_hints: AgentHint {
+                when_to_use: "Use to retrieve the full content of a specific note".into(),
+                common_mistakes: vec!["Using an invalid note_id".into()],
+                examples: vec![],
+                related: vec![CapabilityId::from_static("evernote.notes.read")],
+            },
+            rate_limit: None,
+            requires_approval: None,
+        },
+        OperationInfo {
+            id: OperationId::from_static("evernote.notes.create"),
+            summary: "Create a new note in a notebook".into(),
+            description: None,
+            input_schema: json!({"type": "object", "properties": {"notebook_id": {"type": "string"}, "title": {"type": "string"}, "content": {"type": "string"}}, "required": ["notebook_id", "title"]}),
+            output_schema: json!({"type": "object", "properties": {"note": {"type": "object"}}}),
+            capability: CapabilityId::from_static("evernote.notes.write"),
+            risk_level: RiskLevel::Medium,
+            safety_tier: SafetyTier::Risky,
+            idempotency: IdempotencyClass::None,
+            ai_hints: AgentHint {
+                when_to_use: "Use to create a new note with title and content in a notebook".into(),
+                common_mistakes: vec!["Not providing both notebook_id and title".into()],
+                examples: vec![],
+                related: vec![CapabilityId::from_static("evernote.notes.write")],
+            },
+            rate_limit: None,
+            requires_approval: None,
+        },
+        OperationInfo {
+            id: OperationId::from_static("evernote.notes.delete"),
+            summary: "Delete a note".into(),
+            description: None,
+            input_schema: json!({"type": "object", "properties": {"note_id": {"type": "string"}}, "required": ["note_id"]}),
+            output_schema: json!({"type": "object", "properties": {"deleted": {"type": "boolean"}}}),
+            capability: CapabilityId::from_static("evernote.notes.write"),
+            risk_level: RiskLevel::High,
+            safety_tier: SafetyTier::Dangerous,
+            idempotency: IdempotencyClass::Strict,
+            ai_hints: AgentHint {
+                when_to_use: "Use to permanently delete a note — this action cannot be undone".into(),
+                common_mistakes: vec!["Deleting without confirming the correct note_id".into()],
+                examples: vec![],
+                related: vec![CapabilityId::from_static("evernote.notes.write")],
+            },
+            rate_limit: None,
+            requires_approval: None,
+        },
+    ]
 }
 
-/// Build the operations info for introspection.
-fn operations_info() -> Vec<OperationInfo> {
-    vec![
-        op_info(
-            "evernote.notebooks.list",
-            "List all notebooks for the authenticated user",
-            json!({"type": "object", "required": []}),
-            json!({"type": "object", "required": ["notebooks"], "properties": {"notebooks": {"type": "array"}}}),
-            "evernote.notebooks.read",
-            RiskLevel::Low,
-            SafetyTier::Safe,
-            IdempotencyClass::Strict,
-            AgentHint {
-                when_to_use: "List all notebooks in the Evernote account.".into(),
-                common_mistakes: vec!["Assuming the default notebook is always first in the list; check the defaultNotebook field on each notebook object instead.".into()],
-                examples: vec!["{}".into()],
-                related: vec![
-                    CapabilityId::from_static("evernote.notes.list"),
-                    CapabilityId::from_static("evernote.notes.get"),
-                ],
-            },
-        ),
-        op_info(
-            "evernote.notes.list",
-            "List notes in a notebook",
-            json!({"type": "object", "required": ["notebook_id"], "properties": {"notebook_id": {"type": "string", "description": "Notebook GUID"}}}),
-            json!({"type": "object", "required": ["notes"], "properties": {"notes": {"type": "array"}}}),
-            "evernote.notes.read",
-            RiskLevel::Low,
-            SafetyTier::Safe,
-            IdempotencyClass::Strict,
-            AgentHint {
-                when_to_use: "List notes in a specific notebook.".into(),
-                common_mistakes: vec!["Using a notebook name instead of its GUID for the notebook_id parameter; use evernote.notebooks.list to look up the GUID.".into()],
-                examples: vec![r#"{"notebook_id": "nb-abc123"}"#.into()],
-                related: vec![
-                    CapabilityId::from_static("evernote.notebooks.list"),
-                    CapabilityId::from_static("evernote.notes.get"),
-                ],
-            },
-        ),
-        op_info(
-            "evernote.notes.get",
-            "Retrieve a note by ID",
-            json!({"type": "object", "required": ["note_id"], "properties": {"note_id": {"type": "string", "description": "Note GUID"}}}),
-            json!({"type": "object", "required": ["note_id", "title", "content"], "properties": {"note_id": {"type": "string"}, "title": {"type": "string"}, "content": {"type": "string"}}}),
-            "evernote.notes.read",
-            RiskLevel::Low,
-            SafetyTier::Safe,
-            IdempotencyClass::Strict,
-            AgentHint {
-                when_to_use: "Retrieve a specific note by its GUID.".into(),
-                common_mistakes: vec!["Note content is returned in ENML (Evernote Markup Language), not plain text or HTML; you must parse ENML to extract readable content.".into()],
-                examples: vec![r#"{"note_id": "note-abc123"}"#.into()],
-                related: vec![
-                    CapabilityId::from_static("evernote.notes.list"),
-                    CapabilityId::from_static("evernote.notes.create"),
-                ],
-            },
-        ),
-        op_info(
-            "evernote.notes.create",
-            "Create a new note in a notebook",
-            json!({"type": "object", "required": ["notebook_id", "title"], "properties": {"notebook_id": {"type": "string", "description": "Notebook GUID to create note in"}, "title": {"type": "string"}, "content": {"type": "string"}}}),
-            json!({"type": "object", "required": ["note_id"], "properties": {"note_id": {"type": "string"}}}),
-            "evernote.notes.write",
-            RiskLevel::Medium,
-            SafetyTier::Risky,
-            IdempotencyClass::None,
-            AgentHint {
-                when_to_use: "Create a new note in an Evernote notebook.".into(),
-                common_mistakes: vec!["Forgetting to specify notebook_id".into()],
-                examples: vec![r#"{"notebook_id": "nb-abc123", "title": "Meeting Notes", "content": "Discussed roadmap items."}"#.into()],
-                related: vec![
-                    CapabilityId::from_static("evernote.notes.list"),
-                    CapabilityId::from_static("evernote.notebooks.list"),
-                ],
-            },
-        ),
-        op_info(
-            "evernote.notes.delete",
-            "Delete a note",
-            json!({"type": "object", "required": ["note_id"], "properties": {"note_id": {"type": "string", "description": "Note GUID"}}}),
-            json!({"type": "object"}),
-            "evernote.notes.write",
-            RiskLevel::High,
-            SafetyTier::Dangerous,
-            IdempotencyClass::Strict,
-            AgentHint {
-                when_to_use: "Delete a note from Evernote. Moves to trash.".into(),
-                common_mistakes: vec!["Passing a note title instead of the note GUID; retrieve the GUID from evernote.notes.list first.".into()],
-                examples: vec![r#"{"note_id": "note-abc123"}"#.into()],
-                related: vec![CapabilityId::from_static("evernote.notes.list")],
-            },
-        ),
-    ]
+/// Build the operations info for introspection (JSON format for simulate).
+fn operations_info() -> serde_json::Value {
+    serde_json::to_value(typed_operations_info()).unwrap_or_default()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Serialize `operations_info` to JSON for backward-compatible assertions.
-    fn ops_json() -> serde_json::Value {
-        serde_json::to_value(operations_info()).unwrap()
-    }
 
     #[test]
     fn config_from_access_token() {
@@ -681,14 +659,14 @@ mod tests {
 
     #[test]
     fn operations_info_has_5_operations() {
-        let ops = ops_json();
+        let ops = operations_info();
         let arr = ops.as_array().unwrap();
         assert_eq!(arr.len(), 5);
     }
 
     #[test]
     fn operations_all_have_required_fields() {
-        let ops = ops_json();
+        let ops = operations_info();
         for op in ops.as_array().unwrap() {
             assert!(op.get("id").is_some(), "missing id");
             assert!(op.get("summary").is_some(), "missing summary");
@@ -700,7 +678,7 @@ mod tests {
 
     #[test]
     fn operations_ids_are_unique() {
-        let ops = ops_json();
+        let ops = operations_info();
         let ids: Vec<&str> = ops
             .as_array()
             .unwrap()
@@ -716,7 +694,7 @@ mod tests {
     #[test]
     fn operations_risk_levels_valid() {
         let valid = ["low", "medium", "high"];
-        let ops = ops_json();
+        let ops = operations_info();
         for op in ops.as_array().unwrap() {
             let rl = op["risk_level"].as_str().unwrap();
             assert!(valid.contains(&rl), "invalid risk_level: {rl}");
@@ -726,7 +704,7 @@ mod tests {
     #[test]
     fn operations_safety_tiers_valid() {
         let valid = ["safe", "risky", "dangerous"];
-        let ops = ops_json();
+        let ops = operations_info();
         for op in ops.as_array().unwrap() {
             let st = op["safety_tier"].as_str().unwrap();
             assert!(valid.contains(&st), "invalid safety_tier: {st}");
@@ -736,7 +714,7 @@ mod tests {
     #[test]
     #[allow(clippy::case_sensitive_file_extension_comparisons)]
     fn read_operations_are_safe() {
-        let ops = ops_json();
+        let ops = operations_info();
         for op in ops.as_array().unwrap() {
             let cap = op["capability"].as_str().unwrap();
             if cap.ends_with(".read") {
@@ -758,7 +736,7 @@ mod tests {
 
     #[test]
     fn operations_contain_expected_ids() {
-        let ops = ops_json();
+        let ops = operations_info();
         let ids: Vec<&str> = ops
             .as_array()
             .unwrap()
@@ -774,7 +752,7 @@ mod tests {
 
     #[test]
     fn operations_all_have_idempotency() {
-        let ops = ops_json();
+        let ops = operations_info();
         for op in ops.as_array().unwrap() {
             assert!(
                 op.get("idempotency").is_some(),
@@ -786,7 +764,7 @@ mod tests {
 
     #[test]
     fn operations_notebooks_list_capability() {
-        let ops = ops_json();
+        let ops = operations_info();
         let nb_list = ops
             .as_array()
             .unwrap()
@@ -798,7 +776,7 @@ mod tests {
 
     #[test]
     fn operations_notes_create_capability() {
-        let ops = ops_json();
+        let ops = operations_info();
         let nc = ops
             .as_array()
             .unwrap()
@@ -810,7 +788,7 @@ mod tests {
 
     #[test]
     fn operations_notes_delete_is_dangerous() {
-        let ops = ops_json();
+        let ops = operations_info();
         let nd = ops
             .as_array()
             .unwrap()
@@ -1056,7 +1034,7 @@ mod tests {
 
     #[test]
     fn operations_summaries_non_empty() {
-        let ops = ops_json();
+        let ops = operations_info();
         for op in ops.as_array().unwrap() {
             let summary = op["summary"].as_str().unwrap();
             assert!(!summary.is_empty(), "op {} has empty summary", op["id"]);
@@ -1066,7 +1044,7 @@ mod tests {
     #[test]
     #[allow(clippy::case_sensitive_file_extension_comparisons)]
     fn operations_write_ops_not_safe() {
-        let ops = ops_json();
+        let ops = operations_info();
         for op in ops.as_array().unwrap() {
             let cap = op["capability"].as_str().unwrap();
             if cap.ends_with(".write") {
@@ -1097,7 +1075,7 @@ mod tests {
 
     #[test]
     fn operations_all_capabilities_prefixed_with_evernote() {
-        let ops = ops_json();
+        let ops = operations_info();
         for op in ops.as_array().unwrap() {
             let cap = op["capability"].as_str().unwrap();
             assert!(

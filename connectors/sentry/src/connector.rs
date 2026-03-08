@@ -662,7 +662,10 @@ fn operations_info() -> Vec<OperationInfo> {
             IdempotencyClass::Strict,
             AgentHint {
                 when_to_use: "List all projects in an organization. Useful for discovery before querying issues or events.".into(),
-                common_mistakes: vec![],
+                common_mistakes: vec![
+                    "Using project name instead of project slug for subsequent API calls.".into(),
+                    "Not paginating when the organization has many projects.".into(),
+                ],
                 examples: vec![
                     r#"{"organization_slug": "my-org"}"#.into(),
                 ],
@@ -1031,7 +1034,10 @@ fn operations_info() -> Vec<OperationInfo> {
             IdempotencyClass::Strict,
             AgentHint {
                 when_to_use: "List deployment environments and timestamps for a release to correlate with error spikes.".into(),
-                common_mistakes: vec![],
+                common_mistakes: vec![
+                    "Not URL-encoding the version string when it contains '+' or '@' characters.".into(),
+                    "Confusing deploy timestamps with release creation time — deploys track per-environment rollouts.".into(),
+                ],
                 examples: vec![
                     r#"{"organization_slug": "my-org", "version": "backend@1.2.3"}"#.into(),
                 ],
@@ -1110,7 +1116,10 @@ fn operations_info() -> Vec<OperationInfo> {
             IdempotencyClass::Strict,
             AgentHint {
                 when_to_use: "List configured alert rules for a project.".into(),
-                common_mistakes: vec![],
+                common_mistakes: vec![
+                    "Not distinguishing between issue alert rules and metric alert rules in the response.".into(),
+                    "Assuming all rules are returned in one page — use cursor pagination for projects with many rules.".into(),
+                ],
                 examples: vec![
                     r#"{"organization_slug": "my-org", "project_slug": "backend"}"#.into(),
                 ],

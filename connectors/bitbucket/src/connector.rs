@@ -601,7 +601,9 @@ fn operations_info() -> Vec<OperationInfo> {
             idempotency: IdempotencyClass::Strict,
             ai_hints: AgentHint {
                 when_to_use: "List repositories in a Bitbucket workspace.".into(),
-                common_mistakes: vec![],
+                common_mistakes: vec![
+                    "Using a username instead of the workspace slug — Bitbucket Cloud uses workspace slugs, not the legacy username-based paths.".into(),
+                ],
                 examples: vec![r#"{"workspace": "myteam"}"#.into()],
                 related: vec![
                     CapabilityId::from_static("bitbucket.pull_requests.list"),
@@ -668,7 +670,9 @@ fn operations_info() -> Vec<OperationInfo> {
             idempotency: IdempotencyClass::Strict,
             ai_hints: AgentHint {
                 when_to_use: "List pull requests in a repository.".into(),
-                common_mistakes: vec![],
+                common_mistakes: vec![
+                    "Assuming only open PRs are returned — the default includes all states; use the state filter to scope to OPEN, MERGED, or DECLINED.".into(),
+                ],
                 examples: vec![r#"{"workspace": "myteam", "repo_slug": "backend"}"#.into()],
                 related: vec![
                     CapabilityId::from_static("bitbucket.repos.list"),
@@ -740,7 +744,9 @@ fn operations_info() -> Vec<OperationInfo> {
             idempotency: IdempotencyClass::None,
             ai_hints: AgentHint {
                 when_to_use: "Create a new pull request.".into(),
-                common_mistakes: vec![],
+                common_mistakes: vec![
+                    "Not specifying the destination branch — if omitted it defaults to the repo's main branch, which may not be the intended merge target.".into(),
+                ],
                 examples: vec![
                     r#"{"workspace": "myteam", "repo_slug": "backend", "title": "Fix login bug", "source_branch": "fix/login"}"#.into(),
                 ],
@@ -838,7 +844,9 @@ fn operations_info() -> Vec<OperationInfo> {
             idempotency: IdempotencyClass::Strict,
             ai_hints: AgentHint {
                 when_to_use: "List CI/CD pipelines.".into(),
-                common_mistakes: vec![],
+                common_mistakes: vec![
+                    "Expecting pipelines on repos without a bitbucket-pipelines.yml — Pipelines must be configured in the repository before they can be listed.".into(),
+                ],
                 examples: vec![r#"{"workspace": "myteam", "repo_slug": "backend"}"#.into()],
                 related: vec![CapabilityId::from_static("bitbucket.repos.list")],
             },

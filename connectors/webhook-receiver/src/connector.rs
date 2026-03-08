@@ -479,7 +479,10 @@ fn operations_info() -> Vec<OperationInfo> {
                 when_to_use:
                     "Remove a webhook endpoint. Incoming webhooks to this path will be rejected."
                         .into(),
-                common_mistakes: vec![],
+                common_mistakes: vec![
+                    "Forgetting to unregister the webhook URL at the sending service before deleting the endpoint.".into(),
+                    "Using the endpoint path instead of endpoint_id.".into(),
+                ],
                 examples: vec![r#"{"endpoint_id": "ep_abc123"}"#.into()],
                 related: vec![CapabilityId::from_static("webhook.endpoints.list")],
             },
@@ -505,7 +508,9 @@ fn operations_info() -> Vec<OperationInfo> {
             IdempotencyClass::Strict,
             AgentHint {
                 when_to_use: "List configured webhook endpoints.".into(),
-                common_mistakes: vec![],
+                common_mistakes: vec![
+                    "Assuming the list reflects live registration status at the sending service — it only shows locally registered endpoints.".into(),
+                ],
                 examples: vec!["{}".into()],
                 related: vec![CapabilityId::from_static("webhook.endpoints.create")],
             },
@@ -535,7 +540,10 @@ fn operations_info() -> Vec<OperationInfo> {
             IdempotencyClass::Strict,
             AgentHint {
                 when_to_use: "Get recent webhook events received on an endpoint.".into(),
-                common_mistakes: vec![],
+                common_mistakes: vec![
+                    "Not filtering by endpoint_id and receiving events from all endpoints mixed together.".into(),
+                    "Expecting events that failed signature validation to appear in results — they are rejected before storage.".into(),
+                ],
                 examples: vec![r#"{"endpoint_id": "ep_abc123", "limit": 20}"#.into()],
                 related: vec![CapabilityId::from_static("webhook.endpoints.list")],
             },

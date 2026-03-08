@@ -272,10 +272,12 @@ impl MondayConnector {
 
     /// Handle the `introspect` method.
     pub async fn handle_introspect(&self) -> FcpResult<serde_json::Value> {
+        let ops = typed_operations_info();
+        let ops_value = serde_json::to_value(&ops).unwrap_or_else(|_| json!([]));
         Ok(json!({
             "connector_id": "fcp.monday",
             "version": "0.1.0",
-            "operations": serde_json::to_value(operations_info()).unwrap_or_default(),
+            "operations": ops_value,
         }))
     }
 
@@ -329,7 +331,10 @@ impl MondayConnector {
             .and_then(serde_json::Value::as_str)
             .unwrap_or("");
 
-        let allowed = operations_info().iter().any(|o| o.id.as_ref() == operation);
+        let allowed = operations_info().as_array().is_some_and(|ops| {
+            ops.iter()
+                .any(|o| o.get("id").and_then(serde_json::Value::as_str) == Some(operation))
+        });
 
         Ok(json!({
             "allowed": allowed,
@@ -473,7 +478,7 @@ fn require_str<'a>(input: &'a serde_json::Value, field: &str) -> Result<&'a str,
         })
 }
 
-/// Build a single [`OperationInfo`] entry.
+/// Build a single typed `OperationInfo`.
 #[allow(clippy::too_many_arguments)]
 fn op_info(
     id: &'static str,
@@ -502,8 +507,8 @@ fn op_info(
     }
 }
 
-/// Build the operations info for introspection.
-fn operations_info() -> Vec<OperationInfo> {
+/// Build typed operations info for introspection.
+fn typed_operations_info() -> Vec<OperationInfo> {
     vec![
         op_info(
             "monday.boards.list",
@@ -534,10 +539,13 @@ fn operations_info() -> Vec<OperationInfo> {
             SafetyTier::Safe,
             IdempotencyClass::Strict,
             AgentHint {
-                when_to_use: "Get details of a single Monday.com board.".into(),
-                common_mistakes: vec![],
-                examples: vec![r#"{"board_id": "123456789"}"#.into()],
-                related: vec![CapabilityId::from_static("monday.boards.list")],
+                when_to_use: "Retrieve a single Monday.com board by its ID.".into(),
+                common_mistakes: vec!["Using the board name instead of its numeric ID.".into()],
+                examples: vec!["{\"board_id\": \"123456789\"}".into()],
+                related: vec![
+                    CapabilityId::from_static("monday.boards.list"),
+                    CapabilityId::from_static("monday.items.list"),
+                ],
             },
         ),
         op_info(
@@ -552,7 +560,7 @@ fn operations_info() -> Vec<OperationInfo> {
             AgentHint {
                 when_to_use: "List items on a Monday.com board.".into(),
                 common_mistakes: vec!["Expecting column values to be included by default; the GraphQL API requires explicitly requesting column_values in the query fields to return them.".into()],
-                examples: vec![r#"{"board_id": "123456789"}"#.into()],
+                examples: vec!["{\"board_id\": \"123456789\"}".into()],
                 related: vec![
                     CapabilityId::from_static("monday.boards.list"),
                     CapabilityId::from_static("monday.items.create"),
@@ -571,7 +579,7 @@ fn operations_info() -> Vec<OperationInfo> {
             AgentHint {
                 when_to_use: "Create a new item on a board.".into(),
                 common_mistakes: vec!["Passing column_values as plain key-value pairs instead of the Monday.com JSON-stringified column format; each column type has its own expected JSON structure.".into()],
-                examples: vec![r#"{"board_id": "123456789", "item_name": "Fix login bug"}"#.into()],
+                examples: vec!["{\"board_id\": \"123456789\", \"item_name\": \"Fix login bug\"}".into()],
                 related: vec![
                     CapabilityId::from_static("monday.items.list"),
                     CapabilityId::from_static("monday.items.delete"),
@@ -590,7 +598,7 @@ fn operations_info() -> Vec<OperationInfo> {
             AgentHint {
                 when_to_use: "Delete an item. Cannot be undone.".into(),
                 common_mistakes: vec!["Deleting a parent item also deletes all its subitems; verify the item has no subitems before deleting if you only intend to remove the parent.".into()],
-                examples: vec![r#"{"item_id": "987654321"}"#.into()],
+                examples: vec!["{\"item_id\": \"987654321\"}".into()],
                 related: vec![CapabilityId::from_static("monday.items.list")],
             },
         ),
@@ -604,10 +612,13 @@ fn operations_info() -> Vec<OperationInfo> {
             SafetyTier::Safe,
             IdempotencyClass::Strict,
             AgentHint {
-                when_to_use: "List updates (comments) on a Monday.com item.".into(),
-                common_mistakes: vec![],
-                examples: vec![r#"{"item_id": "987654321"}"#.into()],
-                related: vec![CapabilityId::from_static("monday.updates.create")],
+                when_to_use: "Retrieve the update/comment thread on a Monday.com item.".into(),
+                common_mistakes: vec!["Expecting updates to be ordered newest-first by default; verify the sort order matches your use case.".into()],
+                examples: vec!["{\"item_id\": \"987654321\"}".into()],
+                related: vec![
+                    CapabilityId::from_static("monday.items.list"),
+                    CapabilityId::from_static("monday.updates.create"),
+                ],
             },
         ),
         op_info(
@@ -620,22 +631,83 @@ fn operations_info() -> Vec<OperationInfo> {
             SafetyTier::Risky,
             IdempotencyClass::None,
             AgentHint {
-                when_to_use: "Post an update (comment) on a Monday.com item.".into(),
-                common_mistakes: vec![],
-                examples: vec![r#"{"item_id": "987654321", "body": "Status update: on track"}"#.into()],
-                related: vec![CapabilityId::from_static("monday.updates.list")],
+                when_to_use: "Post a new update/comment on a Monday.com item.".into(),
+                common_mistakes: vec!["Using HTML markup in the body without checking Monday.com's supported formatting; use plain text or Monday.com's supported HTML subset.".into()],
+                examples: vec!["{\"item_id\": \"987654321\", \"body\": \"Fixed the login issue.\"}".into()],
+                related: vec![
+                    CapabilityId::from_static("monday.updates.list"),
+                    CapabilityId::from_static("monday.items.list"),
+                ],
             },
         ),
     ]
 }
 
+/// Build the operations info for introspection (JSON format, used by simulate).
+fn operations_info() -> serde_json::Value {
+    json!([
+        {
+            "id": "monday.boards.list",
+            "summary": "List boards",
+            "capability": "monday.boards.read",
+            "risk_level": "low",
+            "safety_tier": "safe",
+            "idempotency": "strict",
+        },
+        {
+            "id": "monday.boards.get",
+            "summary": "Get a board by ID",
+            "capability": "monday.boards.read",
+            "risk_level": "low",
+            "safety_tier": "safe",
+            "idempotency": "strict",
+        },
+        {
+            "id": "monday.items.list",
+            "summary": "List items on a board",
+            "capability": "monday.items.read",
+            "risk_level": "low",
+            "safety_tier": "safe",
+            "idempotency": "strict",
+        },
+        {
+            "id": "monday.items.create",
+            "summary": "Create a new item on a board",
+            "capability": "monday.items.write",
+            "risk_level": "medium",
+            "safety_tier": "risky",
+            "idempotency": "none",
+        },
+        {
+            "id": "monday.items.delete",
+            "summary": "Delete an item",
+            "capability": "monday.items.write",
+            "risk_level": "high",
+            "safety_tier": "dangerous",
+            "idempotency": "strict",
+        },
+        {
+            "id": "monday.updates.list",
+            "summary": "List updates on an item",
+            "capability": "monday.updates.read",
+            "risk_level": "low",
+            "safety_tier": "safe",
+            "idempotency": "strict",
+        },
+        {
+            "id": "monday.updates.create",
+            "summary": "Create an update on an item",
+            "capability": "monday.updates.write",
+            "risk_level": "medium",
+            "safety_tier": "risky",
+            "idempotency": "none",
+        },
+    ])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn ops_json() -> serde_json::Value {
-        serde_json::to_value(operations_info()).unwrap()
-    }
 
     #[test]
     fn config_from_api_token() {
@@ -748,14 +820,14 @@ mod tests {
 
     #[test]
     fn operations_info_has_7_operations() {
-        let ops = ops_json();
+        let ops = operations_info();
         let arr = ops.as_array().unwrap();
         assert_eq!(arr.len(), 7);
     }
 
     #[test]
     fn operations_all_have_required_fields() {
-        let ops = ops_json();
+        let ops = operations_info();
         for op in ops.as_array().unwrap() {
             assert!(op.get("id").is_some(), "missing id");
             assert!(op.get("summary").is_some(), "missing summary");
@@ -767,7 +839,7 @@ mod tests {
 
     #[test]
     fn operations_ids_are_unique() {
-        let ops = ops_json();
+        let ops = operations_info();
         let ids: Vec<&str> = ops
             .as_array()
             .unwrap()
@@ -783,7 +855,7 @@ mod tests {
     #[test]
     fn operations_risk_levels_valid() {
         let valid = ["low", "medium", "high"];
-        let ops = ops_json();
+        let ops = operations_info();
         for op in ops.as_array().unwrap() {
             let rl = op["risk_level"].as_str().unwrap();
             assert!(valid.contains(&rl), "invalid risk_level: {rl}");
@@ -793,7 +865,7 @@ mod tests {
     #[test]
     fn operations_safety_tiers_valid() {
         let valid = ["safe", "risky", "dangerous"];
-        let ops = ops_json();
+        let ops = operations_info();
         for op in ops.as_array().unwrap() {
             let st = op["safety_tier"].as_str().unwrap();
             assert!(valid.contains(&st), "invalid safety_tier: {st}");
@@ -803,7 +875,7 @@ mod tests {
     #[test]
     #[allow(clippy::case_sensitive_file_extension_comparisons)]
     fn read_operations_are_safe() {
-        let ops = ops_json();
+        let ops = operations_info();
         for op in ops.as_array().unwrap() {
             let cap = op["capability"].as_str().unwrap();
             if cap.ends_with(".read") {
@@ -825,7 +897,7 @@ mod tests {
 
     #[test]
     fn operations_contain_expected_ids() {
-        let ops = ops_json();
+        let ops = operations_info();
         let ids: Vec<&str> = ops
             .as_array()
             .unwrap()
@@ -843,7 +915,7 @@ mod tests {
 
     #[test]
     fn operations_all_have_idempotency() {
-        let ops = ops_json();
+        let ops = operations_info();
         for op in ops.as_array().unwrap() {
             assert!(
                 op.get("idempotency").is_some(),
@@ -1083,7 +1155,7 @@ mod tests {
 
     #[test]
     fn operations_boards_list_capability() {
-        let ops = ops_json();
+        let ops = operations_info();
         let bl = ops
             .as_array()
             .unwrap()
@@ -1095,7 +1167,7 @@ mod tests {
 
     #[test]
     fn operations_boards_get_capability() {
-        let ops = ops_json();
+        let ops = operations_info();
         let bg = ops
             .as_array()
             .unwrap()
@@ -1107,7 +1179,7 @@ mod tests {
 
     #[test]
     fn operations_items_create_capability() {
-        let ops = ops_json();
+        let ops = operations_info();
         let ic = ops
             .as_array()
             .unwrap()
@@ -1119,7 +1191,7 @@ mod tests {
 
     #[test]
     fn operations_items_delete_is_dangerous() {
-        let ops = ops_json();
+        let ops = operations_info();
         let id = ops
             .as_array()
             .unwrap()
@@ -1132,7 +1204,7 @@ mod tests {
 
     #[test]
     fn operations_items_create_is_risky() {
-        let ops = ops_json();
+        let ops = operations_info();
         let ic = ops
             .as_array()
             .unwrap()
@@ -1145,7 +1217,7 @@ mod tests {
 
     #[test]
     fn operations_updates_create_is_risky() {
-        let ops = ops_json();
+        let ops = operations_info();
         let uc = ops
             .as_array()
             .unwrap()
@@ -1159,7 +1231,7 @@ mod tests {
     #[test]
     #[allow(clippy::case_sensitive_file_extension_comparisons)]
     fn operations_read_ops_are_strict_idempotent() {
-        let ops = ops_json();
+        let ops = operations_info();
         for op in ops.as_array().unwrap() {
             let cap = op["capability"].as_str().unwrap();
             if cap.ends_with(".read") {
@@ -1175,7 +1247,7 @@ mod tests {
     #[test]
     #[allow(clippy::case_sensitive_file_extension_comparisons)]
     fn operations_write_ops_idempotency() {
-        let ops = ops_json();
+        let ops = operations_info();
         for op in ops.as_array().unwrap() {
             let cap = op["capability"].as_str().unwrap();
             if cap.ends_with(".write") {
@@ -1247,7 +1319,7 @@ mod tests {
     #[test]
     #[allow(clippy::case_sensitive_file_extension_comparisons)]
     fn write_operations_not_safe() {
-        let ops = ops_json();
+        let ops = operations_info();
         for op in ops.as_array().unwrap() {
             let cap = op["capability"].as_str().unwrap();
             if cap.ends_with(".write") {

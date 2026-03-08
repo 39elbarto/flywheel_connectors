@@ -279,10 +279,11 @@ impl PostgreSqlConnector {
 
     /// Handle the `introspect` method.
     pub async fn handle_introspect(&self) -> FcpResult<serde_json::Value> {
+        let ops = typed_operations_info();
         Ok(json!({
             "connector_id": "fcp.postgresql",
             "version": "0.1.0",
-            "operations": serde_json::to_value(operations_info()).unwrap_or_default(),
+            "operations": serde_json::to_value(&ops).unwrap_or_default(),
         }))
     }
 
@@ -341,7 +342,10 @@ impl PostgreSqlConnector {
             .and_then(serde_json::Value::as_str)
             .unwrap_or("");
 
-        let allowed = operations_info().iter().any(|o| o.id.as_ref() == operation);
+        let allowed = operations_info().as_array().is_some_and(|ops| {
+            ops.iter()
+                .any(|o| o.get("id").and_then(serde_json::Value::as_str) == Some(operation))
+        });
 
         Ok(json!({
             "allowed": allowed,
@@ -534,193 +538,242 @@ fn require_str<'a>(input: &'a serde_json::Value, field: &str) -> Result<&'a str,
         .ok_or_else(|| PostgresError::Query(format!("Missing required field: {field}")))
 }
 
-/// Construct a single [`OperationInfo`].
-#[allow(clippy::too_many_arguments)]
-fn op_info(
-    id: &'static str,
-    summary: &str,
-    input_schema: serde_json::Value,
-    output_schema: serde_json::Value,
-    capability: &'static str,
-    risk_level: RiskLevel,
-    safety_tier: SafetyTier,
-    idempotency: IdempotencyClass,
-    ai_hints: AgentHint,
-) -> OperationInfo {
-    OperationInfo {
-        id: OperationId::from_static(id),
-        summary: summary.into(),
-        input_schema,
-        output_schema,
-        capability: CapabilityId::from_static(capability),
-        risk_level,
-        description: None,
-        rate_limit: None,
-        requires_approval: None,
-        safety_tier,
-        idempotency,
-        ai_hints,
-    }
+/// Build typed operations info for introspection.
+#[allow(clippy::too_many_lines)]
+fn typed_operations_info() -> Vec<OperationInfo> {
+    vec![
+        OperationInfo {
+            id: OperationId::from_static("pg.query"),
+            summary: "Execute a parameterized SQL query (returns rows)".into(),
+            description: None,
+            input_schema: json!({"type": "object", "properties": {"sql": {"type": "string", "description": "SQL query to execute"}, "params": {"type": "array", "description": "Positional parameters for the query"}, "timeout_ms": {"type": "integer", "description": "Query timeout in milliseconds"}}, "required": ["sql"]}),
+            output_schema: json!({"type": "object", "properties": {"result": {"description": "Query result with rows and metadata"}}}),
+            capability: CapabilityId::from_static("pg.read"),
+            risk_level: RiskLevel::Low,
+            safety_tier: SafetyTier::Safe,
+            idempotency: IdempotencyClass::Strict,
+            ai_hints: AgentHint {
+                when_to_use: "Use to execute SELECT queries and retrieve rows from the database".into(),
+                common_mistakes: vec!["Using string interpolation instead of parameterized queries".into()],
+                examples: vec![],
+                related: vec![CapabilityId::from_static("pg.read")],
+            },
+            rate_limit: None,
+            requires_approval: None,
+        },
+        OperationInfo {
+            id: OperationId::from_static("pg.execute"),
+            summary: "Execute a non-returning SQL statement (returns affected_rows)".into(),
+            description: None,
+            input_schema: json!({"type": "object", "properties": {"sql": {"type": "string", "description": "SQL statement to execute"}, "params": {"type": "array", "description": "Positional parameters for the statement"}}, "required": ["sql"]}),
+            output_schema: json!({"type": "object", "properties": {"result": {"description": "Execution result with affected_rows"}}}),
+            capability: CapabilityId::from_static("pg.write"),
+            risk_level: RiskLevel::Medium,
+            safety_tier: SafetyTier::Risky,
+            idempotency: IdempotencyClass::None,
+            ai_hints: AgentHint {
+                when_to_use: "Use for INSERT, UPDATE, DELETE or DDL statements that modify data".into(),
+                common_mistakes: vec!["Running destructive statements without a WHERE clause".into()],
+                examples: vec![],
+                related: vec![CapabilityId::from_static("pg.write")],
+            },
+            rate_limit: None,
+            requires_approval: None,
+        },
+        OperationInfo {
+            id: OperationId::from_static("pg.explain"),
+            summary: "Explain query plan for a SQL query".into(),
+            description: None,
+            input_schema: json!({"type": "object", "properties": {"sql": {"type": "string", "description": "SQL query to explain"}, "params": {"type": "array", "description": "Positional parameters for the query"}}, "required": ["sql"]}),
+            output_schema: json!({"type": "object", "properties": {"plan": {"description": "Query execution plan"}}}),
+            capability: CapabilityId::from_static("pg.read"),
+            risk_level: RiskLevel::Low,
+            safety_tier: SafetyTier::Safe,
+            idempotency: IdempotencyClass::Strict,
+            ai_hints: AgentHint {
+                when_to_use: "Use to analyze query performance before running expensive queries".into(),
+                common_mistakes: vec![],
+                examples: vec![],
+                related: vec![CapabilityId::from_static("pg.read")],
+            },
+            rate_limit: None,
+            requires_approval: None,
+        },
+        OperationInfo {
+            id: OperationId::from_static("pg.schema.tables"),
+            summary: "List tables in a database schema".into(),
+            description: None,
+            input_schema: json!({"type": "object", "properties": {"schema": {"type": "string", "description": "Schema name (default: public)"}}}),
+            output_schema: json!({"type": "object", "properties": {"tables": {"type": "array", "description": "List of tables"}}}),
+            capability: CapabilityId::from_static("pg.read"),
+            risk_level: RiskLevel::Low,
+            safety_tier: SafetyTier::Safe,
+            idempotency: IdempotencyClass::Strict,
+            ai_hints: AgentHint {
+                when_to_use: "Use to discover what tables exist in a schema".into(),
+                common_mistakes: vec![],
+                examples: vec![],
+                related: vec![CapabilityId::from_static("pg.read")],
+            },
+            rate_limit: None,
+            requires_approval: None,
+        },
+        OperationInfo {
+            id: OperationId::from_static("pg.schema.columns"),
+            summary: "Get column details for a table".into(),
+            description: None,
+            input_schema: json!({"type": "object", "properties": {"table": {"type": "string", "description": "Table name"}}, "required": ["table"]}),
+            output_schema: json!({"type": "object", "properties": {"columns": {"type": "array", "description": "Column details"}}}),
+            capability: CapabilityId::from_static("pg.read"),
+            risk_level: RiskLevel::Low,
+            safety_tier: SafetyTier::Safe,
+            idempotency: IdempotencyClass::Strict,
+            ai_hints: AgentHint {
+                when_to_use: "Use to inspect column names, types, and constraints for a table".into(),
+                common_mistakes: vec![],
+                examples: vec![],
+                related: vec![CapabilityId::from_static("pg.read")],
+            },
+            rate_limit: None,
+            requires_approval: None,
+        },
+        OperationInfo {
+            id: OperationId::from_static("pg.schema.indexes"),
+            summary: "List indexes for a table".into(),
+            description: None,
+            input_schema: json!({"type": "object", "properties": {"table": {"type": "string", "description": "Table name"}}, "required": ["table"]}),
+            output_schema: json!({"type": "object", "properties": {"indexes": {"type": "array", "description": "Index details"}}}),
+            capability: CapabilityId::from_static("pg.read"),
+            risk_level: RiskLevel::Low,
+            safety_tier: SafetyTier::Safe,
+            idempotency: IdempotencyClass::Strict,
+            ai_hints: AgentHint {
+                when_to_use: "Use to inspect indexes on a table for performance analysis".into(),
+                common_mistakes: vec![],
+                examples: vec![],
+                related: vec![CapabilityId::from_static("pg.read")],
+            },
+            rate_limit: None,
+            requires_approval: None,
+        },
+        OperationInfo {
+            id: OperationId::from_static("pg.transaction.begin"),
+            summary: "Start a new database transaction".into(),
+            description: None,
+            input_schema: json!({"type": "object", "properties": {"isolation_level": {"type": "string", "description": "Isolation level: read_committed, repeatable_read, serializable"}}}),
+            output_schema: json!({"type": "object", "properties": {"result": {"description": "Transaction info including txn_id"}}}),
+            capability: CapabilityId::from_static("pg.write"),
+            risk_level: RiskLevel::Low,
+            safety_tier: SafetyTier::Safe,
+            idempotency: IdempotencyClass::None,
+            ai_hints: AgentHint {
+                when_to_use: "Use to start a transaction for atomic multi-statement operations".into(),
+                common_mistakes: vec!["Forgetting to commit or rollback the transaction".into()],
+                examples: vec![],
+                related: vec![CapabilityId::from_static("pg.write")],
+            },
+            rate_limit: None,
+            requires_approval: None,
+        },
+        OperationInfo {
+            id: OperationId::from_static("pg.transaction.commit"),
+            summary: "Commit a database transaction".into(),
+            description: None,
+            input_schema: json!({"type": "object", "properties": {"txn_id": {"type": "string", "description": "Transaction ID to commit"}}, "required": ["txn_id"]}),
+            output_schema: json!({"type": "object", "properties": {"result": {"description": "Commit confirmation"}}}),
+            capability: CapabilityId::from_static("pg.write"),
+            risk_level: RiskLevel::Low,
+            safety_tier: SafetyTier::Safe,
+            idempotency: IdempotencyClass::BestEffort,
+            ai_hints: AgentHint {
+                when_to_use: "Use to commit an open transaction and persist changes".into(),
+                common_mistakes: vec!["Committing an already closed transaction".into()],
+                examples: vec![],
+                related: vec![CapabilityId::from_static("pg.write")],
+            },
+            rate_limit: None,
+            requires_approval: None,
+        },
+        OperationInfo {
+            id: OperationId::from_static("pg.transaction.rollback"),
+            summary: "Rollback a database transaction".into(),
+            description: None,
+            input_schema: json!({"type": "object", "properties": {"txn_id": {"type": "string", "description": "Transaction ID to rollback"}}, "required": ["txn_id"]}),
+            output_schema: json!({"type": "object", "properties": {"result": {"description": "Rollback confirmation"}}}),
+            capability: CapabilityId::from_static("pg.write"),
+            risk_level: RiskLevel::Low,
+            safety_tier: SafetyTier::Safe,
+            idempotency: IdempotencyClass::BestEffort,
+            ai_hints: AgentHint {
+                when_to_use: "Use to rollback an open transaction and discard changes".into(),
+                common_mistakes: vec!["Rolling back an already committed transaction".into()],
+                examples: vec![],
+                related: vec![CapabilityId::from_static("pg.write")],
+            },
+            rate_limit: None,
+            requires_approval: None,
+        },
+        OperationInfo {
+            id: OperationId::from_static("pg.batch"),
+            summary: "Execute multiple SQL statements in order".into(),
+            description: None,
+            input_schema: json!({"type": "object", "properties": {"statements": {"type": "array", "items": {"type": "string"}, "description": "SQL statements to execute"}, "params": {"type": "array", "description": "Parameters for each statement"}}, "required": ["statements"]}),
+            output_schema: json!({"type": "object", "properties": {"results": {"description": "Results for each statement"}}}),
+            capability: CapabilityId::from_static("pg.write"),
+            risk_level: RiskLevel::Medium,
+            safety_tier: SafetyTier::Risky,
+            idempotency: IdempotencyClass::None,
+            ai_hints: AgentHint {
+                when_to_use: "Use to execute multiple related statements sequentially".into(),
+                common_mistakes: vec!["Not wrapping in a transaction for atomicity".into()],
+                examples: vec![],
+                related: vec![CapabilityId::from_static("pg.write")],
+            },
+            rate_limit: None,
+            requires_approval: None,
+        },
+        OperationInfo {
+            id: OperationId::from_static("pg.prepared"),
+            summary: "Execute a named prepared statement".into(),
+            description: None,
+            input_schema: json!({"type": "object", "properties": {"name": {"type": "string", "description": "Name of the prepared statement"}, "params": {"type": "array", "description": "Parameters to bind"}}, "required": ["name"]}),
+            output_schema: json!({"type": "object", "properties": {"result": {"description": "Prepared statement execution result"}}}),
+            capability: CapabilityId::from_static("pg.write"),
+            risk_level: RiskLevel::Medium,
+            safety_tier: SafetyTier::Risky,
+            idempotency: IdempotencyClass::BestEffort,
+            ai_hints: AgentHint {
+                when_to_use: "Use to execute a pre-registered prepared statement by name".into(),
+                common_mistakes: vec!["Using a statement name that has not been prepared".into()],
+                examples: vec![],
+                related: vec![CapabilityId::from_static("pg.write")],
+            },
+            rate_limit: None,
+            requires_approval: None,
+        },
+        OperationInfo {
+            id: OperationId::from_static("pg.health"),
+            summary: "Check database connectivity and health".into(),
+            description: None,
+            input_schema: json!({"type": "object", "properties": {}}),
+            output_schema: json!({"type": "object", "properties": {"health": {"description": "Database health status"}}}),
+            capability: CapabilityId::from_static("pg.read"),
+            risk_level: RiskLevel::Low,
+            safety_tier: SafetyTier::Safe,
+            idempotency: IdempotencyClass::Strict,
+            ai_hints: AgentHint {
+                when_to_use: "Use to verify the database connection is alive and responsive".into(),
+                common_mistakes: vec![],
+                examples: vec![],
+                related: vec![CapabilityId::from_static("pg.read")],
+            },
+            rate_limit: None,
+            requires_approval: None,
+        },
+    ]
 }
 
-/// Build the operations info for introspection.
-fn operations_info() -> Vec<OperationInfo> {
-    vec![
-        op_info(
-            "pg.query",
-            "Execute a parameterized SQL query (returns rows)",
-            json!({"type":"object","required":["sql"],"properties":{"sql":{"type":"string","description":"SQL query to execute"},"params":{"type":"array","description":"Positional parameters for the query"},"timeout_ms":{"type":"integer","description":"Query timeout in milliseconds"}}}),
-            json!({"type":"object","required":["result"],"properties":{"result":{"description":"Query result with rows and metadata"}}}),
-            "pg.read", RiskLevel::Low, SafetyTier::Safe, IdempotencyClass::Strict,
-            AgentHint {
-                when_to_use: "Execute a read-only SQL query with optional parameterized values. Use for SELECT statements.".into(),
-                common_mistakes: vec!["Forgetting to use parameterized queries ($1, $2) — never interpolate user input into SQL strings.".into(), "Omitting timeout_ms for long-running analytical queries.".into()],
-                examples: vec![r#"{"sql": "SELECT id, name FROM users WHERE status = $1 LIMIT 100", "params": ["active"], "timeout_ms": 5000}"#.into()],
-                related: vec![CapabilityId::from_static("pg.explain"), CapabilityId::from_static("pg.schema.tables")],
-            },
-        ),
-        op_info(
-            "pg.execute",
-            "Execute a non-returning SQL statement (returns affected_rows)",
-            json!({"type":"object","required":["sql"],"properties":{"sql":{"type":"string","description":"SQL statement to execute"},"params":{"type":"array","description":"Positional parameters for the statement"}}}),
-            json!({"type":"object","required":["result"],"properties":{"result":{"description":"Execution result with affected_rows"}}}),
-            "pg.write", RiskLevel::Medium, SafetyTier::Risky, IdempotencyClass::None,
-            AgentHint {
-                when_to_use: "Execute INSERT, UPDATE, DELETE, or DDL statements that do not return rows.".into(),
-                common_mistakes: vec!["Using pg.execute for SELECT — use pg.query instead to get rows back.".into(), "Running destructive DDL (DROP TABLE) without confirmation.".into()],
-                examples: vec![r#"{"sql": "UPDATE users SET status = $1 WHERE last_login < $2", "params": ["inactive", "2025-01-01"]}"#.into()],
-                related: vec![CapabilityId::from_static("pg.query"), CapabilityId::from_static("pg.batch"), CapabilityId::from_static("pg.transaction.begin")],
-            },
-        ),
-        op_info(
-            "pg.explain",
-            "Explain query plan for a SQL query",
-            json!({"type":"object","required":["sql"],"properties":{"sql":{"type":"string","description":"SQL query to explain"},"params":{"type":"array","description":"Positional parameters for the query"}}}),
-            json!({"type":"object","required":["plan"],"properties":{"plan":{"description":"Query execution plan"}}}),
-            "pg.read", RiskLevel::Low, SafetyTier::Safe, IdempotencyClass::Strict,
-            AgentHint {
-                when_to_use: "Analyze the query execution plan before running an expensive query. Use to debug slow queries.".into(),
-                common_mistakes: vec!["Running EXPLAIN on trivial queries where the plan is obvious.".into()],
-                examples: vec![r#"{"sql": "SELECT * FROM orders WHERE customer_id = $1 AND created_at > $2", "params": ["cust_123", "2025-01-01"]}"#.into()],
-                related: vec![CapabilityId::from_static("pg.query")],
-            },
-        ),
-        op_info(
-            "pg.schema.tables",
-            "List tables in a database schema",
-            json!({"type":"object","required":[],"properties":{"schema":{"type":"string","description":"Schema name (default: public)"}}}),
-            json!({"type":"object","required":["tables"],"properties":{"tables":{"type":"array","description":"List of tables with name, schema, and row_count_estimate"}}}),
-            "pg.read", RiskLevel::Low, SafetyTier::Safe, IdempotencyClass::Strict,
-            AgentHint {
-                when_to_use: "Discover available tables in the database. Start here when exploring an unfamiliar schema.".into(),
-                common_mistakes: vec!["Assuming tables are in the public schema — always check with schema parameter if unsure.".into()],
-                examples: vec![r#"{"schema": "public"}"#.into(), r"{}".into()],
-                related: vec![CapabilityId::from_static("pg.schema.columns"), CapabilityId::from_static("pg.schema.indexes")],
-            },
-        ),
-        op_info(
-            "pg.schema.columns",
-            "Get column details for a table",
-            json!({"type":"object","required":["table"],"properties":{"table":{"type":"string","description":"Table name"}}}),
-            json!({"type":"object","required":["columns"],"properties":{"columns":{"type":"array","description":"List of columns with name, data_type, nullable, default_value, is_primary_key"}}}),
-            "pg.read", RiskLevel::Low, SafetyTier::Safe, IdempotencyClass::Strict,
-            AgentHint {
-                when_to_use: "Inspect column names, types, and constraints for a specific table before writing queries.".into(),
-                common_mistakes: vec!["Not checking column types before inserting data — type mismatches cause runtime errors.".into()],
-                examples: vec![r#"{"table": "users"}"#.into()],
-                related: vec![CapabilityId::from_static("pg.schema.tables"), CapabilityId::from_static("pg.schema.indexes")],
-            },
-        ),
-        op_info(
-            "pg.schema.indexes",
-            "List indexes for a table",
-            json!({"type":"object","required":["table"],"properties":{"table":{"type":"string","description":"Table name"}}}),
-            json!({"type":"object","required":["indexes"],"properties":{"indexes":{"type":"array","description":"List of indexes with name, table, columns, unique, type"}}}),
-            "pg.read", RiskLevel::Low, SafetyTier::Safe, IdempotencyClass::Strict,
-            AgentHint {
-                when_to_use: "Check available indexes on a table to understand query performance characteristics.".into(),
-                common_mistakes: vec!["Assuming an index exists — always verify before relying on indexed lookups in queries.".into()],
-                examples: vec![r#"{"table": "orders"}"#.into()],
-                related: vec![CapabilityId::from_static("pg.schema.tables"), CapabilityId::from_static("pg.schema.columns")],
-            },
-        ),
-        op_info(
-            "pg.transaction.begin",
-            "Start a new database transaction",
-            json!({"type":"object","required":[],"properties":{"isolation_level":{"type":"string","description":"Isolation level: read_committed, repeatable_read, serializable"}}}),
-            json!({"type":"object","required":["result"],"properties":{"result":{"description":"Transaction info including txn_id"}}}),
-            "pg.write", RiskLevel::Low, SafetyTier::Safe, IdempotencyClass::None,
-            AgentHint {
-                when_to_use: "Start a transaction when you need atomicity across multiple statements. Always commit or rollback.".into(),
-                common_mistakes: vec!["Forgetting to commit or rollback — abandoned transactions hold locks.".into(), "Using serializable isolation when read_committed suffices — causes unnecessary contention.".into()],
-                examples: vec![r#"{"isolation_level": "read_committed"}"#.into(), r"{}".into()],
-                related: vec![CapabilityId::from_static("pg.transaction.commit"), CapabilityId::from_static("pg.transaction.rollback"), CapabilityId::from_static("pg.execute")],
-            },
-        ),
-        op_info(
-            "pg.transaction.commit",
-            "Commit a database transaction",
-            json!({"type":"object","required":["txn_id"],"properties":{"txn_id":{"type":"string","description":"Transaction ID to commit"}}}),
-            json!({"type":"object","required":["result"],"properties":{"result":{"description":"Commit confirmation"}}}),
-            "pg.write", RiskLevel::Low, SafetyTier::Safe, IdempotencyClass::BestEffort,
-            AgentHint {
-                when_to_use: "Commit a previously started transaction to make all changes permanent.".into(),
-                common_mistakes: vec!["Committing a transaction that has already been rolled back.".into()],
-                examples: vec![r#"{"txn_id": "txn_abc123"}"#.into()],
-                related: vec![CapabilityId::from_static("pg.transaction.begin"), CapabilityId::from_static("pg.transaction.rollback")],
-            },
-        ),
-        op_info(
-            "pg.transaction.rollback",
-            "Rollback a database transaction",
-            json!({"type":"object","required":["txn_id"],"properties":{"txn_id":{"type":"string","description":"Transaction ID to rollback"}}}),
-            json!({"type":"object","required":["result"],"properties":{"result":{"description":"Rollback confirmation"}}}),
-            "pg.write", RiskLevel::Low, SafetyTier::Safe, IdempotencyClass::BestEffort,
-            AgentHint {
-                when_to_use: "Undo all changes in a transaction. Use when an error occurs mid-transaction.".into(),
-                common_mistakes: vec!["Rolling back a transaction that has already been committed.".into()],
-                examples: vec![r#"{"txn_id": "txn_abc123"}"#.into()],
-                related: vec![CapabilityId::from_static("pg.transaction.begin"), CapabilityId::from_static("pg.transaction.commit")],
-            },
-        ),
-        op_info(
-            "pg.batch",
-            "Execute multiple SQL statements in order",
-            json!({"type":"object","required":["statements"],"properties":{"statements":{"type":"array","description":"SQL statements to execute in order"},"params":{"type":"array","description":"Parameters for each statement"}}}),
-            json!({"type":"object","required":["results"],"properties":{"results":{"description":"Results for each statement"}}}),
-            "pg.write", RiskLevel::Medium, SafetyTier::Risky, IdempotencyClass::None,
-            AgentHint {
-                when_to_use: "Execute multiple SQL statements sequentially in a single call. More efficient than separate pg.execute calls.".into(),
-                common_mistakes: vec!["Not wrapping batch in a transaction — partial failures leave data in an inconsistent state.".into(), "Sending too many statements in one batch — keep batches under 100 statements.".into()],
-                examples: vec![r#"{"statements": ["INSERT INTO logs (msg) VALUES ($1)", "UPDATE counters SET n = n + 1 WHERE name = $1"], "params": [["hello"], ["log_count"]]}"#.into()],
-                related: vec![CapabilityId::from_static("pg.execute"), CapabilityId::from_static("pg.transaction.begin")],
-            },
-        ),
-        op_info(
-            "pg.prepared",
-            "Execute a named prepared statement",
-            json!({"type":"object","required":["name"],"properties":{"name":{"type":"string","description":"Name of the prepared statement"},"params":{"type":"array","description":"Parameters to bind"}}}),
-            json!({"type":"object","required":["result"],"properties":{"result":{"description":"Prepared statement execution result"}}}),
-            "pg.write", RiskLevel::Medium, SafetyTier::Risky, IdempotencyClass::BestEffort,
-            AgentHint {
-                when_to_use: "Execute a server-side prepared statement by name. More efficient for repeated queries with different parameters.".into(),
-                common_mistakes: vec!["Referencing a prepared statement name that does not exist on the server.".into(), "Not providing all required parameters for the prepared statement.".into()],
-                examples: vec![r#"{"name": "get_user_by_id", "params": [42]}"#.into()],
-                related: vec![CapabilityId::from_static("pg.query"), CapabilityId::from_static("pg.execute")],
-            },
-        ),
-        op_info(
-            "pg.health",
-            "Check database connectivity and health",
-            json!({"type":"object","required":[]}),
-            json!({"type":"object","required":["health"],"properties":{"health":{"description":"Database health status"}}}),
-            "pg.read", RiskLevel::Low, SafetyTier::Safe, IdempotencyClass::Strict,
-            AgentHint {
-                when_to_use: "Verify the database is reachable and responding before running queries.".into(),
-                common_mistakes: vec!["Polling health too frequently — once before a batch of work is sufficient.".into()],
-                examples: vec![r"{}".into()],
-                related: vec![CapabilityId::from_static("pg.query")],
-            },
-        ),
-    ]
+/// Build the operations info for introspection (JSON format for simulate).
+fn operations_info() -> serde_json::Value {
+    serde_json::to_value(typed_operations_info()).unwrap_or_default()
 }

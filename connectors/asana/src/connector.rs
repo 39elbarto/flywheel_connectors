@@ -272,10 +272,12 @@ impl AsanaConnector {
 
     /// Handle the `introspect` method.
     pub async fn handle_introspect(&self) -> FcpResult<serde_json::Value> {
+        let ops = typed_operations_info();
+        let ops_value = serde_json::to_value(&ops).unwrap_or_else(|_| json!([]));
         Ok(json!({
             "connector_id": "fcp.asana",
             "version": "0.1.0",
-            "operations": serde_json::to_value(operations_info()).unwrap_or_default(),
+            "operations": ops_value,
         }))
     }
 
@@ -332,7 +334,10 @@ impl AsanaConnector {
             .and_then(serde_json::Value::as_str)
             .unwrap_or("");
 
-        let allowed = operations_info().iter().any(|o| o.id.as_ref() == operation);
+        let allowed = operations_info().as_array().is_some_and(|ops| {
+            ops.iter()
+                .any(|o| o.get("id").and_then(serde_json::Value::as_str) == Some(operation))
+        });
 
         Ok(json!({
             "allowed": allowed,
@@ -481,7 +486,7 @@ fn require_str<'a>(input: &'a serde_json::Value, field: &str) -> Result<&'a str,
         })
 }
 
-/// Build a single [`OperationInfo`] entry.
+/// Build a single typed `OperationInfo`.
 #[allow(clippy::too_many_arguments)]
 fn op_info(
     id: &'static str,
@@ -510,8 +515,8 @@ fn op_info(
     }
 }
 
-/// Build the operations info for introspection.
-fn operations_info() -> Vec<OperationInfo> {
+/// Build typed operations info for introspection.
+fn typed_operations_info() -> Vec<OperationInfo> {
     vec![
         op_info(
             "asana.workspaces.list",
@@ -541,7 +546,7 @@ fn operations_info() -> Vec<OperationInfo> {
             AgentHint {
                 when_to_use: "List projects in an Asana workspace.".into(),
                 common_mistakes: vec!["Passing a project GID instead of a workspace GID; the workspace parameter must be the workspace's numeric GID, not a project identifier.".into()],
-                examples: vec![r#"{"workspace": "1234567890"}"#.into()],
+                examples: vec!["{\"workspace\": \"1234567890\"}".into()],
                 related: vec![
                     CapabilityId::from_static("asana.workspaces.list"),
                     CapabilityId::from_static("asana.tasks.list"),
@@ -558,9 +563,9 @@ fn operations_info() -> Vec<OperationInfo> {
             SafetyTier::Safe,
             IdempotencyClass::Strict,
             AgentHint {
-                when_to_use: "Get details of a single Asana project.".into(),
-                common_mistakes: vec![],
-                examples: vec![r#"{"project_gid": "1234567890"}"#.into()],
+                when_to_use: "Retrieve a single Asana project by its GID.".into(),
+                common_mistakes: vec!["Using a workspace GID instead of a project GID.".into()],
+                examples: vec!["{\"project_gid\": \"1234567890\"}".into()],
                 related: vec![CapabilityId::from_static("asana.projects.list")],
             },
         ),
@@ -576,7 +581,7 @@ fn operations_info() -> Vec<OperationInfo> {
             AgentHint {
                 when_to_use: "List tasks in an Asana project.".into(),
                 common_mistakes: vec!["Only top-level tasks in the project are returned; subtasks are not included and must be fetched separately using the parent task's GID.".into()],
-                examples: vec![r#"{"project": "1234567890"}"#.into()],
+                examples: vec!["{\"project\": \"1234567890\"}".into()],
                 related: vec![
                     CapabilityId::from_static("asana.tasks.create"),
                     CapabilityId::from_static("asana.projects.list"),
@@ -593,16 +598,16 @@ fn operations_info() -> Vec<OperationInfo> {
             SafetyTier::Safe,
             IdempotencyClass::Strict,
             AgentHint {
-                when_to_use: "Get details of a single Asana task.".into(),
-                common_mistakes: vec![],
-                examples: vec![r#"{"task_gid": "1234567890"}"#.into()],
+                when_to_use: "Retrieve a single Asana task by its GID.".into(),
+                common_mistakes: vec!["Confusing task GID with task name or project GID.".into()],
+                examples: vec!["{\"task_gid\": \"1234567890\"}".into()],
                 related: vec![CapabilityId::from_static("asana.tasks.list")],
             },
         ),
         op_info(
             "asana.tasks.create",
             "Create a new task",
-            json!({"type": "object", "required": ["workspace", "name"], "properties": {"name": {"type": "string"}, "notes": {"type": "string"}, "workspace": {"type": "string"}}}),
+            json!({"type": "object", "required": ["workspace", "name"], "properties": {"workspace": {"type": "string"}, "name": {"type": "string"}, "notes": {"type": "string"}}}),
             json!({"type": "object", "required": ["data"], "properties": {"data": {"type": "object"}}}),
             "asana.tasks.write",
             RiskLevel::Medium,
@@ -611,7 +616,7 @@ fn operations_info() -> Vec<OperationInfo> {
             AgentHint {
                 when_to_use: "Create a new task.".into(),
                 common_mistakes: vec!["Creating a task with only workspace and name places it in no project; add a projects or memberships field to assign it to a specific project.".into()],
-                examples: vec![r#"{"workspace": "1234567890", "name": "Fix login timeout", "notes": "Users report 30s timeouts"}"#.into()],
+                examples: vec!["{\"workspace\": \"1234567890\", \"name\": \"Fix login timeout\", \"notes\": \"Users report 30s timeouts\"}".into()],
                 related: vec![
                     CapabilityId::from_static("asana.tasks.list"),
                     CapabilityId::from_static("asana.tasks.delete"),
@@ -629,8 +634,8 @@ fn operations_info() -> Vec<OperationInfo> {
             IdempotencyClass::Strict,
             AgentHint {
                 when_to_use: "Update fields on an existing Asana task.".into(),
-                common_mistakes: vec![],
-                examples: vec![r#"{"task_gid": "1234567890", "name": "Updated title"}"#.into()],
+                common_mistakes: vec!["Omitting the task_gid from the request; it is required to identify which task to update.".into()],
+                examples: vec!["{\"task_gid\": \"1234567890\", \"name\": \"Updated task name\"}".into()],
                 related: vec![
                     CapabilityId::from_static("asana.tasks.get"),
                     CapabilityId::from_static("asana.tasks.list"),
@@ -649,7 +654,7 @@ fn operations_info() -> Vec<OperationInfo> {
             AgentHint {
                 when_to_use: "Delete a task. Cannot be undone.".into(),
                 common_mistakes: vec!["Deleting a task also removes all of its subtasks permanently; verify the task has no subtasks you want to keep before deleting.".into()],
-                examples: vec![r#"{"task": "1234567890"}"#.into()],
+                examples: vec!["{\"task\": \"1234567890\"}".into()],
                 related: vec![CapabilityId::from_static("asana.tasks.list")],
             },
         ),
@@ -663,9 +668,9 @@ fn operations_info() -> Vec<OperationInfo> {
             SafetyTier::Safe,
             IdempotencyClass::Strict,
             AgentHint {
-                when_to_use: "List sections in an Asana project.".into(),
-                common_mistakes: vec![],
-                examples: vec![r#"{"project_gid": "1234567890"}"#.into()],
+                when_to_use: "List sections within an Asana project.".into(),
+                common_mistakes: vec!["Using a workspace GID instead of a project GID for the project_gid parameter.".into()],
+                examples: vec!["{\"project_gid\": \"1234567890\"}".into()],
                 related: vec![CapabilityId::from_static("asana.projects.list")],
             },
         ),
@@ -679,22 +684,107 @@ fn operations_info() -> Vec<OperationInfo> {
             SafetyTier::Safe,
             IdempotencyClass::Strict,
             AgentHint {
-                when_to_use: "Search for tasks across a workspace.".into(),
-                common_mistakes: vec![],
-                examples: vec![r#"{"workspace_gid": "1234567890", "query": "login bug"}"#.into()],
-                related: vec![CapabilityId::from_static("asana.tasks.list")],
+                when_to_use: "Search for tasks across a workspace by keyword.".into(),
+                common_mistakes: vec!["Using a project GID instead of a workspace GID; search operates at the workspace level.".into()],
+                examples: vec!["{\"workspace_gid\": \"1234567890\", \"query\": \"login bug\"}".into()],
+                related: vec![
+                    CapabilityId::from_static("asana.tasks.list"),
+                    CapabilityId::from_static("asana.workspaces.list"),
+                ],
             },
         ),
     ]
 }
 
+/// Build the operations info for introspection (JSON format, used by simulate).
+fn operations_info() -> serde_json::Value {
+    json!([
+        {
+            "id": "asana.workspaces.list",
+            "summary": "List workspaces",
+            "capability": "asana.workspaces.read",
+            "risk_level": "low",
+            "safety_tier": "safe",
+            "idempotency": "strict",
+        },
+        {
+            "id": "asana.projects.list",
+            "summary": "List projects in a workspace",
+            "capability": "asana.projects.read",
+            "risk_level": "low",
+            "safety_tier": "safe",
+            "idempotency": "strict",
+        },
+        {
+            "id": "asana.projects.get",
+            "summary": "Get a single project",
+            "capability": "asana.projects.read",
+            "risk_level": "low",
+            "safety_tier": "safe",
+            "idempotency": "strict",
+        },
+        {
+            "id": "asana.tasks.list",
+            "summary": "List tasks in a project",
+            "capability": "asana.tasks.read",
+            "risk_level": "low",
+            "safety_tier": "safe",
+            "idempotency": "strict",
+        },
+        {
+            "id": "asana.tasks.get",
+            "summary": "Get a single task",
+            "capability": "asana.tasks.read",
+            "risk_level": "low",
+            "safety_tier": "safe",
+            "idempotency": "strict",
+        },
+        {
+            "id": "asana.tasks.create",
+            "summary": "Create a new task",
+            "capability": "asana.tasks.write",
+            "risk_level": "medium",
+            "safety_tier": "risky",
+            "idempotency": "none",
+        },
+        {
+            "id": "asana.tasks.update",
+            "summary": "Update an existing task",
+            "capability": "asana.tasks.write",
+            "risk_level": "medium",
+            "safety_tier": "risky",
+            "idempotency": "strict",
+        },
+        {
+            "id": "asana.tasks.delete",
+            "summary": "Delete a task",
+            "capability": "asana.tasks.write",
+            "risk_level": "high",
+            "safety_tier": "dangerous",
+            "idempotency": "none",
+        },
+        {
+            "id": "asana.sections.list",
+            "summary": "List sections in a project",
+            "capability": "asana.sections.read",
+            "risk_level": "low",
+            "safety_tier": "safe",
+            "idempotency": "strict",
+        },
+        {
+            "id": "asana.tasks.search",
+            "summary": "Search tasks in a workspace",
+            "capability": "asana.tasks.read",
+            "risk_level": "low",
+            "safety_tier": "safe",
+            "idempotency": "strict",
+        },
+    ])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn ops_json() -> serde_json::Value {
-        serde_json::to_value(operations_info()).unwrap()
-    }
 
     #[test]
     fn config_from_access_token() {
@@ -808,14 +898,14 @@ mod tests {
 
     #[test]
     fn operations_info_has_10_operations() {
-        let ops = ops_json();
+        let ops = operations_info();
         let arr = ops.as_array().unwrap();
         assert_eq!(arr.len(), 10);
     }
 
     #[test]
     fn operations_all_have_required_fields() {
-        let ops = ops_json();
+        let ops = operations_info();
         for op in ops.as_array().unwrap() {
             assert!(op.get("id").is_some(), "missing id");
             assert!(op.get("summary").is_some(), "missing summary");
@@ -827,7 +917,7 @@ mod tests {
 
     #[test]
     fn operations_ids_are_unique() {
-        let ops = ops_json();
+        let ops = operations_info();
         let ids: Vec<&str> = ops
             .as_array()
             .unwrap()
@@ -843,7 +933,7 @@ mod tests {
     #[test]
     fn operations_risk_levels_valid() {
         let valid = ["low", "medium", "high"];
-        let ops = ops_json();
+        let ops = operations_info();
         for op in ops.as_array().unwrap() {
             let rl = op["risk_level"].as_str().unwrap();
             assert!(valid.contains(&rl), "invalid risk_level: {rl}");
@@ -853,7 +943,7 @@ mod tests {
     #[test]
     fn operations_safety_tiers_valid() {
         let valid = ["safe", "risky", "dangerous"];
-        let ops = ops_json();
+        let ops = operations_info();
         for op in ops.as_array().unwrap() {
             let st = op["safety_tier"].as_str().unwrap();
             assert!(valid.contains(&st), "invalid safety_tier: {st}");
@@ -863,7 +953,7 @@ mod tests {
     #[test]
     #[allow(clippy::case_sensitive_file_extension_comparisons)]
     fn read_operations_are_safe() {
-        let ops = ops_json();
+        let ops = operations_info();
         for op in ops.as_array().unwrap() {
             let cap = op["capability"].as_str().unwrap();
             if cap.ends_with(".read") {
@@ -885,7 +975,7 @@ mod tests {
 
     #[test]
     fn operations_contain_expected_ids() {
-        let ops = ops_json();
+        let ops = operations_info();
         let ids: Vec<&str> = ops
             .as_array()
             .unwrap()
@@ -906,7 +996,7 @@ mod tests {
 
     #[test]
     fn operations_all_have_idempotency() {
-        let ops = ops_json();
+        let ops = operations_info();
         for op in ops.as_array().unwrap() {
             assert!(
                 op.get("idempotency").is_some(),
@@ -1088,7 +1178,7 @@ mod tests {
 
     #[test]
     fn operations_write_ops_are_risky_or_dangerous() {
-        let ops = ops_json();
+        let ops = operations_info();
         for op in ops.as_array().unwrap() {
             let cap = op["capability"].as_str().unwrap();
             if cap.contains("write") {
@@ -1104,7 +1194,7 @@ mod tests {
 
     #[test]
     fn operations_delete_is_dangerous() {
-        let ops = ops_json();
+        let ops = operations_info();
         let delete_op = ops
             .as_array()
             .unwrap()
@@ -1117,7 +1207,7 @@ mod tests {
 
     #[test]
     fn operations_create_is_medium_risk() {
-        let ops = ops_json();
+        let ops = operations_info();
         let create_op = ops
             .as_array()
             .unwrap()
@@ -1130,7 +1220,7 @@ mod tests {
 
     #[test]
     fn operations_update_is_medium_risk() {
-        let ops = ops_json();
+        let ops = operations_info();
         let update_op = ops
             .as_array()
             .unwrap()
@@ -1142,7 +1232,7 @@ mod tests {
 
     #[test]
     fn operations_all_strict_or_none_idempotency() {
-        let ops = ops_json();
+        let ops = operations_info();
         let valid = ["strict", "none"];
         for op in ops.as_array().unwrap() {
             let idem = op["idempotency"].as_str().unwrap();
@@ -1247,7 +1337,7 @@ mod tests {
 
     #[test]
     fn operations_capabilities_map_correctly() {
-        let ops = ops_json();
+        let ops = operations_info();
         for op in ops.as_array().unwrap() {
             let id = op["id"].as_str().unwrap();
             let cap = op["capability"].as_str().unwrap();

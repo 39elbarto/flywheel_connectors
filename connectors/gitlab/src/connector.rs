@@ -394,7 +394,9 @@ fn operations_info() -> Vec<OperationInfo> {
             idempotency: IdempotencyClass::Strict,
             ai_hints: AgentHint {
                 when_to_use: "List GitLab projects.".into(),
-                common_mistakes: vec![],
+                common_mistakes: vec![
+                    "Assuming all accessible projects are returned — results are paginated and only include projects visible to the authenticated token's scope.".into(),
+                ],
                 examples: vec![r"{}".into()],
                 related: vec![
                     CapabilityId::from_static("gitlab.issues.list"),
@@ -428,7 +430,9 @@ fn operations_info() -> Vec<OperationInfo> {
             idempotency: IdempotencyClass::Strict,
             ai_hints: AgentHint {
                 when_to_use: "List issues in a project.".into(),
-                common_mistakes: vec![],
+                common_mistakes: vec![
+                    "Not distinguishing issue IID (project-scoped number) from issue ID (global database ID) — most operations use the IID.".into(),
+                ],
                 examples: vec![r#"{"project_id": "12345"}"#.into()],
                 related: vec![
                     CapabilityId::from_static("gitlab.issues.create"),
@@ -464,7 +468,9 @@ fn operations_info() -> Vec<OperationInfo> {
             idempotency: IdempotencyClass::None,
             ai_hints: AgentHint {
                 when_to_use: "Create a new issue.".into(),
-                common_mistakes: vec![],
+                common_mistakes: vec![
+                    "Using the project path (e.g., 'group/repo') instead of the numeric project_id — the API requires the numeric ID or a URL-encoded path.".into(),
+                ],
                 examples: vec![
                     r#"{"project_id": "12345", "title": "Fix login timeout", "description": "Users report timeouts after 30s"}"#.into(),
                 ],
@@ -497,7 +503,9 @@ fn operations_info() -> Vec<OperationInfo> {
             idempotency: IdempotencyClass::Strict,
             ai_hints: AgentHint {
                 when_to_use: "List merge requests in a project.".into(),
-                common_mistakes: vec![],
+                common_mistakes: vec![
+                    "Expecting merge request IIDs to match issue IIDs — merge requests and issues have independent IID sequences within the same project.".into(),
+                ],
                 examples: vec![r#"{"project_id": "12345"}"#.into()],
                 related: vec![
                     CapabilityId::from_static("gitlab.projects.list"),
@@ -531,7 +539,9 @@ fn operations_info() -> Vec<OperationInfo> {
             idempotency: IdempotencyClass::Strict,
             ai_hints: AgentHint {
                 when_to_use: "List CI/CD pipelines.".into(),
-                common_mistakes: vec![],
+                common_mistakes: vec![
+                    "Filtering by branch ref without URL-encoding slashes — branch names like 'feature/login' must be URL-encoded in the ref parameter.".into(),
+                ],
                 examples: vec![r#"{"project_id": "12345"}"#.into()],
                 related: vec![CapabilityId::from_static("gitlab.merge_requests.list")],
             },

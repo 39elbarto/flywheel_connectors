@@ -438,8 +438,12 @@ fn operations_info() -> Vec<OperationInfo> {
             IdempotencyClass::Strict,
             AgentHint {
                 when_to_use: "List all zaps for the authenticated Zapier user.".into(),
-                examples: vec![],
-                ..Default::default()
+                common_mistakes: vec![
+                    "Expecting detailed trigger/action configuration in the list response — use individual zap details for full step definitions.".into(),
+                    "Assuming only active zaps are returned — paused and draft zaps are also included.".into(),
+                ],
+                examples: vec!["{}".into()],
+                related: vec![CapabilityId::from_static("zapier.zaps.execute")],
             },
         ),
         op_info(
@@ -466,8 +470,13 @@ fn operations_info() -> Vec<OperationInfo> {
             IdempotencyClass::None,
             AgentHint {
                 when_to_use: "Execute a Zapier NLA action.".into(),
-                examples: vec![],
-                ..Default::default()
+                common_mistakes: vec![
+                    "Forgetting to include required params for the action".into(),
+                ],
+                examples: vec![
+                    r#"{"action_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV", "params": {"body": "Hello from FCP"}}"#.into(),
+                ],
+                related: vec![CapabilityId::from_static("zapier.zaps.list")],
             },
         ),
     ]

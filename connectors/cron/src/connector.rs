@@ -715,8 +715,14 @@ fn operations_info() -> Vec<OperationInfo> {
             IdempotencyClass::Strict,
             AgentHint {
                 when_to_use: "List all configured cron schedules.".into(),
-                examples: vec![],
-                ..Default::default()
+                common_mistakes: vec![
+                    "Assuming the list includes disabled schedules by default — all schedules are returned regardless of enabled state.".into(),
+                ],
+                examples: vec!["{}".into()],
+                related: vec![
+                    CapabilityId::from_static("cron.schedules.create"),
+                    CapabilityId::from_static("cron.schedules.delete"),
+                ],
             },
         ),
         op_info(
@@ -741,8 +747,17 @@ fn operations_info() -> Vec<OperationInfo> {
             AgentHint {
                 when_to_use: "Create a new timed schedule to invoke an operation periodically."
                     .into(),
-                examples: vec![],
-                ..Default::default()
+                common_mistakes: vec![
+                    "Using invalid cron expressions.".into(),
+                    "Forgetting to specify target_operation.".into(),
+                ],
+                examples: vec![
+                    r#"{"name": "hourly-sync", "expression": "0 * * * *", "target_operation": "slack.channels.list"}"#.into(),
+                ],
+                related: vec![
+                    CapabilityId::from_static("cron.schedules.list"),
+                    CapabilityId::from_static("cron.schedules.delete"),
+                ],
             },
         ),
         op_info(
@@ -757,8 +772,14 @@ fn operations_info() -> Vec<OperationInfo> {
             AgentHint {
                 when_to_use: "Remove a cron schedule. The operation will no longer be triggered."
                     .into(),
-                examples: vec![],
-                ..Default::default()
+                common_mistakes: vec![
+                    "Deleting a schedule without first checking its recent execution history for in-flight jobs.".into(),
+                    "Using schedule name instead of schedule_id.".into(),
+                ],
+                examples: vec![
+                    r#"{"schedule_id": "sched_abc123"}"#.into(),
+                ],
+                related: vec![CapabilityId::from_static("cron.schedules.list")],
             },
         ),
         op_info(
@@ -772,8 +793,17 @@ fn operations_info() -> Vec<OperationInfo> {
             IdempotencyClass::None,
             AgentHint {
                 when_to_use: "Manually trigger a schedule outside its normal cron timing.".into(),
-                examples: vec![],
-                ..Default::default()
+                common_mistakes: vec![
+                    "Triggering a disabled schedule without re-enabling it first.".into(),
+                    "Calling trigger repeatedly without waiting for the previous execution to complete.".into(),
+                ],
+                examples: vec![
+                    r#"{"schedule_id": "sched_abc123"}"#.into(),
+                ],
+                related: vec![
+                    CapabilityId::from_static("cron.schedules.list"),
+                    CapabilityId::from_static("cron.executions.list"),
+                ],
             },
         ),
         op_info(
@@ -794,8 +824,14 @@ fn operations_info() -> Vec<OperationInfo> {
             IdempotencyClass::Strict,
             AgentHint {
                 when_to_use: "View execution history for a cron schedule.".into(),
-                examples: vec![],
-                ..Default::default()
+                common_mistakes: vec![
+                    "Omitting schedule_id and expecting executions across all schedules.".into(),
+                    "Not accounting for timezone differences when interpreting execution timestamps.".into(),
+                ],
+                examples: vec![
+                    r#"{"schedule_id": "sched_abc123", "limit": 20}"#.into(),
+                ],
+                related: vec![CapabilityId::from_static("cron.schedules.list")],
             },
         ),
     ]

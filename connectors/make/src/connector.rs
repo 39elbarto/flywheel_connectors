@@ -439,8 +439,14 @@ fn operations_info() -> Vec<OperationInfo> {
             IdempotencyClass::Strict,
             AgentHint {
                 when_to_use: "List all scenarios in a Make team.".into(),
-                examples: vec![],
-                ..Default::default()
+                common_mistakes: vec![
+                    "Forgetting that the team ID is configured at the connector level — scenarios from other teams are not returned.".into(),
+                ],
+                examples: vec!["{}".into()],
+                related: vec![
+                    CapabilityId::from_static("make.scenarios.run"),
+                    CapabilityId::from_static("make.executions.list"),
+                ],
             },
         ),
         op_info(
@@ -454,8 +460,15 @@ fn operations_info() -> Vec<OperationInfo> {
             IdempotencyClass::None,
             AgentHint {
                 when_to_use: "Trigger a Make scenario to run.".into(),
-                examples: vec![],
-                ..Default::default()
+                common_mistakes: vec![
+                    "Triggering a scenario that is turned off — it must be active in Make to accept API-triggered runs.".into(),
+                    "Running a scenario without checking remaining operations quota in the Make plan.".into(),
+                ],
+                examples: vec![r#"{"scenario_id": "12345"}"#.into()],
+                related: vec![
+                    CapabilityId::from_static("make.scenarios.list"),
+                    CapabilityId::from_static("make.executions.list"),
+                ],
             },
         ),
         op_info(
@@ -469,8 +482,15 @@ fn operations_info() -> Vec<OperationInfo> {
             IdempotencyClass::Strict,
             AgentHint {
                 when_to_use: "List recent executions for a Make scenario.".into(),
-                examples: vec![],
-                ..Default::default()
+                common_mistakes: vec![
+                    "Using the scenario name instead of the numeric scenario_id.".into(),
+                    "Expecting executions from all scenarios — you must specify a single scenario_id.".into(),
+                ],
+                examples: vec![r#"{"scenario_id": "12345"}"#.into()],
+                related: vec![
+                    CapabilityId::from_static("make.scenarios.list"),
+                    CapabilityId::from_static("make.scenarios.run"),
+                ],
             },
         ),
     ]

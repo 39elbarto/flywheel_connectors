@@ -859,7 +859,7 @@ mod tests {
         for op in ops {
             let tier = op["safety_tier"].as_str().unwrap();
             assert!(
-                tier == "safe" || tier == "moderate" || tier == "dangerous",
+                tier == "safe" || tier == "risky" || tier == "dangerous",
                 "Invalid safety_tier: {tier}"
             );
         }
@@ -888,16 +888,16 @@ mod tests {
     }
 
     #[test]
-    fn introspect_write_ops_are_moderate() {
+    fn introspect_write_ops_are_risky() {
         let c = PostgreSqlConnector::new();
         let rt = tokio_runtime();
         let result = rt.block_on(c.handle_introspect()).unwrap();
         let ops = result["operations"].as_array().unwrap();
-        let moderate_ops = ["pg.execute", "pg.batch", "pg.prepared"];
+        let risky_ops = ["pg.execute", "pg.batch", "pg.prepared"];
         for op in ops {
             let id = op["id"].as_str().unwrap();
-            if moderate_ops.contains(&id) {
-                assert_eq!(op["safety_tier"], "moderate", "{id} should be moderate");
+            if risky_ops.contains(&id) {
+                assert_eq!(op["safety_tier"], "risky", "{id} should be risky");
             }
         }
     }

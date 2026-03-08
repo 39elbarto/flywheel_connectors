@@ -270,10 +270,11 @@ impl PandaDocConnector {
 
     /// Handle the `introspect` method.
     pub async fn handle_introspect(&self) -> FcpResult<serde_json::Value> {
+        let ops = typed_operations_info();
         Ok(json!({
             "connector_id": "fcp.pandadoc",
             "version": "0.1.0",
-            "operations": serde_json::to_value(operations_info()).unwrap_or_default(),
+            "operations": serde_json::to_value(&ops).unwrap_or_default(),
         }))
     }
 
@@ -326,7 +327,10 @@ impl PandaDocConnector {
             .and_then(serde_json::Value::as_str)
             .unwrap_or("");
 
-        let allowed = operations_info().iter().any(|o| o.id.as_ref() == operation);
+        let allowed = operations_info().as_array().is_some_and(|ops| {
+            ops.iter()
+                .any(|o| o.get("id").and_then(serde_json::Value::as_str) == Some(operation))
+        });
 
         Ok(json!({
             "allowed": allowed,
@@ -429,239 +433,134 @@ fn require_str<'a>(input: &'a serde_json::Value, field: &str) -> Result<&'a str,
         })
 }
 
-/// Build a single [`OperationInfo`].
-#[allow(clippy::too_many_arguments)]
-fn op_info(
-    id: &'static str,
-    summary: &str,
-    input_schema: serde_json::Value,
-    output_schema: serde_json::Value,
-    capability: &'static str,
-    risk_level: RiskLevel,
-    safety_tier: SafetyTier,
-    idempotency: IdempotencyClass,
-    ai_hints: AgentHint,
-) -> OperationInfo {
-    OperationInfo {
-        id: OperationId::from_static(id),
-        summary: summary.into(),
-        input_schema,
-        output_schema,
-        capability: CapabilityId::from_static(capability),
-        risk_level,
-        description: None,
-        rate_limit: None,
-        requires_approval: None,
-        safety_tier,
-        idempotency,
-        ai_hints,
-    }
+/// Build typed operations info for introspection.
+fn typed_operations_info() -> Vec<OperationInfo> {
+    vec![
+        OperationInfo {
+            id: OperationId::from_static("pandadoc.documents.list"),
+            summary: "List documents".into(),
+            description: None,
+            input_schema: json!({"type": "object", "properties": {"status": {"type": "string"}, "count": {"type": "integer"}}}),
+            output_schema: json!({"type": "object", "properties": {"documents": {"type": "array"}}}),
+            capability: CapabilityId::from_static("pandadoc.documents.read"),
+            risk_level: RiskLevel::Low,
+            safety_tier: SafetyTier::Safe,
+            idempotency: IdempotencyClass::Strict,
+            ai_hints: AgentHint {
+                when_to_use: "Use to list documents, optionally filtered by status".into(),
+                common_mistakes: vec![],
+                examples: vec![],
+                related: vec![CapabilityId::from_static("pandadoc.documents.read")],
+            },
+            rate_limit: None,
+            requires_approval: None,
+        },
+        OperationInfo {
+            id: OperationId::from_static("pandadoc.documents.get"),
+            summary: "Get document details".into(),
+            description: None,
+            input_schema: json!({"type": "object", "properties": {"document_id": {"type": "string"}}, "required": ["document_id"]}),
+            output_schema: json!({"type": "object", "properties": {"document": {"type": "object"}}}),
+            capability: CapabilityId::from_static("pandadoc.documents.read"),
+            risk_level: RiskLevel::Low,
+            safety_tier: SafetyTier::Safe,
+            idempotency: IdempotencyClass::Strict,
+            ai_hints: AgentHint {
+                when_to_use: "Use to retrieve details of a specific document".into(),
+                common_mistakes: vec!["Not providing document_id".into()],
+                examples: vec![],
+                related: vec![CapabilityId::from_static("pandadoc.documents.read")],
+            },
+            rate_limit: None,
+            requires_approval: None,
+        },
+        OperationInfo {
+            id: OperationId::from_static("pandadoc.documents.create"),
+            summary: "Create a document from a template".into(),
+            description: None,
+            input_schema: json!({"type": "object", "properties": {"name": {"type": "string"}, "template_uuid": {"type": "string"}, "recipients": {"type": "array"}}, "required": ["name", "template_uuid", "recipients"]}),
+            output_schema: json!({"type": "object", "properties": {"document": {"type": "object"}}}),
+            capability: CapabilityId::from_static("pandadoc.documents.write"),
+            risk_level: RiskLevel::Medium,
+            safety_tier: SafetyTier::Risky,
+            idempotency: IdempotencyClass::None,
+            ai_hints: AgentHint {
+                when_to_use: "Use to create a new document from a template with recipients".into(),
+                common_mistakes: vec!["Forgetting to provide recipients array".into()],
+                examples: vec![],
+                related: vec![CapabilityId::from_static("pandadoc.documents.write")],
+            },
+            rate_limit: None,
+            requires_approval: None,
+        },
+        OperationInfo {
+            id: OperationId::from_static("pandadoc.documents.send"),
+            summary: "Send a document for signing".into(),
+            description: None,
+            input_schema: json!({"type": "object", "properties": {"document_id": {"type": "string"}, "message": {"type": "string"}}, "required": ["document_id"]}),
+            output_schema: json!({"type": "object", "properties": {"status": {"type": "string"}}}),
+            capability: CapabilityId::from_static("pandadoc.documents.write"),
+            risk_level: RiskLevel::High,
+            safety_tier: SafetyTier::Risky,
+            idempotency: IdempotencyClass::Strict,
+            ai_hints: AgentHint {
+                when_to_use: "Use to send a completed document to recipients for signing".into(),
+                common_mistakes: vec!["Sending a document that is not in draft status".into()],
+                examples: vec![],
+                related: vec![CapabilityId::from_static("pandadoc.documents.write")],
+            },
+            rate_limit: None,
+            requires_approval: None,
+        },
+        OperationInfo {
+            id: OperationId::from_static("pandadoc.documents.delete"),
+            summary: "Delete a document".into(),
+            description: None,
+            input_schema: json!({"type": "object", "properties": {"document_id": {"type": "string"}}, "required": ["document_id"]}),
+            output_schema: json!({"type": "object", "properties": {"deleted": {"type": "boolean"}}}),
+            capability: CapabilityId::from_static("pandadoc.documents.write"),
+            risk_level: RiskLevel::High,
+            safety_tier: SafetyTier::Dangerous,
+            idempotency: IdempotencyClass::Strict,
+            ai_hints: AgentHint {
+                when_to_use: "Use to permanently delete a document — this cannot be undone".into(),
+                common_mistakes: vec!["Deleting a document that is actively being signed".into()],
+                examples: vec![],
+                related: vec![CapabilityId::from_static("pandadoc.documents.write")],
+            },
+            rate_limit: None,
+            requires_approval: None,
+        },
+        OperationInfo {
+            id: OperationId::from_static("pandadoc.templates.list"),
+            summary: "List available templates".into(),
+            description: None,
+            input_schema: json!({"type": "object", "properties": {}}),
+            output_schema: json!({"type": "object", "properties": {"templates": {"type": "array"}}}),
+            capability: CapabilityId::from_static("pandadoc.templates.read"),
+            risk_level: RiskLevel::Low,
+            safety_tier: SafetyTier::Safe,
+            idempotency: IdempotencyClass::Strict,
+            ai_hints: AgentHint {
+                when_to_use: "Use to discover available templates for document creation".into(),
+                common_mistakes: vec![],
+                examples: vec![],
+                related: vec![CapabilityId::from_static("pandadoc.templates.read")],
+            },
+            rate_limit: None,
+            requires_approval: None,
+        },
+    ]
 }
 
-/// Build the operations info for introspection.
-fn operations_info() -> Vec<OperationInfo> {
-    vec![
-        op_info(
-            "pandadoc.documents.list",
-            "List documents",
-            json!({
-                "type": "object",
-                "required": [],
-                "properties": {
-                    "status": {"type": "string", "description": "Filter by status (draft, sent, completed, etc.)"},
-                    "count": {"type": "integer", "maximum": 100}
-                }
-            }),
-            json!({
-                "type": "object",
-                "required": ["results"],
-                "properties": {"results": {"type": "array"}}
-            }),
-            "pandadoc.documents.read",
-            RiskLevel::Low,
-            SafetyTier::Safe,
-            IdempotencyClass::Strict,
-            AgentHint {
-                when_to_use: "List PandaDoc documents, optionally filtered by status.".into(),
-                common_mistakes: vec![
-                    "The status filter values are specific strings (draft, sent, completed, viewed, waiting_approval); using arbitrary values returns empty results.".into(),
-                ],
-                examples: vec![r#"{"status": "draft", "count": 20}"#.into()],
-                related: vec![
-                    CapabilityId::from_static("pandadoc.documents.get"),
-                    CapabilityId::from_static("pandadoc.documents.create"),
-                ],
-            },
-        ),
-        op_info(
-            "pandadoc.documents.get",
-            "Get document details",
-            json!({
-                "type": "object",
-                "required": ["document_id"],
-                "properties": {
-                    "document_id": {"type": "string"}
-                }
-            }),
-            json!({
-                "type": "object",
-                "required": ["id", "name", "status"],
-                "properties": {
-                    "id": {"type": "string"},
-                    "name": {"type": "string"},
-                    "status": {"type": "string"}
-                }
-            }),
-            "pandadoc.documents.read",
-            RiskLevel::Low,
-            SafetyTier::Safe,
-            IdempotencyClass::Strict,
-            AgentHint {
-                when_to_use: "Get details for a specific document.".into(),
-                common_mistakes: vec![
-                    "The document_id is a PandaDoc UUID, not the document name; use pandadoc.documents.list to look up the ID.".into(),
-                ],
-                examples: vec![r#"{"document_id": "doc_abc123"}"#.into()],
-                related: vec![
-                    CapabilityId::from_static("pandadoc.documents.list"),
-                ],
-            },
-        ),
-        op_info(
-            "pandadoc.documents.create",
-            "Create a document from a template",
-            json!({
-                "type": "object",
-                "required": ["name", "template_uuid", "recipients"],
-                "properties": {
-                    "name": {"type": "string"},
-                    "template_uuid": {"type": "string"},
-                    "recipients": {"type": "array", "description": "List of recipient objects with email and role"}
-                }
-            }),
-            json!({
-                "type": "object",
-                "required": ["id", "status"],
-                "properties": {
-                    "id": {"type": "string"},
-                    "status": {"type": "string"}
-                }
-            }),
-            "pandadoc.documents.write",
-            RiskLevel::Medium,
-            SafetyTier::Risky,
-            IdempotencyClass::None,
-            AgentHint {
-                when_to_use: "Create a new document from a template.".into(),
-                common_mistakes: vec![
-                    "Forgetting to specify recipients.".into(),
-                ],
-                examples: vec![
-                    r#"{"name": "NDA for Acme", "template_uuid": "tpl_abc123", "recipients": [{"email": "bob@acme.com", "role": "signer"}]}"#.into(),
-                ],
-                related: vec![
-                    CapabilityId::from_static("pandadoc.templates.list"),
-                    CapabilityId::from_static("pandadoc.documents.send"),
-                ],
-            },
-        ),
-        op_info(
-            "pandadoc.documents.send",
-            "Send a document for signing",
-            json!({
-                "type": "object",
-                "required": ["document_id"],
-                "properties": {
-                    "document_id": {"type": "string"},
-                    "message": {"type": "string", "description": "Optional message to include in the email"}
-                }
-            }),
-            json!({
-                "type": "object",
-                "required": ["id", "status"],
-                "properties": {
-                    "id": {"type": "string"},
-                    "status": {"type": "string"}
-                }
-            }),
-            "pandadoc.documents.write",
-            RiskLevel::High,
-            SafetyTier::Risky,
-            IdempotencyClass::Strict,
-            AgentHint {
-                when_to_use: "Send a document to recipients for signing.".into(),
-                common_mistakes: vec![
-                    "Sending a document that is not in draft status.".into(),
-                ],
-                examples: vec![
-                    r#"{"document_id": "doc_abc123", "message": "Please sign this NDA."}"#.into(),
-                ],
-                related: vec![
-                    CapabilityId::from_static("pandadoc.documents.create"),
-                    CapabilityId::from_static("pandadoc.documents.get"),
-                ],
-            },
-        ),
-        op_info(
-            "pandadoc.documents.delete",
-            "Delete a document",
-            json!({
-                "type": "object",
-                "required": ["document_id"],
-                "properties": {
-                    "document_id": {"type": "string"}
-                }
-            }),
-            json!({"type": "object"}),
-            "pandadoc.documents.write",
-            RiskLevel::High,
-            SafetyTier::Dangerous,
-            IdempotencyClass::Strict,
-            AgentHint {
-                when_to_use: "Delete a document. Cannot be undone.".into(),
-                common_mistakes: vec![
-                    "Deleting a document that has already been sent or completed will also revoke signer access; verify the document status with pandadoc.documents.get first.".into(),
-                ],
-                examples: vec![r#"{"document_id": "doc_abc123"}"#.into()],
-                related: vec![
-                    CapabilityId::from_static("pandadoc.documents.list"),
-                ],
-            },
-        ),
-        op_info(
-            "pandadoc.templates.list",
-            "List available templates",
-            json!({"type": "object", "required": []}),
-            json!({
-                "type": "object",
-                "required": ["results"],
-                "properties": {"results": {"type": "array"}}
-            }),
-            "pandadoc.templates.read",
-            RiskLevel::Low,
-            SafetyTier::Safe,
-            IdempotencyClass::Strict,
-            AgentHint {
-                when_to_use: "List available document templates.".into(),
-                common_mistakes: vec![
-                    "Only active templates are returned; archived or deleted templates will not appear in the list.".into(),
-                ],
-                examples: vec!["{}".into()],
-                related: vec![
-                    CapabilityId::from_static("pandadoc.documents.create"),
-                ],
-            },
-        ),
-    ]
+/// Build the operations info for introspection (JSON format for simulate).
+fn operations_info() -> serde_json::Value {
+    serde_json::to_value(typed_operations_info()).unwrap_or_default()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn ops_json() -> serde_json::Value {
-        serde_json::to_value(operations_info()).unwrap()
-    }
 
     #[test]
     fn config_from_api_key() {
@@ -765,14 +664,14 @@ mod tests {
 
     #[test]
     fn operations_info_has_6_operations() {
-        let ops = ops_json();
+        let ops = operations_info();
         let arr = ops.as_array().unwrap();
         assert_eq!(arr.len(), 6);
     }
 
     #[test]
     fn operations_all_have_required_fields() {
-        let ops = ops_json();
+        let ops = operations_info();
         for op in ops.as_array().unwrap() {
             assert!(op.get("id").is_some(), "missing id");
             assert!(op.get("summary").is_some(), "missing summary");
@@ -784,7 +683,7 @@ mod tests {
 
     #[test]
     fn operations_ids_are_unique() {
-        let ops = ops_json();
+        let ops = operations_info();
         let ids: Vec<&str> = ops
             .as_array()
             .unwrap()
@@ -800,7 +699,7 @@ mod tests {
     #[test]
     fn operations_risk_levels_valid() {
         let valid = ["low", "medium", "high"];
-        let ops = ops_json();
+        let ops = operations_info();
         for op in ops.as_array().unwrap() {
             let rl = op["risk_level"].as_str().unwrap();
             assert!(valid.contains(&rl), "invalid risk_level: {rl}");
@@ -810,7 +709,7 @@ mod tests {
     #[test]
     fn operations_safety_tiers_valid() {
         let valid = ["safe", "risky", "dangerous"];
-        let ops = ops_json();
+        let ops = operations_info();
         for op in ops.as_array().unwrap() {
             let st = op["safety_tier"].as_str().unwrap();
             assert!(valid.contains(&st), "invalid safety_tier: {st}");
@@ -819,7 +718,7 @@ mod tests {
 
     #[test]
     fn read_operations_are_safe() {
-        let ops = ops_json();
+        let ops = operations_info();
         for op in ops.as_array().unwrap() {
             let cap = op["capability"].as_str().unwrap();
             #[allow(clippy::case_sensitive_file_extension_comparisons)]
@@ -842,7 +741,7 @@ mod tests {
 
     #[test]
     fn operations_contain_expected_ids() {
-        let ops = ops_json();
+        let ops = operations_info();
         let ids: Vec<&str> = ops
             .as_array()
             .unwrap()
@@ -933,7 +832,7 @@ mod tests {
 
     #[test]
     fn operations_all_have_idempotency() {
-        let ops = ops_json();
+        let ops = operations_info();
         for op in ops.as_array().unwrap() {
             assert!(
                 op.get("idempotency").is_some(),
@@ -1085,7 +984,7 @@ mod tests {
 
     #[test]
     fn operations_delete_is_dangerous() {
-        let ops = ops_json();
+        let ops = operations_info();
         let delete_op = ops
             .as_array()
             .unwrap()
@@ -1098,7 +997,7 @@ mod tests {
 
     #[test]
     fn operations_send_is_risky() {
-        let ops = ops_json();
+        let ops = operations_info();
         let send_op = ops
             .as_array()
             .unwrap()
@@ -1111,7 +1010,7 @@ mod tests {
 
     #[test]
     fn operations_create_is_risky() {
-        let ops = ops_json();
+        let ops = operations_info();
         let create_op = ops
             .as_array()
             .unwrap()
@@ -1123,7 +1022,7 @@ mod tests {
 
     #[test]
     fn operations_templates_list_capability() {
-        let ops = ops_json();
+        let ops = operations_info();
         let tpl_op = ops
             .as_array()
             .unwrap()
@@ -1277,7 +1176,7 @@ mod tests {
 
     #[test]
     fn operations_all_prefixed_pandadoc() {
-        let ops = ops_json();
+        let ops = operations_info();
         for op in ops.as_array().unwrap() {
             let id = op["id"].as_str().unwrap();
             assert!(
@@ -1290,7 +1189,7 @@ mod tests {
     #[test]
     fn operations_valid_idempotency_values() {
         let valid = ["strict", "best_effort", "none"];
-        let ops = ops_json();
+        let ops = operations_info();
         for op in ops.as_array().unwrap() {
             let idem = op["idempotency"].as_str().unwrap();
             assert!(
@@ -1303,7 +1202,7 @@ mod tests {
 
     #[test]
     fn operations_list_documents_is_safe() {
-        let ops = ops_json();
+        let ops = operations_info();
         let op = ops
             .as_array()
             .unwrap()

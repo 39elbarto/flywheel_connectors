@@ -575,7 +575,10 @@ fn operations_info() -> Vec<OperationInfo> {
             IdempotencyClass::Strict,
             AgentHint {
                 when_to_use: "Search and list Grafana dashboards.".into(),
-                common_mistakes: vec![],
+                common_mistakes: vec![
+                    "Expecting full dashboard JSON in the list response — only metadata is returned; use dashboards.get for panel details.".into(),
+                    "Not using tag filters on large Grafana instances — the search endpoint can be slow with thousands of dashboards.".into(),
+                ],
                 examples: vec![
                     r#"{"query": "production", "limit": 50}"#.into(),
                 ],
@@ -606,7 +609,10 @@ fn operations_info() -> Vec<OperationInfo> {
             IdempotencyClass::Strict,
             AgentHint {
                 when_to_use: "Retrieve a specific dashboard by UID.".into(),
-                common_mistakes: vec![],
+                common_mistakes: vec![
+                    "Using the dashboard slug or numeric ID instead of the UID — the UID is the short alphanumeric identifier.".into(),
+                    "Not checking the meta.version field before updating — stale version causes save conflicts.".into(),
+                ],
                 examples: vec![
                     r#"{"uid": "abc123def"}"#.into(),
                 ],
@@ -671,7 +677,10 @@ fn operations_info() -> Vec<OperationInfo> {
             IdempotencyClass::Strict,
             AgentHint {
                 when_to_use: "Delete a dashboard. Cannot be undone.".into(),
-                common_mistakes: vec![],
+                common_mistakes: vec![
+                    "Deleting provisioned dashboards — they will reappear on next Grafana restart or provisioning cycle.".into(),
+                    "Not exporting the dashboard JSON first for backup before permanent deletion.".into(),
+                ],
                 examples: vec![
                     r#"{"uid": "abc123def"}"#.into(),
                 ],
@@ -698,7 +707,10 @@ fn operations_info() -> Vec<OperationInfo> {
             IdempotencyClass::Strict,
             AgentHint {
                 when_to_use: "List configured datasources.".into(),
-                common_mistakes: vec![],
+                common_mistakes: vec![
+                    "Assuming datasource names are unique across organizations — use UID for reliable references.".into(),
+                    "Not checking datasource health/connectivity status before issuing queries against them.".into(),
+                ],
                 examples: vec![
                     r"{}".into(),
                 ],
@@ -764,7 +776,10 @@ fn operations_info() -> Vec<OperationInfo> {
             IdempotencyClass::Strict,
             AgentHint {
                 when_to_use: "List alert rules and their current states.".into(),
-                common_mistakes: vec![],
+                common_mistakes: vec![
+                    "Filtering by state='alerting' misses rules in 'pending' state that are about to fire.".into(),
+                    "Not accounting for Grafana Unified Alerting vs legacy alerting — API endpoints differ between versions.".into(),
+                ],
                 examples: vec![
                     r#"{"state": "alerting"}"#.into(),
                 ],
@@ -829,7 +844,10 @@ fn operations_info() -> Vec<OperationInfo> {
             IdempotencyClass::None,
             AgentHint {
                 when_to_use: "Mark events on dashboards (deploys, incidents, etc.).".into(),
-                common_mistakes: vec![],
+                common_mistakes: vec![
+                    "Not specifying time — defaults to the server's current time, which may differ from the actual event time.".into(),
+                    "Creating dashboard-scoped annotations without providing the dashboard_uid, resulting in global annotations.".into(),
+                ],
                 examples: vec![
                     r#"{"text": "Deploy v2.1.0", "tags": ["deploy"]}"#.into(),
                 ],

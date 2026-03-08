@@ -465,8 +465,14 @@ fn operations_info() -> Vec<OperationInfo> {
             IdempotencyClass::Strict,
             AgentHint {
                 when_to_use: "List all workflows in the n8n instance.".into(),
-                examples: vec![],
-                ..Default::default()
+                common_mistakes: vec![
+                    "Assuming only active workflows are returned — inactive workflows are included in the list.".into(),
+                ],
+                examples: vec!["{}".into()],
+                related: vec![
+                    CapabilityId::from_static("n8n.workflows.get"),
+                    CapabilityId::from_static("n8n.workflows.activate"),
+                ],
             },
         ),
         op_info(
@@ -480,8 +486,14 @@ fn operations_info() -> Vec<OperationInfo> {
             IdempotencyClass::Strict,
             AgentHint {
                 when_to_use: "Retrieve details of a specific n8n workflow by ID.".into(),
-                examples: vec![],
-                ..Default::default()
+                common_mistakes: vec![
+                    "Using the workflow name or slug instead of the numeric workflow ID.".into(),
+                ],
+                examples: vec![r#"{"id": "1001"}"#.into()],
+                related: vec![
+                    CapabilityId::from_static("n8n.workflows.list"),
+                    CapabilityId::from_static("n8n.workflows.activate"),
+                ],
             },
         ),
         op_info(
@@ -495,8 +507,15 @@ fn operations_info() -> Vec<OperationInfo> {
             IdempotencyClass::None,
             AgentHint {
                 when_to_use: "Activate or deactivate an n8n workflow.".into(),
-                examples: vec![],
-                ..Default::default()
+                common_mistakes: vec![
+                    "Activating a workflow that has webhook or cron triggers without verifying its trigger configuration first.".into(),
+                    "Passing the workflow name instead of the numeric workflow ID.".into(),
+                ],
+                examples: vec![r#"{"id": "1001", "active": true}"#.into()],
+                related: vec![
+                    CapabilityId::from_static("n8n.workflows.get"),
+                    CapabilityId::from_static("n8n.workflows.list"),
+                ],
             },
         ),
         op_info(
@@ -510,8 +529,15 @@ fn operations_info() -> Vec<OperationInfo> {
             IdempotencyClass::Strict,
             AgentHint {
                 when_to_use: "List recent workflow executions in n8n.".into(),
-                examples: vec![],
-                ..Default::default()
+                common_mistakes: vec![
+                    "Expecting executions from all workflows — results may be limited to the most recent across the instance.".into(),
+                    "Not paginating when the execution history is large.".into(),
+                ],
+                examples: vec!["{}".into()],
+                related: vec![
+                    CapabilityId::from_static("n8n.executions.get"),
+                    CapabilityId::from_static("n8n.workflows.list"),
+                ],
             },
         ),
         op_info(
@@ -525,8 +551,15 @@ fn operations_info() -> Vec<OperationInfo> {
             IdempotencyClass::Strict,
             AgentHint {
                 when_to_use: "Retrieve details of a specific workflow execution by ID.".into(),
-                examples: vec![],
-                ..Default::default()
+                common_mistakes: vec![
+                    "Using the workflow ID instead of the execution ID.".into(),
+                    "Querying an execution before it has finished — check the 'finished' field in the response.".into(),
+                ],
+                examples: vec![r#"{"id": "50001"}"#.into()],
+                related: vec![
+                    CapabilityId::from_static("n8n.executions.list"),
+                    CapabilityId::from_static("n8n.workflows.get"),
+                ],
             },
         ),
     ]

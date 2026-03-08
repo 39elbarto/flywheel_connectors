@@ -578,11 +578,11 @@ pub struct ConnectorEntry {
 /// Sorted alphabetically by name. Each entry records the connector's cohort,
 /// operation count, metadata quality tier, and manifest presence.
 ///
-/// **Typed** connectors (53): Use `OperationInfo` structs with `AgentHint`
+/// **Typed** connectors (82): Use `OperationInfo` structs with `AgentHint`
 /// objects providing `when_to_use`, `common_mistakes`, `examples`, and
 /// `related` fields. These are fully fwc-ready.
 ///
-/// **JSON** connectors (29): Use raw `serde_json::Value` in `operations_info()`.
+/// **JSON** connectors (0): All connectors have been migrated to typed metadata.
 /// They have `input_schema`, `output_schema`, `risk_level`, `safety_tier`,
 /// and `idempotency` but lack typed `AgentHint` metadata. These are
 /// partially ready — they work but discovery UX is degraded.
@@ -647,8 +647,8 @@ pub static CONNECTOR_INVENTORY: &[ConnectorEntry] = &[
         name: "asana",
         cohort: ConnectorCohort::Workspace,
         operation_count: 10,
-        metadata_tier: MetadataTier::Json,
-        has_agent_hints: false,
+        metadata_tier: MetadataTier::Typed,
+        has_agent_hints: true,
         has_manifest: true,
     },
     ConnectorEntry {
@@ -663,8 +663,8 @@ pub static CONNECTOR_INVENTORY: &[ConnectorEntry] = &[
         name: "bitbucket",
         cohort: ConnectorCohort::DevTools,
         operation_count: 10,
-        metadata_tier: MetadataTier::Json,
-        has_agent_hints: false,
+        metadata_tier: MetadataTier::Typed,
+        has_agent_hints: true,
         has_manifest: true,
     },
     ConnectorEntry {
@@ -679,8 +679,8 @@ pub static CONNECTOR_INVENTORY: &[ConnectorEntry] = &[
         name: "box",
         cohort: ConnectorCohort::Storage,
         operation_count: 5,
-        metadata_tier: MetadataTier::Json,
-        has_agent_hints: false,
+        metadata_tier: MetadataTier::Typed,
+        has_agent_hints: true,
         has_manifest: true,
     },
     ConnectorEntry {
@@ -695,24 +695,24 @@ pub static CONNECTOR_INVENTORY: &[ConnectorEntry] = &[
         name: "clickup",
         cohort: ConnectorCohort::Workspace,
         operation_count: 5,
-        metadata_tier: MetadataTier::Json,
-        has_agent_hints: false,
+        metadata_tier: MetadataTier::Typed,
+        has_agent_hints: true,
         has_manifest: true,
     },
     ConnectorEntry {
         name: "cron",
         cohort: ConnectorCohort::Automation,
         operation_count: 5,
-        metadata_tier: MetadataTier::Json,
-        has_agent_hints: false,
+        metadata_tier: MetadataTier::Typed,
+        has_agent_hints: true,
         has_manifest: true,
     },
     ConnectorEntry {
         name: "datadog",
         cohort: ConnectorCohort::Infra,
         operation_count: 8,
-        metadata_tier: MetadataTier::Json,
-        has_agent_hints: false,
+        metadata_tier: MetadataTier::Typed,
+        has_agent_hints: true,
         has_manifest: true,
     },
     ConnectorEntry {
@@ -727,16 +727,16 @@ pub static CONNECTOR_INVENTORY: &[ConnectorEntry] = &[
         name: "docusign",
         cohort: ConnectorCohort::Finance,
         operation_count: 10,
-        metadata_tier: MetadataTier::Json,
-        has_agent_hints: false,
+        metadata_tier: MetadataTier::Typed,
+        has_agent_hints: true,
         has_manifest: true,
     },
     ConnectorEntry {
         name: "dropbox",
         cohort: ConnectorCohort::Storage,
         operation_count: 4,
-        metadata_tier: MetadataTier::Json,
-        has_agent_hints: false,
+        metadata_tier: MetadataTier::Typed,
+        has_agent_hints: true,
         has_manifest: true,
     },
     ConnectorEntry {
@@ -759,8 +759,8 @@ pub static CONNECTOR_INVENTORY: &[ConnectorEntry] = &[
         name: "evernote",
         cohort: ConnectorCohort::Knowledge,
         operation_count: 5,
-        metadata_tier: MetadataTier::Json,
-        has_agent_hints: false,
+        metadata_tier: MetadataTier::Typed,
+        has_agent_hints: true,
         has_manifest: true,
     },
     ConnectorEntry {
@@ -783,8 +783,8 @@ pub static CONNECTOR_INVENTORY: &[ConnectorEntry] = &[
         name: "gitlab",
         cohort: ConnectorCohort::DevTools,
         operation_count: 5,
-        metadata_tier: MetadataTier::Json,
-        has_agent_hints: false,
+        metadata_tier: MetadataTier::Typed,
+        has_agent_hints: true,
         has_manifest: true,
     },
     ConnectorEntry {
@@ -815,8 +815,8 @@ pub static CONNECTOR_INVENTORY: &[ConnectorEntry] = &[
         name: "grafana",
         cohort: ConnectorCohort::Infra,
         operation_count: 9,
-        metadata_tier: MetadataTier::Json,
-        has_agent_hints: false,
+        metadata_tier: MetadataTier::Typed,
+        has_agent_hints: true,
         has_manifest: true,
     },
     ConnectorEntry {
@@ -855,8 +855,8 @@ pub static CONNECTOR_INVENTORY: &[ConnectorEntry] = &[
         name: "kubernetes",
         cohort: ConnectorCohort::Infra,
         operation_count: 14,
-        metadata_tier: MetadataTier::Json,
-        has_agent_hints: false,
+        metadata_tier: MetadataTier::Typed,
+        has_agent_hints: true,
         has_manifest: true,
     },
     ConnectorEntry {
@@ -887,8 +887,8 @@ pub static CONNECTOR_INVENTORY: &[ConnectorEntry] = &[
         name: "logseq",
         cohort: ConnectorCohort::Knowledge,
         operation_count: 4,
-        metadata_tier: MetadataTier::Json,
-        has_agent_hints: false,
+        metadata_tier: MetadataTier::Typed,
+        has_agent_hints: true,
         has_manifest: true,
     },
     ConnectorEntry {
@@ -903,16 +903,16 @@ pub static CONNECTOR_INVENTORY: &[ConnectorEntry] = &[
         name: "make",
         cohort: ConnectorCohort::Automation,
         operation_count: 3,
-        metadata_tier: MetadataTier::Json,
-        has_agent_hints: false,
+        metadata_tier: MetadataTier::Typed,
+        has_agent_hints: true,
         has_manifest: true,
     },
     ConnectorEntry {
         name: "mcp-bridge",
         cohort: ConnectorCohort::Automation,
         operation_count: 5,
-        metadata_tier: MetadataTier::Json,
-        has_agent_hints: false,
+        metadata_tier: MetadataTier::Typed,
+        has_agent_hints: true,
         has_manifest: true,
     },
     ConnectorEntry {
@@ -943,8 +943,8 @@ pub static CONNECTOR_INVENTORY: &[ConnectorEntry] = &[
         name: "monday",
         cohort: ConnectorCohort::Workspace,
         operation_count: 7,
-        metadata_tier: MetadataTier::Json,
-        has_agent_hints: false,
+        metadata_tier: MetadataTier::Typed,
+        has_agent_hints: true,
         has_manifest: true,
     },
     ConnectorEntry {
@@ -959,8 +959,8 @@ pub static CONNECTOR_INVENTORY: &[ConnectorEntry] = &[
         name: "n8n",
         cohort: ConnectorCohort::Automation,
         operation_count: 5,
-        metadata_tier: MetadataTier::Json,
-        has_agent_hints: false,
+        metadata_tier: MetadataTier::Typed,
+        has_agent_hints: true,
         has_manifest: true,
     },
     ConnectorEntry {
@@ -983,8 +983,8 @@ pub static CONNECTOR_INVENTORY: &[ConnectorEntry] = &[
         name: "pandadoc",
         cohort: ConnectorCohort::Finance,
         operation_count: 6,
-        metadata_tier: MetadataTier::Json,
-        has_agent_hints: false,
+        metadata_tier: MetadataTier::Typed,
+        has_agent_hints: true,
         has_manifest: true,
     },
     ConnectorEntry {
@@ -1007,8 +1007,8 @@ pub static CONNECTOR_INVENTORY: &[ConnectorEntry] = &[
         name: "postgresql",
         cohort: ConnectorCohort::Data,
         operation_count: 12,
-        metadata_tier: MetadataTier::Json,
-        has_agent_hints: false,
+        metadata_tier: MetadataTier::Typed,
+        has_agent_hints: true,
         has_manifest: false,
     },
     ConnectorEntry {
@@ -1023,8 +1023,8 @@ pub static CONNECTOR_INVENTORY: &[ConnectorEntry] = &[
         name: "pulumi",
         cohort: ConnectorCohort::DevTools,
         operation_count: 6,
-        metadata_tier: MetadataTier::Json,
-        has_agent_hints: false,
+        metadata_tier: MetadataTier::Typed,
+        has_agent_hints: true,
         has_manifest: true,
     },
     ConnectorEntry {
@@ -1047,8 +1047,8 @@ pub static CONNECTOR_INVENTORY: &[ConnectorEntry] = &[
         name: "redis",
         cohort: ConnectorCohort::Data,
         operation_count: 14,
-        metadata_tier: MetadataTier::Json,
-        has_agent_hints: false,
+        metadata_tier: MetadataTier::Typed,
+        has_agent_hints: true,
         has_manifest: false,
     },
     ConnectorEntry {
@@ -1063,8 +1063,8 @@ pub static CONNECTOR_INVENTORY: &[ConnectorEntry] = &[
         name: "roam",
         cohort: ConnectorCohort::Knowledge,
         operation_count: 4,
-        metadata_tier: MetadataTier::Json,
-        has_agent_hints: false,
+        metadata_tier: MetadataTier::Typed,
+        has_agent_hints: true,
         has_manifest: true,
     },
     ConnectorEntry {
@@ -1111,8 +1111,8 @@ pub static CONNECTOR_INVENTORY: &[ConnectorEntry] = &[
         name: "sentry",
         cohort: ConnectorCohort::DevTools,
         operation_count: 16,
-        metadata_tier: MetadataTier::Json,
-        has_agent_hints: false,
+        metadata_tier: MetadataTier::Typed,
+        has_agent_hints: true,
         has_manifest: true,
     },
     ConnectorEntry {
@@ -1159,24 +1159,24 @@ pub static CONNECTOR_INVENTORY: &[ConnectorEntry] = &[
         name: "terraform",
         cohort: ConnectorCohort::DevTools,
         operation_count: 12,
-        metadata_tier: MetadataTier::Json,
-        has_agent_hints: false,
+        metadata_tier: MetadataTier::Typed,
+        has_agent_hints: true,
         has_manifest: true,
     },
     ConnectorEntry {
         name: "todoist",
         cohort: ConnectorCohort::Workspace,
         operation_count: 5,
-        metadata_tier: MetadataTier::Json,
-        has_agent_hints: false,
+        metadata_tier: MetadataTier::Typed,
+        has_agent_hints: true,
         has_manifest: true,
     },
     ConnectorEntry {
         name: "trello",
         cohort: ConnectorCohort::Workspace,
         operation_count: 5,
-        metadata_tier: MetadataTier::Json,
-        has_agent_hints: false,
+        metadata_tier: MetadataTier::Typed,
+        has_agent_hints: true,
         has_manifest: true,
     },
     ConnectorEntry {
@@ -1207,16 +1207,16 @@ pub static CONNECTOR_INVENTORY: &[ConnectorEntry] = &[
         name: "webhook-receiver",
         cohort: ConnectorCohort::Automation,
         operation_count: 4,
-        metadata_tier: MetadataTier::Json,
-        has_agent_hints: false,
+        metadata_tier: MetadataTier::Typed,
+        has_agent_hints: true,
         has_manifest: true,
     },
     ConnectorEntry {
         name: "whisper",
         cohort: ConnectorCohort::Ai,
         operation_count: 8,
-        metadata_tier: MetadataTier::Json,
-        has_agent_hints: false,
+        metadata_tier: MetadataTier::Typed,
+        has_agent_hints: true,
         has_manifest: false,
     },
     ConnectorEntry {
@@ -1231,8 +1231,8 @@ pub static CONNECTOR_INVENTORY: &[ConnectorEntry] = &[
         name: "zapier",
         cohort: ConnectorCohort::Automation,
         operation_count: 2,
-        metadata_tier: MetadataTier::Json,
-        has_agent_hints: false,
+        metadata_tier: MetadataTier::Typed,
+        has_agent_hints: true,
         has_manifest: true,
     },
     ConnectorEntry {
@@ -3714,7 +3714,7 @@ mod tests {
             .iter()
             .filter(|e| e.metadata_tier == MetadataTier::Typed)
             .count();
-        assert_eq!(typed_count, 53);
+        assert_eq!(typed_count, 82);
     }
 
     #[test]
@@ -3723,6 +3723,6 @@ mod tests {
             .iter()
             .filter(|e| e.metadata_tier == MetadataTier::Json)
             .count();
-        assert_eq!(json_count, 29);
+        assert_eq!(json_count, 0);
     }
 }

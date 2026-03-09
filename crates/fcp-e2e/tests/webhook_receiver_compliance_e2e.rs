@@ -14,13 +14,13 @@
 use chrono::{Duration as ChronoDuration, Utc};
 use fcp_async_core::sync::Mutex;
 use fcp_conformance::DynamicSuite;
-use fcp_core::InvokeStatus;
 use fcp_core::{
     AgentHint, CapabilityGrant, CapabilityId, CapabilityToken, CapabilityVerifier, ConnectorId,
     ConnectorMetrics, FcpConnector, FcpError, HandshakeRequest, HandshakeResponse, HealthSnapshot,
-    IdempotencyClass, InstanceId, Introspection, InvokeRequest, InvokeResponse, OperationId,
-    OperationInfo, RequestId, RiskLevel, SafetyTier, SessionId, ShutdownRequest, SimulateRequest,
-    SimulateResponse, SubscribeRequest, SubscribeResponse, UnsubscribeRequest, ZoneId,
+    IdempotencyClass, InstanceId, Introspection, InvokeRequest, InvokeResponse, InvokeStatus,
+    OperationId, OperationInfo, RequestId, RiskLevel, SafetyTier, SessionId, ShutdownRequest,
+    SimulateRequest, SimulateResponse, SubscribeRequest, SubscribeResponse, UnsubscribeRequest,
+    ZoneId,
 };
 use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
 use fcp_e2e::{ComplianceSuite, ConnectorSuite, E2eRunner, InvokeExpectations};
@@ -441,7 +441,7 @@ async fn webhook_receiver_default_deny_compliance_suite_passes() {
 }
 
 #[fcp_async_core::runtime::test]
-async fn webhook_receiver_allow_valid_token_connector_suite_passes() {
+async fn webhook_receiver_happy_path_connector_suite_passes() {
     let mut connector = WebhookReceiverConnectorAdapter::new();
     let signing_key = Ed25519SigningKey::generate();
     let handshake = handshake_request(
@@ -454,8 +454,9 @@ async fn webhook_receiver_allow_valid_token_connector_suite_passes() {
         &["webhook.endpoints.list"],
     );
     let invoke = invoke_request("webhook.endpoints.list", json!({}), token);
+
     let suite = ConnectorSuite {
-        test_name: "webhook_receiver_allow_valid_token".to_string(),
+        test_name: "webhook_receiver_happy_path".to_string(),
         config: webhook_receiver_config(),
         handshake,
         invoke: Some(invoke),
@@ -469,13 +470,13 @@ async fn webhook_receiver_allow_valid_token_connector_suite_passes() {
         },
     };
 
-    let mut runner = E2eRunner::new("fcp-e2e-webhook-receiver");
+    let mut runner = E2eRunner::new("fcp-e2e-webhook-receiver-happy");
     let report = runner
         .run_connector_suite(&mut connector, suite)
         .await
         .expect("connector suite run");
 
-    assert!(report.passed, "allow suite should pass: {report:#?}");
+    assert!(report.passed, "happy path should pass: {report:#?}");
     let invoke_entry = report
         .logs
         .iter()
@@ -516,6 +517,7 @@ fn webhook_receiver_manifest_network_guard_allows_and_denies() {
         assert!(host_allowed("localhost.localdomain", &host_allow));
         assert!(!host_allowed("example.com", &host_allow));
         assert!(!host_allowed("webhook.site", &host_allow));
+        assert!(!host_allowed("127.0.0.1", &host_allow));
 
         // Webhook Receiver is a local listener so it intentionally allows localhost/private
         let constraints = operation_network_constraints(&manifest, operation_name);

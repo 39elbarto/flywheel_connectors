@@ -1,11 +1,11 @@
 //! E2E Google Calendar connector compliance tests.
 //!
-//! Exercises the Google Calendar connector through the E2E compliance harness:
-//! - Default deny (missing capability -> error + decision receipt)
-//! - Allow with valid token (happy path invoke via mock REST API)
-//! - Network guard allow/deny (manifest `host_allow` exact-host validation)
+//! Exercises the Google Calendar connector through the shared E2E harness:
+//! - Default deny behavior for capability mismatch
+//! - Allow path with valid capability token
+//! - Network guard allow/deny checks via manifest constraints
 //!
-//! All tests are deterministic -- no real API calls.
+//! All tests are deterministic with mock servers only.
 //! Run: `cargo test --package fcp-e2e --features google_calendar`
 
 #![cfg(feature = "google_calendar")]
@@ -61,7 +61,7 @@ impl FcpConnector for GoogleCalendarConnectorAdapter {
     }
 
     async fn handshake(&mut self, req: HandshakeRequest) -> fcp_core::FcpResult<HandshakeResponse> {
-        let request = serde_json::to_value(req).map_err(|err| FcpError::Internal {
+        let request = serde_json::to_value(&req).map_err(|err| FcpError::Internal {
             message: format!("failed to serialize handshake request: {err}"),
         })?;
         let response = self.connector.handle_handshake(request).await?;
@@ -85,6 +85,13 @@ impl FcpConnector for GoogleCalendarConnectorAdapter {
             }
             Err(err) => HealthSnapshot::error(err.to_string()),
         }
+    }
+
+    async fn self_check(&self) -> fcp_core::FcpResult<fcp_core::SelfCheckReport> {
+        let value = self.connector.handle_self_check().await?;
+        serde_json::from_value(value).map_err(|err| FcpError::Internal {
+            message: format!("failed to deserialize Google Calendar self_check: {err}"),
+        })
     }
 
     fn metrics(&self) -> ConnectorMetrics {
@@ -115,7 +122,7 @@ impl FcpConnector for GoogleCalendarConnectorAdapter {
                         "event": { "type": "object" }
                     }
                 }),
-                capability: CapabilityId::from_static("gcal.read"),
+                capability: CapabilityId::from_static("gcal.events.read"),
                 risk_level: RiskLevel::Low,
                 safety_tier: SafetyTier::Safe,
                 idempotency: IdempotencyClass::Strict,
@@ -149,7 +156,7 @@ impl FcpConnector for GoogleCalendarConnectorAdapter {
     }
 
     async fn simulate(&self, req: SimulateRequest) -> fcp_core::FcpResult<SimulateResponse> {
-        let request = serde_json::to_value(req).map_err(|err| FcpError::Internal {
+        let request = serde_json::to_value(&req).map_err(|err| FcpError::Internal {
             message: format!("failed to serialize simulate request: {err}"),
         })?;
         let value = self.connector.handle_simulate(request).await?;
@@ -171,8 +178,8 @@ impl FcpConnector for GoogleCalendarConnectorAdapter {
 // Helpers
 // ============================================================================
 
-fn reference_manifest_with_hash() -> String {
-    let raw = include_str!("../../../tests/vectors/manifest/manifest_valid.toml");
+fn gcal_manifest_with_hash() -> String {
+    let raw = include_str!("../../../connectors/google-calendar/manifest.toml");
     let unchecked = ConnectorManifest::parse_str_unchecked(raw).expect("unchecked manifest parse");
     let computed = unchecked
         .compute_interface_hash()
@@ -181,6 +188,20 @@ fn reference_manifest_with_hash() -> String {
         &unchecked.manifest.interface_hash.to_string(),
         &computed.to_string(),
     )
+}
+
+fn gcal_manifest_toml() -> toml::Value {
+    toml::from_str(include_str!(
+        "../../../connectors/google-calendar/manifest.toml"
+    ))
+    .expect("google-calendar manifest TOML")
+}
+
+fn gcal_config(base_url: &str) -> serde_json::Value {
+    json!({
+        "token": "ya29_test_e2e",
+        "base_url": base_url,
+    })
 }
 
 fn handshake_request(host_public_key: [u8; 32], capabilities: &[&str]) -> HandshakeRequest {
@@ -242,14 +263,10 @@ fn invoke_request(
     }
 }
 
-fn gcal_manifest_toml() -> toml::Value {
-    toml::from_str(include_str!(
-        "../../../connectors/google-calendar/manifest.toml"
-    ))
-    .expect("google-calendar manifest toml")
-}
-
-fn operation_host_allow_list(manifest: &toml::Value, operation_name: &str) -> Vec<String> {
+fn operation_network_constraints<'a>(
+    manifest: &'a toml::Value,
+    operation_name: &str,
+) -> &'a toml::value::Table {
     manifest
         .get("provides")
         .and_then(toml::Value::as_table)
@@ -259,7 +276,12 @@ fn operation_host_allow_list(manifest: &toml::Value, operation_name: &str) -> Ve
         .and_then(toml::Value::as_table)
         .and_then(|operation| operation.get("network_constraints"))
         .and_then(toml::Value::as_table)
-        .and_then(|constraints| constraints.get("host_allow"))
+        .expect("operation network_constraints")
+}
+
+fn operation_host_allow_list(manifest: &toml::Value, operation_name: &str) -> Vec<String> {
+    operation_network_constraints(manifest, operation_name)
+        .get("host_allow")
         .and_then(toml::Value::as_array)
         .map(|hosts| {
             hosts
@@ -325,15 +347,20 @@ fn gcal_get_event_response() -> serde_json::Value {
 // ============================================================================
 
 /// Default deny: invoke without matching capability triggers error.
-/// Token grants "gcal.write" but invoke targets "gcal.get_event"
-/// (which requires "gcal.read").
+/// Token grants "gcal.events.write" but invoke targets "gcal.get_event"
+/// (which requires "gcal.events.read").
 #[fcp_async_core::runtime::test]
 async fn gcal_default_deny_compliance_suite_passes() {
+    let mock = MockApiServer::start().await;
+
     let mut connector = GoogleCalendarConnectorAdapter::new();
     let signing_key = Ed25519SigningKey::generate();
-    let handshake = handshake_request(signing_key.verifying_key().to_bytes(), &["gcal.write"]);
-    // Token grants "gcal.write" but invoke targets "gcal.get_event" -> denial
-    let token = build_token(&signing_key, "gcal.write", &["gcal.write"]);
+    let handshake = handshake_request(
+        signing_key.verifying_key().to_bytes(),
+        &["gcal.events.write"],
+    );
+    // Token grants "gcal.events.write" but invoke targets "gcal.get_event" -> denial
+    let token = build_token(&signing_key, "gcal.events.write", &["gcal.events.write"]);
     let invoke = invoke_request(
         "gcal.get_event",
         json!({ "calendar_id": "primary", "event_id": "event_e2e_123" }),
@@ -341,11 +368,8 @@ async fn gcal_default_deny_compliance_suite_passes() {
     );
 
     let dynamic = DynamicSuite {
-        config: json!({
-            "token": "ya29_test_000",
-            "base_url": "http://localhost:9999/calendar/v3"
-        }),
-        handshake: handshake.clone(),
+        config: gcal_config(&mock.base_url()),
+        handshake,
         invoke: Some(invoke),
         expect_invoke_error: true,
         simulate: None,
@@ -354,7 +378,7 @@ async fn gcal_default_deny_compliance_suite_passes() {
         require_capability_denial: true,
         require_decision_receipt: false,
     };
-    let suite = ComplianceSuite::new("gcal_default_deny", reference_manifest_with_hash(), dynamic);
+    let suite = ComplianceSuite::new("gcal_default_deny", gcal_manifest_with_hash(), dynamic);
 
     let mut runner = E2eRunner::new("fcp-e2e-gcal");
     let report = runner
@@ -362,7 +386,10 @@ async fn gcal_default_deny_compliance_suite_passes() {
         .await
         .expect("compliance suite run");
 
-    assert!(report.passed, "default deny compliance should pass");
+    assert!(
+        report.passed,
+        "default deny compliance should pass: {report:#?}"
+    );
 }
 
 // ============================================================================
@@ -371,11 +398,10 @@ async fn gcal_default_deny_compliance_suite_passes() {
 
 /// Allow: invoke with valid capability token succeeds against mock REST API.
 #[fcp_async_core::runtime::test]
-async fn gcal_allow_valid_token_connector_suite_passes() {
+async fn gcal_happy_path_connector_suite_passes() {
     let mock = MockApiServer::start().await;
 
     // Mount mock for GET /calendars/{calId}/events/{eventId}
-    // calendar_id "primary" is percent-encoded as "primary"
     Mock::given(method("GET"))
         .and(path_regex(r"^/calendars/.+/events/.+"))
         .respond_with(ResponseTemplate::new(200).set_body_json(gcal_get_event_response()))
@@ -384,19 +410,20 @@ async fn gcal_allow_valid_token_connector_suite_passes() {
 
     let mut connector = GoogleCalendarConnectorAdapter::new();
     let signing_key = Ed25519SigningKey::generate();
-    let handshake = handshake_request(signing_key.verifying_key().to_bytes(), &["gcal.get_event"]);
+    let handshake = handshake_request(
+        signing_key.verifying_key().to_bytes(),
+        &["gcal.get_event"],
+    );
     let token = build_token(&signing_key, "gcal.get_event", &["gcal.get_event"]);
     let invoke = invoke_request(
         "gcal.get_event",
         json!({ "calendar_id": "primary", "event_id": "event_e2e_123" }),
         token,
     );
+
     let suite = ConnectorSuite {
-        test_name: "gcal_allow_valid_token".to_string(),
-        config: json!({
-            "token": "ya29_test_e2e",
-            "base_url": mock.base_url(),
-        }),
+        test_name: "gcal_happy_path".to_string(),
+        config: gcal_config(&mock.base_url()),
         handshake,
         invoke: Some(invoke),
         invoke_expectations: InvokeExpectations {
@@ -409,13 +436,13 @@ async fn gcal_allow_valid_token_connector_suite_passes() {
         },
     };
 
-    let mut runner = E2eRunner::new("fcp-e2e-gcal");
+    let mut runner = E2eRunner::new("fcp-e2e-gcal-happy");
     let report = runner
         .run_connector_suite(&mut connector, suite)
         .await
         .expect("connector suite run");
 
-    assert!(report.passed, "allow suite should pass");
+    assert!(report.passed, "happy path should pass: {report:#?}");
     let invoke_entry = report
         .logs
         .iter()
@@ -438,20 +465,22 @@ async fn gcal_allow_valid_token_connector_suite_passes() {
 #[test]
 fn gcal_manifest_network_guard_allows_and_denies() {
     let manifest = gcal_manifest_toml();
+    let operations = manifest
+        .get("provides")
+        .and_then(toml::Value::as_table)
+        .and_then(|provides| provides.get("operations"))
+        .and_then(toml::Value::as_table)
+        .expect("operations table");
 
-    let operations = [
-        "gcal.create_event",
-        "gcal.get_event",
-        "gcal.update_event",
-        "gcal.delete_event",
-        "gcal.list_events",
-        "gcal.list_calendars",
-        "gcal.freebusy",
-    ];
+    assert_eq!(
+        operations.len(),
+        11,
+        "Google Calendar manifest should declare 11 operations"
+    );
 
     let expected_hosts = vec!["www.googleapis.com".to_string()];
 
-    for operation_name in operations {
+    for operation_name in operations.keys() {
         let host_allow = operation_host_allow_list(&manifest, operation_name);
         assert_eq!(
             host_allow, expected_hosts,
@@ -482,8 +511,31 @@ fn gcal_manifest_network_guard_allows_and_denies() {
             "calendar.google.com should be denied for {operation_name}"
         );
         assert!(
-            !host_allowed("accounts.google.com", &host_allow),
-            "accounts.google.com should be denied for {operation_name}"
+            !host_allowed("127.0.0.1", &host_allow),
+            "127.0.0.1 should be denied for {operation_name}"
+        );
+
+        let constraints = operation_network_constraints(&manifest, operation_name);
+        assert_eq!(
+            constraints
+                .get("deny_localhost")
+                .and_then(toml::Value::as_bool),
+            Some(true),
+            "operation {operation_name} must deny localhost"
+        );
+        assert_eq!(
+            constraints
+                .get("deny_private_ranges")
+                .and_then(toml::Value::as_bool),
+            Some(true),
+            "operation {operation_name} must deny private ranges"
+        );
+        assert_eq!(
+            constraints
+                .get("require_sni")
+                .and_then(toml::Value::as_bool),
+            Some(true),
+            "operation {operation_name} must require SNI"
         );
     }
 }

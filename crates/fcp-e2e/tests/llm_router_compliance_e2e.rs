@@ -1,46 +1,52 @@
 //! E2E LLM Router connector compliance tests.
 //!
-//! Exercises the LLM Router connector through the E2E compliance harness:
-//! - Default deny (missing capability -> error + decision receipt)
-//! - Allow with valid token (happy path invoke via mock REST API)
-//! - Network guard allow/deny (manifest `host_allow` exact-host validation)
+//! Exercises the LLM Router connector through the shared E2E harness:
+//! - Default deny behavior for capability mismatch
+//! - Allow path with valid capability token
+//! - Network guard allow/deny checks via manifest constraints
 //!
-//! All tests are deterministic -- no real API calls.
+//! All tests are deterministic with mock servers only.
 //! Run: `cargo test --package fcp-e2e --features llm_router`
 
 #![cfg(feature = "llm_router")]
 #![allow(clippy::too_many_lines)]
 
 use chrono::{Duration as ChronoDuration, Utc};
+use fcp_async_core::sync::Mutex;
 use fcp_conformance::DynamicSuite;
 use fcp_core::{
-    AgentHint, CapabilityId, CapabilityToken, ConnectorId, ConnectorMetrics, FcpConnector,
-    FcpError, HandshakeRequest, HandshakeResponse, HealthSnapshot, IdempotencyClass, InstanceId,
-    Introspection, InvokeRequest, InvokeResponse, InvokeStatus, OperationId, OperationInfo,
-    RequestId, RiskLevel, SafetyTier, ShutdownRequest, SimulateRequest, SimulateResponse,
-    SubscribeRequest, SubscribeResponse, UnsubscribeRequest, ZoneId,
+    AgentHint, CapabilityGrant, CapabilityId, CapabilityToken, CapabilityVerifier, ConnectorId,
+    ConnectorMetrics, FcpConnector, FcpError, HandshakeRequest, HandshakeResponse, HealthSnapshot,
+    IdempotencyClass, InstanceId, Introspection, InvokeRequest, InvokeResponse, InvokeStatus,
+    OperationId, OperationInfo, RequestId, RiskLevel, SafetyTier, SessionId, ShutdownRequest,
+    SimulateRequest, SimulateResponse, SubscribeRequest, SubscribeResponse, UnsubscribeRequest,
+    ZoneId,
 };
 use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
 use fcp_e2e::{ComplianceSuite, ConnectorSuite, E2eRunner, InvokeExpectations};
 use fcp_manifest::ConnectorManifest;
-use serde_json::json;
-
 use fcp_llm_router::connector::LlmRouterConnector;
+use serde_json::json;
+use std::sync::Arc;
 
 // ============================================================================
 // FcpConnector adapter for LlmRouterConnector
 // ============================================================================
 
 struct LlmRouterConnectorAdapter {
-    connector: LlmRouterConnector,
+    connector: Arc<Mutex<LlmRouterConnector>>,
     id: ConnectorId,
+    instance_id: InstanceId,
+    verifier: Option<CapabilityVerifier>,
 }
 
 impl LlmRouterConnectorAdapter {
     fn new() -> Self {
         Self {
-            connector: LlmRouterConnector::new(),
+            connector: Arc::new(Mutex::new(LlmRouterConnector::new())),
             id: ConnectorId::from_static("llm-router"),
+            instance_id: InstanceId::new(),
+            verifier: None,
         }
     }
 }
@@ -52,34 +58,67 @@ impl FcpConnector for LlmRouterConnectorAdapter {
     }
 
     async fn configure(&mut self, config: serde_json::Value) -> fcp_core::FcpResult<()> {
-        self.connector.handle_configure(config).await.map(|_| ())
+        self.connector
+            .lock()
+            .await
+            .handle_configure(config)
+            .await
+            .map(|_| ())
     }
 
     async fn handshake(&mut self, req: HandshakeRequest) -> fcp_core::FcpResult<HandshakeResponse> {
-        self.connector.handle_handshake(req).await
+        let params = serde_json::to_value(&req).map_err(|e| FcpError::Internal {
+            message: format!("failed to serialize handshake request: {e}"),
+        })?;
+        self.connector.lock().await.handle_handshake(params).await?;
+
+        self.verifier = Some(CapabilityVerifier::new(
+            req.host_public_key,
+            req.zone.clone(),
+            self.instance_id.clone(),
+        ));
+
+        Ok(HandshakeResponse {
+            status: "accepted".to_string(),
+            capabilities_granted: req
+                .capabilities_requested
+                .iter()
+                .cloned()
+                .map(|capability| CapabilityGrant {
+                    capability,
+                    operation: None,
+                })
+                .collect(),
+            session_id: SessionId::new(),
+            manifest_hash: "sha256:llm-router-e2e".to_string(),
+            nonce: req.nonce,
+            event_caps: None,
+            auth_caps: None,
+            op_catalog_hash: None,
+        })
     }
 
     async fn health(&self) -> HealthSnapshot {
-        match self.connector.handle_health().await {
+        match self.connector.lock().await.handle_health().await {
             Ok(val) => {
                 let status = val
                     .get("status")
-                    .and_then(|s| s.as_str())
+                    .and_then(serde_json::Value::as_str)
                     .unwrap_or("unknown");
-                if status == "healthy" {
-                    HealthSnapshot::healthy()
-                } else {
-                    HealthSnapshot::degraded("not_healthy")
+                match status {
+                    "ok" | "healthy" => HealthSnapshot::ready(),
+                    "unconfigured" => HealthSnapshot::degraded("not_configured"),
+                    other => HealthSnapshot::degraded(format!("llm_router_status:{other}")),
                 }
             }
-            Err(_) => HealthSnapshot::degraded("error"),
+            Err(err) => HealthSnapshot::error(err.to_string()),
         }
     }
 
-    async fn self_check(&self) -> fcp_core::FcpResult<SelfCheckReport> {
-        let value = self.connector.handle_self_check().await?;
+    async fn self_check(&self) -> fcp_core::FcpResult<fcp_core::SelfCheckReport> {
+        let value = self.connector.lock().await.handle_self_check().await?;
         serde_json::from_value(value).map_err(|e| FcpError::Internal {
-            message: format!("Failed to parse self_check result: {e}"),
+            message: format!("failed to deserialize LLM Router self_check: {e}"),
         })
     }
 
@@ -88,7 +127,13 @@ impl FcpConnector for LlmRouterConnectorAdapter {
     }
 
     async fn shutdown(&mut self, _req: ShutdownRequest) -> fcp_core::FcpResult<()> {
-        Ok(())
+        self.verifier = None;
+        self.connector
+            .lock()
+            .await
+            .handle_shutdown(json!({}))
+            .await
+            .map(|_| ())
     }
 
     fn introspect(&self) -> Introspection {
@@ -100,9 +145,9 @@ impl FcpConnector for LlmRouterConnectorAdapter {
                 input_schema: json!({"type": "object"}),
                 output_schema: json!({"type": "object"}),
                 capability: CapabilityId::from_static("llm-router.route"),
-                risk_level: RiskLevel::Low,
+                risk_level: RiskLevel::Medium,
                 safety_tier: SafetyTier::Safe,
-                idempotency: IdempotencyClass::Strict,
+                idempotency: IdempotencyClass::None,
                 ai_hints: AgentHint {
                     when_to_use: String::new(),
                     common_mistakes: Vec::new(),
@@ -120,22 +165,53 @@ impl FcpConnector for LlmRouterConnectorAdapter {
     }
 
     async fn invoke(&self, req: InvokeRequest) -> fcp_core::FcpResult<InvokeResponse> {
+        let verifier = self.verifier.as_ref().ok_or(FcpError::Internal {
+            message: "LLM Router verifier not initialized; handshake required".into(),
+        })?;
+        let cap = required_capability(req.operation.as_str())?;
+        verifier.verify(&req.capability_token, &cap, &req.operation, &[])?;
+
         let request_id = req.id.clone();
         let params = json!({
             "operation": req.operation.as_str(),
             "input": req.input,
             "capability_token": req.capability_token,
         });
-        let value = self.connector.handle_invoke(params).await?;
+        let value = self.connector.lock().await.handle_invoke(params).await?;
         Ok(InvokeResponse::ok(request_id, value))
     }
 
     async fn simulate(&self, req: SimulateRequest) -> fcp_core::FcpResult<SimulateResponse> {
-        let request = serde_json::to_value(req).map_err(|err| FcpError::Internal {
-            message: err.to_string(),
+        let verifier = self.verifier.as_ref().ok_or(FcpError::Internal {
+            message: "LLM Router verifier not initialized; handshake required".into(),
         })?;
-        let value = self.connector.handle_simulate(request).await?;
-        Ok(serde_json::from_value(value).unwrap())
+        let cap = required_capability(req.operation.as_str())?;
+        verifier.verify(&req.capability_token, &cap, &req.operation, &[])?;
+
+        let value = self
+            .connector
+            .lock()
+            .await
+            .handle_simulate(json!({
+                "operation": req.operation.as_str(),
+                "input": req.input,
+            }))
+            .await?;
+
+        Ok(SimulateResponse {
+            r#type: "simulate_response".to_string(),
+            id: req.id,
+            would_succeed: value
+                .get("would_succeed")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false),
+            failure_reason: None,
+            denial_code: None,
+            missing_capabilities: Vec::new(),
+            estimated_cost: None,
+            availability: None,
+            response_metadata: None,
+        })
     }
 
     async fn subscribe(&self, _req: SubscribeRequest) -> fcp_core::FcpResult<SubscribeResponse> {
@@ -147,12 +223,33 @@ impl FcpConnector for LlmRouterConnectorAdapter {
     }
 }
 
+fn required_capability(operation: &str) -> fcp_core::FcpResult<CapabilityId> {
+    let capability = match operation {
+        "llm-router.route" | "llm-router.estimate_cost" => "llm-router.route",
+        "llm-router.list_providers" | "llm-router.get_usage" | "llm-router.get_budget" => {
+            "llm-router.admin"
+        }
+        _ => {
+            return Err(FcpError::InvalidRequest {
+                code: 1002,
+                message: format!("Unknown operation: {operation}"),
+            });
+        }
+    };
+
+    capability
+        .parse::<CapabilityId>()
+        .map_err(|err| FcpError::Internal {
+            message: format!("invalid capability id mapping for {operation}: {err}"),
+        })
+}
+
 // ============================================================================
 // Helpers
 // ============================================================================
 
-fn reference_manifest_with_hash() -> String {
-    let raw = include_str!("../../../tests/vectors/manifest/manifest_valid.toml");
+fn llm_router_manifest_with_hash() -> String {
+    let raw = include_str!("../../../connectors/llm-router/manifest.toml");
     let unchecked = ConnectorManifest::parse_str_unchecked(raw).expect("unchecked manifest parse");
     let computed = unchecked
         .compute_interface_hash()
@@ -163,16 +260,53 @@ fn reference_manifest_with_hash() -> String {
     )
 }
 
+fn llm_router_manifest_toml() -> toml::Value {
+    toml::from_str(include_str!("../../../connectors/llm-router/manifest.toml"))
+        .expect("llm-router manifest TOML")
+}
+
+fn llm_router_config() -> serde_json::Value {
+    json!({
+        "providers": [
+            {
+                "name": "anthropic",
+                "base_url": "https://api.anthropic.com",
+                "api_key": "test-key-anthropic-e2e",
+                "priority": 1,
+                "models": [
+                    {
+                        "id": "claude-sonnet-4",
+                        "capabilities": ["code", "tool_use"],
+                        "context_window": 200000,
+                        "cost_per_input_token": 0.000003,
+                        "cost_per_output_token": 0.000015
+                    }
+                ]
+            }
+        ],
+        "default_strategy": "cost",
+        "budget": {
+            "budget_usd": 50.0,
+            "enforcement": "hard",
+            "period": "session"
+        }
+    })
+}
+
 fn handshake_request(host_public_key: [u8; 32], capabilities: &[&str]) -> HandshakeRequest {
     HandshakeRequest {
         protocol_version: "2.0".to_string(),
         zone: ZoneId::work(),
         zone_dir: None,
         host_public_key,
-        nonce: [7u8; 32],
+        nonce: [19_u8; 32],
         capabilities_requested: capabilities
             .iter()
-            .map(|cap| cap.parse::<CapabilityId>().expect("capability id parse"))
+            .map(|capability| {
+                capability
+                    .parse::<CapabilityId>()
+                    .expect("capability id parse")
+            })
             .collect(),
         host: None,
         transport_caps: None,
@@ -186,7 +320,7 @@ fn build_token(
     operations: &[&str],
 ) -> CapabilityToken {
     let now = Utc::now();
-    let cose = CapabilityTokenBuilder::new()
+    let token = CapabilityTokenBuilder::new()
         .capability_id(capability)
         .zone_id("z:work")
         .principal("user:test")
@@ -195,7 +329,7 @@ fn build_token(
         .validity(now, now + ChronoDuration::hours(1))
         .sign(signing_key)
         .expect("capability token sign");
-    CapabilityToken { raw: cose }
+    CapabilityToken { raw: token }
 }
 
 fn invoke_request(
@@ -222,12 +356,10 @@ fn invoke_request(
     }
 }
 
-fn llm_router_manifest_toml() -> toml::Value {
-    toml::from_str(include_str!("../../../connectors/llm-router/manifest.toml"))
-        .expect("llm-router manifest toml")
-}
-
-fn operation_host_allow_list(manifest: &toml::Value, operation_name: &str) -> Vec<String> {
+fn operation_network_constraints<'a>(
+    manifest: &'a toml::Value,
+    operation_name: &str,
+) -> &'a toml::value::Table {
     manifest
         .get("provides")
         .and_then(toml::Value::as_table)
@@ -237,7 +369,12 @@ fn operation_host_allow_list(manifest: &toml::Value, operation_name: &str) -> Ve
         .and_then(toml::Value::as_table)
         .and_then(|operation| operation.get("network_constraints"))
         .and_then(toml::Value::as_table)
-        .and_then(|constraints| constraints.get("host_allow"))
+        .expect("operation network_constraints")
+}
+
+fn operation_host_allow_list(manifest: &toml::Value, operation_name: &str) -> Vec<String> {
+    operation_network_constraints(manifest, operation_name)
+        .get("host_allow")
         .and_then(toml::Value::as_array)
         .map(|hosts| {
             hosts
@@ -255,35 +392,6 @@ fn host_allowed(host: &str, host_allow: &[String]) -> bool {
             || pattern
                 .strip_prefix("*.")
                 .is_some_and(|suffix| host.ends_with(&format!(".{suffix}")))
-    })
-}
-
-/// Test configuration with providers pointing to localhost (testing feature enabled).
-fn test_config_with_base_url(base_url: &str) -> serde_json::Value {
-    json!({
-        "providers": [
-            {
-                "name": "anthropic",
-                "base_url": base_url,
-                "api_key": "test-key-anthropic-e2e",
-                "priority": 1,
-                "models": [
-                    {
-                        "id": "claude-sonnet-4",
-                        "capabilities": ["code", "tool_use"],
-                        "context_window": 200000,
-                        "cost_per_input_token": 0.000003,
-                        "cost_per_output_token": 0.000015
-                    }
-                ]
-            }
-        ],
-        "default_strategy": "cost",
-        "budget": {
-            "budget_usd": 50.0,
-            "enforcement": "hard",
-            "period": "session"
-        }
     })
 }
 
@@ -313,23 +421,8 @@ async fn llm_router_default_deny_compliance_suite_passes() {
     );
 
     let dynamic = DynamicSuite {
-        config: json!({
-            "providers": [{
-                "name": "anthropic",
-                "base_url": "https://api.anthropic.com",
-                "api_key": "sk-test-000",
-                "priority": 1,
-                "models": [{
-                    "id": "claude-sonnet-4",
-                    "capabilities": ["code"],
-                    "context_window": 200000,
-                    "cost_per_input_token": 0.000003,
-                    "cost_per_output_token": 0.000015
-                }]
-            }],
-            "default_strategy": "cost"
-        }),
-        handshake: handshake.clone(),
+        config: llm_router_config(),
+        handshake,
         invoke: Some(invoke),
         expect_invoke_error: true,
         simulate: None,
@@ -340,7 +433,7 @@ async fn llm_router_default_deny_compliance_suite_passes() {
     };
     let suite = ComplianceSuite::new(
         "llm_router_default_deny",
-        reference_manifest_with_hash(),
+        llm_router_manifest_with_hash(),
         dynamic,
     );
 
@@ -360,11 +453,11 @@ async fn llm_router_default_deny_compliance_suite_passes() {
 // Test 2: Allow with valid token -- connector suite
 // ============================================================================
 
-/// Allow: invoke with valid capability token succeeds against mock REST API.
-/// The LLM Router routes locally (no upstream HTTP call for routing logic),
-/// so the mock server is only needed for the configure step's network validation.
+/// Allow: invoke with valid capability token succeeds.
+/// The LLM Router routes locally (no upstream HTTP call for routing logic in
+/// testing mode), so mock server is not needed for the invoke itself.
 #[fcp_async_core::runtime::test]
-async fn llm_router_allow_valid_token_connector_suite_passes() {
+async fn llm_router_happy_path_connector_suite_passes() {
     let mut connector = LlmRouterConnectorAdapter::new();
     let signing_key = Ed25519SigningKey::generate();
     let handshake = handshake_request(
@@ -380,11 +473,9 @@ async fn llm_router_allow_valid_token_connector_suite_passes() {
         token,
     );
 
-    // LLM Router does routing locally (no upstream HTTP during invoke for
-    // simulated responses), so we configure with allowed hosts and testing feature.
     let suite = ConnectorSuite {
-        test_name: "llm_router_allow_valid_token".to_string(),
-        config: test_config_with_base_url("https://api.anthropic.com"),
+        test_name: "llm_router_happy_path".to_string(),
+        config: llm_router_config(),
         handshake,
         invoke: Some(invoke),
         invoke_expectations: InvokeExpectations {
@@ -397,13 +488,13 @@ async fn llm_router_allow_valid_token_connector_suite_passes() {
         },
     };
 
-    let mut runner = E2eRunner::new("fcp-e2e-llm-router");
+    let mut runner = E2eRunner::new("fcp-e2e-llm-router-happy");
     let report = runner
         .run_connector_suite(&mut connector, suite)
         .await
         .expect("connector suite run");
 
-    assert!(report.passed, "allow suite should pass: {report:#?}");
+    assert!(report.passed, "happy path should pass: {report:#?}");
     let invoke_entry = report
         .logs
         .iter()
@@ -425,9 +516,18 @@ async fn llm_router_allow_valid_token_connector_suite_passes() {
 #[test]
 fn llm_router_manifest_network_guard_allows_and_denies() {
     let manifest = llm_router_manifest_toml();
+    let operations = manifest
+        .get("provides")
+        .and_then(toml::Value::as_table)
+        .and_then(|provides| provides.get("operations"))
+        .and_then(toml::Value::as_table)
+        .expect("operations table");
 
-    // Operations with external network access (route and list_providers)
-    let operations_with_network = ["llm-router.route", "llm-router.list_providers"];
+    assert_eq!(
+        operations.len(),
+        5,
+        "LLM Router manifest should declare 5 operations"
+    );
 
     let expected_hosts = vec![
         "api.anthropic.com".to_string(),
@@ -435,7 +535,11 @@ fn llm_router_manifest_network_guard_allows_and_denies() {
         "generativelanguage.googleapis.com".to_string(),
     ];
 
-    for operation_name in operations_with_network {
+    // Only route and list_providers have explicit network_constraints in the manifest.
+    // The other operations (estimate_cost, get_usage, get_budget) are local/computed
+    // and don't have network_constraints sections.
+    let ops_with_constraints = ["llm-router.route", "llm-router.list_providers"];
+    for operation_name in &ops_with_constraints {
         let host_allow = operation_host_allow_list(&manifest, operation_name);
         assert_eq!(
             host_allow, expected_hosts,
@@ -477,23 +581,28 @@ fn llm_router_manifest_network_guard_allows_and_denies() {
             !host_allowed("openai.com", &host_allow),
             "openai.com (bare domain) should be denied for {operation_name}"
         );
-    }
 
-    // estimate_cost has no network_constraints (local computation only).
-    // Either network_constraints is absent entirely, or host_allow is empty.
-    let estimate_host_allow = manifest
-        .get("provides")
-        .and_then(toml::Value::as_table)
-        .and_then(|p| p.get("operations"))
-        .and_then(toml::Value::as_table)
-        .and_then(|ops| ops.get("llm-router.estimate_cost"))
-        .and_then(toml::Value::as_table)
-        .and_then(|op| op.get("network_constraints"))
-        .and_then(toml::Value::as_table)
-        .and_then(|nc| nc.get("host_allow"))
-        .and_then(toml::Value::as_array);
-    assert!(
-        estimate_host_allow.is_none() || estimate_host_allow.unwrap().is_empty(),
-        "estimate_cost should have no network_constraints or empty host_allow (local computation)"
-    );
+        let constraints = operation_network_constraints(&manifest, operation_name);
+        assert_eq!(
+            constraints
+                .get("deny_localhost")
+                .and_then(toml::Value::as_bool),
+            Some(true),
+            "operation {operation_name} must deny localhost"
+        );
+        assert_eq!(
+            constraints
+                .get("deny_private_ranges")
+                .and_then(toml::Value::as_bool),
+            Some(true),
+            "operation {operation_name} must deny private ranges"
+        );
+        assert_eq!(
+            constraints
+                .get("require_sni")
+                .and_then(toml::Value::as_bool),
+            Some(true),
+            "operation {operation_name} must require SNI"
+        );
+    }
 }

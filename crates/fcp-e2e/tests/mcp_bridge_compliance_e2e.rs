@@ -459,7 +459,7 @@ async fn mcp_bridge_happy_path_connector_suite_passes() {
         },
     };
 
-    let mut runner = E2eRunner::new("fcp-e2e-mcp-bridge");
+    let mut runner = E2eRunner::new("fcp-e2e-mcp-bridge-happy");
     let report = runner
         .run_connector_suite(&mut connector, suite)
         .await
@@ -506,6 +506,7 @@ fn mcp_bridge_manifest_network_guard_allows_and_denies() {
         assert!(host_allowed("localhost.localdomain", &host_allow));
         assert!(!host_allowed("example.com", &host_allow));
         assert!(!host_allowed("api.mcp.com", &host_allow));
+        assert!(!host_allowed("127.0.0.1", &host_allow));
 
         // MCP Bridge is a local connector so it intentionally allows localhost/private ranges
         let constraints = operation_network_constraints(&manifest, operation_name);

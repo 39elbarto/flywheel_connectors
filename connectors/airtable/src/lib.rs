@@ -29,7 +29,10 @@
     clippy::unused_async
 )]
 
+pub mod attachments;
 pub mod client;
 pub mod connector;
 pub mod error;
+pub mod records;
 pub mod types;
+pub mod webhooks;

@@ -69,15 +69,9 @@ pub enum InjectionTarget {
         password_field: String,
     },
     /// Custom header, e.g. `X-Api-Key: <value>`.
-    CustomHeader {
-        header_name: String,
-        field: String,
-    },
+    CustomHeader { header_name: String, field: String },
     /// Query parameter, e.g. `?api_key=<value>`.
-    QueryParam {
-        param_name: String,
-        field: String,
-    },
+    QueryParam { param_name: String, field: String },
 }
 
 impl InjectionTarget {
@@ -323,7 +317,8 @@ impl ProxyVault {
 
     /// Serialize the vault to JSON (for persistence).
     pub fn to_json(&self) -> Result<String, SecretlessError> {
-        serde_json::to_string_pretty(self).map_err(|e| SecretlessError::Serialization(e.to_string()))
+        serde_json::to_string_pretty(self)
+            .map_err(|e| SecretlessError::Serialization(e.to_string()))
     }
 
     /// Deserialize a vault from JSON.
@@ -425,12 +420,7 @@ impl InjectionAuditLog {
     }
 
     /// Record an injection attempt.
-    pub fn record(
-        &mut self,
-        credential_id: &str,
-        connector_id: &str,
-        outcome: InjectionOutcome,
-    ) {
+    pub fn record(&mut self, credential_id: &str, connector_id: &str, outcome: InjectionOutcome) {
         if self.entries.len() >= self.max_entries && self.max_entries > 0 {
             self.entries.remove(0);
         }
@@ -537,11 +527,7 @@ impl InjectionPolicy {
     }
 
     /// Add a rule allowing a credential pattern for specific connectors.
-    pub fn allow(
-        &mut self,
-        credential_pattern: impl Into<String>,
-        connectors: Vec<String>,
-    ) {
+    pub fn allow(&mut self, credential_pattern: impl Into<String>, connectors: Vec<String>) {
         self.rules.push(PolicyRule {
             credential_pattern: credential_pattern.into(),
             allowed_connectors: connectors,
@@ -589,7 +575,10 @@ impl EgressProxy {
     }
 
     /// Process an intercepted request: resolve, check policy, inject, audit.
-    pub fn process(&mut self, request: &SecretlessRequest) -> Result<InjectionResult, SecretlessError> {
+    pub fn process(
+        &mut self,
+        request: &SecretlessRequest,
+    ) -> Result<InjectionResult, SecretlessError> {
         let cred_id_str = request.credential_id.as_str();
         let conn_id = &request.connector_id;
 
@@ -618,20 +607,23 @@ impl EgressProxy {
                     .record(cred_id_str, conn_id, InjectionOutcome::NotFound);
                 Err(SecretlessError::NotFound(id))
             }
-            Err(SecretlessError::Expired { credential_id, expired_at }) => {
+            Err(SecretlessError::Expired {
+                credential_id,
+                expired_at,
+            }) => {
                 self.audit_log
                     .record(cred_id_str, conn_id, InjectionOutcome::Expired);
-                Err(SecretlessError::Expired { credential_id, expired_at })
+                Err(SecretlessError::Expired {
+                    credential_id,
+                    expired_at,
+                })
             }
             Err(e) => Err(e),
         }
     }
 
     /// Register a credential mapping in the vault.
-    pub fn register(
-        &mut self,
-        mapping: CredentialMapping,
-    ) -> Result<(), SecretlessError> {
+    pub fn register(&mut self, mapping: CredentialMapping) -> Result<(), SecretlessError> {
         self.vault.add(mapping)
     }
 }
@@ -773,38 +765,40 @@ fn build_injection(
             username_field,
             password_field,
         } => {
-            let user = fields
-                .get(username_field.as_str())
-                .ok_or_else(|| SecretlessError::MissingField {
+            let user = fields.get(username_field.as_str()).ok_or_else(|| {
+                SecretlessError::MissingField {
                     credential_id: String::new(),
                     field: username_field.clone(),
-                })?;
-            let pass = fields
-                .get(password_field.as_str())
-                .ok_or_else(|| SecretlessError::MissingField {
+                }
+            })?;
+            let pass = fields.get(password_field.as_str()).ok_or_else(|| {
+                SecretlessError::MissingField {
                     credential_id: String::new(),
                     field: password_field.clone(),
-                })?;
+                }
+            })?;
             // base64(user:pass)
             let encoded = base64_encode(&format!("{user}:{pass}"));
             headers.push(("authorization".into(), format!("Basic {encoded}")));
         }
         InjectionTarget::CustomHeader { header_name, field } => {
-            let value = fields
-                .get(field.as_str())
-                .ok_or_else(|| SecretlessError::MissingField {
-                    credential_id: String::new(),
-                    field: field.clone(),
-                })?;
+            let value =
+                fields
+                    .get(field.as_str())
+                    .ok_or_else(|| SecretlessError::MissingField {
+                        credential_id: String::new(),
+                        field: field.clone(),
+                    })?;
             headers.push((header_name.clone(), value.clone()));
         }
         InjectionTarget::QueryParam { param_name, field } => {
-            let value = fields
-                .get(field.as_str())
-                .ok_or_else(|| SecretlessError::MissingField {
-                    credential_id: String::new(),
-                    field: field.clone(),
-                })?;
+            let value =
+                fields
+                    .get(field.as_str())
+                    .ok_or_else(|| SecretlessError::MissingField {
+                        credential_id: String::new(),
+                        field: field.clone(),
+                    })?;
             query_params.push((param_name.clone(), value.clone()));
         }
     }
@@ -820,8 +814,16 @@ fn base64_encode(input: &str) -> String {
     let mut result = String::with_capacity(bytes.len().div_ceil(3) * 4);
     for chunk in bytes.chunks(3) {
         let b0 = u32::from(chunk[0]);
-        let b1 = if chunk.len() > 1 { u32::from(chunk[1]) } else { 0 };
-        let b2 = if chunk.len() > 2 { u32::from(chunk[2]) } else { 0 };
+        let b1 = if chunk.len() > 1 {
+            u32::from(chunk[1])
+        } else {
+            0
+        };
+        let b2 = if chunk.len() > 2 {
+            u32::from(chunk[2])
+        } else {
+            0
+        };
         let triple = (b0 << 16) | (b1 << 8) | b2;
         result.push(CHARS[((triple >> 18) & 0x3F) as usize] as char);
         result.push(CHARS[((triple >> 12) & 0x3F) as usize] as char);
@@ -870,12 +872,7 @@ mod tests {
         fields: BTreeMap<String, String>,
         target: InjectionTarget,
     ) -> CredentialMapping {
-        CredentialMapping::new(
-            CredentialId::new(id).unwrap(),
-            connector,
-            fields,
-            target,
-        )
+        CredentialMapping::new(CredentialId::new(id).unwrap(), connector, fields, target)
     }
 
     // ── CredentialId ──────────────────────────────────────────────
@@ -959,7 +956,12 @@ mod tests {
 
     #[test]
     fn mapping_creation() {
-        let m = make_mapping("cred_gh", "github", sample_fields(), InjectionTarget::bearer());
+        let m = make_mapping(
+            "cred_gh",
+            "github",
+            sample_fields(),
+            InjectionTarget::bearer(),
+        );
         assert_eq!(m.credential_id.as_str(), "cred_gh");
         assert_eq!(m.connector_id, "github");
         assert!(!m.is_expired());
@@ -968,21 +970,36 @@ mod tests {
 
     #[test]
     fn mapping_with_expiry() {
-        let m = make_mapping("cred_gh", "github", sample_fields(), InjectionTarget::bearer())
-            .with_expiry(1);
+        let m = make_mapping(
+            "cred_gh",
+            "github",
+            sample_fields(),
+            InjectionTarget::bearer(),
+        )
+        .with_expiry(1);
         assert!(m.is_expired());
     }
 
     #[test]
     fn mapping_with_label() {
-        let m = make_mapping("cred_gh", "github", sample_fields(), InjectionTarget::bearer())
-            .with_label("Work GitHub token");
+        let m = make_mapping(
+            "cred_gh",
+            "github",
+            sample_fields(),
+            InjectionTarget::bearer(),
+        )
+        .with_label("Work GitHub token");
         assert_eq!(m.label, "Work GitHub token");
     }
 
     #[test]
     fn mapping_touch_updates_last_used() {
-        let mut m = make_mapping("cred_gh", "github", sample_fields(), InjectionTarget::bearer());
+        let mut m = make_mapping(
+            "cred_gh",
+            "github",
+            sample_fields(),
+            InjectionTarget::bearer(),
+        );
         assert!(m.last_used_at.is_none());
         m.touch();
         assert!(m.last_used_at.is_some());
@@ -990,7 +1007,12 @@ mod tests {
 
     #[test]
     fn mapping_redacted_fields() {
-        let m = make_mapping("cred_gh", "github", sample_fields(), InjectionTarget::bearer());
+        let m = make_mapping(
+            "cred_gh",
+            "github",
+            sample_fields(),
+            InjectionTarget::bearer(),
+        );
         let redacted = m.redacted_fields();
         let val = redacted.get("token").unwrap();
         assert!(val.starts_with("****"));
@@ -1000,7 +1022,12 @@ mod tests {
 
     #[test]
     fn mapping_serialization_roundtrip() {
-        let m = make_mapping("cred_gh", "github", sample_fields(), InjectionTarget::bearer());
+        let m = make_mapping(
+            "cred_gh",
+            "github",
+            sample_fields(),
+            InjectionTarget::bearer(),
+        );
         let json = serde_json::to_string(&m).unwrap();
         let m2: CredentialMapping = serde_json::from_str(&json).unwrap();
         assert_eq!(m.credential_id, m2.credential_id);
@@ -1013,7 +1040,12 @@ mod tests {
     fn vault_add_and_resolve() {
         let mut vault = ProxyVault::new();
         vault
-            .add(make_mapping("cred_gh", "github", sample_fields(), InjectionTarget::bearer()))
+            .add(make_mapping(
+                "cred_gh",
+                "github",
+                sample_fields(),
+                InjectionTarget::bearer(),
+            ))
             .unwrap();
         assert_eq!(vault.count(), 1);
 
@@ -1029,10 +1061,20 @@ mod tests {
     fn vault_duplicate_rejected() {
         let mut vault = ProxyVault::new();
         vault
-            .add(make_mapping("cred_gh", "github", sample_fields(), InjectionTarget::bearer()))
+            .add(make_mapping(
+                "cred_gh",
+                "github",
+                sample_fields(),
+                InjectionTarget::bearer(),
+            ))
             .unwrap();
         let err = vault
-            .add(make_mapping("cred_gh", "github", sample_fields(), InjectionTarget::bearer()))
+            .add(make_mapping(
+                "cred_gh",
+                "github",
+                sample_fields(),
+                InjectionTarget::bearer(),
+            ))
             .unwrap_err();
         assert!(err.to_string().contains("duplicate"));
     }
@@ -1050,7 +1092,12 @@ mod tests {
     fn vault_remove() {
         let mut vault = ProxyVault::new();
         vault
-            .add(make_mapping("cred_gh", "github", sample_fields(), InjectionTarget::bearer()))
+            .add(make_mapping(
+                "cred_gh",
+                "github",
+                sample_fields(),
+                InjectionTarget::bearer(),
+            ))
             .unwrap();
         let removed = vault
             .remove(&CredentialId::new("cred_gh").unwrap(), "github")
@@ -1072,7 +1119,12 @@ mod tests {
     fn vault_update_secrets() {
         let mut vault = ProxyVault::new();
         vault
-            .add(make_mapping("cred_gh", "github", sample_fields(), InjectionTarget::bearer()))
+            .add(make_mapping(
+                "cred_gh",
+                "github",
+                sample_fields(),
+                InjectionTarget::bearer(),
+            ))
             .unwrap();
         let mut new_fields = BTreeMap::new();
         new_fields.insert("token".into(), "ghp_new_token_999".into());
@@ -1090,8 +1142,13 @@ mod tests {
         let mut vault = ProxyVault::new();
         vault
             .add(
-                make_mapping("cred_gh", "github", sample_fields(), InjectionTarget::bearer())
-                    .with_expiry(1),
+                make_mapping(
+                    "cred_gh",
+                    "github",
+                    sample_fields(),
+                    InjectionTarget::bearer(),
+                )
+                .with_expiry(1),
             )
             .unwrap();
         let err = vault
@@ -1104,13 +1161,28 @@ mod tests {
     fn vault_list_for_connector() {
         let mut vault = ProxyVault::new();
         vault
-            .add(make_mapping("cred_gh1", "github", sample_fields(), InjectionTarget::bearer()))
+            .add(make_mapping(
+                "cred_gh1",
+                "github",
+                sample_fields(),
+                InjectionTarget::bearer(),
+            ))
             .unwrap();
         vault
-            .add(make_mapping("cred_gh2", "github", sample_fields(), InjectionTarget::bearer()))
+            .add(make_mapping(
+                "cred_gh2",
+                "github",
+                sample_fields(),
+                InjectionTarget::bearer(),
+            ))
             .unwrap();
         vault
-            .add(make_mapping("cred_sl", "slack", sample_fields(), InjectionTarget::bearer()))
+            .add(make_mapping(
+                "cred_sl",
+                "slack",
+                sample_fields(),
+                InjectionTarget::bearer(),
+            ))
             .unwrap();
         assert_eq!(vault.list_for_connector("github").len(), 2);
         assert_eq!(vault.list_for_connector("slack").len(), 1);
@@ -1121,10 +1193,20 @@ mod tests {
     fn vault_list_all() {
         let mut vault = ProxyVault::new();
         vault
-            .add(make_mapping("c1", "github", sample_fields(), InjectionTarget::bearer()))
+            .add(make_mapping(
+                "c1",
+                "github",
+                sample_fields(),
+                InjectionTarget::bearer(),
+            ))
             .unwrap();
         vault
-            .add(make_mapping("c2", "slack", sample_fields(), InjectionTarget::bearer()))
+            .add(make_mapping(
+                "c2",
+                "slack",
+                sample_fields(),
+                InjectionTarget::bearer(),
+            ))
             .unwrap();
         assert_eq!(vault.list_all().len(), 2);
     }
@@ -1134,12 +1216,22 @@ mod tests {
         let mut vault = ProxyVault::new();
         vault
             .add(
-                make_mapping("expired", "github", sample_fields(), InjectionTarget::bearer())
-                    .with_expiry(1),
+                make_mapping(
+                    "expired",
+                    "github",
+                    sample_fields(),
+                    InjectionTarget::bearer(),
+                )
+                .with_expiry(1),
             )
             .unwrap();
         vault
-            .add(make_mapping("valid", "github", sample_fields(), InjectionTarget::bearer()))
+            .add(make_mapping(
+                "valid",
+                "github",
+                sample_fields(),
+                InjectionTarget::bearer(),
+            ))
             .unwrap();
         let purged = vault.purge_expired();
         assert_eq!(purged, 1);
@@ -1150,7 +1242,12 @@ mod tests {
     fn vault_json_roundtrip() {
         let mut vault = ProxyVault::new();
         vault
-            .add(make_mapping("cred_gh", "github", sample_fields(), InjectionTarget::bearer()))
+            .add(make_mapping(
+                "cred_gh",
+                "github",
+                sample_fields(),
+                InjectionTarget::bearer(),
+            ))
             .unwrap();
         let json = vault.to_json().unwrap();
         let vault2 = ProxyVault::from_json(&json).unwrap();
@@ -1418,8 +1515,13 @@ mod tests {
         let mut proxy = EgressProxy::new();
         proxy
             .register(
-                make_mapping("cred_gh", "github", sample_fields(), InjectionTarget::bearer())
-                    .with_expiry(1),
+                make_mapping(
+                    "cred_gh",
+                    "github",
+                    sample_fields(),
+                    InjectionTarget::bearer(),
+                )
+                .with_expiry(1),
             )
             .unwrap();
         let req = SecretlessRequest {
@@ -1573,38 +1675,473 @@ mod tests {
 
     #[test]
     fn error_display_variants() {
-        assert!(SecretlessError::InvalidCredentialId("bad".into())
+        assert!(
+            SecretlessError::InvalidCredentialId("bad".into())
+                .to_string()
+                .contains("invalid")
+        );
+        assert!(
+            SecretlessError::NotFound("cred_123".into())
+                .to_string()
+                .contains("not found")
+        );
+        assert!(
+            SecretlessError::Expired {
+                credential_id: "c".into(),
+                expired_at: 100,
+            }
             .to_string()
-            .contains("invalid"));
-        assert!(SecretlessError::NotFound("cred_123".into())
+            .contains("expired")
+        );
+        assert!(
+            SecretlessError::DuplicateMapping {
+                credential_id: "c".into(),
+                connector_id: "g".into(),
+            }
             .to_string()
-            .contains("not found"));
-        assert!(SecretlessError::Expired {
-            credential_id: "c".into(),
-            expired_at: 100,
-        }
-        .to_string()
-        .contains("expired"));
-        assert!(SecretlessError::DuplicateMapping {
-            credential_id: "c".into(),
-            connector_id: "g".into(),
-        }
-        .to_string()
-        .contains("duplicate"));
-        assert!(SecretlessError::MissingField {
-            credential_id: "c".into(),
-            field: "token".into(),
-        }
-        .to_string()
-        .contains("missing"));
-        assert!(SecretlessError::PolicyDenied {
-            credential_id: "c".into(),
-            connector_id: "g".into(),
-        }
-        .to_string()
-        .contains("denied"));
-        assert!(SecretlessError::Serialization("oops".into())
+            .contains("duplicate")
+        );
+        assert!(
+            SecretlessError::MissingField {
+                credential_id: "c".into(),
+                field: "token".into(),
+            }
             .to_string()
-            .contains("serialization"));
+            .contains("missing")
+        );
+        assert!(
+            SecretlessError::PolicyDenied {
+                credential_id: "c".into(),
+                connector_id: "g".into(),
+            }
+            .to_string()
+            .contains("denied")
+        );
+        assert!(
+            SecretlessError::Serialization("oops".into())
+                .to_string()
+                .contains("serialization")
+        );
+    }
+
+    // ── Additional tests ──────────────────────────────────────────
+
+    #[test]
+    fn credential_id_with_slashes_valid() {
+        assert!(CredentialId::new("vault/path/secret").is_ok());
+    }
+
+    #[test]
+    fn credential_id_with_colons_valid() {
+        assert!(CredentialId::new("vault:secret:key").is_ok());
+    }
+
+    #[test]
+    fn credential_id_with_dots_valid() {
+        assert!(CredentialId::new("a.b.c.d").is_ok());
+    }
+
+    #[test]
+    fn credential_id_with_hyphens_valid() {
+        assert!(CredentialId::new("my-cred-id-123").is_ok());
+    }
+
+    #[test]
+    fn credential_id_with_underscores_valid() {
+        assert!(CredentialId::new("cred_github_work_v2").is_ok());
+    }
+
+    #[test]
+    fn credential_id_invalid_newline() {
+        assert!(CredentialId::new("cred\nid").is_err());
+    }
+
+    #[test]
+    fn credential_id_invalid_tab() {
+        assert!(CredentialId::new("cred\tid").is_err());
+    }
+
+    #[test]
+    fn credential_id_invalid_brackets() {
+        assert!(CredentialId::new("cred[0]").is_err());
+    }
+
+    #[test]
+    fn credential_id_serde_roundtrip() {
+        let id = CredentialId::new("cred_github").unwrap();
+        let json = serde_json::to_string(&id).unwrap();
+        let back: CredentialId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn credential_id_hash_equality() {
+        let a = CredentialId::new("same").unwrap();
+        let b = CredentialId::new("same").unwrap();
+        let mut set = std::collections::HashSet::new();
+        set.insert(a);
+        assert!(set.contains(&b));
+    }
+
+    #[test]
+    fn injection_target_serde_roundtrip_bearer() {
+        let t = InjectionTarget::bearer();
+        let json = serde_json::to_string(&t).unwrap();
+        let back: InjectionTarget = serde_json::from_str(&json).unwrap();
+        assert_eq!(t, back);
+    }
+
+    #[test]
+    fn injection_target_serde_roundtrip_basic() {
+        let t = InjectionTarget::basic();
+        let json = serde_json::to_string(&t).unwrap();
+        let back: InjectionTarget = serde_json::from_str(&json).unwrap();
+        assert_eq!(t, back);
+    }
+
+    #[test]
+    fn injection_target_serde_roundtrip_custom_header() {
+        let t = InjectionTarget::header("X-Token", "token_val");
+        let json = serde_json::to_string(&t).unwrap();
+        let back: InjectionTarget = serde_json::from_str(&json).unwrap();
+        assert_eq!(t, back);
+    }
+
+    #[test]
+    fn injection_target_serde_roundtrip_query() {
+        let t = InjectionTarget::query("key", "api_key");
+        let json = serde_json::to_string(&t).unwrap();
+        let back: InjectionTarget = serde_json::from_str(&json).unwrap();
+        assert_eq!(t, back);
+    }
+
+    #[test]
+    fn mapping_not_expired_when_no_expiry() {
+        let m = make_mapping(
+            "cred_a",
+            "slack",
+            sample_fields(),
+            InjectionTarget::bearer(),
+        );
+        assert!(!m.is_expired());
+        assert_eq!(m.expires_at, 0);
+    }
+
+    #[test]
+    fn mapping_not_expired_future_expiry() {
+        let future = epoch_seconds() + 86_400;
+        let m = make_mapping(
+            "cred_a",
+            "slack",
+            sample_fields(),
+            InjectionTarget::bearer(),
+        )
+        .with_expiry(future);
+        assert!(!m.is_expired());
+    }
+
+    #[test]
+    fn mapping_created_at_is_set() {
+        let m = make_mapping(
+            "cred_x",
+            "github",
+            sample_fields(),
+            InjectionTarget::bearer(),
+        );
+        assert!(m.created_at > 0);
+    }
+
+    #[test]
+    fn mapping_default_label_empty() {
+        let m = make_mapping(
+            "cred_x",
+            "github",
+            sample_fields(),
+            InjectionTarget::bearer(),
+        );
+        assert!(m.label.is_empty());
+    }
+
+    #[test]
+    fn mapping_redacted_short_value() {
+        let mut fields = BTreeMap::new();
+        fields.insert("key".into(), "ab".into());
+        let m = make_mapping("c", "g", fields, InjectionTarget::bearer());
+        let redacted = m.redacted_fields();
+        assert_eq!(redacted["key"], "****");
+    }
+
+    #[test]
+    fn vault_new_is_empty() {
+        let vault = ProxyVault::new();
+        assert!(vault.is_empty());
+        assert_eq!(vault.count(), 0);
+    }
+
+    #[test]
+    fn vault_default_is_empty() {
+        let vault = ProxyVault::default();
+        assert!(vault.is_empty());
+    }
+
+    #[test]
+    fn vault_multiple_connectors_same_credential() {
+        let mut vault = ProxyVault::new();
+        vault
+            .add(make_mapping(
+                "shared_cred",
+                "github",
+                sample_fields(),
+                InjectionTarget::bearer(),
+            ))
+            .unwrap();
+        vault
+            .add(make_mapping(
+                "shared_cred",
+                "slack",
+                sample_fields(),
+                InjectionTarget::bearer(),
+            ))
+            .unwrap();
+        assert_eq!(vault.count(), 2);
+    }
+
+    #[test]
+    fn vault_update_secrets_not_found() {
+        let mut vault = ProxyVault::new();
+        let err = vault
+            .update_secrets(&CredentialId::new("nope").unwrap(), "github", BTreeMap::new())
+            .unwrap_err();
+        assert!(err.to_string().contains("not found"));
+    }
+
+    #[test]
+    fn vault_purge_expired_none_expired() {
+        let mut vault = ProxyVault::new();
+        vault
+            .add(make_mapping(
+                "valid",
+                "github",
+                sample_fields(),
+                InjectionTarget::bearer(),
+            ))
+            .unwrap();
+        let purged = vault.purge_expired();
+        assert_eq!(purged, 0);
+        assert_eq!(vault.count(), 1);
+    }
+
+    #[test]
+    fn vault_from_json_invalid() {
+        let err = ProxyVault::from_json("not valid json").unwrap_err();
+        assert!(err.to_string().contains("serialization"));
+    }
+
+    #[test]
+    fn inject_bearer_with_api_token_field() {
+        let mut fields = BTreeMap::new();
+        fields.insert("api_token".into(), "tok_123".into());
+        let (headers, _) = build_injection(&InjectionTarget::bearer(), &fields).unwrap();
+        assert!(headers[0].1.contains("tok_123"));
+    }
+
+    #[test]
+    fn inject_bearer_with_access_token_field() {
+        let mut fields = BTreeMap::new();
+        fields.insert("access_token".into(), "at_xyz".into());
+        let (headers, _) = build_injection(&InjectionTarget::bearer(), &fields).unwrap();
+        assert!(headers[0].1.contains("at_xyz"));
+    }
+
+    #[test]
+    fn inject_basic_missing_username() {
+        let mut fields = BTreeMap::new();
+        fields.insert("password".into(), "pass".into());
+        let err = build_injection(&InjectionTarget::basic(), &fields).unwrap_err();
+        assert!(err.to_string().contains("username"));
+    }
+
+    #[test]
+    fn inject_custom_header_missing_field() {
+        let target = InjectionTarget::header("X-Token", "token_val");
+        let fields = BTreeMap::new();
+        let err = build_injection(&target, &fields).unwrap_err();
+        assert!(err.to_string().contains("token_val"));
+    }
+
+    #[test]
+    fn inject_query_param_missing_field() {
+        let target = InjectionTarget::query("key", "api_key");
+        let fields = BTreeMap::new();
+        let err = build_injection(&target, &fields).unwrap_err();
+        assert!(err.to_string().contains("api_key"));
+    }
+
+    #[test]
+    fn secretless_request_empty_headers() {
+        let headers: Vec<(String, String)> = Vec::new();
+        assert!(SecretlessRequest::from_headers(&headers, "github").is_none());
+    }
+
+    #[test]
+    fn secretless_request_multiple_headers_picks_correct_one() {
+        let headers = vec![
+            ("authorization".to_owned(), "Bearer xxx".to_owned()),
+            ("x-fcp-credential-id".to_owned(), "cred_work".to_owned()),
+            ("content-type".to_owned(), "text/plain".to_owned()),
+        ];
+        let req = SecretlessRequest::from_headers(&headers, "slack").unwrap();
+        assert_eq!(req.credential_id.as_str(), "cred_work");
+    }
+
+    #[test]
+    fn audit_log_zero_capacity() {
+        let mut log = InjectionAuditLog::new(0);
+        log.record("c", "g", InjectionOutcome::Injected);
+        // max_entries = 0 means no eviction guard triggers (no remove when len >= 0 is false)
+        assert_eq!(log.len(), 1);
+    }
+
+    #[test]
+    fn audit_log_serde_roundtrip() {
+        let mut log = InjectionAuditLog::new(100);
+        log.record("cred_a", "github", InjectionOutcome::Injected);
+        log.record("cred_b", "slack", InjectionOutcome::NotFound);
+        let json = serde_json::to_string(&log).unwrap();
+        let back: InjectionAuditLog = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.len(), 2);
+    }
+
+    #[test]
+    fn policy_default_is_allow_all() {
+        let p = InjectionPolicy::default();
+        assert!(p.is_allowed("any", "any"));
+    }
+
+    #[test]
+    fn policy_multiple_rules_first_match_wins() {
+        let mut p = InjectionPolicy::deny_all();
+        p.allow("cred_a", vec!["github".into()]);
+        p.allow("cred_a", vec!["slack".into()]);
+        assert!(p.is_allowed("cred_a", "github"));
+        assert!(p.is_allowed("cred_a", "slack"));
+        assert!(!p.is_allowed("cred_b", "github"));
+    }
+
+    #[test]
+    fn policy_multiple_allowed_connectors() {
+        let mut p = InjectionPolicy::deny_all();
+        p.allow("cred_shared", vec!["github".into(), "slack".into()]);
+        assert!(p.is_allowed("cred_shared", "github"));
+        assert!(p.is_allowed("cred_shared", "slack"));
+        assert!(!p.is_allowed("cred_shared", "jira"));
+    }
+
+    #[test]
+    fn pattern_exact_no_match() {
+        assert!(!pattern_matches("github", "github2"));
+    }
+
+    #[test]
+    fn pattern_wildcard_empty_prefix() {
+        assert!(pattern_matches("*", ""));
+    }
+
+    #[test]
+    fn pattern_exact_empty_matches_empty() {
+        assert!(pattern_matches("", ""));
+    }
+
+    #[test]
+    fn pattern_prefix_exact_boundary() {
+        assert!(pattern_matches("cred*", "cred"));
+        assert!(pattern_matches("cred*", "credential"));
+    }
+
+    #[test]
+    fn egress_proxy_default() {
+        let proxy = EgressProxy::default();
+        assert!(proxy.vault.is_empty());
+        assert!(proxy.audit_log.is_empty());
+    }
+
+    #[test]
+    fn egress_proxy_register_and_resolve() {
+        let mut proxy = EgressProxy::new();
+        proxy
+            .register(make_mapping(
+                "cred_sl",
+                "slack",
+                sample_fields(),
+                InjectionTarget::bearer(),
+            ))
+            .unwrap();
+        let req = SecretlessRequest {
+            credential_id: CredentialId::new("cred_sl").unwrap(),
+            connector_id: "slack".into(),
+        };
+        let result = proxy.process(&req).unwrap();
+        assert_eq!(result.connector_id, "slack");
+        assert!(!result.headers.is_empty());
+    }
+
+    #[test]
+    fn base64_encode_longer_string() {
+        assert_eq!(base64_encode("hello"), "aGVsbG8=");
+    }
+
+    #[test]
+    fn base64_encode_no_padding_needed() {
+        assert_eq!(base64_encode("abcdef"), "YWJjZGVm");
+    }
+
+    #[test]
+    fn redact_empty_string() {
+        // Length 0 <= 4, so returns "****"
+        assert_eq!(redact_secret(""), "****");
+    }
+
+    #[test]
+    fn redact_six_chars() {
+        assert_eq!(redact_secret("abcdef"), "****cdef");
+    }
+
+    #[test]
+    fn outcome_injected_equality() {
+        assert_eq!(InjectionOutcome::Injected, InjectionOutcome::Injected);
+    }
+
+    #[test]
+    fn outcome_missing_field_inequality() {
+        assert_ne!(
+            InjectionOutcome::MissingField("a".into()),
+            InjectionOutcome::MissingField("b".into())
+        );
+    }
+
+    #[test]
+    fn error_is_eq() {
+        let a = SecretlessError::NotFound("x".into());
+        let b = SecretlessError::NotFound("x".into());
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn error_different_variants_ne() {
+        let a = SecretlessError::NotFound("x".into());
+        let b = SecretlessError::InvalidCredentialId("x".into());
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn credential_id_header_constant() {
+        assert_eq!(CREDENTIAL_ID_HEADER, "x-fcp-credential-id");
+    }
+
+    #[test]
+    fn vault_key_format() {
+        let id = CredentialId::new("cred_123").unwrap();
+        let key = vault_key(&id, "github");
+        assert_eq!(key, "cred_123@github");
     }
 }

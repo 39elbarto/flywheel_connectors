@@ -3,7 +3,7 @@ use serde_json::{Value, json};
 pub const COMMANDS: &[&str] = &[
     "guide", "task", "plan", "explain", "do", "list", "search", "show", "ops", "schema",
     "examples", "status", "enable", "disable", "start", "stop", "restart", "install", "update",
-    "pin", "unpin", "config", "invoke", "simulate", "logs",
+    "pin", "unpin", "config", "invoke", "simulate", "logs", "pipeline", "recipe",
 ];
 
 #[allow(clippy::too_many_lines)]
@@ -109,7 +109,7 @@ pub fn guide_payload(command: Option<&str>) -> Value {
                     },
                     {
                         "name": "execution",
-                        "commands": ["simulate", "invoke", "logs"],
+                        "commands": ["simulate", "invoke", "logs", "pipeline", "recipe"],
                     }
                 ],
                 "phase": {
@@ -284,6 +284,14 @@ fn command_contract(command: &str) -> Option<Value> {
             "Read connector logs or event streams with bounded default output.",
             "Operational tail/watch surface that does not flood the caller unless explicitly requested.",
         )),
+        "pipeline" => Some(execution_contract(
+            "Load reusable multi-step connector workflows from TOML and validate or plan them.",
+            "Pipeline discovery and planning surface that binds parameters, validates dependencies, and produces deterministic step plans before host-backed execution exists.",
+        )),
+        "recipe" => Some(execution_contract(
+            "Browse and plan bundled cross-connector pipeline recipes with starter defaults.",
+            "Built-in recipe library that stays deterministic for listing, inspection, estimate, dry-run, and export before agents customize the exported pipeline TOML.",
+        )),
         _ => None,
     }
 }
@@ -421,6 +429,11 @@ mod tests {
     }
 
     #[test]
+    fn commands_contains_recipe() {
+        assert!(COMMANDS.contains(&"recipe"));
+    }
+
+    #[test]
     fn commands_has_no_duplicates() {
         let mut seen = std::collections::HashSet::new();
         for cmd in COMMANDS {
@@ -542,6 +555,13 @@ mod tests {
         let p = guide_payload(Some("config"));
         assert_eq!(p["status"], "ok");
         assert_eq!(p["contract"]["family"], "config");
+    }
+
+    #[test]
+    fn guide_for_recipe_command() {
+        let p = guide_payload(Some("recipe"));
+        assert_eq!(p["status"], "ok");
+        assert_eq!(p["contract"]["family"], "execution");
     }
 
     #[test]
@@ -682,7 +702,7 @@ mod tests {
 
     #[test]
     fn execution_commands_have_execution_family() {
-        for cmd in &["invoke", "simulate", "logs"] {
+        for cmd in &["invoke", "simulate", "logs", "pipeline", "recipe"] {
             let p = guide_payload(Some(cmd));
             assert_eq!(
                 p["contract"]["family"], "execution",
@@ -890,5 +910,324 @@ mod tests {
             let v = val.as_i64().unwrap();
             assert!(v >= 0, "exit code {name} is negative: {v}");
         }
+    }
+
+    // ── Additional tests ──────────────────────────────────────────
+
+    #[test]
+    fn commands_contains_search() {
+        assert!(COMMANDS.contains(&"search"));
+    }
+
+    #[test]
+    fn commands_contains_ops() {
+        assert!(COMMANDS.contains(&"ops"));
+    }
+
+    #[test]
+    fn commands_contains_schema() {
+        assert!(COMMANDS.contains(&"schema"));
+    }
+
+    #[test]
+    fn commands_contains_status() {
+        assert!(COMMANDS.contains(&"status"));
+    }
+
+    #[test]
+    fn commands_contains_enable() {
+        assert!(COMMANDS.contains(&"enable"));
+    }
+
+    #[test]
+    fn commands_contains_disable() {
+        assert!(COMMANDS.contains(&"disable"));
+    }
+
+    #[test]
+    fn commands_contains_logs() {
+        assert!(COMMANDS.contains(&"logs"));
+    }
+
+    #[test]
+    fn commands_contains_pipeline() {
+        assert!(COMMANDS.contains(&"pipeline"));
+    }
+
+    #[test]
+    fn commands_contains_examples() {
+        assert!(COMMANDS.contains(&"examples"));
+    }
+
+    #[test]
+    fn commands_contains_do() {
+        assert!(COMMANDS.contains(&"do"));
+    }
+
+    #[test]
+    fn commands_contains_explain() {
+        assert!(COMMANDS.contains(&"explain"));
+    }
+
+    #[test]
+    fn commands_count() {
+        assert!(COMMANDS.len() >= 27);
+    }
+
+    #[test]
+    fn guide_for_explain_command() {
+        let p = guide_payload(Some("explain"));
+        assert_eq!(p["status"], "ok");
+        assert_eq!(p["contract"]["family"], "intent");
+    }
+
+    #[test]
+    fn guide_for_do_command() {
+        let p = guide_payload(Some("do"));
+        assert_eq!(p["status"], "ok");
+        assert_eq!(p["contract"]["family"], "intent");
+    }
+
+    #[test]
+    fn guide_for_search_command() {
+        let p = guide_payload(Some("search"));
+        assert_eq!(p["status"], "ok");
+        assert_eq!(p["contract"]["family"], "discovery");
+    }
+
+    #[test]
+    fn guide_for_show_command() {
+        let p = guide_payload(Some("show"));
+        assert_eq!(p["status"], "ok");
+        assert_eq!(p["contract"]["family"], "discovery");
+    }
+
+    #[test]
+    fn guide_for_ops_command() {
+        let p = guide_payload(Some("ops"));
+        assert_eq!(p["status"], "ok");
+        assert_eq!(p["contract"]["family"], "discovery");
+    }
+
+    #[test]
+    fn guide_for_schema_command() {
+        let p = guide_payload(Some("schema"));
+        assert_eq!(p["status"], "ok");
+        assert_eq!(p["contract"]["family"], "discovery");
+    }
+
+    #[test]
+    fn guide_for_simulate_command() {
+        let p = guide_payload(Some("simulate"));
+        assert_eq!(p["status"], "ok");
+        assert_eq!(p["contract"]["family"], "execution");
+    }
+
+    #[test]
+    fn guide_for_pipeline_command() {
+        let p = guide_payload(Some("pipeline"));
+        assert_eq!(p["status"], "ok");
+        assert_eq!(p["contract"]["family"], "execution");
+    }
+
+    #[test]
+    fn guide_for_logs_command() {
+        let p = guide_payload(Some("logs"));
+        assert_eq!(p["status"], "ok");
+        assert_eq!(p["contract"]["family"], "execution");
+    }
+
+    #[test]
+    fn guide_for_status_command() {
+        let p = guide_payload(Some("status"));
+        assert_eq!(p["status"], "ok");
+        assert_eq!(p["contract"]["family"], "lifecycle");
+    }
+
+    #[test]
+    fn guide_for_enable_command() {
+        let p = guide_payload(Some("enable"));
+        assert_eq!(p["status"], "ok");
+        assert_eq!(p["contract"]["family"], "lifecycle");
+    }
+
+    #[test]
+    fn guide_for_disable_command() {
+        let p = guide_payload(Some("disable"));
+        assert_eq!(p["status"], "ok");
+        assert_eq!(p["contract"]["family"], "lifecycle");
+    }
+
+    #[test]
+    fn guide_for_start_command() {
+        let p = guide_payload(Some("start"));
+        assert_eq!(p["status"], "ok");
+        assert_eq!(p["contract"]["family"], "lifecycle");
+    }
+
+    #[test]
+    fn guide_for_stop_command() {
+        let p = guide_payload(Some("stop"));
+        assert_eq!(p["status"], "ok");
+        assert_eq!(p["contract"]["family"], "lifecycle");
+    }
+
+    #[test]
+    fn guide_for_restart_command() {
+        let p = guide_payload(Some("restart"));
+        assert_eq!(p["status"], "ok");
+        assert_eq!(p["contract"]["family"], "lifecycle");
+    }
+
+    #[test]
+    fn guide_for_install_command() {
+        let p = guide_payload(Some("install"));
+        assert_eq!(p["status"], "ok");
+        assert_eq!(p["contract"]["family"], "lifecycle");
+    }
+
+    #[test]
+    fn guide_for_update_command() {
+        let p = guide_payload(Some("update"));
+        assert_eq!(p["status"], "ok");
+        assert_eq!(p["contract"]["family"], "lifecycle");
+    }
+
+    #[test]
+    fn guide_for_pin_command() {
+        let p = guide_payload(Some("pin"));
+        assert_eq!(p["status"], "ok");
+        assert_eq!(p["contract"]["family"], "lifecycle");
+    }
+
+    #[test]
+    fn guide_for_unpin_command() {
+        let p = guide_payload(Some("unpin"));
+        assert_eq!(p["status"], "ok");
+        assert_eq!(p["contract"]["family"], "lifecycle");
+    }
+
+    #[test]
+    fn planned_payload_echoes_command_name() {
+        let p = planned_payload("schema", &json!({}));
+        assert_eq!(p["command"], "schema");
+    }
+
+    #[test]
+    fn planned_payload_has_message() {
+        let p = planned_payload("list", &json!({}));
+        assert!(p["message"].is_string());
+        assert!(p["message"].as_str().unwrap().contains("scaffold"));
+    }
+
+    #[test]
+    fn full_guide_has_phase_object() {
+        let g = guide_payload(None);
+        assert!(g["phase"].is_object());
+        assert!(g["phase"]["current_bead"].is_string());
+    }
+
+    #[test]
+    fn full_guide_phase_has_follow_on_beads() {
+        let g = guide_payload(None);
+        assert!(g["phase"]["follow_on_beads"].is_array());
+        assert!(!g["phase"]["follow_on_beads"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn full_guide_defaults_has_json_opt_in() {
+        let g = guide_payload(None);
+        assert_eq!(g["defaults"]["json_opt_in"], "--format json");
+    }
+
+    #[test]
+    fn full_guide_defaults_has_workflow_bias() {
+        let g = guide_payload(None);
+        assert!(g["defaults"]["workflow_bias"].is_string());
+    }
+
+    #[test]
+    fn exit_code_parse_error_is_two() {
+        let g = guide_payload(None);
+        assert_eq!(g["exit_codes"]["parse_error"], 2);
+    }
+
+    #[test]
+    fn exit_code_ambiguous_correction_is_four() {
+        let g = guide_payload(None);
+        assert_eq!(g["exit_codes"]["ambiguous_correction"], 4);
+    }
+
+    #[test]
+    fn exit_code_validation_error_is_five() {
+        let g = guide_payload(None);
+        assert_eq!(g["exit_codes"]["validation_error"], 5);
+    }
+
+    #[test]
+    fn exit_code_policy_denial_is_six() {
+        let g = guide_payload(None);
+        assert_eq!(g["exit_codes"]["policy_denial"], 6);
+    }
+
+    #[test]
+    fn exit_code_connector_error_is_seven() {
+        let g = guide_payload(None);
+        assert_eq!(g["exit_codes"]["connector_error"], 7);
+    }
+
+    #[test]
+    fn exit_code_transport_error_is_eight() {
+        let g = guide_payload(None);
+        assert_eq!(g["exit_codes"]["transport_error"], 8);
+    }
+
+    #[test]
+    fn planned_payload_for_all_families() {
+        let families = [
+            ("guide", "meta"),
+            ("task", "workflow"),
+            ("plan", "intent"),
+            ("explain", "intent"),
+            ("do", "intent"),
+            ("list", "discovery"),
+            ("search", "discovery"),
+            ("invoke", "execution"),
+            ("simulate", "execution"),
+            ("config", "config"),
+        ];
+        for (cmd, family) in &families {
+            let p = planned_payload(cmd, &json!({}));
+            assert_eq!(
+                p["contract"]["family"], *family,
+                "planned_payload for {cmd} should have family {family}"
+            );
+        }
+    }
+
+    #[test]
+    fn planned_payload_with_array_captures() {
+        let cap = json!({"ids": [1, 2, 3]});
+        let p = planned_payload("invoke", &cap);
+        assert_eq!(p["captures"]["ids"], json!([1, 2, 3]));
+    }
+
+    #[test]
+    fn guide_for_examples_command() {
+        let p = guide_payload(Some("examples"));
+        assert_eq!(p["status"], "ok");
+        assert_eq!(p["contract"]["family"], "discovery");
+    }
+
+    #[test]
+    fn guide_unknown_command_message() {
+        let p = guide_payload(Some("does-not-exist"));
+        assert!(p["message"].is_string());
+        assert!(
+            p["message"]
+                .as_str()
+                .unwrap()
+                .contains("No fwc command contract")
+        );
     }
 }

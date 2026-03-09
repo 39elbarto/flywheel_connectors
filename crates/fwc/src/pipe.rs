@@ -603,10 +603,10 @@ type = "string"
 default = "C01234567"
 "#;
 
-const RECIPE_SLACK_CROSS_POST_DISCORD_TOML: &str = r#"
+const RECIPE_SLACK_CROSS_POST_GMAIL_DRAFT_TOML: &str = r#"
 [pipeline]
-name = "slack-cross-post-discord"
-description = "Starter recipe that finds one Slack message set and relays the summary to Discord."
+name = "slack-cross-post-gmail-draft"
+description = "Starter recipe that finds one Slack message set and drafts the relay as email."
 version = "1"
 
 [[steps]]
@@ -616,23 +616,27 @@ input = { query = "{{params.query}}" }
 
 [[steps]]
 id = "relay"
-operation = "discord.send_message"
+operation = "gmail.create_draft"
 depends_on = ["fetch"]
-input = { channel_id = "{{params.discord_channel_id}}", content = "Slack relay for `{{params.query}}`: {{steps.fetch.output.messages[0].text}}" }
+input = { to = "{{params.to}}", subject = "{{params.subject}}", body = "Slack relay for `{{params.query}}`: {{steps.fetch.output.messages[0].text}}" }
 
 [params.query]
 type = "string"
 default = "deployment status"
 
-[params.discord_channel_id]
+[params.to]
 type = "string"
-default = "123456789012345678"
+default = "team@example.com"
+
+[params.subject]
+type = "string"
+default = "Slack relay"
 "#;
 
-const RECIPE_SLACK_CROSS_POST_TELEGRAM_TOML: &str = r#"
+const RECIPE_SLACK_INCIDENT_TO_GITHUB_ISSUE_TOML: &str = r#"
 [pipeline]
-name = "slack-cross-post-telegram"
-description = "Starter recipe that relays a Slack search summary into Telegram."
+name = "slack-incident-to-github-issue"
+description = "Starter recipe that turns a Slack search hit into a GitHub issue draft."
 version = "1"
 
 [[steps]]
@@ -641,18 +645,26 @@ operation = "slack.search_messages"
 input = { query = "{{params.query}}" }
 
 [[steps]]
-id = "relay"
-operation = "telegram.send_message"
+id = "open_issue"
+operation = "github.create_issue"
 depends_on = ["fetch"]
-input = { chat_id = "{{params.chat_id}}", text = "Slack relay for `{{params.query}}`: {{steps.fetch.output.messages[0].text}}" }
+input = { owner = "{{params.owner}}", repo = "{{params.repo}}", title = "{{params.title}}", body = "Slack incident relay for `{{params.query}}`: {{steps.fetch.output.messages[0].text}}" }
 
 [params.query]
 type = "string"
 default = "incident commander"
 
-[params.chat_id]
+[params.owner]
 type = "string"
-default = "-1001234567890"
+default = "octocat"
+
+[params.repo]
+type = "string"
+default = "hello-world"
+
+[params.title]
+type = "string"
+default = "Slack incident relay"
 "#;
 
 const RECIPE_SLACK_DIGEST_EMAIL_DRAFT_TOML: &str = r#"
@@ -847,7 +859,7 @@ version = "1"
 
 [[steps]]
 id = "fetch"
-operation = "gcal.list_events"
+operation = "google-calendar.gcal.list_events"
 input = { calendar_id = "{{params.calendar_id}}", time_min = "{{params.time_min}}", time_max = "{{params.time_max}}" }
 
 [[steps]]
@@ -936,20 +948,20 @@ static BUILTIN_RECIPES: &[BuiltInRecipeSpec] = &[
         pipeline_toml: RECIPE_LINEAR_TRIAGE_TO_SLACK_TOML,
     },
     BuiltInRecipeSpec {
-        slug: "slack-cross-post-discord",
-        title: "Slack Cross-Post to Discord",
+        slug: "slack-cross-post-gmail-draft",
+        title: "Slack Cross-Post Email Draft",
         category: "communication",
-        summary: "Relay a Slack search digest into Discord.",
-        required_connectors: &["slack", "discord"],
-        pipeline_toml: RECIPE_SLACK_CROSS_POST_DISCORD_TOML,
+        summary: "Relay a Slack search digest into a Gmail draft.",
+        required_connectors: &["slack", "gmail"],
+        pipeline_toml: RECIPE_SLACK_CROSS_POST_GMAIL_DRAFT_TOML,
     },
     BuiltInRecipeSpec {
-        slug: "slack-cross-post-telegram",
-        title: "Slack Cross-Post to Telegram",
-        category: "communication",
-        summary: "Relay a Slack search digest into Telegram.",
-        required_connectors: &["slack", "telegram"],
-        pipeline_toml: RECIPE_SLACK_CROSS_POST_TELEGRAM_TOML,
+        slug: "slack-incident-to-github-issue",
+        title: "Slack Incident to GitHub Issue",
+        category: "development",
+        summary: "Turn a Slack search digest into a GitHub issue draft.",
+        required_connectors: &["slack", "github"],
+        pipeline_toml: RECIPE_SLACK_INCIDENT_TO_GITHUB_ISSUE_TOML,
     },
     BuiltInRecipeSpec {
         slug: "slack-digest-email-draft",
@@ -2710,7 +2722,7 @@ operation = "github.list_issues"
         assert!(
             recipes
                 .iter()
-                .any(|recipe| recipe.slug == "slack-cross-post-telegram")
+                .any(|recipe| recipe.slug == "slack-incident-to-github-issue")
         );
     }
 
@@ -2726,5 +2738,763 @@ operation = "github.list_issues"
         assert_eq!(recipe.definition.pipeline.name, "sentry-issue-to-jira");
         assert!(recipe.validation.valid);
         assert!(recipe.toml.starts_with("[pipeline]"));
+    }
+
+    // ── Additional tests ──────────────────────────────────────────
+
+    #[test]
+    fn parse_map_expression_three_rules() {
+        let spec = parse_map_expression("a -> x, b -> y, c -> z").unwrap();
+        assert_eq!(spec.rules.len(), 3);
+    }
+
+    #[test]
+    fn parse_map_expression_with_nested_path() {
+        let spec = parse_map_expression("data.items[0].name -> output.name").unwrap();
+        assert_eq!(spec.rules[0].source, "data.items[0].name");
+        assert_eq!(spec.rules[0].target, "output.name");
+    }
+
+    #[test]
+    fn parse_map_expression_literal_boolean() {
+        let spec = parse_map_expression("true -> flag").unwrap();
+        assert_eq!(spec.rules[0].source, "true");
+    }
+
+    #[test]
+    fn parse_map_expression_literal_number() {
+        let spec = parse_map_expression("42 -> count").unwrap();
+        assert_eq!(spec.rules[0].source, "42");
+    }
+
+    #[test]
+    fn parse_map_expression_only_whitespace() {
+        let err = parse_map_expression("   ").unwrap_err();
+        assert!(err.contains("no mapping rules"));
+    }
+
+    #[test]
+    fn parse_map_expression_only_commas() {
+        let err = parse_map_expression(",,,").unwrap_err();
+        assert!(err.contains("no mapping rules"));
+    }
+
+    #[test]
+    fn parse_map_file_three_rules() {
+        let content = r#"[
+            {"source": "a", "target": "x"},
+            {"source": "b", "target": "y"},
+            {"source": "c", "target": "z"}
+        ]"#;
+        let spec = parse_map_file(content).unwrap();
+        assert_eq!(spec.rules.len(), 3);
+    }
+
+    #[test]
+    fn resolve_literal_string_empty() {
+        let val = resolve_source("\"\"", &json!({}));
+        assert_eq!(val, Some(json!("")));
+    }
+
+    #[test]
+    fn resolve_negative_number() {
+        let val = resolve_source("-5", &json!({}));
+        assert_eq!(val, Some(json!(-5)));
+    }
+
+    #[test]
+    fn resolve_nested_three_levels() {
+        let output = json!({"a": {"b": {"c": 99}}});
+        let val = resolve_source("a.b.c", &output);
+        assert_eq!(val, Some(json!(99)));
+    }
+
+    #[test]
+    fn resolve_array_direct_index() {
+        let output = json!({"list": ["x", "y", "z"]});
+        let val = resolve_source("list[2]", &output);
+        assert_eq!(val, Some(json!("z")));
+    }
+
+    #[test]
+    fn resolve_nested_arrays() {
+        let output = json!({"a": [{"b": [1, 2, 3]}]});
+        let val = resolve_source("a[0].b[2]", &output);
+        assert_eq!(val, Some(json!(3)));
+    }
+
+    #[test]
+    fn resolve_path_missing_intermediate() {
+        let output = json!({"a": {"b": 1}});
+        let val = resolve_source("a.c.d", &output);
+        assert_eq!(val, None);
+    }
+
+    #[test]
+    fn resolve_path_array_on_non_array() {
+        let output = json!({"a": "string"});
+        let val = resolve_source("a[0]", &output);
+        assert_eq!(val, None);
+    }
+
+    #[test]
+    fn set_target_overwrite() {
+        let mut output = Map::new();
+        set_target(&mut output, "key", json!("first"));
+        set_target(&mut output, "key", json!("second"));
+        assert_eq!(output["key"], json!("second"));
+    }
+
+    #[test]
+    fn set_target_multiple_nested_siblings() {
+        let mut output = Map::new();
+        set_target(&mut output, "obj.a", json!(1));
+        set_target(&mut output, "obj.b", json!(2));
+        set_target(&mut output, "obj.c", json!(3));
+        assert_eq!(output["obj"]["a"], json!(1));
+        assert_eq!(output["obj"]["b"], json!(2));
+        assert_eq!(output["obj"]["c"], json!(3));
+    }
+
+    #[test]
+    fn apply_mapping_all_missing_sources() {
+        let output = json!({});
+        let spec = parse_map_expression("a -> x, b -> y, c -> z").unwrap();
+        let result = apply_mapping(&output, &spec);
+        assert_eq!(result.errors.len(), 3);
+    }
+
+    #[test]
+    fn apply_mapping_with_boolean_literal() {
+        let output = json!({"title": "Bug"});
+        let spec = parse_map_expression("title -> text, true -> active").unwrap();
+        let result = apply_mapping(&output, &spec);
+        assert!(result.errors.is_empty());
+        assert_eq!(result.output["active"], true);
+    }
+
+    #[test]
+    fn apply_mapping_with_null_literal() {
+        let spec = parse_map_expression("null -> field").unwrap();
+        let result = apply_mapping(&json!({}), &spec);
+        assert!(result.errors.is_empty());
+        assert!(result.output["field"].is_null());
+    }
+
+    #[test]
+    fn apply_mapping_with_number_literal() {
+        let spec = parse_map_expression("100 -> count").unwrap();
+        let result = apply_mapping(&json!({}), &spec);
+        assert!(result.errors.is_empty());
+        assert_eq!(result.output["count"], 100);
+    }
+
+    #[test]
+    fn mapping_error_display_format() {
+        let err = MappingError {
+            source: "x.y".to_owned(),
+            target: "z".to_owned(),
+            message: "oops".to_owned(),
+        };
+        assert_eq!(err.to_string(), "x.y -> z: oops");
+    }
+
+    #[test]
+    fn mapping_spec_default_is_empty() {
+        let spec = MappingSpec::default();
+        assert!(spec.rules.is_empty());
+    }
+
+    #[test]
+    fn map_rule_clone() {
+        let rule = MapRule {
+            source: "a".to_owned(),
+            target: "b".to_owned(),
+        };
+        let cloned = rule.clone();
+        assert_eq!(rule, cloned);
+    }
+
+    #[test]
+    fn pipe_plan_clone() {
+        let plan = PipePlan {
+            source_operation: "a.b".to_owned(),
+            target_operation: "c.d".to_owned(),
+            mapping: MappingSpec::default(),
+            requires_approval: false,
+            preview_input: None,
+        };
+        let cloned = plan.clone();
+        assert_eq!(plan.source_operation, cloned.source_operation);
+        assert_eq!(plan.target_operation, cloned.target_operation);
+    }
+
+    #[test]
+    fn pipeline_validation_empty_name() {
+        let definition = parse_pipeline_definition(
+            r#"
+[pipeline]
+name = ""
+
+[[steps]]
+id = "fetch"
+operation = "github.list_issues"
+"#,
+        )
+        .unwrap();
+        let validation = validate_pipeline_definition(&definition);
+        assert!(!validation.valid);
+        assert!(
+            validation
+                .errors
+                .iter()
+                .any(|e| e.contains("pipeline.name must not be empty"))
+        );
+    }
+
+    #[test]
+    fn pipeline_validation_empty_step_id() {
+        let definition = parse_pipeline_definition(
+            r#"
+[pipeline]
+name = "test"
+
+[[steps]]
+id = ""
+operation = "github.list_issues"
+"#,
+        )
+        .unwrap();
+        let validation = validate_pipeline_definition(&definition);
+        assert!(!validation.valid);
+        assert!(
+            validation
+                .errors
+                .iter()
+                .any(|e| e.contains("non-empty id"))
+        );
+    }
+
+    #[test]
+    fn pipeline_validation_empty_operation() {
+        let definition = parse_pipeline_definition(
+            r#"
+[pipeline]
+name = "test"
+
+[[steps]]
+id = "fetch"
+operation = ""
+"#,
+        )
+        .unwrap();
+        let validation = validate_pipeline_definition(&definition);
+        assert!(!validation.valid);
+        assert!(
+            validation
+                .errors
+                .iter()
+                .any(|e| e.contains("non-empty operation"))
+        );
+    }
+
+    #[test]
+    fn pipeline_validation_duplicate_step_ids() {
+        let definition = parse_pipeline_definition(
+            r#"
+[pipeline]
+name = "test"
+
+[[steps]]
+id = "fetch"
+operation = "a.b"
+
+[[steps]]
+id = "fetch"
+operation = "c.d"
+"#,
+        )
+        .unwrap();
+        let validation = validate_pipeline_definition(&definition);
+        assert!(!validation.valid);
+        assert!(
+            validation
+                .errors
+                .iter()
+                .any(|e| e.contains("duplicate pipeline step id"))
+        );
+    }
+
+    #[test]
+    fn pipeline_validation_self_dependency() {
+        let definition = parse_pipeline_definition(
+            r#"
+[pipeline]
+name = "test"
+
+[[steps]]
+id = "fetch"
+operation = "a.b"
+depends_on = ["fetch"]
+"#,
+        )
+        .unwrap();
+        let validation = validate_pipeline_definition(&definition);
+        assert!(!validation.valid);
+        assert!(
+            validation
+                .errors
+                .iter()
+                .any(|e| e.contains("cannot depend on itself"))
+        );
+    }
+
+    #[test]
+    fn pipeline_validation_unknown_dependency() {
+        let definition = parse_pipeline_definition(
+            r#"
+[pipeline]
+name = "test"
+
+[[steps]]
+id = "fetch"
+operation = "a.b"
+depends_on = ["nonexistent"]
+"#,
+        )
+        .unwrap();
+        let validation = validate_pipeline_definition(&definition);
+        assert!(!validation.valid);
+        assert!(
+            validation
+                .errors
+                .iter()
+                .any(|e| e.contains("unknown step"))
+        );
+    }
+
+    #[test]
+    fn pipeline_validation_unsupported_param_type() {
+        let definition = parse_pipeline_definition(
+            r#"
+[pipeline]
+name = "test"
+
+[[steps]]
+id = "fetch"
+operation = "a.b"
+
+[params.x]
+type = "custom_type"
+"#,
+        )
+        .unwrap();
+        let validation = validate_pipeline_definition(&definition);
+        assert!(!validation.valid);
+        assert!(
+            validation
+                .errors
+                .iter()
+                .any(|e| e.contains("unsupported type"))
+        );
+    }
+
+    #[test]
+    fn pipeline_validation_no_steps() {
+        let definition = parse_pipeline_definition(
+            r#"
+[pipeline]
+name = "empty"
+"#,
+        )
+        .unwrap();
+        let validation = validate_pipeline_definition(&definition);
+        assert!(!validation.valid);
+        assert!(
+            validation
+                .errors
+                .iter()
+                .any(|e| e.contains("at least one"))
+        );
+    }
+
+    #[test]
+    fn pipeline_valid_three_steps_linear_chain() {
+        let definition = parse_pipeline_definition(
+            r#"
+[pipeline]
+name = "chain"
+
+[[steps]]
+id = "a"
+operation = "x.a"
+
+[[steps]]
+id = "b"
+operation = "x.b"
+depends_on = ["a"]
+
+[[steps]]
+id = "c"
+operation = "x.c"
+depends_on = ["b"]
+"#,
+        )
+        .unwrap();
+        let validation = validate_pipeline_definition(&definition);
+        assert!(validation.valid);
+        assert_eq!(validation.execution_order, vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn bind_pipeline_params_missing_required() {
+        let definition = parse_pipeline_definition(
+            r#"
+[pipeline]
+name = "test"
+
+[[steps]]
+id = "fetch"
+operation = "a.b"
+
+[params.owner]
+type = "string"
+required = true
+"#,
+        )
+        .unwrap();
+        let errors = bind_pipeline_params(&definition, &[]).unwrap_err();
+        assert!(errors.iter().any(|e| e.contains("missing required")));
+    }
+
+    #[test]
+    fn bind_pipeline_params_unknown_param() {
+        let definition = parse_pipeline_definition(
+            r#"
+[pipeline]
+name = "test"
+
+[[steps]]
+id = "fetch"
+operation = "a.b"
+
+[params.owner]
+type = "string"
+default = "x"
+"#,
+        )
+        .unwrap();
+        let errors =
+            bind_pipeline_params(&definition, &["unknown=val".to_owned()]).unwrap_err();
+        assert!(errors.iter().any(|e| e.contains("unknown pipeline parameter")));
+    }
+
+    #[test]
+    fn bind_pipeline_params_invalid_format() {
+        let definition = parse_pipeline_definition(
+            r#"
+[pipeline]
+name = "test"
+
+[[steps]]
+id = "fetch"
+operation = "a.b"
+
+[params.owner]
+type = "string"
+default = "x"
+"#,
+        )
+        .unwrap();
+        let errors =
+            bind_pipeline_params(&definition, &["no-equals-sign".to_owned()]).unwrap_err();
+        assert!(errors.iter().any(|e| e.contains("expected KEY=VALUE")));
+    }
+
+    #[test]
+    fn bind_pipeline_params_type_mismatch() {
+        let definition = parse_pipeline_definition(
+            r#"
+[pipeline]
+name = "test"
+
+[[steps]]
+id = "fetch"
+operation = "a.b"
+
+[params.count]
+type = "integer"
+required = true
+"#,
+        )
+        .unwrap();
+        let errors = bind_pipeline_params(&definition, &["count=hello".to_owned()]).unwrap_err();
+        assert!(errors.iter().any(|e| e.contains("expected type")));
+    }
+
+    #[test]
+    fn builtin_recipe_slugs_non_empty() {
+        let slugs = builtin_recipe_slugs();
+        assert!(slugs.len() >= 15);
+    }
+
+    #[test]
+    fn builtin_recipe_slugs_unique() {
+        let slugs = builtin_recipe_slugs();
+        let set: std::collections::HashSet<&str> = slugs.iter().copied().collect();
+        assert_eq!(slugs.len(), set.len());
+    }
+
+    #[test]
+    fn load_builtin_recipe_not_found() {
+        let err = load_builtin_recipe("nonexistent-recipe").unwrap_err();
+        assert!(err.contains("no built-in recipe"));
+    }
+
+    #[test]
+    fn load_builtin_recipe_github_open_issues() {
+        let recipe = load_builtin_recipe("github-open-issues-to-slack").unwrap();
+        assert!(recipe.validation.valid);
+        assert_eq!(recipe.definition.steps.len(), 2);
+    }
+
+    #[test]
+    fn load_builtin_recipe_jira_backlog() {
+        let recipe = load_builtin_recipe("jira-backlog-to-slack").unwrap();
+        assert!(recipe.validation.valid);
+        assert_eq!(recipe.category, "development");
+    }
+
+    #[test]
+    fn load_builtin_recipe_linear_triage() {
+        let recipe = load_builtin_recipe("linear-triage-to-slack").unwrap();
+        assert!(recipe.validation.valid);
+        assert_eq!(recipe.required_connectors, vec!["linear", "slack"]);
+    }
+
+    #[test]
+    fn load_builtin_recipe_slack_cross_post() {
+        let recipe = load_builtin_recipe("slack-cross-post-gmail-draft").unwrap();
+        assert!(recipe.validation.valid);
+        assert_eq!(recipe.category, "communication");
+    }
+
+    #[test]
+    fn load_builtin_recipe_llm_budget() {
+        let recipe = load_builtin_recipe("llm-budget-to-slack").unwrap();
+        assert!(recipe.validation.valid);
+        assert_eq!(recipe.category, "operations");
+    }
+
+    #[test]
+    fn builtin_recipe_summaries_all_valid() {
+        let summaries = builtin_recipe_summaries();
+        for summary in &summaries {
+            assert!(summary.valid, "recipe {} should be valid", summary.slug);
+        }
+    }
+
+    #[test]
+    fn builtin_recipe_summaries_sorted_by_category() {
+        let summaries = builtin_recipe_summaries();
+        for window in summaries.windows(2) {
+            assert!(
+                window[0].category <= window[1].category,
+                "{} should come before {}",
+                window[0].slug,
+                window[1].slug
+            );
+        }
+    }
+
+    #[test]
+    fn builtin_recipe_export_path_format() {
+        assert_eq!(
+            builtin_recipe_export_path("my-recipe"),
+            ".fwc/pipelines/my-recipe.toml"
+        );
+    }
+
+    #[test]
+    fn default_pipeline_roots_project() {
+        let roots = default_pipeline_roots(std::path::Path::new("/project"));
+        assert_eq!(roots.project, std::path::PathBuf::from("/project/.fwc/pipelines"));
+    }
+
+    #[test]
+    fn is_supported_param_type_all_valid() {
+        for t in &["string", "integer", "number", "boolean", "array", "object", "any"] {
+            assert!(is_supported_param_type(t), "{t} should be supported");
+        }
+    }
+
+    #[test]
+    fn is_supported_param_type_invalid() {
+        assert!(!is_supported_param_type("custom"));
+        assert!(!is_supported_param_type(""));
+        assert!(!is_supported_param_type("int"));
+    }
+
+    #[test]
+    fn value_matches_type_string() {
+        assert!(value_matches_type(&json!("hello"), "string"));
+        assert!(!value_matches_type(&json!(42), "string"));
+    }
+
+    #[test]
+    fn value_matches_type_integer() {
+        assert!(value_matches_type(&json!(42), "integer"));
+        assert!(!value_matches_type(&json!("42"), "integer"));
+    }
+
+    #[test]
+    fn value_matches_type_number() {
+        assert!(value_matches_type(&json!(1.5), "number"));
+        assert!(value_matches_type(&json!(42), "number"));
+        assert!(!value_matches_type(&json!("42"), "number"));
+    }
+
+    #[test]
+    fn value_matches_type_boolean() {
+        assert!(value_matches_type(&json!(true), "boolean"));
+        assert!(!value_matches_type(&json!("true"), "boolean"));
+    }
+
+    #[test]
+    fn value_matches_type_array() {
+        assert!(value_matches_type(&json!([1, 2]), "array"));
+        assert!(!value_matches_type(&json!({}), "array"));
+    }
+
+    #[test]
+    fn value_matches_type_object() {
+        assert!(value_matches_type(&json!({}), "object"));
+        assert!(!value_matches_type(&json!([]), "object"));
+    }
+
+    #[test]
+    fn value_matches_type_any() {
+        assert!(value_matches_type(&json!(null), "any"));
+        assert!(value_matches_type(&json!("x"), "any"));
+        assert!(value_matches_type(&json!(42), "any"));
+    }
+
+    #[test]
+    fn value_matches_type_unknown() {
+        assert!(!value_matches_type(&json!("x"), "unknown_type"));
+    }
+
+    #[test]
+    fn json_type_name_variants() {
+        assert_eq!(json_type_name(&json!(null)), "null");
+        assert_eq!(json_type_name(&json!(true)), "boolean");
+        assert_eq!(json_type_name(&json!(42)), "integer");
+        assert_eq!(json_type_name(&json!(1.5)), "number");
+        assert_eq!(json_type_name(&json!("x")), "string");
+        assert_eq!(json_type_name(&json!([])), "array");
+        assert_eq!(json_type_name(&json!({})), "object");
+    }
+
+    #[test]
+    fn parse_cli_param_value_string() {
+        assert_eq!(parse_cli_param_value("hello"), json!("hello"));
+    }
+
+    #[test]
+    fn parse_cli_param_value_integer() {
+        assert_eq!(parse_cli_param_value("42"), json!(42));
+    }
+
+    #[test]
+    fn parse_cli_param_value_boolean() {
+        assert_eq!(parse_cli_param_value("true"), json!(true));
+    }
+
+    #[test]
+    fn parse_cli_param_value_json_object() {
+        assert_eq!(
+            parse_cli_param_value(r#"{"key":"val"}"#),
+            json!({"key": "val"})
+        );
+    }
+
+    #[test]
+    fn toml_to_json_string() {
+        let v = toml::Value::String("hello".into());
+        assert_eq!(toml_to_json(&v).unwrap(), json!("hello"));
+    }
+
+    #[test]
+    fn toml_to_json_integer() {
+        let v = toml::Value::Integer(42);
+        assert_eq!(toml_to_json(&v).unwrap(), json!(42));
+    }
+
+    #[test]
+    fn pipeline_risk_rank_values() {
+        assert_eq!(pipeline_risk_rank("low"), 1);
+        assert_eq!(pipeline_risk_rank("medium"), 2);
+        assert_eq!(pipeline_risk_rank("high"), 3);
+        assert_eq!(pipeline_risk_rank("critical"), 4);
+        assert_eq!(pipeline_risk_rank("unknown"), 0);
+    }
+
+    #[test]
+    fn pipeline_safety_tier_rank_values() {
+        assert_eq!(pipeline_safety_tier_rank("safe"), 1);
+        assert_eq!(pipeline_safety_tier_rank("risky"), 2);
+        assert_eq!(pipeline_safety_tier_rank("dangerous"), 3);
+        assert_eq!(pipeline_safety_tier_rank("critical"), 4);
+        assert_eq!(pipeline_safety_tier_rank("forbidden"), 5);
+        assert_eq!(pipeline_safety_tier_rank("unknown"), 0);
+    }
+
+    #[test]
+    fn estimated_api_calls_unconditional() {
+        let calls = estimated_api_calls(false);
+        assert_eq!(calls.min, 1);
+        assert_eq!(calls.max, 1);
+        assert!(!calls.conditional);
+        assert_eq!(calls.summary, "~1 API call");
+    }
+
+    #[test]
+    fn estimated_api_calls_conditional() {
+        let calls = estimated_api_calls(true);
+        assert_eq!(calls.min, 0);
+        assert_eq!(calls.max, 1);
+        assert!(calls.conditional);
+        assert_eq!(calls.summary, "~0-1 API calls");
+    }
+
+    #[test]
+    fn estimated_api_call_summary_equal() {
+        assert_eq!(estimated_api_call_summary(3, 3), "~3 API calls");
+    }
+
+    #[test]
+    fn estimated_api_call_summary_range() {
+        assert_eq!(estimated_api_call_summary(1, 5), "~1-5 API calls");
+    }
+
+    #[test]
+    fn estimated_api_call_summary_single() {
+        assert_eq!(estimated_api_call_summary(1, 1), "~1 API call");
+    }
+
+    #[test]
+    fn pipeline_definition_parse_invalid_toml() {
+        let err = parse_pipeline_definition("not valid toml {{{").unwrap_err();
+        assert!(err.contains("invalid pipeline TOML"));
+    }
+
+    #[test]
+    fn resolve_pipeline_reference_nonexistent_file() {
+        let roots = PipelineRoots {
+            project: std::path::PathBuf::from("/nonexistent"),
+            user: None,
+        };
+        let err = resolve_pipeline_reference("/nonexistent/pipeline.toml", &roots).unwrap_err();
+        assert!(err.contains("not found"));
     }
 }

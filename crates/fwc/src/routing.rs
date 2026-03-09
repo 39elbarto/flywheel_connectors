@@ -12,7 +12,6 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-
 // ---------------------------------------------------------------------------
 // Health state
 // ---------------------------------------------------------------------------
@@ -214,7 +213,13 @@ impl Default for SignalWeights {
 impl SignalWeights {
     /// Sum of all weights (used for normalisation).
     fn total(&self) -> f64 {
-        self.zone + self.health + self.rate_limit + self.success + self.preference + self.safety + self.latency
+        self.zone
+            + self.health
+            + self.rate_limit
+            + self.success
+            + self.preference
+            + self.safety
+            + self.latency
     }
 }
 
@@ -252,7 +257,10 @@ fn preference_score(count: u32) -> f64 {
 
 /// Compute the routing score and breakdown for a single candidate.
 #[must_use]
-pub fn compute_score(candidate: &ConnectorCandidate, weights: &SignalWeights) -> (f64, ScoreBreakdown) {
+pub fn compute_score(
+    candidate: &ConnectorCandidate,
+    weights: &SignalWeights,
+) -> (f64, ScoreBreakdown) {
     // Zone and health are hard gates: if either is zero the whole score is 0.
     let zone_val = if candidate.zone_authorized { 1.0 } else { 0.0 };
     let health_val = candidate.health.score();
@@ -288,8 +296,18 @@ pub fn compute_score(candidate: &ConnectorCandidate, weights: &SignalWeights) ->
     }
 
     let total_weight = weights.total();
-    let raw = breakdown.zone + breakdown.health + breakdown.rate_limit + breakdown.success + breakdown.preference + breakdown.safety + breakdown.latency;
-    let normalised = if total_weight > 0.0 { raw / total_weight } else { 0.0 };
+    let raw = breakdown.zone
+        + breakdown.health
+        + breakdown.rate_limit
+        + breakdown.success
+        + breakdown.preference
+        + breakdown.safety
+        + breakdown.latency;
+    let normalised = if total_weight > 0.0 {
+        raw / total_weight
+    } else {
+        0.0
+    };
 
     (normalised, breakdown)
 }
@@ -304,7 +322,10 @@ pub fn compute_score(candidate: &ConnectorCandidate, weights: &SignalWeights) ->
 /// Ties are broken by connector ID (lexicographic, ascending) for
 /// determinism.
 #[must_use]
-pub fn rank_candidates(candidates: &[ConnectorCandidate], config: &RoutingConfig) -> Vec<RoutingScore> {
+pub fn rank_candidates(
+    candidates: &[ConnectorCandidate],
+    config: &RoutingConfig,
+) -> Vec<RoutingScore> {
     if candidates.is_empty() {
         return Vec::new();
     }
@@ -491,7 +512,12 @@ mod tests {
 
     #[test]
     fn health_state_display_roundtrip() {
-        for state in [HealthState::Healthy, HealthState::Degraded, HealthState::Error, HealthState::Unknown] {
+        for state in [
+            HealthState::Healthy,
+            HealthState::Degraded,
+            HealthState::Error,
+            HealthState::Unknown,
+        ] {
             let s = state.to_string();
             let parsed: HealthState = s.parse().unwrap();
             assert_eq!(parsed, state);
@@ -500,8 +526,14 @@ mod tests {
 
     #[test]
     fn health_state_parse_case_insensitive() {
-        assert_eq!("HEALTHY".parse::<HealthState>().unwrap(), HealthState::Healthy);
-        assert_eq!("Degraded".parse::<HealthState>().unwrap(), HealthState::Degraded);
+        assert_eq!(
+            "HEALTHY".parse::<HealthState>().unwrap(),
+            HealthState::Healthy
+        );
+        assert_eq!(
+            "Degraded".parse::<HealthState>().unwrap(),
+            HealthState::Degraded
+        );
     }
 
     #[test]
@@ -524,7 +556,13 @@ mod tests {
 
     #[test]
     fn safety_rank_display_roundtrip() {
-        for rank in [SafetyRank::Unknown, SafetyRank::Safe, SafetyRank::Risky, SafetyRank::Dangerous, SafetyRank::Critical] {
+        for rank in [
+            SafetyRank::Unknown,
+            SafetyRank::Safe,
+            SafetyRank::Risky,
+            SafetyRank::Dangerous,
+            SafetyRank::Critical,
+        ] {
             let s = rank.to_string();
             let parsed: SafetyRank = s.parse().unwrap();
             assert_eq!(parsed, rank);
@@ -534,7 +572,10 @@ mod tests {
     #[test]
     fn safety_rank_parse_case_insensitive() {
         assert_eq!("SAFE".parse::<SafetyRank>().unwrap(), SafetyRank::Safe);
-        assert_eq!("Critical".parse::<SafetyRank>().unwrap(), SafetyRank::Critical);
+        assert_eq!(
+            "Critical".parse::<SafetyRank>().unwrap(),
+            SafetyRank::Critical
+        );
     }
 
     #[test]
@@ -1127,7 +1168,10 @@ mod tests {
         let mut c = default_candidate();
         c.safety_tier = SafetyRank::Critical;
         let (score, _) = compute_score(&c, &default_weights());
-        assert!(score > 0.0, "critical safety should still produce a positive score");
+        assert!(
+            score > 0.0,
+            "critical safety should still produce a positive score"
+        );
     }
 
     #[test]
@@ -1152,5 +1196,322 @@ mod tests {
     fn routing_config_default() {
         let config = RoutingConfig::default();
         assert_eq!(config.weights, SignalWeights::default());
+    }
+
+    // ── Additional tests ──────────────────────────────────────────
+
+    #[test]
+    fn health_state_display_healthy() {
+        assert_eq!(HealthState::Healthy.to_string(), "healthy");
+    }
+
+    #[test]
+    fn health_state_display_degraded() {
+        assert_eq!(HealthState::Degraded.to_string(), "degraded");
+    }
+
+    #[test]
+    fn health_state_display_error() {
+        assert_eq!(HealthState::Error.to_string(), "error");
+    }
+
+    #[test]
+    fn health_state_display_unknown() {
+        assert_eq!(HealthState::Unknown.to_string(), "unknown");
+    }
+
+    #[test]
+    fn safety_rank_display_safe() {
+        assert_eq!(SafetyRank::Safe.to_string(), "safe");
+    }
+
+    #[test]
+    fn safety_rank_display_risky() {
+        assert_eq!(SafetyRank::Risky.to_string(), "risky");
+    }
+
+    #[test]
+    fn safety_rank_display_dangerous() {
+        assert_eq!(SafetyRank::Dangerous.to_string(), "dangerous");
+    }
+
+    #[test]
+    fn safety_rank_display_critical() {
+        assert_eq!(SafetyRank::Critical.to_string(), "critical");
+    }
+
+    #[test]
+    fn safety_rank_display_unknown() {
+        assert_eq!(SafetyRank::Unknown.to_string(), "unknown");
+    }
+
+    #[test]
+    fn safety_rank_parse_risky() {
+        assert_eq!("risky".parse::<SafetyRank>().unwrap(), SafetyRank::Risky);
+    }
+
+    #[test]
+    fn safety_rank_parse_dangerous() {
+        assert_eq!(
+            "dangerous".parse::<SafetyRank>().unwrap(),
+            SafetyRank::Dangerous
+        );
+    }
+
+    #[test]
+    fn safety_rank_dangerous_score() {
+        assert!((SafetyRank::Dangerous.score() - 0.25).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn latency_score_500ms() {
+        let score = latency_score(500);
+        // 1000 / (1000+500) = 2/3 ≈ 0.6667
+        assert!((score - 2.0 / 3.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn latency_score_2000ms() {
+        let score = latency_score(2000);
+        // 1000 / 3000 ≈ 0.333
+        assert!((score - 1.0 / 3.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn preference_score_one_choice() {
+        let score = preference_score(1);
+        assert!(score > 0.0);
+        assert!(score < 0.5);
+    }
+
+    #[test]
+    fn preference_score_hundred_choices() {
+        let score = preference_score(100);
+        // ln(101) / ln(101) = 1.0
+        assert!((score - 1.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn preference_score_monotonic_increase() {
+        let vals: Vec<f64> = (0..10).map(|i| preference_score(i * 10)).collect();
+        for window in vals.windows(2) {
+            assert!(window[1] >= window[0], "preference score should be monotonic");
+        }
+    }
+
+    #[test]
+    fn weights_custom_total() {
+        let w = SignalWeights {
+            zone: 10.0,
+            health: 20.0,
+            rate_limit: 30.0,
+            success: 0.0,
+            preference: 0.0,
+            safety: 0.0,
+            latency: 0.0,
+        };
+        assert!((w.total() - 60.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn score_breakdown_health_weight_applied() {
+        let c = default_candidate();
+        let w = default_weights();
+        let (_, bd) = compute_score(&c, &w);
+        // Healthy (1.0) * 50.0 = 50.0
+        assert!((bd.health - 50.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn score_breakdown_degraded_health_half_weight() {
+        let mut c = default_candidate();
+        c.health = HealthState::Degraded;
+        let w = default_weights();
+        let (_, bd) = compute_score(&c, &w);
+        // Degraded (0.5) * 50.0 = 25.0
+        assert!((bd.health - 25.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn score_breakdown_safety_weight_safe() {
+        let c = default_candidate();
+        let w = default_weights();
+        let (_, bd) = compute_score(&c, &w);
+        // Safe (1.0) * 8.0 = 8.0
+        assert!((bd.safety - 8.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn score_breakdown_safety_weight_dangerous() {
+        let mut c = default_candidate();
+        c.safety_tier = SafetyRank::Dangerous;
+        let w = default_weights();
+        let (_, bd) = compute_score(&c, &w);
+        // Dangerous (0.25) * 8.0 = 2.0
+        assert!((bd.safety - 2.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn score_both_unauthorized_and_unhealthy_yields_zero() {
+        let mut c = default_candidate();
+        c.zone_authorized = false;
+        c.health = HealthState::Error;
+        let (score, bd) = compute_score(&c, &default_weights());
+        assert!((score - 0.0).abs() < f64::EPSILON);
+        assert!((bd.rate_limit - 0.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn rank_five_candidates_correct_order() {
+        let ids = ["e", "d", "c", "b", "a"];
+        let rates = [0.1, 0.3, 0.5, 0.7, 0.9];
+        let candidates: Vec<ConnectorCandidate> = ids
+            .iter()
+            .zip(rates.iter())
+            .map(|(id, &rate)| {
+                let mut c = default_candidate();
+                c.connector_id = (*id).to_owned();
+                c.success_rate = rate;
+                c
+            })
+            .collect();
+
+        let result = rank_candidates(&candidates, &default_config());
+        assert_eq!(result.len(), 5);
+        // Highest success rate first
+        assert_eq!(result[0].connector_id, "a");
+        assert!(result[0].recommended);
+        // Only first is recommended
+        for r in &result[1..] {
+            assert!(!r.recommended);
+        }
+    }
+
+    #[test]
+    fn rank_all_error_health_no_recommended() {
+        let candidates: Vec<ConnectorCandidate> = (0..3)
+            .map(|i| {
+                let mut c = default_candidate();
+                c.connector_id = format!("c{i}");
+                c.health = HealthState::Error;
+                c
+            })
+            .collect();
+        let result = rank_candidates(&candidates, &default_config());
+        for r in &result {
+            assert!(!r.recommended);
+            assert!((r.score - 0.0).abs() < f64::EPSILON);
+        }
+    }
+
+    #[test]
+    fn pref_store_data_accessor_returns_btreemap() {
+        let mut store = PreferenceStore::new("/tmp/test_data_acc.json");
+        store.record_choice("search", "algolia");
+        let data = store.data();
+        assert_eq!(data.len(), 1);
+        assert!(data.contains_key("search"));
+    }
+
+    #[test]
+    fn pref_store_get_preference_unknown_intent() {
+        let store = PreferenceStore::new("/tmp/test_unknown_intent.json");
+        assert_eq!(store.get_preference("unknown_intent", "slack"), 0);
+    }
+
+    #[test]
+    fn pref_store_record_different_connectors_same_intent() {
+        let mut store = PreferenceStore::new("/tmp/test_diff_conn.json");
+        store.record_choice("notify", "slack");
+        store.record_choice("notify", "discord");
+        store.record_choice("notify", "teams");
+        assert_eq!(store.get_preference("notify", "slack"), 1);
+        assert_eq!(store.get_preference("notify", "discord"), 1);
+        assert_eq!(store.get_preference("notify", "teams"), 1);
+    }
+
+    #[test]
+    fn pref_store_record_many_increments() {
+        let mut store = PreferenceStore::new("/tmp/test_many_inc.json");
+        for _ in 0..100 {
+            store.record_choice("deploy", "k8s");
+        }
+        assert_eq!(store.get_preference("deploy", "k8s"), 100);
+    }
+
+    #[test]
+    fn connector_candidate_clone() {
+        let c = default_candidate();
+        let cloned = c.clone();
+        assert_eq!(c.connector_id, cloned.connector_id);
+        assert_eq!(c.operation_id, cloned.operation_id);
+    }
+
+    #[test]
+    fn routing_score_contains_operation_id() {
+        let mut c = default_candidate();
+        c.operation_id = "custom_op".to_owned();
+        let result = rank_candidates(&[c], &default_config());
+        assert_eq!(result[0].operation_id, "custom_op");
+    }
+
+    #[test]
+    fn score_rate_headroom_negative_clamped() {
+        let mut c = default_candidate();
+        c.rate_headroom = -1.0;
+        let w = default_weights();
+        let (_, bd) = compute_score(&c, &w);
+        assert!((bd.rate_limit - 0.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn score_success_rate_clamped_above_one() {
+        let mut c = default_candidate();
+        c.success_rate = 2.0;
+        let w = default_weights();
+        let (_, bd) = compute_score(&c, &w);
+        // Clamped to 1.0 * 15.0 = 15.0
+        assert!((bd.success - 15.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn score_zone_unauthorized_breakdown_retains_zone() {
+        let mut c = default_candidate();
+        c.zone_authorized = false;
+        let (_, bd) = compute_score(&c, &default_weights());
+        assert!((bd.zone - 0.0).abs() < f64::EPSILON);
+        // Other signals zeroed
+        assert!((bd.success - 0.0).abs() < f64::EPSILON);
+        assert!((bd.safety - 0.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn score_error_health_breakdown_retains_health() {
+        let mut c = default_candidate();
+        c.health = HealthState::Error;
+        let (_, bd) = compute_score(&c, &default_weights());
+        assert!((bd.health - 0.0).abs() < f64::EPSILON);
+        // Other signals zeroed
+        assert!((bd.rate_limit - 0.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn health_state_parse_mixed_case() {
+        assert_eq!(
+            "UnKnOwN".parse::<HealthState>().unwrap(),
+            HealthState::Unknown
+        );
+        assert_eq!(
+            "ERROR".parse::<HealthState>().unwrap(),
+            HealthState::Error
+        );
+    }
+
+    #[test]
+    fn safety_rank_parse_mixed_case() {
+        assert_eq!(
+            "DaNgErOuS".parse::<SafetyRank>().unwrap(),
+            SafetyRank::Dangerous
+        );
     }
 }

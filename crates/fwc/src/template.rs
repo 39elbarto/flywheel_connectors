@@ -399,4 +399,504 @@ mod tests {
             serde_json::to_string(&generate_template(&schema, false, &BTreeMap::new())).unwrap();
         assert_eq!(a, b);
     }
+
+    // ── Additional template tests ─────────────────────────────────
+
+    #[test]
+    fn number_placeholder() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "price": { "type": "number" }
+            }
+        });
+        let result = generate_template(&schema, false, &BTreeMap::new());
+        assert_eq!(result["price"], "<number:optional>");
+    }
+
+    #[test]
+    fn null_type_returns_null() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "nothing": { "type": "null" }
+            }
+        });
+        let result = generate_template(&schema, false, &BTreeMap::new());
+        assert!(result["nothing"].is_null());
+    }
+
+    #[test]
+    fn unknown_type_placeholder() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "weird": { "type": "custom_type" }
+            }
+        });
+        let result = generate_template(&schema, false, &BTreeMap::new());
+        assert_eq!(result["weird"], "<custom_type:optional>");
+    }
+
+    #[test]
+    fn required_string_placeholder() {
+        let schema = json!({
+            "type": "object",
+            "required": ["name"],
+            "properties": {
+                "name": { "type": "string" }
+            }
+        });
+        let result = generate_template(&schema, false, &BTreeMap::new());
+        assert_eq!(result["name"], "<string:required>");
+    }
+
+    #[test]
+    fn required_integer_placeholder() {
+        let schema = json!({
+            "type": "object",
+            "required": ["count"],
+            "properties": {
+                "count": { "type": "integer" }
+            }
+        });
+        let result = generate_template(&schema, false, &BTreeMap::new());
+        assert_eq!(result["count"], "<integer:required>");
+    }
+
+    #[test]
+    fn required_number_placeholder() {
+        let schema = json!({
+            "type": "object",
+            "required": ["amount"],
+            "properties": {
+                "amount": { "type": "number" }
+            }
+        });
+        let result = generate_template(&schema, false, &BTreeMap::new());
+        assert_eq!(result["amount"], "<number:required>");
+    }
+
+    #[test]
+    fn required_boolean_placeholder() {
+        let schema = json!({
+            "type": "object",
+            "required": ["active"],
+            "properties": {
+                "active": { "type": "boolean" }
+            }
+        });
+        let result = generate_template(&schema, false, &BTreeMap::new());
+        assert_eq!(result["active"], "<boolean:required>");
+    }
+
+    #[test]
+    fn top_level_array_generates_single_item() {
+        let schema = json!({
+            "type": "array",
+            "items": { "type": "integer" }
+        });
+        let result = generate_template(&schema, false, &BTreeMap::new());
+        assert!(result.is_array());
+        assert_eq!(result.as_array().unwrap().len(), 1);
+        assert_eq!(result[0], "<integer:optional>");
+    }
+
+    #[test]
+    fn top_level_string_type_returns_placeholder() {
+        let schema = json!({"type": "string"});
+        let result = generate_template(&schema, false, &BTreeMap::new());
+        assert_eq!(result, "<string:optional>");
+    }
+
+    #[test]
+    fn top_level_integer_type_returns_placeholder() {
+        let schema = json!({"type": "integer"});
+        let result = generate_template(&schema, false, &BTreeMap::new());
+        assert_eq!(result, "<integer:optional>");
+    }
+
+    #[test]
+    fn top_level_boolean_type_returns_placeholder() {
+        let schema = json!({"type": "boolean"});
+        let result = generate_template(&schema, false, &BTreeMap::new());
+        assert_eq!(result, "<boolean:optional>");
+    }
+
+    #[test]
+    fn no_type_returns_unknown() {
+        let schema = json!({});
+        let result = generate_template(&schema, false, &BTreeMap::new());
+        assert_eq!(result, "<unknown>");
+    }
+
+    #[test]
+    fn enum_single_value_no_pipe() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "state": {
+                    "type": "string",
+                    "enum": ["only"]
+                }
+            }
+        });
+        let result = generate_template(&schema, false, &BTreeMap::new());
+        assert_eq!(result["state"], "only");
+    }
+
+    #[test]
+    fn enum_numeric_first_value_returned_directly() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "level": {
+                    "type": "integer",
+                    "enum": [1, 2, 3]
+                }
+            }
+        });
+        let result = generate_template(&schema, false, &BTreeMap::new());
+        assert_eq!(result["level"], 1);
+    }
+
+    #[test]
+    fn default_takes_precedence_over_example() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "port": { "type": "integer", "default": 8080, "example": 9090 }
+            }
+        });
+        let result = generate_template(&schema, false, &BTreeMap::new());
+        assert_eq!(result["port"], 8080);
+    }
+
+    #[test]
+    fn example_takes_precedence_over_enum() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "color": { "type": "string", "example": "red", "enum": ["blue", "green"] }
+            }
+        });
+        let result = generate_template(&schema, false, &BTreeMap::new());
+        assert_eq!(result["color"], "red");
+    }
+
+    #[test]
+    fn fill_nested_path_replaces_correctly() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "metadata": {
+                    "type": "object",
+                    "properties": {
+                        "name": { "type": "string" }
+                    }
+                }
+            }
+        });
+        let mut fill = BTreeMap::new();
+        fill.insert("metadata.name".to_string(), "my-app".to_string());
+        let result = generate_template(&schema, false, &fill);
+        assert_eq!(result["metadata"]["name"], "my-app");
+    }
+
+    #[test]
+    fn fill_json_boolean_parsed() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "active": { "type": "boolean" }
+            }
+        });
+        let mut fill = BTreeMap::new();
+        fill.insert("active".to_string(), "true".to_string());
+        let result = generate_template(&schema, false, &fill);
+        assert_eq!(result["active"], true);
+    }
+
+    #[test]
+    fn fill_json_null_parsed() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "field": { "type": "null" }
+            }
+        });
+        let mut fill = BTreeMap::new();
+        fill.insert("field".to_string(), "null".to_string());
+        let result = generate_template(&schema, false, &fill);
+        assert!(result["field"].is_null());
+    }
+
+    #[test]
+    fn fill_non_json_string_kept_as_string() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "tag": { "type": "string" }
+            }
+        });
+        let mut fill = BTreeMap::new();
+        fill.insert("tag".to_string(), "hello world".to_string());
+        let result = generate_template(&schema, false, &fill);
+        assert_eq!(result["tag"], "hello world");
+    }
+
+    #[test]
+    fn fill_overrides_default() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "page": { "type": "integer", "default": 1 }
+            }
+        });
+        let mut fill = BTreeMap::new();
+        fill.insert("page".to_string(), "5".to_string());
+        let result = generate_template(&schema, false, &fill);
+        assert_eq!(result["page"], 5);
+    }
+
+    #[test]
+    fn fill_overrides_example() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "email": { "type": "string", "example": "test@example.com" }
+            }
+        });
+        let mut fill = BTreeMap::new();
+        fill.insert("email".to_string(), "me@example.com".to_string());
+        let result = generate_template(&schema, false, &fill);
+        assert_eq!(result["email"], "me@example.com");
+    }
+
+    #[test]
+    fn array_of_objects_generates_single_object() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "items": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "required": ["id"],
+                        "properties": {
+                            "id": { "type": "integer" },
+                            "name": { "type": "string" }
+                        }
+                    }
+                }
+            }
+        });
+        let result = generate_template(&schema, false, &BTreeMap::new());
+        assert!(result["items"].is_array());
+        let items = result["items"].as_array().unwrap();
+        assert_eq!(items.len(), 1);
+        assert!(items[0].is_object());
+        assert_eq!(items[0]["id"], "<integer:required>");
+    }
+
+    #[test]
+    fn array_without_items_uses_string_default() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "tags": { "type": "array" }
+            }
+        });
+        let result = generate_template(&schema, false, &BTreeMap::new());
+        assert!(result["tags"].is_array());
+        assert_eq!(result["tags"][0], "<string:optional>");
+    }
+
+    #[test]
+    fn deeply_nested_object_template() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "a": {
+                    "type": "object",
+                    "properties": {
+                        "b": {
+                            "type": "object",
+                            "properties": {
+                                "c": { "type": "string" }
+                            }
+                        }
+                    }
+                }
+            }
+        });
+        let result = generate_template(&schema, false, &BTreeMap::new());
+        assert_eq!(result["a"]["b"]["c"], "<string:optional>");
+    }
+
+    #[test]
+    fn parse_fill_args_single_pair() {
+        let fill = parse_fill_args("name=test");
+        assert_eq!(fill.len(), 1);
+        assert_eq!(fill.get("name").unwrap(), "test");
+    }
+
+    #[test]
+    fn parse_fill_args_value_with_equals() {
+        // split_once means only the first = matters
+        let fill = parse_fill_args("query=a=b");
+        assert_eq!(fill.get("query").unwrap(), "a=b");
+    }
+
+    #[test]
+    fn parse_fill_args_no_equals_skipped() {
+        let fill = parse_fill_args("noequals,key=val");
+        assert_eq!(fill.len(), 1);
+        assert_eq!(fill.get("key").unwrap(), "val");
+    }
+
+    #[test]
+    fn parse_fill_args_three_pairs() {
+        let fill = parse_fill_args("a=1,b=2,c=3");
+        assert_eq!(fill.len(), 3);
+        assert_eq!(fill.get("a").unwrap(), "1");
+        assert_eq!(fill.get("b").unwrap(), "2");
+        assert_eq!(fill.get("c").unwrap(), "3");
+    }
+
+    #[test]
+    fn required_only_with_nested_array() {
+        let schema = json!({
+            "type": "object",
+            "required": ["ids"],
+            "properties": {
+                "ids": {
+                    "type": "array",
+                    "items": { "type": "integer" }
+                },
+                "labels": {
+                    "type": "array",
+                    "items": { "type": "string" }
+                }
+            }
+        });
+        let result = generate_template(&schema, true, &BTreeMap::new());
+        assert!(result["ids"].is_array());
+        assert!(result.get("labels").is_none());
+    }
+
+    #[test]
+    fn multiple_properties_all_required() {
+        let schema = json!({
+            "type": "object",
+            "required": ["a", "b", "c"],
+            "properties": {
+                "a": { "type": "string" },
+                "b": { "type": "integer" },
+                "c": { "type": "boolean" }
+            }
+        });
+        let result = generate_template(&schema, true, &BTreeMap::new());
+        assert_eq!(result["a"], "<string:required>");
+        assert_eq!(result["b"], "<integer:required>");
+        assert_eq!(result["c"], "<boolean:required>");
+    }
+
+    #[test]
+    fn multiple_properties_none_required() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "x": { "type": "string" },
+                "y": { "type": "integer" }
+            }
+        });
+        let result = generate_template(&schema, true, &BTreeMap::new());
+        // No required fields, all filtered
+        assert_eq!(result, json!({}));
+    }
+
+    #[test]
+    fn object_without_properties_returns_empty() {
+        let schema = json!({
+            "type": "object",
+            "required": ["name"]
+        });
+        let result = generate_template(&schema, false, &BTreeMap::new());
+        assert_eq!(result, json!({}));
+    }
+
+    #[test]
+    fn fill_json_array_parsed() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "ids": { "type": "array" }
+            }
+        });
+        let mut fill = BTreeMap::new();
+        fill.insert("ids".to_string(), "[1,2,3]".to_string());
+        let result = generate_template(&schema, false, &fill);
+        assert_eq!(result["ids"], json!([1, 2, 3]));
+    }
+
+    #[test]
+    fn fill_json_object_parsed() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "meta": { "type": "object" }
+            }
+        });
+        let mut fill = BTreeMap::new();
+        fill.insert("meta".to_string(), r#"{"key":"val"}"#.to_string());
+        let result = generate_template(&schema, false, &fill);
+        assert_eq!(result["meta"], json!({"key": "val"}));
+    }
+
+    #[test]
+    fn enum_empty_array_falls_through_to_type() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "field": {
+                    "type": "string",
+                    "enum": []
+                }
+            }
+        });
+        let result = generate_template(&schema, false, &BTreeMap::new());
+        assert_eq!(result["field"], "<string:optional>");
+    }
+
+    #[test]
+    fn top_level_number_type() {
+        let schema = json!({"type": "number"});
+        let result = generate_template(&schema, false, &BTreeMap::new());
+        assert_eq!(result, "<number:optional>");
+    }
+
+    #[test]
+    fn top_level_null_type() {
+        let schema = json!({"type": "null"});
+        let result = generate_template(&schema, false, &BTreeMap::new());
+        assert!(result.is_null());
+    }
+
+    #[test]
+    fn top_level_array_of_objects() {
+        let schema = json!({
+            "type": "array",
+            "items": {
+                "type": "object",
+                "required": ["id"],
+                "properties": {
+                    "id": { "type": "integer" }
+                }
+            }
+        });
+        let result = generate_template(&schema, false, &BTreeMap::new());
+        assert!(result.is_array());
+        assert_eq!(result[0]["id"], "<integer:required>");
+    }
 }

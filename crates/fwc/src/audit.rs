@@ -1538,4 +1538,575 @@ scope = "instance"
         assert_eq!(audit.rate_limits.pool_count, 0);
         assert!(!audit.rate_limits.has_operation_pools);
     }
+
+    // ── Additional cohort assignment tests ─────────────────────────
+
+    #[test]
+    fn cohort_workspace() {
+        assert_eq!(assign_cohort("microsoft365"), ConnectorCohort::Workspace);
+        assert_eq!(assign_cohort("google-calendar"), ConnectorCohort::Workspace);
+        assert_eq!(assign_cohort("gmail"), ConnectorCohort::Workspace);
+    }
+
+    #[test]
+    fn cohort_knowledge() {
+        assert_eq!(assign_cohort("arxiv"), ConnectorCohort::Knowledge);
+        assert_eq!(assign_cohort("semanticscholar"), ConnectorCohort::Knowledge);
+        assert_eq!(assign_cohort("wikipedia"), ConnectorCohort::Knowledge);
+        assert_eq!(assign_cohort("logseq"), ConnectorCohort::Knowledge);
+    }
+
+    #[test]
+    fn cohort_media() {
+        assert_eq!(assign_cohort("youtube"), ConnectorCohort::Media);
+        assert_eq!(assign_cohort("spotify"), ConnectorCohort::Media);
+    }
+
+    #[test]
+    fn cohort_browser() {
+        assert_eq!(assign_cohort("browser"), ConnectorCohort::Browser);
+        assert_eq!(assign_cohort("algolia"), ConnectorCohort::Browser);
+        assert_eq!(assign_cohort("annas-archive"), ConnectorCohort::Browser);
+    }
+
+    #[test]
+    fn cohort_vectordb() {
+        assert_eq!(assign_cohort("pinecone"), ConnectorCohort::Vectordb);
+        assert_eq!(assign_cohort("qdrant"), ConnectorCohort::Vectordb);
+        assert_eq!(assign_cohort("vectordb"), ConnectorCohort::Vectordb);
+    }
+
+    #[test]
+    fn cohort_iot() {
+        assert_eq!(assign_cohort("homeassistant"), ConnectorCohort::Iot);
+    }
+
+    #[test]
+    fn cohort_full_messaging_list() {
+        for name in ["sendgrid", "mailchimp", "intercom"] {
+            assert_eq!(assign_cohort(name), ConnectorCohort::Messaging, "failed for {name}");
+        }
+    }
+
+    #[test]
+    fn cohort_full_devtools_list() {
+        for name in ["github", "gitlab", "bitbucket", "sentry", "grafana", "datadog"] {
+            assert_eq!(assign_cohort(name), ConnectorCohort::DevTools, "failed for {name}");
+        }
+    }
+
+    #[test]
+    fn cohort_full_productivity_list() {
+        for name in ["notion", "asana", "trello", "todoist", "clickup", "monday", "figma", "jira", "linear"] {
+            assert_eq!(assign_cohort(name), ConnectorCohort::Productivity, "failed for {name}");
+        }
+    }
+
+    #[test]
+    fn cohort_full_automation_list() {
+        for name in ["zapier", "make", "n8n", "retool", "metabase", "cron", "webhook-receiver", "mcp-bridge"] {
+            assert_eq!(assign_cohort(name), ConnectorCohort::Automation, "failed for {name}");
+        }
+    }
+
+    #[test]
+    fn cohort_full_data_list() {
+        for name in ["elasticsearch", "bigquery", "snowflake", "duckdb", "mongodb", "postgresql", "redis"] {
+            assert_eq!(assign_cohort(name), ConnectorCohort::Data, "failed for {name}");
+        }
+    }
+
+    #[test]
+    fn cohort_full_analytics_list() {
+        for name in ["posthog", "mixpanel", "amplitude", "segment"] {
+            assert_eq!(assign_cohort(name), ConnectorCohort::Analytics, "failed for {name}");
+        }
+    }
+
+    #[test]
+    fn cohort_full_business_list() {
+        for name in ["stripe", "plaid", "salesforce", "hubspot", "docusign", "pandadoc"] {
+            assert_eq!(assign_cohort(name), ConnectorCohort::Business, "failed for {name}");
+        }
+    }
+
+    #[test]
+    fn cohort_full_infra_list() {
+        for name in ["kubernetes", "terraform", "pulumi"] {
+            assert_eq!(assign_cohort(name), ConnectorCohort::Infra, "failed for {name}");
+        }
+    }
+
+    #[test]
+    fn cohort_full_ai_list() {
+        for name in ["openai", "anthropic", "google-ai", "llm-router", "whisper"] {
+            assert_eq!(assign_cohort(name), ConnectorCohort::Ai, "failed for {name}");
+        }
+    }
+
+    // ── Additional missing manifest tests ──────────────────────────
+
+    #[test]
+    fn missing_manifest_default_audit_fields() {
+        let audit = audit_missing_manifest("test");
+        assert_eq!(audit.operations.count, 0);
+        assert!(!audit.config.has_state_config);
+        assert!(!audit.config.has_migration_hint);
+        assert_eq!(audit.events.event_count, 0);
+        assert!(!audit.events.has_event_caps);
+        assert_eq!(audit.rate_limits.pool_count, 0);
+        assert!(!audit.rate_limits.has_operation_pools);
+        assert_eq!(audit.agent_hints.with_hints, 0);
+        assert_eq!(audit.network.with_constraints, 0);
+    }
+
+    #[test]
+    fn missing_manifest_assigns_cohort() {
+        let audit = audit_missing_manifest("github");
+        assert_eq!(audit.cohort, ConnectorCohort::DevTools);
+        let audit2 = audit_missing_manifest("slack");
+        assert_eq!(audit2.cohort, ConnectorCohort::Messaging);
+    }
+
+    #[test]
+    fn missing_manifest_gap_remediation() {
+        let audit = audit_missing_manifest("x");
+        assert!(audit.gaps[0].remediation.contains("manifest.toml"));
+    }
+
+    // ── Additional manifest audit edge cases ───────────────────────
+
+    #[test]
+    fn manifest_with_meaningful_migration_hint() {
+        let s = r#"
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+
+[connector]
+id = "fcp.test"
+name = "Test"
+version = "0.1.0"
+description = "Test"
+archetypes = ["operational"]
+format = "wasi"
+
+[connector.state]
+model = "singleton_writer"
+state_schema_version = "1"
+migration_hint = "v2_token_format"
+
+[provides.operations."test.op"]
+description = "Op"
+capability = "test.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+[provides.operations."test.op".input_schema]
+type = "object"
+required = ["id"]
+[provides.operations."test.op".input_schema.properties.id]
+type = "string"
+[provides.operations."test.op".output_schema]
+type = "object"
+required = ["data"]
+[provides.operations."test.op".network_constraints]
+host_allow = ["api.test.com"]
+port_allow = [443]
+[provides.operations."test.op".ai_hints]
+when_to_use = "Test"
+common_mistakes = ["x"]
+examples = ['{}']
+related = ["test.other"]
+"#;
+        let manifest: toml::Value = toml::from_str(s).unwrap();
+        let audit = audit_manifest("test", &manifest);
+        assert!(audit.config.has_migration_hint);
+    }
+
+    #[test]
+    fn manifest_no_state_section() {
+        let manifest = manifest_no_ops();
+        let audit = audit_manifest("empty", &manifest);
+        assert!(!audit.config.has_state_config);
+        assert!(!audit.config.has_migration_hint);
+    }
+
+    #[test]
+    fn manifest_empty_capability_is_blocking() {
+        let s = r#"
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+
+[connector]
+id = "fcp.emptycap"
+name = "EmptyCap"
+version = "0.1.0"
+description = "Empty cap"
+archetypes = ["operational"]
+format = "wasi"
+
+[provides.operations."emptycap.op"]
+description = "Op"
+capability = ""
+risk_level = "low"
+safety_tier = "safe"
+[provides.operations."emptycap.op".input_schema]
+type = "object"
+[provides.operations."emptycap.op".output_schema]
+type = "object"
+[provides.operations."emptycap.op".ai_hints]
+when_to_use = "Test"
+examples = ['{}']
+related = []
+"#;
+        let manifest: toml::Value = toml::from_str(s).unwrap();
+        let audit = audit_manifest("emptycap", &manifest);
+        assert_eq!(audit.operations.with_capability, 0);
+        assert!(audit.gaps.iter().any(|g| g.description.contains("capability")));
+    }
+
+    // ── Additional completeness / coverage tests ───────────────────
+
+    #[test]
+    fn zero_operations_completeness_is_zero() {
+        let manifest = manifest_no_ops();
+        let audit = audit_manifest("empty", &manifest);
+        assert!(audit.operations.completeness.abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn network_coverage_zero_when_no_constraints() {
+        let s = r#"
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+
+[connector]
+id = "fcp.nonet"
+name = "NoNet"
+version = "0.1.0"
+description = "No network"
+archetypes = ["operational"]
+format = "wasi"
+
+[provides.operations."nonet.op"]
+description = "Op"
+capability = "nonet.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+[provides.operations."nonet.op".input_schema]
+type = "object"
+required = ["id"]
+[provides.operations."nonet.op".input_schema.properties.id]
+type = "string"
+[provides.operations."nonet.op".output_schema]
+type = "object"
+required = ["data"]
+[provides.operations."nonet.op".ai_hints]
+when_to_use = "Do stuff."
+common_mistakes = ["x"]
+examples = ['{}']
+related = []
+"#;
+        let manifest: toml::Value = toml::from_str(s).unwrap();
+        let audit = audit_manifest("nonet", &manifest);
+        assert_eq!(audit.network.with_constraints, 0);
+        assert!(audit.network.coverage.abs() < f64::EPSILON);
+    }
+
+    // ── Additional summary computation tests ───────────────────────
+
+    #[test]
+    fn summary_empty_map() {
+        let map = BTreeMap::new();
+        let summary = compute_summary(&map);
+        assert_eq!(summary.ready, 0);
+        assert_eq!(summary.partially_ready, 0);
+        assert_eq!(summary.not_ready, 0);
+        assert_eq!(summary.total_operations, 0);
+        assert_eq!(summary.total_gaps, 0);
+        assert!(summary.mean_operation_completeness.abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn summary_all_not_ready() {
+        let mut map = BTreeMap::new();
+        map.insert("a".into(), audit_missing_manifest("a"));
+        map.insert("b".into(), audit_missing_manifest("b"));
+        let summary = compute_summary(&map);
+        assert_eq!(summary.not_ready, 2);
+        assert_eq!(summary.ready, 0);
+    }
+
+    #[test]
+    fn summary_cosmetic_gaps_counted() {
+        let mut map = BTreeMap::new();
+        let mut audit = audit_manifest("test", &minimal_manifest());
+        audit.gaps.push(ReadinessGap {
+            category: GapCategory::OperationMetadata,
+            severity: GapSeverity::Cosmetic,
+            description: "Minor style issue".into(),
+            remediation: "Fix formatting".into(),
+        });
+        map.insert("test".into(), audit);
+        let summary = compute_summary(&map);
+        assert_eq!(summary.cosmetic_gaps, 1);
+    }
+
+    #[test]
+    fn summary_mean_hint_coverage() {
+        let mut map = BTreeMap::new();
+        map.insert("a".into(), audit_manifest("a", &minimal_manifest()));
+        // minimal_manifest has 100% hint coverage
+        let summary = compute_summary(&map);
+        assert!((summary.mean_hint_coverage - 1.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn summary_mean_hint_coverage_mixed() {
+        let mut map = BTreeMap::new();
+        map.insert("a".into(), audit_manifest("a", &minimal_manifest())); // 100% coverage
+        map.insert("b".into(), audit_manifest("b", &manifest_no_hints())); // 0% coverage
+        let summary = compute_summary(&map);
+        assert!((summary.mean_hint_coverage - 0.5).abs() < f64::EPSILON);
+    }
+
+    // ── Serialization tests ────────────────────────────────────────
+
+    #[test]
+    fn operations_audit_serializes() {
+        let ops = OperationsAudit {
+            count: 5,
+            with_description: 4,
+            with_input_properties: 3,
+            with_output_schema: 3,
+            with_capability: 5,
+            with_risk_level: 5,
+            with_safety_tier: 4,
+            with_idempotency: 3,
+            with_approval: 2,
+            completeness: 0.85,
+        };
+        let json = serde_json::to_value(&ops).unwrap();
+        assert_eq!(json["count"], 5);
+        assert_eq!(json["with_description"], 4);
+    }
+
+    #[test]
+    fn config_audit_serializes() {
+        let config = ConfigAudit {
+            has_state_config: true,
+            has_migration_hint: false,
+        };
+        let json = serde_json::to_value(&config).unwrap();
+        assert_eq!(json["has_state_config"], true);
+        assert_eq!(json["has_migration_hint"], false);
+    }
+
+    #[test]
+    fn event_audit_serializes() {
+        let events = EventAudit {
+            event_count: 3,
+            has_event_caps: true,
+            has_streaming_archetype: true,
+        };
+        let json = serde_json::to_value(&events).unwrap();
+        assert_eq!(json["event_count"], 3);
+        assert_eq!(json["has_event_caps"], true);
+    }
+
+    #[test]
+    fn rate_limit_audit_serializes() {
+        let rl = RateLimitAudit {
+            pool_count: 2,
+            has_operation_pools: true,
+        };
+        let json = serde_json::to_value(&rl).unwrap();
+        assert_eq!(json["pool_count"], 2);
+        assert_eq!(json["has_operation_pools"], true);
+    }
+
+    #[test]
+    fn network_audit_serializes() {
+        let net = NetworkAudit {
+            with_constraints: 4,
+            with_host_allow: 3,
+            with_port_allow: 2,
+            coverage: 0.8,
+        };
+        let json = serde_json::to_value(&net).unwrap();
+        assert_eq!(json["with_constraints"], 4);
+        assert_eq!(json["coverage"], 0.8);
+    }
+
+    #[test]
+    fn agent_hint_audit_serializes() {
+        let hints = AgentHintAudit {
+            with_hints: 5,
+            with_when_to_use: 4,
+            with_examples: 3,
+            with_common_mistakes: 2,
+            with_related: 1,
+            coverage: 0.5,
+        };
+        let json = serde_json::to_value(&hints).unwrap();
+        assert_eq!(json["with_hints"], 5);
+        assert_eq!(json["coverage"], 0.5);
+    }
+
+    #[test]
+    fn audit_summary_serializes() {
+        let summary = AuditSummary {
+            ready: 10,
+            partially_ready: 5,
+            not_ready: 2,
+            total_operations: 150,
+            total_gaps: 20,
+            blocking_gaps: 3,
+            degraded_gaps: 12,
+            cosmetic_gaps: 5,
+            mean_operation_completeness: 0.75,
+            mean_hint_coverage: 0.6,
+            ..AuditSummary::default()
+        };
+        let json = serde_json::to_value(&summary).unwrap();
+        assert_eq!(json["ready"], 10);
+        assert_eq!(json["blocking_gaps"], 3);
+    }
+
+    // ── Multi-op partial completeness ──────────────────────────────
+
+    #[test]
+    fn multi_op_with_some_missing_fields_partial_completeness() {
+        let s = r#"
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+
+[connector]
+id = "fcp.partial"
+name = "Partial"
+version = "0.1.0"
+description = "Partial connector"
+archetypes = ["operational"]
+format = "wasi"
+
+[provides.operations."partial.read"]
+description = "Read"
+capability = "partial.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+[provides.operations."partial.read".input_schema]
+type = "object"
+required = ["id"]
+[provides.operations."partial.read".input_schema.properties.id]
+type = "string"
+[provides.operations."partial.read".output_schema]
+type = "object"
+required = ["data"]
+[provides.operations."partial.read".network_constraints]
+host_allow = ["api.partial.com"]
+port_allow = [443]
+[provides.operations."partial.read".ai_hints]
+when_to_use = "Read"
+common_mistakes = []
+examples = ['{}']
+related = []
+
+[provides.operations."partial.write"]
+description = "Write"
+capability = "partial.write"
+[provides.operations."partial.write".input_schema]
+type = "object"
+[provides.operations."partial.write".output_schema]
+type = "object"
+[provides.operations."partial.write".ai_hints]
+when_to_use = "Write"
+examples = ['{}']
+related = []
+"#;
+        let manifest: toml::Value = toml::from_str(s).unwrap();
+        let audit = audit_manifest("partial", &manifest);
+        assert_eq!(audit.operations.count, 2);
+        assert_eq!(audit.operations.with_description, 2);
+        assert_eq!(audit.operations.with_capability, 2);
+        // partial.write missing risk_level, safety_tier, idempotency, requires_approval
+        assert_eq!(audit.operations.with_risk_level, 1);
+        assert_eq!(audit.operations.with_safety_tier, 1);
+        assert!(audit.operations.completeness < 1.0);
+        assert!(audit.operations.completeness > 0.5);
+    }
+
+    // ── Default trait tests ────────────────────────────────────────
+
+    #[test]
+    fn operations_audit_default() {
+        let ops = OperationsAudit::default();
+        assert_eq!(ops.count, 0);
+        assert!(ops.completeness.abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn config_audit_default() {
+        let config = ConfigAudit::default();
+        assert!(!config.has_state_config);
+        assert!(!config.has_migration_hint);
+    }
+
+    #[test]
+    fn event_audit_default() {
+        let events = EventAudit::default();
+        assert_eq!(events.event_count, 0);
+        assert!(!events.has_event_caps);
+        assert!(!events.has_streaming_archetype);
+    }
+
+    #[test]
+    fn network_audit_default() {
+        let net = NetworkAudit::default();
+        assert_eq!(net.with_constraints, 0);
+        assert!(net.coverage.abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn agent_hint_audit_default() {
+        let hints = AgentHintAudit::default();
+        assert_eq!(hints.with_hints, 0);
+        assert!(hints.coverage.abs() < f64::EPSILON);
+    }
+
+    // ── Clone tests ────────────────────────────────────────────────
+
+    #[test]
+    fn connector_audit_clone() {
+        let audit = audit_manifest("test", &minimal_manifest());
+        let cloned = audit.clone();
+        assert_eq!(audit.name, cloned.name);
+        assert_eq!(audit.level, cloned.level);
+        assert_eq!(audit.operations.count, cloned.operations.count);
+        assert_eq!(audit.gaps.len(), cloned.gaps.len());
+    }
+
+    #[test]
+    fn audit_matrix_clone() {
+        let mut connectors = BTreeMap::new();
+        connectors.insert("test".into(), audit_manifest("test", &minimal_manifest()));
+        let matrix = AuditMatrix {
+            generated_at: "2026-03-09T00:00:00Z".into(),
+            total_connectors: 1,
+            with_manifest: 1,
+            missing_manifest: 0,
+            connectors,
+            summary: AuditSummary::default(),
+        };
+        let cloned = matrix.clone();
+        assert_eq!(matrix.total_connectors, cloned.total_connectors);
+    }
 }

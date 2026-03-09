@@ -5,7 +5,7 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:799a225698f538bb72e8a48614eb71b1e56d7ce36128cae17c5fd53df78b4db1"
+interface_hash = "blake3-256:fcp.interface.v2:03edcf003f5b2cf2616f73fb09e5e3b3e975c3705918096e4f6b00cc26194a4e"
 
 [connector]
 id = "fcp.reddit"
@@ -794,6 +794,430 @@ related = [
     "reddit.search_posts",
 ]
 
+[provides.operations."reddit.delete_content"]
+description = "Delete an existing post or comment."
+capability = "reddit.post"
+risk_level = "high"
+safety_tier = "dangerous"
+requires_approval = "interactive"
+idempotency = "strict"
+
+[provides.operations."reddit.delete_content".rate_limit]
+max = 20
+per_ms = 60000
+
+[provides.operations."reddit.delete_content".input_schema]
+required = ["thing_fullname"]
+type = "object"
+
+[provides.operations."reddit.delete_content".input_schema.properties.thing_fullname]
+description = "Fullname of the post or comment to delete (t3_... or t1_...)."
+pattern = "^t[13]_[A-Za-z0-9]+$"
+type = "string"
+
+[provides.operations."reddit.delete_content".output_schema]
+required = ["deleted"]
+type = "object"
+
+[provides.operations."reddit.delete_content".output_schema.properties.deleted]
+type = "boolean"
+
+[provides.operations."reddit.delete_content".network_constraints]
+host_allow = ["oauth.reddit.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 1
+connect_timeout_ms = 10000
+total_timeout_ms = 45000
+max_response_bytes = 2097152
+
+[provides.operations."reddit.delete_content".ai_hints]
+when_to_use = "Use to permanently delete a post or comment you own."
+common_mistakes = [
+    "Deleting content owned by another user (will fail).",
+    "Deletion is irreversible; confirm before proceeding.",
+]
+examples = ['{"thing_fullname":"t1_xyz789"}']
+related = [
+    "reddit.edit_content",
+    "reddit.mod_remove",
+]
+
+[provides.operations."reddit.edit_content"]
+description = "Edit the text of an existing post or comment."
+capability = "reddit.post"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "best_effort"
+
+[provides.operations."reddit.edit_content".rate_limit]
+max = 30
+per_ms = 60000
+
+[provides.operations."reddit.edit_content".input_schema]
+required = [
+    "thing_fullname",
+    "text",
+]
+type = "object"
+
+[provides.operations."reddit.edit_content".input_schema.properties.text]
+description = "New markdown text for the post/comment body."
+maxLength = 40000
+minLength = 1
+type = "string"
+
+[provides.operations."reddit.edit_content".input_schema.properties.thing_fullname]
+description = "Fullname of the post or comment to edit (t3_... or t1_...)."
+pattern = "^t[13]_[A-Za-z0-9]+$"
+type = "string"
+
+[provides.operations."reddit.edit_content".output_schema]
+type = "object"
+
+[provides.operations."reddit.edit_content".output_schema.properties.json]
+type = "object"
+
+[provides.operations."reddit.edit_content".network_constraints]
+host_allow = ["oauth.reddit.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 1
+connect_timeout_ms = 10000
+total_timeout_ms = 45000
+max_response_bytes = 2097152
+
+[provides.operations."reddit.edit_content".ai_hints]
+when_to_use = "Use to edit the text of a post or comment you own."
+common_mistakes = [
+    "Editing content owned by another user (will fail with 403).",
+    "Using a bare ID instead of a fullname (t3_... or t1_...).",
+]
+examples = ['{"thing_fullname":"t3_abc123", "text":"Updated post body text."}']
+related = [
+    "reddit.create_post",
+    "reddit.delete_content",
+]
+
+[provides.operations."reddit.subreddit.get"]
+description = "Get subreddit metadata including subscribers, description, and rules."
+capability = "reddit.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."reddit.subreddit.get".rate_limit]
+max = 60
+per_ms = 60000
+
+[provides.operations."reddit.subreddit.get".input_schema]
+required = ["subreddit"]
+type = "object"
+
+[provides.operations."reddit.subreddit.get".input_schema.properties.subreddit]
+description = "Subreddit name without r/ prefix."
+pattern = "^[A-Za-z0-9_]{2,21}$"
+type = "string"
+
+[provides.operations."reddit.subreddit.get".output_schema]
+required = ["name"]
+type = "object"
+
+[provides.operations."reddit.subreddit.get".output_schema.properties.description]
+type = "string"
+
+[provides.operations."reddit.subreddit.get".output_schema.properties.name]
+type = "string"
+
+[provides.operations."reddit.subreddit.get".output_schema.properties.over18]
+type = "boolean"
+
+[provides.operations."reddit.subreddit.get".output_schema.properties.public_description]
+type = "string"
+
+[provides.operations."reddit.subreddit.get".output_schema.properties.quarantine]
+type = "boolean"
+
+[provides.operations."reddit.subreddit.get".output_schema.properties.subscribers]
+type = "integer"
+
+[provides.operations."reddit.subreddit.get".network_constraints]
+host_allow = ["oauth.reddit.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 2
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 2097152
+
+[provides.operations."reddit.subreddit.get".ai_hints]
+when_to_use = "Use to retrieve subreddit metadata such as subscribers, description, and rules."
+common_mistakes = ["Including the r/ prefix in the subreddit name."]
+examples = ['{"subreddit":"rust"}']
+related = [
+    "reddit.subreddit.search",
+    "reddit.list_subreddit_new",
+]
+
+[provides.operations."reddit.subreddit.search"]
+description = "Search for subreddits by name or topic."
+capability = "reddit.search"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."reddit.subreddit.search".rate_limit]
+max = 60
+per_ms = 60000
+
+[provides.operations."reddit.subreddit.search".input_schema]
+required = ["query"]
+type = "object"
+
+[provides.operations."reddit.subreddit.search".input_schema.properties.after]
+description = "Pagination cursor from a prior response."
+type = "string"
+
+[provides.operations."reddit.subreddit.search".input_schema.properties.limit]
+default = 25
+description = "Maximum subreddits to return."
+maximum = 100
+minimum = 1
+type = "integer"
+
+[provides.operations."reddit.subreddit.search".input_schema.properties.query]
+description = "Search query for subreddit names and descriptions."
+maxLength = 512
+minLength = 1
+type = "string"
+
+[provides.operations."reddit.subreddit.search".output_schema]
+required = ["posts"]
+type = "object"
+
+[provides.operations."reddit.subreddit.search".output_schema.properties.next_after]
+type = "string"
+
+[provides.operations."reddit.subreddit.search".output_schema.properties.posts]
+type = "array"
+
+[provides.operations."reddit.subreddit.search".network_constraints]
+host_allow = ["oauth.reddit.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 2
+connect_timeout_ms = 10000
+total_timeout_ms = 45000
+max_response_bytes = 8388608
+
+[provides.operations."reddit.subreddit.search".ai_hints]
+when_to_use = "Use to discover subreddits matching a topic or keyword."
+common_mistakes = ["Confusing subreddit search with post search."]
+examples = ['{"query":"machine learning", "limit":10}']
+related = [
+    "reddit.subreddit.get",
+    "reddit.search_posts",
+]
+
+[provides.operations."reddit.user.comments"]
+description = "List a user's comment history."
+capability = "reddit.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."reddit.user.comments".rate_limit]
+max = 60
+per_ms = 60000
+
+[provides.operations."reddit.user.comments".input_schema]
+required = ["username"]
+type = "object"
+
+[provides.operations."reddit.user.comments".input_schema.properties.after]
+description = "Pagination cursor from a prior response."
+type = "string"
+
+[provides.operations."reddit.user.comments".input_schema.properties.limit]
+default = 25
+description = "Maximum comments to return."
+maximum = 100
+minimum = 1
+type = "integer"
+
+[provides.operations."reddit.user.comments".input_schema.properties.sort]
+default = "new"
+description = "Sort mode."
+enum = [
+    "hot",
+    "new",
+    "top",
+    "controversial",
+]
+type = "string"
+
+[provides.operations."reddit.user.comments".input_schema.properties.username]
+description = "Reddit username without u/ prefix."
+pattern = "^[A-Za-z0-9_-]{3,20}$"
+type = "string"
+
+[provides.operations."reddit.user.comments".output_schema]
+required = ["posts"]
+type = "object"
+
+[provides.operations."reddit.user.comments".output_schema.properties.next_after]
+type = "string"
+
+[provides.operations."reddit.user.comments".output_schema.properties.posts]
+type = "array"
+
+[provides.operations."reddit.user.comments".network_constraints]
+host_allow = ["oauth.reddit.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 2
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 6291456
+
+[provides.operations."reddit.user.comments".ai_hints]
+when_to_use = "Use to view a user's comment history."
+common_mistakes = ["Including the u/ prefix in the username."]
+examples = ['{"username":"spez", "limit":10, "sort":"top"}']
+related = [
+    "reddit.user.posts",
+    "reddit.get_post_thread",
+]
+
+[provides.operations."reddit.user.posts"]
+description = "List a user's submitted post history."
+capability = "reddit.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."reddit.user.posts".rate_limit]
+max = 60
+per_ms = 60000
+
+[provides.operations."reddit.user.posts".input_schema]
+required = ["username"]
+type = "object"
+
+[provides.operations."reddit.user.posts".input_schema.properties.after]
+description = "Pagination cursor from a prior response."
+type = "string"
+
+[provides.operations."reddit.user.posts".input_schema.properties.limit]
+default = 25
+description = "Maximum posts to return."
+maximum = 100
+minimum = 1
+type = "integer"
+
+[provides.operations."reddit.user.posts".input_schema.properties.sort]
+default = "new"
+description = "Sort mode."
+enum = [
+    "hot",
+    "new",
+    "top",
+    "controversial",
+]
+type = "string"
+
+[provides.operations."reddit.user.posts".input_schema.properties.username]
+description = "Reddit username without u/ prefix."
+pattern = "^[A-Za-z0-9_-]{3,20}$"
+type = "string"
+
+[provides.operations."reddit.user.posts".output_schema]
+required = ["posts"]
+type = "object"
+
+[provides.operations."reddit.user.posts".output_schema.properties.next_after]
+type = "string"
+
+[provides.operations."reddit.user.posts".output_schema.properties.posts]
+type = "array"
+
+[provides.operations."reddit.user.posts".network_constraints]
+host_allow = ["oauth.reddit.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 2
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 6291456
+
+[provides.operations."reddit.user.posts".ai_hints]
+when_to_use = "Use to view a user's submitted post history."
+common_mistakes = ["Including the u/ prefix in the username."]
+examples = ['{"username":"spez", "limit":10, "sort":"new"}']
+related = [
+    "reddit.user.comments",
+    "reddit.get_post_thread",
+]
+
 [event_caps]
 streaming = true
 replay = true
@@ -857,3 +1281,9 @@ scope = "instance"
 "reddit.download_media" = ["reddit.media"]
 "reddit.create_comment" = ["reddit.write"]
 "reddit.send_message" = ["reddit.write"]
+"reddit.subreddit.get" = ["reddit.read"]
+"reddit.subreddit.search" = ["reddit.read"]
+"reddit.user.posts" = ["reddit.read"]
+"reddit.user.comments" = ["reddit.read"]
+"reddit.edit_content" = ["reddit.write"]
+"reddit.delete_content" = ["reddit.write"]

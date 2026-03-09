@@ -329,6 +329,116 @@ impl RedditClient {
             .await
     }
 
+    // -- Subreddit metadata --
+
+    /// Get subreddit metadata (about page).
+    pub async fn get_subreddit(&self, subreddit: &str) -> RedditResult<serde_json::Value> {
+        self.get(&format!("/r/{subreddit}/about"), None).await
+    }
+
+    // -- Search subreddits --
+
+    /// Search for subreddits by query.
+    pub async fn search_subreddits(
+        &self,
+        query: &str,
+        limit: Option<i64>,
+        after: Option<&str>,
+    ) -> RedditResult<serde_json::Value> {
+        let mut q = vec![("q", query.to_string())];
+        if let Some(l) = limit {
+            q.push(("limit", l.to_string()));
+        }
+        if let Some(a) = after {
+            q.push(("after", a.to_string()));
+        }
+        self.get("/subreddits/search", Some(&q)).await
+    }
+
+    // -- User posts --
+
+    /// List a user's submitted post history.
+    pub async fn get_user_posts(
+        &self,
+        username: &str,
+        limit: Option<i64>,
+        sort: Option<&str>,
+        after: Option<&str>,
+    ) -> RedditResult<serde_json::Value> {
+        let mut q = Vec::new();
+        if let Some(l) = limit {
+            q.push(("limit", l.to_string()));
+        }
+        if let Some(s) = sort {
+            q.push(("sort", s.to_string()));
+        }
+        if let Some(a) = after {
+            q.push(("after", a.to_string()));
+        }
+        self.get(
+            &format!("/user/{username}/submitted"),
+            if q.is_empty() { None } else { Some(&q) },
+        )
+        .await
+    }
+
+    // -- User comments --
+
+    /// List a user's comment history.
+    pub async fn get_user_comments(
+        &self,
+        username: &str,
+        limit: Option<i64>,
+        sort: Option<&str>,
+        after: Option<&str>,
+    ) -> RedditResult<serde_json::Value> {
+        let mut q = Vec::new();
+        if let Some(l) = limit {
+            q.push(("limit", l.to_string()));
+        }
+        if let Some(s) = sort {
+            q.push(("sort", s.to_string()));
+        }
+        if let Some(a) = after {
+            q.push(("after", a.to_string()));
+        }
+        self.get(
+            &format!("/user/{username}/comments"),
+            if q.is_empty() { None } else { Some(&q) },
+        )
+        .await
+    }
+
+    // -- Edit content --
+
+    /// Edit the text of an existing post or comment.
+    pub async fn edit_content(
+        &self,
+        thing_fullname: &str,
+        text: &str,
+    ) -> RedditResult<serde_json::Value> {
+        self.post_form(
+            "/api/editusertext",
+            &[
+                ("thing_id", thing_fullname),
+                ("text", text),
+                ("api_type", "json"),
+            ],
+        )
+        .await
+    }
+
+    // -- Delete content --
+
+    /// Delete an existing post or comment.
+    pub async fn delete_content(
+        &self,
+        thing_fullname: &str,
+    ) -> RedditResult<serde_json::Value> {
+        self.post_form("/api/del", &[("id", thing_fullname)])
+            .await
+    }
+
     // -- Download media --
 
     /// Download media from an allowed `Reddit` media host.

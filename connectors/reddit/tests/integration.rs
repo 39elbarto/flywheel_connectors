@@ -94,7 +94,7 @@ async fn lifecycle_introspect() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
     let intro = c.handle_introspect().await.unwrap();
-    assert_eq!(intro["operations"].as_array().unwrap().len(), 9);
+    assert_eq!(intro["operations"].as_array().unwrap().len(), 15);
 }
 
 // ── Search Posts ─────────────────────────────────────────────────────
@@ -364,6 +364,254 @@ async fn stream_subreddit_new() {
         .unwrap();
     assert_eq!(result["events"].as_array().unwrap().len(), 1);
     assert_eq!(result["next_checkpoint"], "t3_s1");
+}
+
+// ── Subreddit Get ───────────────────────────────────────────────────
+
+#[fcp_async_core::runtime::test]
+async fn subreddit_get() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/r/rust/about"))
+        .and(header("Authorization", "Bearer test-bearer-tok"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "kind": "t5",
+            "data": {
+                "display_name": "rust",
+                "subscribers": 350000,
+                "public_description": "A place for all things related to the Rust programming language.",
+                "over18": false,
+                "quarantine": false
+            }
+        })))
+        .mount(&server)
+        .await;
+
+    let c = setup_connector(&server.uri()).await;
+    let result = c
+        .handle_invoke(json!({
+            "operation_id": "reddit.subreddit.get",
+            "input": {"subreddit": "rust"}
+        }))
+        .await
+        .unwrap();
+    assert!(result.get("data").is_some());
+    assert_eq!(result["data"]["display_name"], "rust");
+}
+
+#[fcp_async_core::runtime::test]
+async fn subreddit_get_missing_subreddit() {
+    let server = MockServer::start().await;
+    let c = setup_connector(&server.uri()).await;
+    assert!(
+        c.handle_invoke(json!({"operation_id": "reddit.subreddit.get", "input": {}}))
+            .await
+            .is_err()
+    );
+}
+
+// ── Subreddit Search ────────────────────────────────────────────────
+
+#[fcp_async_core::runtime::test]
+async fn subreddit_search() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path_regex("/subreddits/search.*"))
+        .and(header("Authorization", "Bearer test-bearer-tok"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(listing_response(
+            &json!([
+                {"display_name": "rust", "subscribers": 350000},
+                {"display_name": "rustjerk", "subscribers": 5000}
+            ]),
+            Some("t5_rustjerk"),
+        )))
+        .mount(&server)
+        .await;
+
+    let c = setup_connector(&server.uri()).await;
+    let result = c
+        .handle_invoke(json!({
+            "operation_id": "reddit.subreddit.search",
+            "input": {"query": "rust", "limit": 10}
+        }))
+        .await
+        .unwrap();
+    assert_eq!(result["posts"].as_array().unwrap().len(), 2);
+    assert_eq!(result["next_after"], "t5_rustjerk");
+}
+
+#[fcp_async_core::runtime::test]
+async fn subreddit_search_missing_query() {
+    let server = MockServer::start().await;
+    let c = setup_connector(&server.uri()).await;
+    assert!(
+        c.handle_invoke(json!({"operation_id": "reddit.subreddit.search", "input": {}}))
+            .await
+            .is_err()
+    );
+}
+
+// ── User Posts ──────────────────────────────────────────────────────
+
+#[fcp_async_core::runtime::test]
+async fn user_posts() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path_regex("/user/testuser/submitted.*"))
+        .and(header("Authorization", "Bearer test-bearer-tok"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(listing_response(
+            &json!([
+                {"name": "t3_p1", "title": "My first post"},
+                {"name": "t3_p2", "title": "My second post"}
+            ]),
+            Some("t3_p2"),
+        )))
+        .mount(&server)
+        .await;
+
+    let c = setup_connector(&server.uri()).await;
+    let result = c
+        .handle_invoke(json!({
+            "operation_id": "reddit.user.posts",
+            "input": {"username": "testuser", "limit": 10, "sort": "new"}
+        }))
+        .await
+        .unwrap();
+    assert_eq!(result["posts"].as_array().unwrap().len(), 2);
+    assert_eq!(result["next_after"], "t3_p2");
+}
+
+#[fcp_async_core::runtime::test]
+async fn user_posts_missing_username() {
+    let server = MockServer::start().await;
+    let c = setup_connector(&server.uri()).await;
+    assert!(
+        c.handle_invoke(json!({"operation_id": "reddit.user.posts", "input": {}}))
+            .await
+            .is_err()
+    );
+}
+
+// ── User Comments ───────────────────────────────────────────────────
+
+#[fcp_async_core::runtime::test]
+async fn user_comments() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path_regex("/user/testuser/comments.*"))
+        .and(header("Authorization", "Bearer test-bearer-tok"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(listing_response(
+            &json!([
+                {"name": "t1_c1", "body": "First comment"},
+                {"name": "t1_c2", "body": "Second comment"}
+            ]),
+            Some("t1_c2"),
+        )))
+        .mount(&server)
+        .await;
+
+    let c = setup_connector(&server.uri()).await;
+    let result = c
+        .handle_invoke(json!({
+            "operation_id": "reddit.user.comments",
+            "input": {"username": "testuser", "limit": 10, "sort": "top"}
+        }))
+        .await
+        .unwrap();
+    assert_eq!(result["posts"].as_array().unwrap().len(), 2);
+    assert_eq!(result["next_after"], "t1_c2");
+}
+
+#[fcp_async_core::runtime::test]
+async fn user_comments_missing_username() {
+    let server = MockServer::start().await;
+    let c = setup_connector(&server.uri()).await;
+    assert!(
+        c.handle_invoke(json!({"operation_id": "reddit.user.comments", "input": {}}))
+            .await
+            .is_err()
+    );
+}
+
+// ── Edit Content ────────────────────────────────────────────────────
+
+#[fcp_async_core::runtime::test]
+async fn edit_content() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/editusertext"))
+        .and(header("Authorization", "Bearer test-bearer-tok"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "json": {"data": {"things": [{"data": {"name": "t3_abc123", "body": "Updated text"}}]}}
+        })))
+        .mount(&server)
+        .await;
+
+    let c = setup_connector(&server.uri()).await;
+    let result = c
+        .handle_invoke(json!({
+            "operation_id": "reddit.edit_content",
+            "input": {"thing_fullname": "t3_abc123", "text": "Updated text"}
+        }))
+        .await
+        .unwrap();
+    assert!(result.get("json").is_some());
+}
+
+#[fcp_async_core::runtime::test]
+async fn edit_content_missing_text() {
+    let server = MockServer::start().await;
+    let c = setup_connector(&server.uri()).await;
+    assert!(
+        c.handle_invoke(json!({"operation_id": "reddit.edit_content", "input": {"thing_fullname": "t3_abc"}}))
+            .await
+            .is_err()
+    );
+}
+
+#[fcp_async_core::runtime::test]
+async fn edit_content_missing_fullname() {
+    let server = MockServer::start().await;
+    let c = setup_connector(&server.uri()).await;
+    assert!(
+        c.handle_invoke(json!({"operation_id": "reddit.edit_content", "input": {"text": "new text"}}))
+            .await
+            .is_err()
+    );
+}
+
+// ── Delete Content ──────────────────────────────────────────────────
+
+#[fcp_async_core::runtime::test]
+async fn delete_content() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/del"))
+        .and(header("Authorization", "Bearer test-bearer-tok"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+        .mount(&server)
+        .await;
+
+    let c = setup_connector(&server.uri()).await;
+    let result = c
+        .handle_invoke(json!({
+            "operation_id": "reddit.delete_content",
+            "input": {"thing_fullname": "t1_xyz789"}
+        }))
+        .await
+        .unwrap();
+    assert_eq!(result["deleted"], true);
+}
+
+#[fcp_async_core::runtime::test]
+async fn delete_content_missing_fullname() {
+    let server = MockServer::start().await;
+    let c = setup_connector(&server.uri()).await;
+    assert!(
+        c.handle_invoke(json!({"operation_id": "reddit.delete_content", "input": {}}))
+            .await
+            .is_err()
+    );
 }
 
 // ── Error handling ───────────────────────────────────────────────────

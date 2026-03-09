@@ -691,6 +691,252 @@ impl RedditConnector {
                         ],
                     },
                 },
+                OperationInfo {
+                    id: OperationId::from_static("reddit.subreddit.get"),
+                    summary: "Get subreddit metadata".into(),
+                    description: None,
+                    input_schema: json!({
+                        "type": "object",
+                        "required": ["subreddit"],
+                        "properties": {
+                            "subreddit": { "type": "string", "description": "Subreddit name without r/ prefix.", "pattern": "^[A-Za-z0-9_]{2,21}$" }
+                        }
+                    }),
+                    output_schema: json!({
+                        "type": "object",
+                        "required": ["name"],
+                        "properties": {
+                            "name": { "type": "string" },
+                            "subscribers": { "type": "integer" },
+                            "description": { "type": "string" },
+                            "public_description": { "type": "string" },
+                            "over18": { "type": "boolean" },
+                            "quarantine": { "type": "boolean" }
+                        }
+                    }),
+                    capability: CapabilityId::from_static("reddit.read"),
+                    risk_level: RiskLevel::Low,
+                    safety_tier: SafetyTier::Safe,
+                    idempotency: IdempotencyClass::Strict,
+                    rate_limit: None,
+                    requires_approval: None,
+                    ai_hints: AgentHint {
+                        when_to_use: "Use to retrieve subreddit metadata such as subscribers, description, and rules.".into(),
+                        common_mistakes: vec![
+                            "Including the r/ prefix in the subreddit name.".into(),
+                        ],
+                        examples: vec![
+                            r#"{"subreddit":"rust"}"#.into(),
+                        ],
+                        related: vec![
+                            CapabilityId::from_static("reddit.subreddit.search"),
+                            CapabilityId::from_static("reddit.list_subreddit_new"),
+                        ],
+                    },
+                },
+                OperationInfo {
+                    id: OperationId::from_static("reddit.subreddit.search"),
+                    summary: "Search for subreddits".into(),
+                    description: None,
+                    input_schema: json!({
+                        "type": "object",
+                        "required": ["query"],
+                        "properties": {
+                            "query": { "type": "string", "description": "Search query for subreddit names and descriptions.", "minLength": 1, "maxLength": 512 },
+                            "limit": { "type": "integer", "description": "Maximum subreddits to return.", "minimum": 1, "maximum": 100, "default": 25 },
+                            "after": { "type": "string", "description": "Pagination cursor from a prior response." }
+                        }
+                    }),
+                    output_schema: json!({
+                        "type": "object",
+                        "required": ["posts"],
+                        "properties": {
+                            "posts": { "type": "array" },
+                            "next_after": { "type": "string" }
+                        }
+                    }),
+                    capability: CapabilityId::from_static("reddit.search"),
+                    risk_level: RiskLevel::Low,
+                    safety_tier: SafetyTier::Safe,
+                    idempotency: IdempotencyClass::Strict,
+                    rate_limit: None,
+                    requires_approval: None,
+                    ai_hints: AgentHint {
+                        when_to_use: "Use to discover subreddits matching a topic or keyword.".into(),
+                        common_mistakes: vec![
+                            "Confusing subreddit search with post search.".into(),
+                        ],
+                        examples: vec![
+                            r#"{"query":"machine learning", "limit":10}"#.into(),
+                        ],
+                        related: vec![
+                            CapabilityId::from_static("reddit.subreddit.get"),
+                            CapabilityId::from_static("reddit.search_posts"),
+                        ],
+                    },
+                },
+                OperationInfo {
+                    id: OperationId::from_static("reddit.user.posts"),
+                    summary: "List a user's post history".into(),
+                    description: None,
+                    input_schema: json!({
+                        "type": "object",
+                        "required": ["username"],
+                        "properties": {
+                            "username": { "type": "string", "description": "Reddit username without u/ prefix.", "pattern": "^[A-Za-z0-9_-]{3,20}$" },
+                            "limit": { "type": "integer", "description": "Maximum posts to return.", "minimum": 1, "maximum": 100, "default": 25 },
+                            "sort": { "type": "string", "description": "Sort mode.", "enum": ["hot", "new", "top", "controversial"], "default": "new" },
+                            "after": { "type": "string", "description": "Pagination cursor from a prior response." }
+                        }
+                    }),
+                    output_schema: json!({
+                        "type": "object",
+                        "required": ["posts"],
+                        "properties": {
+                            "posts": { "type": "array" },
+                            "next_after": { "type": "string" }
+                        }
+                    }),
+                    capability: CapabilityId::from_static("reddit.read"),
+                    risk_level: RiskLevel::Low,
+                    safety_tier: SafetyTier::Safe,
+                    idempotency: IdempotencyClass::Strict,
+                    rate_limit: None,
+                    requires_approval: None,
+                    ai_hints: AgentHint {
+                        when_to_use: "Use to view a user's submitted post history.".into(),
+                        common_mistakes: vec![
+                            "Including the u/ prefix in the username.".into(),
+                        ],
+                        examples: vec![
+                            r#"{"username":"spez", "limit":10, "sort":"new"}"#.into(),
+                        ],
+                        related: vec![
+                            CapabilityId::from_static("reddit.user.comments"),
+                            CapabilityId::from_static("reddit.get_post_thread"),
+                        ],
+                    },
+                },
+                OperationInfo {
+                    id: OperationId::from_static("reddit.user.comments"),
+                    summary: "List a user's comment history".into(),
+                    description: None,
+                    input_schema: json!({
+                        "type": "object",
+                        "required": ["username"],
+                        "properties": {
+                            "username": { "type": "string", "description": "Reddit username without u/ prefix.", "pattern": "^[A-Za-z0-9_-]{3,20}$" },
+                            "limit": { "type": "integer", "description": "Maximum comments to return.", "minimum": 1, "maximum": 100, "default": 25 },
+                            "sort": { "type": "string", "description": "Sort mode.", "enum": ["hot", "new", "top", "controversial"], "default": "new" },
+                            "after": { "type": "string", "description": "Pagination cursor from a prior response." }
+                        }
+                    }),
+                    output_schema: json!({
+                        "type": "object",
+                        "required": ["posts"],
+                        "properties": {
+                            "posts": { "type": "array" },
+                            "next_after": { "type": "string" }
+                        }
+                    }),
+                    capability: CapabilityId::from_static("reddit.read"),
+                    risk_level: RiskLevel::Low,
+                    safety_tier: SafetyTier::Safe,
+                    idempotency: IdempotencyClass::Strict,
+                    rate_limit: None,
+                    requires_approval: None,
+                    ai_hints: AgentHint {
+                        when_to_use: "Use to view a user's comment history.".into(),
+                        common_mistakes: vec![
+                            "Including the u/ prefix in the username.".into(),
+                        ],
+                        examples: vec![
+                            r#"{"username":"spez", "limit":10, "sort":"top"}"#.into(),
+                        ],
+                        related: vec![
+                            CapabilityId::from_static("reddit.user.posts"),
+                            CapabilityId::from_static("reddit.get_post_thread"),
+                        ],
+                    },
+                },
+                OperationInfo {
+                    id: OperationId::from_static("reddit.edit_content"),
+                    summary: "Edit the text of an existing post or comment".into(),
+                    description: None,
+                    input_schema: json!({
+                        "type": "object",
+                        "required": ["thing_fullname", "text"],
+                        "properties": {
+                            "thing_fullname": { "type": "string", "description": "Fullname of the post or comment to edit (t3_... or t1_...).", "pattern": "^t[13]_[A-Za-z0-9]+$" },
+                            "text": { "type": "string", "description": "New markdown text for the post/comment body.", "minLength": 1, "maxLength": 40000 }
+                        }
+                    }),
+                    output_schema: json!({
+                        "type": "object",
+                        "properties": {
+                            "json": { "type": "object" }
+                        }
+                    }),
+                    capability: CapabilityId::from_static("reddit.post"),
+                    risk_level: RiskLevel::Medium,
+                    safety_tier: SafetyTier::Risky,
+                    idempotency: IdempotencyClass::BestEffort,
+                    rate_limit: None,
+                    requires_approval: None,
+                    ai_hints: AgentHint {
+                        when_to_use: "Use to edit the text of a post or comment you own.".into(),
+                        common_mistakes: vec![
+                            "Editing content owned by another user (will fail with 403).".into(),
+                            "Using a bare ID instead of a fullname (t3_... or t1_...).".into(),
+                        ],
+                        examples: vec![
+                            r#"{"thing_fullname":"t3_abc123", "text":"Updated post body text."}"#.into(),
+                        ],
+                        related: vec![
+                            CapabilityId::from_static("reddit.create_post"),
+                            CapabilityId::from_static("reddit.delete_content"),
+                        ],
+                    },
+                },
+                OperationInfo {
+                    id: OperationId::from_static("reddit.delete_content"),
+                    summary: "Delete an existing post or comment".into(),
+                    description: None,
+                    input_schema: json!({
+                        "type": "object",
+                        "required": ["thing_fullname"],
+                        "properties": {
+                            "thing_fullname": { "type": "string", "description": "Fullname of the post or comment to delete (t3_... or t1_...).", "pattern": "^t[13]_[A-Za-z0-9]+$" }
+                        }
+                    }),
+                    output_schema: json!({
+                        "type": "object",
+                        "required": ["deleted"],
+                        "properties": {
+                            "deleted": { "type": "boolean" }
+                        }
+                    }),
+                    capability: CapabilityId::from_static("reddit.post"),
+                    risk_level: RiskLevel::High,
+                    safety_tier: SafetyTier::Dangerous,
+                    idempotency: IdempotencyClass::Strict,
+                    rate_limit: None,
+                    requires_approval: None,
+                    ai_hints: AgentHint {
+                        when_to_use: "Use to permanently delete a post or comment you own.".into(),
+                        common_mistakes: vec![
+                            "Deleting content owned by another user (will fail).".into(),
+                            "Deletion is irreversible; confirm before proceeding.".into(),
+                        ],
+                        examples: vec![
+                            r#"{"thing_fullname":"t1_xyz789"}"#.into(),
+                        ],
+                        related: vec![
+                            CapabilityId::from_static("reddit.edit_content"),
+                            CapabilityId::from_static("reddit.mod_remove"),
+                        ],
+                    },
+                },
             ],
             events: vec![],
             resource_types: vec![],
@@ -729,6 +975,12 @@ impl RedditConnector {
             "reddit.mod_remove" => self.invoke_mod_remove(client, &input).await,
             "reddit.download_media" => self.invoke_download_media(client, &input).await,
             "reddit.stream_subreddit_new" => self.invoke_stream_subreddit_new(client, &input).await,
+            "reddit.subreddit.get" => self.invoke_subreddit_get(client, &input).await,
+            "reddit.subreddit.search" => self.invoke_subreddit_search(client, &input).await,
+            "reddit.user.posts" => self.invoke_user_posts(client, &input).await,
+            "reddit.user.comments" => self.invoke_user_comments(client, &input).await,
+            "reddit.edit_content" => self.invoke_edit_content(client, &input).await,
+            "reddit.delete_content" => self.invoke_delete_content(client, &input).await,
             _ => {
                 return Err(FcpError::InvalidRequest {
                     code: 1002,
@@ -925,6 +1177,75 @@ impl RedditConnector {
         Ok(json!({ "events": events, "next_checkpoint": next_checkpoint }))
     }
 
+    async fn invoke_subreddit_get(
+        &self,
+        client: &RedditClient,
+        input: &serde_json::Value,
+    ) -> Result<serde_json::Value, RedditError> {
+        let subreddit = require_str(input, "subreddit")?;
+        client.get_subreddit(subreddit).await
+    }
+
+    async fn invoke_subreddit_search(
+        &self,
+        client: &RedditClient,
+        input: &serde_json::Value,
+    ) -> Result<serde_json::Value, RedditError> {
+        let query = require_str(input, "query")?;
+        let limit = input.get("limit").and_then(serde_json::Value::as_i64);
+        let after = input.get("after").and_then(|v| v.as_str());
+        let data = client.search_subreddits(query, limit, after).await?;
+        Ok(extract_listing(&data))
+    }
+
+    async fn invoke_user_posts(
+        &self,
+        client: &RedditClient,
+        input: &serde_json::Value,
+    ) -> Result<serde_json::Value, RedditError> {
+        let username = require_str(input, "username")?;
+        let limit = input.get("limit").and_then(serde_json::Value::as_i64);
+        let sort = input.get("sort").and_then(|v| v.as_str());
+        let after = input.get("after").and_then(|v| v.as_str());
+        let data = client.get_user_posts(username, limit, sort, after).await?;
+        Ok(extract_listing(&data))
+    }
+
+    async fn invoke_user_comments(
+        &self,
+        client: &RedditClient,
+        input: &serde_json::Value,
+    ) -> Result<serde_json::Value, RedditError> {
+        let username = require_str(input, "username")?;
+        let limit = input.get("limit").and_then(serde_json::Value::as_i64);
+        let sort = input.get("sort").and_then(|v| v.as_str());
+        let after = input.get("after").and_then(|v| v.as_str());
+        let data = client
+            .get_user_comments(username, limit, sort, after)
+            .await?;
+        Ok(extract_listing(&data))
+    }
+
+    async fn invoke_edit_content(
+        &self,
+        client: &RedditClient,
+        input: &serde_json::Value,
+    ) -> Result<serde_json::Value, RedditError> {
+        let thing_fullname = require_str(input, "thing_fullname")?;
+        let text = require_str(input, "text")?;
+        client.edit_content(thing_fullname, text).await
+    }
+
+    async fn invoke_delete_content(
+        &self,
+        client: &RedditClient,
+        input: &serde_json::Value,
+    ) -> Result<serde_json::Value, RedditError> {
+        let thing_fullname = require_str(input, "thing_fullname")?;
+        let data = client.delete_content(thing_fullname).await?;
+        Ok(json!({ "deleted": true, "raw": data }))
+    }
+
     fn serialize_self_check_report(report: SelfCheckReport) -> FcpResult<serde_json::Value> {
         info!(
             event = "reddit.provisioning.self_check",
@@ -1059,6 +1380,12 @@ fn operations_info() -> serde_json::Value {
         { "id": "reddit.mod_remove", "summary": "Remove a post or comment (mod action)", "capability": "reddit.moderate", "risk_level": "high", "safety_tier": "dangerous", "idempotency": "strict" },
         { "id": "reddit.download_media", "summary": "Download media from Reddit hosts", "capability": "reddit.media.read", "risk_level": "low", "safety_tier": "safe", "idempotency": "strict" },
         { "id": "reddit.stream_subreddit_new", "summary": "Poll new subreddit posts as event stream", "capability": "reddit.stream", "risk_level": "medium", "safety_tier": "risky", "idempotency": "none" },
+        { "id": "reddit.subreddit.get", "summary": "Get subreddit metadata", "capability": "reddit.read", "risk_level": "low", "safety_tier": "safe", "idempotency": "strict" },
+        { "id": "reddit.subreddit.search", "summary": "Search for subreddits", "capability": "reddit.search", "risk_level": "low", "safety_tier": "safe", "idempotency": "strict" },
+        { "id": "reddit.user.posts", "summary": "List a user's post history", "capability": "reddit.read", "risk_level": "low", "safety_tier": "safe", "idempotency": "strict" },
+        { "id": "reddit.user.comments", "summary": "List a user's comment history", "capability": "reddit.read", "risk_level": "low", "safety_tier": "safe", "idempotency": "strict" },
+        { "id": "reddit.edit_content", "summary": "Edit the text of a post or comment", "capability": "reddit.post", "risk_level": "medium", "safety_tier": "risky", "idempotency": "best_effort" },
+        { "id": "reddit.delete_content", "summary": "Delete a post or comment", "capability": "reddit.post", "risk_level": "high", "safety_tier": "dangerous", "idempotency": "strict" },
     ])
 }
 
@@ -1327,8 +1654,8 @@ mod tests {
     // ── operations_info ──────────────────────────────────────────────
 
     #[test]
-    fn operations_info_has_9_operations() {
-        assert_eq!(operations_info().as_array().unwrap().len(), 9);
+    fn operations_info_has_15_operations() {
+        assert_eq!(operations_info().as_array().unwrap().len(), 15);
     }
 
     #[test]
@@ -1431,6 +1758,12 @@ mod tests {
             "reddit.mod_remove",
             "reddit.download_media",
             "reddit.stream_subreddit_new",
+            "reddit.subreddit.get",
+            "reddit.subreddit.search",
+            "reddit.user.posts",
+            "reddit.user.comments",
+            "reddit.edit_content",
+            "reddit.delete_content",
         ];
         for e in &expected {
             assert!(ids.contains(e), "missing expected operation {e}");

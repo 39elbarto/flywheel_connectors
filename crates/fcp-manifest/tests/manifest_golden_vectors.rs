@@ -4308,13 +4308,19 @@ fn reddit_full_manifest_parses_with_all_operations() {
     let expected_ops = [
         "reddit.create_comment",
         "reddit.create_post",
+        "reddit.delete_content",
         "reddit.download_media",
+        "reddit.edit_content",
         "reddit.get_post_thread",
         "reddit.list_subreddit_new",
         "reddit.mod_remove",
         "reddit.search_posts",
         "reddit.send_message",
         "reddit.stream_subreddit_new",
+        "reddit.subreddit.get",
+        "reddit.subreddit.search",
+        "reddit.user.comments",
+        "reddit.user.posts",
     ];
     for op_name in &expected_ops {
         assert!(ops.contains_key(*op_name), "missing operation: {op_name}");

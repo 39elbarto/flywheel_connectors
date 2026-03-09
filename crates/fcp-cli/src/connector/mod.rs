@@ -2768,4 +2768,687 @@ mod tests {
         assert!(!policy.require_sbom);
         assert_eq!(policy.min_slsa_level, 2);
     }
+
+    // ── HostEndpoint Tests ──────────────────────────────────────────
+
+    #[test]
+    fn host_endpoint_from_raw_http() {
+        let ep = HostEndpoint::from_raw("http://10.0.0.1:9090").unwrap();
+        assert_eq!(ep.display(), "http://10.0.0.1:9090/");
+    }
+
+    #[test]
+    fn host_endpoint_from_raw_https() {
+        let ep = HostEndpoint::from_raw("https://host.example.com:443/api").unwrap();
+        assert_eq!(ep.display(), "https://host.example.com/api");
+    }
+
+    #[test]
+    fn host_endpoint_from_raw_tcp_scheme() {
+        let ep = HostEndpoint::from_raw("tcp://127.0.0.1:8080").unwrap();
+        assert_eq!(ep.display(), "http://127.0.0.1:8080/");
+    }
+
+    #[test]
+    fn host_endpoint_from_raw_bare_host_port() {
+        let ep = HostEndpoint::from_raw("192.168.1.1:9090").unwrap();
+        assert_eq!(ep.display(), "http://192.168.1.1:9090/");
+    }
+
+    #[test]
+    fn host_endpoint_from_raw_empty_fails() {
+        assert!(HostEndpoint::from_raw("").is_err());
+    }
+
+    #[test]
+    fn host_endpoint_from_raw_whitespace_only_fails() {
+        assert!(HostEndpoint::from_raw("   ").is_err());
+    }
+
+    #[test]
+    fn host_endpoint_from_raw_trims_whitespace() {
+        let ep = HostEndpoint::from_raw("  http://localhost:9090  ").unwrap();
+        assert_eq!(ep.display(), "http://localhost:9090/");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn host_endpoint_from_raw_unix_scheme() {
+        let ep = HostEndpoint::from_raw("unix:///var/run/fcp.sock").unwrap();
+        assert_eq!(ep.display(), "unix:///var/run/fcp.sock");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn host_endpoint_from_raw_unix_bare_path() {
+        let ep = HostEndpoint::from_raw("/var/run/fcp.sock").unwrap();
+        assert_eq!(ep.display(), "unix:///var/run/fcp.sock");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn host_endpoint_from_raw_unix_empty_path_fails() {
+        assert!(HostEndpoint::from_raw("unix://").is_err());
+    }
+
+    #[test]
+    fn host_endpoint_build_url_simple_path() {
+        let ep = HostEndpoint::from_raw("http://localhost:9090").unwrap();
+        let url = ep.build_url("rpc/pin");
+        assert_eq!(url.path(), "/rpc/pin");
+    }
+
+    #[test]
+    fn host_endpoint_build_url_strips_leading_slash() {
+        let ep = HostEndpoint::from_raw("http://localhost:9090").unwrap();
+        let url = ep.build_url("/rpc/pin");
+        assert_eq!(url.path(), "/rpc/pin");
+    }
+
+    #[test]
+    fn host_endpoint_build_url_with_base_path() {
+        let ep = HostEndpoint::from_raw("http://localhost:9090/api/v1").unwrap();
+        let url = ep.build_url("connectors");
+        assert_eq!(url.path(), "/api/v1/connectors");
+    }
+
+    #[test]
+    fn host_endpoint_build_url_clears_query_fragment() {
+        let ep = HostEndpoint::from_raw("http://localhost:9090").unwrap();
+        let url = ep.build_url("test");
+        assert!(url.query().is_none());
+        assert!(url.fragment().is_none());
+    }
+
+    #[test]
+    fn host_endpoint_clone() {
+        let ep = HostEndpoint::from_raw("http://localhost:9090").unwrap();
+        let cloned = ep.clone();
+        assert_eq!(ep.display(), cloned.display());
+    }
+
+    #[test]
+    fn host_endpoint_debug() {
+        let ep = HostEndpoint::from_raw("http://localhost:9090").unwrap();
+        let debug = format!("{ep:?}");
+        assert!(debug.contains("Http"));
+    }
+
+    // ── rollout_health_label Tests ──────────────────────────────────
+
+    #[test]
+    fn rollout_health_crash_loop_is_unhealthy() {
+        let mut status = test_lifecycle_status(LifecycleState::Production, test_version(1, 0, 0));
+        status.crash_loop_detected = true;
+        assert_eq!(rollout_health_label(&status), "unhealthy");
+    }
+
+    #[test]
+    fn rollout_health_auto_rollback_pending_is_unhealthy() {
+        let mut status = test_lifecycle_status(LifecycleState::Production, test_version(1, 0, 0));
+        status.auto_rollback_pending = true;
+        assert_eq!(rollout_health_label(&status), "unhealthy");
+    }
+
+    #[test]
+    fn rollout_health_zero_samples_is_unknown() {
+        let mut status = test_lifecycle_status(LifecycleState::Canary, test_version(1, 0, 0));
+        status.health.samples = 0;
+        assert_eq!(rollout_health_label(&status), "unknown");
+    }
+
+    #[test]
+    fn rollout_health_high_success_rate_is_healthy() {
+        let mut status = test_lifecycle_status(LifecycleState::Production, test_version(1, 0, 0));
+        status.health.success_rate = 99;
+        assert_eq!(rollout_health_label(&status), "healthy");
+    }
+
+    #[test]
+    fn rollout_health_boundary_95_is_healthy() {
+        let mut status = test_lifecycle_status(LifecycleState::Production, test_version(1, 0, 0));
+        status.health.success_rate = 95;
+        assert_eq!(rollout_health_label(&status), "healthy");
+    }
+
+    #[test]
+    fn rollout_health_94_is_degraded() {
+        let mut status = test_lifecycle_status(LifecycleState::Production, test_version(1, 0, 0));
+        status.health.success_rate = 94;
+        assert_eq!(rollout_health_label(&status), "degraded");
+    }
+
+    #[test]
+    fn rollout_health_boundary_80_is_degraded() {
+        let mut status = test_lifecycle_status(LifecycleState::Production, test_version(1, 0, 0));
+        status.health.success_rate = 80;
+        assert_eq!(rollout_health_label(&status), "degraded");
+    }
+
+    #[test]
+    fn rollout_health_79_is_unhealthy() {
+        let mut status = test_lifecycle_status(LifecycleState::Production, test_version(1, 0, 0));
+        status.health.success_rate = 79;
+        assert_eq!(rollout_health_label(&status), "unhealthy");
+    }
+
+    // ── http_status_error Tests ─────────────────────────────────────
+
+    #[test]
+    fn http_status_error_message_includes_context_and_body() {
+        // We can't create a real Response object without a server, but
+        // we can test the VerifyOutput, VerifyStepOutput, VerifyPolicyOutput
+        // serialization more thoroughly.
+        let output = VerifyOutput {
+            connector_id: "fcp.test:v1".to_string(),
+            decision: "allow".to_string(),
+            reason_code: "all_checks_passed".to_string(),
+            artifact_digest: "blake3-256:deadbeef".to_string(),
+            steps: vec![
+                VerifyStepOutput {
+                    step: "attestation_presence".to_string(),
+                    passed: true,
+                    detail: "found".to_string(),
+                },
+                VerifyStepOutput {
+                    step: "sbom_validation".to_string(),
+                    passed: true,
+                    detail: "valid".to_string(),
+                },
+                VerifyStepOutput {
+                    step: "slsa_level_check".to_string(),
+                    passed: true,
+                    detail: "level 3 >= required 2".to_string(),
+                },
+            ],
+            evidence_digest: "blake3-256:cafe1234".to_string(),
+            policy: VerifyPolicyOutput {
+                require_attestation: true,
+                require_sbom: true,
+                min_slsa_level: 2,
+                allow_unsigned: false,
+            },
+        };
+        let json = serde_json::to_string_pretty(&output).unwrap();
+        assert!(json.contains("all_checks_passed"));
+        assert!(json.contains("deadbeef"));
+        assert!(json.contains("cafe1234"));
+        assert_eq!(output.steps.len(), 3);
+        assert!(output.steps.iter().all(|s| s.passed));
+    }
+
+    // ── HostPinRequest/HostRollbackRequest Serde ────────────────────
+
+    #[test]
+    fn host_pin_request_serde_roundtrip() {
+        let request = HostPinRequest {
+            version: test_version(2, 0, 0),
+        };
+        let json = serde_json::to_string(&request).unwrap();
+        let deserialized: HostPinRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.version, test_version(2, 0, 0));
+    }
+
+    #[test]
+    fn host_rollback_request_serde_roundtrip() {
+        let request = HostRollbackRequest {
+            connector_id: "fcp.test:utility:v1".to_string(),
+            to_version: test_version(1, 0, 0),
+        };
+        let json = serde_json::to_string(&request).unwrap();
+        assert!(json.contains("fcp.test:utility:v1"));
+        assert!(json.contains("1.0.0"));
+    }
+
+    #[test]
+    fn host_rollout_schedule_request_skips_none_previous() {
+        let request = HostRolloutScheduleRequest {
+            connector_id: "fcp.test:utility:v1".to_string(),
+            version: test_version(2, 0, 0),
+            previous_version: None,
+            policy: RolloutPolicy::builder().canary_percent(10).build(),
+        };
+        let json = serde_json::to_string(&request).unwrap();
+        assert!(!json.contains("previous_version"));
+    }
+
+    #[test]
+    fn host_rollout_schedule_request_includes_previous() {
+        let request = HostRolloutScheduleRequest {
+            connector_id: "fcp.test:utility:v1".to_string(),
+            version: test_version(2, 0, 0),
+            previous_version: Some(test_version(1, 0, 0)),
+            policy: RolloutPolicy::builder().canary_percent(50).build(),
+        };
+        let json = serde_json::to_string(&request).unwrap();
+        assert!(json.contains("previous_version"));
+        assert!(json.contains("1.0.0"));
+    }
+
+    // ── PinOutput/RollbackOutput/RolloutStatusOutput edge cases ─────
+
+    #[test]
+    fn pin_output_unpin_action_no_version() {
+        let output = PinOutput {
+            connector_id: "fcp.test:utility:v1".to_string(),
+            action: "unpin".to_string(),
+            version: None,
+            message: "Unpinned".to_string(),
+        };
+        let json = serde_json::to_string(&output).unwrap();
+        assert!(json.contains("\"version\":null"));
+        assert!(json.contains("\"action\":\"unpin\""));
+    }
+
+    #[test]
+    fn rollout_status_output_with_canary() {
+        let output = RolloutStatusOutput {
+            connector_id: "fcp.test:utility:v1".to_string(),
+            state: "canary".to_string(),
+            version: "2.0.0".to_string(),
+            canary_percent: 25,
+            pinned: true,
+            health: "degraded".to_string(),
+            message: "Canary at 25%".to_string(),
+        };
+        let json = serde_json::to_string(&output).unwrap();
+        assert!(json.contains("\"canary_percent\":25"));
+        assert!(json.contains("\"health\":\"degraded\""));
+    }
+
+    #[test]
+    fn rollback_output_message_preserved() {
+        let output = RollbackOutput {
+            connector_id: "fcp.test:utility:v1".to_string(),
+            from_version: "3.0.0".to_string(),
+            to_version: "2.5.0".to_string(),
+            message: "Emergency rollback due to crash loop".to_string(),
+        };
+        let json = serde_json::to_string(&output).unwrap();
+        assert!(json.contains("Emergency rollback"));
+        assert!(json.contains("3.0.0"));
+        assert!(json.contains("2.5.0"));
+    }
+
+    // ── print_* function invocations (no panic) ─────────────────────
+
+    #[test]
+    fn print_list_human_readable_no_panic() {
+        let output = simulate_list_output(None);
+        print_list_human_readable(&output);
+    }
+
+    #[test]
+    fn print_list_human_readable_empty_no_panic() {
+        let output = ConnectorListOutput {
+            total: 0,
+            by_zone: vec![],
+        };
+        print_list_human_readable(&output);
+    }
+
+    #[test]
+    fn print_info_human_readable_no_panic() {
+        let info = simulate_connector_info("fcp.twitter:social:v1").unwrap();
+        print_info_human_readable(&info);
+    }
+
+    #[test]
+    fn print_info_no_rate_limits_no_panic() {
+        let mut info = simulate_connector_info("fcp.twitter:social:v1").unwrap();
+        info.rate_limits = None;
+        print_info_human_readable(&info);
+    }
+
+    #[test]
+    fn print_info_no_events_no_panic() {
+        let mut info = simulate_connector_info("fcp.twitter:social:v1").unwrap();
+        info.events.clear();
+        print_info_human_readable(&info);
+    }
+
+    #[test]
+    fn print_info_no_metrics_no_panic() {
+        let mut info = simulate_connector_info("fcp.twitter:social:v1").unwrap();
+        info.metrics = None;
+        print_info_human_readable(&info);
+    }
+
+    #[test]
+    fn print_info_unsigned_no_panic() {
+        let mut info = simulate_connector_info("fcp.twitter:social:v1").unwrap();
+        info.signed = false;
+        info.attestations.clear();
+        print_info_human_readable(&info);
+    }
+
+    #[test]
+    fn print_info_network_disabled_no_panic() {
+        let mut info = simulate_connector_info("fcp.twitter:social:v1").unwrap();
+        info.sandbox.network_access = false;
+        print_info_human_readable(&info);
+    }
+
+    #[test]
+    fn print_introspection_human_readable_no_panic() {
+        let intro = simulate_introspection("fcp.twitter:social:v1", None).unwrap();
+        print_introspection_human_readable(&intro);
+    }
+
+    #[test]
+    fn print_introspection_no_events_no_panic() {
+        let mut intro = simulate_introspection("fcp.twitter:social:v1", None).unwrap();
+        intro.events.clear();
+        print_introspection_human_readable(&intro);
+    }
+
+    #[test]
+    fn print_introspection_no_rate_limits_no_panic() {
+        let mut intro = simulate_introspection("fcp.twitter:social:v1", None).unwrap();
+        intro.rate_limits = None;
+        print_introspection_human_readable(&intro);
+    }
+
+    #[test]
+    fn print_introspection_no_event_caps_no_panic() {
+        let mut intro = simulate_introspection("fcp.twitter:social:v1", None).unwrap();
+        intro.event_caps = None;
+        print_introspection_human_readable(&intro);
+    }
+
+    #[test]
+    fn print_introspection_no_resource_types_no_panic() {
+        let mut intro = simulate_introspection("fcp.twitter:social:v1", None).unwrap();
+        intro.resource_types.clear();
+        print_introspection_human_readable(&intro);
+    }
+
+    #[test]
+    fn print_introspection_op_no_description_no_panic() {
+        let mut intro = simulate_introspection("fcp.twitter:social:v1", None).unwrap();
+        for op in &mut intro.operations {
+            op.description = None;
+        }
+        print_introspection_human_readable(&intro);
+    }
+
+    #[test]
+    fn print_introspection_op_no_approval_no_panic() {
+        let mut intro = simulate_introspection("fcp.twitter:social:v1", None).unwrap();
+        for op in &mut intro.operations {
+            op.requires_approval = None;
+        }
+        print_introspection_human_readable(&intro);
+    }
+
+    #[test]
+    fn print_introspection_op_no_rate_limit_no_panic() {
+        let mut intro = simulate_introspection("fcp.twitter:social:v1", None).unwrap();
+        for op in &mut intro.operations {
+            op.rate_limit = None;
+        }
+        print_introspection_human_readable(&intro);
+    }
+
+    #[test]
+    fn print_pin_output_json_no_panic() {
+        let output = PinOutput {
+            connector_id: "test".to_string(),
+            action: "pin".to_string(),
+            version: Some("1.0.0".to_string()),
+            message: "done".to_string(),
+        };
+        print_pin_output(&output, true).unwrap();
+    }
+
+    #[test]
+    fn print_pin_output_human_pin_no_panic() {
+        let output = PinOutput {
+            connector_id: "fcp.test:v1".to_string(),
+            action: "pin".to_string(),
+            version: Some("1.0.0".to_string()),
+            message: "done".to_string(),
+        };
+        print_pin_output(&output, false).unwrap();
+    }
+
+    #[test]
+    fn print_pin_output_human_unpin_no_panic() {
+        let output = PinOutput {
+            connector_id: "fcp.test:v1".to_string(),
+            action: "unpin".to_string(),
+            version: None,
+            message: "done".to_string(),
+        };
+        print_pin_output(&output, false).unwrap();
+    }
+
+    #[test]
+    fn print_rollout_status_json_no_panic() {
+        let output = RolloutStatusOutput {
+            connector_id: "test".to_string(),
+            state: "canary".to_string(),
+            version: "1.0.0".to_string(),
+            canary_percent: 50,
+            pinned: true,
+            health: "healthy".to_string(),
+            message: "ok".to_string(),
+        };
+        print_rollout_status_output(&output, true).unwrap();
+    }
+
+    #[test]
+    fn print_rollout_status_human_with_canary_no_panic() {
+        let output = RolloutStatusOutput {
+            connector_id: "test".to_string(),
+            state: "canary".to_string(),
+            version: "1.0.0".to_string(),
+            canary_percent: 25,
+            pinned: true,
+            health: "healthy".to_string(),
+            message: "ok".to_string(),
+        };
+        print_rollout_status_output(&output, false).unwrap();
+    }
+
+    #[test]
+    fn print_rollout_status_human_no_canary_no_panic() {
+        let output = RolloutStatusOutput {
+            connector_id: "test".to_string(),
+            state: "production".to_string(),
+            version: "1.0.0".to_string(),
+            canary_percent: 0,
+            pinned: false,
+            health: "healthy".to_string(),
+            message: "ok".to_string(),
+        };
+        print_rollout_status_output(&output, false).unwrap();
+    }
+
+    #[test]
+    fn print_rollback_json_no_panic() {
+        let output = RollbackOutput {
+            connector_id: "test".to_string(),
+            from_version: "2.0.0".to_string(),
+            to_version: "1.0.0".to_string(),
+            message: "rolled back".to_string(),
+        };
+        print_rollback_output(&output, true).unwrap();
+    }
+
+    #[test]
+    fn print_rollback_human_no_panic() {
+        let output = RollbackOutput {
+            connector_id: "fcp.test:v1".to_string(),
+            from_version: "2.0.0".to_string(),
+            to_version: "1.0.0".to_string(),
+            message: "rolled back".to_string(),
+        };
+        print_rollback_output(&output, false).unwrap();
+    }
+
+    // ── FakeRolloutHostClient error edge cases ──────────────────────
+
+    #[test]
+    fn rollout_status_no_rollout_no_pin_version_fails() {
+        let mut client = FakeRolloutHostClient::new();
+        client.rollout_status = None;
+        client.pin_state.version = None;
+        client.pin_state.pinned = false;
+        let args = RolloutStatusArgs {
+            connector_id: test_connector_id(),
+            json: true,
+        };
+        assert!(run_rollout_status_with_client(&args, &client).is_err());
+    }
+
+    #[test]
+    fn rollout_set_captures_previous_version() {
+        let client = FakeRolloutHostClient::new();
+        let args = RolloutSetArgs {
+            connector_id: test_connector_id(),
+            canary: 10,
+            json: true,
+        };
+        let _output = run_rollout_set_with_client(&args, &client).unwrap();
+        let scheduled = client.scheduled_requests.borrow();
+        assert_eq!(scheduled.len(), 1);
+        // Previous version comes from the rollout status (1.2.2)
+        assert_eq!(scheduled[0].previous_version, Some(test_version(1, 2, 2)));
+    }
+
+    #[test]
+    fn rollout_set_no_existing_rollout_has_no_previous() {
+        let mut client = FakeRolloutHostClient::new();
+        client.rollout_status = None;
+        let args = RolloutSetArgs {
+            connector_id: test_connector_id(),
+            canary: 10,
+            json: true,
+        };
+        let _output = run_rollout_set_with_client(&args, &client).unwrap();
+        let scheduled = client.scheduled_requests.borrow();
+        assert_eq!(scheduled[0].previous_version, None);
+    }
+
+    #[test]
+    fn rollback_records_request() {
+        let client = FakeRolloutHostClient::new();
+        let args = RollbackArgs {
+            connector_id: test_connector_id(),
+            to: "1.0.0".to_string(),
+            json: true,
+        };
+        let _output = run_rollback_with_client(&args, &client).unwrap();
+        let requests = client.rollback_requests.borrow();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].0, test_connector_id());
+        assert_eq!(requests[0].1, test_version(1, 0, 0));
+    }
+
+    // ── Simulate functions: additional edge cases ───────────────────
+
+    #[test]
+    fn list_all_zones_correct_total() {
+        let output = simulate_list_output(None);
+        let counted: usize = output.by_zone.iter().map(|z| z.connectors.len()).sum();
+        assert_eq!(output.total, counted);
+    }
+
+    #[test]
+    fn info_twitter_required_caps() {
+        let info = simulate_connector_info("fcp.twitter:social:v1").unwrap();
+        assert_eq!(info.required_capabilities.len(), 2);
+        assert!(
+            info.required_capabilities
+                .iter()
+                .any(|c| c.as_str() == "twitter:read:tweets")
+        );
+    }
+
+    #[test]
+    fn info_twitter_optional_caps() {
+        let info = simulate_connector_info("fcp.twitter:social:v1").unwrap();
+        assert_eq!(info.optional_capabilities.len(), 3);
+        assert!(
+            info.optional_capabilities
+                .iter()
+                .any(|c| c.as_str() == "twitter:write:tweets")
+        );
+    }
+
+    #[test]
+    fn info_twitter_operations_have_correct_risk_levels() {
+        let info = simulate_connector_info("fcp.twitter:social:v1").unwrap();
+        let get_timeline = info.operations.iter().find(|o| o.id == "twitter.get_timeline").unwrap();
+        assert_eq!(get_timeline.risk_level, RiskLevel::Low);
+        assert_eq!(get_timeline.safety_tier, SafetyTier::Safe);
+
+        let post_tweet = info.operations.iter().find(|o| o.id == "twitter.post_tweet").unwrap();
+        assert_eq!(post_tweet.risk_level, RiskLevel::Medium);
+        assert_eq!(post_tweet.safety_tier, SafetyTier::Risky);
+    }
+
+    #[test]
+    fn info_twitter_metrics_populated() {
+        let info = simulate_connector_info("fcp.twitter:social:v1").unwrap();
+        let metrics = info.metrics.unwrap();
+        assert!(metrics.requests_total > 0);
+        assert!(metrics.requests_success <= metrics.requests_total);
+        assert!(metrics.latency_p50_ms < metrics.latency_p99_ms);
+    }
+
+    #[test]
+    fn introspect_twitter_events_have_schemas() {
+        let intro = simulate_introspection("fcp.twitter:social:v1", None).unwrap();
+        for event in &intro.events {
+            assert!(event.schema.is_object(), "event {} missing schema", event.topic);
+            assert!(event.requires_ack);
+        }
+    }
+
+    #[test]
+    fn introspect_twitter_resource_types_have_uris() {
+        let intro = simulate_introspection("fcp.twitter:social:v1", None).unwrap();
+        for rt in &intro.resource_types {
+            assert!(rt.uri_pattern.starts_with("fcp://"), "bad URI pattern for {}", rt.name);
+            assert!(rt.schema.is_object(), "missing schema for {}", rt.name);
+        }
+    }
+
+    #[test]
+    fn introspect_twitter_rate_limits_match_info() {
+        let info = simulate_connector_info("fcp.twitter:social:v1").unwrap();
+        let intro = simulate_introspection("fcp.twitter:social:v1", None).unwrap();
+        let info_limits = info.rate_limits.unwrap();
+        let intro_limits = intro.rate_limits.unwrap();
+        assert_eq!(info_limits.limits.len(), intro_limits.limits.len());
+        assert_eq!(info_limits.limits[0].id, intro_limits.limits[0].id);
+    }
+
+    #[test]
+    fn list_connectors_all_have_required_fields() {
+        let output = simulate_list_output(None);
+        for zone in &output.by_zone {
+            assert!(!zone.zone_id.is_empty());
+            for conn in &zone.connectors {
+                assert!(!conn.id.is_empty());
+                assert!(!conn.name.is_empty());
+                assert!(!conn.version.is_empty());
+                assert!(!conn.categories.is_empty());
+                assert!(conn.tool_count > 0);
+            }
+        }
+    }
+
+    #[test]
+    fn list_connectors_disabled_connector() {
+        let output = simulate_list_output(None);
+        // All simulated connectors are enabled
+        for zone in &output.by_zone {
+            for conn in &zone.connectors {
+                assert!(conn.enabled);
+            }
+        }
+    }
 }

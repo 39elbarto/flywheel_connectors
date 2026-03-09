@@ -2438,6 +2438,649 @@ mod tests {
         assert!(result.is_err(), "tampered issued_at should cause AAD mismatch");
     }
 
+    // ─────────────────────────────────────────────────────────────────────────
+    // Edge-case and boundary-condition tests (batch 2)
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// Verify `ZoneKeyId` Display for all-FF bytes.
+    #[test]
+    fn zone_key_id_display_all_ff() {
+        let id = ZoneKeyId::from_bytes([0xFF; 8]);
+        assert_eq!(format!("{id}"), "ffffffffffffffff");
+    }
+
+    /// Verify `ObjectIdKeyId` Display for all-FF bytes.
+    #[test]
+    fn object_id_key_id_display_all_ff() {
+        let id = ObjectIdKeyId::from_bytes([0xFF; 8]);
+        assert_eq!(format!("{id}"), "ffffffffffffffff");
+    }
+
+    /// Verify `ZoneKey` single-byte difference causes inequality.
+    #[test]
+    fn zone_key_single_byte_difference() {
+        let mut bytes_a = [0u8; ZONE_KEY_LEN];
+        let mut bytes_b = [0u8; ZONE_KEY_LEN];
+        bytes_b[ZONE_KEY_LEN - 1] = 1;
+        let a = ZoneKey::from_bytes(bytes_a);
+        let b = ZoneKey::from_bytes(bytes_b);
+        assert_ne!(a, b);
+
+        // First byte differs
+        bytes_a[0] = 0xFF;
+        let c = ZoneKey::from_bytes(bytes_a);
+        assert_ne!(a, c);
+    }
+
+    /// Verify that `ObjectIdKey` debug output is redacted.
+    #[test]
+    fn object_id_key_debug_is_redacted() {
+        let key = ObjectIdKey::from_bytes([0x42; 32]);
+        let dbg = format!("{key:?}");
+        assert!(!dbg.contains("42"));
+        assert!(dbg.contains("redacted"));
+        assert!(dbg.contains("ObjectIdKey"));
+    }
+
+    /// Verify `ObjectIdKey` equality and inequality.
+    #[test]
+    fn object_id_key_equality_and_inequality() {
+        let a = ObjectIdKey::from_bytes([0x01; 32]);
+        let b = ObjectIdKey::from_bytes([0x01; 32]);
+        let c = ObjectIdKey::from_bytes([0x02; 32]);
+        assert_eq!(a, b);
+        assert_ne!(a, c);
+    }
+
+    /// Verify `ObjectIdKey` copy semantics.
+    #[test]
+    fn object_id_key_copy() {
+        let a = ObjectIdKey::from_bytes([0xAB; 32]);
+        let b = a;
+        assert_eq!(a, b);
+    }
+
+    /// Verify `ObjectIdKey` `from_bytes`/`as_bytes` roundtrip.
+    #[test]
+    fn object_id_key_from_bytes_as_bytes_roundtrip() {
+        let bytes = [0x13; 32];
+        let key = ObjectIdKey::from_bytes(bytes);
+        assert_eq!(*key.as_bytes(), bytes);
+    }
+
+    /// Verify `ObjectIdKey` hash consistency.
+    #[test]
+    fn object_id_key_hash_consistency() {
+        use std::collections::HashSet;
+        let key = ObjectIdKey::from_bytes([0x77; 32]);
+        let mut set = HashSet::new();
+        set.insert(key);
+        set.insert(key);
+        assert_eq!(set.len(), 1);
+    }
+
+    /// Verify `ObjectIdKeyId` copy semantics.
+    #[test]
+    fn object_id_key_id_copy() {
+        let a = ObjectIdKeyId::from_bytes([0xFE; 8]);
+        let b = a;
+        assert_eq!(a, b);
+    }
+
+    /// Verify `ZoneKeyRing` `active_zone_key` returns `None` when `active_zone_key_id`
+    /// is set to a key ID that was overwritten.
+    #[test]
+    fn zone_key_ring_active_after_overwrite_still_works() {
+        let mut ring = ZoneKeyRing::new(ZoneId::work());
+        let key_id = ZoneKeyId::from_bytes([0x01; 8]);
+        let key_a = ZoneKey::from_bytes([0xAA; ZONE_KEY_LEN]);
+        let key_b = ZoneKey::from_bytes([0xBB; ZONE_KEY_LEN]);
+
+        ring.insert_zone_key(key_id, key_a);
+        assert!(ring.set_active_zone_key(key_id));
+        assert_eq!(ring.active_zone_key(), Some(&key_a));
+
+        // Overwrite key value: active key ID stays but value changes
+        ring.insert_zone_key(key_id, key_b);
+        assert_eq!(ring.active_zone_key(), Some(&key_b));
+    }
+
+    /// Verify `ZoneKeyRing` with multiple object id keys and switching.
+    #[test]
+    fn zone_key_ring_multiple_object_id_keys_switching() {
+        let mut ring = ZoneKeyRing::new(ZoneId::private());
+        let id1 = ObjectIdKeyId::from_bytes([0x01; 8]);
+        let id2 = ObjectIdKeyId::from_bytes([0x02; 8]);
+        let id3 = ObjectIdKeyId::from_bytes([0x03; 8]);
+        let key1 = ObjectIdKey::from_bytes([0x11; 32]);
+        let key2 = ObjectIdKey::from_bytes([0x22; 32]);
+        let key3 = ObjectIdKey::from_bytes([0x33; 32]);
+
+        ring.insert_object_id_key(id1, key1);
+        ring.insert_object_id_key(id2, key2);
+        ring.insert_object_id_key(id3, key3);
+
+        assert!(ring.set_active_object_id_key(id1));
+        assert_eq!(ring.active_object_id_key(), Some(&key1));
+        assert!(ring.set_active_object_id_key(id3));
+        assert_eq!(ring.active_object_id_key(), Some(&key3));
+        assert!(ring.set_active_object_id_key(id2));
+        assert_eq!(ring.active_object_id_key(), Some(&key2));
+    }
+
+    /// Verify manifest serde roundtrip with all optional fields set to None.
+    #[test]
+    fn zone_key_manifest_serde_no_optional_fields() {
+        let zone_id = ZoneId::work();
+        let node_id = TailscaleNodeId::new("node-minimal");
+        let issued_at = 1_700_000_000;
+
+        let sk = X25519SecretKey::generate();
+        let pk = sk.public_key();
+        let zone_key = random_zone_key();
+        let obj_key = random_object_id_key();
+
+        let wrapped_zone = wrap_zone_key(&pk, &zone_id, &node_id, issued_at, &zone_key).unwrap();
+        let wrapped_obj =
+            wrap_object_id_key(&pk, &zone_id, &node_id, issued_at, &obj_key).unwrap();
+
+        let manifest = ZoneKeyManifest {
+            header: test_header(&zone_id),
+            zone_id: zone_id.clone(),
+            zone_key_id: ZoneKeyId::from_bytes([0x01; 8]),
+            object_id_key_id: ObjectIdKeyId::from_bytes([0x02; 8]),
+            algorithm: ZoneKeyAlgorithm::ChaCha20Poly1305,
+            valid_from: issued_at,
+            valid_until: None,
+            prev_zone_key_id: None,
+            wrapped_keys: vec![wrapped_zone],
+            wrapped_object_id_keys: vec![wrapped_obj],
+            rekey_policy: None,
+            signature: test_signature(),
+        };
+
+        let json = serde_json::to_string(&manifest).unwrap();
+        // Optional None fields should be omitted
+        assert!(!json.contains("valid_until"));
+        assert!(!json.contains("prev_zone_key_id"));
+        assert!(!json.contains("rekey_policy"));
+
+        let back: ZoneKeyManifest = serde_json::from_str(&json).unwrap();
+        assert!(back.valid_until.is_none());
+        assert!(back.prev_zone_key_id.is_none());
+        assert!(back.rekey_policy.is_none());
+
+        // Key still unwraps correctly
+        let unwrapped = unwrap_zone_key(&sk, &zone_id, &back.wrapped_keys[0]).unwrap();
+        assert_eq!(unwrapped, zone_key);
+    }
+
+    /// Verify `wrap_object_id_key` produces different ciphertext on each call.
+    #[test]
+    fn wrap_object_id_key_nondeterministic() {
+        let zone_id = ZoneId::private();
+        let node_id = TailscaleNodeId::new("node-obj-nd");
+        let issued_at = 1_700_000_000;
+        let sk = X25519SecretKey::generate();
+        let pk = sk.public_key();
+        let key = ObjectIdKey::from_bytes([0x42; 32]);
+
+        let w1 = wrap_object_id_key(&pk, &zone_id, &node_id, issued_at, &key).unwrap();
+        let w2 = wrap_object_id_key(&pk, &zone_id, &node_id, issued_at, &key).unwrap();
+
+        // Both decrypt to the same key
+        let k1 = unwrap_object_id_key(&sk, &zone_id, &w1).unwrap();
+        let k2 = unwrap_object_id_key(&sk, &zone_id, &w2).unwrap();
+        assert_eq!(k1, key);
+        assert_eq!(k2, key);
+
+        // Ciphertexts differ due to HPKE randomness
+        assert_ne!(w1.sealed.ciphertext, w2.sealed.ciphertext);
+    }
+
+    /// Verify `unwrap_object_id_key` fails when `issued_at` is tampered.
+    #[test]
+    fn unwrap_object_id_key_tampered_issued_at() {
+        let zone_id = ZoneId::community();
+        let node_id = TailscaleNodeId::new("node-obj-tamper");
+        let issued_at = 1_700_000_000;
+
+        let sk = X25519SecretKey::generate();
+        let pk = sk.public_key();
+        let key = random_object_id_key();
+
+        let mut wrapped = wrap_object_id_key(&pk, &zone_id, &node_id, issued_at, &key).unwrap();
+        wrapped.issued_at = 1_700_000_001; // tamper
+
+        let result = unwrap_object_id_key(&sk, &zone_id, &wrapped);
+        assert!(result.is_err(), "tampered issued_at should cause AAD mismatch");
+    }
+
+    /// Verify `RekeyPolicy` serde with zero overlap window.
+    #[test]
+    fn rekey_policy_serde_zero_overlap_window() {
+        let rp = RekeyPolicy {
+            epoch_ratchet: false,
+            overlap_window_secs: Some(0),
+            retain_epochs: Some(0),
+            rewrap_on_membership_change: false,
+            rotate_object_id_key_on_membership_change: false,
+        };
+        let json = serde_json::to_string(&rp).unwrap();
+        let back: RekeyPolicy = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.overlap_window_secs, Some(0));
+        assert_eq!(back.retain_epochs, Some(0));
+    }
+
+    /// Verify `RekeyPolicy` serde with partial fields (only some set).
+    #[test]
+    fn rekey_policy_serde_partial_fields() {
+        let json = r#"{"epoch_ratchet": true, "overlap_window_secs": 1200}"#;
+        let rp: RekeyPolicy = serde_json::from_str(json).unwrap();
+        assert!(rp.epoch_ratchet);
+        assert_eq!(rp.overlap_window_secs, Some(1200));
+        assert!(rp.retain_epochs.is_none());
+        assert!(!rp.rewrap_on_membership_change);
+        assert!(!rp.rotate_object_id_key_on_membership_change);
+    }
+
+    /// Verify `RekeyPolicy` serde with large overlap window.
+    #[test]
+    fn rekey_policy_large_values() {
+        let rp = RekeyPolicy {
+            epoch_ratchet: true,
+            overlap_window_secs: Some(u64::MAX),
+            retain_epochs: Some(u32::MAX),
+            rewrap_on_membership_change: true,
+            rotate_object_id_key_on_membership_change: true,
+        };
+        let json = serde_json::to_string(&rp).unwrap();
+        let back: RekeyPolicy = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.overlap_window_secs, Some(u64::MAX));
+        assert_eq!(back.retain_epochs, Some(u32::MAX));
+    }
+
+    /// Verify `ZoneKeyAlgorithm` serde rejects invalid string.
+    #[test]
+    fn zone_key_algorithm_serde_rejects_invalid() {
+        let result: Result<ZoneKeyAlgorithm, _> = serde_json::from_str(r#""invalid_algo""#);
+        assert!(result.is_err());
+    }
+
+    /// Verify `ZoneKeyManifest` clone preserves all fields.
+    #[test]
+    fn zone_key_manifest_clone_preserves_fields() {
+        let zone_id = ZoneId::work();
+        let node_id = TailscaleNodeId::new("node-clone");
+        let issued_at = 1_700_000_000;
+
+        let sk = X25519SecretKey::generate();
+        let pk = sk.public_key();
+        let zone_key = random_zone_key();
+        let obj_key = random_object_id_key();
+
+        let wrapped_zone = wrap_zone_key(&pk, &zone_id, &node_id, issued_at, &zone_key).unwrap();
+        let wrapped_obj =
+            wrap_object_id_key(&pk, &zone_id, &node_id, issued_at, &obj_key).unwrap();
+
+        let manifest = ZoneKeyManifest {
+            header: test_header(&zone_id),
+            zone_id: zone_id.clone(),
+            zone_key_id: ZoneKeyId::from_bytes([0x01; 8]),
+            object_id_key_id: ObjectIdKeyId::from_bytes([0x02; 8]),
+            algorithm: ZoneKeyAlgorithm::XChaCha20Poly1305,
+            valid_from: issued_at,
+            valid_until: Some(1_700_100_000),
+            prev_zone_key_id: Some(ZoneKeyId::from_bytes([0x99; 8])),
+            wrapped_keys: vec![wrapped_zone],
+            wrapped_object_id_keys: vec![wrapped_obj],
+            rekey_policy: Some(RekeyPolicy {
+                epoch_ratchet: true,
+                overlap_window_secs: Some(300),
+                retain_epochs: Some(2),
+                rewrap_on_membership_change: true,
+                rotate_object_id_key_on_membership_change: false,
+            }),
+            signature: test_signature(),
+        };
+
+        let cloned = manifest.clone();
+        assert_eq!(cloned.zone_id, manifest.zone_id);
+        assert_eq!(cloned.zone_key_id, manifest.zone_key_id);
+        assert_eq!(cloned.object_id_key_id, manifest.object_id_key_id);
+        assert_eq!(cloned.algorithm, manifest.algorithm);
+        assert_eq!(cloned.valid_from, manifest.valid_from);
+        assert_eq!(cloned.valid_until, manifest.valid_until);
+        assert_eq!(cloned.prev_zone_key_id, manifest.prev_zone_key_id);
+        assert_eq!(cloned.wrapped_keys.len(), manifest.wrapped_keys.len());
+        assert_eq!(
+            cloned.wrapped_object_id_keys.len(),
+            manifest.wrapped_object_id_keys.len()
+        );
+        assert!(cloned.rekey_policy.is_some());
+    }
+
+    /// Verify `ZoneKeyManifest` debug output contains type name.
+    #[test]
+    fn zone_key_manifest_debug_output() {
+        let zone_id = ZoneId::work();
+        let signing_key = fcp_crypto::Ed25519SigningKey::generate();
+        let manifest =
+            ZoneKeyManifest::new_empty(zone_id, 1_700_000_000, &signing_key).unwrap();
+        let dbg = format!("{manifest:?}");
+        assert!(dbg.contains("ZoneKeyManifest"));
+        assert!(dbg.contains("zone_key_id"));
+    }
+
+    /// Verify `ZoneKeyError` Debug format for each variant.
+    #[test]
+    fn zone_key_error_debug_format_all_variants() {
+        let err1 = ZoneKeyError::InvalidKeyLength {
+            expected: 32,
+            found: 16,
+        };
+        let dbg1 = format!("{err1:?}");
+        assert!(dbg1.contains("InvalidKeyLength"));
+
+        let err2 = ZoneKeyError::ZoneIdMismatch {
+            expected: "z:work".into(),
+            found: "z:private".into(),
+        };
+        let dbg2 = format!("{err2:?}");
+        assert!(dbg2.contains("ZoneIdMismatch"));
+
+        let err3 = ZoneKeyError::MissingWrappedZoneKey {
+            node_id: "n1".into(),
+        };
+        let dbg3 = format!("{err3:?}");
+        assert!(dbg3.contains("MissingWrappedZoneKey"));
+
+        let err4 = ZoneKeyError::MissingWrappedObjectIdKey {
+            node_id: "n2".into(),
+        };
+        let dbg4 = format!("{err4:?}");
+        assert!(dbg4.contains("MissingWrappedObjectIdKey"));
+    }
+
+    /// Verify `WrappedObjectIdKey` debug output includes relevant information.
+    #[test]
+    fn wrapped_object_id_key_debug() {
+        let zone_id = ZoneId::private();
+        let node_id = TailscaleNodeId::new("node-obj-dbg");
+        let issued_at = 1_700_000_000;
+
+        let sk = X25519SecretKey::generate();
+        let pk = sk.public_key();
+        let key = random_object_id_key();
+
+        let wrapped = wrap_object_id_key(&pk, &zone_id, &node_id, issued_at, &key).unwrap();
+        let dbg = format!("{wrapped:?}");
+        assert!(dbg.contains("WrappedObjectIdKey"));
+        assert!(dbg.contains("node-obj-dbg"));
+    }
+
+    /// Verify wrap/unwrap with different `issued_at` values produce different AADs.
+    #[test]
+    fn wrap_unwrap_different_issued_at() {
+        let zone_id = ZoneId::work();
+        let node_id = TailscaleNodeId::new("node-ts");
+        let sk = X25519SecretKey::generate();
+        let pk = sk.public_key();
+        let zone_key = random_zone_key();
+
+        let issued_at_1 = 1_700_000_000;
+        let issued_at_2 = 1_700_000_001;
+
+        let w1 = wrap_zone_key(&pk, &zone_id, &node_id, issued_at_1, &zone_key).unwrap();
+        let w2 = wrap_zone_key(&pk, &zone_id, &node_id, issued_at_2, &zone_key).unwrap();
+
+        // Each can be unwrapped only with matching issued_at (embedded in AAD)
+        let k1 = unwrap_zone_key(&sk, &zone_id, &w1).unwrap();
+        let k2 = unwrap_zone_key(&sk, &zone_id, &w2).unwrap();
+        assert_eq!(k1, zone_key);
+        assert_eq!(k2, zone_key);
+    }
+
+    /// Verify `ZoneKeyRing` with community zone type.
+    #[test]
+    fn zone_key_ring_community_zone() {
+        let ring = ZoneKeyRing::new(ZoneId::community());
+        assert_eq!(ring.zone_id, ZoneId::community());
+        assert!(ring.active_zone_key().is_none());
+    }
+
+    /// Verify `ZoneKeyRing` with public zone type.
+    #[test]
+    fn zone_key_ring_public_zone() {
+        let ring = ZoneKeyRing::new(ZoneId::public());
+        assert_eq!(ring.zone_id, ZoneId::public());
+        assert!(ring.active_object_id_key().is_none());
+    }
+
+    /// Verify `ZoneKeyRing` with owner zone type.
+    #[test]
+    fn zone_key_ring_owner_zone() {
+        let mut ring = ZoneKeyRing::new(ZoneId::owner());
+        assert_eq!(ring.zone_id, ZoneId::owner());
+        let key_id = ZoneKeyId::from_bytes([0x01; 8]);
+        let key = random_zone_key();
+        ring.insert_zone_key(key_id, key);
+        assert!(ring.set_active_zone_key(key_id));
+        assert_eq!(ring.active_zone_key(), Some(&key));
+    }
+
+    /// Verify manifest with all five zone types can be created via `new_empty`.
+    #[test]
+    fn zone_key_manifest_new_empty_all_zone_types() {
+        let signing_key = fcp_crypto::Ed25519SigningKey::generate();
+        for zone_id in [
+            ZoneId::owner(),
+            ZoneId::private(),
+            ZoneId::work(),
+            ZoneId::community(),
+            ZoneId::public(),
+        ] {
+            let manifest = ZoneKeyManifest::new_empty(zone_id.clone(), 100, &signing_key).unwrap();
+            assert_eq!(manifest.zone_id, zone_id);
+        }
+    }
+
+    /// Verify `ZoneKeyId` `from_bytes`/`as_bytes` roundtrip with alternating bytes.
+    #[test]
+    fn zone_key_id_from_bytes_as_bytes_alternating() {
+        let bytes = [0xAA, 0x55, 0xAA, 0x55, 0xAA, 0x55, 0xAA, 0x55];
+        let id = ZoneKeyId::from_bytes(bytes);
+        assert_eq!(*id.as_bytes(), bytes);
+        assert_eq!(format!("{id}"), "aa55aa55aa55aa55");
+    }
+
+    /// Verify `ObjectIdKeyId` `from_bytes`/`as_bytes` roundtrip with sequential bytes.
+    #[test]
+    fn object_id_key_id_from_bytes_as_bytes_sequential() {
+        let bytes = [0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08];
+        let id = ObjectIdKeyId::from_bytes(bytes);
+        assert_eq!(*id.as_bytes(), bytes);
+        assert_eq!(format!("{id}"), "0102030405060708");
+    }
+
+    /// Verify `ZoneKeyRing` debug output includes `zone_id` when keys are present.
+    #[test]
+    fn zone_key_ring_debug_with_keys() {
+        let mut ring = ZoneKeyRing::new(ZoneId::work());
+        let key_id = ZoneKeyId::from_bytes([0x42; 8]);
+        ring.insert_zone_key(key_id, random_zone_key());
+        let dbg = format!("{ring:?}");
+        assert!(dbg.contains("ZoneKeyRing"));
+        assert!(dbg.contains("z:work"));
+    }
+
+    /// Verify that `set_active_zone_key` preserves pre-existing `active_object_id_key_id`.
+    #[test]
+    fn set_active_zone_key_preserves_object_id_key_state() {
+        let mut ring = ZoneKeyRing::new(ZoneId::work());
+        let zone_key_id = ZoneKeyId::from_bytes([0x01; 8]);
+        let obj_key_id = ObjectIdKeyId::from_bytes([0x02; 8]);
+
+        ring.insert_zone_key(zone_key_id, random_zone_key());
+        ring.insert_object_id_key(obj_key_id, random_object_id_key());
+
+        assert!(ring.set_active_object_id_key(obj_key_id));
+        assert!(ring.set_active_zone_key(zone_key_id));
+
+        // Both actives should be set
+        assert_eq!(ring.active_zone_key_id, Some(zone_key_id));
+        assert_eq!(ring.active_object_id_key_id, Some(obj_key_id));
+    }
+
+    /// Verify that unwrap with wrong key returns Crypto variant error.
+    #[test]
+    fn unwrap_zone_key_wrong_sk_returns_crypto_error() {
+        let zone_id = ZoneId::work();
+        let node_id = TailscaleNodeId::new("node-ce");
+        let issued_at = 1_700_000_000;
+
+        let sk = X25519SecretKey::generate();
+        let pk = sk.public_key();
+        let bad_sk = X25519SecretKey::generate();
+
+        let zone_key = random_zone_key();
+        let wrapped = wrap_zone_key(&pk, &zone_id, &node_id, issued_at, &zone_key).unwrap();
+
+        let err = unwrap_zone_key(&bad_sk, &zone_id, &wrapped).expect_err("should fail");
+        assert!(matches!(err, ZoneKeyError::Crypto(_)));
+    }
+
+    /// Verify `ZoneKeyId` serde roundtrip preserves exact bytes for boundary values.
+    #[test]
+    fn zone_key_id_serde_boundary_bytes() {
+        for bytes in [
+            [0x00; 8],
+            [0xFF; 8],
+            [0x00, 0x01, 0x02, 0x03, 0xFC, 0xFD, 0xFE, 0xFF],
+        ] {
+            let id = ZoneKeyId::from_bytes(bytes);
+            let json = serde_json::to_string(&id).unwrap();
+            let back: ZoneKeyId = serde_json::from_str(&json).unwrap();
+            assert_eq!(id, back);
+            assert_eq!(*back.as_bytes(), bytes);
+        }
+    }
+
+    /// Verify `ObjectIdKeyId` serde roundtrip preserves exact bytes for boundary values.
+    #[test]
+    fn object_id_key_id_serde_boundary_bytes() {
+        for bytes in [
+            [0x00; 8],
+            [0xFF; 8],
+            [0x80, 0x7F, 0x01, 0xFE, 0x00, 0xFF, 0x55, 0xAA],
+        ] {
+            let id = ObjectIdKeyId::from_bytes(bytes);
+            let json = serde_json::to_string(&id).unwrap();
+            let back: ObjectIdKeyId = serde_json::from_str(&json).unwrap();
+            assert_eq!(id, back);
+            assert_eq!(*back.as_bytes(), bytes);
+        }
+    }
+
+    /// Verify `ZONE_KEY_LEN` matches the expected 32-byte `ChaCha20` key size.
+    #[test]
+    fn zone_key_len_matches_key_construction() {
+        let key = ZoneKey::from_bytes([0u8; ZONE_KEY_LEN]);
+        assert_eq!(key.as_bytes().len(), ZONE_KEY_LEN);
+        assert_eq!(key.as_bytes().len(), 32);
+    }
+
+    /// Verify that `wrapped_key_for` returns the first matching entry when duplicates exist.
+    #[test]
+    fn wrapped_key_for_returns_first_match() {
+        let zone_id = ZoneId::work();
+        let node_id = TailscaleNodeId::new("node-dup");
+        let issued_at_a = 1_700_000_000;
+        let issued_at_b = 1_700_000_001;
+
+        let sk = X25519SecretKey::generate();
+        let pk = sk.public_key();
+        let zone_key = random_zone_key();
+
+        let w1 = wrap_zone_key(&pk, &zone_id, &node_id, issued_at_a, &zone_key).unwrap();
+        let w2 = wrap_zone_key(&pk, &zone_id, &node_id, issued_at_b, &zone_key).unwrap();
+
+        let manifest = ZoneKeyManifest {
+            header: test_header(&zone_id),
+            zone_id: zone_id.clone(),
+            zone_key_id: ZoneKeyId::from_bytes([0x01; 8]),
+            object_id_key_id: ObjectIdKeyId::from_bytes([0x11; 8]),
+            algorithm: ZoneKeyAlgorithm::ChaCha20Poly1305,
+            valid_from: issued_at_a,
+            valid_until: None,
+            prev_zone_key_id: None,
+            wrapped_keys: vec![w1, w2],
+            wrapped_object_id_keys: vec![],
+            rekey_policy: None,
+            signature: test_signature(),
+        };
+
+        // Should return the first match (issued_at_a)
+        let found = manifest.wrapped_key_for(&node_id).unwrap();
+        assert_eq!(found.issued_at, issued_at_a);
+    }
+
+    /// Verify `ZoneKeyRing` does not change state on failed `set_active_zone_key`.
+    #[test]
+    fn zone_key_ring_set_active_failure_preserves_state() {
+        let mut ring = ZoneKeyRing::new(ZoneId::work());
+        let good_id = ZoneKeyId::from_bytes([0x01; 8]);
+        let bad_id = ZoneKeyId::from_bytes([0x02; 8]);
+        let key = random_zone_key();
+
+        ring.insert_zone_key(good_id, key);
+        assert!(ring.set_active_zone_key(good_id));
+
+        // Attempt to set to unknown key
+        assert!(!ring.set_active_zone_key(bad_id));
+
+        // Active should still be good_id
+        assert_eq!(ring.active_zone_key_id, Some(good_id));
+        assert_eq!(ring.active_zone_key(), Some(&key));
+    }
+
+    /// Verify `ZoneKeyRing` does not change state on failed `set_active_object_id_key`.
+    #[test]
+    fn zone_key_ring_set_active_object_id_key_failure_preserves_state() {
+        let mut ring = ZoneKeyRing::new(ZoneId::work());
+        let good_id = ObjectIdKeyId::from_bytes([0x01; 8]);
+        let bad_id = ObjectIdKeyId::from_bytes([0x02; 8]);
+        let key = random_object_id_key();
+
+        ring.insert_object_id_key(good_id, key);
+        assert!(ring.set_active_object_id_key(good_id));
+
+        // Attempt to set to unknown key
+        assert!(!ring.set_active_object_id_key(bad_id));
+
+        // Active should still be good_id
+        assert_eq!(ring.active_object_id_key_id, Some(good_id));
+        assert_eq!(ring.active_object_id_key(), Some(&key));
+    }
+
+    /// Verify that multiple different zone key rings are independent.
+    #[test]
+    fn zone_key_rings_are_independent() {
+        let key_id = ZoneKeyId::from_bytes([0x01; 8]);
+        let key = random_zone_key();
+
+        let mut ring1 = ZoneKeyRing::new(ZoneId::work());
+        let mut ring2 = ZoneKeyRing::new(ZoneId::private());
+
+        ring1.insert_zone_key(key_id, key);
+        assert!(ring1.set_active_zone_key(key_id));
+
+        // ring2 should be unaffected
+        assert!(ring2.active_zone_key().is_none());
+        assert!(ring2.zone_key(&key_id).is_none());
+        assert!(!ring2.set_active_zone_key(key_id));
+    }
+
     /// Verify that different zone types produce distinct zone IDs that affect wrapping.
     #[test]
     fn different_zone_types_produce_distinct_aad() {

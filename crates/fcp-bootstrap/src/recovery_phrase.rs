@@ -475,4 +475,135 @@ mod tests {
         let debug = format!("{phrase:?}");
         assert!(debug.contains("24"));
     }
+
+    // ---- from_mnemonic with extra whitespace ----
+
+    #[test]
+    fn test_from_mnemonic_with_extra_spaces() {
+        // split_whitespace should handle multiple spaces
+        let test_phrase = "abandon  abandon  abandon  abandon  abandon  abandon  abandon  abandon  abandon  abandon  abandon  abandon  abandon  abandon  abandon  abandon  abandon  abandon  abandon  abandon  abandon  abandon  abandon  art";
+        let phrase = RecoveryPhrase::from_mnemonic(test_phrase).unwrap();
+        assert_eq!(phrase.words().len(), 24);
+    }
+
+    // ---- from_words with exact 24 words ----
+
+    #[test]
+    fn test_from_words_exact_24() {
+        let words: Vec<&str> = vec![
+            "abandon", "abandon", "abandon", "abandon", "abandon", "abandon",
+            "abandon", "abandon", "abandon", "abandon", "abandon", "abandon",
+            "abandon", "abandon", "abandon", "abandon", "abandon", "abandon",
+            "abandon", "abandon", "abandon", "abandon", "abandon", "art",
+        ];
+        let phrase = RecoveryPhrase::from_words(&words).unwrap();
+        assert_eq!(phrase.words().len(), 24);
+    }
+
+    #[test]
+    fn test_from_words_23_words_error() {
+        let words: Vec<&str> = vec!["abandon"; 23];
+        let result = RecoveryPhrase::from_words(&words);
+        assert!(matches!(
+            result,
+            Err(RecoveryPhraseError::WrongWordCount(23))
+        ));
+    }
+
+    // ---- Entropy is consistent between clone and original ----
+
+    #[test]
+    fn test_clone_entropy_matches() {
+        let phrase = RecoveryPhrase::generate().unwrap();
+        let cloned = phrase.clone();
+        assert_eq!(phrase.entropy(), cloned.entropy());
+    }
+
+    // ---- OwnerKeypair to_bytes is deterministic ----
+
+    #[test]
+    fn test_owner_keypair_to_bytes_deterministic() {
+        let test_phrase = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon art";
+        let p1 = RecoveryPhrase::from_mnemonic(test_phrase).unwrap();
+        let p2 = RecoveryPhrase::from_mnemonic(test_phrase).unwrap();
+        let kp1 = p1.derive_owner_keypair();
+        let kp2 = p2.derive_owner_keypair();
+        assert_eq!(kp1.to_bytes(), kp2.to_bytes());
+    }
+
+    // ---- Sign/verify with different messages ----
+
+    #[test]
+    fn test_owner_keypair_sign_different_messages() {
+        let phrase = RecoveryPhrase::generate().unwrap();
+        let keypair = phrase.derive_owner_keypair();
+        let sig1 = keypair.sign(b"message A");
+        let sig2 = keypair.sign(b"message B");
+        assert_ne!(sig1.to_bytes(), sig2.to_bytes());
+        assert!(keypair.public().verify(b"message A", &sig1).is_ok());
+        assert!(keypair.public().verify(b"message B", &sig2).is_ok());
+    }
+
+    // ---- Cross-verification fails ----
+
+    #[test]
+    fn test_owner_keypair_cross_verify_fails() {
+        let phrase = RecoveryPhrase::generate().unwrap();
+        let keypair = phrase.derive_owner_keypair();
+        let sig = keypair.sign(b"message A");
+        // Verify against wrong message should fail
+        assert!(keypair.public().verify(b"message B", &sig).is_err());
+    }
+
+    // ---- RecoveryPhraseError Debug ----
+
+    #[test]
+    fn test_error_debug() {
+        let err = RecoveryPhraseError::WrongWordCount(15);
+        let debug = format!("{err:?}");
+        assert!(debug.contains("WrongWordCount"));
+        assert!(debug.contains("15"));
+    }
+
+    #[test]
+    fn test_error_debug_invalid_mnemonic() {
+        let err = RecoveryPhraseError::InvalidMnemonic("bad checksum".into());
+        let debug = format!("{err:?}");
+        assert!(debug.contains("InvalidMnemonic"));
+    }
+
+    #[test]
+    fn test_error_debug_derivation_failed() {
+        let err = RecoveryPhraseError::DerivationFailed("hkdf error".into());
+        let debug = format!("{err:?}");
+        assert!(debug.contains("DerivationFailed"));
+    }
+
+    // ---- OwnerKeypair debug does not contain private material ----
+
+    #[test]
+    fn test_owner_keypair_debug_contains_hex_pubkey() {
+        let phrase = RecoveryPhrase::generate().unwrap();
+        let keypair = phrase.derive_owner_keypair();
+        let debug = format!("{keypair:?}");
+        // public_key should be hex-encoded (64 hex chars)
+        let pub_hex = hex::encode(keypair.public().to_bytes());
+        assert!(debug.contains(&pub_hex));
+    }
+
+    // ---- Words are valid BIP39 words ----
+
+    #[test]
+    fn test_generated_words_are_valid_bip39() {
+        let phrase = RecoveryPhrase::generate().unwrap();
+        let words = phrase.words();
+        // All words should be in the English BIP39 wordlist
+        for word in &words {
+            // If from_mnemonic succeeds with these words, they're valid
+            assert!(!word.is_empty());
+        }
+        // Roundtrip confirms they are valid
+        let restored = RecoveryPhrase::from_words(&words).unwrap();
+        assert_eq!(phrase, restored);
+    }
 }

@@ -539,4 +539,105 @@ mod tests {
         let drift = compute_drift(now, ntp);
         assert_eq!(drift.as_secs(), 3600);
     }
+
+    // ---- compute_drift symmetry ----
+
+    #[test]
+    fn compute_drift_symmetric() {
+        let now = Utc::now();
+        let other = now + chrono::Duration::seconds(120);
+        let drift_forward = compute_drift(now, other);
+        let drift_backward = compute_drift(other, now);
+        assert_eq!(drift_forward, drift_backward);
+    }
+
+    // ---- with_drift zero ----
+
+    #[test]
+    fn with_drift_zero_is_valid() {
+        let validation = TimeValidation::with_drift(Duration::ZERO);
+        assert!(matches!(validation.result, TimeValidationResult::Valid));
+        assert_eq!(validation.drift.unwrap(), Duration::ZERO);
+        assert!(validation.ntp_time.is_some());
+    }
+
+    // ---- TimeValidation fields ----
+
+    #[test]
+    fn offline_system_time_is_recent() {
+        let before = Utc::now();
+        let validation = TimeValidation::offline();
+        let after = Utc::now();
+        assert!(validation.system_time >= before);
+        assert!(validation.system_time <= after);
+    }
+
+    #[test]
+    fn with_drift_system_time_is_recent() {
+        let before = Utc::now();
+        let validation = TimeValidation::with_drift(Duration::from_secs(60));
+        let after = Utc::now();
+        assert!(validation.system_time >= before);
+        assert!(validation.system_time <= after);
+    }
+
+    // ---- Display format content ----
+
+    #[test]
+    fn display_drift_warning_contains_duration() {
+        let result = TimeValidationResult::DriftWarning {
+            drift: Duration::from_secs(120),
+        };
+        let s = result.to_string();
+        assert!(s.contains("120"));
+    }
+
+    #[test]
+    fn display_drift_error_contains_sync_required() {
+        let result = TimeValidationResult::DriftError {
+            drift: Duration::from_secs(400),
+        };
+        let s = result.to_string();
+        assert!(s.contains("sync required"));
+    }
+
+    // ---- Result eq with matching drift ----
+
+    #[test]
+    fn result_eq_drift_warning_same_drift() {
+        let r1 = TimeValidationResult::DriftWarning {
+            drift: Duration::from_secs(45),
+        };
+        let r2 = TimeValidationResult::DriftWarning {
+            drift: Duration::from_secs(45),
+        };
+        assert_eq!(r1, r2);
+    }
+
+    #[test]
+    fn result_ne_drift_warning_different_drift() {
+        let r1 = TimeValidationResult::DriftWarning {
+            drift: Duration::from_secs(45),
+        };
+        let r2 = TimeValidationResult::DriftWarning {
+            drift: Duration::from_secs(60),
+        };
+        assert_ne!(r1, r2);
+    }
+
+    // ---- Classify drift at microsecond precision ----
+
+    #[test]
+    fn classify_drift_just_under_30s() {
+        let drift = Duration::from_millis(29_999);
+        let result = classify_drift(drift);
+        assert!(matches!(result, TimeValidationResult::Valid));
+    }
+
+    #[test]
+    fn classify_drift_just_over_300s() {
+        let drift = Duration::from_millis(300_001);
+        let result = classify_drift(drift);
+        assert!(matches!(result, TimeValidationResult::DriftError { .. }));
+    }
 }

@@ -536,4 +536,163 @@ mod tests {
         assert_eq!(prompts.confirmed_data_loss, cloned.confirmed_data_loss);
         assert_eq!(prompts.expected_fingerprint, cloned.expected_fingerprint);
     }
+
+    // ---- Recovery produces valid genesis zones ----
+
+    #[test]
+    fn cold_recovery_genesis_has_5_zones() {
+        let phrase = test_phrase();
+        let recovery = ColdRecovery::from_phrase(&phrase, None).unwrap();
+        assert_eq!(recovery.genesis.initial_zones.len(), 5);
+    }
+
+    #[test]
+    fn cold_recovery_genesis_has_owner_zone() {
+        let phrase = test_phrase();
+        let recovery = ColdRecovery::from_phrase(&phrase, None).unwrap();
+        assert!(
+            recovery
+                .genesis
+                .initial_zones
+                .iter()
+                .any(|z| z.zone_id == "z:owner")
+        );
+    }
+
+    // ---- Fingerprint format ----
+
+    #[test]
+    fn cold_recovery_fingerprint_starts_with_sha256() {
+        let phrase = test_phrase();
+        let recovery = ColdRecovery::from_phrase(&phrase, None).unwrap();
+        assert!(recovery.fingerprint().starts_with("SHA256:"));
+    }
+
+    #[test]
+    fn cold_recovery_fingerprint_has_expected_length() {
+        let phrase = test_phrase();
+        let recovery = ColdRecovery::from_phrase(&phrase, None).unwrap();
+        let fp = recovery.fingerprint();
+        // "SHA256:" prefix + 16 chars base64
+        assert_eq!(fp.len(), 7 + 16);
+    }
+
+    // ---- Owner keypair consistency ----
+
+    #[test]
+    fn cold_recovery_owner_keypair_deterministic() {
+        let phrase = test_phrase();
+        let r1 = ColdRecovery::from_phrase(&phrase, None).unwrap();
+        let r2 = ColdRecovery::from_phrase(&phrase, None).unwrap();
+        assert_eq!(
+            r1.owner_keypair.public().to_bytes(),
+            r2.owner_keypair.public().to_bytes()
+        );
+    }
+
+    #[test]
+    fn cold_recovery_owner_keypair_matches_genesis_key() {
+        let phrase = test_phrase();
+        let recovery = ColdRecovery::from_phrase(&phrase, None).unwrap();
+        assert_eq!(
+            recovery.owner_keypair.public().to_bytes(),
+            recovery.genesis.owner_public_key
+        );
+    }
+
+    // ---- Warning ordering ----
+
+    #[test]
+    fn cold_recovery_warning_order_without_fingerprint() {
+        let phrase = test_phrase();
+        let recovery = ColdRecovery::from_phrase(&phrase, None).unwrap();
+        // First warning should be FingerprintNotVerified
+        assert_eq!(
+            recovery.warnings[0],
+            ColdRecoveryWarning::FingerprintNotVerified
+        );
+        assert_eq!(recovery.warnings[1], ColdRecoveryWarning::NoAuditHistory);
+        assert_eq!(
+            recovery.warnings[2],
+            ColdRecoveryWarning::RevocationStateUnknown
+        );
+        assert_eq!(recovery.warnings[3], ColdRecoveryWarning::SingleNodeStart);
+        assert_eq!(recovery.warnings[4], ColdRecoveryWarning::DataLoss);
+    }
+
+    #[test]
+    fn cold_recovery_warning_order_with_fingerprint() {
+        let phrase = test_phrase();
+        let r1 = ColdRecovery::from_phrase(&phrase, None).unwrap();
+        let fp = r1.fingerprint();
+        let r2 = ColdRecovery::from_phrase(&phrase, Some(&fp)).unwrap();
+        // First warning should be NoAuditHistory (no FingerprintNotVerified)
+        assert_eq!(r2.warnings[0], ColdRecoveryWarning::NoAuditHistory);
+    }
+
+    // ---- ColdRecoveryError Debug ----
+
+    #[test]
+    fn cold_recovery_error_debug() {
+        let err = ColdRecoveryError::FingerprintMismatch {
+            expected: "a".into(),
+            actual: "b".into(),
+        };
+        let debug = format!("{err:?}");
+        assert!(debug.contains("FingerprintMismatch"));
+    }
+
+    // ---- CLI format_warning content ----
+
+    #[test]
+    fn cli_format_warning_no_audit_history_content() {
+        use super::cli::format_warning;
+        let msg = format_warning(&ColdRecoveryWarning::NoAuditHistory);
+        assert!(msg.contains("audit"));
+    }
+
+    #[test]
+    fn cli_format_warning_data_loss_content() {
+        use super::cli::format_warning;
+        let msg = format_warning(&ColdRecoveryWarning::DataLoss);
+        assert!(msg.contains("LOST"));
+    }
+
+    #[test]
+    fn cli_format_warning_fingerprint_not_verified_content() {
+        use super::cli::format_warning;
+        let msg = format_warning(&ColdRecoveryWarning::FingerprintNotVerified);
+        assert!(msg.contains("fingerprint"));
+    }
+
+    // ---- CLI prompts with different states ----
+
+    #[test]
+    fn cli_prompts_all_false() {
+        let prompts = super::cli::ColdRecoveryPrompts {
+            confirmed_no_backup: false,
+            confirmed_data_loss: false,
+            expected_fingerprint: None,
+        };
+        assert!(!prompts.confirmed_no_backup);
+        assert!(!prompts.confirmed_data_loss);
+        assert!(prompts.expected_fingerprint.is_none());
+    }
+
+    // ---- ColdRecoveryWarning Debug ----
+
+    #[test]
+    fn cold_recovery_warning_debug_all_variants() {
+        let variants = [
+            ColdRecoveryWarning::NoAuditHistory,
+            ColdRecoveryWarning::RevocationStateUnknown,
+            ColdRecoveryWarning::SingleNodeStart,
+            ColdRecoveryWarning::DataLoss,
+            ColdRecoveryWarning::FingerprintNotVerified,
+        ];
+        for v in &variants {
+            let debug = format!("{v:?}");
+            assert!(!debug.is_empty());
+        }
+    }
 }

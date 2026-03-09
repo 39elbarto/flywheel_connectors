@@ -737,4 +737,203 @@ mod tests {
             assert!(!v.to_string().is_empty());
         }
     }
+
+    // ---- Phase lock with various phases ----
+
+    #[test]
+    fn phase_lock_roundtrip_ceremony_round2() {
+        let dir = tempdir().unwrap();
+        let phase = BootstrapPhase::CeremonyRound2 {
+            shares_distributed: 3,
+            shares_needed: 5,
+        };
+        write_phase_lock(dir.path(), &phase).unwrap();
+        let detected = detect_partial_state(dir.path()).unwrap();
+        assert_eq!(detected, phase);
+    }
+
+    #[test]
+    fn phase_lock_roundtrip_genesis_create() {
+        let dir = tempdir().unwrap();
+        let phase = BootstrapPhase::GenesisCreate;
+        write_phase_lock(dir.path(), &phase).unwrap();
+        let detected = detect_partial_state(dir.path()).unwrap();
+        assert_eq!(detected, phase);
+    }
+
+    #[test]
+    fn phase_lock_roundtrip_enrollment() {
+        let dir = tempdir().unwrap();
+        let phase = BootstrapPhase::Enrollment;
+        write_phase_lock(dir.path(), &phase).unwrap();
+        let detected = detect_partial_state(dir.path()).unwrap();
+        assert_eq!(detected, phase);
+    }
+
+    #[test]
+    fn phase_lock_roundtrip_completed() {
+        let dir = tempdir().unwrap();
+        let phase = BootstrapPhase::Completed {
+            fingerprint: "SHA256:abc123".to_string(),
+            completed_at: Utc::now(),
+        };
+        write_phase_lock(dir.path(), &phase).unwrap();
+        let detected = detect_partial_state(dir.path()).unwrap();
+        // Completed phase should still be detectable from lock file
+        match detected {
+            BootstrapPhase::Completed { fingerprint, .. } => {
+                assert_eq!(fingerprint, "SHA256:abc123");
+            }
+            other => panic!("expected Completed, got {other}"),
+        }
+    }
+
+    // ---- Lock file priority over partial markers ----
+
+    #[test]
+    fn lock_file_takes_priority_over_genesis_partial() {
+        let dir = tempdir().unwrap();
+        // Create both a lock file and a genesis.partial marker
+        std::fs::create_dir(dir.path().join("genesis.partial")).unwrap();
+        let phase = BootstrapPhase::KeyGeneration;
+        write_phase_lock(dir.path(), &phase).unwrap();
+        // Lock file should take priority
+        let detected = detect_partial_state(dir.path()).unwrap();
+        assert_eq!(detected, BootstrapPhase::KeyGeneration);
+    }
+
+    #[test]
+    fn genesis_partial_takes_priority_over_keys_partial() {
+        let dir = tempdir().unwrap();
+        // Create both partial markers (no lock file)
+        std::fs::create_dir(dir.path().join("genesis.partial")).unwrap();
+        std::fs::create_dir(dir.path().join("keys.partial")).unwrap();
+        // genesis.partial is checked before keys.partial
+        let detected = detect_partial_state(dir.path()).unwrap();
+        assert_eq!(detected, BootstrapPhase::GenesisCreate);
+    }
+
+    // ---- Phase serde with edge values ----
+
+    #[test]
+    fn phase_serde_ceremony_round1_zero_collected() {
+        let phase = BootstrapPhase::CeremonyRound1 {
+            commitments_collected: 0,
+            commitments_needed: 0,
+        };
+        let json = serde_json::to_string(&phase).unwrap();
+        let back: BootstrapPhase = serde_json::from_str(&json).unwrap();
+        assert_eq!(phase, back);
+    }
+
+    #[test]
+    fn phase_serde_ceremony_setup_max_values() {
+        let phase = BootstrapPhase::CeremonySetup {
+            participant_count: u32::MAX,
+            threshold: u32::MAX,
+        };
+        let json = serde_json::to_string(&phase).unwrap();
+        let back: BootstrapPhase = serde_json::from_str(&json).unwrap();
+        assert_eq!(phase, back);
+    }
+
+    // ---- Description content verification ----
+
+    #[test]
+    fn description_uninitialized_contains_not_initialized() {
+        assert!(
+            BootstrapPhase::Uninitialized
+                .description()
+                .contains("not initialized")
+        );
+    }
+
+    #[test]
+    fn description_time_validation_contains_time() {
+        assert!(
+            BootstrapPhase::TimeValidation
+                .description()
+                .contains("time")
+        );
+    }
+
+    #[test]
+    fn description_key_generation_contains_key() {
+        assert!(
+            BootstrapPhase::KeyGeneration
+                .description()
+                .contains("key")
+        );
+    }
+
+    #[test]
+    fn description_completed_contains_completed() {
+        let phase = BootstrapPhase::Completed {
+            fingerprint: "fp".into(),
+            completed_at: Utc::now(),
+        };
+        assert!(phase.description().contains("completed"));
+    }
+
+    #[test]
+    fn description_failed_contains_failed() {
+        let phase = BootstrapPhase::Failed {
+            reason: "err".into(),
+            at_phase: "p".into(),
+        };
+        assert!(phase.description().contains("failed"));
+    }
+
+    // ---- InitSuggestion Debug ----
+
+    #[test]
+    fn init_suggestion_debug() {
+        let debug = format!("{:?}", InitSuggestion::ForceOverwrite);
+        assert!(debug.contains("ForceOverwrite"));
+    }
+
+    #[test]
+    fn partial_state_suggestion_debug() {
+        let debug = format!("{:?}", PartialStateSuggestion::CleanAndRetry);
+        assert!(debug.contains("CleanAndRetry"));
+    }
+
+    // ---- write_phase_lock overwrites existing lock ----
+
+    #[test]
+    fn write_phase_lock_overwrites_existing() {
+        let dir = tempdir().unwrap();
+        let phase1 = BootstrapPhase::TimeValidation;
+        write_phase_lock(dir.path(), &phase1).unwrap();
+
+        let phase2 = BootstrapPhase::KeyGeneration;
+        write_phase_lock(dir.path(), &phase2).unwrap();
+
+        let detected = detect_partial_state(dir.path()).unwrap();
+        assert_eq!(detected, BootstrapPhase::KeyGeneration);
+    }
+
+    // ---- Display for Failed with empty reason ----
+
+    #[test]
+    fn display_failed_empty_reason() {
+        let phase = BootstrapPhase::Failed {
+            reason: String::new(),
+            at_phase: "TimeValidation".into(),
+        };
+        let display = format!("{phase}");
+        assert!(display.starts_with("Failed("));
+    }
+
+    // ---- Display for Completed contains fingerprint ----
+
+    #[test]
+    fn display_completed_shows_fingerprint() {
+        let phase = BootstrapPhase::Completed {
+            fingerprint: "SHA256:uniquevalue".into(),
+            completed_at: Utc::now(),
+        };
+        let display = format!("{phase}");
+        assert!(display.contains("SHA256:uniquevalue"));
+    }
 }

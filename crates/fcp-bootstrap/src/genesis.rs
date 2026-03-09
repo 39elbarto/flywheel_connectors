@@ -1114,4 +1114,164 @@ mod tests {
         // base64 of [0x42] should be "Qg" (URL-safe, no pad)
         assert_eq!(encoded, "Qg");
     }
+
+    // ---- Fingerprint stability: same key always same fingerprint ----
+
+    #[test]
+    fn fingerprint_stable_across_non_deterministic_genesis() {
+        let signing_key = Ed25519SigningKey::generate();
+        let vk = signing_key.verifying_key();
+        // Non-deterministic genesis uses Utc::now() but fingerprint is key-based
+        let g1 = GenesisState::create(&vk);
+        let g2 = GenesisState::create(&vk);
+        assert_eq!(g1.fingerprint(), g2.fingerprint());
+    }
+
+    // ---- CBOR size is reasonable ----
+
+    #[test]
+    fn genesis_cbor_size_reasonable() {
+        let signing_key = Ed25519SigningKey::generate();
+        let genesis = GenesisState::create(&signing_key.verifying_key());
+        let cbor = genesis.to_cbor().unwrap();
+        // Should be less than 1KB for standard genesis
+        assert!(cbor.len() < 1024);
+        assert!(cbor.len() > 50);
+    }
+
+    // ---- Multiple CBOR roundtrips produce stable output ----
+
+    #[test]
+    fn genesis_cbor_double_roundtrip() {
+        let signing_key = Ed25519SigningKey::generate();
+        let genesis = GenesisState::create(&signing_key.verifying_key());
+        let cbor1 = genesis.to_cbor().unwrap();
+        let restored1 = GenesisState::from_cbor(&cbor1).unwrap();
+        let cbor2 = restored1.to_cbor().unwrap();
+        let restored2 = GenesisState::from_cbor(&cbor2).unwrap();
+        assert_eq!(restored1.fingerprint(), restored2.fingerprint());
+        assert_eq!(restored1.owner_public_key, restored2.owner_public_key);
+    }
+
+    // ---- Validation: multiple invalid zones ----
+
+    #[test]
+    fn genesis_validation_stops_at_first_error() {
+        let signing_key = Ed25519SigningKey::generate();
+        let mut genesis = GenesisState::create(&signing_key.verifying_key());
+        genesis.schema_version = 42;
+        // Even though we also break zones, schema version check comes first
+        genesis.initial_zones.clear();
+        let result = genesis.validate();
+        assert!(matches!(
+            result,
+            Err(GenesisValidationError::UnsupportedSchemaVersion(42))
+        ));
+    }
+
+    // ---- OwnerKeypair sign with wrong key rejects ----
+
+    #[test]
+    fn owner_keypair_sign_wrong_key_fails_verify() {
+        let key1 = Ed25519SigningKey::generate();
+        let key2 = Ed25519SigningKey::generate();
+        let keypair = super::OwnerKeypair::new(key1);
+        let sig = keypair.sign(b"msg");
+        // Verify with wrong key should fail
+        assert!(key2.verifying_key().verify(b"msg", &sig).is_err());
+    }
+
+    // ---- GenesisState with all zones removed ----
+
+    #[test]
+    fn genesis_validation_empty_zones() {
+        let signing_key = Ed25519SigningKey::generate();
+        let mut genesis = GenesisState::create(&signing_key.verifying_key());
+        genesis.initial_zones.clear();
+        let result = genesis.validate();
+        assert!(matches!(
+            result,
+            Err(GenesisValidationError::MissingRequiredZone(_))
+        ));
+    }
+
+    // ---- Zone name and ID from create ----
+
+    #[test]
+    fn genesis_owner_zone_has_max_levels() {
+        let signing_key = Ed25519SigningKey::generate();
+        let genesis = GenesisState::create(&signing_key.verifying_key());
+        let owner_zone = genesis
+            .initial_zones
+            .iter()
+            .find(|z| z.zone_id == "z:owner")
+            .unwrap();
+        assert_eq!(owner_zone.integrity_level, 255);
+        assert_eq!(owner_zone.confidentiality_level, 255);
+        assert_eq!(owner_zone.name, "Owner Zone");
+    }
+
+    #[test]
+    fn genesis_public_zone_has_zero_confidentiality() {
+        let signing_key = Ed25519SigningKey::generate();
+        let genesis = GenesisState::create(&signing_key.verifying_key());
+        let public_zone = genesis
+            .initial_zones
+            .iter()
+            .find(|z| z.zone_id == "z:public")
+            .unwrap();
+        assert_eq!(public_zone.confidentiality_level, 0);
+        assert_eq!(public_zone.integrity_level, 50);
+    }
+
+    // ---- Deterministic and non-deterministic genesis differ in time ----
+
+    #[test]
+    fn genesis_deterministic_and_regular_differ_in_time() {
+        let signing_key = Ed25519SigningKey::generate();
+        let vk = signing_key.verifying_key();
+        let det = GenesisState::create_deterministic(&vk);
+        let reg = GenesisState::create(&vk);
+        assert_ne!(det.created_at, reg.created_at);
+        // But same fingerprint (fingerprint ignores time)
+        assert_eq!(det.fingerprint(), reg.fingerprint());
+    }
+
+    // ---- Validation error Debug ----
+
+    #[test]
+    fn genesis_validation_error_debug_all_variants() {
+        let variants: Vec<GenesisValidationError> = vec![
+            GenesisValidationError::InvalidOwnerKey,
+            GenesisValidationError::MissingRequiredZone("z:test".into()),
+            GenesisValidationError::InvalidZoneId("bad".into()),
+            GenesisValidationError::FutureTimestamp,
+            GenesisValidationError::UnsupportedSchemaVersion(7),
+        ];
+        for v in &variants {
+            let debug = format!("{v:?}");
+            assert!(!debug.is_empty());
+        }
+    }
+
+    // ---- base64_encode with known vectors ----
+
+    #[test]
+    fn base64_encode_known_vector() {
+        // [0x00, 0x01, 0x02] => "AAEC"
+        let encoded = base64_encode(&[0x00, 0x01, 0x02]);
+        assert_eq!(encoded, "AAEC");
+    }
+
+    #[test]
+    fn base64_encode_all_0xff() {
+        let encoded = base64_encode(&[0xFF; 12]);
+        // 12 bytes of 0xFF => "__________8" in URL-safe base64
+        assert_eq!(encoded.len(), 16);
+        assert!(
+            encoded
+                .chars()
+                .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+        );
+    }
 }

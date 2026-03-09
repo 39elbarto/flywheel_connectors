@@ -331,4 +331,133 @@ mod tests {
             other => panic!("expected Io, got {other:?}"),
         }
     }
+
+    // ---- Source chain ----
+
+    #[test]
+    fn io_error_source_chain() {
+        use std::error::Error;
+        let io_err = std::io::Error::new(std::io::ErrorKind::Other, "inner");
+        let err = BootstrapError::Io(io_err);
+        // The #[from] attribute sets up the source chain
+        assert!(err.source().is_some());
+    }
+
+    #[test]
+    fn ceremony_error_has_no_source() {
+        use std::error::Error;
+        let err = BootstrapError::Ceremony("test".into());
+        assert!(err.source().is_none());
+    }
+
+    #[test]
+    fn no_hardware_tokens_has_no_source() {
+        use std::error::Error;
+        let err = BootstrapError::NoHardwareTokens;
+        assert!(err.source().is_none());
+    }
+
+    // ---- Debug vs Display difference ----
+
+    #[test]
+    fn debug_and_display_differ_for_time_skew() {
+        let err = BootstrapError::TimeSkew {
+            drift: Duration::from_secs(60),
+            suggestion: "run ntpd",
+        };
+        let display = format!("{err}");
+        let debug = format!("{err:?}");
+        // Debug includes variant name, Display does not
+        assert!(debug.contains("TimeSkew"));
+        assert!(!display.contains("TimeSkew"));
+        // Both include the message content
+        assert!(display.contains("run ntpd"));
+        assert!(debug.contains("run ntpd"));
+    }
+
+    // ---- Error message content ----
+
+    #[test]
+    fn fingerprint_mismatch_contains_both_values() {
+        let err = BootstrapError::FingerprintMismatch {
+            expected: "SHA256:AAAA".into(),
+            actual: "SHA256:BBBB".into(),
+        };
+        let s = err.to_string();
+        assert!(s.contains("SHA256:AAAA"));
+        assert!(s.contains("SHA256:BBBB"));
+        assert!(s.contains("mismatch"));
+    }
+
+    #[test]
+    fn ceremony_timeout_includes_phase() {
+        let err = BootstrapError::CeremonyTimeout {
+            phase: "CeremonyRound2".into(),
+        };
+        let s = err.to_string();
+        assert!(s.contains("timed out"));
+        assert!(s.contains("CeremonyRound2"));
+    }
+
+    // ---- BootstrapResult with complex types ----
+
+    #[test]
+    fn bootstrap_result_with_vec() {
+        let r: BootstrapResult<Vec<u8>> = Ok(vec![1, 2, 3]);
+        assert_eq!(r.unwrap().len(), 3);
+    }
+
+    #[test]
+    fn bootstrap_result_with_string() {
+        let r: BootstrapResult<String> = Err(BootstrapError::Internal("oops".into()));
+        assert!(r.is_err());
+    }
+
+    // ---- From impls for ciborium errors ----
+
+    #[test]
+    fn from_ciborium_ser_error() {
+        // Construct a ciborium ser error via serialization of an unserializable value
+        let io_err = std::io::Error::new(std::io::ErrorKind::Other, "write fail");
+        let cbor_err = ciborium::ser::Error::Io(io_err);
+        let err: BootstrapError = cbor_err.into();
+        match err {
+            BootstrapError::Serialization(msg) => assert!(!msg.is_empty()),
+            other => panic!("expected Serialization, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn from_ciborium_de_error() {
+        // Construct by trying to deserialize invalid data
+        let result: Result<u32, _> = ciborium::from_reader::<u32, _>(&[0xFF][..]);
+        if let Err(cbor_err) = result {
+            let err: BootstrapError = cbor_err.into();
+            match err {
+                BootstrapError::Serialization(msg) => assert!(!msg.is_empty()),
+                other => panic!("expected Serialization, got {other:?}"),
+            }
+        }
+    }
+
+    // ---- Large field values ----
+
+    #[test]
+    fn time_skew_with_very_large_drift() {
+        let err = BootstrapError::TimeSkew {
+            drift: Duration::from_secs(86400 * 365),
+            suggestion: "check hardware clock",
+        };
+        let s = err.to_string();
+        assert!(s.contains("check hardware clock"));
+    }
+
+    #[test]
+    fn already_exists_with_long_fingerprint() {
+        let fp = "SHA256:".to_string() + &"A".repeat(200);
+        let err = BootstrapError::AlreadyExists {
+            fingerprint: fp.clone(),
+        };
+        assert!(err.to_string().contains(&fp));
+    }
 }

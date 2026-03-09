@@ -1806,4 +1806,341 @@ mod tests {
         assert_eq!(restored.ceremony_id, checkpoint.ceremony_id);
         assert_eq!(restored.participants.len(), checkpoint.participants.len());
     }
+
+    // ---- CeremonyId uniqueness ----
+
+    #[test]
+    fn ceremony_id_generate_produces_unique_ids() {
+        let id1 = CeremonyId::generate(2, 3);
+        let id2 = CeremonyId::generate(2, 3);
+        assert_ne!(id1.id, id2.id, "two generated IDs should differ");
+    }
+
+    #[test]
+    fn ceremony_id_hash_works_in_hashset() {
+        use std::collections::HashSet;
+        let id1 = CeremonyId::generate(2, 3);
+        let id2 = id1.clone();
+        let mut set = HashSet::new();
+        set.insert(id1);
+        set.insert(id2);
+        assert_eq!(set.len(), 1);
+    }
+
+    // ---- ParticipantId hash ----
+
+    #[test]
+    fn participant_id_hash_works_in_hashset() {
+        use std::collections::HashSet;
+        let p1 = test_participant(1);
+        let p2 = test_participant(1);
+        let p3 = test_participant(2);
+        let mut set = HashSet::new();
+        set.insert(p1);
+        set.insert(p2);
+        set.insert(p3);
+        assert_eq!(set.len(), 2);
+    }
+
+    // ---- CeremonyPhase clone ----
+
+    #[test]
+    fn ceremony_phase_clone_gathering() {
+        let phase = CeremonyPhase::Gathering {
+            joined: vec![test_participant(1)],
+            target: 3,
+        };
+        let cloned = phase.clone();
+        match (&phase, &cloned) {
+            (
+                CeremonyPhase::Gathering {
+                    joined: j1,
+                    target: t1,
+                },
+                CeremonyPhase::Gathering {
+                    joined: j2,
+                    target: t2,
+                },
+            ) => {
+                assert_eq!(j1.len(), j2.len());
+                assert_eq!(t1, t2);
+            }
+            _ => panic!("expected Gathering"),
+        }
+    }
+
+    #[test]
+    fn ceremony_phase_clone_complete() {
+        let phase = CeremonyPhase::Complete {
+            group_public_key: [0xAB; 32],
+        };
+        let cloned = phase.clone();
+        match cloned {
+            CeremonyPhase::Complete { group_public_key } => {
+                assert_eq!(group_public_key, [0xAB; 32]);
+            }
+            _ => panic!("expected Complete"),
+        }
+    }
+
+    // ---- ThresholdConfig boundary ----
+
+    #[test]
+    fn threshold_config_equal_threshold_and_total() {
+        let config = ThresholdConfig::new(5, 5);
+        assert_eq!(config.threshold, 5);
+        assert_eq!(config.total, 5);
+    }
+
+    #[test]
+    fn threshold_config_with_timeout_chaining() {
+        let config = ThresholdConfig::new(2, 3)
+            .with_timeout(Duration::minutes(5));
+        assert_eq!(config.phase_timeout, Duration::minutes(5));
+        assert_eq!(config.threshold, 2);
+    }
+
+    // ---- Transcript serde ----
+
+    #[test]
+    fn ceremony_transcript_serde_roundtrip() {
+        let transcript = CeremonyTranscript {
+            phases: vec![PhaseRecord {
+                phase: "Gathering".to_string(),
+                entered_at: Utc::now(),
+                reason: None,
+            }],
+            joins: vec![JoinRecord {
+                participant: test_participant(1),
+                joined_at: Utc::now(),
+            }],
+            messages: vec![MessageRecord {
+                from: 1,
+                to: 0,
+                message_type: "commitment".to_string(),
+                timestamp: Utc::now(),
+            }],
+        };
+        let json = serde_json::to_string(&transcript).unwrap();
+        let restored: CeremonyTranscript = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.phases.len(), 1);
+        assert_eq!(restored.joins.len(), 1);
+        assert_eq!(restored.messages.len(), 1);
+    }
+
+    // ---- PhaseRecord serde ----
+
+    #[test]
+    fn phase_record_with_reason_serde() {
+        let record = PhaseRecord {
+            phase: "Failed".to_string(),
+            entered_at: Utc::now(),
+            reason: Some("timeout".to_string()),
+        };
+        let json = serde_json::to_string(&record).unwrap();
+        let restored: PhaseRecord = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.phase, "Failed");
+        assert_eq!(restored.reason, Some("timeout".to_string()));
+    }
+
+    #[test]
+    fn phase_record_without_reason_serde() {
+        let record = PhaseRecord {
+            phase: "Gathering".to_string(),
+            entered_at: Utc::now(),
+            reason: None,
+        };
+        let json = serde_json::to_string(&record).unwrap();
+        let restored: PhaseRecord = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.reason, None);
+    }
+
+    // ---- CeremonyResumeError is std::error::Error ----
+
+    #[test]
+    fn ceremony_resume_error_is_error_trait() {
+        let err = CeremonyResumeError::CheckpointExpired;
+        let _: &dyn std::error::Error = &err;
+    }
+
+    // ---- Resume from Gathering ----
+
+    #[test]
+    fn resume_from_gathering_preserves_participants() {
+        let mut ceremony = ThresholdCeremony::new(2, 3);
+        ceremony.add_participant(test_participant(1)).unwrap();
+        ceremony.add_participant(test_participant(2)).unwrap();
+
+        let result = ceremony.abort("pause");
+        let checkpoint = result.checkpoint.unwrap();
+        assert_eq!(checkpoint.participants.len(), 2);
+
+        let resumed = ThresholdCeremony::resume(checkpoint).unwrap();
+        assert_eq!(resumed.participants.len(), 2);
+    }
+
+    // ---- Full ceremony then abort ----
+
+    #[test]
+    fn complete_ceremony_then_abort_cannot_resume() {
+        let mut ceremony = ThresholdCeremony::new(2, 2);
+        ceremony.add_participant(test_participant(1)).unwrap();
+        ceremony.add_participant(test_participant(2)).unwrap();
+        ceremony.add_commitment(test_commitment(1)).unwrap();
+        ceremony.add_commitment(test_commitment(2)).unwrap();
+        ceremony.add_shares(1, test_shares(1, 2)).unwrap();
+        ceremony.add_shares(2, test_shares(2, 1)).unwrap();
+
+        // Now in Complete phase
+        let result = ceremony.abort("user changed mind");
+        // Complete is not resumable (not Gathering or Round1)
+        assert!(!result.can_resume);
+    }
+
+    // ---- Checkpoint fields ----
+
+    #[test]
+    fn checkpoint_has_correct_ceremony_id() {
+        let mut ceremony = ThresholdCeremony::new(3, 5);
+        let expected_id = ceremony.ceremony_id.clone();
+        let checkpoint = ceremony.create_checkpoint();
+        assert_eq!(checkpoint.ceremony_id, expected_id);
+    }
+
+    #[test]
+    fn checkpoint_deadline_is_in_future() {
+        let ceremony = ThresholdCeremony::new(2, 3);
+        let checkpoint = ceremony.create_checkpoint();
+        assert!(checkpoint.phase_deadline > Utc::now());
+    }
+
+    // ---- EncryptedShare clone ----
+
+    #[test]
+    fn encrypted_share_clone() {
+        let share = EncryptedShare {
+            from_index: 1,
+            to_index: 2,
+            ciphertext: vec![0xAB; 48],
+        };
+        let cloned = share.clone();
+        assert_eq!(share.from_index, cloned.from_index);
+        assert_eq!(share.to_index, cloned.to_index);
+        assert_eq!(share.ciphertext, cloned.ciphertext);
+    }
+
+    // ---- ThresholdSignatureArtifact eq ----
+
+    #[test]
+    fn threshold_signature_artifact_eq() {
+        let mut ceremony = ThresholdCeremony::new(2, 3);
+        ceremony.add_participant(test_participant(1)).unwrap();
+        ceremony.add_participant(test_participant(2)).unwrap();
+        ceremony.add_participant(test_participant(3)).unwrap();
+        ceremony.add_commitment(test_commitment(1)).unwrap();
+        ceremony.add_commitment(test_commitment(2)).unwrap();
+        ceremony.add_commitment(test_commitment(3)).unwrap();
+        ceremony.add_shares(1, test_shares(1, 2)).unwrap();
+        ceremony.add_shares(2, test_shares(2, 1)).unwrap();
+        ceremony.add_shares(3, test_shares(3, 1)).unwrap();
+
+        let mut rng = ChaCha20Rng::seed_from_u64(99);
+        let artifact = ceremony
+            .sign_with_participants_and_rng(
+                &[1, 2],
+                b"ctx",
+                b"msg",
+                &mut rng,
+            )
+            .unwrap();
+
+        let cloned = artifact.clone();
+        assert_eq!(artifact, cloned);
+    }
+
+    // ---- verify_signature_artifact wrong context ----
+
+    #[test]
+    fn verify_signature_artifact_wrong_context_fails() {
+        let mut ceremony = ThresholdCeremony::new(2, 3);
+        ceremony.add_participant(test_participant(1)).unwrap();
+        ceremony.add_participant(test_participant(2)).unwrap();
+        ceremony.add_participant(test_participant(3)).unwrap();
+        ceremony.add_commitment(test_commitment(1)).unwrap();
+        ceremony.add_commitment(test_commitment(2)).unwrap();
+        ceremony.add_commitment(test_commitment(3)).unwrap();
+        ceremony.add_shares(1, test_shares(1, 2)).unwrap();
+        ceremony.add_shares(2, test_shares(2, 1)).unwrap();
+        ceremony.add_shares(3, test_shares(3, 1)).unwrap();
+
+        let mut rng = ChaCha20Rng::seed_from_u64(55);
+        let artifact = ceremony
+            .sign_with_participants_and_rng(
+                &[1, 3],
+                b"correct-context",
+                b"message",
+                &mut rng,
+            )
+            .unwrap();
+
+        // Verify with wrong context should fail
+        let err = ceremony
+            .verify_signature_artifact(&artifact, b"wrong-context", b"message")
+            .unwrap_err();
+        assert!(err.contains("transcript does not match"));
+    }
+
+    // ---- verify_signature_artifact wrong message ----
+
+    #[test]
+    fn verify_signature_artifact_wrong_message_fails() {
+        let mut ceremony = ThresholdCeremony::new(2, 3);
+        ceremony.add_participant(test_participant(1)).unwrap();
+        ceremony.add_participant(test_participant(2)).unwrap();
+        ceremony.add_participant(test_participant(3)).unwrap();
+        ceremony.add_commitment(test_commitment(1)).unwrap();
+        ceremony.add_commitment(test_commitment(2)).unwrap();
+        ceremony.add_commitment(test_commitment(3)).unwrap();
+        ceremony.add_shares(1, test_shares(1, 2)).unwrap();
+        ceremony.add_shares(2, test_shares(2, 1)).unwrap();
+        ceremony.add_shares(3, test_shares(3, 1)).unwrap();
+
+        let mut rng = ChaCha20Rng::seed_from_u64(77);
+        let artifact = ceremony
+            .sign_with_participants_and_rng(
+                &[2, 3],
+                b"context",
+                b"correct-message",
+                &mut rng,
+            )
+            .unwrap();
+
+        let err = ceremony
+            .verify_signature_artifact(&artifact, b"context", b"wrong-message")
+            .unwrap_err();
+        assert!(err.contains("transcript does not match"));
+    }
+
+    // ---- sign before completion ----
+
+    #[test]
+    fn sign_before_completion_fails() {
+        let mut ceremony = ThresholdCeremony::new(2, 2);
+        ceremony.add_participant(test_participant(1)).unwrap();
+        ceremony.add_participant(test_participant(2)).unwrap();
+        // Only in Round1, not Complete
+        let result = ceremony.sign_with_participants(&[1, 2], b"ctx", b"msg");
+        assert!(result.is_err());
+    }
+
+    // ---- CeremonyAbortResult debug ----
+
+    #[test]
+    fn ceremony_abort_result_debug() {
+        let mut ceremony = ThresholdCeremony::new(2, 3);
+        let result = ceremony.abort("test");
+        let debug = format!("{result:?}");
+        assert!(debug.contains("CeremonyAbortResult"));
+        assert!(debug.contains("can_resume"));
+    }
 }

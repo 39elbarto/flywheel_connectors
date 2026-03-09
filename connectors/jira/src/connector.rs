@@ -21,6 +21,7 @@ struct JiraConfig {
     auth: JiraAuth,
     base_url: Option<String>,
     agile_url: Option<String>,
+    automation_url: Option<String>,
 }
 
 impl JiraConfig {
@@ -39,6 +40,7 @@ impl JiraConfig {
         let credential_id = params.get("credential_id").and_then(|v| v.as_str());
         let base_url = params.get("base_url").and_then(|v| v.as_str());
         let agile_url = params.get("agile_url").and_then(|v| v.as_str());
+        let automation_url = params.get("automation_url").and_then(|v| v.as_str());
 
         let auth = match (email, api_token, credential_id) {
             (Some(_), Some(_), Some(_)) => {
@@ -92,6 +94,7 @@ impl JiraConfig {
             auth,
             base_url: base_url.map(String::from),
             agile_url: agile_url.map(String::from),
+            automation_url: automation_url.map(String::from),
         })
     }
 }
@@ -157,6 +160,9 @@ impl JiraConnector {
         }
         if let Some(url) = &cfg.agile_url {
             client = client.with_agile_url(url);
+        }
+        if let Some(url) = &cfg.automation_url {
+            client = client.with_automation_url(url);
         }
 
         self.client = Some(client);
@@ -974,6 +980,255 @@ impl JiraConnector {
                         ],
                     },
                 ),
+                // ── Automation Rules ────────────────────────────────────
+                op_info(
+                    "jira.automation.rule.list",
+                    "List automation rules for a project",
+                    json!({
+                        "type": "object",
+                        "required": ["project_id"],
+                        "properties": {
+                            "project_id": { "type": "string" }
+                        }
+                    }),
+                    json!({
+                        "type": "object",
+                        "properties": {
+                            "rules": { "type": "array" },
+                            "total": { "type": "integer" }
+                        }
+                    }),
+                    "jira.read",
+                    RiskLevel::Low,
+                    SafetyTier::Safe,
+                    IdempotencyClass::Strict,
+                    AgentHint {
+                        when_to_use: "List all automation rules configured for a Jira project.".into(),
+                        common_mistakes: vec![
+                            "Using project key instead of numeric project ID.".into(),
+                        ],
+                        examples: vec![
+                            r#"{"project_id": "10001"}"#.into(),
+                        ],
+                        related: vec![
+                            CapabilityId::from_static("jira.automation.rule.get"),
+                            CapabilityId::from_static("jira.automation.rule.create"),
+                        ],
+                    },
+                ),
+                op_info(
+                    "jira.automation.rule.get",
+                    "Get an automation rule definition and status",
+                    json!({
+                        "type": "object",
+                        "required": ["rule_id"],
+                        "properties": {
+                            "rule_id": { "type": "string" }
+                        }
+                    }),
+                    json!({
+                        "type": "object",
+                        "properties": {
+                            "id": { "type": "integer" },
+                            "name": { "type": "string" },
+                            "state": { "type": "string" },
+                            "enabled": { "type": "boolean" },
+                            "trigger": { "type": "object" },
+                            "conditions": { "type": "array" },
+                            "actions": { "type": "array" }
+                        }
+                    }),
+                    "jira.read",
+                    RiskLevel::Low,
+                    SafetyTier::Safe,
+                    IdempotencyClass::Strict,
+                    AgentHint {
+                        when_to_use: "Retrieve the definition, trigger, conditions, and actions of a specific automation rule.".into(),
+                        common_mistakes: vec![
+                            "Using rule name instead of numeric rule ID.".into(),
+                        ],
+                        examples: vec![
+                            r#"{"rule_id": "42"}"#.into(),
+                        ],
+                        related: vec![
+                            CapabilityId::from_static("jira.automation.rule.list"),
+                            CapabilityId::from_static("jira.automation.rule.update"),
+                        ],
+                    },
+                ),
+                op_info(
+                    "jira.automation.rule.create",
+                    "Create a new automation rule (requires approval)",
+                    json!({
+                        "type": "object",
+                        "required": ["project_id", "name", "trigger", "actions"],
+                        "properties": {
+                            "project_id": { "type": "string" },
+                            "name": { "type": "string" },
+                            "description": { "type": "string" },
+                            "trigger": { "type": "object" },
+                            "conditions": { "type": "array" },
+                            "actions": { "type": "array" },
+                            "tags": { "type": "array", "items": { "type": "string" } },
+                            "enabled": { "type": "boolean" }
+                        }
+                    }),
+                    json!({
+                        "type": "object",
+                        "properties": {
+                            "id": { "type": "integer" },
+                            "name": { "type": "string" },
+                            "state": { "type": "string" },
+                            "enabled": { "type": "boolean" }
+                        }
+                    }),
+                    "jira.write",
+                    RiskLevel::High,
+                    SafetyTier::Dangerous,
+                    IdempotencyClass::None,
+                    AgentHint {
+                        when_to_use: "Create a new automation rule. Rules can auto-transition issues, send notifications, and mutate data.".into(),
+                        common_mistakes: vec![
+                            "Creating rules without proper conditions, which may trigger on every issue.".into(),
+                            "Using project key instead of numeric project ID.".into(),
+                        ],
+                        examples: vec![
+                            r#"{"project_id": "10001", "name": "Auto-assign on create", "trigger": {"type": "jira.issue.created"}, "actions": [{"type": "jira.issue.assign", "value": {"accountId": "abc123"}}]}"#.into(),
+                        ],
+                        related: vec![
+                            CapabilityId::from_static("jira.automation.rule.list"),
+                            CapabilityId::from_static("jira.automation.rule.update"),
+                        ],
+                    },
+                ),
+                op_info(
+                    "jira.automation.rule.update",
+                    "Update an existing automation rule",
+                    json!({
+                        "type": "object",
+                        "required": ["rule_id"],
+                        "properties": {
+                            "rule_id": { "type": "string" },
+                            "name": { "type": "string" },
+                            "description": { "type": "string" },
+                            "trigger": { "type": "object" },
+                            "conditions": { "type": "array" },
+                            "actions": { "type": "array" },
+                            "tags": { "type": "array", "items": { "type": "string" } }
+                        }
+                    }),
+                    json!({
+                        "type": "object",
+                        "properties": {
+                            "id": { "type": "integer" },
+                            "name": { "type": "string" },
+                            "state": { "type": "string" },
+                            "enabled": { "type": "boolean" }
+                        }
+                    }),
+                    "jira.write",
+                    RiskLevel::High,
+                    SafetyTier::Dangerous,
+                    IdempotencyClass::Strict,
+                    AgentHint {
+                        when_to_use: "Modify an existing automation rule's trigger, conditions, or actions.".into(),
+                        common_mistakes: vec![
+                            "Removing conditions from an existing rule, causing unintended mass triggers.".into(),
+                        ],
+                        examples: vec![
+                            r#"{"rule_id": "42", "name": "Updated rule name", "actions": [{"type": "jira.issue.transition", "value": {"transitionId": "5"}}]}"#.into(),
+                        ],
+                        related: vec![
+                            CapabilityId::from_static("jira.automation.rule.get"),
+                            CapabilityId::from_static("jira.automation.rule.list"),
+                        ],
+                    },
+                ),
+                op_info(
+                    "jira.automation.rule.enable",
+                    "Enable a disabled automation rule",
+                    json!({
+                        "type": "object",
+                        "required": ["rule_id"],
+                        "properties": {
+                            "rule_id": { "type": "string" }
+                        }
+                    }),
+                    json!({ "type": "object" }),
+                    "jira.write",
+                    RiskLevel::High,
+                    SafetyTier::Dangerous,
+                    IdempotencyClass::Strict,
+                    AgentHint {
+                        when_to_use: "Re-enable a previously disabled automation rule. The rule will start firing on its trigger.".into(),
+                        common_mistakes: vec![
+                            "Enabling rules without reviewing their conditions first.".into(),
+                        ],
+                        examples: vec![
+                            r#"{"rule_id": "42"}"#.into(),
+                        ],
+                        related: vec![
+                            CapabilityId::from_static("jira.automation.rule.get"),
+                            CapabilityId::from_static("jira.automation.rule.disable"),
+                        ],
+                    },
+                ),
+                op_info(
+                    "jira.automation.rule.disable",
+                    "Disable an enabled automation rule",
+                    json!({
+                        "type": "object",
+                        "required": ["rule_id"],
+                        "properties": {
+                            "rule_id": { "type": "string" }
+                        }
+                    }),
+                    json!({ "type": "object" }),
+                    "jira.write",
+                    RiskLevel::High,
+                    SafetyTier::Dangerous,
+                    IdempotencyClass::Strict,
+                    AgentHint {
+                        when_to_use: "Disable an automation rule so it stops firing. Use before modifying rules in production.".into(),
+                        common_mistakes: vec![],
+                        examples: vec![
+                            r#"{"rule_id": "42"}"#.into(),
+                        ],
+                        related: vec![
+                            CapabilityId::from_static("jira.automation.rule.get"),
+                            CapabilityId::from_static("jira.automation.rule.enable"),
+                        ],
+                    },
+                ),
+                op_info(
+                    "jira.automation.rule.delete",
+                    "Delete an automation rule (irreversible)",
+                    json!({
+                        "type": "object",
+                        "required": ["rule_id"],
+                        "properties": {
+                            "rule_id": { "type": "string" }
+                        }
+                    }),
+                    json!({ "type": "object" }),
+                    "jira.delete",
+                    RiskLevel::High,
+                    SafetyTier::Dangerous,
+                    IdempotencyClass::Strict,
+                    AgentHint {
+                        when_to_use: "Permanently delete an automation rule. Cannot be undone.".into(),
+                        common_mistakes: vec![
+                            "Deleting rules without disabling them first.".into(),
+                        ],
+                        examples: vec![
+                            r#"{"rule_id": "42"}"#.into(),
+                        ],
+                        related: vec![
+                            CapabilityId::from_static("jira.automation.rule.list"),
+                            CapabilityId::from_static("jira.automation.rule.disable"),
+                        ],
+                    },
+                ),
             ],
             events: vec![],
             resource_types: vec![],
@@ -1070,6 +1325,13 @@ impl JiraConnector {
             "jira.worklog.update" => self.invoke_update_worklog(input).await,
             "jira.worklog.delete" => self.invoke_delete_worklog(input).await,
             "jira.add_attachment" => self.invoke_add_attachment(input).await,
+            "jira.automation.rule.list" => self.invoke_list_automation_rules(input).await,
+            "jira.automation.rule.get" => self.invoke_get_automation_rule(input).await,
+            "jira.automation.rule.create" => self.invoke_create_automation_rule(input).await,
+            "jira.automation.rule.update" => self.invoke_update_automation_rule(input).await,
+            "jira.automation.rule.enable" => self.invoke_enable_automation_rule(input).await,
+            "jira.automation.rule.disable" => self.invoke_disable_automation_rule(input).await,
+            "jira.automation.rule.delete" => self.invoke_delete_automation_rule(input).await,
             _ => Err(FcpError::OperationNotGranted {
                 operation: operation.into(),
             }),
@@ -1455,6 +1717,162 @@ impl JiraConnector {
         })
     }
 
+    // ── Automation Rule operation implementations ─────────────────
+
+    async fn invoke_list_automation_rules(
+        &self,
+        input: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let project_id = require_str(&input, "project_id")?;
+
+        let resp = client
+            .list_automation_rules(project_id)
+            .await
+            .map_err(|e: JiraError| e.to_fcp_error())?;
+        serde_json::to_value(resp).map_err(|e| FcpError::Internal {
+            message: format!("Serialization error: {e}"),
+        })
+    }
+
+    async fn invoke_get_automation_rule(
+        &self,
+        input: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let rule_id = require_str(&input, "rule_id")?;
+
+        let resp = client
+            .get_automation_rule(rule_id)
+            .await
+            .map_err(|e: JiraError| e.to_fcp_error())?;
+        serde_json::to_value(resp).map_err(|e| FcpError::Internal {
+            message: format!("Serialization error: {e}"),
+        })
+    }
+
+    async fn invoke_create_automation_rule(
+        &self,
+        input: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let project_id = require_str(&input, "project_id")?;
+        let name = require_str(&input, "name")?;
+
+        let trigger = input.get("trigger").ok_or(FcpError::InvalidRequest {
+            code: 1003,
+            message: "Missing required field: trigger".into(),
+        })?;
+        let actions = input.get("actions").ok_or(FcpError::InvalidRequest {
+            code: 1003,
+            message: "Missing required field: actions".into(),
+        })?;
+
+        let mut body = json!({
+            "name": name,
+            "trigger": trigger,
+            "actions": actions,
+        });
+        if let Some(desc) = input.get("description").and_then(|v| v.as_str()) {
+            body["description"] = json!(desc);
+        }
+        if let Some(conditions) = input.get("conditions") {
+            body["conditions"] = conditions.clone();
+        }
+        if let Some(tags) = input.get("tags") {
+            body["tags"] = tags.clone();
+        }
+        if let Some(enabled) = input.get("enabled").and_then(|v| v.as_bool()) {
+            body["enabled"] = json!(enabled);
+        }
+
+        let resp = client
+            .create_automation_rule(project_id, &body)
+            .await
+            .map_err(|e: JiraError| e.to_fcp_error())?;
+        serde_json::to_value(resp).map_err(|e| FcpError::Internal {
+            message: format!("Serialization error: {e}"),
+        })
+    }
+
+    async fn invoke_update_automation_rule(
+        &self,
+        input: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let rule_id = require_str(&input, "rule_id")?;
+
+        let mut body = json!({});
+        if let Some(name) = input.get("name").and_then(|v| v.as_str()) {
+            body["name"] = json!(name);
+        }
+        if let Some(desc) = input.get("description").and_then(|v| v.as_str()) {
+            body["description"] = json!(desc);
+        }
+        if let Some(trigger) = input.get("trigger") {
+            body["trigger"] = trigger.clone();
+        }
+        if let Some(conditions) = input.get("conditions") {
+            body["conditions"] = conditions.clone();
+        }
+        if let Some(actions) = input.get("actions") {
+            body["actions"] = actions.clone();
+        }
+        if let Some(tags) = input.get("tags") {
+            body["tags"] = tags.clone();
+        }
+
+        let resp = client
+            .update_automation_rule(rule_id, &body)
+            .await
+            .map_err(|e: JiraError| e.to_fcp_error())?;
+        serde_json::to_value(resp).map_err(|e| FcpError::Internal {
+            message: format!("Serialization error: {e}"),
+        })
+    }
+
+    async fn invoke_enable_automation_rule(
+        &self,
+        input: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let rule_id = require_str(&input, "rule_id")?;
+
+        client
+            .enable_automation_rule(rule_id)
+            .await
+            .map_err(|e: JiraError| e.to_fcp_error())?;
+        Ok(json!({ "enabled": true }))
+    }
+
+    async fn invoke_disable_automation_rule(
+        &self,
+        input: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let rule_id = require_str(&input, "rule_id")?;
+
+        client
+            .disable_automation_rule(rule_id)
+            .await
+            .map_err(|e: JiraError| e.to_fcp_error())?;
+        Ok(json!({ "disabled": true }))
+    }
+
+    async fn invoke_delete_automation_rule(
+        &self,
+        input: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let rule_id = require_str(&input, "rule_id")?;
+
+        client
+            .delete_automation_rule(rule_id)
+            .await
+            .map_err(|e: JiraError| e.to_fcp_error())?;
+        Ok(json!({ "deleted": true }))
+    }
+
     /// Handle shutdown.
     pub async fn handle_shutdown(
         &self,
@@ -1649,7 +2067,14 @@ mod tests {
         assert!(op_ids.contains(&"jira.worklog.update"));
         assert!(op_ids.contains(&"jira.worklog.delete"));
         assert!(op_ids.contains(&"jira.add_attachment"));
-        assert_eq!(ops.len(), 16);
+        assert!(op_ids.contains(&"jira.automation.rule.list"));
+        assert!(op_ids.contains(&"jira.automation.rule.get"));
+        assert!(op_ids.contains(&"jira.automation.rule.create"));
+        assert!(op_ids.contains(&"jira.automation.rule.update"));
+        assert!(op_ids.contains(&"jira.automation.rule.enable"));
+        assert!(op_ids.contains(&"jira.automation.rule.disable"));
+        assert!(op_ids.contains(&"jira.automation.rule.delete"));
+        assert_eq!(ops.len(), 23);
     }
 
     #[test]

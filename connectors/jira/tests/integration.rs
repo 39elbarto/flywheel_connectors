@@ -1096,7 +1096,7 @@ async fn lifecycle_shutdown_clean() {
     assert_eq!(result["status"], "shutdown");
 }
 
-/// Introspect exposes all 12 operations with schemas.
+/// Introspect exposes all 23 operations with schemas.
 #[fcp_async_core::runtime::test]
 async fn lifecycle_introspect_all_operations() {
     let connector = JiraConnector::new();
@@ -1121,12 +1121,19 @@ async fn lifecycle_introspect_all_operations() {
         "jira.add_comment",
         "jira.list_comments",
         "jira.add_attachment",
+        "jira.automation.rule.list",
+        "jira.automation.rule.get",
+        "jira.automation.rule.create",
+        "jira.automation.rule.update",
+        "jira.automation.rule.enable",
+        "jira.automation.rule.disable",
+        "jira.automation.rule.delete",
     ];
 
     for expected in &expected_ops {
         assert!(op_ids.contains(expected), "missing operation: {expected}");
     }
-    assert_eq!(ops.len(), 12);
+    assert_eq!(ops.len(), 23);
 
     // Verify schemas are present on all operations
     for op in ops {

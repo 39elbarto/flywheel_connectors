@@ -12,9 +12,9 @@ use tracing::{debug, instrument, warn};
 use crate::{
     error::{JiraError, JiraResult},
     types::{
-        ApiErrorResponse, CommentListResponse, CreateIssueResponse, JiraAttachment, JiraComment,
-        JiraIssue, JiraWorklog, SearchResult, SprintListResponse, TransitionsResponse,
-        WorklogListResponse,
+        ApiErrorResponse, AutomationRuleListResponse, CommentListResponse, CreateIssueResponse,
+        JiraAttachment, JiraAutomationRule, JiraComment, JiraIssue, JiraWorklog, SearchResult,
+        SprintListResponse, TransitionsResponse, WorklogListResponse,
     },
 };
 
@@ -86,12 +86,16 @@ impl JiraAuth {
     }
 }
 
+/// Default Jira Automation API base URL template (append domain).
+pub const DEFAULT_AUTOMATION_BASE: &str = "https://{domain}.atlassian.net/rest/cb-automation/latest";
+
 /// Jira REST API client with retry logic and rate limit awareness.
 pub struct JiraClient {
     client: Client,
     auth: JiraAuth,
     base_url: String,
     agile_url: String,
+    automation_url: String,
     max_retries: u32,
     initial_delay_ms: u64,
     max_delay_ms: u64,
@@ -104,6 +108,7 @@ impl std::fmt::Debug for JiraClient {
             .field("auth", &self.auth)
             .field("base_url", &self.base_url)
             .field("agile_url", &self.agile_url)
+            .field("automation_url", &self.automation_url)
             .field("max_retries", &self.max_retries)
             .finish_non_exhaustive()
     }
@@ -151,6 +156,8 @@ impl JiraClient {
         let domain = auth.domain();
         let base_url = format!("https://{domain}.atlassian.net/rest/api/3");
         let agile_url = format!("https://{domain}.atlassian.net/rest/agile/1.0");
+        let automation_url =
+            format!("https://{domain}.atlassian.net/rest/cb-automation/latest");
 
         let client = Client::builder()
             .default_headers(headers)
@@ -164,6 +171,7 @@ impl JiraClient {
             auth,
             base_url,
             agile_url,
+            automation_url,
             max_retries: 3,
             initial_delay_ms: 1000,
             max_delay_ms: 60_000,
@@ -188,6 +196,13 @@ impl JiraClient {
     #[must_use]
     pub fn with_agile_url(mut self, url: &str) -> Self {
         self.agile_url = url.to_string();
+        self
+    }
+
+    /// Set a custom automation API URL (for testing).
+    #[must_use]
+    pub fn with_automation_url(mut self, url: &str) -> Self {
+        self.automation_url = url.to_string();
         self
     }
 
@@ -523,6 +538,86 @@ impl JiraClient {
                 Err(e) => return Err(JiraError::Http(e)),
             }
         }
+    }
+
+    // ── Automation Rule operations ─────────────────────────────────
+
+    /// List automation rules for a project.
+    #[instrument(skip(self))]
+    pub async fn list_automation_rules(
+        &self,
+        project_id: &str,
+    ) -> JiraResult<AutomationRuleListResponse> {
+        let url = format!(
+            "{}/project/{project_id}/rule",
+            self.automation_url
+        );
+        self.get(&url).await
+    }
+
+    /// Get a single automation rule by ID.
+    #[instrument(skip(self))]
+    pub async fn get_automation_rule(
+        &self,
+        rule_id: &str,
+    ) -> JiraResult<JiraAutomationRule> {
+        let url = format!("{}/rule/{rule_id}", self.automation_url);
+        self.get(&url).await
+    }
+
+    /// Create a new automation rule for a project.
+    #[instrument(skip(self, body))]
+    pub async fn create_automation_rule(
+        &self,
+        project_id: &str,
+        body: &serde_json::Value,
+    ) -> JiraResult<JiraAutomationRule> {
+        let url = format!(
+            "{}/project/{project_id}/rule",
+            self.automation_url
+        );
+        self.post(&url, body).await
+    }
+
+    /// Update an automation rule.
+    #[instrument(skip(self, body))]
+    pub async fn update_automation_rule(
+        &self,
+        rule_id: &str,
+        body: &serde_json::Value,
+    ) -> JiraResult<JiraAutomationRule> {
+        let url = format!("{}/rule/{rule_id}", self.automation_url);
+        self.put(&url, body).await
+    }
+
+    /// Enable an automation rule.
+    #[instrument(skip(self))]
+    pub async fn enable_automation_rule(
+        &self,
+        rule_id: &str,
+    ) -> JiraResult<()> {
+        let url = format!("{}/rule/{rule_id}/enable", self.automation_url);
+        self.put_no_content(&url, &serde_json::json!({})).await
+    }
+
+    /// Disable an automation rule.
+    #[instrument(skip(self))]
+    pub async fn disable_automation_rule(
+        &self,
+        rule_id: &str,
+    ) -> JiraResult<()> {
+        let url = format!("{}/rule/{rule_id}/disable", self.automation_url);
+        self.put_no_content(&url, &serde_json::json!({})).await
+    }
+
+    /// Delete an automation rule.
+    #[instrument(skip(self))]
+    pub async fn delete_automation_rule(
+        &self,
+        rule_id: &str,
+    ) -> JiraResult<()> {
+        let url = format!("{}/rule/{rule_id}", self.automation_url);
+        self.delete(&url).await
     }
 
     // ── Internal HTTP helpers ────────────────────────────────────
@@ -889,6 +984,7 @@ mod tests {
             .unwrap()
             .with_base_url(base_url)
             .with_agile_url(base_url)
+            .with_automation_url(base_url)
             .with_retry_config(1, 10, 100)
     }
 
@@ -1381,5 +1477,229 @@ mod tests {
         let result = client.delete_worklog("PROJ-1", "999999").await;
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), JiraError::NotFound { .. }));
+    }
+
+    // ── Automation Rule operations ──────────────────────────────
+
+    #[fcp_async_core::runtime::test]
+    async fn test_list_automation_rules() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/project/10001/rule"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "rules": [
+                    {"id": 1, "name": "Auto-assign", "state": "ENABLED", "enabled": true},
+                    {"id": 2, "name": "Close stale", "state": "DISABLED", "enabled": false}
+                ],
+                "total": 2
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = test_client(&mock_server.uri());
+        let result = client.list_automation_rules("10001").await.unwrap();
+        let rules = result.rules.unwrap();
+        assert_eq!(rules.len(), 2);
+        assert_eq!(result.total, Some(2));
+        assert_eq!(rules[0].name.as_deref(), Some("Auto-assign"));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_get_automation_rule() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/rule/42"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": 42,
+                "name": "Auto-assign on create",
+                "state": "ENABLED",
+                "enabled": true,
+                "trigger": {"type": "jira.issue.created"},
+                "actions": [{"type": "jira.issue.assign", "value": {"accountId": "abc"}}]
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = test_client(&mock_server.uri());
+        let rule = client.get_automation_rule("42").await.unwrap();
+        assert_eq!(rule.id, Some(42));
+        assert_eq!(rule.name.as_deref(), Some("Auto-assign on create"));
+        assert_eq!(rule.enabled, Some(true));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_get_automation_rule_not_found() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/rule/99999"))
+            .respond_with(ResponseTemplate::new(404).set_body_json(serde_json::json!({
+                "errorMessages": ["Rule not found"],
+                "errors": {}
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = test_client(&mock_server.uri());
+        let result = client.get_automation_rule("99999").await;
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), JiraError::NotFound { .. }));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_create_automation_rule() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/project/10001/rule"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "id": 100,
+                "name": "New rule",
+                "state": "ENABLED",
+                "enabled": true
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = test_client(&mock_server.uri());
+        let body = serde_json::json!({
+            "name": "New rule",
+            "trigger": {"type": "jira.issue.created"},
+            "actions": [{"type": "jira.issue.assign"}]
+        });
+        let rule = client.create_automation_rule("10001", &body).await.unwrap();
+        assert_eq!(rule.id, Some(100));
+        assert_eq!(rule.name.as_deref(), Some("New rule"));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_update_automation_rule() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("PUT"))
+            .and(path("/rule/42"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": 42,
+                "name": "Updated rule",
+                "state": "ENABLED",
+                "enabled": true
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = test_client(&mock_server.uri());
+        let body = serde_json::json!({"name": "Updated rule"});
+        let rule = client.update_automation_rule("42", &body).await.unwrap();
+        assert_eq!(rule.name.as_deref(), Some("Updated rule"));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_enable_automation_rule() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("PUT"))
+            .and(path("/rule/42/enable"))
+            .respond_with(ResponseTemplate::new(204))
+            .mount(&mock_server)
+            .await;
+
+        let client = test_client(&mock_server.uri());
+        client.enable_automation_rule("42").await.unwrap();
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_disable_automation_rule() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("PUT"))
+            .and(path("/rule/42/disable"))
+            .respond_with(ResponseTemplate::new(204))
+            .mount(&mock_server)
+            .await;
+
+        let client = test_client(&mock_server.uri());
+        client.disable_automation_rule("42").await.unwrap();
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_delete_automation_rule() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("DELETE"))
+            .and(path("/rule/42"))
+            .respond_with(ResponseTemplate::new(204))
+            .mount(&mock_server)
+            .await;
+
+        let client = test_client(&mock_server.uri());
+        client.delete_automation_rule("42").await.unwrap();
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_delete_automation_rule_not_found() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("DELETE"))
+            .and(path("/rule/99999"))
+            .respond_with(ResponseTemplate::new(404).set_body_json(serde_json::json!({
+                "errorMessages": ["Rule not found"],
+                "errors": {}
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = test_client(&mock_server.uri());
+        let result = client.delete_automation_rule("99999").await;
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), JiraError::NotFound { .. }));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_enable_automation_rule_unauthorized() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("PUT"))
+            .and(path("/rule/42/enable"))
+            .respond_with(ResponseTemplate::new(401))
+            .mount(&mock_server)
+            .await;
+
+        let client = test_client(&mock_server.uri());
+        let result = client.enable_automation_rule("42").await;
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), JiraError::Unauthorized));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_list_automation_rules_empty() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/project/10001/rule"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "rules": [],
+                "total": 0
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = test_client(&mock_server.uri());
+        let result = client.list_automation_rules("10001").await.unwrap();
+        assert!(result.rules.unwrap().is_empty());
+        assert_eq!(result.total, Some(0));
+    }
+
+    #[test]
+    fn test_with_automation_url() {
+        let client = JiraClient::new("test", "user@example.com", "token")
+            .unwrap()
+            .with_automation_url("https://custom.example.com/automation");
+        let dbg = format!("{client:?}");
+        assert!(
+            dbg.contains("custom.example.com/automation"),
+            "got: {dbg}"
+        );
     }
 }

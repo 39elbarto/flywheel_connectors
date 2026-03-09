@@ -5,7 +5,7 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:90cbfa96b2b970005343071cf821174bdcec1c2627c32c8ad4af8e54971bc43c"
+interface_hash = "blake3-256:fcp.interface.v2:0bf7c1dfaea3fb6368e0c36f358da4d5ec94d0e908d762436bd948ba55927404"
 
 [connector]
 id = "fcp.jira"
@@ -1276,6 +1276,466 @@ examples = ['{"issue_key": "PROJ-123", "worklog_id": "100028"}']
 related = ["jira.worklog.list"]
 
 # ---------------------------------------------------------------------------
+# Operations: Automation Rules
+# ---------------------------------------------------------------------------
+
+[provides.operations."jira.automation.rule.list"]
+description = "List automation rules for a Jira project"
+capability = "jira.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."jira.automation.rule.list".rate_limit]
+max = 60
+per_ms = 60000
+
+[provides.operations."jira.automation.rule.list".input_schema]
+required = ["project_id"]
+type = "object"
+
+[provides.operations."jira.automation.rule.list".input_schema.properties.project_id]
+description = "Jira project ID (numeric)"
+type = "string"
+
+[provides.operations."jira.automation.rule.list".output_schema]
+type = "object"
+
+[provides.operations."jira.automation.rule.list".output_schema.properties.rules]
+description = "Array of automation rules"
+type = "array"
+
+[provides.operations."jira.automation.rule.list".output_schema.properties.total]
+description = "Total number of rules"
+type = "integer"
+
+[provides.operations."jira.automation.rule.list".network_constraints]
+host_allow = ["*.atlassian.net"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 2097152
+
+[provides.operations."jira.automation.rule.list".ai_hints]
+when_to_use = "List all automation rules configured for a Jira project."
+common_mistakes = ["Using project key instead of numeric project ID."]
+examples = ['{"project_id": "10001"}']
+related = ["jira.automation.rule.get", "jira.automation.rule.create"]
+
+[provides.operations."jira.automation.rule.get"]
+description = "Get an automation rule definition and status"
+capability = "jira.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."jira.automation.rule.get".rate_limit]
+max = 60
+per_ms = 60000
+
+[provides.operations."jira.automation.rule.get".input_schema]
+required = ["rule_id"]
+type = "object"
+
+[provides.operations."jira.automation.rule.get".input_schema.properties.rule_id]
+description = "Automation rule ID (numeric)"
+type = "string"
+
+[provides.operations."jira.automation.rule.get".output_schema]
+type = "object"
+
+[provides.operations."jira.automation.rule.get".output_schema.properties.id]
+description = "Rule ID"
+type = "integer"
+
+[provides.operations."jira.automation.rule.get".output_schema.properties.name]
+description = "Rule name"
+type = "string"
+
+[provides.operations."jira.automation.rule.get".output_schema.properties.state]
+description = "Rule state (ENABLED/DISABLED)"
+type = "string"
+
+[provides.operations."jira.automation.rule.get".output_schema.properties.enabled]
+description = "Whether the rule is enabled"
+type = "boolean"
+
+[provides.operations."jira.automation.rule.get".output_schema.properties.trigger]
+description = "Rule trigger definition"
+type = "object"
+
+[provides.operations."jira.automation.rule.get".output_schema.properties.conditions]
+description = "Rule conditions"
+type = "array"
+
+[provides.operations."jira.automation.rule.get".output_schema.properties.actions]
+description = "Rule actions"
+type = "array"
+
+[provides.operations."jira.automation.rule.get".network_constraints]
+host_allow = ["*.atlassian.net"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."jira.automation.rule.get".ai_hints]
+when_to_use = "Retrieve the definition, trigger, conditions, and actions of a specific automation rule."
+common_mistakes = ["Using rule name instead of numeric rule ID."]
+examples = ['{"rule_id": "42"}']
+related = ["jira.automation.rule.list", "jira.automation.rule.update"]
+
+[provides.operations."jira.automation.rule.create"]
+description = "Create a new automation rule for a project (dangerous — can auto-mutate issues)"
+capability = "jira.write"
+risk_level = "high"
+safety_tier = "dangerous"
+requires_approval = "interactive"
+idempotency = "none"
+
+[provides.operations."jira.automation.rule.create".rate_limit]
+max = 20
+per_ms = 60000
+
+[provides.operations."jira.automation.rule.create".input_schema]
+required = ["project_id", "name", "trigger", "actions"]
+type = "object"
+
+[provides.operations."jira.automation.rule.create".input_schema.properties.project_id]
+description = "Jira project ID (numeric)"
+type = "string"
+
+[provides.operations."jira.automation.rule.create".input_schema.properties.name]
+description = "Rule name"
+type = "string"
+
+[provides.operations."jira.automation.rule.create".input_schema.properties.description]
+description = "Rule description"
+type = "string"
+
+[provides.operations."jira.automation.rule.create".input_schema.properties.trigger]
+description = "Trigger definition (e.g., {\"type\": \"jira.issue.created\"})"
+type = "object"
+
+[provides.operations."jira.automation.rule.create".input_schema.properties.conditions]
+description = "Conditions to evaluate before executing actions"
+type = "array"
+
+[provides.operations."jira.automation.rule.create".input_schema.properties.actions]
+description = "Actions to execute when rule fires"
+type = "array"
+
+[provides.operations."jira.automation.rule.create".input_schema.properties.tags]
+description = "Tags to categorize the rule"
+type = "array"
+[provides.operations."jira.automation.rule.create".input_schema.properties.tags.items]
+type = "string"
+
+[provides.operations."jira.automation.rule.create".input_schema.properties.enabled]
+description = "Whether to enable the rule immediately (default: true)"
+type = "boolean"
+
+[provides.operations."jira.automation.rule.create".output_schema]
+type = "object"
+
+[provides.operations."jira.automation.rule.create".output_schema.properties.id]
+description = "Created rule ID"
+type = "integer"
+
+[provides.operations."jira.automation.rule.create".output_schema.properties.name]
+description = "Rule name"
+type = "string"
+
+[provides.operations."jira.automation.rule.create".output_schema.properties.state]
+description = "Rule state"
+type = "string"
+
+[provides.operations."jira.automation.rule.create".output_schema.properties.enabled]
+description = "Whether the rule is enabled"
+type = "boolean"
+
+[provides.operations."jira.automation.rule.create".network_constraints]
+host_allow = ["*.atlassian.net"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."jira.automation.rule.create".ai_hints]
+when_to_use = "Create a new automation rule. Rules can auto-transition issues, send notifications, and mutate data."
+common_mistakes = [
+    "Creating rules without proper conditions, which may trigger on every issue.",
+    "Using project key instead of numeric project ID.",
+]
+examples = ['{"project_id": "10001", "name": "Auto-assign on create", "trigger": {"type": "jira.issue.created"}, "actions": [{"type": "jira.issue.assign", "value": {"accountId": "abc123"}}]}']
+related = ["jira.automation.rule.list", "jira.automation.rule.update"]
+
+[provides.operations."jira.automation.rule.update"]
+description = "Update an existing automation rule (dangerous — modifies automated behavior)"
+capability = "jira.write"
+risk_level = "high"
+safety_tier = "dangerous"
+requires_approval = "interactive"
+idempotency = "strict"
+
+[provides.operations."jira.automation.rule.update".rate_limit]
+max = 20
+per_ms = 60000
+
+[provides.operations."jira.automation.rule.update".input_schema]
+required = ["rule_id"]
+type = "object"
+
+[provides.operations."jira.automation.rule.update".input_schema.properties.rule_id]
+description = "Automation rule ID (numeric)"
+type = "string"
+
+[provides.operations."jira.automation.rule.update".input_schema.properties.name]
+description = "Updated rule name"
+type = "string"
+
+[provides.operations."jira.automation.rule.update".input_schema.properties.description]
+description = "Updated description"
+type = "string"
+
+[provides.operations."jira.automation.rule.update".input_schema.properties.trigger]
+description = "Updated trigger definition"
+type = "object"
+
+[provides.operations."jira.automation.rule.update".input_schema.properties.conditions]
+description = "Updated conditions"
+type = "array"
+
+[provides.operations."jira.automation.rule.update".input_schema.properties.actions]
+description = "Updated actions"
+type = "array"
+
+[provides.operations."jira.automation.rule.update".input_schema.properties.tags]
+description = "Updated tags"
+type = "array"
+[provides.operations."jira.automation.rule.update".input_schema.properties.tags.items]
+type = "string"
+
+[provides.operations."jira.automation.rule.update".output_schema]
+type = "object"
+
+[provides.operations."jira.automation.rule.update".output_schema.properties.id]
+description = "Rule ID"
+type = "integer"
+
+[provides.operations."jira.automation.rule.update".output_schema.properties.name]
+description = "Rule name"
+type = "string"
+
+[provides.operations."jira.automation.rule.update".output_schema.properties.state]
+description = "Rule state"
+type = "string"
+
+[provides.operations."jira.automation.rule.update".output_schema.properties.enabled]
+description = "Whether the rule is enabled"
+type = "boolean"
+
+[provides.operations."jira.automation.rule.update".network_constraints]
+host_allow = ["*.atlassian.net"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."jira.automation.rule.update".ai_hints]
+when_to_use = "Modify an existing automation rule's trigger, conditions, or actions."
+common_mistakes = ["Removing conditions from an existing rule, causing unintended mass triggers."]
+examples = ['{"rule_id": "42", "name": "Updated rule name", "actions": [{"type": "jira.issue.transition", "value": {"transitionId": "5"}}]}']
+related = ["jira.automation.rule.get", "jira.automation.rule.list"]
+
+[provides.operations."jira.automation.rule.enable"]
+description = "Enable a disabled automation rule (dangerous — starts automated behavior)"
+capability = "jira.write"
+risk_level = "high"
+safety_tier = "dangerous"
+requires_approval = "interactive"
+idempotency = "strict"
+
+[provides.operations."jira.automation.rule.enable".rate_limit]
+max = 20
+per_ms = 60000
+
+[provides.operations."jira.automation.rule.enable".input_schema]
+required = ["rule_id"]
+type = "object"
+
+[provides.operations."jira.automation.rule.enable".input_schema.properties.rule_id]
+description = "Automation rule ID to enable"
+type = "string"
+
+[provides.operations."jira.automation.rule.enable".output_schema]
+type = "object"
+
+[provides.operations."jira.automation.rule.enable".network_constraints]
+host_allow = ["*.atlassian.net"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."jira.automation.rule.enable".ai_hints]
+when_to_use = "Re-enable a previously disabled automation rule. The rule will start firing on its trigger."
+common_mistakes = ["Enabling rules without reviewing their conditions first."]
+examples = ['{"rule_id": "42"}']
+related = ["jira.automation.rule.get", "jira.automation.rule.disable"]
+
+[provides.operations."jira.automation.rule.disable"]
+description = "Disable an enabled automation rule (stops automated behavior)"
+capability = "jira.write"
+risk_level = "high"
+safety_tier = "dangerous"
+requires_approval = "interactive"
+idempotency = "strict"
+
+[provides.operations."jira.automation.rule.disable".rate_limit]
+max = 20
+per_ms = 60000
+
+[provides.operations."jira.automation.rule.disable".input_schema]
+required = ["rule_id"]
+type = "object"
+
+[provides.operations."jira.automation.rule.disable".input_schema.properties.rule_id]
+description = "Automation rule ID to disable"
+type = "string"
+
+[provides.operations."jira.automation.rule.disable".output_schema]
+type = "object"
+
+[provides.operations."jira.automation.rule.disable".network_constraints]
+host_allow = ["*.atlassian.net"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."jira.automation.rule.disable".ai_hints]
+when_to_use = "Disable an automation rule so it stops firing. Use before modifying rules in production."
+common_mistakes = []
+examples = ['{"rule_id": "42"}']
+related = ["jira.automation.rule.get", "jira.automation.rule.enable"]
+
+[provides.operations."jira.automation.rule.delete"]
+description = "Delete an automation rule (irreversible)"
+capability = "jira.delete"
+risk_level = "high"
+safety_tier = "dangerous"
+requires_approval = "interactive"
+idempotency = "strict"
+
+[provides.operations."jira.automation.rule.delete".rate_limit]
+max = 20
+per_ms = 60000
+
+[provides.operations."jira.automation.rule.delete".input_schema]
+required = ["rule_id"]
+type = "object"
+
+[provides.operations."jira.automation.rule.delete".input_schema.properties.rule_id]
+description = "Automation rule ID to delete"
+type = "string"
+
+[provides.operations."jira.automation.rule.delete".output_schema]
+type = "object"
+
+[provides.operations."jira.automation.rule.delete".network_constraints]
+host_allow = ["*.atlassian.net"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."jira.automation.rule.delete".ai_hints]
+when_to_use = "Permanently delete an automation rule. Cannot be undone."
+common_mistakes = ["Deleting rules without disabling them first."]
+examples = ['{"rule_id": "42"}']
+related = ["jira.automation.rule.list", "jira.automation.rule.disable"]
+
+# ---------------------------------------------------------------------------
 # Streaming / Event Capabilities
 # ---------------------------------------------------------------------------
 
@@ -1354,3 +1814,10 @@ scope = "instance"
 "jira.worklog.update" = ["jira.write"]
 "jira.worklog.delete" = ["jira.delete"]
 "jira.add_attachment" = ["jira.attachment"]
+"jira.automation.rule.list" = ["jira.read"]
+"jira.automation.rule.get" = ["jira.read"]
+"jira.automation.rule.create" = ["jira.write"]
+"jira.automation.rule.update" = ["jira.write"]
+"jira.automation.rule.enable" = ["jira.write"]
+"jira.automation.rule.disable" = ["jira.write"]
+"jira.automation.rule.delete" = ["jira.delete"]

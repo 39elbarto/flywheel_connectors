@@ -166,6 +166,63 @@ pub struct WorklogListResponse {
     pub max_results: Option<u64>,
 }
 
+// ── Automation Rule ─────────────────────────────────────────────
+
+/// Jira automation rule.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JiraAutomationRule {
+    pub id: Option<u64>,
+    pub name: Option<String>,
+    pub state: Option<String>,
+    pub enabled: Option<bool>,
+    pub description: Option<String>,
+    pub author_account_id: Option<String>,
+    pub created: Option<String>,
+    pub updated: Option<String>,
+    pub trigger: Option<JiraAutomationTrigger>,
+    pub conditions: Option<Vec<JiraAutomationCondition>>,
+    pub actions: Option<Vec<JiraAutomationAction>>,
+    pub projects: Option<Vec<serde_json::Value>>,
+    pub tags: Option<Vec<String>>,
+    pub rule_scope: Option<serde_json::Value>,
+}
+
+/// Automation rule trigger.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JiraAutomationTrigger {
+    #[serde(rename = "type")]
+    pub trigger_type: Option<String>,
+    pub value: Option<serde_json::Value>,
+}
+
+/// Automation rule condition.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JiraAutomationCondition {
+    #[serde(rename = "type")]
+    pub condition_type: Option<String>,
+    pub value: Option<serde_json::Value>,
+}
+
+/// Automation rule action.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JiraAutomationAction {
+    #[serde(rename = "type")]
+    pub action_type: Option<String>,
+    pub value: Option<serde_json::Value>,
+}
+
+/// Paginated automation rule list response.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AutomationRuleListResponse {
+    pub rules: Option<Vec<JiraAutomationRule>>,
+    pub total: Option<u64>,
+}
+
 // ── API Error ───────────────────────────────────────────────────
 
 /// Jira REST API error response body.
@@ -1407,5 +1464,163 @@ mod tests {
         assert_eq!(cloned.total, 0);
         let dbg = format!("{resp:?}");
         assert!(dbg.contains("WorklogListResponse"), "got: {dbg}");
+    }
+
+    // ════════════════════════════════════════════════════════════════
+    // JiraAutomationRule
+    // ════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn automation_rule_serde_roundtrip() {
+        let rule = JiraAutomationRule {
+            id: Some(42),
+            name: Some("Auto-close stale issues".into()),
+            state: Some("ENABLED".into()),
+            enabled: Some(true),
+            description: Some("Closes issues after 30 days".into()),
+            author_account_id: Some("5b109f2e9729b51b54dc274d".into()),
+            created: Some("2026-01-15T10:00:00.000Z".into()),
+            updated: Some("2026-02-01T15:30:00.000Z".into()),
+            trigger: Some(JiraAutomationTrigger {
+                trigger_type: Some("jira.scheduled".into()),
+                value: Some(json!({"cron": "0 0 * * *"})),
+            }),
+            conditions: Some(vec![JiraAutomationCondition {
+                condition_type: Some("jira.issue.condition".into()),
+                value: Some(json!({"selectedField": "status", "compareValue": "Open"})),
+            }]),
+            actions: Some(vec![JiraAutomationAction {
+                action_type: Some("jira.issue.transition".into()),
+                value: Some(json!({"transitionId": "5"})),
+            }]),
+            projects: Some(vec![json!({"projectId": "10001"})]),
+            tags: Some(vec!["maintenance".into()]),
+            rule_scope: None,
+        };
+        let serialized = serde_json::to_string(&rule).unwrap();
+        let back: JiraAutomationRule = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(back.id, Some(42));
+        assert_eq!(back.name.as_deref(), Some("Auto-close stale issues"));
+        assert_eq!(back.state.as_deref(), Some("ENABLED"));
+        assert_eq!(back.enabled, Some(true));
+    }
+
+    #[test]
+    fn automation_rule_minimal_deserialization() {
+        let json = json!({
+            "id": 1,
+            "name": "Test Rule"
+        });
+        let rule: JiraAutomationRule = serde_json::from_value(json).unwrap();
+        assert_eq!(rule.id, Some(1));
+        assert_eq!(rule.name.as_deref(), Some("Test Rule"));
+        assert!(rule.state.is_none());
+        assert!(rule.enabled.is_none());
+        assert!(rule.trigger.is_none());
+        assert!(rule.conditions.is_none());
+        assert!(rule.actions.is_none());
+    }
+
+    #[test]
+    fn automation_rule_all_none() {
+        let json = json!({});
+        let rule: JiraAutomationRule = serde_json::from_value(json).unwrap();
+        assert!(rule.id.is_none());
+        assert!(rule.name.is_none());
+    }
+
+    #[test]
+    fn automation_rule_clone_debug() {
+        let rule = JiraAutomationRule {
+            id: Some(99),
+            name: Some("Cloned rule".into()),
+            state: None,
+            enabled: None,
+            description: None,
+            author_account_id: None,
+            created: None,
+            updated: None,
+            trigger: None,
+            conditions: None,
+            actions: None,
+            projects: None,
+            tags: None,
+            rule_scope: None,
+        };
+        let cloned = rule.clone();
+        assert_eq!(cloned.id, Some(99));
+        let dbg = format!("{rule:?}");
+        assert!(dbg.contains("JiraAutomationRule"), "got: {dbg}");
+    }
+
+    #[test]
+    fn automation_trigger_serde() {
+        let trigger = JiraAutomationTrigger {
+            trigger_type: Some("jira.issue.created".into()),
+            value: Some(json!({"projectId": "10001"})),
+        };
+        let serialized = serde_json::to_string(&trigger).unwrap();
+        assert!(serialized.contains("\"type\":"));
+        let back: JiraAutomationTrigger = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(back.trigger_type.as_deref(), Some("jira.issue.created"));
+    }
+
+    #[test]
+    fn automation_condition_serde() {
+        let cond = JiraAutomationCondition {
+            condition_type: Some("jira.jql.condition".into()),
+            value: Some(json!({"jql": "status = Open"})),
+        };
+        let serialized = serde_json::to_string(&cond).unwrap();
+        let back: JiraAutomationCondition = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(back.condition_type.as_deref(), Some("jira.jql.condition"));
+    }
+
+    #[test]
+    fn automation_action_serde() {
+        let action = JiraAutomationAction {
+            action_type: Some("jira.issue.assign".into()),
+            value: Some(json!({"accountId": "abc123"})),
+        };
+        let serialized = serde_json::to_string(&action).unwrap();
+        let back: JiraAutomationAction = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(back.action_type.as_deref(), Some("jira.issue.assign"));
+    }
+
+    #[test]
+    fn automation_rule_list_response_serde() {
+        let resp_json = json!({
+            "rules": [
+                {"id": 1, "name": "Rule 1", "enabled": true},
+                {"id": 2, "name": "Rule 2", "enabled": false}
+            ],
+            "total": 2
+        });
+        let resp: AutomationRuleListResponse = serde_json::from_value(resp_json).unwrap();
+        assert_eq!(resp.total, Some(2));
+        let rules = resp.rules.unwrap();
+        assert_eq!(rules.len(), 2);
+        assert_eq!(rules[0].name.as_deref(), Some("Rule 1"));
+        assert_eq!(rules[1].enabled, Some(false));
+    }
+
+    #[test]
+    fn automation_rule_list_response_empty() {
+        let resp_json = json!({"rules": [], "total": 0});
+        let resp: AutomationRuleListResponse = serde_json::from_value(resp_json).unwrap();
+        assert_eq!(resp.total, Some(0));
+        assert!(resp.rules.unwrap().is_empty());
+    }
+
+    #[test]
+    fn automation_rule_list_response_clone_debug() {
+        let resp = AutomationRuleListResponse {
+            rules: Some(vec![]),
+            total: Some(0),
+        };
+        let cloned = resp.clone();
+        assert_eq!(cloned.total, Some(0));
+        let dbg = format!("{resp:?}");
+        assert!(dbg.contains("AutomationRuleListResponse"), "got: {dbg}");
     }
 }

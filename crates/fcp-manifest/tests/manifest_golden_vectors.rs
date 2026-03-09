@@ -1342,7 +1342,7 @@ fn jira_full_manifest_parses_with_all_operations() {
 
     assert_eq!(parsed.connector.id.as_str(), "fcp.jira");
 
-    // Verify all 16 operations present
+    // Verify all 23 operations present
     let ops = &parsed.provides.operations;
     let expected_ops = [
         "jira.create_issue",
@@ -1361,6 +1361,13 @@ fn jira_full_manifest_parses_with_all_operations() {
         "jira.worklog.update",
         "jira.worklog.delete",
         "jira.add_attachment",
+        "jira.automation.rule.list",
+        "jira.automation.rule.get",
+        "jira.automation.rule.create",
+        "jira.automation.rule.update",
+        "jira.automation.rule.enable",
+        "jira.automation.rule.disable",
+        "jira.automation.rule.delete",
     ];
     for op_name in &expected_ops {
         assert!(ops.contains_key(*op_name), "missing operation: {op_name}");

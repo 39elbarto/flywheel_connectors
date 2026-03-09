@@ -533,4 +533,75 @@ mod tests {
         assert!(v["port"].is_number());
         assert_eq!(v["port"].as_u64().unwrap(), 3306);
     }
+
+    // ---- Unicode and edge case fixture tests ----
+
+    #[test]
+    fn connector_id_with_hyphens_and_numbers() {
+        let id = connector_id("my-conn-123", "data-api", "0.1.0");
+        assert!(id.as_str().contains("my-conn-123"));
+    }
+
+    #[test]
+    fn json_error_with_unicode_message() {
+        let v = json::error("UNICODE_ERR", "Error: caf\u{00e9}");
+        assert_eq!(v["error"]["message"], "Error: caf\u{00e9}");
+    }
+
+    #[test]
+    fn json_not_found_with_empty_resource() {
+        let v = json::not_found("");
+        assert!(v["error"]["message"].as_str().unwrap().contains("not found"));
+    }
+
+    #[test]
+    fn config_api_key_empty_string() {
+        let v = config::api_key("");
+        assert_eq!(v["api_key"], "");
+    }
+
+    #[test]
+    fn config_oauth_serde_roundtrip() {
+        let v = config::oauth("client-abc", "secret-xyz");
+        let s = serde_json::to_string(&v).unwrap();
+        let d: serde_json::Value = serde_json::from_str(&s).unwrap();
+        assert_eq!(v, d);
+    }
+
+    #[test]
+    fn config_database_serde_roundtrip() {
+        let v = config::database("db.example.com", 5432, "mydb", "user", "pass");
+        let s = serde_json::to_string(&v).unwrap();
+        let d: serde_json::Value = serde_json::from_str(&s).unwrap();
+        assert_eq!(v, d);
+    }
+
+    #[test]
+    fn json_rate_limited_zero_retry() {
+        let v = json::rate_limited(0);
+        assert_eq!(v["error"]["retry_after"], 0);
+    }
+
+    #[test]
+    fn json_paginated_large_total() {
+        let items = vec![1];
+        let v = json::paginated(&items, 1_000_000, 0);
+        assert_eq!(v["total"], 1_000_000);
+        assert_eq!(v["has_more"], true);
+    }
+
+    #[test]
+    fn json_error_with_empty_strings() {
+        let v = json::error("", "");
+        assert_eq!(v["error"]["code"], "");
+        assert_eq!(v["error"]["message"], "");
+    }
+
+    #[test]
+    fn config_oauth_with_tokens_serde_roundtrip() {
+        let v = config::oauth_with_tokens("c", "s", "a", "r");
+        let s = serde_json::to_string(&v).unwrap();
+        let d: serde_json::Value = serde_json::from_str(&s).unwrap();
+        assert_eq!(v, d);
+    }
 }

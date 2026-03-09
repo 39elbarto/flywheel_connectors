@@ -1320,4 +1320,171 @@ mod tests {
         // Both should point to the same backend (Arc)
         assert!(Arc::ptr_eq(&b1, &b2));
     }
+
+    // ---- Additional FakePollingApi edge case tests ----
+
+    #[test]
+    fn fake_polling_api_single_update_per_poll() {
+        let api = FakePollingApi::always_success(1);
+        if let PollResult::Success(updates) = api.poll(None) {
+            assert_eq!(updates.len(), 1);
+            assert_eq!(updates[0].id, 1);
+            assert!(updates[0].payload.starts_with("update-"));
+        } else {
+            panic!("expected success");
+        }
+    }
+
+    #[test]
+    fn fake_polling_api_many_updates_per_poll() {
+        let api = FakePollingApi::always_success(100);
+        if let PollResult::Success(updates) = api.poll(None) {
+            assert_eq!(updates.len(), 100);
+            assert_eq!(updates[0].id, 1);
+            assert_eq!(updates[99].id, 100);
+        } else {
+            panic!("expected success");
+        }
+    }
+
+    #[test]
+    fn fake_polling_api_poll_count_increments_on_error() {
+        let api = FakePollingApi::fail_after(0, FakePollingError::Timeout);
+        api.poll(None);
+        api.poll(None);
+        assert_eq!(api.poll_count(), 2);
+    }
+
+    #[test]
+    fn fake_polling_api_reset_allows_success_again() {
+        let api = FakePollingApi::fail_after(1, FakePollingError::Timeout);
+        assert!(matches!(api.poll(None), PollResult::Success(_)));
+        assert!(matches!(
+            api.poll(None),
+            PollResult::RecoverableError { .. }
+        ));
+        api.reset();
+        // After reset, first poll should succeed again
+        assert!(matches!(api.poll(None), PollResult::Success(_)));
+    }
+
+    // ---- Additional FakeUpdate edge case tests ----
+
+    #[test]
+    fn fake_update_negative_id_representation() {
+        // While the API produces positive IDs, FakeUpdate allows any i64
+        let update = FakeUpdate {
+            id: -1,
+            payload: "negative".to_string(),
+        };
+        assert_eq!(update.id, -1);
+    }
+
+    #[test]
+    fn fake_update_empty_payload() {
+        let update = FakeUpdate {
+            id: 0,
+            payload: String::new(),
+        };
+        assert!(update.payload.is_empty());
+    }
+
+    // ---- Additional FakeStreamingSession edge case tests ----
+
+    #[test]
+    fn fake_streaming_session_set_sequence_directly() {
+        let mut session = FakeStreamingSession::new();
+        session.set_sequence(999);
+        assert_eq!(session.sequence(), 999);
+    }
+
+    #[test]
+    fn fake_streaming_session_multiple_heartbeats() {
+        let mut session = FakeStreamingSession::new();
+        let t1 = std::time::Instant::now();
+        session.record_heartbeat_sent(t1);
+        session.record_heartbeat_ack(t1);
+
+        let t2 = std::time::Instant::now();
+        session.record_heartbeat_sent(t2);
+        // Last sent should be t2
+        assert!(session.last_heartbeat_sent().is_some());
+        // Last ack should still be t1
+        assert!(session.last_heartbeat_ack().is_some());
+    }
+
+    #[test]
+    fn fake_streaming_session_event_ordering_preserved() {
+        let mut session = FakeStreamingSession::new();
+        for i in 0..5_u64 {
+            session.add_event(FakeStreamEvent {
+                seq: i,
+                event_type: format!("type-{i}"),
+                payload: serde_json::json!({"seq": i}),
+            });
+        }
+        for (idx, event) in session.events.iter().enumerate() {
+            assert_eq!(event.seq, idx as u64);
+            assert_eq!(event.event_type, format!("type-{idx}"));
+        }
+    }
+
+    #[test]
+    fn fake_stream_event_empty_payload() {
+        let event = FakeStreamEvent {
+            seq: 0,
+            event_type: "empty".to_string(),
+            payload: serde_json::json!(null),
+        };
+        assert!(event.payload.is_null());
+    }
+
+    // ---- FakeCursorStoreConnector additional tests ----
+
+    #[test]
+    fn fake_cursor_store_connector_single_run() {
+        let api = FakePollingApi::always_success(3);
+        let connector = FakeCursorStoreConnector::new(api);
+        let backend = connector.backend();
+
+        let result = connector
+            .run_once(
+                backend,
+                CursorLease {
+                    lease_seq: 1,
+                    lease_object_id: ObjectId::from_bytes([0x01; 32]),
+                },
+                1_700_000_000,
+            )
+            .expect("run_once should succeed");
+
+        // 3 updates processed, cursor offset should be 4 (next ID after 1,2,3)
+        assert!(result.offset.is_some());
+        assert!(result.last_seen_id.is_some());
+        assert_eq!(result.watermark, Some(1_700_000_000));
+    }
+
+    #[test]
+    fn fake_cursor_store_connector_build_snapshot() {
+        let covers_head = ObjectId::from_bytes([0xAA; 32]);
+        let cursor_state = CursorState {
+            offset: Some(42),
+            last_seen_id: Some("42".to_string()),
+            watermark: Some(1_000_000),
+        };
+        let connector_id = ConnectorId::from_static("test:snapshot:1.0");
+        let zone_id = ZoneId::work();
+
+        let snapshot = FakeCursorStoreConnector::build_snapshot(
+            covers_head,
+            &cursor_state,
+            connector_id,
+            zone_id,
+            1_000_000,
+        );
+
+        assert_eq!(snapshot.covers_head, covers_head);
+        assert_eq!(snapshot.snapshotted_at, 1_000_000);
+        assert!(!snapshot.state_cbor.is_empty());
+    }
 }

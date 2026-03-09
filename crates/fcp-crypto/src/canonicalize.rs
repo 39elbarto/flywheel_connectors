@@ -541,4 +541,110 @@ mod tests {
         let sigs = vec![NodeSignature::new(b"only".to_vec(), vec![1])];
         assert!(verify_node_signature_order(&sigs).is_ok());
     }
+
+    // ---- Deterministic CBOR with integers ----
+
+    #[test]
+    fn deterministic_cbor_integer() {
+        let cbor = to_deterministic_cbor(&42u64).unwrap();
+        assert!(!cbor.is_empty());
+        let cbor2 = to_deterministic_cbor(&42u64).unwrap();
+        assert_eq!(cbor, cbor2);
+    }
+
+    // ---- Deterministic CBOR with null/optional ----
+
+    #[test]
+    fn deterministic_cbor_option_none() {
+        let val: Option<u32> = None;
+        let cbor = to_deterministic_cbor(&val).unwrap();
+        assert!(!cbor.is_empty());
+    }
+
+    #[test]
+    fn deterministic_cbor_option_some() {
+        let val: Option<u32> = Some(42);
+        let cbor = to_deterministic_cbor(&val).unwrap();
+        assert!(!cbor.is_empty());
+    }
+
+    // ---- Schema hash with long input ----
+
+    #[test]
+    fn schema_hash_long_input() {
+        let long_schema = "a".repeat(10_000);
+        let hash = schema_hash(&long_schema);
+        assert_eq!(hash.len(), SCHEMA_HASH_SIZE);
+        // Deterministic
+        assert_eq!(hash, schema_hash(&long_schema));
+    }
+
+    // ---- Schema hash with unicode ----
+
+    #[test]
+    fn schema_hash_unicode() {
+        let hash = schema_hash("schéma.réseau/1.0.0");
+        assert_eq!(hash.len(), SCHEMA_HASH_SIZE);
+        // Different from ASCII variant
+        let hash2 = schema_hash("schema.reseau/1.0.0");
+        assert_ne!(hash, hash2);
+    }
+
+    // ---- Sort signatures with ties ----
+
+    #[test]
+    fn sort_signatures_already_sorted() {
+        let ids: Vec<&[u8]> = vec![b"a", b"b", b"c"];
+        let sorted = sort_signatures_by_node_id(&ids);
+        assert_eq!(sorted, vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn sort_signatures_reverse_order() {
+        let ids: Vec<&[u8]> = vec![b"c", b"b", b"a"];
+        let sorted = sort_signatures_by_node_id(&ids);
+        assert_eq!(sorted, vec![2, 1, 0]);
+    }
+
+    // ---- NodeSignature new const ----
+
+    #[test]
+    fn node_signature_new_preserves_fields() {
+        let sig = NodeSignature::new(b"node-id".to_vec(), vec![0xAA, 0xBB, 0xCC]);
+        assert_eq!(sig.node_id, b"node-id");
+        assert_eq!(sig.signature, vec![0xAA, 0xBB, 0xCC]);
+    }
+
+    // ---- Verify signature order error message ----
+
+    #[test]
+    fn verify_signature_order_error_message() {
+        let ids: Vec<&[u8]> = vec![b"z", b"a"];
+        let err = verify_signature_order(&ids).unwrap_err();
+        assert!(err.to_string().contains("not sorted"));
+    }
+
+    #[test]
+    fn verify_node_signature_order_error_message() {
+        let sigs = vec![
+            NodeSignature::new(b"z".to_vec(), vec![1]),
+            NodeSignature::new(b"a".to_vec(), vec![2]),
+        ];
+        let err = verify_node_signature_order(&sigs).unwrap_err();
+        assert!(err.to_string().contains("not sorted"));
+    }
+
+    // ---- Canonical signing bytes with large CBOR ----
+
+    #[test]
+    fn canonical_signing_bytes_large_cbor() {
+        let large_cbor = vec![0xAB; 100_000];
+        let bytes = canonical_signing_bytes("big.schema/1.0.0", &large_cbor);
+        assert_eq!(
+            bytes.len(),
+            SIGNING_DOMAIN.len() + SCHEMA_HASH_SIZE + 100_000
+        );
+        assert!(bytes.starts_with(SIGNING_DOMAIN));
+        assert!(bytes.ends_with(&large_cbor));
+    }
 }

@@ -523,4 +523,80 @@ mod tests {
         assert_eq!(HKDF_MAX_OUTPUT_LENGTH, 255 * 32);
         assert_eq!(HKDF_MAX_OUTPUT_LENGTH, 8160);
     }
+
+    // ---- DerivedKey various sizes ----
+
+    #[test]
+    fn derived_key_16_bytes() {
+        let key = DerivedKey::<16>::derive(None, b"ikm", b"info").unwrap();
+        assert_eq!(key.as_bytes().len(), 16);
+    }
+
+    #[test]
+    fn derived_key_64_bytes() {
+        let key = DerivedKey::<64>::derive(None, b"ikm", b"info").unwrap();
+        assert_eq!(key.as_bytes().len(), 64);
+    }
+
+    #[test]
+    fn derived_key_1_byte() {
+        let key = DerivedKey::<1>::derive(None, b"ikm", b"info").unwrap();
+        assert_eq!(key.as_bytes().len(), 1);
+    }
+
+    // ---- FCP2 derivation with empty inputs ----
+
+    #[test]
+    fn fcp2_zone_key_empty_material() {
+        let key = Fcp2KeyDerivation::derive_zone_key(&[], b"z:test").unwrap();
+        assert_eq!(key.as_bytes().len(), 32);
+    }
+
+    #[test]
+    fn fcp2_zone_key_empty_zone_id() {
+        let key = Fcp2KeyDerivation::derive_zone_key(&[42u8; 32], b"").unwrap();
+        assert_eq!(key.as_bytes().len(), 32);
+    }
+
+    #[test]
+    fn fcp2_session_key_empty_direction() {
+        let key = Fcp2KeyDerivation::derive_session_key(&[1u8; 32], b"sess", "").unwrap();
+        assert_eq!(key.as_bytes().len(), 32);
+    }
+
+    #[test]
+    fn fcp2_mac_key_empty_purpose() {
+        let key = Fcp2KeyDerivation::derive_mac_key(&[1u8; 32], "").unwrap();
+        assert_eq!(key.as_bytes().len(), 32);
+    }
+
+    // ---- HKDF expand to same size gives same result ----
+
+    #[test]
+    fn hkdf_expand_deterministic_same_instance() {
+        let hkdf = HkdfSha256::new(Some(b"s"), b"ikm");
+        let k1: [u8; 32] = hkdf.expand_to_array(b"info").unwrap();
+        let k2: [u8; 32] = hkdf.expand_to_array(b"info").unwrap();
+        assert_eq!(k1, k2);
+    }
+
+    // ---- DerivedKey debug shows len but not key ----
+
+    #[test]
+    fn derived_key_debug_16() {
+        let key = DerivedKey::<16>::derive(None, b"ikm", b"info").unwrap();
+        let debug = format!("{key:?}");
+        assert!(debug.contains("16"));
+        assert!(!debug.contains("0x"));
+    }
+
+    // ---- HKDF prefix property ----
+
+    #[test]
+    fn hkdf_shorter_output_is_prefix_of_longer() {
+        let hkdf = HkdfSha256::new(None, b"ikm");
+        let short: [u8; 16] = hkdf.expand_to_array(b"info").unwrap();
+        let long: [u8; 32] = hkdf.expand_to_array(b"info").unwrap();
+        assert_eq!(&long[..16], &short);
+    }
 }

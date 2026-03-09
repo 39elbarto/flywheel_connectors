@@ -777,6 +777,50 @@ mod tests {
         assert!(cloned.query.as_ref().unwrap().is_empty());
     }
 
+    #[test]
+    fn recorded_request_unicode_path() {
+        let req = RecordedRequest {
+            method: "GET".to_string(),
+            path: "/api/caf\u{00e9}".to_string(),
+            query: None,
+            body: None,
+            headers: vec![],
+        };
+        assert!(req.path.contains("caf\u{00e9}"));
+    }
+
+    #[test]
+    fn recorded_request_multiple_headers() {
+        let req = RecordedRequest {
+            method: "POST".to_string(),
+            path: "/api/data".to_string(),
+            query: None,
+            body: Some("payload".to_string()),
+            headers: vec![
+                ("Authorization".to_string(), "Bearer tok".to_string()),
+                ("Content-Type".to_string(), "application/json".to_string()),
+                ("X-Request-Id".to_string(), "abc-123".to_string()),
+            ],
+        };
+        assert_eq!(req.headers.len(), 3);
+        let dbg = format!("{req:?}");
+        assert!(dbg.contains("abc-123"));
+    }
+
+    #[test]
+    fn recorded_request_clone_large_body() {
+        let large_body = "x".repeat(10_000);
+        let req = RecordedRequest {
+            method: "POST".to_string(),
+            path: "/bulk".to_string(),
+            query: None,
+            body: Some(large_body),
+            headers: vec![],
+        };
+        let cloned = req.clone();
+        assert_eq!(req.body.as_ref().unwrap().len(), cloned.body.as_ref().unwrap().len());
+    }
+
     // ── MockApiServer: additional HTTP tests ─────────────────────────
 
     #[fcp_async_core::runtime::test]
@@ -962,5 +1006,108 @@ mod tests {
         assert_eq!(b2["n"], 2);
 
         server.assert_request_count(2).await;
+    }
+
+    // ---- MockApiServer: delayed response ----
+
+    #[fcp_async_core::runtime::test]
+    async fn mock_server_expect_delayed_responds() {
+        let mock = MockApiServer::start().await;
+        mock.expect_delayed(
+            "/api/slow",
+            std::time::Duration::from_millis(10),
+            serde_json::json!({"delayed": true}),
+        )
+        .await;
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .get(format!("{}/api/slow", mock.base_url()))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(body["delayed"], true);
+    }
+
+    // ---- MockApiServer: expect_json with various content types ----
+
+    #[fcp_async_core::runtime::test]
+    async fn mock_server_expect_json_returns_json_content_type() {
+        let mock = MockApiServer::start().await;
+        mock.expect_json("/api/typed", serde_json::json!({"typed": true}))
+            .await;
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .get(format!("{}/api/typed", mock.base_url()))
+            .send()
+            .await
+            .unwrap();
+        let ct = resp
+            .headers()
+            .get("content-type")
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(ct.contains("application/json"));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn mock_server_expect_error_body_preserved() {
+        let mock = MockApiServer::start().await;
+        mock.expect_error(
+            "/api/err-body",
+            422,
+            serde_json::json!({"error": "Unprocessable", "details": ["field_a is required"]}),
+        )
+        .await;
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .get(format!("{}/api/err-body", mock.base_url()))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 422);
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(body["error"], "Unprocessable");
+        assert!(body["details"].is_array());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn mock_server_two_servers_independent() {
+        let mock_a = MockApiServer::start().await;
+        let mock_b = MockApiServer::start().await;
+        assert_ne!(mock_a.address().port(), mock_b.address().port());
+
+        mock_a
+            .expect_get("/ping", serde_json::json!({"from": "a"}))
+            .await;
+        mock_b
+            .expect_get("/ping", serde_json::json!({"from": "b"}))
+            .await;
+
+        let client = reqwest::Client::new();
+        let resp_a: serde_json::Value = client
+            .get(format!("{}/ping", mock_a.base_url()))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let resp_b: serde_json::Value = client
+            .get(format!("{}/ping", mock_b.base_url()))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+
+        assert_eq!(resp_a["from"], "a");
+        assert_eq!(resp_b["from"], "b");
     }
 }

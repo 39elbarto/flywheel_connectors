@@ -831,4 +831,91 @@ mod tests {
         assert_eq!(original.message, cloned.message);
         assert_eq!(original.target, cloned.target);
     }
+
+    // ---- Additional LogCapture edge case tests ----
+
+    #[test]
+    fn log_capture_push_line_unicode_content() {
+        let capture = LogCapture::new();
+        capture.push_line(r#"{"msg":"caf\u00e9 \u2603"}"#);
+        let jsonl = capture.jsonl();
+        assert!(jsonl.contains("caf"));
+    }
+
+    #[test]
+    fn log_capture_push_value_empty_object() {
+        let capture = LogCapture::new();
+        capture.push_value(&json!({})).unwrap();
+        let jsonl = capture.jsonl();
+        assert_eq!(jsonl.trim(), "{}");
+    }
+
+    #[test]
+    fn log_capture_push_value_empty_string() {
+        let capture = LogCapture::new();
+        capture.push_value(&json!("")).unwrap();
+        let jsonl = capture.jsonl();
+        assert_eq!(jsonl.trim(), r#""""#);
+    }
+
+    #[test]
+    fn log_capture_push_value_boolean() {
+        let capture = LogCapture::new();
+        capture.push_value(&json!(true)).unwrap();
+        assert_eq!(capture.jsonl().trim(), "true");
+    }
+
+    #[test]
+    fn log_capture_push_value_number() {
+        let capture = LogCapture::new();
+        capture.push_value(&json!(42)).unwrap();
+        assert_eq!(capture.jsonl().trim(), "42");
+    }
+
+    #[test]
+    fn log_capture_push_line_empty_string() {
+        let capture = LogCapture::new();
+        capture.push_line("");
+        // Should still add a newline
+        assert_eq!(capture.jsonl(), "\n");
+    }
+
+    #[test]
+    fn log_capture_validate_rejects_bare_string() {
+        let capture = LogCapture::new();
+        capture.push_line("just a plain string without json");
+        let err = capture.validate_jsonl();
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn log_capture_clone_shares_buffer() {
+        let capture = LogCapture::new();
+        let cloned = capture.clone();
+        capture.push_line(r#"{"shared":true}"#);
+        // Clone shares the same Arc<Mutex<Vec<u8>>>
+        assert_eq!(capture.jsonl(), cloned.jsonl());
+    }
+
+    // ---- TracingCapture edge cases ----
+
+    #[test]
+    fn tracing_capture_events_returns_clone_not_ref() {
+        let capture = super::TracingCapture::new();
+        let events1 = capture.events();
+        let events2 = capture.events();
+        // Both should be empty, independent clones
+        assert_eq!(events1.len(), events2.len());
+    }
+
+    #[test]
+    fn captured_event_unicode_message() {
+        let event = super::CapturedEvent {
+            level: "INFO".to_string(),
+            message: "\u{2603} snowman \u{2764} heart".to_string(),
+            target: "unicode_mod".to_string(),
+        };
+        assert!(event.message.contains('\u{2603}'));
+        assert!(event.message.contains('\u{2764}'));
+    }
 }

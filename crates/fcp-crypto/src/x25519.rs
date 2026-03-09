@@ -585,6 +585,51 @@ mod tests {
 
     // ---- DH commutativity with three parties ----
 
+    // ---- Public key clone ----
+
+    #[test]
+    fn public_key_clone_preserves_equality() {
+        let sk = X25519SecretKey::generate();
+        let pk = sk.public_key();
+        let cloned = pk.clone();
+        assert_eq!(pk, cloned);
+        // Use original after clone
+        assert_eq!(pk.to_hex(), cloned.to_hex());
+    }
+
+    // ---- Secret key debug contains kid ----
+
+    #[test]
+    fn secret_key_debug_contains_kid_hex() {
+        let sk = X25519SecretKey::generate();
+        let kid_hex = sk.key_id().to_hex();
+        let debug = format!("{sk:?}");
+        assert!(debug.contains(&kid_hex));
+    }
+
+    // ---- Serde CBOR roundtrip ----
+
+    #[test]
+    fn public_key_serde_cbor_roundtrip() {
+        let sk = X25519SecretKey::generate();
+        let pk = sk.public_key();
+        let mut cbor_bytes = Vec::new();
+        ciborium::into_writer(&pk, &mut cbor_bytes).unwrap();
+        let decoded: X25519PublicKey = ciborium::from_reader(&cbor_bytes[..]).unwrap();
+        assert_eq!(pk, decoded);
+    }
+
+    // ---- DH with self produces non-zero ----
+
+    #[test]
+    fn dh_self_produces_nonzero_secret() {
+        let sk = X25519SecretKey::generate();
+        let pk = sk.public_key();
+        let shared = sk.diffie_hellman(&pk);
+        // Should not be all zeros (extremely unlikely with valid keys)
+        assert_ne!(shared.as_bytes(), &[0u8; 32]);
+    }
+
     #[test]
     fn dh_commutativity_three_parties() {
         let a = X25519SecretKey::generate();

@@ -686,4 +686,227 @@ mod tests {
         assert_eq!(resp.errors.len(), cloned.errors.len());
         assert_eq!(resp.errors.len(), 2);
     }
+
+    // ---- GraphqlOperation trait tests ----
+
+    #[derive(Debug)]
+    struct TestOp;
+
+    #[derive(Debug, Serialize, Deserialize)]
+    struct TestVars {
+        id: String,
+    }
+
+    #[derive(Debug, Serialize, Deserialize, PartialEq)]
+    struct TestData {
+        name: String,
+    }
+
+    impl GraphqlOperation for TestOp {
+        type Variables = TestVars;
+        type ResponseData = TestData;
+
+        const QUERY: &'static str = "query GetUser($id: ID!) { user(id: $id) { name } }";
+        const OPERATION_NAME: &'static str = "GetUser";
+    }
+
+    #[test]
+    fn trait_defaults_variables_schema_none() {
+        assert!(TestOp::variables_schema().is_none());
+    }
+
+    #[test]
+    fn trait_defaults_response_schema_none() {
+        assert!(TestOp::response_schema().is_none());
+    }
+
+    #[test]
+    fn trait_defaults_is_idempotent_true() {
+        assert!(TestOp::is_idempotent());
+    }
+
+    #[test]
+    fn trait_query_constant() {
+        assert!(TestOp::QUERY.contains("GetUser"));
+        assert!(TestOp::QUERY.contains("$id"));
+    }
+
+    #[test]
+    fn trait_operation_name_constant() {
+        assert_eq!(TestOp::OPERATION_NAME, "GetUser");
+    }
+
+    // ---- Non-idempotent operation test ----
+
+    struct MutationOp;
+
+    impl GraphqlOperation for MutationOp {
+        type Variables = serde_json::Value;
+        type ResponseData = serde_json::Value;
+
+        const QUERY: &'static str = "mutation CreateUser { createUser { id } }";
+        const OPERATION_NAME: &'static str = "CreateUser";
+
+        fn is_idempotent() -> bool {
+            false
+        }
+
+        fn variables_schema() -> Option<&'static str> {
+            Some(r#"{"type":"object"}"#)
+        }
+
+        fn response_schema() -> Option<&'static str> {
+            Some(r#"{"type":"object"}"#)
+        }
+    }
+
+    #[test]
+    fn mutation_op_not_idempotent() {
+        assert!(!MutationOp::is_idempotent());
+    }
+
+    #[test]
+    fn mutation_op_has_schemas() {
+        assert!(MutationOp::variables_schema().is_some());
+        assert!(MutationOp::response_schema().is_some());
+    }
+
+    // ---- GraphqlQuery edge cases ----
+
+    #[test]
+    fn query_very_long_string() {
+        let long = "a".repeat(10_000);
+        let q = GraphqlQuery::new(long);
+        assert_eq!(q.as_str().len(), 10_000);
+        let json = serde_json::to_string(&q).unwrap();
+        let back: GraphqlQuery = serde_json::from_str(&json).unwrap();
+        assert_eq!(q, back);
+    }
+
+    #[test]
+    fn query_with_special_json_chars() {
+        let q = GraphqlQuery::new(r#"{ user(name: "test\"escaped") { id } }"#);
+        let json = serde_json::to_string(&q).unwrap();
+        let back: GraphqlQuery = serde_json::from_str(&json).unwrap();
+        assert_eq!(q, back);
+    }
+
+    #[test]
+    fn query_with_tab_and_carriage_return() {
+        let q = GraphqlQuery::new("{\t\r\n  users { id }\r\n}");
+        assert!(q.as_str().contains('\t'));
+        assert!(q.as_str().contains('\r'));
+    }
+
+    // ---- GraphqlRequest edge cases ----
+
+    #[test]
+    fn request_with_deeply_nested_variables() {
+        let vars = serde_json::json!({
+            "l1": {"l2": {"l3": {"l4": {"l5": "deep"}}}}
+        });
+        let req = GraphqlRequest::new(GraphqlQuery::new("{ x }"), vars);
+        let json = serde_json::to_string(&req).unwrap();
+        let back: GraphqlRequest<serde_json::Value> = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.variables["l1"]["l2"]["l3"]["l4"]["l5"], "deep");
+    }
+
+    #[test]
+    fn request_with_unicode_operation_name() {
+        let req = GraphqlRequest::new(GraphqlQuery::new("{ x }"), serde_json::json!({}))
+            .with_operation_name("BenutzerAbfrage");
+        assert_eq!(req.operation_name.as_deref(), Some("BenutzerAbfrage"));
+    }
+
+    #[test]
+    fn request_with_empty_operation_name() {
+        let req = GraphqlRequest::new(GraphqlQuery::new("{ x }"), serde_json::json!({}))
+            .with_operation_name("");
+        assert_eq!(req.operation_name.as_deref(), Some(""));
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(json.contains("operation_name"));
+    }
+
+    // ---- GraphqlBatchItem edge cases ----
+
+    #[test]
+    fn batch_item_with_empty_operation_name() {
+        let item = GraphqlBatchItem::new(GraphqlQuery::new("{ x }"), serde_json::json!({}))
+            .with_operation_name("");
+        assert_eq!(item.operation_name.as_deref(), Some(""));
+    }
+
+    #[test]
+    fn batch_item_with_deeply_nested_variables() {
+        let vars = serde_json::json!({"a": {"b": {"c": 42}}});
+        let item = GraphqlBatchItem::new(GraphqlQuery::new("{ x }"), vars);
+        let json = serde_json::to_string(&item).unwrap();
+        let back: GraphqlBatchItem<serde_json::Value> = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.variables["a"]["b"]["c"], 42);
+    }
+
+    // ---- GraphqlResponse edge cases ----
+
+    #[test]
+    fn response_serde_with_nested_errors_and_extensions() {
+        let json = r#"{
+            "data": {"count": 5},
+            "errors": [
+                {
+                    "message": "partial",
+                    "locations": [{"line": 2, "column": 3}],
+                    "path": ["users", 0],
+                    "extensions": {"code": "PARTIAL_RESULT"}
+                }
+            ],
+            "extensions": {"requestId": "req-123", "cost": 7}
+        }"#;
+        let resp: GraphqlResponse<serde_json::Value> = serde_json::from_str(json).unwrap();
+        assert!(!resp.is_ok());
+        assert_eq!(resp.data.unwrap()["count"], 5);
+        assert_eq!(resp.errors.len(), 1);
+        assert_eq!(resp.errors[0].locations[0].line, 2);
+        assert_eq!(resp.extensions.unwrap()["cost"], 7);
+    }
+
+    #[test]
+    fn response_with_empty_data_object() {
+        let json = r#"{"data":{}}"#;
+        let resp: GraphqlResponse<serde_json::Value> = serde_json::from_str(json).unwrap();
+        assert!(resp.is_ok());
+        assert!(resp.data.is_some());
+        assert!(resp.data.unwrap().is_object());
+    }
+
+    #[test]
+    fn response_with_empty_errors_array() {
+        let json = r#"{"data":null,"errors":[]}"#;
+        let resp: GraphqlResponse<serde_json::Value> = serde_json::from_str(json).unwrap();
+        assert!(resp.is_ok());
+        assert!(resp.data.is_none());
+    }
+
+    #[test]
+    fn response_clone_with_extensions() {
+        let resp = GraphqlResponse {
+            data: Some(serde_json::json!({"key": "val"})),
+            errors: vec![],
+            extensions: Some(serde_json::json!({"trace_id": "abc", "cost": 42})),
+        };
+        let cloned = resp.clone();
+        assert_eq!(cloned.extensions.unwrap()["trace_id"], "abc");
+        assert!(resp.extensions.is_some());
+    }
+
+    #[test]
+    fn response_debug_contains_struct_name() {
+        let resp = GraphqlResponse::<String> {
+            data: Some("hello".to_string()),
+            errors: vec![],
+            extensions: None,
+        };
+        let dbg = format!("{resp:?}");
+        assert!(dbg.contains("GraphqlResponse"));
+        assert!(dbg.contains("hello"));
+    }
 }

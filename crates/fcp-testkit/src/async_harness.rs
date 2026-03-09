@@ -502,4 +502,79 @@ mod tests {
         let dbg = format!("{ctx:?}");
         assert!(!dbg.is_empty());
     }
+
+    // ---- Additional AsyncTestContext edge case tests ----
+
+    #[test]
+    fn context_with_empty_strings() {
+        let ctx = AsyncTestContext::new("", "");
+        assert!(ctx.run_id().is_empty());
+        assert!(ctx.scenario_id().is_empty());
+        assert!(!ctx.correlation_id().is_empty());
+    }
+
+    #[test]
+    fn context_with_unicode_ids() {
+        let ctx = AsyncTestContext::new("run-\u{00e9}", "scene-\u{2603}");
+        assert_eq!(ctx.run_id(), "run-\u{00e9}");
+        assert_eq!(ctx.scenario_id(), "scene-\u{2603}");
+        assert_eq!(ctx.correlation_id().len(), 36);
+    }
+
+    #[test]
+    fn context_with_very_long_ids() {
+        let long_run = "r".repeat(5000);
+        let long_scene = "s".repeat(5000);
+        let ctx = AsyncTestContext::new(long_run.as_str(), long_scene.as_str());
+        assert_eq!(ctx.run_id(), long_run);
+        assert_eq!(ctx.scenario_id(), long_scene);
+        assert_eq!(ctx.correlation_id().len(), 36);
+    }
+
+    #[test]
+    fn context_clone_eq_roundtrip() {
+        let ctx = AsyncTestContext::new("run-rt", "scene-rt");
+        let cloned = ctx.clone();
+        assert_eq!(ctx, cloned);
+        // Verify all fields match
+        assert_eq!(ctx.run_id(), cloned.run_id());
+        assert_eq!(ctx.scenario_id(), cloned.scenario_id());
+        assert_eq!(ctx.correlation_id(), cloned.correlation_id());
+        assert_eq!(ctx.as_log_fields(), cloned.as_log_fields());
+    }
+
+    #[test]
+    fn deterministic_correlation_id_whitespace_inputs() {
+        let id = deterministic_correlation_id("  ", "\t\n");
+        assert_eq!(id.len(), 36);
+        // Different from empty string inputs
+        let id_empty = deterministic_correlation_id("", "");
+        assert_ne!(id, id_empty);
+    }
+
+    #[test]
+    fn deterministic_correlation_id_newline_in_input() {
+        let id = deterministic_correlation_id("run\nwith\nnewlines", "scene");
+        assert_eq!(id.len(), 36);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn run_with_timeout_returns_string() {
+        let result = run_with_timeout(Duration::from_millis(50), async {
+            String::from("hello")
+        })
+        .await;
+        assert_eq!(result.unwrap(), "hello");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn bounded_queue_multiple_items() {
+        let (tx, mut rx) = bounded_queue::<String>("multi-test", 8);
+        for i in 0..5 {
+            tx.send(format!("item-{i}")).await.expect("send");
+        }
+        for i in 0..5 {
+            assert_eq!(rx.recv().await, Some(format!("item-{i}")));
+        }
+    }
 }

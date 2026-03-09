@@ -492,6 +492,154 @@ mod tests {
         assert!(err_val.is_err());
     }
 
+    // ── Timeout with sub-millisecond precision ──
+
+    #[test]
+    fn timeout_display_nanos() {
+        let e = StreamError::Timeout(Duration::from_nanos(123));
+        let display = e.to_string();
+        assert!(display.contains("Timeout"));
+        assert!(display.contains("123ns"));
+    }
+
+    #[test]
+    fn timeout_display_millis() {
+        let e = StreamError::Timeout(Duration::from_millis(750));
+        let display = e.to_string();
+        assert!(display.contains("750ms"));
+    }
+
+    // ── Display with escape-like characters ──
+
+    #[test]
+    fn connection_failed_with_tabs_and_crlf() {
+        let e = StreamError::ConnectionFailed("a\t\r\nb".into());
+        let display = e.to_string();
+        assert!(display.contains("a\t\r\nb"));
+    }
+
+    #[test]
+    fn http_error_with_html_in_message() {
+        let e = StreamError::HttpError {
+            status: 500,
+            message: "<h1>Internal Server Error</h1>".into(),
+        };
+        let display = e.to_string();
+        assert!(display.contains("<h1>"));
+    }
+
+    #[test]
+    fn parse_error_with_json_content() {
+        let e = StreamError::ParseError(r#"{"error": "unexpected token"}"#.into());
+        let display = e.to_string();
+        assert!(display.contains("unexpected token"));
+    }
+
+    // ── Multiple From conversions ──
+
+    #[test]
+    fn io_error_from_interrupted() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::Interrupted, "interrupted");
+        let stream_err: StreamError = io_err.into();
+        assert!(matches!(stream_err, StreamError::IoError(_)));
+        assert!(stream_err.to_string().contains("interrupted"));
+    }
+
+    // ── StreamResult with complex types ──
+
+    #[test]
+    fn stream_result_with_tuple_type() {
+        // Verify StreamResult works with tuple types
+        let result: StreamResult<(String, u64)> = Ok(("data".into(), 42));
+        assert!(result.is_ok());
+        let err: StreamResult<(String, u64)> =
+            Err(StreamError::ParseError("fail".into()));
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn stream_result_err_preserves_variant() {
+        let result: StreamResult<()> = Err(StreamError::BufferOverflow {
+            size: 999,
+            limit: 100,
+        });
+        match result {
+            Err(StreamError::BufferOverflow { size, limit }) => {
+                assert_eq!(size, 999);
+                assert_eq!(limit, 100);
+            }
+            _ => panic!("expected BufferOverflow"),
+        }
+    }
+
+    // ── Debug output contains all variant fields ──
+
+    #[test]
+    fn connection_closed_debug_contains_reason_and_code() {
+        let e = StreamError::ConnectionClosed {
+            reason: "server shutdown".into(),
+            code: Some(4500),
+        };
+        let debug = format!("{e:?}");
+        assert!(debug.contains("server shutdown"));
+        assert!(debug.contains("4500"));
+    }
+
+    #[test]
+    fn http_error_debug_contains_status_and_message() {
+        let e = StreamError::HttpError {
+            status: 429,
+            message: "Too Many Requests".into(),
+        };
+        let debug = format!("{e:?}");
+        assert!(debug.contains("429"));
+        assert!(debug.contains("Too Many Requests"));
+    }
+
+    // ── Error source chain for non-source variants ──
+
+    #[test]
+    fn connection_closed_source_is_none() {
+        let e = StreamError::ConnectionClosed {
+            reason: "done".into(),
+            code: Some(1000),
+        };
+        assert!(std::error::Error::source(&e).is_none());
+    }
+
+    #[test]
+    fn parse_error_source_is_none() {
+        let e = StreamError::ParseError("fail".into());
+        assert!(std::error::Error::source(&e).is_none());
+    }
+
+    #[test]
+    fn invalid_state_source_is_none() {
+        let e = StreamError::InvalidState("bad state".into());
+        assert!(std::error::Error::source(&e).is_none());
+    }
+
+    // ── Display consistency across constructions ──
+
+    #[test]
+    fn connection_failed_display_matches_format() {
+        let msg = "host unreachable";
+        let e = StreamError::ConnectionFailed(msg.to_string());
+        assert_eq!(e.to_string(), format!("Connection failed: {msg}"));
+    }
+
+    #[test]
+    fn buffer_overflow_display_matches_format() {
+        let e = StreamError::BufferOverflow {
+            size: 12345,
+            limit: 10000,
+        };
+        assert_eq!(
+            e.to_string(),
+            "Buffer overflow: 12345 bytes exceeds limit of 10000"
+        );
+    }
+
     // ── StreamError: From conversions ───────────────────────────────────
 
     #[test]

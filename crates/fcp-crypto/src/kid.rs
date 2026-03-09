@@ -367,4 +367,75 @@ mod tests {
     fn kid_size_constant() {
         assert_eq!(KID_SIZE, 8);
     }
+
+    // ---- Display vs Debug consistency ----
+
+    #[test]
+    fn kid_display_vs_to_hex() {
+        let kid = KeyId::from_bytes([0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE, 0xBA, 0xBE]);
+        assert_eq!(kid.to_string(), kid.to_hex());
+    }
+
+    // ---- Derive from unicode key ----
+
+    #[test]
+    fn kid_derive_from_unicode_public_key() {
+        let kid = KeyId::derive_from_public_key("clé publique réseau".as_bytes());
+        assert_eq!(kid.as_bytes().len(), KID_SIZE);
+        // Deterministic for same input
+        let kid2 = KeyId::derive_from_public_key("clé publique réseau".as_bytes());
+        assert_eq!(kid, kid2);
+    }
+
+    // ---- Hex with mixed case ----
+
+    #[test]
+    fn kid_to_hex_is_lowercase() {
+        let kid = KeyId::from_bytes([0xAB, 0xCD, 0xEF, 0x01, 0x23, 0x45, 0x67, 0x89]);
+        let hex = kid.to_hex();
+        assert_eq!(hex, hex.to_lowercase());
+    }
+
+    // ---- Zeroize semantics ----
+
+    #[test]
+    fn kid_zeroize_clears_bytes() {
+        let mut kid = KeyId::from_bytes([0xFF; KID_SIZE]);
+        kid.zeroize();
+        assert_eq!(kid.as_bytes(), &[0u8; KID_SIZE]);
+    }
+
+    // ---- Eq reflexivity ----
+
+    #[test]
+    fn kid_eq_reflexive() {
+        let kid = KeyId::derive_from_public_key(b"reflexive");
+        assert_eq!(kid, kid);
+    }
+
+    // ---- Serde CBOR roundtrip ----
+
+    #[test]
+    fn kid_serde_cbor_roundtrip() {
+        let kid = KeyId::from_bytes([0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88]);
+        let mut cbor_bytes = Vec::new();
+        ciborium::into_writer(&kid, &mut cbor_bytes).unwrap();
+        let decoded: KeyId = ciborium::from_reader(&cbor_bytes[..]).unwrap();
+        assert_eq!(decoded, kid);
+    }
+
+    // ---- from_hex with too long valid hex ----
+
+    #[test]
+    fn kid_from_hex_too_long() {
+        // 32 hex chars = 16 bytes, but KID expects 8
+        let err = KeyId::from_hex("0123456789abcdef0123456789abcdef").unwrap_err();
+        assert!(matches!(
+            err,
+            CryptoError::InvalidKeyLength {
+                expected: 8,
+                actual: 16
+            }
+        ));
+    }
 }

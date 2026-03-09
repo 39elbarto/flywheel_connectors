@@ -1392,4 +1392,224 @@ mod tests {
         let aad = build_symbol_aad(&ctx);
         assert_eq!(&aad[32..36], &u32::MAX.to_le_bytes());
     }
+
+    // ── Batch 5: SunnyMoose additional edge-case and integration tests ──
+
+    #[test]
+    fn encrypt_decrypt_xchacha20_with_boundary_values() {
+        let zone_key = AeadKey::generate();
+        let mut ctx = test_context();
+        ctx.esi = u32::MAX;
+        ctx.k = u16::MAX;
+        ctx.epoch_id = u64::MAX;
+        ctx.frame_seq = u64::MAX;
+        ctx.sender_instance_id = u64::MAX;
+        let plaintext = b"boundary xchacha20";
+
+        let (ciphertext, auth_tag) = encrypt_symbol(
+            &zone_key,
+            ZoneKeyAlgorithm::XChaCha20Poly1305,
+            &ctx,
+            plaintext,
+        )
+        .unwrap();
+
+        let decrypted = decrypt_symbol(
+            &zone_key,
+            ZoneKeyAlgorithm::XChaCha20Poly1305,
+            &ctx,
+            &ciphertext,
+            &auth_tag,
+        )
+        .unwrap();
+        assert_eq!(decrypted, plaintext);
+    }
+
+    #[test]
+    fn encrypt_deterministic_same_context() {
+        let zone_key = AeadKey::from_bytes([0xCC; 32]);
+        let ctx = test_context();
+        let plaintext = b"determinism check";
+
+        let (ct1, tag1) = encrypt_symbol(
+            &zone_key,
+            ZoneKeyAlgorithm::ChaCha20Poly1305,
+            &ctx,
+            plaintext,
+        )
+        .unwrap();
+        let (ct2, tag2) = encrypt_symbol(
+            &zone_key,
+            ZoneKeyAlgorithm::ChaCha20Poly1305,
+            &ctx,
+            plaintext,
+        )
+        .unwrap();
+        assert_eq!(ct1, ct2);
+        assert_eq!(tag1, tag2);
+    }
+
+    #[test]
+    fn encrypt_different_plaintext_different_ciphertext() {
+        let zone_key = AeadKey::generate();
+        let ctx = test_context();
+
+        let (ct_a, _) = encrypt_symbol(
+            &zone_key,
+            ZoneKeyAlgorithm::ChaCha20Poly1305,
+            &ctx,
+            b"alpha",
+        )
+        .unwrap();
+        let (ct_b, _) = encrypt_symbol(
+            &zone_key,
+            ZoneKeyAlgorithm::ChaCha20Poly1305,
+            &ctx,
+            b"bravo",
+        )
+        .unwrap();
+        assert_ne!(ct_a, ct_b);
+    }
+
+    #[test]
+    fn subkey_with_empty_node_id() {
+        let zone_key = AeadKey::from_bytes([0xEE; 32]);
+        let zone_key_id = ZoneKeyId::from_bytes([0x10; 8]);
+        // Empty string node id
+        let empty_node = TailscaleNodeId::new("");
+        let non_empty_node = TailscaleNodeId::new("x");
+
+        let subkey_empty = derive_sender_subkey(&zone_key, &zone_key_id, &empty_node, 1);
+        let subkey_non_empty = derive_sender_subkey(&zone_key, &zone_key_id, &non_empty_node, 1);
+        assert_ne!(subkey_empty.as_bytes(), subkey_non_empty.as_bytes());
+    }
+
+    #[test]
+    fn nonce12_all_ones() {
+        let nonce = derive_nonce12(u64::MAX, u32::MAX);
+        let bytes = nonce.as_bytes();
+        // All bytes should be 0xFF
+        assert!(bytes.iter().all(|&b| b == 0xFF));
+    }
+
+    #[test]
+    fn aad_all_zeros_context() {
+        let ctx = SymbolContext {
+            object_id: ObjectId::from_bytes([0; 32]),
+            esi: 0,
+            k: 0,
+            zone_id_hash: ZoneIdHash::from_bytes([0; 32]),
+            zone_key_id: ZoneKeyId::from_bytes([0; 8]),
+            epoch_id: 0,
+            sender_node_id: TailscaleNodeId::new(""),
+            sender_instance_id: 0,
+            frame_seq: 0,
+        };
+        let aad = build_symbol_aad(&ctx);
+        assert_eq!(aad, [0u8; SYMBOL_AAD_SIZE]);
+    }
+
+    #[test]
+    fn encrypt_with_unicode_node_id() {
+        let zone_key = AeadKey::generate();
+        let mut ctx = test_context();
+        ctx.sender_node_id = TailscaleNodeId::new("node-\u{1F600}-test");
+        let plaintext = b"unicode node id test";
+
+        let (ciphertext, auth_tag) = encrypt_symbol(
+            &zone_key,
+            ZoneKeyAlgorithm::ChaCha20Poly1305,
+            &ctx,
+            plaintext,
+        )
+        .unwrap();
+
+        let decrypted = decrypt_symbol(
+            &zone_key,
+            ZoneKeyAlgorithm::ChaCha20Poly1305,
+            &ctx,
+            &ciphertext,
+            &auth_tag,
+        )
+        .unwrap();
+        assert_eq!(decrypted, plaintext);
+    }
+
+    #[test]
+    fn nonce24_padding_always_zero() {
+        // Verify that bytes 20-23 are always zero regardless of input
+        for instance_id in [0u64, 1, u64::MAX] {
+            for frame_seq in [0u64, 42, u64::MAX] {
+                for esi in [0u32, 100, u32::MAX] {
+                    let nonce = derive_nonce24(instance_id, frame_seq, esi);
+                    assert_eq!(
+                        &nonce.as_bytes()[20..24],
+                        &[0, 0, 0, 0],
+                        "padding not zero for ({instance_id}, {frame_seq}, {esi})"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn xchacha20_deterministic_same_context() {
+        let zone_key = AeadKey::from_bytes([0xDD; 32]);
+        let ctx = test_context();
+        let plaintext = b"xchacha determinism";
+
+        let (ct1, tag1) = encrypt_symbol(
+            &zone_key,
+            ZoneKeyAlgorithm::XChaCha20Poly1305,
+            &ctx,
+            plaintext,
+        )
+        .unwrap();
+        let (ct2, tag2) = encrypt_symbol(
+            &zone_key,
+            ZoneKeyAlgorithm::XChaCha20Poly1305,
+            &ctx,
+            plaintext,
+        )
+        .unwrap();
+        assert_eq!(ct1, ct2);
+        assert_eq!(tag1, tag2);
+    }
+
+    #[test]
+    fn chacha20_and_xchacha20_produce_different_output() {
+        let zone_key = AeadKey::from_bytes([0xAA; 32]);
+        let ctx = test_context();
+        let plaintext = b"algorithm comparison";
+
+        let result_standard = encrypt_symbol(
+            &zone_key,
+            ZoneKeyAlgorithm::ChaCha20Poly1305,
+            &ctx,
+            plaintext,
+        )
+        .unwrap();
+        let result_extended = encrypt_symbol(
+            &zone_key,
+            ZoneKeyAlgorithm::XChaCha20Poly1305,
+            &ctx,
+            plaintext,
+        )
+        .unwrap();
+        // Different algorithms produce different ciphertext
+        assert_ne!(result_standard.0, result_extended.0);
+        assert_ne!(result_standard.1, result_extended.1);
+    }
+
+    #[test]
+    fn subkey_with_long_unicode_node_id() {
+        let zone_key = AeadKey::from_bytes([0xAA; 32]);
+        let zone_key_id = ZoneKeyId::from_bytes([0x10; 8]);
+        let long_unicode = TailscaleNodeId::new(
+            "node-\u{4E16}\u{754C}\u{1F600}\u{1F601}\u{1F602}-very-long-identifier"
+        );
+        let subkey1 = derive_sender_subkey(&zone_key, &zone_key_id, &long_unicode, 42);
+        let subkey2 = derive_sender_subkey(&zone_key, &zone_key_id, &long_unicode, 42);
+        assert_eq!(subkey1.as_bytes(), subkey2.as_bytes());
+    }
 }

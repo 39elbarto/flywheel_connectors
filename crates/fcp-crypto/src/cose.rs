@@ -1270,4 +1270,112 @@ mod tests {
         assert_eq!(verified.get_holder_node(), Some("node:holder-x"));
         CoseToken::validate_timing(&verified, now).unwrap();
     }
+
+    // ---- CwtClaims clone ----
+
+    #[test]
+    fn cwt_claims_clone_preserves_all_fields() {
+        let claims = CwtClaims::new()
+            .issuer("iss")
+            .capability_id("cap:test")
+            .zone_id("z:clone");
+        let cloned = claims.clone();
+        assert_eq!(cloned.get_issuer(), claims.get_issuer());
+        assert_eq!(cloned.get_capability_id(), claims.get_capability_id());
+        assert_eq!(cloned.get_zone_id(), claims.get_zone_id());
+    }
+
+    // ---- CwtClaims debug ----
+
+    #[test]
+    fn cwt_claims_debug_format() {
+        let claims = CwtClaims::new().issuer("test-debug");
+        let debug = format!("{claims:?}");
+        assert!(debug.contains("CwtClaims"));
+    }
+
+    // ---- CwtClaims serde json roundtrip ----
+
+    #[test]
+    fn cwt_claims_serde_json_roundtrip() {
+        let claims = CwtClaims::new()
+            .issuer("json-iss")
+            .capability_id("cap:json");
+        let json = serde_json::to_string(&claims).unwrap();
+        let deserialized: CwtClaims = serde_json::from_str(&json).unwrap();
+        // Access through CBOR roundtrip to verify
+        let cbor1 = claims.to_cbor().unwrap();
+        let cbor2 = deserialized.to_cbor().unwrap();
+        assert_eq!(cbor1, cbor2);
+    }
+
+    // ---- CoseToken clone ----
+
+    #[test]
+    fn cose_token_clone_verifiable() {
+        let sk = Ed25519SigningKey::generate();
+        let pk = sk.verifying_key();
+        let claims = CwtClaims::new().issuer("clone-test");
+        let token = CoseToken::sign(&sk, &claims).unwrap();
+        let cloned = token.clone();
+        // Both should verify
+        let v1 = token.verify(&pk).unwrap();
+        let v2 = cloned.verify(&pk).unwrap();
+        assert_eq!(v1.get_issuer(), v2.get_issuer());
+    }
+
+    // ---- CoseToken debug ----
+
+    #[test]
+    fn cose_token_debug_format() {
+        let sk = Ed25519SigningKey::generate();
+        let claims = CwtClaims::new().issuer("debug");
+        let token = CoseToken::sign(&sk, &claims).unwrap();
+        let debug = format!("{token:?}");
+        assert!(debug.contains("CoseToken"));
+    }
+
+    // ---- CwtClaims empty CBOR roundtrip ----
+
+    #[test]
+    fn cwt_claims_empty_cbor_roundtrip() {
+        let claims = CwtClaims::new();
+        let cbor = claims.to_cbor().unwrap();
+        let parsed = CwtClaims::from_cbor(&cbor).unwrap();
+        assert!(parsed.get_issuer().is_none());
+        assert!(parsed.get_capability_id().is_none());
+    }
+
+    // ---- Token with unicode claims ----
+
+    #[test]
+    fn cose_token_unicode_claims() {
+        let sk = Ed25519SigningKey::generate();
+        let pk = sk.verifying_key();
+        let claims = CwtClaims::new()
+            .issuer("nœud:primaire")
+            .capability_id("cap:réseau.lire");
+        let token = CoseToken::sign(&sk, &claims).unwrap();
+        let verified = token.verify(&pk).unwrap();
+        assert_eq!(verified.get_issuer(), Some("nœud:primaire"));
+        assert_eq!(verified.get_capability_id(), Some("cap:réseau.lire"));
+    }
+
+    // ---- Token CBOR double roundtrip ----
+
+    #[test]
+    fn cose_token_double_cbor_roundtrip() {
+        let sk = Ed25519SigningKey::generate();
+        let pk = sk.verifying_key();
+        let claims = CwtClaims::new().issuer("double");
+        let token = CoseToken::sign(&sk, &claims).unwrap();
+
+        let cbor1 = token.to_cbor().unwrap();
+        let parsed1 = CoseToken::from_cbor(&cbor1).unwrap();
+        let cbor2 = parsed1.to_cbor().unwrap();
+        let parsed2 = CoseToken::from_cbor(&cbor2).unwrap();
+
+        let verified = parsed2.verify(&pk).unwrap();
+        assert_eq!(verified.get_issuer(), Some("double"));
+    }
 }

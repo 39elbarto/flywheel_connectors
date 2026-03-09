@@ -853,4 +853,76 @@ mod tests {
         // Should be within the refill interval
         assert!(wait <= Duration::from_secs(1));
     }
+
+    // ── Additional sync tests ───────────────────────────────────────────
+
+    #[test]
+    fn try_consume_one_at_a_time() {
+        let limiter = TokenBucket::new(5, Duration::from_secs(60));
+        for i in 0..5 {
+            assert!(limiter.try_consume(1), "failed at iteration {i}");
+        }
+        assert!(!limiter.try_consume(1));
+    }
+
+    #[test]
+    fn try_consume_various_amounts() {
+        let limiter = TokenBucket::new(10, Duration::from_secs(60));
+        assert!(limiter.try_consume(3));
+        assert_eq!(limiter.remaining(), 7);
+        assert!(limiter.try_consume(4));
+        assert_eq!(limiter.remaining(), 3);
+        assert!(!limiter.try_consume(4));
+        assert_eq!(limiter.remaining(), 3);
+        assert!(limiter.try_consume(3));
+        assert_eq!(limiter.remaining(), 0);
+    }
+
+    #[test]
+    fn new_large_capacity() {
+        let limiter = TokenBucket::new(1_000_000, Duration::from_secs(3600));
+        assert_eq!(limiter.capacity, 1_000_000);
+        assert_eq!(limiter.remaining(), 1_000_000);
+    }
+
+    #[test]
+    fn new_millis_window() {
+        let limiter = TokenBucket::new(10, Duration::from_millis(500));
+        assert_eq!(limiter.refill_interval, Duration::from_millis(500));
+        assert_eq!(limiter.capacity, 10);
+    }
+
+    #[test]
+    fn with_burst_equal_to_rate() {
+        let limiter = TokenBucket::with_burst(10, Duration::from_secs(1), 10);
+        assert_eq!(limiter.capacity, 10);
+        assert_eq!(limiter.refill_amount, 10);
+    }
+
+    #[test]
+    fn from_config_with_nanos_window() {
+        let config = RateLimitConfig::new(1, Duration::from_nanos(100));
+        let limiter = TokenBucket::from_config(&config);
+        assert_eq!(limiter.capacity, 1);
+        // refill_interval = 100ns / 1 = 100ns
+        assert_eq!(limiter.refill_interval, Duration::from_nanos(100));
+    }
+
+    #[test]
+    fn state_remaining_plus_consumed_equals_capacity() {
+        let limiter = TokenBucket::new(10, Duration::from_secs(60));
+        limiter.try_consume(4);
+        let state = limiter.state();
+        assert_eq!(state.remaining, 6);
+        assert_eq!(state.limit, 10);
+    }
+
+    #[test]
+    fn try_consume_zero_on_empty_bucket() {
+        let limiter = TokenBucket::new(2, Duration::from_secs(60));
+        limiter.try_consume(2);
+        assert_eq!(limiter.remaining(), 0);
+        // Zero permits should still succeed even on empty bucket
+        assert!(limiter.try_consume(0));
+    }
 }

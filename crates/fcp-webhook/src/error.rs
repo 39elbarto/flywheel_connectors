@@ -483,4 +483,147 @@ mod tests {
         };
         assert!(e.source().is_none());
     }
+
+    // ── Batch 5: SunnyMoose test expansion ──
+
+    #[test]
+    fn missing_signature_with_newlines() {
+        let e = WebhookError::MissingSignature("Header\nWith\nNewlines".into());
+        let display = e.to_string();
+        assert!(display.contains("Header\nWith\nNewlines"));
+    }
+
+    #[test]
+    fn delivery_failed_with_unicode() {
+        let e = WebhookError::DeliveryFailed("Verbindung fehlgeschlagen \u{2014} Zeitlimit".into());
+        let display = e.to_string();
+        assert!(display.contains('\u{2014}'));
+    }
+
+    #[test]
+    fn replay_detected_long_event_id() {
+        let long_id = "evt_".to_string() + &"x".repeat(5000);
+        let e = WebhookError::ReplayDetected {
+            event_id: long_id.clone(),
+        };
+        let display = e.to_string();
+        assert!(display.contains(&long_id));
+    }
+
+    #[test]
+    fn payload_too_large_zero_size() {
+        let e = WebhookError::PayloadTooLarge { size: 0, limit: 0 };
+        assert_eq!(
+            e.to_string(),
+            "Payload too large: 0 bytes exceeds limit of 0"
+        );
+    }
+
+    #[test]
+    fn timestamp_validation_min_max_current_time() {
+        let e = WebhookError::TimestampValidation {
+            reason: "boundary".into(),
+            timestamp: Some(i64::MIN),
+            current_time: i64::MAX,
+            tolerance: Duration::from_secs(1),
+        };
+        let display = e.to_string();
+        assert!(display.contains("boundary"));
+    }
+
+    #[test]
+    fn ip_not_allowed_empty_string() {
+        let e = WebhookError::IpNotAllowed(String::new());
+        assert_eq!(e.to_string(), "IP address not in allowlist: ");
+    }
+
+    #[test]
+    fn error_display_all_variants_not_empty() {
+        use std::time::Duration;
+        let variants: Vec<WebhookError> = vec![
+            WebhookError::InvalidSignature,
+            WebhookError::MissingSignature(String::new()),
+            WebhookError::TimestampValidation {
+                reason: String::new(),
+                timestamp: None,
+                current_time: 0,
+                tolerance: Duration::ZERO,
+            },
+            WebhookError::ReplayDetected {
+                event_id: String::new(),
+            },
+            WebhookError::PayloadTooLarge { size: 0, limit: 0 },
+            WebhookError::InvalidPayload(String::new()),
+            WebhookError::UnsupportedEventType(String::new()),
+            WebhookError::ProviderNotConfigured(String::new()),
+            WebhookError::IpNotAllowed(String::new()),
+            WebhookError::DeliveryFailed(String::new()),
+        ];
+        for v in variants {
+            assert!(!v.to_string().is_empty());
+        }
+    }
+
+    #[test]
+    fn unsupported_event_type_unicode() {
+        let e = WebhookError::UnsupportedEventType("\u{1F4E5} incoming".into());
+        let display = e.to_string();
+        assert!(display.contains('\u{1F4E5}'));
+    }
+
+    #[test]
+    fn provider_not_configured_unicode() {
+        let e = WebhookError::ProviderNotConfigured("c\u{00FC}stom".into());
+        let display = e.to_string();
+        assert!(display.contains("c\u{00FC}stom"));
+    }
+
+    #[test]
+    fn invalid_payload_with_json_content() {
+        let e = WebhookError::InvalidPayload(r#"{"error": "malformed"}"#.into());
+        let display = e.to_string();
+        assert!(display.contains("malformed"));
+    }
+
+    #[test]
+    fn error_source_for_delivery_failed_is_none() {
+        use std::error::Error;
+        let e = WebhookError::DeliveryFailed("timeout".into());
+        assert!(e.source().is_none());
+    }
+
+    #[test]
+    fn error_source_for_unsupported_event_type_is_none() {
+        use std::error::Error;
+        let e = WebhookError::UnsupportedEventType("unknown".into());
+        assert!(e.source().is_none());
+    }
+
+    #[test]
+    fn error_source_for_provider_not_configured_is_none() {
+        use std::error::Error;
+        let e = WebhookError::ProviderNotConfigured("x".into());
+        assert!(e.source().is_none());
+    }
+
+    #[test]
+    fn error_source_for_ip_not_allowed_is_none() {
+        use std::error::Error;
+        let e = WebhookError::IpNotAllowed("1.2.3.4".into());
+        assert!(e.source().is_none());
+    }
+
+    #[test]
+    fn json_error_display_contains_json_parsing_prefix() {
+        let json_err: Result<serde_json::Value, _> = serde_json::from_str("{{{}}}");
+        let e: WebhookError = json_err.unwrap_err().into();
+        assert!(e.to_string().starts_with("JSON parsing error:"));
+    }
+
+    #[test]
+    fn hex_error_display_contains_hex_decoding_prefix() {
+        let hex_err = hex::decode("gg").unwrap_err();
+        let e: WebhookError = hex_err.into();
+        assert!(e.to_string().starts_with("Hex decoding error:"));
+    }
 }

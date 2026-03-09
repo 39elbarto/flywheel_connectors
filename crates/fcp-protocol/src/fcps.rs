@@ -2915,4 +2915,290 @@ mod tests {
         assert_eq!(cloned.source_id.as_str(), signed.source_id.as_str());
         assert_eq!(cloned.frame.symbols.len(), signed.frame.symbols.len());
     }
+
+    // ── Batch 5: SunnyMoose edge-case and integration tests ──
+
+    #[test]
+    fn header_min_symbol_size_one() {
+        let mut header = test_header();
+        header.symbol_size = 1;
+        header.symbol_count = 1;
+        header.total_payload_len =
+            u32::try_from(SYMBOL_RECORD_OVERHEAD + 1).expect("fits");
+        let symbols = vec![SymbolRecord {
+            esi: 0,
+            k: 1,
+            data: vec![0xAA],
+            auth_tag: [0xBB; 16],
+        }];
+        let frame = FcpsFrame { header, symbols };
+        let encoded = frame.encode();
+        let decoded = FcpsFrame::decode(&encoded, 10000).expect("decode");
+        assert_eq!(decoded.symbols.len(), 1);
+        assert_eq!(decoded.symbols[0].data.len(), 1);
+    }
+
+    #[test]
+    fn header_max_symbol_size_roundtrip() {
+        let header = FcpsFrameHeader {
+            version: FCPS_VERSION,
+            flags: FrameFlags::default(),
+            symbol_count: 0,
+            total_payload_len: 0,
+            object_id: ObjectId::from_bytes([0; 32]),
+            symbol_size: u16::MAX,
+            zone_key_id: ZoneKeyId::from_bytes([0; 8]),
+            zone_id_hash: ZoneIdHash::from_bytes([0; 32]),
+            epoch_id: 0,
+            sender_instance_id: 0,
+            frame_seq: 0,
+        };
+        let decoded = FcpsFrameHeader::decode(&header.encode()).expect("decode");
+        assert_eq!(decoded.symbol_size, u16::MAX);
+    }
+
+    #[test]
+    fn symbol_record_wire_size_empty_data() {
+        let record = SymbolRecord {
+            esi: 0,
+            k: 0,
+            data: vec![],
+            auth_tag: [0; 16],
+        };
+        assert_eq!(record.wire_size(), SYMBOL_RECORD_OVERHEAD);
+    }
+
+    #[test]
+    fn decode_status_empty_hint_vec() {
+        let zone_id: ZoneId = "z:empty-hint".parse().unwrap();
+        let status = DecodeStatus {
+            header: make_test_object_header(),
+            object_id: ObjectId::from_bytes([0; 32]),
+            zone_id,
+            zone_key_id: ZoneKeyId::from_bytes([0; 8]),
+            epoch_id: 0,
+            received_unique: 0,
+            needed: 0,
+            complete: false,
+            missing_hint: Some(vec![]),
+            signature: Ed25519Signature::from_bytes(&[0; 64]),
+        };
+        status.validate_hint_bounds().expect("empty vec ok");
+        // Empty vec and None both produce zero-length hint data, so transcript is the same
+        let status_none = DecodeStatus {
+            missing_hint: None,
+            ..status.clone()
+        };
+        assert_eq!(status.transcript_bytes(), status_none.transcript_bytes());
+        // But a non-empty vec differs from both
+        let status_with = DecodeStatus {
+            missing_hint: Some(vec![42]),
+            ..status.clone()
+        };
+        assert_ne!(status.transcript_bytes(), status_with.transcript_bytes());
+    }
+
+    #[test]
+    fn symbol_request_validate_bounds_zero_max_symbols() {
+        let zone_id: ZoneId = "z:zero-max".parse().unwrap();
+        let request = SymbolRequest::new(
+            make_test_object_header(),
+            ObjectId::from_bytes([0; 32]),
+            zone_id,
+            ZoneKeyId::from_bytes([0; 8]),
+            0,
+            0, // zero max_symbols
+            0,
+        );
+        // Zero is within both authenticated and unauthenticated bounds
+        request.validate_bounds(false).expect("zero unauth ok");
+        request.validate_bounds(true).expect("zero auth ok");
+    }
+
+    #[test]
+    fn symbol_ack_all_reasons_have_distinct_transcripts() {
+        use std::collections::HashSet;
+        let zone_id: ZoneId = "z:reason-trans".parse().unwrap();
+        let reasons = [
+            SymbolAckReason::Complete,
+            SymbolAckReason::Cancelled,
+            SymbolAckReason::Duplicate,
+            SymbolAckReason::BudgetExceeded,
+        ];
+        let mut transcripts = HashSet::new();
+        for reason in reasons {
+            let ack = SymbolAck::new(
+                make_test_object_header(),
+                ObjectId::from_bytes([0; 32]),
+                zone_id.clone(),
+                ZoneKeyId::from_bytes([0; 8]),
+                1,
+                reason,
+                100,
+            );
+            transcripts.insert(ack.transcript_bytes());
+        }
+        assert_eq!(transcripts.len(), 4, "all reasons should produce distinct transcripts");
+    }
+
+    #[test]
+    fn signed_frame_zero_timestamp() {
+        let signing_key = Ed25519SigningKey::generate();
+        let header = test_header();
+        let symbols = vec![test_symbol(0, 64), test_symbol(1, 64)];
+        let frame = FcpsFrame { header, symbols };
+        let signed =
+            SignedFcpsFrame::new(frame, TailscaleNodeId::new("zero-ts"), 0, &signing_key);
+        signed
+            .verify(&signing_key.verifying_key())
+            .expect("verify zero ts");
+        assert_eq!(signed.timestamp, 0);
+    }
+
+    #[test]
+    fn signed_frame_max_timestamp() {
+        let signing_key = Ed25519SigningKey::generate();
+        let header = test_header();
+        let symbols = vec![test_symbol(0, 64), test_symbol(1, 64)];
+        let frame = FcpsFrame { header, symbols };
+        let signed = SignedFcpsFrame::new(
+            frame,
+            TailscaleNodeId::new("max-ts"),
+            u64::MAX,
+            &signing_key,
+        );
+        signed
+            .verify(&signing_key.verifying_key())
+            .expect("verify max ts");
+        assert_eq!(signed.timestamp, u64::MAX);
+    }
+
+    #[test]
+    fn frame_header_epoch_id_zero_and_max() {
+        for epoch_id in [0u64, u64::MAX] {
+            let header = FcpsFrameHeader {
+                version: FCPS_VERSION,
+                flags: FrameFlags::default(),
+                symbol_count: 0,
+                total_payload_len: 0,
+                object_id: ObjectId::from_bytes([0; 32]),
+                symbol_size: 64,
+                zone_key_id: ZoneKeyId::from_bytes([0; 8]),
+                zone_id_hash: ZoneIdHash::from_bytes([0; 32]),
+                epoch_id,
+                sender_instance_id: 0,
+                frame_seq: 0,
+            };
+            let decoded = FcpsFrameHeader::decode(&header.encode()).expect("decode");
+            assert_eq!(decoded.epoch_id, epoch_id);
+        }
+    }
+
+    #[test]
+    fn symbol_request_transcript_different_epoch_different_output() {
+        let zone_id: ZoneId = "z:epoch-diff".parse().unwrap();
+        let req_a = SymbolRequest::new(
+            make_test_object_header(),
+            ObjectId::from_bytes([0; 32]),
+            zone_id.clone(),
+            ZoneKeyId::from_bytes([0; 8]),
+            1,
+            10,
+            0,
+        );
+        let req_b = SymbolRequest::new(
+            make_test_object_header(),
+            ObjectId::from_bytes([0; 32]),
+            zone_id,
+            ZoneKeyId::from_bytes([0; 8]),
+            2,
+            10,
+            0,
+        );
+        assert_ne!(req_a.transcript_bytes(), req_b.transcript_bytes());
+    }
+
+    #[test]
+    fn symbol_request_different_current_symbols_different_transcript() {
+        let zone_id: ZoneId = "z:cur-sym".parse().unwrap();
+        let req_a = SymbolRequest::new(
+            make_test_object_header(),
+            ObjectId::from_bytes([0; 32]),
+            zone_id.clone(),
+            ZoneKeyId::from_bytes([0; 8]),
+            1,
+            10,
+            5,
+        );
+        let req_b = SymbolRequest::new(
+            make_test_object_header(),
+            ObjectId::from_bytes([0; 32]),
+            zone_id,
+            ZoneKeyId::from_bytes([0; 8]),
+            1,
+            10,
+            6,
+        );
+        assert_ne!(req_a.transcript_bytes(), req_b.transcript_bytes());
+    }
+
+    #[test]
+    fn decode_status_different_received_unique_different_transcript() {
+        let zone_id: ZoneId = "z:recv-uniq".parse().unwrap();
+        let make_status = |received_unique| DecodeStatus {
+            header: make_test_object_header(),
+            object_id: ObjectId::from_bytes([0; 32]),
+            zone_id: zone_id.clone(),
+            zone_key_id: ZoneKeyId::from_bytes([0; 8]),
+            epoch_id: 1,
+            received_unique,
+            needed: 100,
+            complete: false,
+            missing_hint: None,
+            signature: Ed25519Signature::from_bytes(&[0; 64]),
+        };
+        assert_ne!(
+            make_status(50).transcript_bytes(),
+            make_status(51).transcript_bytes()
+        );
+    }
+
+    #[test]
+    fn decode_status_different_needed_different_transcript() {
+        let zone_id: ZoneId = "z:needed-diff".parse().unwrap();
+        let make_status = |needed| DecodeStatus {
+            header: make_test_object_header(),
+            object_id: ObjectId::from_bytes([0; 32]),
+            zone_id: zone_id.clone(),
+            zone_key_id: ZoneKeyId::from_bytes([0; 8]),
+            epoch_id: 1,
+            received_unique: 50,
+            needed,
+            complete: false,
+            missing_hint: None,
+            signature: Ed25519Signature::from_bytes(&[0; 64]),
+        };
+        assert_ne!(
+            make_status(100).transcript_bytes(),
+            make_status(101).transcript_bytes()
+        );
+    }
+
+    #[test]
+    fn frame_flags_remove_flag() {
+        let mut flags = FrameFlags::ENCRYPTED | FrameFlags::RAPTORQ | FrameFlags::COMPRESSED;
+        flags.remove(FrameFlags::COMPRESSED);
+        assert!(!flags.contains(FrameFlags::COMPRESSED));
+        assert!(flags.contains(FrameFlags::ENCRYPTED));
+        assert!(flags.contains(FrameFlags::RAPTORQ));
+    }
+
+    #[test]
+    fn frame_flags_toggle_flag() {
+        let mut flags = FrameFlags::ENCRYPTED;
+        flags.toggle(FrameFlags::ENCRYPTED);
+        assert!(!flags.contains(FrameFlags::ENCRYPTED));
+        flags.toggle(FrameFlags::ENCRYPTED);
+        assert!(flags.contains(FrameFlags::ENCRYPTED));
+    }
 }

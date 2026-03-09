@@ -364,4 +364,109 @@ mod tests {
     fn default_refresh_threshold_is_positive() {
         assert!(DEFAULT_REFRESH_THRESHOLD.as_secs() > 0);
     }
+
+    // ── New batch: GrantType serde with whitespace and unicode ──
+
+    #[test]
+    fn grant_type_serde_whitespace_padding_rejected() {
+        let result: Result<GrantType, _> = serde_json::from_str("\" authorization_code\"");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn grant_type_serde_trailing_whitespace_rejected() {
+        let result: Result<GrantType, _> = serde_json::from_str("\"authorization_code \"");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn grant_type_serde_unicode_lookalike_rejected() {
+        // Using a unicode underscore-like character
+        let result: Result<GrantType, _> = serde_json::from_str("\"authorization\u{FF3F}code\"");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn grant_type_serde_object_rejected() {
+        let result: Result<GrantType, _> =
+            serde_json::from_str(r#"{"type":"authorization_code"}"#);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn grant_type_serde_float_rejected() {
+        let result: Result<GrantType, _> = serde_json::from_str("1.5");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn grant_type_serde_in_struct_roundtrip() {
+        #[derive(serde::Serialize, serde::Deserialize, PartialEq, Debug)]
+        struct Wrapper {
+            grant: GrantType,
+        }
+        let w = Wrapper {
+            grant: GrantType::DeviceCode,
+        };
+        let json = serde_json::to_string(&w).unwrap();
+        let rt: Wrapper = serde_json::from_str(&json).unwrap();
+        assert_eq!(w, rt);
+    }
+
+    #[test]
+    fn grant_type_serde_in_vec_roundtrip() {
+        let grants = vec![
+            GrantType::AuthorizationCode,
+            GrantType::ClientCredentials,
+            GrantType::RefreshToken,
+            GrantType::DeviceCode,
+        ];
+        let json = serde_json::to_string(&grants).unwrap();
+        let rt: Vec<GrantType> = serde_json::from_str(&json).unwrap();
+        assert_eq!(grants, rt);
+    }
+
+    #[test]
+    fn grant_type_display_contains_no_whitespace() {
+        for gt in [
+            GrantType::AuthorizationCode,
+            GrantType::ClientCredentials,
+            GrantType::RefreshToken,
+            GrantType::DeviceCode,
+        ] {
+            let display = gt.to_string();
+            assert!(!display.contains(' '), "Display should not contain spaces: {display}");
+        }
+    }
+
+    // ── New batch: ResponseMode additional ──
+
+    #[test]
+    fn response_mode_display_lowercase() {
+        for mode in [
+            ResponseMode::Query,
+            ResponseMode::Fragment,
+            ResponseMode::FormPost,
+        ] {
+            let display = mode.to_string();
+            assert_eq!(
+                display,
+                display.to_lowercase(),
+                "ResponseMode Display should be lowercase"
+            );
+        }
+    }
+
+    #[test]
+    fn default_refresh_threshold_exactly_300_seconds() {
+        assert_eq!(DEFAULT_REFRESH_THRESHOLD.as_millis(), 300_000);
+        assert_eq!(DEFAULT_REFRESH_THRESHOLD.as_nanos(), 300_000_000_000);
+    }
+
+    #[test]
+    fn grant_type_device_code_display_contains_urn_prefix() {
+        let display = GrantType::DeviceCode.to_string();
+        assert!(display.starts_with("urn:"));
+        assert!(display.contains("device_code"));
+    }
 }

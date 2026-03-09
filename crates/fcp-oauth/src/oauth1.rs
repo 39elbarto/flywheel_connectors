@@ -1421,4 +1421,144 @@ mod tests {
             Some("https://myapp.com/cb".to_string())
         );
     }
+
+    // ── New batch: percent_encode advanced ──
+
+    #[test]
+    fn test_percent_encode_consecutive_specials() {
+        assert_eq!(percent_encode("&&"), "%26%26");
+        assert_eq!(percent_encode("=="), "%3D%3D");
+    }
+
+    #[test]
+    fn test_percent_encode_mixed_ascii_and_multibyte() {
+        let encoded = percent_encode("a\u{00e9}b");
+        assert_eq!(encoded, "a%C3%A9b");
+    }
+
+    #[test]
+    fn test_percent_encode_preserves_digits_and_letters() {
+        let input = "abc123XYZ";
+        assert_eq!(percent_encode(input), input);
+    }
+
+    #[test]
+    fn test_percent_encode_long_string() {
+        let input = "hello world! ".repeat(100);
+        let encoded = percent_encode(&input);
+        assert!(!encoded.is_empty());
+        assert!(encoded.len() > input.len());
+    }
+
+    // ── New batch: OAuth1 signature edge cases ──
+
+    #[test]
+    fn test_signature_url_with_fragment_ignored_in_base() {
+        let config = test_config();
+        let client = OAuth1Client::new(config);
+        let params = BTreeMap::new();
+
+        // Fragments should be stripped by URL parsing
+        let result = client.calculate_signature(
+            "GET",
+            "https://api.example.com/resource#fragment",
+            &params,
+            "",
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_signature_url_with_path_only() {
+        let config = test_config();
+        let client = OAuth1Client::new(config);
+        let params = BTreeMap::new();
+
+        let result = client.calculate_signature(
+            "GET",
+            "https://api.example.com/",
+            &params,
+            "",
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_signature_delete_method() {
+        let config = test_config();
+        let client = OAuth1Client::new(config);
+        let params = BTreeMap::new();
+
+        let result = client.calculate_signature(
+            "DELETE",
+            "https://api.example.com/resource",
+            &params,
+            "",
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_signature_put_method() {
+        let config = test_config();
+        let client = OAuth1Client::new(config);
+        let params = BTreeMap::new();
+
+        let result = client.calculate_signature(
+            "PUT",
+            "https://api.example.com/resource",
+            &params,
+            "",
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_auth_header_nonce_is_unique_per_call() {
+        let config = test_config();
+        let client = OAuth1Client::new(config);
+        let params: BTreeMap<&str, &str> = BTreeMap::new();
+
+        let h1 = client
+            .build_auth_header("GET", "https://api.example.com/r", &params, None, None)
+            .unwrap();
+        let h2 = client
+            .build_auth_header("GET", "https://api.example.com/r", &params, None, None)
+            .unwrap();
+        // Different nonces should produce different headers
+        assert_ne!(h1, h2);
+    }
+
+    #[test]
+    fn test_oauth1_config_clone_preserves_callback() {
+        let config = test_config();
+        let cloned = config.clone();
+        assert_eq!(config.callback_url, cloned.callback_url);
+        assert_eq!(config.request_token_url, cloned.request_token_url);
+        assert_eq!(config.authorization_url, cloned.authorization_url);
+        assert_eq!(config.access_token_url, cloned.access_token_url);
+    }
+
+    #[test]
+    fn test_oauth1_tokens_debug_contains_field_names() {
+        let tokens = OAuth1Tokens {
+            token: "my_tok".to_string(),
+            token_secret: "my_sec".to_string(),
+            user_id: Some("uid_123".to_string()),
+            screen_name: Some("user_sn".to_string()),
+        };
+        let debug = format!("{tokens:?}");
+        assert!(debug.contains("token"));
+        assert!(debug.contains("token_secret"));
+        assert!(debug.contains("user_id"));
+        assert!(debug.contains("screen_name"));
+    }
+
+    #[test]
+    fn test_parse_request_token_callback_confirmed_numeric() {
+        // Numeric "1" should NOT be treated as confirmed (must be "true")
+        let body = "oauth_token=t&oauth_token_secret=s&oauth_callback_confirmed=1";
+        let token = parse_request_token(body).unwrap();
+        assert!(!token.callback_confirmed);
+    }
 }

@@ -1373,4 +1373,178 @@ mod tests {
         let client = SseClient::new("https://example.com/events#section");
         assert_eq!(client.url(), "https://example.com/events#section");
     }
+
+    // ── SseParser: unicode in data fields ──
+
+    #[test]
+    fn test_parse_unicode_data() {
+        let mut parser = SseParser::new();
+        let data = Bytes::from("data: \u{1F600} hello \u{4E16}\u{754C}\n\n");
+        let events = parser.parse(&data);
+        assert_eq!(events.len(), 1);
+        assert!(events[0].data.contains('\u{1F600}'));
+        assert!(events[0].data.contains('\u{4E16}'));
+    }
+
+    #[test]
+    fn test_parse_unicode_event_type() {
+        let mut parser = SseParser::new();
+        let data = Bytes::from("event: \u{00E9}v\u{00E9}nement\ndata: payload\n\n");
+        let events = parser.parse(&data);
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0].event,
+            Some("\u{00E9}v\u{00E9}nement".to_string())
+        );
+    }
+
+    #[test]
+    fn test_parse_unicode_id() {
+        let mut parser = SseParser::new();
+        let data = Bytes::from("id: \u{00FC}ber-42\ndata: test\n\n");
+        let events = parser.parse(&data);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].id, Some("\u{00FC}ber-42".to_string()));
+    }
+
+    // ── SseParser: complex multi-event scenarios ──
+
+    #[test]
+    fn test_parse_ten_events_sequentially() {
+        use std::fmt::Write;
+        let mut parser = SseParser::new();
+        let mut input = String::new();
+        for i in 0..10 {
+            let _ = write!(input, "data: event-{i}\n\n");
+        }
+        let events = parser.parse(&Bytes::from(input));
+        assert_eq!(events.len(), 10);
+        for (i, evt) in events.iter().enumerate() {
+            assert_eq!(evt.data, format!("event-{i}"));
+        }
+    }
+
+    #[test]
+    fn test_parse_event_with_multiple_data_lines_and_id() {
+        let mut parser = SseParser::new();
+        let data = Bytes::from("id: 77\nevent: batch\ndata: line1\ndata: line2\ndata: line3\n\n");
+        let events = parser.parse(&data);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].data, "line1\nline2\nline3");
+        assert_eq!(events[0].id, Some("77".to_string()));
+        assert_eq!(events[0].event, Some("batch".to_string()));
+    }
+
+    #[test]
+    fn test_parse_alternating_comments_and_events() {
+        let mut parser = SseParser::new();
+        let data = Bytes::from(
+            ": ping\ndata: a\n\n: ping\ndata: b\n\n: ping\ndata: c\n\n",
+        );
+        let events = parser.parse(&data);
+        assert_eq!(events.len(), 3);
+        assert_eq!(events[0].data, "a");
+        assert_eq!(events[1].data, "b");
+        assert_eq!(events[2].data, "c");
+    }
+
+    // ── SseEvent: builder with all fields ──
+
+    #[test]
+    fn test_sse_event_full_construction() {
+        let mut event = SseEvent::new("payload").with_event("update").with_id("123");
+        event.retry = Some(5000);
+        assert_eq!(event.data, "payload");
+        assert_eq!(event.event, Some("update".to_string()));
+        assert_eq!(event.id, Some("123".to_string()));
+        assert_eq!(event.retry, Some(5000));
+    }
+
+    #[test]
+    fn test_sse_event_clone_independence() {
+        let original = SseEvent::new("data").with_event("msg").with_id("1");
+        let cloned = original.clone();
+        // Verify they are equal but independent
+        assert_eq!(original, cloned);
+        assert_eq!(original.data, cloned.data);
+        assert_eq!(original.event, cloned.event);
+        assert_eq!(original.id, cloned.id);
+    }
+
+    // ── SseConfig: clone preserves all fields ──
+
+    #[test]
+    fn test_sse_config_clone_all_fields() {
+        let config = SseConfig::new()
+            .with_timeout(Duration::from_secs(30))
+            .with_max_buffer_size(4096)
+            .with_header("Auth", "Bearer tok")
+            .with_auto_reconnect(false)
+            .with_max_reconnect_attempts(3)
+            .with_reconnect_delay(Duration::from_millis(500));
+        let cloned = config.clone();
+        assert_eq!(config.timeout, cloned.timeout);
+        assert_eq!(config.max_buffer_size, cloned.max_buffer_size);
+        assert_eq!(config.auto_reconnect, cloned.auto_reconnect);
+        assert_eq!(config.max_reconnect_attempts, cloned.max_reconnect_attempts);
+        assert_eq!(config.reconnect_delay, cloned.reconnect_delay);
+        assert_eq!(
+            config.headers.get("Auth"),
+            cloned.headers.get("Auth")
+        );
+    }
+
+    // ── SseParser: empty buffer initially ──
+
+    #[test]
+    fn test_parser_initial_state_empty() {
+        let parser = SseParser::new();
+        assert!(parser.last_event_id().is_none());
+    }
+
+    #[test]
+    fn test_parser_parse_empty_bytes() {
+        let mut parser = SseParser::new();
+        let events = parser.parse(&Bytes::new());
+        assert!(events.is_empty());
+    }
+
+    // ── SseParser: data field with only whitespace ──
+
+    #[test]
+    fn test_parse_data_only_spaces() {
+        let mut parser = SseParser::new();
+        let data = Bytes::from("data:    \n\n");
+        let events = parser.parse(&data);
+        assert_eq!(events.len(), 1);
+        // One leading space stripped, rest preserved
+        assert_eq!(events[0].data, "   ");
+    }
+
+    // ── SseEvent: JSON with unicode keys ──
+
+    #[test]
+    fn test_sse_event_json_unicode_key() {
+        let event = SseEvent::new(r#"{"\u00e9":"accent"}"#);
+        let val: serde_json::Value = event.json().unwrap();
+        assert!(val.is_object());
+    }
+
+    // ── SseClient: empty URL ──
+
+    #[test]
+    fn test_sse_client_empty_url() {
+        let client = SseClient::new("");
+        assert_eq!(client.url(), "");
+    }
+
+    // ── SseConfig: timeout override ──
+
+    #[test]
+    fn test_sse_config_timeout_override() {
+        let config = SseConfig::new()
+            .with_timeout(Duration::from_secs(10))
+            .with_timeout(Duration::from_secs(30));
+        assert_eq!(config.timeout, Some(Duration::from_secs(30)));
+    }
 }

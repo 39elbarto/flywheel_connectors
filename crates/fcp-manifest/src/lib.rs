@@ -7731,4 +7731,1039 @@ schema_version = "2.1"
         };
         assert!(section.validate().is_ok());
     }
+
+    // ══════════════════════════════════════════════════════════════════
+    // NEW BATCH: Extended edge-case and coverage tests
+    // ══════════════════════════════════════════════════════════════════
+
+    // ── ManifestSchemaVersion boundary values ────────────────────────
+
+    #[test]
+    fn manifest_schema_version_minor_overflow_rejected() {
+        let err = ManifestSchemaVersion::try_from("2.99999".to_string()).unwrap_err();
+        assert!(err.to_string().contains("minor"));
+    }
+
+    #[test]
+    fn manifest_schema_version_both_overflow_rejected() {
+        let err = ManifestSchemaVersion::try_from("99999.99999".to_string()).unwrap_err();
+        // Should fail on major first
+        assert!(err.to_string().contains("major"));
+    }
+
+    #[test]
+    fn manifest_schema_version_only_dot_rejected() {
+        let err = ManifestSchemaVersion::try_from(".".to_string()).unwrap_err();
+        assert!(err.to_string().contains("major"));
+    }
+
+    #[test]
+    fn manifest_schema_version_trailing_dot_rejected() {
+        let err = ManifestSchemaVersion::try_from("2.".to_string()).unwrap_err();
+        assert!(err.to_string().contains("minor"));
+    }
+
+    #[test]
+    fn manifest_schema_version_leading_dot_rejected() {
+        let err = ManifestSchemaVersion::try_from(".1".to_string()).unwrap_err();
+        assert!(err.to_string().contains("major"));
+    }
+
+    #[test]
+    fn manifest_schema_version_ne() {
+        let v1 = ManifestSchemaVersion { major: 2, minor: 0 };
+        let v2 = ManifestSchemaVersion { major: 2, minor: 1 };
+        assert_ne!(v1, v2);
+    }
+
+    // ── InterfaceHash edge cases ─────────────────────────────────────
+
+    #[test]
+    fn interface_hash_only_algorithm_rejected() {
+        let err = InterfaceHash::try_from("blake3-256".to_string()).unwrap_err();
+        assert!(err.to_string().contains("domain"));
+    }
+
+    #[test]
+    fn interface_hash_two_colons_empty_parts() {
+        let err = InterfaceHash::try_from("blake3-256::".to_string()).unwrap_err();
+        assert!(err.to_string().contains("domain"));
+    }
+
+    #[test]
+    fn interface_hash_ne() {
+        let h1 = InterfaceHash::new_blake3_256(INTERFACE_HASH_DOMAIN, [0xAA; 32]);
+        let h2 = InterfaceHash::new_blake3_256(INTERFACE_HASH_DOMAIN, [0xBB; 32]);
+        assert_ne!(h1, h2);
+    }
+
+    #[test]
+    fn interface_hash_display_deterministic() {
+        let h = InterfaceHash::new_blake3_256(INTERFACE_HASH_DOMAIN, [0x42; 32]);
+        let s1 = h.to_string();
+        let s2 = h.to_string();
+        assert_eq!(s1, s2);
+    }
+
+    // ── ProtocolRequirement edge cases ───────────────────────────────
+
+    #[test]
+    fn protocol_requirement_version_with_leading_zeros() {
+        let pr = ProtocolRequirement::try_from("proto/02.03".to_string()).unwrap();
+        assert_eq!(pr.version.major, 2);
+        assert_eq!(pr.version.minor, 3);
+    }
+
+    #[test]
+    fn protocol_requirement_ne() {
+        let pr1 = ProtocolRequirement::try_from("fcp2-sym/2.0".to_string()).unwrap();
+        let pr2 = ProtocolRequirement::try_from("fcp2-sym/3.0".to_string()).unwrap();
+        assert_ne!(pr1, pr2);
+    }
+
+    #[test]
+    fn protocol_requirement_different_name_ne() {
+        let pr1 = ProtocolRequirement::try_from("fcp2-sym/2.0".to_string()).unwrap();
+        let pr2 = ProtocolRequirement::try_from("fcp3-asym/2.0".to_string()).unwrap();
+        assert_ne!(pr1, pr2);
+    }
+
+    #[test]
+    fn protocol_requirement_slash_only_rejected() {
+        let err = ProtocolRequirement::try_from("/".to_string()).unwrap_err();
+        assert!(err.to_string().contains("name must not be empty"));
+    }
+
+    // ── FeatureId edge cases ─────────────────────────────────────────
+
+    #[test]
+    fn feature_id_ne() {
+        let f1 = FeatureId::try_from("fcps.aead".to_string()).unwrap();
+        let f2 = FeatureId::try_from("fcps.hmac".to_string()).unwrap();
+        assert_ne!(f1, f2);
+    }
+
+    #[test]
+    fn feature_id_serialize_deserialize_consistency() {
+        let fid = FeatureId::try_from("fcps.stream.replay".to_string()).unwrap();
+        let json = serde_json::to_string(&fid).unwrap();
+        assert_eq!(json, "\"fcps.stream.replay\"");
+    }
+
+    // ── SignatureThreshold boundary ──────────────────────────────────
+
+    #[test]
+    fn signature_threshold_max_values() {
+        let t = SignatureThreshold { k: 255, n: 255 };
+        assert_eq!(t.to_string(), "255-of-255");
+        assert!(t.validate(255).is_ok());
+    }
+
+    #[test]
+    fn signature_threshold_1_of_255_valid() {
+        let t = SignatureThreshold { k: 1, n: 255 };
+        assert!(t.validate(1).is_ok());
+    }
+
+    #[test]
+    fn signature_threshold_clone_eq() {
+        let t1 = SignatureThreshold { k: 2, n: 3 };
+        let t2 = t1;
+        assert_eq!(t1, t2);
+        assert_eq!(t1.k, t2.k);
+    }
+
+    #[test]
+    fn signature_threshold_ne() {
+        let t1 = SignatureThreshold { k: 2, n: 3 };
+        let t2 = SignatureThreshold { k: 1, n: 3 };
+        assert_ne!(t1, t2);
+    }
+
+    #[test]
+    fn signature_threshold_debug() {
+        let t = SignatureThreshold { k: 2, n: 3 };
+        let dbg = format!("{t:?}");
+        assert!(dbg.contains("SignatureThreshold"));
+    }
+
+    // ── ObjectIdRef boundary ─────────────────────────────────────────
+
+    #[test]
+    fn object_id_ref_ne() {
+        let oid1 = ObjectIdRef::try_from("objectid:".to_string() + &"aa".repeat(32)).unwrap();
+        let oid2 = ObjectIdRef::try_from("objectid:".to_string() + &"bb".repeat(32)).unwrap();
+        assert_ne!(oid1, oid2);
+    }
+
+    #[test]
+    fn object_id_ref_too_long_rejected() {
+        let err = ObjectIdRef::try_from("objectid:".to_string() + &"aa".repeat(33)).unwrap_err();
+        assert!(err.to_string().contains("32 bytes"));
+    }
+
+    // ── Base64Bytes boundary ─────────────────────────────────────────
+
+    #[test]
+    fn base64_bytes_ne() {
+        let a = Base64Bytes(vec![1, 2, 3]);
+        let b = Base64Bytes(vec![4, 5, 6]);
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn base64_bytes_clone_preserves_data() {
+        let original = Base64Bytes(vec![0xDE, 0xAD, 0xBE, 0xEF]);
+        let cloned = original.clone();
+        assert_eq!(original.as_bytes(), cloned.as_bytes());
+        // Use original after clone to avoid redundant_clone
+        assert_eq!(original.as_bytes().len(), 4);
+    }
+
+    #[test]
+    fn base64_bytes_with_padding() {
+        // "A" in base64 is "QQ==" (with padding)
+        let b = Base64Bytes::try_from("base64:QQ==".to_string()).unwrap();
+        assert_eq!(b.as_bytes(), &[0x41]);
+    }
+
+    // ── ConnectorArchetype edge cases ────────────────────────────────
+
+    #[test]
+    fn connector_archetype_ne() {
+        assert_ne!(ConnectorArchetype::Bidirectional, ConnectorArchetype::Storage);
+        assert_ne!(ConnectorArchetype::Streaming, ConnectorArchetype::Knowledge);
+    }
+
+    #[test]
+    fn connector_archetype_debug_all_variants() {
+        for variant in [
+            ConnectorArchetype::Bidirectional,
+            ConnectorArchetype::Streaming,
+            ConnectorArchetype::Operational,
+            ConnectorArchetype::Storage,
+            ConnectorArchetype::Knowledge,
+        ] {
+            let dbg = format!("{variant:?}");
+            assert!(!dbg.is_empty());
+        }
+    }
+
+    // ── ConnectorRuntimeFormat edge cases ─────────────────────────────
+
+    #[test]
+    fn connector_runtime_format_ne() {
+        assert_ne!(ConnectorRuntimeFormat::Native, ConnectorRuntimeFormat::Wasi);
+    }
+
+    // ── ConnectorCrdtType edge cases ─────────────────────────────────
+
+    #[test]
+    fn connector_crdt_type_all_as_str_unique() {
+        use std::collections::HashSet;
+        let strs: HashSet<&str> = [
+            ConnectorCrdtType::LwwMap,
+            ConnectorCrdtType::OrSet,
+            ConnectorCrdtType::GCounter,
+            ConnectorCrdtType::PnCounter,
+        ]
+        .iter()
+        .map(ConnectorCrdtType::as_str)
+        .collect();
+        assert_eq!(strs.len(), 4);
+    }
+
+    #[test]
+    fn connector_crdt_type_serde_invalid_rejected() {
+        let result = serde_json::from_str::<ConnectorCrdtType>("\"mvregister\"");
+        assert!(result.is_err());
+    }
+
+    // ── ConnectorStateModel edge cases ───────────────────────────────
+
+    #[test]
+    fn connector_state_model_crdt_all_types_display() {
+        let types = [
+            (ConnectorCrdtType::LwwMap, "lww_map"),
+            (ConnectorCrdtType::OrSet, "or_set"),
+            (ConnectorCrdtType::GCounter, "g_counter"),
+            (ConnectorCrdtType::PnCounter, "pn_counter"),
+        ];
+        for (crdt_type, expected_suffix) in types {
+            let model = ConnectorStateModel::Crdt { crdt_type };
+            let display = model.to_string();
+            assert!(
+                display.contains(expected_suffix),
+                "expected {expected_suffix} in {display}"
+            );
+        }
+    }
+
+    #[test]
+    fn connector_state_model_serde_all_crdt_types() {
+        for crdt_type in [
+            ConnectorCrdtType::LwwMap,
+            ConnectorCrdtType::OrSet,
+            ConnectorCrdtType::GCounter,
+            ConnectorCrdtType::PnCounter,
+        ] {
+            let model = ConnectorStateModel::Crdt { crdt_type };
+            let json = serde_json::to_string(&model).unwrap();
+            let deserialized: ConnectorStateModel = serde_json::from_str(&json).unwrap();
+            assert_eq!(deserialized.crdt_type(), Some(crdt_type));
+        }
+    }
+
+    // ── ManifestApprovalMode edge cases ──────────────────────────────
+
+    #[test]
+    fn manifest_approval_mode_case_sensitive_rejected() {
+        let result = serde_json::from_str::<ManifestApprovalMode>("\"None\"");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn manifest_approval_mode_empty_string_rejected() {
+        let result = serde_json::from_str::<ManifestApprovalMode>("\"\"");
+        assert!(result.is_err());
+    }
+
+    // ── AttestationType edge cases ───────────────────────────────────
+
+    #[test]
+    fn attestation_type_debug_clone_copy() {
+        let a = AttestationType::InToto;
+        let b = a;
+        assert_eq!(a, b);
+        let dbg = format!("{a:?}");
+        assert!(dbg.contains("InToto"));
+    }
+
+    #[test]
+    fn attestation_type_ne() {
+        assert_ne!(AttestationType::InToto, AttestationType::CodeReview);
+        assert_ne!(
+            AttestationType::ReproducibleBuild,
+            AttestationType::CodeReview
+        );
+    }
+
+    #[test]
+    fn attestation_type_case_sensitive_rejected() {
+        let result = serde_json::from_str::<AttestationType>("\"In-Toto\"");
+        assert!(result.is_err());
+    }
+
+    // ── SandboxProfile edge cases ────────────────────────────────────
+
+    #[test]
+    fn sandbox_profile_ne() {
+        assert_ne!(SandboxProfile::Strict, SandboxProfile::Permissive);
+        assert_ne!(SandboxProfile::StrictPlus, SandboxProfile::Moderate);
+    }
+
+    #[test]
+    fn sandbox_profile_case_sensitive_rejected() {
+        let result = serde_json::from_str::<SandboxProfile>("\"Strict\"");
+        assert!(result.is_err());
+    }
+
+    // ── SandboxSection edge cases ────────────────────────────────────
+
+    #[test]
+    fn sandbox_section_zero_memory_valid() {
+        // memory_mb = 0 is technically allowed by validation (only cpu/timeout checked)
+        let section = SandboxSection {
+            profile: SandboxProfile::Strict,
+            memory_mb: 0,
+            cpu_percent: 1,
+            wall_clock_timeout_ms: 1,
+            fs_readonly_paths: vec![],
+            fs_writable_paths: vec![],
+            deny_exec: true,
+            deny_ptrace: true,
+        };
+        assert!(section.validate().is_ok());
+    }
+
+    #[test]
+    fn sandbox_section_large_timeout_valid() {
+        let section = SandboxSection {
+            profile: SandboxProfile::Moderate,
+            memory_mb: 8192,
+            cpu_percent: 100,
+            wall_clock_timeout_ms: u64::MAX,
+            fs_readonly_paths: vec![],
+            fs_writable_paths: vec![],
+            deny_exec: false,
+            deny_ptrace: false,
+        };
+        assert!(section.validate().is_ok());
+    }
+
+    // ── EventCapsSection edge cases ──────────────────────────────────
+
+    #[test]
+    fn event_caps_section_large_buffer_valid() {
+        let ecs = EventCapsSection {
+            streaming: true,
+            replay: true,
+            min_buffer_events: u32::MAX,
+        };
+        assert!(ecs.validate().is_ok());
+    }
+
+    #[test]
+    fn event_caps_section_ne() {
+        let a = EventCapsSection {
+            streaming: true,
+            replay: false,
+            min_buffer_events: 100,
+        };
+        let b = EventCapsSection {
+            streaming: false,
+            replay: true,
+            min_buffer_events: 200,
+        };
+        // Clone and compare fields since EventCapsSection doesn't impl Eq
+        let a_cloned = a.clone();
+        assert_eq!(a.min_buffer_events, a_cloned.min_buffer_events);
+        assert_ne!(a.min_buffer_events, b.min_buffer_events);
+    }
+
+    // ── PolicySection edge cases ─────────────────────────────────────
+
+    #[test]
+    fn policy_section_slsa_boundary_values() {
+        // Test each valid level (0-4)
+        for level in 0..=4 {
+            let p = PolicySection {
+                require_transparency_log: false,
+                require_attestation_types: vec![],
+                min_slsa_level: Some(level),
+                trusted_builders: vec![],
+            };
+            assert!(
+                p.validate().is_ok(),
+                "SLSA level {level} should be valid"
+            );
+        }
+    }
+
+    #[test]
+    fn policy_section_slsa_255_rejected() {
+        let p = PolicySection {
+            require_transparency_log: false,
+            require_attestation_types: vec![],
+            min_slsa_level: Some(255),
+            trusted_builders: vec![],
+        };
+        assert!(p.validate().is_err());
+    }
+
+    #[test]
+    fn policy_section_empty_defaults() {
+        let p = PolicySection {
+            require_transparency_log: false,
+            require_attestation_types: vec![],
+            min_slsa_level: None,
+            trusted_builders: vec![],
+        };
+        assert!(p.validate().is_ok());
+        assert!(!p.require_transparency_log);
+        assert!(p.require_attestation_types.is_empty());
+    }
+
+    #[test]
+    fn policy_section_all_attestation_types() {
+        let p = PolicySection {
+            require_transparency_log: true,
+            require_attestation_types: vec![
+                AttestationType::InToto,
+                AttestationType::ReproducibleBuild,
+                AttestationType::CodeReview,
+            ],
+            min_slsa_level: Some(4),
+            trusted_builders: vec!["builder-a".into(), "builder-b".into()],
+        };
+        assert!(p.validate().is_ok());
+        assert_eq!(p.require_attestation_types.len(), 3);
+    }
+
+    // ── RateLimitsSection edge cases ─────────────────────────────────
+
+    #[test]
+    fn rate_limits_section_multiple_operation_pools() {
+        let section = RateLimitsSection {
+            pools: vec![
+                RateLimitPoolSection {
+                    id: "pool_a".into(),
+                    description: Some("Pool A".into()),
+                    requests: 100,
+                    window_ms: 60_000,
+                    burst: None,
+                    unit: None,
+                    enforcement: None,
+                    scope: None,
+                },
+                RateLimitPoolSection {
+                    id: "pool_b".into(),
+                    description: None,
+                    requests: 50,
+                    window_ms: 1000,
+                    burst: Some(5),
+                    unit: Some("bytes".into()),
+                    enforcement: Some("advisory".into()),
+                    scope: Some("global".into()),
+                },
+            ],
+            operation_pools: {
+                let mut m = std::collections::HashMap::new();
+                m.insert("op1".into(), vec!["pool_a".into()]);
+                m.insert("op2".into(), vec!["pool_a".into(), "pool_b".into()]);
+                m
+            },
+        };
+        let decls = section.to_declarations();
+        assert_eq!(decls.limits.len(), 2);
+        assert_eq!(decls.tool_pool_map.len(), 2);
+        let op2_pools = decls.tool_pool_map.get("op2").unwrap();
+        assert_eq!(op2_pools.len(), 2);
+    }
+
+    #[test]
+    fn rate_limits_section_pool_window_zero() {
+        // window_ms = 0 creates a Duration of 0, which may or may not be valid
+        // depending on the RateLimitDeclarations validation
+        let section = RateLimitsSection {
+            pools: vec![RateLimitPoolSection {
+                id: "zero_window".into(),
+                description: None,
+                requests: 10,
+                window_ms: 0,
+                burst: None,
+                unit: None,
+                enforcement: None,
+                scope: None,
+            }],
+            operation_pools: std::collections::HashMap::default(),
+        };
+        let decls = section.to_declarations();
+        assert_eq!(
+            decls.limits[0].config.window,
+            std::time::Duration::from_millis(0)
+        );
+    }
+
+    // ── NetworkConstraints edge cases ────────────────────────────────
+
+    #[test]
+    fn network_constraints_large_dns_max_ips_valid() {
+        let nc = NetworkConstraints {
+            host_allow: vec!["api.example.com".into()],
+            port_allow: vec![443],
+            ip_allow: vec![],
+            cidr_deny: vec![],
+            deny_localhost: true,
+            deny_private_ranges: true,
+            deny_tailnet_ranges: true,
+            require_sni: true,
+            spki_pins: vec![],
+            deny_ip_literals: true,
+            require_host_canonicalization: false,
+            dns_max_ips: u16::MAX,
+            max_redirects: 0,
+            connect_timeout_ms: 1,
+            total_timeout_ms: 1,
+            max_response_bytes: 1,
+        };
+        assert!(nc.validate().is_ok());
+    }
+
+    #[test]
+    fn network_constraints_all_booleans_false() {
+        let nc = NetworkConstraints {
+            host_allow: vec!["api.example.com".into()],
+            port_allow: vec![443],
+            ip_allow: vec![],
+            cidr_deny: vec![],
+            deny_localhost: false,
+            deny_private_ranges: false,
+            deny_tailnet_ranges: false,
+            require_sni: false,
+            spki_pins: vec![],
+            deny_ip_literals: false,
+            require_host_canonicalization: false,
+            dns_max_ips: 1,
+            max_redirects: 0,
+            connect_timeout_ms: 1,
+            total_timeout_ms: 1,
+            max_response_bytes: 1,
+        };
+        assert!(nc.validate().is_ok());
+    }
+
+    #[test]
+    fn network_constraints_localhost_allowed_when_deny_false_nc() {
+        let nc = NetworkConstraints {
+            host_allow: vec!["localhost".into()],
+            port_allow: vec![8080],
+            ip_allow: vec![],
+            cidr_deny: vec![],
+            deny_localhost: false,
+            deny_private_ranges: false,
+            deny_tailnet_ranges: false,
+            require_sni: false,
+            spki_pins: vec![],
+            deny_ip_literals: false,
+            require_host_canonicalization: false,
+            dns_max_ips: 16,
+            max_redirects: 5,
+            connect_timeout_ms: 10_000,
+            total_timeout_ms: 60_000,
+            max_response_bytes: 10_485_760,
+        };
+        assert!(nc.validate().is_ok());
+    }
+
+    #[test]
+    fn network_constraints_multiple_cidrs_valid() {
+        let nc = NetworkConstraints {
+            host_allow: vec!["api.example.com".into()],
+            port_allow: vec![443],
+            ip_allow: vec![],
+            cidr_deny: vec![
+                "10.0.0.0/8".into(),
+                "172.16.0.0/12".into(),
+                "192.168.0.0/16".into(),
+            ],
+            deny_localhost: true,
+            deny_private_ranges: true,
+            deny_tailnet_ranges: true,
+            require_sni: true,
+            spki_pins: vec![],
+            deny_ip_literals: true,
+            require_host_canonicalization: false,
+            dns_max_ips: 16,
+            max_redirects: 5,
+            connect_timeout_ms: 10_000,
+            total_timeout_ms: 60_000,
+            max_response_bytes: 10_485_760,
+        };
+        assert!(nc.validate().is_ok());
+    }
+
+    // ── validate_host_allow_entry edge cases ─────────────────────────
+
+    #[test]
+    fn host_allow_ipv6_loopback_denied() {
+        let err = validate_host_allow_entry("::1", true, false).unwrap_err();
+        assert!(err.to_string().contains("IP literals"));
+    }
+
+    #[test]
+    fn host_allow_wildcard_four_labels() {
+        // *.sub.example.com has 4 parts → valid
+        assert!(validate_host_allow_entry("*.sub.example.com", false, false).is_ok());
+    }
+
+    #[test]
+    fn host_allow_valid_lowercase_with_canonicalization() {
+        assert!(validate_host_allow_entry("api.example.com", true, true).is_ok());
+    }
+
+    #[test]
+    fn host_allow_mixed_case_rejected_with_canonicalization() {
+        let err = validate_host_allow_entry("Api.Example.Com", false, true).unwrap_err();
+        assert!(err.to_string().contains("lowercase"));
+    }
+
+    #[test]
+    fn host_allow_hyphenated_hostname_valid() {
+        assert!(validate_host_allow_entry("my-api.example.com", false, false).is_ok());
+    }
+
+    // ── lint_capability_id extended ──────────────────────────────────
+
+    #[test]
+    fn lint_allows_numeric_segments_less_than_four() {
+        // Only three consecutive numeric segments should pass
+        assert!(
+            lint_capability_id_no_network_addressing("v.1.2.label", "capabilities.required")
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn lint_allows_colon_followed_by_text() {
+        assert!(
+            lint_capability_id_no_network_addressing("scope:action", "capabilities.required")
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn lint_allows_empty_string() {
+        // Empty string should pass lint (validation of the ID itself is separate)
+        assert!(
+            lint_capability_id_no_network_addressing("", "capabilities.required").is_ok()
+        );
+    }
+
+    #[test]
+    fn lint_port_boundary_two_digits() {
+        // 2-digit port like :80 should be flagged
+        let err =
+            lint_capability_id_no_network_addressing("service:80", "capabilities.required");
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn lint_port_boundary_five_digits() {
+        // 5-digit port like :12345 should be flagged
+        let err =
+            lint_capability_id_no_network_addressing("service:12345", "capabilities.required");
+        assert!(err.is_err());
+    }
+
+    // ── parse_rate_limit_shorthand edge cases ────────────────────────
+
+    #[test]
+    fn parse_rate_limit_shorthand_zero_max_works() {
+        let rl = parse_rate_limit_shorthand("0/min").unwrap();
+        assert_eq!(rl.max, 0);
+        assert_eq!(rl.per_ms, 60_000);
+    }
+
+    #[test]
+    fn parse_rate_limit_shorthand_large_max_works() {
+        let rl = parse_rate_limit_shorthand("4294967295/sec").unwrap();
+        assert_eq!(rl.max, u32::MAX);
+        assert_eq!(rl.per_ms, 1_000);
+    }
+
+    #[test]
+    fn parse_rate_limit_shorthand_burst_and_scope_none() {
+        let rl = parse_rate_limit_shorthand("10/hour").unwrap();
+        assert!(rl.burst.is_none());
+        assert!(rl.scope.is_none());
+        assert!(rl.pool_name.is_none());
+    }
+
+    #[test]
+    fn parse_rate_limit_shorthand_negative_rejected() {
+        let err = parse_rate_limit_shorthand("-1/min");
+        assert!(err.is_err());
+    }
+
+    // ── ManifestSection validation extended ──────────────────────────
+
+    #[test]
+    fn manifest_section_schema_version_1_rejected() {
+        let placeholder = format!("blake3-256:{INTERFACE_HASH_DOMAIN}:{}", "0".repeat(64));
+        let toml = test_manifest_toml(&placeholder)
+            .replace("schema_version = \"2.1\"", "schema_version = \"1.0\"");
+        let m = ConnectorManifest::parse_str_unchecked(&toml).unwrap();
+        let err = m.validate().unwrap_err();
+        assert!(err.to_string().contains("schema"));
+    }
+
+    #[test]
+    fn manifest_section_max_datagram_u16_max_valid() {
+        let placeholder = format!("blake3-256:{INTERFACE_HASH_DOMAIN}:{}", "0".repeat(64));
+        let toml = test_manifest_toml(&placeholder)
+            .replace("max_datagram_bytes = 1200", "max_datagram_bytes = 65535");
+        let m = ConnectorManifest::parse_str_unchecked(&toml).unwrap();
+        // This will fail on hash mismatch but the ManifestSection validation itself should pass
+        let hash = m.compute_interface_hash().unwrap();
+        let with_hash = test_manifest_toml(&hash.to_string())
+            .replace("max_datagram_bytes = 1200", "max_datagram_bytes = 65535");
+        let parsed = ConnectorManifest::parse_str(&with_hash).unwrap();
+        assert_eq!(parsed.manifest.max_datagram_bytes, 65535);
+    }
+
+    // ── ConnectorManifest parse edge cases ───────────────────────────
+
+    #[test]
+    fn parse_str_empty_toml_fails() {
+        let err = ConnectorManifest::parse_str("").unwrap_err();
+        assert!(matches!(err, ManifestError::Toml(_)));
+    }
+
+    #[test]
+    fn parse_str_unchecked_empty_toml_fails() {
+        let err = ConnectorManifest::parse_str_unchecked("").unwrap_err();
+        assert!(matches!(err, ManifestError::Toml(_)));
+    }
+
+    #[test]
+    fn parse_str_random_toml_fails() {
+        let err = ConnectorManifest::parse_str("[foo]\nbar = 42").unwrap_err();
+        assert!(matches!(err, ManifestError::Toml(_)));
+    }
+
+    #[test]
+    fn parse_str_unchecked_valid_then_validate_fails_hash_mismatch() {
+        let placeholder = format!("blake3-256:{INTERFACE_HASH_DOMAIN}:{}", "0".repeat(64));
+        let m = ConnectorManifest::parse_str_unchecked(&test_manifest_toml(&placeholder)).unwrap();
+        let err = m.validate().unwrap_err();
+        assert!(matches!(err, ManifestError::InterfaceHashMismatch { .. }));
+    }
+
+    // ── ConnectorManifest with computed hash full validation ─────────
+
+    #[test]
+    fn manifest_full_validation_with_correct_hash() {
+        let placeholder = format!("blake3-256:{INTERFACE_HASH_DOMAIN}:{}", "0".repeat(64));
+        let m = ConnectorManifest::parse_str_unchecked(&test_manifest_toml(&placeholder)).unwrap();
+        let hash = m.compute_interface_hash().unwrap();
+        let result = ConnectorManifest::parse_str(&test_manifest_toml(&hash.to_string()));
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn manifest_compute_hash_is_deterministic() {
+        let placeholder = format!("blake3-256:{INTERFACE_HASH_DOMAIN}:{}", "0".repeat(64));
+        let m = ConnectorManifest::parse_str_unchecked(&test_manifest_toml(&placeholder)).unwrap();
+        let h1 = m.compute_interface_hash().unwrap();
+        let h2 = m.compute_interface_hash().unwrap();
+        assert_eq!(h1, h2);
+    }
+
+    // ── EventSection edge cases ──────────────────────────────────────
+
+    #[test]
+    fn event_section_empty_description() {
+        let section: EventSection = serde_json::from_value(json!({
+            "description": ""
+        }))
+        .unwrap();
+        assert!(section.description.is_empty());
+    }
+
+    #[test]
+    fn event_section_schema_with_nested_object() {
+        let section: EventSection = serde_json::from_value(json!({
+            "description": "Complex event",
+            "schema": {
+                "type": "object",
+                "properties": {
+                    "id": {"type": "integer"},
+                    "data": {"type": "array", "items": {"type": "string"}}
+                }
+            }
+        }))
+        .unwrap();
+        assert!(section.schema.is_some());
+        let schema = section.schema.unwrap();
+        assert!(schema.get("properties").is_some());
+    }
+
+    // ── SignaturesSection edge cases ─────────────────────────────────
+
+    #[test]
+    fn signatures_section_threshold_with_exactly_k_sigs() {
+        let section = SignaturesSection {
+            publisher_signatures: vec![
+                SignatureEntry {
+                    kid: "k1".into(),
+                    sig: Base64Bytes(vec![1]),
+                },
+                SignatureEntry {
+                    kid: "k2".into(),
+                    sig: Base64Bytes(vec![2]),
+                },
+                SignatureEntry {
+                    kid: "k3".into(),
+                    sig: Base64Bytes(vec![3]),
+                },
+            ],
+            publisher_threshold: Some(SignatureThreshold { k: 3, n: 5 }),
+            registry_signature: None,
+            transparency_log_entry: None,
+        };
+        assert!(section.validate().is_ok());
+    }
+
+    #[test]
+    fn signatures_section_threshold_with_excess_sigs() {
+        let section = SignaturesSection {
+            publisher_signatures: vec![
+                SignatureEntry {
+                    kid: "k1".into(),
+                    sig: Base64Bytes(vec![1]),
+                },
+                SignatureEntry {
+                    kid: "k2".into(),
+                    sig: Base64Bytes(vec![2]),
+                },
+                SignatureEntry {
+                    kid: "k3".into(),
+                    sig: Base64Bytes(vec![3]),
+                },
+                SignatureEntry {
+                    kid: "k4".into(),
+                    sig: Base64Bytes(vec![4]),
+                },
+            ],
+            publisher_threshold: Some(SignatureThreshold { k: 2, n: 4 }),
+            registry_signature: None,
+            transparency_log_entry: None,
+        };
+        assert!(section.validate().is_ok());
+    }
+
+    // ── SupplyChainSection edge cases ────────────────────────────────
+
+    #[test]
+    fn supply_chain_section_single_attestation() {
+        let oid = ObjectIdRef::try_from("objectid:".to_string() + &"11".repeat(32)).unwrap();
+        let section = SupplyChainSection {
+            attestations: vec![SupplyChainAttestationRef {
+                attestation_type: AttestationType::CodeReview,
+                object_id: oid,
+            }],
+        };
+        assert!(section.validate().is_ok());
+    }
+
+    #[test]
+    fn supply_chain_section_all_attestation_types() {
+        let section = SupplyChainSection {
+            attestations: vec![
+                SupplyChainAttestationRef {
+                    attestation_type: AttestationType::InToto,
+                    object_id: ObjectIdRef::try_from(
+                        "objectid:".to_string() + &"11".repeat(32),
+                    )
+                    .unwrap(),
+                },
+                SupplyChainAttestationRef {
+                    attestation_type: AttestationType::ReproducibleBuild,
+                    object_id: ObjectIdRef::try_from(
+                        "objectid:".to_string() + &"22".repeat(32),
+                    )
+                    .unwrap(),
+                },
+                SupplyChainAttestationRef {
+                    attestation_type: AttestationType::CodeReview,
+                    object_id: ObjectIdRef::try_from(
+                        "objectid:".to_string() + &"33".repeat(32),
+                    )
+                    .unwrap(),
+                },
+            ],
+        };
+        assert!(section.validate().is_ok());
+    }
+
+    // ── ManifestError variant coverage ───────────────────────────────
+
+    #[test]
+    fn manifest_error_is_send() {
+        fn assert_send<T: Send>() {}
+        assert_send::<ManifestError>();
+    }
+
+    #[test]
+    fn manifest_error_toml_variant_source() {
+        use std::error::Error;
+        let err: ManifestError = toml::from_str::<ConnectorManifest>("invalid").unwrap_err().into();
+        // The Toml variant should have a source
+        assert!(err.source().is_some());
+    }
+
+    // ── ConnectorStateSection edge cases ─────────────────────────────
+
+    #[test]
+    fn state_section_with_all_optional_fields() {
+        let section: ConnectorStateSection = serde_json::from_value(json!({
+            "model": "crdt",
+            "state_schema_version": "2.0",
+            "migration_hint": "merge-and-compact",
+            "crdt_type": "pn_counter",
+            "snapshot_every_updates": 1000,
+            "snapshot_every_bytes": 1_048_576
+        }))
+        .unwrap();
+        assert_eq!(section.state_schema_version, "2.0");
+        assert_eq!(section.migration_hint.as_deref(), Some("merge-and-compact"));
+        assert_eq!(section.snapshot_every_updates, Some(1000));
+        assert_eq!(section.snapshot_every_bytes, Some(1_048_576));
+        let model = section.to_state_model().unwrap();
+        assert_eq!(model.crdt_type(), Some(ConnectorCrdtType::PnCounter));
+    }
+
+    #[test]
+    fn state_section_singleton_writer_to_model() {
+        let section: ConnectorStateSection = serde_json::from_value(json!({
+            "model": "singleton_writer",
+            "state_schema_version": "1.0",
+            "migration_hint": "reindex"
+        }))
+        .unwrap();
+        let model = section.to_state_model().unwrap();
+        assert!(model.is_singleton_writer());
+        assert!(model.crdt_type().is_none());
+    }
+
+    // ── ProvidesSection with events ──────────────────────────────────
+
+    #[test]
+    fn provides_section_events_serde() {
+        let section: ProvidesSection = serde_json::from_value(json!({
+            "operations": {
+                "test_op": {
+                    "description": "A test operation",
+                    "capability": "test.op",
+                    "risk_level": "low",
+                    "safety_tier": "safe",
+                    "requires_approval": "none",
+                    "rate_limit": null,
+                    "idempotency": "strict",
+                    "input_schema": {"type": "object"},
+                    "output_schema": {"type": "object"}
+                }
+            },
+            "events": {
+                "test_event": {
+                    "description": "A test event",
+                    "streaming": true,
+                    "replay": false,
+                    "topic": "events.test"
+                }
+            }
+        }))
+        .unwrap();
+        assert_eq!(section.operations.len(), 1);
+        assert_eq!(section.events.len(), 1);
+        assert!(section.events.contains_key("test_event"));
+    }
+
+    // ── RateLimit structured form edge cases ─────────────────────────
+
+    #[test]
+    fn rate_limit_structured_with_scope_and_pool() {
+        let rl: RateLimit = serde_json::from_value(json!({
+            "max": 50,
+            "per_ms": 30000,
+            "burst": 10,
+            "scope": "credential",
+            "pool_name": "shared_pool"
+        }))
+        .unwrap();
+        assert_eq!(rl.as_inner().max, 50);
+        assert_eq!(rl.as_inner().per_ms, 30_000);
+        assert_eq!(rl.as_inner().burst, Some(10));
+    }
+
+    #[test]
+    fn rate_limit_serialize_then_deserialize_preserves_values() {
+        let rl: RateLimit = serde_json::from_str("\"100/min\"").unwrap();
+        let json = serde_json::to_string(&rl).unwrap();
+        // After serialization from shorthand, it becomes structured
+        let reparsed: RateLimit = serde_json::from_str(&json).unwrap();
+        assert_eq!(reparsed.as_inner().max, rl.as_inner().max);
+        assert_eq!(reparsed.as_inner().per_ms, rl.as_inner().per_ms);
+    }
 }

@@ -856,4 +856,79 @@ mod tests {
         // reset_after should be between 0 and window
         assert!(state.reset_after <= Duration::from_secs(60));
     }
+
+    // ── Additional SlidingWindow sync tests ─────────────────────────────
+
+    #[test]
+    fn sliding_window_cleanup_empty_timestamps() {
+        let limiter = SlidingWindow::new(10, Duration::from_secs(60));
+        let mut timestamps = limiter.timestamps.lock();
+        let now = std::time::Instant::now();
+        limiter.cleanup_locked(&mut timestamps, now);
+        assert!(timestamps.is_empty());
+        drop(timestamps);
+    }
+
+    #[test]
+    fn sliding_window_state_is_limited_when_zero_limit() {
+        let limiter = SlidingWindow::new(0, Duration::from_secs(1));
+        let state = limiter.state();
+        assert_eq!(state.limit, 0);
+        assert_eq!(state.remaining, 0);
+        assert!(state.is_limited);
+    }
+
+    #[test]
+    fn sliding_window_calculate_remaining_empty() {
+        let limiter = SlidingWindow::new(50, Duration::from_secs(10));
+        assert_eq!(limiter.calculate_remaining(), 50);
+    }
+
+    #[test]
+    fn sliding_window_zero_window() {
+        let limiter = SlidingWindow::new(5, Duration::ZERO);
+        assert_eq!(limiter.window, Duration::ZERO);
+        // With zero window, all timestamps expire immediately
+    }
+
+    // ── Additional FixedWindow sync tests ───────────────────────────────
+
+    #[test]
+    fn fixed_window_state_is_limited_when_zero_limit() {
+        let limiter = FixedWindow::new(0, Duration::from_secs(1));
+        let state = limiter.state();
+        assert_eq!(state.limit, 0);
+        assert_eq!(state.remaining, 0);
+        assert!(state.is_limited);
+    }
+
+    #[test]
+    fn fixed_window_zero_window() {
+        let limiter = FixedWindow::new(5, Duration::ZERO);
+        assert_eq!(limiter.window, Duration::ZERO);
+    }
+
+    #[test]
+    fn fixed_window_state_limit_matches_constructor() {
+        let limiter = FixedWindow::new(42, Duration::from_secs(7));
+        assert_eq!(limiter.state().limit, 42);
+    }
+
+    #[test]
+    fn sliding_window_state_limit_matches_constructor() {
+        let limiter = SlidingWindow::new(77, Duration::from_secs(15));
+        assert_eq!(limiter.state().limit, 77);
+    }
+
+    #[test]
+    fn fixed_window_remaining_starts_at_limit_sync() {
+        let limiter = FixedWindow::new(99, Duration::from_secs(60));
+        assert_eq!(limiter.remaining(), 99);
+    }
+
+    #[test]
+    fn sliding_window_remaining_matches_calculate() {
+        let limiter = SlidingWindow::new(25, Duration::from_secs(30));
+        assert_eq!(limiter.remaining(), limiter.calculate_remaining());
+    }
 }

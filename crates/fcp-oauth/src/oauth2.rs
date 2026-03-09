@@ -1935,4 +1935,198 @@ mod tests {
         assert!(!state.contains('+'));
         assert!(!state.contains('/'));
     }
+
+    // ── New batch: OAuth2Config edge cases ──
+
+    #[test]
+    fn test_config_empty_client_id() {
+        let config = OAuth2Config::new(
+            "",
+            "secret",
+            "https://auth.example.com/authorize",
+            "https://auth.example.com/token",
+        );
+        assert!(config.client_id.is_empty());
+    }
+
+    #[test]
+    fn test_config_empty_client_secret() {
+        let config = OAuth2Config::new(
+            "id",
+            "",
+            "https://auth.example.com/authorize",
+            "https://auth.example.com/token",
+        );
+        assert_eq!(config.client_secret, Some(String::new()));
+    }
+
+    #[test]
+    fn test_config_unicode_client_id() {
+        let config = OAuth2Config::new(
+            "client_\u{00e9}tranger",
+            "secret",
+            "https://auth.example.com/authorize",
+            "https://auth.example.com/token",
+        );
+        assert_eq!(config.client_id, "client_\u{00e9}tranger");
+    }
+
+    #[test]
+    fn test_authorization_url_with_unicode_scope() {
+        let config = test_config();
+        let client = OAuth2Client::new(config).unwrap();
+        let (url, _) = client.authorization_url(&["read", "profil\u{00e9}"]).unwrap();
+        assert!(url.contains("scope=read"));
+    }
+
+    #[test]
+    fn test_config_debug_contains_all_key_fields() {
+        let config = test_config()
+            .with_scopes(vec!["admin".into()])
+            .with_auth_param("prompt", "login")
+            .with_token_param("audience", "api");
+        let debug = format!("{config:?}");
+        assert!(debug.contains("client_id"));
+        assert!(debug.contains("authorization_url"));
+        assert!(debug.contains("token_url"));
+        assert!(debug.contains("use_pkce"));
+    }
+
+    // ── New batch: AuthorizationCallback advanced ──
+
+    #[test]
+    fn test_callback_from_query_with_all_fields() {
+        let callback = AuthorizationCallback::from_query(
+            "code=c&state=s&error=e&error_description=d&error_uri=https://err.com",
+        )
+        .unwrap();
+        assert_eq!(callback.code, Some("c".to_string()));
+        assert_eq!(callback.state, Some("s".to_string()));
+        assert_eq!(callback.error, Some("e".to_string()));
+        assert_eq!(callback.error_description, Some("d".to_string()));
+        assert_eq!(callback.error_uri, Some("https://err.com".to_string()));
+    }
+
+    #[test]
+    fn test_callback_validate_error_with_uri_propagates() {
+        let callback = AuthorizationCallback {
+            code: None,
+            state: Some("s".into()),
+            error: Some("invalid_scope".into()),
+            error_description: Some("Bad scope".into()),
+            error_uri: Some("https://docs.example.com/scopes".into()),
+        };
+        let err = callback.validate("s").unwrap_err();
+        if let OAuthError::AuthorizationError {
+            error,
+            description,
+            error_uri,
+        } = err
+        {
+            assert_eq!(error, "invalid_scope");
+            assert_eq!(description, "Bad scope");
+            assert_eq!(
+                error_uri,
+                Some("https://docs.example.com/scopes".to_string())
+            );
+        } else {
+            panic!("Expected AuthorizationError");
+        }
+    }
+
+    #[test]
+    fn test_callback_from_url_with_multiple_query_params() {
+        let callback = AuthorizationCallback::from_url(
+            "https://localhost/cb?code=xyz&state=abc&extra=ignored",
+        )
+        .unwrap();
+        assert_eq!(callback.code, Some("xyz".to_string()));
+        assert_eq!(callback.state, Some("abc".to_string()));
+    }
+
+    #[test]
+    fn test_callback_clone_independence() {
+        let callback = AuthorizationCallback {
+            code: Some("orig_code".into()),
+            state: Some("orig_state".into()),
+            error: None,
+            error_description: None,
+            error_uri: None,
+        };
+        let cloned = callback.clone();
+        assert_eq!(callback.code, cloned.code);
+        assert_eq!(callback.state, cloned.state);
+        // Validate original still works after clone
+        let code = callback.validate("orig_state").unwrap();
+        assert_eq!(code, "orig_code");
+    }
+
+    // ── New batch: generate_state properties ──
+
+    #[test]
+    fn test_generate_state_ten_calls_all_unique() {
+        let states: Vec<String> = (0..10).map(|_| generate_state()).collect();
+        for i in 0..states.len() {
+            for j in (i + 1)..states.len() {
+                assert_ne!(states[i], states[j], "duplicate at {i} and {j}");
+            }
+        }
+    }
+
+    // ── New batch: OAuth2Client validation ──
+
+    #[test]
+    fn test_client_accepts_localhost_urls() {
+        let config = OAuth2Config::new(
+            "id",
+            "secret",
+            "http://localhost:8080/authorize",
+            "http://localhost:8080/token",
+        );
+        assert!(OAuth2Client::new(config).is_ok());
+    }
+
+    #[test]
+    fn test_client_accepts_ip_urls() {
+        let config = OAuth2Config::new(
+            "id",
+            "secret",
+            "http://127.0.0.1:9090/authorize",
+            "http://127.0.0.1:9090/token",
+        );
+        assert!(OAuth2Client::new(config).is_ok());
+    }
+
+    #[test]
+    fn test_client_rejects_empty_authorization_url() {
+        let config = OAuth2Config::new(
+            "id",
+            "secret",
+            "",
+            "https://auth.example.com/token",
+        );
+        let result = OAuth2Client::new(config);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_client_rejects_empty_token_url() {
+        let config = OAuth2Config::new(
+            "id",
+            "secret",
+            "https://auth.example.com/authorize",
+            "",
+        );
+        let result = OAuth2Client::new(config);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_authorization_url_default_scopes_only() {
+        let config = test_config().with_scopes(vec!["default_scope".into()]);
+        let client = OAuth2Client::new(config).unwrap();
+        // No additional scopes passed
+        let (url, _) = client.authorization_url(&[]).unwrap();
+        assert!(url.contains("scope=default_scope"));
+    }
 }

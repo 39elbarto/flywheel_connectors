@@ -528,4 +528,72 @@ mod tests {
 
         assert_eq!(&full[..MAC_SIZE], &truncated);
     }
+
+    // ---- Blake3Mac compute deterministic ----
+
+    #[test]
+    fn blake3_mac_compute_deterministic() {
+        let key = MacKey::from_bytes([0x55; MAC_KEY_SIZE]);
+        let mac = Blake3Mac::new(&key);
+        let tag1 = mac.compute(b"determinism test");
+        let tag2 = mac.compute(b"determinism test");
+        assert_eq!(tag1, tag2);
+    }
+
+    // ---- Incremental MAC no updates ----
+
+    #[test]
+    fn incremental_mac_no_updates_equals_empty_message() {
+        let key = MacKey::generate();
+        let one_shot = blake3_mac(&key, b"");
+        let inc = IncrementalMac::new(&key);
+        let incremental = inc.finalize();
+        assert_eq!(one_shot, incremental);
+    }
+
+    // ---- Incremental MAC full no updates ----
+
+    #[test]
+    fn incremental_mac_full_no_updates() {
+        let key = MacKey::generate();
+        let one_shot = blake3_mac_full(&key, b"");
+        let inc = IncrementalMac::new(&key);
+        let incremental = inc.finalize_full();
+        assert_eq!(one_shot, incremental);
+    }
+
+    // ---- MacKey try_from_slice exact size ----
+
+    #[test]
+    fn mac_key_try_from_slice_exact() {
+        let bytes = [0x77; MAC_KEY_SIZE];
+        let key = MacKey::try_from_slice(&bytes).unwrap();
+        // Use the key to verify it works
+        let tag = blake3_mac(&key, b"exact");
+        assert_eq!(tag.len(), MAC_SIZE);
+    }
+
+    // ---- MAC verify with bit-flipped tag ----
+
+    #[test]
+    fn mac_verify_single_bit_flip_fails() {
+        let key = MacKey::generate();
+        let mut tag = blake3_mac(&key, b"bit flip test");
+        tag[0] ^= 1; // flip one bit
+        let result = blake3_mac_verify(&key, b"bit flip test", &tag);
+        assert!(matches!(
+            result,
+            Err(CryptoError::SignatureVerificationFailed)
+        ));
+    }
+
+    // ---- Unicode message MAC ----
+
+    #[test]
+    fn mac_unicode_message_roundtrip() {
+        let key = MacKey::generate();
+        let message = "émoji: 🔑 clé".as_bytes();
+        let tag = blake3_mac(&key, message);
+        assert!(blake3_mac_verify(&key, message, &tag).is_ok());
+    }
 }

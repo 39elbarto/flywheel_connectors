@@ -1119,4 +1119,232 @@ mod tests {
         assert!(d >= Duration::from_secs(1));
         assert!(d <= Duration::from_secs(10));
     }
+
+    // ── Additional ExponentialBackoff edge cases ─────────────────────────
+
+    #[test]
+    fn exponential_backoff_zero_initial() {
+        let mut backoff = ExponentialBackoff::new(Duration::ZERO, Duration::from_secs(60))
+            .with_jitter(None);
+        // 0 * 2^n = 0 for any n
+        for attempt in 0..10 {
+            assert_eq!(backoff.next_backoff(attempt), Duration::ZERO);
+        }
+    }
+
+    #[test]
+    fn exponential_backoff_zero_max() {
+        let mut backoff = ExponentialBackoff::new(Duration::from_secs(1), Duration::ZERO)
+            .with_jitter(None);
+        // Everything is capped to 0
+        assert_eq!(backoff.next_backoff(0), Duration::ZERO);
+        assert_eq!(backoff.next_backoff(5), Duration::ZERO);
+    }
+
+    #[test]
+    fn exponential_backoff_fractional_multiplier() {
+        let mut backoff = ExponentialBackoff::new(Duration::from_secs(10), Duration::from_secs(100))
+            .with_multiplier(0.5)
+            .with_jitter(None);
+        // 10 * 0.5^1 = 5, 10 * 0.5^2 = 2.5, etc — decreasing
+        let d0 = backoff.next_backoff(0);
+        let d1 = backoff.next_backoff(1);
+        let d2 = backoff.next_backoff(2);
+        assert_eq!(d0, Duration::from_secs(10));
+        assert_eq!(d1, Duration::from_secs(5));
+        assert!(d2 < d1);
+    }
+
+    #[test]
+    fn exponential_backoff_debug_contains_multiplier() {
+        let backoff = ExponentialBackoff::default();
+        let dbg = format!("{backoff:?}");
+        assert!(dbg.contains("multiplier"));
+        assert!(dbg.contains("jitter"));
+    }
+
+    #[test]
+    fn exponential_backoff_jitter_zero_means_no_jitter_effect() {
+        // jitter=0.0 means factor is in [1.0, 1.0), so deterministic
+        let mut backoff = ExponentialBackoff::new(Duration::from_secs(1), Duration::from_secs(60))
+            .with_jitter(Some(0.0));
+        let d = backoff.next_backoff(0);
+        assert_eq!(d, Duration::from_secs(1));
+    }
+
+    #[test]
+    fn exponential_backoff_clone_box_produces_same_deterministic_results() {
+        let backoff = ExponentialBackoff::new(Duration::from_secs(1), Duration::from_secs(60))
+            .with_jitter(None);
+        let mut boxed = backoff.clone_box();
+        // Should produce same deterministic results
+        assert_eq!(boxed.next_backoff(0), Duration::from_secs(1));
+        assert_eq!(boxed.next_backoff(1), Duration::from_secs(2));
+    }
+
+    // ── Additional DecorrelatedJitter tests ──────────────────────────────
+
+    #[test]
+    fn decorrelated_jitter_equal_base_and_max() {
+        let mut backoff = DecorrelatedJitter::new(Duration::from_secs(5), Duration::from_secs(5));
+        for i in 0..10 {
+            let d = backoff.next_backoff(i);
+            assert_eq!(d, Duration::from_secs(5));
+        }
+    }
+
+    #[test]
+    fn decorrelated_jitter_clone_box_independent_state() {
+        let mut original = DecorrelatedJitter::new(Duration::from_secs(1), Duration::from_secs(30));
+        original.next_backoff(0);
+        let mut boxed = original.clone_box();
+        // boxed should produce valid results independently
+        let d = boxed.next_backoff(0);
+        assert!(d >= Duration::from_secs(1));
+        assert!(d <= Duration::from_secs(30));
+    }
+
+    #[test]
+    fn decorrelated_jitter_debug_contains_base() {
+        let backoff = DecorrelatedJitter::new(Duration::from_millis(100), Duration::from_secs(10));
+        let dbg = format!("{backoff:?}");
+        assert!(dbg.contains("base"));
+        assert!(dbg.contains("max"));
+    }
+
+    // ── Additional LinearBackoff tests ───────────────────────────────────
+
+    #[test]
+    fn linear_backoff_large_increment() {
+        let mut backoff = LinearBackoff::new(
+            Duration::from_millis(100),
+            Duration::from_secs(100),
+            Duration::from_secs(50),
+        );
+        // attempt=0: 100ms, attempt=1: 100ms + 100s = capped at 50s
+        assert_eq!(backoff.next_backoff(0), Duration::from_millis(100));
+        assert_eq!(backoff.next_backoff(1), Duration::from_secs(50));
+    }
+
+    #[test]
+    fn linear_backoff_max_equals_initial() {
+        let mut backoff = LinearBackoff::new(
+            Duration::from_secs(5),
+            Duration::from_secs(1),
+            Duration::from_secs(5),
+        );
+        assert_eq!(backoff.next_backoff(0), Duration::from_secs(5));
+        assert_eq!(backoff.next_backoff(1), Duration::from_secs(5)); // capped
+    }
+
+    #[test]
+    fn linear_backoff_clone_box_works() {
+        let backoff = LinearBackoff::new(
+            Duration::from_secs(1),
+            Duration::from_secs(1),
+            Duration::from_secs(10),
+        );
+        let mut boxed = backoff.clone_box();
+        assert_eq!(boxed.next_backoff(0), Duration::from_secs(1));
+        assert_eq!(boxed.next_backoff(2), Duration::from_secs(3));
+    }
+
+    // ── Additional ConstantBackoff tests ─────────────────────────────────
+
+    #[test]
+    fn constant_backoff_millis_precision() {
+        let mut backoff = ConstantBackoff::new(Duration::from_millis(250));
+        assert_eq!(backoff.next_backoff(0), Duration::from_millis(250));
+        assert_eq!(backoff.next_backoff(99), Duration::from_millis(250));
+    }
+
+    #[test]
+    fn constant_backoff_clone_box_returns_same_delay() {
+        let backoff = ConstantBackoff::new(Duration::from_secs(7));
+        let mut boxed = backoff.clone_box();
+        assert_eq!(boxed.next_backoff(0), Duration::from_secs(7));
+    }
+
+    // ── Additional NoBackoff tests ──────────────────────────────────────
+
+    #[test]
+    fn no_backoff_is_default() {
+        let backoff = NoBackoff;
+        let dbg = format!("{backoff:?}");
+        assert!(dbg.contains("NoBackoff"));
+    }
+
+    #[test]
+    fn no_backoff_clone_box_returns_zero() {
+        let backoff = NoBackoff;
+        let mut boxed = backoff.clone_box();
+        assert_eq!(boxed.next_backoff(0), Duration::ZERO);
+        assert_eq!(boxed.next_backoff(u32::MAX), Duration::ZERO);
+    }
+
+    // ── Additional RetryConfig tests ────────────────────────────────────
+
+    #[test]
+    fn retry_config_clone_with_linear_backoff() {
+        let original = RetryConfig::new(
+            5,
+            LinearBackoff::new(
+                Duration::from_millis(100),
+                Duration::from_millis(50),
+                Duration::from_secs(1),
+            ),
+        )
+        .with_max_total_time(Duration::from_secs(30));
+        let mut cloned = original.clone();
+        assert_eq!(cloned.max_retries, 5);
+        assert_eq!(cloned.max_total_time, Some(Duration::from_secs(30)));
+        // Linear backoff should work through cloned box
+        assert_eq!(cloned.next_backoff(0), Duration::from_millis(100));
+        assert_eq!(cloned.next_backoff(1), Duration::from_millis(150));
+        // Original is still accessible after clone
+        assert_eq!(original.max_retries, 5);
+    }
+
+    #[test]
+    fn retry_config_max_retries_u32_max() {
+        let config = RetryConfig::new(u32::MAX, NoBackoff);
+        assert_eq!(config.max_retries, u32::MAX);
+    }
+
+    #[test]
+    fn retry_config_max_total_time_zero() {
+        let config = RetryConfig::new(3, NoBackoff).with_max_total_time(Duration::ZERO);
+        assert_eq!(config.max_total_time, Some(Duration::ZERO));
+    }
+
+    #[test]
+    fn retry_config_debug_without_max_total_time() {
+        let config = RetryConfig::new(5, ConstantBackoff::new(Duration::from_secs(1)));
+        let dbg = format!("{config:?}");
+        assert!(dbg.contains("max_retries"));
+        assert!(dbg.contains("max_total_time"));
+    }
+
+    #[test]
+    fn retry_config_reset_with_no_backoff() {
+        let mut config = RetryConfig::new(3, NoBackoff);
+        config.reset();
+        assert_eq!(config.next_backoff(0), Duration::ZERO);
+    }
+
+    #[test]
+    fn retry_config_next_backoff_respects_attempt_number() {
+        let mut config = RetryConfig::new(
+            10,
+            LinearBackoff::new(
+                Duration::from_secs(1),
+                Duration::from_secs(1),
+                Duration::from_secs(20),
+            ),
+        );
+        // Linear: initial + increment * attempt
+        assert_eq!(config.next_backoff(0), Duration::from_secs(1));
+        assert_eq!(config.next_backoff(4), Duration::from_secs(5));
+        assert_eq!(config.next_backoff(9), Duration::from_secs(10));
+    }
 }

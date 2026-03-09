@@ -762,4 +762,177 @@ mod tests {
         let err = TailscaleError::InvalidZoneId(String::new());
         assert_eq!(err.to_string(), "invalid zone ID format: ");
     }
+
+    // --- Error variant: Display contains expected substrings ---
+
+    #[test]
+    fn error_display_local_api_request_with_special_chars() {
+        let err = TailscaleError::LocalApiRequest("ECONNREFUSED 127.0.0.1:8080".to_string());
+        let display = err.to_string();
+        assert!(display.contains("ECONNREFUSED"));
+        assert!(display.contains("127.0.0.1"));
+    }
+
+    #[test]
+    fn error_display_parse_error_empty() {
+        let err = TailscaleError::ParseError(String::new());
+        assert_eq!(
+            err.to_string(),
+            "failed to parse `LocalAPI` response: "
+        );
+    }
+
+    #[test]
+    fn error_display_local_api_error_empty() {
+        let err = TailscaleError::LocalApiError(String::new());
+        assert_eq!(err.to_string(), "`LocalAPI` error: ");
+    }
+
+    // --- from_async_error: message is always wrapped in LocalApiRequest ---
+
+    #[test]
+    fn from_async_error_protocol_io_message_preserved() {
+        let async_err = AsyncError::ProtocolIo {
+            message: "TLS handshake failed".to_string(),
+        };
+        let err = TailscaleError::from_async_error(async_err, Duration::from_millis(500));
+        assert!(matches!(err, TailscaleError::LocalApiRequest(_)));
+        assert!(err.to_string().contains("TLS handshake failed"));
+    }
+
+    #[test]
+    fn from_async_error_join_message_preserved() {
+        let async_err = AsyncError::Join {
+            message: "panic in worker".to_string(),
+        };
+        let err = TailscaleError::from_async_error(async_err, Duration::from_millis(100));
+        assert!(err.to_string().contains("panic in worker"));
+    }
+
+    // --- Error: multiple Display calls return same result ---
+
+    #[test]
+    fn error_display_stable_for_peer_not_found() {
+        let err = TailscaleError::PeerNotFound("10.0.0.1".to_string());
+        let d1 = err.to_string();
+        let d2 = err.to_string();
+        let d3 = err.to_string();
+        assert_eq!(d1, d2);
+        assert_eq!(d2, d3);
+    }
+
+    // --- TailscaleResult with nested Result ---
+
+    #[test]
+    fn tailscale_result_map_err() {
+        let result: TailscaleResult<u32> = Err(TailscaleError::NotConnected);
+        let mapped = result.map_err(|e| format!("wrapped: {e}"));
+        assert!(mapped.is_err());
+        assert!(mapped.unwrap_err().contains("not connected"));
+    }
+
+    // --- Error Debug output consistency ---
+
+    #[test]
+    fn error_debug_not_connected_stable() {
+        let err = TailscaleError::NotConnected;
+        let d1 = format!("{err:?}");
+        let d2 = format!("{err:?}");
+        assert_eq!(d1, d2);
+    }
+
+    // --- Error: from_async_error timeout uses duration parameter not async timeout_ms ---
+
+    #[test]
+    fn from_async_error_timeout_uses_duration_param() {
+        // The error message uses the `timeout` Duration, not the AsyncError's timeout_ms
+        let async_err = AsyncError::Timeout { timeout_ms: 100 };
+        let err = TailscaleError::from_async_error(async_err, Duration::from_millis(999));
+        assert!(err.to_string().contains("999ms"));
+    }
+
+    // --- Error: from_async_error runtime variant ---
+
+    #[test]
+    fn from_async_error_runtime_empty_message() {
+        let async_err = AsyncError::Runtime {
+            message: String::new(),
+        };
+        let err = TailscaleError::from_async_error(async_err, Duration::from_secs(5));
+        // Should still produce a LocalApiRequest, just with empty inner
+        assert!(matches!(err, TailscaleError::LocalApiRequest(_)));
+    }
+
+    // --- Error source() for string-carrying variants ---
+
+    #[test]
+    fn source_none_for_all_string_variants() {
+        use std::error::Error;
+        let cases: Vec<TailscaleError> = vec![
+            TailscaleError::InvalidTag("tag".into()),
+            TailscaleError::InvalidZoneId("zone".into()),
+            TailscaleError::NotFcpTag("ntag".into()),
+            TailscaleError::LocalApiRequest("req".into()),
+            TailscaleError::LocalApiError("err".into()),
+            TailscaleError::ParseError("parse".into()),
+            TailscaleError::PeerNotFound("peer".into()),
+        ];
+        for v in &cases {
+            assert!(v.source().is_none(), "expected None source for {v:?}");
+        }
+    }
+
+    // --- Error display: unicode in peer not found ---
+
+    #[test]
+    fn error_display_peer_not_found_unicode() {
+        let err = TailscaleError::PeerNotFound("n\u{00f6}de".to_string());
+        assert!(err.to_string().contains("n\u{00f6}de"));
+    }
+
+    // --- from_io with different inner messages ---
+
+    #[test]
+    fn from_io_custom_error_message_preserved() {
+        let io_err = std::io::Error::other("custom: socket path not found");
+        let err: TailscaleError = io_err.into();
+        assert!(err.to_string().contains("socket path not found"));
+    }
+
+    // --- TailscaleResult: and_then chaining ---
+
+    #[test]
+    fn tailscale_result_and_then() {
+        let result: TailscaleResult<u32> = Ok(10);
+        let chained: TailscaleResult<u32> = result.and_then(|v| {
+            if v > 5 {
+                Ok(v * 2)
+            } else {
+                Err(TailscaleError::NotConnected)
+            }
+        });
+        assert_eq!(chained.unwrap(), 20);
+    }
+
+    #[test]
+    fn tailscale_result_and_then_error() {
+        let result: TailscaleResult<u32> = Ok(3);
+        let chained: TailscaleResult<u32> = result.and_then(|v| {
+            if v > 5 {
+                Ok(v * 2)
+            } else {
+                Err(TailscaleError::NotConnected)
+            }
+        });
+        assert!(chained.is_err());
+    }
+
+    // --- from_async_error: timeout with very small duration ---
+
+    #[test]
+    fn from_async_error_timeout_one_millisecond() {
+        let async_err = AsyncError::Timeout { timeout_ms: 1 };
+        let err = TailscaleError::from_async_error(async_err, Duration::from_millis(1));
+        assert!(err.to_string().contains("1ms"));
+    }
 }

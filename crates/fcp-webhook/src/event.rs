@@ -1211,4 +1211,186 @@ mod tests {
         let cloned = status;
         assert_eq!(status, cloned);
     }
+
+    // ── Batch 5: SunnyMoose test expansion ──
+
+    #[test]
+    fn test_event_matches_type_literal_star_in_event_type() {
+        let event = WebhookEvent::new("e1", "push*", "gh");
+        // "push*" should match itself exactly
+        assert!(event.matches_type("push*"));
+        // But "push*" as pattern means prefix "push" which also matches "push*"
+        assert!(event.matches_type("push*"));
+        // "push" alone doesn't match "push*"
+        assert!(!event.matches_type("push"));
+    }
+
+    #[test]
+    fn test_event_serde_deserialize_missing_optional_metadata_fields() {
+        let json_str = r#"{
+            "id": "e1",
+            "event_type": "test",
+            "timestamp": "2026-01-15T10:30:00Z",
+            "provider": "p",
+            "payload": {"key": "value"}
+        }"#;
+        let event: WebhookEvent = serde_json::from_str(json_str).unwrap();
+        assert_eq!(event.id, "e1");
+        assert_eq!(event.event_type, "test");
+        assert_eq!(event.provider, "p");
+        assert!(event.headers.is_empty());
+        assert_eq!(event.metadata.attempt, 0);
+        assert!(event.metadata.last_error.is_none());
+        assert!(event.metadata.source_ip.is_none());
+    }
+
+    #[test]
+    fn test_event_serde_full_metadata_roundtrip() {
+        use chrono::TimeZone;
+        let ts = Utc.with_ymd_and_hms(2026, 3, 8, 12, 0, 0).unwrap();
+        let mut custom = HashMap::new();
+        custom.insert("region".into(), serde_json::json!("us-east-1"));
+        custom.insert("weight".into(), serde_json::json!(1.23));
+        let meta = EventMetadata {
+            attempt: 7,
+            first_attempt_at: Some(ts),
+            last_attempt_at: Some(ts),
+            next_retry_at: Some(ts),
+            status: DeliveryStatus::DeadLettered,
+            last_error: Some("connection reset".into()),
+            source_ip: Some("10.0.0.1".into()),
+            taint_flags: TaintFlags::default(),
+            custom,
+        };
+        let json = serde_json::to_string(&meta).unwrap();
+        let rt: EventMetadata = serde_json::from_str(&json).unwrap();
+        assert_eq!(rt.attempt, 7);
+        assert_eq!(rt.status, DeliveryStatus::DeadLettered);
+        assert_eq!(rt.last_error.as_deref(), Some("connection reset"));
+        assert_eq!(rt.source_ip.as_deref(), Some("10.0.0.1"));
+        assert!(rt.first_attempt_at.is_some());
+        assert!(rt.last_attempt_at.is_some());
+        assert!(rt.next_retry_at.is_some());
+        assert_eq!(
+            rt.custom.get("region"),
+            Some(&serde_json::json!("us-east-1"))
+        );
+    }
+
+    #[test]
+    fn test_event_get_str_on_nested_object_returns_none() {
+        let event = WebhookEvent::new("e1", "push", "gh")
+            .with_payload(serde_json::json!({"nested": {"key": "val"}}));
+        // "nested" is an object, not a string
+        assert_eq!(event.get_str("nested"), None);
+    }
+
+    #[test]
+    fn test_event_get_i64_on_nested_object_returns_none() {
+        let event = WebhookEvent::new("e1", "push", "gh")
+            .with_payload(serde_json::json!({"nested": {"key": 42}}));
+        assert_eq!(event.get_i64("nested"), None);
+    }
+
+    #[test]
+    fn test_event_header_with_unicode_value() {
+        let mut headers = HashMap::new();
+        headers.insert("X-Custom".into(), "\u{1F600} emoji header".into());
+        let event = WebhookEvent::new("e1", "push", "gh").with_headers(headers);
+        assert_eq!(event.header("x-custom"), Some("\u{1F600} emoji header"));
+    }
+
+    #[test]
+    fn test_subscription_for_types_single_type() {
+        let sub = EventSubscription::for_types(vec!["push".into()]);
+        assert_eq!(sub.event_types.len(), 1);
+        assert!(sub.provider.is_none());
+    }
+
+    #[test]
+    fn test_subscription_matches_empty_event_type_with_wildcard() {
+        let sub = EventSubscription::for_types(vec!["*".into()]);
+        let event = WebhookEvent::new("e1", "", "gh");
+        assert!(sub.matches(&event));
+    }
+
+    #[test]
+    fn test_subscription_matches_unicode_event_type() {
+        let sub = EventSubscription::for_types(vec!["\u{00E9}vent.*".into()]);
+        let event = WebhookEvent::new("e1", "\u{00E9}vent.created", "gh");
+        assert!(sub.matches(&event));
+    }
+
+    #[test]
+    fn test_event_metadata_attempt_boundary() {
+        let meta = EventMetadata {
+            attempt: u32::MAX,
+            ..EventMetadata::default()
+        };
+        assert_eq!(meta.attempt, u32::MAX);
+        let json = serde_json::to_string(&meta).unwrap();
+        let rt: EventMetadata = serde_json::from_str(&json).unwrap();
+        assert_eq!(rt.attempt, u32::MAX);
+    }
+
+    #[test]
+    fn test_delivery_status_serde_pending_is_default() {
+        #[derive(serde::Deserialize)]
+        struct Wrapper {
+            #[serde(default)]
+            status: DeliveryStatus,
+        }
+        let json_str = "{}";
+        let w: Wrapper = serde_json::from_str(json_str).unwrap();
+        assert_eq!(w.status, DeliveryStatus::Pending);
+    }
+
+    #[test]
+    fn test_event_with_headers_empty_map() {
+        let event = WebhookEvent::new("e1", "push", "gh").with_headers(HashMap::new());
+        assert!(event.headers.is_empty());
+        assert!(event.header("anything").is_none());
+    }
+
+    #[test]
+    fn test_event_get_on_array_root() {
+        let event =
+            WebhookEvent::new("e1", "push", "gh").with_payload(serde_json::json!([1, 2, 3]));
+        // Path-based get on an array root won't find string keys
+        assert!(event.get("0").is_none());
+        assert!(event.payload.is_array());
+    }
+
+    #[test]
+    fn test_subscription_all_no_provider() {
+        let sub = EventSubscription::all();
+        assert!(sub.provider.is_none());
+        assert_eq!(sub.event_types, vec!["*"]);
+    }
+
+    #[test]
+    fn test_event_clone_independence() {
+        let original = WebhookEvent::new("e1", "push", "gh")
+            .with_payload(serde_json::json!({"key": "val"}));
+        let mut cloned = original.clone();
+        cloned.id = "e2".into();
+        cloned.event_type = "release".into();
+        // Original should be unchanged
+        assert_eq!(original.id, "e1");
+        assert_eq!(original.event_type, "push");
+    }
+
+    #[test]
+    fn test_event_metadata_clone_independence() {
+        let original = EventMetadata {
+            attempt: 3,
+            last_error: Some("err".into()),
+            ..EventMetadata::default()
+        };
+        let mut cloned = original.clone();
+        cloned.attempt = 99;
+        cloned.last_error = Some("different".into());
+        assert_eq!(original.attempt, 3);
+        assert_eq!(original.last_error.as_deref(), Some("err"));
+    }
 }

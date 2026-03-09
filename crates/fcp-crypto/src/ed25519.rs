@@ -761,4 +761,141 @@ mod tests {
         // The key thing is it doesn't panic.
         let _ = result;
     }
+
+    // ---- Context signing cross-protocol isolation ----
+
+    #[test]
+    fn sign_with_context_different_contexts_produce_different_sigs() {
+        let sk = Ed25519SigningKey::generate();
+        let msg = b"same message";
+        let sig1 = sk.sign_with_context(b"context-A", msg);
+        let sig2 = sk.sign_with_context(b"context-B", msg);
+        assert_ne!(sig1, sig2);
+    }
+
+    #[test]
+    fn sign_with_context_differs_from_plain_sign() {
+        let sk = Ed25519SigningKey::generate();
+        let msg = b"test message";
+        let plain_sig = sk.sign(msg);
+        let ctx_sig = sk.sign_with_context(b"ctx", msg);
+        assert_ne!(plain_sig, ctx_sig);
+    }
+
+    // ---- Signature serde roundtrip ----
+
+    #[test]
+    fn signature_serde_json_roundtrip() {
+        let sk = Ed25519SigningKey::generate();
+        let sig = sk.sign(b"serde test");
+        let json = serde_json::to_string(&sig).unwrap();
+        let deserialized: Ed25519Signature = serde_json::from_str(&json).unwrap();
+        assert_eq!(sig, deserialized);
+    }
+
+    #[test]
+    fn signature_serde_wrong_length_fails() {
+        let short = vec![0u8; 32];
+        let json = serde_json::to_string(&short).unwrap();
+        let result: Result<Ed25519Signature, _> = serde_json::from_str(&json);
+        assert!(result.is_err());
+    }
+
+    // ---- Verifying key equality ----
+
+    #[test]
+    fn verifying_key_equality_same_key() {
+        let sk = Ed25519SigningKey::from_bytes(&[1u8; 32]).unwrap();
+        let pk1 = sk.verifying_key();
+        let pk2 = sk.verifying_key();
+        assert_eq!(pk1, pk2);
+    }
+
+    #[test]
+    fn verifying_key_inequality_different_keys() {
+        let sk1 = Ed25519SigningKey::from_bytes(&[1u8; 32]).unwrap();
+        let sk2 = Ed25519SigningKey::from_bytes(&[2u8; 32]).unwrap();
+        assert_ne!(sk1.verifying_key(), sk2.verifying_key());
+    }
+
+    // ---- Verifying key to_bytes roundtrip ----
+
+    #[test]
+    fn verifying_key_bytes_roundtrip() {
+        let sk = Ed25519SigningKey::generate();
+        let pk = sk.verifying_key();
+        let pk_bytes = pk.to_bytes();
+        let pk2 = Ed25519VerifyingKey::from_bytes(&pk_bytes).unwrap();
+        assert_eq!(pk, pk2);
+        // Key IDs should also match
+        assert_eq!(pk.key_id(), pk2.key_id());
+    }
+
+    // ---- Signing key from_bytes and to_bytes ----
+
+    #[test]
+    fn signing_key_to_bytes_from_bytes_preserves_key() {
+        let original = Ed25519SigningKey::generate();
+        let bytes = original.to_bytes();
+        let restored = Ed25519SigningKey::from_bytes(&bytes).unwrap();
+        // Same key ID
+        assert_eq!(original.key_id(), restored.key_id());
+        // Same verifying key
+        assert_eq!(original.verifying_key(), restored.verifying_key());
+        // Same signatures
+        let sig1 = original.sign(b"roundtrip");
+        let sig2 = restored.sign(b"roundtrip");
+        assert_eq!(sig1, sig2);
+    }
+
+    // ---- Signature hex encoding ----
+
+    #[test]
+    fn signature_hex_is_128_chars() {
+        let sk = Ed25519SigningKey::generate();
+        let sig = sk.sign(b"hex len test");
+        let hex = sig.to_hex();
+        // 64 bytes = 128 hex chars
+        assert_eq!(hex.len(), 128);
+    }
+
+    #[test]
+    fn signature_hex_is_lowercase() {
+        let sk = Ed25519SigningKey::generate();
+        let sig = sk.sign(b"lowercase check");
+        let hex = sig.to_hex();
+        assert_eq!(hex, hex.to_lowercase());
+    }
+
+    // ---- Large context signing ----
+
+    #[test]
+    fn sign_with_large_context() {
+        let sk = Ed25519SigningKey::generate();
+        let pk = sk.verifying_key();
+        let large_context = vec![0xAB; 10_000];
+        let msg = b"message";
+        let sig = sk.sign_with_context(&large_context, msg);
+        assert!(pk.verify_with_context(&large_context, msg, &sig).is_ok());
+    }
+
+    // ---- Signature from_bytes arbitrary ----
+
+    #[test]
+    fn signature_from_bytes_all_zeros() {
+        let sig = Ed25519Signature::from_bytes(&[0u8; 64]);
+        assert_eq!(sig.to_bytes(), [0u8; 64]);
+    }
+
+    // ---- Verify error variant check ----
+
+    #[test]
+    fn verify_returns_signature_verification_failed() {
+        let sk1 = Ed25519SigningKey::generate();
+        let sk2 = Ed25519SigningKey::generate();
+        let pk2 = sk2.verifying_key();
+        let sig = sk1.sign(b"msg");
+        let err = pk2.verify(b"msg", &sig).unwrap_err();
+        assert!(matches!(err, crate::error::CryptoError::SignatureVerificationFailed));
+    }
 }

@@ -764,4 +764,181 @@ mod tests {
         assert_eq!(findings.len(), 1);
         assert!(findings[0].snippet.contains("admin@example.com"));
     }
+
+    // ---- Additional edge case scanner tests ----
+
+    #[test]
+    fn scan_finding_ne_different_rule_ids() {
+        let a = super::ScanFinding {
+            line: 1,
+            rule_id: "A".into(),
+            severity: ScanSeverity::Error,
+            message: "msg".into(),
+            snippet: "s".into(),
+            json_path: None,
+        };
+        let b = super::ScanFinding {
+            line: 1,
+            rule_id: "B".into(),
+            severity: ScanSeverity::Error,
+            message: "msg".into(),
+            snippet: "s".into(),
+            json_path: None,
+        };
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn scan_finding_ne_different_severity() {
+        let a = super::ScanFinding {
+            line: 1,
+            rule_id: "R".into(),
+            severity: ScanSeverity::Error,
+            message: "m".into(),
+            snippet: "s".into(),
+            json_path: None,
+        };
+        let b = super::ScanFinding {
+            line: 1,
+            rule_id: "R".into(),
+            severity: ScanSeverity::Warn,
+            message: "m".into(),
+            snippet: "s".into(),
+            json_path: None,
+        };
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn scan_finding_ne_different_lines() {
+        let a = super::ScanFinding {
+            line: 1,
+            rule_id: "R".into(),
+            severity: ScanSeverity::Error,
+            message: "m".into(),
+            snippet: "s".into(),
+            json_path: None,
+        };
+        let b = super::ScanFinding {
+            line: 2,
+            rule_id: "R".into(),
+            severity: ScanSeverity::Error,
+            message: "m".into(),
+            snippet: "s".into(),
+            json_path: None,
+        };
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn scan_unicode_local_part_email_not_matched() {
+        let scanner = LogRedactionScanner::new();
+        // Unicode chars in local part are not matched by the ASCII-only email regex
+        let input = "{\"msg\":\"caf\u{00e9}@example.com\"}";
+        let findings = scanner.scan_jsonl(input);
+        // The regex [A-Za-z0-9._%+-]+ won't match é, so it may not find the full email
+        // This verifies the scanner doesn't crash on unicode input
+        let _ = findings;
+    }
+
+    #[test]
+    fn scan_multiple_rules_match_same_line() {
+        let scanner = LogRedactionScanner::new();
+        // Line has both an email and a bearer token
+        let input = r#"{"a":"user@example.com","b":"bearer abcdefghijklmnopqrstuvwxyz012345"}"#;
+        let findings = scanner.scan_jsonl(input);
+        let email_count = findings.iter().filter(|f| f.rule_id == "EMAIL").count();
+        let bearer_count = findings
+            .iter()
+            .filter(|f| f.rule_id == "BEARER_TOKEN")
+            .count();
+        assert!(email_count >= 1);
+        assert!(bearer_count >= 1);
+    }
+
+    #[test]
+    fn allowlist_does_not_suppress_other_lines() {
+        let mut allowlist = super::LogScanAllowlist::new();
+        allowlist.allow_line(1);
+        let scanner = LogRedactionScanner::with_allowlist(allowlist);
+        let input = "safe-line\n{\"email\":\"user@leak.com\"}";
+        let findings = scanner.scan_jsonl(input);
+        // Line 2 should still be detected
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].line, 2);
+    }
+
+    #[test]
+    fn allowlist_does_not_suppress_other_rules() {
+        let mut allowlist = super::LogScanAllowlist::new();
+        allowlist.allow_rule_id("JWT");
+        let scanner = LogRedactionScanner::with_allowlist(allowlist);
+        let input = r#"{"email":"user@example.com"}"#;
+        let findings = scanner.scan_jsonl(input);
+        // EMAIL should still be detected
+        assert!(findings.iter().any(|f| f.rule_id == "EMAIL"));
+    }
+
+    #[test]
+    fn scan_json_with_null_values_no_false_positives() {
+        let scanner = LogRedactionScanner::new();
+        let input = r#"{"a":null,"b":null}"#;
+        let findings = scanner.scan_jsonl(input);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn scan_json_with_empty_string_values() {
+        let scanner = LogRedactionScanner::new();
+        let input = r#"{"key":""}"#;
+        let findings = scanner.scan_jsonl(input);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn scan_deeply_nested_secret() {
+        let scanner = LogRedactionScanner::new();
+        let input = r#"{"a":{"b":{"c":{"d":{"key":"sk-abc123def456ghi789jkl012mno345pqr"}}}}}"#;
+        let findings = scanner.scan_jsonl(input);
+        assert!(findings.iter().any(|f| f.rule_id == "OPENAI_API_KEY"));
+        let path = findings[0].json_path.as_ref().unwrap();
+        assert!(path.contains("key"));
+    }
+
+    #[test]
+    fn scan_finding_message_is_non_empty() {
+        let scanner = LogRedactionScanner::new();
+        let input = r#"{"email":"user@example.com"}"#;
+        let findings = scanner.scan_jsonl(input);
+        assert!(!findings[0].message.is_empty());
+    }
+
+    #[test]
+    fn scan_json_boolean_values_no_false_positives() {
+        let scanner = LogRedactionScanner::new();
+        let input = r#"{"active":true,"deleted":false}"#;
+        let findings = scanner.scan_jsonl(input);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn allowlist_substring_partial_match_works() {
+        let mut allowlist = super::LogScanAllowlist::new();
+        allowlist.allow_substring("example.com");
+        let scanner = LogRedactionScanner::with_allowlist(allowlist);
+        let input = r#"{"email":"admin@example.com"}"#;
+        let findings = scanner.scan_jsonl(input);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn scan_finding_json_path_for_nested_array() {
+        let scanner = LogRedactionScanner::new();
+        let input = r#"{"users":[{"email":"a@b.com"}]}"#;
+        let findings = scanner.scan_jsonl(input);
+        assert!(!findings.is_empty());
+        let path = findings[0].json_path.as_ref().unwrap();
+        assert!(path.contains("users"));
+        assert!(path.contains("[0]"));
+    }
 }

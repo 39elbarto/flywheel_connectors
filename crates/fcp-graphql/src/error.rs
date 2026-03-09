@@ -1526,4 +1526,372 @@ mod tests {
         let s = err.to_string();
         assert!(s.contains("type mismatch in field x"));
     }
+
+    // ---- HttpErrorInfo unicode and edge cases ----
+
+    #[test]
+    fn http_error_info_unicode_message() {
+        let info = HttpErrorInfo {
+            message: "Verbindung fehlgeschlagen: Zeitlimit".into(),
+            status_code: Some(504),
+            is_timeout: true,
+            is_connect: false,
+            is_request: false,
+        };
+        let json = serde_json::to_string(&info).unwrap();
+        let back: HttpErrorInfo = serde_json::from_str(&json).unwrap();
+        assert_eq!(info, back);
+        assert!(back.message.contains("Zeitlimit"));
+    }
+
+    #[test]
+    fn http_error_info_status_code_boundary_100() {
+        let info = HttpErrorInfo {
+            message: "info status".into(),
+            status_code: Some(100),
+            is_timeout: false,
+            is_connect: false,
+            is_request: false,
+        };
+        let json = serde_json::to_string(&info).unwrap();
+        let back: HttpErrorInfo = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.status_code, Some(100));
+    }
+
+    #[test]
+    fn http_error_info_status_code_u16_max() {
+        let info = HttpErrorInfo {
+            message: "max".into(),
+            status_code: Some(u16::MAX),
+            is_timeout: false,
+            is_connect: false,
+            is_request: false,
+        };
+        let json = serde_json::to_string(&info).unwrap();
+        let back: HttpErrorInfo = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.status_code, Some(u16::MAX));
+    }
+
+    #[test]
+    fn http_error_info_inequality_by_timeout_flag() {
+        let a = HttpErrorInfo {
+            message: "err".into(),
+            status_code: None,
+            is_timeout: true,
+            is_connect: false,
+            is_request: false,
+        };
+        let b = HttpErrorInfo {
+            message: "err".into(),
+            status_code: None,
+            is_timeout: false,
+            is_connect: false,
+            is_request: false,
+        };
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn http_error_info_inequality_by_message() {
+        let a = HttpErrorInfo {
+            message: "alpha".into(),
+            status_code: None,
+            is_timeout: false,
+            is_connect: false,
+            is_request: false,
+        };
+        let b = HttpErrorInfo {
+            message: "beta".into(),
+            status_code: None,
+            is_timeout: false,
+            is_connect: false,
+            is_request: false,
+        };
+        assert_ne!(a, b);
+    }
+
+    // ---- GraphqlErrorLocation edge cases ----
+
+    #[test]
+    fn error_location_equality_both_same() {
+        let a = GraphqlErrorLocation { line: 7, column: 3 };
+        let b = GraphqlErrorLocation { line: 7, column: 3 };
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn error_location_inequality_by_column() {
+        let a = GraphqlErrorLocation { line: 1, column: 1 };
+        let b = GraphqlErrorLocation { line: 1, column: 2 };
+        assert_ne!(a, b);
+    }
+
+    // ---- GraphqlPathSegment inequality ----
+
+    #[test]
+    fn path_segment_key_vs_index_inequality() {
+        let key = GraphqlPathSegment::Key("0".into());
+        let idx = GraphqlPathSegment::Index(0);
+        assert_ne!(key, idx);
+    }
+
+    #[test]
+    fn path_segment_different_keys_inequality() {
+        let a = GraphqlPathSegment::Key("alpha".into());
+        let b = GraphqlPathSegment::Key("beta".into());
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn path_segment_different_indices_inequality() {
+        let a = GraphqlPathSegment::Index(1);
+        let b = GraphqlPathSegment::Index(2);
+        assert_ne!(a, b);
+    }
+
+    // ---- GraphqlClientError implements std::error::Error ----
+
+    #[test]
+    fn client_error_implements_error_trait() {
+        fn assert_error<E: std::error::Error>(_e: &E) {}
+        assert_error(&GraphqlClientError::Json("test".into()));
+        assert_error(&GraphqlClientError::Protocol {
+            message: "test".into(),
+        });
+        assert_error(&GraphqlClientError::RetriesExhausted { attempts: 1 });
+    }
+
+    // ---- GraphqlError inequality tests ----
+
+    #[test]
+    fn graphql_error_inequality_by_message() {
+        let a = GraphqlError {
+            message: "alpha".into(),
+            locations: vec![],
+            path: vec![],
+            extensions: None,
+        };
+        let b = GraphqlError {
+            message: "beta".into(),
+            locations: vec![],
+            path: vec![],
+            extensions: None,
+        };
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn graphql_error_inequality_by_locations() {
+        let a = GraphqlError {
+            message: "err".into(),
+            locations: vec![GraphqlErrorLocation { line: 1, column: 1 }],
+            path: vec![],
+            extensions: None,
+        };
+        let b = GraphqlError {
+            message: "err".into(),
+            locations: vec![],
+            path: vec![],
+            extensions: None,
+        };
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn graphql_error_inequality_by_path() {
+        let a = GraphqlError {
+            message: "err".into(),
+            locations: vec![],
+            path: vec![GraphqlPathSegment::Key("x".into())],
+            extensions: None,
+        };
+        let b = GraphqlError {
+            message: "err".into(),
+            locations: vec![],
+            path: vec![],
+            extensions: None,
+        };
+        assert_ne!(a, b);
+    }
+
+    // ---- GraphqlClientError clone all variants ----
+
+    #[test]
+    fn client_error_clone_http_status() {
+        let err = GraphqlClientError::HttpStatus {
+            status: StatusCode::TOO_MANY_REQUESTS,
+            body: "rate limited".into(),
+            retry_after: Some(Duration::from_secs(10)),
+        };
+        let cloned = err.clone();
+        assert!(cloned.to_string().contains("429"));
+        assert!(err.to_string().contains("429"));
+    }
+
+    #[test]
+    fn client_error_clone_graphql_errors() {
+        let err = GraphqlClientError::GraphqlErrors {
+            errors: vec![GraphqlError {
+                message: "test".into(),
+                locations: vec![],
+                path: vec![],
+                extensions: None,
+            }],
+        };
+        let cloned = err.clone();
+        assert!(cloned.to_string().contains("GraphQL errors"));
+        assert!(err.to_string().contains("GraphQL errors"));
+    }
+
+    #[test]
+    fn client_error_clone_protocol() {
+        let err = GraphqlClientError::Protocol {
+            message: "proto fail".into(),
+        };
+        let cloned = err.clone();
+        assert!(cloned.to_string().contains("protocol error"));
+        assert!(err.to_string().contains("protocol error"));
+    }
+
+    #[test]
+    fn client_error_clone_schema_validation() {
+        let err = GraphqlClientError::SchemaValidation {
+            message: "invalid".into(),
+            errors: vec!["e1".into(), "e2".into()],
+        };
+        let cloned = err.clone();
+        assert!(cloned.to_string().contains("Schema validation"));
+        assert!(err.to_string().contains("Schema validation"));
+    }
+
+    #[test]
+    fn client_error_clone_retries_exhausted() {
+        let err = GraphqlClientError::RetriesExhausted { attempts: 7 };
+        let cloned = err.clone();
+        assert!(cloned.to_string().contains("7 attempts"));
+        assert!(err.to_string().contains("7 attempts"));
+    }
+
+    // ---- to_fcp_error: http error with request flag (not included in fcp retryable) ----
+
+    #[test]
+    fn to_fcp_http_request_error_not_retryable_in_fcp() {
+        // Note: is_request is retryable for retry policy (is_retryable()),
+        // but to_fcp_error only considers is_timeout || is_connect for retryable.
+        let err = GraphqlClientError::Http(HttpErrorInfo {
+            message: "request failed".into(),
+            status_code: None,
+            is_timeout: false,
+            is_connect: false,
+            is_request: true,
+        });
+        let fcp = err.to_fcp_error("svc");
+        match fcp {
+            FcpError::External { retryable, .. } => assert!(!retryable),
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    // ---- HttpErrorInfo::timeout with very large Duration ----
+
+    #[test]
+    fn http_error_info_timeout_very_large_duration() {
+        // A duration larger than what u64 millis can hold via u128
+        let info = HttpErrorInfo::timeout(Duration::from_secs(u64::MAX));
+        assert!(info.is_timeout);
+        assert_eq!(info.status_code, Some(408));
+    }
+
+    // ---- GraphqlError serde with all fields populated ----
+
+    #[test]
+    fn graphql_error_full_roundtrip_all_fields() {
+        let err = GraphqlError {
+            message: "full error".into(),
+            locations: vec![
+                GraphqlErrorLocation { line: 1, column: 1 },
+                GraphqlErrorLocation {
+                    line: 5,
+                    column: 20,
+                },
+            ],
+            path: vec![
+                GraphqlPathSegment::Key("root".into()),
+                GraphqlPathSegment::Index(0),
+                GraphqlPathSegment::Key("child".into()),
+            ],
+            extensions: Some(serde_json::json!({
+                "code": "ERR_001",
+                "timestamp": "2026-03-08T00:00:00Z",
+                "metadata": {"nested": true}
+            })),
+        };
+        let json = serde_json::to_string(&err).unwrap();
+        let back: GraphqlError = serde_json::from_str(&json).unwrap();
+        assert_eq!(err, back);
+        assert_eq!(back.locations.len(), 2);
+        assert_eq!(back.path.len(), 3);
+        assert_eq!(back.extensions.unwrap()["code"], "ERR_001");
+    }
+
+    // ---- is_retryable: HttpStatus 502 ----
+
+    #[test]
+    fn is_retryable_502_bad_gateway() {
+        let err = GraphqlClientError::HttpStatus {
+            status: StatusCode::BAD_GATEWAY,
+            body: String::new(),
+            retry_after: None,
+        };
+        assert!(err.is_retryable());
+    }
+
+    // ---- to_fcp_error: 503 server error ----
+
+    #[test]
+    fn to_fcp_503_service_unavailable() {
+        let err = GraphqlClientError::HttpStatus {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            body: "maintenance".into(),
+            retry_after: None,
+        };
+        let fcp = err.to_fcp_error("api");
+        match fcp {
+            FcpError::External {
+                retryable,
+                status_code,
+                ..
+            } => {
+                assert!(retryable);
+                assert_eq!(status_code, Some(503));
+            }
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    // ---- GraphqlPathSegment: key with newlines ----
+
+    #[test]
+    fn path_segment_key_with_newlines() {
+        let seg = GraphqlPathSegment::Key("line1\nline2".into());
+        let json = serde_json::to_string(&seg).unwrap();
+        let back: GraphqlPathSegment = serde_json::from_str(&json).unwrap();
+        assert_eq!(seg, back);
+    }
+
+    // ---- HttpErrorInfo: message with special JSON characters ----
+
+    #[test]
+    fn http_error_info_message_with_json_special_chars() {
+        let info = HttpErrorInfo {
+            message: r#"error: "quoted" and \backslash"#.into(),
+            status_code: None,
+            is_timeout: false,
+            is_connect: false,
+            is_request: false,
+        };
+        let json = serde_json::to_string(&info).unwrap();
+        let back: HttpErrorInfo = serde_json::from_str(&json).unwrap();
+        assert_eq!(info, back);
+    }
 }

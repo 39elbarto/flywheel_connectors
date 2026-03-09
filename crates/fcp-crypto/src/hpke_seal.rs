@@ -640,6 +640,21 @@ mod tests {
         assert_eq!(HPKE_TAG_SIZE, 16);
     }
 
+    // ---- Sealed box from_bytes then open ----
+
+    #[test]
+    fn hpke_sealed_box_bytes_roundtrip_then_open() {
+        let recipient_sk = X25519SecretKey::generate();
+        let recip_pub = recipient_sk.public_key();
+        let aad = Fcp2Aad::for_zone_key(b"z:bytes", b"node-bytes", 42);
+        let sealed = hpke_seal(&recip_pub, b"roundtrip open", &aad).unwrap();
+
+        let bytes = sealed.to_bytes();
+        let parsed = HpkeSealedBox::from_bytes(&bytes).unwrap();
+        let opened = hpke_open(&recipient_sk, &parsed, &aad).unwrap();
+        assert_eq!(opened, b"roundtrip open");
+    }
+
     // ---- From bytes minimum valid size ----
 
     #[test]
@@ -676,5 +691,59 @@ mod tests {
         let sealed = hpke_seal(&recip_pub, b"share secret", &aad).unwrap();
         let opened = hpke_open(&recipient_sk, &sealed, &aad).unwrap();
         assert_eq!(opened, b"share secret");
+    }
+
+    // ---- AAD encode deterministic ----
+
+    #[test]
+    fn fcp2_aad_encode_deterministic() {
+        let aad1 = Fcp2Aad::for_zone_key(b"z:det", b"node-det", 12345);
+        let aad2 = Fcp2Aad::for_zone_key(b"z:det", b"node-det", 12345);
+        assert_eq!(aad1.encode(), aad2.encode());
+    }
+
+    // ---- Sealed box from_bytes empty ----
+
+    #[test]
+    fn hpke_sealed_box_from_bytes_empty() {
+        let result = HpkeSealedBox::from_bytes(&[]);
+        assert!(result.is_err());
+    }
+
+    // ---- Wrong purpose AAD fails ----
+
+    #[test]
+    fn hpke_wrong_purpose_fails() {
+        let recipient_sk = X25519SecretKey::generate();
+        let recip_pub = recipient_sk.public_key();
+        let aad_zone = Fcp2Aad::for_zone_key(b"z:test", b"node", 100);
+        let aad_share = Fcp2Aad::for_secret_share(b"z:test", b"node", 100);
+
+        let sealed = hpke_seal(&recip_pub, b"secret", &aad_zone).unwrap();
+        let result = hpke_open(&recipient_sk, &sealed, &aad_share);
+        assert!(result.is_err());
+    }
+
+    // ---- AAD fields ----
+
+    #[test]
+    fn fcp2_aad_for_zone_key_fields() {
+        let aad = Fcp2Aad::for_zone_key(b"z:work", b"node-1", 999);
+        assert_eq!(aad.zone_id, b"z:work");
+        assert_eq!(aad.recipient_node_id, b"node-1");
+        assert_eq!(aad.purpose, purpose::ZONE_KEY);
+        assert_eq!(aad.issued_at, 999);
+    }
+
+    #[test]
+    fn fcp2_aad_for_objectid_key_fields() {
+        let aad = Fcp2Aad::for_objectid_key(b"z:oid", b"node-2", 888);
+        assert_eq!(aad.purpose, purpose::OBJECTID_KEY);
+    }
+
+    #[test]
+    fn fcp2_aad_for_secret_share_fields() {
+        let aad = Fcp2Aad::for_secret_share(b"z:share", b"node-3", 777);
+        assert_eq!(aad.purpose, purpose::SECRET_SHARE);
     }
 }

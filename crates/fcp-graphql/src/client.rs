@@ -1538,4 +1538,188 @@ mod tests {
         let snap2 = snap1;
         assert_eq!(snap1, snap2);
     }
+
+    // ---- map_request_async_error tests ----
+
+    #[test]
+    fn map_timeout_error_to_http_timeout() {
+        let err = map_request_async_error(
+            AsyncError::Timeout { timeout_ms: 30000 },
+            Duration::from_secs(30),
+        );
+        match err {
+            GraphqlClientError::Http(info) => {
+                assert!(info.is_timeout);
+                assert!(info.message.contains("30000"));
+            }
+            other => panic!("expected Http, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn map_cancelled_error_to_http_cancelled() {
+        let err = map_request_async_error(AsyncError::Cancelled, Duration::from_secs(10));
+        match err {
+            GraphqlClientError::Http(info) => {
+                assert!(!info.is_timeout);
+                assert_eq!(info.message, "request cancelled");
+            }
+            other => panic!("expected Http, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn map_protocol_io_error_to_protocol() {
+        let err = map_request_async_error(
+            AsyncError::ProtocolIo {
+                message: "broken pipe".into(),
+            },
+            Duration::from_secs(10),
+        );
+        match err {
+            GraphqlClientError::Protocol { message } => {
+                assert_eq!(message, "broken pipe");
+            }
+            other => panic!("expected Protocol, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn map_join_error_to_protocol() {
+        let err = map_request_async_error(
+            AsyncError::Join {
+                message: "task panicked".into(),
+            },
+            Duration::from_secs(10),
+        );
+        match err {
+            GraphqlClientError::Protocol { message } => {
+                assert_eq!(message, "task panicked");
+            }
+            other => panic!("expected Protocol, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn map_runtime_error_to_protocol() {
+        let err = map_request_async_error(
+            AsyncError::Runtime {
+                message: "runtime shutdown".into(),
+            },
+            Duration::from_secs(10),
+        );
+        match err {
+            GraphqlClientError::Protocol { message } => {
+                assert_eq!(message, "runtime shutdown");
+            }
+            other => panic!("expected Protocol, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn map_channel_closed_to_protocol() {
+        let err = map_request_async_error(AsyncError::ChannelClosed, Duration::from_secs(10));
+        match err {
+            GraphqlClientError::Protocol { message } => {
+                assert!(message.contains("channel closed"));
+            }
+            other => panic!("expected Protocol, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn map_channel_full_to_protocol() {
+        let err = map_request_async_error(AsyncError::ChannelFull, Duration::from_secs(10));
+        match err {
+            GraphqlClientError::Protocol { message } => {
+                assert!(message.contains("channel full"));
+            }
+            other => panic!("expected Protocol, got {other:?}"),
+        }
+    }
+
+    // ---- truncate_body additional edge cases ----
+
+    #[test]
+    fn truncate_body_exactly_max_minus_one() {
+        let body = vec![b'z'; 4095];
+        let result = truncate_body(&body);
+        assert_eq!(result.len(), 4095);
+        assert!(!result.ends_with('…'));
+    }
+
+    #[test]
+    fn truncate_body_all_newlines() {
+        let body = vec![b'\n'; 5000];
+        let result = truncate_body(&body);
+        assert!(result.ends_with('…'));
+    }
+
+    // ---- GraphqlClientConfig edge cases ----
+
+    #[test]
+    fn config_default_retry_policy_matches() {
+        use crate::retry::RetryStrategy;
+        let config = GraphqlClientConfig::default();
+        assert_eq!(config.retry.max_attempts, 3);
+        assert_eq!(config.retry.strategy, RetryStrategy::IdempotentOnly);
+    }
+
+    // ---- GraphqlClientBuilder: endpoint edge cases ----
+
+    #[test]
+    fn builder_with_empty_endpoint() {
+        let builder = GraphqlClientBuilder::new("");
+        assert!(builder.endpoint.is_empty());
+    }
+
+    #[test]
+    fn builder_with_unicode_endpoint() {
+        let builder = GraphqlClientBuilder::new("https://api.example.com/graphql/abfrage");
+        assert!(builder.endpoint.contains("abfrage"));
+    }
+
+    // ---- metrics inequality and default behavior ----
+
+    #[test]
+    fn metrics_snapshot_all_max_values() {
+        let snap = GraphqlClientMetricsSnapshot {
+            requests_total: u64::MAX,
+            requests_success: u64::MAX,
+            requests_error: u64::MAX,
+            requests_retried: u64::MAX,
+        };
+        let copy = snap;
+        assert_eq!(snap, copy);
+    }
+
+    #[test]
+    fn metrics_individual_field_increments() {
+        let metrics = GraphqlClientMetrics::default();
+        metrics.requests_success.fetch_add(10, Ordering::Relaxed);
+        metrics.requests_error.fetch_add(5, Ordering::Relaxed);
+        let snap = metrics.snapshot();
+        assert_eq!(snap.requests_total, 0);
+        assert_eq!(snap.requests_success, 10);
+        assert_eq!(snap.requests_error, 5);
+        assert_eq!(snap.requests_retried, 0);
+    }
+
+    // ---- hash_bytes with various data patterns ----
+
+    #[test]
+    fn hash_bytes_all_zeros() {
+        let data = vec![0u8; 100];
+        let h = hash_bytes(&data);
+        assert_ne!(h, 0); // hash of zeros should not be zero
+    }
+
+    #[test]
+    fn hash_bytes_single_difference() {
+        let mut a = vec![0u8; 100];
+        let mut b = vec![0u8; 100];
+        a[50] = 1;
+        b[50] = 2;
+        assert_ne!(hash_bytes(&a), hash_bytes(&b));
+    }
 }

@@ -2104,4 +2104,246 @@ mod tests {
     fn default_request_timeout_is_30_seconds() {
         assert_eq!(DEFAULT_REQUEST_TIMEOUT, Duration::from_secs(30));
     }
+
+    // --- TailscaleStatus: serde deserialization from invalid JSON ---
+
+    #[test]
+    fn tailscale_status_deserialize_invalid_json_fails() {
+        let result: Result<TailscaleStatus, _> = serde_json::from_str("not json");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn tailscale_status_deserialize_missing_self_fails() {
+        let json = r#"{"BackendState": "Running"}"#;
+        let result: Result<TailscaleStatus, _> = serde_json::from_str(json);
+        assert!(result.is_err());
+    }
+
+    // --- PeerInfo: serde deserialization from invalid JSON ---
+
+    #[test]
+    fn peer_info_deserialize_missing_fields_fails() {
+        let json = r#"{"ID": "n1"}"#;
+        let result: Result<PeerInfo, _> = serde_json::from_str(json);
+        assert!(result.is_err());
+    }
+
+    // --- LocalApiClient: with_http handles various URL formats ---
+
+    #[test]
+    fn local_api_client_https_url() {
+        let client = LocalApiClient::with_http("https://tailscale.local:443");
+        assert_eq!(client.base_url, "https://tailscale.local:443");
+    }
+
+    #[test]
+    fn local_api_client_slash_only_url() {
+        let client = LocalApiClient::with_http("/");
+        assert_eq!(client.base_url, "");
+    }
+
+    // --- PeerInfo: tailscale_tags and fcp_tags with various tag combinations ---
+
+    #[test]
+    fn peer_info_tailscale_tags_mixed_valid_invalid() {
+        let peer = PeerInfo {
+            id: "n1".into(),
+            public_key: "pk".into(),
+            host_name: "h".into(),
+            dns_name: "d".into(),
+            tailscale_ips: vec!["100.64.0.1".parse().unwrap()],
+            tags: vec![
+                "tag:fcp-owner".into(),
+                "invalid".into(),
+                "tag:fcp-work".into(),
+                "also-invalid".into(),
+                "tag:server".into(),
+            ],
+            online: true,
+            os: None,
+            last_seen: None,
+        };
+        assert_eq!(peer.tailscale_tags().len(), 3);
+        assert_eq!(peer.fcp_tags().len(), 2);
+    }
+
+    // --- TailscaleStatus: Clone preserves peers ---
+
+    #[test]
+    fn tailscale_status_clone_preserves_peers() {
+        let mut peers = HashMap::new();
+        peers.insert(
+            "n1".to_string(),
+            PeerInfo {
+                id: "n1".into(),
+                public_key: "pk".into(),
+                host_name: "host1".into(),
+                dns_name: "d.ts.net".into(),
+                tailscale_ips: vec!["100.64.0.1".parse().unwrap()],
+                tags: vec![],
+                online: true,
+                os: None,
+                last_seen: None,
+            },
+        );
+        let status = TailscaleStatus {
+            backend_state: "Running".into(),
+            self_node: SelfNode {
+                id: "s".into(),
+                public_key: "pk".into(),
+                host_name: "h".into(),
+                dns_name: "d".into(),
+                tailscale_ips: vec![],
+                tags: vec![],
+                online: true,
+            },
+            peer: peers,
+            user: None,
+            tailnet: None,
+        };
+        let cloned = status.clone();
+        assert_eq!(cloned.peer.len(), 1);
+        assert_eq!(cloned.peer["n1"].host_name, "host1");
+        // Use original after clone to avoid redundant_clone
+        assert_eq!(status.peer.len(), 1);
+    }
+
+    // --- UserInfo: serde deserialization from JSON ---
+
+    #[test]
+    fn user_info_deserialize_from_json() {
+        let json = r#"{
+            "ID": 555,
+            "LoginName": "admin@corp.com",
+            "DisplayName": "Corp Admin"
+        }"#;
+        let user: UserInfo = serde_json::from_str(json).unwrap();
+        assert_eq!(user.id, 555);
+        assert_eq!(user.login_name, "admin@corp.com");
+        assert_eq!(user.display_name, "Corp Admin");
+    }
+
+    // --- TailnetInfo: serde deserialization without is_personal ---
+
+    #[test]
+    fn tailnet_info_deserialize_without_is_personal() {
+        let json = r#"{"Name": "tailnet.example.com"}"#;
+        let info: TailnetInfo = serde_json::from_str(json).unwrap();
+        assert_eq!(info.name, "tailnet.example.com");
+        assert!(info.is_personal.is_none());
+    }
+
+    // --- SelfNode: Clone preserves all fields ---
+
+    #[test]
+    fn self_node_clone_preserves_all_fields() {
+        let node = SelfNode {
+            id: "self-1".into(),
+            public_key: "pk:self".into(),
+            host_name: "myhost".into(),
+            dns_name: "myhost.ts.net".into(),
+            tailscale_ips: vec![
+                "100.64.0.1".parse().unwrap(),
+                "fd7a:115c:a1e0::1".parse().unwrap(),
+            ],
+            tags: vec!["tag:fcp-owner".into(), "tag:web".into()],
+            online: true,
+        };
+        let cloned = node.clone();
+        assert_eq!(cloned.id, node.id);
+        assert_eq!(cloned.public_key, node.public_key);
+        assert_eq!(cloned.host_name, node.host_name);
+        assert_eq!(cloned.dns_name, node.dns_name);
+        assert_eq!(cloned.tailscale_ips, node.tailscale_ips);
+        assert_eq!(cloned.tags, node.tags);
+        assert_eq!(cloned.online, node.online);
+    }
+
+    // --- Mock client: default() vs disconnected() differ ---
+
+    #[fcp_async_core::runtime::test]
+    async fn test_mock_client_new_vs_default_differ() {
+        let new_client = MockTailscaleClient::new();
+        let default_client = MockTailscaleClient::default();
+
+        // new() creates a connected client with Running state
+        assert!(new_client.status().await.is_ok());
+
+        // default() creates a client with empty state (not connected)
+        assert!(default_client.status().await.is_err());
+    }
+
+    // --- Mock client: peers persist across status calls ---
+
+    #[fcp_async_core::runtime::test]
+    async fn test_mock_client_peers_persist() {
+        let client = MockTailscaleClient::new();
+        let peer =
+            MockTailscaleClient::mock_peer("persist", "host", "100.64.0.5".parse().unwrap(), &[]);
+        client.add_peer(peer).await;
+
+        // Multiple status calls should still show the peer
+        let s1 = client.status().await.unwrap();
+        let s2 = client.status().await.unwrap();
+        let s3 = client.status().await.unwrap();
+        assert_eq!(s1.peer.len(), 1);
+        assert_eq!(s2.peer.len(), 1);
+        assert_eq!(s3.peer.len(), 1);
+    }
+
+    // --- PeerInfo: Clone preserves optional fields ---
+
+    #[test]
+    fn peer_info_clone_preserves_optionals() {
+        let peer = PeerInfo {
+            id: "n1".into(),
+            public_key: "pk".into(),
+            host_name: "h".into(),
+            dns_name: "d".into(),
+            tailscale_ips: vec![],
+            tags: vec![],
+            online: false,
+            os: Some("darwin".into()),
+            last_seen: Some("2026-03-08T00:00:00Z".into()),
+        };
+        let cloned = peer.clone();
+        assert_eq!(cloned.os, peer.os);
+        assert_eq!(cloned.last_seen, peer.last_seen);
+    }
+
+    // --- TailscaleStatus: serde value shape includes Peer key ---
+
+    #[test]
+    fn tailscale_status_serde_value_has_peer_key() {
+        let status = TailscaleStatus {
+            backend_state: "Running".into(),
+            self_node: SelfNode {
+                id: "s".into(),
+                public_key: "pk".into(),
+                host_name: "h".into(),
+                dns_name: "d".into(),
+                tailscale_ips: vec![],
+                tags: vec![],
+                online: true,
+            },
+            peer: HashMap::new(),
+            user: None,
+            tailnet: None,
+        };
+        let val: serde_json::Value = serde_json::to_value(&status).unwrap();
+        let obj = val.as_object().unwrap();
+        assert!(obj.contains_key("Peer"));
+    }
+
+    // --- PeerInfo: node_id returns consistent NodeId ---
+
+    #[test]
+    fn peer_info_node_id_consistent() {
+        let peer =
+            MockTailscaleClient::mock_peer("stable-id", "h", "100.64.0.1".parse().unwrap(), &[]);
+        let id1 = peer.node_id();
+        let id2 = peer.node_id();
+        assert_eq!(id1, id2);
+    }
 }

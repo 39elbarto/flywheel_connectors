@@ -858,4 +858,156 @@ mod tests {
         let sig = verifier.compute(b"payload");
         assert!(verifier.verify(b"payload", &sig).is_ok());
     }
+
+    // ── Batch 5: SunnyMoose test expansion ──
+
+    #[test]
+    fn test_hmac_sha256_all_zero_secret() {
+        let verifier = HmacSha256Verifier::new([0u8; 32]);
+        let sig = verifier.compute(b"data");
+        assert!(verifier.verify(b"data", &sig).is_ok());
+        assert!(verifier.verify(b"other", &sig).is_err());
+    }
+
+    #[test]
+    fn test_hmac_sha1_all_zero_secret() {
+        let verifier = HmacSha1Verifier::new([0u8; 20]);
+        let sig = verifier.compute(b"data");
+        assert!(verifier.verify(b"data", &sig).is_ok());
+        assert!(verifier.verify(b"other", &sig).is_err());
+    }
+
+    #[test]
+    fn test_hmac_sha256_verify_truncated_signature() {
+        let verifier = HmacSha256Verifier::new("secret");
+        let sig = verifier.compute(b"test");
+        // Truncate to half length - should fail verification
+        let truncated = &sig[..32];
+        assert!(verifier.verify(b"test", truncated).is_err());
+    }
+
+    #[test]
+    fn test_hmac_sha1_verify_truncated_signature() {
+        let verifier = HmacSha1Verifier::new("secret");
+        let sig = verifier.compute(b"test");
+        let truncated = &sig[..20];
+        assert!(verifier.verify(b"test", truncated).is_err());
+    }
+
+    #[test]
+    fn test_hmac_sha256_verify_with_unknown_prefix() {
+        let verifier = HmacSha256Verifier::new("secret");
+        let sig = verifier.compute(b"test");
+        // Unknown prefix is not stripped, whole string treated as hex
+        let prefixed = format!("unknown={sig}");
+        assert!(verifier.verify(b"test", &prefixed).is_err());
+    }
+
+    #[test]
+    fn test_hmac_sha256_compute_is_lowercase_hex() {
+        let verifier = HmacSha256Verifier::new("key");
+        let sig = verifier.compute(b"message");
+        assert_eq!(sig, sig.to_lowercase());
+    }
+
+    #[test]
+    fn test_hmac_sha1_compute_is_lowercase_hex() {
+        let verifier = HmacSha1Verifier::new("key");
+        let sig = verifier.compute(b"message");
+        assert_eq!(sig, sig.to_lowercase());
+    }
+
+    #[test]
+    fn test_ed25519_sign_and_verify_empty_payload() {
+        use ed25519_dalek::{Signer, SigningKey};
+        let signing_key = SigningKey::from_bytes(&[
+            0x9d, 0x61, 0xb1, 0x9d, 0xef, 0xfd, 0x5a, 0x60, 0xba, 0x84, 0x4a, 0xf4, 0x92, 0xec,
+            0x2c, 0xc4, 0x44, 0x49, 0xc5, 0x69, 0x7b, 0x32, 0x69, 0x19, 0x70, 0x3b, 0xac, 0x03,
+            0x1c, 0xae, 0x7f, 0x60,
+        ]);
+        let signature = signing_key.sign(b"");
+        let verifier =
+            Ed25519Verifier::from_bytes(&signing_key.verifying_key().to_bytes()).unwrap();
+        let sig_hex = hex::encode(signature.to_bytes());
+        assert!(verifier.verify(b"", &sig_hex).is_ok());
+    }
+
+    #[test]
+    fn test_ed25519_sign_and_verify_large_payload() {
+        use ed25519_dalek::{Signer, SigningKey};
+        let signing_key = SigningKey::from_bytes(&[
+            0x9d, 0x61, 0xb1, 0x9d, 0xef, 0xfd, 0x5a, 0x60, 0xba, 0x84, 0x4a, 0xf4, 0x92, 0xec,
+            0x2c, 0xc4, 0x44, 0x49, 0xc5, 0x69, 0x7b, 0x32, 0x69, 0x19, 0x70, 0x3b, 0xac, 0x03,
+            0x1c, 0xae, 0x7f, 0x60,
+        ]);
+        let payload = vec![b'Z'; 100_000];
+        let signature = signing_key.sign(&payload);
+        let verifier =
+            Ed25519Verifier::from_bytes(&signing_key.verifying_key().to_bytes()).unwrap();
+        let sig_hex = hex::encode(signature.to_bytes());
+        assert!(verifier.verify(&payload, &sig_hex).is_ok());
+    }
+
+    #[test]
+    fn test_hmac_sha256_sha256_prefix_strip_takes_priority() {
+        let verifier = HmacSha256Verifier::new("key");
+        let sig = verifier.compute(b"data");
+        // sha256= prefix is tried first
+        let prefixed = format!("sha256={sig}");
+        assert!(verifier.verify(b"data", &prefixed).is_ok());
+    }
+
+    #[test]
+    fn test_hmac_sha256_v1_prefix_used_when_no_sha256() {
+        let verifier = HmacSha256Verifier::new("key");
+        let sig = verifier.compute(b"data");
+        let prefixed = format!("v1={sig}");
+        assert!(verifier.verify(b"data", &prefixed).is_ok());
+    }
+
+    #[test]
+    fn test_hmac_sha256_v0_prefix_used_when_no_sha256_or_v1() {
+        let verifier = HmacSha256Verifier::new("key");
+        let sig = verifier.compute(b"data");
+        let prefixed = format!("v0={sig}");
+        assert!(verifier.verify(b"data", &prefixed).is_ok());
+    }
+
+    #[test]
+    fn test_hmac_sha256_two_different_payloads_differ() {
+        let verifier = HmacSha256Verifier::new("secret");
+        let sig_a = verifier.compute(b"aaaa");
+        let sig_b = verifier.compute(b"aaab");
+        assert_ne!(sig_a, sig_b);
+    }
+
+    #[test]
+    fn test_signature_algorithm_display_roundtrip_debug() {
+        use std::collections::HashSet;
+        let mut displays = HashSet::new();
+        for alg in [
+            SignatureAlgorithm::HmacSha256,
+            SignatureAlgorithm::HmacSha1,
+            SignatureAlgorithm::Ed25519,
+        ] {
+            let display = alg.to_string();
+            assert!(!display.is_empty());
+            displays.insert(display);
+        }
+        assert_eq!(displays.len(), 3, "All algorithm displays should be unique");
+    }
+
+    #[test]
+    fn test_ed25519_from_hex_odd_length() {
+        // Odd-length hex is invalid for hex::decode
+        assert!(Ed25519Verifier::from_hex("abc").is_err());
+    }
+
+    #[test]
+    fn test_hmac_sha256_verify_extra_long_hex_signature() {
+        let verifier = HmacSha256Verifier::new("secret");
+        // 65 hex chars (one byte too many) - valid hex but wrong length for HMAC
+        let too_long = "a".repeat(66);
+        assert!(verifier.verify(b"test", &too_long).is_err());
+    }
 }

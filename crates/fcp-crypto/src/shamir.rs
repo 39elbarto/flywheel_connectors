@@ -1329,4 +1329,153 @@ mod tests {
         let result = ShamirShare::from_bytes(&[1]);
         assert!(matches!(result, Err(ShamirError::EmptySecret)));
     }
+
+    // ---- GF(256) distributive law ----
+
+    #[test]
+    fn gf256_distributive_law() {
+        let a = Gf256::new(0x53);
+        let b = Gf256::new(0x1F);
+        let c = Gf256::new(0x9A);
+        // a * (b + c) = a*b + a*c
+        let lhs = a.mul(b.add(c));
+        let rhs = a.mul(b).add(a.mul(c));
+        assert_eq!(lhs.value(), rhs.value());
+    }
+
+    // ---- GF(256) constant time equality ----
+
+    #[test]
+    fn gf256_ct_eq() {
+        let a = Gf256::new(42);
+        let b = Gf256::new(42);
+        let c = Gf256::new(43);
+        assert!(bool::from(a.ct_eq(&b)));
+        assert!(!bool::from(a.ct_eq(&c)));
+    }
+
+    // ---- GF(256) conditional select ----
+
+    #[test]
+    fn gf256_conditional_select() {
+        let a = Gf256::new(10);
+        let b = Gf256::new(20);
+        let selected_a = Gf256::conditional_select(&a, &b, Choice::from(0));
+        let selected_b = Gf256::conditional_select(&a, &b, Choice::from(1));
+        assert_eq!(selected_a.value(), 10);
+        assert_eq!(selected_b.value(), 20);
+    }
+
+    // ---- ShamirShare clone ----
+
+    #[test]
+    fn shamir_share_clone() {
+        let share = ShamirShare::new(5, vec![10, 20, 30]);
+        let cloned = share.clone();
+        assert_eq!(share.index(), cloned.index());
+        assert_eq!(share.data(), cloned.data());
+    }
+
+    // ---- SealedShamirShare clone ----
+
+    #[test]
+    fn sealed_shamir_share_clone() {
+        use crate::x25519::X25519SecretKey;
+
+        let secret = b"clone test";
+        let shares = split_secret(secret, 2, 3).unwrap();
+        let sk = X25519SecretKey::generate();
+        let pk = sk.public_key();
+
+        let sealed = seal_share(&shares[0], &pk, b"z:clone", b"n:1", 100).unwrap();
+        let cloned = sealed.clone();
+        assert_eq!(sealed.index(), cloned.index());
+        assert_eq!(sealed.sealed_box().enc, cloned.sealed_box().enc);
+        assert_eq!(sealed.sealed_box().ciphertext, cloned.sealed_box().ciphertext);
+    }
+
+    // ---- SealedShamirShare debug ----
+
+    #[test]
+    fn sealed_shamir_share_debug_format() {
+        use crate::x25519::X25519SecretKey;
+
+        let secret = b"debug test";
+        let shares = split_secret(secret, 2, 3).unwrap();
+        let sk = X25519SecretKey::generate();
+        let pk = sk.public_key();
+
+        let sealed = seal_share(&shares[0], &pk, b"z:dbg", b"n:1", 100).unwrap();
+        let debug = format!("{sealed:?}");
+        assert!(debug.contains("SealedShamirShare"));
+    }
+
+    // ---- Split error: n = 0 ----
+
+    #[test]
+    fn split_error_n_zero() {
+        let result = split_secret(b"test", 1, 0);
+        // k=1 > n=0 triggers ThresholdExceedsTotal
+        assert!(matches!(
+            result,
+            Err(ShamirError::ThresholdExceedsTotal {
+                threshold: 1,
+                total: 0
+            })
+        ));
+    }
+
+    // ---- Reconstruct with index 0 share (via from_bytes bypass) ----
+
+    #[test]
+    fn reconstruct_error_reserved_index_zero_via_from_bytes() {
+        // ShamirShare::new(0, ...) panics, so use from_bytes to create one with index 0
+        // from_bytes rejects index 0
+        let result = ShamirShare::from_bytes(&[0, 1, 2, 3]);
+        assert!(matches!(result, Err(ShamirError::ReservedIndex)));
+    }
+
+    // ---- ZeroizingSecret as_bytes ----
+
+    #[test]
+    fn zeroizing_secret_as_bytes_matches_deref() {
+        let s = ZeroizingSecret(vec![1, 2, 3, 4]);
+        let from_as_bytes = s.as_bytes();
+        let from_deref: &[u8] = &s;
+        assert_eq!(from_as_bytes, from_deref);
+    }
+
+    // ---- ShamirError is std::error::Error ----
+
+    #[test]
+    fn shamir_error_is_std_error() {
+        let err: Box<dyn std::error::Error> = Box::new(ShamirError::EmptySecret);
+        assert_eq!(err.to_string(), "secret cannot be empty");
+    }
+
+    // ---- Share serialization with large data ----
+
+    #[test]
+    fn share_serialization_large_data() {
+        let data = vec![0xAB; 10_000];
+        let share = ShamirShare::new(255, data.clone());
+        let bytes = share.to_bytes();
+        let recovered = ShamirShare::from_bytes(&bytes).unwrap();
+        assert_eq!(recovered.index(), 255);
+        assert_eq!(recovered.data(), &data);
+    }
+
+    // ---- Split with max shares (255) ----
+
+    #[test]
+    fn split_max_shares() {
+        let secret = b"max shares test";
+        let shares = split_secret(secret, 3, 255).unwrap();
+        assert_eq!(shares.len(), 255);
+
+        // Verify reconstruction with first 3
+        let subset: Vec<_> = shares[0..3].to_vec();
+        let recovered = reconstruct_secret(&subset).unwrap();
+        assert_eq!(&recovered[..], secret);
+    }
 }

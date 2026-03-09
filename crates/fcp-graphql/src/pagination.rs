@@ -844,4 +844,162 @@ mod tests {
         assert_eq!(page.items[0].0, 1);
         assert_eq!(page.items[1].1, "b");
     }
+
+    // ---- CursorPageInfo: clone and use original ----
+
+    #[test]
+    fn cursor_page_info_clone_and_use_original() {
+        let info = CursorPageInfo {
+            has_next_page: true,
+            end_cursor: Some("cursor_xyz".into()),
+            total_count: Some(500),
+        };
+        let cloned = info.clone();
+        assert_eq!(cloned.end_cursor.as_deref(), Some("cursor_xyz"));
+        assert!(info.has_next_page);
+        assert_eq!(info.total_count, Some(500));
+    }
+
+    // ---- CursorPage: many items ----
+
+    #[test]
+    fn cursor_page_large_item_count() {
+        let items: Vec<i32> = (0..1000).collect();
+        let page = CursorPage {
+            items,
+            page_info: CursorPageInfo {
+                has_next_page: true,
+                end_cursor: Some("c1000".into()),
+                total_count: Some(5000),
+            },
+        };
+        assert_eq!(page.items.len(), 1000);
+        assert_eq!(page.page_info.total_count, Some(5000));
+    }
+
+    // ---- OffsetPage: clone and use original ----
+
+    #[test]
+    fn offset_page_clone_and_use_original() {
+        let page = OffsetPage {
+            items: vec!["alpha", "beta", "gamma"],
+            next_offset: Some(3),
+            total_count: Some(10),
+        };
+        let cloned = page.clone();
+        assert_eq!(cloned.items.len(), 3);
+        assert_eq!(page.next_offset, Some(3));
+        assert_eq!(page.total_count, Some(10));
+    }
+
+    // ---- OffsetPage: large item count ----
+
+    #[test]
+    fn offset_page_large_item_count() {
+        let items: Vec<u64> = (0..500).collect();
+        let page = OffsetPage {
+            items,
+            next_offset: Some(500),
+            total_count: Some(2000),
+        };
+        assert_eq!(page.items.len(), 500);
+    }
+
+    // ---- PaginationError: Display and Debug for both variants ----
+
+    #[test]
+    fn pagination_error_client_variant_display() {
+        let client_err = GraphqlClientError::Http(crate::error::HttpErrorInfo {
+            message: "conn refused".into(),
+            status_code: None,
+            is_timeout: false,
+            is_connect: true,
+            is_request: false,
+        });
+        let err: PaginationError = client_err.into();
+        let msg = err.to_string();
+        assert!(msg.contains("pagination fetch failed"));
+    }
+
+    #[test]
+    fn pagination_error_limit_exceeded_debug() {
+        let err = PaginationError::LimitExceeded("overflow".into());
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("LimitExceeded"));
+        assert!(dbg.contains("overflow"));
+    }
+
+    // ---- PageLimit: debug format details ----
+
+    #[test]
+    fn page_limit_debug_shows_field() {
+        let limit = PageLimit::new(250);
+        let dbg = format!("{limit:?}");
+        assert!(dbg.contains("max_items"));
+        assert!(dbg.contains("250"));
+    }
+
+    // ---- CursorPageInfo: unicode cursor ----
+
+    #[test]
+    fn cursor_page_info_unicode_cursor() {
+        let info = CursorPageInfo {
+            has_next_page: true,
+            end_cursor: Some("Zeiger-nach-rechts".into()),
+            total_count: None,
+        };
+        assert_eq!(info.end_cursor.as_deref(), Some("Zeiger-nach-rechts"));
+    }
+
+    // ---- OffsetPage: total_count with max value ----
+
+    #[test]
+    fn offset_page_max_total_count() {
+        let page: OffsetPage<u8> = OffsetPage {
+            items: vec![],
+            next_offset: None,
+            total_count: Some(u64::MAX),
+        };
+        assert_eq!(page.total_count, Some(u64::MAX));
+    }
+
+    // ---- CursorPage: equality with different items ----
+
+    #[test]
+    fn cursor_page_inequality_by_items() {
+        let a = CursorPage {
+            items: vec![1, 2],
+            page_info: CursorPageInfo {
+                has_next_page: false,
+                end_cursor: None,
+                total_count: None,
+            },
+        };
+        let b = CursorPage {
+            items: vec![3, 4],
+            page_info: CursorPageInfo {
+                has_next_page: false,
+                end_cursor: None,
+                total_count: None,
+            },
+        };
+        assert_ne!(a, b);
+    }
+
+    // ---- OffsetPage: equality with different next_offset ----
+
+    #[test]
+    fn offset_page_inequality_by_next_offset() {
+        let a: OffsetPage<i32> = OffsetPage {
+            items: vec![1],
+            next_offset: Some(10),
+            total_count: None,
+        };
+        let b: OffsetPage<i32> = OffsetPage {
+            items: vec![1],
+            next_offset: Some(20),
+            total_count: None,
+        };
+        assert_ne!(a, b);
+    }
 }

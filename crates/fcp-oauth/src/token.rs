@@ -1343,4 +1343,216 @@ mod tests {
         assert!(debug.contains("read"));
         assert!(debug.contains("write"));
     }
+
+    // ── New batch: TokenResponse serde edge cases ──
+
+    #[test]
+    fn test_token_response_unicode_access_token() {
+        let json = r#"{"access_token":"tok_\u00e9tranger","token_type":"Bearer"}"#;
+        let resp: TokenResponse = serde_json::from_str(json).unwrap();
+        assert!(resp.access_token.contains('\u{00e9}'));
+    }
+
+    #[test]
+    fn test_token_response_empty_access_token() {
+        let json = r#"{"access_token":"","token_type":"Bearer"}"#;
+        let resp: TokenResponse = serde_json::from_str(json).unwrap();
+        assert!(resp.access_token.is_empty());
+        let tokens = OAuthTokens::from_response(resp);
+        assert!(tokens.access_token().is_empty());
+    }
+
+    #[test]
+    fn test_token_response_empty_token_type() {
+        let json = r#"{"access_token":"tok","token_type":""}"#;
+        let resp: TokenResponse = serde_json::from_str(json).unwrap();
+        assert!(resp.token_type.is_empty());
+    }
+
+    #[test]
+    fn test_token_response_scope_with_single_space() {
+        let json = r#"{"access_token":"t","token_type":"B","scope":" "}"#;
+        let resp: TokenResponse = serde_json::from_str(json).unwrap();
+        let tokens = OAuthTokens::from_response(resp);
+        // Single space should yield empty scopes after split_whitespace
+        assert!(tokens.scopes().is_empty());
+    }
+
+    #[test]
+    fn test_token_response_serde_roundtrip_all_none() {
+        let resp = TokenResponse {
+            access_token: "min".into(),
+            token_type: "Bearer".into(),
+            expires_in: None,
+            refresh_token: None,
+            scope: None,
+            id_token: None,
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        let rt: TokenResponse = serde_json::from_str(&json).unwrap();
+        assert_eq!(rt.access_token, "min");
+        assert!(rt.expires_in.is_none());
+        assert!(rt.refresh_token.is_none());
+        assert!(rt.scope.is_none());
+        assert!(rt.id_token.is_none());
+    }
+
+    #[test]
+    fn test_token_response_serde_roundtrip_all_some() {
+        let resp = TokenResponse {
+            access_token: "at".into(),
+            token_type: "Bearer".into(),
+            expires_in: Some(7200),
+            refresh_token: Some("rt".into()),
+            scope: Some("a b c".into()),
+            id_token: Some("id".into()),
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        let rt: TokenResponse = serde_json::from_str(&json).unwrap();
+        assert_eq!(rt.access_token, "at");
+        assert_eq!(rt.expires_in, Some(7200));
+        assert_eq!(rt.refresh_token.as_deref(), Some("rt"));
+        assert_eq!(rt.scope.as_deref(), Some("a b c"));
+        assert_eq!(rt.id_token.as_deref(), Some("id"));
+    }
+
+    // ── New batch: OAuthTokens advanced lifecycle ──
+
+    #[test]
+    fn test_token_update_replaces_id_token_when_provided() {
+        let mut tokens = OAuthTokens::from_response(TokenResponse {
+            access_token: "t".into(),
+            token_type: "Bearer".into(),
+            expires_in: Some(3600),
+            refresh_token: None,
+            scope: None,
+            id_token: Some("old_id".into()),
+        });
+        tokens.update_from_response(TokenResponse {
+            access_token: "new_t".into(),
+            token_type: "Bearer".into(),
+            expires_in: Some(3600),
+            refresh_token: None,
+            scope: None,
+            id_token: Some("new_id".into()),
+        });
+        assert_eq!(tokens.id_token(), Some("new_id"));
+    }
+
+    #[test]
+    fn test_token_update_replaces_refresh_token_when_provided() {
+        let mut tokens = OAuthTokens::from_response(TokenResponse {
+            access_token: "t".into(),
+            token_type: "Bearer".into(),
+            expires_in: Some(3600),
+            refresh_token: Some("old_rt".into()),
+            scope: None,
+            id_token: None,
+        });
+        tokens.update_from_response(TokenResponse {
+            access_token: "new_t".into(),
+            token_type: "Bearer".into(),
+            expires_in: Some(3600),
+            refresh_token: Some("new_rt".into()),
+            scope: None,
+            id_token: None,
+        });
+        assert_eq!(tokens.refresh_token(), Some("new_rt"));
+    }
+
+    #[test]
+    fn test_token_clone_preserves_all_fields() {
+        let resp = TokenResponse {
+            access_token: "at".into(),
+            token_type: "MAC".into(),
+            expires_in: Some(1800),
+            refresh_token: Some("rt".into()),
+            scope: Some("x y z".into()),
+            id_token: Some("id_jwt".into()),
+        };
+        let tokens = OAuthTokens::from_response(resp);
+        let cloned = tokens.clone();
+        assert_eq!(tokens.access_token(), cloned.access_token());
+        assert_eq!(tokens.token_type(), cloned.token_type());
+        assert_eq!(tokens.refresh_token(), cloned.refresh_token());
+        assert_eq!(tokens.scopes(), cloned.scopes());
+        assert_eq!(tokens.id_token(), cloned.id_token());
+        assert_eq!(tokens.authorization_header(), cloned.authorization_header());
+    }
+
+    #[test]
+    fn test_token_serialize_deserialize_preserves_access_token() {
+        let tokens = OAuthTokens::from_response(mock_token_response(Some(3600)));
+        let json = serde_json::to_string(&tokens).unwrap();
+        let val: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(val["access_token"].as_str(), Some("test_access_token"));
+        assert_eq!(val["token_type"].as_str(), Some("Bearer"));
+    }
+
+    // ── New batch: TokenStore concurrent-style operations ──
+
+    #[test]
+    fn test_token_store_store_get_remove_cycle() {
+        let store = TokenStore::new();
+        let key = "cycle_key";
+
+        // Initially empty
+        assert!(store.get(key).is_none());
+        assert!(!store.has_valid_token(key));
+
+        // Store
+        store.store(key, OAuthTokens::from_response(mock_token_response(Some(3600))));
+        assert!(store.get(key).is_some());
+        assert!(store.has_valid_token(key));
+
+        // Remove
+        let removed = store.remove(key);
+        assert!(removed.is_some());
+        assert!(store.get(key).is_none());
+        assert!(!store.has_valid_token(key));
+    }
+
+    #[test]
+    fn test_token_store_update_then_get_with_metadata() {
+        let store = TokenStore::new();
+        let mut metadata = HashMap::new();
+        metadata.insert("env".to_string(), "production".to_string());
+
+        store.store_with_metadata(
+            "k",
+            OAuthTokens::from_response(mock_token_response(Some(3600))),
+            metadata,
+        );
+
+        let new_tokens = OAuthTokens::from_response(TokenResponse {
+            access_token: "updated_at".into(),
+            token_type: "Bearer".into(),
+            expires_in: Some(7200),
+            refresh_token: None,
+            scope: None,
+            id_token: None,
+        });
+        store.update("k", new_tokens).unwrap();
+
+        let (tokens, meta) = store.get_with_metadata("k").unwrap();
+        assert_eq!(tokens.access_token(), "updated_at");
+        // Metadata should still be preserved after update
+        assert_eq!(meta.get("env"), Some(&"production".to_string()));
+    }
+
+    #[test]
+    fn test_token_store_clear_does_not_affect_cleanup_interval() {
+        let store = TokenStore::new().with_cleanup_interval(Duration::from_secs(999));
+        store.store(
+            "k",
+            OAuthTokens::from_response(mock_token_response(Some(3600))),
+        );
+        store.clear();
+        // Should still be functional after clear
+        store.store(
+            "k2",
+            OAuthTokens::from_response(mock_token_response(Some(3600))),
+        );
+        assert!(store.has_valid_token("k2"));
+    }
 }

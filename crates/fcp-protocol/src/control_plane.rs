@@ -625,4 +625,234 @@ mod tests {
             ControlPlaneRetention::Ephemeral
         );
     }
+
+    // ── Batch 5: SunnyMoose additional edge-case coverage ──
+
+    #[test]
+    fn retention_empty_namespace_defaults_to_required() {
+        let schema = test_schema("", "Empty");
+        assert_eq!(
+            retention_for_schema(&schema),
+            ControlPlaneRetention::Required
+        );
+    }
+
+    #[test]
+    fn retention_partial_prefix_no_match() {
+        // "fcp.inv" is NOT "fcp.invoke" prefix — should default to required
+        let schema = test_schema("fcp.inv", "Partial");
+        assert_eq!(
+            retention_for_schema(&schema),
+            ControlPlaneRetention::Required
+        );
+    }
+
+    #[test]
+    fn retention_case_sensitive() {
+        // Uppercase should NOT match lowercase prefixes
+        let schema = test_schema("FCP.INVOKE", "Upper");
+        assert_eq!(
+            retention_for_schema(&schema),
+            ControlPlaneRetention::Required
+        );
+        let schema = test_schema("FCP.HEALTH", "Upper");
+        // Does not match "fcp.health" so defaults to Required
+        assert_eq!(
+            retention_for_schema(&schema),
+            ControlPlaneRetention::Required
+        );
+    }
+
+    #[test]
+    fn retention_unicode_namespace_defaults_to_required() {
+        let schema = test_schema("fcp.\u{00e9}moji", "Unicode");
+        assert_eq!(
+            retention_for_schema(&schema),
+            ControlPlaneRetention::Required
+        );
+    }
+
+    #[test]
+    fn control_plane_object_body_with_binary_data() {
+        let header = ObjectHeader {
+            schema: test_schema("fcp.invoke", "Binary"),
+            zone_id: ZoneId::work(),
+            created_at: 0,
+            provenance: Provenance::new(ZoneId::work()),
+            refs: vec![],
+            foreign_refs: vec![],
+            ttl_secs: None,
+            placement: None,
+        };
+        let body: Vec<u8> = (0..=255).collect();
+        let obj = ControlPlaneObject::new(header, body.clone());
+        assert_eq!(obj.body.len(), 256);
+        assert_eq!(obj.body, body);
+    }
+
+    #[test]
+    fn control_plane_object_retention_matches_schema() {
+        // Verify a few schemas go through the object's retention method correctly
+        let schemas_required = ["fcp.invoke", "fcp.receipt", "fcp.grant"];
+        let schemas_ephemeral = ["fcp.health", "fcp.ping", "fcp.simulate"];
+
+        for ns in schemas_required {
+            let header = ObjectHeader {
+                schema: test_schema(ns, "Test"),
+                zone_id: ZoneId::work(),
+                created_at: 0,
+                provenance: Provenance::new(ZoneId::work()),
+                refs: vec![],
+                foreign_refs: vec![],
+                ttl_secs: None,
+                placement: None,
+            };
+            let obj = ControlPlaneObject::new(header, vec![]);
+            assert_eq!(
+                obj.retention(),
+                ControlPlaneRetention::Required,
+                "schema {ns} should be required"
+            );
+        }
+
+        for ns in schemas_ephemeral {
+            let header = ObjectHeader {
+                schema: test_schema(ns, "Test"),
+                zone_id: ZoneId::work(),
+                created_at: 0,
+                provenance: Provenance::new(ZoneId::work()),
+                refs: vec![],
+                foreign_refs: vec![],
+                ttl_secs: None,
+                placement: None,
+            };
+            let obj = ControlPlaneObject::new(header, vec![]);
+            assert_eq!(
+                obj.retention(),
+                ControlPlaneRetention::Ephemeral,
+                "schema {ns} should be ephemeral"
+            );
+        }
+    }
+
+    #[test]
+    fn control_plane_object_serde_cbor_roundtrip() {
+        let header = ObjectHeader {
+            schema: test_schema("fcp.receipt", "Exec"),
+            zone_id: ZoneId::work(),
+            created_at: 1_700_000_000,
+            provenance: Provenance::new(ZoneId::work()),
+            refs: vec![],
+            foreign_refs: vec![],
+            ttl_secs: Some(3600),
+            placement: None,
+        };
+        let body = b"cbor roundtrip body".to_vec();
+        let obj = ControlPlaneObject::new(header, body.clone());
+        // CBOR roundtrip
+        let cbor_bytes = fcp_cbor::to_canonical_cbor(&obj).expect("cbor encode");
+        let decoded: ControlPlaneObject =
+            ciborium::from_reader(&cbor_bytes[..]).expect("cbor decode");
+        assert_eq!(decoded.body, body);
+        assert_eq!(decoded.schema().namespace, "fcp.receipt");
+    }
+
+    #[test]
+    fn control_plane_object_derive_id_different_schemas_differ() {
+        let key = ObjectIdKey::from_bytes([0x44; 32]);
+        let body = b"same body".to_vec();
+
+        let header_a = ObjectHeader {
+            schema: test_schema("fcp.invoke", "Req"),
+            zone_id: ZoneId::work(),
+            created_at: 0,
+            provenance: Provenance::new(ZoneId::work()),
+            refs: vec![],
+            foreign_refs: vec![],
+            ttl_secs: None,
+            placement: None,
+        };
+        let header_b = ObjectHeader {
+            schema: test_schema("fcp.receipt", "Resp"),
+            zone_id: ZoneId::work(),
+            created_at: 0,
+            provenance: Provenance::new(ZoneId::work()),
+            refs: vec![],
+            foreign_refs: vec![],
+            ttl_secs: None,
+            placement: None,
+        };
+        let obj_a = ControlPlaneObject::new(header_a, body.clone());
+        let obj_b = ControlPlaneObject::new(header_b, body);
+        let id_a = obj_a.derive_id(&key).expect("derive a");
+        let id_b = obj_b.derive_id(&key).expect("derive b");
+        assert_ne!(id_a, id_b);
+    }
+
+    #[test]
+    fn retention_serde_cbor_roundtrip() {
+        use fcp_cbor::to_canonical_cbor;
+        let r = ControlPlaneRetention::Required;
+        let cbor = to_canonical_cbor(&r).expect("encode");
+        let back: ControlPlaneRetention =
+            ciborium::from_reader(&cbor[..]).expect("decode");
+        assert_eq!(back, r);
+
+        let e = ControlPlaneRetention::Ephemeral;
+        let cbor = to_canonical_cbor(&e).expect("encode");
+        let back: ControlPlaneRetention =
+            ciborium::from_reader(&cbor[..]).expect("decode");
+        assert_eq!(back, e);
+    }
+
+    #[test]
+    fn requires_storage_consistency_with_retention() {
+        // Verify requires_storage is always == (retention == Required)
+        let all_schemas = [
+            "fcp.invoke",
+            "fcp.receipt",
+            "fcp.approval",
+            "fcp.secret",
+            "fcp.revoke",
+            "fcp.audit",
+            "fcp.grant",
+            "fcp.membership",
+            "fcp.health",
+            "fcp.handshake",
+            "fcp.status",
+            "fcp.introspect",
+            "fcp.configure",
+            "fcp.simulate",
+            "fcp.ping",
+            "fcp.heartbeat",
+            "fcp.custom.unknown",
+        ];
+        for ns in all_schemas {
+            let schema = test_schema(ns, "Test");
+            let retention = retention_for_schema(&schema);
+            let storage = requires_storage(&schema);
+            assert_eq!(
+                storage,
+                retention == ControlPlaneRetention::Required,
+                "mismatch for {ns}"
+            );
+        }
+    }
+
+    #[test]
+    fn control_plane_object_schema_version_preserved() {
+        let header = ObjectHeader {
+            schema: SchemaId::new("fcp.test", "Versioned", Version::new(2, 3, 4)),
+            zone_id: ZoneId::work(),
+            created_at: 0,
+            provenance: Provenance::new(ZoneId::work()),
+            refs: vec![],
+            foreign_refs: vec![],
+            ttl_secs: None,
+            placement: None,
+        };
+        let obj = ControlPlaneObject::new(header, vec![]);
+        assert_eq!(obj.schema().version, Version::new(2, 3, 4));
+        assert_eq!(obj.schema().name, "Versioned");
+    }
 }

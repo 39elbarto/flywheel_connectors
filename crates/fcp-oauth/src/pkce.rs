@@ -622,4 +622,115 @@ mod tests {
         let pkce = Pkce::from_verifier(&verifier, PkceMethod::S256).unwrap();
         assert_eq!(pkce.verifier().len(), 128);
     }
+
+    // ── New batch: PKCE edge cases ──
+
+    #[test]
+    fn test_pkce_from_verifier_rejects_newline() {
+        let verifier = "a".repeat(42) + "\n";
+        let result = Pkce::from_verifier(&verifier, PkceMethod::S256);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_pkce_from_verifier_rejects_tab() {
+        let verifier = "a".repeat(42) + "\t";
+        let result = Pkce::from_verifier(&verifier, PkceMethod::S256);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_pkce_from_verifier_rejects_null_byte_in_string() {
+        let verifier = "a".repeat(42) + "\0";
+        let result = Pkce::from_verifier(&verifier, PkceMethod::S256);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_pkce_from_verifier_rejects_unicode_letter() {
+        let verifier = "a".repeat(42) + "\u{00e9}";
+        let result = Pkce::from_verifier(&verifier, PkceMethod::S256);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_pkce_from_verifier_rejects_cjk_character() {
+        let verifier = "a".repeat(42) + "\u{4e16}";
+        let result = Pkce::from_verifier(&verifier, PkceMethod::S256);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_pkce_plain_verifier_equals_challenge_from_verifier() {
+        let v = "a".repeat(43);
+        let pkce = Pkce::from_verifier(&v, PkceMethod::Plain).unwrap();
+        assert_eq!(pkce.verifier(), pkce.challenge());
+        assert_eq!(pkce.verifier(), v);
+    }
+
+    #[test]
+    fn test_pkce_s256_different_length_verifiers_produce_same_length_challenge() {
+        let v43 = "a".repeat(43);
+        let v128 = "b".repeat(128);
+        let p43 = Pkce::from_verifier(&v43, PkceMethod::S256).unwrap();
+        let p128 = Pkce::from_verifier(&v128, PkceMethod::S256).unwrap();
+        // SHA-256 always produces 32 bytes -> 43 base64url chars
+        assert_eq!(p43.challenge().len(), 43);
+        assert_eq!(p128.challenge().len(), 43);
+    }
+
+    #[test]
+    fn test_pkce_from_verifier_error_for_too_long_mentions_length() {
+        let v = "z".repeat(200);
+        let err = Pkce::from_verifier(&v, PkceMethod::S256).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("43-128"));
+        assert!(msg.contains("200"));
+    }
+
+    #[test]
+    fn test_pkce_default_and_new_produce_same_method() {
+        let p1 = Pkce::new();
+        let p2 = Pkce::default();
+        assert_eq!(p1.method(), p2.method());
+        assert_eq!(p1.method(), PkceMethod::S256);
+    }
+
+    #[test]
+    fn test_pkce_clone_independence() {
+        let pkce = Pkce::new();
+        let cloned = pkce.clone();
+        // After cloning, both should still be independently valid
+        assert_eq!(pkce.verifier().len(), 43);
+        assert_eq!(cloned.verifier().len(), 43);
+        assert_eq!(pkce.verifier(), cloned.verifier());
+    }
+
+    #[test]
+    fn test_pkce_from_verifier_all_hyphens() {
+        let verifier = "-".repeat(43);
+        let pkce = Pkce::from_verifier(&verifier, PkceMethod::S256).unwrap();
+        assert_eq!(pkce.verifier(), verifier);
+    }
+
+    #[test]
+    fn test_pkce_from_verifier_all_dots() {
+        let verifier = ".".repeat(43);
+        let pkce = Pkce::from_verifier(&verifier, PkceMethod::S256).unwrap();
+        assert_eq!(pkce.verifier(), verifier);
+    }
+
+    #[test]
+    fn test_pkce_from_verifier_all_underscores() {
+        let verifier = "_".repeat(43);
+        let pkce = Pkce::from_verifier(&verifier, PkceMethod::S256).unwrap();
+        assert_eq!(pkce.verifier(), verifier);
+    }
+
+    #[test]
+    fn test_pkce_from_verifier_all_tildes() {
+        let verifier = "~".repeat(43);
+        let pkce = Pkce::from_verifier(&verifier, PkceMethod::S256).unwrap();
+        assert_eq!(pkce.verifier(), verifier);
+    }
 }

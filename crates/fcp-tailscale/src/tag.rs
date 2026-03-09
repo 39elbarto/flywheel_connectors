@@ -1224,4 +1224,308 @@ mod tests {
         let debug = format!("{err:?}");
         assert!(debug.contains("InvalidZoneId"));
     }
+
+    // --- Tag: serde deserialization from invalid JSON ---
+
+    #[test]
+    fn test_tag_deserialize_from_number_fails() {
+        let result: Result<TailscaleTag, _> = serde_json::from_str("42");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_tag_deserialize_from_null_fails() {
+        let result: Result<TailscaleTag, _> = serde_json::from_str("null");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_tag_deserialize_from_bool_fails() {
+        let result: Result<TailscaleTag, _> = serde_json::from_str("true");
+        assert!(result.is_err());
+    }
+
+    // --- Tag: new with whitespace ---
+
+    #[test]
+    fn test_tag_new_with_leading_whitespace() {
+        assert!(TailscaleTag::new(" tag:server").is_err());
+    }
+
+    #[test]
+    fn test_tag_new_with_trailing_whitespace() {
+        // "tag: server" starts with "tag:" so it's accepted
+        let tag = TailscaleTag::new("tag: server").unwrap();
+        assert_eq!(tag.as_str(), "tag: server");
+    }
+
+    // --- Tag: Display idempotency ---
+
+    #[test]
+    fn test_tag_display_idempotent() {
+        let tag = TailscaleTag::fcp_tag("zone");
+        let d1 = tag.to_string();
+        let d2 = tag.to_string();
+        assert_eq!(d1, d2);
+    }
+
+    // --- Tag: is_fcp_tag boundary with similar prefixes ---
+
+    #[test]
+    fn test_tag_fcp_dash_prefix_required() {
+        let tag = TailscaleTag::new("tag:fcpx").unwrap();
+        assert!(!tag.is_fcp_tag());
+        assert!(tag.fcp_suffix().is_none());
+    }
+
+    #[test]
+    fn test_tag_fcp_double_dash() {
+        let tag = TailscaleTag::new("tag:fcp--work").unwrap();
+        assert!(tag.is_fcp_tag());
+        assert_eq!(tag.fcp_suffix(), Some("-work"));
+    }
+
+    // --- ZoneAclRule: serde roundtrip with empty action ---
+
+    #[test]
+    fn test_zone_acl_rule_serde_empty_action() {
+        let rule = ZoneAclRule {
+            action: String::new(),
+            src: vec!["tag:fcp-work".to_string()],
+            dst: vec!["tag:fcp-work:4200".to_string()],
+        };
+        let json = serde_json::to_string(&rule).unwrap();
+        let decoded: ZoneAclRule = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.action, "");
+    }
+
+    // --- ZoneTagMapping: validate_zone_id with emoji ---
+
+    #[test]
+    fn test_validate_zone_id_emoji_rejected() {
+        let result = ZoneTagMapping::validate_zone_id("z:zone\u{1F600}");
+        assert!(result.is_err());
+    }
+
+    // --- Tag: serde roundtrip in a vec ---
+
+    #[test]
+    fn test_tags_vec_serde_roundtrip() {
+        let tags = vec![
+            TailscaleTag::fcp_tag("owner"),
+            TailscaleTag::fcp_tag("work"),
+            TailscaleTag::new("tag:infra").unwrap(),
+        ];
+        let json = serde_json::to_string(&tags).unwrap();
+        let decoded: Vec<TailscaleTag> = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.len(), 3);
+        assert_eq!(decoded[0], tags[0]);
+        assert_eq!(decoded[1], tags[1]);
+        assert_eq!(decoded[2], tags[2]);
+    }
+
+    // --- ZoneAclGenerator: all_zone_rules with max ports ---
+
+    #[test]
+    fn test_all_zone_rules_max_ports() {
+        let acl_gen = ZoneAclGenerator::new(u16::MAX, u16::MAX);
+        let rules = acl_gen.all_zone_rules().unwrap();
+        assert_eq!(rules.len(), 5);
+        for rule in &rules {
+            for dst in &rule.dst {
+                assert!(dst.ends_with(&format!(":{}", u16::MAX)));
+            }
+        }
+    }
+
+    // --- ZoneTagMapping: zone_to_tag with unicode suffix ---
+
+    #[test]
+    fn test_zone_to_tag_unicode_suffix() {
+        // zone_to_tag only validates prefix, not suffix
+        let tag = ZoneTagMapping::zone_to_tag("z:\u{00e9}").unwrap();
+        assert_eq!(tag.as_str(), "tag:fcp-\u{00e9}");
+    }
+
+    // --- ZoneAclGenerator: rules for each individual standard zone ---
+
+    #[test]
+    fn test_zone_acl_rule_owner() {
+        let acl_gen = ZoneAclGenerator::default();
+        let rule = acl_gen.zone_access_rule("z:owner").unwrap();
+        assert_eq!(rule.src[0], "tag:fcp-owner");
+        assert_eq!(rule.dst[0], "tag:fcp-owner:4200");
+        assert_eq!(rule.dst[1], "tag:fcp-owner:4201");
+    }
+
+    #[test]
+    fn test_zone_acl_rule_community() {
+        let acl_gen = ZoneAclGenerator::default();
+        let rule = acl_gen.zone_access_rule("z:community").unwrap();
+        assert_eq!(rule.src[0], "tag:fcp-community");
+    }
+
+    #[test]
+    fn test_zone_acl_rule_public() {
+        let acl_gen = ZoneAclGenerator::default();
+        let rule = acl_gen.zone_access_rule("z:public").unwrap();
+        assert_eq!(rule.src[0], "tag:fcp-public");
+    }
+
+    // --- ZoneTagMapping: validate_zone_id returns err message containing input ---
+
+    #[test]
+    fn test_validate_zone_id_error_contains_input() {
+        let result = ZoneTagMapping::validate_zone_id("not-a-zone");
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("not-a-zone"));
+    }
+
+    // --- TailscaleTag: Hash uniqueness for different tags ---
+
+    #[test]
+    fn test_tag_hash_many_distinct() {
+        use std::collections::HashSet;
+        let mut set = HashSet::new();
+        for i in 0..25 {
+            set.insert(TailscaleTag::fcp_tag(&format!("zone{i}")));
+        }
+        assert_eq!(set.len(), 25);
+    }
+
+    // --- ZoneAclRule: Debug output contains field values ---
+
+    #[test]
+    fn test_zone_acl_rule_debug_detailed() {
+        let rule = ZoneAclRule {
+            action: "accept".to_string(),
+            src: vec!["tag:fcp-owner".to_string()],
+            dst: vec!["tag:fcp-owner:9090".to_string()],
+        };
+        let dbg = format!("{rule:?}");
+        assert!(dbg.contains("accept"));
+        assert!(dbg.contains("tag:fcp-owner"));
+        assert!(dbg.contains("9090"));
+    }
+
+    // --- ZoneAclGenerator: Debug shows port values ---
+
+    #[test]
+    fn test_zone_acl_generator_debug_custom_ports() {
+        let acl_gen = ZoneAclGenerator::new(1234, 5678);
+        let dbg = format!("{acl_gen:?}");
+        assert!(dbg.contains("1234"));
+        assert!(dbg.contains("5678"));
+    }
+
+    // --- ZoneTagMapping: is_valid_zone_id edge: only hyphens in middle ---
+
+    #[test]
+    fn test_valid_zone_id_hyphens_in_middle() {
+        assert!(ZoneTagMapping::is_valid_zone_id("z:a-b"));
+        assert!(ZoneTagMapping::is_valid_zone_id("z:1-2"));
+    }
+
+    #[test]
+    fn test_invalid_zone_id_only_two_hyphens() {
+        assert!(!ZoneTagMapping::is_valid_zone_id("z:--"));
+    }
+
+    // --- ZoneTagMapping: try_zone_to_tag and zone_to_tag produce same result ---
+
+    #[test]
+    fn test_zone_to_tag_and_try_produce_same() {
+        for zone in ZoneTagMapping::standard_zones() {
+            let tag1 = ZoneTagMapping::zone_to_tag(zone).unwrap();
+            let tag2 = ZoneTagMapping::try_zone_to_tag(zone).unwrap();
+            assert_eq!(tag1, tag2);
+        }
+    }
+
+    // --- ZoneAclRule: serde with large src/dst arrays ---
+
+    #[test]
+    fn test_zone_acl_rule_serde_large_arrays() {
+        let rule = ZoneAclRule {
+            action: "accept".to_string(),
+            src: (0..50).map(|i| format!("tag:fcp-zone{i}")).collect(),
+            dst: (0..100).map(|i| format!("tag:fcp-zone{i}:4200")).collect(),
+        };
+        let json = serde_json::to_string(&rule).unwrap();
+        let decoded: ZoneAclRule = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.src.len(), 50);
+        assert_eq!(decoded.dst.len(), 100);
+    }
+
+    // --- Tag: Display for tag:fcp- (bare prefix) ---
+
+    #[test]
+    fn test_tag_display_bare_fcp_prefix() {
+        let tag = TailscaleTag::fcp_tag("");
+        assert_eq!(format!("{tag}"), "tag:fcp-");
+    }
+
+    // --- ZoneTagMapping: is_valid_zone_id with percent encoding ---
+
+    #[test]
+    fn test_invalid_zone_id_percent_encoding() {
+        assert!(!ZoneTagMapping::is_valid_zone_id("z:zone%20name"));
+    }
+
+    // --- ZoneAclGenerator: all_zone_rules serde roundtrip ---
+
+    #[test]
+    fn test_all_zone_rules_serde_roundtrip() {
+        let acl_gen = ZoneAclGenerator::default();
+        let rules = acl_gen.all_zone_rules().unwrap();
+        let json = serde_json::to_string(&rules).unwrap();
+        let decoded: Vec<ZoneAclRule> = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.len(), 5);
+        for (rule, decoded_rule) in rules.iter().zip(decoded.iter()) {
+            assert_eq!(rule.action, decoded_rule.action);
+            assert_eq!(rule.src, decoded_rule.src);
+            assert_eq!(rule.dst, decoded_rule.dst);
+        }
+    }
+
+    // --- Tag: new rejects tab character prefix ---
+
+    #[test]
+    fn test_tag_new_rejects_tab_prefix() {
+        assert!(TailscaleTag::new("\ttag:server").is_err());
+    }
+
+    // --- ZoneTagMapping: standard_zones all start with z: ---
+
+    #[test]
+    fn test_standard_zones_all_start_with_z_prefix() {
+        for zone in ZoneTagMapping::standard_zones() {
+            assert!(
+                zone.starts_with("z:"),
+                "expected zone to start with 'z:', got: {zone}"
+            );
+        }
+    }
+
+    // --- Tag: serde roundtrip with hyphenated non-fcp tag ---
+
+    #[test]
+    fn test_tag_serde_roundtrip_hyphenated_non_fcp() {
+        let tag = TailscaleTag::new("tag:my-custom-server-tag").unwrap();
+        let json = serde_json::to_string(&tag).unwrap();
+        let decoded: TailscaleTag = serde_json::from_str(&json).unwrap();
+        assert_eq!(tag, decoded);
+        assert!(!decoded.is_fcp_tag());
+    }
+
+    // --- ZoneAclGenerator: zone_access_rule dst has exactly 2 entries ---
+
+    #[test]
+    fn test_zone_acl_rule_dst_always_two_entries() {
+        let acl_gen = ZoneAclGenerator::new(80, 443);
+        for zone in ZoneTagMapping::standard_zones() {
+            let rule = acl_gen.zone_access_rule(zone).unwrap();
+            assert_eq!(rule.dst.len(), 2, "expected 2 dst entries for zone {zone}");
+        }
+    }
 }

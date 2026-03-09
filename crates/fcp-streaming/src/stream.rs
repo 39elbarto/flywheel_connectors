@@ -897,4 +897,165 @@ mod tests {
         while counting.next().await.is_some() {}
         assert_eq!(counting.items_count(), 3);
     }
+
+    // ── CountingStream: additional type coverage ──
+
+    #[fcp_async_core::runtime::test]
+    async fn counting_stream_with_unit_items() {
+        let stream = stream::iter(vec![(), (), ()]);
+        let mut counting = CountingStream::new(stream);
+        while counting.next().await.is_some() {}
+        assert_eq!(counting.items_count(), 3);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn counting_stream_with_tuples() {
+        let stream = stream::iter(vec![(1, "a"), (2, "b")]);
+        let mut counting = CountingStream::new(stream);
+        let first = counting.next().await.unwrap();
+        assert_eq!(first, (1, "a"));
+        assert_eq!(counting.items_count(), 1);
+        let second = counting.next().await.unwrap();
+        assert_eq!(second, (2, "b"));
+        assert_eq!(counting.items_count(), 2);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn counting_stream_with_option_items() {
+        let stream = stream::iter(vec![Some(1), None, Some(3)]);
+        let mut counting = CountingStream::new(stream);
+        assert_eq!(counting.next().await, Some(Some(1)));
+        assert_eq!(counting.next().await, Some(None));
+        assert_eq!(counting.next().await, Some(Some(3)));
+        assert_eq!(counting.items_count(), 3);
+    }
+
+    // ── BatchStream: edge cases ──
+
+    #[fcp_async_core::runtime::test]
+    async fn batch_stream_nine_items_batch_three() {
+        let stream = stream::iter(vec![1, 2, 3, 4, 5, 6, 7, 8, 9]);
+        let batched = BatchStream::new(stream, 3, Duration::from_secs(10));
+        pin_mut!(batched);
+
+        assert_eq!(batched.next().await.unwrap(), vec![1, 2, 3]);
+        assert_eq!(batched.next().await.unwrap(), vec![4, 5, 6]);
+        assert_eq!(batched.next().await.unwrap(), vec![7, 8, 9]);
+        assert!(batched.next().await.is_none());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn batch_stream_with_string_slices() {
+        let stream = stream::iter(vec!["hello", "world", "foo", "bar", "baz"]);
+        let batched = BatchStream::new(stream, 2, Duration::from_secs(10));
+        pin_mut!(batched);
+
+        assert_eq!(batched.next().await.unwrap(), vec!["hello", "world"]);
+        assert_eq!(batched.next().await.unwrap(), vec!["foo", "bar"]);
+        assert_eq!(batched.next().await.unwrap(), vec!["baz"]);
+        assert!(batched.next().await.is_none());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn batch_stream_large_batch_many_items() {
+        let items: Vec<i32> = (0..100).collect();
+        let stream = stream::iter(items);
+        let batched = BatchStream::new(stream, 10, Duration::from_secs(10));
+        pin_mut!(batched);
+
+        let mut total = 0;
+        while let Some(batch) = batched.next().await {
+            assert_eq!(batch.len(), 10);
+            total += batch.len();
+        }
+        assert_eq!(total, 100);
+    }
+
+    // ── TimeoutStream: type coverage ──
+
+    #[fcp_async_core::runtime::test]
+    async fn timeout_stream_with_result_items() {
+        let items: Vec<Result<i32, &str>> = vec![Ok(1), Err("fail"), Ok(3)];
+        let stream = stream::iter(items);
+        let ts = TimeoutStream::new(stream, Duration::from_secs(5));
+        pin_mut!(ts);
+
+        let first = ts.next().await.unwrap().unwrap();
+        assert!(first.is_ok());
+        let second = ts.next().await.unwrap().unwrap();
+        assert!(second.is_err());
+        let third = ts.next().await.unwrap().unwrap();
+        assert!(third.is_ok());
+        assert!(ts.next().await.is_none());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn timeout_stream_with_tuple_items() {
+        let stream = stream::iter(vec![(1, "a"), (2, "b")]);
+        let ts = TimeoutStream::new(stream, Duration::from_secs(1));
+        pin_mut!(ts);
+
+        assert_eq!(ts.next().await.unwrap().unwrap(), (1, "a"));
+        assert_eq!(ts.next().await.unwrap().unwrap(), (2, "b"));
+        assert!(ts.next().await.is_none());
+    }
+
+    // ── RateLimitedStream: additional coverage ──
+
+    #[fcp_async_core::runtime::test]
+    async fn rate_limited_stream_two_items_enforces_one_delay() {
+        let stream = stream::iter(vec![1, 2]);
+        let interval = Duration::from_millis(50);
+        let rl = RateLimitedStream::new(stream, interval);
+        pin_mut!(rl);
+
+        let start = std::time::Instant::now();
+        let mut items = Vec::new();
+        while let Some(item) = rl.next().await {
+            items.push(item);
+        }
+        let elapsed = start.elapsed();
+        assert_eq!(items, vec![1, 2]);
+        // With 2 items and 50ms interval, after item 1 we wait 50ms
+        assert!(elapsed >= Duration::from_millis(40), "expected >=40ms, got {elapsed:?}");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn rate_limited_stream_with_bool_items() {
+        let stream = stream::iter(vec![true, false, true]);
+        let rl = RateLimitedStream::new(stream, Duration::from_millis(1));
+        pin_mut!(rl);
+
+        let mut items = Vec::new();
+        while let Some(item) = rl.next().await {
+            items.push(item);
+        }
+        assert_eq!(items, vec![true, false, true]);
+    }
+
+    // ── StreamExt: trait usage ──
+
+    #[fcp_async_core::runtime::test]
+    async fn stream_ext_with_timeout_preserves_values() {
+        let stream = stream::iter(vec![100, 200, 300]);
+        let ts = super::StreamExt::with_timeout(stream, Duration::from_secs(10));
+        pin_mut!(ts);
+
+        let mut results = Vec::new();
+        while let Some(result) = ts.next().await {
+            results.push(result.unwrap());
+        }
+        assert_eq!(results, vec![100, 200, 300]);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn stream_ext_buffered_batches_three_items_batch_two() {
+        let stream = stream::iter(vec![10, 20, 30]);
+        let batched = super::StreamExt::buffered_batches(stream, 2, Duration::from_secs(10));
+        pin_mut!(batched);
+
+        assert_eq!(batched.next().await.unwrap(), vec![10, 20]);
+        assert_eq!(batched.next().await.unwrap(), vec![30]);
+        assert!(batched.next().await.is_none());
+    }
 }

@@ -3814,4 +3814,1205 @@ mod tests {
         assert_eq!(format!("{:?}", VerifyStatus::Warn), "Warn");
         assert_eq!(format!("{:?}", VerifyStatus::Fail), "Fail");
     }
+
+    // ══════════════════════════════════════════════════════════════════════
+    // Extended test battery: cross-type integration, deeper edge cases
+    // ══════════════════════════════════════════════════════════════════════
+
+    // ── AuditError extended ───────────────────────────────────────────────
+
+    #[test]
+    fn audit_error_error_code_is_deterministic() {
+        let e1 = AuditError::ForkDetected(1);
+        let e2 = AuditError::ForkDetected(999);
+        assert_eq!(e1.error_code(), e2.error_code());
+    }
+
+    #[test]
+    fn audit_error_all_variants_are_std_error() {
+        let variants: Vec<Box<dyn std::error::Error>> = vec![
+            Box::new(AuditError::BuilderMissingField("f".into())),
+            Box::new(AuditError::VerificationFailed("v".into())),
+            Box::new(AuditError::ZoneNotFound("z".into())),
+            Box::new(AuditError::ChainUnavailable("c".into())),
+            Box::new(AuditError::SeqOverflow(42)),
+            Box::new(AuditError::InvalidEntry("i".into())),
+            Box::new(AuditError::SerializationError("s".into())),
+            Box::new(AuditError::ForkDetected(0)),
+        ];
+        assert_eq!(variants.len(), 8);
+        for v in &variants {
+            assert!(!v.to_string().is_empty());
+        }
+    }
+
+    #[test]
+    fn audit_error_display_messages_are_distinct() {
+        use std::collections::HashSet;
+        let errors = [
+            AuditError::BuilderMissingField("f".into()).to_string(),
+            AuditError::VerificationFailed("v".into()).to_string(),
+            AuditError::ZoneNotFound("z".into()).to_string(),
+            AuditError::ChainUnavailable("c".into()).to_string(),
+            AuditError::SeqOverflow(0).to_string(),
+            AuditError::InvalidEntry("i".into()).to_string(),
+            AuditError::SerializationError("s".into()).to_string(),
+            AuditError::ForkDetected(0).to_string(),
+        ];
+        let unique: HashSet<_> = errors.iter().collect();
+        assert_eq!(unique.len(), 8);
+    }
+
+    #[test]
+    fn audit_error_codes_are_unique() {
+        use std::collections::HashSet;
+        let codes: Vec<&str> = vec![
+            AuditError::BuilderMissingField(String::new()).error_code(),
+            AuditError::VerificationFailed(String::new()).error_code(),
+            AuditError::ZoneNotFound(String::new()).error_code(),
+            AuditError::ChainUnavailable(String::new()).error_code(),
+            AuditError::SeqOverflow(0).error_code(),
+            AuditError::InvalidEntry(String::new()).error_code(),
+            AuditError::SerializationError(String::new()).error_code(),
+            AuditError::ForkDetected(0).error_code(),
+        ];
+        let unique: HashSet<_> = codes.iter().collect();
+        assert_eq!(unique.len(), 8);
+    }
+
+    #[test]
+    fn audit_error_codes_start_with_fcp() {
+        let variants: Vec<AuditError> = vec![
+            AuditError::BuilderMissingField(String::new()),
+            AuditError::VerificationFailed(String::new()),
+            AuditError::ZoneNotFound(String::new()),
+            AuditError::ChainUnavailable(String::new()),
+            AuditError::SeqOverflow(0),
+            AuditError::InvalidEntry(String::new()),
+            AuditError::SerializationError(String::new()),
+            AuditError::ForkDetected(0),
+        ];
+        for v in &variants {
+            assert!(
+                v.error_code().starts_with("FCP-"),
+                "error code {} should start with FCP-",
+                v.error_code()
+            );
+        }
+    }
+
+    #[test]
+    fn audit_error_clone_preserves_message_and_code() {
+        let original = AuditError::VerificationFailed("chain broken at seq 5".into());
+        let cloned = original.clone();
+        assert_eq!(original.to_string(), cloned.to_string());
+        assert_eq!(original.error_code(), cloned.error_code());
+    }
+
+    #[test]
+    fn audit_error_empty_message_variants() {
+        let err = AuditError::BuilderMissingField(String::new());
+        assert!(err.to_string().contains("builder missing required field"));
+
+        let err = AuditError::ZoneNotFound(String::new());
+        assert!(err.to_string().contains("not found"));
+    }
+
+    #[test]
+    fn audit_error_unicode_message() {
+        let err = AuditError::InvalidEntry("données corrompues".into());
+        assert!(err.to_string().contains("données"));
+    }
+
+    #[test]
+    fn audit_error_long_message() {
+        let msg = "x".repeat(2000);
+        let err = AuditError::SerializationError(msg.clone());
+        assert!(err.to_string().contains(&msg));
+    }
+
+    #[test]
+    fn audit_error_seq_overflow_max() {
+        let err = AuditError::SeqOverflow(u64::MAX);
+        let s = err.to_string();
+        assert!(s.contains(&u64::MAX.to_string()));
+    }
+
+    #[test]
+    fn audit_error_fork_detected_at_seq_zero() {
+        let err = AuditError::ForkDetected(0);
+        assert!(err.to_string().contains('0'));
+    }
+
+    // ── verify_chain extended scenarios ───────────────────────────────────
+
+    #[test]
+    fn verify_chain_50_entry_valid_chain() {
+        let mut entries = vec![genesis_entry()];
+        for i in 1u64..50 {
+            entries.push(chain_entry(i, &format!("entry-{}", i - 1)));
+        }
+        let report = verify_chain(&entries, None, None);
+        assert!(report.status.is_ok());
+        assert_eq!(report.chain_len, 50);
+        assert!(report.is_clean());
+    }
+
+    #[test]
+    fn verify_chain_gap_at_end() {
+        let e0 = genesis_entry();
+        let e1 = chain_entry(1, "entry-0");
+        let mut e5 = chain_entry(5, "entry-1");
+        e5.id = "entry-5".to_string();
+        let report = verify_chain(&[e0, e1, e5], None, None);
+        assert!(report.status.is_fail());
+        let gap_issues: Vec<_> = report
+            .issues
+            .iter()
+            .filter(|i| i.code == "audit.seq_gap")
+            .collect();
+        assert_eq!(gap_issues.len(), 1);
+        assert_eq!(gap_issues[0].seq, Some(5));
+    }
+
+    #[test]
+    fn verify_chain_multiple_gaps() {
+        let e0 = genesis_entry();
+        let mut e3 = chain_entry(3, "entry-0");
+        e3.id = "entry-3".to_string();
+        let mut e7 = chain_entry(7, "entry-3");
+        e7.id = "entry-7".to_string();
+        let report = verify_chain(&[e0, e3, e7], None, None);
+        let gap_count = report
+            .issues
+            .iter()
+            .filter(|i| i.code == "audit.seq_gap")
+            .count();
+        assert_eq!(gap_count, 2);
+    }
+
+    #[test]
+    fn verify_chain_head_double_mismatch_entry_and_seq() {
+        let e0 = genesis_entry();
+        let head = sample_head("wrong-entry", 999);
+        let report = verify_chain(&[e0], Some(&head), None);
+        assert!(report.status.is_fail());
+        let has_head_mismatch = report
+            .issues
+            .iter()
+            .any(|i| i.code == "audit.head_mismatch");
+        let has_seq_mismatch = report
+            .issues
+            .iter()
+            .any(|i| i.code == "audit.head_seq_mismatch");
+        assert!(has_head_mismatch);
+        assert!(has_seq_mismatch);
+    }
+
+    #[test]
+    fn verify_chain_zone_filter_matching_all_entries() {
+        let mut entries = vec![genesis_entry()];
+        for i in 1u64..5 {
+            entries.push(chain_entry(i, &format!("entry-{}", i - 1)));
+        }
+        let report = verify_chain(&entries, None, Some("z:work"));
+        assert!(report.status.is_ok());
+        assert_eq!(report.zone_id, Some("z:work".to_string()));
+    }
+
+    #[test]
+    fn verify_chain_head_zone_match_ok() {
+        let e0 = genesis_entry();
+        let head = sample_head("entry-0", 0);
+        let report = verify_chain(&[e0], Some(&head), Some("z:work"));
+        let has_zone_head_issues = report
+            .issues
+            .iter()
+            .any(|i| i.code == "audit.head_zone_mismatch");
+        assert!(!has_zone_head_issues);
+    }
+
+    #[test]
+    fn verify_chain_single_invalid_genesis_seq_and_prev() {
+        let mut e0 = genesis_entry();
+        e0.seq = 5;
+        e0.prev = Some("phantom".to_string());
+        let report = verify_chain(&[e0], None, None);
+        assert!(report.status.is_fail());
+        assert!(
+            report
+                .issues
+                .iter()
+                .any(|i| i.code == "audit.genesis_invalid")
+        );
+    }
+
+    #[test]
+    fn verify_chain_no_zone_filter_no_zone_in_report() {
+        let report = verify_chain(&[genesis_entry()], None, None);
+        assert!(report.zone_id.is_none());
+    }
+
+    #[test]
+    fn verify_chain_empty_with_zone() {
+        let report = verify_chain(&[], None, Some("z:test"));
+        assert_eq!(report.zone_id, Some("z:test".to_string()));
+        assert!(report.status.is_ok());
+        assert_eq!(report.chain_len, 0);
+    }
+
+    // ── AuditFilter combination logic ────────────────────────────────────
+
+    #[test]
+    fn filter_matches_subset_of_entries() {
+        let entries: Vec<AuditEntry> = (0..5)
+            .map(|i| {
+                let mut e = genesis_entry();
+                e.id = format!("entry-{i}");
+                e.seq = i;
+                if i % 2 == 0 {
+                    e.severity = Severity::Error;
+                }
+                e
+            })
+            .collect();
+
+        let filter = AuditFilter {
+            min_severity: Some(Severity::Error),
+            ..Default::default()
+        };
+
+        let matched_count = entries.iter().filter(|e| filter.matches(e)).count();
+        assert_eq!(matched_count, 3); // i=0,2,4
+    }
+
+    #[test]
+    fn filter_no_match_when_all_fields_wrong() {
+        let filter = AuditFilter {
+            connector_id: Some("wrong".into()),
+            operation_id: Some("wrong".into()),
+            actor: Some("wrong".into()),
+            zone_id: Some("wrong".into()),
+            ..Default::default()
+        };
+        assert!(!filter.matches(&genesis_entry()));
+    }
+
+    #[test]
+    fn filter_serde_from_empty_json() {
+        let filter: AuditFilter = serde_json::from_str("{}").unwrap();
+        assert!(filter.is_empty());
+        assert_eq!(filter.active_count(), 0);
+    }
+
+    #[test]
+    fn filter_eq_same_fields() {
+        let a = AuditFilter {
+            actor: Some("alice".into()),
+            zone_id: Some("z:work".into()),
+            ..Default::default()
+        };
+        let b = AuditFilter {
+            actor: Some("alice".into()),
+            zone_id: Some("z:work".into()),
+            ..Default::default()
+        };
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn filter_ne_different_fields() {
+        let a = AuditFilter {
+            actor: Some("alice".into()),
+            ..Default::default()
+        };
+        let b = AuditFilter {
+            actor: Some("bob".into()),
+            ..Default::default()
+        };
+        assert_ne!(a, b);
+    }
+
+    // ── DecisionReceipt extended ─────────────────────────────────────────
+
+    #[test]
+    fn receipt_serde_from_minimal_json() {
+        let json = r#"{
+            "id": "r",
+            "request_id": "req",
+            "decision": "allow",
+            "reason_code": "ok",
+            "decided_at": 0,
+            "zone_id": "z"
+        }"#;
+        let receipt: DecisionReceipt = serde_json::from_str(json).unwrap();
+        assert!(receipt.is_allow());
+        assert_eq!(receipt.evidence_count(), 0);
+        assert!(!receipt.has_explanation());
+    }
+
+    #[test]
+    fn receipt_unicode_reason_code() {
+        let mut receipt = sample_receipt();
+        receipt.reason_code = "politique.refusé".into();
+        let json = serde_json::to_string(&receipt).unwrap();
+        let parsed: DecisionReceipt = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.reason_code, "politique.refusé");
+    }
+
+    #[test]
+    fn receipt_eq_same_data() {
+        let a = sample_receipt();
+        let b = sample_receipt();
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn receipt_ne_different_decision() {
+        let mut a = sample_receipt();
+        let mut b = sample_receipt();
+        b.decision = Decision::Deny;
+        a.decision = Decision::Allow;
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn receipt_large_evidence_serde_roundtrip() {
+        let mut receipt = sample_receipt();
+        receipt.evidence = (0..500).map(|i| format!("evidence-ref-{i}")).collect();
+        let json = serde_json::to_string(&receipt).unwrap();
+        let parsed: DecisionReceipt = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.evidence.len(), 500);
+    }
+
+    #[test]
+    fn receipt_display_deny_variant() {
+        let mut receipt = sample_receipt();
+        receipt.decision = Decision::Deny;
+        receipt.reason_code = "cap.revoked".into();
+        let display = receipt.to_string();
+        assert!(display.contains("deny"));
+        assert!(display.contains("cap.revoked"));
+    }
+
+    // ── ChainHead extended ───────────────────────────────────────────────
+
+    #[test]
+    fn chain_head_has_quorum_boundary() {
+        let mut head = sample_head("e", 0);
+        head.signature_count = 1;
+        assert!(head.has_quorum()); // >0 means quorum
+
+        head.signature_count = 0;
+        assert!(!head.has_quorum());
+    }
+
+    #[test]
+    fn chain_head_eq_same_data() {
+        let a = sample_head("entry-5", 5);
+        let b = sample_head("entry-5", 5);
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn chain_head_ne_different_seq() {
+        let a = sample_head("entry-5", 5);
+        let b = sample_head("entry-5", 6);
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn chain_head_ne_different_entry() {
+        let a = sample_head("entry-a", 5);
+        let b = sample_head("entry-b", 5);
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn chain_head_display_includes_zone() {
+        let mut head = sample_head("e", 0);
+        head.zone_id = "z:production-us-east-1".into();
+        let display = head.to_string();
+        assert!(display.contains("z:production-us-east-1"));
+    }
+
+    // ── AuditEntry extended ──────────────────────────────────────────────
+
+    #[test]
+    fn audit_entry_follows_consecutive_chain() {
+        let mut entries = vec![genesis_entry()];
+        for i in 1u64..10 {
+            entries.push(chain_entry(i, &format!("entry-{}", i - 1)));
+        }
+        for i in 1..entries.len() {
+            assert!(
+                entries[i].follows(&entries[i - 1]),
+                "entry {} should follow entry {}",
+                i,
+                i - 1
+            );
+        }
+    }
+
+    #[test]
+    fn audit_entry_genesis_does_not_follow_non_genesis() {
+        let non_genesis = chain_entry(1, "entry-0");
+        let genesis = genesis_entry();
+        assert!(!genesis.follows(&non_genesis));
+    }
+
+    #[test]
+    fn audit_entry_display_chain_entry() {
+        let entry = chain_entry(5, "entry-4");
+        let display = entry.to_string();
+        assert!(display.contains("seq=5"));
+        assert!(display.contains(event_types::SECRET_ACCESS));
+        assert!(display.contains("user:bob"));
+        assert!(display.contains("z:work"));
+    }
+
+    #[test]
+    fn audit_entry_serde_preserves_btreemap_ordering() {
+        let mut entry = genesis_entry();
+        entry.metadata.insert("z_key".into(), serde_json::json!(1));
+        entry.metadata.insert("a_key".into(), serde_json::json!(2));
+        entry.metadata.insert("m_key".into(), serde_json::json!(3));
+
+        let json = serde_json::to_string(&entry).unwrap();
+        let parsed: AuditEntry = serde_json::from_str(&json).unwrap();
+        let keys: Vec<_> = parsed.metadata.keys().collect();
+        assert_eq!(keys, vec!["a_key", "m_key", "z_key"]);
+    }
+
+    #[test]
+    fn audit_entry_ne_different_event_type() {
+        let mut a = genesis_entry();
+        let mut b = genesis_entry();
+        b.event_type = event_types::SECURITY_VIOLATION.into();
+        a.event_type = event_types::CAPABILITY_INVOKE.into();
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn audit_entry_ne_different_metadata() {
+        let mut a = genesis_entry();
+        let mut b = genesis_entry();
+        a.metadata.insert("key".into(), serde_json::json!("val_a"));
+        b.metadata.insert("key".into(), serde_json::json!("val_b"));
+        assert_ne!(a, b);
+    }
+
+    // ── AuditEntryBuilder extended ───────────────────────────────────────
+
+    #[test]
+    fn builder_chain_of_entries() {
+        let e0 = AuditEntryBuilder::new()
+            .id("e-0")
+            .event_type(event_types::CAPABILITY_INVOKE)
+            .actor("user:alice")
+            .zone_id("z:work")
+            .seq(0)
+            .occurred_at(1_000)
+            .build()
+            .unwrap();
+
+        let e1 = AuditEntryBuilder::new()
+            .id("e-1")
+            .event_type(event_types::SECRET_ACCESS)
+            .actor("user:bob")
+            .zone_id("z:work")
+            .seq(1)
+            .occurred_at(2_000)
+            .prev(&e0.id)
+            .correlation_id("corr-1")
+            .build()
+            .unwrap();
+
+        assert!(e0.is_genesis());
+        assert!(e1.follows(&e0));
+    }
+
+    #[test]
+    fn builder_with_all_optional_fields_roundtrip() {
+        let entry = AuditEntryBuilder::new()
+            .id("e-full")
+            .event_type(event_types::ELEVATION_GRANTED)
+            .severity(Severity::Warning)
+            .actor("admin:root")
+            .zone_id("z:secure")
+            .seq(42)
+            .occurred_at(1_700_000_000)
+            .prev("e-41")
+            .correlation_id("corr-xyz")
+            .trace_context(TraceContext::new("trace-full", "span-full").with_flags(0x01))
+            .connector_id("fcp.slack:base:v2")
+            .operation_id("list_channels")
+            .meta("source", serde_json::json!("api"))
+            .meta("latency_ms", serde_json::json!(150))
+            .build()
+            .unwrap();
+
+        let json = serde_json::to_string(&entry).unwrap();
+        let parsed: AuditEntry = serde_json::from_str(&json).unwrap();
+        assert_eq!(entry, parsed);
+    }
+
+    #[test]
+    fn builder_severity_explicit_override_lower() {
+        let entry = AuditEntryBuilder::new()
+            .id("e-1")
+            .event_type(event_types::SECURITY_VIOLATION)
+            .severity(Severity::Info) // explicitly override auto Error to Info
+            .actor("a")
+            .zone_id("z")
+            .seq(0)
+            .occurred_at(0)
+            .build()
+            .unwrap();
+        assert_eq!(entry.severity, Severity::Info);
+    }
+
+    #[test]
+    fn builder_empty_strings_for_required_fields() {
+        let entry = AuditEntryBuilder::new()
+            .id("")
+            .event_type("")
+            .actor("")
+            .zone_id("")
+            .seq(0)
+            .occurred_at(0)
+            .build()
+            .unwrap();
+        assert!(entry.id.is_empty());
+        assert!(entry.event_type.is_empty());
+    }
+
+    #[test]
+    fn builder_error_is_audit_error() {
+        let err = AuditEntryBuilder::new().build().unwrap_err();
+        let _: &AuditError = &err;
+        assert_eq!(err.error_code(), "FCP-4000");
+    }
+
+    // ── FreshnessLevel extended ──────────────────────────────────────────
+
+    #[test]
+    fn freshness_serde_serialized_strings() {
+        assert_eq!(
+            serde_json::to_string(&FreshnessLevel::Fresh).unwrap(),
+            "\"fresh\""
+        );
+        assert_eq!(
+            serde_json::to_string(&FreshnessLevel::Stale).unwrap(),
+            "\"stale\""
+        );
+        assert_eq!(
+            serde_json::to_string(&FreshnessLevel::Degraded).unwrap(),
+            "\"degraded\""
+        );
+        assert_eq!(
+            serde_json::to_string(&FreshnessLevel::Missing).unwrap(),
+            "\"missing\""
+        );
+    }
+
+    #[test]
+    fn freshness_serde_rejects_invalid_variant() {
+        let result: Result<FreshnessLevel, _> = serde_json::from_str("\"expired\"");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn freshness_serde_rejects_numeric() {
+        let result: Result<FreshnessLevel, _> = serde_json::from_str("1");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn freshness_ordering_all_pair_combinations() {
+        let levels = [
+            FreshnessLevel::Fresh,
+            FreshnessLevel::Stale,
+            FreshnessLevel::Degraded,
+            FreshnessLevel::Missing,
+        ];
+        for i in 0..levels.len() {
+            for j in (i + 1)..levels.len() {
+                assert!(levels[i] < levels[j], "{:?} should be < {:?}", levels[i], levels[j]);
+            }
+        }
+    }
+
+    #[test]
+    fn freshness_debug_format_all_variants() {
+        assert_eq!(format!("{:?}", FreshnessLevel::Fresh), "Fresh");
+        assert_eq!(format!("{:?}", FreshnessLevel::Stale), "Stale");
+        assert_eq!(format!("{:?}", FreshnessLevel::Degraded), "Degraded");
+        assert_eq!(format!("{:?}", FreshnessLevel::Missing), "Missing");
+    }
+
+    // ── AuditStatus extended ─────────────────────────────────────────────
+
+    #[test]
+    fn audit_status_fresh_with_full_coverage() {
+        let status = AuditStatus::fresh(999, 1.0);
+        assert_eq!(status.freshness, FreshnessLevel::Fresh);
+        assert_eq!(status.coverage, Some(1.0));
+    }
+
+    #[test]
+    fn audit_status_fresh_with_zero_coverage() {
+        let status = AuditStatus::fresh(0, 0.0);
+        assert_eq!(status.head_seq, Some(0));
+        assert_eq!(status.coverage, Some(0.0));
+    }
+
+    #[test]
+    fn audit_status_with_reason_chain() {
+        let status = AuditStatus::missing().with_reason("no data source configured");
+        assert_eq!(
+            status.reason,
+            Some("no data source configured".to_string())
+        );
+        assert_eq!(status.freshness, FreshnessLevel::Missing);
+    }
+
+    #[test]
+    fn audit_status_display_with_reason_does_not_include_reason() {
+        let status = AuditStatus::fresh(10, 0.5).with_reason("test");
+        let display = status.to_string();
+        // Display only shows freshness, seq, coverage — not reason
+        assert!(display.contains("fresh"));
+        assert!(display.contains("seq=10"));
+        assert!(display.contains("50.0%"));
+    }
+
+    #[test]
+    fn audit_status_eq_same_data() {
+        let a = AuditStatus::fresh(50, 0.75);
+        let b = AuditStatus::fresh(50, 0.75);
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn audit_status_ne_different_freshness() {
+        let a = AuditStatus::fresh(50, 0.75);
+        let b = AuditStatus::missing();
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn audit_status_serde_missing_status_roundtrip() {
+        let status = AuditStatus::missing();
+        let json = serde_json::to_string(&status).unwrap();
+        let parsed: AuditStatus = serde_json::from_str(&json).unwrap();
+        assert_eq!(status, parsed);
+    }
+
+    #[test]
+    fn audit_status_serde_with_all_fields() {
+        let status = AuditStatus {
+            freshness: FreshnessLevel::Stale,
+            head_seq: Some(42),
+            coverage: Some(0.333),
+            reason: Some("behind by 3 epochs".into()),
+        };
+        let json = serde_json::to_string(&status).unwrap();
+        let parsed: AuditStatus = serde_json::from_str(&json).unwrap();
+        assert_eq!(status, parsed);
+    }
+
+    #[test]
+    fn audit_status_display_stale() {
+        let status = AuditStatus {
+            freshness: FreshnessLevel::Stale,
+            head_seq: Some(5),
+            coverage: None,
+            reason: None,
+        };
+        let display = status.to_string();
+        assert!(display.contains("stale"));
+        assert!(display.contains("seq=5"));
+        assert!(!display.contains("coverage"));
+    }
+
+    #[test]
+    fn audit_status_display_degraded_no_seq() {
+        let status = AuditStatus {
+            freshness: FreshnessLevel::Degraded,
+            head_seq: None,
+            coverage: Some(0.1),
+            reason: None,
+        };
+        let display = status.to_string();
+        assert!(display.contains("degraded"));
+        assert!(display.contains("10.0%"));
+        assert!(!display.contains("seq="));
+    }
+
+    // ── Cross-type integration tests ─────────────────────────────────────
+
+    #[test]
+    fn build_chain_verify_and_filter() {
+        let e0 = AuditEntryBuilder::new()
+            .id("chain-0")
+            .event_type(event_types::CAPABILITY_INVOKE)
+            .actor("user:alice")
+            .zone_id("z:work")
+            .seq(0)
+            .occurred_at(1_000)
+            .connector_id("fcp.telegram:base:v1")
+            .operation_id("send_message")
+            .build()
+            .unwrap();
+
+        let e1 = AuditEntryBuilder::new()
+            .id("chain-1")
+            .event_type(event_types::SECRET_ACCESS)
+            .actor("user:bob")
+            .zone_id("z:work")
+            .seq(1)
+            .occurred_at(2_000)
+            .prev("chain-0")
+            .correlation_id("corr-1")
+            .build()
+            .unwrap();
+
+        let e2 = AuditEntryBuilder::new()
+            .id("chain-2")
+            .event_type(event_types::SECURITY_VIOLATION)
+            .actor("user:eve")
+            .zone_id("z:work")
+            .seq(2)
+            .occurred_at(3_000)
+            .prev("chain-1")
+            .build()
+            .unwrap();
+
+        // Verify chain is valid
+        let entries = [e0.clone(), e1.clone(), e2.clone()];
+        let report = verify_chain(&entries, None, Some("z:work"));
+        assert!(report.status.is_ok());
+
+        // Filter by actor
+        let filter_alice = AuditFilter {
+            actor: Some("user:alice".into()),
+            ..Default::default()
+        };
+        assert!(filter_alice.matches(&e0));
+        assert!(!filter_alice.matches(&e1));
+        assert!(!filter_alice.matches(&e2));
+
+        // Filter by severity
+        let filter_error = AuditFilter {
+            min_severity: Some(Severity::Error),
+            ..Default::default()
+        };
+        assert!(!filter_error.matches(&e0)); // Info
+        assert!(!filter_error.matches(&e1)); // Warning
+        assert!(filter_error.matches(&e2)); // Error
+    }
+
+    #[test]
+    fn decision_receipt_with_audit_entry_correlation() {
+        let entry = AuditEntryBuilder::new()
+            .id("e-1")
+            .event_type(event_types::CAPABILITY_INVOKE)
+            .actor("user:alice")
+            .zone_id("z:work")
+            .seq(0)
+            .occurred_at(1_000)
+            .correlation_id("request-abc")
+            .build()
+            .unwrap();
+
+        let request_id = entry.correlation_id.clone();
+        let evidence_id = entry.id.clone();
+        let receipt = DecisionReceipt {
+            id: "receipt-1".into(),
+            request_id,
+            decision: Decision::Allow,
+            reason_code: "policy.match".into(),
+            evidence: vec![evidence_id],
+            explanation: Some("Matched wildcard capability grant".into()),
+            decided_at: 1_001,
+            zone_id: entry.zone_id,
+        };
+
+        assert!(receipt.is_allow());
+        assert_eq!(receipt.evidence_count(), 1);
+        assert_eq!(receipt.evidence[0], "e-1");
+        assert_eq!(receipt.request_id, "request-abc");
+    }
+
+    #[test]
+    fn verify_chain_with_head_and_filter_integration() {
+        let e0 = genesis_entry();
+        let e1 = chain_entry(1, "entry-0");
+        let e2 = chain_entry(2, "entry-1");
+        let entries = [e0, e1.clone(), e2];
+
+        let head = sample_head("entry-2", 2);
+        let report = verify_chain(&entries, Some(&head), Some("z:work"));
+        assert!(report.status.is_ok());
+        assert_eq!(report.head_seq, Some(2));
+        assert_eq!(report.head_entry, Some("entry-2".into()));
+        assert_eq!(report.zone_id, Some("z:work".into()));
+
+        // e1 has Warning severity (chain_entry sets it)
+        let filter = AuditFilter {
+            min_severity: Some(Severity::Warning),
+            ..Default::default()
+        };
+        assert!(filter.matches(&e1));
+    }
+
+    #[test]
+    fn verify_report_from_chain_then_serde() {
+        let e0 = genesis_entry();
+        let e1 = chain_entry(1, "entry-0");
+        let head = sample_head("entry-1", 1);
+        let report = verify_chain(&[e0, e1], Some(&head), Some("z:work"));
+
+        let json = serde_json::to_string(&report).unwrap();
+        let parsed: VerifyReport = serde_json::from_str(&json).unwrap();
+        assert_eq!(report, parsed);
+    }
+
+    // ── VerifyIssue with_entry_id type variations ────────────────────────
+
+    #[test]
+    fn verify_issue_with_entry_id_string_ref() {
+        let id = "entry-42".to_string();
+        let issue = VerifyIssue::new("code", "msg").with_entry_id(&id);
+        assert_eq!(issue.entry_id, Some("entry-42".into()));
+    }
+
+    #[test]
+    fn verify_issue_with_entry_id_owned_string() {
+        let issue = VerifyIssue::new("code", "msg").with_entry_id("owned".to_string());
+        assert_eq!(issue.entry_id, Some("owned".into()));
+    }
+
+    #[test]
+    fn verify_issue_serde_all_fields() {
+        let issue = VerifyIssue::new("audit.seq_gap", "expected 5, found 7")
+            .with_seq(7)
+            .with_entry_id("entry-7");
+        let json = serde_json::to_string(&issue).unwrap();
+        assert!(json.contains("\"seq\":7"));
+        assert!(json.contains("\"entry_id\":\"entry-7\""));
+        let parsed: VerifyIssue = serde_json::from_str(&json).unwrap();
+        assert_eq!(issue, parsed);
+    }
+
+    #[test]
+    fn verify_issue_debug_with_context() {
+        let issue = VerifyIssue::new("audit.fork_detected", "fork")
+            .with_seq(10)
+            .with_entry_id("e-10");
+        let debug = format!("{issue:?}");
+        assert!(debug.contains("VerifyIssue"));
+        assert!(debug.contains("fork_detected"));
+        assert!(debug.contains("10"));
+    }
+
+    // ── Severity boundary behavior ───────────────────────────────────────
+
+    #[test]
+    fn severity_all_variants_to_string_roundtrip() {
+        for sev in [
+            Severity::Info,
+            Severity::Warning,
+            Severity::Error,
+            Severity::Critical,
+        ] {
+            let s = sev.to_string();
+            let json_str = format!("\"{s}\"");
+            let parsed: Severity = serde_json::from_str(&json_str).unwrap();
+            assert_eq!(sev, parsed);
+        }
+    }
+
+    #[test]
+    fn severity_for_event_type_case_sensitive() {
+        // Event types are case-sensitive; "Secret.Access" != "secret.access"
+        assert_eq!(Severity::for_event_type("Secret.Access"), Severity::Info);
+        assert_eq!(
+            Severity::for_event_type("secret.access"),
+            Severity::Warning
+        );
+    }
+
+    // ── Decision exhaustive ──────────────────────────────────────────────
+
+    #[test]
+    fn decision_allow_and_deny_are_only_variants() {
+        let allow = Decision::Allow;
+        let deny = Decision::Deny;
+        assert!(allow.is_allow() && !allow.is_deny());
+        assert!(deny.is_deny() && !deny.is_allow());
+    }
+
+    #[test]
+    fn decision_eq_reflexive() {
+        assert_eq!(Decision::Allow, Decision::Allow);
+        assert_eq!(Decision::Deny, Decision::Deny);
+    }
+
+    #[test]
+    fn decision_ne_different() {
+        assert_ne!(Decision::Allow, Decision::Deny);
+    }
+
+    // ── VerifyStatus serde boundary ──────────────────────────────────────
+
+    #[test]
+    fn verify_status_serde_case_sensitive() {
+        let ok: Result<VerifyStatus, _> = serde_json::from_str("\"Ok\"");
+        assert!(ok.is_err()); // Should be "ok" lowercase
+    }
+
+    #[test]
+    fn verify_status_serde_null_rejected() {
+        let result: Result<VerifyStatus, _> = serde_json::from_str("null");
+        assert!(result.is_err());
+    }
+
+    // ── TraceContext W3C format ───────────────────────────────────────────
+
+    #[test]
+    fn trace_context_w3c_format_structure() {
+        let tc = TraceContext::new("0af7651916cd43dd8448eb211c80319c", "b7ad6b7169203331")
+            .with_flags(0x01);
+        let display = tc.to_string();
+        let parts: Vec<&str> = display.split('-').collect();
+        assert_eq!(parts.len(), 4);
+        assert_eq!(parts[0], "00"); // version
+        assert_eq!(parts[1], "0af7651916cd43dd8448eb211c80319c"); // trace-id
+        assert_eq!(parts[2], "b7ad6b7169203331"); // span-id
+        assert_eq!(parts[3], "01"); // flags
+    }
+
+    // ── AuditEntry metadata type coverage ────────────────────────────────
+
+    #[test]
+    fn audit_entry_metadata_number_types() {
+        let mut entry = genesis_entry();
+        entry
+            .metadata
+            .insert("int".into(), serde_json::json!(42));
+        entry
+            .metadata
+            .insert("float".into(), serde_json::json!(1.23));
+        entry
+            .metadata
+            .insert("negative".into(), serde_json::json!(-100));
+        entry
+            .metadata
+            .insert("zero".into(), serde_json::json!(0));
+
+        let json = serde_json::to_string(&entry).unwrap();
+        let parsed: AuditEntry = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.metadata.get("int"), Some(&serde_json::json!(42)));
+        assert_eq!(parsed.metadata.get("float"), Some(&serde_json::json!(1.23)));
+        assert_eq!(
+            parsed.metadata.get("negative"),
+            Some(&serde_json::json!(-100))
+        );
+    }
+
+    #[test]
+    fn audit_entry_metadata_boolean_and_null() {
+        let mut entry = genesis_entry();
+        entry
+            .metadata
+            .insert("flag_true".into(), serde_json::json!(true));
+        entry
+            .metadata
+            .insert("flag_false".into(), serde_json::json!(false));
+        entry
+            .metadata
+            .insert("nothing".into(), serde_json::Value::Null);
+
+        let json = serde_json::to_string(&entry).unwrap();
+        let parsed: AuditEntry = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.metadata.len(), 3);
+    }
+
+    #[test]
+    fn audit_entry_metadata_array_value() {
+        let mut entry = genesis_entry();
+        entry
+            .metadata
+            .insert("tags".into(), serde_json::json!(["a", "b", "c"]));
+
+        let json = serde_json::to_string(&entry).unwrap();
+        let parsed: AuditEntry = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            parsed.metadata.get("tags"),
+            Some(&serde_json::json!(["a", "b", "c"]))
+        );
+    }
+
+    // ── VerifyReport with zone_id ────────────────────────────────────────
+
+    #[test]
+    fn verify_report_serde_with_zone_and_head() {
+        let report = VerifyReport {
+            status: VerifyStatus::Warn,
+            zone_id: Some("z:prod".into()),
+            chain_len: 100,
+            head_seq: Some(99),
+            head_entry: Some("entry-99".into()),
+            issues: vec![VerifyIssue::new("audit.zone_mismatch", "mismatch").with_seq(50)],
+        };
+        let json = serde_json::to_string(&report).unwrap();
+        let parsed: VerifyReport = serde_json::from_str(&json).unwrap();
+        assert_eq!(report, parsed);
+        assert_eq!(parsed.issues.len(), 1);
+        assert_eq!(parsed.issues[0].seq, Some(50));
+    }
+
+    #[test]
+    fn verify_report_display_warn_status() {
+        let report = VerifyReport {
+            status: VerifyStatus::Warn,
+            zone_id: None,
+            chain_len: 42,
+            head_seq: None,
+            head_entry: None,
+            issues: vec![VerifyIssue::new("warn.test", "warning")],
+        };
+        let display = report.to_string();
+        assert!(display.contains("warn"));
+        assert!(display.contains("chain_len=42"));
+        assert!(display.contains("issues=1"));
+    }
+
+    // ── AuditFilter edge: empty string matches ──────────────────────────
+
+    #[test]
+    fn filter_empty_string_actor_matches_empty_actor_entry() {
+        let filter = AuditFilter {
+            actor: Some(String::new()),
+            ..Default::default()
+        };
+        let mut entry = genesis_entry();
+        entry.actor = String::new();
+        assert!(filter.matches(&entry));
+    }
+
+    #[test]
+    fn filter_empty_string_actor_does_not_match_nonempty() {
+        let filter = AuditFilter {
+            actor: Some(String::new()),
+            ..Default::default()
+        };
+        assert!(!filter.matches(&genesis_entry())); // genesis has "user:alice"
+    }
+
+    // ── ChainHead coverage boundary ─────────────────────────────────────
+
+    #[test]
+    fn chain_head_meets_coverage_negative_threshold() {
+        let head = sample_head("e", 0);
+        // coverage is 0.85, any negative threshold should pass
+        assert!(head.meets_coverage(-1.0));
+    }
+
+    #[test]
+    fn chain_head_meets_coverage_above_one() {
+        let mut head = sample_head("e", 0);
+        head.coverage = 1.5; // unusual but technically possible
+        assert!(head.meets_coverage(1.0));
+        assert!(head.meets_coverage(1.5));
+        assert!(!head.meets_coverage(1.6));
+    }
+
+    // ── Miscellaneous ───────────────────────────────────────────────────
+
+    #[test]
+    fn verify_chain_single_entry_with_matching_head() {
+        let e0 = genesis_entry();
+        let head = sample_head("entry-0", 0);
+        let report = verify_chain(&[e0], Some(&head), None);
+        assert!(report.status.is_ok());
+    }
+
+    #[test]
+    fn verify_chain_fork_does_not_count_same_id_at_same_seq() {
+        let e0 = genesis_entry();
+        let e0_same = genesis_entry(); // identical
+        let report = verify_chain(&[e0, e0_same], None, None);
+        let forks = report
+            .issues
+            .iter()
+            .filter(|i| i.code == "audit.fork_detected")
+            .count();
+        assert_eq!(forks, 0);
+    }
+
+    #[test]
+    fn audit_entry_is_genesis_both_conditions_required() {
+        // seq=0 but has prev -> not genesis
+        let mut e = genesis_entry();
+        e.prev = Some("prev".into());
+        assert!(!e.is_genesis());
+
+        // no prev but seq!=0 -> not genesis
+        let mut e2 = genesis_entry();
+        e2.seq = 1;
+        assert!(!e2.is_genesis());
+    }
+
+    #[test]
+    fn audit_error_debug_includes_variant_and_data() {
+        let err = AuditError::BuilderMissingField("event_type".into());
+        let debug = format!("{err:?}");
+        assert!(debug.contains("BuilderMissingField"));
+        assert!(debug.contains("event_type"));
+    }
+
+    #[test]
+    fn freshness_is_healthy_only_for_fresh() {
+        assert!(FreshnessLevel::Fresh.is_healthy());
+        for level in [
+            FreshnessLevel::Stale,
+            FreshnessLevel::Degraded,
+            FreshnessLevel::Missing,
+        ] {
+            assert!(!level.is_healthy(), "{level:?} should not be healthy");
+        }
+    }
+
+    #[test]
+    fn verify_status_is_ok_only_for_ok() {
+        assert!(VerifyStatus::Ok.is_ok());
+        assert!(!VerifyStatus::Warn.is_ok());
+        assert!(!VerifyStatus::Fail.is_ok());
+    }
+
+    #[test]
+    fn verify_status_is_fail_only_for_fail() {
+        assert!(VerifyStatus::Fail.is_fail());
+        assert!(!VerifyStatus::Ok.is_fail());
+        assert!(!VerifyStatus::Warn.is_fail());
+    }
+
+    #[test]
+    fn audit_status_serde_from_json_fresh() {
+        let json = r#"{"freshness":"fresh","head_seq":10,"coverage":0.9}"#;
+        let status: AuditStatus = serde_json::from_str(json).unwrap();
+        assert_eq!(status.freshness, FreshnessLevel::Fresh);
+        assert_eq!(status.head_seq, Some(10));
+    }
+
+    #[test]
+    fn audit_status_serde_from_json_minimal() {
+        let json = r#"{"freshness":"missing"}"#;
+        let status: AuditStatus = serde_json::from_str(json).unwrap();
+        assert_eq!(status.freshness, FreshnessLevel::Missing);
+        assert!(status.head_seq.is_none());
+    }
 }

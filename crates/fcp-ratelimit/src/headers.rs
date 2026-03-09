@@ -1088,4 +1088,189 @@ mod tests {
         assert!(parsed.limit.is_none());
         assert!(parsed.provider_info.is_empty());
     }
+
+    // ── Additional parse_duration_string edge cases ─────────────────────
+
+    #[test]
+    fn parse_duration_string_only_ms_suffix() {
+        assert!(parse_duration_string("ms").is_none());
+    }
+
+    #[test]
+    fn parse_duration_string_only_s_suffix() {
+        assert!(parse_duration_string("s").is_none());
+    }
+
+    #[test]
+    fn parse_duration_string_only_m_suffix() {
+        assert!(parse_duration_string("m").is_none());
+    }
+
+    #[test]
+    fn parse_duration_string_only_h_suffix() {
+        assert!(parse_duration_string("h").is_none());
+    }
+
+    #[test]
+    fn parse_duration_string_negative_value() {
+        // Negative numbers can't be parsed as u64
+        assert!(parse_duration_string("-5").is_none());
+    }
+
+    #[test]
+    fn parse_duration_string_negative_ms() {
+        assert!(parse_duration_string("-100ms").is_none());
+    }
+
+    #[test]
+    fn parse_duration_string_decimal_seconds() {
+        let d = parse_duration_string("2.5s").unwrap();
+        assert_eq!(d, Duration::from_secs_f64(2.5));
+    }
+
+    #[test]
+    fn parse_duration_string_one_ms() {
+        assert_eq!(
+            parse_duration_string("1ms"),
+            Some(Duration::from_millis(1))
+        );
+    }
+
+    // ── Additional header parsing combinations ──────────────────────────
+
+    #[test]
+    fn parse_standard_overflow_values_ignored() {
+        let mut headers = HashMap::new();
+        // u32::MAX + 1 as string should fail to parse as u32
+        headers.insert(
+            "x-ratelimit-limit".to_string(),
+            "4294967296".to_string(),
+        );
+        let parsed = RateLimitHeaders::parse(&headers);
+        assert!(parsed.limit.is_none());
+    }
+
+    #[test]
+    fn parse_standard_float_values_ignored() {
+        let mut headers = HashMap::new();
+        headers.insert("x-ratelimit-limit".to_string(), "1.5".to_string());
+        let parsed = RateLimitHeaders::parse(&headers);
+        assert!(parsed.limit.is_none());
+    }
+
+    #[test]
+    fn parse_standard_whitespace_values_ignored() {
+        let mut headers = HashMap::new();
+        headers.insert("x-ratelimit-limit".to_string(), " 100 ".to_string());
+        let parsed = RateLimitHeaders::parse(&headers);
+        // parse::<u32>() doesn't trim whitespace, so None
+        assert!(parsed.limit.is_none());
+    }
+
+    #[test]
+    fn is_limited_both_conditions_true() {
+        let mut headers = RateLimitHeaders::new();
+        headers.remaining = Some(0);
+        headers.retry_after = Some(Duration::from_secs(10));
+        assert!(headers.is_limited());
+    }
+
+    #[test]
+    fn suggested_wait_large_retry_after() {
+        let mut headers = RateLimitHeaders::new();
+        headers.retry_after = Some(Duration::from_secs(86400));
+        assert_eq!(
+            headers.suggested_wait(),
+            Some(Duration::from_secs(86400))
+        );
+    }
+
+    #[test]
+    fn parse_github_with_all_fields() {
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let reset_at = now_secs + 60;
+
+        let mut headers = HashMap::new();
+        headers.insert("x-ratelimit-limit".to_string(), "5000".to_string());
+        headers.insert("x-ratelimit-remaining".to_string(), "4900".to_string());
+        headers.insert("x-ratelimit-reset".to_string(), reset_at.to_string());
+        headers.insert("x-ratelimit-used".to_string(), "100".to_string());
+        headers.insert("x-ratelimit-resource".to_string(), "search".to_string());
+        headers.insert("retry-after".to_string(), "30".to_string());
+
+        let parsed = RateLimitHeaders::parse_github(&headers);
+        assert_eq!(parsed.limit, Some(5000));
+        assert_eq!(parsed.remaining, Some(4900));
+        assert_eq!(parsed.retry_after, Some(Duration::from_secs(30)));
+        assert_eq!(
+            parsed.provider_info.get("used"),
+            Some(&"100".to_string())
+        );
+        assert_eq!(
+            parsed.provider_info.get("resource"),
+            Some(&"search".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_openai_reset_requests_minutes() {
+        let mut headers = HashMap::new();
+        headers.insert(
+            "x-ratelimit-reset-requests".to_string(),
+            "2m".to_string(),
+        );
+        let parsed = RateLimitHeaders::parse_openai(&headers);
+        assert_eq!(parsed.reset_seconds, Some(120));
+    }
+
+    #[test]
+    fn parse_anthropic_reset_time_stored() {
+        let mut headers = HashMap::new();
+        headers.insert(
+            "anthropic-ratelimit-requests-reset".to_string(),
+            "2026-12-31T23:59:59Z".to_string(),
+        );
+        let parsed = RateLimitHeaders::parse_anthropic(&headers);
+        assert_eq!(
+            parsed.provider_info.get("reset_time"),
+            Some(&"2026-12-31T23:59:59Z".to_string())
+        );
+    }
+
+    #[test]
+    fn provider_standard_parse_empty() {
+        let headers = HashMap::new();
+        let parsed = Provider::Standard.parse_headers(&headers);
+        assert!(parsed.limit.is_none());
+    }
+
+    #[test]
+    fn rate_limit_headers_debug_with_provider_info() {
+        let mut headers = RateLimitHeaders::new();
+        headers.provider_info.insert("key".to_string(), "val".to_string());
+        let dbg = format!("{headers:?}");
+        assert!(dbg.contains("provider_info"));
+    }
+
+    #[test]
+    fn rate_limit_headers_clone_independence() {
+        let mut original = RateLimitHeaders::new();
+        original.limit = Some(100);
+        original.remaining = Some(50);
+        original.retry_after = Some(Duration::from_secs(5));
+        original.reset_seconds = Some(30);
+        original.reset_at = Some(1_000_000);
+        original.provider_info.insert("k".to_string(), "v".to_string());
+
+        let cloned = original.clone();
+        assert_eq!(cloned.limit, original.limit);
+        assert_eq!(cloned.remaining, original.remaining);
+        assert_eq!(cloned.retry_after, original.retry_after);
+        assert_eq!(cloned.reset_seconds, original.reset_seconds);
+        assert_eq!(cloned.reset_at, original.reset_at);
+        assert_eq!(cloned.provider_info.get("k"), original.provider_info.get("k"));
+    }
 }

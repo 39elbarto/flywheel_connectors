@@ -282,6 +282,108 @@ mod tests {
         assert_eq!(err.to_string(), "AEAD encryption failed");
     }
 
+    // ---- Error source chain ----
+
+    #[test]
+    fn error_source_is_none_for_leaf_variants() {
+        use std::error::Error;
+        let variants: Vec<CryptoError> = vec![
+            CryptoError::SignatureVerificationFailed,
+            CryptoError::AeadEncryptFailed,
+            CryptoError::AeadDecryptFailed,
+            CryptoError::InvalidPublicKey,
+            CryptoError::InvalidSecretKey,
+            CryptoError::TokenExpired,
+            CryptoError::TokenNotYetValid,
+        ];
+        for variant in &variants {
+            assert!(
+                variant.source().is_none(),
+                "expected no source for {variant:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn error_display_invalid_key_length_boundary_values() {
+        let err = CryptoError::InvalidKeyLength {
+            expected: 0,
+            actual: 0,
+        };
+        assert_eq!(err.to_string(), "invalid key length: expected 0, got 0");
+    }
+
+    #[test]
+    fn error_display_invalid_key_length_large_values() {
+        let err = CryptoError::InvalidKeyLength {
+            expected: usize::MAX,
+            actual: usize::MAX,
+        };
+        let display = err.to_string();
+        assert!(display.contains("expected"));
+        assert!(display.contains("got"));
+    }
+
+    #[test]
+    fn error_display_hpke_failed_empty_message() {
+        let err = CryptoError::HpkeFailed(String::new());
+        assert_eq!(err.to_string(), "HPKE operation failed: ");
+    }
+
+    #[test]
+    fn error_display_cose_failed_unicode() {
+        let err = CryptoError::CoseFailed("falló el token".to_string());
+        assert!(err.to_string().contains("falló"));
+    }
+
+    #[test]
+    fn error_display_missing_field_empty() {
+        let err = CryptoError::MissingField(String::new());
+        assert_eq!(err.to_string(), "missing required field: ");
+    }
+
+    #[test]
+    fn error_debug_all_variants_contain_variant_name() {
+        let variants: Vec<(&str, CryptoError)> = vec![
+            ("InvalidKeyLength", CryptoError::InvalidKeyLength { expected: 1, actual: 2 }),
+            ("InvalidSignatureLength", CryptoError::InvalidSignatureLength { expected: 3, actual: 4 }),
+            ("SignatureVerificationFailed", CryptoError::SignatureVerificationFailed),
+            ("InvalidKeyId", CryptoError::InvalidKeyId("x".into())),
+            ("AeadEncryptFailed", CryptoError::AeadEncryptFailed),
+            ("AeadDecryptFailed", CryptoError::AeadDecryptFailed),
+            ("HpkeFailed", CryptoError::HpkeFailed("y".into())),
+            ("CoseFailed", CryptoError::CoseFailed("z".into())),
+            ("InvalidNonceLength", CryptoError::InvalidNonceLength { expected: 5, actual: 6 }),
+            ("KeyDerivationFailed", CryptoError::KeyDerivationFailed("w".into())),
+            ("InvalidPublicKey", CryptoError::InvalidPublicKey),
+            ("InvalidSecretKey", CryptoError::InvalidSecretKey),
+            ("SerializationError", CryptoError::SerializationError("s".into())),
+            ("TokenValidationError", CryptoError::TokenValidationError("t".into())),
+            ("TokenExpired", CryptoError::TokenExpired),
+            ("TokenNotYetValid", CryptoError::TokenNotYetValid),
+            ("MissingField", CryptoError::MissingField("f".into())),
+        ];
+
+        for (name, variant) in &variants {
+            let debug = format!("{variant:?}");
+            assert!(debug.contains(name), "Debug for {name} missing variant name: {debug}");
+        }
+    }
+
+    #[test]
+    fn crypto_result_map_works() {
+        let result: CryptoResult<u32> = Ok(10);
+        let mapped = result.map(|v| v * 2);
+        assert_eq!(mapped.unwrap(), 20);
+    }
+
+    #[test]
+    fn crypto_result_err_downcast() {
+        let err = CryptoError::TokenExpired;
+        let boxed: Box<dyn std::error::Error> = Box::new(err);
+        assert!(boxed.to_string().contains("expired"));
+    }
+
     #[test]
     fn error_display_all_variants_non_empty() {
         let variants: Vec<CryptoError> = vec![

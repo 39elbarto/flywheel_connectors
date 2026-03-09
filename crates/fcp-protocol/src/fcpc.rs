@@ -1349,4 +1349,286 @@ mod tests {
         modified.tag[0] ^= 0xFF;
         assert_ne!(frame, modified);
     }
+
+    // ── Batch 5: SunnyMoose edge-case and integration tests ──
+
+    #[test]
+    fn seal_then_decode_different_limit_succeeds_at_exact() {
+        let session_id = MeshSessionId(SESSION_ID_BYTES);
+        let dir = SessionDirection::InitiatorToResponder;
+        let plaintext = b"variable limit test";
+        let frame = FcpcFrame::seal(
+            session_id,
+            77,
+            dir,
+            FcpcFrameFlags::default(),
+            plaintext,
+            &K_CTX,
+        )
+        .expect("seal ok");
+        let encoded = frame.encode();
+        let ct_len = frame.ciphertext.len();
+        // Exact limit passes
+        let decoded = FcpcFrame::decode_with_limit(&encoded, ct_len).expect("exact ok");
+        let opened = decoded.open(dir, &K_CTX).expect("open ok");
+        assert_eq!(opened, plaintext);
+    }
+
+    #[test]
+    fn seal_responder_direction_roundtrip() {
+        let session_id = MeshSessionId(SESSION_ID_BYTES);
+        let dir = SessionDirection::ResponderToInitiator;
+        let plaintext = b"responder payload";
+        let frame = FcpcFrame::seal(
+            session_id,
+            42,
+            dir,
+            FcpcFrameFlags::default(),
+            plaintext,
+            &K_CTX,
+        )
+        .expect("seal");
+        let encoded = frame.encode();
+        let decoded = FcpcFrame::decode(&encoded).expect("decode");
+        let opened = decoded.open(dir, &K_CTX).expect("open");
+        assert_eq!(opened, plaintext);
+    }
+
+    #[test]
+    fn frame_ne_different_ciphertext() {
+        let session_id = MeshSessionId(SESSION_ID_BYTES);
+        let dir = SessionDirection::InitiatorToResponder;
+        let frame = FcpcFrame::seal(
+            session_id,
+            1,
+            dir,
+            FcpcFrameFlags::default(),
+            b"ciphertext ne",
+            &K_CTX,
+        )
+        .expect("seal");
+        let mut modified = frame.clone();
+        if !modified.ciphertext.is_empty() {
+            modified.ciphertext[0] ^= 0xFF;
+        }
+        assert_ne!(frame, modified);
+    }
+
+    #[test]
+    fn frame_ne_different_seq() {
+        let session_id = MeshSessionId(SESSION_ID_BYTES);
+        let dir = SessionDirection::InitiatorToResponder;
+        let frame_a = FcpcFrame::seal(
+            session_id,
+            1,
+            dir,
+            FcpcFrameFlags::default(),
+            b"same",
+            &K_CTX,
+        )
+        .expect("seal a");
+        let frame_b = FcpcFrame::seal(
+            session_id,
+            2,
+            dir,
+            FcpcFrameFlags::default(),
+            b"same",
+            &K_CTX,
+        )
+        .expect("seal b");
+        assert_ne!(frame_a, frame_b);
+    }
+
+    #[test]
+    fn replay_window_rejects_seq_zero() {
+        let session_id = MeshSessionId(SESSION_ID_BYTES);
+        let dir = SessionDirection::InitiatorToResponder;
+        let frame = FcpcFrame::seal(
+            session_id,
+            0,
+            dir,
+            FcpcFrameFlags::default(),
+            b"zero",
+            &K_CTX,
+        )
+        .expect("seal");
+        let mut window = default_replay_window();
+        // seq 0 is always rejected by ReplayWindow
+        let err = frame.check_replay(&mut window).expect_err("seq 0 rejected");
+        assert!(matches!(err, FcpcError::ReplayRejected { seq: 0 }));
+    }
+
+    #[test]
+    fn header_encode_all_zeros() {
+        let header = FcpcFrameHeader {
+            version: FCPC_VERSION,
+            session_id: MeshSessionId([0; 16]),
+            seq: 0,
+            flags: FcpcFrameFlags::empty(),
+            len: 0,
+        };
+        let bytes = header.encode();
+        // Magic is still "FCPC"
+        assert_eq!(&bytes[0..4], b"FCPC");
+        // Version is 1
+        assert_eq!(&bytes[4..6], &1u16.to_le_bytes());
+        // Session ID is all zeros
+        assert_eq!(&bytes[6..22], &[0u8; 16]);
+        // Seq is zero
+        assert_eq!(&bytes[22..30], &0u64.to_le_bytes());
+        // Flags are zero (empty)
+        assert_eq!(&bytes[30..32], &0u16.to_le_bytes());
+        // Len is zero
+        assert_eq!(&bytes[32..36], &0u32.to_le_bytes());
+    }
+
+    #[test]
+    fn multiple_replay_window_checks_with_gap() {
+        let session_id = MeshSessionId(SESSION_ID_BYTES);
+        let dir = SessionDirection::InitiatorToResponder;
+        let mut window = default_replay_window();
+
+        // Accept seq 1
+        let f1 = FcpcFrame::seal(session_id, 1, dir, FcpcFrameFlags::default(), b"x", &K_CTX)
+            .expect("seal");
+        f1.check_replay(&mut window).expect("seq 1");
+
+        // Skip to seq 100
+        let f100 =
+            FcpcFrame::seal(session_id, 100, dir, FcpcFrameFlags::default(), b"x", &K_CTX)
+                .expect("seal");
+        f100.check_replay(&mut window).expect("seq 100");
+
+        // seq 1 is now too old (gap > 128 window)
+        let f1_replay =
+            FcpcFrame::seal(session_id, 1, dir, FcpcFrameFlags::default(), b"x", &K_CTX)
+                .expect("seal");
+        f1_replay
+            .check_replay(&mut window)
+            .expect_err("seq 1 too old");
+    }
+
+    #[test]
+    fn error_display_replay_rejected_with_specific_seq() {
+        let err = FcpcError::ReplayRejected { seq: 42 };
+        assert_eq!(err.to_string(), "replay rejected for seq 42");
+    }
+
+    #[test]
+    fn header_flags_union_preserved_through_encode_decode() {
+        let flags = FcpcFrameFlags::ENCRYPTED | FcpcFrameFlags::COMPRESSED;
+        let header = FcpcFrameHeader {
+            version: FCPC_VERSION,
+            session_id: MeshSessionId([0; 16]),
+            seq: 0,
+            flags,
+            len: 0,
+        };
+        let decoded = FcpcFrameHeader::decode(&header.encode()).expect("decode");
+        assert!(decoded.flags.contains(FcpcFrameFlags::ENCRYPTED));
+        assert!(decoded.flags.contains(FcpcFrameFlags::COMPRESSED));
+        assert_eq!(decoded.flags.bits(), 0b11);
+    }
+
+    #[test]
+    fn seal_unicode_payload_roundtrip() {
+        let session_id = MeshSessionId(SESSION_ID_BYTES);
+        let dir = SessionDirection::InitiatorToResponder;
+        let plaintext = "Hello \u{1F600} \u{4E16}\u{754C}".as_bytes();
+        let frame = FcpcFrame::seal(
+            session_id,
+            1,
+            dir,
+            FcpcFrameFlags::default(),
+            plaintext,
+            &K_CTX,
+        )
+        .expect("seal unicode");
+        let encoded = frame.encode();
+        let decoded = FcpcFrame::decode(&encoded).expect("decode");
+        let opened = decoded.open(dir, &K_CTX).expect("open");
+        assert_eq!(opened, plaintext);
+        let text = std::str::from_utf8(&opened).expect("valid utf8");
+        assert!(text.contains('\u{1F600}'));
+    }
+
+    #[test]
+    fn frame_decode_truncated_one_byte_short() {
+        let session_id = MeshSessionId(SESSION_ID_BYTES);
+        let dir = SessionDirection::InitiatorToResponder;
+        let frame = FcpcFrame::seal(
+            session_id,
+            1,
+            dir,
+            FcpcFrameFlags::default(),
+            b"truncation test",
+            &K_CTX,
+        )
+        .expect("seal");
+        let mut bytes = frame.encode();
+        bytes.pop(); // remove last byte
+        let err = FcpcFrame::decode(&bytes).expect_err("truncated");
+        assert!(matches!(err, FcpcError::LengthMismatch { .. }));
+    }
+
+    #[test]
+    fn frame_decode_with_extra_byte_fails() {
+        let session_id = MeshSessionId(SESSION_ID_BYTES);
+        let dir = SessionDirection::InitiatorToResponder;
+        let frame = FcpcFrame::seal(
+            session_id,
+            1,
+            dir,
+            FcpcFrameFlags::default(),
+            b"extra byte test",
+            &K_CTX,
+        )
+        .expect("seal");
+        let mut bytes = frame.encode();
+        bytes.push(0xAA); // add extra byte
+        let err = FcpcFrame::decode(&bytes).expect_err("extra byte");
+        assert!(matches!(err, FcpcError::LengthMismatch { .. }));
+    }
+
+    #[test]
+    fn header_session_id_all_ff() {
+        let session_id = MeshSessionId([0xFF; 16]);
+        let header = FcpcFrameHeader {
+            version: FCPC_VERSION,
+            session_id,
+            seq: 0,
+            flags: FcpcFrameFlags::default(),
+            len: 0,
+        };
+        let decoded = FcpcFrameHeader::decode(&header.encode()).expect("decode");
+        assert_eq!(decoded.session_id, session_id);
+    }
+
+    #[test]
+    fn seal_one_byte_payload_roundtrip() {
+        let session_id = MeshSessionId(SESSION_ID_BYTES);
+        let dir = SessionDirection::InitiatorToResponder;
+        let frame = FcpcFrame::seal(
+            session_id,
+            1,
+            dir,
+            FcpcFrameFlags::default(),
+            &[0x42],
+            &K_CTX,
+        )
+        .expect("seal");
+        let encoded = frame.encode();
+        let decoded = FcpcFrame::decode(&encoded).expect("decode");
+        let opened = decoded.open(dir, &K_CTX).expect("open");
+        assert_eq!(opened, &[0x42]);
+    }
+
+    #[test]
+    fn default_replay_window_has_correct_initial_state() {
+        let window = default_replay_window();
+        assert_eq!(window.highest_seq(), 0);
+        // The window should use SessionReplayPolicy default max_reorder_window
+        let policy = SessionReplayPolicy::default();
+        assert_eq!(policy.max_reorder_window, 128);
+    }
 }

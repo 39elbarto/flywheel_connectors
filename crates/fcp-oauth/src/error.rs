@@ -514,4 +514,153 @@ mod tests {
         let e = OAuthError::InvalidConfig("test".into());
         assert!(std::error::Error::source(&e).is_none());
     }
+
+    // ── New batch: OAuthError edge cases and cross-variant ──
+
+    #[test]
+    fn token_exchange_failed_has_no_source() {
+        let e = OAuthError::TokenExchangeFailed("x".into());
+        assert!(std::error::Error::source(&e).is_none());
+    }
+
+    #[test]
+    fn refresh_failed_has_no_source() {
+        let e = OAuthError::RefreshFailed("x".into());
+        assert!(std::error::Error::source(&e).is_none());
+    }
+
+    #[test]
+    fn http_error_has_no_source() {
+        let e = OAuthError::HttpError("x".into());
+        assert!(std::error::Error::source(&e).is_none());
+    }
+
+    #[test]
+    fn signature_error_has_no_source() {
+        let e = OAuthError::SignatureError("x".into());
+        assert!(std::error::Error::source(&e).is_none());
+    }
+
+    #[test]
+    fn token_not_found_has_no_source() {
+        let e = OAuthError::TokenNotFound("x".into());
+        assert!(std::error::Error::source(&e).is_none());
+    }
+
+    #[test]
+    fn pkce_error_has_no_source() {
+        let e = OAuthError::PkceError("x".into());
+        assert!(std::error::Error::source(&e).is_none());
+    }
+
+    #[test]
+    fn unsupported_provider_has_no_source() {
+        let e = OAuthError::UnsupportedProvider("x".into());
+        assert!(std::error::Error::source(&e).is_none());
+    }
+
+    #[test]
+    fn token_expired_has_no_source() {
+        let e = OAuthError::TokenExpired(Duration::from_secs(1));
+        assert!(std::error::Error::source(&e).is_none());
+    }
+
+    #[test]
+    fn state_mismatch_has_no_source() {
+        let e = OAuthError::StateMismatch {
+            expected: "a".into(),
+            actual: "b".into(),
+        };
+        assert!(std::error::Error::source(&e).is_none());
+    }
+
+    #[test]
+    fn authorization_error_has_no_source() {
+        let e = OAuthError::AuthorizationError {
+            error: "e".into(),
+            description: "d".into(),
+            error_uri: None,
+        };
+        assert!(std::error::Error::source(&e).is_none());
+    }
+
+    #[test]
+    fn invalid_token_response_has_no_source() {
+        let e = OAuthError::InvalidTokenResponse("x".into());
+        assert!(std::error::Error::source(&e).is_none());
+    }
+
+    #[test]
+    fn from_async_error_protocol_io_empty_message() {
+        let err = AsyncError::ProtocolIo {
+            message: String::new(),
+        };
+        let oauth_err = OAuthError::from_async_error(err, Duration::from_secs(5));
+        // Should still be HttpError variant even with empty message
+        assert!(matches!(oauth_err, OAuthError::HttpError(_)));
+    }
+
+    #[test]
+    fn from_async_error_join_unicode_message() {
+        let err = AsyncError::Join {
+            message: "tarea fall\u{00f3}".into(),
+        };
+        let oauth_err = OAuthError::from_async_error(err, Duration::from_secs(5));
+        assert!(oauth_err.to_string().contains("fall\u{00f3}"));
+    }
+
+    #[test]
+    fn token_expired_very_large_duration() {
+        let e = OAuthError::TokenExpired(Duration::from_secs(u64::MAX));
+        let display = e.to_string();
+        // Should render without panicking
+        assert!(display.contains("Token expired"));
+    }
+
+    #[test]
+    fn state_mismatch_unicode_values() {
+        let e = OAuthError::StateMismatch {
+            expected: "\u{00e9}tat_attendu".into(),
+            actual: "\u{00e9}tat_re\u{00e7}u".into(),
+        };
+        let display = e.to_string();
+        assert!(display.contains("\u{00e9}tat_attendu"));
+        assert!(display.contains("\u{00e9}tat_re\u{00e7}u"));
+    }
+
+    #[test]
+    fn all_string_variants_debug_format_contains_message() {
+        let variants: Vec<OAuthError> = vec![
+            OAuthError::InvalidConfig("cfg_msg".into()),
+            OAuthError::TokenExchangeFailed("exchange_msg".into()),
+            OAuthError::RefreshFailed("refresh_msg".into()),
+            OAuthError::InvalidTokenResponse("invalid_msg".into()),
+            OAuthError::HttpError("http_msg".into()),
+            OAuthError::SignatureError("sig_msg".into()),
+            OAuthError::UnsupportedProvider("prov_msg".into()),
+            OAuthError::TokenNotFound("notfound_msg".into()),
+            OAuthError::PkceError("pkce_msg".into()),
+        ];
+        for e in &variants {
+            let debug = format!("{e:?}");
+            assert!(
+                !debug.is_empty(),
+                "Debug should not be empty for {e}"
+            );
+        }
+    }
+
+    #[test]
+    fn oauth_result_ok_variant() {
+        let val = 42;
+        let result: OAuthResult<i32> = Ok(val);
+        assert!(result.is_ok());
+        assert_eq!(val, 42);
+    }
+
+    #[test]
+    fn oauth_result_err_variant() {
+        let result: OAuthResult<i32> = Err(OAuthError::NoRefreshToken);
+        assert!(result.is_err());
+    }
 }

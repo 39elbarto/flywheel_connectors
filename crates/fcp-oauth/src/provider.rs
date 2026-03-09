@@ -879,4 +879,105 @@ mod tests {
         );
         assert_eq!(config.token_url, "https://api.dropboxapi.com/oauth2/token");
     }
+
+    // ── New batch: ProviderEndpoints advanced ──
+
+    #[test]
+    fn test_provider_endpoints_unicode_urls() {
+        let endpoints = ProviderEndpoints::new(
+            "https://auth.\u{00e9}xample.com/authorize",
+            "https://auth.\u{00e9}xample.com/token",
+        );
+        assert!(endpoints.authorization_url.contains('\u{00e9}'));
+    }
+
+    #[test]
+    fn test_provider_endpoints_to_oauth2_config_has_defaults() {
+        let endpoints = ProviderEndpoints::new("https://a.com/auth", "https://a.com/token");
+        let config = endpoints.to_oauth2_config("cid", "csec");
+        // Should have all default values for non-URL fields
+        assert!(config.use_pkce);
+        assert_eq!(config.pkce_method, PkceMethod::S256);
+        assert!(config.default_scopes.is_empty());
+        assert!(config.redirect_uri.is_none());
+    }
+
+    #[test]
+    fn test_provider_endpoints_revocation_url_overwrite() {
+        let endpoints = ProviderEndpoints::new("https://a.com/auth", "https://a.com/token")
+            .with_revocation_url("https://a.com/revoke1")
+            .with_revocation_url("https://a.com/revoke2");
+        assert_eq!(
+            endpoints.revocation_url,
+            Some("https://a.com/revoke2".to_string())
+        );
+    }
+
+    #[test]
+    fn test_provider_endpoints_userinfo_url_overwrite() {
+        let endpoints = ProviderEndpoints::new("https://a.com/auth", "https://a.com/token")
+            .with_userinfo_url("https://a.com/user1")
+            .with_userinfo_url("https://a.com/user2");
+        assert_eq!(
+            endpoints.userinfo_url,
+            Some("https://a.com/user2".to_string())
+        );
+    }
+
+    // ── New batch: OAuthProvider all-variants exhaustive ──
+
+    #[test]
+    fn test_all_providers_not_equal_to_each_other() {
+        let all = [
+            OAuthProvider::Google,
+            OAuthProvider::GitHub,
+            OAuthProvider::Twitter,
+            OAuthProvider::TwitterLegacy,
+            OAuthProvider::Slack,
+            OAuthProvider::Notion,
+            OAuthProvider::Linear,
+            OAuthProvider::Discord,
+            OAuthProvider::Spotify,
+            OAuthProvider::Microsoft,
+            OAuthProvider::Dropbox,
+        ];
+        for i in 0..all.len() {
+            for j in (i + 1)..all.len() {
+                assert_ne!(all[i], all[j], "{:?} == {:?}", all[i], all[j]);
+            }
+        }
+    }
+
+    #[test]
+    fn test_twitter_legacy_not_equal_to_twitter() {
+        assert_ne!(OAuthProvider::Twitter, OAuthProvider::TwitterLegacy);
+    }
+
+    #[test]
+    fn test_provider_oauth2_config_empty_credentials() {
+        let config = OAuthProvider::Google.oauth2_config("", "").unwrap();
+        assert!(config.client_id.is_empty());
+        assert_eq!(config.client_secret, Some(String::new()));
+    }
+
+    #[test]
+    fn test_provider_oauth1_config_empty_credentials() {
+        let config = OAuthProvider::TwitterLegacy.oauth1_config("", "").unwrap();
+        assert!(config.consumer_key.is_empty());
+        assert!(config.consumer_secret.is_empty());
+    }
+
+    #[test]
+    fn test_slack_config_no_extra_params() {
+        let config = OAuthProvider::Slack.oauth2_config("id", "sec").unwrap();
+        // Slack does not add extra auth params
+        assert!(config.extra_auth_params.is_empty());
+    }
+
+    #[test]
+    fn test_discord_config_no_pkce() {
+        let config = OAuthProvider::Discord.oauth2_config("id", "sec").unwrap();
+        assert!(!config.use_pkce);
+        assert!(!OAuthProvider::Discord.requires_pkce());
+    }
 }

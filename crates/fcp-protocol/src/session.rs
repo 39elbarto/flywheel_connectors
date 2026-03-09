@@ -2879,4 +2879,301 @@ mod tests {
             );
         }
     }
+
+    // ── Batch 5: SunnyMoose edge-case and integration tests ──
+
+    #[test]
+    fn derive_session_keys_different_nonces_produce_different_keys() {
+        let sk = X25519SecretKey::from_bytes([0x12; 32]);
+        let pk = X25519SecretKey::from_bytes([0x34; 32]).public_key();
+        let shared = sk.diffie_hellman(&pk);
+        let session_id = MeshSessionId([0xAA; 16]);
+        let initiator = TailscaleNodeId::new("node-i");
+        let responder = TailscaleNodeId::new("node-r");
+        let hello_nonce_a = SessionNonce([0x01; 16]);
+        let hello_nonce_b = SessionNonce([0x02; 16]);
+        let ack_nonce = SessionNonce([0x03; 16]);
+
+        let keys_a = derive_session_keys(
+            &shared,
+            &session_id,
+            &initiator,
+            &responder,
+            &hello_nonce_a,
+            &ack_nonce,
+        )
+        .expect("keys a");
+        let keys_b = derive_session_keys(
+            &shared,
+            &session_id,
+            &initiator,
+            &responder,
+            &hello_nonce_b,
+            &ack_nonce,
+        )
+        .expect("keys b");
+        assert_ne!(keys_a.k_mac_i2r, keys_b.k_mac_i2r);
+        assert_ne!(keys_a.k_ctx, keys_b.k_ctx);
+    }
+
+    #[test]
+    fn derive_session_keys_swapped_roles_produce_different_keys() {
+        let sk = X25519SecretKey::from_bytes([0x12; 32]);
+        let pk = X25519SecretKey::from_bytes([0x34; 32]).public_key();
+        let shared = sk.diffie_hellman(&pk);
+        let session_id = MeshSessionId([0xBB; 16]);
+        let node_a = TailscaleNodeId::new("node-a");
+        let node_b = TailscaleNodeId::new("node-b");
+        let hello_nonce = SessionNonce([0x01; 16]);
+        let ack_nonce = SessionNonce([0x02; 16]);
+
+        let keys_ab = derive_session_keys(
+            &shared,
+            &session_id,
+            &node_a,
+            &node_b,
+            &hello_nonce,
+            &ack_nonce,
+        )
+        .expect("keys ab");
+        let keys_ba = derive_session_keys(
+            &shared,
+            &session_id,
+            &node_b,
+            &node_a,
+            &hello_nonce,
+            &ack_nonce,
+        )
+        .expect("keys ba");
+        assert_ne!(keys_ab.k_mac_i2r, keys_ba.k_mac_i2r);
+    }
+
+    #[test]
+    fn negotiate_suite_single_overlap() {
+        let result = negotiate_suite(
+            &[SessionCryptoSuite::Suite1],
+            &[SessionCryptoSuite::Suite1],
+        );
+        assert_eq!(result, Some(SessionCryptoSuite::Suite1));
+    }
+
+    #[test]
+    fn negotiate_suite_duplicate_entries() {
+        let result = negotiate_suite(
+            &[
+                SessionCryptoSuite::Suite2,
+                SessionCryptoSuite::Suite2,
+                SessionCryptoSuite::Suite1,
+            ],
+            &[SessionCryptoSuite::Suite1],
+        );
+        // First match found is Suite1 (Suite2 is not in responder)
+        assert_eq!(result, Some(SessionCryptoSuite::Suite1));
+    }
+
+    #[test]
+    fn session_mac_empty_frame_bytes() {
+        let session_id = MeshSessionId([0x11; 16]);
+        let key = [0x22; 32];
+        let frame: &[u8] = b"";
+        let mac = compute_session_mac(
+            SessionCryptoSuite::Suite1,
+            &key,
+            &session_id,
+            SessionDirection::InitiatorToResponder,
+            1,
+            frame,
+        )
+        .expect("mac empty");
+        verify_session_mac(
+            SessionCryptoSuite::Suite1,
+            &key,
+            &session_id,
+            SessionDirection::InitiatorToResponder,
+            1,
+            frame,
+            &mac,
+        )
+        .expect("verify empty");
+    }
+
+    #[test]
+    fn session_mac_large_frame_bytes() {
+        let session_id = MeshSessionId([0x33; 16]);
+        let key = [0x44; 32];
+        let frame = vec![0xAB; 8192];
+        let mac = compute_session_mac(
+            SessionCryptoSuite::Suite2,
+            &key,
+            &session_id,
+            SessionDirection::ResponderToInitiator,
+            999,
+            &frame,
+        )
+        .expect("mac large");
+        verify_session_mac(
+            SessionCryptoSuite::Suite2,
+            &key,
+            &session_id,
+            SessionDirection::ResponderToInitiator,
+            999,
+            &frame,
+            &mac,
+        )
+        .expect("verify large");
+    }
+
+    #[test]
+    fn datagram_encode_decode_max_seq() {
+        let datagram = FcpsDatagram {
+            session_id: MeshSessionId([0xEE; 16]),
+            seq: u64::MAX,
+            mac: [0xFF; SESSION_MAC_SIZE],
+            frame_bytes: vec![0x01, 0x02],
+        };
+        let encoded = datagram.encode();
+        let decoded =
+            FcpsDatagram::decode(&encoded, DEFAULT_MAX_DATAGRAM_BYTES).expect("decode ok");
+        assert_eq!(decoded.seq, u64::MAX);
+        assert_eq!(decoded.mac, [0xFF; SESSION_MAC_SIZE]);
+    }
+
+    #[test]
+    fn cookie_try_from_slice_zero_length() {
+        let err = SessionCookie::try_from_slice(&[]).expect_err("empty");
+        assert!(matches!(err, SessionError::InvalidCookieLength { len: 0 }));
+    }
+
+    #[test]
+    fn cookie_try_from_slice_one_too_long() {
+        let bytes = [0u8; SESSION_COOKIE_SIZE + 1];
+        let err = SessionCookie::try_from_slice(&bytes).expect_err("too long");
+        assert!(matches!(
+            err,
+            SessionError::InvalidCookieLength { len: 33 }
+        ));
+    }
+
+    #[test]
+    fn mesh_session_id_serde_json_roundtrip() {
+        let id = MeshSessionId([0xAB; 16]);
+        let json = serde_json::to_string(&id).expect("serialize");
+        let back: MeshSessionId = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back, id);
+    }
+
+    #[test]
+    fn session_nonce_serde_json_roundtrip() {
+        let nonce = SessionNonce([0xCD; 16]);
+        let json = serde_json::to_string(&nonce).expect("serialize");
+        let back: SessionNonce = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back, nonce);
+    }
+
+    #[test]
+    fn session_cookie_serde_json_roundtrip() {
+        let cookie = SessionCookie([0xEF; 32]);
+        let json = serde_json::to_string(&cookie).expect("serialize");
+        let back: SessionCookie = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back, cookie);
+    }
+
+    #[test]
+    fn session_mac_size_is_16() {
+        assert_eq!(SESSION_MAC_SIZE, 16);
+    }
+
+    #[test]
+    fn replay_window_u64_max_seq() {
+        let mut window = ReplayWindow::new(128);
+        assert!(window.check_and_update(u64::MAX));
+        assert!(!window.check_and_update(u64::MAX)); // replay
+        assert_eq!(window.highest_seq(), u64::MAX);
+    }
+
+    #[test]
+    fn replay_window_large_window_size() {
+        let mut window = ReplayWindow::new(1000);
+        assert!(window.check_and_update(500));
+        assert!(window.check_and_update(400)); // within window
+        assert!(!window.check_and_update(400)); // replay
+    }
+
+    #[test]
+    fn hello_transcript_with_cookie_differs_from_without() {
+        let _signing_key = Ed25519SigningKey::generate();
+        let hello_no_cookie = MeshSessionHello {
+            from: TailscaleNodeId::new("node-a"),
+            to: TailscaleNodeId::new("node-b"),
+            eph_pubkey: X25519SecretKey::from_bytes([0x11; 32]).public_key(),
+            nonce: SessionNonce([0; 16]),
+            cookie: None,
+            timestamp: 1_700_000_000,
+            suites: vec![SessionCryptoSuite::Suite1],
+            transport_limits: None,
+            signature: None,
+        };
+        let hello_with_cookie = MeshSessionHello {
+            cookie: Some(SessionCookie([0xCC; 32])),
+            ..hello_no_cookie.clone()
+        };
+        let t1 = hello_no_cookie.transcript_bytes().expect("transcript");
+        let t2 = hello_with_cookie.transcript_bytes().expect("transcript");
+        assert_ne!(t1, t2);
+    }
+
+    #[test]
+    fn hello_transcript_with_transport_limits_differs() {
+        let hello_no_limits = MeshSessionHello {
+            from: TailscaleNodeId::new("node-a"),
+            to: TailscaleNodeId::new("node-b"),
+            eph_pubkey: X25519SecretKey::from_bytes([0x11; 32]).public_key(),
+            nonce: SessionNonce([0; 16]),
+            cookie: None,
+            timestamp: 1_700_000_000,
+            suites: vec![SessionCryptoSuite::Suite1],
+            transport_limits: None,
+            signature: None,
+        };
+        let hello_with_limits = MeshSessionHello {
+            transport_limits: Some(TransportLimits {
+                max_datagram_bytes: 1400,
+            }),
+            ..hello_no_limits.clone()
+        };
+        let t1 = hello_no_limits.transcript_bytes().expect("transcript");
+        let t2 = hello_with_limits.transcript_bytes().expect("transcript");
+        assert_ne!(t1, t2);
+    }
+
+    #[test]
+    fn verify_cookie_with_wrong_key_fails() {
+        let key_a = [0xAA; 32];
+        let key_b = [0xBB; 32];
+        let hello = make_hello();
+        let cookie = compute_cookie(&key_a, &hello).expect("cookie");
+        let err = verify_cookie(&key_b, &hello, &cookie).expect_err("wrong key");
+        assert!(matches!(err, SessionError::InvalidCookie));
+    }
+
+    #[test]
+    fn decode_hello_cbor_rejects_trailing_bytes() {
+        let hello = make_hello();
+        let mut encoded = to_canonical_cbor(&hello).expect("encode");
+        encoded.push(0xFF); // trailing byte
+        let err = decode_hello_cbor(&encoded).expect_err("trailing bytes");
+        assert!(matches!(err, SessionError::Cbor(_)));
+    }
+
+    #[test]
+    fn transport_limits_serde_transparent() {
+        // TransportLimits is serde(transparent), so it should serialize as just the u16
+        let limits = TransportLimits {
+            max_datagram_bytes: 1400,
+        };
+        let json = serde_json::to_string(&limits).expect("serialize");
+        assert_eq!(json, "1400");
+        let back: TransportLimits = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back.max_datagram_bytes, 1400);
+    }
 }

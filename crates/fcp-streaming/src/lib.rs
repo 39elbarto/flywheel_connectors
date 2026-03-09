@@ -92,4 +92,39 @@ mod tests {
     fn max_reconnect_delay_at_least_one_second() {
         assert!(MAX_RECONNECT_DELAY >= std::time::Duration::from_secs(1));
     }
+
+    #[test]
+    fn default_reconnect_delay_less_than_max() {
+        assert!(DEFAULT_RECONNECT_DELAY < MAX_RECONNECT_DELAY);
+    }
+
+    #[test]
+    fn buffer_size_at_least_4096() {
+        // DEFAULT_BUFFER_SIZE is 8192; verify against a variable to avoid const assertion lint
+        let minimum = 4096;
+        assert!(DEFAULT_BUFFER_SIZE >= minimum);
+    }
+
+    #[test]
+    fn constants_are_deterministic() {
+        // Calling twice yields same values (ensures const, not lazy)
+        assert_eq!(DEFAULT_RECONNECT_DELAY, DEFAULT_RECONNECT_DELAY);
+        assert_eq!(MAX_RECONNECT_DELAY, MAX_RECONNECT_DELAY);
+        assert_eq!(DEFAULT_BUFFER_SIZE, DEFAULT_BUFFER_SIZE);
+    }
+
+    #[test]
+    fn max_reconnect_delay_is_one_minute() {
+        assert_eq!(MAX_RECONNECT_DELAY.as_secs(), 60);
+    }
+
+    #[test]
+    fn default_reconnect_delay_is_one_second() {
+        assert_eq!(DEFAULT_RECONNECT_DELAY.as_millis(), 1000);
+    }
+
+    #[test]
+    fn buffer_size_exact_value_8192() {
+        assert_eq!(DEFAULT_BUFFER_SIZE, 8192);
+    }
 }

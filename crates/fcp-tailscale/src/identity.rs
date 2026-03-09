@@ -1924,4 +1924,301 @@ mod tests {
         assert_eq!(identity.ips.len(), 1);
         assert!(identity.ips[0].is_ipv4());
     }
+
+    // --- NodeId: serde deserialization from invalid JSON ---
+
+    #[test]
+    fn test_node_id_deserialize_from_number_fails() {
+        let result: Result<NodeId, _> = serde_json::from_str("42");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_node_id_deserialize_from_null_fails() {
+        let result: Result<NodeId, _> = serde_json::from_str("null");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_node_id_deserialize_from_array_fails() {
+        let result: Result<NodeId, _> = serde_json::from_str("[1,2]");
+        assert!(result.is_err());
+    }
+
+    // --- NodeId: Display with empty string produces empty output ---
+
+    #[test]
+    fn test_node_id_display_empty_is_empty() {
+        let id = NodeId::new("");
+        assert_eq!(format!("{id}"), "");
+    }
+
+    // --- NodeKeys: const constructor produces consistent results ---
+
+    #[test]
+    fn test_node_keys_const_new() {
+        let signing = Ed25519SigningKey::generate();
+        let encryption = X25519SecretKey::generate();
+        let issuance = Ed25519SigningKey::generate();
+
+        let keys = NodeKeys::new(
+            signing.verifying_key(),
+            encryption.public_key(),
+            issuance.verifying_key(),
+        );
+        // Key IDs should be non-zero length hex strings
+        assert!(!keys.signing_kid().to_hex().is_empty());
+        assert!(!keys.encryption_kid().to_hex().is_empty());
+        assert!(!keys.issuance_kid().to_hex().is_empty());
+    }
+
+    // --- MeshIdentity: fcp_tags with only fcp- prefix tag ---
+
+    #[test]
+    fn test_mesh_identity_fcp_tags_with_bare_fcp_prefix() {
+        let (owner_key, node_keys) = create_test_keys();
+        let tags = vec![TailscaleTag::new("tag:fcp-").unwrap()];
+        let identity = MeshIdentity::new(
+            NodeId::new("bare-fcp"),
+            "host".to_string(),
+            vec![],
+            tags,
+            owner_key.verifying_key(),
+            node_keys,
+        );
+        // "tag:fcp-" is technically an FCP tag (starts with tag:fcp-)
+        assert_eq!(identity.fcp_tags().len(), 1);
+    }
+
+    // --- Attestation: sign with unicode node_id ---
+
+    #[test]
+    fn test_attestation_sign_verify_unicode_node_id() {
+        let (owner_key, node_keys) = create_test_keys();
+        let node_id = NodeId::new("n\u{00f6}de-\u{1F600}");
+        let tags = vec![TailscaleTag::fcp_tag("work")];
+        let attestation =
+            NodeKeyAttestation::sign(&owner_key, &node_id, &node_keys, &tags, 24).unwrap();
+        attestation
+            .verify(&owner_key.verifying_key(), &node_id, &node_keys, &tags)
+            .unwrap();
+    }
+
+    // --- Attestation: sign with non-fcp and fcp tags mixed ---
+
+    #[test]
+    fn test_attestation_sign_verify_mixed_tags() {
+        let (owner_key, node_keys) = create_test_keys();
+        let node_id = NodeId::new("mixed");
+        let tags = vec![
+            TailscaleTag::fcp_tag("work"),
+            TailscaleTag::new("tag:server").unwrap(),
+            TailscaleTag::fcp_tag("private"),
+            TailscaleTag::new("tag:web").unwrap(),
+        ];
+        let attestation =
+            NodeKeyAttestation::sign(&owner_key, &node_id, &node_keys, &tags, 24).unwrap();
+        attestation
+            .verify(&owner_key.verifying_key(), &node_id, &node_keys, &tags)
+            .unwrap();
+    }
+
+    // --- MeshIdentity: Clone preserves attestation ---
+
+    #[test]
+    fn test_mesh_identity_clone_preserves_attestation() {
+        let (owner_key, node_keys) = create_test_keys();
+        let node_id = NodeId::new("clone-attest");
+        let tags = vec![TailscaleTag::fcp_tag("work")];
+        let attestation =
+            NodeKeyAttestation::sign(&owner_key, &node_id, &node_keys, &tags, 24).unwrap();
+        let identity = MeshIdentity::new(
+            node_id,
+            "host".to_string(),
+            vec![],
+            tags,
+            owner_key.verifying_key(),
+            node_keys,
+        )
+        .with_attestation(attestation);
+
+        let cloned = identity.clone();
+        assert!(cloned.attestation.is_some());
+        assert!(cloned.is_attestation_valid());
+        cloned.verify_attestation().unwrap();
+        // Use original after clone to avoid redundant_clone
+        assert!(identity.is_attestation_valid());
+    }
+
+    // --- MeshIdentity: serde JSON includes all expected top-level keys ---
+
+    #[test]
+    fn test_mesh_identity_json_has_attestation_key() {
+        let (owner_key, node_keys) = create_test_keys();
+        let identity = MeshIdentity::new(
+            NodeId::new("json-keys"),
+            "host".to_string(),
+            vec![],
+            vec![],
+            owner_key.verifying_key(),
+            node_keys,
+        );
+        let json = serde_json::to_string(&identity).unwrap();
+        assert!(json.contains("\"attestation\""));
+    }
+
+    // --- NodeId: HashSet operations ---
+
+    #[test]
+    fn test_node_id_hashset_contains() {
+        use std::collections::HashSet;
+        let mut set = HashSet::new();
+        set.insert(NodeId::new("alpha"));
+        set.insert(NodeId::new("beta"));
+        assert!(set.contains(&NodeId::new("alpha")));
+        assert!(set.contains(&NodeId::new("beta")));
+        assert!(!set.contains(&NodeId::new("gamma")));
+    }
+
+    // --- Attestation: schema constant ---
+
+    #[test]
+    fn test_attestation_payload_schema() {
+        assert_eq!(AttestationPayload::SCHEMA, "fcp.attestation.v1");
+    }
+
+    // --- MeshIdentity: verify_attestation with wrong tags in identity ---
+
+    #[test]
+    fn test_mesh_identity_verify_attestation_mismatched_tags() {
+        let (owner_key, node_keys) = create_test_keys();
+        let node_id = NodeId::new("mismatch-tags");
+        let original_tags = vec![TailscaleTag::fcp_tag("work")];
+        let attestation =
+            NodeKeyAttestation::sign(&owner_key, &node_id, &node_keys, &original_tags, 24)
+                .unwrap();
+
+        // Create identity with DIFFERENT tags than what was signed
+        let identity = MeshIdentity::new(
+            node_id,
+            "host".to_string(),
+            vec![],
+            vec![TailscaleTag::fcp_tag("private")], // different!
+            owner_key.verifying_key(),
+            node_keys,
+        )
+        .with_attestation(attestation);
+
+        // verify_attestation should fail because tags don't match
+        assert!(identity.verify_attestation().is_err());
+    }
+
+    // --- NodeKeys: serde roundtrip with clone ---
+
+    #[test]
+    fn test_node_keys_serde_roundtrip_clone() {
+        let (_, keys) = create_test_keys();
+        let cloned = keys.clone();
+        let json1 = serde_json::to_string(&keys).unwrap();
+        let json2 = serde_json::to_string(&cloned).unwrap();
+        assert_eq!(json1, json2);
+    }
+
+    // --- MeshIdentity: Debug output contains all field names ---
+
+    #[test]
+    fn test_mesh_identity_debug_all_fields() {
+        let (owner_key, node_keys) = create_test_keys();
+        let identity = MeshIdentity::new(
+            NodeId::new("dbg-all"),
+            "test-host".to_string(),
+            vec!["100.64.0.1".parse().unwrap()],
+            vec![TailscaleTag::fcp_tag("work")],
+            owner_key.verifying_key(),
+            node_keys,
+        );
+        let dbg = format!("{identity:?}");
+        assert!(dbg.contains("node_id"));
+        assert!(dbg.contains("hostname"));
+        assert!(dbg.contains("ips"));
+        assert!(dbg.contains("tags"));
+        assert!(dbg.contains("owner_pubkey"));
+        assert!(dbg.contains("node_keys"));
+        assert!(dbg.contains("attestation"));
+    }
+
+    // --- Attestation: issued_at is before expires_at ---
+
+    #[test]
+    fn test_attestation_issued_before_expires() {
+        let (owner_key, node_keys) = create_test_keys();
+        let attestation =
+            NodeKeyAttestation::sign(&owner_key, &NodeId::new("time"), &node_keys, &[], 24)
+                .unwrap();
+        assert!(attestation.issued_at < attestation.expires_at);
+    }
+
+    // --- Attestation: signer_kid is deterministic for same key ---
+
+    #[test]
+    fn test_attestation_signer_kid_deterministic() {
+        let (owner_key, node_keys) = create_test_keys();
+        let node_id = NodeId::new("det");
+        let a1 = NodeKeyAttestation::sign(&owner_key, &node_id, &node_keys, &[], 1).unwrap();
+        let a2 = NodeKeyAttestation::sign(&owner_key, &node_id, &node_keys, &[], 48).unwrap();
+        assert_eq!(a1.signer_kid, a2.signer_kid);
+    }
+
+    // --- MeshIdentity: many tags serde roundtrip ---
+
+    #[test]
+    fn test_mesh_identity_many_tags_serde_roundtrip() {
+        let (owner_key, node_keys) = create_test_keys();
+        let tags: Vec<TailscaleTag> = (0..15)
+            .map(|i| TailscaleTag::fcp_tag(&format!("z{i}")))
+            .collect();
+        let identity = MeshIdentity::new(
+            NodeId::new("many-tags-serde"),
+            "host".to_string(),
+            vec![],
+            tags.clone(),
+            owner_key.verifying_key(),
+            node_keys,
+        );
+        let json = serde_json::to_string(&identity).unwrap();
+        let decoded: MeshIdentity = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.tags.len(), 15);
+        assert_eq!(decoded.tags, tags);
+    }
+
+    // --- Attestation: verify returns AttestationExpired for zero-validity ---
+
+    #[test]
+    fn test_attestation_verify_zero_returns_expired() {
+        let (owner_key, node_keys) = create_test_keys();
+        let node_id = NodeId::new("zero-exp");
+        let tags = vec![];
+        let attestation =
+            NodeKeyAttestation::sign(&owner_key, &node_id, &node_keys, &tags, 0).unwrap();
+        let err = attestation
+            .verify(&owner_key.verifying_key(), &node_id, &node_keys, &tags)
+            .unwrap_err();
+        assert!(matches!(err, TailscaleError::AttestationExpired));
+    }
+
+    // --- Attestation: verify returns InvalidAttestation for wrong signer_kid ---
+
+    #[test]
+    fn test_attestation_verify_wrong_owner_returns_invalid() {
+        let (owner_key, node_keys) = create_test_keys();
+        let wrong_owner = Ed25519SigningKey::generate();
+        let node_id = NodeId::new("wrong-owner");
+        let tags = vec![];
+        let attestation =
+            NodeKeyAttestation::sign(&owner_key, &node_id, &node_keys, &tags, 24).unwrap();
+        let err = attestation
+            .verify(&wrong_owner.verifying_key(), &node_id, &node_keys, &tags)
+            .unwrap_err();
+        assert!(matches!(err, TailscaleError::InvalidAttestation));
+    }
 }

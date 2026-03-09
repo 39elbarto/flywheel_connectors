@@ -1053,4 +1053,124 @@ mod tests {
         assert!(last.result.is_ok());
         assert!(last.input.is_none());
     }
+
+    // ---- RecordedOperation edge cases ----
+
+    #[test]
+    fn recorded_operation_empty_operation_name() {
+        let op = RecordedOperation {
+            operation: String::new(),
+            input: None,
+            result: Ok(serde_json::json!(null)),
+            duration_ms: 0,
+            timestamp: chrono::Utc::now(),
+        };
+        assert!(op.operation.is_empty());
+    }
+
+    #[test]
+    fn recorded_operation_unicode_operation_name() {
+        let op = RecordedOperation {
+            operation: "op-caf\u{00e9}".to_string(),
+            input: Some(serde_json::json!({"key": "\u{2603}"})),
+            result: Ok(serde_json::json!("\u{2764}")),
+            duration_ms: 1,
+            timestamp: chrono::Utc::now(),
+        };
+        assert!(op.operation.contains("caf\u{00e9}"));
+        let dbg = format!("{op:?}");
+        assert!(dbg.contains("caf\u{00e9}"));
+    }
+
+    #[test]
+    fn recorded_operation_max_duration() {
+        let op = RecordedOperation {
+            operation: "long_op".to_string(),
+            input: None,
+            result: Ok(serde_json::json!(null)),
+            duration_ms: u64::MAX,
+            timestamp: chrono::Utc::now(),
+        };
+        assert_eq!(op.duration_ms, u64::MAX);
+    }
+
+    #[test]
+    fn recorded_operation_clone_result_err() {
+        let op = RecordedOperation {
+            operation: "fail_clone".to_string(),
+            input: None,
+            result: Err("cloned error".to_string()),
+            duration_ms: 7,
+            timestamp: chrono::Utc::now(),
+        };
+        let cloned = op.clone();
+        assert_eq!(op.result, cloned.result);
+    }
+
+    // ---- HarnessStats edge cases ----
+
+    #[test]
+    fn harness_stats_single_failure() {
+        let stats = HarnessStats {
+            total_operations: 1,
+            successes: 0,
+            failures: 1,
+            total_duration_ms: 42,
+            avg_duration_ms: 42,
+            max_duration_ms: 42,
+        };
+        assert_eq!(stats.successes + stats.failures, stats.total_operations);
+        assert_eq!(stats.avg_duration_ms, stats.max_duration_ms);
+    }
+
+    #[test]
+    fn harness_stats_large_values() {
+        let stats = HarnessStats {
+            total_operations: usize::MAX,
+            successes: usize::MAX / 2,
+            failures: usize::MAX - usize::MAX / 2,
+            total_duration_ms: u64::MAX,
+            avg_duration_ms: u64::MAX,
+            max_duration_ms: u64::MAX,
+        };
+        let dbg = format!("{stats:?}");
+        assert!(dbg.contains("HarnessStats"));
+    }
+
+    // ---- ConnectorTestHarness additional tests ----
+
+    #[fcp_async_core::runtime::test]
+    async fn harness_stats_total_duration_accumulates() {
+        let mut harness = ConnectorTestHarness::new(StubConnector::ok());
+        harness.configure_default().await.unwrap();
+        harness.health().await;
+        let _ = harness.introspect();
+        let stats = harness.stats();
+        assert_eq!(stats.total_operations, 3);
+        // Each op's duration contributes to total
+        assert_eq!(
+            stats.total_duration_ms,
+            harness
+                .operations()
+                .iter()
+                .map(|op| op.duration_ms)
+                .sum::<u64>()
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn harness_stats_max_duration_geq_avg() {
+        let mut harness = ConnectorTestHarness::new(StubConnector::ok());
+        harness.configure_default().await.unwrap();
+        harness.health().await;
+        let stats = harness.stats();
+        assert!(stats.max_duration_ms >= stats.avg_duration_ms);
+    }
+
+    #[test]
+    fn harness_assert_all_under_duration_empty_operations() {
+        let harness = ConnectorTestHarness::new(StubConnector::ok());
+        // No operations recorded, so nothing to fail
+        harness.assert_all_under_duration(0);
+    }
 }

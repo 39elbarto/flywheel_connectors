@@ -714,4 +714,85 @@ mod tests {
         let result = assert_completes_within(async { 42 }, std::time::Duration::from_secs(1)).await;
         assert_eq!(result, 42);
     }
+
+    // ---- Edge case: assert_json_has with single-key object ----
+
+    #[test]
+    fn test_assert_json_has_top_level_array_index_not_supported() {
+        // assert_json_has uses dot-split, so array indices are just keys
+        let json = serde_json::json!({"0": "zero"});
+        assert_json_has(&json, "0");
+    }
+
+    #[test]
+    fn test_assert_json_eq_empty_objects() {
+        let a = serde_json::json!({});
+        let b = serde_json::json!({});
+        assert_json_eq(&a, &b);
+    }
+
+    #[test]
+    fn test_assert_json_eq_empty_arrays() {
+        let a = serde_json::json!([]);
+        let b = serde_json::json!([]);
+        assert_json_eq(&a, &b);
+    }
+
+    #[test]
+    fn test_assert_json_eq_booleans() {
+        assert_json_eq(&serde_json::json!(true), &serde_json::json!(true));
+        assert_json_eq(&serde_json::json!(false), &serde_json::json!(false));
+    }
+
+    #[test]
+    #[should_panic(expected = "JSON values don't match")]
+    fn test_assert_json_eq_bool_mismatch() {
+        assert_json_eq(&serde_json::json!(true), &serde_json::json!(false));
+    }
+
+    #[test]
+    fn test_assert_json_string_contains_unicode() {
+        let val = serde_json::json!("caf\u{00e9} au lait");
+        assert_json_string_contains(&val, "caf\u{00e9}");
+    }
+
+    #[test]
+    fn test_assert_json_string_contains_empty_pattern() {
+        let val = serde_json::json!("anything");
+        assert_json_string_contains(&val, "");
+    }
+
+    #[test]
+    fn test_assert_json_array_len_large() {
+        let arr: Vec<i32> = (0..100).collect();
+        let json = serde_json::json!(arr);
+        assert_json_array_len(&json, 100);
+    }
+
+    #[test]
+    #[should_panic(expected = "Expected JSON array")]
+    fn test_assert_json_array_len_not_array() {
+        let json = serde_json::json!({"not": "array"});
+        assert_json_array_len(&json, 0);
+    }
+
+    #[test]
+    fn test_assert_ok_with_unit() {
+        let result: FcpResult<()> = Ok(());
+        assert_ok(&result);
+    }
+
+    #[test]
+    #[should_panic(expected = "Expected NotConfigured")]
+    fn test_assert_not_configured_on_ok() {
+        let result: FcpResult<i32> = Ok(42);
+        assert_not_configured(&result);
+    }
+
+    #[test]
+    #[should_panic(expected = "Expected NotHandshaken")]
+    fn test_assert_not_handshaken_on_ok() {
+        let result: FcpResult<i32> = Ok(42);
+        assert_not_handshaken(&result);
+    }
 }

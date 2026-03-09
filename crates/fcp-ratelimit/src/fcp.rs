@@ -1281,4 +1281,319 @@ mod tests {
         let dbg = format!("{ctx:?}");
         assert!(dbg.contains("zone_id"));
     }
+
+    // ── Additional compute_token_cost edge cases ────────────────────────
+
+    #[test]
+    fn compute_token_cost_max_base_zero_others() {
+        let cost = compute_token_cost(u32::MAX, 0, 1, 0).unwrap();
+        assert_eq!(cost.base_tokens, u32::MAX);
+        assert_eq!(cost.bytes_tokens, 0);
+        assert_eq!(cost.compute_tokens, 0);
+        assert_eq!(cost.total(), u32::MAX);
+    }
+
+    #[test]
+    fn compute_token_cost_max_compute_zero_others() {
+        let cost = compute_token_cost(0, 0, 1, u32::MAX).unwrap();
+        assert_eq!(cost.compute_tokens, u32::MAX);
+        assert_eq!(cost.total(), u32::MAX);
+    }
+
+    #[test]
+    fn compute_token_cost_base_plus_compute_overflow() {
+        // base=u32::MAX, compute=1 → overflow
+        let err = compute_token_cost(u32::MAX, 0, 1, 1).unwrap_err();
+        assert!(err.to_string().contains("overflow"));
+    }
+
+    #[test]
+    fn compute_token_cost_bytes_plus_compute_overflow() {
+        // bytes_tokens will be large, plus compute causes overflow
+        let err = compute_token_cost(0, u64::from(u32::MAX), 1, 1).unwrap_err();
+        assert!(err.to_string().contains("overflow"));
+    }
+
+    #[test]
+    fn compute_token_cost_exact_boundary() {
+        // 999 bytes / 1000 bytes_per_token = 1 token (ceiling)
+        let cost = compute_token_cost(0, 999, 1000, 0).unwrap();
+        assert_eq!(cost.bytes_tokens, 1);
+    }
+
+    #[test]
+    fn compute_token_cost_large_bytes_per_token() {
+        // 1 byte / u64::MAX bytes_per_token = 1 token (ceiling)
+        let cost = compute_token_cost(0, 1, u64::MAX, 0).unwrap();
+        assert_eq!(cost.bytes_tokens, 1);
+    }
+
+    // ── Additional utilization_bps tests ─────────────────────────────────
+
+    #[test]
+    fn utilization_bps_u32_max_limit() {
+        // u32::MAX limit, 0 remaining → full utilization
+        assert_eq!(utilization_bps(u32::MAX, 0), 10_000);
+    }
+
+    #[test]
+    fn utilization_bps_exact_threshold_boundary() {
+        // 80% exactly
+        assert_eq!(utilization_bps(100, 20), 8_000);
+        // 95% exactly
+        assert_eq!(utilization_bps(100, 5), 9_500);
+    }
+
+    // ── Additional BackpressureThresholds tests ─────────────────────────
+
+    #[test]
+    fn backpressure_thresholds_custom_values_preserved() {
+        let t = BackpressureThresholds {
+            warning_bps: 1_000,
+            soft_limit_bps: 2_000,
+            hard_limit_bps: 3_000,
+        };
+        let copied = t;
+        assert_eq!(copied.warning_bps, 1_000);
+        assert_eq!(copied.soft_limit_bps, 2_000);
+        assert_eq!(copied.hard_limit_bps, 3_000);
+    }
+
+    #[test]
+    fn backpressure_thresholds_zero_values() {
+        let t = BackpressureThresholds {
+            warning_bps: 0,
+            soft_limit_bps: 0,
+            hard_limit_bps: 0,
+        };
+        assert_eq!(t.warning_bps, 0);
+    }
+
+    // ── Additional ConcurrencyLimiter tests ─────────────────────────────
+
+    #[test]
+    fn concurrency_limiter_drop_permits_in_order() {
+        let limiter = ConcurrencyLimiter::new(3).unwrap();
+        let p1 = limiter.try_acquire().unwrap();
+        let p2 = limiter.try_acquire().unwrap();
+        let p3 = limiter.try_acquire().unwrap();
+        assert_eq!(limiter.in_flight(), 3);
+        assert!(limiter.try_acquire().is_none());
+
+        drop(p2);
+        assert_eq!(limiter.in_flight(), 2);
+        let _p4 = limiter.try_acquire().unwrap();
+        assert_eq!(limiter.in_flight(), 3);
+
+        drop(p1);
+        drop(p3);
+        assert_eq!(limiter.in_flight(), 1);
+    }
+
+    #[test]
+    fn concurrency_limiter_try_acquire_or_violation_success() {
+        let limiter = ConcurrencyLimiter::new(1).unwrap();
+        let ctx = ThrottleContext {
+            zone_id: "z:work".parse().unwrap(),
+            connector_id: None,
+            operation_id: None,
+            limit_type: fcp_core::LimitType::Concurrent,
+        };
+        let _permit = limiter.try_acquire_or_violation(&ctx).unwrap();
+        assert_eq!(limiter.in_flight(), 1);
+    }
+
+    #[test]
+    fn concurrency_limiter_violation_contains_limit_value() {
+        let limiter = ConcurrencyLimiter::new(1).unwrap();
+        let ctx = ThrottleContext {
+            zone_id: "z:work".parse().unwrap(),
+            connector_id: Some("fcp.test:request_response:0.1.0".parse().unwrap()),
+            operation_id: Some("op.test".parse().unwrap()),
+            limit_type: fcp_core::LimitType::Concurrent,
+        };
+        let _p = limiter.try_acquire_or_violation(&ctx).unwrap();
+        let err = limiter.try_acquire_or_violation(&ctx).unwrap_err();
+        let resp = err.to_response();
+        let details = resp.details.unwrap();
+        let viol = &details["throttle_violation"];
+        assert_eq!(viol["limit_value"], 1);
+    }
+
+    // ── Additional TokenCost tests ──────────────────────────────────────
+
+    #[test]
+    fn token_cost_clone() {
+        let original = TokenCost {
+            base_tokens: 5,
+            bytes_tokens: 10,
+            compute_tokens: 15,
+        };
+        let cloned = original;
+        assert_eq!(cloned.total(), original.total());
+        assert_eq!(cloned.total(), 30);
+    }
+
+    #[test]
+    fn token_cost_debug_contains_fields() {
+        let cost = TokenCost {
+            base_tokens: 1,
+            bytes_tokens: 2,
+            compute_tokens: 3,
+        };
+        let dbg = format!("{cost:?}");
+        assert!(dbg.contains("base_tokens"));
+        assert!(dbg.contains("bytes_tokens"));
+        assert!(dbg.contains("compute_tokens"));
+    }
+
+    // ── Additional config_from_core tests ───────────────────────────────
+
+    #[test]
+    fn config_from_core_large_window() {
+        let core = fcp_core::RateLimit {
+            max: 1,
+            per_ms: u64::MAX,
+            burst: None,
+            scope: None,
+            pool_name: None,
+        };
+        let cfg = config_from_core(&core).unwrap();
+        assert_eq!(cfg.requests_per_window, 1);
+    }
+
+    #[test]
+    fn config_from_core_burst_u32_max_minus_one() {
+        let core = fcp_core::RateLimit {
+            max: u32::MAX - 1,
+            per_ms: 60_000,
+            burst: Some(1),
+            scope: None,
+            pool_name: None,
+        };
+        let cfg = config_from_core(&core).unwrap();
+        assert_eq!(cfg.burst_size, Some(u32::MAX));
+    }
+
+    // ── Additional backpressure_from_state tests ────────────────────────
+
+    #[test]
+    fn backpressure_from_state_just_below_warning() {
+        let thresholds = BackpressureThresholds::standard();
+        // 79% utilization → Normal (below 80% warning threshold)
+        let state = RateLimitState {
+            limit: 100,
+            remaining: 21,
+            reset_after: Duration::from_secs(10),
+            is_limited: false,
+        };
+        let signal = backpressure_from_state(&state, thresholds);
+        assert_eq!(signal.level, fcp_core::BackpressureLevel::Normal);
+    }
+
+    #[test]
+    fn backpressure_from_state_just_below_soft_limit() {
+        let thresholds = BackpressureThresholds::standard();
+        // 94% utilization → Warning (above 80%, below 95%)
+        let state = RateLimitState {
+            limit: 100,
+            remaining: 6,
+            reset_after: Duration::from_secs(10),
+            is_limited: false,
+        };
+        let signal = backpressure_from_state(&state, thresholds);
+        assert_eq!(signal.level, fcp_core::BackpressureLevel::Warning);
+        assert!(signal.retry_after_ms.is_none());
+    }
+
+    #[test]
+    fn backpressure_from_state_custom_thresholds() {
+        let thresholds = BackpressureThresholds {
+            warning_bps: 5_000,
+            soft_limit_bps: 7_000,
+            hard_limit_bps: 9_000,
+        };
+        // 60% utilization → Warning with custom thresholds (above 50%)
+        let state = RateLimitState {
+            limit: 100,
+            remaining: 40,
+            reset_after: Duration::from_secs(10),
+            is_limited: false,
+        };
+        let signal = backpressure_from_state(&state, thresholds);
+        assert_eq!(signal.level, fcp_core::BackpressureLevel::Warning);
+    }
+
+    // ── EnforcementOutcome additional tests ─────────────────────────────
+
+    #[test]
+    fn enforcement_outcome_clone_preserves_violation() {
+        let violation = fcp_core::ThrottleViolation::new(fcp_core::ThrottleViolationInput {
+            timestamp_ms: 1_000,
+            zone_id: "z:work".parse().unwrap(),
+            connector_id: None,
+            operation_id: None,
+            limit_type: fcp_core::LimitType::Rpm,
+            limit_value: 100,
+            current_value: 101,
+            retry_after_ms: 500,
+        });
+
+        let out = EnforcementOutcome {
+            allowed: false,
+            state: RateLimitState {
+                limit: 100,
+                remaining: 0,
+                reset_after: Duration::from_secs(5),
+                is_limited: true,
+            },
+            backpressure: fcp_core::BackpressureSignal {
+                level: fcp_core::BackpressureLevel::HardLimit,
+                utilization_bps: 10_000,
+                retry_after_ms: Some(5_000),
+            },
+            violation: Some(violation),
+        };
+        let cloned = out.clone();
+        assert!(!cloned.allowed);
+        assert!(cloned.violation.is_some());
+        assert!(out.violation.is_some());
+    }
+
+    #[test]
+    fn enforcement_outcome_as_error_falls_back_to_violation_retry() {
+        let violation = fcp_core::ThrottleViolation::new(fcp_core::ThrottleViolationInput {
+            timestamp_ms: 1_000,
+            zone_id: "z:work".parse().unwrap(),
+            connector_id: None,
+            operation_id: None,
+            limit_type: fcp_core::LimitType::Rpm,
+            limit_value: 100,
+            current_value: 101,
+            retry_after_ms: 42,
+        });
+
+        let out = EnforcementOutcome {
+            allowed: false,
+            state: RateLimitState {
+                limit: 100,
+                remaining: 0,
+                reset_after: Duration::from_secs(5),
+                is_limited: true,
+            },
+            backpressure: fcp_core::BackpressureSignal {
+                level: fcp_core::BackpressureLevel::HardLimit,
+                utilization_bps: 10_000,
+                retry_after_ms: None, // No backpressure retry
+            },
+            violation: Some(violation),
+        };
+        // Should fall back to violation's retry_after_ms
+        let err = out.as_rate_limited_error().unwrap();
+        if let fcp_core::FcpError::RateLimited { retry_after_ms, .. } = err {
+            assert_eq!(retry_after_ms, 42);
+        } else {
+            panic!("expected RateLimited");
+        }
+    }
 }

@@ -80,6 +80,8 @@ mod secretless;
 #[allow(dead_code)]
 mod session;
 mod template;
+#[allow(dead_code)] // Test observability contract: logging, artifact, redaction, and replay.
+mod test_observability;
 #[allow(dead_code)]
 mod throttle;
 #[allow(dead_code)] // Idempotent undo for reversible operations.

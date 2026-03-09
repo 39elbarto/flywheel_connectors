@@ -1415,4 +1415,163 @@ mod tests {
         // std::error::Error::source() should be None (no inner error)
         assert!(std::error::Error::source(&err).is_none());
     }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // CredentialId – structural & boundary tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn credential_id_test_id_deterministic() {
+        let a = CredentialId::test_id([0x01; 16]);
+        let b = CredentialId::test_id([0x01; 16]);
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn credential_id_test_id_different_bytes_differ() {
+        let a = CredentialId::test_id([0x01; 16]);
+        let b = CredentialId::test_id([0x02; 16]);
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn credential_id_nil_uuid() {
+        let nil = CredentialId::from_uuid(Uuid::nil());
+        assert_eq!(nil.to_string(), "00000000-0000-0000-0000-000000000000");
+    }
+
+    #[test]
+    fn credential_id_max_uuid() {
+        let max = CredentialId::from_uuid(Uuid::max());
+        assert_eq!(max.to_string(), "ffffffff-ffff-ffff-ffff-ffffffffffff");
+    }
+
+    #[test]
+    fn credential_id_size_is_uuid_size() {
+        assert_eq!(
+            std::mem::size_of::<CredentialId>(),
+            std::mem::size_of::<Uuid>()
+        );
+    }
+
+    #[test]
+    fn credential_id_parse_nil_uuid() {
+        let id = CredentialId::parse("00000000-0000-0000-0000-000000000000").unwrap();
+        assert_eq!(*id.as_uuid(), Uuid::nil());
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // CredentialObject – is_expired edge cases
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn credential_object_is_expired_at_zero() {
+        let mut cred = test_credential();
+        cred.expires_at = Some(0);
+        // Expired at time 0 means expired at any time >= 0
+        assert!(cred.is_expired(0));
+        assert!(cred.is_expired(1));
+    }
+
+    #[test]
+    fn credential_object_is_expired_at_u64_max() {
+        let mut cred = test_credential();
+        cred.expires_at = Some(u64::MAX);
+        assert!(!cred.is_expired(u64::MAX - 1));
+        assert!(cred.is_expired(u64::MAX));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // CredentialObject – host matching refinements
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn host_allow_wildcard_single_char_subdomain() {
+        let mut cred = test_credential();
+        cred.host_allow = vec!["*.example.com".into()];
+        assert!(cred.is_host_allowed("x.example.com"));
+    }
+
+    #[test]
+    fn host_allow_exact_match_with_trailing_dot_no_match() {
+        let mut cred = test_credential();
+        cred.host_allow = vec!["api.example.com".into()];
+        // Trailing dot is a different string
+        assert!(!cred.is_host_allowed("api.example.com."));
+    }
+
+    #[test]
+    fn host_allow_wildcard_hyphenated_subdomain() {
+        let mut cred = test_credential();
+        cred.host_allow = vec!["*.example.com".into()];
+        assert!(cred.is_host_allowed("my-service.example.com"));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // CredentialValidationError – clone & equality coverage
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn credential_validation_error_host_not_allowed_clone() {
+        let err = CredentialValidationError::HostNotAllowed {
+            credential_id: CredentialId::test_id([0xCC; 16]),
+            host: "blocked.host".into(),
+        };
+        let cloned = err.clone();
+        assert_eq!(err, cloned);
+    }
+
+    #[test]
+    fn credential_validation_error_secret_not_found_clone() {
+        let err = CredentialValidationError::SecretNotFound {
+            secret_id: SecretId::test_id([0xDD; 16]),
+        };
+        let cloned = err.clone();
+        assert_eq!(err, cloned);
+    }
+
+    #[test]
+    fn credential_validation_error_secret_revoked_clone() {
+        let err = CredentialValidationError::SecretRevoked {
+            secret_id: SecretId::test_id([0xEE; 16]),
+        };
+        let cloned = err.clone();
+        assert_eq!(err, cloned);
+    }
+
+    #[test]
+    fn credential_validation_error_all_sources_none() {
+        let variants: Vec<Box<dyn std::error::Error>> = vec![
+            Box::new(CredentialValidationError::Expired {
+                credential_id: CredentialId::test_id([0x01; 16]),
+            }),
+            Box::new(CredentialValidationError::HostNotAllowed {
+                credential_id: CredentialId::test_id([0x02; 16]),
+                host: "h".into(),
+            }),
+            Box::new(CredentialValidationError::NotInCredentialAllow {
+                credential_id: CredentialId::test_id([0x03; 16]),
+            }),
+            Box::new(CredentialValidationError::SecretNotFound {
+                secret_id: SecretId::test_id([0x04; 16]),
+            }),
+            Box::new(CredentialValidationError::SecretRevoked {
+                secret_id: SecretId::test_id([0x05; 16]),
+            }),
+        ];
+        for err in &variants {
+            assert!(err.source().is_none(), "source should be None for {err}");
+        }
+    }
+
+    #[test]
+    fn credential_validation_error_different_cred_ids_not_equal() {
+        let a = CredentialValidationError::Expired {
+            credential_id: CredentialId::test_id([0x11; 16]),
+        };
+        let b = CredentialValidationError::Expired {
+            credential_id: CredentialId::test_id([0x22; 16]),
+        };
+        assert_ne!(a, b);
+    }
 }

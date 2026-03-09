@@ -1518,4 +1518,521 @@ mod tests {
         let events = manager.replay_from("empty", "").unwrap();
         assert!(events.is_empty());
     }
+
+    // ── SequentialEventProcessor additional coverage ──
+
+    #[test]
+    fn sequential_processor_config_accessor() {
+        let cfg = SequentialEventProcessorConfig {
+            max_queue_per_key: 5,
+            max_total_queued: 20,
+            overflow_policy: SequentialOverflowPolicy::DropOldest,
+            item_timeout: Some(Duration::from_secs(30)),
+        };
+        let processor = SequentialEventProcessor::<u8>::new(cfg);
+        let c = processor.config();
+        assert_eq!(c.max_queue_per_key, 5);
+        assert_eq!(c.max_total_queued, 20);
+        assert_eq!(c.overflow_policy, SequentialOverflowPolicy::DropOldest);
+        assert_eq!(c.item_timeout, Some(Duration::from_secs(30)));
+    }
+
+    #[test]
+    fn sequential_processor_queue_depth_tracking() {
+        let mut processor = SequentialEventProcessor::new(SequentialEventProcessorConfig {
+            max_queue_per_key: 4,
+            max_total_queued: 16,
+            overflow_policy: SequentialOverflowPolicy::RejectNewest,
+            item_timeout: None,
+        });
+        assert_eq!(processor.queue_depth(), 0);
+        assert_eq!(processor.queue_depth_for("a"), 0);
+
+        processor.enqueue("a", 1_u32).unwrap();
+        processor.enqueue("a", 2_u32).unwrap();
+        processor.enqueue("b", 10_u32).unwrap();
+
+        assert_eq!(processor.queue_depth(), 3);
+        assert_eq!(processor.queue_depth_for("a"), 2);
+        assert_eq!(processor.queue_depth_for("b"), 1);
+        assert_eq!(processor.queue_depth_for("unknown"), 0);
+    }
+
+    #[test]
+    fn sequential_processor_active_keys_count() {
+        let mut processor = SequentialEventProcessor::new(SequentialEventProcessorConfig {
+            max_queue_per_key: 4,
+            max_total_queued: 16,
+            overflow_policy: SequentialOverflowPolicy::RejectNewest,
+            item_timeout: None,
+        });
+        assert_eq!(processor.active_keys(), 0);
+
+        processor.enqueue("a", 1_u32).unwrap();
+        processor.enqueue("b", 2_u32).unwrap();
+        // Dequeue "a" - now active
+        let _ = processor.next_ready().unwrap();
+        assert_eq!(processor.active_keys(), 1);
+
+        // Dequeue "b" - now both active
+        let _ = processor.next_ready().unwrap();
+        assert_eq!(processor.active_keys(), 2);
+
+        // Finish "a"
+        processor.finish_key("a");
+        assert_eq!(processor.active_keys(), 1);
+
+        processor.finish_key("b");
+        assert_eq!(processor.active_keys(), 0);
+    }
+
+    #[test]
+    fn sequential_processor_is_idle_transitions() {
+        let mut processor = SequentialEventProcessor::new(SequentialEventProcessorConfig {
+            max_queue_per_key: 4,
+            max_total_queued: 16,
+            overflow_policy: SequentialOverflowPolicy::RejectNewest,
+            item_timeout: None,
+        });
+        assert!(processor.is_idle());
+
+        processor.enqueue("a", 1_u32).unwrap();
+        assert!(!processor.is_idle()); // queued work
+
+        let _ = processor.next_ready().unwrap();
+        assert!(!processor.is_idle()); // active work
+
+        processor.finish_key("a");
+        assert!(processor.is_idle()); // back to idle
+    }
+
+    #[test]
+    fn sequential_processor_default_config() {
+        let processor = SequentialEventProcessor::<u8>::default();
+        let c = processor.config();
+        assert_eq!(c.max_queue_per_key, 32);
+        assert_eq!(c.max_total_queued, 256);
+        assert_eq!(c.overflow_policy, SequentialOverflowPolicy::RejectNewest);
+        assert!(c.item_timeout.is_none());
+        assert!(processor.is_idle());
+    }
+
+    #[test]
+    fn sequential_processor_finish_unknown_key() {
+        let mut processor = SequentialEventProcessor::<u8>::default();
+        // Finishing a key that was never enqueued should return false
+        assert!(!processor.finish_key("nonexistent"));
+    }
+
+    #[test]
+    fn sequential_processor_finish_non_active_key() {
+        let mut processor = SequentialEventProcessor::new(SequentialEventProcessorConfig {
+            max_queue_per_key: 4,
+            max_total_queued: 16,
+            overflow_policy: SequentialOverflowPolicy::RejectNewest,
+            item_timeout: None,
+        });
+        processor.enqueue("a", 1_u32).unwrap();
+        // Key "a" is queued but not active (nothing dequeued yet)
+        // finish_key should return false because state.active is false
+        assert!(!processor.finish_key("a"));
+    }
+
+    #[test]
+    fn sequential_processor_zero_max_queue_rejects() {
+        let mut processor = SequentialEventProcessor::new(SequentialEventProcessorConfig {
+            max_queue_per_key: 0,
+            max_total_queued: 10,
+            overflow_policy: SequentialOverflowPolicy::RejectNewest,
+            item_timeout: None,
+        });
+        let err = processor.enqueue("a", 1_u32).unwrap_err();
+        match err {
+            SequentialEnqueueError::QueueFull { stream_key, item } => {
+                assert_eq!(stream_key, "a");
+                assert_eq!(item, 1);
+            }
+        }
+    }
+
+    #[test]
+    fn sequential_processor_zero_max_total_rejects() {
+        let mut processor = SequentialEventProcessor::new(SequentialEventProcessorConfig {
+            max_queue_per_key: 10,
+            max_total_queued: 0,
+            overflow_policy: SequentialOverflowPolicy::DropOldest,
+            item_timeout: None,
+        });
+        let err = processor.enqueue("a", 1_u32).unwrap_err();
+        match err {
+            SequentialEnqueueError::QueueFull { stream_key, item } => {
+                assert_eq!(stream_key, "a");
+                assert_eq!(item, 1);
+            }
+        }
+    }
+
+    #[test]
+    fn sequential_processor_total_cap_reject_newest() {
+        let mut processor = SequentialEventProcessor::new(SequentialEventProcessorConfig {
+            max_queue_per_key: 4,
+            max_total_queued: 2,
+            overflow_policy: SequentialOverflowPolicy::RejectNewest,
+            item_timeout: None,
+        });
+        processor.enqueue("a", 1_u32).unwrap();
+        processor.enqueue("b", 2_u32).unwrap();
+        // Total is at cap, should reject
+        let err = processor.enqueue("c", 3_u32).unwrap_err();
+        match err {
+            SequentialEnqueueError::QueueFull { stream_key, .. } => {
+                assert_eq!(stream_key, "c");
+            }
+        }
+    }
+
+    #[test]
+    fn sequential_enqueue_error_display() {
+        let err = SequentialEnqueueError::QueueFull {
+            stream_key: "my-key".to_string(),
+            item: 42_u32,
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("my-key"));
+        assert!(msg.contains("full"));
+    }
+
+    #[test]
+    fn sequential_event_processor_config_default() {
+        let cfg = SequentialEventProcessorConfig::default();
+        assert_eq!(cfg.max_queue_per_key, 32);
+        assert_eq!(cfg.max_total_queued, 256);
+        assert_eq!(cfg.overflow_policy, SequentialOverflowPolicy::RejectNewest);
+        assert!(cfg.item_timeout.is_none());
+    }
+
+    #[test]
+    fn sequential_processor_next_ready_empty() {
+        let mut processor = SequentialEventProcessor::<u8>::default();
+        assert!(processor.next_ready().is_none());
+    }
+
+    #[test]
+    fn sequential_processor_drop_oldest_global_when_per_key_also_overflows() {
+        // Per-key limit is 1, total limit is 2, DropOldest policy.
+        // Enqueue one item on "a", one on "b" (total=2).
+        // Then enqueue another on "a" -> per-key overflow drops oldest from "a",
+        // but total is still at 2 (because we added one). Check that
+        // the global overflow path is also triggered if needed.
+        let mut processor = SequentialEventProcessor::new(SequentialEventProcessorConfig {
+            max_queue_per_key: 1,
+            max_total_queued: 2,
+            overflow_policy: SequentialOverflowPolicy::DropOldest,
+            item_timeout: None,
+        });
+        processor.enqueue("a", "a1").unwrap();
+        processor.enqueue("b", "b1").unwrap();
+        // Now total=2, per-key("a")=1. Enqueuing another "a" drops "a1" (per-key),
+        // total becomes 1 (after drop) + 1 (new) = 2, which is at the cap
+        // but the per-key drop already freed space, so no global drop needed.
+        let outcome = processor.enqueue("a", "a2").unwrap();
+        assert_eq!(
+            outcome.dropped,
+            Some(SequentialEvent {
+                stream_key: "a".to_string(),
+                item: "a1",
+            })
+        );
+        assert_eq!(processor.queue_depth(), 2);
+    }
+
+    #[test]
+    fn sequential_processor_timeout_removes_all_expired_items() {
+        let mut processor = SequentialEventProcessor::new(SequentialEventProcessorConfig {
+            max_queue_per_key: 8,
+            max_total_queued: 16,
+            overflow_policy: SequentialOverflowPolicy::RejectNewest,
+            item_timeout: Some(Duration::from_millis(1)),
+        });
+
+        processor.enqueue("a", 1_u32).unwrap();
+        processor.enqueue("a", 2_u32).unwrap();
+        processor.enqueue("b", 3_u32).unwrap();
+
+        thread::sleep(Duration::from_millis(5));
+
+        // All items should have expired; next_ready triggers prune
+        assert!(processor.next_ready().is_none());
+        assert!(processor.is_idle());
+        assert_eq!(processor.queue_depth(), 0);
+    }
+
+    #[test]
+    fn sequential_processor_timeout_preserves_fresh_items() {
+        let mut processor = SequentialEventProcessor::new(SequentialEventProcessorConfig {
+            max_queue_per_key: 8,
+            max_total_queued: 16,
+            overflow_policy: SequentialOverflowPolicy::RejectNewest,
+            item_timeout: Some(Duration::from_millis(1)),
+        });
+
+        processor.enqueue("a", 1_u32).unwrap();
+        thread::sleep(Duration::from_millis(5));
+        // Item 1 expired, enqueue item 2 which is fresh
+        processor.enqueue("a", 2_u32).unwrap();
+
+        let next = processor.next_ready().unwrap();
+        assert_eq!(next.item, 2);
+    }
+
+    // ── EventStreamManager additional coverage ──
+
+    #[test]
+    fn emit_with_seq_ahead_of_next_advances_next_seq() {
+        let mut manager = EventStreamManager::new(caps(false, false, 10));
+        // Emit with seq=100, next_seq advances to 101
+        let e1 = manager.emit_with_seq("t", 100, sample_event_data());
+        assert_eq!(e1.seq, 100);
+        // Next auto-assigned should be 101
+        let e2 = manager.emit("t", sample_event_data());
+        assert_eq!(e2.seq, 101);
+    }
+
+    #[test]
+    fn subscribe_buffer_info_when_replay_enabled() {
+        let mut manager =
+            EventStreamManager::with_limits(caps(true, false, 5), BufferLimits::new(5, 50));
+        let req = SubscribeRequest {
+            r#type: "subscribe".to_string(),
+            id: RequestId::new("req-buf"),
+            topics: vec!["t".to_string()],
+            since: None,
+            max_events_per_sec: None,
+            batch_ms: None,
+            window_size: None,
+            capability_token: None,
+        };
+        let outcome = manager.handle_subscribe(&req).unwrap();
+        let buf = outcome.response.result.buffer.unwrap();
+        assert_eq!(buf.min_events, 5);
+        assert_eq!(buf.overflow, "drop_oldest");
+    }
+
+    #[test]
+    fn subscribe_no_buffer_info_when_replay_disabled() {
+        let mut manager = EventStreamManager::new(caps(false, false, 5));
+        let req = SubscribeRequest {
+            r#type: "subscribe".to_string(),
+            id: RequestId::new("req-nobuf"),
+            topics: vec!["t".to_string()],
+            since: None,
+            max_events_per_sec: None,
+            batch_ms: None,
+            window_size: None,
+            capability_token: None,
+        };
+        let outcome = manager.handle_subscribe(&req).unwrap();
+        assert!(outcome.response.result.buffer.is_none());
+    }
+
+    #[test]
+    fn subscribe_multiple_topics_with_replay_since() {
+        let mut manager = EventStreamManager::new(caps(true, false, 10));
+        manager.emit("t1", sample_event_data()); // seq 0
+        manager.emit("t1", sample_event_data()); // seq 1
+        manager.emit("t2", sample_event_data()); // seq 0
+        manager.emit("t2", sample_event_data()); // seq 1
+        manager.emit("t2", sample_event_data()); // seq 2
+
+        let req = SubscribeRequest {
+            r#type: "subscribe".to_string(),
+            id: RequestId::new("req-multi"),
+            topics: vec!["t1".to_string(), "t2".to_string()],
+            since: Some("0".to_string()),
+            max_events_per_sec: None,
+            batch_ms: None,
+            window_size: None,
+            capability_token: None,
+        };
+
+        let outcome = manager.handle_subscribe(&req).unwrap();
+        // t1 has seq 1 after cursor "0", t2 has seq 1,2 after cursor "0"
+        let t1_replay = outcome.replay_events.get("t1").unwrap();
+        assert_eq!(t1_replay.len(), 1);
+        assert_eq!(t1_replay[0].seq, 1);
+
+        let t2_replay = outcome.replay_events.get("t2").unwrap();
+        assert_eq!(t2_replay.len(), 2);
+        assert_eq!(t2_replay[0].seq, 1);
+        assert_eq!(t2_replay[1].seq, 2);
+    }
+
+    #[test]
+    fn replay_from_nonempty_cursor_on_empty_buffer() {
+        let mut manager = EventStreamManager::new(caps(true, false, 10));
+        // Create topic via subscribe, buffer is empty
+        let req = SubscribeRequest {
+            r#type: "subscribe".to_string(),
+            id: RequestId::new("r"),
+            topics: vec!["t".to_string()],
+            since: None,
+            max_events_per_sec: None,
+            batch_ms: None,
+            window_size: None,
+            capability_token: None,
+        };
+        manager.handle_subscribe(&req).unwrap();
+        // Replay with a non-empty cursor on an empty buffer returns empty (no error)
+        let events = manager.replay_from("t", "5").unwrap();
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn nack_mixed_found_and_missing() {
+        let mut manager = EventStreamManager::new(caps(true, true, 10));
+        let e1 = manager.emit("t", sample_event_data());
+        manager.emit("t", sample_event_data());
+
+        // Nack with one valid seq and one invalid seq
+        let nack = EventNack::new("t", vec![e1.seq, 999], "retry");
+        let result = manager.handle_nack(&nack);
+        assert_eq!(result.redeliver.len(), 1);
+        assert_eq!(result.redeliver[0].seq, e1.seq);
+        assert_eq!(result.missing, vec![999]);
+    }
+
+    #[test]
+    fn record_envelope_requiring_ack_without_caps_flag() {
+        // Caps don't require ack, but envelope itself has requires_ack = true
+        let mut manager = EventStreamManager::new(caps(true, false, 10));
+        let envelope = EventEnvelope::new("t", sample_event_data()).requiring_ack();
+        let recorded = manager.record(envelope);
+        assert!(recorded.requires_ack);
+        assert_eq!(manager.pending_acks("t"), 1);
+    }
+
+    #[test]
+    fn subscribe_with_replay_since_no_matching_events() {
+        let mut manager = EventStreamManager::new(caps(true, false, 10));
+        manager.emit("t", sample_event_data()); // seq 0
+        manager.emit("t", sample_event_data()); // seq 1
+
+        let req = SubscribeRequest {
+            r#type: "subscribe".to_string(),
+            id: RequestId::new("req-noevt"),
+            topics: vec!["t".to_string()],
+            since: Some("1".to_string()), // cursor at latest, nothing after
+            max_events_per_sec: None,
+            batch_ms: None,
+            window_size: None,
+            capability_token: None,
+        };
+        let outcome = manager.handle_subscribe(&req).unwrap();
+        // No replay events since cursor is at the latest
+        assert!(outcome.replay_events.is_empty());
+    }
+
+    #[test]
+    fn ack_result_clone() {
+        let result = AckResult {
+            acked: vec![1, 2, 3],
+            missing: vec![4],
+        };
+        let cloned = result.clone();
+        assert_eq!(result.acked, cloned.acked);
+        assert_eq!(result.missing, cloned.missing);
+    }
+
+    #[test]
+    fn nack_result_clone() {
+        let result = NackResult {
+            redeliver: vec![],
+            missing: vec![10, 20],
+        };
+        let cloned = result.clone();
+        assert_eq!(result.missing, cloned.missing);
+        assert!(cloned.redeliver.is_empty());
+    }
+
+    #[test]
+    fn subscribe_outcome_clone() {
+        let outcome = SubscribeOutcome {
+            response: SubscribeResponse {
+                r#type: "response".to_string(),
+                id: RequestId::new("r"),
+                result: SubscribeResult {
+                    confirmed_topics: vec!["t".to_string()],
+                    cursors: HashMap::new(),
+                    replay_supported: true,
+                    buffer: None,
+                },
+            },
+            replay_events: HashMap::new(),
+        };
+        let cloned = outcome.clone();
+        assert_eq!(
+            outcome.response.result.confirmed_topics,
+            cloned.response.result.confirmed_topics
+        );
+    }
+
+    #[test]
+    fn sequential_event_debug_and_eq() {
+        let event = SequentialEvent {
+            stream_key: "k".to_string(),
+            item: 42_u32,
+        };
+        let debug = format!("{event:?}");
+        assert!(debug.contains("SequentialEvent"));
+        assert!(debug.contains("42"));
+
+        let same = SequentialEvent {
+            stream_key: "k".to_string(),
+            item: 42_u32,
+        };
+        assert_eq!(event, same);
+
+        let different = SequentialEvent {
+            stream_key: "k".to_string(),
+            item: 99_u32,
+        };
+        assert_ne!(event, different);
+    }
+
+    #[test]
+    fn sequential_enqueue_outcome_debug() {
+        let outcome = SequentialEnqueueOutcome::<u32> { dropped: None };
+        let debug = format!("{outcome:?}");
+        assert!(debug.contains("SequentialEnqueueOutcome"));
+    }
+
+    #[test]
+    fn buffer_limits_debug() {
+        let limits = BufferLimits::new(2, 8);
+        let debug = format!("{limits:?}");
+        assert!(debug.contains("BufferLimits"));
+        assert!(debug.contains('2'));
+        assert!(debug.contains('8'));
+    }
+
+    #[test]
+    fn sequential_overflow_policy_eq_and_debug() {
+        let reject = SequentialOverflowPolicy::RejectNewest;
+        let drop_oldest = SequentialOverflowPolicy::DropOldest;
+        assert_ne!(reject, drop_oldest);
+        assert_eq!(reject, SequentialOverflowPolicy::RejectNewest);
+        let debug = format!("{reject:?}");
+        assert!(debug.contains("RejectNewest"));
+    }
+
+    #[test]
+    fn replay_error_debug() {
+        let err = ReplayError::InvalidCursor {
+            topic: "my_topic".into(),
+            cursor: "xyz".into(),
+        };
+        let debug = format!("{err:?}");
+        assert!(debug.contains("InvalidCursor"));
+        assert!(debug.contains("my_topic"));
+    }
 }

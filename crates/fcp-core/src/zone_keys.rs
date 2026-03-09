@@ -1976,4 +1976,491 @@ mod tests {
     fn zone_key_len_is_32() {
         assert_eq!(ZONE_KEY_LEN, 32);
     }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // New coverage tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// Verify `ZoneKeyId` Display for all-zero bytes.
+    #[test]
+    fn zone_key_id_display_all_zeros() {
+        let id = ZoneKeyId::from_bytes([0x00; 8]);
+        assert_eq!(format!("{id}"), "0000000000000000");
+    }
+
+    /// Verify `ObjectIdKeyId` Display for all-zero bytes.
+    #[test]
+    fn object_id_key_id_display_all_zeros() {
+        let id = ObjectIdKeyId::from_bytes([0x00; 8]);
+        assert_eq!(format!("{id}"), "0000000000000000");
+    }
+
+    /// Verify the exact structure of the `ZoneKey` Debug output.
+    #[test]
+    fn zone_key_debug_exact_format() {
+        let key = ZoneKey::from_bytes([0xFF; ZONE_KEY_LEN]);
+        let dbg = format!("{key:?}");
+        assert_eq!(dbg, "ZoneKey(\"[redacted; 32 bytes]\")");
+    }
+
+    /// Verify `ZoneKeyId` Debug includes the hex encoding.
+    #[test]
+    fn zone_key_id_debug_includes_hex() {
+        let id = ZoneKeyId::from_bytes([0xAB, 0xCD, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01]);
+        let dbg = format!("{id:?}");
+        assert!(dbg.starts_with("ZoneKeyId("));
+        assert!(dbg.contains("abcd000000000001"));
+    }
+
+    /// Verify `ObjectIdKeyId` Debug includes the hex encoding.
+    #[test]
+    fn object_id_key_id_debug_includes_hex() {
+        let id = ObjectIdKeyId::from_bytes([0x10, 0x20, 0x30, 0x40, 0x50, 0x60, 0x70, 0x80]);
+        let dbg = format!("{id:?}");
+        assert!(dbg.starts_with("ObjectIdKeyId("));
+        assert!(dbg.contains("1020304050607080"));
+    }
+
+    /// Verify `ZoneKeyAlgorithm` `XChaCha20Poly1305` serde `snake_case`.
+    #[test]
+    fn zone_key_algorithm_xchacha20_serde_snake_case() {
+        let json = serde_json::to_string(&ZoneKeyAlgorithm::XChaCha20Poly1305).unwrap();
+        assert!(json.contains("x_cha_cha20"));
+    }
+
+    /// Verify `ZoneKeyAlgorithm` debug output.
+    #[test]
+    fn zone_key_algorithm_debug_output() {
+        let dbg_c = format!("{:?}", ZoneKeyAlgorithm::ChaCha20Poly1305);
+        assert_eq!(dbg_c, "ChaCha20Poly1305");
+        let dbg_x = format!("{:?}", ZoneKeyAlgorithm::XChaCha20Poly1305);
+        assert_eq!(dbg_x, "XChaCha20Poly1305");
+    }
+
+    /// Verify `ZoneKeyAlgorithm` clone.
+    #[test]
+    fn zone_key_algorithm_clone() {
+        let a = ZoneKeyAlgorithm::ChaCha20Poly1305;
+        #[allow(clippy::clone_on_copy)]
+        let b = a.clone();
+        assert_eq!(a, b);
+    }
+
+    /// Verify that `wrap_zone_key` produces different ciphertext on each call (HPKE non-determinism).
+    #[test]
+    fn wrap_zone_key_nondeterministic() {
+        let zone_id = ZoneId::work();
+        let node_id = TailscaleNodeId::new("node-nd");
+        let issued_at = 1_700_000_000;
+        let sk = X25519SecretKey::generate();
+        let pk = sk.public_key();
+        let zone_key = ZoneKey::from_bytes([0x42; ZONE_KEY_LEN]);
+
+        let w1 = wrap_zone_key(&pk, &zone_id, &node_id, issued_at, &zone_key).unwrap();
+        let w2 = wrap_zone_key(&pk, &zone_id, &node_id, issued_at, &zone_key).unwrap();
+
+        // Both must decrypt to the same key, but sealed boxes should differ
+        let k1 = unwrap_zone_key(&sk, &zone_id, &w1).unwrap();
+        let k2 = unwrap_zone_key(&sk, &zone_id, &w2).unwrap();
+        assert_eq!(k1, zone_key);
+        assert_eq!(k2, zone_key);
+        // The encrypted payloads should differ (HPKE uses fresh randomness)
+        assert_ne!(w1.sealed.ciphertext, w2.sealed.ciphertext);
+    }
+
+    /// Verify `unwrap_zone_key` fails when using a different secret key.
+    #[test]
+    fn unwrap_zone_key_wrong_secret_key() {
+        let zone_id = ZoneId::work();
+        let node_id = TailscaleNodeId::new("node-wsk");
+        let issued_at = 1_700_000_000;
+
+        let sk_correct = X25519SecretKey::generate();
+        let pk = sk_correct.public_key();
+        let sk_wrong = X25519SecretKey::generate();
+
+        let zone_key = random_zone_key();
+        let wrapped = wrap_zone_key(&pk, &zone_id, &node_id, issued_at, &zone_key).unwrap();
+
+        let result = unwrap_zone_key(&sk_wrong, &zone_id, &wrapped);
+        assert!(result.is_err(), "unwrap with wrong SK should fail");
+    }
+
+    /// Verify `unwrap_object_id_key` fails when using a different secret key.
+    #[test]
+    fn unwrap_object_id_key_wrong_secret_key() {
+        let zone_id = ZoneId::private();
+        let node_id = TailscaleNodeId::new("node-wsk2");
+        let issued_at = 1_700_000_000;
+
+        let real_sk = X25519SecretKey::generate();
+        let pk = real_sk.public_key();
+        let bad_sk = X25519SecretKey::generate();
+
+        let key = random_object_id_key();
+        let wrapped = wrap_object_id_key(&pk, &zone_id, &node_id, issued_at, &key).unwrap();
+
+        let result = unwrap_object_id_key(&bad_sk, &zone_id, &wrapped);
+        assert!(result.is_err(), "unwrap with wrong SK should fail");
+    }
+
+    /// Verify `unwrap_zone_key` fails when `zone_id` differs from the one used for wrapping.
+    #[test]
+    fn unwrap_zone_key_wrong_zone_id() {
+        let wrap_zone = ZoneId::work();
+        let open_zone = ZoneId::private();
+        let node_id = TailscaleNodeId::new("node-wzi");
+        let issued_at = 1_700_000_000;
+
+        let sk = X25519SecretKey::generate();
+        let pk = sk.public_key();
+        let zone_key = random_zone_key();
+
+        let wrapped = wrap_zone_key(&pk, &wrap_zone, &node_id, issued_at, &zone_key).unwrap();
+        let result = unwrap_zone_key(&sk, &open_zone, &wrapped);
+        assert!(result.is_err(), "unwrap with wrong zone_id should fail");
+    }
+
+    /// Verify `unwrap_object_id_key` fails when `zone_id` differs.
+    #[test]
+    fn unwrap_object_id_key_wrong_zone_id() {
+        let wrap_zone = ZoneId::community();
+        let open_zone = ZoneId::public();
+        let node_id = TailscaleNodeId::new("node-wzi2");
+        let issued_at = 1_700_000_000;
+
+        let sk = X25519SecretKey::generate();
+        let pk = sk.public_key();
+        let key = random_object_id_key();
+
+        let wrapped = wrap_object_id_key(&pk, &wrap_zone, &node_id, issued_at, &key).unwrap();
+        let result = unwrap_object_id_key(&sk, &open_zone, &wrapped);
+        assert!(result.is_err(), "unwrap with wrong zone_id should fail");
+    }
+
+    /// Verify `ZoneKeyRing::insert_zone_key` overwrites an existing key with the same id.
+    #[test]
+    fn zone_key_ring_insert_overwrites_existing() {
+        let mut ring = ZoneKeyRing::new(ZoneId::work());
+        let key_id = ZoneKeyId::from_bytes([0x01; 8]);
+        let key_a = ZoneKey::from_bytes([0xAA; ZONE_KEY_LEN]);
+        let key_b = ZoneKey::from_bytes([0xBB; ZONE_KEY_LEN]);
+
+        ring.insert_zone_key(key_id, key_a);
+        assert_eq!(ring.zone_key(&key_id), Some(&key_a));
+
+        ring.insert_zone_key(key_id, key_b);
+        assert_eq!(ring.zone_key(&key_id), Some(&key_b));
+    }
+
+    /// Verify `ZoneKeyRing::insert_object_id_key` overwrites an existing key.
+    #[test]
+    fn zone_key_ring_insert_object_id_key_overwrites() {
+        let mut ring = ZoneKeyRing::new(ZoneId::work());
+        let key_id = ObjectIdKeyId::from_bytes([0x02; 8]);
+        let key_a = ObjectIdKey::from_bytes([0xCC; ZONE_KEY_LEN]);
+        let key_b = ObjectIdKey::from_bytes([0xDD; ZONE_KEY_LEN]);
+
+        ring.insert_object_id_key(key_id, key_a);
+        assert_eq!(ring.object_id_key(&key_id), Some(&key_a));
+
+        ring.insert_object_id_key(key_id, key_b);
+        assert_eq!(ring.object_id_key(&key_id), Some(&key_b));
+    }
+
+    /// Verify `ZoneKeyRing` debug output includes the type name.
+    #[test]
+    fn zone_key_ring_debug_output() {
+        let ring = ZoneKeyRing::new(ZoneId::work());
+        let dbg = format!("{ring:?}");
+        assert!(dbg.contains("ZoneKeyRing"));
+    }
+
+    /// Verify `RekeyPolicy` debug output.
+    #[test]
+    fn rekey_policy_debug_output() {
+        let rp = RekeyPolicy {
+            epoch_ratchet: true,
+            overlap_window_secs: Some(600),
+            retain_epochs: Some(5),
+            rewrap_on_membership_change: false,
+            rotate_object_id_key_on_membership_change: false,
+        };
+        let dbg = format!("{rp:?}");
+        assert!(dbg.contains("RekeyPolicy"));
+        assert!(dbg.contains("epoch_ratchet: true"));
+        assert!(dbg.contains("600"));
+    }
+
+    /// Verify `RekeyPolicy` deserialization from minimal JSON (only required fields).
+    #[test]
+    fn rekey_policy_deserialize_minimal_json() {
+        let json = r"{}";
+        let rp: RekeyPolicy = serde_json::from_str(json).unwrap();
+        assert!(!rp.epoch_ratchet);
+        assert!(rp.overlap_window_secs.is_none());
+        assert!(rp.retain_epochs.is_none());
+        assert!(!rp.rewrap_on_membership_change);
+        assert!(!rp.rotate_object_id_key_on_membership_change);
+    }
+
+    /// Verify `ZoneKeyManifest::new_empty` produces unique random key IDs across invocations.
+    #[test]
+    fn zone_key_manifest_new_empty_unique_ids() {
+        let zone_id = ZoneId::work();
+        let signing_key = fcp_crypto::Ed25519SigningKey::generate();
+        let m1 = ZoneKeyManifest::new_empty(zone_id.clone(), 1_700_000_000, &signing_key).unwrap();
+        let m2 = ZoneKeyManifest::new_empty(zone_id, 1_700_000_000, &signing_key).unwrap();
+        // Random IDs should (almost certainly) differ
+        assert_ne!(m1.zone_key_id, m2.zone_key_id);
+        assert_ne!(m1.object_id_key_id, m2.object_id_key_id);
+    }
+
+    /// Verify `ZoneKeyManifest::new_empty` header fields.
+    #[test]
+    fn zone_key_manifest_new_empty_header_fields() {
+        let zone_id = ZoneId::private();
+        let signing_key = fcp_crypto::Ed25519SigningKey::generate();
+        let m = ZoneKeyManifest::new_empty(zone_id.clone(), 1_700_000_000, &signing_key).unwrap();
+        assert_eq!(m.header.zone_id, zone_id);
+        assert_eq!(m.header.created_at, 1_700_000_000);
+        assert!(m.header.refs.is_empty());
+        assert!(m.header.foreign_refs.is_empty());
+        assert!(m.header.ttl_secs.is_none());
+        assert!(m.header.placement.is_none());
+    }
+
+    /// Verify `wrapped_key_for` selects the correct entry among multiple recipients.
+    #[test]
+    #[allow(clippy::similar_names)]
+    fn wrapped_key_for_selects_correct_among_multiple() {
+        let zone_id = ZoneId::work();
+        let node_1 = TailscaleNodeId::new("node-sel-1");
+        let node_2 = TailscaleNodeId::new("node-sel-2");
+        let node_3 = TailscaleNodeId::new("node-sel-3");
+        let issued_at = 1_700_000_000;
+
+        let sk1 = X25519SecretKey::generate();
+        let sk2 = X25519SecretKey::generate();
+        let sk3 = X25519SecretKey::generate();
+        let pk1 = sk1.public_key();
+        let pk2 = sk2.public_key();
+        let pk3 = sk3.public_key();
+
+        let zone_key = random_zone_key();
+        let obj_key = random_object_id_key();
+
+        let w1 = wrap_zone_key(&pk1, &zone_id, &node_1, issued_at, &zone_key).unwrap();
+        let w2 = wrap_zone_key(&pk2, &zone_id, &node_2, issued_at, &zone_key).unwrap();
+        let w3 = wrap_zone_key(&pk3, &zone_id, &node_3, issued_at, &zone_key).unwrap();
+        let o1 = wrap_object_id_key(&pk1, &zone_id, &node_1, issued_at, &obj_key).unwrap();
+        let o2 = wrap_object_id_key(&pk2, &zone_id, &node_2, issued_at, &obj_key).unwrap();
+        let o3 = wrap_object_id_key(&pk3, &zone_id, &node_3, issued_at, &obj_key).unwrap();
+
+        let manifest = ZoneKeyManifest {
+            header: test_header(&zone_id),
+            zone_id: zone_id.clone(),
+            zone_key_id: ZoneKeyId::from_bytes([0x01; 8]),
+            object_id_key_id: ObjectIdKeyId::from_bytes([0x11; 8]),
+            algorithm: ZoneKeyAlgorithm::ChaCha20Poly1305,
+            valid_from: issued_at,
+            valid_until: None,
+            prev_zone_key_id: None,
+            wrapped_keys: vec![w1, w2, w3],
+            wrapped_object_id_keys: vec![o1, o2, o3],
+            rekey_policy: None,
+            signature: test_signature(),
+        };
+
+        // Each node selects its own wrapped key
+        let got_1 = manifest.wrapped_key_for(&node_1).unwrap();
+        assert_eq!(got_1.recipient, node_1);
+        let got_2 = manifest.wrapped_key_for(&node_2).unwrap();
+        assert_eq!(got_2.recipient, node_2);
+        let got_3 = manifest.wrapped_key_for(&node_3).unwrap();
+        assert_eq!(got_3.recipient, node_3);
+
+        // Same for object id keys
+        let obj_got = manifest.wrapped_object_id_key_for(&node_2).unwrap();
+        assert_eq!(obj_got.recipient, node_2);
+    }
+
+    /// Verify `WrappedZoneKey` clone preserves all fields.
+    #[test]
+    fn wrapped_zone_key_clone() {
+        let zone_id = ZoneId::work();
+        let node_id = TailscaleNodeId::new("node-wclone");
+        let issued_at = 1_700_000_000;
+
+        let sk = X25519SecretKey::generate();
+        let pk = sk.public_key();
+        let zone_key = random_zone_key();
+
+        let wrapped = wrap_zone_key(&pk, &zone_id, &node_id, issued_at, &zone_key).unwrap();
+        let cloned = wrapped.clone();
+        assert_eq!(cloned.recipient, wrapped.recipient);
+        assert_eq!(cloned.issued_at, wrapped.issued_at);
+        assert_eq!(cloned.sealed.ciphertext, wrapped.sealed.ciphertext);
+    }
+
+    /// Verify `WrappedObjectIdKey` clone preserves all fields.
+    #[test]
+    fn wrapped_object_id_key_clone() {
+        let zone_id = ZoneId::private();
+        let node_id = TailscaleNodeId::new("node-oclone");
+        let issued_at = 1_700_000_000;
+
+        let sk = X25519SecretKey::generate();
+        let pk = sk.public_key();
+        let key = random_object_id_key();
+
+        let wrapped = wrap_object_id_key(&pk, &zone_id, &node_id, issued_at, &key).unwrap();
+        let cloned = wrapped.clone();
+        assert_eq!(cloned.recipient, wrapped.recipient);
+        assert_eq!(cloned.issued_at, wrapped.issued_at);
+        assert_eq!(cloned.sealed.ciphertext, wrapped.sealed.ciphertext);
+    }
+
+    /// Verify `WrappedZoneKey` debug output includes relevant information.
+    #[test]
+    fn wrapped_zone_key_debug() {
+        let zone_id = ZoneId::work();
+        let node_id = TailscaleNodeId::new("node-dbg");
+        let issued_at = 1_700_000_000;
+
+        let sk = X25519SecretKey::generate();
+        let pk = sk.public_key();
+        let zone_key = random_zone_key();
+
+        let wrapped = wrap_zone_key(&pk, &zone_id, &node_id, issued_at, &zone_key).unwrap();
+        let dbg = format!("{wrapped:?}");
+        assert!(dbg.contains("WrappedZoneKey"));
+        assert!(dbg.contains("node-dbg"));
+    }
+
+    /// Verify `ZoneKeyId` and `ObjectIdKeyId` work correctly as `HashMap` keys with distinct values.
+    #[test]
+    fn key_ids_as_hashmap_keys() {
+        let mut map = HashMap::new();
+        let id_a = ZoneKeyId::from_bytes([0x01; 8]);
+        let id_b = ZoneKeyId::from_bytes([0x02; 8]);
+        let id_c = ZoneKeyId::from_bytes([0x01; 8]); // same as id_a
+
+        map.insert(id_a, "first");
+        map.insert(id_b, "second");
+        map.insert(id_c, "overwritten"); // should overwrite id_a's entry
+
+        assert_eq!(map.len(), 2);
+        assert_eq!(map.get(&id_a), Some(&"overwritten"));
+        assert_eq!(map.get(&id_b), Some(&"second"));
+    }
+
+    /// Verify `ZoneKeyError::Crypto` variant Display.
+    #[test]
+    fn zone_key_error_crypto_display() {
+        let crypto_err = CryptoError::HpkeFailed("test hpke error".to_string());
+        let err = ZoneKeyError::from(crypto_err);
+        let msg = err.to_string();
+        assert!(msg.contains("crypto failure"));
+    }
+
+    /// Verify `ZoneKeyManifest` serde roundtrip (JSON).
+    #[test]
+    fn zone_key_manifest_serde_roundtrip() {
+        let zone_id = ZoneId::work();
+        let node_id = TailscaleNodeId::new("node-serde");
+        let issued_at = 1_700_000_000;
+
+        let sk = X25519SecretKey::generate();
+        let pk = sk.public_key();
+        let zone_key = random_zone_key();
+        let obj_key = random_object_id_key();
+
+        let wrapped_zone = wrap_zone_key(&pk, &zone_id, &node_id, issued_at, &zone_key).unwrap();
+        let wrapped_obj =
+            wrap_object_id_key(&pk, &zone_id, &node_id, issued_at, &obj_key).unwrap();
+
+        let manifest = ZoneKeyManifest {
+            header: test_header(&zone_id),
+            zone_id: zone_id.clone(),
+            zone_key_id: ZoneKeyId::from_bytes([0xAA; 8]),
+            object_id_key_id: ObjectIdKeyId::from_bytes([0xBB; 8]),
+            algorithm: ZoneKeyAlgorithm::XChaCha20Poly1305,
+            valid_from: issued_at,
+            valid_until: Some(1_700_100_000),
+            prev_zone_key_id: Some(ZoneKeyId::from_bytes([0x99; 8])),
+            wrapped_keys: vec![wrapped_zone],
+            wrapped_object_id_keys: vec![wrapped_obj],
+            rekey_policy: Some(RekeyPolicy {
+                epoch_ratchet: true,
+                overlap_window_secs: Some(600),
+                retain_epochs: Some(3),
+                rewrap_on_membership_change: true,
+                rotate_object_id_key_on_membership_change: false,
+            }),
+            signature: test_signature(),
+        };
+
+        let json = serde_json::to_string(&manifest).unwrap();
+        let back: ZoneKeyManifest = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(back.zone_id, manifest.zone_id);
+        assert_eq!(back.zone_key_id, manifest.zone_key_id);
+        assert_eq!(back.object_id_key_id, manifest.object_id_key_id);
+        assert_eq!(back.algorithm, manifest.algorithm);
+        assert_eq!(back.valid_from, manifest.valid_from);
+        assert_eq!(back.valid_until, manifest.valid_until);
+        assert_eq!(back.prev_zone_key_id, manifest.prev_zone_key_id);
+        assert_eq!(back.wrapped_keys.len(), 1);
+        assert_eq!(back.wrapped_object_id_keys.len(), 1);
+        assert!(back.rekey_policy.is_some());
+
+        // The unwrapped key should still work after serde roundtrip
+        let unwrapped = unwrap_zone_key(&sk, &zone_id, &back.wrapped_keys[0]).unwrap();
+        assert_eq!(unwrapped, zone_key);
+    }
+
+    /// Verify that `unwrap_zone_key` with tampered `issued_at` fails (AAD mismatch).
+    #[test]
+    fn unwrap_zone_key_tampered_issued_at() {
+        let zone_id = ZoneId::work();
+        let node_id = TailscaleNodeId::new("node-tamper");
+        let issued_at = 1_700_000_000;
+
+        let sk = X25519SecretKey::generate();
+        let pk = sk.public_key();
+        let zone_key = random_zone_key();
+
+        let mut wrapped = wrap_zone_key(&pk, &zone_id, &node_id, issued_at, &zone_key).unwrap();
+        wrapped.issued_at = 1_700_000_001;
+
+        let result = unwrap_zone_key(&sk, &zone_id, &wrapped);
+        assert!(result.is_err(), "tampered issued_at should cause AAD mismatch");
+    }
+
+    /// Verify that different zone types produce distinct zone IDs that affect wrapping.
+    #[test]
+    fn different_zone_types_produce_distinct_aad() {
+        let node_id = TailscaleNodeId::new("node-zones");
+        let issued_at = 1_700_000_000;
+
+        let sk = X25519SecretKey::generate();
+        let pk = sk.public_key();
+        let zone_key = random_zone_key();
+
+        let wrapped_work =
+            wrap_zone_key(&pk, &ZoneId::work(), &node_id, issued_at, &zone_key).unwrap();
+        let wrapped_private =
+            wrap_zone_key(&pk, &ZoneId::private(), &node_id, issued_at, &zone_key).unwrap();
+
+        // Both should unwrap correctly under their own zone_id
+        let k_work = unwrap_zone_key(&sk, &ZoneId::work(), &wrapped_work).unwrap();
+        let k_priv = unwrap_zone_key(&sk, &ZoneId::private(), &wrapped_private).unwrap();
+        assert_eq!(k_work, zone_key);
+        assert_eq!(k_priv, zone_key);
+
+        // Cross-zone unwrap should fail
+        let result = unwrap_zone_key(&sk, &ZoneId::private(), &wrapped_work);
+        assert!(result.is_err());
+    }
 }

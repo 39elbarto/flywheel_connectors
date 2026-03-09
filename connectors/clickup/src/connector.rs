@@ -492,32 +492,29 @@ pub fn provisioning_recipe() -> ProvisioningRecipe {
         "1",
         "Provision ClickUp connector with a personal API token",
     )
-    .add_step(
+    .with_step(
         ProvisioningStep::new(
             StepId::new("open_settings"),
-            "Open ClickUp app settings to generate an API token",
             ProvisioningStepType::OpenUrl {
                 url: "https://app.clickup.com/settings/apps".into(),
             },
         ),
     )
-    .add_step(
+    .with_step(
         ProvisioningStep::new(
             StepId::new("enter_token"),
-            "Paste your ClickUp personal API token",
             ProvisioningStepType::PromptSecret {
-                key: "api_token".into(),
-                instructions: "Generate a personal API token from ClickUp Settings > Apps and paste it here.".into(),
+                message: "Generate a personal API token from ClickUp Settings > Apps and paste it here.".into(),
             },
         )
         .depends_on(StepId::new("open_settings")),
     )
-    .add_step(
+    .with_step(
         ProvisioningStep::new(
             StepId::new("store_token"),
-            "Store the API token securely",
             ProvisioningStepType::StoreSecret {
                 key: "api_token".into(),
+                value_from: StepId::new("enter_token"),
                 scope: "connector:fcp.clickup".into(),
             },
         )
@@ -1436,8 +1433,9 @@ mod tests {
         let recipe = provisioning_recipe();
         let store_step = &recipe.steps[2];
         match &store_step.kind {
-            ProvisioningStepType::StoreSecret { scope, .. } => {
+            ProvisioningStepType::StoreSecret { scope, key, .. } => {
                 assert_eq!(scope, "connector:fcp.clickup");
+                assert_eq!(key, "api_token");
             }
             other => panic!("expected StoreSecret, got {other:?}"),
         }

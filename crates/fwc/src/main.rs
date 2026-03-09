@@ -3,6 +3,7 @@
 #[allow(dead_code)] // Audit types used by later CLI commands.
 mod audit;
 mod catalog;
+mod export_tools;
 #[allow(dead_code)] // Discovery types wired into host-backed commands in later beads.
 mod identifier;
 mod intent;
@@ -10,9 +11,10 @@ mod intent;
 mod readiness;
 mod recovery;
 mod render;
+mod search;
 mod workflow;
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -24,7 +26,9 @@ use serde_json::{Value, json};
 use crate::readiness::{
     DiscoveredConnector, DiscoveredOperation, DiscoveryCatalog, SelectorError, SelectorErrorKind,
 };
-use crate::render::{OutputFormat, render, token_stats};
+use crate::render::{
+    OutputFormat, RenderOptions, TemplateRender, render_with_options, token_stats,
+};
 
 const ABOUT: &str =
     "Standalone Flywheel connector console with TOON-first, progressive-disclosure output.";
@@ -56,11 +60,16 @@ Examples:
   fwc explain \"find the Notion page named Roadmap and append this summary\"
   fwc do \"disable the slack connector in z:work\" --simulate
   fwc show github
+  fwc show github --template '{{connector.slug}} => {{connector.name}}'
   fwc ops github
   fwc schema github issues.create
   fwc config schema github
   fwc simulate github issues.create --file payload.json
   fwc invoke github issues.create --file payload.json
+  fwc invoke github issues.create --template-file issue_summary.hbs
+  fwc export-tools --format mcp --json
+  fwc export-tools --format claude github
+  fwc export-tools --format openai --risk-max medium --output tools.json
 ";
 
 #[derive(Parser, Debug)]
@@ -79,6 +88,14 @@ struct Cli {
     /// Include token-efficiency statistics comparing TOON vs JSON byte counts.
     #[arg(long, global = true, default_value_t = false)]
     token_stats: bool,
+
+    /// Render the JSON payload through an inline Handlebars template.
+    #[arg(long, global = true, conflicts_with = "template_file")]
+    template: Option<String>,
+
+    /// Render the JSON payload through a Handlebars template loaded from a file.
+    #[arg(long, global = true, value_name = "PATH", conflicts_with = "template")]
+    template_file: Option<PathBuf>,
 
     /// Host endpoint or socket path for future host-backed execution.
     #[arg(long, global = true)]
@@ -173,6 +190,20 @@ enum Commands {
 
     /// Read connector logs or event streams.
     Logs(LogsArgs),
+
+    /// Export tool schemas for AI agent runtimes (MCP, Claude, `OpenAI`).
+    ///
+    /// Generates tool definitions from connector introspection so every
+    /// FCP connector becomes a tool in any agent runtime.
+    #[command(visible_alias = "tools")]
+    ExportTools(ExportToolsArgs),
+
+    /// Suggest relevant operations based on context, goal, or recent usage.
+    ///
+    /// Exploration mode that helps agents discover what they can do without
+    /// already knowing connector names or operation IDs.
+    #[command(visible_alias = "what-can-i-do")]
+    Suggest(SuggestArgs),
 }
 
 #[derive(Args, Debug, Serialize)]
@@ -352,6 +383,38 @@ struct SearchArgs {
     /// Narrow search to one zone.
     #[arg(long)]
     zone: Option<String>,
+
+    /// Restrict to a specific connector (slug or id).
+    #[arg(long)]
+    connector: Option<String>,
+
+    /// Filter by capability family (e.g. "read", "write", "admin").
+    #[arg(long)]
+    capability: Option<String>,
+
+    /// Maximum risk level to include (low, medium, high).
+    #[arg(long)]
+    risk: Option<String>,
+
+    /// Maximum safety tier to include (safe, risky, dangerous, critical).
+    #[arg(long)]
+    safety: Option<String>,
+
+    /// Filter by connector archetype (e.g. "operational", "streaming").
+    #[arg(long)]
+    archetype: Option<String>,
+
+    /// Filter by connector category (e.g. "messaging", "dev-tools").
+    #[arg(long)]
+    category: Option<String>,
+
+    /// Only show idempotent (safe to retry) operations.
+    #[arg(long)]
+    idempotent: bool,
+
+    /// Maximum number of results to return.
+    #[arg(long, default_value_t = 20)]
+    limit: usize,
 }
 
 #[derive(Args, Debug, Serialize)]
@@ -535,6 +598,67 @@ struct LogsArgs {
     since: Option<String>,
 }
 
+#[derive(Args, Debug, Serialize)]
+struct ExportToolsArgs {
+    /// Tool schema format to export.
+    #[arg(long, value_enum)]
+    format: export_tools::ToolSchemaFormat,
+
+    /// Optional connector selector. Omit to export all connectors.
+    connector: Option<String>,
+
+    /// Maximum risk level to include (low, medium, high, critical).
+    #[arg(long)]
+    risk_max: Option<String>,
+
+    /// Filter to a capability prefix (e.g. `github.read`).
+    #[arg(long)]
+    capability: Option<String>,
+
+    /// Strip a connector namespace prefix from tool names.
+    #[arg(long)]
+    strip_prefix: Option<String>,
+
+    /// Exclude safety metadata from descriptions and annotations.
+    #[arg(long, default_value_t = false)]
+    no_safety: bool,
+
+    /// Exclude AI hints from descriptions.
+    #[arg(long, default_value_t = false)]
+    no_hints: bool,
+
+    /// Write output to a file instead of stdout.
+    #[arg(long, value_name = "PATH")]
+    output: Option<PathBuf>,
+}
+
+#[derive(Args, Debug, Serialize)]
+struct SuggestArgs {
+    /// Natural-language goal to find operations for.
+    #[arg(long)]
+    goal: Option<String>,
+
+    /// Restrict to a specific connector.
+    #[arg(long)]
+    connector: Option<String>,
+
+    /// Suggest follow-up operations after a specific operation.
+    #[arg(long)]
+    after: Option<String>,
+
+    /// Maximum risk level to include (low, medium, high).
+    #[arg(long)]
+    risk: Option<String>,
+
+    /// Group results by action family (read, write, manage).
+    #[arg(long, default_value_t = false)]
+    grouped: bool,
+
+    /// Maximum number of suggestions.
+    #[arg(long, default_value_t = 10)]
+    limit: usize,
+}
+
 fn main() -> ExitCode {
     let raw_args = std::env::args().collect::<Vec<_>>();
     let fallback_format = infer_output_format(&raw_args);
@@ -549,6 +673,7 @@ fn main() -> ExitCode {
                 internal_error_dispatch(&raw_args, &error),
                 fallback_format,
                 include_token_stats,
+                &RenderOptions::default(),
             ) {
                 Ok(outcome) => {
                     print!("{}", outcome.text);
@@ -577,7 +702,26 @@ fn execute(raw_args: &[String]) -> Result<ExecutionOutcome> {
                 &prepared.normalized_args,
                 &prepared.corrections,
             );
-            render_dispatch(dispatch, prepared.format, prepared.cli.token_stats)
+            match render_dispatch(
+                dispatch,
+                prepared.format,
+                prepared.cli.token_stats,
+                &prepared.render_options,
+            ) {
+                Ok(outcome) => Ok(outcome),
+                Err(error) if prepared.render_options.has_template() => render_dispatch(
+                    template_render_failure_dispatch(
+                        &prepared.received_args,
+                        &prepared.normalized_args,
+                        &error,
+                        &prepared.render_options,
+                    ),
+                    prepared.format,
+                    false,
+                    &RenderOptions::default(),
+                ),
+                Err(error) => Err(error),
+            }
         }
         Err(PrepareCliError::Clap(error)) => match error.kind() {
             ErrorKind::DisplayHelp | ErrorKind::DisplayVersion => Ok(ExecutionOutcome {
@@ -586,12 +730,20 @@ fn execute(raw_args: &[String]) -> Result<ExecutionOutcome> {
             }),
             _ => {
                 let dispatch = parse_failure_dispatch(raw_args, &error);
-                render_dispatch(dispatch, fallback_format, include_token_stats)
+                render_dispatch(
+                    dispatch,
+                    fallback_format,
+                    include_token_stats,
+                    &RenderOptions::default(),
+                )
             }
         },
-        Err(PrepareCliError::Structured(dispatch)) => {
-            render_dispatch(dispatch, fallback_format, include_token_stats)
-        }
+        Err(PrepareCliError::Structured(dispatch)) => render_dispatch(
+            dispatch,
+            fallback_format,
+            include_token_stats,
+            &RenderOptions::default(),
+        ),
     }
 }
 
@@ -599,16 +751,18 @@ fn render_dispatch(
     mut dispatch: DispatchOutcome,
     format: OutputFormat,
     include_token_stats: bool,
+    render_options: &RenderOptions,
 ) -> Result<ExecutionOutcome> {
     annotate_output_contract(
         &mut dispatch.payload,
         format,
         dispatch.exit_code,
         include_token_stats,
+        render_options,
     );
 
     Ok(ExecutionOutcome {
-        text: render(dispatch.payload, format)?,
+        text: render_with_options(dispatch.payload, format, render_options)?,
         exit_code: dispatch.exit_code.into(),
     })
 }
@@ -618,23 +772,34 @@ fn annotate_output_contract(
     format: OutputFormat,
     exit_code: CliExitCode,
     include_token_stats: bool,
+    render_options: &RenderOptions,
 ) {
+    let template_active = render_options.has_template();
+    let token_stats_enabled = include_token_stats && !template_active;
     let exit = json!({
         "code": exit_code.as_u8(),
         "name": exit_code.label(),
         "category": exit_code.category(),
         "success": exit_code.is_success(),
     });
-    let stats = include_token_stats.then(|| token_stats(payload, format));
+    let stats = token_stats_enabled.then(|| token_stats(payload, format));
 
     if let Some(object) = payload.as_object_mut() {
         object.insert(
             "_output".to_owned(),
             json!({
                 "default_format": OutputFormat::Toon.as_str(),
-                "selected_format": format.as_str(),
+                "selected_format": if template_active { "template" } else { format.as_str() },
+                "base_format": format.as_str(),
+                "transform": render_options.transform_metadata(),
                 "newline_terminated": true,
-                "token_stats_enabled": include_token_stats,
+                "token_stats_requested": include_token_stats,
+                "token_stats_enabled": token_stats_enabled,
+                "token_stats_unavailable_reason": if include_token_stats && template_active {
+                    Some("disabled when output is post-processed by a Handlebars template")
+                } else {
+                    None
+                },
                 "exit": exit,
                 "token_stats": stats,
             }),
@@ -655,6 +820,64 @@ fn annotate_output_contract(
 
 fn infer_token_stats_requested(args: &[String]) -> bool {
     args.iter().any(|arg| arg == "--token-stats")
+}
+
+fn build_render_options(
+    cli: &Cli,
+    received_args: &[String],
+    normalized_args: &[String],
+) -> std::result::Result<RenderOptions, PrepareCliError> {
+    let template = match (cli.template.as_ref(), cli.template_file.as_ref()) {
+        (Some(template), None) => Some(TemplateRender::inline(template.clone()).map_err(|error| {
+            PrepareCliError::Structured(structured_error(
+                "invalid-template",
+                format!("The inline Handlebars template is invalid: {error:#}"),
+                CliExitCode::Validation,
+                true,
+                received_args,
+                normalized_args,
+                ErrorDetails {
+                    did_you_mean: Vec::new(),
+                    examples: vec![
+                        "fwc show github --template '{{connector.slug}}'".to_owned(),
+                        "fwc show github --template '{{json connector}}'".to_owned(),
+                    ],
+                    next_actions: vec![
+                        "Fix the template syntax and retry.".to_owned(),
+                        "Use `--template-file <path>` if inline quoting is getting in the way."
+                            .to_owned(),
+                    ],
+                },
+            ))
+        })?),
+        (None, Some(path)) => Some(TemplateRender::from_file(path).map_err(|error| {
+            PrepareCliError::Structured(structured_error(
+                "invalid-template-file",
+                format!("The Handlebars template file could not be loaded: {error:#}"),
+                CliExitCode::Validation,
+                true,
+                received_args,
+                normalized_args,
+                ErrorDetails {
+                    did_you_mean: Vec::new(),
+                    examples: vec![
+                        format!("fwc show github --template-file {}", path.display()),
+                        "fwc show github --template '{{connector.slug}}'".to_owned(),
+                    ],
+                    next_actions: vec![
+                        "Check that the template file exists, is readable, and contains valid Handlebars syntax."
+                            .to_owned(),
+                        "Rerun with `--format json` and no template if you need to inspect the raw payload shape first."
+                            .to_owned(),
+                    ],
+                },
+            ))
+        })?),
+        (None, None) => None,
+        (Some(_), Some(_)) => unreachable!("clap enforces template flag conflicts"),
+    };
+
+    Ok(RenderOptions { template })
 }
 
 fn internal_error_dispatch(args: &[String], error: &anyhow::Error) -> DispatchOutcome {
@@ -685,6 +908,55 @@ fn internal_error_dispatch(args: &[String], error: &anyhow::Error) -> DispatchOu
         error_obj.insert(
             "debug_chain".to_owned(),
             json!(error.chain().map(ToString::to_string).collect::<Vec<_>>()),
+        );
+    }
+
+    dispatch
+}
+
+fn template_render_failure_dispatch(
+    received_args: &[String],
+    normalized_args: &[String],
+    error: &anyhow::Error,
+    render_options: &RenderOptions,
+) -> DispatchOutcome {
+    let mut dispatch = structured_error(
+        "template-render-failed",
+        format!(
+            "The Handlebars template could not be rendered against this command's JSON payload: {error:#}"
+        ),
+        CliExitCode::Validation,
+        true,
+        received_args,
+        normalized_args,
+        ErrorDetails {
+            did_you_mean: Vec::new(),
+            examples: vec![
+                "fwc show github --format json".to_owned(),
+                "fwc show github --template '{{connector.slug}}'".to_owned(),
+                "fwc show github --template '{{json connector}}'".to_owned(),
+            ],
+            next_actions: vec![
+                "Inspect the raw payload with `--format json` to verify the field paths you are referencing."
+                    .to_owned(),
+                "Use `{{json ...}}` or `{{compact ...}}` inside the template to inspect nested values."
+                    .to_owned(),
+            ],
+        },
+    );
+
+    if let Some(error_obj) = dispatch
+        .payload
+        .get_mut("error")
+        .and_then(Value::as_object_mut)
+    {
+        error_obj.insert(
+            "debug_chain".to_owned(),
+            json!(error.chain().map(ToString::to_string).collect::<Vec<_>>()),
+        );
+        error_obj.insert(
+            "transform".to_owned(),
+            render_options.transform_metadata().unwrap_or(Value::Null),
         );
     }
 
@@ -729,6 +1001,8 @@ fn dispatch(cli: &Cli) -> Result<DispatchOutcome> {
         Commands::Invoke(args) => planned("invoke", args)?,
         Commands::Simulate(args) => planned("simulate", args)?,
         Commands::Logs(args) => planned("logs", args)?,
+        Commands::ExportTools(args) => export_tools_dispatch(args)?,
+        Commands::Suggest(args) => suggest_dispatch(args)?,
     };
 
     Ok(outcome)
@@ -775,35 +1049,54 @@ fn list_dispatch(args: &ListArgs) -> Result<DispatchOutcome> {
 
 fn search_dispatch(args: &SearchArgs) -> Result<DispatchOutcome> {
     let catalog = DiscoveryCatalog::load()?;
-    let zone = args.zone.as_deref();
-    let tokens = search_tokens(&args.query);
-    let mut results = catalog
-        .connectors()
-        .iter()
-        .filter(|connector| zone.is_none_or(|requested| connector.matches_zone(requested)))
-        .filter_map(|connector| connector_search_result(connector, &tokens))
-        .collect::<Vec<_>>();
-    results.sort_by(|left, right| {
-        right["score"]
-            .as_i64()
-            .cmp(&left["score"].as_i64())
-            .then_with(|| left["slug"].as_str().cmp(&right["slug"].as_str()))
-    });
+
+    let filters = search::SearchFilters {
+        connector: args.connector.clone(),
+        capability: args.capability.clone(),
+        risk_max: args.risk.as_deref().and_then(search::RiskCeiling::parse),
+        safety_max: args.safety.as_deref().and_then(search::SafetyCeiling::parse),
+        archetype: args.archetype.clone(),
+        category: args.category.clone(),
+        idempotent_only: args.idempotent,
+        zone: args.zone.clone(),
+    };
+
+    let results = search::search_operations(catalog.connectors(), &args.query, &filters);
+    let total = results.len();
+    let json_results = search::results_to_json(&results, args.limit);
+
+    let active_filters: Vec<String> = [
+        args.connector.as_deref().map(|v| format!("connector={v}")),
+        args.capability.as_deref().map(|v| format!("capability={v}")),
+        args.risk.as_deref().map(|v| format!("risk<={v}")),
+        args.safety.as_deref().map(|v| format!("safety<={v}")),
+        args.archetype.as_deref().map(|v| format!("archetype={v}")),
+        args.category.as_deref().map(|v| format!("category={v}")),
+        args.zone.as_deref().map(|v| format!("zone={v}")),
+        if args.idempotent {
+            Some("idempotent=true".to_owned())
+        } else {
+            None
+        },
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
 
     Ok(DispatchOutcome {
         payload: json!({
             "status": "ok",
             "command": "search",
             "source": "workspace-manifests",
-            "message": format!("Found {} matching connectors.", results.len()),
+            "message": format!("Found {} matching operations ({} shown).", total, json_results.len()),
             "query": &args.query,
-            "filters": {
-                "zone": args.zone.clone(),
-            },
-            "results": results,
+            "filters": active_filters,
+            "total_results": total,
+            "results": json_results,
             "next_actions": [
-                "Use `fwc show <connector>` to inspect the best match in more detail.",
-                "Use `fwc schema <connector> <operation>` once one operation is clearly selected.",
+                "Use `fwc show <connector>` to inspect a connector in more detail.",
+                "Use `fwc schema <connector> <operation>` for the input/output schema.",
+                "Add --capability, --risk, --safety, --idempotent flags to narrow results.",
             ],
         }),
         exit_code: CliExitCode::Success,
@@ -1119,6 +1412,332 @@ fn examples_dispatch(args: &ExampleArgs) -> Result<DispatchOutcome> {
     })
 }
 
+fn export_tools_dispatch(args: &ExportToolsArgs) -> Result<DispatchOutcome> {
+    let catalog = DiscoveryCatalog::load()?;
+
+    let options = export_tools::ExportOptions {
+        include_safety_metadata: !args.no_safety,
+        include_ai_hints: !args.no_hints,
+        include_examples: !args.no_hints,
+        strip_prefix: args.strip_prefix.clone(),
+        risk_max: args.risk_max.clone(),
+        capability_filter: args.capability.clone(),
+    };
+
+    // Collect connectors (one or all).
+    let connectors: Vec<&DiscoveredConnector> = if let Some(selector) = &args.connector {
+        match catalog.resolve_connector(selector) {
+            Ok(connector) => vec![connector],
+            Err(error) => {
+                return Ok(connector_resolution_dispatch(
+                    "export-tools",
+                    selector,
+                    &error,
+                ));
+            }
+        }
+    } else {
+        catalog.list(None, None)
+    };
+
+    // Gather all operations with filters applied.
+    let operations: Vec<&DiscoveredOperation> = connectors
+        .iter()
+        .flat_map(|c| c.operations.iter())
+        .filter(|op| export_tools::passes_risk_filter(op, options.risk_max.as_deref()))
+        .filter(|op| {
+            export_tools::passes_capability_filter(op, options.capability_filter.as_deref())
+        })
+        .collect();
+
+    let tools_json = export_tools::export_tools(&operations, args.format, &options);
+    let tool_count = operations.len();
+    let connector_count = connectors.len();
+
+    // Write to file if requested.
+    if let Some(path) = &args.output {
+        let content = serde_json::to_string_pretty(&tools_json)?;
+        std::fs::write(path, &content)?;
+        return Ok(DispatchOutcome {
+            payload: json!({
+                "status": "ok",
+                "command": "export-tools",
+                "format": args.format.to_string(),
+                "message": format!(
+                    "Exported {tool_count} tool schemas ({connector_count} connectors) to {}.",
+                    path.display()
+                ),
+                "tool_count": tool_count,
+                "connector_count": connector_count,
+                "output_file": path.display().to_string(),
+            }),
+            exit_code: CliExitCode::Success,
+        });
+    }
+
+    Ok(DispatchOutcome {
+        payload: json!({
+            "status": "ok",
+            "command": "export-tools",
+            "format": args.format.to_string(),
+            "message": format!(
+                "Exported {tool_count} tool schemas from {connector_count} connectors.",
+            ),
+            "tool_count": tool_count,
+            "connector_count": connector_count,
+            "tools": tools_json,
+            "next_actions": [
+                "Pipe to a file: fwc export-tools --format mcp --json > tools.json",
+                "Filter by risk: fwc export-tools --format mcp --risk-max medium",
+                "One connector: fwc export-tools --format claude github",
+            ],
+        }),
+        exit_code: CliExitCode::Success,
+    })
+}
+
+
+#[allow(dead_code, clippy::too_many_lines)]
+fn suggest_dispatch(args: &SuggestArgs) -> Result<DispatchOutcome> {
+    let catalog = DiscoveryCatalog::load()?;
+
+    // If --after is specified, find related operations.
+    if let Some(after_op) = &args.after {
+        return suggest_after_dispatch(&catalog, after_op, args);
+    }
+
+    // If --goal is specified, use the search engine for goal-directed suggestions.
+    if let Some(goal) = &args.goal {
+        let filters = search::SearchFilters {
+            connector: args.connector.clone(),
+            risk_max: args.risk.as_deref().and_then(search::RiskCeiling::parse),
+            ..Default::default()
+        };
+        let results = search::search_operations(catalog.connectors(), goal, &filters);
+        let json_results = search::results_to_json(&results, args.limit);
+
+        return Ok(DispatchOutcome {
+            payload: json!({
+                "status": "ok",
+                "command": "suggest",
+                "mode": "goal-directed",
+                "message": format!("Found {} operations matching goal '{goal}'.", results.len()),
+                "goal": goal,
+                "suggestions": json_results,
+                "next_actions": [
+                    "Use `fwc schema <connector> <operation>` to see input/output schema.",
+                    "Use `fwc simulate <connector> <operation> --file payload.json` to test safely.",
+                ],
+            }),
+            exit_code: CliExitCode::Success,
+        });
+    }
+
+    // General suggestions: overview of available operations grouped by action family.
+    let connectors: Vec<&DiscoveredConnector> = if let Some(slug) = &args.connector {
+        match catalog.resolve_connector(slug) {
+            Ok(c) => vec![c],
+            Err(error) => {
+                return Ok(connector_resolution_dispatch("suggest", slug, &error));
+            }
+        }
+    } else {
+        catalog.list(None, None)
+    };
+
+    let mut by_family: BTreeMap<String, Vec<Value>> = BTreeMap::new();
+    let risk_ceiling = args.risk.as_deref().and_then(search::RiskCeiling::parse);
+
+    for connector in &connectors {
+        for operation in &connector.operations {
+            if let Some(ceiling) = risk_ceiling {
+                if !ceiling.allows(&operation.summary.risk_level) {
+                    continue;
+                }
+            }
+            let family = classify_action_family(&operation.summary.capability);
+            let entry = json!({
+                "connector": &connector.slug,
+                "operation": &operation.actual_id,
+                "selector": &operation.preferred_selector,
+                "summary": &operation.summary.summary,
+                "risk_level": &operation.summary.risk_level,
+                "safety_tier": &operation.summary.safety_tier,
+            });
+            by_family.entry(family).or_default().push(entry);
+        }
+    }
+
+    // Flatten and limit.
+    let mut flat: Vec<Value> = Vec::new();
+    if args.grouped {
+        let grouped: Vec<Value> = by_family
+            .iter()
+            .map(|(family, ops)| {
+                json!({
+                    "family": family,
+                    "operation_count": ops.len(),
+                    "operations": ops.iter().take(5).collect::<Vec<_>>(),
+                })
+            })
+            .collect();
+        return Ok(DispatchOutcome {
+            payload: json!({
+                "status": "ok",
+                "command": "suggest",
+                "mode": "overview-grouped",
+                "message": format!(
+                    "Grouped {} action families across {} connectors.",
+                    by_family.len(), connectors.len()
+                ),
+                "families": grouped,
+                "next_actions": [
+                    "Use `fwc suggest --goal '<intent>'` for goal-directed search.",
+                    "Use `fwc search '<query>'` for keyword-based search.",
+                ],
+            }),
+            exit_code: CliExitCode::Success,
+        });
+    }
+
+    for ops in by_family.values() {
+        flat.extend(ops.iter().cloned());
+    }
+    flat.truncate(args.limit);
+
+    Ok(DispatchOutcome {
+        payload: json!({
+            "status": "ok",
+            "command": "suggest",
+            "mode": "overview",
+            "message": format!(
+                "Showing {} of {} available operations across {} connectors.",
+                flat.len(),
+                by_family.values().map(Vec::len).sum::<usize>(),
+                connectors.len(),
+            ),
+            "suggestions": flat,
+            "action_families": by_family.keys().collect::<Vec<_>>(),
+            "next_actions": [
+                "Use `fwc suggest --goal '<intent>'` for goal-directed search.",
+                "Use `fwc suggest --grouped` to see operations grouped by action family.",
+                "Use `fwc suggest --connector <name>` to narrow to one connector.",
+            ],
+        }),
+        exit_code: CliExitCode::Success,
+    })
+}
+
+#[allow(dead_code, clippy::unnecessary_wraps, clippy::assigning_clones)]
+fn suggest_after_dispatch(
+    catalog: &DiscoveryCatalog,
+    after_op: &str,
+    args: &SuggestArgs,
+) -> Result<DispatchOutcome> {
+    // Find the operation and its related hints.
+    let mut related_ids: Vec<String> = Vec::new();
+    let mut source_connector = String::new();
+    let mut source_summary = String::new();
+
+    for connector in catalog.connectors() {
+        for operation in &connector.operations {
+            if operation.actual_id == after_op
+                || operation.local_id == after_op
+                || operation.preferred_selector == after_op
+            {
+                related_ids = operation.related.clone();
+                source_connector = connector.slug.clone();
+                source_summary = operation.summary.summary.clone();
+                break;
+            }
+        }
+        if !source_connector.is_empty() {
+            break;
+        }
+    }
+
+    if source_connector.is_empty() {
+        return Ok(DispatchOutcome {
+            payload: json!({
+                "status": "error",
+                "command": "suggest",
+                "error": {
+                    "type": "operation-not-found",
+                    "message": format!("Operation '{after_op}' not found in any connector."),
+                    "selector": after_op,
+                },
+                "next_actions": [
+                    "Use `fwc search '<query>'` to find the operation.",
+                    "Use `fwc ops <connector>` to list operations for a connector.",
+                ],
+            }),
+            exit_code: CliExitCode::UnknownCommand,
+        });
+    }
+
+    // Find the related operations by ID.
+    let mut suggestions: Vec<Value> = Vec::new();
+    for connector in catalog.connectors() {
+        for operation in &connector.operations {
+            if related_ids
+                .iter()
+                .any(|r| r == &operation.actual_id || r == &operation.summary.capability)
+            {
+                suggestions.push(json!({
+                    "connector": &connector.slug,
+                    "operation": &operation.actual_id,
+                    "selector": &operation.preferred_selector,
+                    "summary": &operation.summary.summary,
+                    "risk_level": &operation.summary.risk_level,
+                    "reason": "related via ai_hints",
+                }));
+            }
+        }
+    }
+    suggestions.truncate(args.limit);
+
+    Ok(DispatchOutcome {
+        payload: json!({
+            "status": "ok",
+            "command": "suggest",
+            "mode": "after",
+            "message": format!(
+                "Found {} follow-up suggestions after '{after_op}'.",
+                suggestions.len()
+            ),
+            "after": {
+                "operation": after_op,
+                "connector": source_connector,
+                "summary": source_summary,
+            },
+            "suggestions": suggestions,
+            "next_actions": [
+                format!("fwc schema {} <operation>", source_connector),
+                "Use `fwc suggest --goal '<next intent>'` for goal-directed search.",
+            ],
+        }),
+        exit_code: CliExitCode::Success,
+    })
+}
+
+#[allow(dead_code)]
+fn classify_action_family(capability: &str) -> String {
+    let lower = capability.to_lowercase();
+    if lower.contains("read") || lower.contains("list") || lower.contains("get") {
+        "read".to_string()
+    } else if lower.contains("write") || lower.contains("create") || lower.contains("update") {
+        "write".to_string()
+    } else if lower.contains("delete") || lower.contains("remove") {
+        "delete".to_string()
+    } else if lower.contains("admin") || lower.contains("manage") || lower.contains("config") {
+        "manage".to_string()
+    } else if lower.contains("monitor") || lower.contains("watch") || lower.contains("stream") {
+        "monitor".to_string()
+    } else {
+        "other".to_string()
+    }
+}
+
 fn connector_list_entry(connector: &DiscoveredConnector) -> Value {
     json!({
         "slug": &connector.slug,
@@ -1157,137 +1776,6 @@ fn operation_summary_entry(operation: &DiscoveredOperation) -> Value {
         "example_count": operation.examples.len(),
         "rate_limits": operation.rate_limits.clone(),
     })
-}
-
-#[allow(clippy::too_many_lines)]
-fn connector_search_result(connector: &DiscoveredConnector, tokens: &[String]) -> Option<Value> {
-    if tokens.is_empty() {
-        return None;
-    }
-
-    let mut matched_fields = BTreeSet::new();
-    let mut score = 0_i64;
-    let slug = connector.slug.to_lowercase();
-    let canonical_id = connector.detail.summary.id.to_lowercase();
-    let name = connector.detail.summary.name.to_lowercase();
-    let description = connector.detail.summary.description.to_lowercase();
-    let cohort = connector.cohort.to_lowercase();
-
-    for token in tokens {
-        if slug == *token || canonical_id == *token || canonical_id.ends_with(token) {
-            matched_fields.insert("id");
-            score += 30;
-        } else if slug.contains(token) || canonical_id.contains(token) {
-            matched_fields.insert("id");
-            score += 14;
-        }
-        if name.contains(token) {
-            matched_fields.insert("name");
-            score += 12;
-        }
-        if description.contains(token) {
-            matched_fields.insert("description");
-            score += 6;
-        }
-        if cohort.contains(token) {
-            matched_fields.insert("cohort");
-            score += 5;
-        }
-        if connector
-            .detail
-            .summary
-            .archetypes
-            .iter()
-            .any(|archetype| archetype.to_lowercase().contains(token))
-        {
-            matched_fields.insert("archetype");
-            score += 4;
-        }
-    }
-
-    let mut operation_matches = connector
-        .operations
-        .iter()
-        .filter_map(|operation| {
-            let mut operation_score = 0_i64;
-            let operation_corpus = operation
-                .aliases
-                .iter()
-                .map(|alias| alias.to_lowercase())
-                .chain([
-                    operation.actual_id.to_lowercase(),
-                    operation.local_id.to_lowercase(),
-                    operation.summary.capability.to_lowercase(),
-                    operation.description.to_lowercase(),
-                    operation.when_to_use.to_lowercase(),
-                ])
-                .collect::<Vec<_>>();
-
-            for token in tokens {
-                if operation_corpus.iter().any(|candidate| candidate == token) {
-                    operation_score += 16;
-                } else if operation_corpus
-                    .iter()
-                    .any(|candidate| candidate.contains(token))
-                {
-                    operation_score += 7;
-                }
-            }
-
-            (operation_score > 0).then(|| {
-                (
-                    operation_score,
-                    json!({
-                        "selector": &operation.preferred_selector,
-                        "canonical_id": &operation.actual_id,
-                        "summary": &operation.summary.summary,
-                    }),
-                )
-            })
-        })
-        .collect::<Vec<_>>();
-    operation_matches.sort_by(|left, right| {
-        right.0.cmp(&left.0).then_with(|| {
-            left.1["selector"]
-                .as_str()
-                .cmp(&right.1["selector"].as_str())
-        })
-    });
-
-    if score == 0 && operation_matches.is_empty() {
-        return None;
-    }
-
-    score += operation_matches
-        .iter()
-        .map(|(value, _)| *value)
-        .sum::<i64>();
-    Some(json!({
-        "slug": &connector.slug,
-        "canonical_id": &connector.detail.summary.id,
-        "name": &connector.detail.summary.name,
-        "score": score,
-        "matched_fields": matched_fields,
-        "matched_operations": operation_matches
-            .into_iter()
-            .map(|(_, payload)| payload)
-            .take(3)
-            .collect::<Vec<_>>(),
-        "next_actions": [
-            format!("fwc show {}", connector.slug),
-            format!("fwc ops {}", connector.slug),
-        ],
-    }))
-}
-
-fn search_tokens(query: &str) -> Vec<String> {
-    query
-        .split(|ch: char| {
-            !ch.is_ascii_alphanumeric() && ch != ':' && ch != '.' && ch != '_' && ch != '-'
-        })
-        .filter(|token| !token.is_empty())
-        .map(str::to_lowercase)
-        .collect()
 }
 
 fn risk_filter_allows(operation: &DiscoveredOperation, risk_at_most: Option<&str>) -> bool {
@@ -2220,6 +2708,7 @@ struct ExecutionOutcome {
 struct PreparedCli {
     cli: Cli,
     format: OutputFormat,
+    render_options: RenderOptions,
     received_args: Vec<String>,
     normalized_args: Vec<String>,
     corrections: Vec<InputCorrection>,
@@ -2353,9 +2842,11 @@ fn prepare_cli(received_args: &[String]) -> std::result::Result<PreparedCli, Pre
             } else {
                 cli.format
             };
+            let render_options = build_render_options(&cli, received_args, &normalized.args)?;
             Ok(PreparedCli {
                 cli,
                 format,
+                render_options,
                 received_args: received_args.to_vec(),
                 normalized_args: normalized.args,
                 corrections: normalized.corrections,
@@ -2603,9 +3094,15 @@ fn first_command_index(args: &[String]) -> Option<usize> {
     while index < args.len() {
         let current = args[index].as_str();
         match current {
-            "--format" | "--host" => index += 2,
+            "--format" | "--host" | "--template" | "--template-file" => index += 2,
             "--json" | "-h" | "--help" | "-V" | "--version" => index += 1,
-            _ if current.starts_with("--format=") || current.starts_with("--host=") => index += 1,
+            _ if current.starts_with("--format=")
+                || current.starts_with("--host=")
+                || current.starts_with("--template=")
+                || current.starts_with("--template-file=") =>
+            {
+                index += 1;
+            }
             _ if current.starts_with('-') => index += 1,
             _ => return Some(index),
         }
@@ -3072,6 +3569,8 @@ fn enrich_unknown_guide_command(payload: &mut Value, command: Option<&str>) {
 
 #[cfg(test)]
 mod tests {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
     use super::{Cli, CliExitCode, catalog, execute, normalize_args};
     use clap::CommandFactory;
     use serde_json::Value;
@@ -3082,6 +3581,12 @@ mod tests {
         let payload: Value =
             serde_json::from_str(&outcome.text).expect("json output should parse cleanly");
         (outcome.exit_code, payload)
+    }
+
+    fn execute_text(args: &[&str]) -> (std::process::ExitCode, String) {
+        let owned_args = args.iter().map(|arg| (*arg).to_owned()).collect::<Vec<_>>();
+        let outcome = execute(&owned_args).expect("execution should not fail internally");
+        (outcome.exit_code, outcome.text)
     }
 
     #[test]
@@ -3210,6 +3715,96 @@ mod tests {
         assert_eq!(outcome.exit_code, CliExitCode::Validation.into());
         assert_eq!(payload["error"]["type"], "missing-operation");
         assert_eq!(payload["error"]["recoverable"], true);
+    }
+
+    #[test]
+    fn execute_renders_show_output_with_inline_template() {
+        let (exit_code, text) = execute_text(&[
+            "fwc",
+            "show",
+            "github",
+            "--template",
+            "{{connector.slug}} => {{connector.name}}",
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(text, "github => GitHub Connector\n");
+    }
+
+    #[test]
+    fn execute_renders_invoke_output_with_inline_template() {
+        let (exit_code, text) = execute_text(&[
+            "fwc",
+            "invoke",
+            "github",
+            "issues.create",
+            "--input",
+            "{}",
+            "--template",
+            "{{command}} {{captures.connector}} {{captures.operation}}",
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(text, "invoke github issues.create\n");
+    }
+
+    #[test]
+    fn execute_renders_output_with_template_file() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("fwc-main-template-{unique}.hbs"));
+        std::fs::write(&path, "{{connector.slug}} from file").unwrap();
+
+        let (exit_code, text) = execute_text(&[
+            "fwc",
+            "show",
+            "github",
+            "--template-file",
+            &path.display().to_string(),
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(text, "github from file\n");
+    }
+
+    #[test]
+    fn execute_returns_validation_error_for_missing_template_field() {
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "show",
+            "github",
+            "--template",
+            "{{connector.nope}}",
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::Validation.into());
+        assert_eq!(payload["error"]["type"], "template-render-failed");
+        assert_eq!(payload["error"]["transform"]["source"], "inline");
+    }
+
+    #[test]
+    fn execute_returns_validation_error_for_missing_template_file() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("fwc-main-missing-{unique}.hbs"));
+        let path_string = path.display().to_string();
+
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "show",
+            "github",
+            "--template-file",
+            &path_string,
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::Validation.into());
+        assert_eq!(payload["error"]["type"], "invalid-template-file");
     }
 
     #[test]
@@ -4243,11 +4838,7 @@ mod tests {
         assert_eq!(exit_code, CliExitCode::Success.into());
         assert_eq!(payload["command"], "search");
         assert!(payload["results"].as_array().unwrap().iter().any(|result| {
-            result["slug"] == "github"
-                && result["matched_operations"].as_array().is_some_and(|ops| {
-                    ops.iter()
-                        .any(|op| op["canonical_id"] == "github.create_issue")
-                })
+            result["connector"] == "github" && result["operation"] == "github.create_issue"
         }));
     }
 

@@ -61,17 +61,13 @@ impl ConnectorEvent {
 /// Extract `HH:MM:SS` from an ISO 8601 timestamp, falling back to the raw string.
 fn extract_time(timestamp: &str) -> &str {
     // Look for "T" separator and take the time part.
-    if let Some(t_pos) = timestamp.find('T') {
-        let after_t = &timestamp[t_pos + 1..];
-        // Take up to 8 chars (HH:MM:SS) or until non-time char.
+    timestamp.split_once('T').map_or(timestamp, |(_, after_t)| {
         let end = after_t
             .find(|c: char| !c.is_ascii_digit() && c != ':')
             .unwrap_or(after_t.len())
             .min(8);
         &after_t[..end]
-    } else {
-        timestamp
-    }
+    })
 }
 
 // ── Since duration parsing ─────────────────────────────────────────────
@@ -83,17 +79,12 @@ pub fn parse_since(s: &str) -> Result<u64, String> {
         return Err("empty duration".to_owned());
     }
 
-    let (num_str, suffix) = if s.ends_with('s') {
-        (&s[..s.len() - 1], "s")
-    } else if s.ends_with('m') {
-        (&s[..s.len() - 1], "m")
-    } else if s.ends_with('h') {
-        (&s[..s.len() - 1], "h")
-    } else if s.ends_with('d') {
-        (&s[..s.len() - 1], "d")
-    } else {
-        // Assume seconds if no suffix.
-        (s, "s")
+    let (num_str, suffix) = match s.as_bytes().last() {
+        Some(b's') => (&s[..s.len() - 1], "s"),
+        Some(b'm') => (&s[..s.len() - 1], "m"),
+        Some(b'h') => (&s[..s.len() - 1], "h"),
+        Some(b'd') => (&s[..s.len() - 1], "d"),
+        _ => (s, "s"), // Assume seconds if no suffix.
     };
 
     let num: u64 = num_str
@@ -158,12 +149,12 @@ impl EventBuffer {
     }
 
     /// Number of events dropped due to backpressure.
-    pub fn dropped_count(&self) -> u64 {
+    pub const fn dropped_count(&self) -> u64 {
         self.dropped
     }
 
     /// Maximum capacity.
-    pub fn capacity(&self) -> usize {
+    pub const fn capacity(&self) -> usize {
         self.capacity
     }
 }
@@ -290,7 +281,10 @@ mod tests {
     fn toon_format_full() {
         let event = sample_event();
         let line = event.format_toon();
-        assert_eq!(line, "[14:32:05] slack  message.new  #general  @alice: Hey team");
+        assert_eq!(
+            line,
+            "[14:32:05] slack  message.new  #general  @alice: Hey team"
+        );
     }
 
     #[test]

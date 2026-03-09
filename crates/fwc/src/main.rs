@@ -10,15 +10,17 @@ mod audit;
 mod batch;
 #[allow(dead_code)] // Result types wired when host integration lands.
 mod batch_file;
-#[allow(dead_code)]
-mod credential_store;
-#[allow(dead_code)] // Stream types wired when host integration lands.
-mod event_stream;
-#[allow(dead_code)]
-mod op_lock;
+#[allow(dead_code)] // Progress tracking wired when host integration lands.
+mod batch_progress;
+mod catalog;
 #[allow(dead_code)] // Auth verify + credential backend trait.
 mod credential;
-mod catalog;
+#[allow(dead_code)]
+mod credential_store;
+#[allow(dead_code)]
+mod doctor;
+#[allow(dead_code)] // Stream types wired when host integration lands.
+mod event_stream;
 #[allow(dead_code)] // Comprehensive event filtering engine.
 mod events;
 mod export_tools;
@@ -37,14 +39,18 @@ mod intent;
 #[allow(dead_code)]
 mod json_diff;
 #[allow(dead_code)]
+mod op_lock;
+#[allow(dead_code)]
 mod pipe;
+#[allow(dead_code)]
+mod rate_limit;
 #[allow(dead_code)] // Contract types wired into host-backed commands in later beads.
 mod readiness;
 mod recovery;
-#[allow(dead_code)] // Operation replay from history with input override.
-mod replay;
 #[allow(dead_code)] // Extract/transform features pending invoke integration.
 mod render;
+#[allow(dead_code)] // Operation replay from history with input override.
+mod replay;
 mod schema_nav;
 mod search;
 #[allow(dead_code)]
@@ -110,6 +116,7 @@ Examples:
   fwc pipeline list
   fwc pipeline validate .fwc/pipelines/notify-on-new-issues.toml
   fwc pipeline dry-run .fwc/pipelines/notify-on-new-issues.toml --param owner=octocat --param repo=hello-world
+  fwc pipeline estimate .fwc/pipelines/notify-on-new-issues.toml --param owner=octocat --param repo=hello-world
   fwc export-tools --format mcp --json
   fwc export-tools --format claude github
   fwc export-tools --format openai --risk-max medium --output tools.json
@@ -896,6 +903,9 @@ enum PipelineCommand {
     /// Build a pipeline plan without pretending to execute it.
     #[command(name = "dry-run", visible_alias = "preview")]
     DryRun(PipelineRunArgs),
+
+    /// Summarize pipeline cost, risk, approvals, and declared rate-limit impact.
+    Estimate(PipelineRunArgs),
 }
 
 #[derive(Args, Debug, Default, Serialize)]
@@ -1466,7 +1476,7 @@ fn dispatch(cli: &Cli) -> Result<DispatchOutcome> {
         Commands::Validate(args) => validate_dispatch(args)?,
         Commands::History(args) => history_dispatch(args)?,
         Commands::Pipe(args) => pipe_dispatch(args)?,
-        Commands::Pipeline(args) => planned("pipeline", args)?,
+        Commands::Pipeline(args) => pipeline_dispatch(args)?,
         Commands::Map(args) => map_dispatch(args)?,
         Commands::BatchFile(args) => batch_file_dispatch(args)?,
         Commands::Events(args) => planned("events", args)?,
@@ -2574,6 +2584,7 @@ fn pipe_dispatch(args: &PipeArgs) -> Result<DispatchOutcome> {
     })
 }
 
+#[allow(dead_code)] // Wired when host integration lands.
 fn pipeline_dispatch(args: &PipelineArgs) -> Result<DispatchOutcome> {
     let cwd = std::env::current_dir()?;
     let roots = pipe::default_pipeline_roots(&cwd);
@@ -2582,11 +2593,42 @@ fn pipeline_dispatch(args: &PipelineArgs) -> Result<DispatchOutcome> {
         PipelineCommand::List(_) => pipeline_list_dispatch(&roots),
         PipelineCommand::Show(args) => Ok(pipeline_show_dispatch(&roots, args)),
         PipelineCommand::Validate(args) => Ok(pipeline_validate_dispatch(&roots, args)),
-        PipelineCommand::Run(args) => pipeline_run_dispatch(&roots, args, false),
-        PipelineCommand::DryRun(args) => pipeline_run_dispatch(&roots, args, true),
+        PipelineCommand::Run(args) => pipeline_run_dispatch(&roots, args, PipelinePlanMode::Run),
+        PipelineCommand::DryRun(args) => {
+            pipeline_run_dispatch(&roots, args, PipelinePlanMode::DryRun)
+        }
+        PipelineCommand::Estimate(args) => {
+            pipeline_run_dispatch(&roots, args, PipelinePlanMode::Estimate)
+        }
     }
 }
 
+#[derive(Clone, Copy)]
+enum PipelinePlanMode {
+    Run,
+    DryRun,
+    Estimate,
+}
+
+impl PipelinePlanMode {
+    const fn subcommand(self) -> &'static str {
+        match self {
+            Self::Run => "run",
+            Self::DryRun => "dry-run",
+            Self::Estimate => "estimate",
+        }
+    }
+
+    const fn include_plan(self) -> bool {
+        !matches!(self, Self::Estimate)
+    }
+
+    const fn dry_run(self) -> bool {
+        matches!(self, Self::DryRun)
+    }
+}
+
+#[allow(dead_code)]
 fn pipeline_list_dispatch(roots: &pipe::PipelineRoots) -> Result<DispatchOutcome> {
     let pipelines = pipe::discover_pipelines(roots).map_err(|error| anyhow::anyhow!("{error}"))?;
     let search_paths = vec![
@@ -2615,7 +2657,7 @@ fn pipeline_list_dispatch(roots: &pipe::PipelineRoots) -> Result<DispatchOutcome
             "next_actions": [
                 "Create `.fwc/pipelines/<name>.toml` in the current project to register a project-scoped pipeline."
                     .to_owned(),
-                "Run `fwc pipeline validate <name-or-path>` before attempting `fwc pipeline dry-run`."
+                "Run `fwc pipeline validate <name-or-path>` before attempting `fwc pipeline estimate` or `fwc pipeline dry-run`."
                     .to_owned(),
             ],
         }),
@@ -2623,6 +2665,7 @@ fn pipeline_list_dispatch(roots: &pipe::PipelineRoots) -> Result<DispatchOutcome
     })
 }
 
+#[allow(dead_code)]
 fn pipeline_show_dispatch(roots: &pipe::PipelineRoots, args: &PipelineRefArgs) -> DispatchOutcome {
     let (path, definition, validation) = match load_pipeline_definition(roots, &args.pipeline) {
         Ok(v) => v,
@@ -2642,6 +2685,7 @@ fn pipeline_show_dispatch(roots: &pipe::PipelineRoots, args: &PipelineRefArgs) -
             "validation": validation,
             "next_actions": [
                 format!("fwc pipeline validate {}", path.display()),
+                format!("fwc pipeline estimate {} --param key=value", path.display()),
                 format!("fwc pipeline dry-run {} --param key=value", path.display()),
             ],
         }),
@@ -2649,6 +2693,7 @@ fn pipeline_show_dispatch(roots: &pipe::PipelineRoots, args: &PipelineRefArgs) -
     }
 }
 
+#[allow(dead_code)]
 fn pipeline_validate_dispatch(
     roots: &pipe::PipelineRoots,
     args: &PipelineRefArgs,
@@ -2675,6 +2720,7 @@ fn pipeline_validate_dispatch(
             "validation": validation,
             "next_actions": [
                 format!("fwc pipeline show {}", path.display()),
+                format!("fwc pipeline estimate {} --param key=value", path.display()),
                 format!("fwc pipeline dry-run {} --param key=value", path.display()),
             ],
         }),
@@ -2682,16 +2728,17 @@ fn pipeline_validate_dispatch(
     }
 }
 
+#[allow(dead_code)]
 fn pipeline_run_dispatch(
     roots: &pipe::PipelineRoots,
     args: &PipelineRunArgs,
-    dry_run: bool,
+    mode: PipelinePlanMode,
 ) -> Result<DispatchOutcome> {
     let (path, definition, validation) = match load_pipeline_definition(roots, &args.pipeline) {
         Ok(v) => v,
         Err(outcome) => return Ok(outcome),
     };
-    let subcommand = if dry_run { "dry-run" } else { "run" };
+    let subcommand = mode.subcommand();
 
     if !validation.valid {
         return Ok(pipeline_invalid_definition_dispatch(
@@ -2721,29 +2768,63 @@ fn pipeline_run_dispatch(
 
     let plan = pipe::build_pipeline_plan(&definition, &params)
         .map_err(|error| anyhow::anyhow!("{error}"))?;
+    let catalog = DiscoveryCatalog::load()?;
+    let operation_metadata =
+        match resolve_pipeline_operation_metadata(&catalog, &plan, subcommand, &path) {
+            Ok(metadata) => metadata,
+            Err(outcome) => return Ok(outcome),
+        };
+    let estimate = pipe::estimate_pipeline(&plan, &operation_metadata)
+        .map_err(|error| anyhow::anyhow!("{error}"))?;
+    let message = match mode {
+        PipelinePlanMode::Run => format!(
+            "Pipeline plan: {} ({} step(s), {}, highest risk {}). Execution requires host integration (not yet available).",
+            definition.pipeline.name,
+            plan.step_count,
+            estimate.estimated_api_calls.summary,
+            estimate.risk_assessment.level,
+        ),
+        PipelinePlanMode::DryRun => format!(
+            "Pipeline dry-run: {} ({} step(s), {}, highest risk {}). Execution requires host integration (not yet available).",
+            definition.pipeline.name,
+            plan.step_count,
+            estimate.estimated_api_calls.summary,
+            estimate.risk_assessment.level,
+        ),
+        PipelinePlanMode::Estimate => format!(
+            "Pipeline estimate: {} ({} step(s), {}, highest risk {}). No host execution was attempted.",
+            definition.pipeline.name,
+            plan.step_count,
+            estimate.estimated_api_calls.summary,
+            estimate.risk_assessment.level,
+        ),
+    };
+    let mut payload = json!({
+        "status": "planned",
+        "command": "pipeline",
+        "subcommand": subcommand,
+        "path": path.display().to_string(),
+        "message": message,
+        "estimate": estimate,
+        "dry_run": mode.dry_run(),
+        "next_actions": [
+            format!("fwc pipeline show {}", path.display()),
+            format!("fwc pipeline validate {}", path.display()),
+            format!("fwc pipeline estimate {} --param key=value", path.display()),
+            format!("fwc pipeline dry-run {} --param key=value", path.display()),
+        ],
+    });
+    if mode.include_plan() {
+        payload["plan"] = serde_json::to_value(&plan)?;
+    }
 
     Ok(DispatchOutcome {
-        payload: json!({
-            "status": "planned",
-            "command": "pipeline",
-            "subcommand": subcommand,
-            "path": path.display().to_string(),
-            "message": format!(
-                "Pipeline plan: {} ({} step(s)). Execution requires host integration (not yet available).",
-                definition.pipeline.name,
-                plan.step_count,
-            ),
-            "plan": plan,
-            "dry_run": dry_run,
-            "next_actions": [
-                format!("fwc pipeline show {}", path.display()),
-                format!("fwc pipeline validate {}", path.display()),
-            ],
-        }),
+        payload,
         exit_code: CliExitCode::Success,
     })
 }
 
+#[allow(dead_code)]
 fn load_pipeline_definition(
     roots: &pipe::PipelineRoots,
     reference: &str,
@@ -2801,6 +2882,7 @@ fn load_pipeline_definition(
     Ok((path, definition, validation))
 }
 
+#[allow(dead_code)]
 fn pipeline_invalid_definition_dispatch(
     subcommand: &str,
     path: &std::path::Path,
@@ -2850,6 +2932,7 @@ fn pipeline_invalid_definition_dispatch(
     }
 }
 
+#[allow(dead_code)]
 fn pipeline_error_dispatch(
     subcommand: &str,
     error_type: &str,
@@ -2873,6 +2956,117 @@ fn pipeline_error_dispatch(
         }),
         exit_code: CliExitCode::Validation,
     }
+}
+
+fn resolve_pipeline_operation_metadata(
+    catalog: &DiscoveryCatalog,
+    plan: &pipe::PipelinePlan,
+    subcommand: &str,
+    path: &std::path::Path,
+) -> Result<BTreeMap<String, pipe::PipelineOperationMetadata>, DispatchOutcome> {
+    let mut operations = BTreeMap::new();
+
+    for step in &plan.steps {
+        if operations.contains_key(&step.operation) {
+            continue;
+        }
+
+        let Some((connector_selector, operation_selector)) = step.operation.split_once('.') else {
+            return Err(pipeline_error_dispatch(
+                subcommand,
+                "invalid-pipeline-operation-reference",
+                format!(
+                    "Pipeline step `{}` must use `<connector>.<operation>` syntax, but `{}` does not.",
+                    step.id, step.operation
+                ),
+                Some(path),
+                &[],
+                &[
+                    format!("fwc pipeline show {}", path.display()),
+                    "Use operation references like `github.list_issues` or `slack.send_message`."
+                        .to_owned(),
+                ],
+            ));
+        };
+
+        let connector = match catalog.resolve_connector(connector_selector) {
+            Ok(connector) => connector,
+            Err(error) => {
+                let details = if error.suggestions.is_empty() {
+                    Vec::new()
+                } else {
+                    error.suggestions.clone()
+                };
+                let next_actions = if error.suggestions.is_empty() {
+                    vec!["fwc list".to_owned()]
+                } else {
+                    error
+                        .suggestions
+                        .iter()
+                        .map(|suggestion| format!("fwc show {suggestion}"))
+                        .collect()
+                };
+                return Err(pipeline_error_dispatch(
+                    subcommand,
+                    "pipeline-connector-not-found",
+                    format!(
+                        "Pipeline step `{}` refers to unknown connector `{connector_selector}` in `{}`.",
+                        step.id, step.operation
+                    ),
+                    Some(path),
+                    &details,
+                    &next_actions,
+                ));
+            }
+        };
+        let operation = match connector.resolve_operation(operation_selector) {
+            Ok(operation) => operation,
+            Err(error) => {
+                let details = if error.suggestions.is_empty() {
+                    Vec::new()
+                } else {
+                    error.suggestions.clone()
+                };
+                let next_actions = if error.suggestions.is_empty() {
+                    vec![format!("fwc ops {}", connector.slug)]
+                } else {
+                    error
+                        .suggestions
+                        .iter()
+                        .map(|suggestion| format!("fwc schema {} {suggestion}", connector.slug))
+                        .collect()
+                };
+                return Err(pipeline_error_dispatch(
+                    subcommand,
+                    "pipeline-operation-not-found",
+                    format!(
+                        "Pipeline step `{}` refers to unknown operation `{}` on connector `{}`.",
+                        step.id, operation_selector, connector.slug
+                    ),
+                    Some(path),
+                    &details,
+                    &next_actions,
+                ));
+            }
+        };
+
+        operations.insert(
+            step.operation.clone(),
+            pipe::PipelineOperationMetadata {
+                connector: connector.slug.clone(),
+                selector: operation.preferred_selector.clone(),
+                canonical_id: operation.actual_id.clone(),
+                capability: operation.summary.capability.clone(),
+                risk_level: operation.summary.risk_level.clone(),
+                safety_tier: operation.summary.safety_tier.clone(),
+                requires_approval: operation.summary.requires_approval,
+                approval_mode: operation.approval_mode.clone(),
+                rate_limits: operation.rate_limits.clone(),
+            },
+        );
+    }
+
+    Ok(operations)
 }
 
 fn map_dispatch(args: &MapArgs) -> Result<DispatchOutcome> {
@@ -2972,6 +3166,7 @@ fn batch_file_dispatch(args: &BatchFileArgs) -> Result<DispatchOutcome> {
     })
 }
 
+#[allow(dead_code)] // Wired when host integration lands.
 fn events_dispatch(args: &EventsArgs) -> Result<DispatchOutcome> {
     // Parse connectors.
     let connectors = if args.all {
@@ -4097,7 +4292,7 @@ struct ErrorDetails {
 const CONFIG_SUBCOMMANDS: &[&str] = &[
     "schema", "get", "set", "unset", "import", "export", "doctor",
 ];
-const PIPELINE_SUBCOMMANDS: &[&str] = &["list", "show", "validate", "run", "dry-run"];
+const PIPELINE_SUBCOMMANDS: &[&str] = &["list", "show", "validate", "run", "dry-run", "estimate"];
 
 fn prepare_cli(received_args: &[String]) -> std::result::Result<PreparedCli, PrepareCliError> {
     let normalized = normalize_args(received_args).map_err(PrepareCliError::Structured)?;
@@ -4515,7 +4710,7 @@ fn parse_failure_dispatch(args: &[String], error: &clap::Error) -> DispatchOutco
                         next_actions: vec![
                             "Use `fwc pipeline list` to discover registered pipeline definitions."
                                 .to_owned(),
-                            "Use `fwc pipeline show|validate|run|dry-run <name-or-path>` once you know the target pipeline."
+                            "Use `fwc pipeline show|validate|run|dry-run|estimate <name-or-path>` once you know the target pipeline."
                                 .to_owned(),
                         ],
                     },
@@ -4566,6 +4761,7 @@ fn parse_failure_dispatch(args: &[String], error: &clap::Error) -> DispatchOutco
                 vec![
                     "fwc pipeline list".to_owned(),
                     "fwc pipeline validate .fwc/pipelines/<name>.toml".to_owned(),
+                    "fwc pipeline estimate .fwc/pipelines/<name>.toml --param key=value".to_owned(),
                     "fwc pipeline dry-run .fwc/pipelines/<name>.toml --param key=value".to_owned(),
                 ],
             ),
@@ -6912,6 +7108,92 @@ default = "#general"
             payload["plan"]["steps"][1]["condition"],
             "{{steps.fetch.output.issues | length}} > 0"
         );
+        assert_eq!(payload["estimate"]["estimated_api_calls"]["min"], 1);
+        assert_eq!(payload["estimate"]["estimated_api_calls"]["max"], 2);
+        assert_eq!(payload["estimate"]["risk_assessment"]["level"], "medium");
+        assert_eq!(
+            payload["estimate"]["required_capabilities"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+        assert_eq!(
+            payload["estimate"]["required_approvals"][0]["step_id"],
+            "notify"
+        );
+    }
+
+    #[test]
+    fn execute_pipeline_estimate_returns_summary_without_plan() {
+        let root = std::env::temp_dir().join(format!(
+            "fwc-pipeline-estimate-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("notify.toml");
+        std::fs::write(
+            &path,
+            r##"
+[pipeline]
+name = "notify-on-new-issues"
+
+[[steps]]
+id = "fetch"
+operation = "github.list_issues"
+
+[[steps]]
+id = "notify"
+operation = "slack.send_message"
+depends_on = ["fetch"]
+condition = "{{steps.fetch.output.issues | length}} > 0"
+"##,
+        )
+        .unwrap();
+
+        let path_str = path.display().to_string();
+        let (exit_code, payload) =
+            execute_json(&["fwc", "--json", "pipeline", "estimate", &path_str]);
+
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["subcommand"], "estimate");
+        assert!(payload.get("plan").is_none());
+        assert_eq!(payload["estimate"]["step_count"], 2);
+        assert_eq!(
+            payload["estimate"]["estimated_api_calls"]["summary"],
+            "~1-2 API calls"
+        );
+    }
+
+    #[test]
+    fn execute_pipeline_dry_run_reports_unknown_operation_references() {
+        let root = std::env::temp_dir().join(format!(
+            "fwc-pipeline-missing-op-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("broken.toml");
+        std::fs::write(
+            &path,
+            r#"
+[pipeline]
+name = "broken"
+
+[[steps]]
+id = "fetch"
+operation = "github.not_a_real_operation"
+"#,
+        )
+        .unwrap();
+
+        let path_str = path.display().to_string();
+        let (exit_code, payload) =
+            execute_json(&["fwc", "--json", "pipeline", "dry-run", &path_str]);
+
+        assert_eq!(exit_code, CliExitCode::Validation.into());
+        assert_eq!(payload["error"]["type"], "pipeline-operation-not-found");
     }
 
     #[test]

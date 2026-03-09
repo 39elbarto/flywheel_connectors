@@ -5,8 +5,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use fcp_core::{
     AgentHint, BaseConnector, CapabilityId, ConnectorId, CredentialId, FcpError, FcpResult,
-    IdempotencyClass, OperationId, OperationInfo, RiskLevel, SafetyTier,
+    IdempotencyClass, OperationId, OperationInfo, ProvisioningRecipe, ProvisioningStep,
+    ProvisioningStepType, RecipeId, RiskLevel, SafetyTier, SelfCheckReport, StepId,
 };
+use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tracing::{info, instrument};
@@ -73,6 +75,35 @@ impl LogseqConfig {
 
         Ok(Self { auth, base_url })
     }
+
+    fn provisioning_readiness(&self) -> ProvisioningReadiness {
+        let (network_ok, network_message) = base_url_policy(&self.base_url);
+
+        ProvisioningReadiness {
+            auth_mode: match &self.auth {
+                LogseqAuth::BearerToken(_) => "bearer_token",
+                LogseqAuth::CredentialId(_) => "credential_id",
+            },
+            token_configured: matches!(&self.auth, LogseqAuth::BearerToken(_)),
+            credential_id_configured: self.auth.is_secretless(),
+            requires_credential_injection: self.auth.is_secretless(),
+            network_ok,
+            network_message,
+            base_url: self.base_url.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[allow(clippy::struct_excessive_bools)]
+struct ProvisioningReadiness {
+    auth_mode: &'static str,
+    token_configured: bool,
+    credential_id_configured: bool,
+    requires_credential_injection: bool,
+    network_ok: bool,
+    network_message: String,
+    base_url: String,
 }
 
 /// Doctor check result.
@@ -265,11 +296,43 @@ impl LogseqConnector {
 
     /// Handle the `self_check` method.
     pub async fn handle_self_check(&self) -> FcpResult<serde_json::Value> {
-        Ok(json!({
-            "connector_id": "fcp.logseq",
-            "version": "0.1.0",
-            "status": if self.config.is_some() { "ready" } else { "unconfigured" },
-        }))
+        let Some(config) = &self.config else {
+            let report =
+                SelfCheckReport::degraded("not_configured", "Connector is not configured");
+            return Self::serialize_self_check_report(report);
+        };
+
+        let readiness = config.provisioning_readiness();
+        if !readiness.network_ok {
+            let mut report = SelfCheckReport::failed(
+                "network_constraints_invalid",
+                readiness.network_message.clone(),
+            );
+            report.details = Some(json!({ "provisioning": readiness }));
+            return Self::serialize_self_check_report(report);
+        }
+
+        let Some(_client) = &self.client else {
+            let mut report = SelfCheckReport::failed(
+                "client_missing",
+                "API client not initialized; re-run configure",
+            );
+            report.details = Some(json!({ "provisioning": readiness }));
+            return Self::serialize_self_check_report(report);
+        };
+
+        if readiness.requires_credential_injection {
+            let mut report = SelfCheckReport::degraded(
+                "credential_injection_required",
+                "credential_id mode requires egress proxy injection; skipping live probe",
+            );
+            report.details = Some(json!({ "provisioning": readiness }));
+            return Self::serialize_self_check_report(report);
+        }
+
+        let mut report = SelfCheckReport::ok();
+        report.details = Some(json!({ "provisioning": readiness }));
+        Self::serialize_self_check_report(report)
     }
 
     /// Handle the `introspect` method.
@@ -393,6 +456,19 @@ impl LogseqConnector {
         let data = client.create_block(page, content).await?;
         Ok(data)
     }
+
+    fn serialize_self_check_report(report: SelfCheckReport) -> FcpResult<serde_json::Value> {
+        info!(
+            event = "logseq.provisioning.self_check",
+            status = ?report.status,
+            reason_code = ?report.reason_code,
+            "Logseq self-check completed"
+        );
+
+        serde_json::to_value(report).map_err(|e| FcpError::Internal {
+            message: format!("Failed to serialize self-check report: {e}"),
+        })
+    }
 }
 
 /// Extract a required string field from input.
@@ -404,6 +480,71 @@ fn require_str<'a>(input: &'a serde_json::Value, field: &str) -> Result<&'a str,
             status_code: 400,
             message: format!("Missing required field: {field}"),
         })
+}
+
+/// Build the provisioning recipe for the Logseq connector.
+///
+/// Logseq uses a local HTTP API with an authorization token that the user
+/// obtains from *Settings > Features > Developer > Authorization token*.
+pub fn provisioning_recipe() -> ProvisioningRecipe {
+    ProvisioningRecipe::new(
+        RecipeId::new("logseq.api_token"),
+        "1",
+        "Provision Logseq connector with a local API authorization token",
+    )
+    .with_step(ProvisioningStep::new(
+        StepId::new("enter_token"),
+        ProvisioningStepType::PromptSecret {
+            message: "Paste your Logseq API authorization token (from Settings > Features > Developer)".into(),
+        },
+    ))
+    .with_step(
+        ProvisioningStep::new(
+            StepId::new("store_token"),
+            ProvisioningStepType::StoreSecret {
+                key: "access_token".into(),
+                value_from: StepId::new("enter_token"),
+                scope: "connector:fcp.logseq".into(),
+            },
+        )
+        .depends_on(StepId::new("enter_token")),
+    )
+}
+
+/// Validate the configured base URL against the Logseq security policy.
+///
+/// Logseq runs as a local desktop application, so we only accept `localhost`,
+/// `127.0.0.1` and `::1` as valid hosts. Any scheme is fine for these local
+/// addresses (typically plain `http`).
+fn base_url_policy(base_url: &str) -> (bool, String) {
+    let parsed = match Url::parse(base_url) {
+        Ok(parsed) => parsed,
+        Err(error) => {
+            return (false, format!("base_url could not be parsed: {error}"));
+        }
+    };
+
+    let Some(host) = parsed.host_str() else {
+        return (false, "base_url must include a host".into());
+    };
+
+    if is_local_test_host(host) {
+        (
+            true,
+            format!("Endpoint accepted by policy checks: {base_url}"),
+        )
+    } else {
+        (
+            false,
+            format!(
+                "Logseq API must be accessed via localhost/127.0.0.1/::1 (got {host}): {base_url}"
+            ),
+        )
+    }
+}
+
+fn is_local_test_host(host: &str) -> bool {
+    matches!(host, "localhost" | "127.0.0.1" | "::1" | "[::1]")
 }
 
 /// Build typed operations info for introspection.
@@ -1140,6 +1281,228 @@ mod tests {
                 "invalid idempotency {idem} for {:?}",
                 op["id"]
             );
+        }
+    }
+
+    // -- Provisioning automation tests --
+
+    #[test]
+    fn provisioning_recipe_has_2_steps() {
+        let recipe = provisioning_recipe();
+        assert_eq!(recipe.id.as_str(), "logseq.api_token");
+        assert_eq!(recipe.version, "1");
+        assert_eq!(recipe.steps.len(), 2);
+    }
+
+    #[test]
+    fn provisioning_recipe_step_order() {
+        let recipe = provisioning_recipe();
+        assert_eq!(recipe.steps[0].id.as_str(), "enter_token");
+        assert_eq!(recipe.steps[1].id.as_str(), "store_token");
+    }
+
+    #[test]
+    fn provisioning_recipe_step_dependencies() {
+        let recipe = provisioning_recipe();
+        assert!(recipe.steps[0].depends_on.is_empty());
+        assert_eq!(recipe.steps[1].depends_on.len(), 1);
+        assert_eq!(recipe.steps[1].depends_on[0].as_str(), "enter_token");
+    }
+
+    #[test]
+    fn provisioning_recipe_serializes() {
+        let recipe = provisioning_recipe();
+        let v = serde_json::to_value(&recipe).unwrap();
+        assert_eq!(v["id"], "logseq.api_token");
+        assert!(v["steps"].as_array().unwrap().len() == 2);
+    }
+
+    #[test]
+    fn provisioning_recipe_description_mentions_logseq() {
+        let recipe = provisioning_recipe();
+        assert!(recipe.description.to_lowercase().contains("logseq"));
+    }
+
+    #[test]
+    fn provisioning_recipe_enter_token_is_prompt_secret() {
+        let recipe = provisioning_recipe();
+        let step = &recipe.steps[0];
+        assert!(matches!(
+            &step.kind,
+            ProvisioningStepType::PromptSecret { .. }
+        ));
+    }
+
+    #[test]
+    fn provisioning_recipe_store_token_is_store_secret() {
+        let recipe = provisioning_recipe();
+        let step = &recipe.steps[1];
+        assert!(matches!(
+            &step.kind,
+            ProvisioningStepType::StoreSecret { .. }
+        ));
+    }
+
+    #[test]
+    fn base_url_policy_accepts_localhost() {
+        let (ok, msg) = base_url_policy("http://localhost:12315/api");
+        assert!(ok);
+        assert!(msg.contains("accepted"));
+    }
+
+    #[test]
+    fn base_url_policy_accepts_127_0_0_1() {
+        let (ok, _) = base_url_policy("http://127.0.0.1:12315/api");
+        assert!(ok);
+    }
+
+    #[test]
+    fn base_url_policy_accepts_ipv6_loopback() {
+        let (ok, msg) = base_url_policy("http://[::1]:12315/api");
+        assert!(ok, "IPv6 loopback should be accepted: {msg}");
+    }
+
+    #[test]
+    fn base_url_policy_accepts_localhost_any_port() {
+        let (ok, _) = base_url_policy("http://localhost:9999");
+        assert!(ok);
+    }
+
+    #[test]
+    fn base_url_policy_rejects_remote_host() {
+        let (ok, msg) = base_url_policy("https://logseq.example.com/api");
+        assert!(!ok);
+        assert!(msg.contains("localhost"));
+    }
+
+    #[test]
+    fn base_url_policy_rejects_invalid_url() {
+        let (ok, msg) = base_url_policy("not a url");
+        assert!(!ok);
+        assert!(msg.contains("could not be parsed"));
+    }
+
+    #[test]
+    fn base_url_policy_rejects_missing_host() {
+        let (ok, msg) = base_url_policy("file:///tmp/logseq");
+        assert!(!ok);
+        // file:// URLs have no host — rejected either by parse or by the host check
+        assert!(!ok, "file URL should be rejected: {msg}");
+    }
+
+    #[test]
+    fn is_local_test_host_recognizes_all() {
+        assert!(is_local_test_host("localhost"));
+        assert!(is_local_test_host("127.0.0.1"));
+        assert!(is_local_test_host("::1"));
+        assert!(is_local_test_host("[::1]"));
+        assert!(!is_local_test_host("example.com"));
+        assert!(!is_local_test_host("192.168.1.1"));
+    }
+
+    #[test]
+    fn provisioning_readiness_bearer_token() {
+        let config = LogseqConfig::from_params(&json!({
+            "access_token": "tok",
+        }))
+        .unwrap();
+        let readiness = config.provisioning_readiness();
+        assert_eq!(readiness.auth_mode, "bearer_token");
+        assert!(readiness.token_configured);
+        assert!(!readiness.credential_id_configured);
+        assert!(!readiness.requires_credential_injection);
+        assert!(readiness.network_ok);
+    }
+
+    #[test]
+    fn provisioning_readiness_credential_id() {
+        let config = LogseqConfig::from_params(&json!({
+            "credential_id": "550e8400-e29b-41d4-a716-446655440000",
+        }))
+        .unwrap();
+        let readiness = config.provisioning_readiness();
+        assert_eq!(readiness.auth_mode, "credential_id");
+        assert!(!readiness.token_configured);
+        assert!(readiness.credential_id_configured);
+        assert!(readiness.requires_credential_injection);
+    }
+
+    #[test]
+    fn provisioning_readiness_serializes() {
+        let config = LogseqConfig::from_params(&json!({
+            "access_token": "tok",
+        }))
+        .unwrap();
+        let readiness = config.provisioning_readiness();
+        let v = serde_json::to_value(&readiness).unwrap();
+        assert_eq!(v["auth_mode"], "bearer_token");
+        assert_eq!(v["token_configured"], true);
+        assert_eq!(v["network_ok"], true);
+    }
+
+    #[test]
+    fn provisioning_readiness_remote_url_rejected() {
+        let config = LogseqConfig::from_params(&json!({
+            "access_token": "tok",
+            "base_url": "https://evil.example.com/api",
+        }))
+        .unwrap();
+        let readiness = config.provisioning_readiness();
+        assert!(!readiness.network_ok);
+        assert!(readiness.network_message.contains("localhost"));
+    }
+
+    #[test]
+    fn provisioning_readiness_custom_localhost_port() {
+        let config = LogseqConfig::from_params(&json!({
+            "access_token": "tok",
+            "base_url": "http://localhost:9999/api",
+        }))
+        .unwrap();
+        let readiness = config.provisioning_readiness();
+        assert!(readiness.network_ok);
+        assert_eq!(readiness.base_url, "http://localhost:9999/api");
+    }
+
+    #[test]
+    fn self_check_report_ok_has_status_ok() {
+        let report = SelfCheckReport::ok();
+        let v = serde_json::to_value(&report).unwrap();
+        assert_eq!(v["status"], "ok");
+    }
+
+    #[test]
+    fn self_check_report_degraded_has_reason() {
+        let report = SelfCheckReport::degraded("test_code", "test message");
+        let v = serde_json::to_value(&report).unwrap();
+        assert_eq!(v["status"], "degraded");
+        assert_eq!(v["reason_code"], "test_code");
+        assert_eq!(v["message"], "test message");
+    }
+
+    #[test]
+    fn self_check_report_failed_has_reason() {
+        let report = SelfCheckReport::failed("net_err", "network failed");
+        let v = serde_json::to_value(&report).unwrap();
+        assert_eq!(v["status"], "failed");
+        assert_eq!(v["reason_code"], "net_err");
+    }
+
+    #[test]
+    fn base_url_policy_accepts_https_localhost() {
+        let (ok, _) = base_url_policy("https://localhost:12315/api");
+        assert!(ok);
+    }
+
+    #[test]
+    fn provisioning_recipe_store_scope_correct() {
+        let recipe = provisioning_recipe();
+        let store_step = &recipe.steps[1];
+        if let ProvisioningStepType::StoreSecret { scope, key, .. } = &store_step.kind {
+            assert_eq!(scope, "connector:fcp.logseq");
+            assert_eq!(key, "access_token");
+        } else {
+            panic!("expected StoreSecret step type");
         }
     }
 }

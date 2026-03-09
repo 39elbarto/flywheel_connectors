@@ -5,8 +5,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use fcp_core::{
     AgentHint, BaseConnector, CapabilityId, ConnectorId, CredentialId, FcpError, FcpResult,
-    IdempotencyClass, OperationId, OperationInfo, RiskLevel, SafetyTier,
+    IdempotencyClass, OperationId, OperationInfo, ProvisioningRecipe, ProvisioningStep,
+    ProvisioningStepType, RecipeId, RiskLevel, SafetyTier, SelfCheckReport, StepId,
 };
+use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tracing::{info, instrument};
@@ -73,6 +75,35 @@ impl EvernoteConfig {
 
         Ok(Self { auth, base_url })
     }
+
+    fn provisioning_readiness(&self) -> ProvisioningReadiness {
+        let (network_ok, network_message) = base_url_policy(&self.base_url);
+
+        ProvisioningReadiness {
+            auth_mode: match &self.auth {
+                EvernoteAuth::BearerToken(_) => "bearer_token",
+                EvernoteAuth::CredentialId(_) => "credential_id",
+            },
+            token_configured: matches!(&self.auth, EvernoteAuth::BearerToken(_)),
+            credential_id_configured: self.auth.is_secretless(),
+            requires_credential_injection: self.auth.is_secretless(),
+            network_ok,
+            network_message,
+            base_url: self.base_url.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[allow(clippy::struct_excessive_bools)]
+struct ProvisioningReadiness {
+    auth_mode: &'static str,
+    token_configured: bool,
+    credential_id_configured: bool,
+    requires_credential_injection: bool,
+    network_ok: bool,
+    network_message: String,
+    base_url: String,
 }
 
 /// Doctor check result.
@@ -261,11 +292,43 @@ impl EvernoteConnector {
 
     /// Handle the `self_check` method.
     pub async fn handle_self_check(&self) -> FcpResult<serde_json::Value> {
-        Ok(json!({
-            "connector_id": "fcp.evernote",
-            "version": "0.1.0",
-            "status": if self.config.is_some() { "ready" } else { "unconfigured" },
-        }))
+        let Some(config) = &self.config else {
+            let report =
+                SelfCheckReport::degraded("not_configured", "Connector is not configured");
+            return Self::serialize_self_check_report(report);
+        };
+
+        let readiness = config.provisioning_readiness();
+        if !readiness.network_ok {
+            let mut report = SelfCheckReport::failed(
+                "network_constraints_invalid",
+                readiness.network_message.clone(),
+            );
+            report.details = Some(json!({ "provisioning": readiness }));
+            return Self::serialize_self_check_report(report);
+        }
+
+        let Some(_client) = &self.client else {
+            let mut report = SelfCheckReport::failed(
+                "client_missing",
+                "API client not initialized; re-run configure",
+            );
+            report.details = Some(json!({ "provisioning": readiness }));
+            return Self::serialize_self_check_report(report);
+        };
+
+        if readiness.requires_credential_injection {
+            let mut report = SelfCheckReport::degraded(
+                "credential_injection_required",
+                "credential_id mode requires egress proxy injection; skipping live probe",
+            );
+            report.details = Some(json!({ "provisioning": readiness }));
+            return Self::serialize_self_check_report(report);
+        }
+
+        let mut report = SelfCheckReport::ok();
+        report.details = Some(json!({ "provisioning": readiness }));
+        Self::serialize_self_check_report(report)
     }
 
     /// Handle the `introspect` method.
@@ -400,6 +463,91 @@ impl EvernoteConnector {
         client.delete_note(note_id).await?;
         Ok(json!({ "deleted": true }))
     }
+
+    fn serialize_self_check_report(report: SelfCheckReport) -> FcpResult<serde_json::Value> {
+        info!(
+            event = "evernote.provisioning.self_check",
+            status = ?report.status,
+            reason_code = ?report.reason_code,
+            "Evernote self-check completed"
+        );
+
+        serde_json::to_value(report).map_err(|e| FcpError::Internal {
+            message: format!("Failed to serialize self-check report: {e}"),
+        })
+    }
+}
+
+/// Build the provisioning recipe for the Evernote connector.
+pub fn provisioning_recipe() -> ProvisioningRecipe {
+    ProvisioningRecipe::new(
+        RecipeId::new("evernote.developer_token"),
+        "1",
+        "Provision Evernote connector with a developer token",
+    )
+    .with_step(ProvisioningStep::new(
+        StepId::new("open_dev_portal"),
+        ProvisioningStepType::OpenUrl {
+            url: "https://dev.evernote.com/doc/".into(),
+        },
+    ))
+    .with_step(
+        ProvisioningStep::new(
+            StepId::new("enter_token"),
+            ProvisioningStepType::PromptSecret {
+                message: "Paste your Evernote developer token".into(),
+            },
+        )
+        .depends_on(StepId::new("open_dev_portal")),
+    )
+    .with_step(
+        ProvisioningStep::new(
+            StepId::new("store_token"),
+            ProvisioningStepType::StoreSecret {
+                key: "access_token".into(),
+                value_from: StepId::new("enter_token"),
+                scope: "connector:fcp.evernote".into(),
+            },
+        )
+        .depends_on(StepId::new("enter_token")),
+    )
+}
+
+fn base_url_policy(base_url: &str) -> (bool, String) {
+    let parsed = match Url::parse(base_url) {
+        Ok(parsed) => parsed,
+        Err(error) => {
+            return (false, format!("base_url could not be parsed: {error}"));
+        }
+    };
+
+    let Some(host) = parsed.host_str() else {
+        return (false, "base_url must include a host".into());
+    };
+
+    let local = is_local_test_host(host);
+    let allowed_host = host.eq_ignore_ascii_case("api.evernote.com")
+        || host.eq_ignore_ascii_case("sandbox.evernote.com")
+        || local;
+    let secure_or_local = parsed.scheme() == "https" || local;
+
+    if allowed_host && secure_or_local {
+        (
+            true,
+            format!("Endpoint accepted by policy checks: {base_url}"),
+        )
+    } else {
+        (
+            false,
+            format!(
+                "Endpoint must use https and api.evernote.com or sandbox.evernote.com (localhost/127.0.0.1/::1 allowed for tests): {base_url}"
+            ),
+        )
+    }
+}
+
+fn is_local_test_host(host: &str) -> bool {
+    matches!(host, "localhost" | "127.0.0.1" | "::1")
 }
 
 /// Extract a required string field from input.
@@ -1125,5 +1273,189 @@ mod tests {
         assert!(dbg.contains("EvernoteConfig"), "got: {dbg}");
         let cloned = config.clone();
         assert_eq!(cloned.base_url, config.base_url);
+    }
+
+    // -- Provisioning readiness tests --
+
+    #[test]
+    fn provisioning_readiness_bearer_token() {
+        let config = EvernoteConfig::from_params(&json!({
+            "access_token": "tok",
+        }))
+        .unwrap();
+        let readiness = config.provisioning_readiness();
+        assert_eq!(readiness.auth_mode, "bearer_token");
+        assert!(readiness.token_configured);
+        assert!(!readiness.credential_id_configured);
+        assert!(!readiness.requires_credential_injection);
+        assert!(readiness.network_ok);
+    }
+
+    #[test]
+    fn provisioning_readiness_credential_id() {
+        let config = EvernoteConfig::from_params(&json!({
+            "credential_id": "550e8400-e29b-41d4-a716-446655440000",
+        }))
+        .unwrap();
+        let readiness = config.provisioning_readiness();
+        assert_eq!(readiness.auth_mode, "credential_id");
+        assert!(!readiness.token_configured);
+        assert!(readiness.credential_id_configured);
+        assert!(readiness.requires_credential_injection);
+    }
+
+    #[test]
+    fn provisioning_readiness_serializes() {
+        let config = EvernoteConfig::from_params(&json!({
+            "access_token": "tok",
+        }))
+        .unwrap();
+        let readiness = config.provisioning_readiness();
+        let v = serde_json::to_value(&readiness).unwrap();
+        assert_eq!(v["auth_mode"], "bearer_token");
+        assert_eq!(v["token_configured"], true);
+        assert_eq!(v["network_ok"], true);
+    }
+
+    #[test]
+    fn provisioning_readiness_custom_base_url_rejected() {
+        let config = EvernoteConfig::from_params(&json!({
+            "access_token": "tok",
+            "base_url": "https://evil.example.com",
+        }))
+        .unwrap();
+        let readiness = config.provisioning_readiness();
+        assert!(!readiness.network_ok);
+        assert!(readiness.network_message.contains("api.evernote.com"));
+    }
+
+    #[test]
+    fn provisioning_readiness_debug() {
+        let config = EvernoteConfig::from_params(&json!({
+            "access_token": "tok",
+        }))
+        .unwrap();
+        let readiness = config.provisioning_readiness();
+        let dbg = format!("{readiness:?}");
+        assert!(dbg.contains("ProvisioningReadiness"), "got: {dbg}");
+    }
+
+    // -- Provisioning recipe tests --
+
+    #[test]
+    fn provisioning_recipe_has_3_steps() {
+        let recipe = provisioning_recipe();
+        assert_eq!(recipe.id.as_str(), "evernote.developer_token");
+        assert_eq!(recipe.version, "1");
+        assert_eq!(recipe.steps.len(), 3);
+    }
+
+    #[test]
+    fn provisioning_recipe_step_order() {
+        let recipe = provisioning_recipe();
+        assert_eq!(recipe.steps[0].id.as_str(), "open_dev_portal");
+        assert_eq!(recipe.steps[1].id.as_str(), "enter_token");
+        assert_eq!(recipe.steps[2].id.as_str(), "store_token");
+    }
+
+    #[test]
+    fn provisioning_recipe_step_dependencies() {
+        let recipe = provisioning_recipe();
+        assert!(recipe.steps[0].depends_on.is_empty());
+        assert_eq!(recipe.steps[1].depends_on.len(), 1);
+        assert_eq!(recipe.steps[1].depends_on[0].as_str(), "open_dev_portal");
+        assert_eq!(recipe.steps[2].depends_on.len(), 1);
+        assert_eq!(recipe.steps[2].depends_on[0].as_str(), "enter_token");
+    }
+
+    #[test]
+    fn provisioning_recipe_serializes() {
+        let recipe = provisioning_recipe();
+        let v = serde_json::to_value(&recipe).unwrap();
+        assert_eq!(v["id"], "evernote.developer_token");
+        assert!(v["steps"].as_array().unwrap().len() == 3);
+    }
+
+    #[test]
+    fn provisioning_recipe_description() {
+        let recipe = provisioning_recipe();
+        assert!(recipe.description.contains("developer token"));
+    }
+
+    #[test]
+    fn provisioning_recipe_store_step_scope() {
+        let recipe = provisioning_recipe();
+        let store_step = &recipe.steps[2];
+        match &store_step.kind {
+            ProvisioningStepType::StoreSecret { scope, key, .. } => {
+                assert_eq!(scope, "connector:fcp.evernote");
+                assert_eq!(key, "access_token");
+            }
+            other => panic!("expected StoreSecret, got {other:?}"),
+        }
+    }
+
+    // -- Base URL policy tests --
+
+    #[test]
+    fn base_url_policy_accepts_api_evernote_https() {
+        let (ok, message) = base_url_policy("https://api.evernote.com/v1");
+        assert!(ok);
+        assert!(message.contains("accepted"));
+    }
+
+    #[test]
+    fn base_url_policy_accepts_sandbox_evernote_https() {
+        let (ok, message) = base_url_policy("https://sandbox.evernote.com/v1");
+        assert!(ok);
+        assert!(message.contains("accepted"));
+    }
+
+    #[test]
+    fn base_url_policy_accepts_localhost() {
+        let (ok, _) = base_url_policy("http://localhost:8080");
+        assert!(ok);
+    }
+
+    #[test]
+    fn base_url_policy_accepts_127_0_0_1() {
+        let (ok, _) = base_url_policy("http://127.0.0.1:9090");
+        assert!(ok);
+    }
+
+    #[test]
+    fn base_url_policy_rejects_http_non_local() {
+        let (ok, message) = base_url_policy("http://api.evernote.com/v1");
+        assert!(!ok);
+        assert!(message.contains("must use https"));
+    }
+
+    #[test]
+    fn base_url_policy_rejects_unknown_host() {
+        let (ok, message) = base_url_policy("https://evil.example.com");
+        assert!(!ok);
+        assert!(message.contains("api.evernote.com"));
+    }
+
+    #[test]
+    fn base_url_policy_rejects_invalid_url() {
+        let (ok, message) = base_url_policy("not a url");
+        assert!(!ok);
+        assert!(message.contains("could not be parsed"));
+    }
+
+    #[test]
+    fn base_url_policy_case_insensitive_host() {
+        let (ok, _) = base_url_policy("https://API.EVERNOTE.COM/v1");
+        assert!(ok);
+    }
+
+    #[test]
+    fn is_local_test_host_coverage() {
+        assert!(is_local_test_host("localhost"));
+        assert!(is_local_test_host("127.0.0.1"));
+        assert!(is_local_test_host("::1"));
+        assert!(!is_local_test_host("api.evernote.com"));
+        assert!(!is_local_test_host("example.com"));
     }
 }

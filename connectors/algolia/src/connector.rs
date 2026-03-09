@@ -5,14 +5,16 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use fcp_core::{
     AgentHint, BaseConnector, CapabilityId, ConnectorId, FcpError, FcpResult, IdempotencyClass,
-    Introspection, OperationId, OperationInfo, RiskLevel, SafetyTier,
+    Introspection, OperationId, OperationInfo, ProvisioningRecipe, ProvisioningStep,
+    ProvisioningStepType, RecipeId, RiskLevel, SafetyTier, SelfCheckReport, StepId,
 };
+use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tracing::{info, instrument};
 
 use crate::{
-    client::{AlgoliaAuth, AlgoliaClient},
+    client::{AlgoliaAuth, AlgoliaClient, DEFAULT_BASE_URL_TEMPLATE},
     error::AlgoliaError,
 };
 
@@ -60,6 +62,32 @@ impl AlgoliaConfig {
             base_url,
         })
     }
+
+    fn provisioning_readiness(&self) -> ProvisioningReadiness {
+        let effective_url = self
+            .base_url
+            .clone()
+            .unwrap_or_else(|| DEFAULT_BASE_URL_TEMPLATE.replace("{app_id}", &self.auth.application_id));
+        let (network_ok, network_message) = base_url_policy(&effective_url);
+
+        ProvisioningReadiness {
+            application_id_configured: true,
+            api_key_configured: true,
+            network_ok,
+            network_message,
+            base_url: effective_url,
+        }
+    }
+}
+
+/// Provisioning readiness summary for the Algolia connector.
+#[derive(Debug, Clone, Serialize)]
+struct ProvisioningReadiness {
+    application_id_configured: bool,
+    api_key_configured: bool,
+    network_ok: bool,
+    network_message: String,
+    base_url: String,
 }
 
 /// Doctor check result.
@@ -249,11 +277,47 @@ impl AlgoliaConnector {
 
     /// Handle the `self_check` method.
     pub async fn handle_self_check(&self) -> FcpResult<serde_json::Value> {
-        Ok(json!({
-            "connector_id": "fcp.algolia",
-            "version": "0.1.0",
-            "status": if self.config.is_some() { "ready" } else { "unconfigured" },
-        }))
+        let Some(config) = &self.config else {
+            let report =
+                SelfCheckReport::degraded("not_configured", "Connector is not configured");
+            return Self::serialize_self_check_report(report);
+        };
+
+        let readiness = config.provisioning_readiness();
+        if !readiness.network_ok {
+            let mut report = SelfCheckReport::failed(
+                "network_constraints_invalid",
+                readiness.network_message.clone(),
+            );
+            report.details = Some(json!({ "provisioning": readiness }));
+            return Self::serialize_self_check_report(report);
+        }
+
+        let Some(_client) = &self.client else {
+            let mut report = SelfCheckReport::failed(
+                "client_missing",
+                "API client not initialized; re-run configure",
+            );
+            report.details = Some(json!({ "provisioning": readiness }));
+            return Self::serialize_self_check_report(report);
+        };
+
+        let mut report = SelfCheckReport::ok();
+        report.details = Some(json!({ "provisioning": readiness }));
+        Self::serialize_self_check_report(report)
+    }
+
+    fn serialize_self_check_report(report: SelfCheckReport) -> FcpResult<serde_json::Value> {
+        info!(
+            event = "algolia.provisioning.self_check",
+            status = ?report.status,
+            reason_code = ?report.reason_code,
+            "Algolia self-check completed"
+        );
+
+        serde_json::to_value(report).map_err(|e| FcpError::Internal {
+            message: format!("Failed to serialize self-check report: {e}"),
+        })
     }
 
     /// Handle the `introspect` method.
@@ -558,6 +622,80 @@ fn operations_info() -> serde_json::Value {
             "idempotency": "strict",
         },
     ])
+}
+
+/// Build the provisioning recipe for the Algolia connector.
+pub fn provisioning_recipe() -> ProvisioningRecipe {
+    ProvisioningRecipe::new(
+        RecipeId::new("algolia.api_key"),
+        "1",
+        "Provision Algolia connector with Application ID and API Key",
+    )
+    .with_step(ProvisioningStep::new(
+        StepId::new("enter_application_id"),
+        ProvisioningStepType::PromptUser {
+            message: "Enter your Algolia Application ID".into(),
+        },
+    ))
+    .with_step(
+        ProvisioningStep::new(
+            StepId::new("enter_api_key"),
+            ProvisioningStepType::PromptSecret {
+                message: "Enter your Algolia API Key".into(),
+            },
+        )
+        .depends_on(StepId::new("enter_application_id")),
+    )
+    .with_step(
+        ProvisioningStep::new(
+            StepId::new("store_api_key"),
+            ProvisioningStepType::StoreSecret {
+                key: "api_key".into(),
+                value_from: StepId::new("enter_api_key"),
+                scope: "connector:fcp.algolia".into(),
+            },
+        )
+        .depends_on(StepId::new("enter_api_key")),
+    )
+}
+
+fn base_url_policy(base_url: &str) -> (bool, String) {
+    let parsed = match Url::parse(base_url) {
+        Ok(parsed) => parsed,
+        Err(error) => {
+            return (false, format!("base_url could not be parsed: {error}"));
+        }
+    };
+
+    let Some(host) = parsed.host_str() else {
+        return (false, "base_url must include a host".into());
+    };
+
+    let local = is_local_test_host(host);
+    let allowed_host = host.eq_ignore_ascii_case("algolia.net")
+        || host.ends_with(".algolia.net")
+        || host.eq_ignore_ascii_case("algolianet.com")
+        || host.ends_with(".algolianet.com")
+        || local;
+    let secure_or_local = parsed.scheme() == "https" || local;
+
+    if allowed_host && secure_or_local {
+        (
+            true,
+            format!("Endpoint accepted by policy checks: {base_url}"),
+        )
+    } else {
+        (
+            false,
+            format!(
+                "Endpoint must use https and *.algolia.net or *.algolianet.com (localhost/127.0.0.1/::1 allowed for tests): {base_url}"
+            ),
+        )
+    }
+}
+
+fn is_local_test_host(host: &str) -> bool {
+    matches!(host, "localhost" | "127.0.0.1" | "::1")
 }
 
 #[cfg(test)]
@@ -1121,5 +1259,184 @@ mod tests {
         assert_eq!(a, b);
         let c = DoctorStatus::Degraded;
         assert_ne!(a, c);
+    }
+
+    // -- Provisioning recipe tests -----------------------------------------------
+
+    #[test]
+    fn provisioning_recipe_has_3_steps() {
+        let recipe = provisioning_recipe();
+        assert_eq!(recipe.id.as_str(), "algolia.api_key");
+        assert_eq!(recipe.version, "1");
+        assert_eq!(recipe.steps.len(), 3);
+    }
+
+    #[test]
+    fn provisioning_recipe_step_order() {
+        let recipe = provisioning_recipe();
+        assert_eq!(recipe.steps[0].id.as_str(), "enter_application_id");
+        assert_eq!(recipe.steps[1].id.as_str(), "enter_api_key");
+        assert_eq!(recipe.steps[2].id.as_str(), "store_api_key");
+    }
+
+    #[test]
+    fn provisioning_recipe_step_dependencies() {
+        let recipe = provisioning_recipe();
+        assert!(recipe.steps[0].depends_on.is_empty());
+        assert_eq!(recipe.steps[1].depends_on.len(), 1);
+        assert_eq!(
+            recipe.steps[1].depends_on[0].as_str(),
+            "enter_application_id"
+        );
+        assert_eq!(recipe.steps[2].depends_on.len(), 1);
+        assert_eq!(recipe.steps[2].depends_on[0].as_str(), "enter_api_key");
+    }
+
+    #[test]
+    fn provisioning_recipe_serializes() {
+        let recipe = provisioning_recipe();
+        let v = serde_json::to_value(&recipe).unwrap();
+        assert_eq!(v["id"], "algolia.api_key");
+        assert!(v["steps"].as_array().unwrap().len() == 3);
+    }
+
+    #[test]
+    fn provisioning_recipe_first_step_is_prompt_user() {
+        let recipe = provisioning_recipe();
+        let v = serde_json::to_value(recipe.steps[0].kind.clone()).unwrap();
+        assert_eq!(v["type"], "prompt_user");
+    }
+
+    #[test]
+    fn provisioning_recipe_second_step_is_prompt_secret() {
+        let recipe = provisioning_recipe();
+        let v = serde_json::to_value(recipe.steps[1].kind.clone()).unwrap();
+        assert_eq!(v["type"], "prompt_secret");
+    }
+
+    #[test]
+    fn provisioning_recipe_third_step_is_store_secret() {
+        let recipe = provisioning_recipe();
+        let v = serde_json::to_value(recipe.steps[2].kind.clone()).unwrap();
+        assert_eq!(v["type"], "store_secret");
+        assert_eq!(v["key"], "api_key");
+        assert_eq!(v["scope"], "connector:fcp.algolia");
+    }
+
+    #[test]
+    fn provisioning_recipe_description_non_empty() {
+        let recipe = provisioning_recipe();
+        assert!(!recipe.description.is_empty());
+    }
+
+    // -- base_url_policy tests ---------------------------------------------------
+
+    #[test]
+    fn base_url_policy_accepts_algolia_net_https() {
+        let (ok, message) = base_url_policy("https://TESTAPP.algolia.net/1");
+        assert!(ok);
+        assert!(message.contains("accepted"));
+    }
+
+    #[test]
+    fn base_url_policy_accepts_algolianet_com_https() {
+        let (ok, message) = base_url_policy("https://TESTAPP-dsn.algolianet.com/1");
+        assert!(ok);
+        assert!(message.contains("accepted"));
+    }
+
+    #[test]
+    fn base_url_policy_accepts_localhost() {
+        let (ok, _) = base_url_policy("http://localhost:8080");
+        assert!(ok);
+    }
+
+    #[test]
+    fn base_url_policy_accepts_127_0_0_1() {
+        let (ok, _) = base_url_policy("http://127.0.0.1:9090");
+        assert!(ok);
+    }
+
+    #[test]
+    fn base_url_policy_rejects_http_non_local() {
+        let (ok, message) = base_url_policy("http://TESTAPP.algolia.net/1");
+        assert!(!ok);
+        assert!(message.contains("must use https"));
+    }
+
+    #[test]
+    fn base_url_policy_rejects_unknown_host() {
+        let (ok, message) = base_url_policy("https://evil.example.com");
+        assert!(!ok);
+        assert!(message.contains("algolia.net"));
+    }
+
+    #[test]
+    fn base_url_policy_rejects_invalid_url() {
+        let (ok, message) = base_url_policy("not a url");
+        assert!(!ok);
+        assert!(message.contains("could not be parsed"));
+    }
+
+    #[test]
+    fn base_url_policy_rejects_no_host() {
+        let (ok, message) = base_url_policy("file:///etc/passwd");
+        assert!(!ok);
+        assert!(message.contains("must include a host"));
+    }
+
+    // -- ProvisioningReadiness tests ---------------------------------------------
+
+    #[test]
+    fn provisioning_readiness_default_url() {
+        let config = AlgoliaConfig::from_params(&json!({
+            "application_id": "MYAPP",
+            "api_key": "secret",
+        }))
+        .unwrap();
+        let readiness = config.provisioning_readiness();
+        assert!(readiness.application_id_configured);
+        assert!(readiness.api_key_configured);
+        assert!(readiness.network_ok);
+        assert!(readiness.base_url.contains("MYAPP"));
+    }
+
+    #[test]
+    fn provisioning_readiness_custom_base_url_rejected() {
+        let config = AlgoliaConfig::from_params(&json!({
+            "application_id": "APP",
+            "api_key": "KEY",
+            "base_url": "https://evil.example.com",
+        }))
+        .unwrap();
+        let readiness = config.provisioning_readiness();
+        assert!(!readiness.network_ok);
+        assert!(readiness.network_message.contains("algolia.net"));
+    }
+
+    #[test]
+    fn provisioning_readiness_serializes() {
+        let config = AlgoliaConfig::from_params(&json!({
+            "application_id": "APP",
+            "api_key": "KEY",
+        }))
+        .unwrap();
+        let readiness = config.provisioning_readiness();
+        let v = serde_json::to_value(&readiness).unwrap();
+        assert_eq!(v["application_id_configured"], true);
+        assert_eq!(v["api_key_configured"], true);
+        assert!(v["network_ok"].as_bool().unwrap());
+    }
+
+    #[test]
+    fn provisioning_readiness_localhost_ok() {
+        let config = AlgoliaConfig::from_params(&json!({
+            "application_id": "APP",
+            "api_key": "KEY",
+            "base_url": "http://localhost:9200",
+        }))
+        .unwrap();
+        let readiness = config.provisioning_readiness();
+        assert!(readiness.network_ok);
     }
 }

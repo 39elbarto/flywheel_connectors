@@ -5,8 +5,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use fcp_core::{
     AgentHint, BaseConnector, CapabilityId, ConnectorId, CredentialId, FcpError, FcpResult,
-    IdempotencyClass, OperationId, OperationInfo, RiskLevel, SafetyTier,
+    IdempotencyClass, OperationId, OperationInfo, ProvisioningRecipe, ProvisioningStep,
+    ProvisioningStepType, RecipeId, RiskLevel, SafetyTier, SelfCheckReport, StepId,
 };
+use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tracing::{info, instrument};
@@ -89,6 +91,35 @@ impl RoamConfig {
             graph_name,
         })
     }
+
+    fn provisioning_readiness(&self) -> ProvisioningReadiness {
+        let (network_ok, network_message) = base_url_policy(&self.base_url);
+
+        ProvisioningReadiness {
+            auth_mode: match &self.auth {
+                RoamAuth::BearerToken(_) => "bearer_token",
+                RoamAuth::CredentialId(_) => "credential_id",
+            },
+            token_configured: matches!(&self.auth, RoamAuth::BearerToken(_)),
+            credential_id_configured: self.auth.is_secretless(),
+            requires_credential_injection: self.auth.is_secretless(),
+            network_ok,
+            network_message,
+            base_url: self.base_url.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[allow(clippy::struct_excessive_bools)]
+struct ProvisioningReadiness {
+    auth_mode: &'static str,
+    token_configured: bool,
+    credential_id_configured: bool,
+    requires_credential_injection: bool,
+    network_ok: bool,
+    network_message: String,
+    base_url: String,
 }
 
 /// Doctor check result.
@@ -286,11 +317,43 @@ impl RoamConnector {
 
     /// Handle the `self_check` method.
     pub async fn handle_self_check(&self) -> FcpResult<serde_json::Value> {
-        Ok(json!({
-            "connector_id": "fcp.roam",
-            "version": "0.1.0",
-            "status": if self.config.is_some() { "ready" } else { "unconfigured" },
-        }))
+        let Some(config) = &self.config else {
+            let report =
+                SelfCheckReport::degraded("not_configured", "Connector is not configured");
+            return Self::serialize_self_check_report(report);
+        };
+
+        let readiness = config.provisioning_readiness();
+        if !readiness.network_ok {
+            let mut report = SelfCheckReport::failed(
+                "network_constraints_invalid",
+                readiness.network_message.clone(),
+            );
+            report.details = Some(json!({ "provisioning": readiness }));
+            return Self::serialize_self_check_report(report);
+        }
+
+        let Some(_client) = &self.client else {
+            let mut report = SelfCheckReport::failed(
+                "client_missing",
+                "API client not initialized; re-run configure",
+            );
+            report.details = Some(json!({ "provisioning": readiness }));
+            return Self::serialize_self_check_report(report);
+        };
+
+        if readiness.requires_credential_injection {
+            let mut report = SelfCheckReport::degraded(
+                "credential_injection_required",
+                "credential_id mode requires egress proxy injection; skipping live probe",
+            );
+            report.details = Some(json!({ "provisioning": readiness }));
+            return Self::serialize_self_check_report(report);
+        }
+
+        let mut report = SelfCheckReport::ok();
+        report.details = Some(json!({ "provisioning": readiness }));
+        Self::serialize_self_check_report(report)
     }
 
     /// Handle the `introspect` method.
@@ -411,6 +474,19 @@ impl RoamConnector {
         let data = client.create_block(page_uid, content).await?;
         Ok(data)
     }
+
+    fn serialize_self_check_report(report: SelfCheckReport) -> FcpResult<serde_json::Value> {
+        info!(
+            event = "roam.provisioning.self_check",
+            status = ?report.status,
+            reason_code = ?report.reason_code,
+            "Roam Research self-check completed"
+        );
+
+        serde_json::to_value(report).map_err(|e| FcpError::Internal {
+            message: format!("Failed to serialize self-check report: {e}"),
+        })
+    }
 }
 
 /// Extract a required string field from input.
@@ -422,6 +498,76 @@ fn require_str<'a>(input: &'a serde_json::Value, field: &str) -> Result<&'a str,
             status_code: 400,
             message: format!("Missing required field: {field}"),
         })
+}
+
+/// Build the provisioning recipe for the Roam Research connector.
+pub fn provisioning_recipe() -> ProvisioningRecipe {
+    ProvisioningRecipe::new(
+        RecipeId::new("roam.api_token"),
+        "1",
+        "Provision Roam Research connector with an API token",
+    )
+    .with_step(ProvisioningStep::new(
+        StepId::new("open_settings"),
+        ProvisioningStepType::OpenUrl {
+            url: "https://roamresearch.com/#/app/developer".into(),
+        },
+    ))
+    .with_step(
+        ProvisioningStep::new(
+            StepId::new("enter_token"),
+            ProvisioningStepType::PromptSecret {
+                message: "Paste your Roam Research API token".into(),
+            },
+        )
+        .depends_on(StepId::new("open_settings")),
+    )
+    .with_step(
+        ProvisioningStep::new(
+            StepId::new("store_token"),
+            ProvisioningStepType::StoreSecret {
+                key: "access_token".into(),
+                value_from: StepId::new("enter_token"),
+                scope: "connector:fcp.roam".into(),
+            },
+        )
+        .depends_on(StepId::new("enter_token")),
+    )
+}
+
+fn base_url_policy(base_url: &str) -> (bool, String) {
+    let parsed = match Url::parse(base_url) {
+        Ok(parsed) => parsed,
+        Err(error) => {
+            return (false, format!("base_url could not be parsed: {error}"));
+        }
+    };
+
+    let Some(host) = parsed.host_str() else {
+        return (false, "base_url must include a host".into());
+    };
+
+    let local = is_local_test_host(host);
+    let allowed_host = host.eq_ignore_ascii_case("api.roamresearch.com") || local;
+    let secure_or_local = parsed.scheme() == "https" || local;
+
+    if allowed_host && secure_or_local {
+        (
+            true,
+            format!("Endpoint accepted by policy checks: {base_url}"),
+        )
+    } else {
+        (
+            false,
+            format!(
+                "Endpoint must use https and api.roamresearch.com (localhost/127.0.0.1/::1 allowed for tests): {base_url}"
+            ),
+        )
+    }
+}
+
+fn is_local_test_host(host: &str) -> bool {
+    matches!(host, "localhost" | "127.0.0.1" | "::1")
 }
 
 /// Build typed operations info for introspection.
@@ -1092,5 +1238,191 @@ mod tests {
         let r = DoctorResult::from_checks(checks);
         assert_eq!(r.checks.len(), 3);
         assert_eq!(r.status, DoctorStatus::Degraded);
+    }
+
+    // ── Provisioning tests ────────────────────────────────────────
+
+    #[test]
+    fn provisioning_readiness_bearer_token_mode() {
+        let config = RoamConfig::from_params(&json!({
+            "access_token": "test-token",
+        }))
+        .unwrap();
+        let readiness = config.provisioning_readiness();
+        assert_eq!(readiness.auth_mode, "bearer_token");
+        assert!(readiness.token_configured);
+        assert!(!readiness.credential_id_configured);
+        assert!(!readiness.requires_credential_injection);
+        assert!(readiness.network_ok);
+        assert_eq!(readiness.base_url, DEFAULT_BASE_URL);
+    }
+
+    #[test]
+    fn provisioning_readiness_credential_id_mode() {
+        let config = RoamConfig::from_params(&json!({
+            "credential_id": "550e8400-e29b-41d4-a716-446655440000",
+        }))
+        .unwrap();
+        let readiness = config.provisioning_readiness();
+        assert_eq!(readiness.auth_mode, "credential_id");
+        assert!(!readiness.token_configured);
+        assert!(readiness.credential_id_configured);
+        assert!(readiness.requires_credential_injection);
+        assert!(readiness.network_ok);
+    }
+
+    #[test]
+    fn provisioning_readiness_serializes() {
+        let config = RoamConfig::from_params(&json!({
+            "access_token": "tok",
+        }))
+        .unwrap();
+        let readiness = config.provisioning_readiness();
+        let v = serde_json::to_value(&readiness).unwrap();
+        assert_eq!(v["auth_mode"], "bearer_token");
+        assert_eq!(v["token_configured"], true);
+        assert_eq!(v["network_ok"], true);
+    }
+
+    #[test]
+    fn provisioning_readiness_custom_base_url_rejected() {
+        let config = RoamConfig::from_params(&json!({
+            "access_token": "tok",
+            "base_url": "https://evil.example.com",
+        }))
+        .unwrap();
+        let readiness = config.provisioning_readiness();
+        assert!(!readiness.network_ok);
+        assert!(readiness.network_message.contains("api.roamresearch.com"));
+    }
+
+    #[test]
+    fn provisioning_recipe_has_3_steps() {
+        let recipe = provisioning_recipe();
+        assert_eq!(recipe.id.as_str(), "roam.api_token");
+        assert_eq!(recipe.version, "1");
+        assert_eq!(recipe.steps.len(), 3);
+    }
+
+    #[test]
+    fn provisioning_recipe_step_order() {
+        let recipe = provisioning_recipe();
+        assert_eq!(recipe.steps[0].id.as_str(), "open_settings");
+        assert_eq!(recipe.steps[1].id.as_str(), "enter_token");
+        assert_eq!(recipe.steps[2].id.as_str(), "store_token");
+    }
+
+    #[test]
+    fn provisioning_recipe_step_dependencies() {
+        let recipe = provisioning_recipe();
+        assert!(recipe.steps[0].depends_on.is_empty());
+        assert_eq!(recipe.steps[1].depends_on.len(), 1);
+        assert_eq!(recipe.steps[1].depends_on[0].as_str(), "open_settings");
+        assert_eq!(recipe.steps[2].depends_on.len(), 1);
+        assert_eq!(recipe.steps[2].depends_on[0].as_str(), "enter_token");
+    }
+
+    #[test]
+    fn provisioning_recipe_serializes() {
+        let recipe = provisioning_recipe();
+        let v = serde_json::to_value(&recipe).unwrap();
+        assert_eq!(v["id"], "roam.api_token");
+        assert!(v["steps"].as_array().unwrap().len() == 3);
+    }
+
+    #[test]
+    fn provisioning_recipe_description() {
+        let recipe = provisioning_recipe();
+        assert!(recipe.description.contains("Roam Research"));
+        assert!(recipe.description.contains("API token"));
+    }
+
+    #[test]
+    fn provisioning_recipe_first_step_is_open_url() {
+        let recipe = provisioning_recipe();
+        assert!(matches!(
+            &recipe.steps[0].kind,
+            ProvisioningStepType::OpenUrl { url } if url.contains("roamresearch.com")
+        ));
+    }
+
+    #[test]
+    fn provisioning_recipe_second_step_is_prompt_secret() {
+        let recipe = provisioning_recipe();
+        assert!(matches!(
+            &recipe.steps[1].kind,
+            ProvisioningStepType::PromptSecret { message } if message.contains("API token")
+        ));
+    }
+
+    #[test]
+    fn provisioning_recipe_third_step_is_store_secret() {
+        let recipe = provisioning_recipe();
+        assert!(matches!(
+            &recipe.steps[2].kind,
+            ProvisioningStepType::StoreSecret { key, scope, .. }
+                if key == "access_token" && scope.contains("roam")
+        ));
+    }
+
+    #[test]
+    fn base_url_policy_accepts_roam_https() {
+        let (ok, message) = base_url_policy("https://api.roamresearch.com/api/graph");
+        assert!(ok);
+        assert!(message.contains("accepted"));
+    }
+
+    #[test]
+    fn base_url_policy_accepts_localhost() {
+        let (ok, _) = base_url_policy("http://localhost:8080");
+        assert!(ok);
+    }
+
+    #[test]
+    fn base_url_policy_accepts_127_0_0_1() {
+        let (ok, _) = base_url_policy("http://127.0.0.1:9090");
+        assert!(ok);
+    }
+
+    #[test]
+    fn base_url_policy_rejects_http_non_local() {
+        let (ok, message) = base_url_policy("http://api.roamresearch.com/api/graph");
+        assert!(!ok);
+        assert!(message.contains("must use https"));
+    }
+
+    #[test]
+    fn base_url_policy_rejects_unknown_host() {
+        let (ok, message) = base_url_policy("https://evil.example.com");
+        assert!(!ok);
+        assert!(message.contains("api.roamresearch.com"));
+    }
+
+    #[test]
+    fn base_url_policy_rejects_invalid_url() {
+        let (ok, message) = base_url_policy("not a url");
+        assert!(!ok);
+        assert!(message.contains("could not be parsed"));
+    }
+
+    #[test]
+    fn is_local_test_host_valid_values() {
+        assert!(is_local_test_host("localhost"));
+        assert!(is_local_test_host("127.0.0.1"));
+        assert!(is_local_test_host("::1"));
+        assert!(!is_local_test_host("example.com"));
+        assert!(!is_local_test_host("api.roamresearch.com"));
+    }
+
+    #[test]
+    fn provisioning_readiness_localhost_base_url() {
+        let config = RoamConfig::from_params(&json!({
+            "access_token": "tok",
+            "base_url": "http://localhost:8080",
+        }))
+        .unwrap();
+        let readiness = config.provisioning_readiness();
+        assert!(readiness.network_ok);
+        assert!(readiness.network_message.contains("accepted"));
     }
 }

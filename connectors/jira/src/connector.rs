@@ -15,10 +15,12 @@ use tracing::{info, instrument};
 
 use crate::client::{JiraAuth, JiraClient};
 use crate::error::JiraError;
+use crate::types::JiraDeployment;
 
 /// Parsed configuration for the Jira connector.
 struct JiraConfig {
     auth: JiraAuth,
+    deployment: JiraDeployment,
     base_url: Option<String>,
     agile_url: Option<String>,
     automation_url: Option<String>,
@@ -41,6 +43,17 @@ impl JiraConfig {
         let base_url = params.get("base_url").and_then(|v| v.as_str());
         let agile_url = params.get("agile_url").and_then(|v| v.as_str());
         let automation_url = params.get("automation_url").and_then(|v| v.as_str());
+        let deployment_str = params
+            .get("deployment")
+            .and_then(|v| v.as_str())
+            .unwrap_or("cloud");
+        let deployment: JiraDeployment =
+            deployment_str
+                .parse()
+                .map_err(|e: String| FcpError::InvalidRequest {
+                    code: 1003,
+                    message: e,
+                })?;
 
         let auth = match (email, api_token, credential_id) {
             (Some(_), Some(_), Some(_)) => {
@@ -92,6 +105,7 @@ impl JiraConfig {
 
         Ok(Self {
             auth,
+            deployment,
             base_url: base_url.map(String::from),
             agile_url: agile_url.map(String::from),
             automation_url: automation_url.map(String::from),
@@ -151,9 +165,10 @@ impl JiraConnector {
         let cfg = JiraConfig::from_params(&params)?;
 
         let mut client =
-            JiraClient::new_with_auth(cfg.auth.clone()).map_err(|e| FcpError::Internal {
-                message: format!("Failed to create HTTP client: {e}"),
-            })?;
+            JiraClient::new_with_auth_and_deployment(cfg.auth.clone(), cfg.deployment)
+                .map_err(|e| FcpError::Internal {
+                    message: format!("Failed to create HTTP client: {e}"),
+                })?;
 
         if let Some(url) = &cfg.base_url {
             client = client.with_base_url(url);
@@ -1229,6 +1244,37 @@ impl JiraConnector {
                         ],
                     },
                 ),
+                // ── Server Info / Deployment ──────────────────────────────
+                op_info(
+                    "jira.server.info",
+                    "Get Jira server information and detect deployment type",
+                    json!({
+                        "type": "object",
+                        "properties": {}
+                    }),
+                    json!({
+                        "type": "object",
+                        "properties": {
+                            "base_url": { "type": "string" },
+                            "version": { "type": "string" },
+                            "deployment_type": { "type": "string" },
+                            "build_number": { "type": "integer" },
+                            "server_title": { "type": "string" }
+                        }
+                    }),
+                    "jira.read",
+                    RiskLevel::Low,
+                    SafetyTier::Safe,
+                    IdempotencyClass::Strict,
+                    AgentHint {
+                        when_to_use: "Retrieve Jira server information including version and deployment type (Cloud vs Server/DC).".into(),
+                        common_mistakes: vec![],
+                        examples: vec![r"{}".into()],
+                        related: vec![
+                            CapabilityId::from_static("jira.get_issue"),
+                        ],
+                    },
+                ),
             ],
             events: vec![],
             resource_types: vec![],
@@ -1332,6 +1378,7 @@ impl JiraConnector {
             "jira.automation.rule.enable" => self.invoke_enable_automation_rule(input).await,
             "jira.automation.rule.disable" => self.invoke_disable_automation_rule(input).await,
             "jira.automation.rule.delete" => self.invoke_delete_automation_rule(input).await,
+            "jira.server.info" => self.invoke_server_info().await,
             _ => Err(FcpError::OperationNotGranted {
                 operation: operation.into(),
             }),
@@ -1873,6 +1920,18 @@ impl JiraConnector {
         Ok(json!({ "deleted": true }))
     }
 
+    async fn invoke_server_info(&self) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+
+        let info = client
+            .server_info()
+            .await
+            .map_err(|e: JiraError| e.to_fcp_error())?;
+        serde_json::to_value(info).map_err(|e| FcpError::Internal {
+            message: format!("Serialization error: {e}"),
+        })
+    }
+
     /// Handle shutdown.
     pub async fn handle_shutdown(
         &self,
@@ -2074,7 +2133,8 @@ mod tests {
         assert!(op_ids.contains(&"jira.automation.rule.enable"));
         assert!(op_ids.contains(&"jira.automation.rule.disable"));
         assert!(op_ids.contains(&"jira.automation.rule.delete"));
-        assert_eq!(ops.len(), 23);
+        assert!(op_ids.contains(&"jira.server.info"));
+        assert_eq!(ops.len(), 24);
     }
 
     #[test]
@@ -2393,5 +2453,124 @@ mod tests {
         assert!(c.config.is_none());
         assert!(c.client.is_none());
         assert!(c.session_id.is_none());
+    }
+
+    // ════════════════════════════════════════════════════════════════
+    // Deployment configuration
+    // ════════════════════════════════════════════════════════════════
+
+    #[fcp_async_core::runtime::test]
+    async fn test_configure_default_deployment_is_cloud() {
+        let mut connector = JiraConnector::new();
+        connector
+            .handle_configure(json!({
+                "domain": "mycompany",
+                "email": "user@example.com",
+                "api_token": "secret-token"
+            }))
+            .await
+            .unwrap();
+        assert!(connector.config.is_some());
+        let cfg = connector.config.as_ref().unwrap();
+        assert_eq!(cfg.deployment, JiraDeployment::Cloud);
+        let client = connector.client.as_ref().unwrap();
+        assert_eq!(client.deployment(), JiraDeployment::Cloud);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_configure_cloud_explicit() {
+        let mut connector = JiraConnector::new();
+        connector
+            .handle_configure(json!({
+                "domain": "mycompany",
+                "email": "user@example.com",
+                "api_token": "secret-token",
+                "deployment": "cloud"
+            }))
+            .await
+            .unwrap();
+        let cfg = connector.config.as_ref().unwrap();
+        assert_eq!(cfg.deployment, JiraDeployment::Cloud);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_configure_server_dc() {
+        let mut connector = JiraConnector::new();
+        connector
+            .handle_configure(json!({
+                "domain": "mycompany",
+                "email": "admin",
+                "api_token": "password",
+                "deployment": "server_dc"
+            }))
+            .await
+            .unwrap();
+        let cfg = connector.config.as_ref().unwrap();
+        assert_eq!(cfg.deployment, JiraDeployment::ServerDc);
+        let client = connector.client.as_ref().unwrap();
+        assert_eq!(client.deployment(), JiraDeployment::ServerDc);
+        assert_eq!(client.api_path(), "/rest/api/2");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_configure_server_shorthand() {
+        let mut connector = JiraConnector::new();
+        connector
+            .handle_configure(json!({
+                "domain": "mycompany",
+                "email": "admin",
+                "api_token": "password",
+                "deployment": "server"
+            }))
+            .await
+            .unwrap();
+        let cfg = connector.config.as_ref().unwrap();
+        assert_eq!(cfg.deployment, JiraDeployment::ServerDc);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_configure_dc_shorthand() {
+        let mut connector = JiraConnector::new();
+        connector
+            .handle_configure(json!({
+                "domain": "mycompany",
+                "email": "admin",
+                "api_token": "password",
+                "deployment": "dc"
+            }))
+            .await
+            .unwrap();
+        let cfg = connector.config.as_ref().unwrap();
+        assert_eq!(cfg.deployment, JiraDeployment::ServerDc);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_configure_invalid_deployment() {
+        let mut connector = JiraConnector::new();
+        let result = connector
+            .handle_configure(json!({
+                "domain": "mycompany",
+                "email": "admin",
+                "api_token": "password",
+                "deployment": "invalid_type"
+            }))
+            .await;
+        assert!(result.is_err());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_introspect_has_server_info_op() {
+        let connector = JiraConnector::new();
+        let result = connector.handle_introspect().await.unwrap();
+        let ops = result["operations"].as_array().unwrap();
+
+        // Find the server.info op and verify its properties
+        let server_info_op = ops
+            .iter()
+            .find(|o| o["id"].as_str() == Some("jira.server.info"))
+            .expect("jira.server.info operation should be present");
+        assert_eq!(server_info_op["capability"], "jira.read");
+        assert_eq!(server_info_op["risk_level"], "low");
+        assert_eq!(server_info_op["safety_tier"], "safe");
     }
 }

@@ -5,7 +5,7 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:0bf7c1dfaea3fb6368e0c36f358da4d5ec94d0e908d762436bd948ba55927404"
+interface_hash = "blake3-256:fcp.interface.v2:e0e333821303fb122f4d22c50a6ab8db87d13e81bf73f6e0bc58a78d3c56669e"
 
 [connector]
 id = "fcp.jira"
@@ -1736,6 +1736,74 @@ examples = ['{"rule_id": "42"}']
 related = ["jira.automation.rule.list", "jira.automation.rule.disable"]
 
 # ---------------------------------------------------------------------------
+# Operations: Server Info / Deployment Detection
+# ---------------------------------------------------------------------------
+
+[provides.operations."jira.server.info"]
+description = "Get Jira server information and detect deployment type (Cloud vs Server/DC)"
+capability = "jira.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."jira.server.info".rate_limit]
+max = 100
+per_ms = 60000
+
+[provides.operations."jira.server.info".input_schema]
+required = []
+type = "object"
+
+[provides.operations."jira.server.info".output_schema]
+required = ["deployment_type"]
+type = "object"
+
+[provides.operations."jira.server.info".output_schema.properties.base_url]
+description = "Base URL of the Jira instance"
+type = "string"
+
+[provides.operations."jira.server.info".output_schema.properties.version]
+description = "Jira version string"
+type = "string"
+
+[provides.operations."jira.server.info".output_schema.properties.deployment_type]
+description = "Deployment type: Cloud or Server"
+type = "string"
+
+[provides.operations."jira.server.info".output_schema.properties.build_number]
+description = "Build number of the Jira instance"
+type = "integer"
+
+[provides.operations."jira.server.info".output_schema.properties.server_title]
+description = "Server title"
+type = "string"
+
+[provides.operations."jira.server.info".network_constraints]
+host_allow = ["*.atlassian.net"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 60000
+max_response_bytes = 10485760
+
+[provides.operations."jira.server.info".ai_hints]
+when_to_use = "Retrieve Jira server information including version and deployment type (Cloud vs Server/DC)."
+common_mistakes = []
+examples = ['{}']
+related = ["jira.get_issue"]
+
+# ---------------------------------------------------------------------------
 # Streaming / Event Capabilities
 # ---------------------------------------------------------------------------
 
@@ -1821,3 +1889,4 @@ scope = "instance"
 "jira.automation.rule.enable" = ["jira.write"]
 "jira.automation.rule.disable" = ["jira.write"]
 "jira.automation.rule.delete" = ["jira.delete"]
+"jira.server.info" = ["jira.read"]

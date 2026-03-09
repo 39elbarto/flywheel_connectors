@@ -13,8 +13,8 @@ use crate::{
     error::{JiraError, JiraResult},
     types::{
         ApiErrorResponse, AutomationRuleListResponse, CommentListResponse, CreateIssueResponse,
-        JiraAttachment, JiraAutomationRule, JiraComment, JiraIssue, JiraWorklog, SearchResult,
-        SprintListResponse, TransitionsResponse, WorklogListResponse,
+        JiraAttachment, JiraAutomationRule, JiraComment, JiraDeployment, JiraIssue, JiraServerInfo,
+        JiraWorklog, SearchResult, SprintListResponse, TransitionsResponse, WorklogListResponse,
     },
 };
 
@@ -93,6 +93,7 @@ pub const DEFAULT_AUTOMATION_BASE: &str = "https://{domain}.atlassian.net/rest/c
 pub struct JiraClient {
     client: Client,
     auth: JiraAuth,
+    deployment: JiraDeployment,
     base_url: String,
     agile_url: String,
     automation_url: String,
@@ -106,6 +107,7 @@ impl std::fmt::Debug for JiraClient {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("JiraClient")
             .field("auth", &self.auth)
+            .field("deployment", &self.deployment)
             .field("base_url", &self.base_url)
             .field("agile_url", &self.agile_url)
             .field("automation_url", &self.automation_url)
@@ -124,8 +126,16 @@ impl JiraClient {
         })
     }
 
-    /// Create a new Jira client with the given auth mode.
+    /// Create a new Jira client with the given auth mode (defaults to Cloud deployment).
     pub fn new_with_auth(auth: JiraAuth) -> JiraResult<Self> {
+        Self::new_with_auth_and_deployment(auth, JiraDeployment::Cloud)
+    }
+
+    /// Create a new Jira client with the given auth mode and deployment type.
+    pub fn new_with_auth_and_deployment(
+        auth: JiraAuth,
+        deployment: JiraDeployment,
+    ) -> JiraResult<Self> {
         let mut headers = reqwest::header::HeaderMap::new();
 
         match &auth {
@@ -154,7 +164,8 @@ impl JiraClient {
         headers.insert(reqwest::header::ACCEPT, "application/json".parse().unwrap());
 
         let domain = auth.domain();
-        let base_url = format!("https://{domain}.atlassian.net/rest/api/3");
+        let api_version = deployment.api_version();
+        let base_url = format!("https://{domain}.atlassian.net/rest/api/{api_version}");
         let agile_url = format!("https://{domain}.atlassian.net/rest/agile/1.0");
         let automation_url =
             format!("https://{domain}.atlassian.net/rest/cb-automation/latest");
@@ -169,6 +180,7 @@ impl JiraClient {
         Ok(Self {
             client,
             auth,
+            deployment,
             base_url,
             agile_url,
             automation_url,
@@ -204,6 +216,61 @@ impl JiraClient {
     pub fn with_automation_url(mut self, url: &str) -> Self {
         self.automation_url = url.to_string();
         self
+    }
+
+    /// Set the deployment type, adjusting the base URL API version accordingly.
+    #[must_use]
+    pub fn with_deployment(mut self, deployment: JiraDeployment) -> Self {
+        self.deployment = deployment;
+        // Rewrite the base_url to use the correct API version if it still uses
+        // the default atlassian.net pattern.
+        let old_versions = ["3", "2"];
+        for old_ver in &old_versions {
+            let old_segment = format!("/rest/api/{old_ver}");
+            if self.base_url.contains(&old_segment) {
+                let new_segment = format!("/rest/api/{}", deployment.api_version());
+                self.base_url = self.base_url.replace(&old_segment, &new_segment);
+                break;
+            }
+        }
+        self
+    }
+
+    /// Return the REST API path prefix for the current deployment.
+    ///
+    /// Cloud uses `/rest/api/3`, Server/DC uses `/rest/api/2`.
+    #[must_use]
+    pub fn api_path(&self) -> String {
+        format!("/rest/api/{}", self.deployment.api_version())
+    }
+
+    /// Return the current deployment type.
+    #[must_use]
+    pub const fn deployment(&self) -> JiraDeployment {
+        self.deployment
+    }
+
+    /// Fetch server information from the Jira instance.
+    ///
+    /// This always uses the `/rest/api/2/serverInfo` endpoint, which is
+    /// available on both Cloud and Server/DC.
+    pub async fn server_info(&self) -> JiraResult<JiraServerInfo> {
+        // serverInfo is available at /rest/api/2 on all deployments
+        let host = self.base_url.split("/rest/").next().unwrap_or(&self.base_url);
+        let url = format!("{host}/rest/api/2/serverInfo");
+        self.get(&url).await
+    }
+
+    /// Auto-detect the deployment type by calling `/rest/api/2/serverInfo`.
+    ///
+    /// Returns `Cloud` if `deploymentType` is `"Cloud"`, otherwise `ServerDc`.
+    pub async fn detect_deployment(&self) -> JiraResult<JiraDeployment> {
+        let info = self.server_info().await?;
+        let deployment = match info.deployment_type.as_deref() {
+            Some("Cloud") => JiraDeployment::Cloud,
+            _ => JiraDeployment::ServerDc,
+        };
+        Ok(deployment)
     }
 
     /// Set retry configuration.
@@ -1701,5 +1768,265 @@ mod tests {
             dbg.contains("custom.example.com/automation"),
             "got: {dbg}"
         );
+    }
+
+    // ════════════════════════════════════════════════════════════════
+    // Deployment support
+    // ════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn test_default_deployment_is_cloud() {
+        let client = JiraClient::new("test", "user@example.com", "token").unwrap();
+        assert_eq!(client.deployment(), JiraDeployment::Cloud);
+    }
+
+    #[test]
+    fn test_cloud_base_url_uses_api_v3() {
+        let client = JiraClient::new("myco", "user@example.com", "token").unwrap();
+        assert_eq!(client.api_path(), "/rest/api/3");
+        let dbg = format!("{client:?}");
+        assert!(dbg.contains("/rest/api/3"), "got: {dbg}");
+    }
+
+    #[test]
+    fn test_server_dc_base_url_uses_api_v2() {
+        let client = JiraClient::new_with_auth_and_deployment(
+            JiraAuth::Token {
+                domain: "myco".into(),
+                email: "user@example.com".into(),
+                api_token: "token".into(),
+            },
+            JiraDeployment::ServerDc,
+        )
+        .unwrap();
+        assert_eq!(client.deployment(), JiraDeployment::ServerDc);
+        assert_eq!(client.api_path(), "/rest/api/2");
+        let dbg = format!("{client:?}");
+        assert!(dbg.contains("/rest/api/2"), "got: {dbg}");
+    }
+
+    #[test]
+    fn test_with_deployment_cloud_to_server() {
+        let client = JiraClient::new("myco", "user@example.com", "token")
+            .unwrap()
+            .with_deployment(JiraDeployment::ServerDc);
+        assert_eq!(client.deployment(), JiraDeployment::ServerDc);
+        assert_eq!(client.api_path(), "/rest/api/2");
+        let dbg = format!("{client:?}");
+        assert!(dbg.contains("/rest/api/2"), "got: {dbg}");
+        // Should NOT contain /rest/api/3 anymore
+        assert!(!dbg.contains("/rest/api/3"), "got: {dbg}");
+    }
+
+    #[test]
+    fn test_with_deployment_server_to_cloud() {
+        let client = JiraClient::new_with_auth_and_deployment(
+            JiraAuth::Token {
+                domain: "myco".into(),
+                email: "user@example.com".into(),
+                api_token: "token".into(),
+            },
+            JiraDeployment::ServerDc,
+        )
+        .unwrap()
+        .with_deployment(JiraDeployment::Cloud);
+        assert_eq!(client.deployment(), JiraDeployment::Cloud);
+        assert_eq!(client.api_path(), "/rest/api/3");
+        let dbg = format!("{client:?}");
+        assert!(dbg.contains("/rest/api/3"), "got: {dbg}");
+    }
+
+    #[test]
+    fn test_with_deployment_idempotent() {
+        let client = JiraClient::new("myco", "user@example.com", "token")
+            .unwrap()
+            .with_deployment(JiraDeployment::Cloud)
+            .with_deployment(JiraDeployment::Cloud);
+        assert_eq!(client.deployment(), JiraDeployment::Cloud);
+        assert_eq!(client.api_path(), "/rest/api/3");
+    }
+
+    #[test]
+    fn test_with_deployment_preserves_custom_base_url() {
+        let client = JiraClient::new("myco", "user@example.com", "token")
+            .unwrap()
+            .with_base_url("http://localhost:8080/rest/api/3")
+            .with_deployment(JiraDeployment::ServerDc);
+        // Should update the version in the custom URL too
+        let dbg = format!("{client:?}");
+        assert!(dbg.contains("/rest/api/2"), "got: {dbg}");
+    }
+
+    #[test]
+    fn test_debug_includes_deployment() {
+        let client = JiraClient::new("test", "user@example.com", "token").unwrap();
+        let dbg = format!("{client:?}");
+        assert!(dbg.contains("deployment"), "got: {dbg}");
+        assert!(dbg.contains("Cloud"), "got: {dbg}");
+    }
+
+    #[test]
+    fn test_debug_includes_deployment_server_dc() {
+        let client = JiraClient::new_with_auth_and_deployment(
+            JiraAuth::Token {
+                domain: "test".into(),
+                email: "user@example.com".into(),
+                api_token: "token".into(),
+            },
+            JiraDeployment::ServerDc,
+        )
+        .unwrap();
+        let dbg = format!("{client:?}");
+        assert!(dbg.contains("ServerDc"), "got: {dbg}");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_server_info_cloud() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/rest/api/2/serverInfo"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "baseUrl": "https://myco.atlassian.net",
+                "version": "1001.0.0-SNAPSHOT",
+                "versionNumbers": [1001, 0, 0],
+                "deploymentType": "Cloud",
+                "buildNumber": 100227,
+                "serverTitle": "My Jira"
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = test_client(&mock_server.uri());
+        let info = client.server_info().await.unwrap();
+        assert_eq!(info.deployment_type.as_deref(), Some("Cloud"));
+        assert_eq!(info.version.as_deref(), Some("1001.0.0-SNAPSHOT"));
+        assert_eq!(info.build_number, Some(100227));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_server_info_server_dc() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/rest/api/2/serverInfo"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "baseUrl": "https://jira.mycompany.com",
+                "version": "9.4.7",
+                "versionNumbers": [9, 4, 7],
+                "deploymentType": "Server",
+                "buildNumber": 90407
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = test_client(&mock_server.uri());
+        let info = client.server_info().await.unwrap();
+        assert_eq!(info.deployment_type.as_deref(), Some("Server"));
+        assert_eq!(info.version.as_deref(), Some("9.4.7"));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_detect_deployment_cloud() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/rest/api/2/serverInfo"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "deploymentType": "Cloud"
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = test_client(&mock_server.uri());
+        let deployment = client.detect_deployment().await.unwrap();
+        assert_eq!(deployment, JiraDeployment::Cloud);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_detect_deployment_server() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/rest/api/2/serverInfo"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "deploymentType": "Server"
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = test_client(&mock_server.uri());
+        let deployment = client.detect_deployment().await.unwrap();
+        assert_eq!(deployment, JiraDeployment::ServerDc);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_detect_deployment_missing_type_defaults_server() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/rest/api/2/serverInfo"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "version": "9.0.0"
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = test_client(&mock_server.uri());
+        let deployment = client.detect_deployment().await.unwrap();
+        assert_eq!(deployment, JiraDeployment::ServerDc);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_cloud_client_issue_url_uses_v3() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/rest/api/3/issue/PROJ-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "10001",
+                "key": "PROJ-1"
+            })))
+            .mount(&mock_server)
+            .await;
+
+        // Cloud client points base_url at mock with /rest/api/3
+        let client = JiraClient::new("test", "user@example.com", "token")
+            .unwrap()
+            .with_base_url(&format!("{}/rest/api/3", mock_server.uri()))
+            .with_retry_config(1, 10, 100);
+
+        let issue = client.get_issue("PROJ-1", None, None).await.unwrap();
+        assert_eq!(issue.key, "PROJ-1");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_server_dc_client_issue_url_uses_v2() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/rest/api/2/issue/PROJ-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "10001",
+                "key": "PROJ-1"
+            })))
+            .mount(&mock_server)
+            .await;
+
+        // Server/DC client points base_url at mock with /rest/api/2
+        let client = JiraClient::new_with_auth_and_deployment(
+            JiraAuth::Token {
+                domain: "test".into(),
+                email: "user@example.com".into(),
+                api_token: "token".into(),
+            },
+            JiraDeployment::ServerDc,
+        )
+        .unwrap()
+        .with_base_url(&format!("{}/rest/api/2", mock_server.uri()))
+        .with_retry_config(1, 10, 100);
+
+        let issue = client.get_issue("PROJ-1", None, None).await.unwrap();
+        assert_eq!(issue.key, "PROJ-1");
     }
 }

@@ -1,6 +1,76 @@
 //! Jira REST API types.
 
+use std::fmt;
+use std::str::FromStr;
+
 use serde::{Deserialize, Serialize};
+
+// ── Deployment ─────────────────────────────────────────────────
+
+/// Jira deployment type — determines API version and auth semantics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum JiraDeployment {
+    /// Atlassian Cloud — uses REST API v3, Basic auth with email:api_token.
+    Cloud,
+    /// Jira Server or Data Center — uses REST API v2, Basic auth with username:password or PAT.
+    ServerDc,
+}
+
+impl Default for JiraDeployment {
+    fn default() -> Self {
+        Self::Cloud
+    }
+}
+
+impl fmt::Display for JiraDeployment {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Cloud => write!(f, "cloud"),
+            Self::ServerDc => write!(f, "server_dc"),
+        }
+    }
+}
+
+impl FromStr for JiraDeployment {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "cloud" => Ok(Self::Cloud),
+            "server_dc" | "server" | "dc" | "datacenter" | "data_center" => Ok(Self::ServerDc),
+            other => Err(format!(
+                "Unknown deployment type '{other}'; expected 'cloud' or 'server_dc'"
+            )),
+        }
+    }
+}
+
+impl JiraDeployment {
+    /// REST API version path component for this deployment type.
+    #[must_use]
+    pub const fn api_version(&self) -> &'static str {
+        match self {
+            Self::Cloud => "3",
+            Self::ServerDc => "2",
+        }
+    }
+}
+
+/// Server information returned by `/rest/api/2/serverInfo`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JiraServerInfo {
+    pub base_url: Option<String>,
+    pub version: Option<String>,
+    pub version_numbers: Option<Vec<u64>>,
+    pub deployment_type: Option<String>,
+    pub build_number: Option<u64>,
+    pub build_date: Option<String>,
+    pub server_time: Option<String>,
+    pub scm_info: Option<String>,
+    pub server_title: Option<String>,
+}
 
 // ── Issue ───────────────────────────────────────────────────────
 
@@ -1622,5 +1692,241 @@ mod tests {
         assert_eq!(cloned.total, Some(0));
         let dbg = format!("{resp:?}");
         assert!(dbg.contains("AutomationRuleListResponse"), "got: {dbg}");
+    }
+
+    // ════════════════════════════════════════════════════════════════
+    // JiraDeployment
+    // ════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn deployment_default_is_cloud() {
+        assert_eq!(JiraDeployment::default(), JiraDeployment::Cloud);
+    }
+
+    #[test]
+    fn deployment_display_cloud() {
+        assert_eq!(JiraDeployment::Cloud.to_string(), "cloud");
+    }
+
+    #[test]
+    fn deployment_display_server_dc() {
+        assert_eq!(JiraDeployment::ServerDc.to_string(), "server_dc");
+    }
+
+    #[test]
+    fn deployment_from_str_cloud() {
+        let d: JiraDeployment = "cloud".parse().unwrap();
+        assert_eq!(d, JiraDeployment::Cloud);
+    }
+
+    #[test]
+    fn deployment_from_str_cloud_uppercase() {
+        let d: JiraDeployment = "Cloud".parse().unwrap();
+        assert_eq!(d, JiraDeployment::Cloud);
+    }
+
+    #[test]
+    fn deployment_from_str_server_dc() {
+        let d: JiraDeployment = "server_dc".parse().unwrap();
+        assert_eq!(d, JiraDeployment::ServerDc);
+    }
+
+    #[test]
+    fn deployment_from_str_server() {
+        let d: JiraDeployment = "server".parse().unwrap();
+        assert_eq!(d, JiraDeployment::ServerDc);
+    }
+
+    #[test]
+    fn deployment_from_str_dc() {
+        let d: JiraDeployment = "dc".parse().unwrap();
+        assert_eq!(d, JiraDeployment::ServerDc);
+    }
+
+    #[test]
+    fn deployment_from_str_datacenter() {
+        let d: JiraDeployment = "datacenter".parse().unwrap();
+        assert_eq!(d, JiraDeployment::ServerDc);
+    }
+
+    #[test]
+    fn deployment_from_str_data_center() {
+        let d: JiraDeployment = "data_center".parse().unwrap();
+        assert_eq!(d, JiraDeployment::ServerDc);
+    }
+
+    #[test]
+    fn deployment_from_str_invalid() {
+        let result: Result<JiraDeployment, _> = "invalid".parse();
+        assert!(result.is_err());
+        let msg = result.unwrap_err();
+        assert!(msg.contains("Unknown deployment type"), "got: {msg}");
+        assert!(msg.contains("invalid"), "got: {msg}");
+    }
+
+    #[test]
+    fn deployment_api_version_cloud() {
+        assert_eq!(JiraDeployment::Cloud.api_version(), "3");
+    }
+
+    #[test]
+    fn deployment_api_version_server_dc() {
+        assert_eq!(JiraDeployment::ServerDc.api_version(), "2");
+    }
+
+    #[test]
+    fn deployment_serialize_cloud() {
+        let json = serde_json::to_string(&JiraDeployment::Cloud).unwrap();
+        assert_eq!(json, "\"cloud\"");
+    }
+
+    #[test]
+    fn deployment_serialize_server_dc() {
+        let json = serde_json::to_string(&JiraDeployment::ServerDc).unwrap();
+        assert_eq!(json, "\"server_dc\"");
+    }
+
+    #[test]
+    fn deployment_deserialize_cloud() {
+        let d: JiraDeployment = serde_json::from_str("\"cloud\"").unwrap();
+        assert_eq!(d, JiraDeployment::Cloud);
+    }
+
+    #[test]
+    fn deployment_deserialize_server_dc() {
+        let d: JiraDeployment = serde_json::from_str("\"server_dc\"").unwrap();
+        assert_eq!(d, JiraDeployment::ServerDc);
+    }
+
+    #[test]
+    fn deployment_serde_roundtrip_cloud() {
+        let original = JiraDeployment::Cloud;
+        let json = serde_json::to_string(&original).unwrap();
+        let deserialized: JiraDeployment = serde_json::from_str(&json).unwrap();
+        assert_eq!(original, deserialized);
+    }
+
+    #[test]
+    fn deployment_serde_roundtrip_server_dc() {
+        let original = JiraDeployment::ServerDc;
+        let json = serde_json::to_string(&original).unwrap();
+        let deserialized: JiraDeployment = serde_json::from_str(&json).unwrap();
+        assert_eq!(original, deserialized);
+    }
+
+    #[test]
+    fn deployment_clone() {
+        let d = JiraDeployment::Cloud;
+        let cloned = d;
+        assert_eq!(d, cloned);
+    }
+
+    #[test]
+    fn deployment_debug() {
+        let dbg = format!("{:?}", JiraDeployment::Cloud);
+        assert!(dbg.contains("Cloud"), "got: {dbg}");
+        let dbg = format!("{:?}", JiraDeployment::ServerDc);
+        assert!(dbg.contains("ServerDc"), "got: {dbg}");
+    }
+
+    #[test]
+    fn deployment_eq() {
+        assert_eq!(JiraDeployment::Cloud, JiraDeployment::Cloud);
+        assert_eq!(JiraDeployment::ServerDc, JiraDeployment::ServerDc);
+        assert_ne!(JiraDeployment::Cloud, JiraDeployment::ServerDc);
+    }
+
+    // ════════════════════════════════════════════════════════════════
+    // JiraServerInfo
+    // ════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn server_info_deserialize_cloud() {
+        let json = json!({
+            "baseUrl": "https://mysite.atlassian.net",
+            "version": "1001.0.0-SNAPSHOT",
+            "versionNumbers": [1001, 0, 0],
+            "deploymentType": "Cloud",
+            "buildNumber": 100227,
+            "buildDate": "2026-03-01T00:00:00.000+0000",
+            "serverTime": "2026-03-09T12:00:00.000+0000",
+            "scmInfo": "abc123",
+            "serverTitle": "My Jira"
+        });
+        let info: JiraServerInfo = serde_json::from_value(json).unwrap();
+        assert_eq!(info.base_url.as_deref(), Some("https://mysite.atlassian.net"));
+        assert_eq!(info.version.as_deref(), Some("1001.0.0-SNAPSHOT"));
+        assert_eq!(info.deployment_type.as_deref(), Some("Cloud"));
+        assert_eq!(info.build_number, Some(100227));
+        assert_eq!(info.server_title.as_deref(), Some("My Jira"));
+    }
+
+    #[test]
+    fn server_info_deserialize_server() {
+        let json = json!({
+            "baseUrl": "https://jira.mycompany.com",
+            "version": "9.4.7",
+            "versionNumbers": [9, 4, 7],
+            "deploymentType": "Server",
+            "buildNumber": 90407
+        });
+        let info: JiraServerInfo = serde_json::from_value(json).unwrap();
+        assert_eq!(info.deployment_type.as_deref(), Some("Server"));
+        assert_eq!(info.version.as_deref(), Some("9.4.7"));
+    }
+
+    #[test]
+    fn server_info_all_optional() {
+        let json = json!({});
+        let info: JiraServerInfo = serde_json::from_value(json).unwrap();
+        assert!(info.base_url.is_none());
+        assert!(info.version.is_none());
+        assert!(info.version_numbers.is_none());
+        assert!(info.deployment_type.is_none());
+        assert!(info.build_number.is_none());
+        assert!(info.build_date.is_none());
+        assert!(info.server_time.is_none());
+        assert!(info.scm_info.is_none());
+        assert!(info.server_title.is_none());
+    }
+
+    #[test]
+    fn server_info_clone_debug() {
+        let info = JiraServerInfo {
+            base_url: Some("https://example.com".into()),
+            version: Some("9.0.0".into()),
+            version_numbers: Some(vec![9, 0, 0]),
+            deployment_type: Some("Server".into()),
+            build_number: Some(90000),
+            build_date: None,
+            server_time: None,
+            scm_info: None,
+            server_title: None,
+        };
+        let cloned = info.clone();
+        assert_eq!(cloned.version, info.version);
+        let dbg = format!("{info:?}");
+        assert!(dbg.contains("JiraServerInfo"), "got: {dbg}");
+    }
+
+    #[test]
+    fn server_info_serde_roundtrip() {
+        let info = JiraServerInfo {
+            base_url: Some("https://jira.example.com".into()),
+            version: Some("8.20.1".into()),
+            version_numbers: Some(vec![8, 20, 1]),
+            deployment_type: Some("Server".into()),
+            build_number: Some(82001),
+            build_date: Some("2025-12-01T00:00:00.000+0000".into()),
+            server_time: Some("2026-03-09T14:00:00.000+0000".into()),
+            scm_info: Some("deadbeef".into()),
+            server_title: Some("Company Jira".into()),
+        };
+        let json = serde_json::to_value(&info).unwrap();
+        let deserialized: JiraServerInfo = serde_json::from_value(json).unwrap();
+        assert_eq!(deserialized.base_url, info.base_url);
+        assert_eq!(deserialized.version, info.version);
+        assert_eq!(deserialized.build_number, info.build_number);
+        assert_eq!(deserialized.deployment_type, info.deployment_type);
     }
 }

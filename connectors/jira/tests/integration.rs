@@ -1128,12 +1128,13 @@ async fn lifecycle_introspect_all_operations() {
         "jira.automation.rule.enable",
         "jira.automation.rule.disable",
         "jira.automation.rule.delete",
+        "jira.server.info",
     ];
 
     for expected in &expected_ops {
         assert!(op_ids.contains(expected), "missing operation: {expected}");
     }
-    assert_eq!(ops.len(), 23);
+    assert_eq!(ops.len(), 24);
 
     // Verify schemas are present on all operations
     for op in ops {

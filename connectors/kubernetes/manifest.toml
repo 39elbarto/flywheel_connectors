@@ -5,7 +5,7 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:dd7e212fa477cc5200f05dcf9ab774aa798460a4a5e3b0df29c7cb1437461fe5"
+interface_hash = "blake3-256:fcp.interface.v2:e90faeeadc7a5377ce77653b8e437e77916f71689d67e66186acddafcbff7a5c"
 
 [connector]
 id = "fcp.kubernetes"
@@ -1785,6 +1785,188 @@ related = [
     "kubernetes.secret.list",
 ]
 
+[provides.operations."kubernetes.rollout.status"]
+description = "Get rollout status for a deployment"
+capability = "kubernetes.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."kubernetes.rollout.status".input_schema]
+type = "object"
+required = [
+    "namespace",
+    "name",
+]
+
+[provides.operations."kubernetes.rollout.status".input_schema.properties.namespace]
+type = "string"
+
+[provides.operations."kubernetes.rollout.status".input_schema.properties.name]
+type = "string"
+
+[provides.operations."kubernetes.rollout.status".output_schema]
+type = "object"
+required = ["rollout_status"]
+
+[provides.operations."kubernetes.rollout.status".output_schema.properties.rollout_status]
+type = "object"
+
+[provides.operations."kubernetes.rollout.status".network_constraints]
+host_allow = ["$KUBE_API_HOST"]
+port_allow = [
+    443,
+    6443,
+]
+ip_allow = []
+cidr_deny = []
+deny_localhost = false
+deny_private_ranges = false
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = false
+require_host_canonicalization = false
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 60000
+max_response_bytes = 1048576
+
+[provides.operations."kubernetes.rollout.status".ai_hints]
+when_to_use = "Check rollout progress for a deployment (replica counts, conditions, completion)."
+common_mistakes = ["Polling too frequently during a slow rollout"]
+examples = ['{"namespace": "production", "name": "api-server"}']
+related = [
+    "kubernetes.rollout.history",
+    "kubernetes.rollout.rollback",
+    "kubernetes.rollout_restart",
+]
+
+[provides.operations."kubernetes.rollout.history"]
+description = "Get rollout revision history for a deployment"
+capability = "kubernetes.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."kubernetes.rollout.history".input_schema]
+type = "object"
+required = [
+    "namespace",
+    "name",
+]
+
+[provides.operations."kubernetes.rollout.history".input_schema.properties.namespace]
+type = "string"
+
+[provides.operations."kubernetes.rollout.history".input_schema.properties.name]
+type = "string"
+
+[provides.operations."kubernetes.rollout.history".output_schema]
+type = "object"
+required = ["revisions"]
+
+[provides.operations."kubernetes.rollout.history".output_schema.properties.revisions]
+type = "array"
+
+[provides.operations."kubernetes.rollout.history".network_constraints]
+host_allow = ["$KUBE_API_HOST"]
+port_allow = [
+    443,
+    6443,
+]
+ip_allow = []
+cidr_deny = []
+deny_localhost = false
+deny_private_ranges = false
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = false
+require_host_canonicalization = false
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 60000
+max_response_bytes = 1048576
+
+[provides.operations."kubernetes.rollout.history".ai_hints]
+when_to_use = "List previous rollout revisions (ReplicaSets) for a deployment."
+common_mistakes = ["Assuming revision numbers are contiguous"]
+examples = ['{"namespace": "production", "name": "api-server"}']
+related = [
+    "kubernetes.rollout.status",
+    "kubernetes.rollout.rollback",
+]
+
+[provides.operations."kubernetes.rollout.rollback"]
+description = "Rollback a deployment to a previous revision"
+capability = "kubernetes.write"
+risk_level = "high"
+safety_tier = "dangerous"
+requires_approval = "interactive"
+idempotency = "best_effort"
+
+[provides.operations."kubernetes.rollout.rollback".input_schema]
+type = "object"
+required = [
+    "namespace",
+    "name",
+    "template",
+]
+
+[provides.operations."kubernetes.rollout.rollback".input_schema.properties.namespace]
+type = "string"
+
+[provides.operations."kubernetes.rollout.rollback".input_schema.properties.name]
+type = "string"
+
+[provides.operations."kubernetes.rollout.rollback".input_schema.properties.template]
+type = "object"
+
+[provides.operations."kubernetes.rollout.rollback".output_schema]
+type = "object"
+required = ["deployment"]
+
+[provides.operations."kubernetes.rollout.rollback".output_schema.properties.deployment]
+type = "object"
+
+[provides.operations."kubernetes.rollout.rollback".network_constraints]
+host_allow = ["$KUBE_API_HOST"]
+port_allow = [
+    443,
+    6443,
+]
+ip_allow = []
+cidr_deny = []
+deny_localhost = false
+deny_private_ranges = false
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = false
+require_host_canonicalization = false
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 60000
+max_response_bytes = 1048576
+
+[provides.operations."kubernetes.rollout.rollback".ai_hints]
+when_to_use = "Rollback a deployment by patching its pod template to a previous revision."
+common_mistakes = [
+    "Rolling back without checking current rollout status first",
+    "Not specifying the correct template from rollout history",
+]
+examples = ['{"namespace": "production", "name": "api-server", "template": {"spec": {"containers": [{"name": "api", "image": "api:v1.2.3"}]}}}']
+related = [
+    "kubernetes.rollout.status",
+    "kubernetes.rollout.history",
+]
+
 [event_caps]
 streaming = true
 replay = false
@@ -1860,3 +2042,6 @@ scope = "instance"
 "kubernetes.secret.get" = ["kubernetes.secrets"]
 "kubernetes.secret.create" = ["kubernetes.secrets"]
 "kubernetes.secret.delete" = ["kubernetes.secrets"]
+"kubernetes.rollout.status" = ["kubernetes.read"]
+"kubernetes.rollout.history" = ["kubernetes.read"]
+"kubernetes.rollout.rollback" = ["kubernetes.write"]

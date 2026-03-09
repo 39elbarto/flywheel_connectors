@@ -663,6 +663,51 @@ impl KubernetesClient {
         }
         self.get(&path).await
     }
+
+    // ── Rollout operations ──────────────────────────────────────
+
+    /// Get rollout status for a deployment by fetching its status conditions.
+    pub async fn get_rollout_status(
+        &self,
+        namespace: &str,
+        name: &str,
+    ) -> KubernetesResult<serde_json::Value> {
+        self.get(&format!(
+            "/apis/apps/v1/namespaces/{namespace}/deployments/{name}"
+        ))
+        .await
+    }
+
+    /// Get rollout history by listing `ReplicaSets` with matching labels.
+    pub async fn get_rollout_history(
+        &self,
+        namespace: &str,
+        name: &str,
+    ) -> KubernetesResult<serde_json::Value> {
+        self.get(&format!(
+            "/apis/apps/v1/namespaces/{namespace}/replicasets?labelSelector=app={name}"
+        ))
+        .await
+    }
+
+    /// Rollback a deployment by patching its `spec.template`.
+    pub async fn rollout_rollback(
+        &self,
+        namespace: &str,
+        name: &str,
+        template: &serde_json::Value,
+    ) -> KubernetesResult<serde_json::Value> {
+        let body = serde_json::json!({
+            "spec": {
+                "template": template
+            }
+        });
+        self.patch(
+            &format!("/apis/apps/v1/namespaces/{namespace}/deployments/{name}"),
+            &body,
+        )
+        .await
+    }
 }
 
 fn epoch_timestamp() -> String {

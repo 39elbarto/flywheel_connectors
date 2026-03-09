@@ -423,6 +423,9 @@ impl KubernetesConnector {
             "kubernetes.secret.get" => self.op_secret_get(client, &input).await,
             "kubernetes.secret.create" => self.op_secret_create(client, &input).await,
             "kubernetes.secret.delete" => self.op_secret_delete(client, &input).await,
+            "kubernetes.rollout.status" => self.op_rollout_status(client, &input).await,
+            "kubernetes.rollout.history" => self.op_rollout_history(client, &input).await,
+            "kubernetes.rollout.rollback" => self.op_rollout_rollback(client, &input).await,
             _ => {
                 return Err(FcpError::InvalidRequest {
                     code: 1002,
@@ -977,6 +980,101 @@ impl KubernetesConnector {
         let name = require_str(input, "name")?;
         let _resp = client.delete_secret(namespace, name).await?;
         Ok(json!({ "deleted": true }))
+    }
+
+    // ── Rollout operations ──────────────────────────────────────
+
+    async fn op_rollout_status(
+        &self,
+        client: &KubernetesClient,
+        input: &serde_json::Value,
+    ) -> Result<serde_json::Value, KubernetesError> {
+        let namespace = require_str(input, "namespace")?;
+        let name = require_str(input, "name")?;
+        let deploy = client.get_rollout_status(namespace, name).await?;
+        let status = deploy.get("status").cloned().unwrap_or(json!({}));
+
+        let replicas = status.get("replicas").and_then(|v| v.as_u64()).map(|v| v as u32);
+        let updated = status.get("updatedReplicas").and_then(|v| v.as_u64()).map(|v| v as u32);
+        let ready = status.get("readyReplicas").and_then(|v| v.as_u64()).map(|v| v as u32);
+        let available = status.get("availableReplicas").and_then(|v| v.as_u64()).map(|v| v as u32);
+        let unavailable = status.get("unavailableReplicas").and_then(|v| v.as_u64()).map(|v| v as u32);
+        let generation = status.get("observedGeneration").and_then(|v| v.as_u64());
+        let conditions = status.get("conditions").cloned();
+        let rollout_complete = replicas == updated && replicas == available && unavailable.unwrap_or(0) == 0;
+
+        Ok(json!({
+            "rollout_status": {
+                "deployment_name": name,
+                "namespace": namespace,
+                "replicas": replicas,
+                "updated_replicas": updated,
+                "ready_replicas": ready,
+                "available_replicas": available,
+                "unavailable_replicas": unavailable,
+                "observed_generation": generation,
+                "conditions": conditions,
+                "rollout_complete": rollout_complete,
+            }
+        }))
+    }
+
+    async fn op_rollout_history(
+        &self,
+        client: &KubernetesClient,
+        input: &serde_json::Value,
+    ) -> Result<serde_json::Value, KubernetesError> {
+        let namespace = require_str(input, "namespace")?;
+        let name = require_str(input, "name")?;
+        let rs_list = client.get_rollout_history(namespace, name).await?;
+        let items = rs_list.get("items").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+
+        let revisions: Vec<serde_json::Value> = items.iter().map(|rs| {
+            let revision = rs
+                .get("metadata")
+                .and_then(|m| m.get("annotations"))
+                .and_then(|a| a.get("deployment.kubernetes.io/revision"))
+                .and_then(|v| v.as_str())
+                .and_then(|s| s.parse::<u64>().ok());
+            let rs_name = rs.get("metadata").and_then(|m| m.get("name")).and_then(|v| v.as_str());
+            let created = rs.get("metadata").and_then(|m| m.get("creationTimestamp")).and_then(|v| v.as_str());
+            let replicas = rs.get("spec").and_then(|s| s.get("replicas")).and_then(|v| v.as_u64()).map(|v| v as u32);
+            let image = rs
+                .get("spec")
+                .and_then(|s| s.get("template"))
+                .and_then(|t| t.get("spec"))
+                .and_then(|s| s.get("containers"))
+                .and_then(|c| c.as_array())
+                .and_then(|arr| arr.first())
+                .and_then(|c| c.get("image"))
+                .and_then(|v| v.as_str());
+            let labels = rs.get("metadata").and_then(|m| m.get("labels")).cloned();
+            json!({
+                "revision": revision,
+                "name": rs_name,
+                "creation_timestamp": created,
+                "replicas": replicas,
+                "image": image,
+                "labels": labels,
+            })
+        }).collect();
+
+        Ok(json!({ "revisions": revisions }))
+    }
+
+    async fn op_rollout_rollback(
+        &self,
+        client: &KubernetesClient,
+        input: &serde_json::Value,
+    ) -> Result<serde_json::Value, KubernetesError> {
+        let namespace = require_str(input, "namespace")?;
+        let name = require_str(input, "name")?;
+        let template = input.get("template").ok_or(KubernetesError::Api {
+            status_code: 400,
+            message: "Missing required field: template".into(),
+        })?;
+        let result = client.rollout_rollback(namespace, name, template).await?;
+        Ok(json!({ "deployment": result }))
     }
 }
 
@@ -2001,6 +2099,112 @@ fn operations_info() -> Vec<OperationInfo> {
                 ],
             },
         ),
+        // ── Feature 4: Rollout monitoring ──────────────────────────────
+        op_info(
+            "kubernetes.rollout.status",
+            "Get rollout status for a deployment",
+            json!({
+                "type": "object",
+                "required": ["namespace", "name"],
+                "properties": {
+                    "namespace": { "type": "string" },
+                    "name": { "type": "string" }
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["rollout_status"],
+                "properties": { "rollout_status": { "type": "object" } }
+            }),
+            "kubernetes.read",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "Check rollout progress for a deployment (replica counts, conditions, completion).".into(),
+                common_mistakes: vec![
+                    "Polling too frequently during a slow rollout".into(),
+                ],
+                examples: vec![
+                    r#"{"namespace": "production", "name": "api-server"}"#.into(),
+                ],
+                related: vec![
+                    CapabilityId::from_static("kubernetes.rollout.history"),
+                    CapabilityId::from_static("kubernetes.rollout.rollback"),
+                    CapabilityId::from_static("kubernetes.rollout_restart"),
+                ],
+            },
+        ),
+        op_info(
+            "kubernetes.rollout.history",
+            "Get rollout revision history for a deployment",
+            json!({
+                "type": "object",
+                "required": ["namespace", "name"],
+                "properties": {
+                    "namespace": { "type": "string" },
+                    "name": { "type": "string" }
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["revisions"],
+                "properties": { "revisions": { "type": "array" } }
+            }),
+            "kubernetes.read",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "List previous rollout revisions (ReplicaSets) for a deployment.".into(),
+                common_mistakes: vec![
+                    "Assuming revision numbers are contiguous".into(),
+                ],
+                examples: vec![
+                    r#"{"namespace": "production", "name": "api-server"}"#.into(),
+                ],
+                related: vec![
+                    CapabilityId::from_static("kubernetes.rollout.status"),
+                    CapabilityId::from_static("kubernetes.rollout.rollback"),
+                ],
+            },
+        ),
+        op_info(
+            "kubernetes.rollout.rollback",
+            "Rollback a deployment to a previous revision",
+            json!({
+                "type": "object",
+                "required": ["namespace", "name", "template"],
+                "properties": {
+                    "namespace": { "type": "string" },
+                    "name": { "type": "string" },
+                    "template": { "type": "object" }
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["deployment"],
+                "properties": { "deployment": { "type": "object" } }
+            }),
+            "kubernetes.write",
+            RiskLevel::High,
+            SafetyTier::Dangerous,
+            IdempotencyClass::BestEffort,
+            AgentHint {
+                when_to_use: "Rollback a deployment by patching its pod template to a previous revision.".into(),
+                common_mistakes: vec![
+                    "Rolling back without checking current rollout status first".into(),
+                    "Not specifying the correct template from rollout history".into(),
+                ],
+                examples: vec![
+                    r#"{"namespace": "production", "name": "api-server", "template": {"spec": {"containers": [{"name": "api", "image": "api:v1.2.3"}]}}}"#.into(),
+                ],
+                related: vec![
+                    CapabilityId::from_static("kubernetes.rollout.status"),
+                    CapabilityId::from_static("kubernetes.rollout.history"),
+                ],
+            },
+        ),
     ]
 }
 
@@ -2137,8 +2341,8 @@ mod tests {
     }
 
     #[test]
-    fn operations_info_has_28_operations() {
-        assert_eq!(operations_info().len(), 28);
+    fn operations_info_has_31_operations() {
+        assert_eq!(operations_info().len(), 31);
     }
 
     #[test]
@@ -2233,6 +2437,9 @@ mod tests {
             "kubernetes.secret.get",
             "kubernetes.secret.create",
             "kubernetes.secret.delete",
+            "kubernetes.rollout.status",
+            "kubernetes.rollout.history",
+            "kubernetes.rollout.rollback",
         ] {
             assert!(ids.contains(expected), "missing: {expected}");
         }
@@ -2651,10 +2858,17 @@ mod tests {
 
     #[test]
     fn operations_write_ops_have_correct_capability() {
+        let write_ops = [
+            "kubernetes.scale_deployment",
+            "kubernetes.rollout_restart",
+            "kubernetes.update_configmap",
+            "kubernetes.configmap.update",
+            "kubernetes.rollout.rollback",
+        ];
         for op in operations_info_json().as_array().unwrap() {
             let id = op["id"].as_str().unwrap();
             let cap = op["capability"].as_str().unwrap();
-            if id.contains("scale") || id.contains("rollout") || id.contains("update") {
+            if write_ops.contains(&id) {
                 assert_eq!(
                     cap, "kubernetes.write",
                     "op {id} should use kubernetes.write"

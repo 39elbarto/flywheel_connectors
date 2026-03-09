@@ -77,7 +77,7 @@ async fn lifecycle_introspect() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
     let intro = c.handle_introspect().await.unwrap();
-    assert_eq!(intro["operations"].as_array().unwrap().len(), 28);
+    assert_eq!(intro["operations"].as_array().unwrap().len(), 31);
 }
 
 // -- list_pods --

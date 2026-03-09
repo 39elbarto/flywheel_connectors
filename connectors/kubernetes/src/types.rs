@@ -80,6 +80,43 @@ pub struct ScaleStatus {
     pub replicas: Option<u32>,
 }
 
+/// Rollout status for a deployment.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RolloutStatus {
+    pub deployment_name: Option<String>,
+    pub namespace: Option<String>,
+    pub replicas: Option<u32>,
+    pub updated_replicas: Option<u32>,
+    pub ready_replicas: Option<u32>,
+    pub available_replicas: Option<u32>,
+    pub unavailable_replicas: Option<u32>,
+    pub observed_generation: Option<u64>,
+    pub conditions: Option<Vec<RolloutCondition>>,
+    pub rollout_complete: bool,
+}
+
+/// A condition reported by the deployment controller.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RolloutCondition {
+    pub condition_type: Option<String>,
+    pub status: Option<String>,
+    pub reason: Option<String>,
+    pub message: Option<String>,
+    pub last_transition_time: Option<String>,
+    pub last_update_time: Option<String>,
+}
+
+/// A single revision entry from rollout history.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RolloutRevision {
+    pub revision: Option<u64>,
+    pub name: Option<String>,
+    pub creation_timestamp: Option<String>,
+    pub replicas: Option<u32>,
+    pub image: Option<String>,
+    pub labels: Option<serde_json::Value>,
+}
+
 /// A Kubernetes service.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Service {

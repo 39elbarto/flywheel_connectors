@@ -439,6 +439,112 @@ impl RedditClient {
             .await
     }
 
+    // -- Saved items --
+
+    /// List saved items for a user.
+    pub async fn get_saved(
+        &self,
+        username: &str,
+        limit: Option<i64>,
+        after: Option<&str>,
+    ) -> RedditResult<serde_json::Value> {
+        let mut q = Vec::new();
+        if let Some(l) = limit {
+            q.push(("limit", l.to_string()));
+        }
+        if let Some(a) = after {
+            q.push(("after", a.to_string()));
+        }
+        self.get(
+            &format!("/user/{username}/saved"),
+            if q.is_empty() { None } else { Some(&q) },
+        )
+        .await
+    }
+
+    /// Save a post or comment.
+    pub async fn save_thing(
+        &self,
+        thing_fullname: &str,
+    ) -> RedditResult<serde_json::Value> {
+        self.post_form("/api/save", &[("id", thing_fullname)])
+            .await
+    }
+
+    /// Unsave a post or comment.
+    pub async fn unsave_thing(
+        &self,
+        thing_fullname: &str,
+    ) -> RedditResult<serde_json::Value> {
+        self.post_form("/api/unsave", &[("id", thing_fullname)])
+            .await
+    }
+
+    // -- Moderation queue --
+
+    /// List the moderation queue for a subreddit.
+    pub async fn get_mod_queue(
+        &self,
+        subreddit: &str,
+        limit: Option<i64>,
+        after: Option<&str>,
+    ) -> RedditResult<serde_json::Value> {
+        let mut q = Vec::new();
+        if let Some(l) = limit {
+            q.push(("limit", l.to_string()));
+        }
+        if let Some(a) = after {
+            q.push(("after", a.to_string()));
+        }
+        self.get(
+            &format!("/r/{subreddit}/about/modqueue"),
+            if q.is_empty() { None } else { Some(&q) },
+        )
+        .await
+    }
+
+    /// Approve a flagged item via moderator action.
+    pub async fn mod_approve(
+        &self,
+        thing_fullname: &str,
+    ) -> RedditResult<serde_json::Value> {
+        self.post_form("/api/approve", &[("id", thing_fullname)])
+            .await
+    }
+
+    // -- Inbox --
+
+    /// List inbox messages/mentions.
+    pub async fn get_inbox(
+        &self,
+        category: &str,
+        limit: Option<i64>,
+        after: Option<&str>,
+    ) -> RedditResult<serde_json::Value> {
+        let mut q = Vec::new();
+        if let Some(l) = limit {
+            q.push(("limit", l.to_string()));
+        }
+        if let Some(a) = after {
+            q.push(("after", a.to_string()));
+        }
+        self.get(
+            &format!("/message/{category}"),
+            if q.is_empty() { None } else { Some(&q) },
+        )
+        .await
+    }
+
+    /// Mark messages as read.
+    pub async fn mark_messages_read(
+        &self,
+        fullnames: &[&str],
+    ) -> RedditResult<serde_json::Value> {
+        let csv = fullnames.join(",");
+        self.post_form("/api/read_message", &[("id", &csv)])
+            .await
+    }
+
     // -- Download media --
 
     /// Download media from an allowed `Reddit` media host.

@@ -937,6 +937,283 @@ impl RedditConnector {
                         ],
                     },
                 },
+                // ── Saved Items ──────────────────────────────────────────
+                OperationInfo {
+                    id: OperationId::from_static("reddit.saved.list"),
+                    summary: "List saved posts and comments for a user".into(),
+                    description: None,
+                    input_schema: json!({
+                        "type": "object",
+                        "required": ["username"],
+                        "properties": {
+                            "username": { "type": "string", "description": "Reddit username without u/ prefix.", "pattern": "^[A-Za-z0-9_-]{3,20}$" },
+                            "limit": { "type": "integer", "description": "Maximum items to return.", "minimum": 1, "maximum": 100, "default": 25 },
+                            "after": { "type": "string", "description": "Pagination cursor from a prior response." }
+                        }
+                    }),
+                    output_schema: json!({
+                        "type": "object",
+                        "required": ["posts"],
+                        "properties": {
+                            "posts": { "type": "array" },
+                            "next_after": { "type": "string" }
+                        }
+                    }),
+                    capability: CapabilityId::from_static("reddit.read"),
+                    risk_level: RiskLevel::Low,
+                    safety_tier: SafetyTier::Safe,
+                    idempotency: IdempotencyClass::Strict,
+                    rate_limit: None,
+                    requires_approval: None,
+                    ai_hints: AgentHint {
+                        when_to_use: "Use to retrieve a user's saved posts and comments.".into(),
+                        common_mistakes: vec![
+                            "Including the u/ prefix in the username.".into(),
+                        ],
+                        examples: vec![
+                            r#"{"username":"myuser", "limit":25}"#.into(),
+                        ],
+                        related: vec![
+                            CapabilityId::from_static("reddit.saved.save"),
+                            CapabilityId::from_static("reddit.saved.unsave"),
+                        ],
+                    },
+                },
+                OperationInfo {
+                    id: OperationId::from_static("reddit.saved.save"),
+                    summary: "Save a post or comment to your saved items".into(),
+                    description: None,
+                    input_schema: json!({
+                        "type": "object",
+                        "required": ["thing_fullname"],
+                        "properties": {
+                            "thing_fullname": { "type": "string", "description": "Fullname of the post or comment to save (t3_... or t1_...).", "pattern": "^t[13]_[A-Za-z0-9]+$" }
+                        }
+                    }),
+                    output_schema: json!({
+                        "type": "object",
+                        "required": ["saved"],
+                        "properties": {
+                            "saved": { "type": "boolean" }
+                        }
+                    }),
+                    capability: CapabilityId::from_static("reddit.post"),
+                    risk_level: RiskLevel::Low,
+                    safety_tier: SafetyTier::Safe,
+                    idempotency: IdempotencyClass::Strict,
+                    rate_limit: None,
+                    requires_approval: None,
+                    ai_hints: AgentHint {
+                        when_to_use: "Use to bookmark a post or comment to your saved items list.".into(),
+                        common_mistakes: vec![
+                            "Using a bare ID instead of a fullname (t3_... or t1_...).".into(),
+                        ],
+                        examples: vec![
+                            r#"{"thing_fullname":"t3_abc123"}"#.into(),
+                        ],
+                        related: vec![
+                            CapabilityId::from_static("reddit.saved.unsave"),
+                            CapabilityId::from_static("reddit.saved.list"),
+                        ],
+                    },
+                },
+                OperationInfo {
+                    id: OperationId::from_static("reddit.saved.unsave"),
+                    summary: "Remove a post or comment from your saved items".into(),
+                    description: None,
+                    input_schema: json!({
+                        "type": "object",
+                        "required": ["thing_fullname"],
+                        "properties": {
+                            "thing_fullname": { "type": "string", "description": "Fullname of the post or comment to unsave (t3_... or t1_...).", "pattern": "^t[13]_[A-Za-z0-9]+$" }
+                        }
+                    }),
+                    output_schema: json!({
+                        "type": "object",
+                        "required": ["unsaved"],
+                        "properties": {
+                            "unsaved": { "type": "boolean" }
+                        }
+                    }),
+                    capability: CapabilityId::from_static("reddit.post"),
+                    risk_level: RiskLevel::Low,
+                    safety_tier: SafetyTier::Safe,
+                    idempotency: IdempotencyClass::Strict,
+                    rate_limit: None,
+                    requires_approval: None,
+                    ai_hints: AgentHint {
+                        when_to_use: "Use to remove a previously saved post or comment from your saved items.".into(),
+                        common_mistakes: vec![
+                            "Using a bare ID instead of a fullname (t3_... or t1_...).".into(),
+                        ],
+                        examples: vec![
+                            r#"{"thing_fullname":"t3_abc123"}"#.into(),
+                        ],
+                        related: vec![
+                            CapabilityId::from_static("reddit.saved.save"),
+                            CapabilityId::from_static("reddit.saved.list"),
+                        ],
+                    },
+                },
+                // ── Moderation ───────────────────────────────────────────
+                OperationInfo {
+                    id: OperationId::from_static("reddit.mod.queue"),
+                    summary: "List the moderation queue for a subreddit".into(),
+                    description: None,
+                    input_schema: json!({
+                        "type": "object",
+                        "required": ["subreddit"],
+                        "properties": {
+                            "subreddit": { "type": "string", "description": "Subreddit name without r/ prefix.", "pattern": "^[A-Za-z0-9_]{2,21}$" },
+                            "limit": { "type": "integer", "description": "Maximum items to return.", "minimum": 1, "maximum": 100, "default": 25 },
+                            "after": { "type": "string", "description": "Pagination cursor from a prior response." }
+                        }
+                    }),
+                    output_schema: json!({
+                        "type": "object",
+                        "required": ["posts"],
+                        "properties": {
+                            "posts": { "type": "array" },
+                            "next_after": { "type": "string" }
+                        }
+                    }),
+                    capability: CapabilityId::from_static("reddit.moderate"),
+                    risk_level: RiskLevel::Low,
+                    safety_tier: SafetyTier::Safe,
+                    idempotency: IdempotencyClass::Strict,
+                    rate_limit: None,
+                    requires_approval: None,
+                    ai_hints: AgentHint {
+                        when_to_use: "Use to review flagged/reported items in a subreddit's moderation queue.".into(),
+                        common_mistakes: vec![
+                            "Including the r/ prefix in the subreddit name.".into(),
+                        ],
+                        examples: vec![
+                            r#"{"subreddit":"rust", "limit":25}"#.into(),
+                        ],
+                        related: vec![
+                            CapabilityId::from_static("reddit.mod.approve"),
+                            CapabilityId::from_static("reddit.mod_remove"),
+                        ],
+                    },
+                },
+                OperationInfo {
+                    id: OperationId::from_static("reddit.mod.approve"),
+                    summary: "Approve a flagged item in the moderation queue".into(),
+                    description: None,
+                    input_schema: json!({
+                        "type": "object",
+                        "required": ["thing_fullname"],
+                        "properties": {
+                            "thing_fullname": { "type": "string", "description": "Fullname of the item to approve (t3_... or t1_...).", "pattern": "^t[13]_[A-Za-z0-9]+$" }
+                        }
+                    }),
+                    output_schema: json!({
+                        "type": "object",
+                        "required": ["approved"],
+                        "properties": {
+                            "approved": { "type": "boolean" }
+                        }
+                    }),
+                    capability: CapabilityId::from_static("reddit.moderate"),
+                    risk_level: RiskLevel::Medium,
+                    safety_tier: SafetyTier::Risky,
+                    idempotency: IdempotencyClass::Strict,
+                    rate_limit: None,
+                    requires_approval: None,
+                    ai_hints: AgentHint {
+                        when_to_use: "Use to approve a flagged/reported item, clearing it from the moderation queue.".into(),
+                        common_mistakes: vec![
+                            "Approving the wrong item due to truncated IDs.".into(),
+                        ],
+                        examples: vec![
+                            r#"{"thing_fullname":"t3_flagged1"}"#.into(),
+                        ],
+                        related: vec![
+                            CapabilityId::from_static("reddit.mod.queue"),
+                            CapabilityId::from_static("reddit.mod_remove"),
+                        ],
+                    },
+                },
+                // ── Inbox ────────────────────────────────────────────────
+                OperationInfo {
+                    id: OperationId::from_static("reddit.inbox.list"),
+                    summary: "List inbox messages, mentions, or unread items".into(),
+                    description: None,
+                    input_schema: json!({
+                        "type": "object",
+                        "properties": {
+                            "category": { "type": "string", "description": "Inbox category to list.", "enum": ["inbox", "unread", "messages", "mentions"], "default": "inbox" },
+                            "limit": { "type": "integer", "description": "Maximum items to return.", "minimum": 1, "maximum": 100, "default": 25 },
+                            "after": { "type": "string", "description": "Pagination cursor from a prior response." }
+                        }
+                    }),
+                    output_schema: json!({
+                        "type": "object",
+                        "required": ["posts"],
+                        "properties": {
+                            "posts": { "type": "array" },
+                            "next_after": { "type": "string" }
+                        }
+                    }),
+                    capability: CapabilityId::from_static("reddit.message"),
+                    risk_level: RiskLevel::Low,
+                    safety_tier: SafetyTier::Safe,
+                    idempotency: IdempotencyClass::Strict,
+                    rate_limit: None,
+                    requires_approval: None,
+                    ai_hints: AgentHint {
+                        when_to_use: "Use to read inbox messages, mentions, or unread items.".into(),
+                        common_mistakes: vec![
+                            "Not specifying category; defaults to 'inbox' which includes all.".into(),
+                        ],
+                        examples: vec![
+                            r#"{"category":"unread", "limit":10}"#.into(),
+                        ],
+                        related: vec![
+                            CapabilityId::from_static("reddit.inbox.mark_read"),
+                            CapabilityId::from_static("reddit.send_message"),
+                        ],
+                    },
+                },
+                OperationInfo {
+                    id: OperationId::from_static("reddit.inbox.mark_read"),
+                    summary: "Mark one or more inbox messages as read".into(),
+                    description: None,
+                    input_schema: json!({
+                        "type": "object",
+                        "required": ["fullnames"],
+                        "properties": {
+                            "fullnames": { "type": "array", "description": "List of message fullnames to mark as read.", "items": { "type": "string" }, "minItems": 1, "maxItems": 25 }
+                        }
+                    }),
+                    output_schema: json!({
+                        "type": "object",
+                        "required": ["marked_read"],
+                        "properties": {
+                            "marked_read": { "type": "boolean" }
+                        }
+                    }),
+                    capability: CapabilityId::from_static("reddit.message"),
+                    risk_level: RiskLevel::Low,
+                    safety_tier: SafetyTier::Safe,
+                    idempotency: IdempotencyClass::Strict,
+                    rate_limit: None,
+                    requires_approval: None,
+                    ai_hints: AgentHint {
+                        when_to_use: "Use to mark messages as read after processing them.".into(),
+                        common_mistakes: vec![
+                            "Passing a single string instead of an array of fullnames.".into(),
+                        ],
+                        examples: vec![
+                            r#"{"fullnames":["t4_abc123","t4_def456"]}"#.into(),
+                        ],
+                        related: vec![
+                            CapabilityId::from_static("reddit.inbox.list"),
+                            CapabilityId::from_static("reddit.send_message"),
+                        ],
+                    },
+                },
             ],
             events: vec![],
             resource_types: vec![],
@@ -981,6 +1258,13 @@ impl RedditConnector {
             "reddit.user.comments" => self.invoke_user_comments(client, &input).await,
             "reddit.edit_content" => self.invoke_edit_content(client, &input).await,
             "reddit.delete_content" => self.invoke_delete_content(client, &input).await,
+            "reddit.saved.list" => self.invoke_saved_list(client, &input).await,
+            "reddit.saved.save" => self.invoke_saved_save(client, &input).await,
+            "reddit.saved.unsave" => self.invoke_saved_unsave(client, &input).await,
+            "reddit.mod.queue" => self.invoke_mod_queue(client, &input).await,
+            "reddit.mod.approve" => self.invoke_mod_approve(client, &input).await,
+            "reddit.inbox.list" => self.invoke_inbox_list(client, &input).await,
+            "reddit.inbox.mark_read" => self.invoke_inbox_mark_read(client, &input).await,
             _ => {
                 return Err(FcpError::InvalidRequest {
                     code: 1002,
@@ -1246,6 +1530,96 @@ impl RedditConnector {
         Ok(json!({ "deleted": true, "raw": data }))
     }
 
+    async fn invoke_saved_list(
+        &self,
+        client: &RedditClient,
+        input: &serde_json::Value,
+    ) -> Result<serde_json::Value, RedditError> {
+        let username = require_str(input, "username")?;
+        let limit = input.get("limit").and_then(serde_json::Value::as_i64);
+        let after = input.get("after").and_then(|v| v.as_str());
+        let data = client.get_saved(username, limit, after).await?;
+        Ok(extract_listing(&data))
+    }
+
+    async fn invoke_saved_save(
+        &self,
+        client: &RedditClient,
+        input: &serde_json::Value,
+    ) -> Result<serde_json::Value, RedditError> {
+        let thing_fullname = require_str(input, "thing_fullname")?;
+        let data = client.save_thing(thing_fullname).await?;
+        Ok(json!({ "saved": true, "raw": data }))
+    }
+
+    async fn invoke_saved_unsave(
+        &self,
+        client: &RedditClient,
+        input: &serde_json::Value,
+    ) -> Result<serde_json::Value, RedditError> {
+        let thing_fullname = require_str(input, "thing_fullname")?;
+        let data = client.unsave_thing(thing_fullname).await?;
+        Ok(json!({ "unsaved": true, "raw": data }))
+    }
+
+    async fn invoke_mod_queue(
+        &self,
+        client: &RedditClient,
+        input: &serde_json::Value,
+    ) -> Result<serde_json::Value, RedditError> {
+        let subreddit = require_str(input, "subreddit")?;
+        let limit = input.get("limit").and_then(serde_json::Value::as_i64);
+        let after = input.get("after").and_then(|v| v.as_str());
+        let data = client.get_mod_queue(subreddit, limit, after).await?;
+        Ok(extract_listing(&data))
+    }
+
+    async fn invoke_mod_approve(
+        &self,
+        client: &RedditClient,
+        input: &serde_json::Value,
+    ) -> Result<serde_json::Value, RedditError> {
+        let thing_fullname = require_str(input, "thing_fullname")?;
+        let data = client.mod_approve(thing_fullname).await?;
+        Ok(json!({ "approved": true, "raw": data }))
+    }
+
+    async fn invoke_inbox_list(
+        &self,
+        client: &RedditClient,
+        input: &serde_json::Value,
+    ) -> Result<serde_json::Value, RedditError> {
+        let category = input
+            .get("category")
+            .and_then(|v| v.as_str())
+            .unwrap_or("inbox");
+        let limit = input.get("limit").and_then(serde_json::Value::as_i64);
+        let after = input.get("after").and_then(|v| v.as_str());
+        let data = client.get_inbox(category, limit, after).await?;
+        Ok(extract_listing(&data))
+    }
+
+    async fn invoke_inbox_mark_read(
+        &self,
+        client: &RedditClient,
+        input: &serde_json::Value,
+    ) -> Result<serde_json::Value, RedditError> {
+        let fullnames_val = input.get("fullnames").ok_or_else(|| RedditError::Api {
+            status_code: 400,
+            message: "Missing required field: fullnames".into(),
+        })?;
+        let fullnames_arr = fullnames_val.as_array().ok_or_else(|| RedditError::Api {
+            status_code: 400,
+            message: "fullnames must be an array of strings".into(),
+        })?;
+        let fullnames: Vec<&str> = fullnames_arr
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        let data = client.mark_messages_read(&fullnames).await?;
+        Ok(json!({ "marked_read": true, "raw": data }))
+    }
+
     fn serialize_self_check_report(report: SelfCheckReport) -> FcpResult<serde_json::Value> {
         info!(
             event = "reddit.provisioning.self_check",
@@ -1386,6 +1760,13 @@ fn operations_info() -> serde_json::Value {
         { "id": "reddit.user.comments", "summary": "List a user's comment history", "capability": "reddit.read", "risk_level": "low", "safety_tier": "safe", "idempotency": "strict" },
         { "id": "reddit.edit_content", "summary": "Edit the text of a post or comment", "capability": "reddit.post", "risk_level": "medium", "safety_tier": "risky", "idempotency": "best_effort" },
         { "id": "reddit.delete_content", "summary": "Delete a post or comment", "capability": "reddit.post", "risk_level": "high", "safety_tier": "dangerous", "idempotency": "strict" },
+        { "id": "reddit.saved.list", "summary": "List saved posts and comments", "capability": "reddit.read", "risk_level": "low", "safety_tier": "safe", "idempotency": "strict" },
+        { "id": "reddit.saved.save", "summary": "Save a post or comment", "capability": "reddit.post", "risk_level": "low", "safety_tier": "safe", "idempotency": "strict" },
+        { "id": "reddit.saved.unsave", "summary": "Unsave a post or comment", "capability": "reddit.post", "risk_level": "low", "safety_tier": "safe", "idempotency": "strict" },
+        { "id": "reddit.mod.queue", "summary": "List the moderation queue", "capability": "reddit.moderate", "risk_level": "low", "safety_tier": "safe", "idempotency": "strict" },
+        { "id": "reddit.mod.approve", "summary": "Approve a flagged item", "capability": "reddit.moderate", "risk_level": "medium", "safety_tier": "risky", "idempotency": "strict" },
+        { "id": "reddit.inbox.list", "summary": "List inbox messages and mentions", "capability": "reddit.message", "risk_level": "low", "safety_tier": "safe", "idempotency": "strict" },
+        { "id": "reddit.inbox.mark_read", "summary": "Mark messages as read", "capability": "reddit.message", "risk_level": "low", "safety_tier": "safe", "idempotency": "strict" },
     ])
 }
 
@@ -1654,8 +2035,8 @@ mod tests {
     // ── operations_info ──────────────────────────────────────────────
 
     #[test]
-    fn operations_info_has_15_operations() {
-        assert_eq!(operations_info().as_array().unwrap().len(), 15);
+    fn operations_info_has_22_operations() {
+        assert_eq!(operations_info().as_array().unwrap().len(), 22);
     }
 
     #[test]
@@ -1764,6 +2145,13 @@ mod tests {
             "reddit.user.comments",
             "reddit.edit_content",
             "reddit.delete_content",
+            "reddit.saved.list",
+            "reddit.saved.save",
+            "reddit.saved.unsave",
+            "reddit.mod.queue",
+            "reddit.mod.approve",
+            "reddit.inbox.list",
+            "reddit.inbox.mark_read",
         ];
         for e in &expected {
             assert!(ids.contains(e), "missing expected operation {e}");

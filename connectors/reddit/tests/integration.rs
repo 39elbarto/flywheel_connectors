@@ -94,7 +94,7 @@ async fn lifecycle_introspect() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
     let intro = c.handle_introspect().await.unwrap();
-    assert_eq!(intro["operations"].as_array().unwrap().len(), 15);
+    assert_eq!(intro["operations"].as_array().unwrap().len(), 22);
 }
 
 // ── Search Posts ─────────────────────────────────────────────────────
@@ -703,6 +703,278 @@ async fn simulate_unknown() {
             .unwrap()["allowed"]
             .as_bool()
             .unwrap()
+    );
+}
+
+// ── Saved List ──────────────────────────────────────────────────────
+
+#[fcp_async_core::runtime::test]
+async fn saved_list() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path_regex("/user/testuser/saved.*"))
+        .and(header("Authorization", "Bearer test-bearer-tok"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(listing_response(
+            &json!([
+                {"name": "t3_saved1", "title": "Saved post"},
+                {"name": "t1_saved2", "body": "Saved comment"}
+            ]),
+            Some("t1_saved2"),
+        )))
+        .mount(&server)
+        .await;
+
+    let c = setup_connector(&server.uri()).await;
+    let result = c
+        .handle_invoke(json!({
+            "operation_id": "reddit.saved.list",
+            "input": {"username": "testuser", "limit": 25}
+        }))
+        .await
+        .unwrap();
+    assert_eq!(result["posts"].as_array().unwrap().len(), 2);
+    assert_eq!(result["next_after"], "t1_saved2");
+}
+
+#[fcp_async_core::runtime::test]
+async fn saved_list_missing_username() {
+    let server = MockServer::start().await;
+    let c = setup_connector(&server.uri()).await;
+    assert!(
+        c.handle_invoke(json!({"operation_id": "reddit.saved.list", "input": {}}))
+            .await
+            .is_err()
+    );
+}
+
+// ── Saved Save ──────────────────────────────────────────────────────
+
+#[fcp_async_core::runtime::test]
+async fn saved_save() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/save"))
+        .and(header("Authorization", "Bearer test-bearer-tok"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+        .mount(&server)
+        .await;
+
+    let c = setup_connector(&server.uri()).await;
+    let result = c
+        .handle_invoke(json!({
+            "operation_id": "reddit.saved.save",
+            "input": {"thing_fullname": "t3_abc123"}
+        }))
+        .await
+        .unwrap();
+    assert_eq!(result["saved"], true);
+}
+
+#[fcp_async_core::runtime::test]
+async fn saved_save_missing_fullname() {
+    let server = MockServer::start().await;
+    let c = setup_connector(&server.uri()).await;
+    assert!(
+        c.handle_invoke(json!({"operation_id": "reddit.saved.save", "input": {}}))
+            .await
+            .is_err()
+    );
+}
+
+// ── Saved Unsave ────────────────────────────────────────────────────
+
+#[fcp_async_core::runtime::test]
+async fn saved_unsave() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/unsave"))
+        .and(header("Authorization", "Bearer test-bearer-tok"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+        .mount(&server)
+        .await;
+
+    let c = setup_connector(&server.uri()).await;
+    let result = c
+        .handle_invoke(json!({
+            "operation_id": "reddit.saved.unsave",
+            "input": {"thing_fullname": "t3_abc123"}
+        }))
+        .await
+        .unwrap();
+    assert_eq!(result["unsaved"], true);
+}
+
+#[fcp_async_core::runtime::test]
+async fn saved_unsave_missing_fullname() {
+    let server = MockServer::start().await;
+    let c = setup_connector(&server.uri()).await;
+    assert!(
+        c.handle_invoke(json!({"operation_id": "reddit.saved.unsave", "input": {}}))
+            .await
+            .is_err()
+    );
+}
+
+// ── Mod Queue ───────────────────────────────────────────────────────
+
+#[fcp_async_core::runtime::test]
+async fn mod_queue() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path_regex("/r/rust/about/modqueue.*"))
+        .and(header("Authorization", "Bearer test-bearer-tok"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(listing_response(
+            &json!([
+                {"name": "t3_flagged1", "title": "Flagged post"},
+                {"name": "t1_flagged2", "body": "Flagged comment"}
+            ]),
+            Some("t1_flagged2"),
+        )))
+        .mount(&server)
+        .await;
+
+    let c = setup_connector(&server.uri()).await;
+    let result = c
+        .handle_invoke(json!({
+            "operation_id": "reddit.mod.queue",
+            "input": {"subreddit": "rust", "limit": 25}
+        }))
+        .await
+        .unwrap();
+    assert_eq!(result["posts"].as_array().unwrap().len(), 2);
+    assert_eq!(result["next_after"], "t1_flagged2");
+}
+
+#[fcp_async_core::runtime::test]
+async fn mod_queue_missing_subreddit() {
+    let server = MockServer::start().await;
+    let c = setup_connector(&server.uri()).await;
+    assert!(
+        c.handle_invoke(json!({"operation_id": "reddit.mod.queue", "input": {}}))
+            .await
+            .is_err()
+    );
+}
+
+// ── Mod Approve ─────────────────────────────────────────────────────
+
+#[fcp_async_core::runtime::test]
+async fn mod_approve() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/approve"))
+        .and(header("Authorization", "Bearer test-bearer-tok"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+        .mount(&server)
+        .await;
+
+    let c = setup_connector(&server.uri()).await;
+    let result = c
+        .handle_invoke(json!({
+            "operation_id": "reddit.mod.approve",
+            "input": {"thing_fullname": "t3_flagged1"}
+        }))
+        .await
+        .unwrap();
+    assert_eq!(result["approved"], true);
+}
+
+#[fcp_async_core::runtime::test]
+async fn mod_approve_missing_fullname() {
+    let server = MockServer::start().await;
+    let c = setup_connector(&server.uri()).await;
+    assert!(
+        c.handle_invoke(json!({"operation_id": "reddit.mod.approve", "input": {}}))
+            .await
+            .is_err()
+    );
+}
+
+// ── Inbox List ──────────────────────────────────────────────────────
+
+#[fcp_async_core::runtime::test]
+async fn inbox_list() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path_regex("/message/unread.*"))
+        .and(header("Authorization", "Bearer test-bearer-tok"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(listing_response(
+            &json!([
+                {"name": "t4_msg1", "subject": "Hello", "body": "Hi there"},
+                {"name": "t4_msg2", "subject": "Re: Hello", "body": "Thanks"}
+            ]),
+            Some("t4_msg2"),
+        )))
+        .mount(&server)
+        .await;
+
+    let c = setup_connector(&server.uri()).await;
+    let result = c
+        .handle_invoke(json!({
+            "operation_id": "reddit.inbox.list",
+            "input": {"category": "unread", "limit": 10}
+        }))
+        .await
+        .unwrap();
+    assert_eq!(result["posts"].as_array().unwrap().len(), 2);
+    assert_eq!(result["next_after"], "t4_msg2");
+}
+
+#[fcp_async_core::runtime::test]
+async fn inbox_list_default_category() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path_regex("/message/inbox.*"))
+        .and(header("Authorization", "Bearer test-bearer-tok"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(listing_response(
+            &json!([{"name": "t4_msg1", "subject": "Test"}]),
+            None,
+        )))
+        .mount(&server)
+        .await;
+
+    let c = setup_connector(&server.uri()).await;
+    let result = c
+        .handle_invoke(json!({
+            "operation_id": "reddit.inbox.list",
+            "input": {}
+        }))
+        .await
+        .unwrap();
+    assert_eq!(result["posts"].as_array().unwrap().len(), 1);
+}
+
+// ── Inbox Mark Read ─────────────────────────────────────────────────
+
+#[fcp_async_core::runtime::test]
+async fn inbox_mark_read() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/read_message"))
+        .and(header("Authorization", "Bearer test-bearer-tok"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+        .mount(&server)
+        .await;
+
+    let c = setup_connector(&server.uri()).await;
+    let result = c
+        .handle_invoke(json!({
+            "operation_id": "reddit.inbox.mark_read",
+            "input": {"fullnames": ["t4_msg1", "t4_msg2"]}
+        }))
+        .await
+        .unwrap();
+    assert_eq!(result["marked_read"], true);
+}
+
+#[fcp_async_core::runtime::test]
+async fn inbox_mark_read_missing_fullnames() {
+    let server = MockServer::start().await;
+    let c = setup_connector(&server.uri()).await;
+    assert!(
+        c.handle_invoke(json!({"operation_id": "reddit.inbox.mark_read", "input": {}}))
+            .await
+            .is_err()
     );
 }
 

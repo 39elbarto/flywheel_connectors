@@ -655,7 +655,7 @@ async fn test_introspect_operations() {
     let result = connector.handle_introspect().await.unwrap();
 
     let ops = result["operations"].as_array().unwrap();
-    assert_eq!(ops.len(), 10);
+    assert_eq!(ops.len(), 14);
 
     let op_ids: Vec<&str> = ops.iter().map(|o| o["id"].as_str().unwrap()).collect();
     assert!(op_ids.contains(&"zendesk.create_ticket"));
@@ -668,6 +668,10 @@ async fn test_introspect_operations() {
     assert!(op_ids.contains(&"zendesk.get_article"));
     assert!(op_ids.contains(&"zendesk.search_users"));
     assert!(op_ids.contains(&"zendesk.apply_macro"));
+    assert!(op_ids.contains(&"zendesk.sla.policies"));
+    assert!(op_ids.contains(&"zendesk.sla.ticket_status"));
+    assert!(op_ids.contains(&"zendesk.analytics.ticket_metrics"));
+    assert!(op_ids.contains(&"zendesk.analytics.satisfaction_ratings"));
 }
 
 #[fcp_async_core::runtime::test]
@@ -788,4 +792,238 @@ async fn test_apply_macro_missing_macro_id() {
         }
         e => panic!("Expected InvalidRequest about 'macro_id', got: {e:?}"),
     }
+}
+
+// ============================================================================
+// SLA Tracking operations
+// ============================================================================
+
+#[fcp_async_core::runtime::test]
+async fn test_list_sla_policies() {
+    let _ctx = AsyncTestContext::for_scenario("zendesk-list-sla-policies");
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/api/v2/slas/policies.json"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "sla_policies": [
+                {
+                    "id": 1,
+                    "title": "Urgent SLA",
+                    "filter": { "all": [{ "field": "priority", "operator": "is", "value": "urgent" }] },
+                    "policy_metrics": [
+                        { "priority": "urgent", "metric": "first_reply_time", "target": 60, "business_hours": false }
+                    ]
+                },
+                {
+                    "id": 2,
+                    "title": "High Priority SLA",
+                    "policy_metrics": [
+                        { "priority": "high", "metric": "first_reply_time", "target": 240, "business_hours": true }
+                    ]
+                }
+            ],
+            "count": 2
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = ZendeskConnector::new();
+    let key = setup_handshake(&mut connector, &["zendesk.sla.policies"]).await;
+    setup_configure(&mut connector, &format!("{}/api/v2", mock_server.uri())).await;
+
+    let token = generate_valid_token(&key, "zendesk.sla.policies");
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "zendesk.sla.policies",
+            "input": {},
+            "capability_token": token
+        }))
+        .await
+        .unwrap();
+
+    let policies = result["sla_policies"].as_array().unwrap();
+    assert_eq!(policies.len(), 2);
+    assert_eq!(policies[0]["title"], "Urgent SLA");
+    assert_eq!(policies[1]["title"], "High Priority SLA");
+}
+
+#[fcp_async_core::runtime::test]
+async fn test_get_ticket_sla() {
+    let _ctx = AsyncTestContext::for_scenario("zendesk-get-ticket-sla");
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/api/v2/tickets/456/metrics.json"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "ticket_metric": {
+                "id": 9001,
+                "ticket_id": 456,
+                "reply_time_in_minutes": { "calendar": 15, "business": 10 },
+                "first_resolution_time_in_minutes": { "calendar": 120, "business": 60 },
+                "full_resolution_time_in_minutes": { "calendar": 240, "business": 120 },
+                "agent_wait_time_in_minutes": { "calendar": 5, "business": 3 }
+            }
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = ZendeskConnector::new();
+    let key = setup_handshake(&mut connector, &["zendesk.sla.ticket_status"]).await;
+    setup_configure(&mut connector, &format!("{}/api/v2", mock_server.uri())).await;
+
+    let token = generate_valid_token(&key, "zendesk.sla.ticket_status");
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "zendesk.sla.ticket_status",
+            "input": { "ticket_id": 456 },
+            "capability_token": token
+        }))
+        .await
+        .unwrap();
+
+    assert_eq!(result["ticket_metric"]["ticket_id"], 456);
+    assert_eq!(result["ticket_metric"]["reply_time_in_minutes"]["calendar"], 15);
+    assert_eq!(result["ticket_metric"]["first_resolution_time_in_minutes"]["business"], 60);
+}
+
+#[fcp_async_core::runtime::test]
+async fn test_get_ticket_sla_missing_ticket_id() {
+    let _ctx = AsyncTestContext::for_scenario("zendesk-sla-missing-ticket-id");
+    let mock_server = MockServer::start().await;
+
+    let mut connector = ZendeskConnector::new();
+    let key = setup_handshake(&mut connector, &["zendesk.sla.ticket_status"]).await;
+    setup_configure(&mut connector, &format!("{}/api/v2", mock_server.uri())).await;
+
+    let token = generate_valid_token(&key, "zendesk.sla.ticket_status");
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "zendesk.sla.ticket_status",
+            "input": {},
+            "capability_token": token
+        }))
+        .await;
+
+    assert!(result.is_err());
+    match result.unwrap_err() {
+        fcp_core::FcpError::InvalidRequest { message, .. } => {
+            assert!(message.contains("ticket_id"));
+        }
+        e => panic!("Expected InvalidRequest about 'ticket_id', got: {e:?}"),
+    }
+}
+
+// ============================================================================
+// Analytics operations
+// ============================================================================
+
+#[fcp_async_core::runtime::test]
+async fn test_list_ticket_metrics() {
+    let _ctx = AsyncTestContext::for_scenario("zendesk-list-ticket-metrics");
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "ticket_metrics": [
+                { "id": 1, "ticket_id": 100, "reply_time_in_minutes": { "calendar": 30 } },
+                { "id": 2, "ticket_id": 101, "reply_time_in_minutes": { "calendar": 45 } },
+                { "id": 3, "ticket_id": 102, "reply_time_in_minutes": { "calendar": 10 } }
+            ],
+            "count": 3
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = ZendeskConnector::new();
+    let key = setup_handshake(&mut connector, &["zendesk.analytics.ticket_metrics"]).await;
+    setup_configure(&mut connector, &format!("{}/api/v2", mock_server.uri())).await;
+
+    let token = generate_valid_token(&key, "zendesk.analytics.ticket_metrics");
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "zendesk.analytics.ticket_metrics",
+            "input": { "page_size": 100 },
+            "capability_token": token
+        }))
+        .await
+        .unwrap();
+
+    assert_eq!(result["count"], 3);
+    let metrics = result["ticket_metrics"].as_array().unwrap();
+    assert_eq!(metrics.len(), 3);
+    assert_eq!(metrics[0]["ticket_id"], 100);
+}
+
+#[fcp_async_core::runtime::test]
+async fn test_list_satisfaction_ratings() {
+    let _ctx = AsyncTestContext::for_scenario("zendesk-list-satisfaction-ratings");
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "satisfaction_ratings": [
+                { "id": 1, "score": "good", "comment": "Great support!", "ticket_id": 100 },
+                { "id": 2, "score": "good", "comment": "Quick resolution", "ticket_id": 101 }
+            ],
+            "count": 2
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = ZendeskConnector::new();
+    let key = setup_handshake(&mut connector, &["zendesk.analytics.satisfaction_ratings"]).await;
+    setup_configure(&mut connector, &format!("{}/api/v2", mock_server.uri())).await;
+
+    let token = generate_valid_token(&key, "zendesk.analytics.satisfaction_ratings");
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "zendesk.analytics.satisfaction_ratings",
+            "input": { "score": "good", "page_size": 100 },
+            "capability_token": token
+        }))
+        .await
+        .unwrap();
+
+    assert_eq!(result["count"], 2);
+    let ratings = result["satisfaction_ratings"].as_array().unwrap();
+    assert_eq!(ratings.len(), 2);
+    assert_eq!(ratings[0]["score"], "good");
+    assert_eq!(ratings[0]["comment"], "Great support!");
+}
+
+#[fcp_async_core::runtime::test]
+async fn test_list_satisfaction_ratings_no_filter() {
+    let _ctx = AsyncTestContext::for_scenario("zendesk-satisfaction-no-filter");
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "satisfaction_ratings": [
+                { "id": 1, "score": "good", "ticket_id": 100 },
+                { "id": 2, "score": "bad", "ticket_id": 101 },
+                { "id": 3, "score": "offered", "ticket_id": 102 }
+            ],
+            "count": 3
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = ZendeskConnector::new();
+    let key = setup_handshake(&mut connector, &["zendesk.analytics.satisfaction_ratings"]).await;
+    setup_configure(&mut connector, &format!("{}/api/v2", mock_server.uri())).await;
+
+    let token = generate_valid_token(&key, "zendesk.analytics.satisfaction_ratings");
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "zendesk.analytics.satisfaction_ratings",
+            "input": {},
+            "capability_token": token
+        }))
+        .await
+        .unwrap();
+
+    assert_eq!(result["count"], 3);
+    let ratings = result["satisfaction_ratings"].as_array().unwrap();
+    assert_eq!(ratings.len(), 3);
 }

@@ -324,6 +324,54 @@ impl ZendeskClient {
         Ok(result)
     }
 
+    // ── SLA operations ────────────────────────────────────────────
+
+    /// List SLA policies.
+    pub async fn list_sla_policies(&self) -> ZendeskResult<serde_json::Value> {
+        let url = format!("{}/slas/policies.json", self.base_url);
+        self.get(&url).await
+    }
+
+    /// Get SLA status / ticket metrics for a specific ticket.
+    pub async fn get_ticket_sla(&self, ticket_id: i64) -> ZendeskResult<serde_json::Value> {
+        let url = format!("{}/tickets/{ticket_id}/metrics.json", self.base_url);
+        self.get(&url).await
+    }
+
+    // ── Analytics operations ─────────────────────────────────────
+
+    /// List ticket metrics (aggregate).
+    pub async fn list_ticket_metrics(
+        &self,
+        page_size: Option<i64>,
+    ) -> ZendeskResult<serde_json::Value> {
+        let mut url = format!("{}/ticket_metrics.json", self.base_url);
+        if let Some(ps) = page_size {
+            url = format!("{url}?page[size]={ps}");
+        }
+        self.get(&url).await
+    }
+
+    /// List satisfaction ratings (CSAT).
+    pub async fn list_satisfaction_ratings(
+        &self,
+        score: Option<&str>,
+        page_size: Option<i64>,
+    ) -> ZendeskResult<serde_json::Value> {
+        let mut url = format!("{}/satisfaction_ratings.json", self.base_url);
+        let mut params = Vec::new();
+        if let Some(s) = score {
+            params.push(format!("score={s}"));
+        }
+        if let Some(ps) = page_size {
+            params.push(format!("page[size]={ps}"));
+        }
+        if !params.is_empty() {
+            url = format!("{url}?{}", params.join("&"));
+        }
+        self.get(&url).await
+    }
+
     // ── HTTP helpers ──────────────────────────────────────────────
 
     async fn get(&self, url: &str) -> ZendeskResult<serde_json::Value> {
@@ -1112,5 +1160,165 @@ mod tests {
         // Already encoded strings get double-encoded (% -> %25)
         let result = percent_encode("%20");
         assert!(result.contains("%25"));
+    }
+
+    // ─── SLA & Analytics client tests ────────────────────────────
+
+    #[fcp_async_core::runtime::test]
+    async fn test_list_sla_policies() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/api/v2/slas/policies.json"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "sla_policies": [
+                    {
+                        "id": 1,
+                        "title": "Urgent SLA",
+                        "filter": { "all": [{ "field": "priority", "operator": "is", "value": "urgent" }] },
+                        "policy_metrics": [
+                            { "priority": "urgent", "metric": "first_reply_time", "target": 60, "business_hours": false }
+                        ]
+                    },
+                    {
+                        "id": 2,
+                        "title": "High SLA",
+                        "filter": { "all": [{ "field": "priority", "operator": "is", "value": "high" }] },
+                        "policy_metrics": [
+                            { "priority": "high", "metric": "first_reply_time", "target": 240, "business_hours": true }
+                        ]
+                    }
+                ],
+                "count": 2
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = ZendeskClient::new("test", "user@example.com", "token123")
+            .unwrap()
+            .with_base_url(&format!("{}/api/v2", mock_server.uri()));
+
+        let result = client.list_sla_policies().await.unwrap();
+        assert_eq!(result["sla_policies"].as_array().unwrap().len(), 2);
+        assert_eq!(result["sla_policies"][0]["title"], "Urgent SLA");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_get_ticket_sla() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/api/v2/tickets/123/metrics.json"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ticket_metric": {
+                    "id": 9001,
+                    "ticket_id": 123,
+                    "reply_time_in_minutes": { "calendar": 15, "business": 10 },
+                    "first_resolution_time_in_minutes": { "calendar": 120, "business": 60 },
+                    "full_resolution_time_in_minutes": { "calendar": 240, "business": 120 },
+                    "agent_wait_time_in_minutes": { "calendar": 5, "business": 3 }
+                }
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = ZendeskClient::new("test", "user@example.com", "token123")
+            .unwrap()
+            .with_base_url(&format!("{}/api/v2", mock_server.uri()));
+
+        let result = client.get_ticket_sla(123).await.unwrap();
+        assert_eq!(result["ticket_metric"]["ticket_id"], 123);
+        assert_eq!(result["ticket_metric"]["reply_time_in_minutes"]["calendar"], 15);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_list_ticket_metrics() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ticket_metrics": [
+                    { "id": 1, "ticket_id": 100, "reply_time_in_minutes": { "calendar": 30 } },
+                    { "id": 2, "ticket_id": 101, "reply_time_in_minutes": { "calendar": 45 } }
+                ],
+                "count": 2
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = ZendeskClient::new("test", "user@example.com", "token123")
+            .unwrap()
+            .with_base_url(&format!("{}/api/v2", mock_server.uri()));
+
+        let result = client.list_ticket_metrics(Some(100)).await.unwrap();
+        assert_eq!(result["ticket_metrics"].as_array().unwrap().len(), 2);
+        assert_eq!(result["count"], 2);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_list_ticket_metrics_no_page_size() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ticket_metrics": [],
+                "count": 0
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = ZendeskClient::new("test", "user@example.com", "token123")
+            .unwrap()
+            .with_base_url(&format!("{}/api/v2", mock_server.uri()));
+
+        let result = client.list_ticket_metrics(None).await.unwrap();
+        assert_eq!(result["count"], 0);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_list_satisfaction_ratings() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "satisfaction_ratings": [
+                    { "id": 1, "score": "good", "comment": "Great support!", "ticket_id": 100 },
+                    { "id": 2, "score": "good", "comment": "Quick resolution", "ticket_id": 101 }
+                ],
+                "count": 2
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = ZendeskClient::new("test", "user@example.com", "token123")
+            .unwrap()
+            .with_base_url(&format!("{}/api/v2", mock_server.uri()));
+
+        let result = client
+            .list_satisfaction_ratings(Some("good"), Some(100))
+            .await
+            .unwrap();
+        assert_eq!(result["satisfaction_ratings"].as_array().unwrap().len(), 2);
+        assert_eq!(result["satisfaction_ratings"][0]["score"], "good");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_list_satisfaction_ratings_no_params() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "satisfaction_ratings": [],
+                "count": 0
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = ZendeskClient::new("test", "user@example.com", "token123")
+            .unwrap()
+            .with_base_url(&format!("{}/api/v2", mock_server.uri()));
+
+        let result = client.list_satisfaction_ratings(None, None).await.unwrap();
+        assert_eq!(result["count"], 0);
     }
 }

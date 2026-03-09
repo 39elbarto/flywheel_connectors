@@ -5,7 +5,7 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:954d5a806ca6c72cfc552965b905ab78150b5ce89eacbd45c7a2ba0ff7d962e5"
+interface_hash = "blake3-256:fcp.interface.v2:4464cafa1abc708c18a5ebb67dc6329bcccd622fe5f3198cb07c60a3550f90c4"
 
 [connector]
 id = "fcp.zendesk"
@@ -694,6 +694,224 @@ examples = ['{"ticket_id": 12345, "macro_id": 67890}']
 related = ["zendesk.update_ticket"]
 
 # ---------------------------------------------------------------------------
+# Operations: SLA Tracking
+# ---------------------------------------------------------------------------
+
+[provides.operations."zendesk.sla.policies"]
+description = "List SLA policies"
+capability = "zendesk.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."zendesk.sla.policies".rate_limit]
+max = 200
+per_ms = 60000
+
+[provides.operations."zendesk.sla.policies".input_schema]
+type = "object"
+
+[provides.operations."zendesk.sla.policies".output_schema]
+required = ["sla_policies"]
+type = "object"
+[provides.operations."zendesk.sla.policies".output_schema.properties.sla_policies]
+type = "array"
+[provides.operations."zendesk.sla.policies".output_schema.properties.sla_policies.items]
+type = "object"
+[provides.operations."zendesk.sla.policies".output_schema.properties.count]
+type = "integer"
+
+[provides.operations."zendesk.sla.policies".network_constraints]
+host_allow = ["*.zendesk.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."zendesk.sla.policies".ai_hints]
+when_to_use = "List all SLA policies configured in this Zendesk instance, including targets and conditions."
+common_mistakes = ["Expecting per-ticket SLA data here — use zendesk.sla.ticket_status for that."]
+examples = ['{}']
+related = ["zendesk.sla.ticket_status"]
+
+[provides.operations."zendesk.sla.ticket_status"]
+description = "Get SLA status for a specific ticket via ticket metrics"
+capability = "zendesk.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."zendesk.sla.ticket_status".rate_limit]
+max = 200
+per_ms = 60000
+
+[provides.operations."zendesk.sla.ticket_status".input_schema]
+required = ["ticket_id"]
+type = "object"
+[provides.operations."zendesk.sla.ticket_status".input_schema.properties.ticket_id]
+description = "Ticket ID (numeric)"
+type = "integer"
+
+[provides.operations."zendesk.sla.ticket_status".output_schema]
+required = ["ticket_metric"]
+type = "object"
+[provides.operations."zendesk.sla.ticket_status".output_schema.properties.ticket_metric]
+type = "object"
+
+[provides.operations."zendesk.sla.ticket_status".network_constraints]
+host_allow = ["*.zendesk.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."zendesk.sla.ticket_status".ai_hints]
+when_to_use = "Retrieve SLA-related metrics for a specific ticket, including reply time, resolution time, and agent wait time."
+common_mistakes = ["Using ticket subject instead of numeric ticket_id."]
+examples = ['{"ticket_id": 12345}']
+related = ["zendesk.sla.policies", "zendesk.get_ticket"]
+
+# ---------------------------------------------------------------------------
+# Operations: Analytics
+# ---------------------------------------------------------------------------
+
+[provides.operations."zendesk.analytics.ticket_metrics"]
+description = "List aggregate ticket metrics across all tickets"
+capability = "zendesk.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."zendesk.analytics.ticket_metrics".rate_limit]
+max = 200
+per_ms = 60000
+
+[provides.operations."zendesk.analytics.ticket_metrics".input_schema]
+type = "object"
+[provides.operations."zendesk.analytics.ticket_metrics".input_schema.properties.page_size]
+description = "Number of metrics per page"
+minimum = 1
+maximum = 100
+type = "integer"
+
+[provides.operations."zendesk.analytics.ticket_metrics".output_schema]
+required = ["ticket_metrics"]
+type = "object"
+[provides.operations."zendesk.analytics.ticket_metrics".output_schema.properties.ticket_metrics]
+type = "array"
+[provides.operations."zendesk.analytics.ticket_metrics".output_schema.properties.ticket_metrics.items]
+type = "object"
+[provides.operations."zendesk.analytics.ticket_metrics".output_schema.properties.count]
+type = "integer"
+
+[provides.operations."zendesk.analytics.ticket_metrics".network_constraints]
+host_allow = ["*.zendesk.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 60000
+max_response_bytes = 10485760
+
+[provides.operations."zendesk.analytics.ticket_metrics".ai_hints]
+when_to_use = "Retrieve aggregate ticket metrics (reply times, resolution times) across all tickets."
+common_mistakes = ["Confusing this with per-ticket SLA metrics — use zendesk.sla.ticket_status for a single ticket."]
+examples = ['{"page_size": 100}']
+related = ["zendesk.sla.ticket_status", "zendesk.search_tickets"]
+
+[provides.operations."zendesk.analytics.satisfaction_ratings"]
+description = "List CSAT / satisfaction ratings"
+capability = "zendesk.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."zendesk.analytics.satisfaction_ratings".rate_limit]
+max = 200
+per_ms = 60000
+
+[provides.operations."zendesk.analytics.satisfaction_ratings".input_schema]
+type = "object"
+[provides.operations."zendesk.analytics.satisfaction_ratings".input_schema.properties.score]
+description = "Filter by score type"
+enum = ["good", "bad", "offered", "unoffered"]
+type = "string"
+[provides.operations."zendesk.analytics.satisfaction_ratings".input_schema.properties.page_size]
+description = "Number of ratings per page"
+minimum = 1
+maximum = 100
+type = "integer"
+
+[provides.operations."zendesk.analytics.satisfaction_ratings".output_schema]
+required = ["satisfaction_ratings"]
+type = "object"
+[provides.operations."zendesk.analytics.satisfaction_ratings".output_schema.properties.satisfaction_ratings]
+type = "array"
+[provides.operations."zendesk.analytics.satisfaction_ratings".output_schema.properties.satisfaction_ratings.items]
+type = "object"
+[provides.operations."zendesk.analytics.satisfaction_ratings".output_schema.properties.count]
+type = "integer"
+
+[provides.operations."zendesk.analytics.satisfaction_ratings".network_constraints]
+host_allow = ["*.zendesk.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 2097152
+
+[provides.operations."zendesk.analytics.satisfaction_ratings".ai_hints]
+when_to_use = "Retrieve customer satisfaction survey results. Can filter by score (good/bad/offered/unoffered)."
+common_mistakes = ["Not specifying a score filter — returns all ratings which can be a large result set."]
+examples = ['{"score": "good", "page_size": 50}']
+related = ["zendesk.analytics.ticket_metrics", "zendesk.get_ticket"]
+
+# ---------------------------------------------------------------------------
 # Streaming / Event Capabilities
 # ---------------------------------------------------------------------------
 
@@ -766,3 +984,7 @@ scope = "instance"
 "zendesk.get_article" = ["zendesk.read"]
 "zendesk.search_users" = ["zendesk.search"]
 "zendesk.apply_macro" = ["zendesk.write"]
+"zendesk.sla.policies" = ["zendesk.read"]
+"zendesk.sla.ticket_status" = ["zendesk.read"]
+"zendesk.analytics.ticket_metrics" = ["zendesk.read"]
+"zendesk.analytics.satisfaction_ratings" = ["zendesk.read"]

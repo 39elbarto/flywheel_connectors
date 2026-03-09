@@ -1744,6 +1744,10 @@ fn zendesk_full_manifest_parses_with_all_operations() {
         "zendesk.get_article",
         "zendesk.search_users",
         "zendesk.apply_macro",
+        "zendesk.sla.policies",
+        "zendesk.sla.ticket_status",
+        "zendesk.analytics.ticket_metrics",
+        "zendesk.analytics.satisfaction_ratings",
     ];
     for op_name in &expected_ops {
         assert!(ops.contains_key(*op_name), "missing operation: {op_name}");

@@ -51,7 +51,11 @@ mod pipe;
 #[allow(dead_code)] // Pipeline conditional branching and error handling.
 mod pipeline_cond;
 #[allow(dead_code)]
+mod pipeline_recipes;
+#[allow(dead_code)]
 mod rate_limit;
+#[allow(dead_code)]
+mod reactive_rules;
 #[allow(dead_code)] // Contract types wired into host-backed commands in later beads.
 mod readiness;
 mod recovery;

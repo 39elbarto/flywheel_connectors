@@ -4790,14 +4790,19 @@ fn docusign_full_manifest_parses_with_all_operations() {
     let ops = &parsed.provides.operations;
     let expected_ops = [
         "docusign.add_recipients",
+        "docusign.add_tabs",
         "docusign.create_envelope",
+        "docusign.create_from_template",
         "docusign.download_documents",
         "docusign.get_envelope",
         "docusign.get_template",
+        "docusign.list_documents",
         "docusign.list_envelopes",
         "docusign.list_templates",
+        "docusign.resend_envelope",
         "docusign.send_envelope",
         "docusign.stream_connect_events",
+        "docusign.update_recipients",
         "docusign.void_envelope",
     ];
     for op_name in &expected_ops {

@@ -79,7 +79,7 @@ async fn lifecycle_introspect() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
     let intro = c.handle_introspect().await.unwrap();
-    assert_eq!(intro["operations"].as_array().unwrap().len(), 10);
+    assert_eq!(intro["operations"].as_array().unwrap().len(), 15);
 }
 
 #[fcp_async_core::runtime::test]
@@ -678,6 +678,11 @@ async fn simulate_all_operations() {
         "docusign.get_template",
         "docusign.download_documents",
         "docusign.stream_connect_events",
+        "docusign.update_recipients",
+        "docusign.add_tabs",
+        "docusign.resend_envelope",
+        "docusign.list_documents",
+        "docusign.create_from_template",
     ];
     for op in ops {
         let result = c
@@ -689,6 +694,289 @@ async fn simulate_all_operations() {
             "op {op} should be allowed"
         );
     }
+}
+
+// -- Update Recipients --
+
+#[fcp_async_core::runtime::test]
+async fn update_recipients() {
+    let server = MockServer::start().await;
+    Mock::given(method("PUT"))
+        .and(path_regex(".*/envelopes/env-draft/recipients"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "signers": [{"recipientId": "1", "name": "Updated Name", "email": "new@example.com"}],
+            "recipientCount": "1",
+        })))
+        .mount(&server)
+        .await;
+
+    let c = setup_connector(&server.uri()).await;
+    let result = c
+        .handle_invoke(json!({
+            "operation_id": "docusign.update_recipients",
+            "input": {
+                "account_id": "acct-123",
+                "envelope_id": "env-draft",
+                "recipients": {
+                    "signers": [{"recipientId": "1", "email": "new@example.com", "name": "Updated Name"}]
+                }
+            }
+        }))
+        .await
+        .unwrap();
+    assert!(result["recipients"].is_object());
+}
+
+#[fcp_async_core::runtime::test]
+async fn update_recipients_missing_recipients() {
+    let server = MockServer::start().await;
+    let c = setup_connector(&server.uri()).await;
+    assert!(
+        c.handle_invoke(json!({
+            "operation_id": "docusign.update_recipients",
+            "input": {"account_id": "acct-123", "envelope_id": "env-draft"}
+        }))
+        .await
+        .is_err()
+    );
+}
+
+// -- Add Tabs --
+
+#[fcp_async_core::runtime::test]
+async fn add_tabs() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path_regex(".*/envelopes/env-draft/recipients/1/tabs"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "signHereTabs": [{"tabId": "tab-1", "documentId": "1", "pageNumber": "1"}],
+        })))
+        .mount(&server)
+        .await;
+
+    let c = setup_connector(&server.uri()).await;
+    let result = c
+        .handle_invoke(json!({
+            "operation_id": "docusign.add_tabs",
+            "input": {
+                "account_id": "acct-123",
+                "envelope_id": "env-draft",
+                "recipient_id": "1",
+                "tabs": {
+                    "signHereTabs": [{"documentId": "1", "pageNumber": "1", "xPosition": "100", "yPosition": "200"}]
+                }
+            }
+        }))
+        .await
+        .unwrap();
+    assert!(result["tabs"].is_object());
+}
+
+#[fcp_async_core::runtime::test]
+async fn add_tabs_missing_tabs() {
+    let server = MockServer::start().await;
+    let c = setup_connector(&server.uri()).await;
+    assert!(
+        c.handle_invoke(json!({
+            "operation_id": "docusign.add_tabs",
+            "input": {"account_id": "acct-123", "envelope_id": "env-draft", "recipient_id": "1"}
+        }))
+        .await
+        .is_err()
+    );
+}
+
+#[fcp_async_core::runtime::test]
+async fn add_tabs_missing_recipient_id() {
+    let server = MockServer::start().await;
+    let c = setup_connector(&server.uri()).await;
+    assert!(
+        c.handle_invoke(json!({
+            "operation_id": "docusign.add_tabs",
+            "input": {"account_id": "acct-123", "envelope_id": "env-draft", "tabs": {"signHereTabs": []}}
+        }))
+        .await
+        .is_err()
+    );
+}
+
+// -- Resend Envelope --
+
+#[fcp_async_core::runtime::test]
+async fn resend_envelope() {
+    let server = MockServer::start().await;
+    Mock::given(method("PUT"))
+        .and(path_regex(".*/envelopes/env-sent.*"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "envelopeId": "env-sent",
+            "status": "sent",
+        })))
+        .mount(&server)
+        .await;
+
+    let c = setup_connector(&server.uri()).await;
+    let result = c
+        .handle_invoke(json!({
+            "operation_id": "docusign.resend_envelope",
+            "input": {"account_id": "acct-123", "envelope_id": "env-sent"}
+        }))
+        .await
+        .unwrap();
+    assert_eq!(result["envelopeId"], "env-sent");
+}
+
+#[fcp_async_core::runtime::test]
+async fn resend_envelope_missing_envelope_id() {
+    let server = MockServer::start().await;
+    let c = setup_connector(&server.uri()).await;
+    assert!(
+        c.handle_invoke(json!({
+            "operation_id": "docusign.resend_envelope",
+            "input": {"account_id": "acct-123"}
+        }))
+        .await
+        .is_err()
+    );
+}
+
+// -- List Documents --
+
+#[fcp_async_core::runtime::test]
+async fn list_documents() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path_regex(".*/envelopes/env-001/documents$"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "envelopeId": "env-001",
+            "envelopeDocuments": [
+                {"documentId": "1", "name": "contract.pdf", "type": "content"},
+                {"documentId": "certificate", "name": "Summary", "type": "summary"},
+            ],
+        })))
+        .mount(&server)
+        .await;
+
+    let c = setup_connector(&server.uri()).await;
+    let result = c
+        .handle_invoke(json!({
+            "operation_id": "docusign.list_documents",
+            "input": {"account_id": "acct-123", "envelope_id": "env-001"}
+        }))
+        .await
+        .unwrap();
+    assert!(result["documents"].is_object());
+    assert_eq!(result["documents"]["envelopeDocuments"].as_array().unwrap().len(), 2);
+}
+
+#[fcp_async_core::runtime::test]
+async fn list_documents_missing_envelope_id() {
+    let server = MockServer::start().await;
+    let c = setup_connector(&server.uri()).await;
+    assert!(
+        c.handle_invoke(json!({
+            "operation_id": "docusign.list_documents",
+            "input": {"account_id": "acct-123"}
+        }))
+        .await
+        .is_err()
+    );
+}
+
+// -- Create From Template --
+
+#[fcp_async_core::runtime::test]
+async fn create_from_template() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path_regex(".*/envelopes"))
+        .respond_with(ResponseTemplate::new(201).set_body_json(json!({
+            "envelopeId": "env-from-tmpl",
+            "status": "created",
+            "uri": "/envelopes/env-from-tmpl",
+        })))
+        .mount(&server)
+        .await;
+
+    let c = setup_connector(&server.uri()).await;
+    let result = c
+        .handle_invoke(json!({
+            "operation_id": "docusign.create_from_template",
+            "input": {
+                "account_id": "acct-123",
+                "template_id": "tmpl-789",
+                "template_roles": [
+                    {"roleName": "Signer", "name": "Alice", "email": "alice@example.com"}
+                ],
+                "status": "created"
+            }
+        }))
+        .await
+        .unwrap();
+    assert_eq!(result["envelopeId"], "env-from-tmpl");
+    assert_eq!(result["status"], "created");
+}
+
+#[fcp_async_core::runtime::test]
+async fn create_from_template_missing_template_id() {
+    let server = MockServer::start().await;
+    let c = setup_connector(&server.uri()).await;
+    assert!(
+        c.handle_invoke(json!({
+            "operation_id": "docusign.create_from_template",
+            "input": {
+                "account_id": "acct-123",
+                "template_roles": [{"roleName": "Signer", "name": "Bob", "email": "bob@example.com"}]
+            }
+        }))
+        .await
+        .is_err()
+    );
+}
+
+#[fcp_async_core::runtime::test]
+async fn create_from_template_missing_roles() {
+    let server = MockServer::start().await;
+    let c = setup_connector(&server.uri()).await;
+    assert!(
+        c.handle_invoke(json!({
+            "operation_id": "docusign.create_from_template",
+            "input": {
+                "account_id": "acct-123",
+                "template_id": "tmpl-789"
+            }
+        }))
+        .await
+        .is_err()
+    );
+}
+
+#[fcp_async_core::runtime::test]
+async fn create_from_template_default_status() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path_regex(".*/envelopes"))
+        .respond_with(ResponseTemplate::new(201).set_body_json(json!({
+            "envelopeId": "env-default",
+            "status": "created",
+        })))
+        .mount(&server)
+        .await;
+
+    let c = setup_connector(&server.uri()).await;
+    let result = c
+        .handle_invoke(json!({
+            "operation_id": "docusign.create_from_template",
+            "input": {
+                "account_id": "acct-123",
+                "template_id": "tmpl-789",
+                "template_roles": [
+                    {"roleName": "Signer", "name": "Charlie", "email": "charlie@example.com"}
+                ]
+            }
+        }))
+        .await
+        .unwrap();
+    assert_eq!(result["status"], "created");
 }
 
 // -- Counters --

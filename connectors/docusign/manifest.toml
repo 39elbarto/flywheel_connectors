@@ -5,7 +5,7 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:122f51ca25f7d300fe39349a2c90c3d6d2458d04ebb387050bf4312c913df71f"
+interface_hash = "blake3-256:fcp.interface.v2:8254e56df582c9f41b517aba31ea915551c911909d06a78c1c6312694531f1fe"
 
 [connector]
 id = "fcp.docusign"
@@ -667,6 +667,356 @@ related = [
     "docusign.list_envelopes",
 ]
 
+[provides.operations."docusign.update_recipients"]
+description = "Update existing recipients on an envelope"
+capability = "docusign.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "best_effort"
+
+[provides.operations."docusign.update_recipients".input_schema]
+required = [
+    "account_id",
+    "envelope_id",
+    "recipients",
+]
+type = "object"
+
+[provides.operations."docusign.update_recipients".input_schema.properties.account_id]
+description = "DocuSign account ID"
+type = "string"
+
+[provides.operations."docusign.update_recipients".input_schema.properties.envelope_id]
+description = "Envelope ID to modify"
+type = "string"
+
+[provides.operations."docusign.update_recipients".input_schema.properties.recipients]
+description = "Recipients object with updated signers, carbonCopies, etc."
+type = "object"
+
+[provides.operations."docusign.update_recipients".output_schema]
+required = ["recipients"]
+type = "object"
+
+[provides.operations."docusign.update_recipients".output_schema.properties.recipients]
+type = "object"
+
+[provides.operations."docusign.update_recipients".network_constraints]
+host_allow = [
+    "*.docusign.net",
+    "*.docusign.com",
+    "demo.docusign.net",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."docusign.update_recipients".ai_hints]
+when_to_use = "Update existing recipients on an envelope (change email, name, routing order)."
+common_mistakes = [
+    "Updating recipients on a completed or voided envelope.",
+    "Not including the recipientId for existing recipients being updated.",
+]
+examples = ['{"account_id": "abc-123", "envelope_id": "env-456", "recipients": {"signers": [{"recipientId": "1", "email": "newemail@example.com", "name": "Updated Name"}]}}']
+related = [
+    "docusign.add_recipients",
+    "docusign.get_envelope",
+]
+
+[provides.operations."docusign.add_tabs"]
+description = "Add tabs/fields to an envelope recipient"
+capability = "docusign.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "none"
+
+[provides.operations."docusign.add_tabs".input_schema]
+required = [
+    "account_id",
+    "envelope_id",
+    "recipient_id",
+    "tabs",
+]
+type = "object"
+
+[provides.operations."docusign.add_tabs".input_schema.properties.account_id]
+description = "DocuSign account ID"
+type = "string"
+
+[provides.operations."docusign.add_tabs".input_schema.properties.envelope_id]
+description = "Envelope ID"
+type = "string"
+
+[provides.operations."docusign.add_tabs".input_schema.properties.recipient_id]
+description = "Recipient ID to add tabs to"
+type = "string"
+
+[provides.operations."docusign.add_tabs".input_schema.properties.tabs]
+description = "Tabs object with signHereTabs, textTabs, dateSignedTabs, etc."
+type = "object"
+
+[provides.operations."docusign.add_tabs".output_schema]
+required = ["tabs"]
+type = "object"
+
+[provides.operations."docusign.add_tabs".output_schema.properties.tabs]
+type = "object"
+
+[provides.operations."docusign.add_tabs".network_constraints]
+host_allow = [
+    "*.docusign.net",
+    "*.docusign.com",
+    "demo.docusign.net",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."docusign.add_tabs".ai_hints]
+when_to_use = "Add signature tabs, text fields, or other form fields to a specific recipient on an envelope."
+common_mistakes = [
+    "Not specifying correct page number and position coordinates for tabs.",
+    "Adding tabs to a recipient on an already-sent envelope without using the correct correction flow.",
+]
+examples = ['{"account_id": "abc-123", "envelope_id": "env-456", "recipient_id": "1", "tabs": {"signHereTabs": [{"documentId": "1", "pageNumber": "1", "xPosition": "100", "yPosition": "200"}]}}']
+related = [
+    "docusign.add_recipients",
+    "docusign.create_envelope",
+]
+
+[provides.operations."docusign.resend_envelope"]
+description = "Resend notifications for an envelope to recipients who have not yet signed"
+capability = "docusign.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "strict"
+
+[provides.operations."docusign.resend_envelope".input_schema]
+required = [
+    "account_id",
+    "envelope_id",
+]
+type = "object"
+
+[provides.operations."docusign.resend_envelope".input_schema.properties.account_id]
+description = "DocuSign account ID"
+type = "string"
+
+[provides.operations."docusign.resend_envelope".input_schema.properties.envelope_id]
+description = "Envelope ID to resend"
+type = "string"
+
+[provides.operations."docusign.resend_envelope".output_schema]
+required = ["envelopeId"]
+type = "object"
+
+[provides.operations."docusign.resend_envelope".output_schema.properties.envelopeId]
+type = "string"
+
+[provides.operations."docusign.resend_envelope".network_constraints]
+host_allow = [
+    "*.docusign.net",
+    "*.docusign.com",
+    "demo.docusign.net",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."docusign.resend_envelope".ai_hints]
+when_to_use = "Resend signing notification emails to recipients who have not yet completed signing."
+common_mistakes = [
+    "Resending to recipients who have already completed signing.",
+    "Resending for envelopes in draft status (must be sent first).",
+]
+examples = ['{"account_id": "abc-123", "envelope_id": "env-456"}']
+related = [
+    "docusign.send_envelope",
+    "docusign.get_envelope",
+]
+
+[provides.operations."docusign.list_documents"]
+description = "List documents contained in an envelope"
+capability = "docusign.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."docusign.list_documents".input_schema]
+required = [
+    "account_id",
+    "envelope_id",
+]
+type = "object"
+
+[provides.operations."docusign.list_documents".input_schema.properties.account_id]
+description = "DocuSign account ID"
+type = "string"
+
+[provides.operations."docusign.list_documents".input_schema.properties.envelope_id]
+description = "Envelope ID"
+type = "string"
+
+[provides.operations."docusign.list_documents".output_schema]
+required = ["documents"]
+type = "object"
+
+[provides.operations."docusign.list_documents".output_schema.properties.documents]
+type = "object"
+
+[provides.operations."docusign.list_documents".network_constraints]
+host_allow = [
+    "*.docusign.net",
+    "*.docusign.com",
+    "demo.docusign.net",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 2097152
+
+[provides.operations."docusign.list_documents".ai_hints]
+when_to_use = "List documents in an envelope to see document IDs, names, and types before downloading."
+common_mistakes = ["Confusing document listing with document download — use download_documents to get actual content."]
+examples = ['{"account_id": "abc-123", "envelope_id": "env-456"}']
+related = [
+    "docusign.download_documents",
+    "docusign.get_envelope",
+]
+
+[provides.operations."docusign.create_from_template"]
+description = "Create a new envelope from a template with role assignments"
+capability = "docusign.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "none"
+
+[provides.operations."docusign.create_from_template".input_schema]
+required = [
+    "account_id",
+    "template_id",
+    "template_roles",
+]
+type = "object"
+
+[provides.operations."docusign.create_from_template".input_schema.properties.account_id]
+description = "DocuSign account ID"
+type = "string"
+
+[provides.operations."docusign.create_from_template".input_schema.properties.template_id]
+description = "Template ID to create envelope from"
+type = "string"
+
+[provides.operations."docusign.create_from_template".input_schema.properties.template_roles]
+description = "Array of template role assignments (name, email, roleName)"
+type = "array"
+
+[provides.operations."docusign.create_from_template".input_schema.properties.status]
+description = "Envelope status: 'created' (draft) or 'sent' (immediately send)"
+type = "string"
+
+[provides.operations."docusign.create_from_template".output_schema]
+required = [
+    "envelopeId",
+    "status",
+]
+type = "object"
+
+[provides.operations."docusign.create_from_template".output_schema.properties.envelopeId]
+description = "Created envelope ID"
+type = "string"
+
+[provides.operations."docusign.create_from_template".output_schema.properties.status]
+description = "Envelope status"
+type = "string"
+
+[provides.operations."docusign.create_from_template".network_constraints]
+host_allow = [
+    "*.docusign.net",
+    "*.docusign.com",
+    "demo.docusign.net",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 60000
+max_response_bytes = 1048576
+
+[provides.operations."docusign.create_from_template".ai_hints]
+when_to_use = "Create a new envelope from an existing template, assigning recipients to template roles."
+common_mistakes = [
+    "Not providing all required template roles defined in the template.",
+    "Setting status='sent' without user confirmation — this immediately sends to recipients.",
+]
+examples = ['{"account_id": "abc-123", "template_id": "tmpl-789", "template_roles": [{"roleName": "Signer", "name": "Alice", "email": "alice@example.com"}], "status": "created"}']
+related = [
+    "docusign.get_template",
+    "docusign.list_templates",
+    "docusign.create_envelope",
+]
+
 [provides.operations."docusign.void_envelope"]
 description = "Void (cancel) a sent envelope that has not been completed"
 capability = "docusign.send"
@@ -785,3 +1135,8 @@ scope = "instance"
 "docusign.send_envelope" = ["docusign.send"]
 "docusign.get_envelope" = ["docusign.read"]
 "docusign.void_envelope" = ["docusign.send"]
+"docusign.update_recipients" = ["docusign.write"]
+"docusign.add_tabs" = ["docusign.write"]
+"docusign.resend_envelope" = ["docusign.write"]
+"docusign.list_documents" = ["docusign.read"]
+"docusign.create_from_template" = ["docusign.write"]

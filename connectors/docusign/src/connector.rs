@@ -386,6 +386,13 @@ impl DocuSignConnector {
             "docusign.list_templates" => self.invoke_list_templates(client, &input).await,
             "docusign.get_template" => self.invoke_get_template(client, &input).await,
             "docusign.download_documents" => self.invoke_download_documents(client, &input).await,
+            "docusign.update_recipients" => self.invoke_update_recipients(client, &input).await,
+            "docusign.add_tabs" => self.invoke_add_tabs(client, &input).await,
+            "docusign.resend_envelope" => self.invoke_resend_envelope(client, &input).await,
+            "docusign.list_documents" => self.invoke_list_documents(client, &input).await,
+            "docusign.create_from_template" => {
+                self.invoke_create_from_template(client, &input).await
+            }
             "docusign.stream_connect_events" => {
                 self.invoke_stream_connect_events(client, &input).await
             }
@@ -562,6 +569,79 @@ impl DocuSignConnector {
             .await?;
         let encoded = base64_encode(&bytes);
         Ok(json!({ "document": serde_json::Value::String(encoded) }))
+    }
+
+    async fn invoke_update_recipients(
+        &self,
+        client: &DocuSignClient,
+        input: &serde_json::Value,
+    ) -> Result<serde_json::Value, DocuSignError> {
+        let account_id = require_str(input, "account_id")?;
+        let envelope_id = require_str(input, "envelope_id")?;
+        let recipients = input.get("recipients").ok_or_else(|| DocuSignError::Api {
+            status_code: 400,
+            message: "Missing required field: recipients".into(),
+        })?;
+        let data = client
+            .update_recipients(account_id, envelope_id, recipients)
+            .await?;
+        Ok(json!({ "recipients": data }))
+    }
+
+    async fn invoke_add_tabs(
+        &self,
+        client: &DocuSignClient,
+        input: &serde_json::Value,
+    ) -> Result<serde_json::Value, DocuSignError> {
+        let account_id = require_str(input, "account_id")?;
+        let envelope_id = require_str(input, "envelope_id")?;
+        let recipient_id = require_str(input, "recipient_id")?;
+        let tabs = input.get("tabs").ok_or_else(|| DocuSignError::Api {
+            status_code: 400,
+            message: "Missing required field: tabs".into(),
+        })?;
+        let data = client
+            .add_tabs(account_id, envelope_id, recipient_id, tabs)
+            .await?;
+        Ok(json!({ "tabs": data }))
+    }
+
+    async fn invoke_resend_envelope(
+        &self,
+        client: &DocuSignClient,
+        input: &serde_json::Value,
+    ) -> Result<serde_json::Value, DocuSignError> {
+        let account_id = require_str(input, "account_id")?;
+        let envelope_id = require_str(input, "envelope_id")?;
+        client.resend_envelope(account_id, envelope_id).await
+    }
+
+    async fn invoke_list_documents(
+        &self,
+        client: &DocuSignClient,
+        input: &serde_json::Value,
+    ) -> Result<serde_json::Value, DocuSignError> {
+        let account_id = require_str(input, "account_id")?;
+        let envelope_id = require_str(input, "envelope_id")?;
+        let data = client.list_documents(account_id, envelope_id).await?;
+        Ok(json!({ "documents": data }))
+    }
+
+    async fn invoke_create_from_template(
+        &self,
+        client: &DocuSignClient,
+        input: &serde_json::Value,
+    ) -> Result<serde_json::Value, DocuSignError> {
+        let account_id = require_str(input, "account_id")?;
+        let template_id = require_str(input, "template_id")?;
+        let roles = input.get("template_roles").ok_or_else(|| DocuSignError::Api {
+            status_code: 400,
+            message: "Missing required field: template_roles".into(),
+        })?;
+        let status = input.get("status").and_then(serde_json::Value::as_str);
+        client
+            .create_from_template(account_id, template_id, roles, status)
+            .await
     }
 
     async fn invoke_stream_connect_events(
@@ -824,6 +904,101 @@ fn typed_operations_info() -> Vec<OperationInfo> {
             rate_limit: None,
             requires_approval: None,
         },
+        OperationInfo {
+            id: OperationId::from_static("docusign.update_recipients"),
+            summary: "Update existing recipients on an envelope".into(),
+            description: None,
+            input_schema: json!({"type": "object", "properties": {"account_id": {"type": "string"}, "envelope_id": {"type": "string"}, "recipients": {"type": "object"}}, "required": ["account_id", "envelope_id", "recipients"]}),
+            output_schema: json!({"type": "object", "properties": {"recipients": {"type": "object"}}}),
+            capability: CapabilityId::from_static("docusign.write"),
+            risk_level: RiskLevel::Medium,
+            safety_tier: SafetyTier::Risky,
+            idempotency: IdempotencyClass::BestEffort,
+            ai_hints: AgentHint {
+                when_to_use: "Use to update existing recipients on an envelope (e.g. change email, name, routing order)".into(),
+                common_mistakes: vec!["Updating recipients on a completed envelope".into()],
+                examples: vec![],
+                related: vec![CapabilityId::from_static("docusign.write")],
+            },
+            rate_limit: None,
+            requires_approval: None,
+        },
+        OperationInfo {
+            id: OperationId::from_static("docusign.add_tabs"),
+            summary: "Add tabs/fields to an envelope recipient".into(),
+            description: None,
+            input_schema: json!({"type": "object", "properties": {"account_id": {"type": "string"}, "envelope_id": {"type": "string"}, "recipient_id": {"type": "string"}, "tabs": {"type": "object"}}, "required": ["account_id", "envelope_id", "recipient_id", "tabs"]}),
+            output_schema: json!({"type": "object", "properties": {"tabs": {"type": "object"}}}),
+            capability: CapabilityId::from_static("docusign.write"),
+            risk_level: RiskLevel::Medium,
+            safety_tier: SafetyTier::Risky,
+            idempotency: IdempotencyClass::None,
+            ai_hints: AgentHint {
+                when_to_use: "Use to add signature tabs, text fields, or other form fields to a recipient on an envelope".into(),
+                common_mistakes: vec!["Adding tabs without specifying correct page and position coordinates".into()],
+                examples: vec![],
+                related: vec![CapabilityId::from_static("docusign.write")],
+            },
+            rate_limit: None,
+            requires_approval: None,
+        },
+        OperationInfo {
+            id: OperationId::from_static("docusign.resend_envelope"),
+            summary: "Resend notifications for an envelope".into(),
+            description: None,
+            input_schema: json!({"type": "object", "properties": {"account_id": {"type": "string"}, "envelope_id": {"type": "string"}}, "required": ["account_id", "envelope_id"]}),
+            output_schema: json!({"type": "object", "properties": {"envelopeId": {"type": "string"}}}),
+            capability: CapabilityId::from_static("docusign.write"),
+            risk_level: RiskLevel::Medium,
+            safety_tier: SafetyTier::Risky,
+            idempotency: IdempotencyClass::Strict,
+            ai_hints: AgentHint {
+                when_to_use: "Use to resend signing notification emails to recipients who have not yet signed".into(),
+                common_mistakes: vec!["Resending to recipients who have already completed signing".into()],
+                examples: vec![],
+                related: vec![CapabilityId::from_static("docusign.write")],
+            },
+            rate_limit: None,
+            requires_approval: None,
+        },
+        OperationInfo {
+            id: OperationId::from_static("docusign.list_documents"),
+            summary: "List documents in an envelope".into(),
+            description: None,
+            input_schema: json!({"type": "object", "properties": {"account_id": {"type": "string"}, "envelope_id": {"type": "string"}}, "required": ["account_id", "envelope_id"]}),
+            output_schema: json!({"type": "object", "properties": {"documents": {"type": "object"}}}),
+            capability: CapabilityId::from_static("docusign.read"),
+            risk_level: RiskLevel::Low,
+            safety_tier: SafetyTier::Safe,
+            idempotency: IdempotencyClass::Strict,
+            ai_hints: AgentHint {
+                when_to_use: "Use to list documents contained in an envelope before downloading".into(),
+                common_mistakes: vec![],
+                examples: vec![],
+                related: vec![CapabilityId::from_static("docusign.read")],
+            },
+            rate_limit: None,
+            requires_approval: None,
+        },
+        OperationInfo {
+            id: OperationId::from_static("docusign.create_from_template"),
+            summary: "Create an envelope from a template".into(),
+            description: None,
+            input_schema: json!({"type": "object", "properties": {"account_id": {"type": "string"}, "template_id": {"type": "string"}, "template_roles": {"type": "array"}, "status": {"type": "string"}}, "required": ["account_id", "template_id", "template_roles"]}),
+            output_schema: json!({"type": "object", "properties": {"envelopeId": {"type": "string"}, "status": {"type": "string"}}}),
+            capability: CapabilityId::from_static("docusign.write"),
+            risk_level: RiskLevel::Medium,
+            safety_tier: SafetyTier::Risky,
+            idempotency: IdempotencyClass::None,
+            ai_hints: AgentHint {
+                when_to_use: "Use to create a new envelope from an existing template, populating template roles with recipient details".into(),
+                common_mistakes: vec!["Not providing all required template roles defined in the template".into()],
+                examples: vec![],
+                related: vec![CapabilityId::from_static("docusign.write")],
+            },
+            rate_limit: None,
+            requires_approval: None,
+        },
     ]
 }
 
@@ -1078,10 +1253,10 @@ mod tests {
     }
 
     #[test]
-    fn operations_info_has_10_operations() {
+    fn operations_info_has_15_operations() {
         let ops = operations_info();
         let arr = ops.as_array().unwrap();
-        assert_eq!(arr.len(), 10);
+        assert_eq!(arr.len(), 15);
     }
 
     #[test]
@@ -1173,6 +1348,11 @@ mod tests {
         assert!(ids.contains(&"docusign.get_template"));
         assert!(ids.contains(&"docusign.download_documents"));
         assert!(ids.contains(&"docusign.stream_connect_events"));
+        assert!(ids.contains(&"docusign.update_recipients"));
+        assert!(ids.contains(&"docusign.add_tabs"));
+        assert!(ids.contains(&"docusign.resend_envelope"));
+        assert!(ids.contains(&"docusign.list_documents"));
+        assert!(ids.contains(&"docusign.create_from_template"));
     }
 
     #[test]
@@ -1390,7 +1570,7 @@ mod tests {
             .iter()
             .filter(|o| o["capability"].as_str() == Some("docusign.read"))
             .count();
-        assert_eq!(read_count, 6);
+        assert_eq!(read_count, 7);
     }
 
     #[test]
@@ -1402,7 +1582,7 @@ mod tests {
             .iter()
             .filter(|o| o["capability"].as_str() == Some("docusign.write"))
             .count();
-        assert_eq!(write_count, 2);
+        assert_eq!(write_count, 6);
     }
 
     #[test]

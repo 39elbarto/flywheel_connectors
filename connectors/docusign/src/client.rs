@@ -339,6 +339,83 @@ impl DocuSignClient {
 
     // -- Documents --
 
+    /// Update existing recipients on an envelope.
+    pub async fn update_recipients(
+        &self,
+        account_id: &str,
+        envelope_id: &str,
+        recipients: &serde_json::Value,
+    ) -> DocuSignResult<serde_json::Value> {
+        self.put(
+            &format!("/{account_id}/envelopes/{envelope_id}/recipients"),
+            recipients,
+        )
+        .await
+    }
+
+    /// Add tabs/fields to an envelope recipient.
+    pub async fn add_tabs(
+        &self,
+        account_id: &str,
+        envelope_id: &str,
+        recipient_id: &str,
+        tabs: &serde_json::Value,
+    ) -> DocuSignResult<serde_json::Value> {
+        self.post(
+            &format!("/{account_id}/envelopes/{envelope_id}/recipients/{recipient_id}/tabs"),
+            tabs,
+        )
+        .await
+    }
+
+    /// Resend notifications for an envelope.
+    pub async fn resend_envelope(
+        &self,
+        account_id: &str,
+        envelope_id: &str,
+    ) -> DocuSignResult<serde_json::Value> {
+        let url = format!(
+            "{}/{account_id}/envelopes/{envelope_id}?resend_envelope=true",
+            self.base_url
+        );
+        let body = serde_json::json!({"status": "sent"});
+        let req = self
+            .add_auth(self.client.put(&url))
+            .header("Accept", "application/json")
+            .json(&body);
+        let resp = req.send().await?;
+        self.handle_response(resp).await
+    }
+
+    /// List documents in an envelope.
+    pub async fn list_documents(
+        &self,
+        account_id: &str,
+        envelope_id: &str,
+    ) -> DocuSignResult<serde_json::Value> {
+        self.get(
+            &format!("/{account_id}/envelopes/{envelope_id}/documents"),
+            None,
+        )
+        .await
+    }
+
+    /// Create an envelope from a template.
+    pub async fn create_from_template(
+        &self,
+        account_id: &str,
+        template_id: &str,
+        roles: &serde_json::Value,
+        status: Option<&str>,
+    ) -> DocuSignResult<serde_json::Value> {
+        let body = serde_json::json!({
+            "templateId": template_id,
+            "templateRoles": roles,
+            "status": status.unwrap_or("created"),
+        });
+        self.post(&format!("/{account_id}/envelopes"), &body).await
+    }
+
     /// Download documents (combined PDF by default).
     pub async fn download_documents(
         &self,

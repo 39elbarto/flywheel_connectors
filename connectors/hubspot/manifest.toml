@@ -5,7 +5,7 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:4a2c940084e6a3e42e800fcb6491a65ae4f2a977962c55054f140c122497ff53"
+interface_hash = "blake3-256:fcp.interface.v2:1075effc7792e5a17b1e69a715787f1180e1f260ff2fa2ad5f76a0d3e474b7ba"
 
 [connector]
 id = "fcp.hubspot"
@@ -170,6 +170,393 @@ examples = ['{"limit": 50, "properties": ["name", "domain", "industry"]}']
 related = [
     "hubspot.contacts.list",
     "hubspot.deals.list",
+]
+
+[provides.operations."hubspot.companies.get"]
+description = "Get a single company by ID"
+capability = "hubspot.companies.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."hubspot.companies.get".input_schema]
+required = ["company_id"]
+type = "object"
+
+[provides.operations."hubspot.companies.get".input_schema.properties.company_id]
+description = "HubSpot company ID"
+type = "string"
+
+[provides.operations."hubspot.companies.get".input_schema.properties.properties]
+description = "List of properties to include"
+type = "array"
+
+[provides.operations."hubspot.companies.get".output_schema]
+required = ["company"]
+type = "object"
+
+[provides.operations."hubspot.companies.get".output_schema.properties.company]
+type = "object"
+
+[provides.operations."hubspot.companies.get".network_constraints]
+host_allow = [
+    "api.hubapi.com",
+    "api.hubspot.com",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."hubspot.companies.get".ai_hints]
+when_to_use = "Retrieve a specific company by its HubSpot ID."
+common_mistakes = ["Not requesting specific properties — only default properties are returned without the properties parameter."]
+examples = ['{"company_id": "12345", "properties": ["name", "domain", "industry"]}']
+related = [
+    "hubspot.companies.list",
+    "hubspot.companies.update",
+]
+
+[provides.operations."hubspot.companies.create"]
+description = "Create a new company"
+capability = "hubspot.companies.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "none"
+
+[provides.operations."hubspot.companies.create".input_schema]
+required = ["properties"]
+type = "object"
+
+[provides.operations."hubspot.companies.create".input_schema.properties.properties]
+description = "Company properties (name, domain, industry, etc.)"
+type = "object"
+
+[provides.operations."hubspot.companies.create".output_schema]
+required = ["company"]
+type = "object"
+
+[provides.operations."hubspot.companies.create".output_schema.properties.company]
+type = "object"
+
+[provides.operations."hubspot.companies.create".network_constraints]
+host_allow = [
+    "api.hubapi.com",
+    "api.hubspot.com",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."hubspot.companies.create".ai_hints]
+when_to_use = "Create a new company in HubSpot CRM."
+common_mistakes = ["Creating duplicate companies — check for existing domain first."]
+examples = ['{"properties": {"name": "Acme Corp", "domain": "acme.com", "industry": "Technology"}}']
+related = [
+    "hubspot.companies.list",
+    "hubspot.companies.update",
+]
+
+[provides.operations."hubspot.companies.update"]
+description = "Update an existing company's properties"
+capability = "hubspot.companies.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "strict"
+
+[provides.operations."hubspot.companies.update".input_schema]
+required = [
+    "company_id",
+    "properties",
+]
+type = "object"
+
+[provides.operations."hubspot.companies.update".input_schema.properties.company_id]
+type = "string"
+
+[provides.operations."hubspot.companies.update".input_schema.properties.properties]
+type = "object"
+
+[provides.operations."hubspot.companies.update".output_schema]
+required = ["company"]
+type = "object"
+
+[provides.operations."hubspot.companies.update".output_schema.properties.company]
+type = "object"
+
+[provides.operations."hubspot.companies.update".network_constraints]
+host_allow = [
+    "api.hubapi.com",
+    "api.hubspot.com",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."hubspot.companies.update".ai_hints]
+when_to_use = "Update properties on an existing company."
+common_mistakes = ["Using display labels instead of internal property names."]
+examples = ['{"company_id": "12345", "properties": {"industry": "SaaS"}}']
+related = [
+    "hubspot.companies.get",
+    "hubspot.companies.create",
+]
+
+[provides.operations."hubspot.contacts.search"]
+description = "Search contacts using HubSpot filter groups"
+capability = "hubspot.contacts.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."hubspot.contacts.search".input_schema]
+required = []
+type = "object"
+
+[provides.operations."hubspot.contacts.search".input_schema.properties.after]
+description = "Pagination cursor"
+type = "string"
+
+[provides.operations."hubspot.contacts.search".input_schema.properties.filter_groups]
+description = "Filter groups for search (HubSpot filter syntax)"
+type = "array"
+
+[provides.operations."hubspot.contacts.search".input_schema.properties.limit]
+description = "Page size (max 100)"
+maximum = 100
+minimum = 1
+type = "integer"
+
+[provides.operations."hubspot.contacts.search".input_schema.properties.properties]
+description = "List of properties to include in results"
+type = "array"
+
+[provides.operations."hubspot.contacts.search".input_schema.properties.query]
+description = "Full-text search query"
+type = "string"
+
+[provides.operations."hubspot.contacts.search".output_schema]
+required = ["results"]
+type = "object"
+
+[provides.operations."hubspot.contacts.search".output_schema.properties.paging]
+type = "object"
+
+[provides.operations."hubspot.contacts.search".output_schema.properties.results]
+type = "array"
+
+[provides.operations."hubspot.contacts.search".output_schema.properties.total]
+type = "integer"
+
+[provides.operations."hubspot.contacts.search".network_constraints]
+host_allow = [
+    "api.hubapi.com",
+    "api.hubspot.com",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
+
+[provides.operations."hubspot.contacts.search".ai_hints]
+when_to_use = "Search contacts using filter groups or full-text query."
+common_mistakes = ["Not specifying properties — only default properties are returned."]
+examples = ['{"filter_groups": [{"filters": [{"propertyName": "email", "operator": "CONTAINS_TOKEN", "value": "example.com"}]}], "properties": ["email", "firstname"]}']
+related = [
+    "hubspot.contacts.list",
+    "hubspot.contacts.get",
+]
+
+[provides.operations."hubspot.companies.search"]
+description = "Search companies using HubSpot filter groups"
+capability = "hubspot.companies.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."hubspot.companies.search".input_schema]
+required = []
+type = "object"
+
+[provides.operations."hubspot.companies.search".input_schema.properties.after]
+description = "Pagination cursor"
+type = "string"
+
+[provides.operations."hubspot.companies.search".input_schema.properties.filter_groups]
+description = "Filter groups for search (HubSpot filter syntax)"
+type = "array"
+
+[provides.operations."hubspot.companies.search".input_schema.properties.limit]
+description = "Page size (max 100)"
+maximum = 100
+minimum = 1
+type = "integer"
+
+[provides.operations."hubspot.companies.search".input_schema.properties.properties]
+description = "List of properties to include in results"
+type = "array"
+
+[provides.operations."hubspot.companies.search".input_schema.properties.query]
+description = "Full-text search query"
+type = "string"
+
+[provides.operations."hubspot.companies.search".output_schema]
+required = ["results"]
+type = "object"
+
+[provides.operations."hubspot.companies.search".output_schema.properties.paging]
+type = "object"
+
+[provides.operations."hubspot.companies.search".output_schema.properties.results]
+type = "array"
+
+[provides.operations."hubspot.companies.search".output_schema.properties.total]
+type = "integer"
+
+[provides.operations."hubspot.companies.search".network_constraints]
+host_allow = [
+    "api.hubapi.com",
+    "api.hubspot.com",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
+
+[provides.operations."hubspot.companies.search".ai_hints]
+when_to_use = "Search companies using filter groups or full-text query."
+common_mistakes = ["Not specifying properties — only default properties are returned."]
+examples = ['{"filter_groups": [{"filters": [{"propertyName": "domain", "operator": "EQ", "value": "acme.com"}]}], "properties": ["name", "domain"]}']
+related = [
+    "hubspot.companies.list",
+    "hubspot.companies.get",
+]
+
+[provides.operations."hubspot.association.get"]
+description = "Get associations between CRM objects"
+capability = "hubspot.associations.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."hubspot.association.get".input_schema]
+required = [
+    "from_object_type",
+    "from_object_id",
+    "to_object_type",
+]
+type = "object"
+
+[provides.operations."hubspot.association.get".input_schema.properties.from_object_id]
+description = "Source object ID"
+type = "string"
+
+[provides.operations."hubspot.association.get".input_schema.properties.from_object_type]
+description = "Source object type (contacts, companies, deals, tickets)"
+type = "string"
+
+[provides.operations."hubspot.association.get".input_schema.properties.to_object_type]
+description = "Target object type (contacts, companies, deals, tickets)"
+type = "string"
+
+[provides.operations."hubspot.association.get".output_schema]
+required = ["results"]
+type = "object"
+
+[provides.operations."hubspot.association.get".output_schema.properties.results]
+type = "array"
+
+[provides.operations."hubspot.association.get".network_constraints]
+host_allow = [
+    "api.hubapi.com",
+    "api.hubspot.com",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
+
+[provides.operations."hubspot.association.get".ai_hints]
+when_to_use = "Get associations between CRM objects (e.g. contacts associated with a company)."
+common_mistakes = ["Using wrong object type names — use plural forms: contacts, companies, deals, tickets."]
+examples = ['{"from_object_type": "companies", "from_object_id": "12345", "to_object_type": "contacts"}']
+related = [
+    "hubspot.companies.get",
+    "hubspot.contacts.get",
 ]
 
 [provides.operations."hubspot.contacts.create"]
@@ -742,6 +1129,20 @@ burst = 50
 scope = "instance"
 
 [[rate_limits.pools]]
+id = "hubspot.companies.write"
+requests = 100
+window_ms = 60000
+burst = 15
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "hubspot.associations.read"
+requests = 500
+window_ms = 60000
+burst = 50
+scope = "instance"
+
+[[rate_limits.pools]]
 id = "hubspot.pipelines.read"
 requests = 100
 window_ms = 60000
@@ -774,3 +1175,9 @@ scope = "instance"
 "hubspot.deals.list" = ["hubspot.deals.read"]
 "hubspot.deals.create" = ["hubspot.deals.write"]
 "hubspot.companies.list" = ["hubspot.companies.read"]
+"hubspot.companies.get" = ["hubspot.companies.read"]
+"hubspot.companies.create" = ["hubspot.companies.write"]
+"hubspot.companies.update" = ["hubspot.companies.write"]
+"hubspot.contacts.search" = ["hubspot.contacts.read"]
+"hubspot.companies.search" = ["hubspot.companies.read"]
+"hubspot.association.get" = ["hubspot.associations.read"]

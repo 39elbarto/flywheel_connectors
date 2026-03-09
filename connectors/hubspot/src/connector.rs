@@ -223,11 +223,13 @@ impl HubSpotConnector {
                 "hubspot.contacts.read",
                 "hubspot.contacts.write",
                 "hubspot.companies.read",
+                "hubspot.companies.write",
                 "hubspot.deals.read",
                 "hubspot.deals.write",
                 "hubspot.pipelines.read",
                 "hubspot.analytics.read",
-                "hubspot.events.read"
+                "hubspot.events.read",
+                "hubspot.associations.read"
             ]
         }))
     }
@@ -553,6 +555,244 @@ impl HubSpotConnector {
                     },
                 },
                 OperationInfo {
+                    id: OperationId::from_static("hubspot.companies.get"),
+                    summary: "Get a single company by ID".into(),
+                    input_schema: json!({
+                        "type": "object",
+                        "required": ["company_id"],
+                        "properties": {
+                            "company_id": { "type": "string", "description": "HubSpot company ID" },
+                            "properties": { "type": "array", "description": "List of properties to include" }
+                        }
+                    }),
+                    output_schema: json!({
+                        "type": "object",
+                        "required": ["company"],
+                        "properties": { "company": { "type": "object" } }
+                    }),
+                    capability: CapabilityId::from_static("hubspot.companies.read"),
+                    risk_level: RiskLevel::Low,
+                    description: None,
+                    rate_limit: None,
+                    requires_approval: None,
+                    safety_tier: SafetyTier::Safe,
+                    idempotency: IdempotencyClass::Strict,
+                    ai_hints: AgentHint {
+                        when_to_use: "Retrieve a specific company by its HubSpot ID.".into(),
+                        common_mistakes: vec![
+                            "Not requesting specific properties — only default properties are returned without the properties parameter.".into(),
+                        ],
+                        examples: vec![
+                            r#"{"company_id": "12345", "properties": ["name", "domain", "industry"]}"#.into(),
+                        ],
+                        related: vec![
+                            CapabilityId::from_static("hubspot.companies.list"),
+                            CapabilityId::from_static("hubspot.companies.update"),
+                        ],
+                    },
+                },
+                OperationInfo {
+                    id: OperationId::from_static("hubspot.companies.create"),
+                    summary: "Create a new company".into(),
+                    input_schema: json!({
+                        "type": "object",
+                        "required": ["properties"],
+                        "properties": {
+                            "properties": { "type": "object", "description": "Company properties (name, domain, industry, etc.)" }
+                        }
+                    }),
+                    output_schema: json!({
+                        "type": "object",
+                        "required": ["company"],
+                        "properties": { "company": { "type": "object" } }
+                    }),
+                    capability: CapabilityId::from_static("hubspot.companies.write"),
+                    risk_level: RiskLevel::Medium,
+                    description: None,
+                    rate_limit: None,
+                    requires_approval: None,
+                    safety_tier: SafetyTier::Risky,
+                    idempotency: IdempotencyClass::None,
+                    ai_hints: AgentHint {
+                        when_to_use: "Create a new company in HubSpot CRM.".into(),
+                        common_mistakes: vec![
+                            "Creating duplicate companies — check for existing domain first.".into(),
+                        ],
+                        examples: vec![
+                            r#"{"properties": {"name": "Acme Corp", "domain": "acme.com", "industry": "Technology"}}"#.into(),
+                        ],
+                        related: vec![
+                            CapabilityId::from_static("hubspot.companies.list"),
+                            CapabilityId::from_static("hubspot.companies.update"),
+                        ],
+                    },
+                },
+                OperationInfo {
+                    id: OperationId::from_static("hubspot.companies.update"),
+                    summary: "Update an existing company's properties".into(),
+                    input_schema: json!({
+                        "type": "object",
+                        "required": ["company_id", "properties"],
+                        "properties": {
+                            "company_id": { "type": "string" },
+                            "properties": { "type": "object" }
+                        }
+                    }),
+                    output_schema: json!({
+                        "type": "object",
+                        "required": ["company"],
+                        "properties": { "company": { "type": "object" } }
+                    }),
+                    capability: CapabilityId::from_static("hubspot.companies.write"),
+                    risk_level: RiskLevel::Medium,
+                    description: None,
+                    rate_limit: None,
+                    requires_approval: None,
+                    safety_tier: SafetyTier::Risky,
+                    idempotency: IdempotencyClass::Strict,
+                    ai_hints: AgentHint {
+                        when_to_use: "Update properties on an existing company.".into(),
+                        common_mistakes: vec![
+                            "Using display labels instead of internal property names.".into(),
+                        ],
+                        examples: vec![
+                            r#"{"company_id": "12345", "properties": {"industry": "SaaS"}}"#.into(),
+                        ],
+                        related: vec![
+                            CapabilityId::from_static("hubspot.companies.get"),
+                            CapabilityId::from_static("hubspot.companies.create"),
+                        ],
+                    },
+                },
+                OperationInfo {
+                    id: OperationId::from_static("hubspot.contacts.search"),
+                    summary: "Search contacts using HubSpot filter groups".into(),
+                    input_schema: json!({
+                        "type": "object",
+                        "required": [],
+                        "properties": {
+                            "filter_groups": { "type": "array", "description": "Filter groups for search (HubSpot filter syntax)" },
+                            "query": { "type": "string", "description": "Full-text search query" },
+                            "properties": { "type": "array", "description": "List of properties to include in results" },
+                            "limit": { "type": "integer", "minimum": 1, "maximum": 100, "description": "Page size (max 100)" },
+                            "after": { "type": "string", "description": "Pagination cursor" }
+                        }
+                    }),
+                    output_schema: json!({
+                        "type": "object",
+                        "required": ["results"],
+                        "properties": {
+                            "results": { "type": "array" },
+                            "paging": { "type": "object" },
+                            "total": { "type": "integer" }
+                        }
+                    }),
+                    capability: CapabilityId::from_static("hubspot.contacts.read"),
+                    risk_level: RiskLevel::Low,
+                    description: None,
+                    rate_limit: None,
+                    requires_approval: None,
+                    safety_tier: SafetyTier::Safe,
+                    idempotency: IdempotencyClass::Strict,
+                    ai_hints: AgentHint {
+                        when_to_use: "Search contacts using filter groups or full-text query.".into(),
+                        common_mistakes: vec![
+                            "Not specifying properties — only default properties are returned.".into(),
+                        ],
+                        examples: vec![
+                            r#"{"filter_groups": [{"filters": [{"propertyName": "email", "operator": "CONTAINS_TOKEN", "value": "example.com"}]}], "properties": ["email", "firstname"]}"#.into(),
+                        ],
+                        related: vec![
+                            CapabilityId::from_static("hubspot.contacts.list"),
+                            CapabilityId::from_static("hubspot.contacts.get"),
+                        ],
+                    },
+                },
+                OperationInfo {
+                    id: OperationId::from_static("hubspot.companies.search"),
+                    summary: "Search companies using HubSpot filter groups".into(),
+                    input_schema: json!({
+                        "type": "object",
+                        "required": [],
+                        "properties": {
+                            "filter_groups": { "type": "array", "description": "Filter groups for search (HubSpot filter syntax)" },
+                            "query": { "type": "string", "description": "Full-text search query" },
+                            "properties": { "type": "array", "description": "List of properties to include in results" },
+                            "limit": { "type": "integer", "minimum": 1, "maximum": 100, "description": "Page size (max 100)" },
+                            "after": { "type": "string", "description": "Pagination cursor" }
+                        }
+                    }),
+                    output_schema: json!({
+                        "type": "object",
+                        "required": ["results"],
+                        "properties": {
+                            "results": { "type": "array" },
+                            "paging": { "type": "object" },
+                            "total": { "type": "integer" }
+                        }
+                    }),
+                    capability: CapabilityId::from_static("hubspot.companies.read"),
+                    risk_level: RiskLevel::Low,
+                    description: None,
+                    rate_limit: None,
+                    requires_approval: None,
+                    safety_tier: SafetyTier::Safe,
+                    idempotency: IdempotencyClass::Strict,
+                    ai_hints: AgentHint {
+                        when_to_use: "Search companies using filter groups or full-text query.".into(),
+                        common_mistakes: vec![
+                            "Not specifying properties — only default properties are returned.".into(),
+                        ],
+                        examples: vec![
+                            r#"{"filter_groups": [{"filters": [{"propertyName": "domain", "operator": "EQ", "value": "acme.com"}]}], "properties": ["name", "domain"]}"#.into(),
+                        ],
+                        related: vec![
+                            CapabilityId::from_static("hubspot.companies.list"),
+                            CapabilityId::from_static("hubspot.companies.get"),
+                        ],
+                    },
+                },
+                OperationInfo {
+                    id: OperationId::from_static("hubspot.association.get"),
+                    summary: "Get associations between CRM objects".into(),
+                    input_schema: json!({
+                        "type": "object",
+                        "required": ["from_object_type", "from_object_id", "to_object_type"],
+                        "properties": {
+                            "from_object_type": { "type": "string", "description": "Source object type (contacts, companies, deals, tickets)" },
+                            "from_object_id": { "type": "string", "description": "Source object ID" },
+                            "to_object_type": { "type": "string", "description": "Target object type (contacts, companies, deals, tickets)" }
+                        }
+                    }),
+                    output_schema: json!({
+                        "type": "object",
+                        "required": ["results"],
+                        "properties": {
+                            "results": { "type": "array" }
+                        }
+                    }),
+                    capability: CapabilityId::from_static("hubspot.associations.read"),
+                    risk_level: RiskLevel::Low,
+                    description: None,
+                    rate_limit: None,
+                    requires_approval: None,
+                    safety_tier: SafetyTier::Safe,
+                    idempotency: IdempotencyClass::Strict,
+                    ai_hints: AgentHint {
+                        when_to_use: "Get associations between CRM objects (e.g. contacts associated with a company).".into(),
+                        common_mistakes: vec![
+                            "Using wrong object type names — use plural forms: contacts, companies, deals, tickets.".into(),
+                        ],
+                        examples: vec![
+                            r#"{"from_object_type": "companies", "from_object_id": "12345", "to_object_type": "contacts"}"#.into(),
+                        ],
+                        related: vec![
+                            CapabilityId::from_static("hubspot.companies.get"),
+                            CapabilityId::from_static("hubspot.contacts.get"),
+                        ],
+                    },
+                },
+                OperationInfo {
                     id: OperationId::from_static("hubspot.deals.list"),
                     summary: "List deals with optional pipeline and stage filtering".into(),
                     input_schema: json!({
@@ -772,6 +1012,12 @@ impl HubSpotConnector {
             "hubspot.contacts.update" => self.invoke_contacts_update(client, &input).await,
             "hubspot.contacts.delete" => self.invoke_contacts_delete(client, &input).await,
             "hubspot.companies.list" => self.invoke_companies_list(client, &input).await,
+            "hubspot.companies.get" => self.invoke_companies_get(client, &input).await,
+            "hubspot.companies.create" => self.invoke_companies_create(client, &input).await,
+            "hubspot.companies.update" => self.invoke_companies_update(client, &input).await,
+            "hubspot.contacts.search" => self.invoke_contacts_search(client, &input).await,
+            "hubspot.companies.search" => self.invoke_companies_search(client, &input).await,
+            "hubspot.association.get" => self.invoke_association_get(client, &input).await,
             "hubspot.deals.list" => self.invoke_deals_list(client, &input).await,
             "hubspot.deals.create" => self.invoke_deals_create(client, &input).await,
             "hubspot.pipelines.list" => self.invoke_pipelines_list(client, &input).await,
@@ -914,6 +1160,105 @@ impl HubSpotConnector {
         client
             .list_companies(limit, after, properties.as_deref())
             .await
+    }
+
+    async fn invoke_companies_get(
+        &self,
+        client: &HubSpotClient,
+        input: &serde_json::Value,
+    ) -> Result<serde_json::Value, HubSpotError> {
+        let company_id = require_str(input, "company_id")?;
+        let properties = extract_string_array(input, "properties");
+        let data = client.get_company(company_id, properties.as_deref()).await?;
+        Ok(json!({ "company": data }))
+    }
+
+    async fn invoke_companies_create(
+        &self,
+        client: &HubSpotClient,
+        input: &serde_json::Value,
+    ) -> Result<serde_json::Value, HubSpotError> {
+        let properties = input.get("properties").ok_or(HubSpotError::Api {
+            status_code: 400,
+            message: "Missing required field: properties".into(),
+        })?;
+        let body = json!({ "properties": properties });
+        let data = client.create_company(&body).await?;
+        Ok(json!({ "company": data }))
+    }
+
+    async fn invoke_companies_update(
+        &self,
+        client: &HubSpotClient,
+        input: &serde_json::Value,
+    ) -> Result<serde_json::Value, HubSpotError> {
+        let company_id = require_str(input, "company_id")?;
+        let properties = input.get("properties").ok_or(HubSpotError::Api {
+            status_code: 400,
+            message: "Missing required field: properties".into(),
+        })?;
+        let body = json!({ "properties": properties });
+        let data = client.update_company(company_id, &body).await?;
+        Ok(json!({ "company": data }))
+    }
+
+    async fn invoke_contacts_search(
+        &self,
+        client: &HubSpotClient,
+        input: &serde_json::Value,
+    ) -> Result<serde_json::Value, HubSpotError> {
+        let mut body = json!({});
+        if let Some(filter_groups) = input.get("filter_groups") {
+            body["filterGroups"] = filter_groups.clone();
+        }
+        if let Some(properties) = input.get("properties") {
+            body["properties"] = properties.clone();
+        }
+        if let Some(limit) = input.get("limit") {
+            body["limit"] = limit.clone();
+        }
+        if let Some(after) = input.get("after") {
+            body["after"] = after.clone();
+        }
+        if let Some(query) = input.get("query") {
+            body["query"] = query.clone();
+        }
+        client.search_contacts(&body).await
+    }
+
+    async fn invoke_companies_search(
+        &self,
+        client: &HubSpotClient,
+        input: &serde_json::Value,
+    ) -> Result<serde_json::Value, HubSpotError> {
+        let mut body = json!({});
+        if let Some(filter_groups) = input.get("filter_groups") {
+            body["filterGroups"] = filter_groups.clone();
+        }
+        if let Some(properties) = input.get("properties") {
+            body["properties"] = properties.clone();
+        }
+        if let Some(limit) = input.get("limit") {
+            body["limit"] = limit.clone();
+        }
+        if let Some(after) = input.get("after") {
+            body["after"] = after.clone();
+        }
+        if let Some(query) = input.get("query") {
+            body["query"] = query.clone();
+        }
+        client.search_companies(&body).await
+    }
+
+    async fn invoke_association_get(
+        &self,
+        client: &HubSpotClient,
+        input: &serde_json::Value,
+    ) -> Result<serde_json::Value, HubSpotError> {
+        let from_object_type = require_str(input, "from_object_type")?;
+        let from_object_id = require_str(input, "from_object_id")?;
+        let to_object_type = require_str(input, "to_object_type")?;
+        client.get_associations(from_object_type, from_object_id, to_object_type).await
     }
 
     async fn invoke_deals_list(
@@ -1162,6 +1507,54 @@ fn operations_info() -> serde_json::Value {
             "idempotency": "strict",
         },
         {
+            "id": "hubspot.companies.get",
+            "summary": "Get a single company by ID",
+            "capability": "hubspot.companies.read",
+            "risk_level": "low",
+            "safety_tier": "safe",
+            "idempotency": "strict",
+        },
+        {
+            "id": "hubspot.companies.create",
+            "summary": "Create a new company",
+            "capability": "hubspot.companies.write",
+            "risk_level": "medium",
+            "safety_tier": "risky",
+            "idempotency": "none",
+        },
+        {
+            "id": "hubspot.companies.update",
+            "summary": "Update an existing company's properties",
+            "capability": "hubspot.companies.write",
+            "risk_level": "medium",
+            "safety_tier": "risky",
+            "idempotency": "strict",
+        },
+        {
+            "id": "hubspot.contacts.search",
+            "summary": "Search contacts using HubSpot filter groups",
+            "capability": "hubspot.contacts.read",
+            "risk_level": "low",
+            "safety_tier": "safe",
+            "idempotency": "strict",
+        },
+        {
+            "id": "hubspot.companies.search",
+            "summary": "Search companies using HubSpot filter groups",
+            "capability": "hubspot.companies.read",
+            "risk_level": "low",
+            "safety_tier": "safe",
+            "idempotency": "strict",
+        },
+        {
+            "id": "hubspot.association.get",
+            "summary": "Get associations between CRM objects",
+            "capability": "hubspot.associations.read",
+            "risk_level": "low",
+            "safety_tier": "safe",
+            "idempotency": "strict",
+        },
+        {
             "id": "hubspot.deals.list",
             "summary": "List deals with optional pipeline and stage filtering",
             "capability": "hubspot.deals.read",
@@ -1290,9 +1683,9 @@ mod tests {
     }
 
     #[test]
-    fn operations_info_has_11_operations() {
+    fn operations_info_has_17_operations() {
         let ops = operations_info();
-        assert_eq!(ops.as_array().unwrap().len(), 11);
+        assert_eq!(ops.as_array().unwrap().len(), 17);
     }
 
     #[test]

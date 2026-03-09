@@ -4193,11 +4193,17 @@ fn hubspot_full_manifest_parses_with_all_operations() {
     let ops = &parsed.provides.operations;
     let expected_ops = [
         "hubspot.analytics.report",
+        "hubspot.association.get",
+        "hubspot.companies.create",
+        "hubspot.companies.get",
         "hubspot.companies.list",
+        "hubspot.companies.search",
+        "hubspot.companies.update",
         "hubspot.contacts.create",
         "hubspot.contacts.delete",
         "hubspot.contacts.get",
         "hubspot.contacts.list",
+        "hubspot.contacts.search",
         "hubspot.contacts.update",
         "hubspot.deals.create",
         "hubspot.deals.list",
@@ -4210,7 +4216,7 @@ fn hubspot_full_manifest_parses_with_all_operations() {
     assert_eq!(ops.len(), expected_ops.len());
 
     let pools = parsed.rate_limits.as_ref().expect("rate_limits");
-    assert_eq!(pools.pools.len(), 8);
+    assert_eq!(pools.pools.len(), 10);
 }
 
 // =============================================================================

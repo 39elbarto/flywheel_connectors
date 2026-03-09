@@ -296,6 +296,78 @@ impl HubSpotClient {
         self.get(&format!("/crm/v3/objects/companies{qs}")).await
     }
 
+    /// Get a company by ID.
+    pub async fn get_company(
+        &self,
+        company_id: &str,
+        properties: Option<&[String]>,
+    ) -> HubSpotResult<serde_json::Value> {
+        let mut params = Vec::new();
+        if let Some(props) = properties {
+            for p in props {
+                params.push(format!("properties={p}"));
+            }
+        }
+        let qs = if params.is_empty() {
+            String::new()
+        } else {
+            format!("?{}", params.join("&"))
+        };
+        self.get(&format!("/crm/v3/objects/companies/{company_id}{qs}"))
+            .await
+    }
+
+    /// Create a company.
+    pub async fn create_company(
+        &self,
+        body: &serde_json::Value,
+    ) -> HubSpotResult<serde_json::Value> {
+        self.post("/crm/v3/objects/companies", body).await
+    }
+
+    /// Update a company.
+    pub async fn update_company(
+        &self,
+        company_id: &str,
+        body: &serde_json::Value,
+    ) -> HubSpotResult<serde_json::Value> {
+        self.patch(&format!("/crm/v3/objects/companies/{company_id}"), body)
+            .await
+    }
+
+    // -- Search --
+
+    /// Search contacts using filter groups.
+    pub async fn search_contacts(
+        &self,
+        body: &serde_json::Value,
+    ) -> HubSpotResult<serde_json::Value> {
+        self.post("/crm/v3/objects/contacts/search", body).await
+    }
+
+    /// Search companies using filter groups.
+    pub async fn search_companies(
+        &self,
+        body: &serde_json::Value,
+    ) -> HubSpotResult<serde_json::Value> {
+        self.post("/crm/v3/objects/companies/search", body).await
+    }
+
+    // -- Associations --
+
+    /// Get associations between CRM objects.
+    pub async fn get_associations(
+        &self,
+        from_object_type: &str,
+        from_object_id: &str,
+        to_object_type: &str,
+    ) -> HubSpotResult<serde_json::Value> {
+        self.get(&format!(
+            "/crm/v4/objects/{from_object_type}/{from_object_id}/associations/{to_object_type}"
+        ))
+        .await
+    }
+
     // -- Deals --
 
     /// List deals.

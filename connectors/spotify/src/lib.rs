@@ -29,4 +29,6 @@
 pub mod client;
 pub mod connector;
 pub mod error;
+pub mod library;
+pub mod playback;
 pub mod types;

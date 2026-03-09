@@ -5,7 +5,7 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:8705e9d7e6210015a17b51b37d09d8774012f5f2209f173868df5eb7c00eca68"
+interface_hash = "blake3-256:fcp.interface.v2:dd7e212fa477cc5200f05dcf9ab774aa798460a4a5e3b0df29c7cb1437461fe5"
 
 [connector]
 id = "fcp.kubernetes"

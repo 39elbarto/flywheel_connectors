@@ -26,10 +26,12 @@
     clippy::unused_async
 )]
 
+pub mod apply;
 pub mod client;
 pub mod connector;
 pub mod drift;
 pub mod error;
+pub mod import;
 pub mod modules;
 pub mod plan;
 pub mod safety;

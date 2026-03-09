@@ -1559,7 +1559,7 @@ mod tests {
 
     #[test]
     fn base_url_policy_rejects_no_host() {
-        let (ok, message) = base_url_policy("file:///etc/passwd");
+        let (ok, _message) = base_url_policy("file:///etc/passwd");
         assert!(!ok);
         // file URLs may or may not have a host depending on platform
         assert!(!ok);

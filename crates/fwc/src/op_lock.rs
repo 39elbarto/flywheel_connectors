@@ -60,11 +60,7 @@ impl OpLock {
         } else if total_secs < 3600 {
             format!("{}m {}s", total_secs / 60, total_secs % 60)
         } else {
-            format!(
-                "{}h {}m",
-                total_secs / 3600,
-                (total_secs % 3600) / 60
-            )
+            format!("{}h {}m", total_secs / 3600, (total_secs % 3600) / 60)
         }
     }
 }
@@ -122,10 +118,7 @@ struct LockData {
 impl LockStore {
     /// Create a store at the default location.
     pub fn default_path() -> Self {
-        let home = std::env::var("HOME").map_or_else(
-            |_| PathBuf::from("."),
-            PathBuf::from,
-        );
+        let home = std::env::var("HOME").map_or_else(|_| PathBuf::from("."), PathBuf::from);
         Self {
             dir: home.join(".fwc").join("locks"),
         }
@@ -205,9 +198,7 @@ impl LockStore {
 
         match data.locks.get(resource) {
             None => Ok(CheckResult::Free),
-            Some(lock) if lock.agent == agent => {
-                Ok(CheckResult::HeldBySelf { lock: lock.clone() })
-            }
+            Some(lock) if lock.agent == agent => Ok(CheckResult::HeldBySelf { lock: lock.clone() }),
             Some(lock) => Ok(CheckResult::HeldByOther {
                 held_by: lock.agent.clone(),
                 expires_at: lock.expires_at.to_rfc3339(),
@@ -271,8 +262,8 @@ impl LockStore {
         if !path.exists() {
             return Ok(LockData::default());
         }
-        let json =
-            std::fs::read_to_string(&path).map_err(|e| format!("failed to read lock store: {e}"))?;
+        let json = std::fs::read_to_string(&path)
+            .map_err(|e| format!("failed to read lock store: {e}"))?;
         serde_json::from_str(&json).map_err(|e| format!("lock store corrupted: {e}"))
     }
 
@@ -322,9 +313,9 @@ pub fn parse_ttl(input: &str) -> Result<u32, String> {
     }
 
     // Plain number defaults to minutes.
-    input
-        .parse::<u32>()
-        .map_err(|_| format!("invalid TTL: `{input}`; expected number with optional suffix (30m, 2h, 90s)"))
+    input.parse::<u32>().map_err(|_| {
+        format!("invalid TTL: `{input}`; expected number with optional suffix (30m, 2h, 90s)")
+    })
 }
 
 /// Validate a resource identifier.
@@ -514,7 +505,9 @@ mod tests {
     #[test]
     fn acquire_new_lock() {
         let store = temp_store();
-        let result = store.acquire("github.issues", "SunnyMoose", 30, None).unwrap();
+        let result = store
+            .acquire("github.issues", "SunnyMoose", 30, None)
+            .unwrap();
         assert!(result.is_acquired());
 
         if let AcquireResult::Acquired { lock } = result {
@@ -527,12 +520,8 @@ mod tests {
     #[test]
     fn acquire_conflict_different_agent() {
         let store = temp_store();
-        store
-            .acquire("github.issues", "AgentA", 30, None)
-            .unwrap();
-        let result = store
-            .acquire("github.issues", "AgentB", 30, None)
-            .unwrap();
+        store.acquire("github.issues", "AgentA", 30, None).unwrap();
+        let result = store.acquire("github.issues", "AgentB", 30, None).unwrap();
         assert!(!result.is_acquired());
 
         if let AcquireResult::Conflict { held_by, .. } = result {
@@ -547,7 +536,12 @@ mod tests {
             .acquire("github.issues", "SunnyMoose", 10, None)
             .unwrap();
         let result = store
-            .acquire("github.issues", "SunnyMoose", 60, Some("extended".to_owned()))
+            .acquire(
+                "github.issues",
+                "SunnyMoose",
+                60,
+                Some("extended".to_owned()),
+            )
             .unwrap();
         assert!(result.is_acquired());
 
@@ -585,9 +579,7 @@ mod tests {
     #[test]
     fn release_other_agents_lock_fails() {
         let store = temp_store();
-        store
-            .acquire("github.issues", "AgentA", 30, None)
-            .unwrap();
+        store.acquire("github.issues", "AgentA", 30, None).unwrap();
         assert!(!store.release("github.issues", "AgentB").unwrap());
         // Lock should still be held by AgentA.
         let check = store.check("github.issues", "AgentA").unwrap();
@@ -616,9 +608,7 @@ mod tests {
     #[test]
     fn check_held_by_other() {
         let store = temp_store();
-        store
-            .acquire("github.issues", "AgentA", 30, None)
-            .unwrap();
+        store.acquire("github.issues", "AgentA", 30, None).unwrap();
         let result = store.check("github.issues", "AgentB").unwrap();
         assert!(matches!(result, CheckResult::HeldByOther { .. }));
     }
@@ -736,7 +726,9 @@ mod tests {
         std::fs::write(store.data_path(), json).unwrap();
 
         // New agent should be able to acquire it.
-        let result = store.acquire("github.issues", "NewAgent", 30, None).unwrap();
+        let result = store
+            .acquire("github.issues", "NewAgent", 30, None)
+            .unwrap();
         assert!(result.is_acquired());
     }
 

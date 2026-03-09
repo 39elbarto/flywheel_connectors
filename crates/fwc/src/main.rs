@@ -12,7 +12,15 @@ mod batch;
 mod batch_file;
 #[allow(dead_code)]
 mod credential_store;
+#[allow(dead_code)] // Stream types wired when host integration lands.
+mod event_stream;
+#[allow(dead_code)]
+mod op_lock;
+#[allow(dead_code)] // Auth verify + credential backend trait.
+mod credential;
 mod catalog;
+#[allow(dead_code)] // Comprehensive event filtering engine.
+mod events;
 mod export_tools;
 mod format_table;
 #[allow(
@@ -33,6 +41,8 @@ mod pipe;
 #[allow(dead_code)] // Contract types wired into host-backed commands in later beads.
 mod readiness;
 mod recovery;
+#[allow(dead_code)] // Operation replay from history with input override.
+mod replay;
 #[allow(dead_code)] // Extract/transform features pending invoke integration.
 mod render;
 mod schema_nav;
@@ -304,6 +314,13 @@ enum Commands {
     /// Independent operations run in parallel; dependent ones follow topological order.
     #[command(name = "batch-file", visible_alias = "batch-ops")]
     BatchFile(BatchFileArgs),
+
+    /// Tail real-time events from one or more connectors.
+    ///
+    /// Streams events in unified format. Use `--all` for all streaming
+    /// connectors or specify a comma-separated list.
+    #[command(visible_alias = "tail")]
+    Events(EventsArgs),
 }
 
 #[derive(Args, Debug, Serialize)]
@@ -948,6 +965,24 @@ struct BatchFileArgs {
     on_error: String,
 }
 
+#[derive(Args, Debug, Serialize)]
+struct EventsArgs {
+    /// Connectors to tail (comma-separated, e.g. `slack,discord`).
+    connectors: Option<String>,
+
+    /// Tail all streaming connectors.
+    #[arg(long)]
+    all: bool,
+
+    /// Include events from this duration ago (e.g. `5m`, `1h`, `30s`).
+    #[arg(long, value_name = "DURATION")]
+    since: Option<String>,
+
+    /// Backpressure buffer size.
+    #[arg(long, default_value_t = 1000)]
+    buffer_size: usize,
+}
+
 fn main() -> ExitCode {
     let raw_args = std::env::args().collect::<Vec<_>>();
     let fallback_format = infer_output_format(&raw_args);
@@ -1431,9 +1466,10 @@ fn dispatch(cli: &Cli) -> Result<DispatchOutcome> {
         Commands::Validate(args) => validate_dispatch(args)?,
         Commands::History(args) => history_dispatch(args)?,
         Commands::Pipe(args) => pipe_dispatch(args)?,
-        Commands::Pipeline(args) => pipeline_dispatch(args)?,
+        Commands::Pipeline(args) => planned("pipeline", args)?,
         Commands::Map(args) => map_dispatch(args)?,
         Commands::BatchFile(args) => batch_file_dispatch(args)?,
+        Commands::Events(args) => planned("events", args)?,
     };
 
     Ok(outcome)
@@ -2931,6 +2967,68 @@ fn batch_file_dispatch(args: &BatchFileArgs) -> Result<DispatchOutcome> {
             "next_actions": plan.connectors.iter().map(|c| {
                 format!("fwc show {c}")
             }).collect::<Vec<_>>(),
+        }),
+        exit_code: CliExitCode::Success,
+    })
+}
+
+fn events_dispatch(args: &EventsArgs) -> Result<DispatchOutcome> {
+    // Parse connectors.
+    let connectors = if args.all {
+        Vec::new() // Empty = all.
+    } else if let Some(ref s) = args.connectors {
+        event_stream::TailConfig::parse_connectors(s)
+    } else {
+        return Ok(DispatchOutcome {
+            payload: json!({
+                "status": "error",
+                "command": "events",
+                "error": {
+                    "type": "missing-target",
+                    "message": "Specify connectors to tail or use --all.",
+                },
+                "next_actions": [
+                    "fwc events slack",
+                    "fwc events slack,discord",
+                    "fwc events --all",
+                ],
+            }),
+            exit_code: CliExitCode::UnknownCommand,
+        });
+    };
+
+    // Parse since duration.
+    let since_seconds = if let Some(ref since) = args.since {
+        Some(event_stream::parse_since(since).map_err(|e| anyhow::anyhow!("{e}"))?)
+    } else {
+        None
+    };
+
+    let plan = event_stream::TailPlan {
+        connectors: if args.all {
+            vec!["<all streaming connectors>".to_owned()]
+        } else {
+            connectors
+        },
+        all: args.all,
+        since: args.since.clone(),
+        buffer_size: args.buffer_size,
+    };
+
+    Ok(DispatchOutcome {
+        payload: json!({
+            "status": "planned",
+            "command": "events",
+            "message": format!(
+                "Tail plan: {} connector(s){}. \
+                 Execution requires host integration (not yet available).",
+                plan.connectors.len(),
+                since_seconds.map_or_else(String::new, |s| format!(", since {s}s ago")),
+            ),
+            "plan": plan,
+            "next_actions": [
+                "fwc list --streaming",
+            ],
         }),
         exit_code: CliExitCode::Success,
     })

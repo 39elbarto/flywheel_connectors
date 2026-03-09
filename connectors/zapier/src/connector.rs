@@ -5,8 +5,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use fcp_core::{
     AgentHint, BaseConnector, CapabilityId, ConnectorId, CredentialId, FcpError, FcpResult,
-    IdempotencyClass, OperationId, OperationInfo, RiskLevel, SafetyTier,
+    IdempotencyClass, OperationId, OperationInfo, ProvisioningRecipe, ProvisioningStep,
+    ProvisioningStepType, RecipeId, RiskLevel, SafetyTier, SelfCheckReport, StepId,
 };
+use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tracing::{info, instrument};
@@ -73,6 +75,35 @@ impl ZapierConfig {
 
         Ok(Self { auth, base_url })
     }
+
+    fn provisioning_readiness(&self) -> ProvisioningReadiness {
+        let (network_ok, network_message) = base_url_policy(&self.base_url);
+
+        ProvisioningReadiness {
+            auth_mode: match &self.auth {
+                ZapierAuth::BearerToken(_) => "api_key",
+                ZapierAuth::CredentialId(_) => "credential_id",
+            },
+            token_configured: matches!(&self.auth, ZapierAuth::BearerToken(_)),
+            credential_id_configured: self.auth.is_secretless(),
+            requires_credential_injection: self.auth.is_secretless(),
+            network_ok,
+            network_message,
+            base_url: self.base_url.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[allow(clippy::struct_excessive_bools)]
+struct ProvisioningReadiness {
+    auth_mode: &'static str,
+    token_configured: bool,
+    credential_id_configured: bool,
+    requires_credential_injection: bool,
+    network_ok: bool,
+    network_message: String,
+    base_url: String,
 }
 
 /// Doctor check result.
@@ -260,11 +291,43 @@ impl ZapierConnector {
 
     /// Handle the `self_check` method.
     pub async fn handle_self_check(&self) -> FcpResult<serde_json::Value> {
-        Ok(json!({
-            "connector_id": "fcp.zapier",
-            "version": "0.1.0",
-            "status": if self.config.is_some() { "ready" } else { "unconfigured" },
-        }))
+        let Some(config) = &self.config else {
+            let report =
+                SelfCheckReport::degraded("not_configured", "Connector is not configured");
+            return Self::serialize_self_check_report(report);
+        };
+
+        let readiness = config.provisioning_readiness();
+        if !readiness.network_ok {
+            let mut report = SelfCheckReport::failed(
+                "network_constraints_invalid",
+                readiness.network_message.clone(),
+            );
+            report.details = Some(json!({ "provisioning": readiness }));
+            return Self::serialize_self_check_report(report);
+        }
+
+        let Some(_client) = &self.client else {
+            let mut report = SelfCheckReport::failed(
+                "client_missing",
+                "API client not initialized; re-run configure",
+            );
+            report.details = Some(json!({ "provisioning": readiness }));
+            return Self::serialize_self_check_report(report);
+        };
+
+        if readiness.requires_credential_injection {
+            let mut report = SelfCheckReport::degraded(
+                "credential_injection_required",
+                "credential_id mode requires egress proxy injection; skipping live probe",
+            );
+            report.details = Some(json!({ "provisioning": readiness }));
+            return Self::serialize_self_check_report(report);
+        }
+
+        let mut report = SelfCheckReport::ok();
+        report.details = Some(json!({ "provisioning": readiness }));
+        Self::serialize_self_check_report(report)
     }
 
     /// Handle the `introspect` method.
@@ -371,6 +434,91 @@ impl ZapierConnector {
         let resp = client.execute_action(action_id, &params).await?;
         Ok(json!({ "result": resp }))
     }
+
+    fn serialize_self_check_report(report: SelfCheckReport) -> FcpResult<serde_json::Value> {
+        info!(
+            event = "zapier.provisioning.self_check",
+            status = ?report.status,
+            reason_code = ?report.reason_code,
+            "Zapier self-check completed"
+        );
+
+        serde_json::to_value(report).map_err(|e| FcpError::Internal {
+            message: format!("Failed to serialize self-check report: {e}"),
+        })
+    }
+}
+
+/// Build the provisioning recipe for the `Zapier` NLA connector.
+pub fn provisioning_recipe() -> ProvisioningRecipe {
+    ProvisioningRecipe::new(
+        RecipeId::new("zapier.api_key"),
+        "1",
+        "Provision `Zapier` NLA connector with an API key",
+    )
+    .with_step(ProvisioningStep::new(
+        StepId::new("open_developer_settings"),
+        ProvisioningStepType::OpenUrl {
+            url: "https://nla.zapier.com/credentials/".into(),
+        },
+    ))
+    .with_step(
+        ProvisioningStep::new(
+            StepId::new("enter_api_key"),
+            ProvisioningStepType::PromptSecret {
+                message: "Paste your Zapier NLA API key".into(),
+            },
+        )
+        .depends_on(StepId::new("open_developer_settings")),
+    )
+    .with_step(
+        ProvisioningStep::new(
+            StepId::new("store_api_key"),
+            ProvisioningStepType::StoreSecret {
+                key: "api_key".into(),
+                value_from: StepId::new("enter_api_key"),
+                scope: "connector:fcp.zapier".into(),
+            },
+        )
+        .depends_on(StepId::new("enter_api_key")),
+    )
+}
+
+fn base_url_policy(base_url: &str) -> (bool, String) {
+    let parsed = match Url::parse(base_url) {
+        Ok(parsed) => parsed,
+        Err(error) => {
+            return (false, format!("base_url could not be parsed: {error}"));
+        }
+    };
+
+    let Some(host) = parsed.host_str() else {
+        return (false, "base_url must include a host".into());
+    };
+
+    let local = is_local_test_host(host);
+    let allowed_host = host.eq_ignore_ascii_case("nla.zapier.com")
+        || host.eq_ignore_ascii_case("api.zapier.com")
+        || local;
+    let secure_or_local = parsed.scheme() == "https" || local;
+
+    if allowed_host && secure_or_local {
+        (
+            true,
+            format!("Endpoint accepted by policy checks: {base_url}"),
+        )
+    } else {
+        (
+            false,
+            format!(
+                "Endpoint must use https and nla.zapier.com or api.zapier.com (localhost/127.0.0.1 allowed for tests): {base_url}"
+            ),
+        )
+    }
+}
+
+fn is_local_test_host(host: &str) -> bool {
+    matches!(host, "localhost" | "127.0.0.1")
 }
 
 /// Extract a required string field from input.
@@ -1107,5 +1255,228 @@ mod tests {
         let cloned = r.clone();
         assert_eq!(r.status, DoctorStatus::Healthy);
         assert_eq!(cloned.checks.len(), 1);
+    }
+
+    // -- Provisioning recipe --
+
+    #[test]
+    fn provisioning_recipe_has_3_steps() {
+        let recipe = provisioning_recipe();
+        assert_eq!(recipe.id.as_str(), "zapier.api_key");
+        assert_eq!(recipe.version, "1");
+        assert_eq!(recipe.steps.len(), 3);
+    }
+
+    #[test]
+    fn provisioning_recipe_step_order() {
+        let recipe = provisioning_recipe();
+        assert_eq!(recipe.steps[0].id.as_str(), "open_developer_settings");
+        assert_eq!(recipe.steps[1].id.as_str(), "enter_api_key");
+        assert_eq!(recipe.steps[2].id.as_str(), "store_api_key");
+    }
+
+    #[test]
+    fn provisioning_recipe_step_dependencies() {
+        let recipe = provisioning_recipe();
+        assert!(recipe.steps[0].depends_on.is_empty());
+        assert_eq!(recipe.steps[1].depends_on.len(), 1);
+        assert_eq!(
+            recipe.steps[1].depends_on[0].as_str(),
+            "open_developer_settings"
+        );
+        assert_eq!(recipe.steps[2].depends_on.len(), 1);
+        assert_eq!(recipe.steps[2].depends_on[0].as_str(), "enter_api_key");
+    }
+
+    #[test]
+    fn provisioning_recipe_serializes() {
+        let recipe = provisioning_recipe();
+        let v = serde_json::to_value(&recipe).unwrap();
+        assert_eq!(v["id"], "zapier.api_key");
+        assert!(v["steps"].as_array().unwrap().len() == 3);
+    }
+
+    #[test]
+    fn provisioning_recipe_description() {
+        let recipe = provisioning_recipe();
+        assert!(recipe.description.contains("Zapier"));
+        assert!(recipe.description.contains("API key"));
+    }
+
+    #[test]
+    fn provisioning_recipe_store_secret_scope() {
+        let recipe = provisioning_recipe();
+        let store_step = &recipe.steps[2];
+        if let ProvisioningStepType::StoreSecret { key, scope, .. } = &store_step.kind {
+            assert_eq!(key, "api_key");
+            assert_eq!(scope, "connector:fcp.zapier");
+        } else {
+            panic!("expected StoreSecret step type");
+        }
+    }
+
+    #[test]
+    fn provisioning_recipe_store_secret_value_from() {
+        let recipe = provisioning_recipe();
+        let store_step = &recipe.steps[2];
+        if let ProvisioningStepType::StoreSecret { value_from, .. } = &store_step.kind {
+            assert_eq!(value_from.as_str(), "enter_api_key");
+        } else {
+            panic!("expected StoreSecret step type");
+        }
+    }
+
+    #[test]
+    fn provisioning_recipe_open_url_step() {
+        let recipe = provisioning_recipe();
+        let open_step = &recipe.steps[0];
+        if let ProvisioningStepType::OpenUrl { url } = &open_step.kind {
+            assert!(url.contains("zapier.com"));
+        } else {
+            panic!("expected OpenUrl step type");
+        }
+    }
+
+    #[test]
+    fn provisioning_recipe_prompt_secret_step() {
+        let recipe = provisioning_recipe();
+        let prompt_step = &recipe.steps[1];
+        if let ProvisioningStepType::PromptSecret { message } = &prompt_step.kind {
+            assert!(message.contains("API key"));
+        } else {
+            panic!("expected PromptSecret step type");
+        }
+    }
+
+    // -- base_url_policy --
+
+    #[test]
+    fn base_url_policy_accepts_nla_zapier_https() {
+        let (ok, message) = base_url_policy("https://nla.zapier.com");
+        assert!(ok);
+        assert!(message.contains("accepted"));
+    }
+
+    #[test]
+    fn base_url_policy_accepts_api_zapier_https() {
+        let (ok, message) = base_url_policy("https://api.zapier.com/v1");
+        assert!(ok);
+        assert!(message.contains("accepted"));
+    }
+
+    #[test]
+    fn base_url_policy_accepts_localhost() {
+        let (ok, _) = base_url_policy("http://localhost:8080");
+        assert!(ok);
+    }
+
+    #[test]
+    fn base_url_policy_accepts_127_0_0_1() {
+        let (ok, _) = base_url_policy("http://127.0.0.1:9090");
+        assert!(ok);
+    }
+
+    #[test]
+    fn base_url_policy_rejects_http_non_local() {
+        let (ok, message) = base_url_policy("http://nla.zapier.com");
+        assert!(!ok);
+        assert!(message.contains("must use https"));
+    }
+
+    #[test]
+    fn base_url_policy_rejects_unknown_host() {
+        let (ok, message) = base_url_policy("https://evil.example.com");
+        assert!(!ok);
+        assert!(message.contains("zapier.com"));
+    }
+
+    #[test]
+    fn base_url_policy_rejects_invalid_url() {
+        let (ok, message) = base_url_policy("not a url");
+        assert!(!ok);
+        assert!(message.contains("could not be parsed"));
+    }
+
+    #[test]
+    fn base_url_policy_rejects_http_api_zapier() {
+        let (ok, _) = base_url_policy("http://api.zapier.com");
+        assert!(!ok);
+    }
+
+    #[test]
+    fn base_url_policy_case_insensitive_host() {
+        let (ok, _) = base_url_policy("https://NLA.ZAPIER.COM");
+        assert!(ok);
+    }
+
+    #[test]
+    fn base_url_policy_localhost_http_ok() {
+        let (ok, _) = base_url_policy("http://localhost:3000/v1");
+        assert!(ok);
+    }
+
+    // -- ProvisioningReadiness --
+
+    #[test]
+    fn provisioning_readiness_bearer_token() {
+        let config =
+            ZapierConfig::from_params(&json!({ "api_key": "tok" })).unwrap();
+        let readiness = config.provisioning_readiness();
+        assert_eq!(readiness.auth_mode, "api_key");
+        assert!(readiness.token_configured);
+        assert!(!readiness.credential_id_configured);
+        assert!(!readiness.requires_credential_injection);
+    }
+
+    #[test]
+    fn provisioning_readiness_credential_id() {
+        let config = ZapierConfig::from_params(&json!({
+            "credential_id": "550e8400-e29b-41d4-a716-446655440000"
+        }))
+        .unwrap();
+        let readiness = config.provisioning_readiness();
+        assert_eq!(readiness.auth_mode, "credential_id");
+        assert!(!readiness.token_configured);
+        assert!(readiness.credential_id_configured);
+        assert!(readiness.requires_credential_injection);
+    }
+
+    #[test]
+    fn provisioning_readiness_network_ok_with_default_url() {
+        let config =
+            ZapierConfig::from_params(&json!({ "api_key": "tok" })).unwrap();
+        let readiness = config.provisioning_readiness();
+        assert!(readiness.network_ok);
+    }
+
+    #[test]
+    fn provisioning_readiness_network_rejected_custom_url() {
+        let config = ZapierConfig::from_params(&json!({
+            "api_key": "tok",
+            "base_url": "https://evil.example.com",
+        }))
+        .unwrap();
+        let readiness = config.provisioning_readiness();
+        assert!(!readiness.network_ok);
+        assert!(readiness.network_message.contains("zapier.com"));
+    }
+
+    #[test]
+    fn provisioning_readiness_serializes() {
+        let config =
+            ZapierConfig::from_params(&json!({ "api_key": "tok" })).unwrap();
+        let readiness = config.provisioning_readiness();
+        let v = serde_json::to_value(&readiness).unwrap();
+        assert_eq!(v["auth_mode"], "api_key");
+        assert_eq!(v["token_configured"], true);
+        assert_eq!(v["network_ok"], true);
+    }
+
+    #[test]
+    fn is_local_test_host_checks() {
+        assert!(is_local_test_host("localhost"));
+        assert!(is_local_test_host("127.0.0.1"));
+        assert!(!is_local_test_host("example.com"));
+        assert!(!is_local_test_host("nla.zapier.com"));
     }
 }

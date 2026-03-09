@@ -5,8 +5,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use fcp_core::{
     AgentHint, BaseConnector, CapabilityId, ConnectorId, FcpError, FcpResult, IdempotencyClass,
-    OperationId, OperationInfo, RiskLevel, SafetyTier,
+    OperationId, OperationInfo, ProvisioningRecipe, ProvisioningStep, ProvisioningStepType,
+    RecipeId, RiskLevel, SafetyTier, SelfCheckReport, StepId,
 };
+use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tracing::{info, instrument};
@@ -48,6 +50,31 @@ impl McpBridgeConfig {
             auth: McpAuth { api_key },
         })
     }
+
+    fn provisioning_readiness(&self) -> ProvisioningReadiness {
+        let (network_ok, network_message) = base_url_policy(&self.mcp_url);
+
+        ProvisioningReadiness {
+            auth_mode: if self.auth.api_key.is_some() {
+                "api_key"
+            } else {
+                "none"
+            },
+            token_configured: self.auth.api_key.is_some(),
+            network_ok,
+            network_message,
+            mcp_url: self.mcp_url.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ProvisioningReadiness {
+    auth_mode: &'static str,
+    token_configured: bool,
+    network_ok: bool,
+    network_message: String,
+    mcp_url: String,
 }
 
 /// Doctor check result.
@@ -237,11 +264,34 @@ impl McpBridgeConnector {
 
     /// Handle the `self_check` method.
     pub async fn handle_self_check(&self) -> FcpResult<serde_json::Value> {
-        Ok(json!({
-            "connector_id": "fcp.mcp-bridge",
-            "version": "0.1.0",
-            "status": if self.config.is_some() { "ready" } else { "unconfigured" },
-        }))
+        let Some(config) = &self.config else {
+            let report =
+                SelfCheckReport::degraded("not_configured", "Connector is not configured");
+            return Self::serialize_self_check_report(report);
+        };
+
+        let readiness = config.provisioning_readiness();
+        if !readiness.network_ok {
+            let mut report = SelfCheckReport::failed(
+                "network_constraints_invalid",
+                readiness.network_message.clone(),
+            );
+            report.details = Some(json!({ "provisioning": readiness }));
+            return Self::serialize_self_check_report(report);
+        }
+
+        let Some(_client) = &self.client else {
+            let mut report = SelfCheckReport::failed(
+                "client_missing",
+                "MCP client not initialized; re-run configure",
+            );
+            report.details = Some(json!({ "provisioning": readiness }));
+            return Self::serialize_self_check_report(report);
+        };
+
+        let mut report = SelfCheckReport::ok();
+        report.details = Some(json!({ "provisioning": readiness }));
+        Self::serialize_self_check_report(report)
     }
 
     /// Handle the `introspect` method.
@@ -389,6 +439,19 @@ impl McpBridgeConnector {
         let data = client.prompts_list().await?;
         Ok(data)
     }
+
+    fn serialize_self_check_report(report: SelfCheckReport) -> FcpResult<serde_json::Value> {
+        info!(
+            event = "mcp_bridge.provisioning.self_check",
+            status = ?report.status,
+            reason_code = ?report.reason_code,
+            "MCP Bridge self-check completed"
+        );
+
+        serde_json::to_value(report).map_err(|e| FcpError::Internal {
+            message: format!("Failed to serialize self-check report: {e}"),
+        })
+    }
 }
 
 /// Extract a required string field from input.
@@ -509,6 +572,83 @@ fn typed_operations_info() -> Vec<OperationInfo> {
 /// Build the operations info for introspection (JSON format for simulate).
 fn operations_info() -> serde_json::Value {
     serde_json::to_value(typed_operations_info()).unwrap_or_default()
+}
+
+/// Build the provisioning recipe for the MCP Bridge connector.
+///
+/// MCP Bridge connects to arbitrary MCP servers, so the recipe prompts
+/// for the server URL and an optional auth token.
+pub fn provisioning_recipe() -> ProvisioningRecipe {
+    ProvisioningRecipe::new(
+        RecipeId::new("mcp-bridge.api_token"),
+        "1",
+        "Provision MCP Bridge connector with an MCP server URL and optional auth token",
+    )
+    .with_step(ProvisioningStep::new(
+        StepId::new("enter_url"),
+        ProvisioningStepType::PromptUser {
+            message: "Enter the MCP server URL (e.g. https://mcp.example.com)".into(),
+        },
+    ))
+    .with_step(
+        ProvisioningStep::new(
+            StepId::new("enter_token"),
+            ProvisioningStepType::PromptSecret {
+                message: "Paste your MCP server auth token (leave empty if none)".into(),
+            },
+        )
+        .depends_on(StepId::new("enter_url")),
+    )
+    .with_step(
+        ProvisioningStep::new(
+            StepId::new("store_token"),
+            ProvisioningStepType::StoreSecret {
+                key: "api_key".into(),
+                value_from: StepId::new("enter_token"),
+                scope: "connector:fcp.mcp-bridge".into(),
+            },
+        )
+        .depends_on(StepId::new("enter_token")),
+    )
+}
+
+/// Validate the MCP server URL.
+///
+/// MCP Bridge is permissive: any host is valid as long as the URL can be
+/// parsed. Both HTTP and HTTPS are accepted because MCP servers may run
+/// locally over plain HTTP.
+fn base_url_policy(mcp_url: &str) -> (bool, String) {
+    let parsed = match Url::parse(mcp_url) {
+        Ok(parsed) => parsed,
+        Err(error) => {
+            return (false, format!("mcp_url could not be parsed: {error}"));
+        }
+    };
+
+    let Some(host) = parsed.host_str() else {
+        return (false, "mcp_url must include a host".into());
+    };
+
+    let scheme = parsed.scheme();
+    if scheme != "http" && scheme != "https" {
+        return (
+            false,
+            format!("mcp_url must use http or https scheme, got: {scheme}"),
+        );
+    }
+
+    if host.is_empty() {
+        return (false, "mcp_url host must not be empty".into());
+    }
+
+    (
+        true,
+        format!("MCP server endpoint accepted by policy checks: {mcp_url}"),
+    )
+}
+
+fn is_local_test_host(host: &str) -> bool {
+    matches!(host, "localhost" | "127.0.0.1" | "::1")
 }
 
 #[cfg(test)]
@@ -1077,5 +1217,244 @@ mod tests {
     fn config_rejects_array_mcp_url() {
         let result = McpBridgeConfig::from_params(&json!({ "mcp_url": [1, 2, 3] }));
         assert!(result.is_err());
+    }
+
+    // -- Provisioning recipe tests -----------------------------------------------
+
+    #[test]
+    fn provisioning_recipe_has_3_steps() {
+        let recipe = provisioning_recipe();
+        assert_eq!(recipe.id.as_str(), "mcp-bridge.api_token");
+        assert_eq!(recipe.version, "1");
+        assert_eq!(recipe.steps.len(), 3);
+    }
+
+    #[test]
+    fn provisioning_recipe_step_order() {
+        let recipe = provisioning_recipe();
+        assert_eq!(recipe.steps[0].id.as_str(), "enter_url");
+        assert_eq!(recipe.steps[1].id.as_str(), "enter_token");
+        assert_eq!(recipe.steps[2].id.as_str(), "store_token");
+    }
+
+    #[test]
+    fn provisioning_recipe_step_dependencies() {
+        let recipe = provisioning_recipe();
+        assert!(recipe.steps[0].depends_on.is_empty());
+        assert_eq!(recipe.steps[1].depends_on.len(), 1);
+        assert_eq!(recipe.steps[1].depends_on[0].as_str(), "enter_url");
+        assert_eq!(recipe.steps[2].depends_on.len(), 1);
+        assert_eq!(recipe.steps[2].depends_on[0].as_str(), "enter_token");
+    }
+
+    #[test]
+    fn provisioning_recipe_serializes() {
+        let recipe = provisioning_recipe();
+        let v = serde_json::to_value(&recipe).unwrap();
+        assert_eq!(v["id"], "mcp-bridge.api_token");
+        assert_eq!(v["steps"].as_array().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn provisioning_recipe_description_non_empty() {
+        let recipe = provisioning_recipe();
+        assert!(!recipe.description.is_empty());
+    }
+
+    #[test]
+    fn provisioning_recipe_step1_is_prompt_user() {
+        let recipe = provisioning_recipe();
+        assert!(matches!(
+            recipe.steps[0].kind,
+            ProvisioningStepType::PromptUser { .. }
+        ));
+    }
+
+    #[test]
+    fn provisioning_recipe_step2_is_prompt_secret() {
+        let recipe = provisioning_recipe();
+        assert!(matches!(
+            recipe.steps[1].kind,
+            ProvisioningStepType::PromptSecret { .. }
+        ));
+    }
+
+    #[test]
+    fn provisioning_recipe_step3_is_store_secret() {
+        let recipe = provisioning_recipe();
+        assert!(matches!(
+            recipe.steps[2].kind,
+            ProvisioningStepType::StoreSecret { .. }
+        ));
+    }
+
+    #[test]
+    fn provisioning_recipe_store_secret_scope() {
+        let recipe = provisioning_recipe();
+        if let ProvisioningStepType::StoreSecret { scope, key, .. } = &recipe.steps[2].kind {
+            assert_eq!(scope, "connector:fcp.mcp-bridge");
+            assert_eq!(key, "api_key");
+        } else {
+            panic!("expected StoreSecret step");
+        }
+    }
+
+    #[test]
+    fn provisioning_recipe_store_secret_value_from() {
+        let recipe = provisioning_recipe();
+        if let ProvisioningStepType::StoreSecret { value_from, .. } = &recipe.steps[2].kind {
+            assert_eq!(value_from.as_str(), "enter_token");
+        } else {
+            panic!("expected StoreSecret step");
+        }
+    }
+
+    #[test]
+    fn provisioning_recipe_no_approval_required() {
+        let recipe = provisioning_recipe();
+        for step in &recipe.steps {
+            assert!(!step.requires_approval);
+        }
+    }
+
+    // -- base_url_policy tests ---------------------------------------------------
+
+    #[test]
+    fn base_url_policy_accepts_https() {
+        let (ok, message) = base_url_policy("https://mcp.example.com");
+        assert!(ok);
+        assert!(message.contains("accepted"));
+    }
+
+    #[test]
+    fn base_url_policy_accepts_http() {
+        let (ok, message) = base_url_policy("http://mcp.example.com");
+        assert!(ok);
+        assert!(message.contains("accepted"));
+    }
+
+    #[test]
+    fn base_url_policy_accepts_localhost() {
+        let (ok, _) = base_url_policy("http://localhost:3000");
+        assert!(ok);
+    }
+
+    #[test]
+    fn base_url_policy_accepts_127_0_0_1() {
+        let (ok, _) = base_url_policy("http://127.0.0.1:9090");
+        assert!(ok);
+    }
+
+    #[test]
+    fn base_url_policy_accepts_any_host() {
+        let (ok, _) = base_url_policy("https://any-host.example.org:8443/v1");
+        assert!(ok);
+    }
+
+    #[test]
+    fn base_url_policy_rejects_invalid_url() {
+        let (ok, message) = base_url_policy("not a url");
+        assert!(!ok);
+        assert!(message.contains("could not be parsed"));
+    }
+
+    #[test]
+    fn base_url_policy_rejects_ftp_scheme() {
+        let (ok, message) = base_url_policy("ftp://files.example.com/data");
+        assert!(!ok);
+        assert!(message.contains("http or https"));
+    }
+
+    #[test]
+    fn base_url_policy_rejects_empty() {
+        let (ok, _) = base_url_policy("");
+        assert!(!ok);
+    }
+
+    #[test]
+    fn base_url_policy_accepts_ipv6() {
+        let (ok, _) = base_url_policy("http://[::1]:8080");
+        assert!(ok);
+    }
+
+    #[test]
+    fn base_url_policy_accepts_https_with_path() {
+        let (ok, _) = base_url_policy("https://mcp.example.com/api/v2");
+        assert!(ok);
+    }
+
+    // -- ProvisioningReadiness tests ---------------------------------------------
+
+    #[test]
+    fn provisioning_readiness_with_api_key() {
+        let config = McpBridgeConfig::from_params(&json!({
+            "mcp_url": "http://localhost:3000",
+            "api_key": "test-key",
+        }))
+        .unwrap();
+        let readiness = config.provisioning_readiness();
+        assert_eq!(readiness.auth_mode, "api_key");
+        assert!(readiness.token_configured);
+        assert!(readiness.network_ok);
+        assert_eq!(readiness.mcp_url, "http://localhost:3000");
+    }
+
+    #[test]
+    fn provisioning_readiness_without_api_key() {
+        let config = McpBridgeConfig::from_params(&json!({
+            "mcp_url": "http://localhost:3000",
+        }))
+        .unwrap();
+        let readiness = config.provisioning_readiness();
+        assert_eq!(readiness.auth_mode, "none");
+        assert!(!readiness.token_configured);
+        assert!(readiness.network_ok);
+    }
+
+    #[test]
+    fn provisioning_readiness_serializes() {
+        let config = McpBridgeConfig::from_params(&json!({
+            "mcp_url": "https://mcp.example.com",
+            "api_key": "tok",
+        }))
+        .unwrap();
+        let readiness = config.provisioning_readiness();
+        let v = serde_json::to_value(&readiness).unwrap();
+        assert_eq!(v["auth_mode"], "api_key");
+        assert_eq!(v["token_configured"], true);
+        assert_eq!(v["network_ok"], true);
+        assert_eq!(v["mcp_url"], "https://mcp.example.com");
+    }
+
+    #[test]
+    fn provisioning_readiness_network_message_contains_accepted() {
+        let config = McpBridgeConfig::from_params(&json!({
+            "mcp_url": "https://mcp.example.com",
+        }))
+        .unwrap();
+        let readiness = config.provisioning_readiness();
+        assert!(readiness.network_message.contains("accepted"));
+    }
+
+    // -- is_local_test_host tests ------------------------------------------------
+
+    #[test]
+    fn is_local_test_host_localhost() {
+        assert!(is_local_test_host("localhost"));
+    }
+
+    #[test]
+    fn is_local_test_host_127_0_0_1() {
+        assert!(is_local_test_host("127.0.0.1"));
+    }
+
+    #[test]
+    fn is_local_test_host_ipv6_loopback() {
+        assert!(is_local_test_host("::1"));
+    }
+
+    #[test]
+    fn is_local_test_host_rejects_remote() {
+        assert!(!is_local_test_host("mcp.example.com"));
     }
 }

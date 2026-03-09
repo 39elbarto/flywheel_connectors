@@ -5,8 +5,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use fcp_core::{
     AgentHint, BaseConnector, CapabilityId, ConnectorId, FcpError, FcpResult, IdempotencyClass,
-    Introspection, OperationId, OperationInfo, RiskLevel, SafetyTier,
+    Introspection, OperationId, OperationInfo, ProvisioningRecipe, ProvisioningStep,
+    ProvisioningStepType, RecipeId, RiskLevel, SafetyTier, SelfCheckReport, StepId,
 };
+use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tracing::{info, instrument};
@@ -53,6 +55,36 @@ impl RetoolConfig {
             base_url,
         })
     }
+
+    /// Resolve the effective base URL for policy checks.
+    fn effective_base_url(&self) -> String {
+        if let Some(ref url) = self.base_url {
+            url.clone()
+        } else {
+            let sub = self.subdomain.as_deref().unwrap_or("app");
+            format!("https://{sub}.retool.com/api/v1")
+        }
+    }
+
+    fn provisioning_readiness(&self) -> ProvisioningReadiness {
+        let effective_url = self.effective_base_url();
+        let (network_ok, network_message) = base_url_policy(&effective_url);
+
+        ProvisioningReadiness {
+            token_configured: true,
+            network_ok,
+            network_message,
+            base_url: effective_url,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ProvisioningReadiness {
+    token_configured: bool,
+    network_ok: bool,
+    network_message: String,
+    base_url: String,
 }
 
 /// Doctor check result.
@@ -244,11 +276,34 @@ impl RetoolConnector {
 
     /// Handle the `self_check` method.
     pub async fn handle_self_check(&self) -> FcpResult<serde_json::Value> {
-        Ok(json!({
-            "connector_id": "fcp.retool",
-            "version": "0.1.0",
-            "status": if self.config.is_some() { "ready" } else { "unconfigured" },
-        }))
+        let Some(config) = &self.config else {
+            let report =
+                SelfCheckReport::degraded("not_configured", "Connector is not configured");
+            return Self::serialize_self_check_report(report);
+        };
+
+        let readiness = config.provisioning_readiness();
+        if !readiness.network_ok {
+            let mut report = SelfCheckReport::failed(
+                "network_constraints_invalid",
+                readiness.network_message.clone(),
+            );
+            report.details = Some(json!({ "provisioning": readiness }));
+            return Self::serialize_self_check_report(report);
+        }
+
+        let Some(_client) = &self.client else {
+            let mut report = SelfCheckReport::failed(
+                "client_missing",
+                "API client not initialized; re-run configure",
+            );
+            report.details = Some(json!({ "provisioning": readiness }));
+            return Self::serialize_self_check_report(report);
+        };
+
+        let mut report = SelfCheckReport::ok();
+        report.details = Some(json!({ "provisioning": readiness }));
+        Self::serialize_self_check_report(report)
     }
 
     /// Handle the `introspect` method.
@@ -377,6 +432,19 @@ impl RetoolConnector {
         Ok(json!({}))
     }
 
+    fn serialize_self_check_report(report: SelfCheckReport) -> FcpResult<serde_json::Value> {
+        info!(
+            event = "retool.provisioning.self_check",
+            status = ?report.status,
+            reason_code = ?report.reason_code,
+            "Retool self-check completed"
+        );
+
+        serde_json::to_value(report).map_err(|e| FcpError::Internal {
+            message: format!("Failed to serialize self-check report: {e}"),
+        })
+    }
+
     // -- Operation implementations --
 
     async fn invoke_workflows_list(
@@ -430,6 +498,68 @@ fn operations_info() -> serde_json::Value {
             "idempotency": "none",
         },
     ])
+}
+
+/// Build the provisioning recipe for the `Retool` connector.
+pub fn provisioning_recipe() -> ProvisioningRecipe {
+    ProvisioningRecipe::new(
+        RecipeId::new("retool.api_key"),
+        "1",
+        "Provision `Retool` connector with an API key",
+    )
+    .with_step(ProvisioningStep::new(
+        StepId::new("enter_api_key"),
+        ProvisioningStepType::PromptSecret {
+            message: "Paste your Retool API key".into(),
+        },
+    ))
+    .with_step(
+        ProvisioningStep::new(
+            StepId::new("store_api_key"),
+            ProvisioningStepType::StoreSecret {
+                key: "api_token".into(),
+                value_from: StepId::new("enter_api_key"),
+                scope: "connector:fcp.retool".into(),
+            },
+        )
+        .depends_on(StepId::new("enter_api_key")),
+    )
+}
+
+fn base_url_policy(base_url: &str) -> (bool, String) {
+    let parsed = match Url::parse(base_url) {
+        Ok(parsed) => parsed,
+        Err(error) => {
+            return (false, format!("base_url could not be parsed: {error}"));
+        }
+    };
+
+    let Some(host) = parsed.host_str() else {
+        return (false, "base_url must include a host".into());
+    };
+
+    let local = is_local_test_host(host);
+    let allowed_host =
+        host.eq_ignore_ascii_case("retool.com") || host.ends_with(".retool.com") || local;
+    let secure_or_local = parsed.scheme() == "https" || local;
+
+    if allowed_host && secure_or_local {
+        (
+            true,
+            format!("Endpoint accepted by policy checks: {base_url}"),
+        )
+    } else {
+        (
+            false,
+            format!(
+                "Endpoint must use https and *.retool.com (localhost/127.0.0.1/::1 allowed for tests): {base_url}"
+            ),
+        )
+    }
+}
+
+fn is_local_test_host(host: &str) -> bool {
+    matches!(host, "localhost" | "127.0.0.1" | "::1" | "[::1]")
 }
 
 #[cfg(test)]
@@ -1194,5 +1324,287 @@ mod tests {
             let back: DoctorStatus = serde_json::from_value(v).unwrap();
             assert_eq!(back, status);
         }
+    }
+
+    // ── provisioning_recipe tests ──────────────────────────────────
+
+    #[test]
+    fn provisioning_recipe_has_2_steps() {
+        let recipe = provisioning_recipe();
+        assert_eq!(recipe.id.as_str(), "retool.api_key");
+        assert_eq!(recipe.version, "1");
+        assert_eq!(recipe.steps.len(), 2);
+    }
+
+    #[test]
+    fn provisioning_recipe_step_order() {
+        let recipe = provisioning_recipe();
+        assert_eq!(recipe.steps[0].id.as_str(), "enter_api_key");
+        assert_eq!(recipe.steps[1].id.as_str(), "store_api_key");
+    }
+
+    #[test]
+    fn provisioning_recipe_step_dependencies() {
+        let recipe = provisioning_recipe();
+        assert!(recipe.steps[0].depends_on.is_empty());
+        assert_eq!(recipe.steps[1].depends_on.len(), 1);
+        assert_eq!(recipe.steps[1].depends_on[0].as_str(), "enter_api_key");
+    }
+
+    #[test]
+    fn provisioning_recipe_serializes() {
+        let recipe = provisioning_recipe();
+        let v = serde_json::to_value(&recipe).unwrap();
+        assert_eq!(v["id"], "retool.api_key");
+        assert!(v["steps"].as_array().unwrap().len() == 2);
+    }
+
+    #[test]
+    fn provisioning_recipe_description_mentions_retool() {
+        let recipe = provisioning_recipe();
+        assert!(recipe.description.contains("Retool"));
+    }
+
+    #[test]
+    fn provisioning_recipe_store_step_key_is_api_token() {
+        let recipe = provisioning_recipe();
+        let store_step = &recipe.steps[1];
+        match &store_step.kind {
+            ProvisioningStepType::StoreSecret { key, scope, .. } => {
+                assert_eq!(key, "api_token");
+                assert_eq!(scope, "connector:fcp.retool");
+            }
+            other => panic!("expected StoreSecret, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn provisioning_recipe_prompt_step_has_message() {
+        let recipe = provisioning_recipe();
+        let prompt_step = &recipe.steps[0];
+        match &prompt_step.kind {
+            ProvisioningStepType::PromptSecret { message } => {
+                assert!(message.contains("Retool"));
+                assert!(message.contains("API key"));
+            }
+            other => panic!("expected PromptSecret, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn provisioning_recipe_store_value_from_matches_prompt_id() {
+        let recipe = provisioning_recipe();
+        let prompt_id = recipe.steps[0].id.clone();
+        match &recipe.steps[1].kind {
+            ProvisioningStepType::StoreSecret { value_from, .. } => {
+                assert_eq!(value_from.as_str(), prompt_id.as_str());
+            }
+            other => panic!("expected StoreSecret, got {other:?}"),
+        }
+    }
+
+    // ── base_url_policy tests ──────────────────────────────────────
+
+    #[test]
+    fn base_url_policy_accepts_retool_https() {
+        let (ok, message) = base_url_policy("https://app.retool.com/api/v1");
+        assert!(ok);
+        assert!(message.contains("accepted"));
+    }
+
+    #[test]
+    fn base_url_policy_accepts_custom_subdomain() {
+        let (ok, message) = base_url_policy("https://myorg.retool.com/api/v1");
+        assert!(ok);
+        assert!(message.contains("accepted"));
+    }
+
+    #[test]
+    fn base_url_policy_accepts_bare_retool_domain() {
+        let (ok, _) = base_url_policy("https://retool.com/api/v1");
+        assert!(ok);
+    }
+
+    #[test]
+    fn base_url_policy_accepts_localhost() {
+        let (ok, _) = base_url_policy("http://localhost:8080");
+        assert!(ok);
+    }
+
+    #[test]
+    fn base_url_policy_accepts_127_0_0_1() {
+        let (ok, _) = base_url_policy("http://127.0.0.1:9090");
+        assert!(ok);
+    }
+
+    #[test]
+    fn base_url_policy_accepts_ipv6_loopback() {
+        let (ok, _) = base_url_policy("http://[::1]:9090");
+        assert!(ok);
+    }
+
+    #[test]
+    fn base_url_policy_rejects_http_non_local() {
+        let (ok, message) = base_url_policy("http://app.retool.com/api/v1");
+        assert!(!ok);
+        assert!(message.contains("must use https"));
+    }
+
+    #[test]
+    fn base_url_policy_rejects_unknown_host() {
+        let (ok, message) = base_url_policy("https://evil.example.com");
+        assert!(!ok);
+        assert!(message.contains("retool.com"));
+    }
+
+    #[test]
+    fn base_url_policy_rejects_invalid_url() {
+        let (ok, message) = base_url_policy("not a url");
+        assert!(!ok);
+        assert!(message.contains("could not be parsed"));
+    }
+
+    #[test]
+    fn base_url_policy_rejects_no_host() {
+        let (ok, _message) = base_url_policy("file:///etc/passwd");
+        assert!(!ok);
+    }
+
+    #[test]
+    fn base_url_policy_rejects_retool_like_subdomain_on_other_domain() {
+        let (ok, _) = base_url_policy("https://retool.com.evil.com");
+        assert!(!ok);
+    }
+
+    // ── provisioning_readiness tests ───────────────────────────────
+
+    #[test]
+    fn provisioning_readiness_default_base_url() {
+        let config = RetoolConfig::from_params(&json!({"api_token": "tok"})).unwrap();
+        let readiness = config.provisioning_readiness();
+        assert!(readiness.token_configured);
+        assert!(readiness.network_ok);
+        assert!(readiness.base_url.contains("retool.com"));
+    }
+
+    #[test]
+    fn provisioning_readiness_custom_subdomain() {
+        let config = RetoolConfig::from_params(&json!({
+            "api_token": "tok",
+            "subdomain": "myorg",
+        }))
+        .unwrap();
+        let readiness = config.provisioning_readiness();
+        assert!(readiness.network_ok);
+        assert!(readiness.base_url.contains("myorg.retool.com"));
+    }
+
+    #[test]
+    fn provisioning_readiness_custom_base_url_accepted() {
+        let config = RetoolConfig::from_params(&json!({
+            "api_token": "tok",
+            "base_url": "https://custom.retool.com/api/v1",
+        }))
+        .unwrap();
+        let readiness = config.provisioning_readiness();
+        assert!(readiness.network_ok);
+    }
+
+    #[test]
+    fn provisioning_readiness_custom_base_url_rejected() {
+        let config = RetoolConfig::from_params(&json!({
+            "api_token": "tok",
+            "base_url": "https://evil.example.com",
+        }))
+        .unwrap();
+        let readiness = config.provisioning_readiness();
+        assert!(!readiness.network_ok);
+        assert!(readiness.network_message.contains("retool.com"));
+    }
+
+    #[test]
+    fn provisioning_readiness_localhost_accepted() {
+        let config = RetoolConfig::from_params(&json!({
+            "api_token": "tok",
+            "base_url": "http://localhost:3000",
+        }))
+        .unwrap();
+        let readiness = config.provisioning_readiness();
+        assert!(readiness.network_ok);
+    }
+
+    #[test]
+    fn provisioning_readiness_serializes() {
+        let config = RetoolConfig::from_params(&json!({"api_token": "tok"})).unwrap();
+        let readiness = config.provisioning_readiness();
+        let v = serde_json::to_value(&readiness).unwrap();
+        assert_eq!(v["token_configured"], true);
+        assert_eq!(v["network_ok"], true);
+    }
+
+    // ── effective_base_url tests ───────────────────────────────────
+
+    #[test]
+    fn effective_base_url_no_overrides() {
+        let config = RetoolConfig::from_params(&json!({"api_token": "tok"})).unwrap();
+        assert_eq!(
+            config.effective_base_url(),
+            "https://app.retool.com/api/v1"
+        );
+    }
+
+    #[test]
+    fn effective_base_url_with_subdomain() {
+        let config = RetoolConfig::from_params(&json!({
+            "api_token": "tok",
+            "subdomain": "acme",
+        }))
+        .unwrap();
+        assert_eq!(
+            config.effective_base_url(),
+            "https://acme.retool.com/api/v1"
+        );
+    }
+
+    #[test]
+    fn effective_base_url_explicit_overrides_subdomain() {
+        let config = RetoolConfig::from_params(&json!({
+            "api_token": "tok",
+            "subdomain": "acme",
+            "base_url": "https://custom.retool.com/api/v2",
+        }))
+        .unwrap();
+        assert_eq!(
+            config.effective_base_url(),
+            "https://custom.retool.com/api/v2"
+        );
+    }
+
+    // ── is_local_test_host tests ───────────────────────────────────
+
+    #[test]
+    fn is_local_test_host_localhost() {
+        assert!(is_local_test_host("localhost"));
+    }
+
+    #[test]
+    fn is_local_test_host_ipv4_loopback() {
+        assert!(is_local_test_host("127.0.0.1"));
+    }
+
+    #[test]
+    fn is_local_test_host_ipv6_loopback() {
+        assert!(is_local_test_host("::1"));
+        assert!(is_local_test_host("[::1]"));
+    }
+
+    #[test]
+    fn is_local_test_host_rejects_random() {
+        assert!(!is_local_test_host("example.com"));
+    }
+
+    #[test]
+    fn is_local_test_host_rejects_empty() {
+        assert!(!is_local_test_host(""));
     }
 }

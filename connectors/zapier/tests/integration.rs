@@ -15,7 +15,7 @@ use serde_json::json;
 use wiremock::matchers::{header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
-use fcp_zapier::connector::ZapierConnector;
+use fcp_zapier::connector::{ZapierConnector, provisioning_recipe};
 
 async fn setup_connector(mock_url: &str) -> ZapierConnector {
     let mut c = ZapierConnector::new();
@@ -81,16 +81,51 @@ async fn lifecycle_self_check_ready() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
     let check = c.handle_self_check().await.unwrap();
-    assert_eq!(check["status"], "ready");
-    assert_eq!(check["connector_id"], "fcp.zapier");
-    assert_eq!(check["version"], "0.1.0");
+    assert_eq!(check["status"], "ok");
+    assert!(check["details"]["provisioning"]["network_ok"]
+        .as_bool()
+        .unwrap());
+    assert_eq!(
+        check["details"]["provisioning"]["auth_mode"], "api_key"
+    );
 }
 
 #[fcp_async_core::runtime::test]
 async fn lifecycle_self_check_unconfigured() {
     let c = ZapierConnector::new();
     let check = c.handle_self_check().await.unwrap();
-    assert_eq!(check["status"], "unconfigured");
+    assert_eq!(check["status"], "degraded");
+    assert_eq!(check["reason_code"], "not_configured");
+}
+
+#[fcp_async_core::runtime::test]
+async fn lifecycle_self_check_credential_id() {
+    let mut c = ZapierConnector::new();
+    c.handle_configure(json!({
+        "credential_id": "550e8400-e29b-41d4-a716-446655440000"
+    }))
+    .await
+    .unwrap();
+    let check = c.handle_self_check().await.unwrap();
+    assert_eq!(check["status"], "degraded");
+    assert_eq!(check["reason_code"], "credential_injection_required");
+    assert!(check["details"]["provisioning"]["requires_credential_injection"]
+        .as_bool()
+        .unwrap());
+}
+
+#[fcp_async_core::runtime::test]
+async fn lifecycle_self_check_bad_network() {
+    let mut c = ZapierConnector::new();
+    c.handle_configure(json!({
+        "api_key": "tok",
+        "base_url": "https://evil.example.com"
+    }))
+    .await
+    .unwrap();
+    let check = c.handle_self_check().await.unwrap();
+    assert_eq!(check["status"], "failed");
+    assert_eq!(check["reason_code"], "network_constraints_invalid");
 }
 
 #[fcp_async_core::runtime::test]
@@ -723,4 +758,15 @@ async fn invoke_before_configure_fails() {
         .await
         .is_err()
     );
+}
+
+// -- Provisioning recipe --
+
+#[test]
+fn provisioning_recipe_integration() {
+    let recipe = provisioning_recipe();
+    assert_eq!(recipe.id.as_str(), "zapier.api_key");
+    assert_eq!(recipe.steps.len(), 3);
+    let v = serde_json::to_value(&recipe).unwrap();
+    assert!(v["description"].as_str().unwrap().contains("Zapier"));
 }

@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use fcp_core::{
     AgentHint, BaseConnector, CapabilityId, ConnectorId, CredentialId, FcpError, FcpResult,
-    IdempotencyClass, OperationId, OperationInfo, RiskLevel, SafetyTier,
+    IdempotencyClass, OperationId, OperationInfo, RiskLevel, SafetyTier, SelfCheckReport,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -73,6 +73,50 @@ impl KubernetesConfig {
 
         Ok(Self { auth, base_url })
     }
+
+    const fn auth_mode(&self) -> &'static str {
+        match &self.auth {
+            KubernetesAuth::BearerToken(_) => "bearer_token",
+            KubernetesAuth::CredentialId(_) => "credential_id",
+        }
+    }
+
+    const fn rate_limit_profile(&self) -> &'static str {
+        match &self.auth {
+            KubernetesAuth::BearerToken(_) => "bearer_token: cluster-level rate limiting",
+            KubernetesAuth::CredentialId(_) => {
+                "credential_id: authenticated via egress proxy injection"
+            }
+        }
+    }
+
+    fn provisioning_readiness(&self) -> ProvisioningReadiness {
+        let (network_ok, network_message) = base_url_policy(&self.base_url);
+
+        ProvisioningReadiness {
+            auth_mode: self.auth_mode(),
+            bearer_token_configured: matches!(self.auth, KubernetesAuth::BearerToken(_)),
+            credential_id_configured: self.auth.is_secretless(),
+            requires_credential_injection: self.auth.is_secretless(),
+            network_ok,
+            network_message,
+            rate_limit_profile: self.rate_limit_profile(),
+            base_url: self.base_url.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[allow(clippy::struct_excessive_bools)]
+struct ProvisioningReadiness {
+    auth_mode: &'static str,
+    bearer_token_configured: bool,
+    credential_id_configured: bool,
+    requires_credential_injection: bool,
+    network_ok: bool,
+    network_message: String,
+    rate_limit_profile: &'static str,
+    base_url: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -148,7 +192,13 @@ impl KubernetesConnector {
         params: serde_json::Value,
     ) -> FcpResult<serde_json::Value> {
         let config = KubernetesConfig::from_params(&params)?;
-        info!(auth = %config.auth.redacted_label(), base_url = %config.base_url, "Configuring Kubernetes connector");
+        let provisioning = config.provisioning_readiness();
+        let status = if provisioning.network_ok {
+            "configured"
+        } else {
+            "configured_with_warnings"
+        };
+        info!(auth = %config.auth.redacted_label(), base_url = %config.base_url, %status, "Configuring Kubernetes connector");
 
         let client = KubernetesClient::new(config.auth.clone(), Some(&config.base_url))
             .map_err(|e| e.to_fcp_error())?;
@@ -156,7 +206,7 @@ impl KubernetesConnector {
         self.client = Some(Arc::new(client));
         self.config = Some(config);
         self.base.set_configured(true);
-        Ok(json!({}))
+        Ok(json!({ "status": status }))
     }
 
     pub async fn handle_handshake(
@@ -249,16 +299,71 @@ impl KubernetesConnector {
             critical: false,
         });
 
+        if let Some(config) = &self.config {
+            let readiness = config.provisioning_readiness();
+            checks.push(DoctorCheck {
+                name: "network_constraints".into(),
+                passed: readiness.network_ok,
+                message: Some(readiness.network_message),
+                critical: true,
+            });
+        }
+
         let result = DoctorResult::from_checks(checks);
         Ok(serde_json::to_value(result).unwrap_or(json!({"status": "error"})))
     }
 
     pub async fn handle_self_check(&self) -> FcpResult<serde_json::Value> {
-        Ok(json!({
-            "connector_id": "fcp.kubernetes",
-            "version": "0.1.0",
-            "status": if self.config.is_some() { "ready" } else { "unconfigured" },
-        }))
+        let Some(config) = &self.config else {
+            let report =
+                SelfCheckReport::degraded("not_configured", "Connector is not configured");
+            return Self::serialize_self_check_report(report);
+        };
+
+        let readiness = config.provisioning_readiness();
+        if !readiness.network_ok {
+            let mut report = SelfCheckReport::failed(
+                "network_constraints_invalid",
+                readiness.network_message.clone(),
+            );
+            report.details = Some(json!({ "provisioning": readiness }));
+            return Self::serialize_self_check_report(report);
+        }
+
+        if self.client.is_none() {
+            let mut report = SelfCheckReport::failed(
+                "client_missing",
+                "API client not initialized; re-run configure",
+            );
+            report.details = Some(json!({ "provisioning": readiness }));
+            return Self::serialize_self_check_report(report);
+        }
+
+        if readiness.requires_credential_injection {
+            let mut report = SelfCheckReport::degraded(
+                "credential_injection_required",
+                "credential_id mode requires egress proxy injection; skipping live probe",
+            );
+            report.details = Some(json!({ "provisioning": readiness }));
+            return Self::serialize_self_check_report(report);
+        }
+
+        let mut report = SelfCheckReport::ok();
+        report.details = Some(json!({ "provisioning": readiness }));
+        Self::serialize_self_check_report(report)
+    }
+
+    fn serialize_self_check_report(report: SelfCheckReport) -> FcpResult<serde_json::Value> {
+        info!(
+            event = "kubernetes.provisioning.self_check",
+            status = ?report.status,
+            reason_code = ?report.reason_code,
+            "Kubernetes self-check completed"
+        );
+
+        serde_json::to_value(report).map_err(|e| FcpError::Internal {
+            message: format!("Failed to serialize self-check report: {e}"),
+        })
     }
 
     pub async fn handle_introspect(&self) -> FcpResult<serde_json::Value> {
@@ -576,6 +681,59 @@ fn require_str<'a>(input: &'a serde_json::Value, field: &str) -> Result<&'a str,
             status_code: 400,
             message: format!("Missing required field: {field}"),
         })
+}
+
+fn is_local_test_host(host: &str) -> bool {
+    host.eq_ignore_ascii_case("localhost")
+        || host == "127.0.0.1"
+        || host == "::1"
+        || host == "[::1]"
+}
+
+fn base_url_policy(base_url: &str) -> (bool, String) {
+    let lower = base_url.to_ascii_lowercase();
+    let Some(scheme_end) = lower.find("://") else {
+        return (false, "base_url must include a scheme (https://)".into());
+    };
+    let scheme = &lower[..scheme_end];
+    let after_scheme = &base_url[scheme_end + 3..];
+    let host_part = after_scheme
+        .split('/')
+        .next()
+        .unwrap_or(after_scheme)
+        .split(':')
+        .next()
+        .unwrap_or(after_scheme);
+
+    if host_part.is_empty() {
+        return (false, "base_url must include a host".into());
+    }
+
+    let host_lower = host_part.to_ascii_lowercase();
+    let local = is_local_test_host(host_part);
+    let allowed_host = host_lower == "kubernetes.default.svc"
+        || host_lower.as_bytes().ends_with(b".svc")
+        || host_lower.as_bytes().ends_with(b".svc.cluster.local")
+        || local;
+    let secure_or_local = scheme == "https" || local;
+
+    if !secure_or_local {
+        return (
+            false,
+            format!("base_url must use https for non-local hosts (got {scheme}://{host_part})"),
+        );
+    }
+
+    if !allowed_host {
+        return (
+            true,
+            format!(
+                "base_url accepted: custom host {host_part} (not a standard in-cluster endpoint)"
+            ),
+        );
+    }
+
+    (true, format!("base_url accepted: {host_part}"))
 }
 
 fn operations_info() -> Vec<OperationInfo> {
@@ -1729,5 +1887,90 @@ mod tests {
         assert_eq!(a, b);
         let c = DoctorStatus::Unhealthy;
         assert_ne!(a, c);
+    }
+
+    // ── provisioning_readiness ────────────────────────────────────
+
+    #[test]
+    fn provisioning_readiness_bearer_token_mode() {
+        let config =
+            KubernetesConfig::from_params(&json!({"bearer_token": "test-token"})).unwrap();
+        let readiness = config.provisioning_readiness();
+        assert_eq!(readiness.auth_mode, "bearer_token");
+        assert!(readiness.bearer_token_configured);
+        assert!(!readiness.credential_id_configured);
+        assert!(!readiness.requires_credential_injection);
+        assert!(readiness.network_ok);
+    }
+
+    #[test]
+    fn provisioning_readiness_credential_id_mode() {
+        let config = KubernetesConfig::from_params(
+            &json!({"credential_id": "550e8400-e29b-41d4-a716-446655440000"}),
+        )
+        .unwrap();
+        let readiness = config.provisioning_readiness();
+        assert_eq!(readiness.auth_mode, "credential_id");
+        assert!(!readiness.bearer_token_configured);
+        assert!(readiness.credential_id_configured);
+        assert!(readiness.requires_credential_injection);
+        assert!(readiness.network_ok);
+        assert_eq!(
+            readiness.rate_limit_profile,
+            "credential_id: authenticated via egress proxy injection"
+        );
+    }
+
+    #[test]
+    fn provisioning_readiness_custom_base_url() {
+        let config = KubernetesConfig::from_params(
+            &json!({"bearer_token": "tok", "base_url": "https://k8s.example.com"}),
+        )
+        .unwrap();
+        let readiness = config.provisioning_readiness();
+        assert!(readiness.network_ok);
+        assert!(readiness.network_message.contains("custom host"));
+        assert_eq!(readiness.base_url, "https://k8s.example.com");
+    }
+
+    #[test]
+    fn provisioning_readiness_serializes() {
+        let config =
+            KubernetesConfig::from_params(&json!({"bearer_token": "test-token"})).unwrap();
+        let readiness = config.provisioning_readiness();
+        let v = serde_json::to_value(&readiness).unwrap();
+        assert_eq!(v["auth_mode"], "bearer_token");
+        assert_eq!(v["bearer_token_configured"], true);
+        assert_eq!(v["credential_id_configured"], false);
+        assert!(v["network_message"].as_str().is_some());
+    }
+
+    // ── base_url_policy ───────────────────────────────────────────
+
+    #[test]
+    fn base_url_policy_accepts_default_in_cluster() {
+        let (ok, message) = base_url_policy("https://kubernetes.default.svc");
+        assert!(ok);
+        assert!(message.contains("accepted"));
+    }
+
+    #[test]
+    fn base_url_policy_accepts_localhost() {
+        let (ok, _) = base_url_policy("http://localhost:6443");
+        assert!(ok);
+    }
+
+    #[test]
+    fn base_url_policy_rejects_http_non_local() {
+        let (ok, message) = base_url_policy("http://k8s.example.com");
+        assert!(!ok);
+        assert!(message.contains("must use https"));
+    }
+
+    #[test]
+    fn base_url_policy_accepts_svc_cluster_local() {
+        let (ok, message) = base_url_policy("https://api.kube-system.svc.cluster.local");
+        assert!(ok);
+        assert!(message.contains("accepted"));
     }
 }

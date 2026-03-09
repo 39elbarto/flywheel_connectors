@@ -34,6 +34,11 @@ impl HomeAssistantAuth {
     }
 
     #[must_use]
+    pub const fn has_token(&self) -> bool {
+        matches!(self, Self::BearerToken(_))
+    }
+
+    #[must_use]
     pub const fn is_secretless(&self) -> bool {
         matches!(self, Self::CredentialId(_))
     }
@@ -167,6 +172,11 @@ impl HomeAssistantClient {
             .json(body);
         let resp = req.send().await?;
         self.handle_response(resp).await
+    }
+
+    /// Check connectivity by hitting the root API endpoint.
+    pub async fn health_check(&self) -> HomeAssistantResult<()> {
+        self.get("", None).await.map(|_| ())
     }
 
     // -- States --

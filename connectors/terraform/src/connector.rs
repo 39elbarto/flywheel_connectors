@@ -5,8 +5,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use fcp_core::{
     AgentHint, BaseConnector, CapabilityId, ConnectorId, CredentialId, FcpError, FcpResult,
-    IdempotencyClass, OperationId, OperationInfo, RiskLevel, SafetyTier,
+    IdempotencyClass, OperationId, OperationInfo, ProvisioningRecipe, ProvisioningStep,
+    ProvisioningStepType, RecipeId, RiskLevel, SafetyTier, SelfCheckReport, StepId,
 };
+use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tracing::{info, instrument};
@@ -83,6 +85,53 @@ impl TerraformConfig {
             organization,
         })
     }
+
+    const fn auth_mode(&self) -> &'static str {
+        match &self.auth {
+            TerraformAuth::BearerToken(_) => "api_token",
+            TerraformAuth::CredentialId(_) => "credential_id",
+        }
+    }
+
+    const fn rate_limit_profile(&self) -> &'static str {
+        match &self.auth {
+            TerraformAuth::BearerToken(_) => "api_token: 30 requests/second sustained",
+            TerraformAuth::CredentialId(_) => {
+                "credential_id: authenticated via egress proxy injection"
+            }
+        }
+    }
+
+    fn provisioning_readiness(&self) -> ProvisioningReadiness {
+        let (network_ok, network_message) = base_url_policy(&self.base_url);
+        let has_token = matches!(self.auth, TerraformAuth::BearerToken(_));
+
+        ProvisioningReadiness {
+            auth_mode: self.auth_mode(),
+            api_token_configured: has_token,
+            credential_id_configured: self.auth.is_secretless(),
+            requires_credential_injection: self.auth.is_secretless(),
+            network_ok,
+            network_message,
+            rate_limit_profile: self.rate_limit_profile(),
+            base_url: self.base_url.clone(),
+            organization: self.organization.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[allow(clippy::struct_excessive_bools)]
+struct ProvisioningReadiness {
+    auth_mode: &'static str,
+    api_token_configured: bool,
+    credential_id_configured: bool,
+    requires_credential_injection: bool,
+    network_ok: bool,
+    network_message: String,
+    rate_limit_profile: &'static str,
+    base_url: String,
+    organization: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -119,6 +168,14 @@ impl DoctorResult {
             DoctorStatus::Healthy
         };
         Self { status, checks }
+    }
+
+    const fn status_label(&self) -> &'static str {
+        match self.status {
+            DoctorStatus::Healthy => "healthy",
+            DoctorStatus::Degraded => "degraded",
+            DoctorStatus::Unhealthy => "unhealthy",
+        }
     }
 }
 
@@ -157,13 +214,30 @@ impl TerraformConnector {
         params: serde_json::Value,
     ) -> FcpResult<serde_json::Value> {
         let config = TerraformConfig::from_params(&params)?;
-        info!(auth = %config.auth.redacted_label(), base_url = %config.base_url, "Configuring Terraform connector");
+        let provisioning = config.provisioning_readiness();
+        let status = if provisioning.network_ok {
+            "configured"
+        } else {
+            "configured_with_warnings"
+        };
+        info!(
+            event = "terraform.provisioning.configure",
+            auth = %config.auth.redacted_label(),
+            auth_mode = provisioning.auth_mode,
+            network_ok = provisioning.network_ok,
+            rate_limit_profile = provisioning.rate_limit_profile,
+            base_url = %config.base_url,
+            "Configuring Terraform connector"
+        );
         let client = TerraformClient::new(config.auth.clone(), Some(&config.base_url))
             .map_err(|e| e.to_fcp_error())?;
         self.client = Some(Arc::new(client));
         self.config = Some(config);
         self.base.set_configured(true);
-        Ok(json!({}))
+        Ok(json!({
+            "status": status,
+            "provisioning": provisioning,
+        }))
     }
 
     pub async fn handle_handshake(
@@ -190,6 +264,10 @@ impl TerraformConnector {
     pub async fn handle_health(&self) -> FcpResult<serde_json::Value> {
         let configured = self.config.is_some();
         let handshaken = self.session_id.is_some();
+        let provisioning = self
+            .config
+            .as_ref()
+            .map(TerraformConfig::provisioning_readiness);
         let status = if configured && handshaken {
             "healthy"
         } else if configured {
@@ -197,52 +275,108 @@ impl TerraformConnector {
         } else {
             "unconfigured"
         };
-        Ok(
-            json!({"status": status, "configured": configured, "handshaken": handshaken,
-            "requests": self.request_count.load(Ordering::Relaxed), "errors": self.error_count.load(Ordering::Relaxed)}),
-        )
+        Ok(json!({
+            "status": status,
+            "configured": configured,
+            "handshaken": handshaken,
+            "requests": self.request_count.load(Ordering::Relaxed),
+            "errors": self.error_count.load(Ordering::Relaxed),
+            "provisioning": provisioning,
+        }))
     }
 
     pub async fn handle_doctor(&self) -> FcpResult<serde_json::Value> {
-        let mut checks = Vec::new();
-        checks.push(DoctorCheck {
-            name: "configuration".into(),
-            passed: self.config.is_some(),
-            message: if self.config.is_none() {
-                Some("Not configured".into())
-            } else {
-                None
-            },
-            critical: true,
-        });
-        checks.push(DoctorCheck {
-            name: "client_initialized".into(),
-            passed: self.client.is_some(),
-            message: if self.client.is_none() {
-                Some("API client not initialized".into())
-            } else {
-                None
-            },
-            critical: true,
-        });
-        let handshaken = self.session_id.is_some();
-        checks.push(DoctorCheck {
-            name: "handshake".into(),
-            passed: handshaken,
-            message: if handshaken {
-                None
-            } else {
-                Some("Handshake not completed".into())
-            },
-            critical: false,
-        });
-        let result = DoctorResult::from_checks(checks);
+        let result = self.build_doctor_result();
+        let failed_checks = result.checks.iter().filter(|check| !check.passed).count();
+        info!(
+            event = "terraform.provisioning.doctor",
+            status = result.status_label(),
+            check_count = result.checks.len(),
+            failed_checks,
+            "Terraform doctor checks completed"
+        );
         Ok(serde_json::to_value(result).unwrap_or_else(|_| json!({"status": "error"})))
     }
 
     pub async fn handle_self_check(&self) -> FcpResult<serde_json::Value> {
-        Ok(json!({"connector_id": "fcp.terraform", "version": "0.1.0",
-            "status": if self.config.is_some() { "ready" } else { "unconfigured" }}))
+        let Some(config) = &self.config else {
+            return Self::serialize_self_check_report(SelfCheckReport::degraded(
+                "not_configured",
+                "Connector is not configured",
+            ));
+        };
+
+        let readiness = config.provisioning_readiness();
+        if !readiness.network_ok {
+            let mut report = SelfCheckReport::failed(
+                "network_constraints_invalid",
+                readiness.network_message.clone(),
+            );
+            report.details = Some(json!({ "provisioning": readiness }));
+            return Self::serialize_self_check_report(report);
+        }
+
+        let Some(_client) = &self.client else {
+            let mut report = SelfCheckReport::failed(
+                "client_missing",
+                "API client not initialized; re-run configure",
+            );
+            report.details = Some(json!({ "provisioning": readiness }));
+            return Self::serialize_self_check_report(report);
+        };
+
+        if readiness.requires_credential_injection {
+            let mut report = SelfCheckReport::degraded(
+                "credential_injection_required",
+                "credential_id mode requires egress proxy injection; skipping live probe",
+            );
+            report.details = Some(json!({ "provisioning": readiness }));
+            return Self::serialize_self_check_report(report);
+        }
+
+        let mut report = SelfCheckReport::ok();
+        report.details = Some(json!({ "provisioning": readiness }));
+        Self::serialize_self_check_report(report)
+    }
+
+    fn provisioning_recipe() -> ProvisioningRecipe {
+        ProvisioningRecipe::new(
+            RecipeId::new("terraform.setup"),
+            "1",
+            "Provision Terraform Cloud API token and configure the connector",
+        )
+        .with_step(ProvisioningStep::new(
+            StepId::new("obtain_token"),
+            ProvisioningStepType::OpenUrl {
+                url: "https://app.terraform.io/app/settings/tokens".into(),
+            },
+        ))
+        .with_step(
+            ProvisioningStep::new(
+                StepId::new("enter_token"),
+                ProvisioningStepType::PromptSecret {
+                    message: "Paste your Terraform Cloud API token".into(),
+                },
+            )
+            .depends_on(StepId::new("obtain_token")),
+        )
+        .with_step(
+            ProvisioningStep::new(
+                StepId::new("store_token"),
+                ProvisioningStepType::StoreSecret {
+                    key: "terraform_api_token".into(),
+                    value_from: StepId::new("enter_token"),
+                    scope: "connector:fcp.terraform".into(),
+                },
+            )
+            .depends_on(StepId::new("enter_token")),
+        )
+        .with_step(ProvisioningStep::new(
+            StepId::new("enter_organization"),
+            ProvisioningStepType::PromptUser {
+                message: "Enter your Terraform Cloud organization name".into(),
+            },
+        ))
     }
 
     pub async fn handle_introspect(&self) -> FcpResult<serde_json::Value> {
@@ -317,6 +451,111 @@ impl TerraformConnector {
         self.base.set_configured(false);
         self.base.set_handshaken(false);
         Ok(json!({}))
+    }
+
+    fn build_doctor_result(&self) -> DoctorResult {
+        let mut checks = Vec::new();
+
+        checks.push(DoctorCheck {
+            name: "configuration".into(),
+            passed: self.config.is_some(),
+            message: Some(if self.config.is_some() {
+                "Configuration loaded".into()
+            } else {
+                "Not configured — call configure first".into()
+            }),
+            critical: true,
+        });
+
+        checks.push(DoctorCheck {
+            name: "client_initialized".into(),
+            passed: self.client.is_some(),
+            message: Some(if self.client.is_some() {
+                "API client initialized".into()
+            } else {
+                "API client not initialized".into()
+            }),
+            critical: true,
+        });
+
+        let Some(config) = &self.config else {
+            return DoctorResult::from_checks(checks);
+        };
+
+        let readiness = config.provisioning_readiness();
+        checks.push(DoctorCheck {
+            name: "network_constraints".into(),
+            passed: readiness.network_ok,
+            message: Some(readiness.network_message),
+            critical: true,
+        });
+
+        checks.push(DoctorCheck {
+            name: "auth_mode".into(),
+            passed: true,
+            message: Some(format!("Auth mode: {}", readiness.auth_mode)),
+            critical: false,
+        });
+
+        let handshaken = self.session_id.is_some();
+        checks.push(DoctorCheck {
+            name: "handshake".into(),
+            passed: handshaken,
+            message: Some(if handshaken {
+                "Handshake completed".into()
+            } else {
+                "Handshake not completed".into()
+            }),
+            critical: false,
+        });
+
+        checks.push(DoctorCheck {
+            name: "api_token".into(),
+            passed: readiness.api_token_configured || readiness.credential_id_configured,
+            message: Some(if readiness.api_token_configured {
+                "API token configured for Terraform Cloud access".into()
+            } else {
+                "credential_id configured for secretless authenticated access".into()
+            }),
+            critical: false,
+        });
+
+        checks.push(DoctorCheck {
+            name: "credential_injection".into(),
+            passed: !readiness.requires_credential_injection,
+            message: Some(if readiness.requires_credential_injection {
+                "credential_id mode requires egress proxy injection".into()
+            } else {
+                "Credential injection not required".into()
+            }),
+            critical: false,
+        });
+
+        checks.push(DoctorCheck {
+            name: "organization".into(),
+            passed: readiness.organization.is_some(),
+            message: Some(if let Some(org) = &readiness.organization {
+                format!("Organization: {org}")
+            } else {
+                "No default organization configured; must be provided per-request".into()
+            }),
+            critical: false,
+        });
+
+        DoctorResult::from_checks(checks)
+    }
+
+    fn serialize_self_check_report(report: SelfCheckReport) -> FcpResult<serde_json::Value> {
+        info!(
+            event = "terraform.provisioning.self_check",
+            status = ?report.status,
+            reason_code = ?report.reason_code,
+            "Terraform self-check completed"
+        );
+
+        serde_json::to_value(report).map_err(|e| FcpError::Internal {
+            message: format!("Failed to serialize self-check report: {e}"),
+        })
     }
 
     fn effective_org<'a>(
@@ -719,6 +958,43 @@ fn require_str<'a>(input: &'a serde_json::Value, field: &str) -> Result<&'a str,
             status_code: 400,
             message: format!("Missing required field: {field}"),
         })
+}
+
+fn base_url_policy(base_url: &str) -> (bool, String) {
+    let parsed = match Url::parse(base_url) {
+        Ok(parsed) => parsed,
+        Err(error) => {
+            return (false, format!("base_url could not be parsed: {error}"));
+        }
+    };
+
+    let Some(host) = parsed.host_str() else {
+        return (false, "base_url must include a host".into());
+    };
+
+    let local = is_local_test_host(host);
+    let allowed_host = host.eq_ignore_ascii_case("app.terraform.io")
+        || host.ends_with(".terraform.io")
+        || local;
+    let secure_or_local = parsed.scheme() == "https" || local;
+
+    if allowed_host && secure_or_local {
+        (
+            true,
+            format!("Endpoint accepted by policy checks: {base_url}"),
+        )
+    } else {
+        (
+            false,
+            format!(
+                "Endpoint must use https and *.terraform.io (localhost/127.0.0.1/::1 allowed for tests): {base_url}"
+            ),
+        )
+    }
+}
+
+fn is_local_test_host(host: &str) -> bool {
+    matches!(host, "localhost" | "127.0.0.1" | "::1")
 }
 
 fn operations_info() -> Vec<OperationInfo> {
@@ -1473,5 +1749,194 @@ mod tests {
     fn config_default_base_url() {
         let c = TerraformConfig::from_params(&json!({"api_token": "t"})).unwrap();
         assert_eq!(c.base_url, DEFAULT_BASE_URL);
+    }
+
+    #[test]
+    fn provisioning_readiness_api_token_mode() {
+        let config = TerraformConfig::from_params(&json!({"api_token": "test-token"})).unwrap();
+        let readiness = config.provisioning_readiness();
+        assert_eq!(readiness.auth_mode, "api_token");
+        assert!(readiness.api_token_configured);
+        assert!(!readiness.credential_id_configured);
+        assert!(!readiness.requires_credential_injection);
+        assert!(readiness.network_ok);
+        assert_eq!(
+            readiness.rate_limit_profile,
+            "api_token: 30 requests/second sustained"
+        );
+    }
+
+    #[test]
+    fn provisioning_readiness_credential_id_mode() {
+        let config = TerraformConfig::from_params(
+            &json!({"credential_id": "550e8400-e29b-41d4-a716-446655440000"}),
+        )
+        .unwrap();
+        let readiness = config.provisioning_readiness();
+        assert_eq!(readiness.auth_mode, "credential_id");
+        assert!(!readiness.api_token_configured);
+        assert!(readiness.credential_id_configured);
+        assert!(readiness.requires_credential_injection);
+        assert_eq!(
+            readiness.rate_limit_profile,
+            "credential_id: authenticated via egress proxy injection"
+        );
+    }
+
+    #[test]
+    fn provisioning_readiness_with_organization() {
+        let config =
+            TerraformConfig::from_params(&json!({"api_token": "t", "organization": "my-org"}))
+                .unwrap();
+        let readiness = config.provisioning_readiness();
+        assert_eq!(readiness.organization, Some("my-org".into()));
+    }
+
+    #[test]
+    fn provisioning_readiness_without_organization() {
+        let config = TerraformConfig::from_params(&json!({"api_token": "t"})).unwrap();
+        let readiness = config.provisioning_readiness();
+        assert!(readiness.organization.is_none());
+    }
+
+    #[test]
+    fn base_url_policy_accepts_terraform_https() {
+        let (ok, _msg) = base_url_policy("https://app.terraform.io/api/v2");
+        assert!(ok);
+    }
+
+    #[test]
+    fn base_url_policy_accepts_localhost() {
+        let (ok, _msg) = base_url_policy("http://localhost:8080/api/v2");
+        assert!(ok);
+    }
+
+    #[test]
+    fn base_url_policy_rejects_http_non_localhost() {
+        let (ok, _msg) = base_url_policy("http://app.terraform.io/api/v2");
+        assert!(!ok);
+    }
+
+    #[test]
+    fn base_url_policy_accepts_custom_terraform_subdomain() {
+        let (ok, _msg) = base_url_policy("https://tfe.terraform.io/api/v2");
+        assert!(ok);
+    }
+
+    #[test]
+    fn provisioning_recipe_has_steps() {
+        let recipe = TerraformConnector::provisioning_recipe();
+        assert_eq!(recipe.id.as_str(), "terraform.setup");
+        assert_eq!(recipe.version, "1");
+        assert_eq!(recipe.steps.len(), 4);
+    }
+
+    #[test]
+    fn provisioning_recipe_step_order() {
+        let recipe = TerraformConnector::provisioning_recipe();
+        assert_eq!(recipe.steps[0].id.as_str(), "obtain_token");
+        assert_eq!(recipe.steps[1].id.as_str(), "enter_token");
+        assert_eq!(recipe.steps[2].id.as_str(), "store_token");
+        assert_eq!(recipe.steps[3].id.as_str(), "enter_organization");
+    }
+
+    #[test]
+    fn provisioning_recipe_dependencies() {
+        let recipe = TerraformConnector::provisioning_recipe();
+        assert!(recipe.steps[0].depends_on.is_empty());
+        assert_eq!(recipe.steps[1].depends_on.len(), 1);
+        assert_eq!(recipe.steps[1].depends_on[0].as_str(), "obtain_token");
+        assert_eq!(recipe.steps[2].depends_on.len(), 1);
+        assert_eq!(recipe.steps[2].depends_on[0].as_str(), "enter_token");
+        assert!(recipe.steps[3].depends_on.is_empty());
+    }
+
+    #[test]
+    fn provisioning_recipe_serializes() {
+        let recipe = TerraformConnector::provisioning_recipe();
+        let v = serde_json::to_value(&recipe).unwrap();
+        assert_eq!(v["id"], "terraform.setup");
+        assert!(v["steps"].as_array().unwrap().len() >= 4);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn self_check_unconfigured() {
+        let connector = TerraformConnector::new();
+        let result = connector.handle_self_check().await.unwrap();
+        assert_eq!(result["status"], "degraded");
+        assert_eq!(result["reason_code"], "not_configured");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn self_check_configured_ok() {
+        let mut connector = TerraformConnector::new();
+        connector
+            .handle_configure(json!({"api_token": "test-token"}))
+            .await
+            .unwrap();
+        let result = connector.handle_self_check().await.unwrap();
+        assert_eq!(result["status"], "ok");
+        assert!(result["details"]["provisioning"]["api_token_configured"]
+            .as_bool()
+            .unwrap());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn self_check_credential_id_is_degraded() {
+        let mut connector = TerraformConnector::new();
+        connector
+            .handle_configure(
+                json!({"credential_id": "550e8400-e29b-41d4-a716-446655440000"}),
+            )
+            .await
+            .unwrap();
+        let result = connector.handle_self_check().await.unwrap();
+        assert_eq!(result["status"], "degraded");
+        assert_eq!(result["reason_code"], "credential_injection_required");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn configure_returns_provisioning_readiness() {
+        let mut connector = TerraformConnector::new();
+        let result = connector
+            .handle_configure(json!({"api_token": "test-token"}))
+            .await
+            .unwrap();
+        assert_eq!(result["status"], "configured");
+        let prov = &result["provisioning"];
+        assert_eq!(prov["auth_mode"], "api_token");
+        assert!(prov["api_token_configured"].as_bool().unwrap());
+        assert!(prov["network_ok"].as_bool().unwrap());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn health_includes_provisioning() {
+        let mut connector = TerraformConnector::new();
+        connector
+            .handle_configure(json!({"api_token": "test-token"}))
+            .await
+            .unwrap();
+        let result = connector.handle_health().await.unwrap();
+        assert_eq!(result["provisioning"]["auth_mode"], "api_token");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn doctor_includes_provisioning_checks() {
+        let mut connector = TerraformConnector::new();
+        connector
+            .handle_configure(json!({"api_token": "test-token"}))
+            .await
+            .unwrap();
+        let result = connector.handle_doctor().await.unwrap();
+        let checks = result["checks"].as_array().unwrap();
+        let check_names: Vec<&str> = checks
+            .iter()
+            .filter_map(|c| c["name"].as_str())
+            .collect();
+        assert!(check_names.contains(&"network_constraints"));
+        assert!(check_names.contains(&"auth_mode"));
+        assert!(check_names.contains(&"api_token"));
+        assert!(check_names.contains(&"credential_injection"));
+        assert!(check_names.contains(&"organization"));
     }
 }

@@ -6,7 +6,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use fcp_core::{
     AgentHint, BaseConnector, CapabilityId, ConnectorId, CredentialId, FcpError, FcpResult,
     IdempotencyClass, Introspection, OperationId, OperationInfo, RiskLevel, SafetyTier,
+    SelfCheckReport,
 };
+use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tracing::{info, instrument};
@@ -73,6 +75,52 @@ impl HomeAssistantConfig {
 
         Ok(Self { auth, base_url })
     }
+
+    const fn auth_mode(&self) -> &'static str {
+        match &self.auth {
+            HomeAssistantAuth::BearerToken(_) => "access_token",
+            HomeAssistantAuth::CredentialId(_) => "credential_id",
+        }
+    }
+
+    const fn rate_limit_profile(&self) -> &'static str {
+        match &self.auth {
+            HomeAssistantAuth::BearerToken(_) => {
+                "access_token: local instance, no external rate limits"
+            }
+            HomeAssistantAuth::CredentialId(_) => {
+                "credential_id: authenticated via egress proxy injection"
+            }
+        }
+    }
+
+    fn provisioning_readiness(&self) -> ProvisioningReadiness {
+        let (network_ok, network_message) = base_url_policy(&self.base_url);
+
+        ProvisioningReadiness {
+            auth_mode: self.auth_mode(),
+            access_token_configured: self.auth.has_token(),
+            credential_id_configured: self.auth.is_secretless(),
+            requires_credential_injection: self.auth.is_secretless(),
+            network_ok,
+            network_message,
+            rate_limit_profile: self.rate_limit_profile(),
+            base_url: self.base_url.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[allow(clippy::struct_excessive_bools)]
+struct ProvisioningReadiness {
+    auth_mode: &'static str,
+    access_token_configured: bool,
+    credential_id_configured: bool,
+    requires_credential_injection: bool,
+    network_ok: bool,
+    network_message: String,
+    rate_limit_profile: &'static str,
+    base_url: String,
 }
 
 /// Doctor check result.
@@ -112,6 +160,14 @@ impl DoctorResult {
             DoctorStatus::Healthy
         };
         Self { status, checks }
+    }
+
+    const fn status_label(&self) -> &'static str {
+        match self.status {
+            DoctorStatus::Healthy => "healthy",
+            DoctorStatus::Degraded => "degraded",
+            DoctorStatus::Unhealthy => "unhealthy",
+        }
     }
 }
 
@@ -154,7 +210,21 @@ impl HomeAssistantConnector {
         params: serde_json::Value,
     ) -> FcpResult<serde_json::Value> {
         let config = HomeAssistantConfig::from_params(&params)?;
-        info!(auth = %config.auth.redacted_label(), base_url = %config.base_url, "Configuring Home Assistant connector");
+        let provisioning = config.provisioning_readiness();
+        let status = if provisioning.network_ok {
+            "configured"
+        } else {
+            "configured_with_warnings"
+        };
+        info!(
+            event = "homeassistant.provisioning.configure",
+            auth = %config.auth.redacted_label(),
+            auth_mode = provisioning.auth_mode,
+            network_ok = provisioning.network_ok,
+            rate_limit_profile = provisioning.rate_limit_profile,
+            base_url = %config.base_url,
+            "Configuring Home Assistant connector"
+        );
 
         let client = HomeAssistantClient::new(config.auth.clone(), Some(&config.base_url))
             .map_err(|e| e.to_fcp_error())?;
@@ -162,7 +232,10 @@ impl HomeAssistantConnector {
         self.client = Some(Arc::new(client));
         self.config = Some(config);
         self.base.set_configured(true);
-        Ok(json!({}))
+        Ok(json!({
+            "status": status,
+            "provisioning": provisioning,
+        }))
     }
 
     /// Handle the `handshake` method.
@@ -201,6 +274,10 @@ impl HomeAssistantConnector {
     pub async fn handle_health(&self) -> FcpResult<serde_json::Value> {
         let configured = self.config.is_some();
         let handshaken = self.session_id.is_some();
+        let provisioning = self
+            .config
+            .as_ref()
+            .map(HomeAssistantConfig::provisioning_readiness);
 
         let status = if configured && handshaken {
             "healthy"
@@ -216,58 +293,75 @@ impl HomeAssistantConnector {
             "handshaken": handshaken,
             "requests": self.request_count.load(Ordering::Relaxed),
             "errors": self.error_count.load(Ordering::Relaxed),
+            "provisioning": provisioning,
         }))
     }
 
     /// Handle the `doctor` method.
     pub async fn handle_doctor(&self) -> FcpResult<serde_json::Value> {
-        let mut checks = Vec::new();
-
-        checks.push(DoctorCheck {
-            name: "configuration".into(),
-            passed: self.config.is_some(),
-            message: if self.config.is_none() {
-                Some("Not configured — call configure first".into())
-            } else {
-                None
-            },
-            critical: true,
-        });
-
-        checks.push(DoctorCheck {
-            name: "client_initialized".into(),
-            passed: self.client.is_some(),
-            message: if self.client.is_none() {
-                Some("API client not initialized".into())
-            } else {
-                None
-            },
-            critical: true,
-        });
-
-        let handshaken = self.session_id.is_some();
-        checks.push(DoctorCheck {
-            name: "handshake".into(),
-            passed: handshaken,
-            message: if handshaken {
-                None
-            } else {
-                Some("Handshake not completed".into())
-            },
-            critical: false,
-        });
-
-        let result = DoctorResult::from_checks(checks);
+        let result = self.build_doctor_result();
+        let failed_checks = result.checks.iter().filter(|check| !check.passed).count();
+        info!(
+            event = "homeassistant.provisioning.doctor",
+            status = result.status_label(),
+            total_checks = result.checks.len(),
+            failed_checks,
+            "Home Assistant doctor completed"
+        );
         Ok(serde_json::to_value(result).unwrap_or_else(|_| json!({"status": "error"})))
     }
 
     /// Handle the `self_check` method.
     pub async fn handle_self_check(&self) -> FcpResult<serde_json::Value> {
-        Ok(json!({
-            "connector_id": "fcp.homeassistant",
-            "version": "0.1.0",
-            "status": if self.config.is_some() { "ready" } else { "unconfigured" },
-        }))
+        let Some(config) = &self.config else {
+            let report = SelfCheckReport::degraded(
+                "not_configured",
+                "Connector is not configured",
+            );
+            return Self::serialize_self_check_report(report);
+        };
+
+        let readiness = config.provisioning_readiness();
+        if !readiness.network_ok {
+            let mut report = SelfCheckReport::failed(
+                "network_constraints_invalid",
+                readiness.network_message.clone(),
+            );
+            report.details = Some(json!({ "provisioning": readiness }));
+            return Self::serialize_self_check_report(report);
+        }
+
+        let Some(client) = &self.client else {
+            let mut report = SelfCheckReport::failed(
+                "client_missing",
+                "API client not initialized; re-run configure",
+            );
+            report.details = Some(json!({ "provisioning": readiness }));
+            return Self::serialize_self_check_report(report);
+        };
+
+        if readiness.requires_credential_injection {
+            let mut report = SelfCheckReport::degraded(
+                "credential_injection_required",
+                "credential_id mode requires egress proxy injection; skipping live probe",
+            );
+            report.details = Some(json!({ "provisioning": readiness }));
+            return Self::serialize_self_check_report(report);
+        }
+
+        let mut report = match client.health_check().await {
+            Ok(()) => SelfCheckReport::ok(),
+            Err(error) => {
+                if error.is_retryable() {
+                    SelfCheckReport::degraded("connectivity_retryable", error.to_string())
+                } else {
+                    SelfCheckReport::failed("connectivity_failed", error.to_string())
+                }
+            }
+        };
+        report.details = Some(json!({ "provisioning": readiness }));
+
+        Self::serialize_self_check_report(report)
     }
 
     /// Handle the `introspect` method.
@@ -610,6 +704,102 @@ impl HomeAssistantConnector {
         }
         Ok(result)
     }
+
+    fn build_doctor_result(&self) -> DoctorResult {
+        let mut checks = Vec::new();
+
+        checks.push(DoctorCheck {
+            name: "configuration".into(),
+            passed: self.config.is_some(),
+            message: Some(if self.config.is_some() {
+                "Configuration loaded".into()
+            } else {
+                "Not configured — call configure first".into()
+            }),
+            critical: true,
+        });
+
+        checks.push(DoctorCheck {
+            name: "client_initialized".into(),
+            passed: self.client.is_some(),
+            message: Some(if self.client.is_some() {
+                "API client initialized".into()
+            } else {
+                "API client not initialized".into()
+            }),
+            critical: true,
+        });
+
+        let Some(config) = &self.config else {
+            return DoctorResult::from_checks(checks);
+        };
+
+        let readiness = config.provisioning_readiness();
+        checks.push(DoctorCheck {
+            name: "network_constraints".into(),
+            passed: readiness.network_ok,
+            message: Some(readiness.network_message),
+            critical: true,
+        });
+
+        checks.push(DoctorCheck {
+            name: "auth_mode".into(),
+            passed: true,
+            message: Some(format!("Auth mode: {}", readiness.auth_mode)),
+            critical: false,
+        });
+
+        let handshaken = self.session_id.is_some();
+        checks.push(DoctorCheck {
+            name: "handshake".into(),
+            passed: handshaken,
+            message: Some(if handshaken {
+                "Handshake completed".into()
+            } else {
+                "Handshake not completed".into()
+            }),
+            critical: false,
+        });
+
+        checks.push(DoctorCheck {
+            name: "access_token".into(),
+            passed: readiness.access_token_configured || readiness.credential_id_configured,
+            message: Some(if readiness.access_token_configured {
+                "Long-lived access token configured".into()
+            } else if readiness.credential_id_configured {
+                "credential_id configured for secretless authenticated access".into()
+            } else {
+                "No access token configured".into()
+            }),
+            critical: false,
+        });
+
+        checks.push(DoctorCheck {
+            name: "credential_injection".into(),
+            passed: !readiness.requires_credential_injection,
+            message: Some(if readiness.requires_credential_injection {
+                "credential_id mode requires egress proxy injection".into()
+            } else {
+                "Credential injection not required".into()
+            }),
+            critical: false,
+        });
+
+        DoctorResult::from_checks(checks)
+    }
+
+    fn serialize_self_check_report(report: SelfCheckReport) -> FcpResult<serde_json::Value> {
+        info!(
+            event = "homeassistant.provisioning.self_check",
+            status = ?report.status,
+            reason_code = ?report.reason_code,
+            "Home Assistant self-check completed"
+        );
+
+        serde_json::to_value(report).map_err(|e| FcpError::Internal {
+            message: format!("Failed to serialize self-check report: {e}"),
+        })
+    }
 }
 
 /// Extract a required string field from input.
@@ -624,6 +814,44 @@ fn require_str<'a>(
             status_code: 400,
             message: format!("Missing required field: {field}"),
         })
+}
+
+fn base_url_policy(base_url: &str) -> (bool, String) {
+    let parsed = match Url::parse(base_url) {
+        Ok(parsed) => parsed,
+        Err(error) => {
+            return (false, format!("base_url could not be parsed: {error}"));
+        }
+    };
+
+    let Some(host) = parsed.host_str() else {
+        return (false, "base_url must include a host".into());
+    };
+
+    let local = is_local_test_host(host);
+    let private_network = host.starts_with("192.168.")
+        || host.starts_with("10.")
+        || host.starts_with("172.")
+        || host == "homeassistant.local";
+    let secure_or_local = parsed.scheme() == "https" || local || private_network;
+
+    if secure_or_local {
+        (
+            true,
+            format!("Endpoint accepted by policy checks: {base_url}"),
+        )
+    } else {
+        (
+            false,
+            format!(
+                "Endpoint must use https or be on a local/private network (localhost/127.0.0.1/::1/192.168.*/10.*/homeassistant.local allowed): {base_url}"
+            ),
+        )
+    }
+}
+
+fn is_local_test_host(host: &str) -> bool {
+    matches!(host, "localhost" | "127.0.0.1" | "::1")
 }
 
 /// Build typed operation info for introspection with full `AgentHint` metadata.
@@ -1853,5 +2081,144 @@ mod tests {
     fn config_default_base_url() {
         let config = HomeAssistantConfig::from_params(&json!({"access_token": "tok"})).unwrap();
         assert_eq!(config.base_url, DEFAULT_BASE_URL);
+    }
+
+    // -- Provisioning readiness tests --
+
+    #[test]
+    fn provisioning_readiness_access_token_mode() {
+        let config = HomeAssistantConfig::from_params(&json!({
+            "access_token": "test-token",
+        }))
+        .unwrap();
+        let readiness = config.provisioning_readiness();
+        assert_eq!(readiness.auth_mode, "access_token");
+        assert!(readiness.access_token_configured);
+        assert!(!readiness.credential_id_configured);
+        assert!(!readiness.requires_credential_injection);
+        assert_eq!(
+            readiness.rate_limit_profile,
+            "access_token: local instance, no external rate limits"
+        );
+    }
+
+    #[test]
+    fn provisioning_readiness_credential_id_mode() {
+        let config = HomeAssistantConfig::from_params(&json!({
+            "credential_id": "550e8400-e29b-41d4-a716-446655440000",
+        }))
+        .unwrap();
+        let readiness = config.provisioning_readiness();
+        assert_eq!(readiness.auth_mode, "credential_id");
+        assert!(!readiness.access_token_configured);
+        assert!(readiness.credential_id_configured);
+        assert!(readiness.requires_credential_injection);
+        assert_eq!(
+            readiness.rate_limit_profile,
+            "credential_id: authenticated via egress proxy injection"
+        );
+    }
+
+    #[test]
+    fn provisioning_readiness_default_url_accepted() {
+        let config = HomeAssistantConfig::from_params(&json!({
+            "access_token": "tok",
+        }))
+        .unwrap();
+        let readiness = config.provisioning_readiness();
+        assert!(readiness.network_ok);
+        assert!(readiness.network_message.contains("accepted"));
+    }
+
+    #[test]
+    fn provisioning_readiness_serializes() {
+        let config = HomeAssistantConfig::from_params(&json!({
+            "access_token": "tok",
+        }))
+        .unwrap();
+        let readiness = config.provisioning_readiness();
+        let v = serde_json::to_value(&readiness).unwrap();
+        assert_eq!(v["auth_mode"], "access_token");
+        assert_eq!(v["access_token_configured"], true);
+        assert_eq!(v["credential_id_configured"], false);
+        assert!(v["base_url"].as_str().is_some());
+    }
+
+    // -- base_url_policy tests --
+
+    #[test]
+    fn base_url_policy_accepts_localhost() {
+        let (ok, _) = base_url_policy("http://localhost:8123/api");
+        assert!(ok);
+    }
+
+    #[test]
+    fn base_url_policy_accepts_private_network() {
+        let (ok, _) = base_url_policy("http://192.168.1.100:8123/api");
+        assert!(ok);
+    }
+
+    #[test]
+    fn base_url_policy_accepts_homeassistant_local() {
+        let (ok, msg) = base_url_policy("http://homeassistant.local:8123/api");
+        assert!(ok);
+        assert!(msg.contains("accepted"));
+    }
+
+    #[test]
+    fn base_url_policy_accepts_https() {
+        let (ok, msg) = base_url_policy("https://ha.example.com:8123/api");
+        assert!(ok);
+        assert!(msg.contains("accepted"));
+    }
+
+    #[test]
+    fn base_url_policy_rejects_public_http() {
+        let (ok, msg) = base_url_policy("http://ha.example.com:8123/api");
+        assert!(!ok);
+        assert!(msg.contains("must use https"));
+    }
+
+    #[test]
+    fn base_url_policy_rejects_unparseable() {
+        let (ok, msg) = base_url_policy("not a url");
+        assert!(!ok);
+        assert!(msg.contains("could not be parsed"));
+    }
+
+    #[test]
+    fn base_url_policy_accepts_loopback_ipv4() {
+        let (ok, _) = base_url_policy("http://127.0.0.1:8123/api");
+        assert!(ok);
+    }
+
+    #[test]
+    fn base_url_policy_accepts_10_network() {
+        let (ok, _) = base_url_policy("http://10.0.0.5:8123/api");
+        assert!(ok);
+    }
+
+    // -- Doctor with provisioning tests --
+
+    #[test]
+    fn doctor_result_status_label() {
+        let r = DoctorResult::from_checks(vec![]);
+        assert_eq!(r.status_label(), "healthy");
+
+        let r = DoctorResult::from_checks(vec![DoctorCheck {
+            name: "x".into(),
+            passed: false,
+            message: None,
+            critical: false,
+        }]);
+        assert_eq!(r.status_label(), "degraded");
+
+        let r = DoctorResult::from_checks(vec![DoctorCheck {
+            name: "x".into(),
+            passed: false,
+            message: None,
+            critical: true,
+        }]);
+        assert_eq!(r.status_label(), "unhealthy");
     }
 }

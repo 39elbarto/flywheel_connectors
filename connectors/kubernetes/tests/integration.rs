@@ -62,7 +62,7 @@ async fn lifecycle_shutdown() {
 async fn lifecycle_self_check() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
-    assert_eq!(c.handle_self_check().await.unwrap()["status"], "ready");
+    assert_eq!(c.handle_self_check().await.unwrap()["status"], "ok");
 }
 
 #[fcp_async_core::runtime::test]

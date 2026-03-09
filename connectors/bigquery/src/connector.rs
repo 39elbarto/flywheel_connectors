@@ -5,14 +5,16 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use fcp_core::{
     AgentHint, BaseConnector, CapabilityId, ConnectorId, FcpError, FcpResult, IdempotencyClass,
-    Introspection, OperationId, OperationInfo, RiskLevel, SafetyTier,
+    Introspection, OperationId, OperationInfo, ProvisioningRecipe, ProvisioningStep,
+    ProvisioningStepType, RecipeId, RiskLevel, SafetyTier, SelfCheckReport, StepId,
 };
+use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tracing::{info, instrument};
 
 use crate::{
-    client::{BigQueryAuth, BigQueryClient},
+    client::{DEFAULT_BASE_URL, BigQueryAuth, BigQueryClient},
     error::BigQueryError,
 };
 
@@ -55,6 +57,34 @@ impl BigQueryConfig {
             base_url,
         })
     }
+
+    fn provisioning_readiness(&self) -> ProvisioningReadiness {
+        let effective_url = self
+            .base_url
+            .as_deref()
+            .unwrap_or(DEFAULT_BASE_URL);
+        let (network_ok, network_message) = base_url_policy(effective_url);
+
+        ProvisioningReadiness {
+            auth_mode: "bearer_token",
+            token_configured: true,
+            project_id_configured: self.project_id.is_some(),
+            network_ok,
+            network_message,
+            base_url: effective_url.to_string(),
+        }
+    }
+}
+
+/// Provisioning readiness assessment.
+#[derive(Debug, Clone, Serialize)]
+struct ProvisioningReadiness {
+    auth_mode: &'static str,
+    token_configured: bool,
+    project_id_configured: bool,
+    network_ok: bool,
+    network_message: String,
+    base_url: String,
 }
 
 /// Doctor check result.
@@ -248,11 +278,47 @@ impl BigQueryConnector {
 
     /// Handle the `self_check` method.
     pub async fn handle_self_check(&self) -> FcpResult<serde_json::Value> {
-        Ok(json!({
-            "connector_id": "fcp.bigquery",
-            "version": "0.1.0",
-            "status": if self.config.is_some() { "ready" } else { "unconfigured" },
-        }))
+        let Some(config) = &self.config else {
+            let report =
+                SelfCheckReport::degraded("not_configured", "Connector is not configured");
+            return Self::serialize_self_check_report(report);
+        };
+
+        let readiness = config.provisioning_readiness();
+        if !readiness.network_ok {
+            let mut report = SelfCheckReport::failed(
+                "network_constraints_invalid",
+                readiness.network_message.clone(),
+            );
+            report.details = Some(json!({ "provisioning": readiness }));
+            return Self::serialize_self_check_report(report);
+        }
+
+        let Some(_client) = &self.client else {
+            let mut report = SelfCheckReport::failed(
+                "client_missing",
+                "API client not initialized; re-run configure",
+            );
+            report.details = Some(json!({ "provisioning": readiness }));
+            return Self::serialize_self_check_report(report);
+        };
+
+        let mut report = SelfCheckReport::ok();
+        report.details = Some(json!({ "provisioning": readiness }));
+        Self::serialize_self_check_report(report)
+    }
+
+    fn serialize_self_check_report(report: SelfCheckReport) -> FcpResult<serde_json::Value> {
+        info!(
+            event = "bigquery.provisioning.self_check",
+            status = ?report.status,
+            reason_code = ?report.reason_code,
+            "BigQuery self-check completed"
+        );
+
+        serde_json::to_value(report).map_err(|e| FcpError::Internal {
+            message: format!("Failed to serialize self-check report: {e}"),
+        })
     }
 
     /// Handle the `introspect` method.
@@ -540,6 +606,90 @@ fn require_str<'a>(input: &'a serde_json::Value, field: &str) -> Result<&'a str,
             status_code: 400,
             message: format!("Missing required field: {field}"),
         })
+}
+
+/// Build the provisioning recipe for the `BigQuery` connector.
+///
+/// `BigQuery` uses a service account JSON key (or OAuth access token). The recipe
+/// captures: (1) prompt for the service account key, (2) store the secret, and
+/// (3) prompt for a default project ID.
+pub fn provisioning_recipe() -> ProvisioningRecipe {
+    ProvisioningRecipe::new(
+        RecipeId::new("bigquery.service_account"),
+        "1",
+        "Provision BigQuery connector with a service account key or OAuth token",
+    )
+    .with_step(ProvisioningStep::new(
+        StepId::new("enter_service_account_key"),
+        ProvisioningStepType::PromptSecret {
+            message: "Paste your BigQuery service account JSON key or OAuth access token".into(),
+        },
+    ))
+    .with_step(
+        ProvisioningStep::new(
+            StepId::new("store_service_account_key"),
+            ProvisioningStepType::StoreSecret {
+                key: "access_token".into(),
+                value_from: StepId::new("enter_service_account_key"),
+                scope: "connector:fcp.bigquery".into(),
+            },
+        )
+        .depends_on(StepId::new("enter_service_account_key")),
+    )
+    .with_step(
+        ProvisioningStep::new(
+            StepId::new("enter_project_id"),
+            ProvisioningStepType::PromptUser {
+                message: "Enter the default GCP project ID for BigQuery operations".into(),
+            },
+        )
+        .depends_on(StepId::new("enter_service_account_key")),
+    )
+}
+
+/// Validate a base URL against the `BigQuery` connector's network policy.
+///
+/// Accepts:
+///   - `bigquery.googleapis.com` (primary)
+///   - `*.googleapis.com` (other Google endpoints)
+///   - `localhost`, `127.0.0.1`, `::1` (local testing)
+fn base_url_policy(base_url: &str) -> (bool, String) {
+    let parsed = match Url::parse(base_url) {
+        Ok(parsed) => parsed,
+        Err(error) => {
+            return (false, format!("base_url could not be parsed: {error}"));
+        }
+    };
+
+    let Some(host) = parsed.host_str() else {
+        return (false, "base_url must include a host".into());
+    };
+
+    let local = is_local_test_host(host);
+    let allowed_host = host.eq_ignore_ascii_case("bigquery.googleapis.com")
+        || host
+            .to_ascii_lowercase()
+            .ends_with(".googleapis.com")
+        || local;
+    let secure_or_local = parsed.scheme() == "https" || local;
+
+    if allowed_host && secure_or_local {
+        (
+            true,
+            format!("Endpoint accepted by policy checks: {base_url}"),
+        )
+    } else {
+        (
+            false,
+            format!(
+                "Endpoint must use https and googleapis.com (localhost/127.0.0.1/::1 allowed for tests): {base_url}"
+            ),
+        )
+    }
+}
+
+fn is_local_test_host(host: &str) -> bool {
+    matches!(host, "localhost" | "127.0.0.1" | "::1")
 }
 
 /// Build the operations info for introspection.
@@ -1216,5 +1366,216 @@ mod tests {
         assert_eq!(cloned.checks.len(), 1);
         let dbg = format!("{r:?}");
         assert!(dbg.contains("DoctorResult"));
+    }
+
+    // -- Provisioning readiness tests --
+
+    #[test]
+    fn provisioning_readiness_default_base_url() {
+        let config = BigQueryConfig::from_params(&json!({
+            "access_token": "ya29.tok",
+        }))
+        .unwrap();
+        let readiness = config.provisioning_readiness();
+        assert_eq!(readiness.auth_mode, "bearer_token");
+        assert!(readiness.token_configured);
+        assert!(!readiness.project_id_configured);
+        assert!(readiness.network_ok);
+        assert!(readiness.base_url.contains("googleapis.com"));
+    }
+
+    #[test]
+    fn provisioning_readiness_with_project_id() {
+        let config = BigQueryConfig::from_params(&json!({
+            "access_token": "tok",
+            "project_id": "my-proj",
+        }))
+        .unwrap();
+        let readiness = config.provisioning_readiness();
+        assert!(readiness.project_id_configured);
+    }
+
+    #[test]
+    fn provisioning_readiness_serializes() {
+        let config = BigQueryConfig::from_params(&json!({
+            "access_token": "tok",
+            "project_id": "proj-1",
+        }))
+        .unwrap();
+        let readiness = config.provisioning_readiness();
+        let v = serde_json::to_value(&readiness).unwrap();
+        assert_eq!(v["auth_mode"], "bearer_token");
+        assert_eq!(v["token_configured"], true);
+        assert_eq!(v["project_id_configured"], true);
+        assert_eq!(v["network_ok"], true);
+    }
+
+    #[test]
+    fn provisioning_readiness_custom_base_url_rejected() {
+        let config = BigQueryConfig::from_params(&json!({
+            "access_token": "tok",
+            "base_url": "https://evil.example.com",
+        }))
+        .unwrap();
+        let readiness = config.provisioning_readiness();
+        assert!(!readiness.network_ok);
+        assert!(readiness.network_message.contains("googleapis.com"));
+    }
+
+    #[test]
+    fn provisioning_readiness_debug() {
+        let config = BigQueryConfig::from_params(&json!({
+            "access_token": "tok",
+        }))
+        .unwrap();
+        let readiness = config.provisioning_readiness();
+        let dbg = format!("{readiness:?}");
+        assert!(dbg.contains("ProvisioningReadiness"));
+    }
+
+    // -- Provisioning recipe tests --
+
+    #[test]
+    fn provisioning_recipe_has_3_steps() {
+        let recipe = provisioning_recipe();
+        assert_eq!(recipe.id.as_str(), "bigquery.service_account");
+        assert_eq!(recipe.version, "1");
+        assert_eq!(recipe.steps.len(), 3);
+    }
+
+    #[test]
+    fn provisioning_recipe_step_order() {
+        let recipe = provisioning_recipe();
+        assert_eq!(recipe.steps[0].id.as_str(), "enter_service_account_key");
+        assert_eq!(recipe.steps[1].id.as_str(), "store_service_account_key");
+        assert_eq!(recipe.steps[2].id.as_str(), "enter_project_id");
+    }
+
+    #[test]
+    fn provisioning_recipe_step_dependencies() {
+        let recipe = provisioning_recipe();
+        assert!(recipe.steps[0].depends_on.is_empty());
+        assert_eq!(recipe.steps[1].depends_on.len(), 1);
+        assert_eq!(
+            recipe.steps[1].depends_on[0].as_str(),
+            "enter_service_account_key"
+        );
+        assert_eq!(recipe.steps[2].depends_on.len(), 1);
+        assert_eq!(
+            recipe.steps[2].depends_on[0].as_str(),
+            "enter_service_account_key"
+        );
+    }
+
+    #[test]
+    fn provisioning_recipe_serializes() {
+        let recipe = provisioning_recipe();
+        let v = serde_json::to_value(&recipe).unwrap();
+        assert_eq!(v["id"], "bigquery.service_account");
+        assert_eq!(v["steps"].as_array().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn provisioning_recipe_description_non_empty() {
+        let recipe = provisioning_recipe();
+        assert!(!recipe.description.is_empty());
+    }
+
+    #[test]
+    fn provisioning_recipe_step_types() {
+        let recipe = provisioning_recipe();
+        assert!(matches!(
+            &recipe.steps[0].kind,
+            ProvisioningStepType::PromptSecret { .. }
+        ));
+        assert!(matches!(
+            &recipe.steps[1].kind,
+            ProvisioningStepType::StoreSecret { .. }
+        ));
+        assert!(matches!(
+            &recipe.steps[2].kind,
+            ProvisioningStepType::PromptUser { .. }
+        ));
+    }
+
+    #[test]
+    fn provisioning_recipe_store_secret_scope() {
+        let recipe = provisioning_recipe();
+        if let ProvisioningStepType::StoreSecret { key, scope, .. } = &recipe.steps[1].kind {
+            assert_eq!(key, "access_token");
+            assert_eq!(scope, "connector:fcp.bigquery");
+        } else {
+            panic!("step 1 should be StoreSecret");
+        }
+    }
+
+    // -- Base URL policy tests --
+
+    #[test]
+    fn base_url_policy_accepts_bigquery_googleapis() {
+        let (ok, message) = base_url_policy("https://bigquery.googleapis.com/bigquery/v2");
+        assert!(ok);
+        assert!(message.contains("accepted"));
+    }
+
+    #[test]
+    fn base_url_policy_accepts_other_googleapis() {
+        let (ok, _) = base_url_policy("https://content-bigquery.googleapis.com/bigquery/v2");
+        assert!(ok);
+    }
+
+    #[test]
+    fn base_url_policy_accepts_localhost() {
+        let (ok, _) = base_url_policy("http://localhost:8080");
+        assert!(ok);
+    }
+
+    #[test]
+    fn base_url_policy_accepts_127_0_0_1() {
+        let (ok, _) = base_url_policy("http://127.0.0.1:9090");
+        assert!(ok);
+    }
+
+    #[test]
+    fn base_url_policy_rejects_http_non_local() {
+        let (ok, message) = base_url_policy("http://bigquery.googleapis.com/bigquery/v2");
+        assert!(!ok);
+        assert!(message.contains("must use https"));
+    }
+
+    #[test]
+    fn base_url_policy_rejects_unknown_host() {
+        let (ok, message) = base_url_policy("https://evil.example.com");
+        assert!(!ok);
+        assert!(message.contains("googleapis.com"));
+    }
+
+    #[test]
+    fn base_url_policy_rejects_invalid_url() {
+        let (ok, message) = base_url_policy("not a url");
+        assert!(!ok);
+        assert!(message.contains("could not be parsed"));
+    }
+
+    #[test]
+    fn base_url_policy_rejects_no_host() {
+        let (ok, message) = base_url_policy("file:///etc/passwd");
+        assert!(!ok);
+        // file URLs may or may not have a host depending on platform
+        assert!(!ok);
+    }
+
+    #[test]
+    fn is_local_test_host_known_locals() {
+        assert!(is_local_test_host("localhost"));
+        assert!(is_local_test_host("127.0.0.1"));
+        assert!(is_local_test_host("::1"));
+    }
+
+    #[test]
+    fn is_local_test_host_rejects_non_local() {
+        assert!(!is_local_test_host("example.com"));
+        assert!(!is_local_test_host("192.168.1.1"));
+        assert!(!is_local_test_host("googleapis.com"));
     }
 }

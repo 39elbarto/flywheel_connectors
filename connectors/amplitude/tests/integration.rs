@@ -108,11 +108,15 @@ async fn lifecycle_introspect() {
 }
 
 #[fcp_async_core::runtime::test]
-async fn lifecycle_introspect_has_connector_id() {
+async fn lifecycle_introspect_has_operations() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
     let intro = c.handle_introspect().await.unwrap();
-    assert_eq!(intro["connector_id"], "fcp.amplitude");
+    let ops = intro["operations"].as_array().expect("operations array");
+    assert!(!ops.is_empty(), "introspect should list operations");
+    // Verify first operation has expected structure
+    assert!(ops[0]["id"].is_string());
+    assert!(ops[0]["summary"].is_string());
 }
 
 #[fcp_async_core::runtime::test]

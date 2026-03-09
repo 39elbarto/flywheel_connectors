@@ -107,12 +107,10 @@ impl AirtableError {
                     FcpError::ResourceNotFound {
                         resource: message.clone(),
                     }
-                } else if matches!(status_code, Some(400 | 422))
-                    || matches!(
-                        error_type.as_str(),
-                        "INVALID_REQUEST" | "INVALID_REQUEST_UNKNOWN"
-                    )
-                {
+                } else if matches!(
+                    error_type.as_str(),
+                    "INVALID_REQUEST" | "INVALID_REQUEST_UNKNOWN"
+                ) {
                     FcpError::InvalidRequest {
                         code: 1003,
                         message: message.clone(),

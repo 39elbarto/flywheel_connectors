@@ -1504,4 +1504,128 @@ mod tests {
         assert_eq!(lease.purpose, LeasePurpose::OperationExecution);
         assert_eq!(lease.expires_at, 9999);
     }
+
+    // ── Batch: additional planner tests ──
+
+    #[test]
+    fn lease_purpose_display_all_variants() {
+        assert_eq!(LeasePurpose::SingletonWriter.to_string(), "singleton_writer");
+        assert_eq!(
+            LeasePurpose::OperationExecution.to_string(),
+            "operation_execution"
+        );
+        assert_eq!(
+            LeasePurpose::CoordinatorElection.to_string(),
+            "coordinator_election"
+        );
+        assert_eq!(LeasePurpose::Other.to_string(), "other");
+    }
+
+    #[test]
+    fn planner_context_builder_chain() {
+        let ctx = PlannerContext::new(test_connector_id())
+            .with_min_version("2.0.0")
+            .with_min_memory_mb(4096)
+            .with_gpu()
+            .with_tpu()
+            .with_singleton_writer()
+            .excluding(vec!["excluded-node"]);
+
+        assert!(ctx.requires_gpu);
+        assert!(ctx.requires_tpu);
+        assert!(ctx.singleton_writer);
+        assert_eq!(ctx.min_memory_mb, Some(4096));
+        assert_eq!(ctx.min_connector_version.as_deref(), Some("2.0.0"));
+        assert!(ctx.excluded_nodes.contains("excluded-node"));
+    }
+
+    #[test]
+    fn planner_input_singleton_holder_set() {
+        let input = PlannerInput::new(vec![], 1000).with_singleton_holder("node-a");
+        assert_eq!(input.singleton_lease_holder.as_deref(), Some("node-a"));
+    }
+
+    #[test]
+    fn execution_planner_plan_empty_input() {
+        let planner = ExecutionPlanner::new();
+        let input = PlannerInput::new(vec![], 1000);
+        let context = PlannerContext::new(test_connector_id());
+        let candidates = planner.plan(&input, &context);
+        assert!(candidates.is_empty());
+    }
+
+    #[test]
+    fn candidate_node_ordering_by_score() {
+        let a = CandidateNode {
+            node_id: test_node_id("a"),
+            score: 80.0,
+            base_fitness: 80.0,
+            adjustments: vec![],
+            eligible: true,
+            decision_reasons: vec![],
+        };
+        let b = CandidateNode {
+            node_id: test_node_id("b"),
+            score: 100.0,
+            base_fitness: 100.0,
+            adjustments: vec![],
+            eligible: true,
+            decision_reasons: vec![],
+        };
+        // b has higher score, so b < a in Ord (higher score first)
+        assert!(b < a);
+    }
+
+    #[test]
+    fn candidate_node_eq_same_node_id_different_score() {
+        let a = CandidateNode {
+            node_id: test_node_id("same"),
+            score: 50.0,
+            base_fitness: 50.0,
+            adjustments: vec![],
+            eligible: true,
+            decision_reasons: vec![],
+        };
+        let b = CandidateNode {
+            node_id: test_node_id("same"),
+            score: 100.0,
+            base_fitness: 100.0,
+            adjustments: vec![],
+            eligible: true,
+            decision_reasons: vec![],
+        };
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn node_info_node_id_accessor() {
+        let profile = make_profile("test-node", 1024, false, "1.0.0");
+        let info = NodeInfo {
+            profile,
+            local_symbols: HashSet::new(),
+            held_leases: vec![],
+        };
+        assert_eq!(info.node_id().as_str(), "node-test-node");
+    }
+
+    #[test]
+    fn planner_context_target_zone_set() {
+        let zone: ZoneId = "z:work".parse().unwrap();
+        let ctx = PlannerContext::new(test_connector_id()).with_target_zone(zone.clone());
+        assert_eq!(ctx.target_zone.unwrap(), zone);
+    }
+
+    #[test]
+    fn planner_context_with_preferred_symbols() {
+        let symbols = vec![test_object_id(1), test_object_id(2)];
+        let ctx = PlannerContext::new(test_connector_id()).with_preferred_symbols(symbols);
+        assert_eq!(ctx.preferred_symbols.len(), 2);
+    }
+
+    #[test]
+    fn planner_context_with_required_symbols() {
+        let symbols = vec![test_object_id(3)];
+        let ctx = PlannerContext::new(test_connector_id()).with_required_symbols(symbols);
+        assert_eq!(ctx.required_symbols.len(), 1);
+    }
 }

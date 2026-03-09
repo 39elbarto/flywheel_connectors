@@ -794,4 +794,151 @@ mod tests {
         let best = TransportSelector::best_path(&paths, &policy).expect("best path");
         assert_eq!(best.path.kind, TransportPathKind::Derp);
     }
+
+    // ── Batch: additional transport edge cases ──
+
+    #[test]
+    fn transport_path_clone_eq() {
+        let path = TransportPath::new(TransportPathKind::Mesh, peer("n"), "p", Some(5));
+        let cloned = path.clone();
+        assert_eq!(path, cloned);
+    }
+
+    #[test]
+    fn transport_path_debug_format() {
+        let path = TransportPath::new(TransportPathKind::Direct, peer("n1"), "path-1", Some(10));
+        let debug = format!("{path:?}");
+        assert!(debug.contains("Direct"));
+        assert!(debug.contains("path-1"));
+    }
+
+    #[test]
+    fn transport_path_kind_debug_format() {
+        let kinds = [
+            TransportPathKind::Direct,
+            TransportPathKind::Mesh,
+            TransportPathKind::Derp,
+            TransportPathKind::Funnel,
+        ];
+        for kind in kinds {
+            let debug = format!("{kind:?}");
+            assert!(!debug.is_empty());
+        }
+    }
+
+    #[test]
+    fn transport_path_ne_different_kind() {
+        let a = TransportPath::new(TransportPathKind::Direct, peer("n"), "p", None);
+        let b = TransportPath::new(TransportPathKind::Mesh, peer("n"), "p", None);
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn transport_path_ne_different_peer() {
+        let a = TransportPath::new(TransportPathKind::Direct, peer("n1"), "p", None);
+        let b = TransportPath::new(TransportPathKind::Direct, peer("n2"), "p", None);
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn transport_path_ne_different_rtt() {
+        let a = TransportPath::new(TransportPathKind::Direct, peer("n"), "p", Some(5));
+        let b = TransportPath::new(TransportPathKind::Direct, peer("n"), "p", Some(10));
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn select_multipath_single_eligible_returned() {
+        let policy = ZoneTransportPolicy {
+            allow_lan: true,
+            allow_derp: false,
+            allow_funnel: false,
+        };
+        let paths = vec![
+            TransportPath::new(TransportPathKind::Direct, peer("p1"), "d1", None),
+            TransportPath::new(TransportPathKind::Derp, peer("p2"), "d2", None),
+            TransportPath::new(TransportPathKind::Funnel, peer("p3"), "f1", None),
+        ];
+        let obj = ObjectId::from_unscoped_bytes(b"test");
+        let selected = TransportSelector::select_multipath(&paths, &policy, &obj, 0, 5);
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].kind, TransportPathKind::Direct);
+    }
+
+    #[test]
+    fn best_path_only_funnel_allowed() {
+        let policy = ZoneTransportPolicy {
+            allow_lan: false,
+            allow_derp: false,
+            allow_funnel: true,
+        };
+        let paths = vec![
+            TransportPath::new(TransportPathKind::Direct, peer("p1"), "d1", None),
+            TransportPath::new(TransportPathKind::Funnel, peer("p2"), "f1", None),
+        ];
+        let best = TransportSelector::best_path(&paths, &policy).unwrap();
+        assert_eq!(best.path.kind, TransportPathKind::Funnel);
+    }
+
+    #[test]
+    fn ranked_path_clone() {
+        let rp = RankedPath {
+            path: TransportPath::new(TransportPathKind::Direct, peer("n"), "p", None),
+            priority: 4,
+            eligible: true,
+            reason: None,
+        };
+        let cloned = rp.clone();
+        // Use original after clone to avoid redundant_clone
+        assert_eq!(rp.priority, 4);
+        assert_eq!(cloned.priority, 4);
+        assert!(cloned.eligible);
+    }
+
+    #[test]
+    fn path_weight_differs_by_object_id() {
+        let obj1 = ObjectId::from_unscoped_bytes(b"abc");
+        let obj2 = ObjectId::from_unscoped_bytes(b"xyz");
+        let w1 = path_weight(&obj1, 0, "path");
+        let w2 = path_weight(&obj2, 0, "path");
+        assert_ne!(w1, w2);
+    }
+
+    #[test]
+    fn select_multipath_fanout_one_from_mixed_priorities() {
+        let policy = ZoneTransportPolicy {
+            allow_lan: true,
+            allow_derp: true,
+            allow_funnel: true,
+        };
+        let paths = vec![
+            TransportPath::new(TransportPathKind::Funnel, peer("p1"), "f1", None),
+            TransportPath::new(TransportPathKind::Derp, peer("p2"), "d1", None),
+            TransportPath::new(TransportPathKind::Direct, peer("p3"), "x1", None),
+        ];
+        let obj = ObjectId::from_unscoped_bytes(b"select-test");
+        let selected = TransportSelector::select_multipath(&paths, &policy, &obj, 0, 1);
+        assert_eq!(selected.len(), 1);
+        // Should pick from Direct (highest priority)
+        assert_eq!(selected[0].kind, TransportPathKind::Direct);
+    }
+
+    #[test]
+    fn rank_paths_single_path() {
+        let policy = ZoneTransportPolicy {
+            allow_lan: true,
+            allow_derp: true,
+            allow_funnel: true,
+        };
+        let paths = vec![TransportPath::new(
+            TransportPathKind::Mesh,
+            peer("p1"),
+            "m1",
+            Some(15),
+        )];
+        let ranked = TransportSelector::rank_paths(&paths, &policy);
+        assert_eq!(ranked.len(), 1);
+        assert!(ranked[0].eligible);
+        assert_eq!(ranked[0].priority, TransportPathKind::Mesh.priority());
+    }
 }

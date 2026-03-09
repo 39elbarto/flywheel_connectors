@@ -1515,4 +1515,222 @@ mod tests {
         let handler = InMemoryControlPlaneHandler::new();
         assert_eq!(handler.count(), 0);
     }
+
+    // ── Batch: additional degraded-mode tests ──
+
+    #[test]
+    fn retention_class_default_variant() {
+        assert_eq!(RetentionClass::default(), RetentionClass::Required);
+    }
+
+    #[test]
+    fn retention_class_debug_format() {
+        let required = RetentionClass::Required;
+        let ephemeral = RetentionClass::Ephemeral;
+        assert!(format!("{required:?}").contains("Required"));
+        assert!(format!("{ephemeral:?}").contains("Ephemeral"));
+    }
+
+    #[test]
+    fn retention_class_clone_and_copy() {
+        let r = RetentionClass::Ephemeral;
+        let cloned = r;
+        assert_eq!(r, cloned);
+    }
+
+    #[test]
+    fn control_plane_envelope_new_fields() {
+        let env = ControlPlaneEnvelope::new(
+            vec![1, 2, 3],
+            [0xBB; 32],
+            ObjectId::from_bytes([0x33; 32]),
+            test_zone_id(),
+            ZoneKeyId::from_bytes([0x44; 8]),
+            42,
+            RetentionClass::Ephemeral,
+        );
+        assert_eq!(env.payload, vec![1, 2, 3]);
+        assert_eq!(env.schema_hash, [0xBB; 32]);
+        assert_eq!(env.epoch_id, 42);
+        assert_eq!(env.retention, RetentionClass::Ephemeral);
+    }
+
+    #[test]
+    fn control_plane_envelope_clone() {
+        let env = test_envelope();
+        let cloned = env.clone();
+        assert_eq!(env.payload, cloned.payload);
+        assert_eq!(env.schema_hash, cloned.schema_hash);
+        assert_eq!(env.object_id, cloned.object_id);
+        assert_eq!(env.epoch_id, cloned.epoch_id);
+    }
+
+    #[test]
+    fn control_plane_envelope_debug() {
+        let env = test_envelope();
+        let debug = format!("{env:?}");
+        assert!(debug.contains("ControlPlaneEnvelope"));
+        assert!(debug.contains("Required"));
+    }
+
+    #[test]
+    fn degraded_transport_error_display_encode() {
+        let err = DegradedTransportError::MissingControlPlaneFlag;
+        assert!(err.to_string().contains("CONTROL_PLANE"));
+    }
+
+    #[test]
+    fn degraded_transport_error_display_incomplete() {
+        let err = DegradedTransportError::Incomplete {
+            received: 5,
+            needed: 10,
+        };
+        let msg = err.to_string();
+        assert!(msg.contains('5'));
+        assert!(msg.contains("10"));
+    }
+
+    #[test]
+    fn degraded_transport_error_display_schema_mismatch() {
+        let err = DegradedTransportError::SchemaHashMismatch {
+            expected: [1u8; 32],
+            actual: [2u8; 32],
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("schema hash mismatch"));
+    }
+
+    #[test]
+    fn degraded_transport_error_display_object_id_mismatch() {
+        let err = DegradedTransportError::ObjectIdMismatch;
+        assert!(err.to_string().contains("object ID mismatch"));
+    }
+
+    #[test]
+    fn degraded_transport_error_display_retention_violation() {
+        let err = DegradedTransportError::RetentionViolation;
+        assert!(err.to_string().contains("retention violation"));
+    }
+
+    #[test]
+    fn degraded_transport_error_display_sig_failed() {
+        let err = DegradedTransportError::SignatureVerificationFailed;
+        assert!(err.to_string().contains("signature verification failed"));
+    }
+
+    #[test]
+    fn decoder_pending_count_zero_initially() {
+        let decoder = DegradedModeDecoder::new(test_config());
+        assert_eq!(decoder.pending_count(), 0);
+    }
+
+    #[test]
+    fn decoder_clear_pending_returns_false_when_empty() {
+        let mut decoder = DegradedModeDecoder::new(test_config());
+        let oid = ObjectId::from_bytes([0xFF; 32]);
+        assert!(!decoder.clear_pending(&oid));
+    }
+
+    #[test]
+    fn decoder_get_status_none_for_unknown() {
+        let decoder = DegradedModeDecoder::new(test_config());
+        let oid = ObjectId::from_bytes([0xEE; 32]);
+        assert!(decoder.get_status(&oid).is_none());
+    }
+
+    #[test]
+    fn decode_status_info_debug() {
+        let info = DecodeStatusInfo {
+            received: 5,
+            needed: 10,
+            likely_complete: false,
+        };
+        let debug = format!("{info:?}");
+        assert!(debug.contains("received: 5"));
+        assert!(debug.contains("needed: 10"));
+    }
+
+    #[test]
+    fn handler_ephemeral_not_stored() {
+        let handler = InMemoryControlPlaneHandler::new();
+        let mut env = test_envelope();
+        env.retention = RetentionClass::Ephemeral;
+        handler.handle(env).unwrap();
+        assert_eq!(handler.count(), 0);
+    }
+
+    #[test]
+    fn handler_required_stored() {
+        let handler = InMemoryControlPlaneHandler::new();
+        let env = test_envelope();
+        let oid = env.object_id.clone();
+        handler.handle(env).unwrap();
+        assert_eq!(handler.count(), 1);
+        assert!(handler.get(&oid).is_some());
+    }
+
+    #[test]
+    fn handler_replace_object_same_id() {
+        let handler = InMemoryControlPlaneHandler::new();
+        let env1 = test_envelope();
+        let oid = env1.object_id.clone();
+        handler.handle(env1).unwrap();
+
+        let mut env2 = test_envelope();
+        env2.payload = vec![0x99; 100];
+        handler.handle(env2).unwrap();
+
+        assert_eq!(handler.count(), 1);
+        let stored = handler.get(&oid).unwrap();
+        assert_eq!(stored.payload, vec![0x99; 100]);
+    }
+
+    #[test]
+    fn handler_list_epochs_with_since_filter() {
+        let handler = InMemoryControlPlaneHandler::new();
+        let zone_id = test_zone_id();
+        for epoch in [1, 3, 5, 7] {
+            let mut env = test_envelope();
+            env.object_id = ObjectId::from_bytes([epoch as u8; 32]);
+            env.epoch_id = epoch;
+            handler.handle(env).unwrap();
+        }
+        let epochs = handler.list_epochs(&zone_id, Some(3));
+        assert_eq!(epochs, vec![5, 7]);
+    }
+
+    #[test]
+    fn handler_fetch_epoch_returns_correct_objects() {
+        let handler = InMemoryControlPlaneHandler::new();
+        let zone_id = test_zone_id();
+        for i in 0..3_u8 {
+            let mut env = test_envelope();
+            env.object_id = ObjectId::from_bytes([i; 32]);
+            env.epoch_id = 10;
+            handler.handle(env).unwrap();
+        }
+        let objects = handler.fetch_epoch(&zone_id, 10);
+        assert_eq!(objects.len(), 3);
+    }
+
+    #[test]
+    fn handler_list_epochs_unknown_zone() {
+        let handler = InMemoryControlPlaneHandler::new();
+        let unknown_zone: ZoneId = "z:unknown".parse().unwrap();
+        let epochs = handler.list_epochs(&unknown_zone, None);
+        assert!(epochs.is_empty());
+    }
+
+    #[test]
+    fn encoder_frame_seq_increments() {
+        let config = test_config();
+        let mut encoder = DegradedModeEncoder::new(config, 0xBEEF);
+        let env = test_envelope();
+
+        let frames1 = encoder.encode(&env, 1).unwrap();
+        let frames2 = encoder.encode(&env, 2).unwrap();
+
+        assert_eq!(frames1[0].header.frame_seq, 0);
+        assert_eq!(frames2[0].header.frame_seq, 1);
+    }
 }

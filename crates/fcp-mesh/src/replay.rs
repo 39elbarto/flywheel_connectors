@@ -387,7 +387,9 @@ impl From<TraceError> for TraceReplayError {
 mod tests {
     use super::*;
 
-    use fcp_telemetry::trace_capture::{AdmissionOutcome, PolicyDecision, RoutingDecision};
+    use fcp_telemetry::trace_capture::{
+        AdmissionOutcome, GossipEvent, LeaseEvent, PolicyDecision, RoutingDecision, SessionEvent,
+    };
 
     fn sample_trace() -> CapturedTrace {
         let mut trace = CapturedTrace::new("trace-replay-test");
@@ -818,5 +820,189 @@ mod tests {
         assert!(decode_trace_bytes(b"not valid", TraceReplayInputFormat::Json).is_err());
         assert!(decode_trace_bytes(b"not valid", TraceReplayInputFormat::Cbor).is_err());
         assert!(decode_trace_bytes(b"not valid", TraceReplayInputFormat::Auto).is_err());
+    }
+
+    // ── Batch: additional replay tests ──
+
+    #[test]
+    fn trace_replay_diff_clone() {
+        let diff = TraceReplayDiff {
+            index: 3,
+            event_type: "admission".to_string(),
+            expected_decision: Some("deny".to_string()),
+            actual_decision: None,
+            detail: "missing".to_string(),
+        };
+        let cloned = diff.clone();
+        assert_eq!(diff, cloned);
+    }
+
+    #[test]
+    fn trace_replay_diff_debug() {
+        let diff = TraceReplayDiff {
+            index: 0,
+            event_type: "routing".to_string(),
+            expected_decision: None,
+            actual_decision: None,
+            detail: "test".to_string(),
+        };
+        let debug = format!("{diff:?}");
+        assert!(debug.contains("TraceReplayDiff"));
+    }
+
+    #[test]
+    fn trace_replay_summary_clone() {
+        let summary = TraceReplaySummary {
+            total_events: 5,
+            event_type_counts: BTreeMap::new(),
+            expected_decision_counts: BTreeMap::new(),
+            actual_decision_counts: BTreeMap::new(),
+            matched_events: 5,
+            mismatched_events: 0,
+            matched_decisions: 0,
+            mismatched_decisions: 0,
+        };
+        let cloned = summary.clone();
+        assert_eq!(summary, cloned);
+    }
+
+    #[test]
+    fn trace_replay_report_clone() {
+        let report = TraceReplayReport {
+            source_trace_id: "t".to_string(),
+            source_capturing_node: None,
+            input_events: 0,
+            replayed_events: 0,
+            summary: TraceReplaySummary {
+                total_events: 0,
+                event_type_counts: BTreeMap::new(),
+                expected_decision_counts: BTreeMap::new(),
+                actual_decision_counts: BTreeMap::new(),
+                matched_events: 0,
+                mismatched_events: 0,
+                matched_decisions: 0,
+                mismatched_decisions: 0,
+            },
+            diffs: vec![],
+        };
+        let cloned = report.clone();
+        assert_eq!(report, cloned);
+    }
+
+    #[test]
+    fn trace_replay_input_format_clone_copy() {
+        let fmt = TraceReplayInputFormat::Cbor;
+        let cloned = fmt;
+        assert_eq!(fmt, cloned);
+    }
+
+    #[test]
+    fn event_type_label_gossip() {
+        let event = TraceEvent::Gossip(GossipEvent {
+            timestamp: 0,
+            trace_id: String::new(),
+            gossip_type: String::new(),
+            object_count: 0,
+            peer_node: None,
+            success: true,
+        });
+        assert_eq!(event_type_label(&event), "gossip");
+    }
+
+    #[test]
+    fn event_type_label_lease() {
+        let event = TraceEvent::Lease(LeaseEvent {
+            timestamp: 0,
+            trace_id: String::new(),
+            operation: String::new(),
+            subject_id: String::new(),
+            purpose: String::new(),
+            node_id: String::new(),
+            success: true,
+            conflict_holder: None,
+        });
+        assert_eq!(event_type_label(&event), "lease");
+    }
+
+    #[test]
+    fn event_type_label_session() {
+        let event = TraceEvent::Session(SessionEvent {
+            timestamp: 0,
+            trace_id: String::new(),
+            session_id: String::new(),
+            kind: String::new(),
+            peer_node: String::new(),
+            suite: None,
+            failure_reason: None,
+        });
+        assert_eq!(event_type_label(&event), "session");
+    }
+
+    #[test]
+    fn decision_label_gossip_is_none() {
+        let event = TraceEvent::Gossip(GossipEvent {
+            timestamp: 0,
+            trace_id: String::new(),
+            gossip_type: String::new(),
+            object_count: 0,
+            peer_node: None,
+            success: true,
+        });
+        assert!(decision_label(&event).is_none());
+    }
+
+    #[test]
+    fn decision_label_lease_is_none() {
+        let event = TraceEvent::Lease(LeaseEvent {
+            timestamp: 0,
+            trace_id: String::new(),
+            operation: String::new(),
+            subject_id: String::new(),
+            purpose: String::new(),
+            node_id: String::new(),
+            success: true,
+            conflict_holder: None,
+        });
+        assert!(decision_label(&event).is_none());
+    }
+
+    #[test]
+    fn decision_label_session_is_none() {
+        let event = TraceEvent::Session(SessionEvent {
+            timestamp: 0,
+            trace_id: String::new(),
+            session_id: String::new(),
+            kind: String::new(),
+            peer_node: String::new(),
+            suite: None,
+            failure_reason: None,
+        });
+        assert!(decision_label(&event).is_none());
+    }
+
+    #[test]
+    fn load_trace_from_nonexistent_path() {
+        let result =
+            TraceReplayEngine::load_trace_from_path("/nonexistent/path.json", TraceReplayInputFormat::Auto);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("/nonexistent/path.json"));
+    }
+
+    #[test]
+    fn replay_path_nonexistent_returns_io_error() {
+        let result =
+            TraceReplayEngine::replay_path("/nonexistent.json", TraceReplayInputFormat::Json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn looks_like_json_plain_text() {
+        assert!(!looks_like_json(b"hello world"));
+    }
+
+    #[test]
+    fn looks_like_json_only_whitespace() {
+        assert!(!looks_like_json(b"   \n\t  "));
     }
 }

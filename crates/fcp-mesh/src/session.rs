@@ -735,4 +735,141 @@ mod tests {
         // Should fail because session_b has different session_id
         assert!(!session_b.verify_incoming(seq, frame, &tag));
     }
+
+    // ── Batch: additional session edge cases ──
+
+    #[test]
+    fn check_recv_seq_direct() {
+        let mut session = build_session(true, SessionReplayPolicy::default());
+        assert!(session.check_recv_seq(1));
+        assert!(session.check_recv_seq(2));
+        // replay of 1 rejected
+        assert!(!session.check_recv_seq(1));
+    }
+
+    #[test]
+    fn session_fields_accessible() {
+        let policy = SessionReplayPolicy::default();
+        let session = build_session(false, policy);
+        assert_eq!(session.peer_id.as_str(), "node-test");
+        assert!(!session.is_initiator);
+        assert!(matches!(session.suite, SessionCryptoSuite::Suite1));
+    }
+
+    #[test]
+    fn responder_mac_roundtrip() {
+        let keys = SessionKeys {
+            k_mac_i2r: [5u8; 32],
+            k_mac_r2i: [6u8; 32],
+            k_ctx: [7u8; 32],
+        };
+        let session_id = MeshSessionId([99u8; 16]);
+        let policy = SessionReplayPolicy::default();
+
+        let mut responder = MeshSession::new(
+            session_id,
+            NodeId::new("init"),
+            SessionCryptoSuite::Suite1,
+            keys.clone(),
+            TransportLimits::default(),
+            false,
+            500,
+            policy.clone(),
+        );
+        let mut initiator = MeshSession::new(
+            session_id,
+            NodeId::new("resp"),
+            SessionCryptoSuite::Suite1,
+            keys,
+            TransportLimits::default(),
+            true,
+            500,
+            policy,
+        );
+
+        // responder sends, initiator verifies
+        let frame = b"resp-to-init";
+        let (seq, tag) = responder.mac_outgoing(frame);
+        assert!(initiator.verify_incoming(seq, frame, &tag));
+    }
+
+    #[test]
+    fn needs_rekey_all_thresholds_at_once() {
+        let policy = SessionReplayPolicy {
+            max_reorder_window: 128,
+            rekey_after_frames: 2,
+            rekey_after_seconds: 10,
+            rekey_after_bytes: 50,
+        };
+        let mut session = build_session(true, policy);
+        // Send 2 frames * 30 bytes = 60 bytes, 2 frames
+        let _ = session.mac_outgoing(&[0u8; 30]);
+        let _ = session.mac_outgoing(&[0u8; 30]);
+        // frames=2 >= 2 (triggers), bytes=60 >= 50 (triggers)
+        assert!(session.needs_rekey(1_000));
+    }
+
+    #[test]
+    fn mac_outgoing_increments_seq_and_bytes() {
+        let policy = SessionReplayPolicy {
+            max_reorder_window: 128,
+            rekey_after_frames: u64::MAX,
+            rekey_after_seconds: u64::MAX,
+            rekey_after_bytes: u64::MAX,
+        };
+        let mut session = build_session(true, policy);
+        let (seq1, _) = session.mac_outgoing(b"abc");
+        let (seq2, _) = session.mac_outgoing(b"defgh");
+        assert_eq!(seq1, 1);
+        assert_eq!(seq2, 2);
+    }
+
+    #[test]
+    fn verify_incoming_different_frame_same_seq_rejected() {
+        let mut session = build_session(true, SessionReplayPolicy::default());
+        let frame_a = b"frame-a";
+        let frame_b = b"frame-b";
+        let seq = 1;
+
+        // MAC computed for frame_a
+        let tag = compute_session_mac(
+            SessionCryptoSuite::Suite1,
+            session.recv_mac_key(),
+            &session.session_id,
+            session.recv_direction(),
+            seq,
+            frame_a,
+        )
+        .expect("mac");
+
+        // Trying to verify with frame_b should fail (bad MAC)
+        assert!(!session.verify_incoming(seq, frame_b, &tag));
+    }
+
+    #[test]
+    fn consecutive_seqs_all_accepted() {
+        let mut session = build_session(true, SessionReplayPolicy::default());
+        let frame = b"test";
+
+        for seq in 1..=10u64 {
+            let tag = compute_session_mac(
+                SessionCryptoSuite::Suite1,
+                session.recv_mac_key(),
+                &session.session_id,
+                session.recv_direction(),
+                seq,
+                frame,
+            )
+            .expect("mac");
+            assert!(session.verify_incoming(seq, frame, &tag));
+        }
+    }
+
+    #[test]
+    fn transport_limits_accessible() {
+        let session = build_session(true, SessionReplayPolicy::default());
+        // Just verifying the field is accessible
+        let debug = format!("{:?}", session.transport_limits);
+        assert!(!debug.is_empty());
+    }
 }

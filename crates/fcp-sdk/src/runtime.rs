@@ -3996,7 +3996,7 @@ mod tests {
     }
 
     #[test]
-    fn supervisor_config_serde_roundtrip() {
+    fn supervisor_config_serde_basic_fields() {
         let config = SupervisorConfig::default();
         let json = serde_json::to_string(&config).unwrap();
         let deserialized: SupervisorConfig = serde_json::from_str(&json).unwrap();
@@ -4032,13 +4032,13 @@ mod tests {
     // ── NEW: InMemoryPollingCursor edge cases ─────────────────────────
 
     #[test]
-    fn polling_cursor_with_offset() {
+    fn polling_cursor_with_offset_initial() {
         let cursor = InMemoryPollingCursor::with_offset(42);
         assert_eq!(cursor.offset(), Some(42));
     }
 
     #[test]
-    fn polling_cursor_record_poll() {
+    fn polling_cursor_record_poll_with_count() {
         let mut cursor = InMemoryPollingCursor::new();
         assert!(cursor.last_poll_at().is_none());
         assert_eq!(cursor.last_poll_count(), 0);
@@ -4107,7 +4107,7 @@ mod tests {
     }
 
     #[test]
-    fn health_tracker_snapshot_with_failures() {
+    fn health_tracker_snapshot_single_failure() {
         let mut tracker = HealthTracker::new();
         tracker.record_failure("test error");
         let snapshot = tracker.snapshot();
@@ -4275,7 +4275,7 @@ mod tests {
     // ── NEW: StreamingSupervisorStats ─────────────────────────────────
 
     #[test]
-    fn streaming_supervisor_stats_default() {
+    fn streaming_supervisor_stats_default_all_fields() {
         let stats = StreamingSupervisorStats::default();
         assert_eq!(stats.connection_attempts, 0);
         assert_eq!(stats.successful_connections, 0);
@@ -4288,7 +4288,7 @@ mod tests {
     // ── NEW: StreamingHealthState serde ───────────────────────────────
 
     #[test]
-    fn streaming_health_state_serde_roundtrip() {
+    fn streaming_health_state_serde_full_roundtrip() {
         let state = StreamingHealthState {
             last_heartbeat_at: Some(1000),
             last_ack_at: Some(900),
@@ -4354,7 +4354,7 @@ mod tests {
     // ── NEW: HealthTransition clone ───────────────────────────────────
 
     #[test]
-    fn health_transition_clone() {
+    fn health_transition_clone_to_degraded() {
         let t = HealthTransition::ToDegraded {
             reason: "test".to_string(),
         };
@@ -4366,7 +4366,7 @@ mod tests {
     }
 
     #[test]
-    fn health_transition_debug() {
+    fn health_transition_debug_to_healthy() {
         let t = HealthTransition::ToHealthy;
         let debug = format!("{t:?}");
         assert!(debug.contains("ToHealthy"));

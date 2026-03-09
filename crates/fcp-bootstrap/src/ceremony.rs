@@ -1874,6 +1874,7 @@ mod tests {
         let phase = CeremonyPhase::Complete {
             group_public_key: [0xAB; 32],
         };
+        #[allow(clippy::redundant_clone)]
         let cloned = phase.clone();
         match cloned {
             CeremonyPhase::Complete { group_public_key } => {
@@ -2001,7 +2002,7 @@ mod tests {
 
     #[test]
     fn checkpoint_has_correct_ceremony_id() {
-        let mut ceremony = ThresholdCeremony::new(3, 5);
+        let ceremony = ThresholdCeremony::new(3, 5);
         let expected_id = ceremony.ceremony_id.clone();
         let checkpoint = ceremony.create_checkpoint();
         assert_eq!(checkpoint.ceremony_id, expected_id);

@@ -337,7 +337,7 @@ mod tests {
     #[test]
     fn io_error_source_chain() {
         use std::error::Error;
-        let io_err = std::io::Error::new(std::io::ErrorKind::Other, "inner");
+        let io_err = std::io::Error::other("inner");
         let err = BootstrapError::Io(io_err);
         // The #[from] attribute sets up the source chain
         assert!(err.source().is_some());
@@ -404,7 +404,8 @@ mod tests {
     #[test]
     fn bootstrap_result_with_vec() {
         let r: BootstrapResult<Vec<u8>> = Ok(vec![1, 2, 3]);
-        assert_eq!(r.unwrap().len(), 3);
+        let v = r.expect("should be Ok");
+        assert_eq!(v.len(), 3);
     }
 
     #[test]
@@ -418,7 +419,7 @@ mod tests {
     #[test]
     fn from_ciborium_ser_error() {
         // Construct a ciborium ser error via serialization of an unserializable value
-        let io_err = std::io::Error::new(std::io::ErrorKind::Other, "write fail");
+        let io_err = std::io::Error::other("write fail");
         let cbor_err = ciborium::ser::Error::Io(io_err);
         let err: BootstrapError = cbor_err.into();
         match err {

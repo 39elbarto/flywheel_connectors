@@ -427,6 +427,17 @@ impl SpotifyConnector {
             "spotify.player.recently_played" => self.invoke_recently_played(client, &input).await,
             "spotify.top_items" => self.invoke_top_items(client, &input).await,
             "spotify.recommendations.get" => self.invoke_recommendations(client, &input).await,
+            "spotify.recommendations.genres" => self.invoke_genre_seeds(client).await,
+            // Typed search
+            "spotify.search.tracks" => self.invoke_search_tracks(client, &input).await,
+            "spotify.search.albums" => self.invoke_search_albums(client, &input).await,
+            "spotify.search.artists" => self.invoke_search_artists(client, &input).await,
+            "spotify.search.shows" => self.invoke_search_shows(client, &input).await,
+            "spotify.search.episodes" => self.invoke_search_episodes(client, &input).await,
+            // Podcasts
+            "spotify.show.get" => self.invoke_show_get(client, &input).await,
+            "spotify.show.episodes" => self.invoke_show_episodes(client, &input).await,
+            "spotify.episode.get" => self.invoke_episode_get(client, &input).await,
             // Playback control
             "spotify.playback.get_state" => self.invoke_playback_get_state(client).await,
             "spotify.playback.devices" => self.invoke_playback_devices(client).await,
@@ -649,6 +660,142 @@ impl SpotifyConnector {
             .await?;
         let tracks = resp.get("tracks").cloned().unwrap_or_else(|| json!([]));
         Ok(json!({ "tracks": tracks }))
+    }
+
+    // -- Genre Seeds --
+
+    async fn invoke_genre_seeds(
+        &self,
+        client: &SpotifyClient,
+    ) -> Result<serde_json::Value, SpotifyError> {
+        let resp = client.get_genre_seeds().await?;
+        let genres = resp.get("genres").cloned().unwrap_or_else(|| json!([]));
+        Ok(json!({ "genres": genres }))
+    }
+
+    // -- Typed Search --
+
+    async fn invoke_search_tracks(
+        &self,
+        client: &SpotifyClient,
+        input: &serde_json::Value,
+    ) -> Result<serde_json::Value, SpotifyError> {
+        let query = require_str(input, "query")?;
+        let limit = input
+            .get("limit")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(20) as u32;
+        let market = input.get("market").and_then(serde_json::Value::as_str);
+        let resp = client.search_tracks(query, limit, market).await?;
+        Ok(json!({ "results": resp }))
+    }
+
+    async fn invoke_search_albums(
+        &self,
+        client: &SpotifyClient,
+        input: &serde_json::Value,
+    ) -> Result<serde_json::Value, SpotifyError> {
+        let query = require_str(input, "query")?;
+        let limit = input
+            .get("limit")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(20) as u32;
+        let market = input.get("market").and_then(serde_json::Value::as_str);
+        let resp = client.search_albums(query, limit, market).await?;
+        Ok(json!({ "results": resp }))
+    }
+
+    async fn invoke_search_artists(
+        &self,
+        client: &SpotifyClient,
+        input: &serde_json::Value,
+    ) -> Result<serde_json::Value, SpotifyError> {
+        let query = require_str(input, "query")?;
+        let limit = input
+            .get("limit")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(20) as u32;
+        let market = input.get("market").and_then(serde_json::Value::as_str);
+        let resp = client.search_artists(query, limit, market).await?;
+        Ok(json!({ "results": resp }))
+    }
+
+    async fn invoke_search_shows(
+        &self,
+        client: &SpotifyClient,
+        input: &serde_json::Value,
+    ) -> Result<serde_json::Value, SpotifyError> {
+        let query = require_str(input, "query")?;
+        let limit = input
+            .get("limit")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(20) as u32;
+        let market = input.get("market").and_then(serde_json::Value::as_str);
+        let resp = client.search_shows(query, limit, market).await?;
+        Ok(json!({ "results": resp }))
+    }
+
+    async fn invoke_search_episodes(
+        &self,
+        client: &SpotifyClient,
+        input: &serde_json::Value,
+    ) -> Result<serde_json::Value, SpotifyError> {
+        let query = require_str(input, "query")?;
+        let limit = input
+            .get("limit")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(20) as u32;
+        let market = input.get("market").and_then(serde_json::Value::as_str);
+        let resp = client.search_episodes(query, limit, market).await?;
+        Ok(json!({ "results": resp }))
+    }
+
+    // -- Podcasts --
+
+    async fn invoke_show_get(
+        &self,
+        client: &SpotifyClient,
+        input: &serde_json::Value,
+    ) -> Result<serde_json::Value, SpotifyError> {
+        let show_id = require_str(input, "show_id")?;
+        let market = input.get("market").and_then(serde_json::Value::as_str);
+        let resp = client.get_show(show_id, market).await?;
+        Ok(json!({ "show": resp }))
+    }
+
+    async fn invoke_show_episodes(
+        &self,
+        client: &SpotifyClient,
+        input: &serde_json::Value,
+    ) -> Result<serde_json::Value, SpotifyError> {
+        let show_id = require_str(input, "show_id")?;
+        let limit = input
+            .get("limit")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(20) as u32;
+        let offset = input
+            .get("offset")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0) as u32;
+        let market = input.get("market").and_then(serde_json::Value::as_str);
+        let resp = client
+            .get_show_episodes(show_id, limit, offset, market)
+            .await?;
+        Ok(json!({
+            "items": resp.get("items").cloned().unwrap_or(serde_json::Value::Null),
+            "total": resp.get("total").cloned().unwrap_or(serde_json::Value::Null),
+        }))
+    }
+
+    async fn invoke_episode_get(
+        &self,
+        client: &SpotifyClient,
+        input: &serde_json::Value,
+    ) -> Result<serde_json::Value, SpotifyError> {
+        let episode_id = require_str(input, "episode_id")?;
+        let market = input.get("market").and_then(serde_json::Value::as_str);
+        let resp = client.get_episode(episode_id, market).await?;
+        Ok(json!({ "episode": resp }))
     }
 
     // -- Playback Control --
@@ -1460,6 +1607,318 @@ fn operations_info() -> Vec<OperationInfo> {
                 related: vec![
                     CapabilityId::from_static("spotify.search"),
                     CapabilityId::from_static("spotify.tracks.get"),
+                ],
+            },
+        ),
+        // ── Genre Seeds ──────────────────────────────────────────────
+        op_info(
+            "spotify.recommendations.genres",
+            "Get available genre seeds for recommendations",
+            json!({
+                "type": "object",
+                "properties": {}
+            }),
+            json!({
+                "type": "object",
+                "required": ["genres"],
+                "properties": {
+                    "genres": { "type": "array", "items": { "type": "string" } }
+                }
+            }),
+            "spotify.read",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "Fetch available genre seed values for the recommendations endpoint.".into(),
+                common_mistakes: vec![],
+                examples: vec!["{}".into()],
+                related: vec![
+                    CapabilityId::from_static("spotify.recommendations.get"),
+                ],
+            },
+        ),
+        // ── Typed Search ────────────────────────────────────────────
+        op_info(
+            "spotify.search.tracks",
+            "Search for tracks by query",
+            json!({
+                "type": "object",
+                "required": ["query"],
+                "properties": {
+                    "query": { "type": "string", "maxLength": 512 },
+                    "limit": { "type": "integer", "minimum": 1, "maximum": 50 },
+                    "market": { "type": "string", "pattern": "^[A-Z]{2}$" }
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["results"],
+                "properties": { "results": { "type": "object" } }
+            }),
+            "spotify.read",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "Search specifically for tracks by text query.".into(),
+                common_mistakes: vec![
+                    "Using lowercase country codes for market.".into(),
+                ],
+                examples: vec![
+                    r#"{"query": "bohemian rhapsody", "limit": 10}"#.into(),
+                ],
+                related: vec![
+                    CapabilityId::from_static("spotify.search"),
+                    CapabilityId::from_static("spotify.tracks.get"),
+                ],
+            },
+        ),
+        op_info(
+            "spotify.search.albums",
+            "Search for albums by query",
+            json!({
+                "type": "object",
+                "required": ["query"],
+                "properties": {
+                    "query": { "type": "string", "maxLength": 512 },
+                    "limit": { "type": "integer", "minimum": 1, "maximum": 50 },
+                    "market": { "type": "string", "pattern": "^[A-Z]{2}$" }
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["results"],
+                "properties": { "results": { "type": "object" } }
+            }),
+            "spotify.read",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "Search specifically for albums by text query.".into(),
+                common_mistakes: vec![
+                    "Using lowercase country codes for market.".into(),
+                ],
+                examples: vec![
+                    r#"{"query": "kind of blue", "limit": 10}"#.into(),
+                ],
+                related: vec![
+                    CapabilityId::from_static("spotify.search"),
+                    CapabilityId::from_static("spotify.albums.get"),
+                ],
+            },
+        ),
+        op_info(
+            "spotify.search.artists",
+            "Search for artists by query",
+            json!({
+                "type": "object",
+                "required": ["query"],
+                "properties": {
+                    "query": { "type": "string", "maxLength": 512 },
+                    "limit": { "type": "integer", "minimum": 1, "maximum": 50 },
+                    "market": { "type": "string", "pattern": "^[A-Z]{2}$" }
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["results"],
+                "properties": { "results": { "type": "object" } }
+            }),
+            "spotify.read",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "Search specifically for artists by text query.".into(),
+                common_mistakes: vec![
+                    "Using lowercase country codes for market.".into(),
+                ],
+                examples: vec![
+                    r#"{"query": "miles davis", "limit": 10}"#.into(),
+                ],
+                related: vec![
+                    CapabilityId::from_static("spotify.search"),
+                    CapabilityId::from_static("spotify.artists.get"),
+                ],
+            },
+        ),
+        op_info(
+            "spotify.search.shows",
+            "Search for shows (podcasts) by query",
+            json!({
+                "type": "object",
+                "required": ["query"],
+                "properties": {
+                    "query": { "type": "string", "maxLength": 512 },
+                    "limit": { "type": "integer", "minimum": 1, "maximum": 50 },
+                    "market": { "type": "string", "pattern": "^[A-Z]{2}$" }
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["results"],
+                "properties": { "results": { "type": "object" } }
+            }),
+            "spotify.read",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "Search specifically for podcast shows by text query.".into(),
+                common_mistakes: vec![
+                    "Using lowercase country codes for market.".into(),
+                ],
+                examples: vec![
+                    r#"{"query": "tech podcast", "limit": 10}"#.into(),
+                ],
+                related: vec![
+                    CapabilityId::from_static("spotify.search"),
+                    CapabilityId::from_static("spotify.show.get"),
+                ],
+            },
+        ),
+        op_info(
+            "spotify.search.episodes",
+            "Search for episodes by query",
+            json!({
+                "type": "object",
+                "required": ["query"],
+                "properties": {
+                    "query": { "type": "string", "maxLength": 512 },
+                    "limit": { "type": "integer", "minimum": 1, "maximum": 50 },
+                    "market": { "type": "string", "pattern": "^[A-Z]{2}$" }
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["results"],
+                "properties": { "results": { "type": "object" } }
+            }),
+            "spotify.read",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "Search specifically for podcast episodes by text query.".into(),
+                common_mistakes: vec![
+                    "Using lowercase country codes for market.".into(),
+                ],
+                examples: vec![
+                    r#"{"query": "AI news", "limit": 10}"#.into(),
+                ],
+                related: vec![
+                    CapabilityId::from_static("spotify.search"),
+                    CapabilityId::from_static("spotify.episode.get"),
+                ],
+            },
+        ),
+        // ── Podcasts ────────────────────────────────────────────────
+        op_info(
+            "spotify.show.get",
+            "Get show (podcast) metadata by ID",
+            json!({
+                "type": "object",
+                "required": ["show_id"],
+                "properties": {
+                    "show_id": { "type": "string" },
+                    "market": { "type": "string", "pattern": "^[A-Z]{2}$" }
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["show"],
+                "properties": { "show": { "type": "object" } }
+            }),
+            "spotify.read",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "Fetch metadata for a podcast show by its Spotify ID.".into(),
+                common_mistakes: vec![
+                    "Passing a Spotify URI instead of the bare show ID.".into(),
+                ],
+                examples: vec![
+                    r#"{"show_id": "5CfCWKI5pZ28U0uOzXkDHe"}"#.into(),
+                ],
+                related: vec![
+                    CapabilityId::from_static("spotify.show.episodes"),
+                    CapabilityId::from_static("spotify.search.shows"),
+                ],
+            },
+        ),
+        op_info(
+            "spotify.show.episodes",
+            "List episodes of a show (podcast)",
+            json!({
+                "type": "object",
+                "required": ["show_id"],
+                "properties": {
+                    "show_id": { "type": "string" },
+                    "limit": { "type": "integer", "minimum": 1, "maximum": 50 },
+                    "offset": { "type": "integer", "minimum": 0 },
+                    "market": { "type": "string", "pattern": "^[A-Z]{2}$" }
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["items"],
+                "properties": {
+                    "items": { "type": "array" },
+                    "total": { "type": "integer" }
+                }
+            }),
+            "spotify.read",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "List episodes of a podcast show with pagination.".into(),
+                common_mistakes: vec![
+                    "Forgetting pagination for shows with many episodes.".into(),
+                ],
+                examples: vec![
+                    r#"{"show_id": "5CfCWKI5pZ28U0uOzXkDHe", "limit": 20}"#.into(),
+                ],
+                related: vec![
+                    CapabilityId::from_static("spotify.show.get"),
+                    CapabilityId::from_static("spotify.episode.get"),
+                ],
+            },
+        ),
+        op_info(
+            "spotify.episode.get",
+            "Get episode metadata by ID",
+            json!({
+                "type": "object",
+                "required": ["episode_id"],
+                "properties": {
+                    "episode_id": { "type": "string" },
+                    "market": { "type": "string", "pattern": "^[A-Z]{2}$" }
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["episode"],
+                "properties": { "episode": { "type": "object" } }
+            }),
+            "spotify.read",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "Fetch metadata for a podcast episode by its Spotify ID.".into(),
+                common_mistakes: vec![
+                    "Passing a Spotify URI instead of the bare episode ID.".into(),
+                ],
+                examples: vec![
+                    r#"{"episode_id": "512ojhOuo1ktJprKbVcKyQ"}"#.into(),
+                ],
+                related: vec![
+                    CapabilityId::from_static("spotify.show.get"),
+                    CapabilityId::from_static("spotify.search.episodes"),
                 ],
             },
         ),
@@ -2314,8 +2773,8 @@ mod tests {
     }
 
     #[test]
-    fn operations_info_has_33_operations() {
-        assert_eq!(operations_info().len(), 33);
+    fn operations_info_has_42_operations() {
+        assert_eq!(operations_info().len(), 42);
     }
 
     #[test]
@@ -2396,6 +2855,18 @@ mod tests {
         assert!(ids.contains(&"spotify.player.recently_played"));
         assert!(ids.contains(&"spotify.top_items"));
         assert!(ids.contains(&"spotify.recommendations.get"));
+        // Genre seeds (1)
+        assert!(ids.contains(&"spotify.recommendations.genres"));
+        // Typed search (5)
+        assert!(ids.contains(&"spotify.search.tracks"));
+        assert!(ids.contains(&"spotify.search.albums"));
+        assert!(ids.contains(&"spotify.search.artists"));
+        assert!(ids.contains(&"spotify.search.shows"));
+        assert!(ids.contains(&"spotify.search.episodes"));
+        // Podcasts (3)
+        assert!(ids.contains(&"spotify.show.get"));
+        assert!(ids.contains(&"spotify.show.episodes"));
+        assert!(ids.contains(&"spotify.episode.get"));
         // Playback control (11)
         assert!(ids.contains(&"spotify.playback.get_state"));
         assert!(ids.contains(&"spotify.playback.devices"));

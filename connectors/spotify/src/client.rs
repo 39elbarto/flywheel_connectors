@@ -258,6 +258,81 @@ impl SpotifyClient {
         .await
     }
 
+    /// Search for tracks only.
+    pub async fn search_tracks(
+        &self,
+        query: &str,
+        limit: u32,
+        market: Option<&str>,
+    ) -> SpotifyResult<serde_json::Value> {
+        let encoded_query = percent_encode(query);
+        let mut url = format!("/search?q={encoded_query}&type=track&limit={limit}");
+        if let Some(m) = market {
+            url = format!("{url}&market={m}");
+        }
+        self.get(&url).await
+    }
+
+    /// Search for albums only.
+    pub async fn search_albums(
+        &self,
+        query: &str,
+        limit: u32,
+        market: Option<&str>,
+    ) -> SpotifyResult<serde_json::Value> {
+        let encoded_query = percent_encode(query);
+        let mut url = format!("/search?q={encoded_query}&type=album&limit={limit}");
+        if let Some(m) = market {
+            url = format!("{url}&market={m}");
+        }
+        self.get(&url).await
+    }
+
+    /// Search for artists only.
+    pub async fn search_artists(
+        &self,
+        query: &str,
+        limit: u32,
+        market: Option<&str>,
+    ) -> SpotifyResult<serde_json::Value> {
+        let encoded_query = percent_encode(query);
+        let mut url = format!("/search?q={encoded_query}&type=artist&limit={limit}");
+        if let Some(m) = market {
+            url = format!("{url}&market={m}");
+        }
+        self.get(&url).await
+    }
+
+    /// Search for shows (podcasts) only.
+    pub async fn search_shows(
+        &self,
+        query: &str,
+        limit: u32,
+        market: Option<&str>,
+    ) -> SpotifyResult<serde_json::Value> {
+        let encoded_query = percent_encode(query);
+        let mut url = format!("/search?q={encoded_query}&type=show&limit={limit}");
+        if let Some(m) = market {
+            url = format!("{url}&market={m}");
+        }
+        self.get(&url).await
+    }
+
+    /// Search for episodes only.
+    pub async fn search_episodes(
+        &self,
+        query: &str,
+        limit: u32,
+        market: Option<&str>,
+    ) -> SpotifyResult<serde_json::Value> {
+        let encoded_query = percent_encode(query);
+        let mut url = format!("/search?q={encoded_query}&type=episode&limit={limit}");
+        if let Some(m) = market {
+            url = format!("{url}&market={m}");
+        }
+        self.get(&url).await
+    }
+
     // -- Tracks --
 
     /// Get a track by ID.
@@ -327,6 +402,54 @@ impl SpotifyClient {
             "/recommendations?seed_artists={seed_artists}&seed_genres={seed_genres}&limit={limit}"
         ))
         .await
+    }
+
+    /// Get available genre seeds for recommendations.
+    pub async fn get_genre_seeds(&self) -> SpotifyResult<serde_json::Value> {
+        self.get("/recommendations/available-genre-seeds").await
+    }
+
+    // -- Podcasts (Shows & Episodes) --
+
+    /// Get a show (podcast) by ID.
+    pub async fn get_show(
+        &self,
+        show_id: &str,
+        market: Option<&str>,
+    ) -> SpotifyResult<serde_json::Value> {
+        let mut url = format!("/shows/{show_id}");
+        if let Some(m) = market {
+            url = format!("{url}?market={m}");
+        }
+        self.get(&url).await
+    }
+
+    /// Get episodes of a show (podcast).
+    pub async fn get_show_episodes(
+        &self,
+        show_id: &str,
+        limit: u32,
+        offset: u32,
+        market: Option<&str>,
+    ) -> SpotifyResult<serde_json::Value> {
+        let mut url = format!("/shows/{show_id}/episodes?limit={limit}&offset={offset}");
+        if let Some(m) = market {
+            url = format!("{url}&market={m}");
+        }
+        self.get(&url).await
+    }
+
+    /// Get an episode by ID.
+    pub async fn get_episode(
+        &self,
+        episode_id: &str,
+        market: Option<&str>,
+    ) -> SpotifyResult<serde_json::Value> {
+        let mut url = format!("/episodes/{episode_id}");
+        if let Some(m) = market {
+            url = format!("{url}?market={m}");
+        }
+        self.get(&url).await
     }
 
     // -- Playback Control --

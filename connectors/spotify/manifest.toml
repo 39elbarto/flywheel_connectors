@@ -87,6 +87,436 @@ common_mistakes = ["Using lowercase country codes for market.", "Forgetting type
 examples = ['{"query": "kind of blue", "type": "album", "limit": 10, "market": "US"}']
 related = ["spotify.track.get", "spotify.album.get", "spotify.artist.get"]
 
+# ── Typed search operations ───────────────────────────────────────────────────
+
+[provides.operations."spotify.search.tracks"]
+description = "Search for tracks by query"
+capability = "spotify.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."spotify.search.tracks".input_schema]
+required = ["query"]
+type = "object"
+[provides.operations."spotify.search.tracks".input_schema.properties.query]
+type = "string"
+maxLength = 512
+[provides.operations."spotify.search.tracks".input_schema.properties.limit]
+type = "integer"
+minimum = 1
+maximum = 50
+[provides.operations."spotify.search.tracks".input_schema.properties.market]
+type = "string"
+pattern = "^[A-Z]{2}$"
+
+[provides.operations."spotify.search.tracks".output_schema]
+required = ["results"]
+type = "object"
+[provides.operations."spotify.search.tracks".output_schema.properties.results]
+type = "object"
+
+[provides.operations."spotify.search.tracks".network_constraints]
+host_allow = ["api.spotify.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 6291456
+
+[provides.operations."spotify.search.tracks".ai_hints]
+when_to_use = "Search specifically for tracks by text query."
+common_mistakes = ["Using lowercase country codes for market."]
+examples = ['{"query": "bohemian rhapsody", "limit": 10}']
+related = ["spotify.search", "spotify.track.get"]
+
+[provides.operations."spotify.search.albums"]
+description = "Search for albums by query"
+capability = "spotify.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."spotify.search.albums".input_schema]
+required = ["query"]
+type = "object"
+[provides.operations."spotify.search.albums".input_schema.properties.query]
+type = "string"
+maxLength = 512
+[provides.operations."spotify.search.albums".input_schema.properties.limit]
+type = "integer"
+minimum = 1
+maximum = 50
+[provides.operations."spotify.search.albums".input_schema.properties.market]
+type = "string"
+pattern = "^[A-Z]{2}$"
+
+[provides.operations."spotify.search.albums".output_schema]
+required = ["results"]
+type = "object"
+[provides.operations."spotify.search.albums".output_schema.properties.results]
+type = "object"
+
+[provides.operations."spotify.search.albums".network_constraints]
+host_allow = ["api.spotify.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 6291456
+
+[provides.operations."spotify.search.albums".ai_hints]
+when_to_use = "Search specifically for albums by text query."
+common_mistakes = ["Using lowercase country codes for market."]
+examples = ['{"query": "kind of blue", "limit": 10}']
+related = ["spotify.search", "spotify.album.get"]
+
+[provides.operations."spotify.search.artists"]
+description = "Search for artists by query"
+capability = "spotify.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."spotify.search.artists".input_schema]
+required = ["query"]
+type = "object"
+[provides.operations."spotify.search.artists".input_schema.properties.query]
+type = "string"
+maxLength = 512
+[provides.operations."spotify.search.artists".input_schema.properties.limit]
+type = "integer"
+minimum = 1
+maximum = 50
+[provides.operations."spotify.search.artists".input_schema.properties.market]
+type = "string"
+pattern = "^[A-Z]{2}$"
+
+[provides.operations."spotify.search.artists".output_schema]
+required = ["results"]
+type = "object"
+[provides.operations."spotify.search.artists".output_schema.properties.results]
+type = "object"
+
+[provides.operations."spotify.search.artists".network_constraints]
+host_allow = ["api.spotify.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 6291456
+
+[provides.operations."spotify.search.artists".ai_hints]
+when_to_use = "Search specifically for artists by text query."
+common_mistakes = ["Using lowercase country codes for market."]
+examples = ['{"query": "miles davis", "limit": 10}']
+related = ["spotify.search", "spotify.artist.get"]
+
+[provides.operations."spotify.search.shows"]
+description = "Search for shows (podcasts) by query"
+capability = "spotify.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."spotify.search.shows".input_schema]
+required = ["query"]
+type = "object"
+[provides.operations."spotify.search.shows".input_schema.properties.query]
+type = "string"
+maxLength = 512
+[provides.operations."spotify.search.shows".input_schema.properties.limit]
+type = "integer"
+minimum = 1
+maximum = 50
+[provides.operations."spotify.search.shows".input_schema.properties.market]
+type = "string"
+pattern = "^[A-Z]{2}$"
+
+[provides.operations."spotify.search.shows".output_schema]
+required = ["results"]
+type = "object"
+[provides.operations."spotify.search.shows".output_schema.properties.results]
+type = "object"
+
+[provides.operations."spotify.search.shows".network_constraints]
+host_allow = ["api.spotify.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 6291456
+
+[provides.operations."spotify.search.shows".ai_hints]
+when_to_use = "Search specifically for podcast shows by text query."
+common_mistakes = ["Using lowercase country codes for market."]
+examples = ['{"query": "tech podcast", "limit": 10}']
+related = ["spotify.search", "spotify.show.get"]
+
+[provides.operations."spotify.search.episodes"]
+description = "Search for episodes by query"
+capability = "spotify.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."spotify.search.episodes".input_schema]
+required = ["query"]
+type = "object"
+[provides.operations."spotify.search.episodes".input_schema.properties.query]
+type = "string"
+maxLength = 512
+[provides.operations."spotify.search.episodes".input_schema.properties.limit]
+type = "integer"
+minimum = 1
+maximum = 50
+[provides.operations."spotify.search.episodes".input_schema.properties.market]
+type = "string"
+pattern = "^[A-Z]{2}$"
+
+[provides.operations."spotify.search.episodes".output_schema]
+required = ["results"]
+type = "object"
+[provides.operations."spotify.search.episodes".output_schema.properties.results]
+type = "object"
+
+[provides.operations."spotify.search.episodes".network_constraints]
+host_allow = ["api.spotify.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 6291456
+
+[provides.operations."spotify.search.episodes".ai_hints]
+when_to_use = "Search specifically for podcast episodes by text query."
+common_mistakes = ["Using lowercase country codes for market."]
+examples = ['{"query": "AI news", "limit": 10}']
+related = ["spotify.search", "spotify.episode.get"]
+
+# ── Recommendation genre seeds ────────────────────────────────────────────────
+
+[provides.operations."spotify.recommendations.genres"]
+description = "Get available genre seeds for recommendations"
+capability = "spotify.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."spotify.recommendations.genres".input_schema]
+type = "object"
+
+[provides.operations."spotify.recommendations.genres".output_schema]
+required = ["genres"]
+type = "object"
+[provides.operations."spotify.recommendations.genres".output_schema.properties.genres]
+type = "array"
+
+[provides.operations."spotify.recommendations.genres".network_constraints]
+host_allow = ["api.spotify.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 6291456
+
+[provides.operations."spotify.recommendations.genres".ai_hints]
+when_to_use = "Fetch available genre seed values for the recommendations endpoint."
+common_mistakes = []
+examples = ['{}']
+related = ["spotify.recommendations.get"]
+
+# ── Podcast operations ────────────────────────────────────────────────────────
+
+[provides.operations."spotify.show.get"]
+description = "Get show (podcast) metadata by ID"
+capability = "spotify.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."spotify.show.get".input_schema]
+required = ["show_id"]
+type = "object"
+[provides.operations."spotify.show.get".input_schema.properties.show_id]
+type = "string"
+[provides.operations."spotify.show.get".input_schema.properties.market]
+type = "string"
+pattern = "^[A-Z]{2}$"
+
+[provides.operations."spotify.show.get".output_schema]
+required = ["show"]
+type = "object"
+[provides.operations."spotify.show.get".output_schema.properties.show]
+type = "object"
+
+[provides.operations."spotify.show.get".network_constraints]
+host_allow = ["api.spotify.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 6291456
+
+[provides.operations."spotify.show.get".ai_hints]
+when_to_use = "Fetch metadata for a podcast show by its Spotify ID."
+common_mistakes = ["Passing a Spotify URI instead of the bare show ID."]
+examples = ['{"show_id": "5CfCWKI5pZ28U0uOzXkDHe"}']
+related = ["spotify.show.episodes", "spotify.search.shows"]
+
+[provides.operations."spotify.show.episodes"]
+description = "List episodes of a show (podcast)"
+capability = "spotify.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."spotify.show.episodes".input_schema]
+required = ["show_id"]
+type = "object"
+[provides.operations."spotify.show.episodes".input_schema.properties.show_id]
+type = "string"
+[provides.operations."spotify.show.episodes".input_schema.properties.limit]
+type = "integer"
+minimum = 1
+maximum = 50
+[provides.operations."spotify.show.episodes".input_schema.properties.offset]
+type = "integer"
+minimum = 0
+[provides.operations."spotify.show.episodes".input_schema.properties.market]
+type = "string"
+pattern = "^[A-Z]{2}$"
+
+[provides.operations."spotify.show.episodes".output_schema]
+required = ["items"]
+type = "object"
+[provides.operations."spotify.show.episodes".output_schema.properties.items]
+type = "array"
+[provides.operations."spotify.show.episodes".output_schema.properties.total]
+type = "integer"
+
+[provides.operations."spotify.show.episodes".network_constraints]
+host_allow = ["api.spotify.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 6291456
+
+[provides.operations."spotify.show.episodes".ai_hints]
+when_to_use = "List episodes of a podcast show with pagination."
+common_mistakes = ["Forgetting pagination for shows with many episodes."]
+examples = ['{"show_id": "5CfCWKI5pZ28U0uOzXkDHe", "limit": 20}']
+related = ["spotify.show.get", "spotify.episode.get"]
+
+[provides.operations."spotify.episode.get"]
+description = "Get episode metadata by ID"
+capability = "spotify.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."spotify.episode.get".input_schema]
+required = ["episode_id"]
+type = "object"
+[provides.operations."spotify.episode.get".input_schema.properties.episode_id]
+type = "string"
+[provides.operations."spotify.episode.get".input_schema.properties.market]
+type = "string"
+pattern = "^[A-Z]{2}$"
+
+[provides.operations."spotify.episode.get".output_schema]
+required = ["episode"]
+type = "object"
+[provides.operations."spotify.episode.get".output_schema.properties.episode]
+type = "object"
+
+[provides.operations."spotify.episode.get".network_constraints]
+host_allow = ["api.spotify.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 6291456
+
+[provides.operations."spotify.episode.get".ai_hints]
+when_to_use = "Fetch metadata for a podcast episode by its Spotify ID."
+common_mistakes = ["Passing a Spotify URI instead of the bare episode ID."]
+examples = ['{"episode_id": "512ojhOuo1ktJprKbVcKyQ"}']
+related = ["spotify.show.get", "spotify.search.episodes"]
+
 [provides.operations."spotify.track.get"]
 description = "Get track metadata by Spotify track ID"
 capability = "spotify.read"
@@ -1542,6 +1972,15 @@ scope = "instance"
 
 [rate_limits.operation_pools]
 "spotify.search" = ["spotify.read"]
+"spotify.search.tracks" = ["spotify.read"]
+"spotify.search.albums" = ["spotify.read"]
+"spotify.search.artists" = ["spotify.read"]
+"spotify.search.shows" = ["spotify.read"]
+"spotify.search.episodes" = ["spotify.read"]
+"spotify.recommendations.genres" = ["spotify.read"]
+"spotify.show.get" = ["spotify.read"]
+"spotify.show.episodes" = ["spotify.read"]
+"spotify.episode.get" = ["spotify.read"]
 "spotify.track.get" = ["spotify.read"]
 "spotify.album.get" = ["spotify.read"]
 "spotify.artist.get" = ["spotify.read"]

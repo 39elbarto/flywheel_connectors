@@ -113,7 +113,7 @@ async fn lifecycle_introspect() {
     assert_eq!(intro["connector_id"], "fcp.spotify");
     assert_eq!(intro["version"], "0.1.0");
     let ops = intro["operations"].as_array().unwrap();
-    assert_eq!(ops.len(), 33);
+    assert_eq!(ops.len(), 42);
 }
 
 #[fcp_async_core::runtime::test]
@@ -415,6 +415,174 @@ async fn search_missing_query() {
         .await
         .is_err()
     );
+}
+
+// ============================================================
+// Typed Search
+// ============================================================
+
+#[fcp_async_core::runtime::test]
+async fn search_tracks_typed() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/search"))
+        .and(query_param("type", "track"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "tracks": {
+                "items": [{"id": "t1", "name": "Bohemian Rhapsody"}]
+            }
+        })))
+        .mount(&server)
+        .await;
+
+    let c = setup_connector(&server.uri()).await;
+    let result = c
+        .handle_invoke(json!({
+            "operation_id": "spotify.search.tracks",
+            "input": {"query": "bohemian rhapsody", "limit": 10}
+        }))
+        .await
+        .unwrap();
+    assert!(result["results"].is_object());
+    assert!(result["results"]["tracks"].is_object());
+}
+
+#[fcp_async_core::runtime::test]
+async fn search_albums_typed() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/search"))
+        .and(query_param("type", "album"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "albums": {
+                "items": [{"id": "alb1", "name": "A Night at the Opera"}]
+            }
+        })))
+        .mount(&server)
+        .await;
+
+    let c = setup_connector(&server.uri()).await;
+    let result = c
+        .handle_invoke(json!({
+            "operation_id": "spotify.search.albums",
+            "input": {"query": "a night at the opera", "limit": 10}
+        }))
+        .await
+        .unwrap();
+    assert!(result["results"].is_object());
+    assert!(result["results"]["albums"].is_object());
+}
+
+// ============================================================
+// Recommendations - Genre Seeds
+// ============================================================
+
+#[fcp_async_core::runtime::test]
+async fn recommendations_genre_seeds() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/recommendations/available-genre-seeds"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "genres": ["acoustic", "alt-rock", "blues", "classical", "country"]
+        })))
+        .mount(&server)
+        .await;
+
+    let c = setup_connector(&server.uri()).await;
+    let result = c
+        .handle_invoke(json!({
+            "operation_id": "spotify.recommendations.genres",
+            "input": {}
+        }))
+        .await
+        .unwrap();
+    let genres = result["genres"].as_array().unwrap();
+    assert_eq!(genres.len(), 5);
+    assert_eq!(genres[0], "acoustic");
+}
+
+// ============================================================
+// Podcasts - Shows & Episodes
+// ============================================================
+
+#[fcp_async_core::runtime::test]
+async fn show_get() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/shows/5CfCWKI5pZ28U0uOzXkDHe"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "5CfCWKI5pZ28U0uOzXkDHe",
+            "name": "The Joe Rogan Experience",
+            "publisher": "Joe Rogan",
+            "total_episodes": 2000
+        })))
+        .mount(&server)
+        .await;
+
+    let c = setup_connector(&server.uri()).await;
+    let result = c
+        .handle_invoke(json!({
+            "operation_id": "spotify.show.get",
+            "input": {"show_id": "5CfCWKI5pZ28U0uOzXkDHe"}
+        }))
+        .await
+        .unwrap();
+    assert_eq!(result["show"]["id"], "5CfCWKI5pZ28U0uOzXkDHe");
+    assert_eq!(result["show"]["name"], "The Joe Rogan Experience");
+}
+
+#[fcp_async_core::runtime::test]
+async fn show_episodes() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/shows/5CfCWKI5pZ28U0uOzXkDHe/episodes"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "items": [
+                {"id": "ep1", "name": "Episode 1"},
+                {"id": "ep2", "name": "Episode 2"}
+            ],
+            "total": 100
+        })))
+        .mount(&server)
+        .await;
+
+    let c = setup_connector(&server.uri()).await;
+    let result = c
+        .handle_invoke(json!({
+            "operation_id": "spotify.show.episodes",
+            "input": {"show_id": "5CfCWKI5pZ28U0uOzXkDHe", "limit": 20, "offset": 0}
+        }))
+        .await
+        .unwrap();
+    let items = result["items"].as_array().unwrap();
+    assert_eq!(items.len(), 2);
+    assert_eq!(result["total"], 100);
+}
+
+#[fcp_async_core::runtime::test]
+async fn episode_get() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/episodes/512ojhOuo1ktJprKbVcKyQ"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "512ojhOuo1ktJprKbVcKyQ",
+            "name": "AI and the Future",
+            "duration_ms": 3600000,
+            "show": {"id": "show123", "name": "Tech Talk"}
+        })))
+        .mount(&server)
+        .await;
+
+    let c = setup_connector(&server.uri()).await;
+    let result = c
+        .handle_invoke(json!({
+            "operation_id": "spotify.episode.get",
+            "input": {"episode_id": "512ojhOuo1ktJprKbVcKyQ"}
+        }))
+        .await
+        .unwrap();
+    assert_eq!(result["episode"]["id"], "512ojhOuo1ktJprKbVcKyQ");
+    assert_eq!(result["episode"]["name"], "AI and the Future");
 }
 
 // ============================================================

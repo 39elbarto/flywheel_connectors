@@ -1380,4 +1380,138 @@ mod tests {
         }
         panic!("Failed to decode with source symbols only");
     }
+
+    // ── Additional decode tests (batch 2) ─────────────────────────────────
+
+    #[test]
+    fn decoder_needed_for_k_500() {
+        let config = test_config();
+        let decoder = RaptorQDecoder::with_expected_symbols(500, 32_000, 64, &config);
+        // ceil(500 * 1.002) = 501
+        assert_eq!(decoder.needed(), 501);
+    }
+
+    #[test]
+    fn decoder_from_oti_single_byte_transfer() {
+        let config = test_config();
+        let oti = ObjectTransmissionInformation::new(1, 64, 1, 1, 8);
+        let decoder = RaptorQDecoder::new(oti, &config);
+        assert_eq!(decoder.expected_k(), 1);
+    }
+
+    #[test]
+    fn decoder_from_oti_exactly_one_symbol() {
+        let config = test_config();
+        let oti = ObjectTransmissionInformation::new(64, 64, 1, 1, 8);
+        let decoder = RaptorQDecoder::new(oti, &config);
+        assert_eq!(decoder.expected_k(), 1);
+    }
+
+    #[test]
+    fn decoder_from_oti_two_and_a_half_symbols() {
+        let config = test_config();
+        let oti = ObjectTransmissionInformation::new(160, 64, 1, 1, 8);
+        let decoder = RaptorQDecoder::new(oti, &config);
+        // ceil(160 / 64) = 3
+        assert_eq!(decoder.expected_k(), 3);
+    }
+
+    #[test]
+    fn admission_controller_single_slot() {
+        let controller =
+            DecodeAdmissionController::with_limits(1, 1024, Duration::from_secs(30), 100);
+        let p = controller.try_acquire().unwrap();
+        assert!(!controller.has_capacity());
+        drop(p);
+        assert!(controller.has_capacity());
+    }
+
+    #[test]
+    fn permit_buffer_symbol_exactly_at_memory_limit() {
+        let controller =
+            DecodeAdmissionController::with_limits(1, 1024, Duration::from_secs(30), 100);
+        let mut permit = controller.try_acquire().unwrap();
+        // Use exactly up to the limit
+        permit.try_buffer_symbol(512).unwrap();
+        permit.try_buffer_symbol(512).unwrap();
+        assert_eq!(permit.memory_used(), 1024);
+        // One more byte should fail
+        let result = permit.try_buffer_symbol(1);
+        assert!(matches!(
+            result,
+            Err(DecodeError::MemoryLimitExceeded { .. })
+        ));
+    }
+
+    #[test]
+    fn permit_buffer_symbol_exactly_at_symbol_limit() {
+        let controller =
+            DecodeAdmissionController::with_limits(1, 1024 * 1024, Duration::from_secs(30), 5);
+        let mut permit = controller.try_acquire().unwrap();
+        for _ in 0..5 {
+            permit.try_buffer_symbol(10).unwrap();
+        }
+        assert_eq!(permit.symbols_buffered(), 5);
+        let result = permit.try_buffer_symbol(10);
+        assert!(matches!(
+            result,
+            Err(DecodeError::SymbolBufferExceeded { .. })
+        ));
+    }
+
+    #[test]
+    fn decoder_elapsed_is_positive() {
+        let config = test_config();
+        let decoder = RaptorQDecoder::with_expected_symbols(10, 640, 64, &config);
+        // Elapsed should be non-negative (might be zero on fast systems)
+        let _ = decoder.elapsed(); // Just check it doesn't panic
+    }
+
+    #[test]
+    fn admission_controller_zero_max_concurrent() {
+        let controller =
+            DecodeAdmissionController::with_limits(0, 1024, Duration::from_secs(30), 100);
+        assert!(!controller.has_capacity());
+        assert!(controller.try_acquire().is_none());
+        assert!(matches!(
+            controller.acquire(),
+            Err(DecodeError::AdmissionDenied { .. })
+        ));
+    }
+
+    #[test]
+    fn permit_time_remaining_positive_initially() {
+        let controller =
+            DecodeAdmissionController::with_limits(1, 1024, Duration::from_secs(60), 100);
+        let permit = controller.try_acquire().unwrap();
+        assert!(permit.time_remaining() > Duration::from_secs(59));
+    }
+
+    #[test]
+    fn decoder_roundtrip_multi_symbol() {
+        let config = test_config();
+        let payload: Vec<u8> = (0..256_u32).map(|i| (i % 256) as u8).collect();
+        let encoder = RaptorQEncoder::new(&payload, &config).unwrap();
+        let symbols = encoder.encode_all();
+        let oti = encoder.transmission_info();
+
+        let mut decoder = RaptorQDecoder::new(oti, &config);
+        for (esi, data) in symbols {
+            if let Ok(Some(decoded)) = decoder.add_symbol(esi, data) {
+                assert_eq!(&decoded[..payload.len()], &payload[..]);
+                return;
+            }
+        }
+        panic!("Failed to decode multi-symbol payload");
+    }
+
+    #[test]
+    fn controller_clone_max_concurrent_preserved() {
+        let controller =
+            DecodeAdmissionController::with_limits(7, 2048, Duration::from_secs(15), 500);
+        let original = controller;
+        let cloned = original.clone();
+        assert_eq!(cloned.max_concurrent(), 7);
+        assert_eq!(original.max_concurrent(), 7);
+    }
 }

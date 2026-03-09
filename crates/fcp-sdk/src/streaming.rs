@@ -2073,7 +2073,7 @@ mod tests {
     }
 
     #[test]
-    fn replay_error_clone() {
+    fn replay_error_clone_roundtrip() {
         let err = ReplayError::UnknownTopic {
             topic: "t".to_string(),
         };
@@ -2161,7 +2161,7 @@ mod tests {
     // ── NEW: SequentialEnqueueError ──────────────────────────────────
 
     #[test]
-    fn sequential_enqueue_error_display() {
+    fn sequential_enqueue_error_display_detail() {
         let err = SequentialEnqueueError::QueueFull {
             stream_key: "chat_123".to_string(),
             item: 42_u32,

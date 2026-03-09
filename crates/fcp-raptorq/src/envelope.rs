@@ -1352,7 +1352,7 @@ mod tests {
     fn sender_subkey_with_long_node_id() {
         let zone_key = ZoneKey::from_bytes([0xAA; 32]);
         let zone_key_id = ZoneKeyId::from_bytes([0x33; 8]);
-        let long_id = NodeId::new(&"a".repeat(1000));
+        let long_id = NodeId::new("a".repeat(1000));
 
         let k = derive_sender_subkey(&zone_key, &zone_key_id, &long_id, 1);
         // Should produce a valid non-zero key

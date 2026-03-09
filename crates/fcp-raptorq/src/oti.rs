@@ -502,4 +502,11 @@ mod tests {
         let b = ObjectTransmissionInformation::new(100, 64, 1, 1, 8);
         assert_ne!(a, b);
     }
+
+    #[test]
+    fn oti_serde_null_value_fails() {
+        let json = r#"{"transfer_length":null,"symbol_size":64,"source_blocks":1,"sub_blocks":1,"alignment":8}"#;
+        let result = serde_json::from_str::<ObjectTransmissionInformation>(json);
+        assert!(result.is_err());
+    }
 }

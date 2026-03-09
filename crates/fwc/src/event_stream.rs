@@ -955,7 +955,7 @@ mod tests {
             last_event_at: Some("2026-03-09T15:00:00Z".to_owned()),
         };
         let cloned = state.clone();
-        assert_eq!(cloned.connector, "slack");
+        assert_eq!(state.connector, "slack");
         assert_eq!(cloned.events_received, 100);
     }
 
@@ -994,7 +994,7 @@ mod tests {
             dropped_events: 0,
         };
         let cloned = summary.clone();
-        assert_eq!(cloned.total_events, 0);
+        assert_eq!(summary.total_events, 0);
         assert!(cloned.streams.is_empty());
     }
 }

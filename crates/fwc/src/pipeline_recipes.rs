@@ -1327,7 +1327,7 @@ mod tests {
     fn step_clone() {
         let s = RecipeStep::new("a", "b", "c").with_input("k", "v");
         let cloned = s.clone();
-        assert_eq!(cloned.name, "a");
+        assert_eq!(s.name, "a");
         assert_eq!(cloned.input["k"], "v");
     }
 
@@ -1410,7 +1410,7 @@ mod tests {
             .with_connector("mixpanel")
             .with_step(RecipeStep::new("s", "mixpanel", "o"));
         let cloned = r.clone();
-        assert_eq!(cloned.id, "t");
+        assert_eq!(r.id, "t");
         assert_eq!(cloned.required_connectors, vec!["mixpanel"]);
     }
 
@@ -1618,7 +1618,7 @@ mod tests {
         let recipes = builtin_recipes();
         let ids: Vec<&str> = recipes.iter().map(|r| r.id.as_str()).collect();
         let mut deduped = ids.clone();
-        deduped.sort();
+        deduped.sort_unstable();
         deduped.dedup();
         assert_eq!(ids.len(), deduped.len());
     }

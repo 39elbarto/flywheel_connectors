@@ -77,6 +77,8 @@ mod schema_nav;
 mod search;
 #[allow(dead_code)] // Secretless injection wired when egress proxy integration lands.
 mod secretless;
+#[allow(dead_code)] // MCP server module — data layer for `fwc serve-mcp`.
+mod serve_mcp;
 #[allow(dead_code)]
 mod session;
 mod template;

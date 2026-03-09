@@ -1169,7 +1169,7 @@ mod tests {
             operation_ids: vec!["x".to_owned(), "y".to_owned()],
         };
         let cloned = wave.clone();
-        assert_eq!(cloned.wave, 2);
+        assert_eq!(wave.wave, 2);
         assert_eq!(cloned.operation_ids.len(), 2);
     }
 

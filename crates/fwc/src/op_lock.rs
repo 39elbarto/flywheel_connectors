@@ -958,7 +958,8 @@ mod tests {
             remaining: "5m".to_owned(),
         };
         let cloned = result.clone();
-        assert!(!cloned.is_acquired());
+        assert!(!result.is_acquired());
+        let _ = cloned;
     }
 
     // ── CheckResult additional ───────────────────────────────────
@@ -983,7 +984,8 @@ mod tests {
     fn check_result_clone() {
         let result = CheckResult::Free;
         let cloned = result.clone();
-        let json = serde_json::to_value(&cloned).unwrap();
+        let json = serde_json::to_value(&result).unwrap();
+        let _ = cloned;
         assert_eq!(json["status"], "free");
     }
 

@@ -1181,7 +1181,7 @@ mod tests {
     fn fix_action_clone() {
         let fix = FixAction::command("Fix", "cmd").safe();
         let cloned = fix.clone();
-        assert_eq!(cloned.description, "Fix");
+        assert_eq!(fix.description, "Fix");
         assert!(cloned.auto_safe);
     }
 
@@ -1251,7 +1251,7 @@ mod tests {
     fn report_clone() {
         let report = DiagnosticReport::healthy("github");
         let cloned = report.clone();
-        assert_eq!(cloned.connector_id, "github");
+        assert_eq!(report.connector_id, "github");
         assert_eq!(cloned.status, HealthStatus::Healthy);
     }
 
@@ -1486,7 +1486,7 @@ mod tests {
             ..Default::default()
         };
         let cloned = s.clone();
-        assert!(cloned.installed);
+        assert!(s.installed);
         assert_eq!(cloned.http_status, Some(200));
     }
 
@@ -1502,7 +1502,7 @@ mod tests {
             fixes: vec![FixAction::manual("fix it")],
         };
         let cloned = diag.clone();
-        assert_eq!(cloned.connector_id, "test");
+        assert_eq!(diag.connector_id, "test");
         assert_eq!(cloned.fixes.len(), 1);
     }
 

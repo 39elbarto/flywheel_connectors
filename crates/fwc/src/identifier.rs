@@ -1191,7 +1191,7 @@ mod tests {
     fn resource_families_unique_names() {
         let mut names: Vec<&str> = RESOURCE_FAMILIES.iter().map(|f| f.family).collect();
         let original_len = names.len();
-        names.sort();
+        names.sort_unstable();
         names.dedup();
         assert_eq!(names.len(), original_len, "duplicate family names found");
     }

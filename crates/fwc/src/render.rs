@@ -1,14 +1,32 @@
-use anyhow::Result;
+use std::path::{Path, PathBuf};
+
+use anyhow::{Context, Result, anyhow};
+use chrono::{DateTime, Utc};
 use clap::ValueEnum;
+use handlebars::{Handlebars, handlebars_helper, no_escape};
+use jaq_core::{
+    Ctx, RcIter,
+    load::{Arena, File, Loader},
+};
 use serde::Serialize;
-use serde_json::Value;
+use serde_json::{Value, json};
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, ValueEnum)]
 pub enum OutputFormat {
     Json,
     Jsonl,
+    /// Newline-delimited JSON: arrays emit one object per line.
+    Ndjson,
     #[default]
     Toon,
+    /// ASCII table with aligned columns.
+    Table,
+    /// Comma-separated values.
+    Csv,
+    /// Tab-separated values.
+    Tsv,
+    /// Markdown table.
+    Markdown,
 }
 
 impl OutputFormat {
@@ -16,7 +34,146 @@ impl OutputFormat {
         match self {
             Self::Json => "json",
             Self::Jsonl => "jsonl",
+            Self::Ndjson => "ndjson",
             Self::Toon => "toon",
+            Self::Table => "table",
+            Self::Csv => "csv",
+            Self::Tsv => "tsv",
+            Self::Markdown => "markdown",
+        }
+    }
+
+    /// Whether this format is a tabular format.
+    pub const fn is_tabular(self) -> bool {
+        matches!(self, Self::Table | Self::Csv | Self::Tsv | Self::Markdown)
+    }
+
+    /// Whether this format preserves JSON semantics after rendering.
+    #[allow(dead_code)]
+    pub const fn is_json_like(self) -> bool {
+        matches!(self, Self::Json | Self::Jsonl | Self::Ndjson)
+    }
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct RenderOptions {
+    pub template: Option<TemplateRender>,
+    pub extract: Option<ExtractRender>,
+    /// Explicit column list for tabular formats.
+    pub tabular_columns: Vec<String>,
+    /// Sort by this column in tabular formats.
+    pub tabular_sort_by: Option<String>,
+    /// Maximum rows for tabular formats (0 = unlimited).
+    pub tabular_limit: usize,
+    /// Suppress headers in tabular formats.
+    pub tabular_no_headers: bool,
+}
+
+impl RenderOptions {
+    pub const fn has_template(&self) -> bool {
+        self.template.is_some()
+    }
+
+    pub const fn has_extract(&self) -> bool {
+        self.extract.is_some()
+    }
+
+    pub const fn has_transform(&self) -> bool {
+        self.template.is_some() || self.extract.is_some()
+    }
+
+    pub fn without_extract(&self) -> Self {
+        Self {
+            template: self.template.clone(),
+            extract: None,
+            tabular_columns: self.tabular_columns.clone(),
+            tabular_sort_by: self.tabular_sort_by.clone(),
+            tabular_limit: self.tabular_limit,
+            tabular_no_headers: self.tabular_no_headers,
+        }
+    }
+
+    pub fn transform_metadata(&self) -> Option<Value> {
+        self.template
+            .as_ref()
+            .map(TemplateRender::metadata)
+            .or_else(|| self.extract.as_ref().map(ExtractRender::metadata))
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TemplateRender {
+    template: String,
+    source: TemplateSource,
+    origin: Option<PathBuf>,
+}
+
+impl TemplateRender {
+    pub fn inline(template: impl Into<String>) -> Result<Self> {
+        let template = template.into();
+        validate_template(&template).context("failed to parse inline template")?;
+        Ok(Self {
+            template,
+            source: TemplateSource::Inline,
+            origin: None,
+        })
+    }
+
+    pub fn from_file(path: impl AsRef<Path>) -> Result<Self> {
+        let path = path.as_ref().to_path_buf();
+        let template = std::fs::read_to_string(&path)
+            .with_context(|| format!("failed to read template file `{}`", path.display()))?;
+        validate_template(&template)
+            .with_context(|| format!("failed to parse template file `{}`", path.display()))?;
+        Ok(Self {
+            template,
+            source: TemplateSource::File,
+            origin: Some(path),
+        })
+    }
+
+    fn metadata(&self) -> Value {
+        json!({
+            "kind": "handlebars",
+            "source": self.source.as_str(),
+            "path": self.origin.as_ref().map(|path| path.display().to_string()),
+        })
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExtractRender {
+    filter: String,
+}
+
+impl ExtractRender {
+    pub fn inline(filter: impl Into<String>) -> Result<Self> {
+        let filter = filter.into();
+        validate_extract_filter(&filter).context("failed to parse jq filter")?;
+        Ok(Self { filter })
+    }
+
+    fn metadata(&self) -> Value {
+        json!({
+            "kind": "jq",
+            "engine": "jaq",
+            "filter": self.filter,
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum TemplateSource {
+    Inline,
+    File,
+}
+
+impl TemplateSource {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Inline => "inline",
+            Self::File => "file",
         }
     }
 }
@@ -28,14 +185,75 @@ impl OutputFormat {
 /// - **Json**: pretty-printed with stable key ordering (`serde_json` sorts keys
 ///   for `BTreeMap` and preserves insertion order for `serde_json::Map`)
 /// - **Jsonl**: compact single-line JSON
+#[allow(dead_code)]
 pub fn render(value: Value, format: OutputFormat) -> Result<String> {
+    render_with_options(value, format, &RenderOptions::default())
+}
+
+/// Render a JSON value according to the chosen output format plus any
+/// post-processing transforms such as Handlebars templating.
+pub fn render_with_options(
+    mut value: Value,
+    format: OutputFormat,
+    options: &RenderOptions,
+) -> Result<String> {
+    if let Some(extract) = &options.extract {
+        value = render_extract(&value, extract)?;
+    }
+
+    if let Some(template) = &options.template {
+        let rendered = render_template(&value, template)?;
+        return Ok(ensure_trailing_newline(rendered));
+    }
+
+    if format.is_tabular() {
+        return render_tabular_value(&value, format, options);
+    }
+
     let rendered = match format {
         OutputFormat::Json => serde_json::to_string_pretty(&value)?,
         OutputFormat::Jsonl => serde_json::to_string(&value)?,
+        OutputFormat::Ndjson => render_ndjson(&value),
         OutputFormat::Toon => toon::encode(value, None),
+        // Tabular formats handled above.
+        OutputFormat::Table | OutputFormat::Csv | OutputFormat::Tsv | OutputFormat::Markdown => {
+            unreachable!()
+        }
     };
 
-    Ok(format!("{rendered}\n"))
+    Ok(ensure_trailing_newline(rendered))
+}
+
+/// Render a JSON value in a tabular format (table, CSV, TSV, or Markdown).
+fn render_tabular_value(
+    value: &Value,
+    format: OutputFormat,
+    options: &RenderOptions,
+) -> Result<String> {
+    use crate::format_table::{TabularFormat, TabularOptions, render_tabular};
+
+    let tab_fmt = match format {
+        OutputFormat::Table => TabularFormat::Table,
+        OutputFormat::Csv => TabularFormat::Csv,
+        OutputFormat::Tsv => TabularFormat::Tsv,
+        OutputFormat::Markdown => TabularFormat::Markdown,
+        _ => unreachable!(),
+    };
+
+    let tab_opts = TabularOptions {
+        columns: options.tabular_columns.clone(),
+        sort_by: options.tabular_sort_by.clone(),
+        limit: options.tabular_limit,
+        no_headers: options.tabular_no_headers,
+    };
+
+    // If data isn't tabular, fall back to JSON.
+    if let Ok(rendered) = render_tabular(value, tab_fmt, &tab_opts) {
+        Ok(ensure_trailing_newline(rendered))
+    } else {
+        let rendered = serde_json::to_string_pretty(value)?;
+        Ok(ensure_trailing_newline(rendered))
+    }
 }
 
 /// Token-efficiency statistics comparing TOON vs JSON representations.
@@ -76,8 +294,14 @@ pub fn token_stats(value: &Value, selected_format: OutputFormat) -> TokenStats {
     let compact_len = compact_out.len();
     let selected_bytes = match selected_format {
         OutputFormat::Json => pretty_len,
-        OutputFormat::Jsonl => compact_len,
         OutputFormat::Toon => toon_len,
+        // All other formats approximate as compact.
+        OutputFormat::Jsonl
+        | OutputFormat::Ndjson
+        | OutputFormat::Table
+        | OutputFormat::Csv
+        | OutputFormat::Tsv
+        | OutputFormat::Markdown => compact_len,
     };
     let recommended = [
         (OutputFormat::Toon, toon_len),
@@ -119,11 +343,208 @@ fn signed_len_delta(lhs: usize, rhs: usize) -> i64 {
     }
 }
 
+/// Render NDJSON: arrays emit one JSON object per line, others act like JSONL.
+fn render_ndjson(value: &Value) -> String {
+    match value {
+        Value::Array(items) => {
+            let mut out = String::new();
+            for item in items {
+                if let Ok(line) = serde_json::to_string(item) {
+                    out.push_str(&line);
+                    out.push('\n');
+                }
+            }
+            out
+        }
+        // For objects, look for a well-known data array field and stream its items.
+        Value::Object(map) => {
+            for key in &[
+                "items",
+                "results",
+                "data",
+                "rows",
+                "entries",
+                "records",
+                "connectors",
+                "operations",
+                "issues",
+                "messages",
+            ] {
+                if let Some(Value::Array(items)) = map.get(*key) {
+                    let mut out = String::new();
+                    for item in items {
+                        if let Ok(line) = serde_json::to_string(item) {
+                            out.push_str(&line);
+                            out.push('\n');
+                        }
+                    }
+                    return out;
+                }
+            }
+            // No array field found — emit the whole object as one line.
+            serde_json::to_string(value).unwrap_or_default()
+        }
+        _ => serde_json::to_string(value).unwrap_or_default(),
+    }
+}
+
+fn ensure_trailing_newline(rendered: String) -> String {
+    if rendered.ends_with('\n') {
+        rendered
+    } else {
+        format!("{rendered}\n")
+    }
+}
+
+fn validate_extract_filter(filter: &str) -> Result<()> {
+    let arena = Arena::default();
+    let loader = Loader::new(jaq_std::defs().chain(jaq_json::defs()));
+    let modules = loader
+        .load(
+            &arena,
+            File {
+                code: filter,
+                path: (),
+            },
+        )
+        .map_err(|errors| anyhow!("failed to parse jq filter: {errors:?}"))?;
+    jaq_core::Compiler::default()
+        .with_funs(jaq_std::funs().chain(jaq_json::funs()))
+        .compile(modules)
+        .map_err(|errors| anyhow!("failed to compile jq filter: {errors:?}"))?;
+    Ok(())
+}
+
+fn render_extract(value: &Value, extract: &ExtractRender) -> Result<Value> {
+    let arena = Arena::default();
+    let loader = Loader::new(jaq_std::defs().chain(jaq_json::defs()));
+    let modules = loader
+        .load(
+            &arena,
+            File {
+                code: &extract.filter,
+                path: (),
+            },
+        )
+        .map_err(|errors| anyhow!("failed to parse jq filter: {errors:?}"))?;
+    let filter = jaq_core::Compiler::default()
+        .with_funs(jaq_std::funs().chain(jaq_json::funs()))
+        .compile(modules)
+        .map_err(|errors| anyhow!("failed to compile jq filter: {errors:?}"))?;
+    let inputs = RcIter::new(core::iter::empty());
+    let mut outputs = Vec::new();
+
+    for output in filter.run((Ctx::new([], &inputs), jaq_json::Val::from(value.clone()))) {
+        let output = output.map_err(|e| anyhow!("failed to evaluate jq filter: {e:?}"))?;
+        outputs.push(serde_json::Value::from(output));
+    }
+
+    Ok(match outputs.len() {
+        0 => Value::Null,
+        1 => outputs.into_iter().next().unwrap_or(Value::Null),
+        _ => Value::Array(outputs),
+    })
+}
+
+fn render_template(value: &Value, template: &TemplateRender) -> Result<String> {
+    let registry = template_registry();
+    registry
+        .render_template(&template.template, value)
+        .context("failed to render Handlebars template")
+}
+
+fn validate_template(template: &str) -> Result<()> {
+    let mut registry = template_registry();
+    registry
+        .register_template_string("__fwc_validate__", template)
+        .context("template syntax error")
+}
+
+fn template_registry() -> Handlebars<'static> {
+    handlebars_helper!(json_helper: |value: Json| serde_json::to_string_pretty(value).unwrap_or_else(|_| "null".to_owned()));
+    handlebars_helper!(compact_helper: |value: Json| serde_json::to_string(value).unwrap_or_else(|_| "null".to_owned()));
+    handlebars_helper!(count_helper: |value: Json| u64::try_from(count_value(value)).unwrap_or(u64::MAX));
+    handlebars_helper!(truncate_helper: |value: str, max: u64| truncate_text(value, usize::try_from(max).unwrap_or(usize::MAX)));
+    handlebars_helper!(timeago_helper: |value: str| humanize_timestamp(value, Utc::now()));
+    handlebars_helper!(if_eq_helper: |left: Json, right: Json| left == right);
+
+    let mut registry = Handlebars::new();
+    registry.register_escape_fn(no_escape);
+    registry.set_strict_mode(true);
+    registry.register_helper("json", Box::new(json_helper));
+    registry.register_helper("compact", Box::new(compact_helper));
+    registry.register_helper("count", Box::new(count_helper));
+    registry.register_helper("truncate", Box::new(truncate_helper));
+    registry.register_helper("timeago", Box::new(timeago_helper));
+    registry.register_helper("if_eq", Box::new(if_eq_helper));
+    registry
+}
+
+fn count_value(value: &Value) -> usize {
+    match value {
+        Value::Array(items) => items.len(),
+        Value::Object(entries) => entries.len(),
+        Value::String(text) => text.chars().count(),
+        Value::Null => 0,
+        Value::Bool(_) | Value::Number(_) => 1,
+    }
+}
+
+fn truncate_text(value: &str, max: usize) -> String {
+    let len = value.chars().count();
+    if len <= max {
+        return value.to_owned();
+    }
+    if max == 0 {
+        return String::new();
+    }
+    if max == 1 {
+        return "…".to_owned();
+    }
+
+    value.chars().take(max - 1).collect::<String>() + "…"
+}
+
+fn humanize_timestamp(value: &str, now: DateTime<Utc>) -> String {
+    DateTime::parse_from_rfc3339(value).map_or_else(
+        |_| value.to_owned(),
+        |timestamp| relative_time_label(timestamp.with_timezone(&Utc), now),
+    )
+}
+
+fn relative_time_label(target: DateTime<Utc>, now: DateTime<Utc>) -> String {
+    let delta = target.signed_duration_since(now);
+    let seconds = delta.num_seconds();
+    if seconds.unsigned_abs() < 5 {
+        return "just now".to_owned();
+    }
+
+    let (magnitude, unit) = match seconds.unsigned_abs() {
+        0..=59 => (seconds.unsigned_abs(), "s"),
+        60..=3_599 => (seconds.unsigned_abs() / 60, "m"),
+        3_600..=86_399 => (seconds.unsigned_abs() / 3_600, "h"),
+        86_400..=604_799 => (seconds.unsigned_abs() / 86_400, "d"),
+        value => (value / 604_800, "w"),
+    };
+
+    if seconds.is_positive() {
+        format!("in {magnitude}{unit}")
+    } else {
+        format!("{magnitude}{unit} ago")
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use chrono::{Duration, Utc};
     use serde_json::{Value, json};
 
-    use super::{OutputFormat, render, token_stats};
+    use super::{
+        ExtractRender, OutputFormat, RenderOptions, TemplateRender, TemplateSource,
+        humanize_timestamp, relative_time_label, render, render_with_options, token_stats,
+    };
 
     // ── Basic format rendering ──────────────────────────────────────────
 
@@ -470,5 +891,384 @@ mod tests {
         let text = render(v, OutputFormat::Jsonl).unwrap();
         // Only trailing newline, no internal ones
         assert_eq!(text.trim().lines().count(), 1);
+    }
+
+    // ── Template transforms ─────────────────────────────────────────────
+
+    #[test]
+    fn template_render_interpolates_nested_fields() {
+        let template = TemplateRender::inline("{{connector.slug}} => {{connector.name}}").unwrap();
+        let text = render_with_options(
+            json!({"connector": {"slug": "github", "name": "GitHub"}}),
+            OutputFormat::Toon,
+            &RenderOptions {
+                template: Some(template),
+                ..RenderOptions::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(text, "github => GitHub\n");
+    }
+
+    #[test]
+    fn template_render_supports_each_and_if_eq_helpers() {
+        let template = TemplateRender::inline(
+            "{{#each issues}}{{#if (if_eq state \"open\")}}#{{number}} {{title}}\n{{/if}}{{/each}}",
+        )
+        .unwrap();
+        let text = render_with_options(
+            json!({
+                "issues": [
+                    {"number": 1, "title": "open", "state": "open"},
+                    {"number": 2, "title": "closed", "state": "closed"}
+                ]
+            }),
+            OutputFormat::Json,
+            &RenderOptions {
+                template: Some(template),
+                ..RenderOptions::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(text, "#1 open\n");
+    }
+
+    #[test]
+    fn template_render_supports_json_compact_count_and_truncate_helpers() {
+        let template = TemplateRender::inline(
+            "{{count items}}|{{truncate title 6}}|{{compact meta}}|{{json meta}}",
+        )
+        .unwrap();
+        let text = render_with_options(
+            json!({
+                "items": [1, 2, 3],
+                "title": "connector",
+                "meta": {"risk": "low"}
+            }),
+            OutputFormat::Json,
+            &RenderOptions {
+                template: Some(template),
+                ..RenderOptions::default()
+            },
+        )
+        .unwrap();
+
+        assert!(text.starts_with("3|conne…|{\"risk\":\"low\"}|{\n"));
+        assert!(text.ends_with("}\n"));
+    }
+
+    #[test]
+    fn template_render_supports_timeago_helper() {
+        let template = TemplateRender::inline("{{timeago ts}}").unwrap();
+        let ts = (Utc::now() - Duration::hours(2)).to_rfc3339();
+        let text = render_with_options(
+            json!({ "ts": ts }),
+            OutputFormat::Json,
+            &RenderOptions {
+                template: Some(template),
+                ..RenderOptions::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(text, "2h ago\n");
+    }
+
+    #[test]
+    fn template_render_reports_missing_fields_in_strict_mode() {
+        let template = TemplateRender::inline("{{connector.slug}}").unwrap();
+        let error = render_with_options(
+            json!({"status": "ok"}),
+            OutputFormat::Json,
+            &RenderOptions {
+                template: Some(template),
+                ..RenderOptions::default()
+            },
+        )
+        .expect_err("missing template field should fail");
+
+        assert!(
+            error
+                .to_string()
+                .contains("failed to render Handlebars template"),
+            "unexpected error: {error:#}"
+        );
+    }
+
+    #[test]
+    fn template_render_loads_from_file() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("fwc-render-{unique}.hbs"));
+        std::fs::write(&path, "{{connector.slug}} from file").unwrap();
+
+        let template = TemplateRender::from_file(&path).unwrap();
+        assert_eq!(template.source, TemplateSource::File);
+
+        let text = render_with_options(
+            json!({"connector": {"slug": "github"}}),
+            OutputFormat::Json,
+            &RenderOptions {
+                template: Some(template),
+                ..RenderOptions::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(text, "github from file\n");
+    }
+
+    #[test]
+    fn template_metadata_captures_source_kind_and_path() {
+        let inline = TemplateRender::inline("{{status}}").unwrap();
+        assert_eq!(inline.metadata()["source"], "inline");
+
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("fwc-render-metadata-{unique}.hbs"));
+        std::fs::write(&path, "{{status}}").unwrap();
+        let from_file = TemplateRender::from_file(&path).unwrap();
+        assert_eq!(from_file.metadata()["source"], "file");
+        assert_eq!(from_file.metadata()["path"], path.display().to_string());
+    }
+
+    #[test]
+    fn invalid_inline_template_is_rejected() {
+        let error = TemplateRender::inline("{{#if status}}").expect_err("template should fail");
+        assert!(
+            error
+                .to_string()
+                .contains("failed to parse inline template"),
+            "unexpected error: {error:#}"
+        );
+    }
+
+    #[test]
+    fn invalid_template_file_is_rejected() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("fwc-render-invalid-{unique}.hbs"));
+        std::fs::write(&path, "{{#if status}}").unwrap();
+        let error = TemplateRender::from_file(&path).expect_err("template should fail");
+        assert!(
+            error.to_string().contains(&format!(
+                "failed to parse template file `{}`",
+                path.display()
+            )),
+            "unexpected error: {error:#}"
+        );
+    }
+
+    #[test]
+    fn extract_render_selects_nested_field() {
+        let extract = ExtractRender::inline(".connector.slug").unwrap();
+        let text = render_with_options(
+            json!({"connector": {"slug": "github", "name": "GitHub"}}),
+            OutputFormat::Json,
+            &RenderOptions {
+                extract: Some(extract),
+                ..RenderOptions::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(text, "\"github\"\n");
+    }
+
+    #[test]
+    fn extract_render_supports_array_indexing() {
+        let extract = ExtractRender::inline(".issues[0].title").unwrap();
+        let text = render_with_options(
+            json!({
+                "issues": [
+                    {"title": "open", "number": 1},
+                    {"title": "closed", "number": 2}
+                ]
+            }),
+            OutputFormat::Json,
+            &RenderOptions {
+                extract: Some(extract),
+                ..RenderOptions::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(text, "\"open\"\n");
+    }
+
+    #[test]
+    fn extract_render_supports_object_construction() {
+        let extract = ExtractRender::inline(".issues[] | {title, number}").unwrap();
+        let text = render_with_options(
+            json!({
+                "issues": [
+                    {"title": "open", "number": 1, "state": "open"},
+                    {"title": "closed", "number": 2, "state": "closed"}
+                ]
+            }),
+            OutputFormat::Json,
+            &RenderOptions {
+                extract: Some(extract),
+                ..RenderOptions::default()
+            },
+        )
+        .unwrap();
+        let payload: Value = serde_json::from_str(&text).unwrap();
+
+        assert_eq!(
+            payload,
+            json!([
+                {"title": "open", "number": 1},
+                {"title": "closed", "number": 2}
+            ])
+        );
+    }
+
+    #[test]
+    fn extract_render_supports_length_queries() {
+        let extract = ExtractRender::inline(".issues | length").unwrap();
+        let text = render_with_options(
+            json!({
+                "issues": [
+                    {"title": "open"},
+                    {"title": "closed"}
+                ]
+            }),
+            OutputFormat::Json,
+            &RenderOptions {
+                extract: Some(extract),
+                ..RenderOptions::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(text, "2\n");
+    }
+
+    #[test]
+    fn extract_render_returns_null_for_empty_results() {
+        let extract = ExtractRender::inline(".issues[] | select(.state == \"missing\")").unwrap();
+        let text = render_with_options(
+            json!({
+                "issues": [
+                    {"title": "open", "state": "open"},
+                    {"title": "closed", "state": "closed"}
+                ]
+            }),
+            OutputFormat::Json,
+            &RenderOptions {
+                extract: Some(extract),
+                ..RenderOptions::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(text, "null\n");
+    }
+
+    #[test]
+    fn invalid_extract_filter_is_rejected() {
+        let error = ExtractRender::inline(".issues[").expect_err("filter should fail");
+        assert!(
+            error.to_string().contains("failed to parse jq filter"),
+            "unexpected error: {error:#}"
+        );
+    }
+
+    #[test]
+    fn humanize_timestamp_falls_back_to_original_value_for_invalid_input() {
+        assert_eq!(
+            humanize_timestamp("not-a-timestamp", Utc::now()),
+            "not-a-timestamp"
+        );
+    }
+
+    #[test]
+    fn relative_time_label_handles_future_values() {
+        let now = Utc::now();
+        let label = relative_time_label(now + Duration::minutes(15), now);
+        assert_eq!(label, "in 15m");
+    }
+
+    // ── NDJSON rendering ────────────────────────────────────────────
+
+    #[test]
+    fn ndjson_array_emits_one_line_per_item() {
+        let data = json!([{"a": 1}, {"a": 2}, {"a": 3}]);
+        let text = render(data, OutputFormat::Ndjson).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 3);
+        assert!(lines[0].contains("\"a\":1") || lines[0].contains("\"a\": 1"));
+    }
+
+    #[test]
+    fn ndjson_single_object_emits_one_line() {
+        let data = json!({"status": "ok"});
+        let text = render(data, OutputFormat::Ndjson).unwrap();
+        assert_eq!(text.lines().count(), 1);
+    }
+
+    #[test]
+    fn ndjson_wrapper_object_with_items_streams_items() {
+        let data = json!({
+            "total": 2,
+            "items": [{"id": 1}, {"id": 2}]
+        });
+        let text = render(data, OutputFormat::Ndjson).unwrap();
+        assert_eq!(text.lines().count(), 2);
+    }
+
+    #[test]
+    fn ndjson_empty_array() {
+        let data = json!([]);
+        let text = render(data, OutputFormat::Ndjson).unwrap();
+        // Empty array produces empty string, trailing newline added.
+        assert!(text.trim().is_empty() || text == "\n");
+    }
+
+    #[test]
+    fn ndjson_each_line_is_valid_json() {
+        let data = json!([
+            {"name": "alice", "score": 10},
+            {"name": "bob", "score": 20},
+        ]);
+        let text = render(data, OutputFormat::Ndjson).unwrap();
+        for line in text.lines() {
+            if !line.is_empty() {
+                let parsed: Value =
+                    serde_json::from_str(line).expect("each NDJSON line should be valid JSON");
+                assert!(parsed.is_object());
+            }
+        }
+    }
+
+    #[test]
+    fn ndjson_scalar_value() {
+        let data = json!("hello");
+        let text = render(data, OutputFormat::Ndjson).unwrap();
+        assert_eq!(text.trim(), "\"hello\"");
+    }
+
+    #[test]
+    fn ndjson_wrapper_connectors_field() {
+        let data = json!({
+            "status": "ok",
+            "connectors": [
+                {"slug": "github"},
+                {"slug": "slack"},
+            ]
+        });
+        let text = render(data, OutputFormat::Ndjson).unwrap();
+        assert_eq!(text.lines().count(), 2);
+        assert!(text.contains("github"));
+        assert!(text.contains("slack"));
     }
 }

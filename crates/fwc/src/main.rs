@@ -5,13 +5,23 @@ mod audit;
 mod catalog;
 mod export_tools;
 mod format_table;
-#[allow(dead_code, clippy::writeln_empty_string, clippy::missing_const_for_fn, clippy::collection_is_never_read, clippy::needless_continue)] mod history;
+#[allow(
+    dead_code,
+    clippy::writeln_empty_string,
+    clippy::missing_const_for_fn,
+    clippy::collection_is_never_read,
+    clippy::needless_continue
+)]
+mod history;
 #[allow(dead_code)] // Discovery types wired into host-backed commands in later beads.
 mod identifier;
 mod intent;
+#[allow(dead_code)]
+mod pipe;
 #[allow(dead_code)] // Contract types wired into host-backed commands in later beads.
 mod readiness;
 mod recovery;
+#[allow(dead_code)] // Extract/transform features pending invoke integration.
 mod render;
 mod schema_nav;
 mod search;
@@ -32,7 +42,7 @@ use crate::readiness::{
     DiscoveredConnector, DiscoveredOperation, DiscoveryCatalog, SelectorError, SelectorErrorKind,
 };
 use crate::render::{
-    OutputFormat, RenderOptions, TemplateRender, render_with_options, token_stats,
+    ExtractRender, OutputFormat, RenderOptions, TemplateRender, render_with_options, token_stats,
 };
 
 const ABOUT: &str =
@@ -72,6 +82,7 @@ Examples:
   fwc simulate github issues.create --file payload.json
   fwc invoke github issues.create --file payload.json
   fwc invoke github issues.create --template-file issue_summary.hbs
+  fwc show github --json --extract '.connector.slug'
   fwc export-tools --format mcp --json
   fwc export-tools --format claude github
   fwc export-tools --format openai --risk-max medium --output tools.json
@@ -101,6 +112,10 @@ struct Cli {
     /// Render the JSON payload through a Handlebars template loaded from a file.
     #[arg(long, global = true, value_name = "PATH", conflicts_with = "template")]
     template_file: Option<PathBuf>,
+
+    /// Apply a jq/jaq filter to successful JSON output.
+    #[arg(long, global = true, alias = "jq", value_name = "FILTER", conflicts_with_all = ["template", "template_file"])]
+    extract: Option<String>,
 
     /// Explicit column list for table/CSV/TSV/Markdown formats (comma-separated).
     #[arg(long, global = true, value_delimiter = ',')]
@@ -244,6 +259,13 @@ enum Commands {
     /// status, time range, or entry ID for debugging and replay.
     #[command(visible_alias = "audit")]
     History(HistoryArgs),
+
+    /// Chain two operations: output of A feeds input of B via field mapping.
+    ///
+    /// Use `--map` to define source-to-target field mappings, or `--map-file`
+    /// for complex mappings defined in a JSON file.
+    #[command(visible_alias = "chain")]
+    Pipe(PipeArgs),
 }
 
 #[derive(Args, Debug, Serialize)]
@@ -715,7 +737,6 @@ struct SuggestArgs {
     limit: usize,
 }
 
-
 #[derive(Args, Debug, Serialize)]
 struct TemplateArgs {
     /// Connector id, alias, or family name.
@@ -772,6 +793,31 @@ struct HistoryArgs {
     limit: usize,
 }
 
+#[derive(Args, Debug, Serialize)]
+struct PipeArgs {
+    /// Source operation (e.g. `github.list_issues`).
+    source: String,
+
+    /// Target operation (e.g. `slack.send_message`).
+    target: String,
+
+    /// Field mapping expression (e.g. `"title -> text, body -> desc"`).
+    #[arg(long)]
+    map: Option<String>,
+
+    /// Path to a JSON mapping file.
+    #[arg(long, value_name = "PATH")]
+    map_file: Option<PathBuf>,
+
+    /// Preview the mapped input without executing the target operation.
+    #[arg(long)]
+    dry_run: bool,
+
+    /// Include intermediate output from the source operation.
+    #[arg(long)]
+    include_intermediate: bool,
+}
+
 fn main() -> ExitCode {
     let raw_args = std::env::args().collect::<Vec<_>>();
     let fallback_format = infer_output_format(&raw_args);
@@ -822,6 +868,17 @@ fn execute(raw_args: &[String]) -> Result<ExecutionOutcome> {
                 &prepared.render_options,
             ) {
                 Ok(outcome) => Ok(outcome),
+                Err(error) if prepared.render_options.has_extract() => render_dispatch(
+                    extract_render_failure_dispatch(
+                        &prepared.received_args,
+                        &prepared.normalized_args,
+                        &error,
+                        &prepared.render_options,
+                    ),
+                    prepared.format,
+                    false,
+                    &RenderOptions::default(),
+                ),
                 Err(error) if prepared.render_options.has_template() => render_dispatch(
                     template_render_failure_dispatch(
                         &prepared.received_args,
@@ -866,16 +923,22 @@ fn render_dispatch(
     include_token_stats: bool,
     render_options: &RenderOptions,
 ) -> Result<ExecutionOutcome> {
+    let effective_render_options = if dispatch.exit_code.is_success() {
+        render_options.clone()
+    } else {
+        render_options.without_extract()
+    };
+
     annotate_output_contract(
         &mut dispatch.payload,
         format,
         dispatch.exit_code,
         include_token_stats,
-        render_options,
+        &effective_render_options,
     );
 
     Ok(ExecutionOutcome {
-        text: render_with_options(dispatch.payload, format, render_options)?,
+        text: render_with_options(dispatch.payload, format, &effective_render_options)?,
         exit_code: dispatch.exit_code.into(),
     })
 }
@@ -888,7 +951,9 @@ fn annotate_output_contract(
     render_options: &RenderOptions,
 ) {
     let template_active = render_options.has_template();
-    let token_stats_enabled = include_token_stats && !template_active;
+    let extract_active = render_options.has_extract();
+    let transform_active = render_options.has_transform();
+    let token_stats_enabled = include_token_stats && !transform_active;
     let exit = json!({
         "code": exit_code.as_u8(),
         "name": exit_code.label(),
@@ -908,8 +973,14 @@ fn annotate_output_contract(
                 "newline_terminated": true,
                 "token_stats_requested": include_token_stats,
                 "token_stats_enabled": token_stats_enabled,
-                "token_stats_unavailable_reason": if include_token_stats && template_active {
-                    Some("disabled when output is post-processed by a Handlebars template")
+                "token_stats_unavailable_reason": if include_token_stats && transform_active {
+                    Some(if template_active {
+                        "disabled when output is post-processed by a Handlebars template"
+                    } else if extract_active {
+                        "disabled when output is post-processed by a jq extract filter"
+                    } else {
+                        "disabled when output is post-processed"
+                    })
                 } else {
                     None
                 },
@@ -935,8 +1006,10 @@ fn infer_token_stats_requested(args: &[String]) -> bool {
     args.iter().any(|arg| arg == "--token-stats")
 }
 
+#[allow(clippy::too_many_lines)]
 fn build_render_options(
     cli: &Cli,
+    format: OutputFormat,
     received_args: &[String],
     normalized_args: &[String],
 ) -> std::result::Result<RenderOptions, PrepareCliError> {
@@ -990,8 +1063,63 @@ fn build_render_options(
         (Some(_), Some(_)) => unreachable!("clap enforces template flag conflicts"),
     };
 
+    let extract = match cli.extract.as_ref() {
+        Some(_filter) if !format.is_json_like() => {
+            return Err(PrepareCliError::Structured(structured_error(
+                "extract-requires-json-output",
+                "The `--extract` filter only runs on JSON output. Re-run with `--json`, `--format jsonl`, or `--format ndjson`.",
+                CliExitCode::Validation,
+                true,
+                received_args,
+                normalized_args,
+                ErrorDetails {
+                    did_you_mean: vec![
+                        "Did you mean `--json --extract '<filter>'`?".to_owned(),
+                        "Or `--format ndjson --extract '<filter>'` for line-oriented JSON output?"
+                            .to_owned(),
+                    ],
+                    examples: vec![
+                        "fwc show github --json --extract '.connector.slug'".to_owned(),
+                        "fwc search github --format ndjson --extract '.results[]'".to_owned(),
+                    ],
+                    next_actions: vec![
+                        "Switch the output format to JSON before applying `--extract`."
+                            .to_owned(),
+                        "Use plain TOON or tabular output without `--extract` if you want the full human-oriented view."
+                            .to_owned(),
+                    ],
+                },
+            )));
+        }
+        Some(filter) => Some(ExtractRender::inline(filter.clone()).map_err(|error| {
+            PrepareCliError::Structured(structured_error(
+                "invalid-extract-filter",
+                format!("The jq extract filter is invalid: {error:#}"),
+                CliExitCode::Validation,
+                true,
+                received_args,
+                normalized_args,
+                ErrorDetails {
+                    did_you_mean: Vec::new(),
+                    examples: vec![
+                        "fwc show github --json --extract '.connector.slug'".to_owned(),
+                        "fwc search github --json --extract '.results | length'".to_owned(),
+                        "fwc invoke github issues.create --json --extract '.captures.operation'".to_owned(),
+                    ],
+                    next_actions: vec![
+                        "Fix the jq syntax and retry.".to_owned(),
+                        "Inspect the raw payload with `--json` first if you are unsure about the field path."
+                            .to_owned(),
+                    ],
+                },
+            ))
+        })?),
+        None => None,
+    };
+
     Ok(RenderOptions {
         template,
+        extract,
         tabular_columns: cli.columns.clone(),
         tabular_sort_by: cli.sort_by.clone(),
         tabular_limit: cli.limit,
@@ -1082,6 +1210,53 @@ fn template_render_failure_dispatch(
     dispatch
 }
 
+fn extract_render_failure_dispatch(
+    received_args: &[String],
+    normalized_args: &[String],
+    error: &anyhow::Error,
+    render_options: &RenderOptions,
+) -> DispatchOutcome {
+    let mut dispatch = structured_error(
+        "extract-render-failed",
+        format!("The jq extract filter could not be evaluated against this command's JSON payload: {error:#}"),
+        CliExitCode::Validation,
+        true,
+        received_args,
+        normalized_args,
+        ErrorDetails {
+            did_you_mean: Vec::new(),
+            examples: vec![
+                "fwc show github --json --extract '.connector.slug'".to_owned(),
+                "fwc search github --json --extract '.results | length'".to_owned(),
+                "fwc show github --json".to_owned(),
+            ],
+            next_actions: vec![
+                "Inspect the raw payload with `--json` first to confirm the field path you are selecting."
+                    .to_owned(),
+                "Use jq-safe patterns like `?`, `//`, or narrower selectors if the payload shape can vary."
+                    .to_owned(),
+            ],
+        },
+    );
+
+    if let Some(error_obj) = dispatch
+        .payload
+        .get_mut("error")
+        .and_then(Value::as_object_mut)
+    {
+        error_obj.insert(
+            "debug_chain".to_owned(),
+            json!(error.chain().map(ToString::to_string).collect::<Vec<_>>()),
+        );
+        error_obj.insert(
+            "transform".to_owned(),
+            render_options.transform_metadata().unwrap_or(Value::Null),
+        );
+    }
+
+    dispatch
+}
+
 fn dispatch(cli: &Cli) -> Result<DispatchOutcome> {
     let outcome = match &cli.command {
         Commands::Guide(args) => {
@@ -1125,6 +1300,7 @@ fn dispatch(cli: &Cli) -> Result<DispatchOutcome> {
         Commands::Template(args) => template_dispatch(args)?,
         Commands::Validate(args) => validate_dispatch(args)?,
         Commands::History(args) => history_dispatch(args)?,
+        Commands::Pipe(args) => pipe_dispatch(args)?,
     };
 
     Ok(outcome)
@@ -1176,7 +1352,10 @@ fn search_dispatch(args: &SearchArgs) -> Result<DispatchOutcome> {
         connector: args.connector.clone(),
         capability: args.capability.clone(),
         risk_max: args.risk.as_deref().and_then(search::RiskCeiling::parse),
-        safety_max: args.safety.as_deref().and_then(search::SafetyCeiling::parse),
+        safety_max: args
+            .safety
+            .as_deref()
+            .and_then(search::SafetyCeiling::parse),
         archetype: args.archetype.clone(),
         category: args.category.clone(),
         idempotent_only: args.idempotent,
@@ -1189,7 +1368,9 @@ fn search_dispatch(args: &SearchArgs) -> Result<DispatchOutcome> {
 
     let active_filters: Vec<String> = [
         args.connector.as_deref().map(|v| format!("connector={v}")),
-        args.capability.as_deref().map(|v| format!("capability={v}")),
+        args.capability
+            .as_deref()
+            .map(|v| format!("capability={v}")),
         args.risk.as_deref().map(|v| format!("risk<={v}")),
         args.safety.as_deref().map(|v| format!("safety<={v}")),
         args.archetype.as_deref().map(|v| format!("archetype={v}")),
@@ -1680,7 +1861,6 @@ fn export_tools_dispatch(args: &ExportToolsArgs) -> Result<DispatchOutcome> {
     })
 }
 
-
 #[allow(dead_code, clippy::too_many_lines)]
 fn suggest_dispatch(args: &SuggestArgs) -> Result<DispatchOutcome> {
     let catalog = DiscoveryCatalog::load()?;
@@ -1922,7 +2102,6 @@ fn classify_action_family(capability: &str) -> String {
     }
 }
 
-
 fn template_dispatch(args: &TemplateArgs) -> Result<DispatchOutcome> {
     let catalog = DiscoveryCatalog::load()?;
     let connector = match catalog.resolve_connector(&args.connector) {
@@ -1988,7 +2167,6 @@ fn template_dispatch(args: &TemplateArgs) -> Result<DispatchOutcome> {
         exit_code: CliExitCode::Success,
     })
 }
-
 
 fn validate_dispatch(args: &ValidateArgs) -> Result<DispatchOutcome> {
     let catalog = DiscoveryCatalog::load()?;
@@ -2167,6 +2345,60 @@ fn history_dispatch(args: &HistoryArgs) -> Result<DispatchOutcome> {
                 "fwc history --connector github",
                 "fwc history --status error",
                 "fwc history --since 1h",
+            ],
+        }),
+        exit_code: CliExitCode::Success,
+    })
+}
+
+fn pipe_dispatch(args: &PipeArgs) -> Result<DispatchOutcome> {
+    // Parse the mapping spec.
+    let spec = if let Some(ref map_expr) = args.map {
+        pipe::parse_map_expression(map_expr).map_err(|e| anyhow::anyhow!("{e}"))?
+    } else if let Some(ref path) = args.map_file {
+        let content = std::fs::read_to_string(path)?;
+        pipe::parse_map_file(&content).map_err(|e| anyhow::anyhow!("{e}"))?
+    } else {
+        return Ok(DispatchOutcome {
+            payload: json!({
+                "status": "error",
+                "command": "pipe",
+                "error": {
+                    "type": "missing-mapping",
+                    "message": "No mapping provided. Use --map or --map-file.",
+                },
+                "next_actions": [
+                    format!("fwc pipe {} {} --map 'field_a -> field_b'", args.source, args.target),
+                ],
+            }),
+            exit_code: CliExitCode::UnknownCommand,
+        });
+    };
+
+    // Build pipe plan.
+    let plan = pipe::PipePlan {
+        source_operation: args.source.clone(),
+        target_operation: args.target.clone(),
+        mapping: spec,
+        requires_approval: false,
+        preview_input: None,
+    };
+
+    Ok(DispatchOutcome {
+        payload: json!({
+            "status": "planned",
+            "command": "pipe",
+            "message": format!(
+                "Pipe plan: {} -> {} ({} mapping rule(s)). \
+                 Execution requires host integration (not yet available).",
+                args.source, args.target, plan.mapping.rules.len()
+            ),
+            "plan": plan,
+            "dry_run": args.dry_run,
+            "include_intermediate": args.include_intermediate,
+            "next_actions": [
+                format!("fwc schema {} --scaffold", args.source),
+                format!("fwc schema {} --required-only", args.target),
             ],
         }),
         exit_code: CliExitCode::Success,
@@ -3140,6 +3372,7 @@ struct ExecutionOutcome {
     exit_code: ExitCode,
 }
 
+#[derive(Debug)]
 struct PreparedCli {
     cli: Cli,
     format: OutputFormat,
@@ -3277,7 +3510,8 @@ fn prepare_cli(received_args: &[String]) -> std::result::Result<PreparedCli, Pre
             } else {
                 cli.format
             };
-            let render_options = build_render_options(&cli, received_args, &normalized.args)?;
+            let render_options =
+                build_render_options(&cli, format, received_args, &normalized.args)?;
             Ok(PreparedCli {
                 cli,
                 format,
@@ -3519,6 +3753,11 @@ fn parse_output_format(value: &str) -> OutputFormat {
     match value {
         "json" => OutputFormat::Json,
         "jsonl" => OutputFormat::Jsonl,
+        "ndjson" => OutputFormat::Ndjson,
+        "table" => OutputFormat::Table,
+        "csv" => OutputFormat::Csv,
+        "tsv" => OutputFormat::Tsv,
+        "markdown" => OutputFormat::Markdown,
         _ => OutputFormat::Toon,
     }
 }
@@ -3529,12 +3768,19 @@ fn first_command_index(args: &[String]) -> Option<usize> {
     while index < args.len() {
         let current = args[index].as_str();
         match current {
-            "--format" | "--host" | "--template" | "--template-file" => index += 2,
-            "--json" | "-h" | "--help" | "-V" | "--version" => index += 1,
+            "--format" | "--host" | "--template" | "--template-file" | "--extract"
+            | "--sort-by" | "--limit" | "--columns" => index += 2,
+            "--json" | "--token-stats" | "--no-headers" | "-h" | "--help" | "-V" | "--version" => {
+                index += 1;
+            }
             _ if current.starts_with("--format=")
                 || current.starts_with("--host=")
                 || current.starts_with("--template=")
-                || current.starts_with("--template-file=") =>
+                || current.starts_with("--template-file=")
+                || current.starts_with("--extract=")
+                || current.starts_with("--sort-by=")
+                || current.starts_with("--limit=")
+                || current.starts_with("--columns=") =>
             {
                 index += 1;
             }
@@ -4006,7 +4252,7 @@ fn enrich_unknown_guide_command(payload: &mut Value, command: Option<&str>) {
 mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    use super::{Cli, CliExitCode, catalog, execute, normalize_args};
+    use super::{Cli, CliExitCode, PrepareCliError, catalog, execute, normalize_args, prepare_cli};
     use clap::CommandFactory;
     use serde_json::Value;
 
@@ -4240,6 +4486,79 @@ mod tests {
 
         assert_eq!(exit_code, CliExitCode::Validation.into());
         assert_eq!(payload["error"]["type"], "invalid-template-file");
+    }
+
+    #[test]
+    fn execute_show_supports_extract_with_json_output() {
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "show",
+            "github",
+            "--extract",
+            ".connector.slug",
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload, Value::String("github".to_owned()));
+    }
+
+    #[test]
+    fn execute_show_supports_extract_alias() {
+        let (exit_code, payload) =
+            execute_json(&["fwc", "--json", "show", "github", "--jq", ".connector.slug"]);
+
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload, Value::String("github".to_owned()));
+    }
+
+    #[test]
+    fn execute_returns_validation_error_for_invalid_extract_filter() {
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "show",
+            "github",
+            "--extract",
+            ".connector[",
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::Validation.into());
+        assert_eq!(payload["error"]["type"], "invalid-extract-filter");
+    }
+
+    #[test]
+    fn prepare_cli_rejects_extract_without_json_output() {
+        let Err(error) = prepare_cli(
+            &["fwc", "show", "github", "--extract", ".connector.slug"].map(str::to_owned),
+        ) else {
+            panic!("TOON output should reject --extract");
+        };
+
+        let PrepareCliError::Structured(dispatch) = error else {
+            panic!("expected structured validation error");
+        };
+
+        assert_eq!(dispatch.exit_code, CliExitCode::Validation);
+        assert_eq!(
+            dispatch.payload["error"]["type"],
+            "extract-requires-json-output"
+        );
+    }
+
+    #[test]
+    fn execute_extract_is_skipped_when_command_fails() {
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "show",
+            "definitely-not-a-real-connector",
+            "--extract",
+            ".connector.slug",
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::Validation.into());
+        assert_eq!(payload["error"]["type"], "connector-not-found");
     }
 
     #[test]

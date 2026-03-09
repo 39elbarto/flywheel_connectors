@@ -16,7 +16,7 @@ use crate::{
     types::{
         ApiErrorResponse, CallListResponse, MediaListResponse, MessageListResponse,
         PhoneNumberListResponse, RecordingListResponse, TwilioAccount, TwilioCall,
-        TwilioMediaResource, TwilioMessage, TwimlTemplate,
+        TwilioMediaResource, TwilioMessage, TwimlTemplate, WhatsAppMessage,
     },
 };
 

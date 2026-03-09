@@ -153,6 +153,25 @@ pub struct PhoneNumberListResponse {
     pub next_page_uri: Option<String>,
 }
 
+/// A WhatsApp message (same Messages API with `whatsapp:` prefix on numbers).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WhatsAppMessage {
+    pub sid: String,
+    pub status: String,
+    pub to: String,
+    pub from: String,
+    pub body: Option<String>,
+    pub date_created: Option<String>,
+    pub date_updated: Option<String>,
+    pub date_sent: Option<String>,
+    pub price: Option<String>,
+    pub price_unit: Option<String>,
+    pub num_media: Option<String>,
+    pub num_segments: Option<String>,
+    pub direction: Option<String>,
+    pub uri: Option<String>,
+}
+
 /// Twilio API error response.
 #[derive(Debug, Clone, Deserialize)]
 pub struct ApiErrorResponse {

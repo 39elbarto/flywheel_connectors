@@ -381,28 +381,15 @@ async fn host_discovery_with_subprocess_connectors() -> Result<(), Box<dyn std::
 
 type StderrLogs = Arc<StdMutex<Vec<String>>>;
 
-fn test_cx() -> asupersync::Cx {
-    asupersync::Cx::current().unwrap_or_else(asupersync::Cx::for_testing)
-}
-
 fn build_http_client(builder: reqwest::ClientBuilder) -> Result<reqwest::Client, reqwest::Error> {
-    asupersync_tokio_compat::runtime::with_tokio_context_sync(|| builder.build())
+    builder.build()
 }
 
 async fn http_get_status(
     client: reqwest::Client,
     url: String,
 ) -> Result<reqwest::StatusCode, Box<dyn std::error::Error>> {
-    let cx = test_cx();
-    let status = asupersync_tokio_compat::runtime::with_tokio_context(&cx, move || async move {
-        client
-            .get(url)
-            .send()
-            .await
-            .map(|response| response.status())
-    })
-    .await
-    .ok_or_else(|| std::io::Error::other("tokio-compat GET status request cancelled"))??;
+    let status = client.get(url).send().await?.status();
     Ok(status)
 }
 
@@ -437,20 +424,14 @@ where
     B: serde::Serialize + Send + 'static,
     T: DeserializeOwned + Send + 'static,
 {
-    let cx = test_cx();
-    let response = asupersync_tokio_compat::runtime::with_tokio_context(&cx, move || async move {
-        let response = client
-            .put(url)
-            .json(&body)
-            .send()
-            .await?
-            .error_for_status()?;
-        let body = response.json::<T>().await?;
-        Ok::<_, reqwest::Error>(body)
-    })
-    .await
-    .ok_or_else(|| std::io::Error::other("tokio-compat PUT JSON request cancelled"))??;
-    Ok(response)
+    let response = client
+        .put(url)
+        .json(&body)
+        .send()
+        .await?
+        .error_for_status()?;
+    let body = response.json::<T>().await?;
+    Ok(body)
 }
 
 async fn http_delete_json<T>(
@@ -460,15 +441,9 @@ async fn http_delete_json<T>(
 where
     T: DeserializeOwned + Send + 'static,
 {
-    let cx = test_cx();
-    let response = asupersync_tokio_compat::runtime::with_tokio_context(&cx, move || async move {
-        let response = client.delete(url).send().await?.error_for_status()?;
-        let body = response.json::<T>().await?;
-        Ok::<_, reqwest::Error>(body)
-    })
-    .await
-    .ok_or_else(|| std::io::Error::other("tokio-compat DELETE JSON request cancelled"))??;
-    Ok(response)
+    let response = client.delete(url).send().await?.error_for_status()?;
+    let body = response.json::<T>().await?;
+    Ok(body)
 }
 
 struct HttpJsonResponse<T> {
@@ -485,25 +460,19 @@ async fn http_get_json_response<T>(
 where
     T: DeserializeOwned + Send + 'static,
 {
-    let cx = test_cx();
-    let response = asupersync_tokio_compat::runtime::with_tokio_context(&cx, move || async move {
-        let mut request = client.get(url);
-        if let Some(headers) = headers {
-            request = request.headers(headers);
-        }
-        let response = request.send().await?.error_for_status()?;
-        let status = response.status();
-        let headers = response.headers().clone();
-        let body = response.json::<T>().await?;
-        Ok::<_, reqwest::Error>(HttpJsonResponse {
-            status,
-            headers,
-            body,
-        })
+    let mut request = client.get(url);
+    if let Some(hdrs) = headers {
+        request = request.headers(hdrs);
+    }
+    let response = request.send().await?.error_for_status()?;
+    let status = response.status();
+    let resp_headers = response.headers().clone();
+    let body = response.json::<T>().await?;
+    Ok(HttpJsonResponse {
+        status,
+        headers: resp_headers,
+        body,
     })
-    .await
-    .ok_or_else(|| std::io::Error::other("tokio-compat GET JSON request cancelled"))??;
-    Ok(response)
 }
 
 async fn http_post_json_response<B, T>(
@@ -516,25 +485,19 @@ where
     B: serde::Serialize + Send + 'static,
     T: DeserializeOwned + Send + 'static,
 {
-    let cx = test_cx();
-    let response = asupersync_tokio_compat::runtime::with_tokio_context(&cx, move || async move {
-        let mut request = client.post(url).json(&body);
-        if let Some(headers) = headers {
-            request = request.headers(headers);
-        }
-        let response = request.send().await?.error_for_status()?;
-        let status = response.status();
-        let headers = response.headers().clone();
-        let body = response.json::<T>().await?;
-        Ok::<_, reqwest::Error>(HttpJsonResponse {
-            status,
-            headers,
-            body,
-        })
+    let mut request = client.post(url).json(&body);
+    if let Some(hdrs) = headers {
+        request = request.headers(hdrs);
+    }
+    let response = request.send().await?.error_for_status()?;
+    let status = response.status();
+    let resp_headers = response.headers().clone();
+    let body = response.json::<T>().await?;
+    Ok(HttpJsonResponse {
+        status,
+        headers: resp_headers,
+        body,
     })
-    .await
-    .ok_or_else(|| std::io::Error::other("tokio-compat POST JSON request cancelled"))??;
-    Ok(response)
 }
 
 fn assert_cache_headers(

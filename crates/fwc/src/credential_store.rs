@@ -238,9 +238,7 @@ impl CredentialStore {
     /// Create a store at the default path (`~/.fwc/credentials.enc`).
     pub fn default_path() -> Self {
         let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-        let path = PathBuf::from(home)
-            .join(".fwc")
-            .join("credentials.enc");
+        let path = PathBuf::from(home).join(".fwc").join("credentials.enc");
         Self {
             path,
             key: derive_key(),
@@ -352,8 +350,7 @@ impl CredentialStore {
         let encrypted = std::fs::read(&self.path)
             .map_err(|e| format!("failed to read credential store: {e}"))?;
         let plaintext = decrypt(&encrypted, &self.key)?;
-        serde_json::from_slice(&plaintext)
-            .map_err(|e| format!("credential store corrupted: {e}"))
+        serde_json::from_slice(&plaintext).map_err(|e| format!("credential store corrupted: {e}"))
     }
 
     fn save_data(&self, data: &StoreData) -> Result<(), String> {
@@ -361,8 +358,8 @@ impl CredentialStore {
             std::fs::create_dir_all(parent)
                 .map_err(|e| format!("failed to create credential store directory: {e}"))?;
         }
-        let plaintext =
-            serde_json::to_vec(data).map_err(|e| format!("failed to serialize credentials: {e}"))?;
+        let plaintext = serde_json::to_vec(data)
+            .map_err(|e| format!("failed to serialize credentials: {e}"))?;
         let encrypted = encrypt(&plaintext, &self.key)?;
         std::fs::write(&self.path, encrypted)
             .map_err(|e| format!("failed to write credential store: {e}"))
@@ -825,10 +822,7 @@ mod tests {
 
     #[test]
     fn parse_credential_fields_multiple() {
-        let inputs = vec![
-            "username=admin".to_owned(),
-            "password=secret".to_owned(),
-        ];
+        let inputs = vec!["username=admin".to_owned(), "password=secret".to_owned()];
         let fields = parse_credential_fields(&inputs).unwrap();
         assert_eq!(fields.len(), 2);
         assert_eq!(fields["username"], "admin");
@@ -880,5 +874,392 @@ mod tests {
     fn validate_connector_id_max_length_ok() {
         let max = "a".repeat(64);
         assert!(validate_connector_id(&max).is_ok());
+    }
+
+    // ── Additional AuthMethod tests ────────────────────────────────
+
+    #[test]
+    fn auth_method_serde_all_variants() {
+        for (method, expected) in [
+            (AuthMethod::BearerToken, "\"bearer_token\""),
+            (AuthMethod::BasicAuth, "\"basic_auth\""),
+            (AuthMethod::OAuth2, "\"o_auth2\""),
+            (AuthMethod::ApiKey, "\"api_key\""),
+            (AuthMethod::SessionToken, "\"session_token\""),
+            (AuthMethod::SecretlessRef, "\"secretless_ref\""),
+            (AuthMethod::Custom, "\"custom\""),
+        ] {
+            let json = serde_json::to_string(&method).unwrap();
+            assert_eq!(json, expected);
+            let back: AuthMethod = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, method);
+        }
+    }
+
+    #[test]
+    fn auth_method_clone() {
+        let method = AuthMethod::OAuth2;
+        let cloned = method.clone();
+        assert_eq!(method, cloned);
+    }
+
+    #[test]
+    fn auth_method_debug() {
+        let debug = format!("{:?}", AuthMethod::BearerToken);
+        assert_eq!(debug, "BearerToken");
+    }
+
+    #[test]
+    fn detect_api_token_field() {
+        let mut fields = BTreeMap::new();
+        fields.insert("api_token".to_owned(), "tok_xyz".to_owned());
+        assert_eq!(AuthMethod::detect(&fields), AuthMethod::BearerToken);
+    }
+
+    #[test]
+    fn detect_empty_fields_is_custom() {
+        let fields = BTreeMap::new();
+        assert_eq!(AuthMethod::detect(&fields), AuthMethod::Custom);
+    }
+
+    #[test]
+    fn detect_credential_id_takes_priority() {
+        let mut fields = BTreeMap::new();
+        fields.insert("credential_id".to_owned(), "ref-1".to_owned());
+        fields.insert("token".to_owned(), "tok".to_owned());
+        assert_eq!(AuthMethod::detect(&fields), AuthMethod::SecretlessRef);
+    }
+
+    #[test]
+    fn detect_oauth2_takes_priority_over_basic() {
+        let mut fields = BTreeMap::new();
+        fields.insert("client_id".to_owned(), "id".to_owned());
+        fields.insert("client_secret".to_owned(), "sec".to_owned());
+        fields.insert("username".to_owned(), "user".to_owned());
+        fields.insert("password".to_owned(), "pass".to_owned());
+        assert_eq!(AuthMethod::detect(&fields), AuthMethod::OAuth2);
+    }
+
+    // ── Additional Credential tests ────────────────────────────────
+
+    #[test]
+    fn credential_serde_roundtrip_all_fields() {
+        let mut cred = Credential::new("github", sample_fields(), Some("work".to_owned()));
+        cred.touch();
+        let json = serde_json::to_string_pretty(&cred).unwrap();
+        let back: Credential = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.connector_id, "github");
+        assert_eq!(back.auth_method, AuthMethod::BearerToken);
+        assert_eq!(back.label.as_deref(), Some("work"));
+        assert!(back.last_used_at.is_some());
+        assert_eq!(back.get_field("token"), Some("ghp_abc123def456"));
+    }
+
+    #[test]
+    fn credential_no_label() {
+        let cred = Credential::new("slack", sample_basic_fields(), None);
+        assert!(cred.label.is_none());
+    }
+
+    #[test]
+    fn credential_get_field_multiple() {
+        let cred = Credential::new("jira", sample_basic_fields(), None);
+        assert_eq!(cred.get_field("username"), Some("admin"));
+        assert_eq!(cred.get_field("password"), Some("s3cr3t_password"));
+    }
+
+    #[test]
+    fn credential_clone() {
+        let cred = Credential::new("github", sample_fields(), Some("test".to_owned()));
+        let cloned = cred.clone();
+        assert_eq!(cloned.connector_id, cred.connector_id);
+        assert_eq!(cloned.auth_method, cred.auth_method);
+        assert_eq!(cloned.fields, cred.fields);
+    }
+
+    #[test]
+    fn credential_debug() {
+        let cred = Credential::new("github", sample_fields(), None);
+        let debug = format!("{cred:?}");
+        assert!(debug.contains("github"));
+    }
+
+    #[test]
+    fn credential_created_equals_updated() {
+        let cred = Credential::new("github", sample_fields(), None);
+        assert_eq!(cred.created_at, cred.updated_at);
+    }
+
+    #[test]
+    fn credential_touch_multiple_times() {
+        let mut cred = Credential::new("github", sample_fields(), None);
+        cred.touch();
+        let first = cred.last_used_at.unwrap();
+        cred.touch();
+        let second = cred.last_used_at.unwrap();
+        assert!(second >= first);
+    }
+
+    // ── Additional redaction tests ─────────────────────────────────
+
+    #[test]
+    fn redact_exactly_8_chars() {
+        assert_eq!(redact_value("abcdefgh"), "a***h");
+    }
+
+    #[test]
+    fn redact_7_chars() {
+        assert_eq!(redact_value("abcdefg"), "***");
+    }
+
+    #[test]
+    fn redact_single_char() {
+        assert_eq!(redact_value("x"), "***");
+    }
+
+    #[test]
+    fn redact_empty() {
+        assert_eq!(redact_value(""), "***");
+    }
+
+    #[test]
+    fn redacted_view_all_fields_redacted() {
+        let cred = Credential::new("jira", sample_basic_fields(), None);
+        let view = cred.redacted_view();
+        let fields = view["fields"].as_object().unwrap();
+        for (_, v) in fields {
+            assert!(v.as_str().unwrap().contains("***"));
+        }
+    }
+
+    #[test]
+    fn redacted_view_has_auth_method() {
+        let cred = Credential::new("github", sample_fields(), None);
+        let view = cred.redacted_view();
+        assert_eq!(view["auth_method"], "bearer_token");
+    }
+
+    #[test]
+    fn redacted_view_has_timestamps() {
+        let cred = Credential::new("github", sample_fields(), None);
+        let view = cred.redacted_view();
+        assert!(view["created_at"].is_string());
+        assert!(view["updated_at"].is_string());
+    }
+
+    // ── Additional encryption tests ────────────────────────────────
+
+    #[test]
+    fn encrypt_empty_plaintext() {
+        let key = test_key();
+        let encrypted = encrypt(b"", &key).unwrap();
+        assert!(!encrypted.is_empty());
+        let decrypted = decrypt(&encrypted, &key).unwrap();
+        assert!(decrypted.is_empty());
+    }
+
+    #[test]
+    fn encrypt_large_plaintext() {
+        let key = test_key();
+        let plaintext = vec![42u8; 10_000];
+        let encrypted = encrypt(&plaintext, &key).unwrap();
+        let decrypted = decrypt(&encrypted, &key).unwrap();
+        assert_eq!(decrypted, plaintext);
+    }
+
+    #[test]
+    fn decrypt_corrupted_ciphertext() {
+        let key = test_key();
+        let plaintext = b"test data";
+        let mut encrypted = encrypt(plaintext, &key).unwrap();
+        // Corrupt the ciphertext portion (after nonce)
+        if encrypted.len() > NONCE_LEN + 5 {
+            encrypted[NONCE_LEN + 5] ^= 0xFF;
+        }
+        let result = decrypt(&encrypted, &key);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn decrypt_empty_fails() {
+        let key = test_key();
+        let result = decrypt(&[], &key);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn encrypt_output_has_nonce_prefix() {
+        let key = test_key();
+        let encrypted = encrypt(b"test", &key).unwrap();
+        // Output should be at least NONCE_LEN + 16 (tag) + plaintext
+        assert!(encrypted.len() >= NONCE_LEN + 16 + 4);
+    }
+
+    // ── Additional CredentialStore tests ────────────────────────────
+
+    #[test]
+    fn store_multiple_credentials() {
+        let store = temp_store();
+        for connector in ["github", "slack", "jira", "notion", "linear"] {
+            let mut fields = BTreeMap::new();
+            fields.insert("token".to_owned(), format!("tok_{connector}"));
+            store
+                .add(Credential::new(connector, fields, None))
+                .unwrap();
+        }
+        assert_eq!(store.count().unwrap(), 5);
+        let ids = store.list_ids().unwrap();
+        assert!(ids.contains(&"github".to_owned()));
+        assert!(ids.contains(&"linear".to_owned()));
+    }
+
+    #[test]
+    fn store_update_changes_auth_method() {
+        let store = temp_store();
+        store
+            .add(Credential::new("github", sample_fields(), None))
+            .unwrap();
+        assert_eq!(
+            store.get("github").unwrap().unwrap().auth_method,
+            AuthMethod::BearerToken
+        );
+
+        // Add username and password fields
+        let mut new_fields = BTreeMap::new();
+        new_fields.insert("username".to_owned(), "user".to_owned());
+        new_fields.insert("password".to_owned(), "pass".to_owned());
+        store.update_fields("github", new_fields).unwrap();
+
+        // Now it should detect as BasicAuth (has both username+password along with token)
+        // Actually: token is still present, but detect checks order: credential_id > oauth2 > basic > bearer > api_key > session
+        // Since username+password are present, it should be BasicAuth
+        let loaded = store.get("github").unwrap().unwrap();
+        assert_eq!(loaded.auth_method, AuthMethod::BasicAuth);
+    }
+
+    #[test]
+    fn store_list_empty() {
+        let store = temp_store();
+        let list = store.list().unwrap();
+        assert!(list.is_empty());
+    }
+
+    #[test]
+    fn store_list_ids_empty() {
+        let store = temp_store();
+        let ids = store.list_ids().unwrap();
+        assert!(ids.is_empty());
+    }
+
+    #[test]
+    fn store_list_ids_sorted() {
+        let store = temp_store();
+        // BTreeMap keeps keys sorted
+        store
+            .add(Credential::new("zzz", sample_fields(), None))
+            .unwrap();
+        store
+            .add(Credential::new("aaa", sample_fields(), None))
+            .unwrap();
+        store
+            .add(Credential::new("mmm", sample_fields(), None))
+            .unwrap();
+        let ids = store.list_ids().unwrap();
+        assert_eq!(ids, vec!["aaa", "mmm", "zzz"]);
+    }
+
+    #[test]
+    fn store_path_method() {
+        let store = temp_store();
+        assert!(store.path().to_str().unwrap().contains("credentials.enc"));
+    }
+
+    #[test]
+    fn store_remove_nonexistent() {
+        let store = temp_store();
+        assert!(!store.remove("nope").unwrap());
+    }
+
+    // ── Additional CLI parsing tests ───────────────────────────────
+
+    #[test]
+    fn parse_field_special_chars_in_value() {
+        let (k, v) = parse_credential_field("token=abc!@#$%^&*()").unwrap();
+        assert_eq!(k, "token");
+        assert_eq!(v, "abc!@#$%^&*()");
+    }
+
+    #[test]
+    fn parse_field_url_value() {
+        let (k, v) = parse_credential_field("base_url=https://api.example.com/v2").unwrap();
+        assert_eq!(k, "base_url");
+        assert_eq!(v, "https://api.example.com/v2");
+    }
+
+    #[test]
+    fn parse_fields_single() {
+        let inputs = vec!["token=abc".to_owned()];
+        let fields = parse_credential_fields(&inputs).unwrap();
+        assert_eq!(fields.len(), 1);
+        assert_eq!(fields["token"], "abc");
+    }
+
+    #[test]
+    fn parse_fields_invalid_among_valid() {
+        let inputs = vec!["token=abc".to_owned(), "bad-field".to_owned()];
+        let result = parse_credential_fields(&inputs);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("bad-field"));
+    }
+
+    // ── Additional connector ID validation tests ───────────────────
+
+    #[test]
+    fn validate_connector_id_single_char() {
+        assert!(validate_connector_id("a").is_ok());
+    }
+
+    #[test]
+    fn validate_connector_id_numbers() {
+        assert!(validate_connector_id("123").is_ok());
+    }
+
+    #[test]
+    fn validate_connector_id_dots_and_dashes() {
+        assert!(validate_connector_id("fcp.github-v2").is_ok());
+    }
+
+    #[test]
+    fn validate_connector_id_underscore() {
+        assert!(validate_connector_id("my_connector").is_ok());
+    }
+
+    #[test]
+    fn validate_connector_id_unicode_rejected() {
+        assert!(validate_connector_id("héllo").is_err());
+    }
+
+    #[test]
+    fn validate_connector_id_newline_rejected() {
+        assert!(validate_connector_id("abc\ndef").is_err());
+    }
+
+    #[test]
+    fn validate_connector_id_error_message_empty() {
+        let err = validate_connector_id("").unwrap_err();
+        assert!(err.contains("empty"));
+    }
+
+    #[test]
+    fn validate_connector_id_error_message_too_long() {
+        let long = "x".repeat(65);
+        let err = validate_connector_id(&long).unwrap_err();
+        assert!(err.contains("too long"));
+    }
+
+    #[test]
+    fn validate_connector_id_error_message_invalid_chars() {
+        let err = validate_connector_id("has space").unwrap_err();
+        assert!(err.contains("invalid characters"));
     }
 }

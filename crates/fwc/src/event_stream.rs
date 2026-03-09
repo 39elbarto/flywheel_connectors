@@ -636,4 +636,365 @@ mod tests {
         let json = serde_json::to_value(&summary).unwrap();
         assert_eq!(json["dropped_events"], 50);
     }
+
+    // ── ConnectorEvent additional ─────────────────────────────────
+
+    #[test]
+    fn event_clone() {
+        let event = sample_event();
+        let cloned = event.clone();
+        assert_eq!(cloned.connector, event.connector);
+        assert_eq!(cloned.event_type, event.event_type);
+        assert_eq!(cloned.timestamp, event.timestamp);
+    }
+
+    #[test]
+    fn event_debug_format() {
+        let event = sample_event();
+        let debug = format!("{event:?}");
+        assert!(debug.contains("ConnectorEvent"));
+        assert!(debug.contains("slack"));
+    }
+
+    #[test]
+    fn event_json_format_parses_back() {
+        let event = sample_event();
+        let json_str = event.format_json();
+        let back: ConnectorEvent = serde_json::from_str(&json_str).unwrap();
+        assert_eq!(back.connector, "slack");
+        assert_eq!(back.context.as_deref(), Some("#general"));
+        assert_eq!(back.summary.as_deref(), Some("@alice: Hey team"));
+    }
+
+    #[test]
+    fn event_with_empty_data() {
+        let event = ConnectorEvent {
+            timestamp: "2026-01-01T00:00:00Z".to_owned(),
+            connector: "test".to_owned(),
+            event_type: "ping".to_owned(),
+            context: None,
+            summary: None,
+            data: json!({}),
+        };
+        let json = event.format_json();
+        assert!(json.contains("\"data\":{}"));
+    }
+
+    #[test]
+    fn event_with_complex_data() {
+        let event = ConnectorEvent {
+            timestamp: "2026-01-01T12:00:00Z".to_owned(),
+            connector: "github".to_owned(),
+            event_type: "push".to_owned(),
+            context: Some("main".to_owned()),
+            summary: Some("3 commits pushed".to_owned()),
+            data: json!({"commits": [{"sha": "abc123"}, {"sha": "def456"}]}),
+        };
+        let json_str = event.format_json();
+        let parsed: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+        assert!(parsed["data"]["commits"].is_array());
+        assert_eq!(parsed["data"]["commits"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn toon_format_with_context_no_summary() {
+        let event = ConnectorEvent {
+            timestamp: "2026-06-15T08:30:00Z".to_owned(),
+            connector: "discord".to_owned(),
+            event_type: "voice.join".to_owned(),
+            context: Some("lobby".to_owned()),
+            summary: None,
+            data: json!({}),
+        };
+        let line = event.format_toon();
+        assert!(line.contains("[08:30:00]"));
+        assert!(line.contains("discord"));
+        assert!(line.contains("lobby"));
+    }
+
+    // ── extract_time additional ───────────────────────────────────
+
+    #[test]
+    fn extract_time_midnight() {
+        assert_eq!(extract_time("2026-01-01T00:00:00Z"), "00:00:00");
+    }
+
+    #[test]
+    fn extract_time_end_of_day() {
+        assert_eq!(extract_time("2026-12-31T23:59:59Z"), "23:59:59");
+    }
+
+    #[test]
+    fn extract_time_with_negative_offset() {
+        assert_eq!(extract_time("2026-03-09T14:32:05-07:00"), "14:32:05");
+    }
+
+    #[test]
+    fn extract_time_no_timezone() {
+        // No Z or offset, just the time
+        assert_eq!(extract_time("2026-03-09T10:20:30"), "10:20:30");
+    }
+
+    #[test]
+    fn extract_time_empty_string() {
+        // Falls back to raw string
+        assert_eq!(extract_time(""), "");
+    }
+
+    #[test]
+    fn extract_time_just_date() {
+        // No T separator, returns raw
+        assert_eq!(extract_time("2026-03-09"), "2026-03-09");
+    }
+
+    // ── parse_since additional ────────────────────────────────────
+
+    #[test]
+    fn parse_since_zero_seconds() {
+        assert_eq!(parse_since("0s"), Ok(0));
+    }
+
+    #[test]
+    fn parse_since_zero_minutes() {
+        assert_eq!(parse_since("0m"), Ok(0));
+    }
+
+    #[test]
+    fn parse_since_large_day_value() {
+        assert_eq!(parse_since("30d"), Ok(2_592_000));
+    }
+
+    #[test]
+    fn parse_since_large_hour_value() {
+        assert_eq!(parse_since("48h"), Ok(172_800));
+    }
+
+    #[test]
+    fn parse_since_one_second() {
+        assert_eq!(parse_since("1s"), Ok(1));
+    }
+
+    #[test]
+    fn parse_since_only_whitespace_is_error() {
+        assert!(parse_since("   ").is_err());
+    }
+
+    #[test]
+    fn parse_since_negative_number() {
+        // "-5m" — the numeric part is "-5", which is not a valid u64
+        assert!(parse_since("-5m").is_err());
+    }
+
+    #[test]
+    fn parse_since_decimal_number() {
+        // "1.5h" — not an integer
+        assert!(parse_since("1.5h").is_err());
+    }
+
+    // ── EventBuffer additional ────────────────────────────────────
+
+    #[test]
+    fn buffer_push_preserves_order() {
+        let mut buf = EventBuffer::new(5);
+        for i in 0..3 {
+            let mut e = sample_event();
+            e.event_type = format!("ev_{i}");
+            buf.push(e);
+        }
+        let events = buf.drain();
+        assert_eq!(events[0].event_type, "ev_0");
+        assert_eq!(events[1].event_type, "ev_1");
+        assert_eq!(events[2].event_type, "ev_2");
+    }
+
+    #[test]
+    fn buffer_drain_resets_state() {
+        let mut buf = EventBuffer::new(10);
+        buf.push(sample_event());
+        buf.push(sample_event());
+        let _ = buf.drain();
+        assert!(buf.is_empty());
+        assert_eq!(buf.len(), 0);
+        // Dropped count is NOT reset by drain
+        assert_eq!(buf.dropped_count(), 0);
+    }
+
+    #[test]
+    fn buffer_multiple_drain_cycles() {
+        let mut buf = EventBuffer::new(5);
+        buf.push(sample_event());
+        let first = buf.drain();
+        assert_eq!(first.len(), 1);
+
+        buf.push(sample_event());
+        buf.push(sample_event());
+        let second = buf.drain();
+        assert_eq!(second.len(), 2);
+    }
+
+    #[test]
+    fn buffer_dropped_count_accumulates() {
+        let mut buf = EventBuffer::new(1);
+        for _ in 0..10 {
+            buf.push(sample_event());
+        }
+        assert_eq!(buf.dropped_count(), 9);
+        assert_eq!(buf.len(), 1);
+    }
+
+    #[test]
+    fn buffer_exact_capacity_no_drop() {
+        let mut buf = EventBuffer::new(3);
+        buf.push(sample_event());
+        buf.push(sample_event());
+        buf.push(sample_event());
+        assert_eq!(buf.len(), 3);
+        assert_eq!(buf.dropped_count(), 0);
+    }
+
+    // ── TailConfig additional ─────────────────────────────────────
+
+    #[test]
+    fn parse_connectors_trailing_comma() {
+        let connectors = TailConfig::parse_connectors("slack,discord,");
+        assert_eq!(connectors, vec!["slack", "discord"]);
+    }
+
+    #[test]
+    fn parse_connectors_leading_comma() {
+        let connectors = TailConfig::parse_connectors(",slack");
+        assert_eq!(connectors, vec!["slack"]);
+    }
+
+    #[test]
+    fn tail_config_serializes() {
+        let config = TailConfig {
+            connectors: vec!["slack".to_owned()],
+            all: true,
+            since_seconds: Some(300),
+            buffer_size: 500,
+        };
+        let json = serde_json::to_value(&config).unwrap();
+        assert_eq!(json["all"], true);
+        assert_eq!(json["since_seconds"], 300);
+        assert_eq!(json["buffer_size"], 500);
+    }
+
+    // ── TailPlan additional ──────────────────────────────────────
+
+    #[test]
+    fn tail_plan_no_since() {
+        let plan = TailPlan {
+            connectors: vec!["github".to_owned()],
+            all: false,
+            since: None,
+            buffer_size: 1000,
+        };
+        let json = serde_json::to_value(&plan).unwrap();
+        assert!(json["since"].is_null());
+    }
+
+    #[test]
+    fn tail_plan_all_mode() {
+        let plan = TailPlan {
+            connectors: Vec::new(),
+            all: true,
+            since: Some("1h".to_owned()),
+            buffer_size: 2000,
+        };
+        let json = serde_json::to_value(&plan).unwrap();
+        assert_eq!(json["all"], true);
+        assert!(json["connectors"].as_array().unwrap().is_empty());
+    }
+
+    // ── StreamStatus additional ──────────────────────────────────
+
+    #[test]
+    fn stream_status_serde_values() {
+        assert_eq!(serde_json::to_string(&StreamStatus::Active).unwrap(), "\"active\"");
+        assert_eq!(serde_json::to_string(&StreamStatus::Waiting).unwrap(), "\"waiting\"");
+        assert_eq!(serde_json::to_string(&StreamStatus::Error).unwrap(), "\"error\"");
+        assert_eq!(serde_json::to_string(&StreamStatus::Disconnected).unwrap(), "\"disconnected\"");
+        assert_eq!(serde_json::to_string(&StreamStatus::Unsupported).unwrap(), "\"unsupported\"");
+    }
+
+    #[test]
+    fn stream_status_clone() {
+        let s = StreamStatus::Active;
+        let c = s.clone();
+        assert_eq!(s, c);
+    }
+
+    #[test]
+    fn stream_status_debug() {
+        let debug = format!("{:?}", StreamStatus::Disconnected);
+        assert!(debug.contains("Disconnected"));
+    }
+
+    // ── ConnectorStreamState additional ───────────────────────────
+
+    #[test]
+    fn connector_stream_state_no_last_event() {
+        let state = ConnectorStreamState {
+            connector: "discord".to_owned(),
+            status: StreamStatus::Waiting,
+            events_received: 0,
+            last_event_at: None,
+        };
+        let json = serde_json::to_value(&state).unwrap();
+        assert_eq!(json["events_received"], 0);
+        assert!(json["last_event_at"].is_null());
+    }
+
+    #[test]
+    fn connector_stream_state_clone() {
+        let state = ConnectorStreamState {
+            connector: "slack".to_owned(),
+            status: StreamStatus::Active,
+            events_received: 100,
+            last_event_at: Some("2026-03-09T15:00:00Z".to_owned()),
+        };
+        let cloned = state.clone();
+        assert_eq!(cloned.connector, "slack");
+        assert_eq!(cloned.events_received, 100);
+    }
+
+    // ── TailSummary additional ───────────────────────────────────
+
+    #[test]
+    fn tail_summary_multiple_streams() {
+        let summary = TailSummary {
+            streams: vec![
+                ConnectorStreamState {
+                    connector: "slack".to_owned(),
+                    status: StreamStatus::Active,
+                    events_received: 50,
+                    last_event_at: Some("2026-03-09T15:00:00Z".to_owned()),
+                },
+                ConnectorStreamState {
+                    connector: "discord".to_owned(),
+                    status: StreamStatus::Disconnected,
+                    events_received: 10,
+                    last_event_at: None,
+                },
+            ],
+            total_events: 60,
+            dropped_events: 5,
+        };
+        let json = serde_json::to_value(&summary).unwrap();
+        assert_eq!(json["streams"].as_array().unwrap().len(), 2);
+        assert_eq!(json["total_events"], 60);
+    }
+
+    #[test]
+    fn tail_summary_clone() {
+        let summary = TailSummary {
+            streams: vec![],
+            total_events: 0,
+            dropped_events: 0,
+        };
+        let cloned = summary.clone();
+        assert_eq!(cloned.total_events, 0);
+        assert!(cloned.streams.is_empty());
+    }
 }

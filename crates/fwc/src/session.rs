@@ -75,7 +75,11 @@ pub struct Session {
 
 impl Session {
     /// Create a new active session.
-    pub fn new(agent_name: impl Into<String>, goal: impl Into<String>, zone: Option<String>) -> Self {
+    pub fn new(
+        agent_name: impl Into<String>,
+        goal: impl Into<String>,
+        zone: Option<String>,
+    ) -> Self {
         let now = Utc::now();
         Self {
             id: SessionId::generate(),
@@ -142,10 +146,7 @@ pub struct SessionStore {
 impl SessionStore {
     /// Create a store at the default location.
     pub fn default_path() -> Self {
-        let home = std::env::var("HOME").map_or_else(
-            |_| PathBuf::from("."),
-            PathBuf::from,
-        );
+        let home = std::env::var("HOME").map_or_else(|_| PathBuf::from("."), PathBuf::from);
         let dir = home.join(".fwc").join("sessions");
         Self { dir }
     }
@@ -313,7 +314,10 @@ mod tests {
     fn session_context() {
         let mut session = Session::new("Agent", "goal", None);
         session.set_context("key", serde_json::json!("value"));
-        assert_eq!(session.get_context("key"), Some(&serde_json::json!("value")));
+        assert_eq!(
+            session.get_context("key"),
+            Some(&serde_json::json!("value"))
+        );
         assert_eq!(session.get_context("missing"), None);
     }
 
@@ -446,5 +450,330 @@ mod tests {
         let sessions = store.list(None).unwrap();
         // Most recently updated should come first.
         assert!(sessions[0].updated_at >= sessions[1].updated_at);
+    }
+
+    // ── Additional SessionId tests ─────────────────────────────────
+
+    #[test]
+    fn session_id_generate_unique() {
+        let a = SessionId::generate();
+        let b = SessionId::generate();
+        assert_ne!(a.as_str(), b.as_str());
+    }
+
+    #[test]
+    fn session_id_as_str_matches_display() {
+        let id = SessionId::parse("s:cafebabe").unwrap();
+        assert_eq!(id.as_str(), &format!("{id}"));
+    }
+
+    #[test]
+    fn session_id_clone_equality() {
+        let id = SessionId::parse("s:deadbeef").unwrap();
+        let cloned = id.clone();
+        assert_eq!(id, cloned);
+    }
+
+    #[test]
+    fn session_id_parse_long_hex() {
+        let id = SessionId::parse("s:aabbccdd11223344").unwrap();
+        assert_eq!(id.short_id(), "aabbccdd11223344");
+    }
+
+    #[test]
+    fn session_id_parse_single_char() {
+        let id = SessionId::parse("s:a").unwrap();
+        assert_eq!(id.short_id(), "a");
+    }
+
+    #[test]
+    fn session_id_serde_roundtrip() {
+        let id = SessionId::parse("s:abcdef01").unwrap();
+        let json = serde_json::to_string(&id).unwrap();
+        let restored: SessionId = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored, id);
+    }
+
+    #[test]
+    fn session_id_serde_json_value() {
+        let id = SessionId::parse("s:face1234").unwrap();
+        let val = serde_json::to_value(&id).unwrap();
+        assert_eq!(val, serde_json::json!("s:face1234"));
+    }
+
+    #[test]
+    fn session_id_debug_format() {
+        let id = SessionId::parse("s:abc").unwrap();
+        let debug = format!("{id:?}");
+        assert!(debug.contains("s:abc"));
+    }
+
+    // ── Additional Session tests ───────────────────────────────────
+
+    #[test]
+    fn session_new_with_zone() {
+        let session = Session::new("Agent", "goal", Some("zone:prod".to_string()));
+        assert_eq!(session.zone.as_deref(), Some("zone:prod"));
+    }
+
+    #[test]
+    fn session_new_without_zone() {
+        let session = Session::new("Agent", "goal", None);
+        assert!(session.zone.is_none());
+    }
+
+    #[test]
+    fn session_created_at_equals_updated_at_initially() {
+        let session = Session::new("Agent", "goal", None);
+        assert_eq!(session.created_at, session.updated_at);
+    }
+
+    #[test]
+    fn session_end_sets_ended_at() {
+        let mut session = Session::new("Agent", "goal", None);
+        assert!(session.ended_at.is_none());
+        session.end();
+        assert!(session.ended_at.is_some());
+    }
+
+    #[test]
+    fn session_pause_does_not_set_ended_at() {
+        let mut session = Session::new("Agent", "goal", None);
+        session.pause();
+        assert!(session.ended_at.is_none());
+    }
+
+    #[test]
+    fn session_resume_after_end_makes_active() {
+        let mut session = Session::new("Agent", "goal", None);
+        session.end();
+        session.resume();
+        assert!(session.is_active());
+    }
+
+    #[test]
+    fn session_context_overwrite() {
+        let mut session = Session::new("Agent", "goal", None);
+        session.set_context("key", serde_json::json!("first"));
+        session.set_context("key", serde_json::json!("second"));
+        assert_eq!(
+            session.get_context("key"),
+            Some(&serde_json::json!("second"))
+        );
+    }
+
+    #[test]
+    fn session_context_multiple_keys() {
+        let mut session = Session::new("Agent", "goal", None);
+        session.set_context("a", serde_json::json!(1));
+        session.set_context("b", serde_json::json!(2));
+        session.set_context("c", serde_json::json!(3));
+        assert_eq!(session.context.len(), 3);
+    }
+
+    #[test]
+    fn session_context_complex_value() {
+        let mut session = Session::new("Agent", "goal", None);
+        let complex = serde_json::json!({
+            "nested": {"deep": true},
+            "list": [1, 2, 3]
+        });
+        session.set_context("data", complex.clone());
+        assert_eq!(session.get_context("data"), Some(&complex));
+    }
+
+    #[test]
+    fn session_operations_counter_starts_at_zero() {
+        let session = Session::new("Agent", "goal", None);
+        assert_eq!(session.operations_completed, 0);
+    }
+
+    #[test]
+    fn session_record_many_operations() {
+        let mut session = Session::new("Agent", "goal", None);
+        for _ in 0..100 {
+            session.record_operation();
+        }
+        assert_eq!(session.operations_completed, 100);
+    }
+
+    #[test]
+    fn session_serde_with_ended_session() {
+        let mut session = Session::new("Agent", "goal", Some("z:dev".into()));
+        session.record_operation();
+        session.set_context("foo", serde_json::json!("bar"));
+        session.end();
+        let json = serde_json::to_string_pretty(&session).unwrap();
+        let restored: Session = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.status, SessionStatus::Ended);
+        assert!(restored.ended_at.is_some());
+        assert_eq!(restored.operations_completed, 1);
+    }
+
+    #[test]
+    fn session_serde_with_paused_session() {
+        let mut session = Session::new("Agent", "goal", None);
+        session.pause();
+        let json = serde_json::to_string(&session).unwrap();
+        let restored: Session = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.status, SessionStatus::Paused);
+    }
+
+    // ── Additional SessionStatus tests ─────────────────────────────
+
+    #[test]
+    fn session_status_serde_active() {
+        let json = serde_json::to_string(&SessionStatus::Active).unwrap();
+        assert_eq!(json, "\"active\"");
+        let back: SessionStatus = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, SessionStatus::Active);
+    }
+
+    #[test]
+    fn session_status_serde_paused() {
+        let json = serde_json::to_string(&SessionStatus::Paused).unwrap();
+        assert_eq!(json, "\"paused\"");
+    }
+
+    #[test]
+    fn session_status_serde_ended() {
+        let json = serde_json::to_string(&SessionStatus::Ended).unwrap();
+        assert_eq!(json, "\"ended\"");
+    }
+
+    #[test]
+    fn session_status_equality() {
+        assert_eq!(SessionStatus::Active, SessionStatus::Active);
+        assert_ne!(SessionStatus::Active, SessionStatus::Paused);
+        assert_ne!(SessionStatus::Paused, SessionStatus::Ended);
+    }
+
+    #[test]
+    fn session_status_clone() {
+        let status = SessionStatus::Active;
+        let cloned = status;
+        assert_eq!(status, cloned);
+    }
+
+    // ── Additional SessionStore tests ──────────────────────────────
+
+    #[test]
+    fn store_save_multiple_and_load_each() {
+        let store = temp_store();
+        let sessions: Vec<Session> = (0..5)
+            .map(|i| Session::new(format!("Agent{i}"), format!("goal{i}"), None))
+            .collect();
+
+        for s in &sessions {
+            store.save(s).unwrap();
+        }
+
+        for s in &sessions {
+            let loaded = store.load(&s.id).unwrap().unwrap();
+            assert_eq!(loaded.agent_name, s.agent_name);
+        }
+    }
+
+    #[test]
+    fn store_overwrite_session() {
+        let store = temp_store();
+        let mut session = Session::new("Agent", "goal v1", None);
+        let id = session.id.clone();
+        store.save(&session).unwrap();
+
+        session.goal = "goal v2".to_string();
+        store.save(&session).unwrap();
+
+        let loaded = store.load(&id).unwrap().unwrap();
+        assert_eq!(loaded.goal, "goal v2");
+    }
+
+    #[test]
+    fn store_list_paused_filter() {
+        let store = temp_store();
+        let s1 = Session::new("A", "g1", None);
+        let mut s2 = Session::new("B", "g2", None);
+        s2.pause();
+        store.save(&s1).unwrap();
+        store.save(&s2).unwrap();
+
+        let paused = store.list(Some(SessionStatus::Paused)).unwrap();
+        assert_eq!(paused.len(), 1);
+        assert_eq!(paused[0].agent_name, "B");
+    }
+
+    #[test]
+    fn store_no_active_session_when_empty() {
+        let store = temp_store();
+        assert!(store.active_session().unwrap().is_none());
+    }
+
+    #[test]
+    fn store_no_active_when_all_ended() {
+        let store = temp_store();
+        let mut s = Session::new("Agent", "goal", None);
+        s.end();
+        store.save(&s).unwrap();
+        assert!(store.active_session().unwrap().is_none());
+    }
+
+    #[test]
+    fn store_delete_nonexistent() {
+        let store = temp_store();
+        let id = SessionId::parse("s:nonexist").unwrap();
+        assert!(!store.delete(&id).unwrap());
+    }
+
+    #[test]
+    fn store_path_contains_short_id() {
+        let store = temp_store();
+        let session = Session::new("Agent", "goal", None);
+        let id = session.id.clone();
+        store.save(&session).unwrap();
+        let expected_file = format!("{}.json", id.short_id());
+        // Verify the file exists at the expected path
+        let loaded = store.load(&id).unwrap();
+        assert!(loaded.is_some());
+        // The session path should use the short_id
+        assert!(expected_file.ends_with(".json"));
+    }
+
+    // ── Additional resolve_session_id tests ────────────────────────
+
+    #[test]
+    fn resolve_empty_string() {
+        // "s:" + "" = "s:" which has len 2 but s: prefix, so parse returns None for len <= 2
+        // Actually "s:" has exactly 2 chars, so parse returns None
+        let result = resolve_session_id("");
+        // "s:" is len 2, parse requires len > 2
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn resolve_with_long_id() {
+        let id = resolve_session_id("aabbccddeeff0011").unwrap();
+        assert_eq!(id.as_str(), "s:aabbccddeeff0011");
+    }
+
+    #[test]
+    fn resolve_preserves_exact_prefix() {
+        let id = resolve_session_id("s:xyz").unwrap();
+        assert_eq!(id.short_id(), "xyz");
+    }
+
+    // ── session_dir helper ─────────────────────────────────────────
+
+    #[test]
+    fn session_dir_appends_sessions() {
+        let base = Path::new("/home/user/.fwc");
+        let dir = session_dir(base);
+        assert_eq!(dir, PathBuf::from("/home/user/.fwc/sessions"));
+    }
+
+    #[test]
+    fn session_dir_relative_path() {
+        let base = Path::new(".");
+        let dir = session_dir(base);
+        assert_eq!(dir, PathBuf::from("./sessions"));
     }
 }

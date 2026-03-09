@@ -1054,4 +1054,469 @@ mod tests {
         assert_eq!(json["reference_url"], "https://example.com");
         assert_eq!(json["command"], "fwc do thing");
     }
+
+    // ── Severity additional ──────────────────────────────────────
+
+    #[test]
+    fn severity_equality() {
+        assert_eq!(Severity::Info, Severity::Info);
+        assert_ne!(Severity::Info, Severity::Warning);
+        assert_ne!(Severity::Warning, Severity::Error);
+        assert_ne!(Severity::Error, Severity::Critical);
+    }
+
+    #[test]
+    fn severity_display_all() {
+        assert_eq!(Severity::Info.to_string(), "info");
+        assert_eq!(Severity::Warning.to_string(), "warning");
+        assert_eq!(Severity::Error.to_string(), "error");
+        assert_eq!(Severity::Critical.to_string(), "critical");
+    }
+
+    #[test]
+    fn severity_serializes() {
+        assert_eq!(serde_json::to_string(&Severity::Info).unwrap(), "\"info\"");
+        assert_eq!(serde_json::to_string(&Severity::Warning).unwrap(), "\"warning\"");
+        assert_eq!(serde_json::to_string(&Severity::Error).unwrap(), "\"error\"");
+        assert_eq!(serde_json::to_string(&Severity::Critical).unwrap(), "\"critical\"");
+    }
+
+    #[test]
+    fn severity_copy_clone() {
+        let s = Severity::Warning;
+        let c = s;
+        assert_eq!(s, c);
+    }
+
+    #[test]
+    fn severity_debug() {
+        let debug = format!("{:?}", Severity::Error);
+        assert!(debug.contains("Error"));
+    }
+
+    // ── HealthStatus additional ──────────────────────────────────
+
+    #[test]
+    fn health_status_display_all() {
+        assert_eq!(HealthStatus::Healthy.to_string(), "healthy");
+        assert_eq!(HealthStatus::Degraded.to_string(), "degraded");
+        assert_eq!(HealthStatus::Unhealthy.to_string(), "unhealthy");
+        assert_eq!(HealthStatus::Unknown.to_string(), "unknown");
+    }
+
+    #[test]
+    fn health_status_equality() {
+        assert_eq!(HealthStatus::Healthy, HealthStatus::Healthy);
+        assert_ne!(HealthStatus::Healthy, HealthStatus::Degraded);
+        assert_ne!(HealthStatus::Degraded, HealthStatus::Unhealthy);
+        assert_ne!(HealthStatus::Unhealthy, HealthStatus::Unknown);
+    }
+
+    #[test]
+    fn health_status_serializes() {
+        assert_eq!(serde_json::to_string(&HealthStatus::Healthy).unwrap(), "\"healthy\"");
+        assert_eq!(serde_json::to_string(&HealthStatus::Unknown).unwrap(), "\"unknown\"");
+    }
+
+    #[test]
+    fn health_status_copy_clone() {
+        let s = HealthStatus::Degraded;
+        let c = s;
+        assert_eq!(s, c);
+    }
+
+    // ── DiagnosisCategory additional ─────────────────────────────
+
+    #[test]
+    fn category_equality() {
+        assert_eq!(DiagnosisCategory::Auth, DiagnosisCategory::Auth);
+        assert_ne!(DiagnosisCategory::Auth, DiagnosisCategory::Network);
+    }
+
+    #[test]
+    fn category_serializes() {
+        assert_eq!(serde_json::to_string(&DiagnosisCategory::Auth).unwrap(), "\"auth\"");
+        assert_eq!(serde_json::to_string(&DiagnosisCategory::RateLimit).unwrap(), "\"rate_limit\"");
+        assert_eq!(serde_json::to_string(&DiagnosisCategory::Network).unwrap(), "\"network\"");
+        assert_eq!(serde_json::to_string(&DiagnosisCategory::Certificate).unwrap(), "\"certificate\"");
+        assert_eq!(serde_json::to_string(&DiagnosisCategory::ServiceError).unwrap(), "\"service_error\"");
+        assert_eq!(serde_json::to_string(&DiagnosisCategory::Unknown).unwrap(), "\"unknown\"");
+    }
+
+    #[test]
+    fn category_copy_clone() {
+        let c = DiagnosisCategory::Config;
+        let c2 = c;
+        assert_eq!(c, c2);
+    }
+
+    // ── FixAction additional ─────────────────────────────────────
+
+    #[test]
+    fn fix_action_command_not_auto_safe_by_default() {
+        let fix = FixAction::command("test", "cmd");
+        assert!(!fix.auto_safe);
+        assert!(fix.reference_url.is_none());
+    }
+
+    #[test]
+    fn fix_action_manual_no_command() {
+        let fix = FixAction::manual("Do something manually");
+        assert!(fix.command.is_none());
+        assert!(!fix.auto_safe);
+        assert!(fix.reference_url.is_none());
+    }
+
+    #[test]
+    fn fix_action_chained_builders() {
+        let fix = FixAction::command("Fix", "fwc fix")
+            .safe()
+            .with_url("https://docs.example.com");
+        assert!(fix.auto_safe);
+        assert_eq!(fix.command.as_deref(), Some("fwc fix"));
+        assert_eq!(fix.reference_url.as_deref(), Some("https://docs.example.com"));
+    }
+
+    #[test]
+    fn fix_action_clone() {
+        let fix = FixAction::command("Fix", "cmd").safe();
+        let cloned = fix.clone();
+        assert_eq!(cloned.description, "Fix");
+        assert!(cloned.auto_safe);
+    }
+
+    // ── DiagnosticReport additional ──────────────────────────────
+
+    #[test]
+    fn report_from_diagnoses_healthy_when_info_only() {
+        let diags = vec![Diagnosis {
+            connector_id: "test".to_owned(),
+            category: DiagnosisCategory::Config,
+            severity: Severity::Info,
+            message: "Just informational".to_owned(),
+            fixes: vec![],
+        }];
+        let report = DiagnosticReport::from_diagnoses("test", diags);
+        assert_eq!(report.status, HealthStatus::Healthy);
+        assert!(report.has_issues());
+    }
+
+    #[test]
+    fn report_healthy_no_fix_commands() {
+        let report = DiagnosticReport::healthy("test");
+        assert!(report.all_fix_commands().is_empty());
+    }
+
+    #[test]
+    fn report_summary_line_multiple_issues() {
+        let diags = vec![
+            Diagnosis {
+                connector_id: "test".to_owned(),
+                category: DiagnosisCategory::Auth,
+                severity: Severity::Warning,
+                message: "warning".to_owned(),
+                fixes: vec![],
+            },
+            Diagnosis {
+                connector_id: "test".to_owned(),
+                category: DiagnosisCategory::Latency,
+                severity: Severity::Critical,
+                message: "critical".to_owned(),
+                fixes: vec![],
+            },
+        ];
+        let report = DiagnosticReport::from_diagnoses("test", diags);
+        let line = report.summary_line();
+        assert!(line.contains("2 issue"));
+        assert!(line.contains("critical"));
+    }
+
+    #[test]
+    fn report_to_json_with_issues() {
+        let diags = vec![Diagnosis {
+            connector_id: "slack".to_owned(),
+            category: DiagnosisCategory::RateLimit,
+            severity: Severity::Warning,
+            message: "Rate limited".to_owned(),
+            fixes: vec![FixAction::command("Check", "fwc rate-limits slack")],
+        }];
+        let report = DiagnosticReport::from_diagnoses("slack", diags);
+        let json = report.to_json();
+        assert_eq!(json["status"], "degraded");
+        assert!(json["diagnoses"].is_array());
+        assert_eq!(json["diagnoses"][0]["category"], "rate_limit");
+    }
+
+    #[test]
+    fn report_clone() {
+        let report = DiagnosticReport::healthy("github");
+        let cloned = report.clone();
+        assert_eq!(cloned.connector_id, "github");
+        assert_eq!(cloned.status, HealthStatus::Healthy);
+    }
+
+    #[test]
+    fn report_auto_fixable_none() {
+        let diags = vec![Diagnosis {
+            connector_id: "test".to_owned(),
+            category: DiagnosisCategory::Auth,
+            severity: Severity::Error,
+            message: "auth".to_owned(),
+            fixes: vec![FixAction::manual("Do it yourself")],
+        }];
+        let report = DiagnosticReport::from_diagnoses("test", diags);
+        assert_eq!(report.auto_fixable_count(), 0);
+    }
+
+    // ── compute_status additional ────────────────────────────────
+
+    #[test]
+    fn status_healthy_on_info() {
+        let diags = vec![Diagnosis {
+            connector_id: "test".to_owned(),
+            category: DiagnosisCategory::Config,
+            severity: Severity::Info,
+            message: "info".to_owned(),
+            fixes: vec![],
+        }];
+        assert_eq!(compute_status(&diags), HealthStatus::Healthy);
+    }
+
+    #[test]
+    fn status_mixed_warning_and_info() {
+        let diags = vec![
+            Diagnosis {
+                connector_id: "test".to_owned(),
+                category: DiagnosisCategory::Config,
+                severity: Severity::Info,
+                message: "info".to_owned(),
+                fixes: vec![],
+            },
+            Diagnosis {
+                connector_id: "test".to_owned(),
+                category: DiagnosisCategory::Latency,
+                severity: Severity::Warning,
+                message: "slow".to_owned(),
+                fixes: vec![],
+            },
+        ];
+        assert_eq!(compute_status(&diags), HealthStatus::Degraded);
+    }
+
+    // ── diagnose() additional flows ──────────────────────────────
+
+    #[test]
+    fn diagnose_503_server_error() {
+        let mut symptoms = default_symptoms();
+        symptoms.http_status = Some(503);
+        let report = diagnose("github", &symptoms);
+        assert!(report.has_issues());
+        assert!(report.diagnoses[0].message.contains("503"));
+    }
+
+    #[test]
+    fn diagnose_599_server_error() {
+        let mut symptoms = default_symptoms();
+        symptoms.http_status = Some(599);
+        let report = diagnose("github", &symptoms);
+        assert!(report.has_issues());
+        assert_eq!(report.diagnoses[0].category, DiagnosisCategory::ServiceError);
+    }
+
+    #[test]
+    fn diagnose_404_no_issue() {
+        let mut symptoms = default_symptoms();
+        symptoms.http_status = Some(404);
+        let report = diagnose("github", &symptoms);
+        assert!(!report.has_issues());
+    }
+
+    #[test]
+    fn diagnose_connect_error() {
+        let mut symptoms = default_symptoms();
+        symptoms.error_message = Some("connect error: network unreachable".to_owned());
+        let report = diagnose("github", &symptoms);
+        assert_eq!(report.diagnoses[0].category, DiagnosisCategory::Network);
+    }
+
+    #[test]
+    fn diagnose_resolve_error() {
+        let mut symptoms = default_symptoms();
+        symptoms.error_message = Some("could not resolve host".to_owned());
+        let report = diagnose("github", &symptoms);
+        assert_eq!(report.diagnoses[0].category, DiagnosisCategory::Network);
+    }
+
+    #[test]
+    fn diagnose_ssl_keyword() {
+        let mut symptoms = default_symptoms();
+        symptoms.error_message = Some("SSL handshake error".to_owned());
+        let report = diagnose("github", &symptoms);
+        assert_eq!(report.diagnoses[0].category, DiagnosisCategory::Certificate);
+    }
+
+    #[test]
+    fn diagnose_latency_at_boundary_2000() {
+        let mut symptoms = default_symptoms();
+        symptoms.latency_ms = Some(2000);
+        let report = diagnose("github", &symptoms);
+        assert!(!report.has_issues());
+    }
+
+    #[test]
+    fn diagnose_latency_at_boundary_2001() {
+        let mut symptoms = default_symptoms();
+        symptoms.latency_ms = Some(2001);
+        let report = diagnose("github", &symptoms);
+        assert!(report.has_issues());
+        assert_eq!(report.diagnoses[0].severity, Severity::Warning);
+    }
+
+    #[test]
+    fn diagnose_latency_at_boundary_5000() {
+        let mut symptoms = default_symptoms();
+        symptoms.latency_ms = Some(5000);
+        let report = diagnose("github", &symptoms);
+        assert!(report.has_issues());
+        assert_eq!(report.diagnoses[0].severity, Severity::Warning);
+    }
+
+    #[test]
+    fn diagnose_latency_at_boundary_5001() {
+        let mut symptoms = default_symptoms();
+        symptoms.latency_ms = Some(5001);
+        let report = diagnose("github", &symptoms);
+        assert!(report.has_issues());
+        assert_eq!(report.diagnoses[0].severity, Severity::Error);
+    }
+
+    #[test]
+    fn diagnose_rate_limit_at_79() {
+        let mut symptoms = default_symptoms();
+        symptoms.rate_limit_percent = Some(79);
+        let report = diagnose("github", &symptoms);
+        assert!(!report.has_issues());
+    }
+
+    #[test]
+    fn diagnose_rate_limit_at_80() {
+        let mut symptoms = default_symptoms();
+        symptoms.rate_limit_percent = Some(80);
+        let report = diagnose("github", &symptoms);
+        assert!(report.has_issues());
+        assert_eq!(report.diagnoses[0].severity, Severity::Warning);
+    }
+
+    #[test]
+    fn diagnose_rate_limit_at_94() {
+        let mut symptoms = default_symptoms();
+        symptoms.rate_limit_percent = Some(94);
+        let report = diagnose("github", &symptoms);
+        assert!(report.has_issues());
+        assert_eq!(report.diagnoses[0].severity, Severity::Warning);
+    }
+
+    #[test]
+    fn diagnose_rate_limit_at_95() {
+        let mut symptoms = default_symptoms();
+        symptoms.rate_limit_percent = Some(95);
+        let report = diagnose("github", &symptoms);
+        assert!(report.has_issues());
+        assert_eq!(report.diagnoses[0].severity, Severity::Critical);
+    }
+
+    #[test]
+    fn diagnose_rate_limit_at_100() {
+        let mut symptoms = default_symptoms();
+        symptoms.rate_limit_percent = Some(100);
+        let report = diagnose("github", &symptoms);
+        assert_eq!(report.diagnoses[0].severity, Severity::Critical);
+    }
+
+    #[test]
+    fn diagnose_not_installed_early_return() {
+        // When not installed, no other symptoms should be checked
+        let symptoms = Symptoms {
+            installed: false,
+            has_credentials: false,
+            http_status: Some(401),
+            latency_ms: Some(10_000),
+            rate_limit_percent: Some(100),
+            ..Default::default()
+        };
+        let report = diagnose("fakeco", &symptoms);
+        // Only the NotFound diagnosis should be present
+        assert_eq!(report.diagnoses.len(), 1);
+        assert_eq!(report.diagnoses[0].category, DiagnosisCategory::NotFound);
+    }
+
+    #[test]
+    fn diagnose_no_symptoms_at_all() {
+        let symptoms = Symptoms {
+            installed: true,
+            has_credentials: true,
+            ..Default::default()
+        };
+        let report = diagnose("github", &symptoms);
+        assert_eq!(report.status, HealthStatus::Healthy);
+        assert!(!report.has_issues());
+    }
+
+    // ── Symptoms default ─────────────────────────────────────────
+
+    #[test]
+    fn symptoms_default_values() {
+        let s = Symptoms::default();
+        assert!(!s.installed);
+        assert!(!s.has_credentials);
+        assert!(s.http_status.is_none());
+        assert!(s.error_message.is_none());
+        assert!(s.latency_ms.is_none());
+        assert!(s.rate_limit_percent.is_none());
+        assert!(s.last_op_success.is_none());
+    }
+
+    #[test]
+    fn symptoms_clone() {
+        let s = Symptoms {
+            installed: true,
+            has_credentials: true,
+            http_status: Some(200),
+            latency_ms: Some(50),
+            ..Default::default()
+        };
+        let cloned = s.clone();
+        assert!(cloned.installed);
+        assert_eq!(cloned.http_status, Some(200));
+    }
+
+    // ── Diagnosis clone and debug ────────────────────────────────
+
+    #[test]
+    fn diagnosis_clone() {
+        let diag = Diagnosis {
+            connector_id: "test".to_owned(),
+            category: DiagnosisCategory::Auth,
+            severity: Severity::Error,
+            message: "auth failed".to_owned(),
+            fixes: vec![FixAction::manual("fix it")],
+        };
+        let cloned = diag.clone();
+        assert_eq!(cloned.connector_id, "test");
+        assert_eq!(cloned.fixes.len(), 1);
+    }
+
+    #[test]
+    fn diagnosis_debug() {
+        let diag = Diagnosis {
+            connector_id: "x".to_owned(),
+            category: DiagnosisCategory::Network,
+            severity: Severity::Critical,
+            message: "down".to_owned(),
+            fixes: vec![],
+        };
+        let debug = format!("{diag:?}");
+        assert!(debug.contains("Diagnosis"));
+        assert!(debug.contains("Network"));
+    }
 }

@@ -731,4 +731,570 @@ mod tests {
         let json = serde_json::to_value(&opt).unwrap();
         assert!(json["context"].is_null());
     }
+
+    // ── Additional LookupRequest tests ─────────────────────────────
+
+    #[test]
+    fn lookup_request_defaults() {
+        let req = LookupRequest::new("slack", "general");
+        assert_eq!(req.connector, "slack");
+        assert_eq!(req.query, "general");
+        assert!(req.resource_type.is_none());
+        assert!(req.operation_hint.is_none());
+        assert_eq!(req.limit, 5);
+    }
+
+    #[test]
+    fn lookup_request_chained_builders() {
+        let req = LookupRequest::new("github", "fwc")
+            .with_resource_type("repo")
+            .with_operation("repos.get");
+        assert_eq!(req.resource_type.as_deref(), Some("repo"));
+        assert_eq!(req.operation_hint.as_deref(), Some("repos.get"));
+    }
+
+    #[test]
+    fn lookup_request_clone() {
+        let req = LookupRequest::new("notion", "Roadmap").with_resource_type("page");
+        let cloned = req.clone();
+        assert_eq!(cloned.connector, req.connector);
+        assert_eq!(cloned.query, req.query);
+        assert_eq!(cloned.resource_type, req.resource_type);
+    }
+
+    #[test]
+    fn lookup_request_debug() {
+        let req = LookupRequest::new("slack", "general");
+        let debug = format!("{req:?}");
+        assert!(debug.contains("slack"));
+        assert!(debug.contains("general"));
+    }
+
+    #[test]
+    fn lookup_request_serde_all_fields() {
+        let req = LookupRequest::new("jira", "PROJ-123")
+            .with_resource_type("issue")
+            .with_operation("issues.get");
+        let json = serde_json::to_value(&req).unwrap();
+        assert_eq!(json["connector"], "jira");
+        assert_eq!(json["query"], "PROJ-123");
+        assert_eq!(json["resource_type"], "issue");
+        assert_eq!(json["operation_hint"], "issues.get");
+        assert_eq!(json["limit"], 5);
+    }
+
+    // ── Additional MatchQuality tests ──────────────────────────────
+
+    #[test]
+    fn match_quality_all_variants_serde() {
+        for (variant, expected) in [
+            (MatchQuality::Exact, "\"exact\""),
+            (MatchQuality::Prefix, "\"prefix\""),
+            (MatchQuality::Partial, "\"partial\""),
+            (MatchQuality::Fuzzy, "\"fuzzy\""),
+        ] {
+            let json = serde_json::to_string(&variant).unwrap();
+            assert_eq!(json, expected);
+            let back: MatchQuality = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, variant);
+        }
+    }
+
+    #[test]
+    fn match_quality_equality() {
+        assert_eq!(MatchQuality::Exact, MatchQuality::Exact);
+        assert_ne!(MatchQuality::Exact, MatchQuality::Fuzzy);
+    }
+
+    #[test]
+    fn match_quality_clone() {
+        let q = MatchQuality::Prefix;
+        let cloned = q;
+        assert_eq!(q, cloned);
+    }
+
+    #[test]
+    fn match_quality_debug() {
+        let debug = format!("{:?}", MatchQuality::Partial);
+        assert_eq!(debug, "Partial");
+    }
+
+    // ── Additional ResourceCandidate tests ─────────────────────────
+
+    #[test]
+    fn resource_candidate_empty_context() {
+        let candidate = ResourceCandidate {
+            id: "id-1".to_owned(),
+            display_name: "Item".to_owned(),
+            resource_type: "page".to_owned(),
+            context: BTreeMap::new(),
+            match_quality: MatchQuality::Exact,
+        };
+        assert!(candidate.context.is_empty());
+    }
+
+    #[test]
+    fn resource_candidate_clone() {
+        let candidate = ResourceCandidate {
+            id: "id-1".to_owned(),
+            display_name: "Item".to_owned(),
+            resource_type: "page".to_owned(),
+            context: BTreeMap::new(),
+            match_quality: MatchQuality::Exact,
+        };
+        let cloned = candidate.clone();
+        assert_eq!(cloned.id, candidate.id);
+        assert_eq!(cloned.match_quality, candidate.match_quality);
+    }
+
+    #[test]
+    fn resource_candidate_roundtrip() {
+        let candidate = ResourceCandidate {
+            id: "uuid-123".to_owned(),
+            display_name: "My Page".to_owned(),
+            resource_type: "page".to_owned(),
+            context: BTreeMap::from([("parent".to_owned(), "Root".to_owned())]),
+            match_quality: MatchQuality::Prefix,
+        };
+        let json = serde_json::to_string(&candidate).unwrap();
+        let back: ResourceCandidate = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.id, "uuid-123");
+        assert_eq!(back.display_name, "My Page");
+        assert_eq!(back.match_quality, MatchQuality::Prefix);
+        assert_eq!(back.context["parent"], "Root");
+    }
+
+    // ── Additional resolve_candidates tests ────────────────────────
+
+    #[test]
+    fn resolve_single_match_next_command_substitution() {
+        let candidates = vec![ResourceCandidate {
+            id: "ch-42".to_owned(),
+            display_name: "#general".to_owned(),
+            resource_type: "channel".to_owned(),
+            context: BTreeMap::new(),
+            match_quality: MatchQuality::Exact,
+        }];
+        let result = resolve_candidates(
+            "general",
+            "channel_id",
+            "slack",
+            candidates,
+            "fwc invoke slack messages.send --channel={id}",
+        );
+        match &result.outcome {
+            LookupOutcome::Resolved { next_command, .. } => {
+                assert_eq!(
+                    next_command,
+                    "fwc invoke slack messages.send --channel=ch-42"
+                );
+            }
+            _ => panic!("expected Resolved"),
+        }
+    }
+
+    #[test]
+    fn resolve_not_found_suggestions_content() {
+        let result = resolve_candidates(
+            "missing",
+            "page_id",
+            "notion",
+            vec![],
+            "fwc invoke notion pages.update --page_id={id}",
+        );
+        match &result.outcome {
+            LookupOutcome::NotFound { suggestions } => {
+                assert_eq!(suggestions.len(), 3);
+                assert!(suggestions[0].contains("missing"));
+                assert!(suggestions[1].contains("notion"));
+                assert!(suggestions[2].contains("access"));
+            }
+            _ => panic!("expected NotFound"),
+        }
+    }
+
+    #[test]
+    fn resolve_ambiguous_prompt_content() {
+        let candidates = vec![
+            ResourceCandidate {
+                id: "1".to_owned(),
+                display_name: "A".to_owned(),
+                resource_type: "repo".to_owned(),
+                context: BTreeMap::new(),
+                match_quality: MatchQuality::Partial,
+            },
+            ResourceCandidate {
+                id: "2".to_owned(),
+                display_name: "B".to_owned(),
+                resource_type: "repo".to_owned(),
+                context: BTreeMap::new(),
+                match_quality: MatchQuality::Fuzzy,
+            },
+            ResourceCandidate {
+                id: "3".to_owned(),
+                display_name: "C".to_owned(),
+                resource_type: "repo".to_owned(),
+                context: BTreeMap::new(),
+                match_quality: MatchQuality::Fuzzy,
+            },
+        ];
+        let result = resolve_candidates(
+            "test",
+            "repo_id",
+            "github",
+            candidates,
+            "fwc invoke github repos.get --repo={id}",
+        );
+        match &result.outcome {
+            LookupOutcome::Ambiguous { candidates, prompt } => {
+                assert_eq!(candidates.len(), 3);
+                assert_eq!(prompt.binding_key, "repo_id");
+                assert!(prompt.question.contains("github"));
+                assert!(prompt.question.contains("test"));
+                assert_eq!(prompt.options.len(), 3);
+                assert_eq!(prompt.next_commands.len(), 3);
+                assert!(prompt.next_commands[0].contains("repo=1"));
+                assert!(prompt.next_commands[2].contains("repo=3"));
+            }
+            _ => panic!("expected Ambiguous"),
+        }
+    }
+
+    #[test]
+    fn resolve_candidates_result_fields() {
+        let result = resolve_candidates("q", "key", "conn", vec![], "cmd {id}");
+        assert_eq!(result.query, "q");
+        assert_eq!(result.connector, "conn");
+    }
+
+    // ── Additional LookupOutcome serde tests ───────────────────────
+
+    #[test]
+    fn lookup_outcome_ambiguous_serde() {
+        let outcome = LookupOutcome::Ambiguous {
+            candidates: vec![ResourceCandidate {
+                id: "1".to_owned(),
+                display_name: "A".to_owned(),
+                resource_type: "page".to_owned(),
+                context: BTreeMap::new(),
+                match_quality: MatchQuality::Fuzzy,
+            }],
+            prompt: DisambiguationPrompt {
+                binding_key: "page_id".to_owned(),
+                question: "Which one?".to_owned(),
+                options: vec![],
+                next_commands: vec![],
+            },
+        };
+        let json = serde_json::to_value(&outcome).unwrap();
+        assert_eq!(json["type"], "ambiguous");
+        assert!(json["candidates"].is_array());
+        assert!(json["prompt"].is_object());
+    }
+
+    #[test]
+    fn lookup_outcome_all_variants_tagged() {
+        let resolved = serde_json::to_value(&LookupOutcome::Resolved {
+            candidate: ResourceCandidate {
+                id: "x".to_owned(),
+                display_name: "X".to_owned(),
+                resource_type: "t".to_owned(),
+                context: BTreeMap::new(),
+                match_quality: MatchQuality::Exact,
+            },
+            next_command: "cmd".to_owned(),
+        })
+        .unwrap();
+        assert_eq!(resolved["type"], "resolved");
+
+        let not_found = serde_json::to_value(&LookupOutcome::NotFound {
+            suggestions: vec![],
+        })
+        .unwrap();
+        assert_eq!(not_found["type"], "not-found");
+
+        let unsupported = serde_json::to_value(&LookupOutcome::Unsupported {
+            reason: "r".to_owned(),
+        })
+        .unwrap();
+        assert_eq!(unsupported["type"], "unsupported");
+    }
+
+    // ── Additional LookupResult tests ──────────────────────────────
+
+    #[test]
+    fn lookup_result_not_found_roundtrip() {
+        let result = LookupResult {
+            query: "missing".to_owned(),
+            connector: "github".to_owned(),
+            outcome: LookupOutcome::NotFound {
+                suggestions: vec!["try again".to_owned()],
+            },
+        };
+        let json = serde_json::to_string(&result).unwrap();
+        let back: LookupResult = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.query, "missing");
+        match back.outcome {
+            LookupOutcome::NotFound { suggestions } => assert_eq!(suggestions.len(), 1),
+            _ => panic!("expected NotFound"),
+        }
+    }
+
+    #[test]
+    fn lookup_result_unsupported_roundtrip() {
+        let result = LookupResult {
+            query: "test".to_owned(),
+            connector: "custom".to_owned(),
+            outcome: LookupOutcome::Unsupported {
+                reason: "not implemented".to_owned(),
+            },
+        };
+        let json = serde_json::to_string(&result).unwrap();
+        let back: LookupResult = serde_json::from_str(&json).unwrap();
+        match back.outcome {
+            LookupOutcome::Unsupported { reason } => assert_eq!(reason, "not implemented"),
+            _ => panic!("expected Unsupported"),
+        }
+    }
+
+    // ── Additional DisambiguationPrompt tests ──────────────────────
+
+    #[test]
+    fn disambiguation_prompt_roundtrip() {
+        let prompt = DisambiguationPrompt {
+            binding_key: "id".to_owned(),
+            question: "Which?".to_owned(),
+            options: vec![DisambiguationOption {
+                value: "v1".to_owned(),
+                label: "L1".to_owned(),
+                context: Some("ctx".to_owned()),
+            }],
+            next_commands: vec!["cmd1".to_owned()],
+        };
+        let json = serde_json::to_string(&prompt).unwrap();
+        let back: DisambiguationPrompt = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.binding_key, "id");
+        assert_eq!(back.options.len(), 1);
+        assert_eq!(back.next_commands.len(), 1);
+    }
+
+    #[test]
+    fn disambiguation_option_with_context_roundtrip() {
+        let opt = DisambiguationOption {
+            value: "val".to_owned(),
+            label: "Lab".to_owned(),
+            context: Some("in workspace X".to_owned()),
+        };
+        let json = serde_json::to_string(&opt).unwrap();
+        let back: DisambiguationOption = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.context.as_deref(), Some("in workspace X"));
+    }
+
+    // ── Additional ConnectorResourceModel tests ────────────────────
+
+    #[test]
+    fn connector_resource_model_roundtrip() {
+        let model = ConnectorResourceModel {
+            connector: "github".to_owned(),
+            resource_types: vec![ResourceTypeDescriptor {
+                name: "repo".to_owned(),
+                description: "GitHub repository".to_owned(),
+                lookup_operation: "repos.search".to_owned(),
+                id_field: "full_name".to_owned(),
+                name_field: "name".to_owned(),
+                consumed_by: vec!["repos.get".to_owned()],
+                example_queries: vec!["fwc".to_owned()],
+            }],
+        };
+        let json = serde_json::to_string(&model).unwrap();
+        let back: ConnectorResourceModel = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.connector, "github");
+        assert_eq!(back.resource_types.len(), 1);
+        assert_eq!(back.resource_types[0].name, "repo");
+    }
+
+    #[test]
+    fn connector_resource_model_multiple_types() {
+        let model = ConnectorResourceModel {
+            connector: "github".to_owned(),
+            resource_types: vec![
+                ResourceTypeDescriptor {
+                    name: "repo".to_owned(),
+                    description: "Repository".to_owned(),
+                    lookup_operation: "repos.search".to_owned(),
+                    id_field: "full_name".to_owned(),
+                    name_field: "name".to_owned(),
+                    consumed_by: vec!["repos.get".to_owned()],
+                    example_queries: vec!["fwc".to_owned()],
+                },
+                ResourceTypeDescriptor {
+                    name: "issue".to_owned(),
+                    description: "Issue".to_owned(),
+                    lookup_operation: "issues.search".to_owned(),
+                    id_field: "number".to_owned(),
+                    name_field: "title".to_owned(),
+                    consumed_by: vec!["issues.get".to_owned(), "issues.update".to_owned()],
+                    example_queries: vec!["bug".to_owned(), "feature".to_owned()],
+                },
+            ],
+        };
+        assert_eq!(model.resource_types.len(), 2);
+        assert_eq!(model.resource_types[1].consumed_by.len(), 2);
+        assert_eq!(model.resource_types[1].example_queries.len(), 2);
+    }
+
+    // ── Additional RESOURCE_FAMILIES tests ─────────────────────────
+
+    #[test]
+    fn resource_families_all_have_discovery_hints() {
+        for family in RESOURCE_FAMILIES {
+            assert!(
+                !family.discovery_hint.is_empty(),
+                "family {} has no discovery hint",
+                family.family
+            );
+        }
+    }
+
+    #[test]
+    fn resource_families_all_have_id_shapes() {
+        for family in RESOURCE_FAMILIES {
+            assert!(
+                !family.typical_id_shape.is_empty(),
+                "family {} has no id shape",
+                family.family
+            );
+        }
+    }
+
+    #[test]
+    fn resource_families_contain_document() {
+        assert!(RESOURCE_FAMILIES.iter().any(|f| f.family == "document"));
+    }
+
+    #[test]
+    fn resource_families_contain_record() {
+        assert!(RESOURCE_FAMILIES.iter().any(|f| f.family == "record"));
+    }
+
+    #[test]
+    fn resource_families_contain_contact() {
+        assert!(RESOURCE_FAMILIES.iter().any(|f| f.family == "contact"));
+    }
+
+    #[test]
+    fn resource_families_contain_workspace() {
+        assert!(RESOURCE_FAMILIES.iter().any(|f| f.family == "workspace"));
+    }
+
+    #[test]
+    fn resource_families_unique_names() {
+        let mut names: Vec<&str> = RESOURCE_FAMILIES.iter().map(|f| f.family).collect();
+        let original_len = names.len();
+        names.sort();
+        names.dedup();
+        assert_eq!(names.len(), original_len, "duplicate family names found");
+    }
+
+    // ── Additional find_resource_family tests ──────────────────────
+
+    #[test]
+    fn find_family_github_project() {
+        let f = find_resource_family("github", "project").unwrap();
+        assert!(f.connectors.contains(&"github"));
+    }
+
+    #[test]
+    fn find_family_slack_channel() {
+        let f = find_resource_family("slack", "channel").unwrap();
+        assert_eq!(f.family, "channel");
+    }
+
+    #[test]
+    fn find_family_unknown_connector() {
+        assert!(find_resource_family("unknown-connector", "project").is_none());
+    }
+
+    #[test]
+    fn find_family_salesforce_record() {
+        let f = find_resource_family("salesforce", "record").unwrap();
+        assert_eq!(f.family, "record");
+    }
+
+    #[test]
+    fn find_family_hubspot_contact() {
+        let f = find_resource_family("hubspot", "contact").unwrap();
+        assert_eq!(f.family, "contact");
+    }
+
+    // ── Additional suggest_discovery_commands tests ─────────────────
+
+    #[test]
+    fn suggest_commands_include_show() {
+        let cmds = suggest_discovery_commands("slack", None);
+        assert!(cmds.iter().any(|c| c.contains("show")));
+    }
+
+    #[test]
+    fn suggest_commands_known_resource_type_includes_hint() {
+        let cmds = suggest_discovery_commands("github", Some("project"));
+        assert!(cmds.iter().any(|c| c.contains("list/search")));
+    }
+
+    #[test]
+    fn suggest_commands_unknown_resource_type() {
+        let cmds = suggest_discovery_commands("github", Some("unknown_type"));
+        // Should still include ops and search commands even if family not found
+        assert!(cmds.iter().any(|c| c.contains("ops")));
+        assert!(cmds.iter().any(|c| c.contains("search")));
+    }
+
+    #[test]
+    fn suggest_commands_length_with_type() {
+        let cmds = suggest_discovery_commands("notion", Some("page"));
+        // Should have: hint comment, search command, ops command, show command
+        assert!(cmds.len() >= 3);
+    }
+
+    #[test]
+    fn suggest_commands_length_without_type() {
+        let cmds = suggest_discovery_commands("notion", None);
+        // Should have: ops and show commands
+        assert_eq!(cmds.len(), 2);
+    }
+
+    // ── ResourceTypeDescriptor edge cases ──────────────────────────
+
+    #[test]
+    fn resource_type_descriptor_empty_consumed_by() {
+        let desc = ResourceTypeDescriptor {
+            name: "webhook".to_owned(),
+            description: "Webhook endpoint".to_owned(),
+            lookup_operation: "webhooks.list".to_owned(),
+            id_field: "id".to_owned(),
+            name_field: "url".to_owned(),
+            consumed_by: vec![],
+            example_queries: vec![],
+        };
+        let json = serde_json::to_value(&desc).unwrap();
+        assert!(json["consumed_by"].as_array().unwrap().is_empty());
+        assert!(json["example_queries"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn resource_type_descriptor_roundtrip() {
+        let desc = ResourceTypeDescriptor {
+            name: "channel".to_owned(),
+            description: "Slack channel".to_owned(),
+            lookup_operation: "channels.list".to_owned(),
+            id_field: "id".to_owned(),
+            name_field: "name".to_owned(),
+            consumed_by: vec!["messages.send".to_owned()],
+            example_queries: vec!["#general".to_owned(), "#random".to_owned()],
+        };
+        let json = serde_json::to_string(&desc).unwrap();
+        let back: ResourceTypeDescriptor = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.name, "channel");
+        assert_eq!(back.example_queries.len(), 2);
+    }
 }

@@ -35,11 +35,7 @@ pub struct Recipe {
 
 impl Recipe {
     /// Create a new recipe.
-    pub fn new(
-        id: impl Into<String>,
-        name: impl Into<String>,
-        category: RecipeCategory,
-    ) -> Self {
+    pub fn new(id: impl Into<String>, name: impl Into<String>, category: RecipeCategory) -> Self {
         Self {
             id: id.into(),
             name: name.into(),
@@ -163,10 +159,7 @@ pub struct RecipeParameter {
 
 impl RecipeParameter {
     /// Create a required parameter.
-    pub fn required(
-        name: impl Into<String>,
-        label: impl Into<String>,
-    ) -> Self {
+    pub fn required(name: impl Into<String>, label: impl Into<String>) -> Self {
         Self {
             name: name.into(),
             label: label.into(),
@@ -367,330 +360,376 @@ pub fn builtin_recipes() -> Vec<Recipe> {
 }
 
 fn recipe_issue_to_branch() -> Recipe {
-    Recipe::new("issue-to-branch", "Issue to Branch", RecipeCategory::Development)
-        .with_description("Create a git branch from a GitHub/Jira issue and post the link back")
-        .with_connector("github")
-        .with_tag("git")
-        .with_tag("automation")
-        .with_parameter(
-            RecipeParameter::required("owner", "Repository owner")
-                .with_example("octocat"),
-        )
-        .with_parameter(
-            RecipeParameter::required("repo", "Repository name")
-                .with_example("hello-world"),
-        )
-        .with_parameter(
-            RecipeParameter::required("issue_number", "Issue number")
-                .with_example("42"),
-        )
-        .with_step(
-            RecipeStep::new("get-issue", "github", "get_issue")
-                .with_input("owner", "{{param.owner}}")
-                .with_input("repo", "{{param.repo}}")
-                .with_input("issue_number", "{{param.issue_number}}"),
-        )
-        .with_step(
-            RecipeStep::new("create-branch", "github", "create_branch")
-                .with_input("owner", "{{param.owner}}")
-                .with_input("repo", "{{param.repo}}")
-                .with_input("branch", "issue-{{param.issue_number}}-{{prev.title | slugify}}"),
-        )
-        .with_step(
-            RecipeStep::new("comment-on-issue", "github", "create_comment")
-                .with_input("owner", "{{param.owner}}")
-                .with_input("repo", "{{param.repo}}")
-                .with_input("issue_number", "{{param.issue_number}}")
-                .with_input("body", "Branch created: `{{prev.branch}}`"),
-        )
+    Recipe::new(
+        "issue-to-branch",
+        "Issue to Branch",
+        RecipeCategory::Development,
+    )
+    .with_description("Create a git branch from a GitHub/Jira issue and post the link back")
+    .with_connector("github")
+    .with_tag("git")
+    .with_tag("automation")
+    .with_parameter(RecipeParameter::required("owner", "Repository owner").with_example("octocat"))
+    .with_parameter(
+        RecipeParameter::required("repo", "Repository name").with_example("hello-world"),
+    )
+    .with_parameter(RecipeParameter::required("issue_number", "Issue number").with_example("42"))
+    .with_step(
+        RecipeStep::new("get-issue", "github", "get_issue")
+            .with_input("owner", "{{param.owner}}")
+            .with_input("repo", "{{param.repo}}")
+            .with_input("issue_number", "{{param.issue_number}}"),
+    )
+    .with_step(
+        RecipeStep::new("create-branch", "github", "create_branch")
+            .with_input("owner", "{{param.owner}}")
+            .with_input("repo", "{{param.repo}}")
+            .with_input(
+                "branch",
+                "issue-{{param.issue_number}}-{{prev.title | slugify}}",
+            ),
+    )
+    .with_step(
+        RecipeStep::new("comment-on-issue", "github", "create_comment")
+            .with_input("owner", "{{param.owner}}")
+            .with_input("repo", "{{param.repo}}")
+            .with_input("issue_number", "{{param.issue_number}}")
+            .with_input("body", "Branch created: `{{prev.branch}}`"),
+    )
 }
 
 fn recipe_pr_review_notify() -> Recipe {
-    Recipe::new("pr-review-notify", "PR Review Notification", RecipeCategory::Development)
-        .with_description("Summarize PR changes and notify team on Slack/Discord")
-        .with_connector("github")
-        .with_connector("slack")
-        .with_tag("code-review")
-        .with_tag("notification")
-        .with_parameter(
-            RecipeParameter::required("owner", "Repository owner"),
-        )
-        .with_parameter(
-            RecipeParameter::required("repo", "Repository name"),
-        )
-        .with_parameter(
-            RecipeParameter::required("pr_number", "Pull request number"),
-        )
-        .with_parameter(
-            RecipeParameter::required("channel", "Slack channel")
-                .with_example("code-review"),
-        )
-        .with_step(
-            RecipeStep::new("get-pr", "github", "get_pull_request")
-                .with_input("owner", "{{param.owner}}")
-                .with_input("repo", "{{param.repo}}")
-                .with_input("pull_number", "{{param.pr_number}}"),
-        )
-        .with_step(
-            RecipeStep::new("notify-slack", "slack", "send_message")
-                .with_input("channel", "{{param.channel}}")
-                .with_input("text", "🔍 PR #{{param.pr_number}} ready for review: {{prev.title}}\n{{prev.html_url}}"),
-        )
+    Recipe::new(
+        "pr-review-notify",
+        "PR Review Notification",
+        RecipeCategory::Development,
+    )
+    .with_description("Summarize PR changes and notify team on Slack/Discord")
+    .with_connector("github")
+    .with_connector("slack")
+    .with_tag("code-review")
+    .with_tag("notification")
+    .with_parameter(RecipeParameter::required("owner", "Repository owner"))
+    .with_parameter(RecipeParameter::required("repo", "Repository name"))
+    .with_parameter(RecipeParameter::required(
+        "pr_number",
+        "Pull request number",
+    ))
+    .with_parameter(
+        RecipeParameter::required("channel", "Slack channel").with_example("code-review"),
+    )
+    .with_step(
+        RecipeStep::new("get-pr", "github", "get_pull_request")
+            .with_input("owner", "{{param.owner}}")
+            .with_input("repo", "{{param.repo}}")
+            .with_input("pull_number", "{{param.pr_number}}"),
+    )
+    .with_step(
+        RecipeStep::new("notify-slack", "slack", "send_message")
+            .with_input("channel", "{{param.channel}}")
+            .with_input(
+                "text",
+                "🔍 PR #{{param.pr_number}} ready for review: {{prev.title}}\n{{prev.html_url}}",
+            ),
+    )
 }
 
 fn recipe_deploy_announce() -> Recipe {
-    Recipe::new("deploy-announce", "Deploy Announcement", RecipeCategory::Deployment)
-        .with_description("Announce deployment status to team channel")
-        .with_connector("slack")
-        .with_tag("deploy")
-        .with_tag("notification")
-        .with_parameter(
-            RecipeParameter::required("channel", "Notification channel")
-                .with_example("deployments"),
-        )
-        .with_parameter(
-            RecipeParameter::required("service", "Service name")
-                .with_example("api-server"),
-        )
-        .with_parameter(
-            RecipeParameter::required("version", "Version deployed")
-                .with_example("v2.3.1"),
-        )
-        .with_parameter(
-            RecipeParameter::optional("environment", "Target environment", "production"),
-        )
-        .with_step(
-            RecipeStep::new("announce", "slack", "send_message")
-                .with_input("channel", "{{param.channel}}")
-                .with_input("text", "🚀 *{{param.service}}* {{param.version}} deployed to {{param.environment}}"),
-        )
+    Recipe::new(
+        "deploy-announce",
+        "Deploy Announcement",
+        RecipeCategory::Deployment,
+    )
+    .with_description("Announce deployment status to team channel")
+    .with_connector("slack")
+    .with_tag("deploy")
+    .with_tag("notification")
+    .with_parameter(
+        RecipeParameter::required("channel", "Notification channel").with_example("deployments"),
+    )
+    .with_parameter(RecipeParameter::required("service", "Service name").with_example("api-server"))
+    .with_parameter(RecipeParameter::required("version", "Version deployed").with_example("v2.3.1"))
+    .with_parameter(RecipeParameter::optional(
+        "environment",
+        "Target environment",
+        "production",
+    ))
+    .with_step(
+        RecipeStep::new("announce", "slack", "send_message")
+            .with_input("channel", "{{param.channel}}")
+            .with_input(
+                "text",
+                "🚀 *{{param.service}}* {{param.version}} deployed to {{param.environment}}",
+            ),
+    )
 }
 
 fn recipe_bug_triage() -> Recipe {
-    Recipe::new("bug-triage", "Bug Triage Pipeline", RecipeCategory::Development)
-        .with_description("Create issue from error alert, assign, and notify team")
-        .with_connector("github")
-        .with_connector("slack")
-        .with_tag("bugs")
-        .with_tag("triage")
-        .with_parameter(
-            RecipeParameter::required("owner", "Repository owner"),
-        )
-        .with_parameter(
-            RecipeParameter::required("repo", "Repository name"),
-        )
-        .with_parameter(
-            RecipeParameter::required("error_title", "Error summary"),
-        )
-        .with_parameter(
-            RecipeParameter::required("error_details", "Error details"),
-        )
-        .with_parameter(
-            RecipeParameter::optional("assignee", "Assignee", ""),
-        )
-        .with_parameter(
-            RecipeParameter::optional("channel", "Notification channel", "bugs"),
-        )
-        .with_step(
-            RecipeStep::new("create-issue", "github", "create_issue")
-                .with_input("owner", "{{param.owner}}")
-                .with_input("repo", "{{param.repo}}")
-                .with_input("title", "[Bug] {{param.error_title}}")
-                .with_input("body", "{{param.error_details}}")
-                .with_input("labels", "bug,triage"),
-        )
-        .with_step(
-            RecipeStep::new("notify", "slack", "send_message")
-                .with_input("channel", "{{param.channel}}")
-                .with_input("text", "🐛 New bug: {{param.error_title}}\n{{prev.html_url}}"),
-        )
+    Recipe::new(
+        "bug-triage",
+        "Bug Triage Pipeline",
+        RecipeCategory::Development,
+    )
+    .with_description("Create issue from error alert, assign, and notify team")
+    .with_connector("github")
+    .with_connector("slack")
+    .with_tag("bugs")
+    .with_tag("triage")
+    .with_parameter(RecipeParameter::required("owner", "Repository owner"))
+    .with_parameter(RecipeParameter::required("repo", "Repository name"))
+    .with_parameter(RecipeParameter::required("error_title", "Error summary"))
+    .with_parameter(RecipeParameter::required("error_details", "Error details"))
+    .with_parameter(RecipeParameter::optional("assignee", "Assignee", ""))
+    .with_parameter(RecipeParameter::optional(
+        "channel",
+        "Notification channel",
+        "bugs",
+    ))
+    .with_step(
+        RecipeStep::new("create-issue", "github", "create_issue")
+            .with_input("owner", "{{param.owner}}")
+            .with_input("repo", "{{param.repo}}")
+            .with_input("title", "[Bug] {{param.error_title}}")
+            .with_input("body", "{{param.error_details}}")
+            .with_input("labels", "bug,triage"),
+    )
+    .with_step(
+        RecipeStep::new("notify", "slack", "send_message")
+            .with_input("channel", "{{param.channel}}")
+            .with_input(
+                "text",
+                "🐛 New bug: {{param.error_title}}\n{{prev.html_url}}",
+            ),
+    )
 }
 
 fn recipe_cross_post() -> Recipe {
-    Recipe::new("cross-post", "Cross-Post Message", RecipeCategory::Communication)
-        .with_description("Forward a message to multiple platforms (Slack → Discord + Telegram)")
-        .with_connector("slack")
-        .with_connector("discord")
-        .with_tag("messaging")
-        .with_tag("cross-platform")
-        .with_parameter(
-            RecipeParameter::required("message", "Message to cross-post"),
-        )
-        .with_parameter(
-            RecipeParameter::required("discord_channel_id", "Discord channel ID"),
-        )
-        .with_parameter(
-            RecipeParameter::optional("slack_channel", "Slack channel", "general"),
-        )
-        .with_step(
-            RecipeStep::new("post-slack", "slack", "send_message")
-                .with_input("channel", "{{param.slack_channel}}")
-                .with_input("text", "{{param.message}}"),
-        )
-        .with_step(
-            RecipeStep::new("post-discord", "discord", "send_message")
-                .with_input("channel_id", "{{param.discord_channel_id}}")
-                .with_input("content", "{{param.message}}")
-                .with_continue_on_error(true),
-        )
+    Recipe::new(
+        "cross-post",
+        "Cross-Post Message",
+        RecipeCategory::Communication,
+    )
+    .with_description("Forward a message to multiple platforms (Slack → Discord + Telegram)")
+    .with_connector("slack")
+    .with_connector("discord")
+    .with_tag("messaging")
+    .with_tag("cross-platform")
+    .with_parameter(RecipeParameter::required(
+        "message",
+        "Message to cross-post",
+    ))
+    .with_parameter(RecipeParameter::required(
+        "discord_channel_id",
+        "Discord channel ID",
+    ))
+    .with_parameter(RecipeParameter::optional(
+        "slack_channel",
+        "Slack channel",
+        "general",
+    ))
+    .with_step(
+        RecipeStep::new("post-slack", "slack", "send_message")
+            .with_input("channel", "{{param.slack_channel}}")
+            .with_input("text", "{{param.message}}"),
+    )
+    .with_step(
+        RecipeStep::new("post-discord", "discord", "send_message")
+            .with_input("channel_id", "{{param.discord_channel_id}}")
+            .with_input("content", "{{param.message}}")
+            .with_continue_on_error(true),
+    )
 }
 
 fn recipe_digest_email() -> Recipe {
-    Recipe::new("digest-email", "Slack Digest Email", RecipeCategory::Communication)
-        .with_description("Aggregate recent Slack messages and send as email digest")
-        .with_connector("slack")
-        .with_connector("gmail")
-        .with_tag("email")
-        .with_tag("digest")
-        .with_parameter(
-            RecipeParameter::required("slack_channel", "Slack channel to digest"),
-        )
-        .with_parameter(
-            RecipeParameter::required("email_to", "Recipient email"),
-        )
-        .with_parameter(
-            RecipeParameter::optional("hours", "Hours to look back", "24"),
-        )
-        .with_step(
-            RecipeStep::new("fetch-messages", "slack", "list_messages")
-                .with_input("channel", "{{param.slack_channel}}")
-                .with_input("limit", "50"),
-        )
-        .with_step(
-            RecipeStep::new("send-digest", "gmail", "send_email")
-                .with_input("to", "{{param.email_to}}")
-                .with_input("subject", "Slack digest: #{{param.slack_channel}}")
-                .with_input("body", "Recent messages from #{{param.slack_channel}}:\n\n{{prev.messages}}"),
-        )
+    Recipe::new(
+        "digest-email",
+        "Slack Digest Email",
+        RecipeCategory::Communication,
+    )
+    .with_description("Aggregate recent Slack messages and send as email digest")
+    .with_connector("slack")
+    .with_connector("gmail")
+    .with_tag("email")
+    .with_tag("digest")
+    .with_parameter(RecipeParameter::required(
+        "slack_channel",
+        "Slack channel to digest",
+    ))
+    .with_parameter(RecipeParameter::required("email_to", "Recipient email"))
+    .with_parameter(RecipeParameter::optional(
+        "hours",
+        "Hours to look back",
+        "24",
+    ))
+    .with_step(
+        RecipeStep::new("fetch-messages", "slack", "list_messages")
+            .with_input("channel", "{{param.slack_channel}}")
+            .with_input("limit", "50"),
+    )
+    .with_step(
+        RecipeStep::new("send-digest", "gmail", "send_email")
+            .with_input("to", "{{param.email_to}}")
+            .with_input("subject", "Slack digest: #{{param.slack_channel}}")
+            .with_input(
+                "body",
+                "Recent messages from #{{param.slack_channel}}:\n\n{{prev.messages}}",
+            ),
+    )
 }
 
 fn recipe_health_check_all() -> Recipe {
-    Recipe::new("health-check-all", "Health Check All Connectors", RecipeCategory::Monitoring)
-        .with_description("Check health of all connectors and report to Slack")
-        .with_connector("slack")
-        .with_tag("health")
-        .with_tag("monitoring")
-        .with_parameter(
-            RecipeParameter::required("channel", "Report channel")
-                .with_example("ops-alerts"),
-        )
-        .with_step(
-            RecipeStep::new("report", "slack", "send_message")
-                .with_input("channel", "{{param.channel}}")
-                .with_input("text", "🏥 Connector health check complete.\n{{prev.summary}}"),
-        )
+    Recipe::new(
+        "health-check-all",
+        "Health Check All Connectors",
+        RecipeCategory::Monitoring,
+    )
+    .with_description("Check health of all connectors and report to Slack")
+    .with_connector("slack")
+    .with_tag("health")
+    .with_tag("monitoring")
+    .with_parameter(
+        RecipeParameter::required("channel", "Report channel").with_example("ops-alerts"),
+    )
+    .with_step(
+        RecipeStep::new("report", "slack", "send_message")
+            .with_input("channel", "{{param.channel}}")
+            .with_input(
+                "text",
+                "🏥 Connector health check complete.\n{{prev.summary}}",
+            ),
+    )
 }
 
 fn recipe_rotate_secrets() -> Recipe {
-    Recipe::new("rotate-secrets", "Secret Rotation", RecipeCategory::Security)
-        .with_description("List expiring credentials, rotate them, and notify")
-        .with_connector("slack")
-        .with_tag("secrets")
-        .with_tag("rotation")
-        .with_parameter(
-            RecipeParameter::optional("channel", "Notification channel", "security"),
-        )
-        .with_parameter(
-            RecipeParameter::optional("days_threshold", "Days until expiry to trigger", "7"),
-        )
-        .with_step(
-            RecipeStep::new("notify", "slack", "send_message")
-                .with_input("channel", "{{param.channel}}")
-                .with_input("text", "🔑 Secret rotation complete.\n{{prev.summary}}"),
-        )
+    Recipe::new(
+        "rotate-secrets",
+        "Secret Rotation",
+        RecipeCategory::Security,
+    )
+    .with_description("List expiring credentials, rotate them, and notify")
+    .with_connector("slack")
+    .with_tag("secrets")
+    .with_tag("rotation")
+    .with_parameter(RecipeParameter::optional(
+        "channel",
+        "Notification channel",
+        "security",
+    ))
+    .with_parameter(RecipeParameter::optional(
+        "days_threshold",
+        "Days until expiry to trigger",
+        "7",
+    ))
+    .with_step(
+        RecipeStep::new("notify", "slack", "send_message")
+            .with_input("channel", "{{param.channel}}")
+            .with_input("text", "🔑 Secret rotation complete.\n{{prev.summary}}"),
+    )
 }
 
 fn recipe_sync_contacts() -> Recipe {
-    Recipe::new("sync-contacts", "Sync CRM Contacts", RecipeCategory::DataSync)
-        .with_description("Sync contacts from HubSpot to Google Contacts")
-        .with_connector("hubspot")
-        .with_connector("google-contacts")
-        .with_tag("crm")
-        .with_tag("sync")
-        .with_parameter(
-            RecipeParameter::optional("limit", "Max contacts to sync", "100"),
-        )
-        .with_step(
-            RecipeStep::new("fetch-contacts", "hubspot", "list_contacts")
-                .with_input("limit", "{{param.limit}}"),
-        )
-        .with_step(
-            RecipeStep::new("sync-to-google", "google-contacts", "create_contact")
-                .with_input("name", "{{prev.name}}")
-                .with_input("email", "{{prev.email}}")
-                .with_continue_on_error(true),
-        )
+    Recipe::new(
+        "sync-contacts",
+        "Sync CRM Contacts",
+        RecipeCategory::DataSync,
+    )
+    .with_description("Sync contacts from HubSpot to Google Contacts")
+    .with_connector("hubspot")
+    .with_connector("google-contacts")
+    .with_tag("crm")
+    .with_tag("sync")
+    .with_parameter(RecipeParameter::optional(
+        "limit",
+        "Max contacts to sync",
+        "100",
+    ))
+    .with_step(
+        RecipeStep::new("fetch-contacts", "hubspot", "list_contacts")
+            .with_input("limit", "{{param.limit}}"),
+    )
+    .with_step(
+        RecipeStep::new("sync-to-google", "google-contacts", "create_contact")
+            .with_input("name", "{{prev.name}}")
+            .with_input("email", "{{prev.email}}")
+            .with_continue_on_error(true),
+    )
 }
 
 fn recipe_analytics_report() -> Recipe {
-    Recipe::new("analytics-report", "Analytics Report to Slack", RecipeCategory::Analytics)
-        .with_description("Fetch Mixpanel analytics data and send formatted report to Slack")
-        .with_connector("mixpanel")
-        .with_connector("slack")
-        .with_tag("analytics")
-        .with_tag("reporting")
-        .with_parameter(
-            RecipeParameter::required("channel", "Slack channel for report"),
-        )
-        .with_parameter(
-            RecipeParameter::optional("days", "Days to look back", "7"),
-        )
-        .with_step(
-            RecipeStep::new("fetch-data", "mixpanel", "get_report")
-                .with_input("days", "{{param.days}}"),
-        )
-        .with_step(
-            RecipeStep::new("post-report", "slack", "send_message")
-                .with_input("channel", "{{param.channel}}")
-                .with_input("text", "📊 Analytics report (last {{param.days}} days):\n{{prev.summary}}"),
-        )
+    Recipe::new(
+        "analytics-report",
+        "Analytics Report to Slack",
+        RecipeCategory::Analytics,
+    )
+    .with_description("Fetch Mixpanel analytics data and send formatted report to Slack")
+    .with_connector("mixpanel")
+    .with_connector("slack")
+    .with_tag("analytics")
+    .with_tag("reporting")
+    .with_parameter(RecipeParameter::required(
+        "channel",
+        "Slack channel for report",
+    ))
+    .with_parameter(RecipeParameter::optional("days", "Days to look back", "7"))
+    .with_step(
+        RecipeStep::new("fetch-data", "mixpanel", "get_report")
+            .with_input("days", "{{param.days}}"),
+    )
+    .with_step(
+        RecipeStep::new("post-report", "slack", "send_message")
+            .with_input("channel", "{{param.channel}}")
+            .with_input(
+                "text",
+                "📊 Analytics report (last {{param.days}} days):\n{{prev.summary}}",
+            ),
+    )
 }
 
 fn recipe_meeting_notes() -> Recipe {
-    Recipe::new("meeting-notes", "Distribute Meeting Notes", RecipeCategory::Communication)
-        .with_description("Send meeting notes to attendees via email")
-        .with_connector("gmail")
-        .with_tag("meetings")
-        .with_tag("notes")
-        .with_parameter(
-            RecipeParameter::required("recipients", "Comma-separated email list"),
-        )
-        .with_parameter(
-            RecipeParameter::required("subject", "Meeting subject"),
-        )
-        .with_parameter(
-            RecipeParameter::required("notes", "Meeting notes content"),
-        )
-        .with_step(
-            RecipeStep::new("send-notes", "gmail", "send_email")
-                .with_input("to", "{{param.recipients}}")
-                .with_input("subject", "Meeting Notes: {{param.subject}}")
-                .with_input("body", "{{param.notes}}"),
-        )
+    Recipe::new(
+        "meeting-notes",
+        "Distribute Meeting Notes",
+        RecipeCategory::Communication,
+    )
+    .with_description("Send meeting notes to attendees via email")
+    .with_connector("gmail")
+    .with_tag("meetings")
+    .with_tag("notes")
+    .with_parameter(RecipeParameter::required(
+        "recipients",
+        "Comma-separated email list",
+    ))
+    .with_parameter(RecipeParameter::required("subject", "Meeting subject"))
+    .with_parameter(RecipeParameter::required("notes", "Meeting notes content"))
+    .with_step(
+        RecipeStep::new("send-notes", "gmail", "send_email")
+            .with_input("to", "{{param.recipients}}")
+            .with_input("subject", "Meeting Notes: {{param.subject}}")
+            .with_input("body", "{{param.notes}}"),
+    )
 }
 
 fn recipe_backup_to_s3() -> Recipe {
-    Recipe::new("backup-to-s3", "Backup Data to S3", RecipeCategory::DataSync)
-        .with_description("Export data from a service and upload to S3")
-        .with_connector("aws-s3")
-        .with_tag("backup")
-        .with_tag("s3")
-        .with_parameter(
-            RecipeParameter::required("bucket", "S3 bucket name"),
-        )
-        .with_parameter(
-            RecipeParameter::required("key_prefix", "S3 key prefix")
-                .with_example("backups/daily/"),
-        )
-        .with_parameter(
-            RecipeParameter::required("source_data", "Data to upload"),
-        )
-        .with_step(
-            RecipeStep::new("upload", "aws-s3", "put_object")
-                .with_input("bucket", "{{param.bucket}}")
-                .with_input("key", "{{param.key_prefix}}backup-{{now}}.json")
-                .with_input("body", "{{param.source_data}}"),
-        )
+    Recipe::new(
+        "backup-to-s3",
+        "Backup Data to S3",
+        RecipeCategory::DataSync,
+    )
+    .with_description("Export data from a service and upload to S3")
+    .with_connector("aws-s3")
+    .with_tag("backup")
+    .with_tag("s3")
+    .with_parameter(RecipeParameter::required("bucket", "S3 bucket name"))
+    .with_parameter(
+        RecipeParameter::required("key_prefix", "S3 key prefix").with_example("backups/daily/"),
+    )
+    .with_parameter(RecipeParameter::required("source_data", "Data to upload"))
+    .with_step(
+        RecipeStep::new("upload", "aws-s3", "put_object")
+            .with_input("bucket", "{{param.bucket}}")
+            .with_input("key", "{{param.key_prefix}}backup-{{now}}.json")
+            .with_input("body", "{{param.source_data}}"),
+    )
 }
 
 // ── Display helpers ───────────────────────────────────────────────
@@ -714,10 +753,7 @@ pub fn format_recipe_detail(recipe: &Recipe) -> String {
         format!("Recipe: {} ({})", recipe.name, recipe.id),
         format!("Category: {}", recipe.category),
         format!("Description: {}", recipe.description),
-        format!(
-            "Connectors: {}",
-            recipe.required_connectors.join(", ")
-        ),
+        format!("Connectors: {}", recipe.required_connectors.join(", ")),
     ];
 
     if !recipe.parameters.is_empty() {
@@ -776,9 +812,7 @@ pub fn validate_recipe(recipe: &Recipe) -> Vec<String> {
     }
     // Check required connectors match step connectors
     for step in &recipe.steps {
-        if !step.connector.is_empty()
-            && !recipe.required_connectors.contains(&step.connector)
-        {
+        if !step.connector.is_empty() && !recipe.required_connectors.contains(&step.connector) {
             errors.push(format!(
                 "step '{}' uses connector '{}' not in required_connectors",
                 step.name, step.connector
@@ -855,15 +889,13 @@ mod tests {
 
     #[test]
     fn step_with_inputs() {
-        let s = RecipeStep::new("s", "c", "o")
-            .with_input("key", "value");
+        let s = RecipeStep::new("s", "c", "o").with_input("key", "value");
         assert_eq!(s.input["key"], "value");
     }
 
     #[test]
     fn step_with_condition() {
-        let s = RecipeStep::new("s", "c", "o")
-            .with_condition("prev.status == 'success'");
+        let s = RecipeStep::new("s", "c", "o").with_condition("prev.status == 'success'");
         assert_eq!(s.condition.as_deref(), Some("prev.status == 'success'"));
     }
 
@@ -921,7 +953,11 @@ mod tests {
         let r = Recipe::new("test", "Test", RecipeCategory::Development)
             .with_connector("github")
             .with_connector("slack");
-        let available = vec!["github".to_string(), "slack".to_string(), "discord".to_string()];
+        let available = vec![
+            "github".to_string(),
+            "slack".to_string(),
+            "discord".to_string(),
+        ];
         assert!(r.check_requirements(&available).is_empty());
     }
 
@@ -1139,7 +1175,11 @@ mod tests {
             .with_connector("github")
             .with_step(RecipeStep::new("s", "slack", "o"));
         let errors = validate_recipe(&r);
-        assert!(errors.iter().any(|e| e.contains("not in required_connectors")));
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.contains("not in required_connectors"))
+        );
     }
 
     #[test]
@@ -1183,5 +1223,403 @@ mod tests {
             .with_step(RecipeStep::new("s", "github", "o"));
         let s = format_recipe_detail(&r);
         assert!(!s.contains("Parameters:"));
+    }
+
+    // ── RecipeCategory additional ────────────────────────────────
+
+    #[test]
+    fn category_roundtrip_serde() {
+        for cat in [
+            RecipeCategory::Development,
+            RecipeCategory::Communication,
+            RecipeCategory::Deployment,
+            RecipeCategory::Analytics,
+            RecipeCategory::Security,
+            RecipeCategory::DataSync,
+            RecipeCategory::Monitoring,
+        ] {
+            let json = serde_json::to_string(&cat).unwrap();
+            let back: RecipeCategory = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, cat);
+        }
+    }
+
+    #[test]
+    fn category_equality() {
+        assert_eq!(RecipeCategory::Development, RecipeCategory::Development);
+        assert_ne!(RecipeCategory::Development, RecipeCategory::Analytics);
+    }
+
+    #[test]
+    fn category_hash() {
+        use std::collections::HashSet;
+        let mut set = HashSet::new();
+        set.insert(RecipeCategory::Development);
+        set.insert(RecipeCategory::Development);
+        assert_eq!(set.len(), 1);
+        set.insert(RecipeCategory::Security);
+        assert_eq!(set.len(), 2);
+    }
+
+    #[test]
+    fn category_clone_copy() {
+        let c = RecipeCategory::Deployment;
+        let c2 = c;
+        assert_eq!(c, c2);
+    }
+
+    // ── RecipeParameter additional ───────────────────────────────
+
+    #[test]
+    fn param_roundtrip_serde() {
+        let p = RecipeParameter::required("owner", "Repo Owner")
+            .with_description("GitHub repository owner")
+            .with_example("octocat");
+        let json = serde_json::to_string(&p).unwrap();
+        let back: RecipeParameter = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.name, "owner");
+        assert!(back.required);
+        assert_eq!(back.example.as_deref(), Some("octocat"));
+    }
+
+    #[test]
+    fn param_optional_roundtrip() {
+        let p = RecipeParameter::optional("env", "Environment", "prod");
+        let json = serde_json::to_string(&p).unwrap();
+        let back: RecipeParameter = serde_json::from_str(&json).unwrap();
+        assert!(!back.required);
+        assert_eq!(back.default.as_deref(), Some("prod"));
+    }
+
+    #[test]
+    fn param_clone() {
+        let p = RecipeParameter::required("x", "X").with_example("val");
+        let cloned = p.clone();
+        assert_eq!(cloned.name, "x");
+        assert_eq!(cloned.example, p.example);
+    }
+
+    // ── RecipeStep additional ────────────────────────────────────
+
+    #[test]
+    fn step_roundtrip_serde() {
+        let s = RecipeStep::new("fetch", "github", "list_issues")
+            .with_input("owner", "octocat")
+            .with_input("repo", "hello-world")
+            .with_condition("prev.ok")
+            .with_continue_on_error(true);
+        let json = serde_json::to_string(&s).unwrap();
+        let back: RecipeStep = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.name, "fetch");
+        assert_eq!(back.input.len(), 2);
+        assert_eq!(back.condition.as_deref(), Some("prev.ok"));
+        assert!(back.continue_on_error);
+    }
+
+    #[test]
+    fn step_default_continue_on_error_false() {
+        let s = RecipeStep::new("s", "c", "o");
+        assert!(!s.continue_on_error);
+        assert!(s.condition.is_none());
+    }
+
+    #[test]
+    fn step_clone() {
+        let s = RecipeStep::new("a", "b", "c").with_input("k", "v");
+        let cloned = s.clone();
+        assert_eq!(cloned.name, "a");
+        assert_eq!(cloned.input["k"], "v");
+    }
+
+    #[test]
+    fn step_multiple_inputs() {
+        let s = RecipeStep::new("s", "c", "o")
+            .with_input("a", "1")
+            .with_input("b", "2")
+            .with_input("c", "3");
+        assert_eq!(s.input.len(), 3);
+    }
+
+    // ── Recipe additional ────────────────────────────────────────
+
+    #[test]
+    fn recipe_roundtrip_serde() {
+        let r = Recipe::new("test", "Test", RecipeCategory::Security)
+            .with_description("A test")
+            .with_connector("github")
+            .with_tag("sec")
+            .with_parameter(RecipeParameter::required("x", "X"))
+            .with_step(RecipeStep::new("s", "github", "o"));
+        let json = serde_json::to_string(&r).unwrap();
+        let back: Recipe = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.id, "test");
+        assert_eq!(back.category, RecipeCategory::Security);
+        assert_eq!(back.tags, vec!["sec"]);
+    }
+
+    #[test]
+    fn recipe_no_steps_step_count_zero() {
+        let r = Recipe::new("empty", "Empty", RecipeCategory::Monitoring);
+        assert_eq!(r.step_count(), 0);
+    }
+
+    #[test]
+    fn recipe_connectors_used_empty() {
+        let r = Recipe::new("empty", "Empty", RecipeCategory::Monitoring);
+        assert!(r.connectors_used().is_empty());
+    }
+
+    #[test]
+    fn recipe_connectors_used_deduplicates() {
+        let r = Recipe::new("t", "T", RecipeCategory::Development)
+            .with_step(RecipeStep::new("a", "github", "o1"))
+            .with_step(RecipeStep::new("b", "github", "o2"))
+            .with_step(RecipeStep::new("c", "slack", "o3"))
+            .with_step(RecipeStep::new("d", "github", "o4"));
+        let used = r.connectors_used();
+        assert_eq!(used, vec!["github", "slack"]);
+    }
+
+    #[test]
+    fn recipe_check_requirements_empty_available() {
+        let r = Recipe::new("t", "T", RecipeCategory::Development)
+            .with_connector("github");
+        let missing = r.check_requirements(&[]);
+        assert_eq!(missing, vec!["github"]);
+    }
+
+    #[test]
+    fn recipe_check_requirements_no_required() {
+        let r = Recipe::new("t", "T", RecipeCategory::Development);
+        let missing = r.check_requirements(&["github".to_string()]);
+        assert!(missing.is_empty());
+    }
+
+    #[test]
+    fn recipe_multiple_tags() {
+        let r = Recipe::new("t", "T", RecipeCategory::Development)
+            .with_tag("a")
+            .with_tag("b")
+            .with_tag("c");
+        assert_eq!(r.tags.len(), 3);
+    }
+
+    #[test]
+    fn recipe_clone() {
+        let r = Recipe::new("t", "T", RecipeCategory::Analytics)
+            .with_connector("mixpanel")
+            .with_step(RecipeStep::new("s", "mixpanel", "o"));
+        let cloned = r.clone();
+        assert_eq!(cloned.id, "t");
+        assert_eq!(cloned.required_connectors, vec!["mixpanel"]);
+    }
+
+    // ── RecipeLibrary additional ─────────────────────────────────
+
+    #[test]
+    fn library_get_nonexistent() {
+        let lib = RecipeLibrary::new();
+        assert!(lib.get("nope").is_none());
+    }
+
+    #[test]
+    fn library_add_multiple() {
+        let mut lib = RecipeLibrary::new();
+        lib.add(Recipe::new("a", "A", RecipeCategory::Development));
+        lib.add(Recipe::new("b", "B", RecipeCategory::Security));
+        lib.add(Recipe::new("c", "C", RecipeCategory::Development));
+        assert_eq!(lib.len(), 3);
+    }
+
+    #[test]
+    fn library_by_category_empty() {
+        let lib = RecipeLibrary::with_builtins();
+        // No recipes in some hypothetical category — well, all built-in categories have at least one
+        // but after filtering, we can verify the correct count
+        let analytics = lib.by_category(RecipeCategory::Analytics);
+        assert_eq!(analytics.len(), 1); // analytics-report
+    }
+
+    #[test]
+    fn library_search_no_results() {
+        let lib = RecipeLibrary::with_builtins();
+        let results = lib.search("xyznonexistent");
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn library_search_by_description() {
+        let lib = RecipeLibrary::with_builtins();
+        let results = lib.search("Mixpanel");
+        assert!(!results.is_empty());
+        assert!(results.iter().any(|r| r.id == "analytics-report"));
+    }
+
+    #[test]
+    fn library_available_recipes_none_match() {
+        let lib = RecipeLibrary::with_builtins();
+        let available: Vec<String> = Vec::new();
+        let recipes = lib.available_recipes(&available);
+        // No connectors available, so no recipes should match
+        assert!(recipes.is_empty());
+    }
+
+    #[test]
+    fn library_available_recipes_partial() {
+        let lib = RecipeLibrary::with_builtins();
+        let available = vec!["slack".to_string()];
+        let recipes = lib.available_recipes(&available);
+        // deploy-announce, health-check-all, rotate-secrets only need slack
+        assert!(recipes.iter().any(|r| r.id == "deploy-announce"));
+    }
+
+    #[test]
+    fn library_default_is_empty() {
+        let lib = RecipeLibrary::default();
+        assert!(lib.is_empty());
+    }
+
+    #[test]
+    fn library_roundtrip_serde() {
+        let mut lib = RecipeLibrary::new();
+        lib.add(
+            Recipe::new("test", "Test", RecipeCategory::Development)
+                .with_connector("github")
+                .with_step(RecipeStep::new("s", "github", "o")),
+        );
+        let json = serde_json::to_string(&lib).unwrap();
+        let back: RecipeLibrary = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.len(), 1);
+        assert_eq!(back.get("test").unwrap().id, "test");
+    }
+
+    #[test]
+    fn library_clone() {
+        let lib = RecipeLibrary::with_builtins();
+        let cloned = lib.clone();
+        assert_eq!(cloned.len(), lib.len());
+    }
+
+    // ── validate_recipe additional ───────────────────────────────
+
+    #[test]
+    fn validate_empty_name() {
+        let r = Recipe::new("test", "", RecipeCategory::Development)
+            .with_step(RecipeStep::new("s", "c", "o"));
+        let errors = validate_recipe(&r);
+        assert!(errors.iter().any(|e| e.contains("name")));
+    }
+
+    #[test]
+    fn validate_step_missing_operation() {
+        let r = Recipe::new("test", "Test", RecipeCategory::Development)
+            .with_connector("github")
+            .with_step(RecipeStep::new("s", "github", ""));
+        let errors = validate_recipe(&r);
+        assert!(errors.iter().any(|e| e.contains("no operation")));
+    }
+
+    #[test]
+    fn validate_param_empty_name() {
+        let mut r = Recipe::new("test", "Test", RecipeCategory::Development)
+            .with_connector("github")
+            .with_step(RecipeStep::new("s", "github", "o"));
+        r.parameters.push(RecipeParameter {
+            name: String::new(),
+            label: "X".to_owned(),
+            description: String::new(),
+            required: false,
+            default: None,
+            example: None,
+        });
+        let errors = validate_recipe(&r);
+        assert!(errors.iter().any(|e| e.contains("parameter name")));
+    }
+
+    #[test]
+    fn validate_multiple_errors() {
+        let r = Recipe::new("", "", RecipeCategory::Development);
+        let errors = validate_recipe(&r);
+        assert!(errors.len() >= 3); // empty id, empty name, no steps
+    }
+
+    // ── format helpers additional ────────────────────────────────
+
+    #[test]
+    fn format_summary_with_multiple_connectors() {
+        let r = Recipe::new("multi", "Multi Connector", RecipeCategory::Communication)
+            .with_connector("slack")
+            .with_connector("discord")
+            .with_step(RecipeStep::new("a", "slack", "send"))
+            .with_step(RecipeStep::new("b", "discord", "send"));
+        let s = format_recipe_summary(&r);
+        assert!(s.contains("slack, discord"));
+        assert!(s.contains("2 steps"));
+    }
+
+    #[test]
+    fn format_detail_with_default_param() {
+        let r = Recipe::new("test", "Test", RecipeCategory::Development)
+            .with_connector("github")
+            .with_parameter(RecipeParameter::optional("env", "Environment", "production"))
+            .with_step(RecipeStep::new("s", "github", "o"));
+        let s = format_recipe_detail(&r);
+        assert!(s.contains("[default: production]"));
+    }
+
+    #[test]
+    fn format_detail_required_param_marker() {
+        let r = Recipe::new("test", "Test", RecipeCategory::Development)
+            .with_connector("github")
+            .with_parameter(RecipeParameter::required("owner", "Owner"))
+            .with_step(RecipeStep::new("s", "github", "o"));
+        let s = format_recipe_detail(&r);
+        assert!(s.contains("(required)"));
+    }
+
+    #[test]
+    fn format_detail_no_steps() {
+        let r = Recipe::new("empty", "Empty", RecipeCategory::Development);
+        let s = format_recipe_detail(&r);
+        assert!(!s.contains("Steps:"));
+    }
+
+    // ── Built-in recipe details ──────────────────────────────────
+
+    #[test]
+    fn builtin_recipes_all_have_descriptions() {
+        for recipe in builtin_recipes() {
+            assert!(
+                !recipe.description.is_empty(),
+                "recipe '{}' has no description",
+                recipe.id
+            );
+        }
+    }
+
+    #[test]
+    fn builtin_recipes_all_have_tags() {
+        for recipe in builtin_recipes() {
+            assert!(
+                !recipe.tags.is_empty(),
+                "recipe '{}' has no tags",
+                recipe.id
+            );
+        }
+    }
+
+    #[test]
+    fn builtin_recipes_count() {
+        assert_eq!(builtin_recipes().len(), 12);
+    }
+
+    #[test]
+    fn builtin_recipe_ids_unique() {
+        let recipes = builtin_recipes();
+        let ids: Vec<&str> = recipes.iter().map(|r| r.id.as_str()).collect();
+        let mut deduped = ids.clone();
+        deduped.sort();
+        deduped.dedup();
+        assert_eq!(ids.len(), deduped.len());
     }
 }

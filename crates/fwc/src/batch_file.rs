@@ -838,4 +838,391 @@ mod tests {
         assert_eq!(waves.len(), 1);
         assert_eq!(waves[0].operation_ids.len(), 100);
     }
+
+    // ── Additional parsing edge cases ─────────────────────────────
+
+    #[test]
+    fn parse_whitespace_only_lines() {
+        let content = "   \n\t\n{\"id\":\"a\",\"connector\":\"g\",\"operation\":\"o\",\"input\":{}}\n  \n";
+        let batch = BatchFile::parse(content).unwrap();
+        assert_eq!(batch.len(), 1);
+    }
+
+    #[test]
+    fn parse_inline_comment_before_op() {
+        let content = "# header\n{\"id\":\"a\",\"connector\":\"g\",\"operation\":\"o\",\"input\":{}}";
+        let batch = BatchFile::parse(content).unwrap();
+        assert_eq!(batch.len(), 1);
+        assert_eq!(batch.operations[0].id, "a");
+    }
+
+    #[test]
+    fn parse_only_whitespace_error() {
+        let err = BatchFile::parse("   \n\t\n  ").unwrap_err();
+        assert_eq!(err, BatchFileError::Empty);
+    }
+
+    #[test]
+    fn parse_invalid_json_on_second_line() {
+        let content = "{\"id\":\"a\",\"connector\":\"g\",\"operation\":\"o\",\"input\":{}}\nnot json";
+        let err = BatchFile::parse(content).unwrap_err();
+        match err {
+            BatchFileError::InvalidJson { line, .. } => assert_eq!(line, 2),
+            other => panic!("expected InvalidJson, got {other}"),
+        }
+    }
+
+    #[test]
+    fn parse_preserves_input_payload() {
+        let content = r#"{"id":"s1","connector":"g","operation":"o","input":{"key":"value","num":42,"nested":{"a":1}}}"#;
+        let batch = BatchFile::parse(content).unwrap();
+        assert_eq!(batch.operations[0].input["key"], "value");
+        assert_eq!(batch.operations[0].input["num"], 42);
+        assert_eq!(batch.operations[0].input["nested"]["a"], 1);
+    }
+
+    #[test]
+    fn parse_null_input() {
+        let content = r#"{"id":"s1","connector":"g","operation":"o","input":null}"#;
+        let batch = BatchFile::parse(content).unwrap();
+        assert!(batch.operations[0].input.is_null());
+    }
+
+    #[test]
+    fn parse_array_input() {
+        let content = r#"{"id":"s1","connector":"g","operation":"o","input":[1,2,3]}"#;
+        let batch = BatchFile::parse(content).unwrap();
+        assert!(batch.operations[0].input.is_array());
+    }
+
+    #[test]
+    fn parse_empty_depends_on_is_default() {
+        let content = r#"{"id":"s1","connector":"g","operation":"o","input":{},"depends_on":[]}"#;
+        let batch = BatchFile::parse(content).unwrap();
+        assert!(batch.operations[0].depends_on.is_empty());
+    }
+
+    #[test]
+    fn parse_multiple_dependencies() {
+        let content = r#"{"id":"a","connector":"g","operation":"o","input":{}}
+{"id":"b","connector":"g","operation":"o","input":{}}
+{"id":"c","connector":"g","operation":"o","input":{},"depends_on":["a","b"]}"#;
+        let batch = BatchFile::parse(content).unwrap();
+        assert_eq!(batch.operations[2].depends_on.len(), 2);
+        assert!(batch.operations[2].depends_on.contains(&"a".to_owned()));
+        assert!(batch.operations[2].depends_on.contains(&"b".to_owned()));
+    }
+
+    // ── BatchFile methods (additional) ────────────────────────────
+
+    #[test]
+    fn batch_file_len() {
+        let content = r#"{"id":"a","connector":"g","operation":"o","input":{}}
+{"id":"b","connector":"g","operation":"o","input":{}}
+{"id":"c","connector":"h","operation":"p","input":{}}"#;
+        let batch = BatchFile::parse(content).unwrap();
+        assert_eq!(batch.len(), 3);
+    }
+
+    #[test]
+    fn connectors_single_connector() {
+        let content = r#"{"id":"a","connector":"github","operation":"list","input":{}}
+{"id":"b","connector":"github","operation":"create","input":{}}"#;
+        let batch = BatchFile::parse(content).unwrap();
+        let connectors = batch.connectors();
+        assert_eq!(connectors.len(), 1);
+        assert!(connectors.contains("github"));
+    }
+
+    #[test]
+    fn connectors_many() {
+        let content = r#"{"id":"a","connector":"github","operation":"o","input":{}}
+{"id":"b","connector":"slack","operation":"o","input":{}}
+{"id":"c","connector":"discord","operation":"o","input":{}}
+{"id":"d","connector":"github","operation":"o","input":{}}"#;
+        let batch = BatchFile::parse(content).unwrap();
+        let connectors = batch.connectors();
+        assert_eq!(connectors.len(), 3);
+    }
+
+    // ── BatchOp additional serde ──────────────────────────────────
+
+    #[test]
+    fn batch_op_with_complex_input_roundtrip() {
+        let op = BatchOp {
+            id: "step1".to_owned(),
+            connector: "github".to_owned(),
+            operation: "create_issue".to_owned(),
+            input: json!({"title": "Bug", "body": "Details", "labels": ["bug", "priority"]}),
+            depends_on: vec!["step0".to_owned(), "step-1".to_owned()],
+        };
+        let json = serde_json::to_string(&op).unwrap();
+        let back: BatchOp = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.depends_on.len(), 2);
+        assert!(back.input["labels"].is_array());
+    }
+
+    #[test]
+    fn batch_op_clone() {
+        let op = BatchOp {
+            id: "s1".to_owned(),
+            connector: "g".to_owned(),
+            operation: "o".to_owned(),
+            input: json!({"x": 1}),
+            depends_on: vec!["dep".to_owned()],
+        };
+        let cloned = op.clone();
+        assert_eq!(cloned.id, op.id);
+        assert_eq!(cloned.depends_on, op.depends_on);
+    }
+
+    // ── OpStatus additional ───────────────────────────────────────
+
+    #[test]
+    fn op_status_serde_values() {
+        assert_eq!(serde_json::to_string(&OpStatus::Success).unwrap(), "\"success\"");
+        assert_eq!(serde_json::to_string(&OpStatus::Error).unwrap(), "\"error\"");
+        assert_eq!(serde_json::to_string(&OpStatus::Skipped).unwrap(), "\"skipped\"");
+        assert_eq!(serde_json::to_string(&OpStatus::Pending).unwrap(), "\"pending\"");
+    }
+
+    #[test]
+    fn op_status_clone() {
+        let s = OpStatus::Success;
+        let c = s.clone();
+        assert_eq!(s, c);
+    }
+
+    // ── OpResult additional ───────────────────────────────────────
+
+    #[test]
+    fn op_result_pending_serializes() {
+        let result = OpResult {
+            id: "s4".to_owned(),
+            operation: "jira.create".to_owned(),
+            status: OpStatus::Pending,
+            wave: None,
+            result: None,
+            error: None,
+        };
+        let json = serde_json::to_string(&result).unwrap();
+        assert!(json.contains("\"status\":\"pending\""));
+        assert!(!json.contains("\"wave\""));
+        assert!(!json.contains("\"result\""));
+        assert!(!json.contains("\"error\""));
+    }
+
+    #[test]
+    fn op_result_with_both_result_and_error() {
+        let result = OpResult {
+            id: "s5".to_owned(),
+            operation: "test.op".to_owned(),
+            status: OpStatus::Error,
+            wave: Some(3),
+            result: Some(json!({"partial": true})),
+            error: Some(json!({"code": "PARTIAL_FAILURE"})),
+        };
+        let json = serde_json::to_string(&result).unwrap();
+        assert!(json.contains("\"partial\""));
+        assert!(json.contains("PARTIAL_FAILURE"));
+    }
+
+    #[test]
+    fn op_result_roundtrip_all_fields() {
+        let original = OpResult {
+            id: "roundtrip".to_owned(),
+            operation: "github.list".to_owned(),
+            status: OpStatus::Error,
+            wave: Some(5),
+            result: None,
+            error: Some(json!({"msg": "timeout"})),
+        };
+        let json = serde_json::to_string(&original).unwrap();
+        let back: OpResult = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.id, "roundtrip");
+        assert_eq!(back.status, OpStatus::Error);
+        assert_eq!(back.wave, Some(5));
+        assert!(back.result.is_none());
+        assert_eq!(back.error.unwrap()["msg"], "timeout");
+    }
+
+    #[test]
+    fn op_result_clone() {
+        let result = OpResult {
+            id: "c1".to_owned(),
+            operation: "g.o".to_owned(),
+            status: OpStatus::Success,
+            wave: Some(0),
+            result: Some(json!(42)),
+            error: None,
+        };
+        let cloned = result.clone();
+        assert_eq!(cloned.id, result.id);
+        assert_eq!(cloned.status, result.status);
+    }
+
+    // ── BatchFileError additional ─────────────────────────────────
+
+    #[test]
+    fn error_missing_field_display_contains_field_name() {
+        let err = BatchFileError::MissingField {
+            line: 7,
+            field: "connector",
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("line 7"));
+        assert!(msg.contains("'connector'"));
+    }
+
+    #[test]
+    fn error_clone() {
+        let err = BatchFileError::DuplicateId { id: "abc".to_owned() };
+        let cloned = err.clone();
+        assert_eq!(err, cloned);
+    }
+
+    #[test]
+    fn error_debug_format() {
+        let err = BatchFileError::Empty;
+        let debug = format!("{err:?}");
+        assert!(debug.contains("Empty"));
+    }
+
+    // ── Execution waves additional ────────────────────────────────
+
+    #[test]
+    fn waves_w_shape_graph() {
+        // r1 -> m -> join
+        // r2 ---^
+        let content = r#"{"id":"r1","connector":"g","operation":"o","input":{}}
+{"id":"r2","connector":"g","operation":"o","input":{}}
+{"id":"m","connector":"g","operation":"o","input":{},"depends_on":["r1","r2"]}
+{"id":"join","connector":"g","operation":"o","input":{},"depends_on":["m"]}"#;
+        let batch = BatchFile::parse(content).unwrap();
+        let waves = topological_waves(&batch);
+        assert_eq!(waves.len(), 3);
+        assert_eq!(waves[0].operation_ids.len(), 2);
+        assert_eq!(waves[1].operation_ids, vec!["m"]);
+        assert_eq!(waves[2].operation_ids, vec!["join"]);
+    }
+
+    #[test]
+    fn waves_single_operation() {
+        let content = r#"{"id":"solo","connector":"g","operation":"o","input":{}}"#;
+        let batch = BatchFile::parse(content).unwrap();
+        let waves = topological_waves(&batch);
+        assert_eq!(waves.len(), 1);
+        assert_eq!(waves[0].operation_ids, vec!["solo"]);
+        assert_eq!(waves[0].wave, 0);
+    }
+
+    // ── ExecutionPlan additional ──────────────────────────────────
+
+    #[test]
+    fn execution_plan_concurrency_and_error_mode() {
+        let content = r#"{"id":"a","connector":"g","operation":"o","input":{}}"#;
+        let batch = BatchFile::parse(content).unwrap();
+        let plan = ExecutionPlan::from_batch(&batch, 10, "skip");
+        assert_eq!(plan.concurrency, 10);
+        assert_eq!(plan.on_error, "skip");
+    }
+
+    #[test]
+    fn execution_plan_connectors_sorted() {
+        let content = r#"{"id":"a","connector":"slack","operation":"o","input":{}}
+{"id":"b","connector":"github","operation":"o","input":{}}"#;
+        let batch = BatchFile::parse(content).unwrap();
+        let plan = ExecutionPlan::from_batch(&batch, 1, "abort");
+        // BTreeSet produces sorted order
+        assert_eq!(plan.connectors, vec!["github", "slack"]);
+    }
+
+    #[test]
+    fn execution_plan_wave_indices() {
+        let content = r#"{"id":"a","connector":"g","operation":"o","input":{}}
+{"id":"b","connector":"g","operation":"o","input":{},"depends_on":["a"]}"#;
+        let batch = BatchFile::parse(content).unwrap();
+        let plan = ExecutionPlan::from_batch(&batch, 4, "abort");
+        assert_eq!(plan.waves[0].wave, 0);
+        assert_eq!(plan.waves[1].wave, 1);
+    }
+
+    #[test]
+    fn execution_plan_json_has_all_fields() {
+        let content = r#"{"id":"a","connector":"g","operation":"o","input":{}}"#;
+        let batch = BatchFile::parse(content).unwrap();
+        let plan = ExecutionPlan::from_batch(&batch, 8, "continue");
+        let json = serde_json::to_value(&plan).unwrap();
+        assert!(json.get("total_operations").is_some());
+        assert!(json.get("concurrency").is_some());
+        assert!(json.get("on_error").is_some());
+        assert!(json.get("waves").is_some());
+        assert!(json.get("connectors").is_some());
+    }
+
+    // ── ExecutionWave clone and debug ─────────────────────────────
+
+    #[test]
+    fn execution_wave_clone() {
+        let wave = ExecutionWave {
+            wave: 2,
+            operation_ids: vec!["x".to_owned(), "y".to_owned()],
+        };
+        let cloned = wave.clone();
+        assert_eq!(cloned.wave, 2);
+        assert_eq!(cloned.operation_ids.len(), 2);
+    }
+
+    #[test]
+    fn execution_wave_debug() {
+        let wave = ExecutionWave {
+            wave: 0,
+            operation_ids: vec!["a".to_owned()],
+        };
+        let debug = format!("{wave:?}");
+        assert!(debug.contains("ExecutionWave"));
+    }
+
+    // ── BatchFile Serialize ──────────────────────────────────────
+
+    #[test]
+    fn batch_file_serializes() {
+        let content = r#"{"id":"a","connector":"g","operation":"o","input":{"k":1}}"#;
+        let batch = BatchFile::parse(content).unwrap();
+        let json = serde_json::to_value(&batch).unwrap();
+        assert!(json["operations"].is_array());
+        assert_eq!(json["operations"][0]["id"], "a");
+    }
+
+    // ── Cycle detection edge cases ────────────────────────────────
+
+    #[test]
+    fn four_node_cycle_detected() {
+        let content = r#"{"id":"a","connector":"g","operation":"o","input":{},"depends_on":["d"]}
+{"id":"b","connector":"g","operation":"o","input":{},"depends_on":["a"]}
+{"id":"c","connector":"g","operation":"o","input":{},"depends_on":["b"]}
+{"id":"d","connector":"g","operation":"o","input":{},"depends_on":["c"]}"#;
+        let err = BatchFile::parse(content).unwrap_err();
+        match err {
+            BatchFileError::CycleDetected { ids } => assert_eq!(ids.len(), 4),
+            other => panic!("expected CycleDetected, got {other}"),
+        }
+    }
+
+    #[test]
+    fn partial_cycle_with_free_nodes() {
+        // a -> b -> c -> a (cycle), d is free
+        let content = r#"{"id":"d","connector":"g","operation":"o","input":{}}
+{"id":"a","connector":"g","operation":"o","input":{},"depends_on":["c"]}
+{"id":"b","connector":"g","operation":"o","input":{},"depends_on":["a"]}
+{"id":"c","connector":"g","operation":"o","input":{},"depends_on":["b"]}"#;
+        let err = BatchFile::parse(content).unwrap_err();
+        match err {
+            BatchFileError::CycleDetected { ids } => {
+                assert_eq!(ids.len(), 3);
+                assert!(!ids.contains(&"d".to_owned()));
+            }
+            other => panic!("expected CycleDetected, got {other}"),
+        }
+    }
 }

@@ -1,5 +1,7 @@
 #![deny(unsafe_code)]
 
+#[allow(dead_code)] // Multi-agent coordination wired when Agent Mail integration lands.
+mod agent_coord;
 #[allow(dead_code)]
 mod auth_status;
 #[allow(dead_code)] // Audit types used by later CLI commands.
@@ -77,6 +79,8 @@ mod throttle;
 #[allow(dead_code)] // Idempotent undo for reversible operations.
 mod undo;
 mod validate;
+#[allow(dead_code)]
+mod zone_scope;
 mod workflow;
 
 use std::collections::BTreeMap;
@@ -137,6 +141,10 @@ Examples:
   fwc pipeline validate .fwc/pipelines/notify-on-new-issues.toml
   fwc pipeline dry-run .fwc/pipelines/notify-on-new-issues.toml --param owner=octocat --param repo=hello-world
   fwc pipeline estimate .fwc/pipelines/notify-on-new-issues.toml --param owner=octocat --param repo=hello-world
+  fwc recipe list
+  fwc recipe show github-pr-review-notify
+  fwc recipe dry-run github-pr-review-notify
+  fwc recipe export github-pr-review-notify > .fwc/pipelines/github-pr-review-notify.toml
   fwc export-tools --format mcp --json
   fwc export-tools --format claude github
   fwc export-tools --format openai --risk-max medium --output tools.json
@@ -327,6 +335,13 @@ enum Commands {
     /// multi-step connector workflows from scratch every time.
     #[command(visible_alias = "pipelines")]
     Pipeline(PipelineArgs),
+
+    /// Browse and plan bundled cross-connector pipeline recipes.
+    ///
+    /// Recipes ship with starter parameter defaults so agents can inspect,
+    /// validate, estimate, export, and customize common multi-step workflows.
+    #[command(visible_alias = "recipes")]
+    Recipe(RecipeArgs),
 
     /// Apply one operation to many inputs in parallel.
     ///
@@ -898,6 +913,56 @@ struct PipeArgs {
     /// Include intermediate output from the source operation.
     #[arg(long)]
     include_intermediate: bool,
+}
+
+#[derive(Args, Debug, Serialize)]
+struct RecipeArgs {
+    #[command(subcommand)]
+    command: RecipeCommand,
+}
+
+#[derive(Subcommand, Debug, Serialize)]
+enum RecipeCommand {
+    /// List bundled built-in recipes.
+    List(RecipeListArgs),
+
+    /// Show one built-in recipe definition, estimate, and export target.
+    Show(RecipeRefArgs),
+
+    /// Validate one built-in recipe definition without planning execution.
+    Validate(RecipeRefArgs),
+
+    /// Plan one built-in recipe with bound parameters.
+    Run(RecipeRunArgs),
+
+    /// Build a recipe plan without pretending to execute it.
+    #[command(name = "dry-run", visible_alias = "preview")]
+    DryRun(RecipeRunArgs),
+
+    /// Summarize recipe cost, risk, approvals, and declared rate-limit impact.
+    Estimate(RecipeRunArgs),
+
+    /// Export one built-in recipe as raw TOML for local customization.
+    Export(RecipeRefArgs),
+}
+
+#[derive(Args, Debug, Default, Serialize)]
+struct RecipeListArgs {}
+
+#[derive(Args, Debug, Serialize)]
+struct RecipeRefArgs {
+    /// Built-in recipe slug.
+    recipe: String,
+}
+
+#[derive(Args, Debug, Serialize)]
+struct RecipeRunArgs {
+    /// Built-in recipe slug.
+    recipe: String,
+
+    /// Bind a recipe parameter as KEY=VALUE.
+    #[arg(long = "param", value_name = "KEY=VALUE")]
+    params: Vec<String>,
 }
 
 #[derive(Args, Debug, Serialize)]
@@ -1497,6 +1562,7 @@ fn dispatch(cli: &Cli) -> Result<DispatchOutcome> {
         Commands::History(args) => history_dispatch(args)?,
         Commands::Pipe(args) => pipe_dispatch(args)?,
         Commands::Pipeline(args) => pipeline_dispatch(args)?,
+        Commands::Recipe(args) => planned("recipe", args)?,
         Commands::Map(args) => map_dispatch(args)?,
         Commands::BatchFile(args) => batch_file_dispatch(args)?,
         Commands::Events(args) => planned("events", args)?,
@@ -4312,6 +4378,15 @@ struct ErrorDetails {
 const CONFIG_SUBCOMMANDS: &[&str] = &[
     "schema", "get", "set", "unset", "import", "export", "doctor",
 ];
+const RECIPE_SUBCOMMANDS: &[&str] = &[
+    "list",
+    "show",
+    "validate",
+    "run",
+    "dry-run",
+    "estimate",
+    "export",
+];
 const PIPELINE_SUBCOMMANDS: &[&str] = &["list", "show", "validate", "run", "dry-run", "estimate"];
 
 fn prepare_cli(received_args: &[String]) -> std::result::Result<PreparedCli, PrepareCliError> {
@@ -4737,6 +4812,30 @@ fn parse_failure_dispatch(args: &[String], error: &clap::Error) -> DispatchOutco
                 );
             }
 
+            if command == Some("recipe") {
+                return structured_error(
+                    "missing-recipe-subcommand",
+                    "No recipe subcommand was provided.",
+                    CliExitCode::Parse,
+                    true,
+                    args,
+                    &normalized_args,
+                    ErrorDetails {
+                        did_you_mean: Vec::new(),
+                        examples: vec![
+                            "fwc recipe list".to_owned(),
+                            "fwc recipe show github-pr-review-notify".to_owned(),
+                        ],
+                        next_actions: vec![
+                            "Use `fwc recipe list` to discover the bundled recipe library."
+                                .to_owned(),
+                            "Use `fwc recipe show|validate|run|dry-run|estimate|export <slug>` once you know the target recipe."
+                                .to_owned(),
+                        ],
+                    },
+                );
+            }
+
             structured_error(
                 "missing-command",
                 "No `fwc` command was provided.",
@@ -4783,6 +4882,22 @@ fn parse_failure_dispatch(args: &[String], error: &clap::Error) -> DispatchOutco
                     "fwc pipeline validate .fwc/pipelines/<name>.toml".to_owned(),
                     "fwc pipeline estimate .fwc/pipelines/<name>.toml --param key=value".to_owned(),
                     "fwc pipeline dry-run .fwc/pipelines/<name>.toml --param key=value".to_owned(),
+                ],
+            ),
+            Some("recipe") => unknown_subcommand_dispatch(
+                "recipe-subcommand",
+                "recipe",
+                args,
+                &normalized_args,
+                command_index
+                    .and_then(|index| args.get(index + 1))
+                    .map(String::as_str),
+                RECIPE_SUBCOMMANDS,
+                vec![
+                    "fwc recipe list".to_owned(),
+                    "fwc recipe show github-pr-review-notify".to_owned(),
+                    "fwc recipe export github-pr-review-notify".to_owned(),
+                    "fwc recipe dry-run github-pr-review-notify".to_owned(),
                 ],
             ),
             Some("task") => unknown_subcommand_dispatch(

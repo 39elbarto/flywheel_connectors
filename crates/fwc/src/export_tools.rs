@@ -3,10 +3,7 @@
 //! Converts [`DiscoveredOperation`] data from the discovery catalog into
 //! tool schemas consumable by external AI agent runtimes.
 
-use fcp_core::{
-    AgentHint, ApprovalMode, CapabilityId, IdempotencyClass, OperationId, OperationInfo,
-    RiskLevel, SafetyTier,
-};
+use fcp_core::tool_schema::ExportOptions as SharedExportOptions;
 use serde::Serialize;
 use serde_json::{Value, json};
 
@@ -144,84 +141,13 @@ fn make_tool_name(op_id: &str, opts: &ExportOptions, sanitize: bool) -> String {
     name
 }
 
-fn shared_export_options(opts: &ExportOptions, sanitize_name: bool) -> fcp_core::tool_schema::ExportOptions {
-    fcp_core::tool_schema::ExportOptions {
+fn shared_export_options(opts: &ExportOptions, sanitize_name: bool) -> SharedExportOptions {
+    SharedExportOptions {
         include_safety_metadata: opts.include_safety_metadata,
         include_ai_hints: opts.include_ai_hints,
         include_examples: opts.include_examples,
         strip_prefix: opts.strip_prefix.clone(),
         sanitize_name,
-    }
-}
-
-fn parse_risk_level(label: &str) -> RiskLevel {
-    match label {
-        "low" => RiskLevel::Low,
-        "medium" => RiskLevel::Medium,
-        "high" => RiskLevel::High,
-        "critical" => RiskLevel::Critical,
-        other => panic!("unexpected risk level label from discovery catalog: {other}"),
-    }
-}
-
-fn parse_safety_tier(label: &str) -> SafetyTier {
-    match label {
-        "safe" => SafetyTier::Safe,
-        "risky" => SafetyTier::Risky,
-        "dangerous" => SafetyTier::Dangerous,
-        "critical" => SafetyTier::Critical,
-        "forbidden" => SafetyTier::Forbidden,
-        other => panic!("unexpected safety tier label from discovery catalog: {other}"),
-    }
-}
-
-fn parse_idempotency(label: &str) -> IdempotencyClass {
-    match label {
-        "none" => IdempotencyClass::None,
-        "best-effort" | "best_effort" => IdempotencyClass::BestEffort,
-        "strict" => IdempotencyClass::Strict,
-        other => panic!("unexpected idempotency label from discovery catalog: {other}"),
-    }
-}
-
-fn parse_approval_mode(label: &str) -> Option<ApprovalMode> {
-    match label {
-        "none" => None,
-        "policy" => Some(ApprovalMode::Policy),
-        "interactive" => Some(ApprovalMode::Interactive),
-        "elevation-token" | "elevation_token" => Some(ApprovalMode::ElevationToken),
-        other => panic!("unexpected approval mode label from discovery catalog: {other}"),
-    }
-}
-
-fn to_operation_info(op: &DiscoveredOperation) -> OperationInfo {
-    OperationInfo {
-        id: OperationId::new(op.actual_id.clone())
-            .expect("discovery catalog should only surface canonical operation ids"),
-        summary: op.summary.summary.clone(),
-        description: Some(op.description.clone()).filter(|description| !description.is_empty()),
-        input_schema: op.input_schema.clone(),
-        output_schema: op.output_schema.clone(),
-        capability: CapabilityId::new(op.summary.capability.clone())
-            .expect("discovery catalog should only surface canonical capability ids"),
-        risk_level: parse_risk_level(&op.summary.risk_level),
-        safety_tier: parse_safety_tier(&op.summary.safety_tier),
-        idempotency: parse_idempotency(&op.summary.idempotency),
-        ai_hints: AgentHint {
-            when_to_use: op.when_to_use.clone(),
-            common_mistakes: op.common_mistakes.clone(),
-            examples: op.examples.clone(),
-            related: op
-                .related
-                .iter()
-                .filter_map(|related| CapabilityId::new(related.clone()).ok())
-                .collect(),
-        },
-        // The readiness catalog intentionally stores human-facing summaries rather
-        // than the raw rate-limit declaration, so the shared schema export path
-        // only preserves metadata required by the tool descriptors themselves.
-        rate_limit: None,
-        requires_approval: parse_approval_mode(&op.approval_mode),
     }
 }
 
@@ -273,7 +199,10 @@ fn is_destructive(op: &DiscoveredOperation) -> bool {
 
 /// Convert a discovered operation to an MCP tool.
 pub fn to_mcp_tool(op: &DiscoveredOperation, opts: &ExportOptions) -> McpTool {
-    let tool = fcp_core::tool_schema::to_mcp_tool(&to_operation_info(op), &shared_export_options(opts, false));
+    let tool = fcp_core::tool_schema::to_mcp_tool(
+        &op.operation_info(),
+        &shared_export_options(opts, false),
+    );
     McpTool {
         name: tool.name,
         description: tool.description,
@@ -291,8 +220,10 @@ pub fn to_mcp_tool(op: &DiscoveredOperation, opts: &ExportOptions) -> McpTool {
 
 /// Convert a discovered operation to a Claude tool.
 pub fn to_claude_tool(op: &DiscoveredOperation, opts: &ExportOptions) -> ClaudeTool {
-    let tool =
-        fcp_core::tool_schema::to_claude_tool(&to_operation_info(op), &shared_export_options(opts, false));
+    let tool = fcp_core::tool_schema::to_claude_tool(
+        &op.operation_info(),
+        &shared_export_options(opts, false),
+    );
     ClaudeTool {
         name: tool.name,
         description: tool.description,
@@ -302,8 +233,10 @@ pub fn to_claude_tool(op: &DiscoveredOperation, opts: &ExportOptions) -> ClaudeT
 
 /// Convert a discovered operation to an `OpenAI` tool.
 pub fn to_openai_tool(op: &DiscoveredOperation, opts: &ExportOptions) -> OpenAiTool {
-    let tool =
-        fcp_core::tool_schema::to_openai_tool(&to_operation_info(op), &shared_export_options(opts, true));
+    let tool = fcp_core::tool_schema::to_openai_tool(
+        &op.operation_info(),
+        &shared_export_options(opts, true),
+    );
     OpenAiTool {
         tool_type: tool.tool_type,
         function: OpenAiFunction {
@@ -743,10 +676,7 @@ mod tests {
     #[test]
     fn description_multiple_common_mistakes_joined() {
         let mut op = sample_op();
-        op.common_mistakes = vec![
-            "Mistake A".to_string(),
-            "Mistake B".to_string(),
-        ];
+        op.common_mistakes = vec!["Mistake A".to_string(), "Mistake B".to_string()];
         let desc = build_description(&op, &ExportOptions::default());
         assert!(desc.contains("Mistake A; Mistake B"));
     }

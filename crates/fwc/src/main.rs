@@ -1742,6 +1742,7 @@ fn show_dispatch(args: &ShowArgs) -> Result<DispatchOutcome> {
             "zones": connector.zones.clone(),
             "capabilities": connector.capabilities.clone(),
             "rate_limits": connector.detail.rate_limits.clone(),
+            "shared_descriptor": connector.shared_descriptor(),
             "operations": {
                 "preview": preview,
                 "preview_truncated": preview_truncated,
@@ -7044,6 +7045,15 @@ mod tests {
         assert_eq!(payload["connector"]["format"], "wasi");
         assert_eq!(payload["connector"]["state"], "unknown");
         assert_eq!(payload["zones"]["home"], "z:work");
+        assert_eq!(payload["shared_descriptor"]["connector_id"], "fcp.github");
+        assert_eq!(
+            payload["shared_descriptor"]["auth"]["status"],
+            "unverifiable"
+        );
+        assert_eq!(
+            payload["shared_descriptor"]["readiness"]["status"],
+            "unverifiable"
+        );
         assert!(
             payload["operations"]["preview"]
                 .as_array()

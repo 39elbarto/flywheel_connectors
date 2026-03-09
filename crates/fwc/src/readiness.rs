@@ -13,6 +13,11 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
+use fcp_core::{
+    AgentHint, ApprovalMode, AuthDescriptor, CapabilityId, ConnectorDescriptor, DescriptorCheck,
+    DescriptorStatus, IdempotencyClass, OperationId, OperationInfo, PrerequisiteCatalog,
+    ReadinessDescriptor, RiskLevel, SafetyTier,
+};
 use fcp_manifest::{ConnectorManifest, ConnectorRuntimeFormat, ManifestApprovalMode};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -661,6 +666,78 @@ impl DiscoveredConnector {
     }
 
     #[must_use]
+    pub fn shared_descriptor(&self) -> ConnectorDescriptor {
+        let auth = AuthDescriptor::unverifiable(
+            "Auth capabilities are not surfaced by workspace-manifest discovery yet.",
+        )
+        .with_check(
+            DescriptorCheck::new(
+                "auth.discovery",
+                DescriptorStatus::Unverifiable,
+                "Use host-backed introspection to inspect active auth methods, profiles, and health.",
+            )
+            .with_remediation("Expose auth capabilities and active auth state through the host discovery contract."),
+        );
+
+        let prerequisites = PrerequisiteCatalog::unverifiable(
+            "Provisioning prerequisites are not surfaced by workspace-manifest discovery yet.",
+        );
+
+        let readiness = ReadinessDescriptor::unverifiable(
+            "Workspace-manifest discovery confirms static connector metadata, but runtime and setup state still require host-backed evidence.",
+        )
+        .with_check(DescriptorCheck::new(
+            "manifest.metadata",
+            DescriptorStatus::Ready,
+            "Connector identity and operation catalog loaded from manifest metadata.",
+        ))
+        .with_check(DescriptorCheck::new(
+            "runtime.state",
+            DescriptorStatus::Unverifiable,
+            "Runtime lifecycle and health require host-backed discovery.",
+        ))
+        .with_check(if self.detail.config_schema.is_some() {
+            DescriptorCheck::new(
+                "config.schema",
+                DescriptorStatus::Ready,
+                "Config schema is available for this connector.",
+            )
+        } else {
+            DescriptorCheck::new(
+                "config.schema",
+                DescriptorStatus::Unverifiable,
+                "Config schema is not available from manifest-backed discovery.",
+            )
+            .with_remediation(
+                "Expose redaction-aware config schema through host-backed config introspection.",
+            )
+        })
+        .with_check(DescriptorCheck::new(
+            "setup.prerequisites",
+            DescriptorStatus::Unverifiable,
+            "Service-side onboarding and prerequisite drift need shared provisioning descriptors.",
+        ));
+
+        let mut descriptor = ConnectorDescriptor::new(self.detail.summary.id.clone());
+        descriptor.display_name = Some(self.detail.summary.name.clone());
+        descriptor.version = Some(self.detail.summary.version.clone());
+        descriptor.description = Some(self.detail.summary.description.clone());
+        descriptor.archetypes = self.detail.summary.archetypes.clone();
+        descriptor.supported_zones = self.supported_zones.clone();
+        descriptor.runtime_format = Some(self.runtime_format.clone());
+        descriptor.state_model = self.state_model.clone();
+        descriptor.operations = self
+            .operations
+            .iter()
+            .map(DiscoveredOperation::operation_info)
+            .collect();
+        descriptor.auth = Some(auth);
+        descriptor.prerequisites = Some(prerequisites);
+        descriptor.readiness = Some(readiness);
+        descriptor
+    }
+
+    #[must_use]
     pub fn matches_zone(&self, zone: &str) -> bool {
         self.supported_zones
             .iter()
@@ -844,6 +921,39 @@ impl DiscoveredOperation {
             .any(|candidate| candidate.starts_with(selector))
     }
 
+    #[must_use]
+    pub fn operation_info(&self) -> OperationInfo {
+        OperationInfo {
+            id: OperationId::new(self.actual_id.clone())
+                .expect("discovery catalog should only surface canonical operation ids"),
+            summary: self.summary.summary.clone(),
+            description: Some(self.description.clone())
+                .filter(|description| !description.is_empty()),
+            input_schema: self.input_schema.clone(),
+            output_schema: self.output_schema.clone(),
+            capability: CapabilityId::new(self.summary.capability.clone())
+                .expect("discovery catalog should only surface canonical capability ids"),
+            risk_level: parse_risk_level(&self.summary.risk_level),
+            safety_tier: parse_safety_tier(&self.summary.safety_tier),
+            idempotency: parse_idempotency(&self.summary.idempotency),
+            ai_hints: AgentHint {
+                when_to_use: self.when_to_use.clone(),
+                common_mistakes: self.common_mistakes.clone(),
+                examples: self.examples.clone(),
+                related: self
+                    .related
+                    .iter()
+                    .filter_map(|related| CapabilityId::new(related.clone()).ok())
+                    .collect(),
+            },
+            // Discovery intentionally stores human-facing rate-limit summaries
+            // rather than the raw declaration, so the canonical `OperationInfo`
+            // path leaves this unset until host-backed introspection lands.
+            rate_limit: None,
+            requires_approval: parse_approval_mode(&self.approval_mode),
+        }
+    }
+
     fn selector_keys(&self) -> Vec<String> {
         self.aliases
             .iter()
@@ -909,6 +1019,46 @@ const fn runtime_format_label(format: ConnectorRuntimeFormat) -> &'static str {
     match format {
         ConnectorRuntimeFormat::Native => "native",
         ConnectorRuntimeFormat::Wasi => "wasi",
+    }
+}
+
+fn parse_risk_level(label: &str) -> RiskLevel {
+    match label {
+        "low" => RiskLevel::Low,
+        "medium" => RiskLevel::Medium,
+        "high" => RiskLevel::High,
+        "critical" => RiskLevel::Critical,
+        other => panic!("unexpected risk level label from discovery catalog: {other}"),
+    }
+}
+
+fn parse_safety_tier(label: &str) -> SafetyTier {
+    match label {
+        "safe" => SafetyTier::Safe,
+        "risky" => SafetyTier::Risky,
+        "dangerous" => SafetyTier::Dangerous,
+        "critical" => SafetyTier::Critical,
+        "forbidden" => SafetyTier::Forbidden,
+        other => panic!("unexpected safety tier label from discovery catalog: {other}"),
+    }
+}
+
+fn parse_idempotency(label: &str) -> IdempotencyClass {
+    match label {
+        "none" => IdempotencyClass::None,
+        "best-effort" | "best_effort" => IdempotencyClass::BestEffort,
+        "strict" => IdempotencyClass::Strict,
+        other => panic!("unexpected idempotency label from discovery catalog: {other}"),
+    }
+}
+
+fn parse_approval_mode(label: &str) -> Option<ApprovalMode> {
+    match label {
+        "none" => None,
+        "policy" => Some(ApprovalMode::Policy),
+        "interactive" => Some(ApprovalMode::Interactive),
+        "elevation-token" | "elevation_token" => Some(ApprovalMode::ElevationToken),
+        other => panic!("unexpected approval mode label from discovery catalog: {other}"),
     }
 }
 

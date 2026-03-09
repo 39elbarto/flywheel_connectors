@@ -2035,4 +2035,179 @@ mod tests {
         assert!(debug.contains("InvalidCursor"));
         assert!(debug.contains("my_topic"));
     }
+
+    // ── NEW: ReplayError Display ─────────────────────────────────────
+
+    #[test]
+    fn replay_error_unknown_topic_display() {
+        let err = ReplayError::UnknownTopic {
+            topic: "events".to_string(),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("events"));
+        assert!(msg.contains("unknown topic"));
+    }
+
+    #[test]
+    fn replay_error_invalid_cursor_display() {
+        let err = ReplayError::InvalidCursor {
+            topic: "updates".to_string(),
+            cursor: "abc".to_string(),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("updates"));
+        assert!(msg.contains("abc"));
+    }
+
+    #[test]
+    fn replay_error_cursor_stale_display() {
+        let err = ReplayError::CursorStale {
+            topic: "events".to_string(),
+            cursor_seq: 5,
+            oldest_seq: 10,
+        };
+        let msg = err.to_string();
+        assert!(msg.contains('5'));
+        assert!(msg.contains("10"));
+        assert!(msg.contains("events"));
+    }
+
+    #[test]
+    fn replay_error_clone() {
+        let err = ReplayError::UnknownTopic {
+            topic: "t".to_string(),
+        };
+        let cloned = err.clone();
+        assert_eq!(err.to_string(), cloned.to_string());
+    }
+
+    // ── NEW: BufferLimits edge cases ─────────────────────────────────
+
+    #[test]
+    fn buffer_limits_max_enforced_at_least_min() {
+        let limits = BufferLimits::new(10, 5);
+        // max_events should be bumped to at least min_events
+        assert_eq!(limits.max_events, 10);
+    }
+
+    #[test]
+    fn buffer_limits_default_values() {
+        let limits = BufferLimits::default();
+        assert_eq!(limits.min_events, 10);
+        assert_eq!(limits.max_events, 100);
+    }
+
+    #[test]
+    fn buffer_limits_copy() {
+        let limits = BufferLimits::new(5, 50);
+        let copied = limits;
+        assert_eq!(limits.min_events, copied.min_events);
+        assert_eq!(limits.max_events, copied.max_events);
+    }
+
+    // ── NEW: AckResult and NackResult ────────────────────────────────
+
+    #[test]
+    fn ack_result_debug_and_clone() {
+        let result = AckResult {
+            acked: vec![1, 2, 3],
+            missing: vec![4],
+        };
+        let cloned = result.clone();
+        assert_eq!(result.acked, cloned.acked);
+        assert_eq!(result.missing, cloned.missing);
+        let debug = format!("{result:?}");
+        assert!(debug.contains("AckResult"));
+    }
+
+    #[test]
+    fn nack_result_debug_and_clone() {
+        let result = NackResult {
+            redeliver: vec![],
+            missing: vec![1, 2],
+        };
+        let cloned = result.clone();
+        assert_eq!(result.missing, cloned.missing);
+        let debug = format!("{result:?}");
+        assert!(debug.contains("NackResult"));
+    }
+
+    // ── NEW: SubscribeOutcome ────────────────────────────────────────
+
+    #[test]
+    fn subscribe_outcome_debug_and_clone() {
+        let outcome = SubscribeOutcome {
+            response: SubscribeResponse {
+                r#type: "response".to_string(),
+                id: RequestId("test-id".to_string()),
+                result: SubscribeResult {
+                    confirmed_topics: vec!["t1".to_string()],
+                    cursors: HashMap::new(),
+                    replay_supported: false,
+                    buffer: None,
+                },
+            },
+            replay_events: HashMap::new(),
+        };
+        let cloned = outcome.clone();
+        assert_eq!(
+            outcome.response.result.confirmed_topics,
+            cloned.response.result.confirmed_topics
+        );
+        let debug = format!("{outcome:?}");
+        assert!(debug.contains("SubscribeOutcome"));
+    }
+
+    // ── NEW: SequentialEnqueueError ──────────────────────────────────
+
+    #[test]
+    fn sequential_enqueue_error_display() {
+        let err = SequentialEnqueueError::QueueFull {
+            stream_key: "chat_123".to_string(),
+            item: 42_u32,
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("chat_123"));
+        assert!(msg.contains("full"));
+    }
+
+    #[test]
+    fn sequential_enqueue_error_eq() {
+        let err1 = SequentialEnqueueError::QueueFull {
+            stream_key: "k".to_string(),
+            item: 1_u32,
+        };
+        let err2 = SequentialEnqueueError::QueueFull {
+            stream_key: "k".to_string(),
+            item: 1_u32,
+        };
+        assert_eq!(err1, err2);
+    }
+
+    // ── NEW: SequentialEventProcessorConfig ──────────────────────────
+
+    #[test]
+    fn sequential_config_default_values() {
+        let config = SequentialEventProcessorConfig::default();
+        assert_eq!(config.max_queue_per_key, 32);
+        assert_eq!(config.max_total_queued, 256);
+        assert_eq!(
+            config.overflow_policy,
+            SequentialOverflowPolicy::RejectNewest
+        );
+        assert!(config.item_timeout.is_none());
+    }
+
+    #[test]
+    fn sequential_config_clone_and_copy() {
+        let config = SequentialEventProcessorConfig {
+            max_queue_per_key: 16,
+            max_total_queued: 128,
+            overflow_policy: SequentialOverflowPolicy::DropOldest,
+            item_timeout: Some(Duration::from_secs(30)),
+        };
+        let copied = config;
+        assert_eq!(config.max_queue_per_key, copied.max_queue_per_key);
+        assert_eq!(config.item_timeout, copied.item_timeout);
+    }
 }

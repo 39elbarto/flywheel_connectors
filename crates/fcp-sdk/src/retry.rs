@@ -949,4 +949,97 @@ mod tests {
     fn duration_to_ms_exact_millisecond() {
         assert_eq!(duration_to_ms(Duration::from_millis(1)), 1);
     }
+
+    // ── NEW: RetryPolicy edge cases ──────────────────────────────────
+
+    #[test]
+    fn retry_policy_zero_max_attempts() {
+        let p = RetryPolicy::new().with_max_attempts(Some(0));
+        assert!(p.next_delay(0, RetryDecision::Backoff, None).is_none());
+    }
+
+    #[test]
+    fn retry_policy_max_attempts_one() {
+        let p = RetryPolicy::new().with_max_attempts(Some(1));
+        assert!(p.next_delay(0, RetryDecision::Backoff, None).is_some());
+        assert!(p.next_delay(1, RetryDecision::Backoff, None).is_none());
+    }
+
+    #[test]
+    fn compute_backoff_base_one() {
+        let p = RetryPolicy::new()
+            .with_base_backoff_ms(1)
+            .with_max_backoff_ms(1024)
+            .with_jitter_enabled(false);
+        assert_eq!(p.compute_backoff_ms(0), 1);
+        assert_eq!(p.compute_backoff_ms(10), 1024);
+    }
+
+    #[test]
+    fn compute_backoff_max_less_than_computed() {
+        let p = RetryPolicy::new()
+            .with_base_backoff_ms(500)
+            .with_max_backoff_ms(500)
+            .with_jitter_enabled(false);
+        // Any attempt should be capped at 500
+        assert_eq!(p.compute_backoff_ms(0), 500);
+        assert_eq!(p.compute_backoff_ms(5), 500);
+    }
+
+    // ── NEW: decision_from_http_status comprehensive ─────────────────
+
+    #[test]
+    fn http_599_returns_backoff() {
+        assert_eq!(decision_from_http_status(599, None), RetryDecision::Backoff);
+    }
+
+    #[test]
+    fn http_600_returns_terminal() {
+        assert_eq!(
+            decision_from_http_status(600, None),
+            RetryDecision::Terminal
+        );
+    }
+
+    #[test]
+    fn http_499_returns_terminal() {
+        assert_eq!(
+            decision_from_http_status(499, None),
+            RetryDecision::Terminal
+        );
+    }
+
+    // ── NEW: map_external_error service name propagation ─────────────
+
+    #[test]
+    fn map_external_error_service_name_preserved() {
+        let (_decision, error) =
+            map_external_error("my-service", Some(500), "error msg", None);
+        match error {
+            FcpError::External { service, message, .. } => {
+                assert_eq!(service, "my-service");
+                assert_eq!(message, "error msg");
+            }
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn map_external_error_no_status_parse_error_is_terminal() {
+        let (decision, _error) =
+            map_external_error("svc", None, "can't parse entities", None);
+        assert_eq!(decision, RetryDecision::Terminal);
+    }
+
+    // ── NEW: duration_to_ms additional edge cases ────────────────────
+
+    #[test]
+    fn duration_to_ms_one_second() {
+        assert_eq!(duration_to_ms(Duration::from_secs(1)), 1_000);
+    }
+
+    #[test]
+    fn duration_to_ms_fractional() {
+        assert_eq!(duration_to_ms(Duration::from_millis(1500)), 1500);
+    }
 }

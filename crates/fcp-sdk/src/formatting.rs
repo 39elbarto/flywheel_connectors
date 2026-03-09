@@ -1191,4 +1191,148 @@ mod tests {
     fn is_numeric_entity_valid_hex() {
         assert!(is_numeric_entity("#xFF"));
     }
+
+    // ── NEW: validate_html additional edge cases ──────────────────────
+
+    #[test]
+    fn validate_html_only_tag() {
+        assert!(validate_html("<br>").is_ok());
+    }
+
+    #[test]
+    fn validate_html_adjacent_entities() {
+        assert!(validate_html("&amp;&lt;&gt;&quot;&apos;").is_ok());
+    }
+
+    #[test]
+    fn validate_html_tag_with_attributes() {
+        assert!(validate_html("<a href=\"url\">text</a>").is_ok());
+    }
+
+    #[test]
+    fn validate_html_ampersand_alone_at_eof() {
+        // Bare & at end of input — no semicolon found before EOF
+        let result = validate_html("test &");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn validate_html_tab_and_newline_allowed() {
+        assert!(validate_html("line1\nline2\ttab").is_ok());
+    }
+
+    // ── NEW: validate_markdown additional edge cases ──────────────────
+
+    #[test]
+    fn validate_markdown_only_backslash_pairs() {
+        assert!(validate_markdown("\\\\\\\\").is_ok());
+    }
+
+    #[test]
+    fn validate_markdown_escape_then_normal() {
+        assert!(validate_markdown("\\*hello").is_ok());
+    }
+
+    // ── NEW: strip_html additional edge cases ─────────────────────────
+
+    #[test]
+    fn strip_html_preserves_text_between_tags() {
+        assert_eq!(strip_html("a<b>b</b>c"), "abc");
+    }
+
+    #[test]
+    fn strip_html_consecutive_tags() {
+        assert_eq!(strip_html("<b></b><i></i>"), "");
+    }
+
+    #[test]
+    fn strip_html_entity_long_no_semicolon() {
+        // Entity name exceeds 10 chars — buffer fills then breaks
+        let result = strip_html("&averylonginvalidname");
+        assert!(result.contains('&'));
+    }
+
+    // ── NEW: strip_markdown additional edge cases ─────────────────────
+
+    #[test]
+    fn strip_markdown_trailing_escape_char() {
+        // Trailing backslash — escape flag is true at end, nothing to output
+        assert_eq!(strip_markdown("text\\"), "text");
+    }
+
+    #[test]
+    fn strip_markdown_consecutive_controls() {
+        assert_eq!(strip_markdown("***bold***"), "bold");
+    }
+
+    // ── NEW: classify_error_message priority ──────────────────────────
+
+    #[test]
+    fn classify_parse_takes_priority_over_rate_limit() {
+        // "parse entities" should classify as ParseError even if "rate limit" also present
+        assert_eq!(
+            classify_error_message("can't parse entities due to rate limit"),
+            ErrorClass::ParseError
+        );
+    }
+
+    #[test]
+    fn classify_http_429_string() {
+        assert_eq!(
+            classify_error_message("HTTP 429 Too Many Requests"),
+            ErrorClass::RateLimit
+        );
+    }
+
+    // ── NEW: decode_entity edge cases ─────────────────────────────────
+
+    #[test]
+    fn decode_entity_empty_string() {
+        assert_eq!(decode_entity(""), None);
+    }
+
+    #[test]
+    fn decode_numeric_entity_zero() {
+        assert_eq!(decode_numeric_entity("#0"), Some('\0'));
+    }
+
+    #[test]
+    fn decode_numeric_entity_large_invalid_codepoint() {
+        // 0xFFFFFFFF is not a valid Unicode scalar
+        assert_eq!(decode_numeric_entity("#xFFFFFFFF"), None);
+    }
+
+    // ── NEW: is_valid_entity additional edge cases ────────────────────
+
+    #[test]
+    fn is_valid_entity_empty_string() {
+        assert!(!is_valid_entity(""));
+    }
+
+    #[test]
+    fn is_valid_entity_numeric_decimal_zero() {
+        assert!(is_valid_entity("#0"));
+    }
+
+    // ── NEW: fallback_plaintext edge cases ────────────────────────────
+
+    #[test]
+    fn fallback_plaintext_plain_with_control_chars() {
+        let result = fallback_plaintext("text\x00here", FormatMode::Plain);
+        assert!(result.contains("\\u{0}"));
+    }
+
+    #[test]
+    fn fallback_plaintext_html_strips_and_escapes() {
+        let result = fallback_plaintext("<b>bold\x00</b>", FormatMode::Html);
+        assert_eq!(result, "bold\\u{0}");
+    }
+
+    #[test]
+    fn fallback_plaintext_markdown_strips_and_escapes() {
+        let result = fallback_plaintext("*bold*\x01text", FormatMode::MarkdownV2);
+        // * stripped, control escaped
+        assert!(!result.contains('*'));
+        assert!(result.contains("\\u{1}"));
+    }
 }

@@ -4,6 +4,8 @@
 mod audit;
 mod catalog;
 mod export_tools;
+mod format_table;
+#[allow(dead_code, clippy::writeln_empty_string, clippy::missing_const_for_fn, clippy::collection_is_never_read, clippy::needless_continue)] mod history;
 #[allow(dead_code)] // Discovery types wired into host-backed commands in later beads.
 mod identifier;
 mod intent;
@@ -99,6 +101,22 @@ struct Cli {
     /// Render the JSON payload through a Handlebars template loaded from a file.
     #[arg(long, global = true, value_name = "PATH", conflicts_with = "template")]
     template_file: Option<PathBuf>,
+
+    /// Explicit column list for table/CSV/TSV/Markdown formats (comma-separated).
+    #[arg(long, global = true, value_delimiter = ',')]
+    columns: Vec<String>,
+
+    /// Sort tabular output by this column name.
+    #[arg(long, global = true)]
+    sort_by: Option<String>,
+
+    /// Maximum number of rows in tabular output.
+    #[arg(long, global = true, default_value_t = 0)]
+    limit: usize,
+
+    /// Suppress column headers in tabular output.
+    #[arg(long, global = true, default_value_t = false)]
+    no_headers: bool,
 
     /// Host endpoint or socket path for future host-backed execution.
     #[arg(long, global = true)]
@@ -219,6 +237,13 @@ enum Commands {
     /// Reports structured errors with fix suggestions for each problem.
     #[command(visible_alias = "check")]
     Validate(ValidateArgs),
+
+    /// Browse the append-only operation audit log.
+    ///
+    /// Every invoke and simulate call is recorded. Query by connector,
+    /// status, time range, or entry ID for debugging and replay.
+    #[command(visible_alias = "audit")]
+    History(HistoryArgs),
 }
 
 #[derive(Args, Debug, Serialize)]
@@ -724,6 +749,29 @@ struct ValidateArgs {
     #[arg(long, value_name = "PATH")]
     input_file: Option<std::path::PathBuf>,
 }
+
+#[derive(Args, Debug, Serialize)]
+struct HistoryArgs {
+    /// Show details for a specific entry ID.
+    entry_id: Option<String>,
+
+    /// Filter by connector slug.
+    #[arg(long)]
+    connector: Option<String>,
+
+    /// Filter by status (success, error, timeout, `rate_limited`, denied, simulated).
+    #[arg(long)]
+    status: Option<String>,
+
+    /// Show entries since duration (e.g. `1h`, `30m`, `7d`).
+    #[arg(long)]
+    since: Option<String>,
+
+    /// Maximum number of entries to return.
+    #[arg(long, default_value_t = 20)]
+    limit: usize,
+}
+
 fn main() -> ExitCode {
     let raw_args = std::env::args().collect::<Vec<_>>();
     let fallback_format = infer_output_format(&raw_args);
@@ -942,7 +990,13 @@ fn build_render_options(
         (Some(_), Some(_)) => unreachable!("clap enforces template flag conflicts"),
     };
 
-    Ok(RenderOptions { template })
+    Ok(RenderOptions {
+        template,
+        tabular_columns: cli.columns.clone(),
+        tabular_sort_by: cli.sort_by.clone(),
+        tabular_limit: cli.limit,
+        tabular_no_headers: cli.no_headers,
+    })
 }
 
 fn internal_error_dispatch(args: &[String], error: &anyhow::Error) -> DispatchOutcome {
@@ -1070,6 +1124,7 @@ fn dispatch(cli: &Cli) -> Result<DispatchOutcome> {
         Commands::Suggest(args) => suggest_dispatch(args)?,
         Commands::Template(args) => template_dispatch(args)?,
         Commands::Validate(args) => validate_dispatch(args)?,
+        Commands::History(args) => history_dispatch(args)?,
     };
 
     Ok(outcome)
@@ -2039,6 +2094,83 @@ fn validate_dispatch(args: &ValidateArgs) -> Result<DispatchOutcome> {
             exit_code: CliExitCode::UnknownCommand,
         })
     }
+}
+
+#[allow(clippy::option_if_let_else)]
+fn history_dispatch(args: &HistoryArgs) -> Result<DispatchOutcome> {
+    let store_path = history::HistoryStore::default_path()?;
+    let store = history::HistoryStore::new(store_path);
+
+    // Single entry lookup.
+    if let Some(ref entry_id) = args.entry_id {
+        return store.get(entry_id)?.map_or_else(
+            || {
+                Ok(DispatchOutcome {
+                    payload: json!({
+                        "status": "error",
+                        "command": "history",
+                        "error": {
+                            "type": "not-found",
+                            "message": format!("No history entry with ID '{entry_id}'."),
+                        },
+                        "next_actions": ["fwc history"],
+                    }),
+                    exit_code: CliExitCode::UnknownCommand,
+                })
+            },
+            |entry| {
+                Ok(DispatchOutcome {
+                    payload: json!({
+                        "status": "ok",
+                        "command": "history",
+                        "scope": "entry",
+                        "entry": entry,
+                    }),
+                    exit_code: CliExitCode::Success,
+                })
+            },
+        );
+    }
+
+    // Build filter.
+    let mut filter = history::HistoryFilter::new();
+    filter.limit = args.limit;
+    filter.connector.clone_from(&args.connector);
+    if let Some(ref status_str) = args.status {
+        filter.status = history::parse_status(status_str);
+    }
+    if let Some(ref since_str) = args.since {
+        if let Some(dur) = history::parse_since(since_str) {
+            filter.since = Some(chrono::Utc::now() - dur);
+        }
+    }
+
+    let entries = store.query(&filter)?;
+    let total = store.count()?;
+
+    Ok(DispatchOutcome {
+        payload: json!({
+            "status": "ok",
+            "command": "history",
+            "scope": "list",
+            "total_entries": total,
+            "returned": entries.len(),
+            "filter": {
+                "connector": args.connector,
+                "status": args.status,
+                "since": args.since,
+                "limit": args.limit,
+            },
+            "entries": entries,
+            "next_actions": [
+                "fwc history <entry_id>",
+                "fwc history --connector github",
+                "fwc history --status error",
+                "fwc history --since 1h",
+            ],
+        }),
+        exit_code: CliExitCode::Success,
+    })
 }
 
 fn connector_list_entry(connector: &DiscoveredConnector) -> Value {

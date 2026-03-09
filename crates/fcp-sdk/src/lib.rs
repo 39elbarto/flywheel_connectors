@@ -1452,4 +1452,317 @@ mod tests {
         let debug = format!("{e:?}");
         assert!(debug.contains("Serialization"));
     }
+
+    // ── NEW: SchemaValidationError variants ─────────────────────────────
+
+    #[test]
+    fn schema_validation_error_invalid_schema_display() {
+        let err = SchemaValidationError::InvalidSchema {
+            message: "broken $ref".to_string(),
+        };
+        let s = err.to_string();
+        assert!(s.contains("invalid JSON Schema"));
+        assert!(s.contains("broken $ref"));
+    }
+
+    #[test]
+    fn schema_validation_error_validation_failed_display() {
+        let err = SchemaValidationError::ValidationFailed {
+            message: "summary".to_string(),
+            errors: vec!["a".to_string(), "b".to_string()],
+        };
+        let s = err.to_string();
+        assert!(s.contains("schema validation failed"));
+        assert!(s.contains("summary"));
+    }
+
+    #[test]
+    fn schema_validation_error_validation_failed_errors_vec() {
+        let err = SchemaValidationError::ValidationFailed {
+            message: "m".to_string(),
+            errors: vec!["first".to_string(), "second".to_string(), "third".to_string()],
+        };
+        match err {
+            SchemaValidationError::ValidationFailed { errors, .. } => {
+                assert_eq!(errors.len(), 3);
+                assert_eq!(errors[0], "first");
+                assert_eq!(errors[2], "third");
+            }
+            SchemaValidationError::InvalidSchema { .. } => panic!("wrong variant"),
+        }
+    }
+
+    // ── NEW: SchemaValidator with complex schemas ───────────────────────
+
+    #[test]
+    fn schema_validator_one_of() {
+        let schema = json!({
+            "oneOf": [
+                {"type": "string"},
+                {"type": "integer"}
+            ]
+        });
+        let v = SchemaValidator::compile(&schema).unwrap();
+        assert!(v.validate(&json!("hello")).is_ok());
+        assert!(v.validate(&json!(42)).is_ok());
+        assert!(v.validate(&json!(true)).is_err());
+    }
+
+    #[test]
+    fn schema_validator_required_with_additional_properties() {
+        let schema = json!({
+            "type": "object",
+            "required": ["id"],
+            "properties": {
+                "id": {"type": "integer"},
+                "name": {"type": "string"}
+            },
+            "additionalProperties": false
+        });
+        let v = SchemaValidator::compile(&schema).unwrap();
+        assert!(v.validate(&json!({"id": 1})).is_ok());
+        assert!(v.validate(&json!({"id": 1, "name": "x"})).is_ok());
+        assert!(v.validate(&json!({"name": "x"})).is_err()); // missing id
+        assert!(v.validate(&json!({"id": 1, "extra": true})).is_err()); // extra prop
+    }
+
+    #[test]
+    fn schema_validator_nested_object_validation() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "address": {
+                    "type": "object",
+                    "required": ["city"],
+                    "properties": {
+                        "city": {"type": "string"},
+                        "zip": {"type": "string"}
+                    }
+                }
+            }
+        });
+        let v = SchemaValidator::compile(&schema).unwrap();
+        assert!(v.validate(&json!({"address": {"city": "NY"}})).is_ok());
+        assert!(v.validate(&json!({"address": {}})).is_err()); // missing city
+    }
+
+    #[test]
+    fn schema_validator_min_items_array() {
+        let schema = json!({
+            "type": "array",
+            "minItems": 2,
+            "maxItems": 4,
+            "items": {"type": "number"}
+        });
+        let v = SchemaValidator::compile(&schema).unwrap();
+        assert!(v.validate(&json!([1, 2])).is_ok());
+        assert!(v.validate(&json!([1, 2, 3, 4])).is_ok());
+        assert!(v.validate(&json!([1])).is_err()); // too few
+        assert!(v.validate(&json!([1, 2, 3, 4, 5])).is_err()); // too many
+    }
+
+    #[test]
+    fn schema_validator_true_schema_accepts_all() {
+        let schema = json!(true);
+        let v = SchemaValidator::compile(&schema).unwrap();
+        assert!(v.validate(&json!(42)).is_ok());
+        assert!(v.validate(&json!("any")).is_ok());
+        assert!(v.validate(&json!(null)).is_ok());
+    }
+
+    #[test]
+    fn schema_validator_false_schema_rejects_all() {
+        let schema = json!(false);
+        let v = SchemaValidator::compile(&schema).unwrap();
+        assert!(v.validate(&json!(42)).is_err());
+        assert!(v.validate(&json!(null)).is_err());
+    }
+
+    // ── NEW: validate_json_schema with true/false schemas ───────────────
+
+    #[test]
+    fn validate_json_schema_true_schema() {
+        assert!(validate_json_schema(&json!(true), &json!(42)).is_ok());
+    }
+
+    #[test]
+    fn validate_json_schema_false_schema() {
+        assert!(validate_json_schema(&json!(false), &json!(42)).is_err());
+    }
+
+    // ── NEW: format_schema_errors boundary ──────────────────────────────
+
+    #[test]
+    fn format_schema_errors_exactly_at_max() {
+        let errors: Vec<String> = (0..5).map(|i| format!("e{i}")).collect();
+        let result = format_schema_errors(&errors);
+        assert!(result.contains("e0"));
+        assert!(result.contains("e4"));
+        assert!(!result.contains("more"));
+    }
+
+    #[test]
+    fn format_schema_errors_one_over_max() {
+        let errors: Vec<String> = (0..6).map(|i| format!("e{i}")).collect();
+        let result = format_schema_errors(&errors);
+        assert!(result.contains("+1 more"));
+        assert!(!result.contains("e5")); // 6th error not shown
+    }
+
+    #[test]
+    fn format_schema_errors_ten_shows_plus_five() {
+        let errors: Vec<String> = (0..10).map(|i| format!("e{i}")).collect();
+        let result = format_schema_errors(&errors);
+        assert!(result.contains("+5 more"));
+    }
+
+    // ── NEW: Limits partial configuration ───────────────────────────────
+
+    #[test]
+    fn limits_only_max_bytes_set() {
+        let limits = Limits {
+            max_bytes: Some(100),
+            max_array_len: None,
+            max_depth: None,
+        };
+        // Small enough payload should pass
+        assert!(enforce_limits(&json!({"k": "v"}), &limits).is_ok());
+    }
+
+    #[test]
+    fn limits_only_max_array_len_set() {
+        let limits = Limits {
+            max_bytes: None,
+            max_array_len: Some(1),
+            max_depth: None,
+        };
+        assert!(enforce_limits(&json!([1, 2]), &limits).is_err());
+        assert!(enforce_limits(&json!([1]), &limits).is_ok());
+    }
+
+    #[test]
+    fn limits_only_max_depth_set() {
+        let limits = Limits {
+            max_bytes: None,
+            max_array_len: None,
+            max_depth: Some(2),
+        };
+        assert!(enforce_limits(&json!({"a": 1}), &limits).is_ok()); // depth 2
+        assert!(enforce_limits(&json!({"a": {"b": 1}}), &limits).is_err()); // depth 3
+    }
+
+    // ── NEW: enforce_limits with zero limits ────────────────────────────
+
+    #[test]
+    fn enforce_limits_zero_bytes_rejects_nonempty() {
+        let limits = Limits {
+            max_bytes: Some(0),
+            max_array_len: None,
+            max_depth: None,
+        };
+        // Even an empty JSON object is multiple bytes serialized
+        assert!(enforce_limits(&json!({}), &limits).is_err());
+    }
+
+    #[test]
+    fn enforce_limits_zero_array_len_rejects_nonempty_array() {
+        let limits = Limits {
+            max_bytes: None,
+            max_array_len: Some(0),
+            max_depth: None,
+        };
+        assert!(enforce_limits(&json!([1]), &limits).is_err());
+        assert!(enforce_limits(&json!([]), &limits).is_ok());
+    }
+
+    // ── NEW: check_limits recursion on nested arrays ────────────────────
+
+    #[test]
+    fn enforce_limits_nested_object_in_array() {
+        let limits = Limits::new(1_000_000, 1000, 2);
+        // depth 1: root array, depth 2: objects inside, depth 3: value inside obj → exceeds
+        let value = json!([{"a": {"b": 1}}]);
+        assert!(enforce_limits(&value, &limits).is_err());
+    }
+
+    #[test]
+    fn enforce_limits_mixed_deep_structure_ok() {
+        let limits = Limits::new(1_000_000, 100, 5);
+        let value = json!({"a": [1, 2, {"b": [3, 4]}]});
+        // depth path: root(1) -> a(2) -> array items(3) -> obj(4) -> b(5) -> array items... wait
+        // Actually: root obj(1), "a" val(2), array elem(3), obj(3), "b" val(4), array elem(5) = ok at boundary
+        assert!(enforce_limits(&value, &limits).is_ok());
+    }
+
+    // ── NEW: validate_input_with_limits / validate_output_with_limits ───
+
+    #[test]
+    fn validate_input_with_disabled_limits_ok() {
+        let schema = json!({"type": "object"});
+        let limits = Limits::disabled();
+        let big_array: Vec<i32> = (0..5000).collect();
+        let value = json!({"data": big_array});
+        assert!(validate_input_with_limits(&schema, &value, &limits).is_ok());
+    }
+
+    #[test]
+    fn validate_output_with_disabled_limits_ok() {
+        let schema = json!({"type": "object"});
+        let limits = Limits::disabled();
+        let value = json!({"data": [1, 2, 3]});
+        assert!(validate_output_with_limits(&schema, &value, &limits).is_ok());
+    }
+
+    // ── NEW: escape_json_pointer edge cases ─────────────────────────────
+
+    #[test]
+    fn escape_json_pointer_empty_string() {
+        assert_eq!(escape_json_pointer(""), "");
+    }
+
+    #[test]
+    fn escape_json_pointer_only_tilde() {
+        assert_eq!(escape_json_pointer("~"), "~0");
+    }
+
+    #[test]
+    fn escape_json_pointer_only_slash() {
+        assert_eq!(escape_json_pointer("/"), "~1");
+    }
+
+    #[test]
+    fn escape_json_pointer_multiple_tildes_and_slashes() {
+        assert_eq!(escape_json_pointer("~~/~"), "~0~0~1~0");
+    }
+
+    // ── NEW: format_path deep nesting ───────────────────────────────────
+
+    #[test]
+    fn format_path_deeply_nested() {
+        let segments = vec![
+            PathSegment::Key("a".to_string()),
+            PathSegment::Index(0),
+            PathSegment::Key("b".to_string()),
+            PathSegment::Index(1),
+            PathSegment::Key("c".to_string()),
+        ];
+        assert_eq!(format_path(&segments), "$/a/0/b/1/c");
+    }
+
+    // ── NEW: INVALID_REQUEST constants ──────────────────────────────────
+
+    #[test]
+    fn invalid_request_schema_code_value() {
+        assert_eq!(INVALID_REQUEST_SCHEMA_CODE, 1001);
+    }
+
+    #[test]
+    fn invalid_request_limits_code_value() {
+        assert_eq!(INVALID_REQUEST_LIMITS_CODE, 1004);
+    }
+
+    #[test]
+    fn max_schema_errors_value() {
+        assert_eq!(MAX_SCHEMA_ERRORS, 5);
+    }
 }

@@ -1242,4 +1242,394 @@ mod tests {
         assert_ne!(envelope_hash, nack_hash);
         assert_ne!(ack_hash, nack_hash);
     }
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    // Expanded coverage: EventEnvelope
+    // ─────────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn event_envelope_clone_preserves_all_fields() {
+        let data = sample_event_data();
+        let envelope = EventEnvelope::new("events.clone", data)
+            .with_seq(55)
+            .with_cursor("clone-cur")
+            .with_stream_key("sk-1")
+            .with_ordering(OrderingPolicy::Gateway)
+            .requiring_ack();
+        let cloned = envelope.clone();
+        assert_eq!(cloned.topic, envelope.topic);
+        assert_eq!(cloned.seq, envelope.seq);
+        assert_eq!(cloned.cursor, envelope.cursor);
+        assert_eq!(cloned.requires_ack, envelope.requires_ack);
+        assert_eq!(cloned.stream_key, envelope.stream_key);
+        assert_eq!(cloned.ordering, envelope.ordering);
+    }
+
+    #[test]
+    fn event_envelope_debug_format() {
+        let data = sample_event_data();
+        let envelope = EventEnvelope::new("events.dbg", data);
+        let dbg = format!("{envelope:?}");
+        assert!(dbg.contains("events.dbg"));
+        assert!(dbg.contains("EventEnvelope"));
+    }
+
+    #[test]
+    fn event_envelope_with_cursor_seq_max() {
+        let data = sample_event_data();
+        let envelope = EventEnvelope::new("events.max", data).with_cursor_seq(u64::MAX);
+        assert_eq!(envelope.cursor, u64::MAX.to_string());
+    }
+
+    #[test]
+    fn event_envelope_with_seq_zero() {
+        let data = sample_event_data();
+        let envelope = EventEnvelope::new("events.z", data).with_seq(0);
+        assert_eq!(envelope.seq, 0);
+    }
+
+    #[test]
+    fn event_envelope_with_seq_max() {
+        let data = sample_event_data();
+        let envelope = EventEnvelope::new("events.max", data).with_seq(u64::MAX);
+        assert_eq!(envelope.seq, u64::MAX);
+    }
+
+    #[test]
+    fn event_envelope_empty_topic() {
+        let data = sample_event_data();
+        let envelope = EventEnvelope::new("", data);
+        assert!(envelope.topic.is_empty());
+    }
+
+    #[test]
+    fn event_envelope_unicode_topic() {
+        let data = sample_event_data();
+        let envelope = EventEnvelope::new("events.unicode.\u{1F600}", data);
+        assert!(envelope.topic.contains('\u{1F600}'));
+    }
+
+    #[test]
+    fn event_envelope_long_cursor() {
+        let data = sample_event_data();
+        let long_cursor = "x".repeat(10_000);
+        let envelope = EventEnvelope::new("t", data).with_cursor(long_cursor);
+        assert_eq!(envelope.cursor.len(), 10_000);
+    }
+
+    #[test]
+    fn event_envelope_canonical_bytes_nonempty() {
+        let data = sample_event_data();
+        let envelope = EventEnvelope::new("events.bytes", data).with_seq(1);
+        let bytes = envelope.canonical_bytes().unwrap();
+        assert!(!bytes.is_empty());
+    }
+
+    #[test]
+    fn event_envelope_canonical_bytes_differ_by_seq() {
+        let data1 = sample_event_data();
+        let data2 = sample_event_data();
+        let e1 = EventEnvelope::new("t", data1).with_seq(1).with_cursor("c");
+        let e2 = EventEnvelope::new("t", data2).with_seq(2).with_cursor("c");
+        let b1 = e1.canonical_bytes().unwrap();
+        let b2 = e2.canonical_bytes().unwrap();
+        assert_ne!(b1, b2);
+    }
+
+    #[test]
+    fn event_envelope_schema_version() {
+        let schema = EventEnvelope::schema();
+        // Version should be 1.1.0 per code
+        let hash = schema.hash();
+        assert!(!hash.as_bytes().is_empty());
+    }
+
+    #[test]
+    fn event_envelope_all_ordering_policies_roundtrip() {
+        for policy in [
+            OrderingPolicy::Gateway,
+            OrderingPolicy::PerKey,
+            OrderingPolicy::Unordered,
+        ] {
+            let data = sample_event_data();
+            let envelope = EventEnvelope::new("t", data).with_ordering(policy);
+            let json = serde_json::to_string(&envelope).unwrap();
+            let back: EventEnvelope = serde_json::from_str(&json).unwrap();
+            assert_eq!(back.ordering, Some(policy));
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    // Expanded coverage: OrderingPolicy
+    // ─────────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn ordering_policy_eq() {
+        assert_eq!(OrderingPolicy::Gateway, OrderingPolicy::Gateway);
+        assert_ne!(OrderingPolicy::Gateway, OrderingPolicy::PerKey);
+        assert_ne!(OrderingPolicy::PerKey, OrderingPolicy::Unordered);
+    }
+
+    #[test]
+    fn ordering_policy_debug_all_variants() {
+        assert!(format!("{:?}", OrderingPolicy::PerKey).contains("PerKey"));
+        assert!(format!("{:?}", OrderingPolicy::Unordered).contains("Unordered"));
+    }
+
+    #[test]
+    fn ordering_policy_deserialize_unknown_fails() {
+        let result = serde_json::from_str::<OrderingPolicy>("\"unknown_policy\"");
+        assert!(result.is_err());
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    // Expanded coverage: EventData
+    // ─────────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn event_data_clone_preserves_fields() {
+        let data = sample_event_data()
+            .with_resource_uris(vec!["uri:1".to_string()])
+            .with_thread_info(ThreadInfo::new("t1", ThreadKind::Thread));
+        let cloned = data.clone();
+        assert_eq!(cloned.connector_id.as_str(), data.connector_id.as_str());
+        assert_eq!(cloned.resource_uris, data.resource_uris);
+        assert_eq!(cloned.thread_info, data.thread_info);
+    }
+
+    #[test]
+    fn event_data_debug_format() {
+        let data = sample_event_data();
+        let dbg = format!("{data:?}");
+        assert!(dbg.contains("EventData"));
+    }
+
+    #[test]
+    fn event_data_null_payload() {
+        let data = EventData::new(
+            sample_connector_id(),
+            InstanceId::new(),
+            ZoneId::work(),
+            sample_principal(),
+            json!(null),
+        );
+        assert!(data.payload.is_null());
+    }
+
+    #[test]
+    fn event_data_array_payload() {
+        let data = EventData::new(
+            sample_connector_id(),
+            InstanceId::new(),
+            ZoneId::work(),
+            sample_principal(),
+            json!([1, 2, 3]),
+        );
+        assert!(data.payload.is_array());
+        assert_eq!(data.payload.as_array().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn event_data_empty_resource_uris_roundtrip() {
+        let data = sample_event_data().with_resource_uris(vec![]);
+        let json = serde_json::to_string(&data).unwrap();
+        let back: EventData = serde_json::from_str(&json).unwrap();
+        assert!(back.resource_uris.is_empty());
+    }
+
+    #[test]
+    fn event_data_many_resource_uris() {
+        let uris: Vec<String> = (0..100).map(|i| format!("fcp://res/{i}")).collect();
+        let data = sample_event_data().with_resource_uris(uris);
+        assert_eq!(data.resource_uris.len(), 100);
+        let json = serde_json::to_string(&data).unwrap();
+        let back: EventData = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.resource_uris.len(), 100);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    // Expanded coverage: EventAck
+    // ─────────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn event_ack_clone_preserves_all_fields() {
+        let ack = EventAck::new("t.clone", vec![1, 2, 3])
+            .with_cursors(vec!["c1".to_string(), "c2".to_string()]);
+        let cloned = ack.clone();
+        assert_eq!(cloned.r#type, ack.r#type);
+        assert_eq!(cloned.topic, ack.topic);
+        assert_eq!(cloned.seqs, ack.seqs);
+        assert_eq!(cloned.cursors, ack.cursors);
+    }
+
+    #[test]
+    fn event_ack_large_seqs() {
+        let seqs: Vec<u64> = (0..1000).collect();
+        let ack = EventAck::new("t.large", seqs);
+        assert_eq!(ack.seqs.len(), 1000);
+    }
+
+    #[test]
+    fn event_ack_debug_format() {
+        let ack = EventAck::new("t", vec![1]);
+        let dbg = format!("{ack:?}");
+        assert!(dbg.contains("EventAck"));
+    }
+
+    #[test]
+    fn event_ack_canonical_bytes_nonempty() {
+        let ack = EventAck::new("t.cb", vec![1, 2]);
+        let bytes = ack.canonical_bytes().unwrap();
+        assert!(!bytes.is_empty());
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    // Expanded coverage: EventNack
+    // ─────────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn event_nack_clone_preserves_all_fields() {
+        let nack = EventNack::new("t.clone", vec![7], "err").with_delay(500);
+        let cloned = nack.clone();
+        assert_eq!(cloned.r#type, nack.r#type);
+        assert_eq!(cloned.topic, nack.topic);
+        assert_eq!(cloned.seqs, nack.seqs);
+        assert_eq!(cloned.reason, nack.reason);
+        assert_eq!(cloned.delay_ms, nack.delay_ms);
+    }
+
+    #[test]
+    fn event_nack_debug_format() {
+        let nack = EventNack::new("t", vec![1], "r");
+        let dbg = format!("{nack:?}");
+        assert!(dbg.contains("EventNack"));
+    }
+
+    #[test]
+    fn event_nack_empty_reason() {
+        let nack = EventNack::new("t", vec![1], "");
+        assert!(nack.reason.is_empty());
+    }
+
+    #[test]
+    fn event_nack_empty_seqs() {
+        let nack = EventNack::new("t", vec![], "r");
+        assert!(nack.seqs.is_empty());
+    }
+
+    #[test]
+    fn event_nack_max_delay() {
+        let nack = EventNack::new("t", vec![1], "r").with_delay(u64::MAX);
+        assert_eq!(nack.delay_ms, Some(u64::MAX));
+    }
+
+    #[test]
+    fn event_nack_canonical_bytes_nonempty() {
+        let nack = EventNack::new("t", vec![1], "r");
+        let bytes = nack.canonical_bytes().unwrap();
+        assert!(!bytes.is_empty());
+    }
+
+    #[test]
+    fn event_nack_delay_omitted_in_json_when_none() {
+        let nack = EventNack::new("t", vec![1], "r");
+        let json = serde_json::to_string(&nack).unwrap();
+        assert!(!json.contains("delay_ms"));
+    }
+
+    #[test]
+    fn event_nack_delay_present_in_json_when_set() {
+        let nack = EventNack::new("t", vec![1], "r").with_delay(250);
+        let json = serde_json::to_string(&nack).unwrap();
+        assert!(json.contains("\"delay_ms\":250"));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    // Expanded coverage: ThreadInfo
+    // ─────────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn thread_info_clone() {
+        let info = ThreadInfo::new("t1", ThreadKind::Thread).with_parent_id("p1");
+        let cloned = info.clone();
+        assert_eq!(info, cloned);
+    }
+
+    #[test]
+    fn thread_info_debug_format() {
+        let info = ThreadInfo::new("tid", ThreadKind::ForumTopic);
+        let dbg = format!("{info:?}");
+        assert!(dbg.contains("ThreadInfo"));
+        assert!(dbg.contains("ForumTopic"));
+    }
+
+    #[test]
+    fn thread_info_from_discord_thread_no_parent() {
+        let info = ThreadInfo::from_discord_thread("thread-1", None);
+        assert_eq!(info.thread_id, "thread-1");
+        assert!(info.parent_id.is_none());
+        assert_eq!(info.kind, ThreadKind::Channel);
+    }
+
+    #[test]
+    fn thread_info_from_discord_channel_all_thread_types() {
+        for channel_type in [10, 11, 12] {
+            let result =
+                ThreadInfo::from_discord_channel("ch", channel_type, Some("parent".into()));
+            assert!(result.is_some(), "channel_type {channel_type} should be a thread");
+        }
+    }
+
+    #[test]
+    fn thread_info_from_discord_channel_non_thread_types() {
+        for channel_type in [0, 1, 2, 5, 9, 13, 100] {
+            let result = ThreadInfo::from_discord_channel("ch", channel_type, None);
+            assert!(
+                result.is_none(),
+                "channel_type {channel_type} should not be a thread"
+            );
+        }
+    }
+
+    #[test]
+    fn thread_info_from_telegram_negative_thread_id() {
+        let info = ThreadInfo::from_telegram_message_thread(-1, "chat");
+        assert_eq!(info.thread_id, "-1");
+    }
+
+    #[test]
+    fn thread_info_parent_id_omitted_in_json_when_none() {
+        let info = ThreadInfo::new("t1", ThreadKind::Thread);
+        let json = serde_json::to_string(&info).unwrap();
+        assert!(!json.contains("parent_id"));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    // Expanded coverage: ThreadKind
+    // ─────────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn thread_kind_clone_and_eq() {
+        let a = ThreadKind::Thread;
+        let b = a.clone();
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn thread_kind_debug() {
+        assert!(format!("{:?}", ThreadKind::Reply).contains("Reply"));
+        assert!(format!("{:?}", ThreadKind::Channel).contains("Channel"));
+    }
+
+    #[test]
+    fn thread_kind_deserialize_unknown_fails() {
+        let result = serde_json::from_str::<ThreadKind>("\"unknown_kind\"");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn thread_kind_inequality() {
+        assert_ne!(ThreadKind::Thread, ThreadKind::ForumTopic);
+        assert_ne!(ThreadKind::Channel, ThreadKind::Reply);
+    }
 }

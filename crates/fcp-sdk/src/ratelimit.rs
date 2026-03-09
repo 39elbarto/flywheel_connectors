@@ -1523,4 +1523,539 @@ mod tests {
         assert!(tracker.try_consume("write", 1).is_some());
         assert!(tracker.try_consume("delete", 1).is_some());
     }
+
+    // ── NEW: RateLimitError field validation ────────────────────────────
+
+    #[test]
+    fn rate_limit_error_for_pool_field_values() {
+        let pool = RateLimitPoolBuilder::new("test_pool")
+            .requests(25)
+            .enforcement(RateLimitEnforcement::Hard)
+            .build();
+        let err = RateLimitError::for_pool(&pool, 20, 15_000);
+        assert_eq!(err.pool_id, "test_pool");
+        assert_eq!(err.limit, 25);
+        assert_eq!(err.current, 20);
+        assert_eq!(err.retry_after_ms, 15_000);
+        assert!(!err.is_soft());
+    }
+
+    #[test]
+    fn rate_limit_error_for_pool_zero_current() {
+        let pool = test_pool("api", 10, 60);
+        let err = RateLimitError::for_pool(&pool, 0, 500);
+        assert_eq!(err.current, 0);
+        assert!(err.message.contains('0'));
+    }
+
+    #[test]
+    fn rate_limit_error_for_pool_zero_retry_after() {
+        let pool = test_pool("api", 5, 60);
+        let err = RateLimitError::for_pool(&pool, 5, 0);
+        assert_eq!(err.retry_after_ms, 0);
+        let fcp_err = err.into_fcp_error();
+        assert_eq!(fcp_err.retry_after(), Some(Duration::ZERO));
+    }
+
+    #[test]
+    fn rate_limit_error_into_fcp_error_violation_is_none() {
+        let err = RateLimitError {
+            pool_id: "p".into(),
+            limit: 10,
+            current: 10,
+            retry_after_ms: 1000,
+            enforcement: RateLimitEnforcement::Hard,
+            message: "exceeded".into(),
+        };
+        let fcp_err = err.into_fcp_error();
+        match fcp_err {
+            FcpError::RateLimited { violation, .. } => assert!(violation.is_none()),
+            other => panic!("expected RateLimited, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rate_limit_error_display_equals_message() {
+        let err = RateLimitError {
+            pool_id: "pool".into(),
+            limit: 5,
+            current: 5,
+            retry_after_ms: 100,
+            enforcement: RateLimitEnforcement::Hard,
+            message: "custom message here".into(),
+        };
+        assert_eq!(format!("{err}"), "custom message here");
+    }
+
+    #[test]
+    fn rate_limit_error_std_error_source_is_none() {
+        let err = RateLimitError {
+            pool_id: "p".into(),
+            limit: 1,
+            current: 1,
+            retry_after_ms: 0,
+            enforcement: RateLimitEnforcement::Hard,
+            message: "msg".into(),
+        };
+        // std::error::Error default source() returns None
+        assert!(std::error::Error::source(&err).is_none());
+    }
+
+    // ── NEW: RateLimitPoolBuilder edge cases ────────────────────────────
+
+    #[test]
+    fn pool_builder_zero_requests() {
+        let pool = RateLimitPoolBuilder::new("zero_pool")
+            .requests(0)
+            .build();
+        assert_eq!(pool.config.requests, 0);
+    }
+
+    #[test]
+    fn pool_builder_large_requests() {
+        let pool = RateLimitPoolBuilder::new("big")
+            .requests(u32::MAX)
+            .build();
+        assert_eq!(pool.config.requests, u32::MAX);
+    }
+
+    #[test]
+    fn pool_builder_large_burst() {
+        let pool = RateLimitPoolBuilder::new("burst_big")
+            .requests(100)
+            .burst(u32::MAX)
+            .build();
+        assert_eq!(pool.config.burst, Some(u32::MAX));
+    }
+
+    #[test]
+    fn pool_builder_zero_window() {
+        let pool = RateLimitPoolBuilder::new("zero_window")
+            .window_secs(0)
+            .build();
+        assert_eq!(pool.config.window, Duration::ZERO);
+    }
+
+    #[test]
+    fn pool_builder_sub_second_window() {
+        let pool = RateLimitPoolBuilder::new("fast")
+            .window(Duration::from_millis(100))
+            .build();
+        assert_eq!(pool.config.window, Duration::from_millis(100));
+    }
+
+    #[test]
+    fn pool_builder_empty_id() {
+        let pool = RateLimitPoolBuilder::new("").build();
+        assert_eq!(pool.id, "");
+    }
+
+    #[test]
+    fn pool_builder_long_description() {
+        let desc = "x".repeat(1000);
+        let pool = RateLimitPoolBuilder::new("p")
+            .description(desc.as_str())
+            .build();
+        assert_eq!(pool.description.len(), 1000);
+    }
+
+    #[test]
+    fn pool_builder_all_enforcement_variants() {
+        for enforcement in [
+            RateLimitEnforcement::Hard,
+            RateLimitEnforcement::Soft,
+            RateLimitEnforcement::Advisory,
+        ] {
+            let pool = RateLimitPoolBuilder::new("e")
+                .enforcement(enforcement)
+                .build();
+            assert_eq!(pool.enforcement, enforcement);
+        }
+    }
+
+    #[test]
+    fn pool_builder_all_scope_variants() {
+        for scope in [
+            RateLimitScope::Instance,
+            RateLimitScope::Credential,
+            RateLimitScope::Global,
+        ] {
+            let pool = RateLimitPoolBuilder::new("s")
+                .scope(scope)
+                .build();
+            assert_eq!(pool.scope, scope);
+        }
+    }
+
+    #[test]
+    fn pool_builder_all_unit_variants() {
+        for unit in [
+            RateLimitUnit::Requests,
+            RateLimitUnit::Tokens,
+            RateLimitUnit::Bytes,
+            RateLimitUnit::Custom,
+        ] {
+            let pool = RateLimitPoolBuilder::new("u")
+                .unit(unit)
+                .build();
+            assert_eq!(pool.config.unit, unit);
+        }
+    }
+
+    // ── NEW: Tracker consume boundary tests ─────────────────────────────
+
+    #[test]
+    fn tracker_consume_one_less_than_limit() {
+        let decls = RateLimitDeclarations {
+            limits: vec![test_pool("api", 5, 60)],
+            tool_pool_map: HashMap::from([("op".to_string(), vec!["api".to_string()])]),
+        };
+        let tracker = RateLimitTracker::from_declarations(&decls);
+        assert!(tracker.try_consume("op", 4).is_none());
+        let status = tracker.pool_status("api").unwrap();
+        assert_eq!(status.remaining, 1);
+        assert!(!status.is_limited());
+    }
+
+    #[test]
+    fn tracker_consume_one_more_than_limit() {
+        let decls = RateLimitDeclarations {
+            limits: vec![test_pool("api", 5, 60)],
+            tool_pool_map: HashMap::from([("op".to_string(), vec!["api".to_string()])]),
+        };
+        let tracker = RateLimitTracker::from_declarations(&decls);
+        let err = tracker.try_consume("op", 6).unwrap();
+        assert_eq!(err.limit, 5);
+        assert_eq!(err.current, 0);
+    }
+
+    #[test]
+    fn tracker_repeated_single_consume_to_exhaustion() {
+        let decls = RateLimitDeclarations {
+            limits: vec![test_pool("api", 3, 60)],
+            tool_pool_map: HashMap::from([("op".to_string(), vec!["api".to_string()])]),
+        };
+        let tracker = RateLimitTracker::from_declarations(&decls);
+        for i in 0..3 {
+            assert!(
+                tracker.try_consume("op", 1).is_none(),
+                "consume {i} should succeed"
+            );
+        }
+        assert!(tracker.try_consume("op", 1).is_some());
+    }
+
+    // ── NEW: Tracker status validation ──────────────────────────────────
+
+    #[test]
+    fn tracker_pool_status_after_partial_consume() {
+        let decls = RateLimitDeclarations {
+            limits: vec![test_pool("api", 10, 60)],
+            tool_pool_map: HashMap::from([("op".to_string(), vec!["api".to_string()])]),
+        };
+        let tracker = RateLimitTracker::from_declarations(&decls);
+        tracker.try_consume("op", 7);
+        let status = tracker.pool_status("api").unwrap();
+        assert_eq!(status.limit, 10);
+        assert_eq!(status.remaining, 3);
+        assert!(!status.is_limited());
+    }
+
+    #[test]
+    fn tracker_pool_status_fully_consumed() {
+        let decls = RateLimitDeclarations {
+            limits: vec![test_pool("api", 5, 60)],
+            tool_pool_map: HashMap::from([("op".to_string(), vec!["api".to_string()])]),
+        };
+        let tracker = RateLimitTracker::from_declarations(&decls);
+        tracker.try_consume("op", 5);
+        let status = tracker.pool_status("api").unwrap();
+        assert_eq!(status.remaining, 0);
+        assert!(status.is_limited());
+    }
+
+    #[test]
+    fn tracker_pool_status_nonexistent_returns_none() {
+        let tracker = RateLimitTracker::new();
+        assert!(tracker.pool_status("does_not_exist").is_none());
+    }
+
+    // ── NEW: Tracker operation_status details ───────────────────────────
+
+    #[test]
+    fn tracker_operation_status_multiple_pools_remaining() {
+        let decls = RateLimitDeclarations {
+            limits: vec![test_pool("a", 10, 60), test_pool("b", 20, 60)],
+            tool_pool_map: HashMap::from([(
+                "op".to_string(),
+                vec!["a".to_string(), "b".to_string()],
+            )]),
+        };
+        let tracker = RateLimitTracker::from_declarations(&decls);
+        tracker.try_consume("op", 3);
+
+        let statuses = tracker.operation_status("op");
+        let a_status = statuses.iter().find(|(id, _)| id == "a").unwrap();
+        let b_status = statuses.iter().find(|(id, _)| id == "b").unwrap();
+        assert_eq!(a_status.1.remaining, 7);
+        assert_eq!(b_status.1.remaining, 17);
+    }
+
+    // ── NEW: Tracker most_constrained_status detailed ───────────────────
+
+    #[test]
+    fn tracker_most_constrained_after_asymmetric_consume() {
+        let decls = RateLimitDeclarations {
+            limits: vec![test_pool("fast", 3, 60), test_pool("slow", 100, 60)],
+            tool_pool_map: HashMap::from([(
+                "op".to_string(),
+                vec!["fast".to_string(), "slow".to_string()],
+            )]),
+        };
+        let tracker = RateLimitTracker::from_declarations(&decls);
+        tracker.try_consume("op", 2);
+
+        let (id, status) = tracker.most_constrained_status("op").unwrap();
+        assert_eq!(id, "fast");
+        assert_eq!(status.remaining, 1);
+    }
+
+    // ── NEW: Tracker reset_all restores capacity ────────────────────────
+
+    #[test]
+    fn tracker_reset_all_restores_full_capacity() {
+        let decls = RateLimitDeclarations {
+            limits: vec![test_pool("api", 10, 60)],
+            tool_pool_map: HashMap::from([("op".to_string(), vec!["api".to_string()])]),
+        };
+        let tracker = RateLimitTracker::from_declarations(&decls);
+        tracker.try_consume("op", 10);
+        assert!(tracker.is_limited("op"));
+
+        tracker.reset_all();
+        assert!(!tracker.is_limited("op"));
+        let status = tracker.pool_status("api").unwrap();
+        assert_eq!(status.remaining, 10);
+    }
+
+    // ── NEW: Tracker with burst + consume behavior ──────────────────────
+
+    #[test]
+    fn tracker_burst_consume_exactly_at_effective_limit() {
+        let pool = RateLimitPoolBuilder::new("bp")
+            .requests(5)
+            .burst(5)
+            .build();
+        let decls = RateLimitDeclarations {
+            limits: vec![pool],
+            tool_pool_map: HashMap::from([("op".to_string(), vec!["bp".to_string()])]),
+        };
+        let tracker = RateLimitTracker::from_declarations(&decls);
+
+        // Effective limit = 10
+        assert!(tracker.try_consume("op", 10).is_none());
+        let status = tracker.pool_status("bp").unwrap();
+        assert_eq!(status.remaining, 0);
+        assert!(status.is_limited());
+    }
+
+    #[test]
+    fn tracker_burst_consume_one_over_effective_limit() {
+        let pool = RateLimitPoolBuilder::new("bp")
+            .requests(5)
+            .burst(5)
+            .build();
+        let decls = RateLimitDeclarations {
+            limits: vec![pool],
+            tool_pool_map: HashMap::from([("op".to_string(), vec!["bp".to_string()])]),
+        };
+        let tracker = RateLimitTracker::from_declarations(&decls);
+
+        let err = tracker.try_consume("op", 11).unwrap();
+        assert_eq!(err.pool_id, "bp");
+    }
+
+    // ── NEW: Tracker clone independence for operation_map ────────────────
+
+    #[test]
+    fn tracker_clone_shares_pools_via_arc() {
+        let tracker = RateLimitTracker::new();
+        tracker.add_pool(test_pool("p", 10, 60));
+        let cloned = tracker.clone();
+
+        // Both should see the same pool
+        assert!(tracker.pool_status("p").is_some());
+        assert!(cloned.pool_status("p").is_some());
+    }
+
+    // ── NEW: Advisory force_consume behavior ────────────────────────────
+
+    #[test]
+    fn advisory_limit_force_consume_tracks_count() {
+        let pool = RateLimitPoolBuilder::new("adv")
+            .requests(1)
+            .enforcement(RateLimitEnforcement::Advisory)
+            .build();
+        let decls = RateLimitDeclarations {
+            limits: vec![pool],
+            tool_pool_map: HashMap::from([("op".to_string(), vec!["adv".to_string()])]),
+        };
+        let tracker = RateLimitTracker::from_declarations(&decls);
+
+        // Advisory allows overconsumption
+        assert!(tracker.try_consume("op", 1).is_none());
+        assert!(tracker.try_consume("op", 1).is_none());
+        assert!(tracker.try_consume("op", 1).is_none());
+        // Count is now 3 but advisory never blocks
+    }
+
+    // ── NEW: Multiple pools with different windows ──────────────────────
+
+    #[test]
+    fn tracker_pools_different_windows() {
+        let decls = RateLimitDeclarations {
+            limits: vec![
+                test_pool("minute", 60, 60),
+                test_pool("hour", 1000, 3600),
+            ],
+            tool_pool_map: HashMap::from([(
+                "op".to_string(),
+                vec!["minute".to_string(), "hour".to_string()],
+            )]),
+        };
+        let tracker = RateLimitTracker::from_declarations(&decls);
+
+        let min_status = tracker.pool_status("minute").unwrap();
+        assert_eq!(min_status.window_seconds, 60);
+
+        let hour_status = tracker.pool_status("hour").unwrap();
+        assert_eq!(hour_status.window_seconds, 3600);
+    }
+
+    // ── NEW: RateLimitError message contains pool name ──────────────────
+
+    #[test]
+    fn rate_limit_error_message_contains_all_info() {
+        let pool = test_pool("special_pool", 42, 120);
+        let err = RateLimitError::for_pool(&pool, 39, 5000);
+        assert!(err.message.contains("special_pool"));
+        assert!(err.message.contains("39"));
+        assert!(err.message.contains("42"));
+        assert!(err.message.contains("Rate limit exceeded"));
+    }
+
+    // ── NEW: Tracker is_limited with burst ──────────────────────────────
+
+    #[test]
+    fn tracker_is_limited_with_burst_not_limited_at_base() {
+        let pool = RateLimitPoolBuilder::new("bp")
+            .requests(5)
+            .burst(5)
+            .build();
+        let decls = RateLimitDeclarations {
+            limits: vec![pool],
+            tool_pool_map: HashMap::from([("op".to_string(), vec!["bp".to_string()])]),
+        };
+        let tracker = RateLimitTracker::from_declarations(&decls);
+        tracker.try_consume("op", 5);
+        // Not limited because burst capacity remains
+        assert!(!tracker.is_limited("op"));
+    }
+
+    #[test]
+    fn tracker_is_limited_with_burst_at_effective_limit() {
+        let pool = RateLimitPoolBuilder::new("bp")
+            .requests(5)
+            .burst(5)
+            .build();
+        let decls = RateLimitDeclarations {
+            limits: vec![pool],
+            tool_pool_map: HashMap::from([("op".to_string(), vec!["bp".to_string()])]),
+        };
+        let tracker = RateLimitTracker::from_declarations(&decls);
+        tracker.try_consume("op", 10);
+        assert!(tracker.is_limited("op"));
+    }
+
+    // ── NEW: Declarations with duplicate pool IDs ───────────────────────
+
+    #[test]
+    fn tracker_declarations_duplicate_pool_ids_last_wins() {
+        let decls = RateLimitDeclarations {
+            limits: vec![test_pool("api", 10, 60), test_pool("api", 99, 120)],
+            tool_pool_map: HashMap::new(),
+        };
+        let tracker = RateLimitTracker::from_declarations(&decls);
+        let status = tracker.pool_status("api").unwrap();
+        // HashMap insert: last wins
+        assert_eq!(status.limit, 99);
+    }
+
+    // ── NEW: all_pool_statuses reflects consumption ─────────────────────
+
+    #[test]
+    fn tracker_all_pool_statuses_after_mixed_ops() {
+        let decls = RateLimitDeclarations {
+            limits: vec![test_pool("a", 10, 60), test_pool("b", 20, 60), test_pool("c", 30, 60)],
+            tool_pool_map: HashMap::from([
+                ("op_a".to_string(), vec!["a".to_string()]),
+                ("op_b".to_string(), vec!["b".to_string()]),
+            ]),
+        };
+        let tracker = RateLimitTracker::from_declarations(&decls);
+        tracker.try_consume("op_a", 5);
+        tracker.try_consume("op_b", 10);
+
+        let all = tracker.all_pool_statuses();
+        assert_eq!(all.len(), 3);
+        assert_eq!(all["a"].remaining, 5);
+        assert_eq!(all["b"].remaining, 10);
+        assert_eq!(all["c"].remaining, 30); // untouched
+    }
+
+    // ── NEW: Tracker consume u32::MAX boundary ──────────────────────────
+
+    #[test]
+    fn tracker_consume_max_u32_succeeds_when_limit_is_max() {
+        let decls = RateLimitDeclarations {
+            limits: vec![test_pool("big", u32::MAX, 60)],
+            tool_pool_map: HashMap::from([("op".to_string(), vec!["big".to_string()])]),
+        };
+        let tracker = RateLimitTracker::from_declarations(&decls);
+        assert!(tracker.try_consume("op", u32::MAX).is_none());
+        let status = tracker.pool_status("big").unwrap();
+        assert_eq!(status.remaining, 0);
+    }
+
+    // ── NEW: RateLimitError enforcement variants are preserved ──────────
+
+    #[test]
+    fn rate_limit_error_enforcement_hard() {
+        let pool = RateLimitPoolBuilder::new("h")
+            .enforcement(RateLimitEnforcement::Hard)
+            .build();
+        let err = RateLimitError::for_pool(&pool, 0, 0);
+        assert_eq!(err.enforcement, RateLimitEnforcement::Hard);
+        assert!(!err.is_soft());
+    }
+
+    #[test]
+    fn rate_limit_error_enforcement_soft() {
+        let pool = RateLimitPoolBuilder::new("s")
+            .enforcement(RateLimitEnforcement::Soft)
+            .build();
+        let err = RateLimitError::for_pool(&pool, 0, 0);
+        assert_eq!(err.enforcement, RateLimitEnforcement::Soft);
+        assert!(err.is_soft());
+    }
+
+    #[test]
+    fn rate_limit_error_enforcement_advisory() {
+        let pool = RateLimitPoolBuilder::new("a")
+            .enforcement(RateLimitEnforcement::Advisory)
+            .build();
+        let err = RateLimitError::for_pool(&pool, 0, 0);
+        assert_eq!(err.enforcement, RateLimitEnforcement::Advisory);
+        assert!(err.is_soft());
+    }
 }

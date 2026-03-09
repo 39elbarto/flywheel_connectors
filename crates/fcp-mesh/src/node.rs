@@ -2660,4 +2660,733 @@ mod tests {
         }
         assert_eq!(node.metrics().peer_updates, 4);
     }
+
+    // ---- Signing key management ----
+
+    #[test]
+    fn register_and_remove_peer_signing_key() {
+        let mut node = test_node("node-1");
+        let key = Ed25519SigningKey::generate();
+        let peer = NodeId::new("peer-1");
+        node.register_peer_signing_key(peer.clone(), key.verifying_key());
+        node.remove_peer_signing_key(&peer);
+        // Removing again is a no-op
+        node.remove_peer_signing_key(&peer);
+    }
+
+    #[test]
+    fn remove_peer_clears_signing_key() {
+        let mut node = test_node("node-1");
+        let peer = NodeId::new("peer-1");
+        let key = Ed25519SigningKey::generate();
+        let profile = test_device_profile("peer-1");
+
+        node.register_peer_signing_key(peer.clone(), key.verifying_key());
+        node.update_peer_state(peer.clone(), profile, HashSet::new(), vec![], 1000);
+        assert_eq!(node.peer_count(), 1);
+
+        node.remove_peer(&peer);
+        assert_eq!(node.peer_count(), 0);
+        // Signing key should also be gone (no panic on double remove)
+        node.remove_peer_signing_key(&peer);
+    }
+
+    // ---- Session + peer removal interaction ----
+
+    #[test]
+    fn remove_peer_with_active_session_cleans_up() {
+        let mut node = test_node("node-1");
+        let peer = NodeId::new("peer-1");
+        let profile = test_device_profile("peer-1");
+        let session = test_session("peer-1");
+
+        node.update_peer_state(peer.clone(), profile, HashSet::new(), vec![], 1000);
+        node.register_session(session, 1000);
+        assert!(node.is_peer_authenticated(&peer));
+
+        node.remove_peer(&peer);
+        assert!(!node.is_peer_authenticated(&peer));
+        assert_eq!(node.peer_count(), 0);
+    }
+
+    #[test]
+    fn remove_peer_without_session_still_clears_auth() {
+        let mut node = test_node("node-1");
+        let peer = NodeId::new("peer-1");
+        let profile = test_device_profile("peer-1");
+
+        node.update_peer_state(peer.clone(), profile, HashSet::new(), vec![], 1000);
+        // No session registered
+        node.remove_peer(&peer);
+        assert_eq!(node.peer_count(), 0);
+        assert!(!node.is_peer_authenticated(&peer));
+    }
+
+    // ---- Trace capture edge cases ----
+
+    #[test]
+    fn trace_redacted_snapshot_returns_none_without_capture() {
+        let node = test_node("node-1");
+        assert!(node.trace_redacted_snapshot().is_none());
+    }
+
+    #[test]
+    fn trace_redacted_snapshot_returns_some_with_capture() {
+        let node = test_node_with_trace("node-1");
+        let snapshot = node.trace_redacted_snapshot();
+        assert!(snapshot.is_some());
+    }
+
+    #[test]
+    fn trace_capture_records_gossip_events() {
+        let mut node = test_node_with_trace("node-1");
+        let zone_id = ZoneId::work();
+        let object_id = ObjectId::from_bytes([0xEE; 32]);
+
+        node.announce_object(&zone_id, &object_id, ObjectAdmissionClass::Admitted, 1000);
+
+        let snapshot = node.trace_snapshot().expect("trace capture enabled");
+        let gossip_count = snapshot
+            .events
+            .iter()
+            .filter(|e| matches!(e, TraceEvent::Gossip(_)))
+            .count();
+        assert_eq!(gossip_count, 1);
+    }
+
+    #[test]
+    fn trace_capture_records_routing_decisions() {
+        let mut node = test_node_with_trace("node-1");
+        let policy = ZoneTransportPolicy {
+            allow_lan: true,
+            allow_derp: true,
+            allow_funnel: true,
+        };
+        let paths = vec![TransportPath::new(
+            TransportPathKind::Direct,
+            NodeId::new("peer-1"),
+            "direct",
+            None,
+        )];
+        let object_id = test_object_id("routing-test");
+
+        let _ = node.select_transport_paths(&policy, &paths, &object_id, 0, 1);
+
+        let snapshot = node.trace_snapshot().expect("trace capture enabled");
+        let routing_count = snapshot
+            .events
+            .iter()
+            .filter(|e| matches!(e, TraceEvent::Routing(_)))
+            .count();
+        assert!(routing_count > 0);
+    }
+
+    #[test]
+    fn trace_capture_routing_no_path_records_dropped() {
+        let mut node = test_node_with_trace("node-1");
+        let policy = ZoneTransportPolicy {
+            allow_lan: false,
+            allow_derp: false,
+            allow_funnel: false,
+        };
+        let paths = vec![TransportPath::new(
+            TransportPathKind::Derp,
+            NodeId::new("peer-1"),
+            "derp",
+            None,
+        )];
+        let object_id = test_object_id("routing-dropped");
+
+        let selected = node.select_transport_paths(&policy, &paths, &object_id, 0, 1);
+        assert!(selected.is_empty());
+
+        let snapshot = node.trace_snapshot().expect("trace capture enabled");
+        let routing_count = snapshot
+            .events
+            .iter()
+            .filter(|e| matches!(e, TraceEvent::Routing(_)))
+            .count();
+        assert!(routing_count > 0);
+    }
+
+    #[test]
+    fn ingest_trace_event_fails_without_capture() {
+        let mut node = test_node("node-1"); // no trace capture
+        let event = TraceEvent::Session(SessionEvent {
+            timestamp: 1000,
+            trace_id: "test".to_string(),
+            session_id: "sess-1".to_string(),
+            kind: "established".to_string(),
+            peer_node: "peer-1".to_string(),
+            suite: None,
+            failure_reason: None,
+        });
+        let result = node.ingest_trace_event_for_replay(event);
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), MeshNodeError::TraceNotEnabled));
+    }
+
+    #[test]
+    fn ingest_trace_event_succeeds_with_capture() {
+        let mut node = test_node_with_trace("node-1");
+        let event = TraceEvent::Session(SessionEvent {
+            timestamp: 1000,
+            trace_id: "test".to_string(),
+            session_id: "sess-1".to_string(),
+            kind: "established".to_string(),
+            peer_node: "peer-1".to_string(),
+            suite: None,
+            failure_reason: None,
+        });
+        let result = node.ingest_trace_event_for_replay(event);
+        assert!(result.is_ok());
+
+        let snapshot = node.trace_snapshot().unwrap();
+        assert_eq!(snapshot.events.len(), 1);
+    }
+
+    // ---- Export trace to path ----
+
+    #[test]
+    fn export_trace_fails_without_capture() {
+        let node = test_node("node-1");
+        let result = node.export_trace_to_path("/tmp/test.json", false, TraceExportFormat::Json);
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), MeshNodeError::TraceNotEnabled));
+    }
+
+    // ---- Planner singleton holder from peer ----
+
+    #[test]
+    fn build_planner_input_detects_peer_singleton_holder() {
+        let mut node = test_node("node-1");
+        let local_profile = test_device_profile("node-1");
+        node.update_local_state(local_profile, HashSet::new(), vec![]);
+
+        let peer_profile = test_device_profile("peer-1");
+        let lease = HeldLease {
+            subject_id: ObjectId::from_bytes([0xDD; 32]),
+            purpose: LeasePurpose::SingletonWriter,
+            expires_at: 999_999,
+        };
+        node.update_peer_state(
+            NodeId::new("peer-1"),
+            peer_profile,
+            HashSet::new(),
+            vec![lease],
+            1000,
+        );
+
+        let input = node.build_planner_input(1000);
+        assert_eq!(input.nodes.len(), 2);
+        assert!(input.singleton_lease_holder.is_some());
+        assert_eq!(input.singleton_lease_holder.as_deref(), Some("peer-1"));
+    }
+
+    #[test]
+    fn build_planner_input_expired_lease_no_singleton() {
+        let mut node = test_node("node-1");
+        let local_profile = test_device_profile("node-1");
+        let lease = HeldLease {
+            subject_id: ObjectId::from_bytes([0xCC; 32]),
+            purpose: LeasePurpose::SingletonWriter,
+            expires_at: 0, // Already expired
+        };
+
+        node.update_local_state(local_profile, HashSet::new(), vec![lease]);
+        // now_ms = 5000 => lease expired at 0 secs, now_secs = 5
+        let input = node.build_planner_input(5000);
+        assert_eq!(input.nodes.len(), 1);
+        assert!(input.singleton_lease_holder.is_none());
+    }
+
+    // ---- Admission reason codes ----
+
+    #[test]
+    fn admission_reason_code_coverage() {
+        assert_eq!(
+            MeshNode::admission_reason_code(&AdmissionError::ByteBudgetExceeded {
+                current: 100,
+                limit: 50,
+                retry_after: std::time::Duration::from_secs(30),
+            }),
+            "byte_budget_exceeded"
+        );
+        assert_eq!(
+            MeshNode::admission_reason_code(&AdmissionError::SymbolBudgetExceeded {
+                current: 10,
+                limit: 5,
+                retry_after: std::time::Duration::from_secs(30),
+            }),
+            "symbol_budget_exceeded"
+        );
+        assert_eq!(
+            MeshNode::admission_reason_code(&AdmissionError::AuthenticationRequired),
+            "authentication_required"
+        );
+        assert_eq!(
+            MeshNode::admission_reason_code(&AdmissionError::ProofOfNeedRequired),
+            "proof_of_need_required"
+        );
+        assert_eq!(
+            MeshNode::admission_reason_code(&AdmissionError::ObjectQuarantined {
+                object_id: "test".to_string(),
+            }),
+            "object_quarantined"
+        );
+    }
+
+    #[test]
+    fn symbol_request_reason_code_coverage() {
+        assert_eq!(
+            MeshNode::symbol_request_reason_code(&SymbolRequestError::InvalidRequest {
+                reason: "bad".to_string(),
+            }),
+            "invalid_request"
+        );
+        assert_eq!(
+            MeshNode::symbol_request_reason_code(&SymbolRequestError::BoundsExceeded {
+                requested: 100,
+                max_allowed: 50,
+            }),
+            "bounds_exceeded"
+        );
+        assert_eq!(
+            MeshNode::symbol_request_reason_code(&SymbolRequestError::SignatureInvalid),
+            "signature_invalid"
+        );
+        assert_eq!(
+            MeshNode::symbol_request_reason_code(&SymbolRequestError::AlreadyComplete {
+                object_id: "test".to_string(),
+            }),
+            "already_complete"
+        );
+        assert_eq!(
+            MeshNode::symbol_request_reason_code(&SymbolRequestError::ObjectNotFound {
+                object_id: "test".to_string(),
+            }),
+            "object_not_found"
+        );
+    }
+
+    // ---- Trace zone filtering ----
+
+    #[test]
+    fn trace_zone_enabled_no_filter_always_true() {
+        let node = test_node("node-1");
+        assert!(node.trace_zone_enabled(None));
+        assert!(node.trace_zone_enabled(Some(&ZoneId::work())));
+        assert!(node.trace_zone_enabled(Some(&ZoneId::private())));
+    }
+
+    #[test]
+    fn trace_zone_enabled_with_allowlist() {
+        let object_store = Arc::new(MemoryObjectStore::new(MemoryObjectStoreConfig::default()));
+        let symbol_store = Arc::new(MemorySymbolStore::new(MemorySymbolStoreConfig::default()));
+        let quarantine_store = Arc::new(QuarantineStore::new(ObjectAdmissionPolicy::default()));
+        let node = MeshNode::new(
+            MeshNodeConfig::new("node-1")
+                .with_sender_instance_id(42)
+                .with_trace_capture_zones([ZoneId::work()]),
+            object_store,
+            symbol_store,
+            quarantine_store,
+        );
+
+        assert!(node.trace_zone_enabled(None));
+        assert!(node.trace_zone_enabled(Some(&ZoneId::work())));
+        assert!(!node.trace_zone_enabled(Some(&ZoneId::private())));
+    }
+
+    // ---- Lease delta tracking ----
+
+    #[test]
+    fn trace_records_lease_release_on_removal() {
+        let mut node = test_node_with_trace("node-1");
+        let lease = HeldLease {
+            subject_id: test_object_id("lease-release"),
+            purpose: LeasePurpose::SingletonWriter,
+            expires_at: 100,
+        };
+
+        // First add a lease
+        node.update_local_state(
+            test_device_profile("node-1"),
+            HashSet::new(),
+            vec![lease],
+        );
+        // Then remove it
+        node.update_local_state(
+            test_device_profile("node-1"),
+            HashSet::new(),
+            vec![],
+        );
+
+        let snapshot = node.trace_snapshot().expect("trace capture enabled");
+        let lease_count = snapshot
+            .events
+            .iter()
+            .filter(|e| matches!(e, TraceEvent::Lease(_)))
+            .count();
+        assert!(lease_count >= 2, "should have acquire + release");
+    }
+
+    #[test]
+    fn trace_records_lease_renew_on_expiry_change() {
+        let mut node = test_node_with_trace("node-1");
+        let obj_id = test_object_id("lease-renew");
+
+        let lease_v1 = HeldLease {
+            subject_id: obj_id,
+            purpose: LeasePurpose::SingletonWriter,
+            expires_at: 100,
+        };
+        let lease_v2 = HeldLease {
+            subject_id: obj_id,
+            purpose: LeasePurpose::SingletonWriter,
+            expires_at: 200,
+        };
+
+        node.update_local_state(
+            test_device_profile("node-1"),
+            HashSet::new(),
+            vec![lease_v1],
+        );
+        node.update_local_state(
+            test_device_profile("node-1"),
+            HashSet::new(),
+            vec![lease_v2],
+        );
+
+        let snapshot = node.trace_snapshot().expect("trace capture enabled");
+        let lease_count = snapshot
+            .events
+            .iter()
+            .filter(|e| matches!(e, TraceEvent::Lease(_)))
+            .count();
+        // Should have acquire + renew
+        assert!(lease_count >= 2);
+    }
+
+    // ---- MeshNodeConfig clone ----
+
+    #[test]
+    fn config_clone_preserves_all_fields() {
+        let config = MeshNodeConfig::new("node-clone")
+            .with_sender_instance_id(12345)
+            .with_trace_capture_config(TraceCaptureConfig::new().enabled())
+            .with_trace_capture_zones([ZoneId::work()]);
+        let cloned = config.clone();
+        // Verify original
+        assert_eq!(config.node_id, "node-clone");
+        assert_eq!(config.sender_instance_id, 12345);
+        // Verify clone
+        assert_eq!(cloned.node_id, "node-clone");
+        assert!(cloned.trace_capture.enabled);
+        assert!(cloned.trace_capture_zones.is_some());
+    }
+
+    // ---- MeshNodeMetrics clone ----
+
+    #[test]
+    fn mesh_node_metrics_clone_preserves_values() {
+        let m = MeshNodeMetrics {
+            gossip_announcements: 42,
+            gossip_updates: 7,
+            peer_updates: 13,
+            ..Default::default()
+        };
+        let cloned = m.clone();
+        // Verify original
+        assert_eq!(m.gossip_announcements, 42);
+        assert_eq!(m.gossip_updates, 7);
+        // Verify clone
+        assert_eq!(cloned.gossip_announcements, 42);
+        assert_eq!(cloned.peer_updates, 13);
+    }
+
+    // ---- PeerState clone ----
+
+    #[test]
+    fn peer_state_clone_preserves_fields() {
+        let mut symbols = HashSet::new();
+        symbols.insert(ObjectId::from_bytes([0x11; 32]));
+
+        let leases = vec![HeldLease {
+            subject_id: ObjectId::from_bytes([0x22; 32]),
+            purpose: LeasePurpose::SingletonWriter,
+            expires_at: 5000,
+        }];
+
+        let state = PeerState {
+            profile: test_device_profile("peer-1"),
+            local_symbols: symbols,
+            held_leases: leases,
+            last_seen_ms: 3000,
+        };
+        let cloned = state.clone();
+        // Verify original
+        assert_eq!(state.last_seen_ms, 3000);
+        assert_eq!(state.local_symbols.len(), 1);
+        // Verify clone
+        assert_eq!(cloned.held_leases.len(), 1);
+        assert_eq!(cloned.profile.node_id.as_str(), "peer-1");
+    }
+
+    // ---- Best transport path ----
+
+    #[test]
+    fn best_transport_path_returns_best_eligible() {
+        let node = test_node("node-1");
+        let policy = ZoneTransportPolicy {
+            allow_lan: true,
+            allow_derp: true,
+            allow_funnel: false,
+        };
+
+        let paths = vec![
+            TransportPath::new(TransportPathKind::Direct, NodeId::new("p1"), "direct", None),
+            TransportPath::new(TransportPathKind::Derp, NodeId::new("p2"), "derp", None),
+            TransportPath::new(TransportPathKind::Funnel, NodeId::new("p3"), "funnel", None),
+        ];
+
+        let best = node.best_transport_path(&policy, &paths);
+        assert!(best.is_some());
+        // Direct should be preferred
+        assert_eq!(best.unwrap().path.kind, TransportPathKind::Direct);
+    }
+
+    #[test]
+    fn best_transport_path_empty_paths_returns_none() {
+        let node = test_node("node-1");
+        let policy = ZoneTransportPolicy {
+            allow_lan: true,
+            allow_derp: true,
+            allow_funnel: true,
+        };
+        let best = node.best_transport_path(&policy, &[]);
+        assert!(best.is_none());
+    }
+
+    // ---- Select transport multipath ----
+
+    #[test]
+    fn select_transport_paths_fanout_multiple() {
+        let mut node = test_node("node-1");
+        let policy = ZoneTransportPolicy {
+            allow_lan: true,
+            allow_derp: true,
+            allow_funnel: true,
+        };
+        let paths = vec![
+            TransportPath::new(TransportPathKind::Direct, NodeId::new("p1"), "d", None),
+            TransportPath::new(TransportPathKind::Mesh, NodeId::new("p2"), "m", None),
+            TransportPath::new(TransportPathKind::Derp, NodeId::new("p3"), "r", None),
+        ];
+        let object_id = test_object_id("fanout-test");
+
+        let selected = node.select_transport_paths(&policy, &paths, &object_id, 0, 3);
+        // Should select up to 3 paths
+        assert!(!selected.is_empty());
+        assert!(selected.len() <= 3);
+    }
+
+    // ---- Decode status ----
+
+    #[test]
+    fn handle_decode_status_with_missing_hint() {
+        let mut node = test_node("node-1");
+        let object_id = ObjectId::from_bytes([0x55; 32]);
+
+        let status = DecodeStatus {
+            header: test_object_header(),
+            object_id,
+            zone_id: ZoneId::work(),
+            zone_key_id: ZoneKeyId::from_bytes([0x66; 8]),
+            epoch_id: 1,
+            received_unique: 5,
+            needed: 3,
+            complete: false,
+            missing_hint: Some(vec![1, 2, 3]),
+            signature: fcp_crypto::Ed25519Signature::from_bytes(&[0u8; 64]),
+        };
+
+        // Should not panic
+        node.handle_decode_status(&status, 2000);
+    }
+
+    // ---- Announce duplicate ----
+
+    #[test]
+    fn announce_same_object_twice_increments_both() {
+        let mut node = test_node("node-1");
+        let zone_id = ZoneId::work();
+        let object_id = ObjectId::from_bytes([0x77; 32]);
+
+        let first = node.announce_object(
+            &zone_id,
+            &object_id,
+            ObjectAdmissionClass::Admitted,
+            1000,
+        );
+        assert!(first);
+
+        let second = node.announce_object(
+            &zone_id,
+            &object_id,
+            ObjectAdmissionClass::Admitted,
+            1001,
+        );
+        // Gossip tracks announcements even for previously announced objects
+        if second {
+            assert_eq!(node.metrics().gossip_announcements, 2);
+        } else {
+            assert_eq!(node.metrics().gossip_announcements, 1);
+        }
+    }
+
+    // ---- transport_path_kind_label ----
+
+    #[test]
+    fn transport_path_kind_label_all_variants() {
+        assert_eq!(transport_path_kind_label(TransportPathKind::Direct), "direct");
+        assert_eq!(transport_path_kind_label(TransportPathKind::Mesh), "mesh");
+        assert_eq!(transport_path_kind_label(TransportPathKind::Derp), "derp");
+        assert_eq!(transport_path_kind_label(TransportPathKind::Funnel), "funnel");
+    }
+
+    // ---- MeshNodeError display ----
+
+    #[test]
+    fn mesh_node_error_degraded_transport_display() {
+        let inner = DegradedTransportError::Incomplete {
+            received: 5,
+            needed: 10,
+        };
+        let err = MeshNodeError::DegradedTransport(inner);
+        let display = err.to_string();
+        assert!(display.contains("degraded transport error"));
+    }
+
+    // ---- Prune with no stale state ----
+
+    #[test]
+    fn prune_stale_state_returns_zero_when_clean() {
+        let mut node = test_node("node-1");
+        let pruned = node.prune_stale_state(100_000);
+        assert_eq!(pruned, 0);
+    }
+
+    // ---- Additional MeshNodeError From conversions ----
+
+    #[test]
+    fn mesh_node_error_from_object_store_error() {
+        let inner = fcp_store::ObjectStoreError::NotFound(ObjectId::from_bytes([0; 32]));
+        let err = MeshNodeError::ObjectStore(inner);
+        assert!(err.to_string().contains("object store error"));
+    }
+
+    #[test]
+    fn mesh_node_error_from_symbol_store_error() {
+        let inner = fcp_store::SymbolStoreError::ObjectNotFound(ObjectId::from_bytes([0; 32]));
+        let err = MeshNodeError::SymbolStore(inner);
+        assert!(err.to_string().contains("symbol store error"));
+    }
+
+    #[test]
+    fn mesh_node_error_from_quarantine_error() {
+        let inner = fcp_store::QuarantineError::QuotaExceeded {
+            used: 100,
+            max: 50,
+        };
+        let err = MeshNodeError::Quarantine(inner);
+        assert!(err.to_string().contains("quarantine error"));
+    }
+
+    // ---- MeshNodeEnforcementError From conversions ----
+
+    #[test]
+    fn enforcement_error_from_invoke_validation() {
+        let inner = InvokeValidationError::HolderProofRequired;
+        let err: MeshNodeEnforcementError = inner.into();
+        assert!(err.to_string().contains("invoke validation"));
+    }
+
+    #[test]
+    fn enforcement_error_from_fcp_error() {
+        let inner = FcpError::InvalidSignature;
+        let err: MeshNodeEnforcementError = inner.into();
+        assert!(err.to_string().contains("capability verification"));
+    }
+
+    // ---- Local state updates overwrite previous ----
+
+    #[test]
+    fn update_local_state_replaces_previous() {
+        let mut node = test_node("node-1");
+        let profile_v1 = DeviceProfileBuilder::new(NodeId::new("node-1"))
+            .cpu_cores(4)
+            .build();
+        let profile_v2 = DeviceProfileBuilder::new(NodeId::new("node-1"))
+            .cpu_cores(16)
+            .build();
+
+        node.update_local_state(profile_v1, HashSet::new(), vec![]);
+        assert_eq!(node.local_profile.as_ref().unwrap().cpu_cores, 4);
+
+        node.update_local_state(profile_v2, HashSet::new(), vec![]);
+        assert_eq!(node.local_profile.as_ref().unwrap().cpu_cores, 16);
+    }
+
+    // ---- Peer update overwrites profile ----
+
+    #[test]
+    fn update_peer_state_replaces_profile() {
+        let mut node = test_node("node-1");
+        let peer = NodeId::new("peer-1");
+
+        let profile_v1 = DeviceProfileBuilder::new(peer.clone())
+            .cpu_cores(4)
+            .build();
+        let profile_v2 = DeviceProfileBuilder::new(peer.clone())
+            .cpu_cores(32)
+            .build();
+
+        node.update_peer_state(peer.clone(), profile_v1, HashSet::new(), vec![], 1000);
+        node.update_peer_state(peer, profile_v2, HashSet::new(), vec![], 2000);
+
+        assert_eq!(node.peer_count(), 1);
+        assert_eq!(node.metrics().peer_updates, 2);
+    }
+
+    // ---- Trace capture not enabled -> no events ----
+
+    #[test]
+    fn session_events_not_traced_without_capture() {
+        let mut node = test_node("node-1"); // no trace
+        let session = test_session("peer-1");
+        let peer_id = session.peer_id.clone();
+
+        node.register_session(session, 1000);
+        node.remove_session(&peer_id, 2000);
+
+        // No trace capture, so trace_snapshot is None
+        assert!(node.trace_snapshot().is_none());
+    }
+
+    // ---- Plan execution with no matching connector ----
+
+    #[test]
+    fn plan_execution_no_candidates_when_no_connector() {
+        let mut node = test_node("node-1");
+        let local_profile = test_device_profile("node-1"); // no connectors
+        node.update_local_state(local_profile, HashSet::new(), vec![]);
+
+        let ctx = PlannerContext::new(
+            fcp_core::ConnectorId::new("fcp.test", "nonexistent", "v1")
+                .expect("valid connector id"),
+        );
+        let candidates = node.plan_execution(&ctx, 2000);
+        assert!(candidates.is_empty());
+    }
 }

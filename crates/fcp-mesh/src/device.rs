@@ -2343,4 +2343,606 @@ mod tests {
     fn default_refresh_interval() {
         assert_eq!(DEFAULT_REFRESH_INTERVAL_SECS, 300);
     }
+
+    // ── Clone semantics tests ─────────────────────────────────
+
+    #[test]
+    fn device_profile_clone_eq() {
+        let profile = DeviceProfile::builder(NodeId::new("clone-test"))
+            .cpu_cores(8)
+            .memory_mb(16384)
+            .timestamp(1000)
+            .build();
+        let cloned = profile.clone();
+        assert_eq!(profile, cloned);
+    }
+
+    #[test]
+    fn gpu_profile_clone_eq() {
+        let gpu = GpuProfile::new(GpuVendor::Nvidia, "RTX 4090", 24576)
+            .with_compute_capability("8.9");
+        let cloned = gpu.clone();
+        assert_eq!(gpu, cloned);
+    }
+
+    #[test]
+    fn tpu_profile_clone_eq() {
+        let tpu = TpuProfile::new(TpuVendor::Google, "v5p", 16, 98304);
+        let cloned = tpu.clone();
+        assert_eq!(tpu, cloned);
+    }
+
+    #[test]
+    fn installed_connector_clone_eq() {
+        let c = InstalledConnector::new(
+            ConnectorId::from_static("fcp:test:1.0.0"),
+            "1.0.0",
+            ObjectId::from_bytes([0x55; 32]),
+        );
+        let cloned = c.clone();
+        assert_eq!(c, cloned);
+    }
+
+    // ── Copy semantics for enums ──────────────────────────────
+
+    #[test]
+    fn cpu_arch_copy() {
+        let arch = CpuArch::Aarch64;
+        let copied = arch;
+        assert_eq!(arch, copied);
+    }
+
+    #[test]
+    fn power_source_copy() {
+        let src = PowerSource::Solar;
+        let copied = src;
+        assert_eq!(src, copied);
+    }
+
+    #[test]
+    fn latency_class_copy() {
+        let lc = LatencyClass::Lan;
+        let copied = lc;
+        assert_eq!(lc, copied);
+    }
+
+    #[test]
+    fn availability_profile_copy() {
+        let avail = AvailabilityProfile::Scheduled;
+        let copied = avail;
+        assert_eq!(avail, copied);
+    }
+
+    #[test]
+    fn gpu_vendor_copy() {
+        let v = GpuVendor::Apple;
+        let copied = v;
+        assert_eq!(v, copied);
+    }
+
+    #[test]
+    fn tpu_vendor_copy() {
+        let v = TpuVendor::Google;
+        let copied = v;
+        assert_eq!(v, copied);
+    }
+
+    // ── Hash tests for enums ──────────────────────────────────
+
+    #[test]
+    fn cpu_arch_hash_consistency() {
+        use std::collections::HashSet;
+        let mut set = HashSet::new();
+        set.insert(CpuArch::X86_64);
+        set.insert(CpuArch::Aarch64);
+        set.insert(CpuArch::Wasm32);
+        set.insert(CpuArch::Riscv64);
+        assert_eq!(set.len(), 4);
+        // Inserting duplicate does nothing
+        set.insert(CpuArch::X86_64);
+        assert_eq!(set.len(), 4);
+    }
+
+    #[test]
+    fn power_source_hash_all_variants() {
+        use std::collections::HashSet;
+        let mut set = HashSet::new();
+        set.insert(PowerSource::Mains);
+        set.insert(PowerSource::Battery);
+        set.insert(PowerSource::Solar);
+        set.insert(PowerSource::Unknown);
+        assert_eq!(set.len(), 4);
+    }
+
+    #[test]
+    fn latency_class_hash_all_variants() {
+        use std::collections::HashSet;
+        let mut set = HashSet::new();
+        set.insert(LatencyClass::Local);
+        set.insert(LatencyClass::Lan);
+        set.insert(LatencyClass::Internet);
+        set.insert(LatencyClass::Derp);
+        assert_eq!(set.len(), 4);
+    }
+
+    // ── Debug formatting ──────────────────────────────────────
+
+    #[test]
+    fn device_profile_debug_contains_fields() {
+        let profile = DeviceProfile::builder(NodeId::new("debug-test"))
+            .cpu_cores(4)
+            .timestamp(0)
+            .build();
+        let dbg = format!("{profile:?}");
+        assert!(dbg.contains("DeviceProfile"));
+        assert!(dbg.contains("debug-test"));
+    }
+
+    #[test]
+    fn gpu_profile_debug() {
+        let gpu = GpuProfile::new(GpuVendor::Amd, "RX 7900", 24576);
+        let dbg = format!("{gpu:?}");
+        assert!(dbg.contains("GpuProfile"));
+        assert!(dbg.contains("RX 7900"));
+    }
+
+    #[test]
+    fn tpu_profile_debug() {
+        let tpu = TpuProfile::new(TpuVendor::Other, "custom-v1", 8, 65536);
+        let dbg = format!("{tpu:?}");
+        assert!(dbg.contains("TpuProfile"));
+        assert!(dbg.contains("custom-v1"));
+    }
+
+    #[test]
+    fn fitness_score_debug() {
+        let score = FitnessScore {
+            score: 85.5,
+            eligible: true,
+        };
+        let dbg = format!("{score:?}");
+        assert!(dbg.contains("FitnessScore"));
+        assert!(dbg.contains("85.5"));
+    }
+
+    #[test]
+    fn fitness_context_debug() {
+        let ctx = FitnessContext::new().with_requires_gpu(true);
+        let dbg = format!("{ctx:?}");
+        assert!(dbg.contains("FitnessContext"));
+    }
+
+    #[test]
+    fn device_profile_builder_debug() {
+        let builder = DeviceProfileBuilder::new(NodeId::new("builder-dbg"));
+        let dbg = format!("{builder:?}");
+        assert!(dbg.contains("DeviceProfileBuilder"));
+    }
+
+    // ── Battery boundary values ───────────────────────────────
+
+    #[test]
+    fn battery_boundary_at_20_not_low() {
+        let p = DeviceProfile::builder(NodeId::new("bnd1"))
+            .power_source(PowerSource::Battery)
+            .battery_percent(20)
+            .timestamp(0)
+            .build();
+        assert!(!p.is_low_battery());
+    }
+
+    #[test]
+    fn battery_boundary_at_19_is_low() {
+        let p = DeviceProfile::builder(NodeId::new("bnd2"))
+            .power_source(PowerSource::Battery)
+            .battery_percent(19)
+            .timestamp(0)
+            .build();
+        assert!(p.is_low_battery());
+    }
+
+    #[test]
+    fn battery_boundary_at_0_is_low() {
+        let p = DeviceProfile::builder(NodeId::new("bnd3"))
+            .power_source(PowerSource::Battery)
+            .battery_percent(0)
+            .timestamp(0)
+            .build();
+        assert!(p.is_low_battery());
+    }
+
+    #[test]
+    fn battery_boundary_at_100_not_low() {
+        let p = DeviceProfile::builder(NodeId::new("bnd4"))
+            .power_source(PowerSource::Battery)
+            .battery_percent(100)
+            .timestamp(0)
+            .build();
+        assert!(!p.is_low_battery());
+    }
+
+    // ── Multiple connectors ───────────────────────────────────
+
+    #[test]
+    fn profile_with_multiple_connectors() {
+        let c1 = InstalledConnector::new(
+            ConnectorId::from_static("fcp:slack:1.0.0"),
+            "1.0.0",
+            ObjectId::from_bytes([0x01; 32]),
+        );
+        let c2 = InstalledConnector::new(
+            ConnectorId::from_static("fcp:github:2.0.0"),
+            "2.0.0",
+            ObjectId::from_bytes([0x02; 32]),
+        );
+        let c3 = InstalledConnector::new(
+            ConnectorId::from_static("fcp:linear:3.0.0"),
+            "3.0.0",
+            ObjectId::from_bytes([0x03; 32]),
+        );
+
+        let p = DeviceProfile::builder(NodeId::new("multi-conn"))
+            .add_connector(c1)
+            .add_connector(c2)
+            .add_connector(c3)
+            .timestamp(0)
+            .build();
+
+        assert_eq!(p.connectors.len(), 3);
+        assert!(p.has_connector(&ConnectorId::from_static("fcp:slack:1.0.0")));
+        assert!(p.has_connector(&ConnectorId::from_static("fcp:github:2.0.0")));
+        assert!(p.has_connector(&ConnectorId::from_static("fcp:linear:3.0.0")));
+        assert!(!p.has_connector(&ConnectorId::from_static("fcp:discord:1.0.0")));
+    }
+
+    // ── FitnessScore ordering edge cases ──────────────────────
+
+    #[test]
+    fn fitness_score_partial_eq() {
+        let a = FitnessScore { score: 75.0, eligible: true };
+        let b = FitnessScore { score: 75.0, eligible: true };
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn fitness_score_partial_ord() {
+        let low = FitnessScore { score: 50.0, eligible: true };
+        let high = FitnessScore { score: 80.0, eligible: true };
+        assert!(low < high);
+        assert!(high > low);
+    }
+
+    #[test]
+    fn fitness_score_eligible_vs_ineligible_ordering() {
+        let eligible = FitnessScore { score: 1.0, eligible: true };
+        let ineligible = FitnessScore { score: 999.0, eligible: false };
+        assert!(eligible > ineligible);
+    }
+
+    #[test]
+    fn fitness_score_both_ineligible_ordering() {
+        let a = FitnessScore { score: 0.0, eligible: false };
+        let b = FitnessScore { score: 0.0, eligible: false };
+        assert_eq!(a.cmp(&b), std::cmp::Ordering::Equal);
+    }
+
+    #[test]
+    fn fitness_score_copy_semantics() {
+        let score = FitnessScore { score: 42.0, eligible: true };
+        let copied = score;
+        assert!((score.score - copied.score).abs() < f64::EPSILON);
+        assert_eq!(score.eligible, copied.eligible);
+    }
+
+    // ── Fitness with GPU + TPU bonuses ────────────────────────
+
+    #[test]
+    fn fitness_gpu_bonus_when_required_and_present() {
+        let p = DeviceProfile::builder(NodeId::new("gpu-bonus"))
+            .gpu(GpuProfile::new(GpuVendor::Nvidia, "A100", 80000))
+            .latency_class(LatencyClass::Local)
+            .availability(AvailabilityProfile::AlwaysOn)
+            .timestamp(0)
+            .build();
+
+        let ctx_no_gpu = FitnessContext::new();
+        let ctx_gpu = FitnessContext::new().with_requires_gpu(true);
+
+        let score_no_req = p.compute_fitness(&ctx_no_gpu);
+        let score_gpu_req = p.compute_fitness(&ctx_gpu);
+
+        assert!(score_gpu_req.eligible);
+        assert!(score_gpu_req.score > score_no_req.score, "GPU bonus should increase score");
+    }
+
+    #[test]
+    fn fitness_tpu_bonus_when_required_and_present() {
+        let p = DeviceProfile::builder(NodeId::new("tpu-bonus"))
+            .tpu(TpuProfile::new(TpuVendor::Google, "v5e", 8, 65536))
+            .latency_class(LatencyClass::Local)
+            .availability(AvailabilityProfile::AlwaysOn)
+            .timestamp(0)
+            .build();
+
+        let ctx_no_tpu = FitnessContext::new();
+        let ctx_tpu = FitnessContext::new().with_requires_tpu(true);
+
+        let score_no_req = p.compute_fitness(&ctx_no_tpu);
+        let score_tpu_req = p.compute_fitness(&ctx_tpu);
+
+        assert!(score_tpu_req.eligible);
+        assert!(score_tpu_req.score > score_no_req.score, "TPU bonus should increase score");
+    }
+
+    // ── Fitness latency penalty scaling ───────────────────────
+
+    #[test]
+    fn fitness_latency_classes_ordered() {
+        let ctx = FitnessContext::new();
+        let make = |lc| {
+            DeviceProfile::builder(NodeId::new("lat"))
+                .latency_class(lc)
+                .availability(AvailabilityProfile::AlwaysOn)
+                .power_source(PowerSource::Mains)
+                .timestamp(0)
+                .build()
+                .compute_fitness(&ctx)
+                .score
+        };
+        let local = make(LatencyClass::Local);
+        let lan = make(LatencyClass::Lan);
+        let internet = make(LatencyClass::Internet);
+        let derp = make(LatencyClass::Derp);
+
+        assert!(local > lan);
+        assert!(lan > internet);
+        assert!(internet > derp);
+    }
+
+    // ── Fitness score max(0) clamping ─────────────────────────
+
+    #[test]
+    fn fitness_score_never_goes_negative() {
+        // Create worst possible eligible profile
+        let p = DeviceProfile::builder(NodeId::new("negative"))
+            .latency_class(LatencyClass::Derp)
+            .power_source(PowerSource::Battery)
+            .battery_percent(1)
+            .availability(AvailabilityProfile::BestEffort)
+            .metered(true)
+            .timestamp(0)
+            .build();
+
+        let ctx = FitnessContext::new();
+        let score = p.compute_fitness(&ctx);
+        assert!(score.eligible);
+        assert!(score.score >= 0.0, "Score should never go negative");
+    }
+
+    // ── GpuVendor all variants ────────────────────────────────
+
+    #[test]
+    fn gpu_vendor_all_variants_distinct() {
+        let variants = [
+            GpuVendor::Nvidia,
+            GpuVendor::Amd,
+            GpuVendor::Apple,
+            GpuVendor::Intel,
+            GpuVendor::Other,
+        ];
+        for (i, a) in variants.iter().enumerate() {
+            for (j, b) in variants.iter().enumerate() {
+                if i == j {
+                    assert_eq!(a, b);
+                } else {
+                    assert_ne!(a, b);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn tpu_vendor_all_variants_distinct() {
+        assert_ne!(TpuVendor::Google, TpuVendor::Other);
+    }
+
+    // ── Serde: GPU vendor roundtrip ───────────────────────────
+
+    #[test]
+    fn gpu_vendor_json_roundtrip() {
+        for vendor in [
+            GpuVendor::Nvidia,
+            GpuVendor::Amd,
+            GpuVendor::Apple,
+            GpuVendor::Intel,
+            GpuVendor::Other,
+        ] {
+            let json = serde_json::to_string(&vendor).unwrap();
+            let decoded: GpuVendor = serde_json::from_str(&json).unwrap();
+            assert_eq!(vendor, decoded);
+        }
+    }
+
+    #[test]
+    fn tpu_vendor_json_roundtrip() {
+        for vendor in [TpuVendor::Google, TpuVendor::Other] {
+            let json = serde_json::to_string(&vendor).unwrap();
+            let decoded: TpuVendor = serde_json::from_str(&json).unwrap();
+            assert_eq!(vendor, decoded);
+        }
+    }
+
+    #[test]
+    fn power_source_json_roundtrip() {
+        for src in [
+            PowerSource::Mains,
+            PowerSource::Battery,
+            PowerSource::Solar,
+            PowerSource::Unknown,
+        ] {
+            let json = serde_json::to_string(&src).unwrap();
+            let decoded: PowerSource = serde_json::from_str(&json).unwrap();
+            assert_eq!(src, decoded);
+        }
+    }
+
+    #[test]
+    fn latency_class_json_roundtrip() {
+        for lc in [
+            LatencyClass::Local,
+            LatencyClass::Lan,
+            LatencyClass::Internet,
+            LatencyClass::Derp,
+        ] {
+            let json = serde_json::to_string(&lc).unwrap();
+            let decoded: LatencyClass = serde_json::from_str(&json).unwrap();
+            assert_eq!(lc, decoded);
+        }
+    }
+
+    #[test]
+    fn availability_json_roundtrip() {
+        for avail in [
+            AvailabilityProfile::AlwaysOn,
+            AvailabilityProfile::Scheduled,
+            AvailabilityProfile::BestEffort,
+        ] {
+            let json = serde_json::to_string(&avail).unwrap();
+            let decoded: AvailabilityProfile = serde_json::from_str(&json).unwrap();
+            assert_eq!(avail, decoded);
+        }
+    }
+
+    #[test]
+    fn cpu_arch_json_roundtrip() {
+        for arch in [
+            CpuArch::X86_64,
+            CpuArch::Aarch64,
+            CpuArch::Wasm32,
+            CpuArch::Riscv64,
+        ] {
+            let json = serde_json::to_string(&arch).unwrap();
+            let decoded: CpuArch = serde_json::from_str(&json).unwrap();
+            assert_eq!(arch, decoded);
+        }
+    }
+
+    // ── InstalledConnector serde ───────────────────────────────
+
+    #[test]
+    fn installed_connector_json_roundtrip() {
+        let caps = vec![CapabilityGrant {
+            capability: CapabilityId::from_static("cap:admin"),
+            operation: None,
+        }];
+        let c = InstalledConnector::new(
+            ConnectorId::from_static("fcp:test:1.0.0"),
+            "2.5.0",
+            ObjectId::from_bytes([0xAB; 32]),
+        )
+        .with_capabilities(caps);
+
+        let json = serde_json::to_string(&c).unwrap();
+        let decoded: InstalledConnector = serde_json::from_str(&json).unwrap();
+        assert_eq!(c, decoded);
+        assert_eq!(decoded.capabilities.len(), 1);
+    }
+
+    #[test]
+    fn installed_connector_cbor_roundtrip() {
+        let c = InstalledConnector::new(
+            ConnectorId::from_static("fcp:test:1.0.0"),
+            "3.0.0",
+            ObjectId::from_bytes([0xCD; 32]),
+        );
+        let mut cbor_bytes = Vec::new();
+        ciborium::into_writer(&c, &mut cbor_bytes).unwrap();
+        let decoded: InstalledConnector = ciborium::from_reader(&cbor_bytes[..]).unwrap();
+        assert_eq!(c, decoded);
+    }
+
+    // ── GpuProfile serde ──────────────────────────────────────
+
+    #[test]
+    fn gpu_profile_json_roundtrip() {
+        let gpu = GpuProfile::new(GpuVendor::Intel, "Arc A770", 16384)
+            .with_compute_capability("Xe");
+        let json = serde_json::to_string(&gpu).unwrap();
+        let decoded: GpuProfile = serde_json::from_str(&json).unwrap();
+        assert_eq!(gpu, decoded);
+    }
+
+    #[test]
+    fn gpu_profile_without_compute_capability_json() {
+        let gpu = GpuProfile::new(GpuVendor::Apple, "M4", 32768);
+        let json = serde_json::to_string(&gpu).unwrap();
+        assert!(!json.contains("compute_capability"));
+        let decoded: GpuProfile = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.compute_capability, None);
+    }
+
+    // ── TpuProfile serde ──────────────────────────────────────
+
+    #[test]
+    fn tpu_profile_json_roundtrip() {
+        let tpu = TpuProfile::new(TpuVendor::Other, "custom-chip", 32, 131_072);
+        let json = serde_json::to_string(&tpu).unwrap();
+        let decoded: TpuProfile = serde_json::from_str(&json).unwrap();
+        assert_eq!(tpu, decoded);
+    }
+
+    // ── FitnessContext clone ──────────────────────────────────
+
+    #[test]
+    fn fitness_context_clone() {
+        let ctx = FitnessContext::new()
+            .with_requires_gpu(true)
+            .with_min_memory_mb(4096)
+            .with_symbols_present(true);
+        let cloned = ctx.clone();
+        // Verify original
+        assert!(ctx.requires_gpu);
+        assert_eq!(ctx.min_memory_mb, Some(4096));
+        // Verify clone
+        assert!(cloned.requires_gpu);
+        assert!(cloned.symbols_present);
+    }
+
+    // ── Profile equality with different optional fields ───────
+
+    #[test]
+    fn profiles_differ_by_gpu() {
+        let a = DeviceProfile::builder(NodeId::new("eq1"))
+            .timestamp(0)
+            .build();
+        let b = DeviceProfile::builder(NodeId::new("eq1"))
+            .gpu(GpuProfile::new(GpuVendor::Nvidia, "RTX 4090", 24576))
+            .timestamp(0)
+            .build();
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn profiles_differ_by_metered() {
+        let a = DeviceProfile::builder(NodeId::new("eq2"))
+            .metered(false)
+            .timestamp(0)
+            .build();
+        let b = DeviceProfile::builder(NodeId::new("eq2"))
+            .metered(true)
+            .timestamp(0)
+            .build();
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn profiles_differ_by_node_id() {
+        let a = DeviceProfile::builder(NodeId::new("node-a"))
+            .timestamp(0)
+            .build();
+        let b = DeviceProfile::builder(NodeId::new("node-b"))
+            .timestamp(0)
+            .build();
+        assert_ne!(a, b);
+    }
 }

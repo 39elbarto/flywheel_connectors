@@ -1778,4 +1778,759 @@ mod tests {
             quorum_signatures: SignatureSet::default(),
         }
     }
+
+    fn create_test_lease_with_purpose(
+        lease_seq: u64,
+        exp: u64,
+        subject: ObjectId,
+        purpose: LeasePurpose,
+    ) -> Lease {
+        let mut lease = create_test_lease_with_subject(lease_seq, exp, subject);
+        lease.purpose = purpose;
+        lease
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Expanded coverage: LeasePurpose
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn lease_purpose_debug_format() {
+        let dbg = format!("{:?}", LeasePurpose::ComputationMigration);
+        assert!(dbg.contains("ComputationMigration"));
+    }
+
+    #[test]
+    fn lease_purpose_clone() {
+        let p = LeasePurpose::CoordinatorElection;
+        let cloned = p;
+        assert_eq!(p, cloned);
+    }
+
+    #[test]
+    fn lease_purpose_serde_snake_case() {
+        let json = serde_json::to_string(&LeasePurpose::OperationExecution).unwrap();
+        assert_eq!(json, "\"operation_execution\"");
+
+        let json = serde_json::to_string(&LeasePurpose::ConnectorStateWrite).unwrap();
+        assert_eq!(json, "\"connector_state_write\"");
+
+        let json = serde_json::to_string(&LeasePurpose::ComputationMigration).unwrap();
+        assert_eq!(json, "\"computation_migration\"");
+
+        let json = serde_json::to_string(&LeasePurpose::CoordinatorElection).unwrap();
+        assert_eq!(json, "\"coordinator_election\"");
+
+        let json = serde_json::to_string(&LeasePurpose::Migration).unwrap();
+        assert_eq!(json, "\"migration\"");
+
+        let json = serde_json::to_string(&LeasePurpose::ResourceAccess).unwrap();
+        assert_eq!(json, "\"resource_access\"");
+    }
+
+    #[test]
+    fn lease_purpose_deserialize_unknown_fails() {
+        let result = serde_json::from_str::<LeasePurpose>("\"unknown_purpose\"");
+        assert!(result.is_err());
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Expanded coverage: LeaseTransferValidationError Display
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn lease_transfer_error_display_expired() {
+        let err = LeaseTransferValidationError::LeaseExpired {
+            expired_at: 100,
+            now: 200,
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("expired"));
+        assert!(msg.contains("100"));
+        assert!(msg.contains("200"));
+    }
+
+    #[test]
+    fn lease_transfer_error_display_reused() {
+        let err = LeaseTransferValidationError::LeaseIdReused {
+            lease_id: test_object_id("dup"),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("reused"));
+    }
+
+    #[test]
+    fn lease_transfer_error_display_self_transfer() {
+        let err = LeaseTransferValidationError::SelfTransfer {
+            holder: test_node("self-node"),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("different holder"));
+    }
+
+    #[test]
+    fn lease_transfer_error_display_from_holder_mismatch() {
+        let err = LeaseTransferValidationError::FromHolderMismatch {
+            expected: test_node("a"),
+            got: test_node("b"),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("source holder mismatch"));
+    }
+
+    #[test]
+    fn lease_transfer_error_display_subject_mismatch() {
+        let err = LeaseTransferValidationError::SubjectMismatch {
+            expected: test_object_id("a"),
+            got: test_object_id("b"),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("subject mismatch"));
+    }
+
+    #[test]
+    fn lease_transfer_error_display_zone_mismatch() {
+        let err = LeaseTransferValidationError::ZoneMismatch {
+            expected: ZoneId::work(),
+            got: ZoneId::private(),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("zone mismatch"));
+    }
+
+    #[test]
+    fn lease_transfer_error_display_purpose_mismatch() {
+        let err = LeaseTransferValidationError::PurposeMismatch {
+            expected: LeasePurpose::OperationExecution,
+            got: LeasePurpose::Migration,
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("purpose mismatch"));
+    }
+
+    #[test]
+    fn lease_transfer_error_display_previous_fence_mismatch() {
+        let err = LeaseTransferValidationError::PreviousFenceMismatch {
+            expected: 10,
+            got: 5,
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("fencing token mismatch"));
+        assert!(msg.contains("10"));
+    }
+
+    #[test]
+    fn lease_transfer_error_display_non_monotonic() {
+        let err = LeaseTransferValidationError::NonMonotonicFence {
+            previous: 7,
+            next: 3,
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("monotonically"));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Expanded coverage: validate_lease_handoff
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn validate_lease_handoff_rejects_expired_lease() {
+        let subject = test_object_id("s");
+        let mut active_lease = create_test_lease_with_subject(5, 100, subject);
+        active_lease.purpose = LeasePurpose::ComputationMigration;
+
+        let handoff = LeaseHandoff {
+            previous_lease_id: test_object_id("prev"),
+            next_lease_id: test_object_id("next"),
+            from_holder: active_lease.holder.clone(),
+            to_holder: test_node("target"),
+            zone_id: active_lease.zone_id().clone(),
+            subject_object_id: subject,
+            purpose: LeasePurpose::ComputationMigration,
+            previous_fencing_token: 5,
+            next_fencing_token: 6,
+            transferred_at: 200,
+            checkpoint_object_id: None,
+        };
+
+        let err = validate_lease_handoff(&active_lease, &handoff, 200).unwrap_err();
+        assert!(matches!(
+            err,
+            LeaseTransferValidationError::LeaseExpired { .. }
+        ));
+    }
+
+    #[test]
+    fn validate_lease_handoff_rejects_self_transfer() {
+        let subject = test_object_id("s");
+        let mut active_lease = create_test_lease_with_subject(5, 2000, subject);
+        active_lease.purpose = LeasePurpose::ComputationMigration;
+
+        let handoff = LeaseHandoff {
+            previous_lease_id: test_object_id("prev"),
+            next_lease_id: test_object_id("next"),
+            from_holder: active_lease.holder.clone(),
+            to_holder: active_lease.holder.clone(), // same as from
+            zone_id: active_lease.zone_id().clone(),
+            subject_object_id: subject,
+            purpose: LeasePurpose::ComputationMigration,
+            previous_fencing_token: 5,
+            next_fencing_token: 6,
+            transferred_at: 1500,
+            checkpoint_object_id: None,
+        };
+
+        let err = validate_lease_handoff(&active_lease, &handoff, 1500).unwrap_err();
+        assert!(matches!(
+            err,
+            LeaseTransferValidationError::SelfTransfer { .. }
+        ));
+    }
+
+    #[test]
+    fn validate_lease_handoff_rejects_holder_mismatch() {
+        let subject = test_object_id("s");
+        let active_lease = create_test_lease_with_purpose(
+            5,
+            2000,
+            subject,
+            LeasePurpose::ComputationMigration,
+        );
+
+        let handoff = LeaseHandoff {
+            previous_lease_id: test_object_id("prev"),
+            next_lease_id: test_object_id("next"),
+            from_holder: test_node("wrong-holder"),
+            to_holder: test_node("target"),
+            zone_id: active_lease.zone_id().clone(),
+            subject_object_id: subject,
+            purpose: LeasePurpose::ComputationMigration,
+            previous_fencing_token: 5,
+            next_fencing_token: 6,
+            transferred_at: 1500,
+            checkpoint_object_id: None,
+        };
+
+        let err = validate_lease_handoff(&active_lease, &handoff, 1500).unwrap_err();
+        assert!(matches!(
+            err,
+            LeaseTransferValidationError::FromHolderMismatch { .. }
+        ));
+    }
+
+    #[test]
+    fn validate_lease_handoff_rejects_subject_mismatch() {
+        let subject = test_object_id("s");
+        let active_lease = create_test_lease_with_purpose(
+            5,
+            2000,
+            subject,
+            LeasePurpose::ComputationMigration,
+        );
+
+        let handoff = LeaseHandoff {
+            previous_lease_id: test_object_id("prev"),
+            next_lease_id: test_object_id("next"),
+            from_holder: active_lease.holder.clone(),
+            to_holder: test_node("target"),
+            zone_id: active_lease.zone_id().clone(),
+            subject_object_id: test_object_id("wrong-subject"),
+            purpose: LeasePurpose::ComputationMigration,
+            previous_fencing_token: 5,
+            next_fencing_token: 6,
+            transferred_at: 1500,
+            checkpoint_object_id: None,
+        };
+
+        let err = validate_lease_handoff(&active_lease, &handoff, 1500).unwrap_err();
+        assert!(matches!(
+            err,
+            LeaseTransferValidationError::SubjectMismatch { .. }
+        ));
+    }
+
+    #[test]
+    fn validate_lease_handoff_rejects_zone_mismatch() {
+        let subject = test_object_id("s");
+        let active_lease = create_test_lease_with_purpose(
+            5,
+            2000,
+            subject,
+            LeasePurpose::ComputationMigration,
+        );
+
+        let handoff = LeaseHandoff {
+            previous_lease_id: test_object_id("prev"),
+            next_lease_id: test_object_id("next"),
+            from_holder: active_lease.holder.clone(),
+            to_holder: test_node("target"),
+            zone_id: ZoneId::private(), // wrong zone
+            subject_object_id: subject,
+            purpose: LeasePurpose::ComputationMigration,
+            previous_fencing_token: 5,
+            next_fencing_token: 6,
+            transferred_at: 1500,
+            checkpoint_object_id: None,
+        };
+
+        let err = validate_lease_handoff(&active_lease, &handoff, 1500).unwrap_err();
+        assert!(matches!(
+            err,
+            LeaseTransferValidationError::ZoneMismatch { .. }
+        ));
+    }
+
+    #[test]
+    fn validate_lease_handoff_rejects_purpose_mismatch() {
+        let subject = test_object_id("s");
+        let active_lease = create_test_lease_with_purpose(
+            5,
+            2000,
+            subject,
+            LeasePurpose::ComputationMigration,
+        );
+
+        let handoff = LeaseHandoff {
+            previous_lease_id: test_object_id("prev"),
+            next_lease_id: test_object_id("next"),
+            from_holder: active_lease.holder.clone(),
+            to_holder: test_node("target"),
+            zone_id: active_lease.zone_id().clone(),
+            subject_object_id: subject,
+            purpose: LeasePurpose::ResourceAccess, // wrong purpose
+            previous_fencing_token: 5,
+            next_fencing_token: 6,
+            transferred_at: 1500,
+            checkpoint_object_id: None,
+        };
+
+        let err = validate_lease_handoff(&active_lease, &handoff, 1500).unwrap_err();
+        assert!(matches!(
+            err,
+            LeaseTransferValidationError::PurposeMismatch { .. }
+        ));
+    }
+
+    #[test]
+    fn validate_lease_handoff_rejects_fence_mismatch() {
+        let subject = test_object_id("s");
+        let active_lease = create_test_lease_with_purpose(
+            5,
+            2000,
+            subject,
+            LeasePurpose::ComputationMigration,
+        );
+
+        let handoff = LeaseHandoff {
+            previous_lease_id: test_object_id("prev"),
+            next_lease_id: test_object_id("next"),
+            from_holder: active_lease.holder.clone(),
+            to_holder: test_node("target"),
+            zone_id: active_lease.zone_id().clone(),
+            subject_object_id: subject,
+            purpose: LeasePurpose::ComputationMigration,
+            previous_fencing_token: 99, // wrong token
+            next_fencing_token: 100,
+            transferred_at: 1500,
+            checkpoint_object_id: None,
+        };
+
+        let err = validate_lease_handoff(&active_lease, &handoff, 1500).unwrap_err();
+        assert!(matches!(
+            err,
+            LeaseTransferValidationError::PreviousFenceMismatch { .. }
+        ));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Expanded coverage: LeaseHandoff
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn lease_handoff_serde_roundtrip() {
+        let handoff = LeaseHandoff {
+            previous_lease_id: test_object_id("prev"),
+            next_lease_id: test_object_id("next"),
+            from_holder: test_node("from"),
+            to_holder: test_node("to"),
+            zone_id: test_zone(),
+            subject_object_id: test_object_id("subj"),
+            purpose: LeasePurpose::Migration,
+            previous_fencing_token: 10,
+            next_fencing_token: 11,
+            transferred_at: 5000,
+            checkpoint_object_id: Some(test_object_id("cp")),
+        };
+
+        let json = serde_json::to_string(&handoff).unwrap();
+        let back: LeaseHandoff = serde_json::from_str(&json).unwrap();
+        assert_eq!(handoff, back);
+    }
+
+    #[test]
+    fn lease_handoff_serde_without_checkpoint() {
+        let handoff = LeaseHandoff {
+            previous_lease_id: test_object_id("prev"),
+            next_lease_id: test_object_id("next"),
+            from_holder: test_node("from"),
+            to_holder: test_node("to"),
+            zone_id: test_zone(),
+            subject_object_id: test_object_id("subj"),
+            purpose: LeasePurpose::OperationExecution,
+            previous_fencing_token: 1,
+            next_fencing_token: 2,
+            transferred_at: 1000,
+            checkpoint_object_id: None,
+        };
+
+        let json = serde_json::to_string(&handoff).unwrap();
+        assert!(!json.contains("checkpoint_object_id"));
+        let back: LeaseHandoff = serde_json::from_str(&json).unwrap();
+        assert!(back.checkpoint_object_id.is_none());
+    }
+
+    #[test]
+    fn lease_handoff_clone() {
+        let handoff = LeaseHandoff {
+            previous_lease_id: test_object_id("prev"),
+            next_lease_id: test_object_id("next"),
+            from_holder: test_node("from"),
+            to_holder: test_node("to"),
+            zone_id: test_zone(),
+            subject_object_id: test_object_id("subj"),
+            purpose: LeasePurpose::ResourceAccess,
+            previous_fencing_token: 5,
+            next_fencing_token: 6,
+            transferred_at: 2000,
+            checkpoint_object_id: None,
+        };
+        let cloned = handoff.clone();
+        assert_eq!(handoff, cloned);
+    }
+
+    #[test]
+    fn lease_handoff_debug_format() {
+        let handoff = LeaseHandoff {
+            previous_lease_id: test_object_id("prev"),
+            next_lease_id: test_object_id("next"),
+            from_holder: test_node("from"),
+            to_holder: test_node("to"),
+            zone_id: test_zone(),
+            subject_object_id: test_object_id("subj"),
+            purpose: LeasePurpose::Migration,
+            previous_fencing_token: 1,
+            next_fencing_token: 2,
+            transferred_at: 1000,
+            checkpoint_object_id: None,
+        };
+        let dbg = format!("{handoff:?}");
+        assert!(dbg.contains("LeaseHandoff"));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Expanded coverage: Lease expiry edge cases
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn lease_not_expired_at_zero_timestamp() {
+        let lease = create_test_lease_with_exp(1, 2000);
+        assert!(!lease.is_expired(0));
+    }
+
+    #[test]
+    fn lease_expired_at_max_timestamp() {
+        let lease = create_test_lease_with_exp(1, u64::MAX);
+        assert!(!lease.is_expired(u64::MAX - 1));
+        assert!(lease.is_expired(u64::MAX));
+    }
+
+    #[test]
+    fn lease_with_zero_expiry_always_expired() {
+        let lease = create_test_lease_with_exp(1, 0);
+        assert!(lease.is_expired(0));
+        assert!(lease.is_expired(1));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Expanded coverage: validate_lease edge cases
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn validate_lease_exact_expiry_fails() {
+        let subject = test_object_id("s");
+        let zone = test_zone();
+        let lease = create_test_lease_with_subject(5, 2000, subject);
+
+        let result = validate_lease(
+            &lease,
+            &subject,
+            &zone,
+            LeasePurpose::OperationExecution,
+            5,
+            2000, // exactly at expiry
+            0,
+        );
+        assert!(matches!(result, Err(LeaseValidationError::Expired { .. })));
+    }
+
+    #[test]
+    fn validate_lease_just_before_expiry_succeeds() {
+        let subject = test_object_id("s");
+        let zone = test_zone();
+        let lease = create_test_lease_with_subject(5, 2000, subject);
+
+        let result = validate_lease(
+            &lease,
+            &subject,
+            &zone,
+            LeasePurpose::OperationExecution,
+            5,
+            1999, // just before expiry
+            0,
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn validate_lease_seq_zero_valid() {
+        let subject = test_object_id("s");
+        let zone = test_zone();
+        let lease = create_test_lease_with_subject(0, 2000, subject);
+
+        let result = validate_lease(
+            &lease,
+            &subject,
+            &zone,
+            LeasePurpose::OperationExecution,
+            0,
+            1000,
+            0,
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn validate_lease_all_purposes() {
+        let subject = test_object_id("s");
+        let zone = test_zone();
+        for purpose in [
+            LeasePurpose::OperationExecution,
+            LeasePurpose::ConnectorStateWrite,
+            LeasePurpose::ComputationMigration,
+            LeasePurpose::CoordinatorElection,
+            LeasePurpose::Migration,
+            LeasePurpose::ResourceAccess,
+        ] {
+            let lease = create_test_lease_with_purpose(5, 2000, subject, purpose);
+            let result = validate_lease(&lease, &subject, &zone, purpose, 5, 1000, 0);
+            assert!(result.is_ok(), "purpose {purpose:?} should validate");
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Expanded coverage: HRW
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn hrw_all_nodes_appear_in_ranking() {
+        let zone = test_zone();
+        let subject = test_object_id("s");
+        let nodes = vec![
+            test_node("a"),
+            test_node("b"),
+            test_node("c"),
+            test_node("d"),
+        ];
+        let ranked = rank_nodes_by_hrw(&zone, &subject, &nodes);
+        for n in &nodes {
+            assert!(ranked.contains(n));
+        }
+    }
+
+    #[test]
+    fn hrw_ranking_is_permutation() {
+        let zone = test_zone();
+        let subject = test_object_id("subj");
+        let nodes = vec![test_node("x"), test_node("y"), test_node("z")];
+        let ranked = rank_nodes_by_hrw(&zone, &subject, &nodes);
+        assert_eq!(ranked.len(), nodes.len());
+        // Verify each node appears exactly once
+        for n in &nodes {
+            assert!(ranked.contains(n), "ranked should contain {n:?}");
+        }
+    }
+
+    #[test]
+    fn hrw_different_zones_may_differ() {
+        let subject = test_object_id("s");
+        let nodes = vec![test_node("a"), test_node("b"), test_node("c")];
+        let coord1 = select_coordinator(&ZoneId::work(), &subject, &nodes);
+        let coord2 = select_coordinator(&ZoneId::private(), &subject, &nodes);
+        // They might differ (probabilistic but likely with 2 different zones)
+        // We just verify both are valid
+        assert!(coord1.is_some());
+        assert!(coord2.is_some());
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Expanded coverage: LeaseRequest serde edge cases
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn lease_request_no_renew_seq_serde() {
+        let request = LeaseRequest {
+            subject_object_id: test_object_id("s"),
+            zone_id: test_zone(),
+            requester: test_node("n"),
+            requested_ttl: 120,
+            renew_seq: None,
+        };
+        let json = serde_json::to_string(&request).unwrap();
+        let back: LeaseRequest = serde_json::from_str(&json).unwrap();
+        assert!(back.renew_seq.is_none());
+        assert_eq!(back.requested_ttl, 120);
+    }
+
+    #[test]
+    fn lease_request_zero_ttl() {
+        let request = LeaseRequest {
+            subject_object_id: test_object_id("s"),
+            zone_id: test_zone(),
+            requester: test_node("n"),
+            requested_ttl: 0,
+            renew_seq: None,
+        };
+        assert_eq!(request.requested_ttl, 0);
+    }
+
+    #[test]
+    fn lease_request_max_ttl() {
+        let request = LeaseRequest {
+            subject_object_id: test_object_id("s"),
+            zone_id: test_zone(),
+            requester: test_node("n"),
+            requested_ttl: u32::MAX,
+            renew_seq: None,
+        };
+        assert_eq!(request.requested_ttl, u32::MAX);
+    }
+
+    #[test]
+    fn lease_request_debug_format() {
+        let request = LeaseRequest {
+            subject_object_id: test_object_id("s"),
+            zone_id: test_zone(),
+            requester: test_node("n"),
+            requested_ttl: 60,
+            renew_seq: None,
+        };
+        let dbg = format!("{request:?}");
+        assert!(dbg.contains("LeaseRequest"));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Expanded coverage: LeaseResponse edge cases
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn lease_response_invalid_empty_reason() {
+        let response = LeaseResponse::Invalid {
+            reason: String::new(),
+        };
+        assert!(
+            matches!(&response, LeaseResponse::Invalid { reason } if reason.is_empty())
+        );
+    }
+
+    #[test]
+    fn lease_response_denied_zero_values() {
+        let response = LeaseResponse::Denied {
+            current_holder: test_node("h"),
+            expires_at: 0,
+            current_seq: 0,
+        };
+        let json = serde_json::to_string(&response).unwrap();
+        let back: LeaseResponse = serde_json::from_str(&json).unwrap();
+        assert!(matches!(
+            back,
+            LeaseResponse::Denied {
+                expires_at: 0,
+                current_seq: 0,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn lease_response_debug_format() {
+        let resp = LeaseResponse::Invalid {
+            reason: "test".to_string(),
+        };
+        let dbg = format!("{resp:?}");
+        assert!(dbg.contains("Invalid"));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Expanded coverage: current_timestamp
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn current_timestamp_monotonic_within_test() {
+        let t1 = current_timestamp();
+        let t2 = current_timestamp();
+        assert!(t2 >= t1);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Expanded coverage: Lease::new
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn lease_new_zero_ttl() {
+        use crate::Provenance;
+        use fcp_cbor::SchemaId;
+        use semver::Version;
+
+        let zone = test_zone();
+        let subject = test_object_id("s");
+        let params = LeaseParams {
+            schema: SchemaId::new("fcp.lease", "lease", Version::new(1, 0, 0)),
+            zone_id: zone.clone(),
+            holder: test_node("h"),
+            lease_seq: 1,
+            ttl_secs: 0,
+            subject_object_id: subject,
+            provenance: Provenance::new(zone),
+            purpose: LeasePurpose::ResourceAccess,
+            quorum_signatures: SignatureSet::default(),
+        };
+        let lease = Lease::new(params);
+        assert_eq!(lease.exp, lease.header.created_at);
+    }
+
+    #[test]
+    fn lease_new_large_ttl() {
+        use crate::Provenance;
+        use fcp_cbor::SchemaId;
+        use semver::Version;
+
+        let zone = test_zone();
+        let subject = test_object_id("s");
+        let params = LeaseParams {
+            schema: SchemaId::new("fcp.lease", "lease", Version::new(1, 0, 0)),
+            zone_id: zone.clone(),
+            holder: test_node("h"),
+            lease_seq: 1,
+            ttl_secs: u32::MAX,
+            subject_object_id: subject,
+            provenance: Provenance::new(zone),
+            purpose: LeasePurpose::ConnectorStateWrite,
+            quorum_signatures: SignatureSet::default(),
+        };
+        let lease = Lease::new(params);
+        assert_eq!(
+            lease.exp,
+            lease.header.created_at + u64::from(u32::MAX)
+        );
+    }
 }

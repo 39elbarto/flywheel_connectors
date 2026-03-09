@@ -1042,4 +1042,288 @@ mod tests {
     fn duration_to_ms_fractional() {
         assert_eq!(duration_to_ms(Duration::from_millis(1500)), 1500);
     }
+
+    // ── NEW: RetryDecision Copy semantics ──────────────────────────────
+
+    #[test]
+    fn retry_decision_is_copy() {
+        let d = RetryDecision::Backoff;
+        let copy1 = d;
+        let copy2 = d;
+        assert_eq!(copy1, copy2);
+    }
+
+    #[test]
+    fn retry_decision_after_copy_preserves_duration() {
+        let d = RetryDecision::After(Duration::from_secs(7));
+        let copy = d;
+        assert_eq!(d.retry_after(), copy.retry_after());
+    }
+
+    // ── NEW: RetryPolicy builder returns correct types ─────────────────
+
+    #[test]
+    fn retry_policy_with_base_backoff_zero() {
+        let p = RetryPolicy::new()
+            .with_base_backoff_ms(0)
+            .with_jitter_enabled(false);
+        assert_eq!(p.compute_backoff_ms(0), 0);
+        assert_eq!(p.compute_backoff_ms(10), 0);
+    }
+
+    #[test]
+    fn retry_policy_with_max_backoff_zero() {
+        let p = RetryPolicy::new()
+            .with_base_backoff_ms(1000)
+            .with_max_backoff_ms(0)
+            .with_jitter_enabled(false);
+        assert_eq!(p.compute_backoff_ms(0), 0); // min(1000, 0) = 0
+    }
+
+    #[test]
+    fn retry_policy_with_max_backoff_less_than_base() {
+        let p = RetryPolicy::new()
+            .with_base_backoff_ms(5000)
+            .with_max_backoff_ms(1000)
+            .with_jitter_enabled(false);
+        assert_eq!(p.compute_backoff_ms(0), 1000);
+    }
+
+    // ── NEW: compute_backoff_ms specific attempts ──────────────────────
+
+    #[test]
+    fn compute_backoff_attempt_four() {
+        let p = RetryPolicy::new()
+            .with_base_backoff_ms(1000)
+            .with_max_backoff_ms(100_000)
+            .with_jitter_enabled(false);
+        // 1000 * 2^4 = 16000
+        assert_eq!(p.compute_backoff_ms(4), 16_000);
+    }
+
+    #[test]
+    fn compute_backoff_attempt_exactly_30() {
+        let p = RetryPolicy::new()
+            .with_base_backoff_ms(1)
+            .with_max_backoff_ms(u64::MAX)
+            .with_jitter_enabled(false);
+        // 1 * 2^30 = 1073741824
+        assert_eq!(p.compute_backoff_ms(30), 1_073_741_824);
+    }
+
+    #[test]
+    fn compute_backoff_attempt_31_same_as_30() {
+        let p = RetryPolicy::new()
+            .with_base_backoff_ms(1)
+            .with_max_backoff_ms(u64::MAX)
+            .with_jitter_enabled(false);
+        assert_eq!(p.compute_backoff_ms(30), p.compute_backoff_ms(31));
+        assert_eq!(p.compute_backoff_ms(30), p.compute_backoff_ms(100));
+    }
+
+    // ── NEW: compute_backoff_with_jitter_ms detailed ───────────────────
+
+    #[test]
+    fn jitter_factor_quarter_gives_62_percent() {
+        let p = RetryPolicy::new()
+            .with_base_backoff_ms(1000)
+            .with_jitter_enabled(true);
+        // factor=0.25 -> 0.25*0.5+0.5=0.625 -> 1000*0.625=625
+        let result = p.compute_backoff_with_jitter_ms(0, 0.25);
+        assert_eq!(result, 625);
+    }
+
+    #[test]
+    fn jitter_factor_three_quarters() {
+        let p = RetryPolicy::new()
+            .with_base_backoff_ms(1000)
+            .with_jitter_enabled(true);
+        // factor=0.75 -> 0.75*0.5+0.5=0.875 -> 1000*0.875=875
+        let result = p.compute_backoff_with_jitter_ms(0, 0.75);
+        assert_eq!(result, 875);
+    }
+
+    #[test]
+    fn jitter_with_higher_attempt_still_works() {
+        let p = RetryPolicy::new()
+            .with_base_backoff_ms(100)
+            .with_max_backoff_ms(10_000)
+            .with_jitter_enabled(true);
+        // attempt=3 -> base=100*2^3=800, factor=0.5 -> 0.5*0.5+0.5=0.75 -> 800*0.75=600
+        let result = p.compute_backoff_with_jitter_ms(3, 0.5);
+        assert_eq!(result, 600);
+    }
+
+    // ── NEW: next_delay comprehensive combinations ─────────────────────
+
+    #[test]
+    fn next_delay_terminal_always_none_regardless_of_attempts() {
+        let p = RetryPolicy::new().with_max_attempts(None);
+        for attempt in [0, 1, 10, 100, 1000] {
+            assert!(
+                p.next_delay(attempt, RetryDecision::Terminal, None).is_none(),
+                "attempt {attempt} should be None for Terminal"
+            );
+        }
+    }
+
+    #[test]
+    fn next_delay_immediate_always_zero_regardless_of_hint() {
+        let p = RetryPolicy::new();
+        let hints = [
+            None,
+            Some(Duration::from_secs(1)),
+            Some(Duration::from_secs(3600)),
+        ];
+        for hint in hints {
+            let delay = p.next_delay(0, RetryDecision::Immediate, hint);
+            assert_eq!(delay, Some(Duration::ZERO));
+        }
+    }
+
+    #[test]
+    fn next_delay_backoff_no_jitter_grows_exponentially() {
+        let p = RetryPolicy::new()
+            .with_base_backoff_ms(100)
+            .with_max_backoff_ms(100_000)
+            .with_jitter_enabled(false)
+            .with_max_attempts(None);
+
+        let d0 = p.next_delay(0, RetryDecision::Backoff, None).unwrap();
+        let d1 = p.next_delay(1, RetryDecision::Backoff, None).unwrap();
+        let d2 = p.next_delay(2, RetryDecision::Backoff, None).unwrap();
+
+        assert_eq!(d0, Duration::from_millis(100));
+        assert_eq!(d1, Duration::from_millis(200));
+        assert_eq!(d2, Duration::from_millis(400));
+    }
+
+    #[test]
+    fn next_delay_max_attempts_zero_always_none() {
+        let p = RetryPolicy::new().with_max_attempts(Some(0));
+        assert!(p.next_delay(0, RetryDecision::Immediate, None).is_none());
+        assert!(p.next_delay(0, RetryDecision::Backoff, None).is_none());
+        assert!(
+            p.next_delay(0, RetryDecision::After(Duration::from_secs(1)), None)
+                .is_none()
+        );
+    }
+
+    // ── NEW: decision_from_http_status comprehensive coverage ──────────
+
+    #[test]
+    fn http_200_to_399_all_terminal() {
+        for status in [200, 201, 204, 301, 302, 304, 399] {
+            assert_eq!(
+                decision_from_http_status(status, None),
+                RetryDecision::Terminal,
+                "status {status} should be Terminal"
+            );
+        }
+    }
+
+    #[test]
+    fn http_400_to_428_terminal_except_408_425() {
+        for status in [400, 401, 402, 403, 404, 405, 409, 410, 415, 422, 426, 428] {
+            assert_eq!(
+                decision_from_http_status(status, None),
+                RetryDecision::Terminal,
+                "status {status} should be Terminal"
+            );
+        }
+    }
+
+    #[test]
+    fn http_500_to_504_all_backoff() {
+        for status in [500, 501, 502, 503, 504] {
+            assert_eq!(
+                decision_from_http_status(status, None),
+                RetryDecision::Backoff,
+                "status {status} should be Backoff"
+            );
+        }
+    }
+
+    // ── NEW: map_external_error with varied inputs ─────────────────────
+
+    #[test]
+    fn map_external_error_408_retryable() {
+        let (decision, error) = map_external_error("svc", Some(408), "timeout", None);
+        assert_eq!(decision, RetryDecision::Backoff);
+        match error {
+            FcpError::External { retryable, .. } => assert!(retryable),
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn map_external_error_425_retryable() {
+        let (decision, _) = map_external_error("svc", Some(425), "too early", None);
+        assert_eq!(decision, RetryDecision::Backoff);
+    }
+
+    #[test]
+    fn map_external_error_no_status_rate_limit_message() {
+        let (decision, _) = map_external_error("api", None, "rate limit hit", None);
+        assert_eq!(decision, RetryDecision::Backoff);
+    }
+
+    #[test]
+    fn map_external_error_429_default_retry_after_30s() {
+        let (_, error) = map_external_error("api", Some(429), "rate limited", None);
+        match error {
+            FcpError::RateLimited { retry_after_ms, .. } => {
+                assert_eq!(retry_after_ms, 30_000);
+            }
+            other => panic!("expected RateLimited, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn map_external_error_503_with_hint_propagates_retry_after() {
+        let hint = Duration::from_secs(45);
+        let (_, error) = map_external_error("svc", Some(503), "unavailable", Some(hint));
+        match error {
+            FcpError::External { retry_after, .. } => {
+                assert_eq!(retry_after, Some(hint));
+            }
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn map_external_error_terminal_no_retry_after() {
+        let (_, error) = map_external_error("svc", Some(400), "bad request", None);
+        match error {
+            FcpError::External { retry_after, .. } => {
+                assert!(retry_after.is_none());
+            }
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    // ── NEW: duration_to_ms precision ──────────────────────────────────
+
+    #[test]
+    fn duration_to_ms_nanos_truncated() {
+        // 1ms + 999_999ns = just under 2ms, should truncate to 1
+        let d = Duration::from_millis(1) + Duration::from_nanos(999_999);
+        assert_eq!(duration_to_ms(d), 1);
+    }
+
+    #[test]
+    fn duration_to_ms_exactly_two_ms() {
+        assert_eq!(duration_to_ms(Duration::from_millis(2)), 2);
+    }
+
+    // ── NEW: pseudo_random_jitter stress test ──────────────────────────
+
+    #[test]
+    fn pseudo_random_jitter_extreme_attempt_values() {
+        for attempt in [0, 1, u32::MAX / 2, u32::MAX - 1, u32::MAX] {
+            let j = pseudo_random_jitter(attempt);
+            assert!(j >= 0.0, "jitter for attempt {attempt} must be >= 0.0");
+            assert!(j < 1.0, "jitter for attempt {attempt} must be < 1.0");
+        }
+    }
 }

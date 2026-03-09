@@ -1089,4 +1089,509 @@ mod tests {
 
         assert_eq!(counter.value(), 5);
     }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // CrdtActorId – expanded coverage
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn actor_id_empty_string() {
+        let a = CrdtActorId::new("");
+        assert_eq!(a.as_str(), "");
+        assert_eq!(a.to_string(), "");
+    }
+
+    #[test]
+    fn actor_id_unicode() {
+        let a = CrdtActorId::new("node-\u{1F600}");
+        assert_eq!(a.as_str(), "node-\u{1F600}");
+    }
+
+    #[test]
+    fn actor_id_long_string() {
+        let long = "a".repeat(10_000);
+        let a = CrdtActorId::new(long.clone());
+        assert_eq!(a.as_str(), long);
+    }
+
+    #[test]
+    fn actor_id_debug_format() {
+        let a = actor("dbg-node");
+        let dbg = format!("{a:?}");
+        assert!(dbg.contains("dbg-node"));
+    }
+
+    #[test]
+    fn actor_id_as_ref_str() {
+        let a = actor("ref-test");
+        let s: &str = a.as_ref();
+        assert_eq!(s, "ref-test");
+    }
+
+    #[test]
+    fn actor_id_from_string_owned() {
+        let s = String::from("owned");
+        let a: CrdtActorId = s.into();
+        assert_eq!(a.as_str(), "owned");
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // LwwEntry – expanded coverage
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn lww_entry_wins_over_much_higher_timestamp() {
+        let new_entry = LwwEntry {
+            value: "new",
+            timestamp: u64::MAX,
+            actor: actor("A"),
+        };
+        let old_entry = LwwEntry {
+            value: "old",
+            timestamp: 0,
+            actor: actor("Z"),
+        };
+        assert!(new_entry.wins_over(&old_entry));
+        assert!(!old_entry.wins_over(&new_entry));
+    }
+
+    #[test]
+    fn lww_entry_tiebreak_with_equal_timestamp_equal_actor() {
+        let a = LwwEntry {
+            value: 1,
+            timestamp: 100,
+            actor: actor("same"),
+        };
+        let b = LwwEntry {
+            value: 2,
+            timestamp: 100,
+            actor: actor("same"),
+        };
+        // Neither wins with equal timestamp and equal actor
+        assert!(!a.wins_over(&b));
+        assert!(!b.wins_over(&a));
+    }
+
+    #[test]
+    fn lww_entry_debug_format() {
+        let entry = LwwEntry {
+            value: 42,
+            timestamp: 100,
+            actor: actor("A"),
+        };
+        let dbg = format!("{entry:?}");
+        assert!(dbg.contains("LwwEntry"));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // LwwMap – expanded coverage
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn lww_map_clone() {
+        let mut map: LwwMap<String, i32> = LwwMap::default();
+        map.insert("k".to_string(), 42, 100, actor("A"));
+        let cloned = map.clone();
+        assert_eq!(map, cloned);
+    }
+
+    #[test]
+    fn lww_map_many_keys() {
+        let mut map: LwwMap<String, i32> = LwwMap::default();
+        for i in 0..100 {
+            map.insert(format!("key-{i}"), i, 100, actor("A"));
+        }
+        assert_eq!(map.len(), 100);
+        assert!(!map.is_empty());
+    }
+
+    #[test]
+    fn lww_map_overwrite_same_timestamp_lower_actor_ignored() {
+        let mut map: LwwMap<String, i32> = LwwMap::default();
+        map.insert("k".to_string(), 1, 100, actor("zzz"));
+        map.insert("k".to_string(), 2, 100, actor("aaa")); // lower actor
+        assert_eq!(map.get(&"k".to_string()).unwrap().value, 1);
+    }
+
+    #[test]
+    fn lww_map_merge_multiple_keys_mixed() {
+        let mut m1: LwwMap<String, i32> = LwwMap::default();
+        m1.insert("a".to_string(), 1, 100, actor("X"));
+        m1.insert("b".to_string(), 2, 200, actor("X"));
+
+        let mut m2: LwwMap<String, i32> = LwwMap::default();
+        m2.insert("a".to_string(), 10, 200, actor("Y"));
+        m2.insert("b".to_string(), 20, 100, actor("Y"));
+        m2.insert("c".to_string(), 30, 150, actor("Y"));
+
+        m1.merge(&m2);
+        assert_eq!(m1.get(&"a".to_string()).unwrap().value, 10); // m2 newer
+        assert_eq!(m1.get(&"b".to_string()).unwrap().value, 2); // m1 newer
+        assert_eq!(m1.get(&"c".to_string()).unwrap().value, 30); // only in m2
+    }
+
+    #[test]
+    fn lww_map_merge_associative() {
+        let mut a: LwwMap<String, i32> = LwwMap::default();
+        a.insert("k".to_string(), 1, 100, actor("A"));
+
+        let mut b: LwwMap<String, i32> = LwwMap::default();
+        b.insert("k".to_string(), 2, 200, actor("B"));
+
+        let mut c: LwwMap<String, i32> = LwwMap::default();
+        c.insert("k".to_string(), 3, 300, actor("C"));
+
+        // (a merge b) merge c
+        let mut ab = a.clone();
+        ab.merge(&b);
+        ab.merge(&c);
+
+        // a merge (b merge c)
+        let mut bc = b.clone();
+        bc.merge(&c);
+        let mut a_bc = a.clone();
+        a_bc.merge(&bc);
+
+        assert_eq!(
+            ab.get(&"k".to_string()).unwrap().value,
+            a_bc.get(&"k".to_string()).unwrap().value
+        );
+    }
+
+    #[test]
+    fn lww_map_default_is_empty() {
+        let map: LwwMap<String, String> = LwwMap::default();
+        assert!(map.is_empty());
+        assert_eq!(map.len(), 0);
+    }
+
+    #[test]
+    fn lww_map_insert_different_values_same_key_latest_wins() {
+        let mut map: LwwMap<String, String> = LwwMap::default();
+        map.insert("k".to_string(), "first".to_string(), 1, actor("A"));
+        map.insert("k".to_string(), "second".to_string(), 2, actor("A"));
+        map.insert("k".to_string(), "third".to_string(), 3, actor("A"));
+        assert_eq!(map.get(&"k".to_string()).unwrap().value, "third");
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // OrSetTag – expanded coverage
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn or_set_tag_clone() {
+        let t = tag("a", 1);
+        let cloned = t.clone();
+        assert_eq!(t, cloned);
+    }
+
+    #[test]
+    fn or_set_tag_debug_format() {
+        let t = tag("actor1", 42);
+        let dbg = format!("{t:?}");
+        assert!(dbg.contains("OrSetTag"));
+        assert!(dbg.contains("actor1"));
+    }
+
+    #[test]
+    fn or_set_tag_nonce_zero() {
+        let t = tag("a", 0);
+        assert_eq!(t.nonce, 0);
+    }
+
+    #[test]
+    fn or_set_tag_nonce_max() {
+        let t = tag("a", u64::MAX);
+        assert_eq!(t.nonce, u64::MAX);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // OrSet – expanded coverage
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn or_set_clone() {
+        let mut set: OrSet<String> = OrSet::default();
+        set.add("x".to_string(), tag("A", 1));
+        let cloned = set.clone();
+        assert_eq!(set, cloned);
+    }
+
+    #[test]
+    fn or_set_remove_nonexistent_is_noop() {
+        let mut set: OrSet<String> = OrSet::default();
+        set.remove_observed(&"missing".to_string());
+        assert!(set.is_empty());
+    }
+
+    #[test]
+    fn or_set_add_many_values() {
+        let mut set: OrSet<u64> = OrSet::default();
+        for i in 0u64..100 {
+            set.add(i, OrSetTag::new(actor("A"), i));
+        }
+        assert_eq!(set.len(), 100);
+    }
+
+    #[test]
+    fn or_set_values_sorted_for_btree() {
+        let mut set: OrSet<String> = OrSet::default();
+        set.add("c".to_string(), tag("A", 3));
+        set.add("a".to_string(), tag("A", 1));
+        set.add("b".to_string(), tag("A", 2));
+        // BTreeMap preserves order, so values should be sorted
+        let vals = set.values();
+        assert_eq!(vals, vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn or_set_merge_with_empty() {
+        let mut set: OrSet<String> = OrSet::default();
+        set.add("x".to_string(), tag("A", 1));
+        let empty: OrSet<String> = OrSet::default();
+        set.merge(&empty);
+        assert_eq!(set.len(), 1);
+        assert!(set.contains(&"x".to_string()));
+    }
+
+    #[test]
+    fn or_set_empty_merge_into_nonempty() {
+        let mut empty: OrSet<String> = OrSet::default();
+        let mut nonempty: OrSet<String> = OrSet::default();
+        nonempty.add("x".to_string(), tag("A", 1));
+        empty.merge(&nonempty);
+        assert_eq!(empty.len(), 1);
+    }
+
+    #[test]
+    fn or_set_merge_associative() {
+        let mut a: OrSet<String> = OrSet::default();
+        a.add("x".to_string(), tag("A", 1));
+
+        let mut b: OrSet<String> = OrSet::default();
+        b.add("y".to_string(), tag("B", 1));
+
+        let mut c: OrSet<String> = OrSet::default();
+        c.add("z".to_string(), tag("C", 1));
+
+        // (a merge b) merge c
+        let mut ab = a.clone();
+        ab.merge(&b);
+        ab.merge(&c);
+
+        // a merge (b merge c)
+        let mut bc = b.clone();
+        bc.merge(&c);
+        let mut a_bc = a.clone();
+        a_bc.merge(&bc);
+
+        let mut vals_ab = ab.values();
+        vals_ab.sort();
+        let mut vals_abc = a_bc.values();
+        vals_abc.sort();
+        assert_eq!(vals_ab, vals_abc);
+    }
+
+    #[test]
+    fn or_set_concurrent_remove_loses_to_concurrent_add() {
+        // Standard OR-Set semantics: add wins over concurrent remove
+        let mut replica1: OrSet<String> = OrSet::default();
+        let mut replica2: OrSet<String> = OrSet::default();
+
+        // Both start with "x" added by tag A:1
+        replica1.add("x".to_string(), tag("A", 1));
+        replica2.add("x".to_string(), tag("A", 1));
+
+        // replica1 removes "x"
+        replica1.remove_observed(&"x".to_string());
+
+        // replica2 adds "x" with new tag
+        replica2.add("x".to_string(), tag("B", 1));
+
+        // Merge: B's add should survive
+        replica1.merge(&replica2);
+        assert!(replica1.contains(&"x".to_string()));
+    }
+
+    #[test]
+    fn or_set_debug_format() {
+        let set: OrSet<String> = OrSet::default();
+        let dbg = format!("{set:?}");
+        assert!(dbg.contains("OrSet"));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // GCounter – expanded coverage
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn gcounter_increment_zero_delta() {
+        let mut counter = GCounter::default();
+        counter.increment(actor("A"), 0);
+        assert_eq!(counter.value(), 0);
+    }
+
+    #[test]
+    fn gcounter_many_actors() {
+        let mut counter = GCounter::default();
+        for i in 0..100 {
+            counter.increment(actor(&format!("actor-{i}")), 1);
+        }
+        assert_eq!(counter.value(), 100);
+    }
+
+    #[test]
+    fn gcounter_merge_with_empty() {
+        let mut counter = GCounter::default();
+        counter.increment(actor("A"), 10);
+        let empty = GCounter::default();
+        counter.merge(&empty);
+        assert_eq!(counter.value(), 10);
+    }
+
+    #[test]
+    fn gcounter_empty_merge_into_nonempty() {
+        let mut empty = GCounter::default();
+        let mut nonempty = GCounter::default();
+        nonempty.increment(actor("A"), 10);
+        empty.merge(&nonempty);
+        assert_eq!(empty.value(), 10);
+    }
+
+    #[test]
+    fn gcounter_merge_associative() {
+        let mut a = GCounter::default();
+        a.increment(actor("A"), 5);
+
+        let mut b = GCounter::default();
+        b.increment(actor("B"), 10);
+
+        let mut c = GCounter::default();
+        c.increment(actor("C"), 15);
+
+        let mut ab = a.clone();
+        ab.merge(&b);
+        ab.merge(&c);
+
+        let mut bc = b.clone();
+        bc.merge(&c);
+        let mut a_bc = a.clone();
+        a_bc.merge(&bc);
+
+        assert_eq!(ab.value(), a_bc.value());
+    }
+
+    #[test]
+    fn gcounter_debug_format() {
+        let counter = GCounter::default();
+        let dbg = format!("{counter:?}");
+        assert!(dbg.contains("GCounter"));
+    }
+
+    #[test]
+    fn gcounter_default_counts_empty() {
+        let counter = GCounter::default();
+        assert!(counter.counts.is_empty());
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // PnCounter – expanded coverage
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn pn_counter_increment_then_decrement_to_zero() {
+        let mut counter = PnCounter::default();
+        counter.increment(actor("A"), 50);
+        counter.decrement(actor("A"), 50);
+        assert_eq!(counter.value(), 0);
+    }
+
+    #[test]
+    fn pn_counter_many_actors() {
+        let mut counter = PnCounter::default();
+        for i in 0..50 {
+            counter.increment(actor(&format!("inc-{i}")), 2);
+        }
+        for i in 0..30 {
+            counter.decrement(actor(&format!("dec-{i}")), 1);
+        }
+        assert_eq!(counter.value(), 70); // 100 - 30
+    }
+
+    #[test]
+    fn pn_counter_merge_with_empty() {
+        let mut counter = PnCounter::default();
+        counter.increment(actor("A"), 10);
+        let empty = PnCounter::default();
+        counter.merge(&empty);
+        assert_eq!(counter.value(), 10);
+    }
+
+    #[test]
+    fn pn_counter_merge_associative() {
+        let mut a = PnCounter::default();
+        a.increment(actor("A"), 5);
+
+        let mut b = PnCounter::default();
+        b.decrement(actor("B"), 3);
+
+        let mut c = PnCounter::default();
+        c.increment(actor("C"), 10);
+
+        let mut ab = a.clone();
+        ab.merge(&b);
+        ab.merge(&c);
+
+        let mut bc = b.clone();
+        bc.merge(&c);
+        let mut a_bc = a.clone();
+        a_bc.merge(&bc);
+
+        assert_eq!(ab.value(), a_bc.value());
+    }
+
+    #[test]
+    fn pn_counter_debug_format() {
+        let counter = PnCounter::default();
+        let dbg = format!("{counter:?}");
+        assert!(dbg.contains("PnCounter"));
+    }
+
+    #[test]
+    fn pn_counter_default_is_zero() {
+        let counter = PnCounter::default();
+        assert_eq!(counter.value(), 0);
+        assert!(counter.positive.counts.is_empty());
+        assert!(counter.negative.counts.is_empty());
+    }
+
+    #[test]
+    fn pn_counter_only_decrements() {
+        let mut counter = PnCounter::default();
+        counter.decrement(actor("A"), 1);
+        counter.decrement(actor("B"), 2);
+        counter.decrement(actor("C"), 3);
+        assert_eq!(counter.value(), -6);
+    }
+
+    #[test]
+    fn pn_counter_increment_zero() {
+        let mut counter = PnCounter::default();
+        counter.increment(actor("A"), 0);
+        assert_eq!(counter.value(), 0);
+    }
+
+    #[test]
+    fn pn_counter_decrement_zero() {
+        let mut counter = PnCounter::default();
+        counter.decrement(actor("A"), 0);
+        assert_eq!(counter.value(), 0);
+    }
+
+    #[test]
+    fn pn_counter_value_exactly_i64_max() {
+        let mut counter = PnCounter::default();
+        counter.increment(actor("A"), i64::MAX as u64);
+        assert_eq!(counter.value(), i64::MAX);
+    }
 }

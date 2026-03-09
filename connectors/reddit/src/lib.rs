@@ -13,5 +13,10 @@
 
 pub mod client;
 pub mod connector;
+pub mod content;
 pub mod error;
+pub mod moderation;
+pub mod posting;
+pub mod saved;
+pub mod subreddit;
 pub mod types;

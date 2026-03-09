@@ -672,4 +672,121 @@ mod tests {
         assert!(cache.validate(schema, &json!("d")).is_err());
         assert!(cache.validate(schema, &json!(1)).is_err());
     }
+
+    // ---- Schema: object with minProperties/maxProperties ----
+
+    #[test]
+    fn validate_object_min_properties() {
+        let schema = r#"{"type": "object", "minProperties": 2}"#;
+        let cache = SchemaCache::default();
+        assert!(cache.validate(schema, &json!({"a": 1, "b": 2})).is_ok());
+        assert!(cache.validate(schema, &json!({"a": 1})).is_err());
+    }
+
+    #[test]
+    fn validate_object_max_properties() {
+        let schema = r#"{"type": "object", "maxProperties": 2}"#;
+        let cache = SchemaCache::default();
+        assert!(cache.validate(schema, &json!({"a": 1, "b": 2})).is_ok());
+        assert!(
+            cache
+                .validate(schema, &json!({"a": 1, "b": 2, "c": 3}))
+                .is_err()
+        );
+    }
+
+    // ---- Schema: numeric multipleOf with float ----
+
+    #[test]
+    fn validate_number_multiple_of_float() {
+        let schema = r#"{"type": "number", "multipleOf": 0.5}"#;
+        let cache = SchemaCache::default();
+        assert!(cache.validate(schema, &json!(1.5)).is_ok());
+        assert!(cache.validate(schema, &json!(2.0)).is_ok());
+        assert!(cache.validate(schema, &json!(1.3)).is_err());
+    }
+
+    // ---- Schema: ref within definitions ----
+
+    #[test]
+    fn validate_schema_with_definitions_and_ref() {
+        let ref_str = "#/$defs/name";
+        let schema = serde_json::json!({
+            "$defs": {
+                "name": {"type": "string", "minLength": 1}
+            },
+            "type": "object",
+            "properties": {
+                "first_name": {"$ref": ref_str},
+                "last_name": {"$ref": ref_str}
+            },
+            "required": ["first_name"]
+        })
+        .to_string();
+        let cache = SchemaCache::default();
+        assert!(
+            cache
+                .validate(&schema, &json!({"first_name": "Alice"}))
+                .is_ok()
+        );
+        assert!(cache.validate(&schema, &json!({})).is_err());
+        assert!(
+            cache
+                .validate(&schema, &json!({"first_name": ""}))
+                .is_err()
+        );
+    }
+
+    // ---- Schema cache: concurrent-safe usage ----
+
+    #[test]
+    fn cache_compile_and_validate_in_sequence() {
+        let cache = SchemaCache::default();
+        let schema = r#"{"type": "integer", "minimum": 0}"#;
+
+        // Compile
+        let v = cache.get_or_compile(schema).unwrap();
+        assert!(Arc::strong_count(&v) >= 1);
+
+        // Validate using same schema
+        assert!(cache.validate(schema, &json!(5)).is_ok());
+        assert!(cache.validate(schema, &json!(-1)).is_err());
+
+        // Re-fetch should be cached
+        let v2 = cache.get_or_compile(schema).unwrap();
+        assert!(Arc::ptr_eq(&v, &v2));
+    }
+
+    // ---- Schema: empty required array ----
+
+    #[test]
+    fn validate_empty_required_array_accepts_empty_object() {
+        let schema = r#"{"type": "object", "required": []}"#;
+        let cache = SchemaCache::default();
+        assert!(cache.validate(schema, &json!({})).is_ok());
+    }
+
+    // ---- Schema: type array (multiple types) ----
+
+    #[test]
+    fn validate_type_array_string_or_null() {
+        let schema = r#"{"type": ["string", "null"]}"#;
+        let cache = SchemaCache::default();
+        assert!(cache.validate(schema, &json!("hello")).is_ok());
+        assert!(cache.validate(schema, &json!(null)).is_ok());
+        assert!(cache.validate(schema, &json!(42)).is_err());
+    }
+
+    // ---- SchemaCache: compile returns error for deeply invalid schemas ----
+
+    #[test]
+    fn compile_deeply_invalid_type() {
+        let cache = SchemaCache::default();
+        // "type": 42 is invalid
+        let result = cache.get_or_compile(r#"{"type": 42}"#);
+        match result {
+            Err(GraphqlClientError::SchemaValidation { .. }) => {}
+            other => panic!("expected SchemaValidation error, got {other:?}"),
+        }
+    }
 }

@@ -30,6 +30,7 @@ thiserror.workspace = true
 tracing.workspace = true
 url.workspace = true
 rand.workspace = true
+tokio = { version = "1.49", features = ["macros", "rt", "time"] }
 
 # WASI runtime
 wasmtime.workspace = true

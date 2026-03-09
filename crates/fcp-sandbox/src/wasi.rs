@@ -42,11 +42,13 @@
 //!
 //! // 2. Create WASI runtime with policy
 //! let config = WasiConfig::from_policy(&policy)?;
-//! let runtime = WasiRuntime::new(config).await?;
+//! let runtime = WasiRuntime::new(config)?;
 //!
 //! // 3. Load and run connector component
 //! let component = runtime.load_component(&wasm_bytes)?;
+//! let args = vec!["--dry-run".to_string()];
 //! let result = runtime.invoke(&component, "run", &args).await?;
+//! assert_eq!(result.exit_code, 0);
 //! ```
 
 use std::collections::HashMap;
@@ -744,6 +746,13 @@ impl WasiRuntime {
     ///
     /// Returns an error if the store cannot be created.
     pub fn create_store(&self) -> WasiResult<Store<WasiHostState>> {
+        self.create_store_for_args(None)
+    }
+
+    fn create_store_for_args(
+        &self,
+        args_override: Option<&[String]>,
+    ) -> WasiResult<Store<WasiHostState>> {
         // Build WASI context
         let mut wasi_builder = WasiCtxBuilder::new();
 
@@ -753,7 +762,8 @@ impl WasiRuntime {
         }
 
         // Add arguments
-        wasi_builder.args(&self.config.args);
+        let args = args_override.unwrap_or(&self.config.args);
+        wasi_builder.args(args);
 
         // Configure stdio
         if self.config.inherit_stdout {
@@ -806,6 +816,73 @@ impl WasiRuntime {
         }
 
         Ok(store)
+    }
+
+    async fn instantiate(
+        &self,
+        store: &mut Store<WasiHostState>,
+        component: &Component,
+    ) -> WasiResult<wasmtime::component::Instance> {
+        self.linker
+            .instantiate_async(store, component)
+            .await
+            .map_err(|e| WasiError::Instantiation(e.to_string()))
+    }
+
+    /// Instantiate a component and invoke a zero-argument exported function.
+    ///
+    /// The provided `args` override the runtime's configured CLI arguments for
+    /// this invocation only. This is primarily intended for command-style
+    /// connectors that expose a `run` export.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the component cannot be instantiated, the export
+    /// cannot be resolved, the export traps, or execution exceeds the
+    /// configured wall-clock timeout.
+    pub async fn invoke(
+        &self,
+        component: &Component,
+        export_name: &str,
+        args: &[String],
+    ) -> WasiResult<ExecutionResult> {
+        let started = Instant::now();
+        let mut store = self.create_store_for_args(Some(args))?;
+        let instance = self.instantiate(&mut store, component).await?;
+        let func = instance.get_typed_func::<(), ()>(&mut store, export_name).map_err(|e| {
+            WasiError::Execution(format!("failed to resolve zero-arg export `{export_name}`: {e}"))
+        })?;
+
+        tokio::time::timeout(self.config.wall_clock_timeout, async {
+            func.call_async(&mut store, ()).await.map_err(|e| {
+                WasiError::Execution(format!("component export `{export_name}` failed: {e}"))
+            })?;
+            func.post_return_async(&mut store).await.map_err(|e| {
+                WasiError::Execution(format!(
+                    "component export `{export_name}` post-return cleanup failed: {e}"
+                ))
+            })?;
+            Ok::<(), WasiError>(())
+        })
+        .await
+        .map_err(|_| WasiError::Timeout)??;
+
+        let fuel_consumed = if self.config.max_fuel > 0 {
+            let remaining_fuel = store.get_fuel().map_err(|e| {
+                WasiError::Execution(format!("failed to query remaining fuel: {e}"))
+            })?;
+            Some(self.config.max_fuel.saturating_sub(remaining_fuel))
+        } else {
+            None
+        };
+
+        Ok(ExecutionResult {
+            exit_code: 0,
+            stdout: None,
+            stderr: None,
+            duration: started.elapsed(),
+            fuel_consumed,
+        })
     }
 
     /// Get a reference to the linker.
@@ -973,6 +1050,18 @@ pub struct ExecutionResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn minimal_command_component() -> &'static [u8] {
+        br#"
+        (component
+            (core module $m
+                (func (export "run"))
+            )
+            (core instance $i (instantiate $m))
+            (func (export "run") (canon lift (core func $i "run")))
+        )
+        "#
+    }
 
     #[test]
     fn test_wasi_config_default() {
@@ -1585,6 +1674,35 @@ mod tests {
         let runtime = WasiRuntime::new(config).unwrap();
         let result = runtime.load_component(b"not valid wasm");
         assert!(result.is_err());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_wasi_runtime_invoke_component_export() {
+        let config = WasiConfig {
+            max_fuel: 10_000,
+            ..WasiConfig::default()
+        };
+        let runtime = WasiRuntime::new(config).unwrap();
+        let component = runtime.load_component(minimal_command_component()).unwrap();
+        let args = vec!["--dry-run".to_string()];
+
+        let result = runtime.invoke(&component, "run", &args).await.unwrap();
+
+        assert_eq!(result.exit_code, 0);
+        assert!(result.duration >= Duration::ZERO);
+        assert!(result.fuel_consumed.is_some());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_wasi_runtime_invoke_missing_export() {
+        let runtime = WasiRuntime::new(WasiConfig::default()).unwrap();
+        let component = runtime.load_component(minimal_command_component()).unwrap();
+        let args = Vec::new();
+
+        let err = runtime.invoke(&component, "missing", &args).await.unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("missing"));
+        assert!(message.contains("failed to resolve"));
     }
 
     #[test]

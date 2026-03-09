@@ -70,7 +70,9 @@
 //!
 //! // 3. Load and run connector component
 //! let component = runtime.load_component(&wasm_bytes)?;
-//! let mut store = runtime.create_store()?;
+//! let args = vec!["--dry-run".to_string()];
+//! let result = runtime.invoke(&component, "run", &args).await?;
+//! assert_eq!(result.exit_code, 0);
 //! ```
 
 // Note: unsafe code allowed via Cargo.toml lints for OS sandbox syscalls

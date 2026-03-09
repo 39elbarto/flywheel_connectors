@@ -85,6 +85,18 @@ fn strict_sandbox_section() -> SandboxSection {
     }
 }
 
+fn minimal_command_component() -> &'static [u8] {
+    br#"
+    (component
+        (core module $m
+            (func (export "run"))
+        )
+        (core instance $i (instantiate $m))
+        (func (export "run") (canon lift (core func $i "run")))
+    )
+    "#
+}
+
 // ============================================================================
 // 1. EgressGuard - host allow/deny
 // ============================================================================
@@ -803,6 +815,35 @@ fn wasi_runtime_load_invalid_component() {
     let runtime = WasiRuntime::new(config).unwrap();
     let result = runtime.load_component(b"not valid wasm");
     assert!(result.is_err());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn wasi_runtime_invokes_minimal_component() {
+    let config = WasiConfig {
+        max_fuel: 10_000,
+        ..WasiConfig::default()
+    };
+    let runtime = WasiRuntime::new(config).unwrap();
+    let component = runtime.load_component(minimal_command_component()).unwrap();
+    let args = vec!["--dry-run".to_string()];
+
+    let result = runtime.invoke(&component, "run", &args).await.unwrap();
+
+    assert_eq!(result.exit_code, 0);
+    assert!(result.duration >= std::time::Duration::ZERO);
+    assert!(result.fuel_consumed.is_some());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn wasi_runtime_reports_missing_export() {
+    let runtime = WasiRuntime::new(WasiConfig::default()).unwrap();
+    let component = runtime.load_component(minimal_command_component()).unwrap();
+    let args = Vec::new();
+
+    let err = runtime.invoke(&component, "missing", &args).await.unwrap_err();
+    let message = err.to_string();
+    assert!(message.contains("missing"));
+    assert!(message.contains("failed to resolve"));
 }
 
 // ============================================================================

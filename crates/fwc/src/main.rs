@@ -47,6 +47,8 @@ mod intent;
 #[allow(dead_code)]
 mod json_diff;
 #[allow(dead_code)]
+mod mcp_resources;
+#[allow(dead_code)]
 mod op_lock;
 #[allow(dead_code)]
 mod pipe;
@@ -2712,6 +2714,319 @@ impl PipelinePlanMode {
     const fn dry_run(self) -> bool {
         matches!(self, Self::DryRun)
     }
+}
+
+fn recipe_dispatch(args: &RecipeArgs) -> Result<DispatchOutcome> {
+    match &args.command {
+        RecipeCommand::List(_) => recipe_list_dispatch(),
+        RecipeCommand::Show(args) => recipe_show_dispatch(args),
+        RecipeCommand::Validate(args) => Ok(recipe_validate_dispatch(args)),
+        RecipeCommand::Run(args) => recipe_run_dispatch(args, PipelinePlanMode::Run),
+        RecipeCommand::DryRun(args) => recipe_run_dispatch(args, PipelinePlanMode::DryRun),
+        RecipeCommand::Estimate(args) => recipe_run_dispatch(args, PipelinePlanMode::Estimate),
+        RecipeCommand::Export(args) => Ok(recipe_export_dispatch(args)),
+    }
+}
+
+fn recipe_list_dispatch() -> Result<DispatchOutcome> {
+    let catalog = DiscoveryCatalog::load()?;
+    let recipes = pipe::builtin_recipe_summaries()
+        .into_iter()
+        .map(|summary| {
+            let estimate = pipe::load_builtin_recipe(&summary.slug)
+                .ok()
+                .and_then(|recipe| default_recipe_estimate(&catalog, &recipe));
+            json!({
+                "slug": summary.slug,
+                "title": summary.title,
+                "category": summary.category,
+                "summary": summary.summary,
+                "required_connectors": summary.required_connectors,
+                "export_path": summary.export_path,
+                "step_count": summary.step_count,
+                "valid": summary.valid,
+                "errors": summary.errors,
+                "risk_level": estimate.as_ref().map(|value| value.risk_assessment.level.clone()),
+                "highest_safety_tier": estimate.as_ref().map(|value| value.risk_assessment.highest_safety_tier.clone()),
+                "estimated_api_calls": estimate.as_ref().map(|value| value.estimated_api_calls.summary.clone()),
+                "required_capabilities": estimate.as_ref().map(|value| value.required_capabilities.clone()),
+                "approval_count": estimate.as_ref().map(|value| value.required_approvals.len()),
+            })
+        })
+        .collect::<Vec<_>>();
+    let category_counts = recipes.iter().fold(BTreeMap::new(), |mut acc, recipe| {
+        let category = recipe["category"]
+            .as_str()
+            .unwrap_or("unknown")
+            .to_owned();
+        *acc.entry(category).or_insert(0usize) += 1;
+        acc
+    });
+
+    Ok(DispatchOutcome {
+        payload: json!({
+            "status": "ok",
+            "command": "recipe",
+            "subcommand": "list",
+            "message": "Bundled recipe library loaded. Built-ins include placeholder defaults so agents can inspect, estimate, and export them deterministically before customization.",
+            "recipe_count": recipes.len(),
+            "categories": category_counts,
+            "recipes": recipes,
+            "next_actions": [
+                "fwc recipe show github-pr-review-notify".to_owned(),
+                "fwc recipe dry-run github-pr-review-notify".to_owned(),
+                "fwc recipe export github-pr-review-notify".to_owned(),
+            ],
+        }),
+        exit_code: CliExitCode::Success,
+    })
+}
+
+fn recipe_show_dispatch(args: &RecipeRefArgs) -> Result<DispatchOutcome> {
+    let recipe = match load_recipe_definition(&args.recipe, "show") {
+        Ok(recipe) => recipe,
+        Err(outcome) => return Ok(outcome),
+    };
+    if !recipe.validation.valid {
+        return Ok(recipe_invalid_definition_dispatch("show", &recipe));
+    }
+
+    let catalog = DiscoveryCatalog::load()?;
+    let estimate = default_recipe_estimate(&catalog, &recipe)
+        .ok_or_else(|| anyhow::anyhow!("built-in recipe estimate unexpectedly failed"))?;
+
+    Ok(DispatchOutcome {
+        payload: json!({
+            "status": "ok",
+            "command": "recipe",
+            "subcommand": "show",
+            "recipe": {
+                "slug": recipe.slug,
+                "title": recipe.title,
+                "category": recipe.category,
+                "summary": recipe.summary,
+                "required_connectors": recipe.required_connectors,
+                "export_path": recipe.export_path,
+            },
+            "definition": recipe.definition,
+            "validation": recipe.validation,
+            "estimate": estimate,
+            "next_actions": recipe_next_actions(&args.recipe),
+        }),
+        exit_code: CliExitCode::Success,
+    })
+}
+
+fn recipe_validate_dispatch(args: &RecipeRefArgs) -> DispatchOutcome {
+    let recipe = match load_recipe_definition(&args.recipe, "validate") {
+        Ok(recipe) => recipe,
+        Err(outcome) => return outcome,
+    };
+    if !recipe.validation.valid {
+        return recipe_invalid_definition_dispatch("validate", &recipe);
+    }
+
+    DispatchOutcome {
+        payload: json!({
+            "status": "ok",
+            "command": "recipe",
+            "subcommand": "validate",
+            "recipe": {
+                "slug": recipe.slug,
+                "title": recipe.title,
+                "category": recipe.category,
+                "summary": recipe.summary,
+                "required_connectors": recipe.required_connectors,
+                "export_path": recipe.export_path,
+            },
+            "validation": recipe.validation,
+            "next_actions": recipe_next_actions(&args.recipe),
+        }),
+        exit_code: CliExitCode::Success,
+    }
+}
+
+fn recipe_run_dispatch(
+    args: &RecipeRunArgs,
+    mode: PipelinePlanMode,
+) -> Result<DispatchOutcome> {
+    let recipe = match load_recipe_definition(&args.recipe, mode.subcommand()) {
+        Ok(recipe) => recipe,
+        Err(outcome) => return Ok(outcome),
+    };
+    if !recipe.validation.valid {
+        return Ok(recipe_invalid_definition_dispatch(mode.subcommand(), &recipe));
+    }
+
+    let params = match pipe::bind_pipeline_params(&recipe.definition, &args.params) {
+        Ok(params) => params,
+        Err(errors) => {
+            return Ok(recipe_error_dispatch(
+                mode.subcommand(),
+                "invalid-recipe-parameters",
+                "The provided recipe parameters are incomplete or invalid.",
+                Some(&recipe.slug),
+                &errors,
+                &recipe_next_actions(&recipe.slug),
+            ));
+        }
+    };
+
+    let plan = pipe::build_pipeline_plan(&recipe.definition, &params)
+        .map_err(|error| anyhow::anyhow!("{error}"))?;
+    let catalog = DiscoveryCatalog::load()?;
+    let operation_metadata =
+        match resolve_recipe_operation_metadata(&catalog, &plan, mode.subcommand(), &recipe.slug) {
+            Ok(metadata) => metadata,
+            Err(outcome) => return Ok(outcome),
+        };
+    let estimate = pipe::estimate_pipeline(&plan, &operation_metadata)
+        .map_err(|error| anyhow::anyhow!("{error}"))?;
+    let message = match mode {
+        PipelinePlanMode::Run => format!(
+            "Recipe plan: {} ({} step(s), {}, highest risk {}). Execution requires host integration (not yet available).",
+            recipe.title,
+            plan.step_count,
+            estimate.estimated_api_calls.summary,
+            estimate.risk_assessment.level,
+        ),
+        PipelinePlanMode::DryRun => format!(
+            "Recipe dry-run: {} ({} step(s), {}, highest risk {}). Execution requires host integration (not yet available).",
+            recipe.title,
+            plan.step_count,
+            estimate.estimated_api_calls.summary,
+            estimate.risk_assessment.level,
+        ),
+        PipelinePlanMode::Estimate => format!(
+            "Recipe estimate: {} ({} step(s), {}, highest risk {}). No host execution was attempted.",
+            recipe.title,
+            plan.step_count,
+            estimate.estimated_api_calls.summary,
+            estimate.risk_assessment.level,
+        ),
+    };
+    let mut payload = json!({
+        "status": "planned",
+        "command": "recipe",
+        "subcommand": mode.subcommand(),
+        "recipe": recipe.slug,
+        "export_path": recipe.export_path,
+        "message": message,
+        "estimate": estimate,
+        "dry_run": mode.dry_run(),
+        "next_actions": recipe_next_actions(&recipe.slug),
+    });
+    if mode.include_plan() {
+        payload["plan"] = serde_json::to_value(&plan)?;
+    }
+
+    Ok(DispatchOutcome {
+        payload,
+        exit_code: CliExitCode::Success,
+    })
+}
+
+fn recipe_export_dispatch(args: &RecipeRefArgs) -> DispatchOutcome {
+    let recipe = match load_recipe_definition(&args.recipe, "export") {
+        Ok(recipe) => recipe,
+        Err(outcome) => return outcome,
+    };
+
+    DispatchOutcome {
+        payload: Value::String(recipe.toml),
+        exit_code: CliExitCode::Success,
+    }
+}
+
+fn recipe_next_actions(recipe: &str) -> Vec<String> {
+    vec![
+        format!("fwc recipe show {recipe}"),
+        format!("fwc recipe validate {recipe}"),
+        format!("fwc recipe estimate {recipe}"),
+        format!("fwc recipe dry-run {recipe}"),
+        format!("fwc recipe export {recipe}"),
+    ]
+}
+
+fn recipe_invalid_definition_dispatch(
+    subcommand: &str,
+    recipe: &pipe::BuiltInRecipe,
+) -> DispatchOutcome {
+    DispatchOutcome {
+        payload: json!({
+            "status": "error",
+            "command": "recipe",
+            "subcommand": subcommand,
+            "recipe": recipe.slug,
+            "error": {
+                "type": "invalid-recipe-definition",
+                "message": "The recipe definition is structurally invalid.",
+                "details": recipe.validation.errors,
+                "next_actions": recipe_next_actions(&recipe.slug),
+            },
+        }),
+        exit_code: CliExitCode::Validation,
+    }
+}
+
+fn recipe_error_dispatch(
+    subcommand: &str,
+    error_type: &str,
+    message: impl Into<String>,
+    reference: Option<&str>,
+    details: &[String],
+    next_actions: &[String],
+) -> DispatchOutcome {
+    DispatchOutcome {
+        payload: json!({
+            "status": "error",
+            "command": "recipe",
+            "subcommand": subcommand,
+            "reference": reference,
+            "error": {
+                "type": error_type,
+                "message": message.into(),
+                "details": details,
+                "next_actions": next_actions,
+            },
+        }),
+        exit_code: CliExitCode::Validation,
+    }
+}
+
+fn resolve_recipe_operation_metadata(
+    catalog: &DiscoveryCatalog,
+    plan: &pipe::PipelinePlan,
+    subcommand: &str,
+    slug: &str,
+) -> Result<BTreeMap<String, pipe::PipelineOperationMetadata>, DispatchOutcome> {
+    resolve_pipeline_operation_metadata(catalog, plan, subcommand, &std::path::PathBuf::from(slug))
+}
+
+fn load_recipe_definition(
+    reference: &str,
+    subcommand: &str,
+) -> Result<pipe::BuiltInRecipe, DispatchOutcome> {
+    pipe::load_builtin_recipe(reference).map_err(|error| {
+        recipe_error_dispatch(
+            subcommand,
+            "recipe-not-found",
+            error,
+            Some(reference),
+            &[],
+            &["fwc recipe list".to_owned()],
+        )
+    })
+}
+
+fn default_recipe_estimate(
+    catalog: &DiscoveryCatalog,
+    recipe: &pipe::BuiltInRecipe,
+) -> Option<pipe::PipelineEstimate> {
+    let params = pipe::bind_pipeline_params(&recipe.definition, &[]).ok()?;
+    let plan = pipe::build_pipeline_plan(&recipe.definition, &params).ok()?;
+    let metadata = resolve_recipe_operation_metadata(catalog, &plan, "show", &recipe.slug).ok()?;
+    pipe::estimate_pipeline(&plan, &metadata).ok()
 }
 
 #[allow(dead_code)]

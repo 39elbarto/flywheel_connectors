@@ -109,18 +109,14 @@ impl ResourcePattern {
     }
 
     /// MIME type.
-    pub const fn mime_type(&self) -> &'static str {
+    pub const fn mime_type() -> &'static str {
         "application/json"
     }
 
     /// Build an `McpResource` from this pattern.
     pub fn to_resource(&self, connector_id: Option<&str>) -> McpResource {
-        McpResource::new(
-            self.uri(connector_id),
-            self.name(),
-            self.mime_type(),
-        )
-        .with_description(self.description())
+        McpResource::new(self.uri(connector_id), self.name(), Self::mime_type())
+            .with_description(self.description())
     }
 }
 
@@ -147,10 +143,7 @@ pub struct McpPrompt {
 
 impl McpPrompt {
     /// Create a new prompt.
-    pub fn new(
-        uri: impl Into<String>,
-        name: impl Into<String>,
-    ) -> Self {
+    pub fn new(uri: impl Into<String>, name: impl Into<String>) -> Self {
         Self {
             uri: uri.into(),
             name: name.into(),
@@ -248,11 +241,8 @@ impl PromptPattern {
 
     /// Build an `McpPrompt` from this pattern.
     pub fn to_prompt(&self, connector_id: &str, operation: Option<&str>) -> McpPrompt {
-        let mut prompt = McpPrompt::new(
-            self.uri(connector_id, operation),
-            self.name(),
-        )
-        .with_description(self.description());
+        let mut prompt = McpPrompt::new(self.uri(connector_id, operation), self.name())
+            .with_description(self.description());
 
         // Add pattern-specific arguments
         match self {
@@ -375,7 +365,7 @@ pub struct McpResourceRegistry {
 
 impl McpResourceRegistry {
     /// Create an empty registry.
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self {
             resources: Vec::new(),
             prompts: Vec::new(),
@@ -395,10 +385,7 @@ impl McpResourceRegistry {
         }
 
         // Add prompt patterns
-        for pattern in &[
-            PromptPattern::HowToUse,
-            PromptPattern::Troubleshoot,
-        ] {
+        for pattern in &[PromptPattern::HowToUse, PromptPattern::Troubleshoot] {
             self.prompts.push(pattern.to_prompt(connector_id, None));
         }
     }
@@ -411,9 +398,8 @@ impl McpResourceRegistry {
 
     /// Register an operation-specific example prompt.
     pub fn register_operation_prompt(&mut self, connector_id: &str, operation: &str) {
-        self.prompts.push(
-            PromptPattern::OperationExample.to_prompt(connector_id, Some(operation)),
-        );
+        self.prompts
+            .push(PromptPattern::OperationExample.to_prompt(connector_id, Some(operation)));
     }
 
     /// List all resources.
@@ -647,7 +633,10 @@ mod tests {
     #[test]
     fn resource_pattern_names() {
         assert_eq!(ResourcePattern::ConnectorHealth.name(), "Connector Health");
-        assert_eq!(ResourcePattern::ConnectorsStatus.name(), "All Connectors Status");
+        assert_eq!(
+            ResourcePattern::ConnectorsStatus.name(),
+            "All Connectors Status"
+        );
     }
 
     #[test]
@@ -660,7 +649,10 @@ mod tests {
 
     #[test]
     fn resource_pattern_display() {
-        assert_eq!(ResourcePattern::ConnectorHealth.to_string(), "Connector Health");
+        assert_eq!(
+            ResourcePattern::ConnectorHealth.to_string(),
+            "Connector Health"
+        );
     }
 
     // ── McpPrompt ─────────────────────────────────────────────────
@@ -786,28 +778,34 @@ mod tests {
         let mut reg = McpResourceRegistry::new();
         reg.register_operation_prompt("github", "create_issue");
         assert_eq!(reg.prompt_count(), 1);
-        assert!(reg
-            .find_prompt("prompt://connector/github/op/create_issue/example")
-            .is_some());
+        assert!(
+            reg.find_prompt("prompt://connector/github/op/create_issue/example")
+                .is_some()
+        );
     }
 
     #[test]
     fn registry_find_resource() {
         let mut reg = McpResourceRegistry::new();
         reg.register_connector("github");
-        assert!(reg
-            .find_resource("resource://connector/github/health")
-            .is_some());
-        assert!(reg.find_resource("resource://connector/slack/health").is_none());
+        assert!(
+            reg.find_resource("resource://connector/github/health")
+                .is_some()
+        );
+        assert!(
+            reg.find_resource("resource://connector/slack/health")
+                .is_none()
+        );
     }
 
     #[test]
     fn registry_find_prompt() {
         let mut reg = McpResourceRegistry::new();
         reg.register_connector("github");
-        assert!(reg
-            .find_prompt("prompt://connector/github/how-to-use")
-            .is_some());
+        assert!(
+            reg.find_prompt("prompt://connector/github/how-to-use")
+                .is_some()
+        );
     }
 
     // ── parse_uri ─────────────────────────────────────────────────
@@ -921,10 +919,8 @@ mod tests {
 
     #[test]
     fn format_prompts_no_args() {
-        let prompts = vec![
-            McpPrompt::new("prompt://test", "Test")
-                .with_description("A test prompt"),
-        ];
+        let prompts =
+            vec![McpPrompt::new("prompt://test", "Test").with_description("A test prompt")];
         let s = format_prompt_list(&prompts);
         assert!(!s.contains("args"));
     }

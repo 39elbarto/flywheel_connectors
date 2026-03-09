@@ -133,10 +133,7 @@ pub struct ZoneScopedTool {
 
 impl ZoneScopedTool {
     /// Create a new tool entry.
-    pub fn new(
-        connector: impl Into<String>,
-        operation: impl Into<String>,
-    ) -> Self {
+    pub fn new(connector: impl Into<String>, operation: impl Into<String>) -> Self {
         let connector = connector.into();
         let operation = operation.into();
         let name = format!("{connector}.{operation}");
@@ -214,13 +211,9 @@ pub struct ZoneViolation {
 
 impl ZoneViolation {
     /// Create a new violation.
-    pub fn new(
-        tool: impl Into<String>,
-        zone: ZoneId,
-        reason: ViolationReason,
-    ) -> Self {
+    pub fn new(tool: impl Into<String>, zone: ZoneId, reason: ViolationReason) -> Self {
         let tool = tool.into();
-        let message = format!("Tool '{}' not available in zone '{}': {}", tool, zone, reason);
+        let message = format!("Tool '{tool}' not available in zone '{zone}': {reason}");
         Self {
             tool,
             zone,
@@ -256,7 +249,7 @@ pub struct ZoneRegistry {
 
 impl ZoneRegistry {
     /// Create an empty registry.
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self {
             tools: Vec::new(),
             zones: BTreeSet::new(),
@@ -273,10 +266,7 @@ impl ZoneRegistry {
 
     /// Get all tools available in a zone.
     pub fn tools_in_zone(&self, zone: &ZoneId) -> Vec<&ZoneScopedTool> {
-        self.tools
-            .iter()
-            .filter(|t| t.available_in(zone))
-            .collect()
+        self.tools.iter().filter(|t| t.available_in(zone)).collect()
     }
 
     /// Get tools for a specific connector in a zone.
@@ -297,7 +287,7 @@ impl ZoneRegistry {
     }
 
     /// All known zones.
-    pub fn known_zones(&self) -> &BTreeSet<ZoneId> {
+    pub const fn known_zones(&self) -> &BTreeSet<ZoneId> {
         &self.zones
     }
 
@@ -331,40 +321,54 @@ pub fn validate_tool_call(
 ) -> Result<(), ZoneViolation> {
     // Must have a token
     let Some(token) = token else {
-        return Err(ZoneViolation::new(tool_name, zone.clone(), ViolationReason::NoToken));
+        return Err(ZoneViolation::new(
+            tool_name,
+            zone.clone(),
+            ViolationReason::NoToken,
+        ));
     };
 
     // Token must match zone
     if token.zone != *zone {
-        return Err(ZoneViolation::new(tool_name, zone.clone(), ViolationReason::UnknownZone));
+        return Err(ZoneViolation::new(
+            tool_name,
+            zone.clone(),
+            ViolationReason::UnknownZone,
+        ));
     }
 
     // Token must not be expired
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
+        .map_or(0, |d| d.as_secs());
     if token.is_expired(now) {
-        return Err(ZoneViolation::new(tool_name, zone.clone(), ViolationReason::TokenExpired));
+        return Err(ZoneViolation::new(
+            tool_name,
+            zone.clone(),
+            ViolationReason::TokenExpired,
+        ));
     }
 
     // Find the tool
-    let tool = registry
-        .tools
-        .iter()
-        .find(|t| t.name == tool_name);
+    let tool = registry.tools.iter().find(|t| t.name == tool_name);
 
     let Some(tool) = tool else {
-        return Err(ZoneViolation::new(tool_name, zone.clone(), ViolationReason::ConnectorNotInZone));
+        return Err(ZoneViolation::new(
+            tool_name,
+            zone.clone(),
+            ViolationReason::ConnectorNotInZone,
+        ));
     };
 
     // Tool must be available in zone
     if !tool.available_in(zone) {
         let available: Vec<ZoneId> = tool.zones.iter().cloned().collect();
-        return Err(
-            ZoneViolation::new(tool_name, zone.clone(), ViolationReason::ConnectorNotInZone)
-                .with_available_in(available),
-        );
+        return Err(ZoneViolation::new(
+            tool_name,
+            zone.clone(),
+            ViolationReason::ConnectorNotInZone,
+        )
+        .with_available_in(available));
     }
 
     // Connector must be allowed by token
@@ -411,10 +415,7 @@ pub fn format_zone_tools(zone: &ZoneId, tools: &[&ZoneScopedTool]) -> String {
     let mut lines = vec![format!("Zone: {} ({} tools)", zone, tools.len())];
     let mut by_connector: BTreeMap<&str, Vec<&ZoneScopedTool>> = BTreeMap::new();
     for tool in tools {
-        by_connector
-            .entry(&tool.connector)
-            .or_default()
-            .push(tool);
+        by_connector.entry(&tool.connector).or_default().push(tool);
     }
     for (connector, conn_tools) in &by_connector {
         lines.push(format!("  {connector}:"));
@@ -429,8 +430,8 @@ pub fn format_zone_tools(zone: &ZoneId, tools: &[&ZoneScopedTool]) -> String {
 pub fn format_violation(violation: &ZoneViolation) -> String {
     let mut output = format!("✗ {}", violation.message);
     if !violation.available_in.is_empty() {
-        let zones: Vec<&str> = violation.available_in.iter().map(ZoneId::as_str).collect();
         use std::fmt::Write;
+        let zones: Vec<&str> = violation.available_in.iter().map(ZoneId::as_str).collect();
         let _ = write!(output, "\n  Available in: {}", zones.join(", "));
     }
     output
@@ -480,14 +481,8 @@ mod tests {
                 .with_zone(zone_work())
                 .with_zone(zone_public()),
         );
-        reg.register_tool(
-            ZoneScopedTool::new("slack", "send_message")
-                .with_zone(zone_work()),
-        );
-        reg.register_tool(
-            ZoneScopedTool::new("vault", "get_secret")
-                .with_zone(zone_private()),
-        );
+        reg.register_tool(ZoneScopedTool::new("slack", "send_message").with_zone(zone_work()));
+        reg.register_tool(ZoneScopedTool::new("vault", "get_secret").with_zone(zone_private()));
         reg
     }
 
@@ -562,8 +557,7 @@ mod tests {
 
     #[test]
     fn token_denied_operations() {
-        let t = sample_token(zone_work())
-            .with_denied_operation("delete_repo");
+        let t = sample_token(zone_work()).with_denied_operation("delete_repo");
         assert!(t.is_operation_denied("delete_repo"));
         assert!(!t.is_operation_denied("create_issue"));
     }
@@ -616,15 +610,14 @@ mod tests {
 
     #[test]
     fn tool_with_description() {
-        let t = ZoneScopedTool::new("github", "create_issue")
-            .with_description("Create a GitHub issue");
+        let t =
+            ZoneScopedTool::new("github", "create_issue").with_description("Create a GitHub issue");
         assert_eq!(t.description, "Create a GitHub issue");
     }
 
     #[test]
     fn tool_serializes() {
-        let t = ZoneScopedTool::new("github", "create_issue")
-            .with_zone(zone_work());
+        let t = ZoneScopedTool::new("github", "create_issue").with_zone(zone_work());
         let json = serde_json::to_value(&t).unwrap();
         assert_eq!(json["name"], "github.create_issue");
     }
@@ -661,7 +654,11 @@ mod tests {
 
     #[test]
     fn violation_basic() {
-        let v = ZoneViolation::new("github.create_issue", zone_public(), ViolationReason::ConnectorNotInZone);
+        let v = ZoneViolation::new(
+            "github.create_issue",
+            zone_public(),
+            ViolationReason::ConnectorNotInZone,
+        );
         assert_eq!(v.tool, "github.create_issue");
         assert_eq!(v.zone, zone_public());
         assert!(v.message.contains("not available"));
@@ -669,8 +666,12 @@ mod tests {
 
     #[test]
     fn violation_with_available_in() {
-        let v = ZoneViolation::new("vault.get_secret", zone_public(), ViolationReason::ConnectorNotInZone)
-            .with_available_in(vec![zone_private()]);
+        let v = ZoneViolation::new(
+            "vault.get_secret",
+            zone_public(),
+            ViolationReason::ConnectorNotInZone,
+        )
+        .with_available_in(vec![zone_private()]);
         assert_eq!(v.available_in.len(), 1);
     }
 
@@ -767,7 +768,10 @@ mod tests {
         let token = sample_token(zone_public());
         let result = validate_tool_call(&reg, "slack.send_message", &zone_public(), Some(&token));
         assert!(result.is_err());
-        assert_eq!(result.unwrap_err().reason, ViolationReason::ConnectorNotInZone);
+        assert_eq!(
+            result.unwrap_err().reason,
+            ViolationReason::ConnectorNotInZone
+        );
     }
 
     #[test]
@@ -843,8 +847,12 @@ mod tests {
 
     #[test]
     fn format_violation_display() {
-        let v = ZoneViolation::new("vault.get_secret", zone_public(), ViolationReason::ConnectorNotInZone)
-            .with_available_in(vec![zone_private()]);
+        let v = ZoneViolation::new(
+            "vault.get_secret",
+            zone_public(),
+            ViolationReason::ConnectorNotInZone,
+        )
+        .with_available_in(vec![zone_private()]);
         let s = format_violation(&v);
         assert!(s.contains("not available"));
         assert!(s.contains("z:private"));

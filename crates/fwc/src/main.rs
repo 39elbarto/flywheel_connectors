@@ -2,10 +2,12 @@
 
 #[allow(dead_code)] // Multi-agent coordination wired when Agent Mail integration lands.
 mod agent_coord;
-#[allow(dead_code)]
-mod auth_status;
+#[allow(dead_code)] // Agent Mail multi-agent coordination.
+mod agent_mail;
 #[allow(dead_code)] // Audit types used by later CLI commands.
 mod audit;
+#[allow(dead_code)]
+mod auth_status;
 #[allow(
     dead_code,
     clippy::str_split_at_newline,
@@ -56,6 +58,8 @@ mod pipe;
 mod pipeline_cond;
 #[allow(dead_code)]
 mod pipeline_recipes;
+#[allow(dead_code, clippy::cast_precision_loss)]
+mod rate_forecast;
 #[allow(dead_code)]
 mod rate_limit;
 #[allow(dead_code)]
@@ -81,9 +85,9 @@ mod throttle;
 #[allow(dead_code)] // Idempotent undo for reversible operations.
 mod undo;
 mod validate;
+mod workflow;
 #[allow(dead_code)]
 mod zone_scope;
-mod workflow;
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -1564,7 +1568,7 @@ fn dispatch(cli: &Cli) -> Result<DispatchOutcome> {
         Commands::History(args) => history_dispatch(args)?,
         Commands::Pipe(args) => pipe_dispatch(args)?,
         Commands::Pipeline(args) => pipeline_dispatch(args)?,
-        Commands::Recipe(args) => planned("recipe", args)?,
+        Commands::Recipe(args) => recipe_dispatch(args)?,
         Commands::Map(args) => map_dispatch(args)?,
         Commands::BatchFile(args) => batch_file_dispatch(args)?,
         Commands::Events(args) => planned("events", args)?,
@@ -2716,6 +2720,7 @@ impl PipelinePlanMode {
     }
 }
 
+#[allow(dead_code)]
 fn recipe_dispatch(args: &RecipeArgs) -> Result<DispatchOutcome> {
     match &args.command {
         RecipeCommand::List(_) => recipe_list_dispatch(),
@@ -2728,6 +2733,7 @@ fn recipe_dispatch(args: &RecipeArgs) -> Result<DispatchOutcome> {
     }
 }
 
+#[allow(dead_code)]
 fn recipe_list_dispatch() -> Result<DispatchOutcome> {
     let catalog = DiscoveryCatalog::load()?;
     let recipes = pipe::builtin_recipe_summaries()
@@ -2755,10 +2761,7 @@ fn recipe_list_dispatch() -> Result<DispatchOutcome> {
         })
         .collect::<Vec<_>>();
     let category_counts = recipes.iter().fold(BTreeMap::new(), |mut acc, recipe| {
-        let category = recipe["category"]
-            .as_str()
-            .unwrap_or("unknown")
-            .to_owned();
+        let category = recipe["category"].as_str().unwrap_or("unknown").to_owned();
         *acc.entry(category).or_insert(0usize) += 1;
         acc
     });
@@ -2782,6 +2785,7 @@ fn recipe_list_dispatch() -> Result<DispatchOutcome> {
     })
 }
 
+#[allow(dead_code)]
 fn recipe_show_dispatch(args: &RecipeRefArgs) -> Result<DispatchOutcome> {
     let recipe = match load_recipe_definition(&args.recipe, "show") {
         Ok(recipe) => recipe,
@@ -2817,6 +2821,7 @@ fn recipe_show_dispatch(args: &RecipeRefArgs) -> Result<DispatchOutcome> {
     })
 }
 
+#[allow(dead_code)]
 fn recipe_validate_dispatch(args: &RecipeRefArgs) -> DispatchOutcome {
     let recipe = match load_recipe_definition(&args.recipe, "validate") {
         Ok(recipe) => recipe,
@@ -2846,16 +2851,17 @@ fn recipe_validate_dispatch(args: &RecipeRefArgs) -> DispatchOutcome {
     }
 }
 
-fn recipe_run_dispatch(
-    args: &RecipeRunArgs,
-    mode: PipelinePlanMode,
-) -> Result<DispatchOutcome> {
+#[allow(dead_code)]
+fn recipe_run_dispatch(args: &RecipeRunArgs, mode: PipelinePlanMode) -> Result<DispatchOutcome> {
     let recipe = match load_recipe_definition(&args.recipe, mode.subcommand()) {
         Ok(recipe) => recipe,
         Err(outcome) => return Ok(outcome),
     };
     if !recipe.validation.valid {
-        return Ok(recipe_invalid_definition_dispatch(mode.subcommand(), &recipe));
+        return Ok(recipe_invalid_definition_dispatch(
+            mode.subcommand(),
+            &recipe,
+        ));
     }
 
     let params = match pipe::bind_pipeline_params(&recipe.definition, &args.params) {
@@ -2926,6 +2932,7 @@ fn recipe_run_dispatch(
     })
 }
 
+#[allow(dead_code)]
 fn recipe_export_dispatch(args: &RecipeRefArgs) -> DispatchOutcome {
     let recipe = match load_recipe_definition(&args.recipe, "export") {
         Ok(recipe) => recipe,
@@ -2938,6 +2945,7 @@ fn recipe_export_dispatch(args: &RecipeRefArgs) -> DispatchOutcome {
     }
 }
 
+#[allow(dead_code)]
 fn recipe_next_actions(recipe: &str) -> Vec<String> {
     vec![
         format!("fwc recipe show {recipe}"),
@@ -2948,61 +2956,7 @@ fn recipe_next_actions(recipe: &str) -> Vec<String> {
     ]
 }
 
-fn recipe_invalid_definition_dispatch(
-    subcommand: &str,
-    recipe: &pipe::BuiltInRecipe,
-) -> DispatchOutcome {
-    DispatchOutcome {
-        payload: json!({
-            "status": "error",
-            "command": "recipe",
-            "subcommand": subcommand,
-            "recipe": recipe.slug,
-            "error": {
-                "type": "invalid-recipe-definition",
-                "message": "The recipe definition is structurally invalid.",
-                "details": recipe.validation.errors,
-                "next_actions": recipe_next_actions(&recipe.slug),
-            },
-        }),
-        exit_code: CliExitCode::Validation,
-    }
-}
-
-fn recipe_error_dispatch(
-    subcommand: &str,
-    error_type: &str,
-    message: impl Into<String>,
-    reference: Option<&str>,
-    details: &[String],
-    next_actions: &[String],
-) -> DispatchOutcome {
-    DispatchOutcome {
-        payload: json!({
-            "status": "error",
-            "command": "recipe",
-            "subcommand": subcommand,
-            "reference": reference,
-            "error": {
-                "type": error_type,
-                "message": message.into(),
-                "details": details,
-                "next_actions": next_actions,
-            },
-        }),
-        exit_code: CliExitCode::Validation,
-    }
-}
-
-fn resolve_recipe_operation_metadata(
-    catalog: &DiscoveryCatalog,
-    plan: &pipe::PipelinePlan,
-    subcommand: &str,
-    slug: &str,
-) -> Result<BTreeMap<String, pipe::PipelineOperationMetadata>, DispatchOutcome> {
-    resolve_pipeline_operation_metadata(catalog, plan, subcommand, &std::path::PathBuf::from(slug))
-}
-
+#[allow(dead_code)]
 fn load_recipe_definition(
     reference: &str,
     subcommand: &str,
@@ -3019,6 +2973,7 @@ fn load_recipe_definition(
     })
 }
 
+#[allow(dead_code)]
 fn default_recipe_estimate(
     catalog: &DiscoveryCatalog,
     recipe: &pipe::BuiltInRecipe,
@@ -3027,6 +2982,173 @@ fn default_recipe_estimate(
     let plan = pipe::build_pipeline_plan(&recipe.definition, &params).ok()?;
     let metadata = resolve_recipe_operation_metadata(catalog, &plan, "show", &recipe.slug).ok()?;
     pipe::estimate_pipeline(&plan, &metadata).ok()
+}
+
+#[allow(dead_code)]
+fn recipe_invalid_definition_dispatch(
+    subcommand: &str,
+    recipe: &pipe::BuiltInRecipe,
+) -> DispatchOutcome {
+    DispatchOutcome {
+        payload: json!({
+            "status": "error",
+            "command": "recipe",
+            "subcommand": subcommand,
+            "recipe": {
+                "slug": recipe.slug,
+                "title": recipe.title,
+                "category": recipe.category,
+                "summary": recipe.summary,
+                "required_connectors": recipe.required_connectors,
+                "export_path": recipe.export_path,
+            },
+            "definition": &recipe.definition,
+            "error": {
+                "type": "invalid-recipe-definition",
+                "message": "The built-in recipe definition is structurally invalid.",
+                "details": &recipe.validation.errors,
+                "next_actions": recipe_next_actions(&recipe.slug),
+            },
+        }),
+        exit_code: CliExitCode::Validation,
+    }
+}
+
+#[allow(dead_code)]
+fn recipe_error_dispatch(
+    subcommand: &str,
+    error_type: &str,
+    message: impl Into<String>,
+    recipe: Option<&str>,
+    details: &[String],
+    next_actions: &[String],
+) -> DispatchOutcome {
+    DispatchOutcome {
+        payload: json!({
+            "status": "error",
+            "command": "recipe",
+            "subcommand": subcommand,
+            "recipe": recipe,
+            "error": {
+                "type": error_type,
+                "message": message.into(),
+                "details": details,
+                "next_actions": next_actions,
+            },
+        }),
+        exit_code: CliExitCode::Validation,
+    }
+}
+
+#[allow(dead_code)]
+fn resolve_recipe_operation_metadata(
+    catalog: &DiscoveryCatalog,
+    plan: &pipe::PipelinePlan,
+    subcommand: &str,
+    recipe: &str,
+) -> Result<BTreeMap<String, pipe::PipelineOperationMetadata>, DispatchOutcome> {
+    let mut operations = BTreeMap::new();
+
+    for step in &plan.steps {
+        if operations.contains_key(&step.operation) {
+            continue;
+        }
+
+        let Some((connector_selector, operation_selector)) = step.operation.split_once('.') else {
+            let next_actions = recipe_next_actions(recipe);
+            return Err(recipe_error_dispatch(
+                subcommand,
+                "invalid-recipe-operation-reference",
+                format!(
+                    "Recipe step `{}` must use `<connector>.<operation>` syntax, but `{}` does not.",
+                    step.id, step.operation
+                ),
+                Some(recipe),
+                &[],
+                &next_actions,
+            ));
+        };
+
+        let connector = match catalog.resolve_connector(connector_selector) {
+            Ok(connector) => connector,
+            Err(error) => {
+                let details = if error.suggestions.is_empty() {
+                    Vec::new()
+                } else {
+                    error.suggestions.clone()
+                };
+                let mut next_actions = vec![format!("fwc recipe show {recipe}")];
+                if error.suggestions.is_empty() {
+                    next_actions.push("fwc list".to_owned());
+                } else {
+                    next_actions.extend(
+                        error
+                            .suggestions
+                            .iter()
+                            .map(|suggestion| format!("fwc show {suggestion}")),
+                    );
+                }
+                return Err(recipe_error_dispatch(
+                    subcommand,
+                    "recipe-connector-not-found",
+                    format!(
+                        "Recipe step `{}` refers to unknown connector `{connector_selector}` in `{}`.",
+                        step.id, step.operation
+                    ),
+                    Some(recipe),
+                    &details,
+                    &next_actions,
+                ));
+            }
+        };
+        let operation =
+            match connector.resolve_operation(operation_selector) {
+                Ok(operation) => operation,
+                Err(error) => {
+                    let details = if error.suggestions.is_empty() {
+                        Vec::new()
+                    } else {
+                        error.suggestions.clone()
+                    };
+                    let mut next_actions = vec![format!("fwc recipe show {recipe}")];
+                    if error.suggestions.is_empty() {
+                        next_actions.push(format!("fwc ops {}", connector.slug));
+                    } else {
+                        next_actions.extend(error.suggestions.iter().map(|suggestion| {
+                            format!("fwc schema {} {suggestion}", connector.slug)
+                        }));
+                    }
+                    return Err(recipe_error_dispatch(
+                        subcommand,
+                        "recipe-operation-not-found",
+                        format!(
+                            "Recipe step `{}` refers to unknown operation `{}` on connector `{}`.",
+                            step.id, operation_selector, connector.slug
+                        ),
+                        Some(recipe),
+                        &details,
+                        &next_actions,
+                    ));
+                }
+            };
+
+        operations.insert(
+            step.operation.clone(),
+            pipe::PipelineOperationMetadata {
+                connector: connector.slug.clone(),
+                selector: operation.preferred_selector.clone(),
+                canonical_id: operation.actual_id.clone(),
+                capability: operation.summary.capability.clone(),
+                risk_level: operation.summary.risk_level.clone(),
+                safety_tier: operation.summary.safety_tier.clone(),
+                requires_approval: operation.summary.requires_approval,
+                approval_mode: operation.approval_mode.clone(),
+                rate_limits: operation.rate_limits.clone(),
+            },
+        );
+    }
+
+    Ok(operations)
 }
 
 #[allow(dead_code)]
@@ -4694,13 +4816,7 @@ const CONFIG_SUBCOMMANDS: &[&str] = &[
     "schema", "get", "set", "unset", "import", "export", "doctor",
 ];
 const RECIPE_SUBCOMMANDS: &[&str] = &[
-    "list",
-    "show",
-    "validate",
-    "run",
-    "dry-run",
-    "estimate",
-    "export",
+    "list", "show", "validate", "run", "dry-run", "estimate", "export",
 ];
 const PIPELINE_SUBCOMMANDS: &[&str] = &["list", "show", "validate", "run", "dry-run", "estimate"];
 
@@ -7684,6 +7800,119 @@ depends_on = ["missing"]
                     .as_str()
                     .is_some_and(|text| text.contains("unknown step")))
         );
+    }
+
+    #[test]
+    fn execute_recipe_list_reports_builtin_recipes() {
+        let (exit_code, payload) = execute_json(&["fwc", "--json", "recipe", "list"]);
+
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["command"], "recipe");
+        assert_eq!(payload["subcommand"], "list");
+        assert!(
+            payload["recipe_count"].as_u64().unwrap() >= 15,
+            "expected bundled recipe catalog to have at least 15 entries"
+        );
+        assert!(payload["categories"].is_object());
+        assert!(payload["recipes"].as_array().unwrap().iter().any(|recipe| {
+            recipe["slug"] == "github-pr-review-notify" && recipe["valid"] == Value::Bool(true)
+        }));
+    }
+
+    #[test]
+    fn execute_recipe_show_returns_definition_and_estimate() {
+        let (exit_code, payload) =
+            execute_json(&["fwc", "--json", "recipe", "show", "github-pr-review-notify"]);
+
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["command"], "recipe");
+        assert_eq!(payload["subcommand"], "show");
+        assert_eq!(payload["recipe"]["slug"], "github-pr-review-notify");
+        assert_eq!(
+            payload["recipe"]["export_path"],
+            ".fwc/pipelines/github-pr-review-notify.toml"
+        );
+        assert_eq!(
+            payload["definition"]["pipeline"]["name"],
+            "github-pr-review-notify"
+        );
+        assert_eq!(payload["estimate"]["step_count"], 2);
+        assert_eq!(payload["estimate"]["risk_assessment"]["level"], "medium");
+    }
+
+    #[test]
+    fn execute_recipe_export_returns_raw_toml() {
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "recipe",
+            "export",
+            "github-pr-review-notify",
+        ]);
+
+        let export = payload
+            .as_str()
+            .expect("recipe export should serialize as a JSON string");
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert!(export.starts_with("[pipeline]"));
+        assert!(export.contains("name = \"github-pr-review-notify\""));
+        assert!(export.contains("operation = \"github.get_pull_request\""));
+    }
+
+    #[test]
+    fn execute_recipe_dry_run_uses_bundled_defaults() {
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "recipe",
+            "dry-run",
+            "github-pr-review-notify",
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["status"], "planned");
+        assert_eq!(payload["command"], "recipe");
+        assert_eq!(payload["subcommand"], "dry-run");
+        assert_eq!(payload["recipe"], "github-pr-review-notify");
+        assert_eq!(payload["plan"]["steps"][0]["input"]["owner"], "octocat");
+        assert_eq!(payload["plan"]["steps"][0]["input"]["repo"], "hello-world");
+        assert_eq!(payload["plan"]["steps"][0]["input"]["pull_number"], "1");
+        assert_eq!(payload["plan"]["steps"][1]["input"]["channel"], "C01234567");
+        assert_eq!(
+            payload["estimate"]["estimated_api_calls"]["summary"],
+            "~2 API calls"
+        );
+    }
+
+    #[test]
+    fn execute_all_builtin_recipes_estimate_successfully() {
+        for slug in super::pipe::builtin_recipe_slugs() {
+            let (exit_code, payload) = execute_json(&["fwc", "--json", "recipe", "estimate", slug]);
+
+            assert_eq!(
+                exit_code,
+                CliExitCode::Success.into(),
+                "recipe estimate should succeed for {slug}"
+            );
+            assert_eq!(
+                payload["command"], "recipe",
+                "unexpected command for {slug}"
+            );
+            assert_eq!(
+                payload["subcommand"], "estimate",
+                "unexpected subcommand for {slug}"
+            );
+            assert_eq!(payload["recipe"], slug, "unexpected recipe slug for {slug}");
+            assert_eq!(
+                payload["estimate"]["step_count"].as_u64().unwrap(),
+                2,
+                "all bundled recipes currently have two steps: {slug}"
+            );
+            assert!(
+                payload.get("plan").is_none(),
+                "estimate should omit plan for {slug}"
+            );
+        }
     }
 
     // ── BatchFile (heterogeneous batch) integration tests ──────────

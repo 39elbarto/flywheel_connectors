@@ -404,6 +404,620 @@ pub struct DiscoveredPipeline {
 }
 
 #[derive(Debug, Clone)]
+struct BuiltInRecipeSpec {
+    slug: &'static str,
+    title: &'static str,
+    category: &'static str,
+    summary: &'static str,
+    required_connectors: &'static [&'static str],
+    pipeline_toml: &'static str,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct BuiltInRecipeSummary {
+    pub slug: String,
+    pub title: String,
+    pub category: String,
+    pub summary: String,
+    pub required_connectors: Vec<String>,
+    pub export_path: String,
+    pub step_count: usize,
+    pub valid: bool,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub errors: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct BuiltInRecipe {
+    pub slug: String,
+    pub title: String,
+    pub category: String,
+    pub summary: String,
+    pub required_connectors: Vec<String>,
+    pub export_path: String,
+    pub definition: PipelineDefinition,
+    pub validation: PipelineValidation,
+    pub toml: String,
+}
+
+const RECIPE_GITHUB_OPEN_ISSUES_TO_SLACK_TOML: &str = r#"
+[pipeline]
+name = "github-open-issues-to-slack"
+description = "Starter recipe that searches GitHub issues and posts a Slack summary."
+version = "1"
+
+[[steps]]
+id = "fetch"
+operation = "github.search_issues"
+input = { query = "repo:{{params.owner}}/{{params.repo}} is:issue is:open label:{{params.label}}" }
+
+[[steps]]
+id = "notify"
+operation = "slack.post_message"
+depends_on = ["fetch"]
+input = { channel = "{{params.channel}}", text = "GitHub issue digest for {{params.owner}}/{{params.repo}} (label {{params.label}}): {{steps.fetch.output.total_count}} match(es)." }
+
+[params.owner]
+type = "string"
+default = "octocat"
+
+[params.repo]
+type = "string"
+default = "hello-world"
+
+[params.label]
+type = "string"
+default = "bug"
+
+[params.channel]
+type = "string"
+default = "C01234567"
+"#;
+
+const RECIPE_GITHUB_PR_REVIEW_NOTIFY_TOML: &str = r#"
+[pipeline]
+name = "github-pr-review-notify"
+description = "Starter recipe that inspects one pull request and posts a review prompt to Slack."
+version = "1"
+
+[[steps]]
+id = "fetch"
+operation = "github.get_pull_request"
+input = { owner = "{{params.owner}}", repo = "{{params.repo}}", pull_number = "{{params.pull_number}}" }
+
+[[steps]]
+id = "notify"
+operation = "slack.post_message"
+depends_on = ["fetch"]
+input = { channel = "{{params.channel}}", text = "PR review requested for {{params.owner}}/{{params.repo}}#{{params.pull_number}}: {{steps.fetch.output.pull_request.title}}" }
+
+[params.owner]
+type = "string"
+default = "octocat"
+
+[params.repo]
+type = "string"
+default = "hello-world"
+
+[params.pull_number]
+type = "integer"
+default = 1
+
+[params.channel]
+type = "string"
+default = "C01234567"
+"#;
+
+const RECIPE_JIRA_BACKLOG_TO_SLACK_TOML: &str = r#"
+[pipeline]
+name = "jira-backlog-to-slack"
+description = "Starter recipe that queries Jira backlog work and posts a Slack summary."
+version = "1"
+
+[[steps]]
+id = "fetch"
+operation = "jira.search_jql"
+input = { jql = "project = {{params.project_key}} AND statusCategory != Done ORDER BY priority DESC", fields = "summary,status,priority", max_results = "{{params.max_results}}" }
+
+[[steps]]
+id = "notify"
+operation = "slack.post_message"
+depends_on = ["fetch"]
+input = { channel = "{{params.channel}}", text = "Jira backlog digest for {{params.project_key}}: {{steps.fetch.output.total}} matching issue(s)." }
+
+[params.project_key]
+type = "string"
+default = "PROJ"
+
+[params.max_results]
+type = "integer"
+default = 10
+
+[params.channel]
+type = "string"
+default = "C01234567"
+"#;
+
+const RECIPE_SENTRY_ISSUE_TO_JIRA_TOML: &str = r#"
+[pipeline]
+name = "sentry-issue-to-jira"
+description = "Starter recipe that searches Sentry issues and drafts a Jira ticket for triage."
+version = "1"
+
+[[steps]]
+id = "fetch"
+operation = "sentry.list_issues"
+input = { organization_slug = "{{params.organization_slug}}", project_slug = "{{params.project_slug}}", query = "{{params.query}}" }
+
+[[steps]]
+id = "create"
+operation = "jira.create_issue"
+depends_on = ["fetch"]
+condition = "{{steps.fetch.output.issues | length}} > 0"
+input = { project_key = "{{params.jira_project_key}}", issue_type = "{{params.issue_type}}", summary = "Imported from Sentry {{params.project_slug}}: {{steps.fetch.output.issues[0].title}}", description = "This starter recipe mirrored a Sentry issue into Jira. Review the imported context before executing live.", labels = ["sentry", "recipe-sync"] }
+
+[params.organization_slug]
+type = "string"
+default = "my-org"
+
+[params.project_slug]
+type = "string"
+default = "backend"
+
+[params.query]
+type = "string"
+default = "is:unresolved level:error"
+
+[params.jira_project_key]
+type = "string"
+default = "PROJ"
+
+[params.issue_type]
+type = "string"
+default = "Bug"
+"#;
+
+const RECIPE_LINEAR_TRIAGE_TO_SLACK_TOML: &str = r#"
+[pipeline]
+name = "linear-triage-to-slack"
+description = "Starter recipe that searches Linear issues and posts a Slack triage digest."
+version = "1"
+
+[[steps]]
+id = "fetch"
+operation = "linear.search_issues"
+input = { query = "{{params.query}}" }
+
+[[steps]]
+id = "notify"
+operation = "slack.post_message"
+depends_on = ["fetch"]
+input = { channel = "{{params.channel}}", text = "Linear triage digest for `{{params.query}}`: {{steps.fetch.output.issues | length}} matching issue(s)." }
+
+[params.query]
+type = "string"
+default = "login bug"
+
+[params.channel]
+type = "string"
+default = "C01234567"
+"#;
+
+const RECIPE_SLACK_CROSS_POST_DISCORD_TOML: &str = r#"
+[pipeline]
+name = "slack-cross-post-discord"
+description = "Starter recipe that finds one Slack message set and relays the summary to Discord."
+version = "1"
+
+[[steps]]
+id = "fetch"
+operation = "slack.search_messages"
+input = { query = "{{params.query}}" }
+
+[[steps]]
+id = "relay"
+operation = "discord.send_message"
+depends_on = ["fetch"]
+input = { channel_id = "{{params.discord_channel_id}}", content = "Slack relay for `{{params.query}}`: {{steps.fetch.output.messages[0].text}}" }
+
+[params.query]
+type = "string"
+default = "deployment status"
+
+[params.discord_channel_id]
+type = "string"
+default = "123456789012345678"
+"#;
+
+const RECIPE_SLACK_CROSS_POST_TELEGRAM_TOML: &str = r#"
+[pipeline]
+name = "slack-cross-post-telegram"
+description = "Starter recipe that relays a Slack search summary into Telegram."
+version = "1"
+
+[[steps]]
+id = "fetch"
+operation = "slack.search_messages"
+input = { query = "{{params.query}}" }
+
+[[steps]]
+id = "relay"
+operation = "telegram.send_message"
+depends_on = ["fetch"]
+input = { chat_id = "{{params.chat_id}}", text = "Slack relay for `{{params.query}}`: {{steps.fetch.output.messages[0].text}}" }
+
+[params.query]
+type = "string"
+default = "incident commander"
+
+[params.chat_id]
+type = "string"
+default = "-1001234567890"
+"#;
+
+const RECIPE_SLACK_DIGEST_EMAIL_DRAFT_TOML: &str = r#"
+[pipeline]
+name = "slack-digest-email-draft"
+description = "Starter recipe that converts recent Slack history into a Gmail draft."
+version = "1"
+
+[[steps]]
+id = "fetch"
+operation = "slack.get_channel_history"
+input = { channel = "{{params.channel}}", limit = "{{params.limit}}" }
+
+[[steps]]
+id = "draft"
+operation = "gmail.create_draft"
+depends_on = ["fetch"]
+input = { to = "{{params.to}}", subject = "{{params.subject}}", body = "Slack digest for {{params.channel}} containing {{steps.fetch.output.messages | length}} message(s)." }
+
+[params.channel]
+type = "string"
+default = "C01234567"
+
+[params.limit]
+type = "integer"
+default = 25
+
+[params.to]
+type = "string"
+default = "team@example.com"
+
+[params.subject]
+type = "string"
+default = "Slack digest"
+"#;
+
+const RECIPE_NOTION_MEETING_NOTES_EMAIL_DRAFT_TOML: &str = r#"
+[pipeline]
+name = "notion-meeting-notes-email-draft"
+description = "Starter recipe that searches Notion meeting notes and drafts an email summary."
+version = "1"
+
+[[steps]]
+id = "search"
+operation = "notion.search"
+input = { query = "{{params.query}}" }
+
+[[steps]]
+id = "draft"
+operation = "gmail.create_draft"
+depends_on = ["search"]
+input = { to = "{{params.to}}", subject = "{{params.subject}}", body = "Notion search `{{params.query}}` returned {{steps.search.output.result_count}} result(s)." }
+
+[params.query]
+type = "string"
+default = "meeting notes"
+
+[params.to]
+type = "string"
+default = "attendees@example.com"
+
+[params.subject]
+type = "string"
+default = "Meeting notes summary"
+"#;
+
+const RECIPE_LOGSEQ_DAILY_NOTES_TO_SLACK_TOML: &str = r#"
+[pipeline]
+name = "logseq-daily-notes-to-slack"
+description = "Starter recipe that loads a Logseq page and posts a Slack digest."
+version = "1"
+
+[[steps]]
+id = "fetch"
+operation = "logseq.blocks.list"
+input = { page = "{{params.page}}" }
+
+[[steps]]
+id = "notify"
+operation = "slack.post_message"
+depends_on = ["fetch"]
+input = { channel = "{{params.channel}}", text = "Logseq page `{{params.page}}` has {{steps.fetch.output.blocks | length}} block(s)." }
+
+[params.page]
+type = "string"
+default = "Daily Notes"
+
+[params.channel]
+type = "string"
+default = "C01234567"
+"#;
+
+const RECIPE_HUBSPOT_CONTACTS_TO_SLACK_TOML: &str = r#"
+[pipeline]
+name = "hubspot-contacts-to-slack"
+description = "Starter recipe that lists HubSpot contacts and posts a Slack summary."
+version = "1"
+
+[[steps]]
+id = "fetch"
+operation = "hubspot.contacts.list"
+input = { limit = "{{params.limit}}", properties = ["email", "firstname", "lastname", "company"] }
+
+[[steps]]
+id = "notify"
+operation = "slack.post_message"
+depends_on = ["fetch"]
+input = { channel = "{{params.channel}}", text = "HubSpot contact digest: {{steps.fetch.output.results | length}} contact(s) in this snapshot." }
+
+[params.limit]
+type = "integer"
+default = 25
+
+[params.channel]
+type = "string"
+default = "C01234567"
+"#;
+
+const RECIPE_MIXPANEL_SIGNUPS_TO_SLACK_TOML: &str = r#"
+[pipeline]
+name = "mixpanel-signups-to-slack"
+description = "Starter recipe that queries Mixpanel signup events and posts a Slack report."
+version = "1"
+
+[[steps]]
+id = "fetch"
+operation = "mixpanel.events.query"
+input = { event = "{{params.event}}", from_date = "{{params.from_date}}", to_date = "{{params.to_date}}" }
+
+[[steps]]
+id = "notify"
+operation = "slack.post_message"
+depends_on = ["fetch"]
+input = { channel = "{{params.channel}}", text = "Mixpanel event report for `{{params.event}}`: {{steps.fetch.output.data | length}} row(s) returned." }
+
+[params.event]
+type = "string"
+default = "signup"
+
+[params.from_date]
+type = "string"
+default = "2026-03-01"
+
+[params.to_date]
+type = "string"
+default = "2026-03-07"
+
+[params.channel]
+type = "string"
+default = "C01234567"
+"#;
+
+const RECIPE_S3_BUCKET_AUDIT_TO_SLACK_TOML: &str = r#"
+[pipeline]
+name = "s3-bucket-audit-to-slack"
+description = "Starter recipe that lists S3 objects and posts a Slack audit summary."
+version = "1"
+
+[[steps]]
+id = "fetch"
+operation = "s3.list_objects"
+input = { bucket = "{{params.bucket}}", prefix = "{{params.prefix}}", max_keys = "{{params.max_keys}}" }
+
+[[steps]]
+id = "notify"
+operation = "slack.post_message"
+depends_on = ["fetch"]
+input = { channel = "{{params.channel}}", text = "S3 audit for s3://{{params.bucket}}/{{params.prefix}} -> {{steps.fetch.output.contents | length}} object(s)." }
+
+[params.bucket]
+type = "string"
+default = "example-bucket"
+
+[params.prefix]
+type = "string"
+default = "exports/"
+
+[params.max_keys]
+type = "integer"
+default = 100
+
+[params.channel]
+type = "string"
+default = "C01234567"
+"#;
+
+const RECIPE_GCAL_AGENDA_TO_SLACK_TOML: &str = r#"
+[pipeline]
+name = "gcal-agenda-to-slack"
+description = "Starter recipe that loads an agenda window from Google Calendar and posts a Slack summary."
+version = "1"
+
+[[steps]]
+id = "fetch"
+operation = "gcal.list_events"
+input = { calendar_id = "{{params.calendar_id}}", time_min = "{{params.time_min}}", time_max = "{{params.time_max}}" }
+
+[[steps]]
+id = "notify"
+operation = "slack.post_message"
+depends_on = ["fetch"]
+input = { channel = "{{params.channel}}", text = "Agenda summary for {{params.calendar_id}}: {{steps.fetch.output.items | length}} event(s) between {{params.time_min}} and {{params.time_max}}." }
+
+[params.calendar_id]
+type = "string"
+default = "primary"
+
+[params.time_min]
+type = "string"
+default = "2026-03-09T09:00:00Z"
+
+[params.time_max]
+type = "string"
+default = "2026-03-09T17:00:00Z"
+
+[params.channel]
+type = "string"
+default = "C01234567"
+"#;
+
+const RECIPE_LLM_BUDGET_TO_SLACK_TOML: &str = r#"
+[pipeline]
+name = "llm-budget-to-slack"
+description = "Starter recipe that reads LLM Router budget state and posts a Slack alert."
+version = "1"
+
+[[steps]]
+id = "fetch"
+operation = "llm-router.get_budget"
+
+[[steps]]
+id = "notify"
+operation = "slack.post_message"
+depends_on = ["fetch"]
+input = { channel = "{{params.channel}}", text = "LLM budget report: remaining={{steps.fetch.output.remaining_usd}} USD, spent={{steps.fetch.output.spent_usd}} USD." }
+
+[params.channel]
+type = "string"
+default = "C01234567"
+"#;
+
+static BUILTIN_RECIPES: &[BuiltInRecipeSpec] = &[
+    BuiltInRecipeSpec {
+        slug: "github-open-issues-to-slack",
+        title: "GitHub Open Issues to Slack",
+        category: "development",
+        summary: "Search matching GitHub issues and post a Slack summary.",
+        required_connectors: &["github", "slack"],
+        pipeline_toml: RECIPE_GITHUB_OPEN_ISSUES_TO_SLACK_TOML,
+    },
+    BuiltInRecipeSpec {
+        slug: "github-pr-review-notify",
+        title: "GitHub PR Review Notify",
+        category: "development",
+        summary: "Inspect one pull request and post a review prompt to Slack.",
+        required_connectors: &["github", "slack"],
+        pipeline_toml: RECIPE_GITHUB_PR_REVIEW_NOTIFY_TOML,
+    },
+    BuiltInRecipeSpec {
+        slug: "jira-backlog-to-slack",
+        title: "Jira Backlog to Slack",
+        category: "development",
+        summary: "Search Jira backlog work and publish a Slack digest.",
+        required_connectors: &["jira", "slack"],
+        pipeline_toml: RECIPE_JIRA_BACKLOG_TO_SLACK_TOML,
+    },
+    BuiltInRecipeSpec {
+        slug: "sentry-issue-to-jira",
+        title: "Sentry Issue to Jira",
+        category: "development",
+        summary: "Search Sentry issues and draft a Jira ticket.",
+        required_connectors: &["sentry", "jira"],
+        pipeline_toml: RECIPE_SENTRY_ISSUE_TO_JIRA_TOML,
+    },
+    BuiltInRecipeSpec {
+        slug: "linear-triage-to-slack",
+        title: "Linear Triage to Slack",
+        category: "development",
+        summary: "Search Linear issues and post a Slack triage digest.",
+        required_connectors: &["linear", "slack"],
+        pipeline_toml: RECIPE_LINEAR_TRIAGE_TO_SLACK_TOML,
+    },
+    BuiltInRecipeSpec {
+        slug: "slack-cross-post-discord",
+        title: "Slack Cross-Post to Discord",
+        category: "communication",
+        summary: "Relay a Slack search digest into Discord.",
+        required_connectors: &["slack", "discord"],
+        pipeline_toml: RECIPE_SLACK_CROSS_POST_DISCORD_TOML,
+    },
+    BuiltInRecipeSpec {
+        slug: "slack-cross-post-telegram",
+        title: "Slack Cross-Post to Telegram",
+        category: "communication",
+        summary: "Relay a Slack search digest into Telegram.",
+        required_connectors: &["slack", "telegram"],
+        pipeline_toml: RECIPE_SLACK_CROSS_POST_TELEGRAM_TOML,
+    },
+    BuiltInRecipeSpec {
+        slug: "slack-digest-email-draft",
+        title: "Slack Digest Email Draft",
+        category: "communication",
+        summary: "Turn recent Slack history into a Gmail draft.",
+        required_connectors: &["slack", "gmail"],
+        pipeline_toml: RECIPE_SLACK_DIGEST_EMAIL_DRAFT_TOML,
+    },
+    BuiltInRecipeSpec {
+        slug: "notion-meeting-notes-email-draft",
+        title: "Notion Meeting Notes Email Draft",
+        category: "communication",
+        summary: "Search Notion notes and draft an email recap.",
+        required_connectors: &["notion", "gmail"],
+        pipeline_toml: RECIPE_NOTION_MEETING_NOTES_EMAIL_DRAFT_TOML,
+    },
+    BuiltInRecipeSpec {
+        slug: "logseq-daily-notes-to-slack",
+        title: "Logseq Daily Notes to Slack",
+        category: "communication",
+        summary: "Digest a Logseq page and post the result to Slack.",
+        required_connectors: &["logseq", "slack"],
+        pipeline_toml: RECIPE_LOGSEQ_DAILY_NOTES_TO_SLACK_TOML,
+    },
+    BuiltInRecipeSpec {
+        slug: "hubspot-contacts-to-slack",
+        title: "HubSpot Contacts to Slack",
+        category: "data",
+        summary: "List HubSpot contacts and post a summary to Slack.",
+        required_connectors: &["hubspot", "slack"],
+        pipeline_toml: RECIPE_HUBSPOT_CONTACTS_TO_SLACK_TOML,
+    },
+    BuiltInRecipeSpec {
+        slug: "mixpanel-signups-to-slack",
+        title: "Mixpanel Signups to Slack",
+        category: "data",
+        summary: "Query Mixpanel events and publish a Slack report.",
+        required_connectors: &["mixpanel", "slack"],
+        pipeline_toml: RECIPE_MIXPANEL_SIGNUPS_TO_SLACK_TOML,
+    },
+    BuiltInRecipeSpec {
+        slug: "s3-bucket-audit-to-slack",
+        title: "S3 Bucket Audit to Slack",
+        category: "data",
+        summary: "List S3 objects and post an audit digest to Slack.",
+        required_connectors: &["s3", "slack"],
+        pipeline_toml: RECIPE_S3_BUCKET_AUDIT_TO_SLACK_TOML,
+    },
+    BuiltInRecipeSpec {
+        slug: "gcal-agenda-to-slack",
+        title: "Google Calendar Agenda to Slack",
+        category: "data",
+        summary: "List events from Google Calendar and post an agenda summary.",
+        required_connectors: &["google-calendar", "slack"],
+        pipeline_toml: RECIPE_GCAL_AGENDA_TO_SLACK_TOML,
+    },
+    BuiltInRecipeSpec {
+        slug: "llm-budget-to-slack",
+        title: "LLM Budget to Slack",
+        category: "operations",
+        summary: "Fetch LLM Router budget state and post an alert to Slack.",
+        required_connectors: &["llm-router", "slack"],
+        pipeline_toml: RECIPE_LLM_BUDGET_TO_SLACK_TOML,
+    },
+];
+
+#[derive(Debug, Clone)]
 pub struct PipelineRoots {
     pub project: PathBuf,
     pub user: Option<PathBuf>,
@@ -432,6 +1046,84 @@ struct RateLimitImpactAccumulator {
 
 fn default_pipeline_input() -> toml::Value {
     toml::Value::Table(toml::map::Map::new())
+}
+
+fn builtin_recipe_export_path(slug: &str) -> String {
+    format!(".fwc/pipelines/{slug}.toml")
+}
+
+fn parse_builtin_recipe_spec(spec: &BuiltInRecipeSpec) -> Result<BuiltInRecipe, String> {
+    let definition = parse_pipeline_definition(spec.pipeline_toml)?;
+    let validation = validate_pipeline_definition(&definition);
+
+    Ok(BuiltInRecipe {
+        slug: spec.slug.to_owned(),
+        title: spec.title.to_owned(),
+        category: spec.category.to_owned(),
+        summary: spec.summary.to_owned(),
+        required_connectors: spec
+            .required_connectors
+            .iter()
+            .map(|connector| (*connector).to_owned())
+            .collect(),
+        export_path: builtin_recipe_export_path(spec.slug),
+        definition,
+        validation,
+        toml: spec.pipeline_toml.trim_start().to_owned(),
+    })
+}
+
+pub fn builtin_recipe_slugs() -> Vec<&'static str> {
+    BUILTIN_RECIPES.iter().map(|spec| spec.slug).collect()
+}
+
+pub fn builtin_recipe_summaries() -> Vec<BuiltInRecipeSummary> {
+    let mut summaries = BUILTIN_RECIPES
+        .iter()
+        .map(|spec| match parse_builtin_recipe_spec(spec) {
+            Ok(recipe) => BuiltInRecipeSummary {
+                slug: recipe.slug,
+                title: recipe.title,
+                category: recipe.category,
+                summary: recipe.summary,
+                required_connectors: recipe.required_connectors,
+                export_path: recipe.export_path,
+                step_count: recipe.definition.steps.len(),
+                valid: recipe.validation.valid,
+                errors: recipe.validation.errors,
+            },
+            Err(error) => BuiltInRecipeSummary {
+                slug: spec.slug.to_owned(),
+                title: spec.title.to_owned(),
+                category: spec.category.to_owned(),
+                summary: spec.summary.to_owned(),
+                required_connectors: spec
+                    .required_connectors
+                    .iter()
+                    .map(|connector| (*connector).to_owned())
+                    .collect(),
+                export_path: builtin_recipe_export_path(spec.slug),
+                step_count: 0,
+                valid: false,
+                errors: vec![error],
+            },
+        })
+        .collect::<Vec<_>>();
+
+    summaries.sort_by(|left, right| {
+        left.category
+            .cmp(&right.category)
+            .then(left.slug.cmp(&right.slug))
+    });
+    summaries
+}
+
+pub fn load_builtin_recipe(reference: &str) -> Result<BuiltInRecipe, String> {
+    let spec = BUILTIN_RECIPES
+        .iter()
+        .find(|spec| spec.slug == reference)
+        .ok_or_else(|| format!("no built-in recipe named `{reference}` was found"))?;
+    parse_builtin_recipe_spec(spec)
 }
 
 pub fn parse_pipeline_definition(content: &str) -> Result<PipelineDefinition, String> {
@@ -1042,7 +1734,10 @@ fn pipeline_risk_summary(steps: &[String], step_estimates: &[PipelineStepEstimat
     let level = step_estimates
         .iter()
         .find(|step| step.id == *first_step)
-        .map_or_else(|| "UNKNOWN".to_owned(), |step| step.risk_level.to_ascii_uppercase());
+        .map_or_else(
+            || "UNKNOWN".to_owned(),
+            |step| step.risk_level.to_ascii_uppercase(),
+        );
 
     match steps {
         [step] => format!("{level} risk because step `{step}` is the highest-risk operation."),
@@ -1999,5 +2694,37 @@ operation = "github.list_issues"
         let error = estimate_pipeline(&plan, &BTreeMap::new()).unwrap_err();
         assert!(error.contains("missing manifest metadata"));
         assert!(error.contains("fetch"));
+    }
+
+    #[test]
+    fn builtin_recipe_catalog_is_present_and_validates() {
+        let recipes = builtin_recipe_summaries();
+
+        assert!(recipes.len() >= 15);
+        assert!(recipes.iter().all(|recipe| recipe.valid));
+        assert!(
+            recipes
+                .iter()
+                .any(|recipe| recipe.slug == "github-pr-review-notify")
+        );
+        assert!(
+            recipes
+                .iter()
+                .any(|recipe| recipe.slug == "slack-cross-post-telegram")
+        );
+    }
+
+    #[test]
+    fn load_builtin_recipe_returns_exportable_definition() {
+        let recipe = load_builtin_recipe("sentry-issue-to-jira").unwrap();
+
+        assert_eq!(recipe.slug, "sentry-issue-to-jira");
+        assert_eq!(
+            recipe.export_path,
+            ".fwc/pipelines/sentry-issue-to-jira.toml"
+        );
+        assert_eq!(recipe.definition.pipeline.name, "sentry-issue-to-jira");
+        assert!(recipe.validation.valid);
+        assert!(recipe.toml.starts_with("[pipeline]"));
     }
 }

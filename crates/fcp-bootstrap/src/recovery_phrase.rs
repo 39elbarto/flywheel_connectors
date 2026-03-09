@@ -605,4 +605,96 @@ mod tests {
         let restored = RecoveryPhrase::from_words(&words).unwrap();
         assert_eq!(phrase, restored);
     }
+
+    // ---- RecoveryPhrase reflexive equality ----
+
+    #[test]
+    fn test_phrase_eq_reflexive() {
+        let phrase = RecoveryPhrase::generate().unwrap();
+        assert_eq!(phrase, phrase);
+    }
+
+    // ---- RecoveryPhrase symmetric equality ----
+
+    #[test]
+    fn test_phrase_eq_symmetric() {
+        let phrase = RecoveryPhrase::generate().unwrap();
+        let cloned = phrase.clone();
+        assert_eq!(phrase, cloned);
+        assert_eq!(cloned, phrase);
+    }
+
+    // ---- OwnerKeypair sign large data ----
+
+    #[test]
+    fn test_owner_keypair_sign_large_data() {
+        let phrase = RecoveryPhrase::generate().unwrap();
+        let keypair = phrase.derive_owner_keypair();
+        let large_msg = vec![0xAB_u8; 100_000];
+        let sig = keypair.sign(&large_msg);
+        assert!(keypair.public().verify(&large_msg, &sig).is_ok());
+    }
+
+    // ---- OwnerKeypair public key is 32 bytes ----
+
+    #[test]
+    fn test_owner_keypair_public_key_is_32_bytes() {
+        let phrase = RecoveryPhrase::generate().unwrap();
+        let keypair = phrase.derive_owner_keypair();
+        assert_eq!(keypair.public().to_bytes().len(), 32);
+    }
+
+    // ---- RecoveryPhraseError Display exact messages ----
+
+    #[test]
+    fn test_error_display_wrong_word_count_exact() {
+        let err = RecoveryPhraseError::WrongWordCount(0);
+        assert_eq!(err.to_string(), "expected 24 words, got 0");
+    }
+
+    #[test]
+    fn test_error_display_derivation_failed_exact() {
+        let err = RecoveryPhraseError::DerivationFailed("hkdf".into());
+        assert_eq!(err.to_string(), "key derivation failed: hkdf");
+    }
+
+    // ---- RecoveryPhrase generate produces unique phrases ----
+
+    #[test]
+    fn test_generate_produces_unique_phrases() {
+        let p1 = RecoveryPhrase::generate().unwrap();
+        let p2 = RecoveryPhrase::generate().unwrap();
+        let p3 = RecoveryPhrase::generate().unwrap();
+        assert_ne!(p1, p2);
+        assert_ne!(p2, p3);
+        assert_ne!(p1, p3);
+    }
+
+    // ---- from_mnemonic leading/trailing whitespace ----
+
+    #[test]
+    fn test_from_mnemonic_with_leading_trailing_whitespace() {
+        let test_phrase = "  abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon art  ";
+        let phrase = RecoveryPhrase::from_mnemonic(test_phrase).unwrap();
+        assert_eq!(phrase.words().len(), 24);
+    }
+
+    // ---- OwnerKeypair debug format stability ----
+
+    #[test]
+    fn test_owner_keypair_debug_contains_finish_non_exhaustive() {
+        let phrase = RecoveryPhrase::generate().unwrap();
+        let keypair = phrase.derive_owner_keypair();
+        let debug = format!("{keypair:?}");
+        assert!(debug.contains(".."));
+    }
+
+    // ---- RecoveryPhrase debug format stability ----
+
+    #[test]
+    fn test_recovery_phrase_debug_contains_finish_non_exhaustive() {
+        let phrase = RecoveryPhrase::generate().unwrap();
+        let debug = format!("{phrase:?}");
+        assert!(debug.contains(".."));
+    }
 }

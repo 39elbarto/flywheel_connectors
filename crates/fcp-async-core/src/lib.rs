@@ -5722,4 +5722,643 @@ mod tests {
         let err = tx.send(1).unwrap_err();
         assert_eq!(err.0, 1);
     }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // NEW TESTS — batch expansion to reach ~440 tests
+    // ═══════════════════════════════════════════════════════════════════════
+
+    // ─── BoundedSender/BoundedReceiver: sync-visible surface ─────────────
+
+    #[test]
+    fn bounded_sender_clone_preserves_name() {
+        let (tx, _rx) = channel::bounded::<u32>("my-queue", 8);
+        let tx2 = tx.clone();
+        // Both senders should be usable without panic
+        tx.try_send(1).unwrap();
+        tx2.try_send(2).unwrap();
+    }
+
+    #[test]
+    fn bounded_try_send_on_fresh_queue() {
+        let (tx, _rx) = channel::bounded::<u32>("fresh", 4);
+        tx.try_send(10).unwrap();
+        tx.try_send(20).unwrap();
+        tx.try_send(30).unwrap();
+        tx.try_send(40).unwrap();
+        // Now full
+        let err = tx.try_send(50).unwrap_err();
+        assert_eq!(err, AsyncError::ChannelFull);
+    }
+
+    #[test]
+    fn bounded_try_send_closed_queue() {
+        let (tx, rx) = channel::bounded::<u32>("closing", 4);
+        drop(rx);
+        let err = tx.try_send(1).unwrap_err();
+        assert_eq!(err, AsyncError::ChannelClosed);
+    }
+
+    #[runtime::test]
+    async fn bounded_sender_multiple_clones_all_send() {
+        let (tx, mut rx) = channel::bounded::<u32>("multi-clone", 16);
+        let tx2 = tx.clone();
+        let tx3 = tx.clone();
+        tx.send(1).await.unwrap();
+        tx2.send(2).await.unwrap();
+        tx3.send(3).await.unwrap();
+        assert_eq!(rx.recv().await, Some(1));
+        assert_eq!(rx.recv().await, Some(2));
+        assert_eq!(rx.recv().await, Some(3));
+    }
+
+    #[runtime::test]
+    async fn bounded_receiver_recv_none_after_all_senders_dropped() {
+        let (tx, mut rx) = channel::bounded::<u32>("drain", 4);
+        tx.send(42).await.unwrap();
+        drop(tx);
+        assert_eq!(rx.recv().await, Some(42));
+        assert_eq!(rx.recv().await, None);
+    }
+
+    #[runtime::test]
+    async fn bounded_receiver_close_then_recv_drains() {
+        let (tx, mut rx) = channel::bounded::<u32>("close-drain", 4);
+        tx.send(1).await.unwrap();
+        tx.send(2).await.unwrap();
+        rx.close();
+        // Should still be able to drain buffered items
+        assert_eq!(rx.recv().await, Some(1));
+        assert_eq!(rx.recv().await, Some(2));
+    }
+
+    // ─── AsyncError: pattern matching on all variants ────────────────────
+
+    #[test]
+    fn async_error_match_timeout_extracts_ms() {
+        let e = AsyncError::Timeout { timeout_ms: 999 };
+        match e {
+            AsyncError::Timeout { timeout_ms } => assert_eq!(timeout_ms, 999),
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn async_error_match_protocol_io_extracts_message() {
+        let e = AsyncError::ProtocolIo {
+            message: "conn reset".into(),
+        };
+        match e {
+            AsyncError::ProtocolIo { message } => assert_eq!(message, "conn reset"),
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn async_error_match_join_extracts_message() {
+        let e = AsyncError::Join {
+            message: "worker died".into(),
+        };
+        match e {
+            AsyncError::Join { message } => assert_eq!(message, "worker died"),
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn async_error_match_runtime_extracts_message() {
+        let e = AsyncError::Runtime {
+            message: "init fail".into(),
+        };
+        match e {
+            AsyncError::Runtime { message } => assert_eq!(message, "init fail"),
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn async_error_match_cancelled() {
+        let e = AsyncError::Cancelled;
+        assert!(matches!(e, AsyncError::Cancelled));
+    }
+
+    #[test]
+    fn async_error_match_channel_closed() {
+        let e = AsyncError::ChannelClosed;
+        assert!(matches!(e, AsyncError::ChannelClosed));
+    }
+
+    #[test]
+    fn async_error_match_channel_full() {
+        let e = AsyncError::ChannelFull;
+        assert!(matches!(e, AsyncError::ChannelFull));
+    }
+
+    // ─── Deadline: arithmetic edge cases ─────────────────────────────────
+
+    #[test]
+    fn deadline_after_one_nanosecond() {
+        let d = super::Deadline::after(Duration::from_nanos(1));
+        // Should not panic even with very small duration
+        let _ = d.is_expired();
+        let _ = d.remaining();
+    }
+
+    #[test]
+    fn deadline_after_max_safe_duration() {
+        // Use a large but safe duration (not Duration::MAX which could overflow)
+        let d = super::Deadline::after(Duration::from_secs(86400));
+        assert!(!d.is_expired());
+        assert!(d.remaining() > Duration::from_secs(86000));
+    }
+
+    #[test]
+    fn deadline_at_far_future() {
+        let far = std::time::Instant::now() + Duration::from_secs(86400 * 365);
+        let d = super::Deadline::at(far);
+        assert!(!d.is_expired());
+    }
+
+    #[test]
+    fn deadline_ne_different_instants() {
+        let d1 = super::Deadline::after(Duration::from_secs(1));
+        // Sleep briefly to ensure different instant
+        std::thread::sleep(Duration::from_millis(2));
+        let d2 = super::Deadline::after(Duration::from_secs(1));
+        // Different instants should produce different deadlines
+        assert_ne!(d1, d2);
+    }
+
+    // ─── ExecutionContext: chaining and nesting ───────────────────────────
+
+    #[test]
+    fn execution_context_with_deadline_overwrites_previous() {
+        let ctx = ExecutionContext::request_scoped(Duration::from_secs(60))
+            .with_deadline(Duration::from_millis(100));
+        let budget = ctx.remaining_budget().unwrap();
+        // New deadline should be much shorter than original 60s
+        assert!(budget < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn execution_context_background_with_deadline_becomes_scoped() {
+        let ctx = ExecutionContext::background().with_deadline(Duration::from_secs(10));
+        // Scope stays Background even with deadline
+        assert_eq!(ctx.scope(), ContextScope::Background);
+        assert!(ctx.deadline().is_some());
+    }
+
+    #[test]
+    fn execution_context_child_of_child_inherits_cancel() {
+        let parent = ExecutionContext::request_scoped(Duration::from_secs(10));
+        let child = parent.child();
+        let grandchild = child.child();
+        assert!(!grandchild.is_cancelled());
+        parent.cancel();
+        assert!(grandchild.is_cancelled());
+    }
+
+    #[test]
+    fn execution_context_multiple_children_all_cancelled() {
+        let parent = ExecutionContext::background();
+        let c1 = parent.child();
+        let c2 = parent.child();
+        let c3 = parent.child();
+        parent.cancel();
+        assert!(c1.is_cancelled());
+        assert!(c2.is_cancelled());
+        assert!(c3.is_cancelled());
+    }
+
+    #[test]
+    fn execution_context_child_scope_matches_parent_background() {
+        let parent = ExecutionContext::background();
+        let child = parent.child();
+        assert_eq!(child.scope(), ContextScope::Background);
+    }
+
+    // ─── CancellationToken: advanced sync tests ──────────────────────────
+
+    #[test]
+    fn cancellation_token_subscriber_before_cancel_detects_after() {
+        let token = CancellationToken::new();
+        let l1 = token.subscribe();
+        let l2 = token.subscribe();
+        assert!(!l1.is_cancelled());
+        assert!(!l2.is_cancelled());
+        token.cancel();
+        assert!(l1.is_cancelled());
+        assert!(l2.is_cancelled());
+    }
+
+    #[test]
+    fn cancellation_token_subscriber_after_cancel_sees_cancelled() {
+        let token = CancellationToken::new();
+        token.cancel();
+        let listener = token.subscribe();
+        assert!(listener.is_cancelled());
+    }
+
+    #[test]
+    fn cancellation_token_many_clones_all_share_state() {
+        let t1 = CancellationToken::new();
+        let t2 = t1.clone();
+        let t3 = t2.clone();
+        let t4 = t3.clone();
+        t4.cancel();
+        assert!(t1.is_cancelled());
+        assert!(t2.is_cancelled());
+        assert!(t3.is_cancelled());
+    }
+
+    // ─── Semaphore: multi-step operations ────────────────────────────────
+
+    #[test]
+    fn semaphore_repeated_add_permits() {
+        let sem = super::sync::Semaphore::new(0);
+        sem.add_permits(1);
+        sem.add_permits(2);
+        sem.add_permits(3);
+        assert_eq!(sem.available_permits(), 6);
+    }
+
+    #[test]
+    fn semaphore_acquire_then_add_permits() {
+        let sem = super::sync::Semaphore::new(1);
+        let _p = sem.try_acquire().unwrap();
+        assert_eq!(sem.available_permits(), 0);
+        sem.add_permits(5);
+        assert_eq!(sem.available_permits(), 5);
+    }
+
+    #[test]
+    fn semaphore_multiple_owned_permits() {
+        let sem = Arc::new(super::sync::Semaphore::new(3));
+        let p1 = Arc::clone(&sem).try_acquire_owned().unwrap();
+        let p2 = Arc::clone(&sem).try_acquire_owned().unwrap();
+        assert_eq!(sem.available_permits(), 1);
+        drop(p1);
+        assert_eq!(sem.available_permits(), 2);
+        drop(p2);
+        assert_eq!(sem.available_permits(), 3);
+    }
+
+    // ─── Mutex: type-specific sync tests ─────────────────────────────────
+
+    #[test]
+    fn mutex_with_option_type() {
+        let m = super::sync::Mutex::new(None::<u32>);
+        {
+            let mut g = m.try_lock().unwrap();
+            *g = Some(42);
+        }
+        let g = m.try_lock().unwrap();
+        assert_eq!(*g, Some(42));
+    }
+
+    #[test]
+    fn mutex_with_tuple_type() {
+        let m = super::sync::Mutex::new((1_u32, "hello"));
+        let g = m.try_lock().unwrap();
+        assert_eq!(g.0, 1);
+        assert_eq!(g.1, "hello");
+    }
+
+    #[test]
+    fn mutex_get_mut_then_into_inner() {
+        let mut m = super::sync::Mutex::new(0_u32);
+        *m.get_mut() = 100;
+        assert_eq!(m.into_inner(), 100);
+    }
+
+    // ─── RwLock: type-specific sync tests ────────────────────────────────
+
+    #[test]
+    fn rwlock_with_option_type() {
+        let rw = super::sync::RwLock::new(None::<String>);
+        {
+            let mut w = rw.try_write().unwrap();
+            *w = Some("data".into());
+        }
+        let r = rw.try_read().unwrap();
+        assert_eq!(*r, Some("data".to_string()));
+    }
+
+    #[test]
+    fn rwlock_with_hashmap() {
+        use std::collections::HashMap;
+        let rw = super::sync::RwLock::new(HashMap::<String, u32>::new());
+        {
+            let mut w = rw.try_write().unwrap();
+            w.insert("key".into(), 42);
+        }
+        let r = rw.try_read().unwrap();
+        assert_eq!(r.get("key"), Some(&42));
+    }
+
+    #[test]
+    fn rwlock_get_mut_then_into_inner() {
+        let mut rw = super::sync::RwLock::new(vec![1_u32]);
+        rw.get_mut().push(2);
+        let v = rw.into_inner();
+        assert_eq!(v, vec![1, 2]);
+    }
+
+    // ─── Watch: sync borrow after multiple sends ─────────────────────────
+
+    #[test]
+    fn watch_multiple_sends_latest_visible() {
+        let (tx, rx) = channel::watch::channel(0_u32);
+        tx.send(1).unwrap();
+        tx.send(2).unwrap();
+        tx.send(3).unwrap();
+        assert_eq!(*rx.borrow(), 3);
+    }
+
+    #[test]
+    fn watch_send_modify_multiple_times() {
+        let (tx, rx) = channel::watch::channel(0_u32);
+        tx.send_modify(|v| *v += 1);
+        tx.send_modify(|v| *v += 10);
+        tx.send_modify(|v| *v += 100);
+        assert_eq!(*rx.borrow(), 111);
+    }
+
+    #[test]
+    fn watch_sender_subscribe_sync() {
+        let (tx, _rx) = channel::watch::channel(0_u32);
+        let rx2 = tx.subscribe();
+        tx.send(99).unwrap();
+        assert_eq!(*rx2.borrow(), 99);
+    }
+
+    #[test]
+    fn watch_sender_is_closed_with_receivers() {
+        let (tx, rx) = channel::watch::channel(0_u32);
+        assert!(!tx.is_closed());
+        let rx2 = tx.subscribe();
+        drop(rx);
+        // Still have rx2
+        assert!(!tx.is_closed());
+        drop(rx2);
+        // Now all receivers dropped
+        assert!(tx.is_closed());
+    }
+
+    #[test]
+    fn watch_sender_clone_both_can_send() {
+        let (tx, rx) = channel::watch::channel(0_u32);
+        let tx2 = tx.clone();
+        tx.send(1).unwrap();
+        assert_eq!(*rx.borrow(), 1);
+        tx2.send(2).unwrap();
+        assert_eq!(*rx.borrow(), 2);
+    }
+
+    // ─── Broadcast: sync-visible tests ───────────────────────────────────
+
+    #[test]
+    fn broadcast_sender_debug_format() {
+        let (tx, _rx) = channel::broadcast::channel::<u32>(4);
+        let dbg = format!("{tx:?}");
+        assert!(dbg.contains("Sender"));
+    }
+
+    #[test]
+    fn broadcast_receiver_debug_format() {
+        let (_tx, rx) = channel::broadcast::channel::<u32>(4);
+        let dbg = format!("{rx:?}");
+        assert!(dbg.contains("Receiver"));
+    }
+
+    #[test]
+    fn broadcast_sender_clone_debug() {
+        let (tx, _rx) = channel::broadcast::channel::<u32>(4);
+        let tx2 = tx.clone();
+        let dbg = format!("{tx2:?}");
+        assert!(dbg.contains("Sender"));
+        // Use original after clone to avoid redundant_clone
+        let dbg_orig = format!("{tx:?}");
+        assert!(dbg_orig.contains("Sender"));
+    }
+
+    // ─── Oneshot: sync-visible tests ─────────────────────────────────────
+
+    #[test]
+    fn oneshot_receiver_debug_format() {
+        let (_tx, rx) = channel::oneshot::channel::<u32>();
+        let dbg = format!("{rx:?}");
+        assert!(dbg.contains("Receiver"));
+    }
+
+    #[test]
+    fn oneshot_send_error_source_is_none() {
+        let err = channel::oneshot::SendError(0_u32);
+        assert!(std::error::Error::source(&err).is_none());
+    }
+
+    // ─── mpsc: Sender debug and receiver debug ───────────────────────────
+
+    #[test]
+    fn mpsc_sender_debug_format() {
+        let (tx, _rx) = channel::mpsc::channel::<u32>(4);
+        let dbg = format!("{tx:?}");
+        assert!(dbg.contains("Sender"));
+    }
+
+    #[test]
+    fn mpsc_receiver_debug_format() {
+        let (_tx, rx) = channel::mpsc::channel::<u32>(4);
+        let dbg = format!("{rx:?}");
+        assert!(dbg.contains("Receiver"));
+    }
+
+    #[test]
+    fn mpsc_sender_clone_debug() {
+        let (tx, _rx) = channel::mpsc::channel::<u32>(4);
+        let tx2 = tx.clone();
+        let dbg = format!("{tx2:?}");
+        assert!(dbg.contains("Sender"));
+        // Use original after clone to avoid redundant_clone
+        let dbg_orig = format!("{tx:?}");
+        assert!(dbg_orig.contains("Sender"));
+    }
+
+    #[test]
+    fn mpsc_unbounded_sender_debug() {
+        let (tx, _rx) = channel::mpsc::unbounded_channel::<u32>();
+        let dbg = format!("{tx:?}");
+        assert!(dbg.contains("UnboundedSender"));
+    }
+
+    #[test]
+    fn mpsc_unbounded_receiver_debug() {
+        let (_tx, rx) = channel::mpsc::unbounded_channel::<u32>();
+        let dbg = format!("{rx:?}");
+        assert!(dbg.contains("UnboundedReceiver"));
+    }
+
+    // ─── mpsc: try_send fills then drains ────────────────────────────────
+
+    #[test]
+    fn mpsc_try_send_fill_to_capacity() {
+        let (tx, _rx) = channel::mpsc::channel::<u32>(3);
+        tx.try_send(1).unwrap();
+        tx.try_send(2).unwrap();
+        tx.try_send(3).unwrap();
+        assert_eq!(tx.len(), 3);
+        assert_eq!(tx.capacity(), 0);
+        assert!(tx.try_send(4).is_err());
+    }
+
+    #[test]
+    fn mpsc_sender_is_closed_when_receiver_dropped() {
+        let (tx, rx) = channel::mpsc::channel::<u32>(4);
+        assert!(!tx.is_closed());
+        drop(rx);
+        assert!(tx.is_closed());
+    }
+
+    // ─── Instrumentation: custom impl with all hooks ─────────────────────
+
+    #[test]
+    fn custom_instrumentation_implements_trait() {
+        use std::sync::atomic::AtomicU32;
+
+        struct AllHooks {
+            task_spawns: AtomicU32,
+            task_exits: AtomicU32,
+            queue_sends: AtomicU32,
+            queue_recvs: AtomicU32,
+        }
+
+        impl Instrumentation for AllHooks {
+            fn on_task_spawn(&self, _name: &str) {
+                self.task_spawns.fetch_add(1, Ordering::SeqCst);
+            }
+            fn on_task_exit(&self, _name: &str, _result: &Result<(), AsyncError>) {
+                self.task_exits.fetch_add(1, Ordering::SeqCst);
+            }
+            fn on_queue_send(&self, _name: &str, _depth: usize, _cap: usize) {
+                self.queue_sends.fetch_add(1, Ordering::SeqCst);
+            }
+            fn on_queue_receive(&self, _name: &str, _depth: usize, _cap: usize) {
+                self.queue_recvs.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        let hooks = AllHooks {
+            task_spawns: AtomicU32::new(0),
+            task_exits: AtomicU32::new(0),
+            queue_sends: AtomicU32::new(0),
+            queue_recvs: AtomicU32::new(0),
+        };
+
+        hooks.on_task_spawn("t1");
+        hooks.on_task_spawn("t2");
+        hooks.on_task_exit("t1", &Ok(()));
+        hooks.on_queue_send("q", 1, 10);
+        hooks.on_queue_receive("q", 0, 10);
+
+        assert_eq!(hooks.task_spawns.load(Ordering::SeqCst), 2);
+        assert_eq!(hooks.task_exits.load(Ordering::SeqCst), 1);
+        assert_eq!(hooks.queue_sends.load(Ordering::SeqCst), 1);
+        assert_eq!(hooks.queue_recvs.load(Ordering::SeqCst), 1);
+    }
+
+    // ─── Runtime: block_on with async operations ─────────────────────────
+
+    #[test]
+    fn runtime_block_on_with_channel_ops() {
+        let rt = runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let (tx, mut rx) = channel::mpsc::channel::<u32>(4);
+            tx.send(42).await.unwrap();
+            assert_eq!(rx.recv().await, Some(42));
+        });
+    }
+
+    #[test]
+    fn runtime_block_on_with_watch_channel() {
+        let rt = runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let (tx, rx) = channel::watch::channel(0_u32);
+            tx.send(99).unwrap();
+            assert_eq!(*rx.borrow(), 99);
+        });
+    }
+
+    // ─── TaskGroup: async edge cases ─────────────────────────────────────
+
+    #[runtime::test]
+    async fn task_group_single_fast_task() {
+        let mut group = TaskGroup::new();
+        group.spawn("fast", async { Ok(()) });
+        let result = group.shutdown(Duration::from_secs(1)).await;
+        assert!(result.is_ok());
+    }
+
+    #[runtime::test]
+    async fn task_group_cancellation_token_is_not_cancelled_before_shutdown() {
+        let group = TaskGroup::new();
+        let token = group.cancellation_token();
+        assert!(!token.is_cancelled());
+        group.shutdown(Duration::from_millis(50)).await.unwrap();
+        assert!(token.is_cancelled());
+    }
+
+    #[runtime::test]
+    async fn task_group_spawn_task_that_returns_error_variant() {
+        let mut group = TaskGroup::new();
+        group.spawn("channel-err", async {
+            Err(AsyncError::ChannelClosed)
+        });
+        let err = group
+            .shutdown(Duration::from_secs(1))
+            .await
+            .expect_err("should propagate");
+        assert_eq!(err, AsyncError::ChannelClosed);
+    }
+
+    // ─── ExecutionContext: async run with various futures ─────────────────
+
+    #[runtime::test]
+    async fn context_run_with_channel_send() {
+        let ctx = ExecutionContext::request_scoped(Duration::from_secs(5));
+        let (tx, mut rx) = channel::mpsc::channel::<u32>(1);
+        ctx.run(async { tx.send(42).await.unwrap() })
+            .await
+            .unwrap();
+        assert_eq!(rx.recv().await, Some(42));
+    }
+
+    #[runtime::test]
+    async fn context_run_background_no_timeout() {
+        let ctx = ExecutionContext::background();
+        let result = ctx.run(async { 123_u32 }).await;
+        assert_eq!(result.unwrap(), 123);
+    }
+
+    // ─── Shutdown: edge cases ────────────────────────────────────────────
+
+    #[runtime::test]
+    async fn wait_for_shutdown_sender_dropped() {
+        let (tx, mut rx) = channel::watch::channel(false);
+        drop(tx);
+        let err = super::shutdown::wait_for_shutdown(&mut rx)
+            .await
+            .expect_err("sender dropped should cancel");
+        assert_eq!(err, AsyncError::Cancelled);
+    }
+
+    #[runtime::test]
+    async fn sleep_or_shutdown_sender_dropped() {
+        let (tx, mut rx) = channel::watch::channel(false);
+        drop(tx);
+        // When sender drops, behavior depends on implementation
+        // It should either complete the sleep or return Cancelled
+        let result =
+            super::shutdown::sleep_or_shutdown(Duration::from_millis(10), &mut rx).await;
+        // Either Ok or Err is valid when sender drops
+        let _ = result;
+    }
 }

@@ -540,4 +540,80 @@ mod tests {
         // Shutdown should never panic even without init
         shutdown_telemetry();
     }
+
+    #[test]
+    fn test_telemetry_config_with_prometheus_default_port() {
+        let config = TelemetryConfig::new("test").with_prometheus(0);
+        assert!(config.prometheus_enabled);
+        assert_eq!(config.prometheus_port, 0);
+    }
+
+    #[test]
+    fn test_telemetry_config_with_prometheus_max_port() {
+        let config = TelemetryConfig::new("test").with_prometheus(u16::MAX);
+        assert_eq!(config.prometheus_port, u16::MAX);
+    }
+
+    #[test]
+    #[allow(clippy::float_cmp)]
+    fn test_telemetry_config_sample_rate_negative() {
+        // Negative sample rate should be stored as-is (validation is caller's responsibility)
+        let config = TelemetryConfig::new("test").with_sample_rate(-1.0);
+        assert_eq!(config.trace_sample_rate, -1.0);
+    }
+
+    #[test]
+    fn test_telemetry_error_is_send_sync() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<TelemetryError>();
+    }
+
+    #[test]
+    fn test_telemetry_config_long_service_name() {
+        let long_name = "a".repeat(1000);
+        let config = TelemetryConfig::new(&long_name);
+        assert_eq!(config.service_name.len(), 1000);
+    }
+
+    #[test]
+    fn test_telemetry_config_with_empty_redact_fields() {
+        let config = TelemetryConfig::new("test").with_redact_fields(vec![]);
+        // Original defaults should still be present
+        assert_eq!(config.redact_fields.len(), 5);
+    }
+
+    #[test]
+    fn test_telemetry_config_with_otlp_empty_endpoint() {
+        let config = TelemetryConfig::new("test").with_otlp("");
+        assert!(config.otlp_enabled);
+        assert_eq!(config.otlp_endpoint, Some(String::new()));
+    }
+
+    #[test]
+    fn test_telemetry_error_display_long_message() {
+        let long_msg = "x".repeat(500);
+        let error = TelemetryError::Config(long_msg.clone());
+        let display = format!("{error}");
+        assert!(display.contains(&long_msg));
+    }
+
+    #[test]
+    fn test_telemetry_error_source_is_none() {
+        let error = TelemetryError::LoggingInit("test".to_string());
+        assert!(std::error::Error::source(&error).is_none());
+    }
+
+    #[test]
+    fn test_telemetry_config_debug_contains_all_fields() {
+        let config = TelemetryConfig::new("svc")
+            .with_log_level("debug")
+            .with_prometheus(9090)
+            .with_otlp("http://otel:4317")
+            .with_sample_rate(0.5);
+        let debug = format!("{config:?}");
+        assert!(debug.contains("svc"));
+        assert!(debug.contains("debug"));
+        assert!(debug.contains("9090"));
+        assert!(debug.contains("otel"));
+    }
 }

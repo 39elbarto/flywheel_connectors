@@ -2295,4 +2295,113 @@ mod tests {
         let copied = fmt;
         assert_eq!(fmt, copied);
     }
+
+    #[test]
+    fn test_captured_trace_empty_id() {
+        let trace = CapturedTrace::new("");
+        assert_eq!(trace.id, "");
+        assert!(trace.is_empty());
+    }
+
+    #[test]
+    fn test_captured_trace_unicode_id() {
+        let trace = CapturedTrace::new("trace-日本語-test");
+        assert_eq!(trace.id, "trace-日本語-test");
+    }
+
+    #[test]
+    fn test_captured_trace_with_node_none_by_default() {
+        let trace = CapturedTrace::new("test");
+        assert!(trace.capturing_node.is_none());
+    }
+
+    #[test]
+    fn test_trace_capture_clone() {
+        let config = TraceCaptureConfig::new().enabled();
+        let mut capture = TraceCapture::new("clone-test", config);
+        capture
+            .record(TraceEvent::Gossip(GossipEvent {
+                timestamp: 1,
+                trace_id: "g".to_string(),
+                gossip_type: "announce".to_string(),
+                object_count: 1,
+                peer_node: None,
+                success: true,
+            }))
+            .unwrap();
+        let cloned = capture.clone();
+        assert_eq!(cloned.trace_id(), capture.trace_id());
+        assert_eq!(cloned.snapshot().events.len(), 1);
+    }
+
+    #[test]
+    fn test_trace_error_io_display() {
+        let err = TraceError::Io("permission denied".to_string());
+        let display = format!("{err}");
+        assert!(display.contains("IO"));
+        assert!(display.contains("permission denied"));
+    }
+
+    #[test]
+    fn test_trace_error_unsupported_version_display() {
+        let err = TraceError::UnsupportedVersion(42);
+        let display = format!("{err}");
+        assert!(display.contains("42"));
+    }
+
+    #[test]
+    fn test_redaction_policy_clone() {
+        let policy = RedactionPolicy::default()
+            .with_field("custom")
+            .with_prefix("x-custom-")
+            .with_hash_redacted(true)
+            .with_marker("[GONE]");
+        let cloned = policy.clone();
+        // Use original after clone to verify independence
+        assert!(policy.should_redact("custom"));
+        assert!(cloned.should_redact("custom"));
+        assert!(cloned.should_redact("x-custom-header"));
+        assert!(cloned.hash_redacted);
+    }
+
+    #[test]
+    fn test_redaction_policy_debug() {
+        let policy = RedactionPolicy::default();
+        let debug = format!("{policy:?}");
+        assert!(debug.contains("RedactionPolicy"));
+        assert!(debug.contains("redact_fields"));
+    }
+
+    #[test]
+    fn test_captured_trace_finish_then_duration() {
+        let mut trace = CapturedTrace::new("duration-check");
+        assert!(trace.duration_ms().is_none());
+        trace.finish();
+        let duration = trace.duration_ms();
+        assert!(duration.is_some());
+        // Duration should be very small since we just created and finished
+        assert!(duration.unwrap() < 1000);
+    }
+
+    #[test]
+    fn test_trace_capture_config_clone() {
+        let config = TraceCaptureConfig::new()
+            .enabled()
+            .with_max_events(999)
+            .with_max_size_bytes(5000)
+            .with_sample_rate(0.25);
+        let cloned = config.clone();
+        // Use original after clone to verify independence
+        assert!(config.enabled);
+        assert!(cloned.enabled);
+        assert_eq!(cloned.max_events, 999);
+        assert_eq!(cloned.max_size_bytes, 5000);
+    }
+
+    #[test]
+    fn test_trace_capture_config_debug() {
+        let config = TraceCaptureConfig::default();
+        let debug = format!("{config:?}");
+        assert!(debug.contains("TraceCaptureConfig"));
+    }
 }

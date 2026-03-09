@@ -492,4 +492,101 @@ mod tests {
         let response = HealthResponse::healthy("v1.0-日本語", 100);
         assert_eq!(response.version, "v1.0-日本語");
     }
+
+    #[test]
+    fn test_health_check_with_empty_name() {
+        let response = HealthResponse::healthy("1.0.0", 100).with_check("", true, None);
+        assert_eq!(response.checks[0].name, "");
+        assert!(response.is_healthy());
+    }
+
+    #[test]
+    fn test_health_response_unhealthy_with_additional_passing_checks() {
+        let response = HealthResponse::unhealthy("1.0.0", 100, "main failure")
+            .with_check("db", true, None)
+            .with_check("cache", true, None);
+        // Main status is unhealthy, so is_healthy returns false even with passing checks
+        assert!(!response.is_healthy());
+        assert_eq!(response.checks.len(), 3); // main + db + cache
+    }
+
+    #[test]
+    fn test_health_response_json_roundtrip() {
+        let response = HealthResponse::healthy("2.1.0", 12345)
+            .with_check("api", true, Some("OK"))
+            .with_check("db", false, Some("Timeout"));
+        let json = serde_json::to_string(&response).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["status"], "healthy");
+        assert_eq!(parsed["version"], "2.1.0");
+        assert_eq!(parsed["uptime_seconds"], 12345);
+    }
+
+    #[test]
+    fn test_health_check_message_with_newlines() {
+        let response = HealthResponse::healthy("1.0.0", 100)
+            .with_check("test", false, Some("Line 1\nLine 2\nLine 3"));
+        assert_eq!(
+            response.checks[0].message,
+            Some("Line 1\nLine 2\nLine 3".to_string())
+        );
+    }
+
+    #[test]
+    fn test_health_response_healthy_no_checks_is_healthy() {
+        let response = HealthResponse::healthy("1.0.0", 100);
+        assert!(response.is_healthy());
+        assert!(response.checks.is_empty());
+    }
+
+    #[test]
+    fn test_health_response_unhealthy_zero_uptime() {
+        let response = HealthResponse::unhealthy("1.0.0", 0, "not started");
+        assert!(!response.is_healthy());
+        assert_eq!(response.uptime_seconds, 0);
+    }
+
+    #[test]
+    fn test_health_check_json_serialization_with_message() {
+        let check = HealthCheck {
+            name: "test_check".to_string(),
+            status: "pass".to_string(),
+            message: Some("all good".to_string()),
+        };
+        let json = serde_json::to_string(&check).unwrap();
+        assert!(json.contains("\"message\":\"all good\""));
+    }
+
+    #[test]
+    fn test_health_check_json_serialization_without_message() {
+        let check = HealthCheck {
+            name: "test_check".to_string(),
+            status: "pass".to_string(),
+            message: None,
+        };
+        let json = serde_json::to_string(&check).unwrap();
+        // message should be skipped when None
+        assert!(!json.contains("message"));
+    }
+
+    #[test]
+    fn test_health_response_single_failing_check() {
+        let response = HealthResponse::healthy("1.0.0", 100)
+            .with_check("critical", false, Some("Down"));
+        assert!(!response.is_healthy());
+        assert_eq!(response.checks.len(), 1);
+    }
+
+    #[test]
+    fn test_health_response_clone_deep_independence() {
+        let response = HealthResponse::healthy("1.0.0", 100)
+            .with_check("a", true, Some("ok"))
+            .with_check("b", false, Some("err"));
+        let mut cloned = response.clone();
+        cloned.status = "degraded".to_string();
+        cloned.checks.clear();
+        // Original should be unaffected
+        assert_eq!(response.status, "healthy");
+        assert_eq!(response.checks.len(), 2);
+    }
 }

@@ -464,4 +464,122 @@ mod tests {
         };
         assert!(err.to_string().contains(&fp));
     }
+
+    // ---- BootstrapError Debug for all variants ----
+
+    #[test]
+    fn debug_no_hardware_tokens() {
+        let err = BootstrapError::NoHardwareTokens;
+        let debug = format!("{err:?}");
+        assert!(debug.contains("NoHardwareTokens"));
+    }
+
+    #[test]
+    fn debug_serialization() {
+        let err = BootstrapError::Serialization("encode fail".into());
+        let debug = format!("{err:?}");
+        assert!(debug.contains("Serialization"));
+        assert!(debug.contains("encode fail"));
+    }
+
+    #[test]
+    fn debug_config() {
+        let err = BootstrapError::Config("bad config".into());
+        let debug = format!("{err:?}");
+        assert!(debug.contains("Config"));
+    }
+
+    #[test]
+    fn debug_internal() {
+        let err = BootstrapError::Internal("state machine bug".into());
+        let debug = format!("{err:?}");
+        assert!(debug.contains("Internal"));
+    }
+
+    #[test]
+    fn debug_crypto() {
+        let err = BootstrapError::Crypto("key error".into());
+        let debug = format!("{err:?}");
+        assert!(debug.contains("Crypto"));
+    }
+
+    #[test]
+    fn debug_hardware_token() {
+        let err = BootstrapError::HardwareToken("slot 0 busy".into());
+        let debug = format!("{err:?}");
+        assert!(debug.contains("HardwareToken"));
+        assert!(debug.contains("slot 0 busy"));
+    }
+
+    #[test]
+    fn debug_io() {
+        let io_err = std::io::Error::other("disk full");
+        let err = BootstrapError::Io(io_err);
+        let debug = format!("{err:?}");
+        assert!(debug.contains("Io"));
+    }
+
+    #[test]
+    fn debug_invalid_recovery_phrase() {
+        let err = BootstrapError::InvalidRecoveryPhrase("bad checksum".into());
+        let debug = format!("{err:?}");
+        assert!(debug.contains("InvalidRecoveryPhrase"));
+    }
+
+    // ---- Display consistency checks ----
+
+    #[test]
+    fn display_time_skew_contains_drift_value() {
+        let err = BootstrapError::TimeSkew {
+            drift: Duration::from_secs(42),
+            suggestion: "fix clock",
+        };
+        let s = err.to_string();
+        assert!(s.contains("42"));
+        assert!(s.contains("fix clock"));
+    }
+
+    #[test]
+    fn display_partial_state_contains_phase() {
+        let err = BootstrapError::PartialState {
+            phase: "Enrollment".into(),
+        };
+        assert!(err.to_string().contains("Enrollment"));
+    }
+
+    // ---- From io error preserves other kinds ----
+
+    #[test]
+    fn from_io_error_preserves_kind_timed_out() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::TimedOut, "timed out");
+        let err: BootstrapError = io_err.into();
+        match err {
+            BootstrapError::Io(e) => assert_eq!(e.kind(), std::io::ErrorKind::TimedOut),
+            other => panic!("expected Io, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn from_io_error_preserves_kind_already_exists() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::AlreadyExists, "exists");
+        let err: BootstrapError = io_err.into();
+        match err {
+            BootstrapError::Io(e) => assert_eq!(e.kind(), std::io::ErrorKind::AlreadyExists),
+            other => panic!("expected Io, got {other:?}"),
+        }
+    }
+
+    // ---- BootstrapResult with unit ----
+
+    #[test]
+    fn bootstrap_result_unit_ok() {
+        let r: BootstrapResult<()> = Ok(());
+        assert!(r.is_ok());
+    }
+
+    #[test]
+    fn bootstrap_result_unit_err() {
+        let r: BootstrapResult<()> = Err(BootstrapError::Internal("fail".into()));
+        assert!(r.is_err());
+    }
 }

@@ -2128,4 +2128,173 @@ mod tests {
         assert!(debug.contains("CeremonyAbortResult"));
         assert!(debug.contains("can_resume"));
     }
+
+    // ---- CeremonyResumeError Debug for all variants ----
+
+    #[test]
+    fn ceremony_resume_error_debug_checkpoint_expired() {
+        let err = CeremonyResumeError::CheckpointExpired;
+        let debug = format!("{err:?}");
+        assert!(debug.contains("CheckpointExpired"));
+    }
+
+    #[test]
+    fn ceremony_resume_error_debug_non_resumable_phase() {
+        let err = CeremonyResumeError::NonResumablePhase("Round2Shares".into());
+        let debug = format!("{err:?}");
+        assert!(debug.contains("NonResumablePhase"));
+        assert!(debug.contains("Round2Shares"));
+    }
+
+    #[test]
+    fn ceremony_resume_error_debug_invalid_checkpoint() {
+        let err = CeremonyResumeError::InvalidCheckpoint("corrupt data".into());
+        let debug = format!("{err:?}");
+        assert!(debug.contains("InvalidCheckpoint"));
+    }
+
+    // ---- CeremonyId eq and ne ----
+
+    #[test]
+    fn ceremony_id_eq_same_fields() {
+        let id1 = CeremonyId {
+            id: [1; 16],
+            threshold: 2,
+            total: 3,
+        };
+        let id2 = CeremonyId {
+            id: [1; 16],
+            threshold: 2,
+            total: 3,
+        };
+        assert_eq!(id1, id2);
+    }
+
+    #[test]
+    fn ceremony_id_ne_different_id_bytes() {
+        let id1 = CeremonyId {
+            id: [1; 16],
+            threshold: 2,
+            total: 3,
+        };
+        let id2 = CeremonyId {
+            id: [2; 16],
+            threshold: 2,
+            total: 3,
+        };
+        assert_ne!(id1, id2);
+    }
+
+    // ---- ParticipantId Display with different names ----
+
+    #[test]
+    fn participant_id_display_custom_name() {
+        let p = ParticipantId {
+            index: 42,
+            name: "Alice".to_string(),
+            public_key: [0; 32],
+        };
+        assert_eq!(format!("{p}"), "Alice(42)");
+    }
+
+    // ---- ThresholdConfig Debug ----
+
+    #[test]
+    fn threshold_config_debug() {
+        let config = ThresholdConfig::new(2, 3);
+        let debug = format!("{config:?}");
+        assert!(debug.contains("ThresholdConfig"));
+        assert!(debug.contains('2'));
+        assert!(debug.contains('3'));
+    }
+
+    // ---- CeremonyTranscript clone ----
+
+    #[test]
+    fn ceremony_transcript_clone() {
+        let transcript = CeremonyTranscript {
+            phases: vec![PhaseRecord {
+                phase: "Gathering".to_string(),
+                entered_at: Utc::now(),
+                reason: None,
+            }],
+            joins: vec![],
+            messages: vec![],
+        };
+        let cloned = transcript.clone();
+        assert_eq!(transcript.phases.len(), cloned.phases.len());
+        assert_eq!(transcript.phases[0].phase, cloned.phases[0].phase);
+    }
+
+    // ---- EncryptedShare Debug ----
+
+    #[test]
+    fn encrypted_share_debug() {
+        let share = EncryptedShare {
+            from_index: 1,
+            to_index: 2,
+            ciphertext: vec![0xAB; 16],
+        };
+        let debug = format!("{share:?}");
+        assert!(debug.contains("EncryptedShare"));
+        assert!(debug.contains("from_index"));
+    }
+
+    // ---- FrostCommitment Debug ----
+
+    #[test]
+    fn frost_commitment_debug() {
+        let c = test_commitment(3);
+        let debug = format!("{c:?}");
+        assert!(debug.contains("FrostCommitment"));
+        assert!(debug.contains("participant_index"));
+    }
+
+    // ---- ThresholdSignatureArtifact Debug ----
+
+    #[test]
+    fn threshold_signature_artifact_debug() {
+        let mut ceremony = ThresholdCeremony::new(2, 3);
+        ceremony.add_participant(test_participant(1)).unwrap();
+        ceremony.add_participant(test_participant(2)).unwrap();
+        ceremony.add_participant(test_participant(3)).unwrap();
+        ceremony.add_commitment(test_commitment(1)).unwrap();
+        ceremony.add_commitment(test_commitment(2)).unwrap();
+        ceremony.add_commitment(test_commitment(3)).unwrap();
+        ceremony.add_shares(1, test_shares(1, 2)).unwrap();
+        ceremony.add_shares(2, test_shares(2, 1)).unwrap();
+        ceremony.add_shares(3, test_shares(3, 1)).unwrap();
+
+        let mut rng = ChaCha20Rng::seed_from_u64(123);
+        let artifact = ceremony
+            .sign_with_participants_and_rng(&[1, 2], b"ctx", b"msg", &mut rng)
+            .unwrap();
+        let debug = format!("{artifact:?}");
+        assert!(debug.contains("ThresholdSignatureArtifact"));
+        assert!(debug.contains("participants"));
+    }
+
+    // ---- sign_with_participants_and_rng deduplicates participant indices ----
+
+    #[test]
+    fn sign_deduplicates_participants() {
+        let mut ceremony = ThresholdCeremony::new(2, 3);
+        ceremony.add_participant(test_participant(1)).unwrap();
+        ceremony.add_participant(test_participant(2)).unwrap();
+        ceremony.add_participant(test_participant(3)).unwrap();
+        ceremony.add_commitment(test_commitment(1)).unwrap();
+        ceremony.add_commitment(test_commitment(2)).unwrap();
+        ceremony.add_commitment(test_commitment(3)).unwrap();
+        ceremony.add_shares(1, test_shares(1, 2)).unwrap();
+        ceremony.add_shares(2, test_shares(2, 1)).unwrap();
+        ceremony.add_shares(3, test_shares(3, 1)).unwrap();
+
+        let mut rng = ChaCha20Rng::seed_from_u64(88);
+        // Pass duplicate participant indices
+        let artifact = ceremony
+            .sign_with_participants_and_rng(&[1, 1, 2, 2], b"ctx", b"msg", &mut rng)
+            .unwrap();
+        // After dedup, should have [1, 2]
+        assert_eq!(artifact.participants.len(), 2);
+    }
 }

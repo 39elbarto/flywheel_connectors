@@ -695,4 +695,91 @@ mod tests {
             assert!(!debug.is_empty());
         }
     }
+
+    // ---- ColdRecoveryError from InvalidPhrase ----
+
+    #[test]
+    fn cold_recovery_error_from_invalid_phrase() {
+        let phrase_err = crate::recovery_phrase::RecoveryPhraseError::WrongWordCount(12);
+        let err: ColdRecoveryError = phrase_err.into();
+        let s = err.to_string();
+        assert!(s.contains("invalid recovery phrase"));
+        assert!(s.contains("12"));
+    }
+
+    // ---- ColdRecoveryError Debug for InvalidPhrase variant ----
+
+    #[test]
+    fn cold_recovery_error_debug_invalid_phrase() {
+        let phrase_err = crate::recovery_phrase::RecoveryPhraseError::InvalidMnemonic("bad".into());
+        let err: ColdRecoveryError = phrase_err.into();
+        let debug = format!("{err:?}");
+        assert!(debug.contains("InvalidPhrase"));
+    }
+
+    // ---- ColdRecovery fingerprint is non-empty ----
+
+    #[test]
+    fn cold_recovery_fingerprint_is_non_empty() {
+        let phrase = test_phrase();
+        let recovery = ColdRecovery::from_phrase(&phrase, None).unwrap();
+        let fp = recovery.fingerprint();
+        assert!(!fp.is_empty());
+        assert!(fp.len() > 10);
+    }
+
+    // ---- ColdRecovery genesis owner key matches phrase ----
+
+    #[test]
+    fn cold_recovery_genesis_owner_key_matches_derived_key() {
+        let phrase = test_phrase();
+        let recovery = ColdRecovery::from_phrase(&phrase, None).unwrap();
+        let derived_pub = phrase.derive_owner_keypair().public().to_bytes();
+        assert_eq!(recovery.genesis.owner_public_key, derived_pub);
+    }
+
+    // ---- ColdRecovery with different phrases produces different fingerprints ----
+
+    #[test]
+    fn cold_recovery_different_phrases_different_fingerprints() {
+        let p1 = crate::RecoveryPhrase::generate().unwrap();
+        let p2 = crate::RecoveryPhrase::generate().unwrap();
+        let r1 = ColdRecovery::from_phrase(&p1, None).unwrap();
+        let r2 = ColdRecovery::from_phrase(&p2, None).unwrap();
+        assert_ne!(r1.fingerprint(), r2.fingerprint());
+    }
+
+    // ---- CLI format_warning contains emoji ----
+
+    #[test]
+    fn cli_format_warning_revocation_state_content() {
+        use super::cli::format_warning;
+        let msg = format_warning(&ColdRecoveryWarning::RevocationStateUnknown);
+        assert!(msg.contains("revoked"));
+    }
+
+    #[test]
+    fn cli_format_warning_single_node_start_content() {
+        use super::cli::format_warning;
+        let msg = format_warning(&ColdRecoveryWarning::SingleNodeStart);
+        assert!(msg.contains("single node"));
+    }
+
+    // ---- ColdRecoveryWarning Display exact messages ----
+
+    #[test]
+    fn cold_recovery_warning_display_exact_no_audit_history() {
+        assert_eq!(
+            ColdRecoveryWarning::NoAuditHistory.to_string(),
+            "No audit history available - starting fresh"
+        );
+    }
+
+    #[test]
+    fn cold_recovery_warning_display_exact_data_loss() {
+        assert_eq!(
+            ColdRecoveryWarning::DataLoss.to_string(),
+            "Objects created after original genesis will be lost"
+        );
+    }
 }

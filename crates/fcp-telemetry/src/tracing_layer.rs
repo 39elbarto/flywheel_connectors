@@ -743,4 +743,71 @@ mod tests {
     fn test_parse_traceparent_empty_string() {
         assert!(TraceContext::from_traceparent("").is_none());
     }
+
+    #[test]
+    fn test_trace_context_new_is_sampled() {
+        let ctx = TraceContext::new();
+        assert!(ctx.is_sampled());
+    }
+
+    #[test]
+    fn test_trace_context_child_preserves_trace_id() {
+        let parent = TraceContext::new();
+        let child = parent.child();
+        assert_eq!(parent.trace_id, child.trace_id);
+    }
+
+    #[test]
+    fn test_trace_context_traceparent_starts_with_version() {
+        let ctx = TraceContext::new();
+        let tp = ctx.to_traceparent();
+        assert!(tp.starts_with("00-"));
+    }
+
+    #[test]
+    fn test_fcp_span_unicode_name() {
+        let span = FcpSpan::new("operation-日本語");
+        assert_eq!(span.name, "operation-日本語");
+    }
+
+    #[test]
+    fn test_fcp_span_long_name() {
+        let name = "a".repeat(500);
+        let span = FcpSpan::new(&name);
+        assert_eq!(span.name.len(), 500);
+    }
+
+    #[test]
+    fn test_fcp_span_many_attributes() {
+        let mut span = FcpSpan::new("multi_attr");
+        for i in 0..20 {
+            span = span.attribute(format!("key_{i}"), format!("val_{i}"));
+        }
+        assert_eq!(span.attributes.len(), 20);
+    }
+
+    #[test]
+    fn test_trace_context_default_trace_state_is_none() {
+        let ctx = TraceContext::default();
+        assert!(ctx.trace_state.is_none());
+    }
+
+    #[test]
+    fn test_inject_overwrites_existing_headers() {
+        let ctx = TraceContext::new();
+        let mut headers = HashMap::new();
+        headers.insert(TRACEPARENT_HEADER.to_string(), "old-value".to_string());
+        inject_trace_context(&ctx, &mut headers);
+        assert_ne!(headers.get(TRACEPARENT_HEADER).unwrap(), "old-value");
+    }
+
+    #[test]
+    fn test_span_guard_multiple_errors() {
+        let span = FcpSpan::new("error_test");
+        let mut guard = span.start();
+        guard.record_error("first error");
+        guard.record_error("second error");
+        guard.record_error("third error");
+        // Should not panic with multiple error recordings
+    }
 }

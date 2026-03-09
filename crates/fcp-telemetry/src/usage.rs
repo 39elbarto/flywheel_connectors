@@ -2293,4 +2293,206 @@ mod tests {
         // Pretty JSON has newlines
         assert!(json.contains('\n'));
     }
+
+    #[test]
+    fn test_aggregate_saturating_add_total() {
+        let store = CapabilityUsageStore::new(UsageTelemetryConfig::default());
+        // Record many events to verify saturating arithmetic
+        for ts in 0..1000 {
+            store.record(&sample_event(CapabilityUsageOutcome::Allow, ts));
+        }
+        let snap = store.snapshot();
+        assert_eq!(snap[0].total, 1000);
+        assert_eq!(snap[0].allowed, 1000);
+    }
+
+    #[test]
+    fn test_store_with_max_entries_zero() {
+        let config = UsageTelemetryConfig {
+            max_entries: 0,
+            ..UsageTelemetryConfig::default()
+        };
+        let store = CapabilityUsageStore::new(config);
+        let event = sample_event(CapabilityUsageOutcome::Allow, 10);
+        // Should reject all events since max_entries is 0
+        assert!(!store.record(&event));
+        assert!(store.snapshot().is_empty());
+    }
+
+    #[test]
+    fn test_store_with_zero_retention() {
+        let config = UsageTelemetryConfig {
+            retention_secs: 0,
+            ..UsageTelemetryConfig::default()
+        };
+        let store = CapabilityUsageStore::new(config);
+        let event = sample_event(CapabilityUsageOutcome::Allow, 10);
+        store.record(&event);
+        // With zero retention, a second event at any later time should prune previous
+        let event2 = sample_event(CapabilityUsageOutcome::Allow, 11);
+        store.record(&event2);
+        let snap = store.snapshot();
+        assert_eq!(snap.len(), 1);
+        // first_seen should be 11 since t=10 was pruned
+        assert_eq!(snap[0].first_seen, 11);
+    }
+
+    #[test]
+    fn test_recommendation_exact_boundary_unused() {
+        // Test at exact boundary: now - last_seen == unused_after_secs
+        let key = CapabilityUsageKey::new(
+            ZoneId::work(),
+            ConnectorId::from_static("fcp.boundary:request-response:1"),
+            CapabilityId::from_static("fcp.boundary.read"),
+        );
+        let aggregate = CapabilityUsageAggregate {
+            key,
+            total: 1,
+            allowed: 1,
+            denied: 0,
+            errors: 0,
+            first_seen: 50,
+            last_seen: 50,
+            last_risk_tier: SafetyTier::Safe,
+        };
+        let report = recommend_capabilities(
+            &[aggregate],
+            100,
+            RecommendationConfig {
+                unused_after_secs: 50,
+            },
+        );
+        // At exact boundary (100-50=50, not > 50), should be Keep
+        assert_eq!(
+            report.recommendations[0].suggestion,
+            CapabilitySuggestionKind::Keep
+        );
+    }
+
+    #[test]
+    fn test_recommendation_just_past_boundary_unused() {
+        let key = CapabilityUsageKey::new(
+            ZoneId::work(),
+            ConnectorId::from_static("fcp.pastboundary:request-response:1"),
+            CapabilityId::from_static("fcp.pastboundary.read"),
+        );
+        let aggregate = CapabilityUsageAggregate {
+            key,
+            total: 1,
+            allowed: 1,
+            denied: 0,
+            errors: 0,
+            first_seen: 49,
+            last_seen: 49,
+            last_risk_tier: SafetyTier::Safe,
+        };
+        let report = recommend_capabilities(
+            &[aggregate],
+            100,
+            RecommendationConfig {
+                unused_after_secs: 50,
+            },
+        );
+        // 100-49=51 > 50, should be RemoveUnused
+        assert_eq!(
+            report.recommendations[0].suggestion,
+            CapabilitySuggestionKind::RemoveUnused
+        );
+    }
+
+    #[test]
+    fn test_zone_risk_summary_clone_and_debug() {
+        let summary = ZoneRiskSummary {
+            zone_id: "z:test".to_string(),
+            safe: 1,
+            risky: 2,
+            dangerous: 3,
+            critical: 4,
+            forbidden: 5,
+        };
+        let cloned = summary.clone();
+        assert_eq!(cloned.safe, 1);
+        assert_eq!(cloned.forbidden, 5);
+        let debug = format!("{summary:?}");
+        assert!(debug.contains("z:test"));
+    }
+
+    #[test]
+    fn test_recommendation_summary_debug() {
+        let summary = CapabilityRecommendationSummary {
+            total: 10,
+            remove_unused: 3,
+            review_risky: 2,
+            keep: 5,
+        };
+        let debug = format!("{summary:?}");
+        assert!(debug.contains("CapabilityRecommendationSummary"));
+        assert!(debug.contains("10"));
+    }
+
+    #[test]
+    fn test_recommendation_report_debug() {
+        let report = recommend_capabilities(&[], 100, RecommendationConfig::default());
+        let debug = format!("{report:?}");
+        assert!(debug.contains("CapabilityRecommendationReport"));
+        assert!(debug.contains("100"));
+    }
+
+    #[test]
+    fn test_report_by_suggestion_returns_none_for_missing() {
+        let key = CapabilityUsageKey::new(
+            ZoneId::work(),
+            ConnectorId::from_static("fcp.miss:request-response:1"),
+            CapabilityId::from_static("fcp.miss.read"),
+        );
+        let aggregate = CapabilityUsageAggregate {
+            key,
+            total: 1,
+            allowed: 1,
+            denied: 0,
+            errors: 0,
+            first_seen: 90,
+            last_seen: 99,
+            last_risk_tier: SafetyTier::Safe,
+        };
+        let report = recommend_capabilities(
+            &[aggregate],
+            100,
+            RecommendationConfig {
+                unused_after_secs: 50,
+            },
+        );
+        // Should be Keep, so RemoveUnused and ReviewRisky should be empty
+        assert!(
+            report
+                .by_suggestion(CapabilitySuggestionKind::RemoveUnused)
+                .is_empty()
+        );
+        assert!(
+            report
+                .by_suggestion(CapabilitySuggestionKind::ReviewRisky)
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn test_aggregate_debug_format() {
+        let aggregate = CapabilityUsageAggregate {
+            key: CapabilityUsageKey::new(
+                ZoneId::work(),
+                ConnectorId::from_static("fcp.dbg:request-response:1"),
+                CapabilityId::from_static("fcp.dbg.read"),
+            ),
+            total: 42,
+            allowed: 30,
+            denied: 10,
+            errors: 2,
+            first_seen: 100,
+            last_seen: 200,
+            last_risk_tier: SafetyTier::Risky,
+        };
+        let debug = format!("{aggregate:?}");
+        assert!(debug.contains("CapabilityUsageAggregate"));
+        assert!(debug.contains("42"));
+    }
 }

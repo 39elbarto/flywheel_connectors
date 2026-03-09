@@ -640,4 +640,142 @@ mod tests {
         let result = classify_drift(drift);
         assert!(matches!(result, TimeValidationResult::DriftError { .. }));
     }
+
+    // ---- TimeValidation check() produces result ----
+
+    #[test]
+    fn time_validation_check_does_not_panic() {
+        let validation = TimeValidation::check();
+        // In CI, may be Valid or CannotValidate
+        assert!(
+            matches!(
+                validation.result,
+                TimeValidationResult::Valid
+                    | TimeValidationResult::CannotValidate
+                    | TimeValidationResult::DriftWarning { .. }
+            ),
+            "check() should produce Valid, CannotValidate, or DriftWarning"
+        );
+    }
+
+    #[test]
+    fn time_validation_check_system_time_recent() {
+        let before = Utc::now();
+        let validation = TimeValidation::check();
+        let after = Utc::now();
+        assert!(validation.system_time >= before);
+        assert!(validation.system_time <= after);
+    }
+
+    // ---- Display drift_warning different durations ----
+
+    #[test]
+    fn display_drift_warning_subsecond() {
+        let result = TimeValidationResult::DriftWarning {
+            drift: Duration::from_millis(30_500),
+        };
+        let s = result.to_string();
+        assert!(s.contains("Clock drift warning"));
+    }
+
+    // ---- TimeValidation with_drift produces correct ntp_time ----
+
+    #[test]
+    fn with_drift_ntp_time_is_before_system_time() {
+        let validation = TimeValidation::with_drift(Duration::from_secs(100));
+        assert!(validation.ntp_time.is_some());
+        assert!(validation.ntp_time.unwrap() < validation.system_time);
+    }
+
+    // ---- should_proceed and is_error consistency ----
+
+    #[test]
+    fn should_proceed_and_is_error_never_both_true() {
+        let variants = [
+            TimeValidationResult::Valid,
+            TimeValidationResult::DriftWarning {
+                drift: Duration::from_secs(60),
+            },
+            TimeValidationResult::DriftError {
+                drift: Duration::from_secs(600),
+            },
+            TimeValidationResult::CannotValidate,
+        ];
+        for v in &variants {
+            // If is_error is true, should_proceed must be false, and vice versa
+            assert!(
+                !(v.is_error() && v.should_proceed()),
+                "is_error and should_proceed should not both be true"
+            );
+        }
+    }
+
+    // ---- Debug format for DriftWarning and DriftError contain field data ----
+
+    #[test]
+    fn debug_drift_warning_contains_drift() {
+        let r = TimeValidationResult::DriftWarning {
+            drift: Duration::from_secs(45),
+        };
+        let debug = format!("{r:?}");
+        assert!(debug.contains("DriftWarning"));
+        assert!(debug.contains("45"));
+    }
+
+    #[test]
+    fn debug_drift_error_contains_drift() {
+        let r = TimeValidationResult::DriftError {
+            drift: Duration::from_secs(600),
+        };
+        let debug = format!("{r:?}");
+        assert!(debug.contains("DriftError"));
+        assert!(debug.contains("600"));
+    }
+
+    // ---- Eq for DriftError ----
+
+    #[test]
+    fn result_eq_drift_error_same_drift() {
+        let r1 = TimeValidationResult::DriftError {
+            drift: Duration::from_secs(500),
+        };
+        let r2 = TimeValidationResult::DriftError {
+            drift: Duration::from_secs(500),
+        };
+        assert_eq!(r1, r2);
+    }
+
+    #[test]
+    fn result_ne_drift_error_different_drift() {
+        let r1 = TimeValidationResult::DriftError {
+            drift: Duration::from_secs(500),
+        };
+        let r2 = TimeValidationResult::DriftError {
+            drift: Duration::from_secs(600),
+        };
+        assert_ne!(r1, r2);
+    }
+
+    // ---- classify_drift with sub-millisecond precision ----
+
+    #[test]
+    fn classify_drift_at_nanosecond_precision() {
+        let drift = Duration::from_nanos(1);
+        let result = classify_drift(drift);
+        assert!(matches!(result, TimeValidationResult::Valid));
+        assert!(result.should_proceed());
+        assert!(!result.is_error());
+    }
+
+    // ---- TimeValidation clone with drift fields ----
+
+    #[test]
+    fn time_validation_clone_with_drift() {
+        let validation = TimeValidation::with_drift(Duration::from_secs(60));
+        let cloned = validation.clone();
+        assert_eq!(validation.result, cloned.result);
+        assert_eq!(validation.drift, cloned.drift);
+        assert_eq!(validation.system_time, cloned.system_time);
+        assert_eq!(validation.ntp_time, cloned.ntp_time);
+    }
 }

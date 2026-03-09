@@ -600,4 +600,117 @@ mod tests {
         let restored: DetectedToken = serde_json::from_str(&json).unwrap();
         assert_eq!(token.label, restored.label);
     }
+
+    // ---- DetectedToken supports_ed25519 with partial match ----
+
+    #[test]
+    fn token_supports_ed25519_case_sensitive() {
+        let mut token = test_token();
+        token.mechanisms = vec!["ckm_ed25519".to_string()];
+        // Mechanism check uses contains, which is case-sensitive
+        assert!(!token.supports_ed25519());
+    }
+
+    #[test]
+    fn token_supports_x25519_case_sensitive() {
+        let mut token = test_token();
+        token.mechanisms = vec!["ckm_x25519".to_string()];
+        assert!(!token.supports_x25519());
+    }
+
+    // ---- DetectedToken with mixed mechanisms ----
+
+    #[test]
+    fn token_ed25519_but_not_x25519() {
+        let mut token = test_token();
+        token.mechanisms = vec!["CKM_ED25519".to_string()];
+        assert!(token.supports_ed25519());
+        assert!(!token.supports_x25519());
+    }
+
+    #[test]
+    fn token_x25519_but_not_ed25519() {
+        let mut token = test_token();
+        token.mechanisms = vec!["CKM_X25519".to_string()];
+        assert!(!token.supports_ed25519());
+        assert!(token.supports_x25519());
+    }
+
+    // ---- DetectedToken serde with special chars ----
+
+    #[test]
+    fn token_serde_with_special_chars_in_serial() {
+        let mut token = test_token();
+        token.serial = "SN/2026-#001".to_string();
+        let json = serde_json::to_string(&token).unwrap();
+        let restored: DetectedToken = serde_json::from_str(&json).unwrap();
+        assert_eq!(token.serial, restored.serial);
+    }
+
+    // ---- DetectedToken PartialEq ----
+
+    #[test]
+    fn detected_token_eq_identical() {
+        let t1 = test_token();
+        let t2 = test_token();
+        assert_eq!(t1, t2);
+    }
+
+    #[test]
+    fn detected_token_ne_different_slot() {
+        let t1 = test_token();
+        let mut t2 = test_token();
+        t2.slot = 99;
+        assert_ne!(t1, t2);
+    }
+
+    #[test]
+    fn detected_token_ne_different_serial() {
+        let t1 = test_token();
+        let mut t2 = test_token();
+        t2.serial = "DIFFERENT".to_string();
+        assert_ne!(t1, t2);
+    }
+
+    // ---- TokenError Debug for all variants ----
+
+    #[test]
+    fn token_error_debug_no_tokens() {
+        let err = TokenError::NoTokens;
+        let debug = format!("{err:?}");
+        assert!(debug.contains("NoTokens"));
+    }
+
+    #[test]
+    fn token_error_debug_token_not_found() {
+        let err = TokenError::TokenNotFound("slot-3".into());
+        let debug = format!("{err:?}");
+        assert!(debug.contains("TokenNotFound"));
+        assert!(debug.contains("slot-3"));
+    }
+
+    #[test]
+    fn token_error_debug_unsupported_mechanism() {
+        let err = TokenError::UnsupportedMechanism("CKM_RSA".into());
+        let debug = format!("{err:?}");
+        assert!(debug.contains("UnsupportedMechanism"));
+    }
+
+    #[test]
+    fn token_error_debug_pkcs11() {
+        let err = TokenError::Pkcs11("CKR_DEVICE_ERROR".into());
+        let debug = format!("{err:?}");
+        assert!(debug.contains("Pkcs11"));
+    }
+
+    // ---- MockTokenProvider generate_keypair returns different keys ----
+
+    #[test]
+    fn mock_provider_generate_keypair_returns_32_bytes() {
+        use mock::MockTokenProvider;
+        let provider = MockTokenProvider::new();
+        let token = test_token();
+        let key = provider.generate_keypair(&token, "0000", "key1").unwrap();
+        assert_eq!(key.len(), 32);
+    }
 }

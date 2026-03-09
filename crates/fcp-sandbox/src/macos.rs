@@ -1083,4 +1083,138 @@ mod tests {
         let profile = MacOsSandbox::generate_profile(&policy);
         assert!(profile.contains("(allow signal (target self))"));
     }
+
+    // ── New batch: profile generation combinations ──
+
+    #[test]
+    fn test_generate_profile_all_permissive() {
+        let mut policy = test_policy();
+        policy.deny_exec = false;
+        policy.deny_ptrace = false;
+        policy.block_direct_network = false;
+        let profile = MacOsSandbox::generate_profile(&policy);
+        assert!(profile.contains("(allow process-exec)"));
+        assert!(profile.contains("(allow process-fork)"));
+        assert!(profile.contains("(allow network*)"));
+        assert!(!profile.contains("Debugging denied"));
+    }
+
+    #[test]
+    fn test_generate_profile_all_restrictive() {
+        let policy = test_policy();
+        let profile = MacOsSandbox::generate_profile(&policy);
+        assert!(profile.contains("(deny process-exec)"));
+        assert!(profile.contains("(deny process-fork)"));
+        assert!(profile.contains("(deny network*)"));
+        assert!(profile.contains("Debugging denied"));
+    }
+
+    #[test]
+    fn test_generate_profile_cpu_1_percent() {
+        let mut policy = test_policy();
+        policy.cpu_percent = 1;
+        let profile = MacOsSandbox::generate_profile(&policy);
+        assert!(profile.contains("cpu=1%"));
+    }
+
+    #[test]
+    fn test_generate_profile_zero_memory() {
+        let mut policy = test_policy();
+        policy.memory_limit_bytes = 0;
+        let profile = MacOsSandbox::generate_profile(&policy);
+        assert!(profile.contains("memory=0MB"));
+    }
+
+    #[test]
+    fn test_generate_profile_many_readonly_paths() {
+        let mut policy = test_policy();
+        policy.readonly_paths = (0..10)
+            .map(|i| PathBuf::from(format!("/data/volume{i}")))
+            .collect();
+        let profile = MacOsSandbox::generate_profile(&policy);
+        for i in 0..10 {
+            assert!(profile.contains(&format!("/data/volume{i}")));
+        }
+    }
+
+    // ── New batch: sanitize_sbpl_path ──
+
+    #[test]
+    fn test_sanitize_sbpl_path_long_safe_path() {
+        let path = "/very/long/path/to/some/nested/directory/structure/file.dat";
+        assert_eq!(sanitize_sbpl_path(path), path);
+    }
+
+    #[test]
+    fn test_sanitize_sbpl_path_only_double_quote() {
+        let result = sanitize_sbpl_path("\"");
+        assert_eq!(result, "/dev/null/REJECTED_UNSAFE_PATH");
+    }
+
+    #[test]
+    fn test_sanitize_sbpl_path_only_open_paren() {
+        let result = sanitize_sbpl_path("(");
+        assert_eq!(result, "/dev/null/REJECTED_UNSAFE_PATH");
+    }
+
+    #[test]
+    fn test_sanitize_sbpl_path_only_close_paren() {
+        let result = sanitize_sbpl_path(")");
+        assert_eq!(result, "/dev/null/REJECTED_UNSAFE_PATH");
+    }
+
+    #[test]
+    fn test_sanitize_sbpl_path_carriage_return_only() {
+        let result = sanitize_sbpl_path("\r");
+        assert_eq!(result, "/dev/null/REJECTED_UNSAFE_PATH");
+    }
+
+    // ── New batch: verify_file_access edge cases ──
+
+    #[test]
+    fn test_verify_file_access_writable_path_read_allowed() {
+        let sandbox = MacOsSandbox::new();
+        let policy = test_policy();
+        // /tmp/test is writable, reading should also be allowed
+        assert!(
+            sandbox
+                .verify_file_access(&policy, Path::new("/tmp/test/some_file"), false)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn test_verify_file_access_system_library_subpath() {
+        let sandbox = MacOsSandbox::new();
+        let policy = test_policy();
+        assert!(
+            sandbox
+                .verify_file_access(
+                    &policy,
+                    Path::new("/System/Library/CoreServices/SystemVersion.plist"),
+                    false
+                )
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn test_verify_file_access_random_home_dir_denied() {
+        let sandbox = MacOsSandbox::new();
+        let policy = test_policy();
+        let result =
+            sandbox.verify_file_access(&policy, Path::new("/Users/admin/.ssh/id_rsa"), false);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_verify_file_access_write_to_system_lib_denied() {
+        let sandbox = MacOsSandbox::new();
+        let policy = test_policy();
+        let result =
+            sandbox.verify_file_access(&policy, Path::new("/usr/lib/malicious.dylib"), true);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("not allowed"));
+    }
 }

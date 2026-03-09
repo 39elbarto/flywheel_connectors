@@ -932,4 +932,134 @@ mod tests {
         let display = format!("{phase}");
         assert!(display.contains("SHA256:uniquevalue"));
     }
+
+    // ---- BootstrapPhase serde roundtrip for all simple variants ----
+
+    #[test]
+    fn phase_serde_time_validation() {
+        let phase = BootstrapPhase::TimeValidation;
+        let json = serde_json::to_string(&phase).unwrap();
+        let back: BootstrapPhase = serde_json::from_str(&json).unwrap();
+        assert_eq!(phase, back);
+    }
+
+    #[test]
+    fn phase_serde_key_generation() {
+        let phase = BootstrapPhase::KeyGeneration;
+        let json = serde_json::to_string(&phase).unwrap();
+        let back: BootstrapPhase = serde_json::from_str(&json).unwrap();
+        assert_eq!(phase, back);
+    }
+
+    // ---- description specific content ----
+
+    #[test]
+    fn description_ceremony_setup_contains_ceremony() {
+        let phase = BootstrapPhase::CeremonySetup {
+            participant_count: 3,
+            threshold: 2,
+        };
+        assert!(phase.description().contains("ceremony"));
+    }
+
+    #[test]
+    fn description_genesis_create_contains_genesis() {
+        assert!(BootstrapPhase::GenesisCreate.description().contains("genesis"));
+    }
+
+    #[test]
+    fn description_enrollment_contains_device() {
+        assert!(BootstrapPhase::Enrollment.description().contains("device"));
+    }
+
+    // ---- BootstrapPhase Clone for all remaining variants ----
+
+    #[test]
+    fn phase_clone_time_validation() {
+        let phase = BootstrapPhase::TimeValidation;
+        let cloned = phase.clone();
+        assert_eq!(phase, cloned);
+    }
+
+    #[test]
+    fn phase_clone_key_generation() {
+        let phase = BootstrapPhase::KeyGeneration;
+        let cloned = phase.clone();
+        assert_eq!(phase, cloned);
+    }
+
+    #[test]
+    fn phase_clone_genesis_create() {
+        let phase = BootstrapPhase::GenesisCreate;
+        let cloned = phase.clone();
+        assert_eq!(phase, cloned);
+    }
+
+    #[test]
+    fn phase_clone_enrollment() {
+        let phase = BootstrapPhase::Enrollment;
+        let cloned = phase.clone();
+        assert_eq!(phase, cloned);
+    }
+
+    #[test]
+    fn phase_clone_ceremony_round1() {
+        let phase = BootstrapPhase::CeremonyRound1 {
+            commitments_collected: 2,
+            commitments_needed: 5,
+        };
+        let cloned = phase.clone();
+        assert_eq!(phase, cloned);
+    }
+
+    #[test]
+    fn phase_clone_ceremony_round2() {
+        let phase = BootstrapPhase::CeremonyRound2 {
+            shares_distributed: 1,
+            shares_needed: 3,
+        };
+        let cloned = phase.clone();
+        assert_eq!(phase, cloned);
+    }
+
+    // ---- Phase Display roundtrip through serde ----
+
+    #[test]
+    fn phase_display_genesiscreate() {
+        assert_eq!(format!("{}", BootstrapPhase::GenesisCreate), "GenesisCreate");
+    }
+
+    #[test]
+    fn phase_display_enrollment() {
+        assert_eq!(format!("{}", BootstrapPhase::Enrollment), "Enrollment");
+    }
+
+    // ---- Phase inequality between different variants ----
+
+    #[test]
+    fn phase_ne_different_variants() {
+        assert_ne!(BootstrapPhase::Uninitialized, BootstrapPhase::TimeValidation);
+        assert_ne!(BootstrapPhase::KeyGeneration, BootstrapPhase::GenesisCreate);
+        assert_ne!(BootstrapPhase::Enrollment, BootstrapPhase::Uninitialized);
+    }
+
+    // ---- Phase is_resumable negative cases ----
+
+    #[test]
+    fn phase_completed_not_resumable() {
+        let phase = BootstrapPhase::Completed {
+            fingerprint: "fp".into(),
+            completed_at: Utc::now(),
+        };
+        assert!(!phase.is_resumable());
+    }
+
+    #[test]
+    fn phase_failed_not_resumable() {
+        let phase = BootstrapPhase::Failed {
+            reason: "err".into(),
+            at_phase: "p".into(),
+        };
+        assert!(!phase.is_resumable());
+    }
 }

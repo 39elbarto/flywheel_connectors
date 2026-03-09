@@ -1688,4 +1688,92 @@ mod tests {
         assert!(display.contains("Unsupported traceparent version"));
         assert!(display.contains("ff"));
     }
+
+    #[test]
+    fn test_trace_context_new_specific_ids() {
+        let trace_id = [0xDE; TRACE_ID_SIZE];
+        let span_id = [0xAD; SPAN_ID_SIZE];
+        let ctx = TraceContext::new(trace_id, span_id);
+        assert_eq!(ctx.trace_id_hex(), "dededededededededededededededede");
+        assert_eq!(ctx.span_id_hex(), "adadadadadadadad");
+    }
+
+    #[test]
+    fn test_trace_context_with_sampled_preserves_other_flags() {
+        let trace_id = [1u8; TRACE_ID_SIZE];
+        let span_id = [2u8; SPAN_ID_SIZE];
+        let mut ctx = TraceContext::new(trace_id, span_id);
+        ctx.trace_flags = 0xFE; // all bits except sampled
+        let sampled_ctx = ctx.with_sampled(true);
+        assert_eq!(sampled_ctx.trace_flags, 0xFF); // sampled bit added
+        let unsampled = sampled_ctx.with_sampled(false);
+        assert_eq!(unsampled.trace_flags, 0xFE); // sampled bit cleared, others preserved
+    }
+
+    #[test]
+    fn test_trace_context_from_traceparent_invalid_hex_trace_id() {
+        let traceparent = "00-ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ-00f067aa0ba902b7-01";
+        let result = TraceContext::from_traceparent(traceparent);
+        assert!(matches!(result, Err(TraceContextError::InvalidFormat(_))));
+    }
+
+    #[test]
+    fn test_trace_context_from_traceparent_invalid_span_id_length_short() {
+        let traceparent = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa-01";
+        let result = TraceContext::from_traceparent(traceparent);
+        assert!(matches!(result, Err(TraceContextError::InvalidFormat(_))));
+    }
+
+    #[test]
+    fn test_trace_context_serde_cbor_roundtrip() {
+        let ctx = TraceContext::generate().with_trace_state("cbor=test");
+        let mut bytes = Vec::new();
+        ciborium::into_writer(&ctx, &mut bytes).unwrap();
+        let parsed: TraceContext = ciborium::from_reader(&bytes[..]).unwrap();
+        assert_eq!(ctx.trace_id, parsed.trace_id);
+        assert_eq!(ctx.span_id, parsed.span_id);
+        assert_eq!(ctx.trace_state, parsed.trace_state);
+    }
+
+    #[test]
+    fn test_telemetry_context_new_equals_default() {
+        let new_ctx = TelemetryContext::new();
+        let default_ctx = TelemetryContext::default();
+        assert_eq!(new_ctx.correlation_id, default_ctx.correlation_id);
+        assert_eq!(new_ctx.zone_id, default_ctx.zone_id);
+        assert_eq!(new_ctx.connector_id, default_ctx.connector_id);
+    }
+
+    #[test]
+    fn test_telemetry_context_add_many_fields() {
+        let ctx = TelemetryContext::new();
+        for i in 0..50 {
+            ctx.add_field(format!("key_{i}"), format!("val_{i}"));
+        }
+        let fields = ctx.all_fields();
+        assert_eq!(fields.len(), 50);
+    }
+
+    #[test]
+    fn test_telemetry_context_child_span_preserves_correlation_id() {
+        let ctx = TelemetryContext::with_trace().correlation_id("corr-123");
+        let child = ctx.child_span();
+        // correlation_id should be preserved in child
+        assert_eq!(child.correlation_id, Some("corr-123".to_string()));
+    }
+
+    #[test]
+    fn test_trace_context_error_is_std_error() {
+        let err: Box<dyn std::error::Error> =
+            Box::new(TraceContextError::InvalidFormat("test".to_string()));
+        assert!(err.to_string().contains("Invalid traceparent format"));
+    }
+
+    #[test]
+    fn test_telemetry_context_with_trace_has_32_char_correlation() {
+        let ctx = TelemetryContext::with_trace();
+        let corr_id = ctx.correlation_id.as_ref().unwrap();
+        assert_eq!(corr_id.len(), 32); // hex-encoded 16 bytes
+        assert!(corr_id.chars().all(|c| c.is_ascii_hexdigit()));
+    }
 }

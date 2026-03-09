@@ -2885,4 +2885,298 @@ mod tests {
         // Component is usable
         let _engine = runner.runtime().engine();
     }
+
+    // ── New batch: WasiError display completeness ──
+
+    #[test]
+    fn test_wasi_error_display_timeout() {
+        let e = WasiError::Timeout;
+        assert!(e.to_string().contains("timeout"));
+    }
+
+    #[test]
+    fn test_wasi_error_display_io() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::BrokenPipe, "pipe broken");
+        let e = WasiError::from(io_err);
+        assert!(e.to_string().contains("pipe broken"));
+    }
+
+    #[test]
+    fn test_wasi_error_display_sandbox() {
+        let sandbox_err = SandboxError::InvalidConfig("bad config".into());
+        let e = WasiError::from(sandbox_err);
+        assert!(e.to_string().contains("bad config"));
+    }
+
+    // ── New batch: DeterministicRng ──
+
+    #[test]
+    fn test_deterministic_rng_large_seed() {
+        let mut rng = DeterministicRng::new(u64::MAX);
+        let val = rng.next_u64();
+        assert_ne!(val, 0);
+    }
+
+    #[test]
+    fn test_deterministic_rng_sequential_values_differ() {
+        let mut rng = DeterministicRng::new(42);
+        let v1 = rng.next_u64();
+        let v2 = rng.next_u64();
+        let v3 = rng.next_u64();
+        assert_ne!(v1, v2);
+        assert_ne!(v2, v3);
+    }
+
+    #[test]
+    fn test_deterministic_seed_bytes_deterministic() {
+        let bytes1 = deterministic_seed_bytes(42);
+        let bytes2 = deterministic_seed_bytes(42);
+        assert_eq!(bytes1, bytes2);
+        assert_eq!(bytes1.len(), 32);
+    }
+
+    #[test]
+    fn test_deterministic_seed_bytes_different_seeds() {
+        let bytes1 = deterministic_seed_bytes(1);
+        let bytes2 = deterministic_seed_bytes(2);
+        assert_ne!(bytes1, bytes2);
+    }
+
+    #[test]
+    fn test_deterministic_seed_bytes_zero_seed() {
+        let bytes = deterministic_seed_bytes(0);
+        assert_eq!(bytes.len(), 32);
+        // Zero seed uses fallback non-zero state, so bytes should not be all zeros
+        assert!(bytes.iter().any(|&b| b != 0));
+    }
+
+    // ── New batch: FixedWallClock ──
+
+    #[test]
+    fn test_fixed_wall_clock_resolution() {
+        let clock = FixedWallClock::new(1_700_000_000);
+        assert_eq!(clock.resolution(), Duration::from_nanos(1));
+    }
+
+    #[test]
+    fn test_fixed_wall_clock_now() {
+        let clock = FixedWallClock::new(1_234_567);
+        assert_eq!(clock.now(), Duration::from_secs(1_234_567));
+    }
+
+    #[test]
+    fn test_fixed_wall_clock_zero() {
+        let clock = FixedWallClock::new(0);
+        assert_eq!(clock.now(), Duration::ZERO);
+    }
+
+    #[test]
+    fn test_fixed_wall_clock_debug() {
+        let clock = FixedWallClock::new(100);
+        let dbg = format!("{clock:?}");
+        assert!(dbg.contains("FixedWallClock"));
+    }
+
+    // ── New batch: FixedMonotonicClock ──
+
+    #[test]
+    fn test_fixed_monotonic_clock_resolution() {
+        let clock = FixedMonotonicClock::new(1_000_000);
+        assert_eq!(clock.resolution(), 1);
+    }
+
+    #[test]
+    fn test_fixed_monotonic_clock_now_increments() {
+        let clock = FixedMonotonicClock::new(1_000_000);
+        let t1 = clock.now();
+        let t2 = clock.now();
+        let t3 = clock.now();
+        assert_eq!(t1, 0);
+        assert_eq!(t2, 1_000_000);
+        assert_eq!(t3, 2_000_000);
+    }
+
+    #[test]
+    fn test_fixed_monotonic_clock_debug() {
+        let clock = FixedMonotonicClock::new(500);
+        let dbg = format!("{clock:?}");
+        assert!(dbg.contains("FixedMonotonicClock"));
+    }
+
+    // ── New batch: socket_addr_allowed edge cases ──
+
+    #[test]
+    fn test_socket_addr_allowed_localhost_denied() {
+        let constraints = NetworkConstraints {
+            host_allow: vec![],
+            port_allow: vec![80],
+            ip_allow: vec![],
+            cidr_deny: vec![],
+            deny_localhost: true,
+            deny_private_ranges: false,
+            deny_tailnet_ranges: false,
+            require_sni: false,
+            spki_pins: vec![],
+            deny_ip_literals: false,
+            require_host_canonicalization: false,
+            dns_max_ips: 16,
+            max_redirects: 5,
+            connect_timeout_ms: 10_000,
+            total_timeout_ms: 60_000,
+            max_response_bytes: 10_485_760,
+        };
+        let addr: SocketAddr = "127.0.0.1:80".parse().unwrap();
+        assert!(!socket_addr_allowed(&constraints, addr, SocketAddrUse::TcpConnect));
+    }
+
+    #[test]
+    fn test_socket_addr_allowed_private_range_denied() {
+        let constraints = NetworkConstraints {
+            host_allow: vec![],
+            port_allow: vec![443],
+            ip_allow: vec![],
+            cidr_deny: vec![],
+            deny_localhost: false,
+            deny_private_ranges: true,
+            deny_tailnet_ranges: false,
+            require_sni: false,
+            spki_pins: vec![],
+            deny_ip_literals: false,
+            require_host_canonicalization: false,
+            dns_max_ips: 16,
+            max_redirects: 5,
+            connect_timeout_ms: 10_000,
+            total_timeout_ms: 60_000,
+            max_response_bytes: 10_485_760,
+        };
+        let addr: SocketAddr = "10.0.0.1:443".parse().unwrap();
+        assert!(!socket_addr_allowed(&constraints, addr, SocketAddrUse::TcpConnect));
+    }
+
+    #[test]
+    fn test_socket_addr_allowed_udp_bind_denied() {
+        let constraints = NetworkConstraints {
+            host_allow: vec![],
+            port_allow: vec![443],
+            ip_allow: vec![],
+            cidr_deny: vec![],
+            deny_localhost: false,
+            deny_private_ranges: false,
+            deny_tailnet_ranges: false,
+            require_sni: false,
+            spki_pins: vec![],
+            deny_ip_literals: false,
+            require_host_canonicalization: false,
+            dns_max_ips: 16,
+            max_redirects: 5,
+            connect_timeout_ms: 10_000,
+            total_timeout_ms: 60_000,
+            max_response_bytes: 10_485_760,
+        };
+        let addr: SocketAddr = "1.2.3.4:443".parse().unwrap();
+        assert!(!socket_addr_allowed(&constraints, addr, SocketAddrUse::UdpBind));
+    }
+
+    // ── New batch: WasiConfig from_policy ──
+
+    #[test]
+    fn test_wasi_config_from_policy_zero_cpu() {
+        use crate::sandbox::{CompiledPolicy, PlatformFlags};
+        use fcp_manifest::SandboxProfile;
+        let policy = CompiledPolicy {
+            profile: SandboxProfile::Strict,
+            memory_limit_bytes: 128 * 1024 * 1024,
+            cpu_percent: 0,
+            wall_clock_timeout: Duration::from_secs(10),
+            readonly_paths: vec![],
+            writable_paths: vec![],
+            deny_exec: true,
+            deny_ptrace: true,
+            block_direct_network: true,
+            state_dir: None,
+            platform_flags: PlatformFlags::default(),
+        };
+        let config = WasiConfig::from_policy(&policy).unwrap();
+        assert_eq!(config.max_fuel, 1); // cpu_percent=0 -> minimal fuel
+    }
+
+    #[test]
+    fn test_wasi_config_from_policy_max_cpu() {
+        use crate::sandbox::{CompiledPolicy, PlatformFlags};
+        use fcp_manifest::SandboxProfile;
+        let policy = CompiledPolicy {
+            profile: SandboxProfile::Permissive,
+            memory_limit_bytes: 1024 * 1024 * 1024,
+            cpu_percent: 100,
+            wall_clock_timeout: Duration::from_secs(120),
+            readonly_paths: vec![],
+            writable_paths: vec![],
+            deny_exec: false,
+            deny_ptrace: false,
+            block_direct_network: false,
+            state_dir: None,
+            platform_flags: PlatformFlags::default(),
+        };
+        let config = WasiConfig::from_policy(&policy).unwrap();
+        assert_eq!(config.max_fuel, 1_000_000_000_000);
+        assert!(!config.block_direct_network);
+    }
+
+    // ── New batch: WasiRuntime linker/engine accessors ──
+
+    #[test]
+    fn test_wasi_runtime_engine_accessor() {
+        let config = WasiConfig::default();
+        let runtime = WasiRuntime::new(config).unwrap();
+        let _engine = runtime.engine();
+        let _linker = runtime.linker();
+    }
+
+    // ── New batch: extract_custom_section edge cases ──
+
+    #[test]
+    fn test_extract_custom_section_empty_payload() {
+        let section_name = b"empty";
+        let name_len = section_name.len();
+        // section content = name_len_byte + name + (empty payload)
+        let content_len = 1 + name_len;
+
+        let mut wasm = Vec::new();
+        wasm.extend_from_slice(b"\0asm\x01\0\0\0");
+        wasm.push(0); // custom section id
+        wasm.push(content_len as u8);
+        wasm.push(name_len as u8);
+        wasm.extend_from_slice(section_name);
+        // no payload
+
+        let result = extract_custom_section(&wasm, "empty");
+        assert_eq!(result, Some(vec![]));
+    }
+
+    #[test]
+    fn test_extract_custom_section_7_bytes_too_short() {
+        // Exactly 7 bytes, less than required 8 for WASM magic
+        assert!(extract_custom_section(&[0, 1, 2, 3, 4, 5, 6], "x").is_none());
+    }
+
+    // ── New batch: LEB128 edge cases ──
+
+    #[test]
+    fn test_leb128_max_single_byte() {
+        // 0x7F = 127, single byte, no continuation
+        assert_eq!(read_leb128(&[0x7F]), Some((127, 1)));
+    }
+
+    #[test]
+    fn test_leb128_two_byte_256() {
+        // 256 = 0x80 0x02
+        assert_eq!(read_leb128(&[0x80, 0x02]), Some((256, 2)));
+    }
+
+    #[test]
+    fn test_leb128_trailing_bytes_ignored() {
+        // Only reads until terminator; trailing bytes are not consumed
+        let result = read_leb128(&[0x05, 0xFF, 0xFF]);
+        assert_eq!(result, Some((5, 1)));
+    }
 }

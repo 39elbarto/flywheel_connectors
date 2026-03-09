@@ -902,4 +902,255 @@ mod tests {
         let policy = CompiledPolicy::from_manifest(&section, None).unwrap();
         assert!(policy.block_direct_network);
     }
+
+    // ── New batch: SandboxError display and debug additional variants ──
+
+    #[test]
+    fn test_sandbox_error_unsupported_platform_display() {
+        let e = SandboxError::UnsupportedPlatform("haiku".into());
+        let msg = e.to_string();
+        assert!(msg.contains("haiku"));
+        assert!(msg.contains("not supported"));
+    }
+
+    #[test]
+    fn test_sandbox_error_policy_compilation_display() {
+        let e = SandboxError::PolicyCompilationFailed("invalid path".into());
+        let msg = e.to_string();
+        assert!(msg.contains("invalid path"));
+        assert!(msg.contains("compile"));
+    }
+
+    #[test]
+    fn test_sandbox_error_apply_failed_display() {
+        let e = SandboxError::ApplyFailed("seccomp rejected".into());
+        let msg = e.to_string();
+        assert!(msg.contains("seccomp rejected"));
+        assert!(msg.contains("apply"));
+    }
+
+    #[test]
+    fn test_sandbox_error_resource_limit_display() {
+        let e = SandboxError::ResourceLimitExceeded("cpu time".into());
+        let msg = e.to_string();
+        assert!(msg.contains("cpu time"));
+    }
+
+    #[test]
+    fn test_sandbox_error_invalid_config_display() {
+        let e = SandboxError::InvalidConfig("cpu_percent > 100".into());
+        let msg = e.to_string();
+        assert!(msg.contains("cpu_percent > 100"));
+    }
+
+    #[test]
+    fn test_sandbox_error_syscall_display() {
+        let e = SandboxError::SyscallFailed("prctl(PR_SET_NO_NEW_PRIVS)".into());
+        let msg = e.to_string();
+        assert!(msg.contains("prctl"));
+    }
+
+    #[test]
+    fn test_sandbox_error_timeout_display() {
+        let e = SandboxError::Timeout;
+        let msg = e.to_string();
+        assert!(msg.contains("timeout"));
+    }
+
+    #[test]
+    fn test_sandbox_error_io_permission_denied() {
+        let io_err =
+            std::io::Error::new(std::io::ErrorKind::PermissionDenied, "access denied");
+        let e: SandboxError = io_err.into();
+        let msg = e.to_string();
+        assert!(msg.contains("access denied"));
+    }
+
+    #[test]
+    fn test_sandbox_error_io_not_found() {
+        let io_err =
+            std::io::Error::new(std::io::ErrorKind::NotFound, "file missing");
+        let e: SandboxError = io_err.into();
+        let msg = e.to_string();
+        assert!(msg.contains("file missing"));
+    }
+
+    #[test]
+    fn test_sandbox_error_debug_all_variants() {
+        let errors: Vec<SandboxError> = vec![
+            SandboxError::UnsupportedPlatform("os".into()),
+            SandboxError::PolicyCompilationFailed("x".into()),
+            SandboxError::ApplyFailed("y".into()),
+            SandboxError::ResourceLimitExceeded("z".into()),
+            SandboxError::InvalidConfig("a".into()),
+            SandboxError::SyscallFailed("b".into()),
+            SandboxError::Timeout,
+        ];
+        for err in &errors {
+            let dbg = format!("{err:?}");
+            assert!(!dbg.is_empty());
+        }
+    }
+
+    // ── New batch: PlatformFlags edge cases ──
+
+    #[test]
+    fn test_platform_flags_with_multiple_entitlements() {
+        let flags = PlatformFlags {
+            linux_use_landlock: false,
+            linux_use_userns: false,
+            macos_entitlements: vec![
+                "com.apple.security.app-sandbox".into(),
+                "com.apple.security.network.client".into(),
+                "com.apple.security.files.user-selected.read-only".into(),
+            ],
+            windows_low_integrity: false,
+        };
+        assert!(!flags.is_empty());
+        assert_eq!(flags.macos_entitlements.len(), 3);
+    }
+
+    #[test]
+    fn test_platform_flags_all_fields_set() {
+        let flags = PlatformFlags {
+            linux_use_landlock: true,
+            linux_use_userns: true,
+            macos_entitlements: vec!["ent".into()],
+            windows_low_integrity: true,
+        };
+        assert!(!flags.is_empty());
+        let json = serde_json::to_string(&flags).unwrap();
+        let rt: PlatformFlags = serde_json::from_str(&json).unwrap();
+        assert!(rt.linux_use_landlock);
+        assert!(rt.linux_use_userns);
+        assert_eq!(rt.macos_entitlements.len(), 1);
+        assert!(rt.windows_low_integrity);
+    }
+
+    #[test]
+    fn test_platform_flags_serde_partial_fields() {
+        // Only some fields present in JSON; rest should default
+        let json = r#"{"linux_use_landlock": true}"#;
+        let flags: PlatformFlags = serde_json::from_str(json).unwrap();
+        assert!(flags.linux_use_landlock);
+        assert!(!flags.linux_use_userns);
+        assert!(flags.macos_entitlements.is_empty());
+        assert!(!flags.windows_low_integrity);
+    }
+
+    // ── New batch: CompiledPolicy edge cases ──
+
+    #[test]
+    fn test_compiled_policy_empty_readonly_and_writable() {
+        let mut section = test_sandbox_section();
+        section.fs_readonly_paths = vec![];
+        section.fs_writable_paths = vec![];
+        let policy = CompiledPolicy::from_manifest(&section, None).unwrap();
+        assert!(policy.readonly_paths.is_empty());
+        assert!(policy.writable_paths.is_empty());
+    }
+
+    #[test]
+    fn test_compiled_policy_zero_timeout() {
+        let mut section = test_sandbox_section();
+        section.wall_clock_timeout_ms = 0;
+        let policy = CompiledPolicy::from_manifest(&section, None).unwrap();
+        assert_eq!(policy.wall_clock_timeout, Duration::from_millis(0));
+    }
+
+    #[test]
+    fn test_compiled_policy_large_memory() {
+        let mut section = test_sandbox_section();
+        section.memory_mb = 32_768; // 32 GB
+        let policy = CompiledPolicy::from_manifest(&section, None).unwrap();
+        assert_eq!(
+            policy.memory_limit_bytes,
+            32_768 * 1024 * 1024
+        );
+    }
+
+    #[test]
+    fn test_compiled_policy_serde_json_roundtrip_all_fields() {
+        let section = test_sandbox_section();
+        let state_dir = Some(PathBuf::from("/var/data"));
+        let flags = PlatformFlags {
+            linux_use_landlock: true,
+            linux_use_userns: false,
+            macos_entitlements: vec!["ent".into()],
+            windows_low_integrity: true,
+        };
+        let policy = CompiledPolicy::from_manifest(&section, state_dir)
+            .unwrap()
+            .with_platform_flags(flags);
+        let json = serde_json::to_string_pretty(&policy).unwrap();
+        let rt: CompiledPolicy = serde_json::from_str(&json).unwrap();
+        assert_eq!(rt.profile, policy.profile);
+        assert_eq!(rt.memory_limit_bytes, policy.memory_limit_bytes);
+        assert_eq!(rt.cpu_percent, policy.cpu_percent);
+        assert_eq!(rt.deny_exec, policy.deny_exec);
+        assert_eq!(rt.deny_ptrace, policy.deny_ptrace);
+        assert_eq!(rt.block_direct_network, policy.block_direct_network);
+        assert_eq!(rt.state_dir, policy.state_dir);
+        assert!(rt.platform_flags.linux_use_landlock);
+        assert!(rt.platform_flags.windows_low_integrity);
+    }
+
+    // ── New batch: expand_path edge cases ──
+
+    #[test]
+    fn test_expand_path_state_dir_with_deep_nesting() {
+        let sd = PathBuf::from("/mnt/data");
+        assert_eq!(
+            expand_path("$CONNECTOR_STATE/a/b/c/d/e/f", Some(&sd)),
+            Some(PathBuf::from("/mnt/data/a/b/c/d/e/f"))
+        );
+    }
+
+    #[test]
+    fn test_expand_path_dollar_sign_not_connector_state() {
+        // Path starting with $ but not $CONNECTOR_STATE should be literal
+        assert_eq!(
+            expand_path("$HOME/data", None),
+            Some(PathBuf::from("$HOME/data"))
+        );
+    }
+
+    #[test]
+    fn test_expand_path_relative_path() {
+        assert_eq!(
+            expand_path("relative/path", None),
+            Some(PathBuf::from("relative/path"))
+        );
+    }
+
+    // ── New batch: NoOpSandbox default trait ──
+
+    #[test]
+    fn test_noop_sandbox_default_trait() {
+        let sandbox = NoOpSandbox;
+        assert!(sandbox.is_available());
+        assert_eq!(sandbox.platform_name(), "noop");
+    }
+
+    #[test]
+    fn test_noop_sandbox_verify_all_operations() {
+        let sandbox = NoOpSandbox;
+        let section = test_sandbox_section();
+        let policy = CompiledPolicy::from_manifest(&section, None).unwrap();
+
+        // All verifications should pass for NoOp
+        assert!(
+            sandbox
+                .verify_file_access(&policy, std::path::Path::new("/etc/secret"), true)
+                .is_ok()
+        );
+        assert!(
+            sandbox
+                .verify_file_access(&policy, std::path::Path::new("/nonexistent"), false)
+                .is_ok()
+        );
+        assert!(sandbox.verify_exec_allowed(&policy).is_ok());
+        assert!(sandbox.verify_network_blocked(&policy).is_ok());
+        assert!(sandbox.apply(&policy).is_ok());
+    }
 }

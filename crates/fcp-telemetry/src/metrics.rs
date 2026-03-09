@@ -947,4 +947,70 @@ mod tests {
     fn test_histogram_with_large_value() {
         record_histogram("large_hist", f64::MAX / 2.0, &[("test", "large")]);
     }
+
+    #[test]
+    fn test_timer_elapsed_ms_positive() {
+        let timer = Timer::start("ms_positive_test", &[]);
+        let ms = timer.elapsed_ms();
+        // Should be a non-negative value
+        assert!(ms < 1000); // should be close to 0 on a fast machine
+    }
+
+    #[test]
+    fn test_timer_guard_multiple_elapsed_calls() {
+        let guard = TimerGuard::new("multi_elapsed_guard", &[("test", "multi")]);
+        let e1 = guard.elapsed_seconds();
+        let e2 = guard.elapsed_seconds();
+        let e3 = guard.elapsed_seconds();
+        // Elapsed values should be non-decreasing
+        assert!(e2 >= e1);
+        assert!(e3 >= e2);
+    }
+
+    #[test]
+    fn test_timer_with_no_labels() {
+        let timer = Timer::start("no_labels_timer", &[]);
+        assert!(timer.labels.is_empty());
+        assert_eq!(timer.name, "no_labels_timer");
+    }
+
+    #[test]
+    fn test_timer_stop_consumes_timer() {
+        let timer = Timer::start("consume_test", &[]);
+        timer.stop();
+        // timer is consumed, so this won't compile if we try to use it again
+    }
+
+    #[test]
+    fn test_record_request_success_with_zero_duration() {
+        record_request_success("zero-duration", "read", 0.0);
+    }
+
+    #[test]
+    fn test_record_request_error_with_empty_type() {
+        record_request_error("test-connector", "write", "", 0.5);
+    }
+
+    #[test]
+    fn test_update_health_status_many_times() {
+        for _ in 0..100 {
+            update_health_status("stress-connector", HealthStatusMetric::Ready);
+        }
+    }
+
+    #[test]
+    fn test_update_rate_limit_boundary_values() {
+        update_rate_limit("boundary", 1, true);
+        update_rate_limit("boundary", 1, false);
+    }
+
+    #[test]
+    fn test_record_event_dropped_empty_type() {
+        record_event_dropped("connector", "", "empty_type");
+    }
+
+    #[test]
+    fn test_symbol_coverage_zero_distinct_nodes() {
+        record_symbol_coverage("z:empty", 0, 0, 0, 0);
+    }
 }

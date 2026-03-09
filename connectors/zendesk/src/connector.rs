@@ -716,6 +716,128 @@ impl ZendeskConnector {
                         related: vec![CapabilityId::from_static("zendesk.update_ticket")],
                     },
                 ),
+                // ── SLA Tracking ─────────────────────────────────────────
+                op_info(
+                    "zendesk.sla.policies",
+                    "List SLA policies",
+                    json!({
+                        "type": "object",
+                        "properties": {}
+                    }),
+                    json!({
+                        "type": "object",
+                        "required": ["sla_policies"],
+                        "properties": {
+                            "sla_policies": { "type": "array", "items": { "type": "object" } },
+                            "count": { "type": "integer" }
+                        }
+                    }),
+                    "zendesk.read",
+                    RiskLevel::Low,
+                    SafetyTier::Safe,
+                    IdempotencyClass::Strict,
+                    AgentHint {
+                        when_to_use: "List all SLA policies configured in this Zendesk instance, including targets and conditions.".into(),
+                        common_mistakes: vec!["Expecting per-ticket SLA data here — use zendesk.sla.ticket_status for that.".into()],
+                        examples: vec!["{}".into()],
+                        related: vec![CapabilityId::from_static("zendesk.sla.ticket_status")],
+                    },
+                ),
+                op_info(
+                    "zendesk.sla.ticket_status",
+                    "Get SLA status for a specific ticket via ticket metrics",
+                    json!({
+                        "type": "object",
+                        "required": ["ticket_id"],
+                        "properties": {
+                            "ticket_id": { "type": "integer", "description": "Ticket ID (numeric)" }
+                        }
+                    }),
+                    json!({
+                        "type": "object",
+                        "required": ["ticket_metric"],
+                        "properties": {
+                            "ticket_metric": { "type": "object" }
+                        }
+                    }),
+                    "zendesk.read",
+                    RiskLevel::Low,
+                    SafetyTier::Safe,
+                    IdempotencyClass::Strict,
+                    AgentHint {
+                        when_to_use: "Retrieve SLA-related metrics for a specific ticket, including reply time, resolution time, and agent wait time.".into(),
+                        common_mistakes: vec!["Using ticket subject instead of numeric ticket_id.".into()],
+                        examples: vec![r#"{"ticket_id": 12345}"#.into()],
+                        related: vec![
+                            CapabilityId::from_static("zendesk.sla.policies"),
+                            CapabilityId::from_static("zendesk.get_ticket"),
+                        ],
+                    },
+                ),
+                // ── Analytics ────────────────────────────────────────────
+                op_info(
+                    "zendesk.analytics.ticket_metrics",
+                    "List aggregate ticket metrics across all tickets",
+                    json!({
+                        "type": "object",
+                        "properties": {
+                            "page_size": { "type": "integer", "minimum": 1, "maximum": 100, "description": "Number of metrics per page" }
+                        }
+                    }),
+                    json!({
+                        "type": "object",
+                        "required": ["ticket_metrics"],
+                        "properties": {
+                            "ticket_metrics": { "type": "array", "items": { "type": "object" } },
+                            "count": { "type": "integer" }
+                        }
+                    }),
+                    "zendesk.read",
+                    RiskLevel::Low,
+                    SafetyTier::Safe,
+                    IdempotencyClass::Strict,
+                    AgentHint {
+                        when_to_use: "Retrieve aggregate ticket metrics (reply times, resolution times) across all tickets.".into(),
+                        common_mistakes: vec!["Confusing this with per-ticket SLA metrics — use zendesk.sla.ticket_status for a single ticket.".into()],
+                        examples: vec![r#"{"page_size": 100}"#.into()],
+                        related: vec![
+                            CapabilityId::from_static("zendesk.sla.ticket_status"),
+                            CapabilityId::from_static("zendesk.search_tickets"),
+                        ],
+                    },
+                ),
+                op_info(
+                    "zendesk.analytics.satisfaction_ratings",
+                    "List CSAT / satisfaction ratings",
+                    json!({
+                        "type": "object",
+                        "properties": {
+                            "score": { "type": "string", "enum": ["good", "bad", "offered", "unoffered"], "description": "Filter by score type" },
+                            "page_size": { "type": "integer", "minimum": 1, "maximum": 100, "description": "Number of ratings per page" }
+                        }
+                    }),
+                    json!({
+                        "type": "object",
+                        "required": ["satisfaction_ratings"],
+                        "properties": {
+                            "satisfaction_ratings": { "type": "array", "items": { "type": "object" } },
+                            "count": { "type": "integer" }
+                        }
+                    }),
+                    "zendesk.read",
+                    RiskLevel::Low,
+                    SafetyTier::Safe,
+                    IdempotencyClass::Strict,
+                    AgentHint {
+                        when_to_use: "Retrieve customer satisfaction survey results. Can filter by score (good/bad/offered/unoffered).".into(),
+                        common_mistakes: vec!["Not specifying a score filter — returns all ratings which can be a large result set.".into()],
+                        examples: vec![r#"{"score": "good", "page_size": 50}"#.into()],
+                        related: vec![
+                            CapabilityId::from_static("zendesk.analytics.ticket_metrics"),
+                            CapabilityId::from_static("zendesk.get_ticket"),
+                        ],
+                    },
+                ),
             ],
             events: vec![],
             resource_types: vec![],
@@ -803,6 +925,12 @@ impl ZendeskConnector {
             "zendesk.get_article" => self.invoke_get_article(input).await,
             "zendesk.search_users" => self.invoke_search_users(input).await,
             "zendesk.apply_macro" => self.invoke_apply_macro(input).await,
+            "zendesk.sla.policies" => self.invoke_list_sla_policies().await,
+            "zendesk.sla.ticket_status" => self.invoke_get_ticket_sla(input).await,
+            "zendesk.analytics.ticket_metrics" => self.invoke_list_ticket_metrics(input).await,
+            "zendesk.analytics.satisfaction_ratings" => {
+                self.invoke_list_satisfaction_ratings(input).await
+            }
             _ => Err(FcpError::OperationNotGranted {
                 operation: operation.into(),
             }),
@@ -930,6 +1058,59 @@ impl ZendeskConnector {
         let macro_id = require_i64(&input, "macro_id")?;
         let result = client
             .apply_macro(ticket_id, macro_id)
+            .await
+            .map_err(|e: ZendeskError| e.to_fcp_error())?;
+        Ok(result)
+    }
+
+    // ── SLA operations ───────────────────────────────────────────
+
+    async fn invoke_list_sla_policies(&self) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let result = client
+            .list_sla_policies()
+            .await
+            .map_err(|e: ZendeskError| e.to_fcp_error())?;
+        Ok(result)
+    }
+
+    async fn invoke_get_ticket_sla(
+        &self,
+        input: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let ticket_id = require_i64(&input, "ticket_id")?;
+        let result = client
+            .get_ticket_sla(ticket_id)
+            .await
+            .map_err(|e: ZendeskError| e.to_fcp_error())?;
+        Ok(result)
+    }
+
+    // ── Analytics operations ─────────────────────────────────────
+
+    async fn invoke_list_ticket_metrics(
+        &self,
+        input: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let page_size = input.get("page_size").and_then(|v| v.as_i64());
+        let result = client
+            .list_ticket_metrics(page_size)
+            .await
+            .map_err(|e: ZendeskError| e.to_fcp_error())?;
+        Ok(result)
+    }
+
+    async fn invoke_list_satisfaction_ratings(
+        &self,
+        input: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let score = input.get("score").and_then(|v| v.as_str());
+        let page_size = input.get("page_size").and_then(|v| v.as_i64());
+        let result = client
+            .list_satisfaction_ratings(score, page_size)
             .await
             .map_err(|e: ZendeskError| e.to_fcp_error())?;
         Ok(result)
@@ -1133,7 +1314,11 @@ mod tests {
         assert!(op_ids.contains(&"zendesk.get_article"));
         assert!(op_ids.contains(&"zendesk.search_users"));
         assert!(op_ids.contains(&"zendesk.apply_macro"));
-        assert_eq!(ops.len(), 10);
+        assert!(op_ids.contains(&"zendesk.sla.policies"));
+        assert!(op_ids.contains(&"zendesk.sla.ticket_status"));
+        assert!(op_ids.contains(&"zendesk.analytics.ticket_metrics"));
+        assert!(op_ids.contains(&"zendesk.analytics.satisfaction_ratings"));
+        assert_eq!(ops.len(), 14);
     }
 
     #[test]

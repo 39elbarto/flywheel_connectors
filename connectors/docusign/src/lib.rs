@@ -28,5 +28,6 @@
 
 pub mod client;
 pub mod connector;
+pub mod envelopes;
 pub mod error;
 pub mod types;

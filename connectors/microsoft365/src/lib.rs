@@ -35,4 +35,7 @@
 pub mod client;
 pub mod connector;
 pub mod error;
+pub mod excel;
+pub mod planner;
+pub mod sharepoint;
 pub mod types;

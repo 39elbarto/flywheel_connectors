@@ -8,6 +8,24 @@ use serde::{Deserialize, Serialize};
 
 use crate::{ConnectorId, CorrelationId, InstanceId, Principal, ZoneId};
 
+/// Policy governing how sequence numbers on an event stream are interpreted.
+///
+/// Connectors that emit ordering metadata should set this to indicate whether
+/// ordering is global (gateway-scoped), per-key, or unordered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OrderingPolicy {
+    /// The gateway (host) assigns sequence numbers globally.
+    /// Events are totally ordered across all keys.
+    Gateway,
+    /// Sequence numbers are scoped per `stream_key`.
+    /// Events with the same key are ordered; cross-key order is undefined.
+    PerKey,
+    /// No ordering guarantee. Sequence numbers may be used for deduplication
+    /// but do not imply delivery order.
+    Unordered,
+}
+
 /// Event envelope wrapper for streaming events.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EventEnvelope {
@@ -28,6 +46,21 @@ pub struct EventEnvelope {
 
     /// Event data
     pub data: EventData,
+
+    /// Optional stream key for per-key ordering.
+    ///
+    /// When set, events with the same `stream_key` are delivered in `seq` order.
+    /// Connectors should populate this with a stable identifier (e.g., channel ID,
+    /// user ID, or resource ID) when the source system provides key-scoped ordering.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub stream_key: Option<String>,
+
+    /// Ordering policy that governs how sequence numbers should be interpreted.
+    ///
+    /// Defaults to `None` (unspecified) for backward compatibility. Connectors
+    /// that emit ordering metadata should set this explicitly.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub ordering: Option<OrderingPolicy>,
 }
 
 impl EventEnvelope {
@@ -41,6 +74,8 @@ impl EventEnvelope {
             cursor: String::new(),
             requires_ack: false,
             data,
+            stream_key: None,
+            ordering: None,
         }
     }
 
@@ -62,6 +97,20 @@ impl EventEnvelope {
     #[must_use]
     pub const fn requiring_ack(mut self) -> Self {
         self.requires_ack = true;
+        self
+    }
+
+    /// Set the stream key for per-key ordering.
+    #[must_use]
+    pub fn with_stream_key(mut self, key: impl Into<String>) -> Self {
+        self.stream_key = Some(key.into());
+        self
+    }
+
+    /// Set the ordering policy.
+    #[must_use]
+    pub const fn with_ordering(mut self, policy: OrderingPolicy) -> Self {
+        self.ordering = Some(policy);
         self
     }
 
@@ -470,6 +519,155 @@ mod tests {
 
         // Cursor is always present for replay semantics
         assert!(json.contains("\"cursor\":\"\""));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    // OrderingPolicy tests
+    // ─────────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn ordering_policy_serde_all_variants() {
+        for (policy, expected) in [
+            (OrderingPolicy::Gateway, "\"gateway\""),
+            (OrderingPolicy::PerKey, "\"per_key\""),
+            (OrderingPolicy::Unordered, "\"unordered\""),
+        ] {
+            let json = serde_json::to_string(&policy).unwrap();
+            assert_eq!(json, expected);
+            let back: OrderingPolicy = serde_json::from_str(&json).unwrap();
+            assert_eq!(policy, back);
+        }
+    }
+
+    #[test]
+    fn ordering_policy_clone_and_copy() {
+        let policy = OrderingPolicy::PerKey;
+        let cloned = policy;
+        assert_eq!(policy, cloned);
+    }
+
+    #[test]
+    fn ordering_policy_debug_format() {
+        let dbg = format!("{:?}", OrderingPolicy::Gateway);
+        assert!(dbg.contains("Gateway"));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    // EventEnvelope stream_key / ordering tests
+    // ─────────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn event_envelope_new_defaults_stream_key_none() {
+        let data = sample_event_data();
+        let envelope = EventEnvelope::new("events.test", data);
+        assert!(envelope.stream_key.is_none());
+        assert!(envelope.ordering.is_none());
+    }
+
+    #[test]
+    fn event_envelope_with_stream_key() {
+        let data = sample_event_data();
+        let envelope = EventEnvelope::new("events.test", data)
+            .with_stream_key("channel-123");
+        assert_eq!(envelope.stream_key, Some("channel-123".to_string()));
+    }
+
+    #[test]
+    fn event_envelope_with_ordering() {
+        let data = sample_event_data();
+        let envelope = EventEnvelope::new("events.test", data)
+            .with_ordering(OrderingPolicy::PerKey);
+        assert_eq!(envelope.ordering, Some(OrderingPolicy::PerKey));
+    }
+
+    #[test]
+    fn event_envelope_stream_key_and_ordering_builder_chain() {
+        let data = sample_event_data();
+        let envelope = EventEnvelope::new("events.keyed", data)
+            .with_seq(10)
+            .with_stream_key("user-42")
+            .with_ordering(OrderingPolicy::PerKey)
+            .requiring_ack();
+
+        assert_eq!(envelope.seq, 10);
+        assert_eq!(envelope.stream_key, Some("user-42".to_string()));
+        assert_eq!(envelope.ordering, Some(OrderingPolicy::PerKey));
+        assert!(envelope.requires_ack);
+    }
+
+    #[test]
+    fn event_envelope_stream_key_omitted_when_none() {
+        let data = sample_event_data();
+        let envelope = EventEnvelope::new("events.minimal", data);
+        let json = serde_json::to_string(&envelope).unwrap();
+        assert!(!json.contains("stream_key"));
+        assert!(!json.contains("ordering"));
+    }
+
+    #[test]
+    fn event_envelope_stream_key_present_when_set() {
+        let data = sample_event_data();
+        let envelope = EventEnvelope::new("events.keyed", data)
+            .with_stream_key("key-abc")
+            .with_ordering(OrderingPolicy::Gateway);
+        let json = serde_json::to_string(&envelope).unwrap();
+        assert!(json.contains("\"stream_key\":\"key-abc\""));
+        assert!(json.contains("\"ordering\":\"gateway\""));
+    }
+
+    #[test]
+    fn event_envelope_ordering_roundtrip() {
+        let data = sample_event_data();
+        let envelope = EventEnvelope::new("events.rt", data)
+            .with_stream_key("resource-99")
+            .with_ordering(OrderingPolicy::Unordered)
+            .with_seq(7);
+
+        let json = serde_json::to_string(&envelope).unwrap();
+        let parsed: EventEnvelope = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(parsed.stream_key, Some("resource-99".to_string()));
+        assert_eq!(parsed.ordering, Some(OrderingPolicy::Unordered));
+        assert_eq!(parsed.seq, 7);
+    }
+
+    #[test]
+    fn event_envelope_backward_compat_missing_stream_key() {
+        // Old JSON without stream_key/ordering should deserialize with None defaults
+        let json = r#"{
+            "topic": "events.old",
+            "timestamp": "2025-01-01T00:00:00Z",
+            "seq": 1,
+            "cursor": "c1",
+            "requires_ack": false,
+            "data": {
+                "connector_id": "test:streaming:v1",
+                "instance_id": "inst_old",
+                "zone_id": "z:work",
+                "principal": {"kind": "user", "id": "alice", "trust": "paired"},
+                "payload": {}
+            }
+        }"#;
+
+        let envelope: EventEnvelope = serde_json::from_str(json).unwrap();
+        assert_eq!(envelope.topic, "events.old");
+        assert!(envelope.stream_key.is_none());
+        assert!(envelope.ordering.is_none());
+    }
+
+    #[test]
+    fn event_envelope_gateway_ordering_no_stream_key() {
+        // Gateway ordering doesn't require a stream_key (global ordering)
+        let data = sample_event_data();
+        let envelope = EventEnvelope::new("events.global", data)
+            .with_ordering(OrderingPolicy::Gateway);
+
+        assert!(envelope.stream_key.is_none());
+        assert_eq!(envelope.ordering, Some(OrderingPolicy::Gateway));
+
+        let json = serde_json::to_string(&envelope).unwrap();
+        assert!(!json.contains("stream_key"));
+        assert!(json.contains("\"ordering\":\"gateway\""));
     }
 
     // ─────────────────────────────────────────────────────────────────────────────

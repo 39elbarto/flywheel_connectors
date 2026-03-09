@@ -29,5 +29,6 @@
 pub mod client;
 pub mod connector;
 pub mod error;
+pub mod events;
 pub mod types;
 pub mod zone;

@@ -486,6 +486,104 @@ impl TwilioClient {
         Ok(serde_json::from_value(data)?)
     }
 
+    // ── WhatsApp operations ──────────────────────────────────────
+
+    /// Send a freeform WhatsApp message.
+    ///
+    /// Uses the same Messages API as SMS but with `whatsapp:` prefix on numbers.
+    pub async fn whatsapp_send(
+        &self,
+        to: &str,
+        from: &str,
+        body: &str,
+        media_url: Option<&[String]>,
+        status_callback: Option<&str>,
+    ) -> TwilioResult<WhatsAppMessage> {
+        let url = format!("{}/Messages.json", self.base_url);
+        let wa_to = ensure_whatsapp_prefix(to);
+        let wa_from = ensure_whatsapp_prefix(from);
+        let mut payload = serde_json::json!({
+            "To": wa_to,
+            "From": wa_from,
+            "Body": body,
+        });
+        if let Some(urls) = media_url {
+            payload["MediaUrl"] = serde_json::json!(urls);
+        }
+        if let Some(cb) = status_callback {
+            payload["StatusCallback"] = serde_json::Value::String(cb.to_string());
+        }
+        let data = self.post_json(&url, &payload).await?;
+        Ok(serde_json::from_value(data)?)
+    }
+
+    /// Send a template-based WhatsApp message.
+    ///
+    /// Uses `ContentSid` to reference pre-approved templates with optional
+    /// `ContentVariables` for variable substitution.
+    pub async fn whatsapp_send_template(
+        &self,
+        to: &str,
+        from: &str,
+        content_sid: &str,
+        content_variables: Option<&serde_json::Value>,
+        status_callback: Option<&str>,
+    ) -> TwilioResult<WhatsAppMessage> {
+        let url = format!("{}/Messages.json", self.base_url);
+        let wa_to = ensure_whatsapp_prefix(to);
+        let wa_from = ensure_whatsapp_prefix(from);
+        let mut payload = serde_json::json!({
+            "To": wa_to,
+            "From": wa_from,
+            "ContentSid": content_sid,
+        });
+        if let Some(vars) = content_variables {
+            payload["ContentVariables"] = serde_json::Value::String(vars.to_string());
+        }
+        if let Some(cb) = status_callback {
+            payload["StatusCallback"] = serde_json::Value::String(cb.to_string());
+        }
+        let data = self.post_json(&url, &payload).await?;
+        Ok(serde_json::from_value(data)?)
+    }
+
+    /// Get a WhatsApp message by SID.
+    pub async fn whatsapp_get(&self, message_sid: &str) -> TwilioResult<WhatsAppMessage> {
+        let url = format!("{}/Messages/{message_sid}.json", self.base_url);
+        let data = self.get(&url).await?;
+        Ok(serde_json::from_value(data)?)
+    }
+
+    /// List WhatsApp messages by filtering on the `whatsapp:` prefix.
+    pub async fn whatsapp_list(
+        &self,
+        to: Option<&str>,
+        from: Option<&str>,
+        date_sent: Option<&str>,
+        page_size: Option<u32>,
+        page: Option<u32>,
+    ) -> TwilioResult<MessageListResponse> {
+        let base_url = format!("{}/Messages.json", self.base_url);
+        let mut params: Vec<(&str, String)> = Vec::new();
+        if let Some(v) = to {
+            params.push(("To", ensure_whatsapp_prefix(v)));
+        }
+        if let Some(v) = from {
+            params.push(("From", ensure_whatsapp_prefix(v)));
+        }
+        if let Some(v) = date_sent {
+            params.push(("DateSent", v.to_string()));
+        }
+        if let Some(v) = page_size {
+            params.push(("PageSize", v.to_string()));
+        }
+        if let Some(v) = page {
+            params.push(("Page", v.to_string()));
+        }
+        let data = self.get_with_params(&base_url, &params).await?;
+        Ok(serde_json::from_value(data)?)
+    }
+
     // ── Account operations ───────────────────────────────────────
 
     /// Get account details.

@@ -21,6 +21,7 @@ use fcp_crypto::cose::CapabilityTokenBuilder;
 use fcp_crypto::ed25519::Ed25519SigningKey;
 use fcp_testkit::AsyncTestContext;
 use serde_json::json;
+use uuid::Uuid;
 use wiremock::{
     Mock, MockServer, ResponseTemplate,
     matchers::{method, path},
@@ -50,6 +51,15 @@ fn generate_valid_token(signing_key: &Ed25519SigningKey, cap: &str) -> fcp_core:
 
 /// Perform handshake on a connector, returning the signing key for token generation.
 async fn setup_handshake(connector: &mut JiraConnector, caps: &[&str]) -> Ed25519SigningKey {
+    setup_handshake_with_zone(connector, caps, None).await
+}
+
+/// Perform handshake with an optional persisted `zone_dir`.
+async fn setup_handshake_with_zone(
+    connector: &mut JiraConnector,
+    caps: &[&str],
+    zone_dir: Option<&str>,
+) -> Ed25519SigningKey {
     let signing_key = Ed25519SigningKey::generate();
     let verifying_key = signing_key.verifying_key();
 
@@ -57,6 +67,7 @@ async fn setup_handshake(connector: &mut JiraConnector, caps: &[&str]) -> Ed2551
         .handle_handshake(json!({
             "protocol_version": "1.0.0",
             "zone": "z:work",
+            "zone_dir": zone_dir,
             "host_public_key": verifying_key.to_bytes(),
             "nonce": vec![0u8; 32],
             "capabilities_requested": caps
@@ -1128,13 +1139,16 @@ async fn lifecycle_introspect_all_operations() {
         "jira.automation.rule.enable",
         "jira.automation.rule.disable",
         "jira.automation.rule.delete",
+        "jira.sync.pull_issue",
+        "jira.sync.push_bead",
+        "jira.sync.reconcile",
         "jira.server.info",
     ];
 
     for expected in &expected_ops {
         assert!(op_ids.contains(expected), "missing operation: {expected}");
     }
-    assert_eq!(ops.len(), 24);
+    assert_eq!(ops.len(), 27);
 
     // Verify schemas are present on all operations
     for op in ops {
@@ -1327,4 +1341,450 @@ async fn validation_update_issue_missing_fields() {
         }
         other => panic!("expected InvalidRequest, got: {other:?}"),
     }
+}
+
+/// Sync operations require a `zone_dir` because they persist connector state.
+#[fcp_async_core::runtime::test]
+async fn sync_operations_require_zone_dir() {
+    let mock_server = MockServer::start().await;
+    let mut connector = JiraConnector::new();
+    setup_configure(&mut connector, &mock_server.uri()).await;
+    let signing_key = setup_handshake(&mut connector, &["jira.sync.pull_issue"]).await;
+    let token = generate_valid_token(&signing_key, "jira.sync.pull_issue");
+
+    let err = connector
+        .handle_invoke(json!({
+            "operation": "jira.sync.pull_issue",
+            "input": { "issue_key": "PROJ-100" },
+            "capability_token": token
+        }))
+        .await
+        .expect_err("sync pull without zone_dir should fail");
+
+    match err {
+        fcp_core::FcpError::InvalidRequest { message, .. } => {
+            assert!(message.contains("zone_dir"));
+        }
+        other => panic!("expected InvalidRequest, got: {other:?}"),
+    }
+}
+
+/// Sync state persists across restarts and prevents duplicate issue creation.
+#[fcp_async_core::runtime::test]
+async fn sync_push_bead_persists_across_restart_and_is_idempotent() {
+    let _ctx = AsyncTestContext::for_scenario("jira.sync.push_bead.persistence");
+    let mock_server = MockServer::start().await;
+    let zone_dir = std::env::temp_dir()
+        .join(format!("jira-sync-int-push-persist-{}", Uuid::new_v4()))
+        .to_string_lossy()
+        .into_owned();
+
+    Mock::given(method("POST"))
+        .and(path("/issue"))
+        .respond_with(ResponseTemplate::new(201).set_body_json(json!({
+            "id": "10001",
+            "key": "PROJ-100",
+            "self": "https://test-org.atlassian.net/rest/api/3/issue/10001"
+        })))
+        .expect(1)
+        .mount(&mock_server)
+        .await;
+
+    Mock::given(method("POST"))
+        .and(path("/search"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "issues": [],
+            "total": 0,
+            "startAt": 0,
+            "maxResults": 2
+        })))
+        .expect(1)
+        .mount(&mock_server)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path("/issue/PROJ-100"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "10001",
+            "key": "PROJ-100",
+            "self": "https://test-org.atlassian.net/rest/api/3/issue/10001",
+            "fields": {
+                "summary": "Ship Jira sync",
+                "description": {
+                    "type": "doc",
+                    "version": 1,
+                    "content": [{
+                        "type": "paragraph",
+                        "content": [{ "type": "text", "text": "Normalize records" }]
+                    }]
+                },
+                "status": { "name": "In Progress" },
+                "priority": { "name": "High" },
+                "labels": ["backend", "bead:br-123"],
+                "assignee": { "accountId": "acct-1" },
+                "duedate": "2026-03-31",
+                "updated": "2026-03-09T10:00:00+00:00",
+                "timetracking": { "originalEstimateSeconds": 5400 }
+            }
+        })))
+        .expect(2)
+        .mount(&mock_server)
+        .await;
+
+    let mut first = JiraConnector::new();
+    setup_configure(&mut first, &mock_server.uri()).await;
+    let first_key =
+        setup_handshake_with_zone(&mut first, &["jira.sync.push_bead"], Some(&zone_dir)).await;
+    let first_token = generate_valid_token(&first_key, "jira.sync.push_bead");
+    let first_result = first
+        .handle_invoke(json!({
+            "operation": "jira.sync.push_bead",
+            "input": {
+                "project_key": "PROJ",
+                "issue_type": "Task",
+                "bead": {
+                    "beadId": "br-123",
+                    "title": "Ship Jira sync",
+                    "description": "Normalize records",
+                    "status": "In Progress",
+                    "priority": "High",
+                    "labels": ["backend"],
+                    "assignee": "acct-1",
+                    "dueDate": "2026-03-31",
+                    "estimateSeconds": 5400,
+                    "revision": "2026-03-09T10:00:00+00:00"
+                }
+            },
+            "capability_token": first_token
+        }))
+        .await
+        .expect("initial sync push should succeed");
+
+    assert_eq!(first_result["action"], "push_bead");
+    assert_eq!(first_result["created"], true);
+
+    let state_path = std::path::PathBuf::from(&zone_dir).join("jira_sync_state.json");
+    let persisted: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&state_path).expect("state file should exist"))
+            .expect("state file should be valid json");
+    assert_eq!(persisted["mappings"]["br-123"]["issueKey"], "PROJ-100");
+
+    let mut second = JiraConnector::new();
+    setup_configure(&mut second, &mock_server.uri()).await;
+    let second_key =
+        setup_handshake_with_zone(&mut second, &["jira.sync.push_bead"], Some(&zone_dir)).await;
+    let second_token = generate_valid_token(&second_key, "jira.sync.push_bead");
+    let second_result = second
+        .handle_invoke(json!({
+            "operation": "jira.sync.push_bead",
+            "input": {
+                "bead": {
+                    "beadId": "br-123",
+                    "title": "Ship Jira sync",
+                    "description": "Normalize records",
+                    "status": "In Progress",
+                    "priority": "High",
+                    "labels": ["backend"],
+                    "assignee": "acct-1",
+                    "dueDate": "2026-03-31",
+                    "estimateSeconds": 5400,
+                    "revision": "2026-03-09T10:00:00+00:00"
+                }
+            },
+            "capability_token": second_token
+        }))
+        .await
+        .expect("repeat sync push should converge");
+
+    assert_eq!(second_result["action"], "noop");
+    assert_eq!(second_result["created"], false);
+    assert_eq!(second_result["updated"], false);
+}
+
+/// A Jira webhook replay after a Beads-origin push is treated as a noop.
+#[fcp_async_core::runtime::test]
+async fn sync_pull_issue_replay_is_noop_after_push() {
+    let _ctx = AsyncTestContext::for_scenario("jira.sync.pull_issue.loop_prevention");
+    let mock_server = MockServer::start().await;
+    let zone_dir = std::env::temp_dir()
+        .join(format!("jira-sync-int-pull-replay-{}", Uuid::new_v4()))
+        .to_string_lossy()
+        .into_owned();
+
+    Mock::given(method("POST"))
+        .and(path("/issue"))
+        .respond_with(ResponseTemplate::new(201).set_body_json(json!({
+            "id": "10001",
+            "key": "PROJ-100",
+            "self": "https://test-org.atlassian.net/rest/api/3/issue/10001"
+        })))
+        .expect(1)
+        .mount(&mock_server)
+        .await;
+
+    Mock::given(method("POST"))
+        .and(path("/search"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "issues": [],
+            "total": 0,
+            "startAt": 0,
+            "maxResults": 2
+        })))
+        .expect(1)
+        .mount(&mock_server)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path("/issue/PROJ-100"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "10001",
+            "key": "PROJ-100",
+            "self": "https://test-org.atlassian.net/rest/api/3/issue/10001",
+            "fields": {
+                "summary": "Ship Jira sync",
+                "description": {
+                    "type": "doc",
+                    "version": 1,
+                    "content": [{
+                        "type": "paragraph",
+                        "content": [{ "type": "text", "text": "Normalize records" }]
+                    }]
+                },
+                "status": { "name": "In Progress" },
+                "priority": { "name": "High" },
+                "labels": ["backend", "bead:br-123"],
+                "assignee": { "accountId": "acct-1" },
+                "duedate": "2026-03-31",
+                "updated": "2026-03-09T10:00:00+00:00",
+                "timetracking": { "originalEstimateSeconds": 5400 }
+            }
+        })))
+        .expect(2)
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = JiraConnector::new();
+    setup_configure(&mut connector, &mock_server.uri()).await;
+    let signing_key = setup_handshake_with_zone(
+        &mut connector,
+        &["jira.sync.push_bead", "jira.sync.pull_issue"],
+        Some(&zone_dir),
+    )
+    .await;
+
+    let push_token = generate_valid_token(&signing_key, "jira.sync.push_bead");
+    connector
+        .handle_invoke(json!({
+            "operation": "jira.sync.push_bead",
+            "input": {
+                "project_key": "PROJ",
+                "issue_type": "Task",
+                "bead": {
+                    "beadId": "br-123",
+                    "title": "Ship Jira sync",
+                    "description": "Normalize records",
+                    "status": "In Progress",
+                    "priority": "High",
+                    "labels": ["backend"],
+                    "assignee": "acct-1",
+                    "dueDate": "2026-03-31",
+                    "estimateSeconds": 5400,
+                    "revision": "2026-03-09T10:00:00+00:00"
+                }
+            },
+            "capability_token": push_token
+        }))
+        .await
+        .expect("push should succeed");
+
+    let pull_token = generate_valid_token(&signing_key, "jira.sync.pull_issue");
+    let pull_result = connector
+        .handle_invoke(json!({
+            "operation": "jira.sync.pull_issue",
+            "input": { "issue_key": "PROJ-100" },
+            "capability_token": pull_token
+        }))
+        .await
+        .expect("pull should succeed");
+
+    assert_eq!(pull_result["action"], "noop");
+    assert_eq!(pull_result["bead"]["beadId"], "br-123");
+}
+
+/// Concurrent edits surface an explicit conflict and the divergence is persisted.
+#[fcp_async_core::runtime::test]
+async fn sync_reconcile_conflict_is_explicit_and_persisted() {
+    let _ctx = AsyncTestContext::for_scenario("jira.sync.reconcile.conflict");
+    let initial_server = MockServer::start().await;
+    let reconcile_server = MockServer::start().await;
+    let zone_dir = std::env::temp_dir()
+        .join(format!(
+            "jira-sync-int-reconcile-conflict-{}",
+            Uuid::new_v4()
+        ))
+        .to_string_lossy()
+        .into_owned();
+
+    Mock::given(method("POST"))
+        .and(path("/issue"))
+        .respond_with(ResponseTemplate::new(201).set_body_json(json!({
+            "id": "10001",
+            "key": "PROJ-100",
+            "self": "https://test-org.atlassian.net/rest/api/3/issue/10001"
+        })))
+        .expect(1)
+        .mount(&initial_server)
+        .await;
+
+    Mock::given(method("POST"))
+        .and(path("/search"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "issues": [],
+            "total": 0,
+            "startAt": 0,
+            "maxResults": 2
+        })))
+        .expect(1)
+        .mount(&initial_server)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path("/issue/PROJ-100"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "10001",
+            "key": "PROJ-100",
+            "self": "https://test-org.atlassian.net/rest/api/3/issue/10001",
+            "fields": {
+                "summary": "Ship Jira sync",
+                "description": {
+                    "type": "doc",
+                    "version": 1,
+                    "content": [{
+                        "type": "paragraph",
+                        "content": [{ "type": "text", "text": "Normalize records" }]
+                    }]
+                },
+                "status": { "name": "In Progress" },
+                "priority": { "name": "High" },
+                "labels": ["backend", "bead:br-123"],
+                "assignee": { "accountId": "acct-1" },
+                "duedate": "2026-03-31",
+                "updated": "2026-03-09T10:00:00+00:00",
+                "timetracking": { "originalEstimateSeconds": 5400 }
+            }
+        })))
+        .expect(1)
+        .mount(&initial_server)
+        .await;
+
+    let mut push_connector = JiraConnector::new();
+    setup_configure(&mut push_connector, &initial_server.uri()).await;
+    let push_key = setup_handshake_with_zone(
+        &mut push_connector,
+        &["jira.sync.push_bead"],
+        Some(&zone_dir),
+    )
+    .await;
+    let push_token = generate_valid_token(&push_key, "jira.sync.push_bead");
+    push_connector
+        .handle_invoke(json!({
+            "operation": "jira.sync.push_bead",
+            "input": {
+                "project_key": "PROJ",
+                "issue_type": "Task",
+                "bead": {
+                    "beadId": "br-123",
+                    "title": "Ship Jira sync",
+                    "description": "Normalize records",
+                    "status": "In Progress",
+                    "priority": "High",
+                    "labels": ["backend"],
+                    "assignee": "acct-1",
+                    "dueDate": "2026-03-31",
+                    "estimateSeconds": 5400,
+                    "revision": "2026-03-09T10:00:00+00:00"
+                }
+            },
+            "capability_token": push_token
+        }))
+        .await
+        .expect("initial push should seed sync state");
+
+    Mock::given(method("GET"))
+        .and(path("/issue/PROJ-100"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "10001",
+            "key": "PROJ-100",
+            "self": "https://test-org.atlassian.net/rest/api/3/issue/10001",
+            "fields": {
+                "summary": "Remote Jira edit",
+                "description": {
+                    "type": "doc",
+                    "version": 1,
+                    "content": [{
+                        "type": "paragraph",
+                        "content": [{ "type": "text", "text": "Normalize records" }]
+                    }]
+                },
+                "status": { "name": "In Progress" },
+                "priority": { "name": "High" },
+                "labels": ["backend", "bead:br-123"],
+                "assignee": { "accountId": "acct-1" },
+                "duedate": "2026-03-31",
+                "updated": "2026-03-09T10:30:00+00:00",
+                "timetracking": { "originalEstimateSeconds": 5400 }
+            }
+        })))
+        .expect(1)
+        .mount(&reconcile_server)
+        .await;
+
+    let mut reconcile_connector = JiraConnector::new();
+    setup_configure(&mut reconcile_connector, &reconcile_server.uri()).await;
+    let reconcile_key = setup_handshake_with_zone(
+        &mut reconcile_connector,
+        &["jira.sync.reconcile"],
+        Some(&zone_dir),
+    )
+    .await;
+    let reconcile_token = generate_valid_token(&reconcile_key, "jira.sync.reconcile");
+    let reconcile_result = reconcile_connector
+        .handle_invoke(json!({
+            "operation": "jira.sync.reconcile",
+            "input": {
+                "issue_key": "PROJ-100",
+                "bead": {
+                    "beadId": "br-123",
+                    "title": "Local Bead Edit",
+                    "description": "Normalize records",
+                    "status": "In Progress",
+                    "priority": "High",
+                    "labels": ["backend"],
+                    "assignee": "acct-1",
+                    "dueDate": "2026-03-31",
+                    "estimateSeconds": 5400,
+                    "revision": "2026-03-09T11:00:00+00:00"
+                },
+                "conflict_policy": "fail_closed"
+            },
+            "capability_token": reconcile_token
+        }))
+        .await
+        .expect("reconcile should return an explicit conflict");
+
+    assert_eq!(reconcile_result["action"], "conflict");
+    assert_eq!(
+        reconcile_result["conflict"]["reasonCode"],
+        "concurrent_changes_detected"
+    );
+
+    let state_path = std::path::PathBuf::from(&zone_dir).join("jira_sync_state.json");
+    let persisted: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&state_path).expect("state file should exist"))
+            .expect("state file should be valid json");
+    assert_eq!(persisted["mappings"]["br-123"]["issueKey"], "PROJ-100");
+    assert_ne!(
+        persisted["mappings"]["br-123"]["beadFingerprint"],
+        persisted["mappings"]["br-123"]["jiraFingerprint"]
+    );
 }

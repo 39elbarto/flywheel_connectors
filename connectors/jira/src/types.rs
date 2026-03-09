@@ -190,6 +190,133 @@ pub struct SearchResult {
     pub start_at: u64,
 }
 
+// ── Beads Sync ──────────────────────────────────────────────────
+
+/// Direction/origin marker for Jira ↔ Beads synchronization.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum JiraSyncOrigin {
+    /// The Jira copy is authoritative for this sync step.
+    Jira,
+    /// The Beads copy is authoritative for this sync step.
+    Beads,
+}
+
+/// Reconciliation action chosen by the sync engine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum JiraSyncAction {
+    /// No mutation required; both sides already converge.
+    Noop,
+    /// Push the Beads projection into Jira.
+    PushBead,
+    /// Pull the Jira issue into a Beads projection.
+    PullIssue,
+    /// Abort because both sides changed concurrently.
+    Conflict,
+}
+
+/// Conflict resolution policy for a sync run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum JiraSyncConflictPolicy {
+    /// Default: fail closed and surface an explicit conflict object.
+    #[default]
+    FailClosed,
+    /// Deterministically prefer one side when both changed.
+    LastWriteWins,
+}
+
+/// Canonical Beads-facing issue projection used by Jira sync operations.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JiraBeadRecord {
+    /// Stable bead identifier.
+    pub bead_id: String,
+    /// Title / summary.
+    pub title: String,
+    /// Optional Markdown description.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// Optional workflow status.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    /// Optional priority label.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub priority: Option<String>,
+    /// Optional labels.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub labels: Vec<String>,
+    /// Optional assignee identifier.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub assignee: Option<String>,
+    /// Optional due date in `YYYY-MM-DD`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub due_date: Option<String>,
+    /// Optional estimate in seconds.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub estimate_seconds: Option<u64>,
+    /// Linked Jira issue key when known.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub issue_key: Option<String>,
+    /// Linked Jira issue ID when known.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub issue_id: Option<String>,
+    /// Revision fingerprint/timestamp for the Beads-side copy.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub revision: Option<String>,
+}
+
+/// Persistable synchronization state that callers can store via connector state plumbing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JiraSyncState {
+    /// Stable bead identifier if the mapping is established.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bead_id: Option<String>,
+    /// Jira issue key if the mapping is established.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub issue_key: Option<String>,
+    /// Jira issue ID if known.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub issue_id: Option<String>,
+    /// Deterministic projection fingerprint for the last synced Beads payload.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bead_fingerprint: Option<String>,
+    /// Deterministic projection fingerprint for the last synced Jira payload.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub jira_fingerprint: Option<String>,
+    /// Last synced Beads revision marker.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bead_revision: Option<String>,
+    /// Last synced Jira revision marker.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub jira_revision: Option<String>,
+    /// Which side authored the last successful sync.
+    pub last_sync_origin: JiraSyncOrigin,
+    /// Tombstone for archived/deleted mappings.
+    #[serde(default)]
+    pub tombstoned: bool,
+}
+
+/// Explicit conflict evidence returned by `jira.sync.reconcile`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JiraSyncConflict {
+    /// Stable reason code suitable for automation.
+    pub reason_code: String,
+    /// Current Beads-side fingerprint.
+    pub bead_fingerprint: String,
+    /// Current Jira-side fingerprint.
+    pub jira_fingerprint: String,
+    /// Beads revision marker, if present.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bead_revision: Option<String>,
+    /// Jira revision marker, if present.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub jira_revision: Option<String>,
+}
+
 // ── Attachment ──────────────────────────────────────────────────
 
 /// Jira attachment metadata.
@@ -430,6 +557,82 @@ mod tests {
         assert!(val["self"].is_null());
         assert!(val["fields"].is_null());
         assert!(val["changelog"].is_null());
+    }
+
+    // ════════════════════════════════════════════════════════════════
+    // Jira Sync Types
+    // ════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn jira_sync_origin_roundtrip() {
+        let value = serde_json::to_value(JiraSyncOrigin::Beads).unwrap();
+        assert_eq!(value, json!("beads"));
+        let roundtrip: JiraSyncOrigin = serde_json::from_value(value).unwrap();
+        assert_eq!(roundtrip, JiraSyncOrigin::Beads);
+    }
+
+    #[test]
+    fn jira_sync_conflict_policy_default() {
+        assert_eq!(
+            JiraSyncConflictPolicy::default(),
+            JiraSyncConflictPolicy::FailClosed
+        );
+    }
+
+    #[test]
+    fn jira_bead_record_roundtrip() {
+        let bead = JiraBeadRecord {
+            bead_id: "br-123".into(),
+            title: "Fix Jira sync".into(),
+            description: Some("Ship deterministic mapping.".into()),
+            status: Some("in_progress".into()),
+            priority: Some("1".into()),
+            labels: vec!["backend".into(), "jira".into()],
+            assignee: Some("acct-1".into()),
+            due_date: Some("2026-03-31".into()),
+            estimate_seconds: Some(3600),
+            issue_key: Some("PROJ-12".into()),
+            issue_id: Some("10012".into()),
+            revision: Some("bead-rev-7".into()),
+        };
+
+        let value = serde_json::to_value(&bead).unwrap();
+        let roundtrip: JiraBeadRecord = serde_json::from_value(value).unwrap();
+        assert_eq!(roundtrip, bead);
+    }
+
+    #[test]
+    fn jira_sync_state_roundtrip() {
+        let state = JiraSyncState {
+            bead_id: Some("br-123".into()),
+            issue_key: Some("PROJ-12".into()),
+            issue_id: Some("10012".into()),
+            bead_fingerprint: Some("{\"title\":\"x\"}".into()),
+            jira_fingerprint: Some("{\"title\":\"y\"}".into()),
+            bead_revision: Some("bead-rev-7".into()),
+            jira_revision: Some("2026-03-09T00:00:00Z".into()),
+            last_sync_origin: JiraSyncOrigin::Jira,
+            tombstoned: false,
+        };
+
+        let value = serde_json::to_value(&state).unwrap();
+        let roundtrip: JiraSyncState = serde_json::from_value(value).unwrap();
+        assert_eq!(roundtrip, state);
+    }
+
+    #[test]
+    fn jira_sync_conflict_roundtrip() {
+        let conflict = JiraSyncConflict {
+            reason_code: "concurrent_changes_detected".into(),
+            bead_fingerprint: "{\"title\":\"local\"}".into(),
+            jira_fingerprint: "{\"title\":\"remote\"}".into(),
+            bead_revision: Some("b-1".into()),
+            jira_revision: Some("j-1".into()),
+        };
+
+        let value = serde_json::to_value(&conflict).unwrap();
+        let roundtrip: JiraSyncConflict = serde_json::from_value(value).unwrap();
+        assert_eq!(roundtrip, conflict);
     }
 
     // ════════════════════════════════════════════════════════════════
@@ -1854,7 +2057,10 @@ mod tests {
             "serverTitle": "My Jira"
         });
         let info: JiraServerInfo = serde_json::from_value(json).unwrap();
-        assert_eq!(info.base_url.as_deref(), Some("https://mysite.atlassian.net"));
+        assert_eq!(
+            info.base_url.as_deref(),
+            Some("https://mysite.atlassian.net")
+        );
         assert_eq!(info.version.as_deref(), Some("1001.0.0-SNAPSHOT"));
         assert_eq!(info.deployment_type.as_deref(), Some("Cloud"));
         assert_eq!(info.build_number, Some(100227));

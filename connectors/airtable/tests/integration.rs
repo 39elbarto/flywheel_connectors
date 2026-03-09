@@ -845,6 +845,111 @@ async fn invoke_get_record_through_connector() {
 }
 
 #[fcp_async_core::runtime::test]
+async fn invoke_get_record_expands_linked_records_and_marks_missing_targets() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/meta/bases/appABC123/tables"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "tables": [
+                {
+                    "id": "tblTASK",
+                    "name": "Tasks",
+                    "fields": [
+                        { "id": "fldNAME", "name": "Name", "type": "singleLineText" },
+                        {
+                            "id": "fldPROJ",
+                            "name": "Project",
+                            "type": "multipleRecordLinks",
+                            "options": { "linkedTableId": "tblPROJ" }
+                        },
+                        { "id": "fldROLL", "name": "Rollup Score", "type": "rollup" }
+                    ],
+                    "views": []
+                },
+                {
+                    "id": "tblPROJ",
+                    "name": "Projects",
+                    "fields": [
+                        { "id": "fldPNAME", "name": "Name", "type": "singleLineText" }
+                    ],
+                    "views": []
+                }
+            ]
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/appABC123/tblTASK/rec001"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(record_json(
+            "rec001",
+            &json!({
+                "Name": "Task Alpha",
+                "Project": ["recPROJ1", "recMISS1"],
+                "Rollup Score": 42
+            }),
+        )))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/appABC123/tblPROJ/recPROJ1"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(record_json("recPROJ1", &json!({ "Name": "Project One" }))),
+        )
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/appABC123/tblPROJ/recMISS1"))
+        .respond_with(ResponseTemplate::new(404).set_body_json(json!({
+            "error": { "type": "NOT_FOUND", "message": "Could not find record recMISS1" }
+        })))
+        .mount(&server)
+        .await;
+
+    let mut connector = AirtableConnector::new();
+    let signing_key = Ed25519SigningKey::generate();
+
+    setup_handshake(&mut connector, &signing_key, &["airtable.get_record"]).await;
+    setup_configure(&mut connector, &server.uri()).await;
+
+    let token = generate_valid_token(&signing_key, "airtable.get_record");
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "airtable.get_record",
+            "input": {
+                "base_id": "appABC123",
+                "table_id": "Tasks",
+                "record_id": "rec001",
+                "expand_linked_records": true,
+                "linked_field_refs": ["Project"],
+                "linked_record_depth": 2,
+                "linked_record_limit": 5
+            },
+            "capability_token": token
+        }))
+        .await
+        .unwrap();
+
+    assert_eq!(result["field_metadata"]["Rollup Score"]["read_only"], true);
+    assert_eq!(
+        result["field_metadata"]["Project"]["linked_table"]["id"],
+        "tblPROJ"
+    );
+    assert_eq!(
+        result["linked_records"]["Project"]["records"][0]["field_metadata"]["Name"]["field_type"],
+        "singleLineText"
+    );
+    assert_eq!(
+        result["linked_records"]["Project"]["records"][1]["id"],
+        "recMISS1"
+    );
+    assert_eq!(
+        result["linked_records"]["Project"]["records"][1]["status"],
+        "missing"
+    );
+}
+
+#[fcp_async_core::runtime::test]
 async fn invoke_list_tables_through_connector() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -1230,6 +1335,183 @@ async fn invoke_list_records_rejects_control_chars_in_filter_formula() {
         }
         other => panic!("Expected InvalidRequest, got {other:?}"),
     }
+}
+
+#[fcp_async_core::runtime::test]
+async fn invoke_list_records_expands_linked_cycles_without_refetching_root() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/meta/bases/appABC123/tables"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "tables": [
+                {
+                    "id": "tblTASK",
+                    "name": "Tasks",
+                    "fields": [
+                        { "id": "fldNAME", "name": "Name", "type": "singleLineText" },
+                        {
+                            "id": "fldPARENT",
+                            "name": "Parent Task",
+                            "type": "multipleRecordLinks",
+                            "options": { "linkedTableId": "tblTASK" }
+                        }
+                    ],
+                    "views": []
+                }
+            ]
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/appABC123/tblTASK"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "records": [
+                record_json("recA", &json!({
+                    "Name": "Task A",
+                    "Parent Task": ["recB"]
+                }))
+            ]
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/appABC123/tblTASK/recB"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(record_json(
+            "recB",
+            &json!({
+                "Name": "Task B",
+                "Parent Task": ["recA"]
+            }),
+        )))
+        .mount(&server)
+        .await;
+
+    let mut connector = AirtableConnector::new();
+    let signing_key = Ed25519SigningKey::generate();
+    setup_handshake(&mut connector, &signing_key, &["airtable.list_records"]).await;
+    setup_configure(&mut connector, &server.uri()).await;
+
+    let token = generate_valid_token(&signing_key, "airtable.list_records");
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "airtable.list_records",
+            "input": {
+                "base_id": "appABC123",
+                "table_id": "tblTASK",
+                "expand_linked_records": true,
+                "linked_field_refs": ["Parent Task"],
+                "linked_record_depth": 2
+            },
+            "capability_token": token
+        }))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        result["field_metadata"]["Parent Task"]["linked_table"]["id"],
+        "tblTASK"
+    );
+    assert_eq!(
+        result["records"][0]["linked_records"]["Parent Task"]["records"][0]["id"],
+        "recB"
+    );
+    assert_eq!(
+        result["records"][0]["linked_records"]["Parent Task"]["records"][0]["linked_records"]["Parent Task"]
+            ["records"][0]["id"],
+        "recA"
+    );
+    assert_eq!(
+        result["records"][0]["linked_records"]["Parent Task"]["records"][0]["linked_records"]["Parent Task"]
+            ["records"][0]["status"],
+        "cycle"
+    );
+}
+
+#[fcp_async_core::runtime::test]
+async fn invoke_list_records_marks_truncated_linked_records_when_limit_is_exhausted() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/meta/bases/appABC123/tables"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "tables": [
+                {
+                    "id": "tblTASK",
+                    "name": "Tasks",
+                    "fields": [
+                        { "id": "fldNAME", "name": "Name", "type": "singleLineText" },
+                        {
+                            "id": "fldCHILD",
+                            "name": "Child Tasks",
+                            "type": "multipleRecordLinks",
+                            "options": { "linkedTableId": "tblTASK" }
+                        }
+                    ],
+                    "views": []
+                }
+            ]
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/appABC123/tblTASK"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "records": [
+                record_json("recROOT", &json!({
+                    "Name": "Root",
+                    "Child Tasks": ["recCHILD1", "recCHILD2"]
+                }))
+            ]
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/appABC123/tblTASK/recCHILD1"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(record_json("recCHILD1", &json!({ "Name": "Child One" }))),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let mut connector = AirtableConnector::new();
+    let signing_key = Ed25519SigningKey::generate();
+    setup_handshake(&mut connector, &signing_key, &["airtable.list_records"]).await;
+    setup_configure(&mut connector, &server.uri()).await;
+
+    let token = generate_valid_token(&signing_key, "airtable.list_records");
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "airtable.list_records",
+            "input": {
+                "base_id": "appABC123",
+                "table_id": "tblTASK",
+                "expand_linked_records": true,
+                "linked_field_refs": ["Child Tasks"],
+                "linked_record_depth": 1,
+                "linked_record_limit": 1
+            },
+            "capability_token": token
+        }))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        result["records"][0]["linked_records"]["Child Tasks"]["partial"],
+        true
+    );
+    assert_eq!(
+        result["records"][0]["linked_records"]["Child Tasks"]["records"][0]["id"],
+        "recCHILD1"
+    );
+    assert_eq!(
+        result["records"][0]["linked_records"]["Child Tasks"]["records"][1]["id"],
+        "recCHILD2"
+    );
+    assert_eq!(
+        result["records"][0]["linked_records"]["Child Tasks"]["records"][1]["status"],
+        "truncated"
+    );
 }
 
 #[fcp_async_core::runtime::test]

@@ -1126,7 +1126,7 @@ related = [
 ]
 
 [provides.operations.get_record]
-description = "Get a single record by ID from an Airtable table"
+description = "Get a single record by ID from an Airtable table, with optional bounded linked-record expansion"
 capability = "airtable.read"
 risk_level = "low"
 safety_tier = "safe"
@@ -1155,6 +1155,29 @@ description = "Record ID (starts with 'rec')"
 pattern = "^rec[a-zA-Z0-9]+$"
 type = "string"
 
+[provides.operations.get_record.input_schema.properties.expand_linked_records]
+description = "If true, resolve linked-record fields into bounded nested record objects"
+type = "boolean"
+
+[provides.operations.get_record.input_schema.properties.linked_field_refs]
+description = "Optional subset of linked-record field IDs or exact names to expand"
+type = "array"
+
+[provides.operations.get_record.input_schema.properties.linked_field_refs.items]
+type = "string"
+
+[provides.operations.get_record.input_schema.properties.linked_record_depth]
+description = "Maximum nested linked-record depth (1-3)"
+minimum = 1
+maximum = 3
+type = "integer"
+
+[provides.operations.get_record.input_schema.properties.linked_record_limit]
+description = "Maximum number of linked records to resolve before truncation placeholders are emitted (1-25)"
+minimum = 1
+maximum = 25
+type = "integer"
+
 [provides.operations.get_record.input_schema.properties.table_id]
 description = "Table name or ID"
 type = "string"
@@ -1170,6 +1193,10 @@ type = "object"
 description = "ISO 8601 timestamp when record was created"
 type = "string"
 
+[provides.operations.get_record.output_schema.properties.field_metadata]
+description = "Per-field metadata including Airtable field type, read-only/computed markers, and linked-table summaries"
+type = "object"
+
 [provides.operations.get_record.output_schema.properties.fields]
 description = "Record field values"
 type = "object"
@@ -1177,6 +1204,10 @@ type = "object"
 [provides.operations.get_record.output_schema.properties.id]
 description = "Record ID"
 type = "string"
+
+[provides.operations.get_record.output_schema.properties.linked_records]
+description = "Expanded linked-record chains grouped by linked field name"
+type = "object"
 
 [provides.operations.get_record.network_constraints]
 host_allow = ["api.airtable.com"]
@@ -1197,9 +1228,16 @@ total_timeout_ms = 30000
 max_response_bytes = 1048576
 
 [provides.operations.get_record.ai_hints]
-when_to_use = "Retrieve a specific record when you know its ID."
-common_mistakes = ["Using row number instead of record ID."]
-examples = ['{"base_id": "appXXX", "table_id": "Tasks", "record_id": "recYYY"}']
+when_to_use = "Retrieve a specific record when you know its ID, optionally expanding linked records for focused graph traversal."
+common_mistakes = [
+    "Using row number instead of record ID.",
+    "Requesting linked_field_refs that are not linked-record fields.",
+    "Expecting unbounded recursive expansion instead of respecting depth and record limits.",
+]
+examples = [
+    '{"base_id": "appXXX", "table_id": "Tasks", "record_id": "recYYY"}',
+    '{"base_id": "appXXX", "table_id": "Tasks", "record_id": "recYYY", "expand_linked_records": true, "linked_field_refs": ["Parent Task"], "linked_record_depth": 2}',
+]
 related = [
     "airtable.list_records",
     "airtable.update_record",
@@ -1265,7 +1303,7 @@ examples = ["{}"]
 related = ["airtable.get_base_schema"]
 
 [provides.operations.list_records]
-description = "List records from an Airtable table with validated filtering, sorting, and optional view selection"
+description = "List records from an Airtable table with validated filtering, sorting, optional view selection, and bounded linked-record expansion"
 capability = "airtable.read"
 risk_level = "low"
 safety_tier = "safe"
@@ -1309,6 +1347,29 @@ type = "integer"
 description = "Pagination cursor from previous response"
 type = "string"
 
+[provides.operations.list_records.input_schema.properties.expand_linked_records]
+description = "If true, resolve linked-record fields into bounded nested record objects"
+type = "boolean"
+
+[provides.operations.list_records.input_schema.properties.linked_field_refs]
+description = "Optional subset of linked-record field IDs or exact names to expand"
+type = "array"
+
+[provides.operations.list_records.input_schema.properties.linked_field_refs.items]
+type = "string"
+
+[provides.operations.list_records.input_schema.properties.linked_record_depth]
+description = "Maximum nested linked-record depth (1-3)"
+minimum = 1
+maximum = 3
+type = "integer"
+
+[provides.operations.list_records.input_schema.properties.linked_record_limit]
+description = "Maximum number of linked records to resolve before truncation placeholders are emitted (1-25)"
+minimum = 1
+maximum = 25
+type = "integer"
+
 [provides.operations.list_records.input_schema.properties.page_size]
 description = "Records per page (max 100)"
 maximum = 100
@@ -1338,6 +1399,10 @@ type = "object"
 description = "Pagination cursor for next page"
 type = "string"
 
+[provides.operations.list_records.output_schema.properties.field_metadata]
+description = "Per-field metadata for the visible record fields in the current page"
+type = "object"
+
 [provides.operations.list_records.output_schema.properties.records]
 description = "List of records"
 type = "array"
@@ -1364,16 +1429,18 @@ total_timeout_ms = 60000
 max_response_bytes = 10485760
 
 [provides.operations.list_records.ai_hints]
-when_to_use = "Query records from an Airtable table with validated filters and deterministic sorting."
+when_to_use = "Query records from an Airtable table with validated filters, deterministic sorting, and optional bounded linked-record expansion."
 common_mistakes = [
     "Using SQL syntax instead of Airtable formula syntax.",
     "Using field IDs directly inside filter_by_formula instead of Airtable field names.",
     "Not handling pagination for large datasets.",
     "Requesting more than 100 records per page.",
+    "Requesting linked_field_refs without including those fields in the fields projection.",
 ]
 examples = [
     '{"base_id": "appXXX", "table_id": "Tasks", "filter_by_formula": "{Status} = \"Active\""}',
     '{"base_id": "appXXX", "table_id": "tblYYY", "max_records": 50, "sort": [{"field": "Created", "direction": "desc"}]}',
+    '{"base_id": "appXXX", "table_id": "Tasks", "fields": ["Name", "Parent Task"], "linked_field_refs": ["Parent Task"], "linked_record_limit": 10}',
 ]
 related = [
     "airtable.list_view_records",

@@ -215,7 +215,12 @@ fn connector_passes_filters(connector: &DiscoveredConnector, filters: &SearchFil
     if let Some(ref slug) = filters.connector {
         let slug_lower = slug.to_lowercase();
         if connector.slug.to_lowercase() != slug_lower
-            && !connector.detail.summary.id.to_lowercase().ends_with(&slug_lower)
+            && !connector
+                .detail
+                .summary
+                .id
+                .to_lowercase()
+                .ends_with(&slug_lower)
         {
             return false;
         }
@@ -248,7 +253,12 @@ fn connector_passes_filters(connector: &DiscoveredConnector, filters: &SearchFil
 fn operation_passes_filters(operation: &DiscoveredOperation, filters: &SearchFilters) -> bool {
     if let Some(ref cap) = filters.capability {
         let cap_lower = cap.to_lowercase();
-        if !operation.summary.capability.to_lowercase().contains(&cap_lower) {
+        if !operation
+            .summary
+            .capability
+            .to_lowercase()
+            .contains(&cap_lower)
+        {
             return false;
         }
     }
@@ -313,11 +323,7 @@ fn score_operation(
         }
 
         // Alias match.
-        if operation
-            .aliases
-            .iter()
-            .any(|a| a.to_lowercase() == *token)
-        {
+        if operation.aliases.iter().any(|a| a.to_lowercase() == *token) {
             score += WEIGHT_OP_ID_EXACT;
             reasons.insert("alias_match".to_owned());
         } else if operation
@@ -373,7 +379,9 @@ fn score_operation(
 
 fn tokenize(query: &str) -> Vec<String> {
     query
-        .split(|ch: char| !ch.is_ascii_alphanumeric() && ch != ':' && ch != '.' && ch != '_' && ch != '-')
+        .split(|ch: char| {
+            !ch.is_ascii_alphanumeric() && ch != ':' && ch != '.' && ch != '_' && ch != '-'
+        })
         .filter(|token| !token.is_empty())
         .map(str::to_lowercase)
         .collect()
@@ -390,8 +398,7 @@ mod tests {
     };
 
     fn stub_connector(slug: &str, ops: Vec<DiscoveredOperation>) -> DiscoveredConnector {
-        let op_summaries: Vec<OperationSummary> =
-            ops.iter().map(|o| o.summary.clone()).collect();
+        let op_summaries: Vec<OperationSummary> = ops.iter().map(|o| o.summary.clone()).collect();
         DiscoveredConnector {
             slug: slug.to_owned(),
             manifest_path: format!("connectors/{slug}/manifest.toml"),
@@ -529,10 +536,18 @@ mod tests {
     #[test]
     fn search_exact_operation_id() {
         let connectors = sample_connectors();
-        let results = search_operations(&connectors, "github.create_issue", &SearchFilters::default());
+        let results = search_operations(
+            &connectors,
+            "github.create_issue",
+            &SearchFilters::default(),
+        );
         assert!(!results.is_empty());
         assert_eq!(results[0].operation_id, "github.create_issue");
-        assert!(results[0].match_reasons.contains(&"exact_id_match".to_owned()));
+        assert!(
+            results[0]
+                .match_reasons
+                .contains(&"exact_id_match".to_owned())
+        );
     }
 
     #[test]
@@ -542,7 +557,11 @@ mod tests {
         assert!(!results.is_empty());
         // slack.send_message has "team" in when_to_use
         assert_eq!(results[0].operation_id, "slack.send_message");
-        assert!(results[0].match_reasons.contains(&"when_to_use_match".to_owned()));
+        assert!(
+            results[0]
+                .match_reasons
+                .contains(&"when_to_use_match".to_owned())
+        );
     }
 
     #[test]
@@ -550,7 +569,9 @@ mod tests {
         let connectors = sample_connectors();
         let results = search_operations(&connectors, "channel", &SearchFilters::default());
         assert!(!results.is_empty());
-        let has_slack = results.iter().any(|r| r.operation_id == "slack.list_channels");
+        let has_slack = results
+            .iter()
+            .any(|r| r.operation_id == "slack.list_channels");
         assert!(has_slack);
     }
 
@@ -608,9 +629,7 @@ mod tests {
         };
         let results = search_operations(&connectors, "list", &filters);
         assert!(!results.is_empty());
-        assert!(results
-            .iter()
-            .all(|r| r.capability.contains("read")));
+        assert!(results.iter().all(|r| r.capability.contains("read")));
     }
 
     #[test]
@@ -634,9 +653,11 @@ mod tests {
         };
         let results = search_operations(&connectors, "create", &filters);
         assert!(!results.is_empty());
-        assert!(results
-            .iter()
-            .all(|r| matches!(r.risk_level.as_str(), "low" | "medium")));
+        assert!(
+            results
+                .iter()
+                .all(|r| matches!(r.risk_level.as_str(), "low" | "medium"))
+        );
     }
 
     #[test]
@@ -660,9 +681,11 @@ mod tests {
         };
         let results = search_operations(&connectors, "list", &filters);
         assert!(!results.is_empty());
-        assert!(results
-            .iter()
-            .all(|r| matches!(r.idempotency.as_str(), "strict" | "best_effort")));
+        assert!(
+            results
+                .iter()
+                .all(|r| matches!(r.idempotency.as_str(), "strict" | "best_effort"))
+        );
     }
 
     #[test]
@@ -674,7 +697,10 @@ mod tests {
         };
         // Empty query with filters should return all read operations.
         let results = search_operations(&connectors, "", &filters);
-        assert!(results.is_empty(), "empty query returns nothing even with filters");
+        assert!(
+            results.is_empty(),
+            "empty query returns nothing even with filters"
+        );
     }
 
     #[test]
@@ -799,8 +825,14 @@ mod tests {
     fn safety_ceiling_parse() {
         assert_eq!(SafetyCeiling::parse("safe"), Some(SafetyCeiling::Safe));
         assert_eq!(SafetyCeiling::parse("RISKY"), Some(SafetyCeiling::Risky));
-        assert_eq!(SafetyCeiling::parse("dangerous"), Some(SafetyCeiling::Dangerous));
-        assert_eq!(SafetyCeiling::parse("critical"), Some(SafetyCeiling::Critical));
+        assert_eq!(
+            SafetyCeiling::parse("dangerous"),
+            Some(SafetyCeiling::Dangerous)
+        );
+        assert_eq!(
+            SafetyCeiling::parse("critical"),
+            Some(SafetyCeiling::Critical)
+        );
         assert_eq!(SafetyCeiling::parse("forbidden"), None);
     }
 
@@ -838,7 +870,11 @@ mod tests {
     #[test]
     fn results_to_json_includes_all_fields() {
         let connectors = sample_connectors();
-        let results = search_operations(&connectors, "github.create_issue", &SearchFilters::default());
+        let results = search_operations(
+            &connectors,
+            "github.create_issue",
+            &SearchFilters::default(),
+        );
         let json = results_to_json(&results, 10);
         assert!(!json.is_empty());
         let first = &json[0];
@@ -859,16 +895,17 @@ mod tests {
             vec!["Forgetting to set labels for triage".to_owned()];
         let results = search_operations(&connectors, "triage", &SearchFilters::default());
         assert!(!results.is_empty());
-        assert!(results[0]
-            .match_reasons
-            .contains(&"common_mistakes_match".to_owned()));
+        assert!(
+            results[0]
+                .match_reasons
+                .contains(&"common_mistakes_match".to_owned())
+        );
     }
 
     #[test]
     fn related_operations_boost_score() {
         let mut connectors = sample_connectors();
-        connectors[0].operations[0].related =
-            vec!["github.list_issues".to_owned()];
+        connectors[0].operations[0].related = vec!["github.list_issues".to_owned()];
         let results = search_operations(&connectors, "list_issues", &SearchFilters::default());
         // Both the actual list_issues and the related reference should match
         assert!(results.len() >= 2);

@@ -94,11 +94,7 @@ fn extract_required(schema: &Value) -> Vec<&str> {
     schema
         .get("required")
         .and_then(Value::as_array)
-        .map(|arr| {
-            arr.iter()
-                .filter_map(Value::as_str)
-                .collect()
-        })
+        .map(|arr| arr.iter().filter_map(Value::as_str).collect())
         .unwrap_or_default()
 }
 
@@ -117,13 +113,12 @@ fn walk_property(
         .map(str::to_owned);
     let example = examples.get(path).cloned().or_else(|| {
         schema.get("example").cloned().or_else(|| {
-            schema.get("examples").and_then(|e| e.as_array().and_then(|a| a.first().cloned()))
+            schema
+                .get("examples")
+                .and_then(|e| e.as_array().and_then(|a| a.first().cloned()))
         })
     });
-    let enum_values = schema
-        .get("enum")
-        .and_then(Value::as_array)
-        .cloned();
+    let enum_values = schema.get("enum").and_then(Value::as_array).cloned();
     let minimum = schema.get("minimum").cloned();
     let maximum = schema.get("maximum").cloned();
     let default = schema.get("default").cloned();
@@ -183,10 +178,7 @@ fn infer_type(schema: &Value) -> String {
     if let Some(type_str) = schema.get("type").and_then(Value::as_str) {
         if type_str == "array" {
             if let Some(items) = schema.get("items") {
-                let item_type = items
-                    .get("type")
-                    .and_then(Value::as_str)
-                    .unwrap_or("any");
+                let item_type = items.get("type").and_then(Value::as_str).unwrap_or("any");
                 return format!("[{item_type}]");
             }
             return "[any]".to_owned();
@@ -339,18 +331,16 @@ mod tests {
         let schema = simple_schema();
         let fields = walk_schema(&schema, &[]);
         let first_optional = fields.iter().position(|f| !f.required).unwrap();
-        let last_required = fields
-            .iter()
-            .rposition(|f| f.required)
-            .unwrap_or(0);
+        let last_required = fields.iter().rposition(|f| f.required).unwrap_or(0);
         assert!(last_required < first_optional);
     }
 
     #[test]
     fn walk_schema_with_examples() {
         let schema = simple_schema();
-        let examples =
-            vec![r#"{"owner": "octocat", "repo": "hello-world", "title": "Bug report"}"#.to_owned()];
+        let examples = vec![
+            r#"{"owner": "octocat", "repo": "hello-world", "title": "Bug report"}"#.to_owned(),
+        ];
         let fields = walk_schema(&schema, &examples);
         let owner = fields.iter().find(|f| f.path == "owner").unwrap();
         assert_eq!(owner.example, Some(json!("octocat")));
@@ -396,8 +386,16 @@ mod tests {
             }
         });
         let fields = walk_schema(&schema, &[]);
-        assert!(fields.iter().any(|f| f.path == "spec.replicas" && f.required));
-        assert!(fields.iter().any(|f| f.path == "spec.selector" && !f.required));
+        assert!(
+            fields
+                .iter()
+                .any(|f| f.path == "spec.replicas" && f.required)
+        );
+        assert!(
+            fields
+                .iter()
+                .any(|f| f.path == "spec.selector" && !f.required)
+        );
     }
 
     #[test]
@@ -420,9 +418,21 @@ mod tests {
             }
         });
         let fields = walk_schema(&schema, &[]);
-        assert!(fields.iter().any(|f| f.path == "containers[].name" && f.required));
-        assert!(fields.iter().any(|f| f.path == "containers[].image" && f.required));
-        assert!(fields.iter().any(|f| f.path == "containers[].ports" && !f.required));
+        assert!(
+            fields
+                .iter()
+                .any(|f| f.path == "containers[].name" && f.required)
+        );
+        assert!(
+            fields
+                .iter()
+                .any(|f| f.path == "containers[].image" && f.required)
+        );
+        assert!(
+            fields
+                .iter()
+                .any(|f| f.path == "containers[].ports" && !f.required)
+        );
     }
 
     #[test]

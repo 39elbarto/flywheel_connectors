@@ -162,7 +162,10 @@ fn validate_array(
             errors.push(ValidationError {
                 path: path_str,
                 message: format!("array too short: {} items, minimum {min}", arr.len()),
-                suggestion: format!("add at least {} more item(s)", usize::try_from(min).unwrap_or(usize::MAX) - arr.len()),
+                suggestion: format!(
+                    "add at least {} more item(s)",
+                    usize::try_from(min).unwrap_or(usize::MAX) - arr.len()
+                ),
             });
         }
     }
@@ -176,7 +179,10 @@ fn validate_array(
             errors.push(ValidationError {
                 path: path_str,
                 message: format!("array too long: {} items, maximum {max}", arr.len()),
-                suggestion: format!("remove {} item(s)", arr.len() - usize::try_from(max).unwrap_or(0)),
+                suggestion: format!(
+                    "remove {} item(s)",
+                    arr.len() - usize::try_from(max).unwrap_or(0)
+                ),
             });
         }
     }
@@ -191,12 +197,7 @@ fn validate_array(
     }
 }
 
-fn validate_string(
-    s: &str,
-    schema: &Value,
-    path: &str,
-    errors: &mut Vec<ValidationError>,
-) {
+fn validate_string(s: &str, schema: &Value, path: &str, errors: &mut Vec<ValidationError>) {
     if let Some(min_len) = schema.get("minLength").and_then(Value::as_u64) {
         if (s.len() as u64) < min_len {
             errors.push(ValidationError {
@@ -217,12 +218,7 @@ fn validate_string(
     }
 }
 
-fn validate_number(
-    n: f64,
-    schema: &Value,
-    path: &str,
-    errors: &mut Vec<ValidationError>,
-) {
+fn validate_number(n: f64, schema: &Value, path: &str, errors: &mut Vec<ValidationError>) {
     if let Some(min) = schema.get("minimum").and_then(Value::as_f64) {
         if n < min {
             errors.push(ValidationError {
@@ -562,7 +558,11 @@ mod tests {
         let input = json!({});
         let result = validate(&input, &issue_schema());
         for error in &result.errors {
-            assert!(!error.suggestion.is_empty(), "suggestion should not be empty for: {}", error.path);
+            assert!(
+                !error.suggestion.is_empty(),
+                "suggestion should not be empty for: {}",
+                error.path
+            );
         }
     }
 

@@ -883,12 +883,19 @@ async fn lifecycle_introspect_all_operations() {
         "twilio.verify.send",
         "twilio.verify.check",
         "twilio.verify.cancel",
+        // Video API
+        "twilio.video.room.create",
+        "twilio.video.room.get",
+        "twilio.video.room.list",
+        "twilio.video.room.end",
+        "twilio.video.room.participants",
+        "twilio.video.recording.list",
     ];
 
     for expected in &expected_ops {
         assert!(op_ids.contains(expected), "missing operation: {expected}");
     }
-    assert_eq!(ops.len(), 29);
+    assert_eq!(ops.len(), 35);
 
     for op in ops {
         assert!(

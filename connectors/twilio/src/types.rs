@@ -276,6 +276,81 @@ pub struct ApiErrorResponse {
     pub more_info: Option<String>,
 }
 
+// ── Video API types ──────────────────────────────────────────────
+
+/// Twilio Video room.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TwilioVideoRoom {
+    pub sid: String,
+    pub unique_name: Option<String>,
+    #[serde(rename = "type")]
+    pub room_type: Option<String>,
+    pub status: Option<String>,
+    pub max_participants: Option<u32>,
+    pub max_participant_duration: Option<u32>,
+    pub duration: Option<u32>,
+    pub date_created: Option<String>,
+    pub date_updated: Option<String>,
+    pub end_time: Option<String>,
+    pub url: Option<String>,
+}
+
+/// Twilio Video room list response.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VideoRoomListResponse {
+    pub rooms: Vec<serde_json::Value>,
+    pub meta: Option<VideoMeta>,
+}
+
+/// Twilio Video participant.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TwilioVideoParticipant {
+    pub sid: String,
+    pub room_sid: Option<String>,
+    pub identity: Option<String>,
+    pub status: Option<String>,
+    pub duration: Option<u32>,
+    pub date_created: Option<String>,
+    pub date_updated: Option<String>,
+    pub url: Option<String>,
+}
+
+/// Twilio Video participant list response.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VideoParticipantListResponse {
+    pub participants: Vec<serde_json::Value>,
+    pub meta: Option<VideoMeta>,
+}
+
+/// Twilio Video recording.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TwilioVideoRecording {
+    pub sid: String,
+    pub room_sid: Option<String>,
+    pub status: Option<String>,
+    pub duration: Option<u32>,
+    #[serde(rename = "type")]
+    pub recording_type: Option<String>,
+    pub date_created: Option<String>,
+    pub url: Option<String>,
+}
+
+/// Twilio Video recording list response.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VideoRecordingListResponse {
+    pub recordings: Vec<serde_json::Value>,
+    pub meta: Option<VideoMeta>,
+}
+
+/// Video API pagination meta.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VideoMeta {
+    pub page: Option<u32>,
+    pub page_size: Option<u32>,
+    pub next_page_url: Option<String>,
+    pub previous_page_url: Option<String>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

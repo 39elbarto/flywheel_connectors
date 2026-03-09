@@ -18,7 +18,8 @@ use crate::{
         ConversationMessageListResponse, ConversationParticipant, MediaListResponse,
         MessageListResponse, PhoneNumberListResponse, RecordingListResponse, TwilioAccount,
         TwilioCall, TwilioConversation, TwilioMediaResource, TwilioMessage, TwilioVerification,
-        TwimlTemplate, VerificationCheck, WhatsAppMessage,
+        TwimlTemplate, TwilioVideoRoom, VerificationCheck, VideoParticipantListResponse,
+        VideoRecordingListResponse, VideoRoomListResponse, WhatsAppMessage,
     },
 };
 
@@ -30,6 +31,9 @@ pub const DEFAULT_CONVERSATIONS_BASE: &str = "https://conversations.twilio.com/v
 
 /// Default Twilio Verify API base URL.
 pub const DEFAULT_VERIFY_BASE: &str = "https://verify.twilio.com/v2";
+
+/// Default Twilio Video API base URL.
+pub const DEFAULT_VIDEO_BASE: &str = "https://video.twilio.com/v1";
 
 /// Authentication mode for the Twilio client.
 #[derive(Clone)]
@@ -98,6 +102,7 @@ pub struct TwilioClient {
     base_url: String,
     conversations_base_url: String,
     verify_base_url: String,
+    video_base_url: String,
     account_sid: String,
     max_retries: u32,
 }
@@ -109,6 +114,7 @@ impl std::fmt::Debug for TwilioClient {
             .field("base_url", &self.base_url)
             .field("conversations_base_url", &self.conversations_base_url)
             .field("verify_base_url", &self.verify_base_url)
+            .field("video_base_url", &self.video_base_url)
             .field("account_sid", &self.account_sid)
             .field("max_retries", &self.max_retries)
             .finish_non_exhaustive()
@@ -159,6 +165,7 @@ impl TwilioClient {
         let base_url = format!("{DEFAULT_API_BASE}/{sid}");
         let conversations_base_url = DEFAULT_CONVERSATIONS_BASE.to_string();
         let verify_base_url = DEFAULT_VERIFY_BASE.to_string();
+        let video_base_url = DEFAULT_VIDEO_BASE.to_string();
 
         Ok(Self {
             http,
@@ -166,6 +173,7 @@ impl TwilioClient {
             base_url,
             conversations_base_url,
             verify_base_url,
+            video_base_url,
             account_sid: sid,
             max_retries: 2,
         })
@@ -187,6 +195,13 @@ impl TwilioClient {
     #[must_use]
     pub fn with_conversations_base_url(mut self, url: &str) -> Self {
         self.conversations_base_url = url.to_string();
+        self
+    }
+
+    /// Set a custom Video API base URL (for testing).
+    #[must_use]
+    pub fn with_video_base_url(mut self, url: &str) -> Self {
+        self.video_base_url = url.to_string();
         self
     }
 
@@ -814,6 +829,90 @@ impl TwilioClient {
             "Status": "canceled",
         });
         let data = self.post_json(&url, &payload).await?;
+        Ok(serde_json::from_value(data)?)
+    }
+
+    // ── Video API ──────────────────────────────────────────────────
+
+    /// Create a video room.
+    pub async fn create_video_room(
+        &self,
+        unique_name: Option<&str>,
+        room_type: Option<&str>,
+        max_participants: Option<u32>,
+    ) -> TwilioResult<TwilioVideoRoom> {
+        let url = format!("{}/Rooms", self.video_base_url);
+        let mut payload = serde_json::json!({});
+        if let Some(name) = unique_name {
+            payload["UniqueName"] = serde_json::Value::String(name.to_string());
+        }
+        if let Some(rt) = room_type {
+            payload["Type"] = serde_json::Value::String(rt.to_string());
+        }
+        if let Some(mp) = max_participants {
+            payload["MaxParticipants"] = serde_json::Value::Number(mp.into());
+        }
+        let data = self.post_json(&url, &payload).await?;
+        Ok(serde_json::from_value(data)?)
+    }
+
+    /// Get a video room by SID or unique name.
+    pub async fn get_video_room(&self, room_sid: &str) -> TwilioResult<TwilioVideoRoom> {
+        let url = format!("{}/Rooms/{room_sid}", self.video_base_url);
+        let data = self.get(&url).await?;
+        Ok(serde_json::from_value(data)?)
+    }
+
+    /// List video rooms.
+    pub async fn list_video_rooms(
+        &self,
+        status: Option<&str>,
+        page_size: Option<u32>,
+    ) -> TwilioResult<VideoRoomListResponse> {
+        let base_url = format!("{}/Rooms", self.video_base_url);
+        let mut params: Vec<(&str, String)> = Vec::new();
+        if let Some(s) = status {
+            params.push(("Status", s.to_string()));
+        }
+        if let Some(ps) = page_size {
+            params.push(("PageSize", ps.to_string()));
+        }
+        let data = self.get_with_params(&base_url, &params).await?;
+        Ok(serde_json::from_value(data)?)
+    }
+
+    /// End a video room (set status to completed).
+    pub async fn end_video_room(&self, room_sid: &str) -> TwilioResult<TwilioVideoRoom> {
+        let url = format!("{}/Rooms/{room_sid}", self.video_base_url);
+        let payload = serde_json::json!({
+            "Status": "completed",
+        });
+        let data = self.post_json(&url, &payload).await?;
+        Ok(serde_json::from_value(data)?)
+    }
+
+    /// List participants in a video room.
+    pub async fn list_video_participants(
+        &self,
+        room_sid: &str,
+        status: Option<&str>,
+    ) -> TwilioResult<VideoParticipantListResponse> {
+        let base_url = format!("{}/Rooms/{room_sid}/Participants", self.video_base_url);
+        let mut params: Vec<(&str, String)> = Vec::new();
+        if let Some(s) = status {
+            params.push(("Status", s.to_string()));
+        }
+        let data = self.get_with_params(&base_url, &params).await?;
+        Ok(serde_json::from_value(data)?)
+    }
+
+    /// List recordings for a video room.
+    pub async fn list_video_recordings(
+        &self,
+        room_sid: &str,
+    ) -> TwilioResult<VideoRecordingListResponse> {
+        let url = format!("{}/Rooms/{room_sid}/Recordings", self.video_base_url);
+        let data = self.get(&url).await?;
         Ok(serde_json::from_value(data)?)
     }
 

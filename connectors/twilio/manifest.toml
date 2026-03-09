@@ -5,13 +5,13 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:ab60ebc4abaff3fe2c80dc12dbf29e08c66007a4d800661c2f0f76eebc4974dd"
+interface_hash = "blake3-256:fcp.interface.v2:18bac3be47ea32bc71136c6a0833546a47470c0b65e13df2b9518076a6c7f491"
 
 [connector]
 id = "fcp.twilio"
 name = "Twilio Connector"
 version = "0.1.0"
-description = "FCP connector for Twilio communications platform (SMS, voice, messaging, media)"
+description = "FCP connector for Twilio communications platform (SMS, voice, messaging, media, video)"
 archetypes = [
     "operational",
     "streaming",
@@ -2028,6 +2028,320 @@ examples = ['{"service_sid": "VAxxx", "verification_sid": "VExxx"}']
 related = ["twilio.verify.send"]
 
 # ---------------------------------------------------------------------------
+# Operations: Video API
+# ---------------------------------------------------------------------------
+
+[provides.operations."twilio.video.room.create"]
+description = "Create a video room"
+capability = "twilio.video.rooms.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "none"
+
+[provides.operations."twilio.video.room.create".rate_limit]
+max = 100
+per_ms = 60000
+
+[provides.operations."twilio.video.room.create".input_schema]
+type = "object"
+
+[provides.operations."twilio.video.room.create".input_schema.properties.unique_name]
+type = "string"
+description = "Unique name for the room"
+
+[provides.operations."twilio.video.room.create".input_schema.properties.room_type]
+type = "string"
+description = "Room type: group, peer-to-peer, group-small, go"
+
+[provides.operations."twilio.video.room.create".input_schema.properties.max_participants]
+type = "integer"
+description = "Maximum number of participants"
+
+[provides.operations."twilio.video.room.create".output_schema]
+type = "object"
+required = ["sid"]
+
+[provides.operations."twilio.video.room.create".output_schema.properties.sid]
+type = "string"
+
+[provides.operations."twilio.video.room.create".output_schema.properties.unique_name]
+type = "string"
+
+[provides.operations."twilio.video.room.create".output_schema.properties.status]
+type = "string"
+
+[provides.operations."twilio.video.room.create".output_schema.properties.max_participants]
+type = "integer"
+
+[provides.operations."twilio.video.room.create".output_schema.properties.date_created]
+type = "string"
+
+[provides.operations."twilio.video.room.create".network_constraints]
+host_allow = ["video.twilio.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+require_sni = true
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."twilio.video.room.create".ai_hints]
+when_to_use = "Create a new Twilio Video room for real-time video/audio communication."
+common_mistakes = ["Not specifying a unique_name makes it harder to reference the room later."]
+examples = ['{"unique_name": "daily-standup", "room_type": "group", "max_participants": 10}']
+related = ["twilio.video.room.get", "twilio.video.room.list", "twilio.video.room.end"]
+
+[provides.operations."twilio.video.room.get"]
+description = "Get a video room by SID or unique name"
+capability = "twilio.video.rooms.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."twilio.video.room.get".rate_limit]
+max = 100
+per_ms = 60000
+
+[provides.operations."twilio.video.room.get".input_schema]
+type = "object"
+required = ["room_sid"]
+
+[provides.operations."twilio.video.room.get".input_schema.properties.room_sid]
+type = "string"
+description = "Room SID or unique name"
+
+[provides.operations."twilio.video.room.get".output_schema]
+type = "object"
+required = ["sid"]
+
+[provides.operations."twilio.video.room.get".output_schema.properties.sid]
+type = "string"
+
+[provides.operations."twilio.video.room.get".output_schema.properties.unique_name]
+type = "string"
+
+[provides.operations."twilio.video.room.get".output_schema.properties.status]
+type = "string"
+
+[provides.operations."twilio.video.room.get".output_schema.properties.duration]
+type = "integer"
+
+[provides.operations."twilio.video.room.get".output_schema.properties.date_created]
+type = "string"
+
+[provides.operations."twilio.video.room.get".output_schema.properties.end_time]
+type = "string"
+
+[provides.operations."twilio.video.room.get".network_constraints]
+host_allow = ["video.twilio.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+require_sni = true
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."twilio.video.room.get".ai_hints]
+when_to_use = "Retrieve details of a specific video room by its SID or unique name."
+common_mistakes = []
+examples = ['{"room_sid": "RMxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"}']
+related = ["twilio.video.room.list", "twilio.video.room.participants"]
+
+[provides.operations."twilio.video.room.list"]
+description = "List video rooms"
+capability = "twilio.video.rooms.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."twilio.video.room.list".rate_limit]
+max = 100
+per_ms = 60000
+
+[provides.operations."twilio.video.room.list".input_schema]
+type = "object"
+
+[provides.operations."twilio.video.room.list".input_schema.properties.status]
+type = "string"
+description = "Filter by status: in-progress, completed"
+
+[provides.operations."twilio.video.room.list".input_schema.properties.page_size]
+type = "integer"
+description = "Results per page"
+
+[provides.operations."twilio.video.room.list".output_schema]
+type = "object"
+
+[provides.operations."twilio.video.room.list".output_schema.properties.rooms]
+type = "array"
+
+[provides.operations."twilio.video.room.list".output_schema.properties.meta]
+type = "object"
+
+[provides.operations."twilio.video.room.list".network_constraints]
+host_allow = ["video.twilio.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+require_sni = true
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."twilio.video.room.list".ai_hints]
+when_to_use = "List video rooms, optionally filtered by status."
+common_mistakes = []
+examples = ['{"status": "in-progress", "page_size": 20}']
+related = ["twilio.video.room.get", "twilio.video.room.create"]
+
+[provides.operations."twilio.video.room.end"]
+description = "End/complete a video room"
+capability = "twilio.video.rooms.write"
+risk_level = "high"
+safety_tier = "dangerous"
+requires_approval = "interactive"
+idempotency = "strict"
+
+[provides.operations."twilio.video.room.end".rate_limit]
+max = 100
+per_ms = 60000
+
+[provides.operations."twilio.video.room.end".input_schema]
+type = "object"
+required = ["room_sid"]
+
+[provides.operations."twilio.video.room.end".input_schema.properties.room_sid]
+type = "string"
+description = "Room SID to end"
+
+[provides.operations."twilio.video.room.end".output_schema]
+type = "object"
+
+[provides.operations."twilio.video.room.end".output_schema.properties.sid]
+type = "string"
+
+[provides.operations."twilio.video.room.end".output_schema.properties.status]
+type = "string"
+
+[provides.operations."twilio.video.room.end".output_schema.properties.end_time]
+type = "string"
+
+[provides.operations."twilio.video.room.end".network_constraints]
+host_allow = ["video.twilio.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+require_sni = true
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."twilio.video.room.end".ai_hints]
+when_to_use = "End an active video room. This disconnects all participants immediately."
+common_mistakes = ["Cannot end a room that is already completed."]
+examples = ['{"room_sid": "RMxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"}']
+related = ["twilio.video.room.get", "twilio.video.room.participants"]
+
+[provides.operations."twilio.video.room.participants"]
+description = "List participants in a video room"
+capability = "twilio.video.participants.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."twilio.video.room.participants".rate_limit]
+max = 100
+per_ms = 60000
+
+[provides.operations."twilio.video.room.participants".input_schema]
+type = "object"
+required = ["room_sid"]
+
+[provides.operations."twilio.video.room.participants".input_schema.properties.room_sid]
+type = "string"
+description = "Room SID"
+
+[provides.operations."twilio.video.room.participants".input_schema.properties.status]
+type = "string"
+description = "Filter by status: connected, disconnected"
+
+[provides.operations."twilio.video.room.participants".output_schema]
+type = "object"
+
+[provides.operations."twilio.video.room.participants".output_schema.properties.participants]
+type = "array"
+
+[provides.operations."twilio.video.room.participants".output_schema.properties.meta]
+type = "object"
+
+[provides.operations."twilio.video.room.participants".network_constraints]
+host_allow = ["video.twilio.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+require_sni = true
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."twilio.video.room.participants".ai_hints]
+when_to_use = "List participants in a video room, optionally filtered by connection status."
+common_mistakes = []
+examples = ['{"room_sid": "RMxxx", "status": "connected"}']
+related = ["twilio.video.room.get"]
+
+[provides.operations."twilio.video.recording.list"]
+description = "List recordings for a video room"
+capability = "twilio.video.recordings.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."twilio.video.recording.list".rate_limit]
+max = 100
+per_ms = 60000
+
+[provides.operations."twilio.video.recording.list".input_schema]
+type = "object"
+required = ["room_sid"]
+
+[provides.operations."twilio.video.recording.list".input_schema.properties.room_sid]
+type = "string"
+description = "Room SID"
+
+[provides.operations."twilio.video.recording.list".output_schema]
+type = "object"
+
+[provides.operations."twilio.video.recording.list".output_schema.properties.recordings]
+type = "array"
+
+[provides.operations."twilio.video.recording.list".output_schema.properties.meta]
+type = "object"
+
+[provides.operations."twilio.video.recording.list".network_constraints]
+host_allow = ["video.twilio.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+require_sni = true
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."twilio.video.recording.list".ai_hints]
+when_to_use = "List video recordings for a specific room."
+common_mistakes = []
+examples = ['{"room_sid": "RMxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"}']
+related = ["twilio.video.room.get"]
+
+# ---------------------------------------------------------------------------
 # Streaming / Event Capabilities
 # ---------------------------------------------------------------------------
 
@@ -2105,6 +2419,14 @@ window_ms = 60000
 burst = 5
 scope = "instance"
 
+[[rate_limits.pools]]
+id = "twilio.video"
+description = "Video API operations"
+requests = 100
+window_ms = 60000
+burst = 20
+scope = "instance"
+
 [rate_limits.operation_pools]
 "twilio.send_message" = ["twilio.message"]
 "twilio.get_message" = ["twilio.read"]
@@ -2135,3 +2457,9 @@ scope = "instance"
 "twilio.verify.send" = ["twilio.verify"]
 "twilio.verify.check" = ["twilio.verify"]
 "twilio.verify.cancel" = ["twilio.verify"]
+"twilio.video.room.create" = ["twilio.video"]
+"twilio.video.room.get" = ["twilio.video"]
+"twilio.video.room.list" = ["twilio.video"]
+"twilio.video.room.end" = ["twilio.video"]
+"twilio.video.room.participants" = ["twilio.video"]
+"twilio.video.recording.list" = ["twilio.video"]

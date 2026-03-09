@@ -1434,6 +1434,219 @@ impl TwilioConnector {
                         ],
                     },
                 ),
+                // ── Video API ──────────────────────────────────────
+                op_info(
+                    "twilio.video.room.create",
+                    "Create a video room",
+                    json!({
+                        "type": "object",
+                        "properties": {
+                            "unique_name": { "type": "string", "description": "Unique name for the room" },
+                            "room_type": { "type": "string", "description": "Room type: group, peer-to-peer, group-small, go" },
+                            "max_participants": { "type": "integer", "description": "Maximum number of participants" }
+                        }
+                    }),
+                    json!({
+                        "type": "object",
+                        "properties": {
+                            "sid": { "type": "string" },
+                            "unique_name": { "type": "string" },
+                            "status": { "type": "string" },
+                            "max_participants": { "type": "integer" },
+                            "date_created": { "type": "string" }
+                        }
+                    }),
+                    "twilio.video.rooms.write",
+                    RiskLevel::Medium,
+                    SafetyTier::Risky,
+                    IdempotencyClass::None,
+                    AgentHint {
+                        when_to_use: "Create a new Twilio Video room for real-time video/audio communication.".into(),
+                        common_mistakes: vec![
+                            "Not specifying a unique_name makes it harder to reference the room later.".into(),
+                        ],
+                        examples: vec![
+                            r#"{"unique_name": "daily-standup", "room_type": "group", "max_participants": 10}"#.into(),
+                        ],
+                        related: vec![
+                            CapabilityId::from_static("twilio.video.room.get"),
+                            CapabilityId::from_static("twilio.video.room.list"),
+                            CapabilityId::from_static("twilio.video.room.end"),
+                        ],
+                    },
+                ),
+                op_info(
+                    "twilio.video.room.get",
+                    "Get a video room by SID or unique name",
+                    json!({
+                        "type": "object",
+                        "required": ["room_sid"],
+                        "properties": {
+                            "room_sid": { "type": "string", "description": "Room SID or unique name" }
+                        }
+                    }),
+                    json!({
+                        "type": "object",
+                        "properties": {
+                            "sid": { "type": "string" },
+                            "unique_name": { "type": "string" },
+                            "status": { "type": "string" },
+                            "max_participants": { "type": "integer" },
+                            "duration": { "type": "integer" },
+                            "date_created": { "type": "string" },
+                            "end_time": { "type": "string" }
+                        }
+                    }),
+                    "twilio.video.rooms.read",
+                    RiskLevel::Low,
+                    SafetyTier::Safe,
+                    IdempotencyClass::Strict,
+                    AgentHint {
+                        when_to_use: "Retrieve details of a specific video room by its SID or unique name.".into(),
+                        common_mistakes: vec![],
+                        examples: vec![
+                            r#"{"room_sid": "RMxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"}"#.into(),
+                        ],
+                        related: vec![
+                            CapabilityId::from_static("twilio.video.room.list"),
+                            CapabilityId::from_static("twilio.video.room.participants"),
+                        ],
+                    },
+                ),
+                op_info(
+                    "twilio.video.room.list",
+                    "List video rooms",
+                    json!({
+                        "type": "object",
+                        "properties": {
+                            "status": { "type": "string", "description": "Filter by status: in-progress, completed" },
+                            "page_size": { "type": "integer", "description": "Results per page" }
+                        }
+                    }),
+                    json!({
+                        "type": "object",
+                        "properties": {
+                            "rooms": { "type": "array" },
+                            "meta": { "type": "object" }
+                        }
+                    }),
+                    "twilio.video.rooms.read",
+                    RiskLevel::Low,
+                    SafetyTier::Safe,
+                    IdempotencyClass::Strict,
+                    AgentHint {
+                        when_to_use: "List video rooms, optionally filtered by status.".into(),
+                        common_mistakes: vec![],
+                        examples: vec![
+                            r#"{"status": "in-progress", "page_size": 20}"#.into(),
+                        ],
+                        related: vec![
+                            CapabilityId::from_static("twilio.video.room.get"),
+                            CapabilityId::from_static("twilio.video.room.create"),
+                        ],
+                    },
+                ),
+                op_info(
+                    "twilio.video.room.end",
+                    "End/complete a video room",
+                    json!({
+                        "type": "object",
+                        "required": ["room_sid"],
+                        "properties": {
+                            "room_sid": { "type": "string", "description": "Room SID to end" }
+                        }
+                    }),
+                    json!({
+                        "type": "object",
+                        "properties": {
+                            "sid": { "type": "string" },
+                            "status": { "type": "string" },
+                            "end_time": { "type": "string" }
+                        }
+                    }),
+                    "twilio.video.rooms.write",
+                    RiskLevel::High,
+                    SafetyTier::Dangerous,
+                    IdempotencyClass::Strict,
+                    AgentHint {
+                        when_to_use: "End an active video room. This disconnects all participants immediately.".into(),
+                        common_mistakes: vec![
+                            "Cannot end a room that is already completed.".into(),
+                        ],
+                        examples: vec![
+                            r#"{"room_sid": "RMxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"}"#.into(),
+                        ],
+                        related: vec![
+                            CapabilityId::from_static("twilio.video.room.get"),
+                            CapabilityId::from_static("twilio.video.room.participants"),
+                        ],
+                    },
+                ),
+                op_info(
+                    "twilio.video.room.participants",
+                    "List participants in a video room",
+                    json!({
+                        "type": "object",
+                        "required": ["room_sid"],
+                        "properties": {
+                            "room_sid": { "type": "string", "description": "Room SID" },
+                            "status": { "type": "string", "description": "Filter by status: connected, disconnected" }
+                        }
+                    }),
+                    json!({
+                        "type": "object",
+                        "properties": {
+                            "participants": { "type": "array" },
+                            "meta": { "type": "object" }
+                        }
+                    }),
+                    "twilio.video.participants.read",
+                    RiskLevel::Low,
+                    SafetyTier::Safe,
+                    IdempotencyClass::Strict,
+                    AgentHint {
+                        when_to_use: "List participants in a video room, optionally filtered by connection status.".into(),
+                        common_mistakes: vec![],
+                        examples: vec![
+                            r#"{"room_sid": "RMxxx", "status": "connected"}"#.into(),
+                        ],
+                        related: vec![
+                            CapabilityId::from_static("twilio.video.room.get"),
+                        ],
+                    },
+                ),
+                op_info(
+                    "twilio.video.recording.list",
+                    "List recordings for a video room",
+                    json!({
+                        "type": "object",
+                        "required": ["room_sid"],
+                        "properties": {
+                            "room_sid": { "type": "string", "description": "Room SID" }
+                        }
+                    }),
+                    json!({
+                        "type": "object",
+                        "properties": {
+                            "recordings": { "type": "array" },
+                            "meta": { "type": "object" }
+                        }
+                    }),
+                    "twilio.video.recordings.read",
+                    RiskLevel::Low,
+                    SafetyTier::Safe,
+                    IdempotencyClass::Strict,
+                    AgentHint {
+                        when_to_use: "List video recordings for a specific room.".into(),
+                        common_mistakes: vec![],
+                        examples: vec![
+                            r#"{"room_sid": "RMxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"}"#.into(),
+                        ],
+                        related: vec![
+                            CapabilityId::from_static("twilio.video.room.get"),
+                        ],
+                    },
+                ),
             ],
             events: vec![],
             resource_types: vec![],
@@ -1555,6 +1768,17 @@ impl TwilioConnector {
             "twilio.verify.send" => self.invoke_verify_send(input).await,
             "twilio.verify.check" => self.invoke_verify_check(input).await,
             "twilio.verify.cancel" => self.invoke_verify_cancel(input).await,
+            // Video API
+            "twilio.video.room.create" => self.invoke_video_room_create(input).await,
+            "twilio.video.room.get" => self.invoke_video_room_get(input).await,
+            "twilio.video.room.list" => self.invoke_video_room_list(input).await,
+            "twilio.video.room.end" => self.invoke_video_room_end(input).await,
+            "twilio.video.room.participants" => {
+                self.invoke_video_room_participants(input).await
+            }
+            "twilio.video.recording.list" => {
+                self.invoke_video_recording_list(input).await
+            }
             _ => Err(FcpError::OperationNotGranted {
                 operation: operation.into(),
             }),
@@ -2111,6 +2335,111 @@ impl TwilioConnector {
         })
     }
 
+    // ── Video API implementations ─────────────────────────────
+
+    async fn invoke_video_room_create(
+        &self,
+        input: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let unique_name = input.get("unique_name").and_then(|v| v.as_str());
+        let room_type = input.get("room_type").and_then(|v| v.as_str());
+        let max_participants = input
+            .get("max_participants")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as u32);
+        let resp = client
+            .create_video_room(unique_name, room_type, max_participants)
+            .await
+            .map_err(|e: TwilioError| e.to_fcp_error())?;
+        serde_json::to_value(resp).map_err(|e| FcpError::Internal {
+            message: format!("Serialization error: {e}"),
+        })
+    }
+
+    async fn invoke_video_room_get(
+        &self,
+        input: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let room_sid = require_str(&input, "room_sid")?;
+        let resp = client
+            .get_video_room(room_sid)
+            .await
+            .map_err(|e: TwilioError| e.to_fcp_error())?;
+        serde_json::to_value(resp).map_err(|e| FcpError::Internal {
+            message: format!("Serialization error: {e}"),
+        })
+    }
+
+    async fn invoke_video_room_list(
+        &self,
+        input: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let status = input.get("status").and_then(|v| v.as_str());
+        let page_size = input
+            .get("page_size")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as u32);
+        let resp = client
+            .list_video_rooms(status, page_size)
+            .await
+            .map_err(|e: TwilioError| e.to_fcp_error())?;
+        Ok(json!({
+            "rooms": resp.rooms,
+            "meta": serde_json::to_value(&resp.meta).unwrap_or(json!(null)),
+        }))
+    }
+
+    async fn invoke_video_room_end(
+        &self,
+        input: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let room_sid = require_str(&input, "room_sid")?;
+        let resp = client
+            .end_video_room(room_sid)
+            .await
+            .map_err(|e: TwilioError| e.to_fcp_error())?;
+        serde_json::to_value(resp).map_err(|e| FcpError::Internal {
+            message: format!("Serialization error: {e}"),
+        })
+    }
+
+    async fn invoke_video_room_participants(
+        &self,
+        input: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let room_sid = require_str(&input, "room_sid")?;
+        let status = input.get("status").and_then(|v| v.as_str());
+        let resp = client
+            .list_video_participants(room_sid, status)
+            .await
+            .map_err(|e: TwilioError| e.to_fcp_error())?;
+        Ok(json!({
+            "participants": resp.participants,
+            "meta": serde_json::to_value(&resp.meta).unwrap_or(json!(null)),
+        }))
+    }
+
+    async fn invoke_video_recording_list(
+        &self,
+        input: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let room_sid = require_str(&input, "room_sid")?;
+        let resp = client
+            .list_video_recordings(room_sid)
+            .await
+            .map_err(|e: TwilioError| e.to_fcp_error())?;
+        Ok(json!({
+            "recordings": resp.recordings,
+            "meta": serde_json::to_value(&resp.meta).unwrap_or(json!(null)),
+        }))
+    }
+
     /// Handle shutdown.
     pub async fn handle_shutdown(
         &self,
@@ -2319,7 +2648,14 @@ mod tests {
         assert!(op_ids.contains(&"twilio.verify.send"));
         assert!(op_ids.contains(&"twilio.verify.check"));
         assert!(op_ids.contains(&"twilio.verify.cancel"));
-        assert_eq!(ops.len(), 29);
+        // Video API
+        assert!(op_ids.contains(&"twilio.video.room.create"));
+        assert!(op_ids.contains(&"twilio.video.room.get"));
+        assert!(op_ids.contains(&"twilio.video.room.list"));
+        assert!(op_ids.contains(&"twilio.video.room.end"));
+        assert!(op_ids.contains(&"twilio.video.room.participants"));
+        assert!(op_ids.contains(&"twilio.video.recording.list"));
+        assert_eq!(ops.len(), 35);
     }
 
     // ── Provisioning tests ─────────────────────────────────────────

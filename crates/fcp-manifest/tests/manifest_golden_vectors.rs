@@ -1629,6 +1629,13 @@ fn twilio_full_manifest_parses_with_all_operations() {
         "twilio.verify.send",
         "twilio.verify.check",
         "twilio.verify.cancel",
+        // Video API
+        "twilio.video.room.create",
+        "twilio.video.room.get",
+        "twilio.video.room.list",
+        "twilio.video.room.end",
+        "twilio.video.room.participants",
+        "twilio.video.recording.list",
     ];
     for op_name in &expected_ops {
         assert!(ops.contains_key(*op_name), "missing operation: {op_name}");
@@ -1647,9 +1654,9 @@ fn twilio_full_manifest_parses_with_all_operations() {
     let nc = dl_rec.network_constraints.as_ref().expect("nc");
     assert!(nc.host_allow.iter().any(|h| h == "media.twiliocdn.com"));
 
-    // Verify 6 rate limit pools (read, message, voice, media, conversations, verify)
+    // Verify 7 rate limit pools (read, message, voice, media, conversations, verify, video)
     let pools = parsed.rate_limits.as_ref().expect("rate_limits");
-    assert_eq!(pools.pools.len(), 6);
+    assert_eq!(pools.pools.len(), 7);
 }
 
 #[test]

@@ -5,7 +5,7 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:2c9fed2dacdfd55b228a6779da03e1916ec2d262854b941e7911d607ff7eb468"
+interface_hash = "blake3-256:fcp.interface.v2:fba40e8129b2695742e8ca3813f6ac1d656a1ce0181f702a5c9b61cf82caa9d8"
 
 [connector]
 id = "fcp.hubspot"

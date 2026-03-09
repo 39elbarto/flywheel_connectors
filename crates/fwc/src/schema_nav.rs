@@ -788,4 +788,536 @@ mod tests {
         let template = scaffold_template(&schema);
         assert_eq!(template["tags"], json!([]));
     }
+
+    // ── Additional walk_schema tests ───────────────────────────────
+
+    #[test]
+    fn walk_schema_number_type() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "price": { "type": "number" }
+            }
+        });
+        let fields = walk_schema(&schema, &[]);
+        let price = fields.iter().find(|f| f.path == "price").unwrap();
+        assert_eq!(price.field_type, "number");
+    }
+
+    #[test]
+    fn walk_schema_boolean_type() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "enabled": { "type": "boolean", "description": "Feature flag" }
+            }
+        });
+        let fields = walk_schema(&schema, &[]);
+        let f = fields.iter().find(|f| f.path == "enabled").unwrap();
+        assert_eq!(f.field_type, "boolean");
+        assert_eq!(f.description.as_deref(), Some("Feature flag"));
+    }
+
+    #[test]
+    fn walk_schema_array_of_integers() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "ports": { "type": "array", "items": { "type": "integer" } }
+            }
+        });
+        let fields = walk_schema(&schema, &[]);
+        let ports = fields.iter().find(|f| f.path == "ports").unwrap();
+        assert_eq!(ports.field_type, "[integer]");
+    }
+
+    #[test]
+    fn walk_schema_array_of_objects_without_properties() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "items": { "type": "array", "items": { "type": "object" } }
+            }
+        });
+        let fields = walk_schema(&schema, &[]);
+        let items = fields.iter().find(|f| f.path == "items").unwrap();
+        assert_eq!(items.field_type, "[object]");
+        // No child fields since items has no properties
+        assert!(!fields.iter().any(|f| f.path.starts_with("items[]")));
+    }
+
+    #[test]
+    fn walk_schema_deeply_nested() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "level1": {
+                    "type": "object",
+                    "properties": {
+                        "level2": {
+                            "type": "object",
+                            "properties": {
+                                "level3": { "type": "string" }
+                            }
+                        }
+                    }
+                }
+            }
+        });
+        let fields = walk_schema(&schema, &[]);
+        let l3 = fields.iter().find(|f| f.path == "level1.level2.level3").unwrap();
+        assert_eq!(l3.depth, 2);
+        assert_eq!(l3.field_type, "string");
+    }
+
+    #[test]
+    fn walk_schema_multiple_required_and_optional() {
+        let schema = json!({
+            "type": "object",
+            "required": ["a", "c"],
+            "properties": {
+                "a": { "type": "string" },
+                "b": { "type": "string" },
+                "c": { "type": "string" },
+                "d": { "type": "string" }
+            }
+        });
+        let fields = walk_schema(&schema, &[]);
+        assert_eq!(fields.len(), 4);
+        let required: Vec<&str> = fields.iter().filter(|f| f.required).map(|f| f.path.as_str()).collect();
+        assert_eq!(required.len(), 2);
+        assert!(required.contains(&"a"));
+        assert!(required.contains(&"c"));
+    }
+
+    #[test]
+    fn walk_schema_alphabetical_within_required_group() {
+        let schema = json!({
+            "type": "object",
+            "required": ["zulu", "alpha"],
+            "properties": {
+                "zulu": { "type": "string" },
+                "alpha": { "type": "string" },
+                "mike": { "type": "string" }
+            }
+        });
+        let fields = walk_schema(&schema, &[]);
+        // Required fields come first, sorted alphabetically among themselves
+        assert!(fields[0].required);
+        assert!(fields[1].required);
+        assert!(!fields[2].required);
+        assert!(fields[0].path < fields[1].path);
+    }
+
+    #[test]
+    fn walk_schema_no_description() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "id": { "type": "string" }
+            }
+        });
+        let fields = walk_schema(&schema, &[]);
+        let id = fields.iter().find(|f| f.path == "id").unwrap();
+        assert!(id.description.is_none());
+    }
+
+    #[test]
+    fn walk_schema_all_constraint_fields() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "count": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 1000,
+                    "default": 10,
+                    "description": "Item count"
+                }
+            }
+        });
+        let fields = walk_schema(&schema, &[]);
+        let count = fields.iter().find(|f| f.path == "count").unwrap();
+        assert_eq!(count.minimum, Some(json!(0)));
+        assert_eq!(count.maximum, Some(json!(1000)));
+        assert_eq!(count.default, Some(json!(10)));
+    }
+
+    #[test]
+    fn walk_schema_external_example_overrides_schema_example() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "name": { "type": "string", "example": "default-name" }
+            }
+        });
+        let examples = vec![r#"{"name": "external-name"}"#.to_owned()];
+        let fields = walk_schema(&schema, &examples);
+        let name = fields.iter().find(|f| f.path == "name").unwrap();
+        // External examples take priority over schema examples
+        assert_eq!(name.example, Some(json!("external-name")));
+    }
+
+    #[test]
+    fn walk_schema_empty_examples_array() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "status": { "type": "string", "examples": [] }
+            }
+        });
+        let fields = walk_schema(&schema, &[]);
+        let status = fields.iter().find(|f| f.path == "status").unwrap();
+        assert!(status.example.is_none());
+    }
+
+    // ── Additional infer_type tests ────────────────────────────────
+
+    #[test]
+    fn infer_type_number() {
+        assert_eq!(infer_type(&json!({"type": "number"})), "number");
+    }
+
+    #[test]
+    fn infer_type_array_of_objects() {
+        assert_eq!(
+            infer_type(&json!({"type": "array", "items": {"type": "object"}})),
+            "[object]"
+        );
+    }
+
+    #[test]
+    fn infer_type_array_of_boolean() {
+        assert_eq!(
+            infer_type(&json!({"type": "array", "items": {"type": "boolean"}})),
+            "[boolean]"
+        );
+    }
+
+    #[test]
+    fn infer_type_array_items_no_type() {
+        assert_eq!(
+            infer_type(&json!({"type": "array", "items": {}})),
+            "[any]"
+        );
+    }
+
+    // ── Additional scaffold_template tests ─────────────────────────
+
+    #[test]
+    fn scaffold_template_number_placeholder() {
+        let schema = json!({
+            "type": "object",
+            "required": ["amount"],
+            "properties": {
+                "amount": { "type": "number" }
+            }
+        });
+        let template = scaffold_template(&schema);
+        assert_eq!(template["amount"], 0);
+    }
+
+    #[test]
+    fn scaffold_template_null_for_unknown_type() {
+        let schema = json!({
+            "type": "object",
+            "required": ["data"],
+            "properties": {
+                "data": { "type": "custom" }
+            }
+        });
+        let template = scaffold_template(&schema);
+        assert_eq!(template["data"], json!(null));
+    }
+
+    #[test]
+    fn scaffold_template_no_type_field() {
+        let schema = json!({
+            "type": "object",
+            "required": ["value"],
+            "properties": {
+                "value": {}
+            }
+        });
+        let template = scaffold_template(&schema);
+        assert_eq!(template["value"], json!(null));
+    }
+
+    #[test]
+    fn scaffold_template_deeply_nested_required() {
+        let schema = json!({
+            "type": "object",
+            "required": ["outer"],
+            "properties": {
+                "outer": {
+                    "type": "object",
+                    "required": ["inner"],
+                    "properties": {
+                        "inner": { "type": "string" },
+                        "optional_field": { "type": "integer" }
+                    }
+                }
+            }
+        });
+        let template = scaffold_template(&schema);
+        assert!(template.get("outer").is_some());
+        assert_eq!(template["outer"]["inner"], "<string>");
+        assert!(template["outer"].get("optional_field").is_none());
+    }
+
+    #[test]
+    fn scaffold_template_enum_with_integers() {
+        let schema = json!({
+            "type": "object",
+            "required": ["priority"],
+            "properties": {
+                "priority": { "type": "string", "enum": ["high", "medium", "low"] }
+            }
+        });
+        let template = scaffold_template(&schema);
+        assert_eq!(template["priority"], "high");
+    }
+
+    #[test]
+    fn scaffold_template_empty_enum_fallback() {
+        let schema = json!({
+            "type": "object",
+            "required": ["status"],
+            "properties": {
+                "status": { "type": "string", "enum": [] }
+            }
+        });
+        let template = scaffold_template(&schema);
+        assert_eq!(template["status"], "<string>");
+    }
+
+    // ── Additional filter_by_field tests ───────────────────────────
+
+    #[test]
+    fn filter_by_field_leaf_node() {
+        let schema = simple_schema();
+        let fields = walk_schema(&schema, &[]);
+        let filtered = filter_by_field(&fields, "owner");
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].path, "owner");
+    }
+
+    #[test]
+    fn filter_by_field_nested_children() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "config": {
+                    "type": "object",
+                    "properties": {
+                        "timeout": { "type": "integer" },
+                        "retries": { "type": "integer" }
+                    }
+                },
+                "name": { "type": "string" }
+            }
+        });
+        let fields = walk_schema(&schema, &[]);
+        let filtered = filter_by_field(&fields, "config");
+        assert_eq!(filtered.len(), 3); // config + config.timeout + config.retries
+        assert!(filtered.iter().all(|f| f.path == "config" || f.path.starts_with("config.")));
+    }
+
+    #[test]
+    fn filter_by_field_does_not_match_partial_prefix() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "name": { "type": "string" },
+                "namespace": { "type": "string" }
+            }
+        });
+        let fields = walk_schema(&schema, &[]);
+        let filtered = filter_by_field(&fields, "name");
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].path, "name");
+    }
+
+    // ── Additional extract_example_values tests ────────────────────
+
+    #[test]
+    fn extract_example_values_non_object_skipped() {
+        let examples = vec!["42".to_owned(), "[1,2,3]".to_owned()];
+        let values = extract_example_values(&examples);
+        assert!(values.as_object().unwrap().is_empty());
+    }
+
+    #[test]
+    fn extract_example_values_later_overwrites_earlier() {
+        let examples = vec![
+            r#"{"key": "first"}"#.to_owned(),
+            r#"{"key": "second"}"#.to_owned(),
+        ];
+        let values = extract_example_values(&examples);
+        assert_eq!(values["key"], "second");
+    }
+
+    // ── SchemaField serialization tests ────────────────────────────
+
+    #[test]
+    fn schema_field_serializes_enum_values() {
+        let field = SchemaField {
+            path: "status".to_owned(),
+            field_type: "string".to_owned(),
+            required: false,
+            description: None,
+            example: None,
+            enum_values: Some(vec![json!("a"), json!("b")]),
+            minimum: None,
+            maximum: None,
+            default: Some(json!("a")),
+            depth: 0,
+        };
+        let json = serde_json::to_value(&field).unwrap();
+        assert_eq!(json["enum_values"], json!(["a", "b"]));
+        assert_eq!(json["default"], "a");
+    }
+
+    #[test]
+    fn schema_field_serializes_constraints() {
+        let field = SchemaField {
+            path: "count".to_owned(),
+            field_type: "integer".to_owned(),
+            required: true,
+            description: Some("Item count".to_owned()),
+            example: Some(json!(42)),
+            enum_values: None,
+            minimum: Some(json!(1)),
+            maximum: Some(json!(100)),
+            default: None,
+            depth: 1,
+        };
+        let json = serde_json::to_value(&field).unwrap();
+        assert_eq!(json["minimum"], 1);
+        assert_eq!(json["maximum"], 100);
+        assert_eq!(json["depth"], 1);
+        assert_eq!(json["example"], 42);
+    }
+
+    #[test]
+    fn schema_field_clone() {
+        let field = SchemaField {
+            path: "test".to_owned(),
+            field_type: "string".to_owned(),
+            required: true,
+            description: Some("desc".to_owned()),
+            example: None,
+            enum_values: None,
+            minimum: None,
+            maximum: None,
+            default: None,
+            depth: 0,
+        };
+        let cloned = field.clone();
+        assert_eq!(field.path, cloned.path);
+        assert_eq!(field.required, cloned.required);
+    }
+
+    // ── Array items recursion tests ────────────────────────────────
+
+    #[test]
+    fn walk_schema_array_items_required() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "users": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "required": ["email"],
+                        "properties": {
+                            "email": { "type": "string" },
+                            "name": { "type": "string" }
+                        }
+                    }
+                }
+            }
+        });
+        let fields = walk_schema(&schema, &[]);
+        let email = fields.iter().find(|f| f.path == "users[].email").unwrap();
+        assert!(email.required);
+        let name = fields.iter().find(|f| f.path == "users[].name").unwrap();
+        assert!(!name.required);
+    }
+
+    #[test]
+    fn walk_schema_array_items_depth() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "records": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "id": { "type": "string" }
+                        }
+                    }
+                }
+            }
+        });
+        let fields = walk_schema(&schema, &[]);
+        let id = fields.iter().find(|f| f.path == "records[].id").unwrap();
+        assert_eq!(id.depth, 1);
+    }
+
+    // ── Additional edge case tests ─────────────────────────────────
+
+    #[test]
+    fn walk_schema_single_field() {
+        let schema = json!({
+            "type": "object",
+            "required": ["id"],
+            "properties": {
+                "id": { "type": "string" }
+            }
+        });
+        let fields = walk_schema(&schema, &[]);
+        assert_eq!(fields.len(), 1);
+        assert!(fields[0].required);
+        assert_eq!(fields[0].depth, 0);
+    }
+
+    #[test]
+    fn walk_schema_null_type_field() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "data": { "type": "null" }
+            }
+        });
+        let fields = walk_schema(&schema, &[]);
+        let data = fields.iter().find(|f| f.path == "data").unwrap();
+        assert_eq!(data.field_type, "null");
+    }
+
+    #[test]
+    fn scaffold_template_multiple_required_string_fields() {
+        let schema = json!({
+            "type": "object",
+            "required": ["first_name", "last_name", "email"],
+            "properties": {
+                "first_name": { "type": "string" },
+                "last_name": { "type": "string" },
+                "email": { "type": "string" },
+                "age": { "type": "integer" }
+            }
+        });
+        let template = scaffold_template(&schema);
+        assert_eq!(template["first_name"], "<string>");
+        assert_eq!(template["last_name"], "<string>");
+        assert_eq!(template["email"], "<string>");
+        assert!(template.get("age").is_none());
+    }
+
+    #[test]
+    fn filter_by_field_empty_fields_list() {
+        let filtered = filter_by_field(&[], "anything");
+        assert!(filtered.is_empty());
+    }
 }

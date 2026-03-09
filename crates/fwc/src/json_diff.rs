@@ -72,10 +72,18 @@ impl DiffResult {
         for change in &self.changes {
             let line = match change.kind {
                 ChangeKind::Added => {
-                    format!("+ {}: {}", change.path, format_value_compact(change.new.as_ref()))
+                    format!(
+                        "+ {}: {}",
+                        change.path,
+                        format_value_compact(change.new.as_ref())
+                    )
                 }
                 ChangeKind::Removed => {
-                    format!("- {}: {}", change.path, format_value_compact(change.old.as_ref()))
+                    format!(
+                        "- {}: {}",
+                        change.path,
+                        format_value_compact(change.old.as_ref())
+                    )
                 }
                 ChangeKind::Modified => {
                     format!(
@@ -345,7 +353,12 @@ mod tests {
         let result = diff(&old, &new);
         // issues[0].title changed, issues[2] added
         assert!(result.changes.iter().any(|c| c.path == "issues[0].title"));
-        assert!(result.changes.iter().any(|c| c.path == "issues[2]" && c.kind == ChangeKind::Added));
+        assert!(
+            result
+                .changes
+                .iter()
+                .any(|c| c.path == "issues[2]" && c.kind == ChangeKind::Added)
+        );
     }
 
     // ── Root-level changes ──────────────────────────────────────────
@@ -460,5 +473,466 @@ mod tests {
         let a = serde_json::to_string(&diff(&old, &new)).unwrap();
         let b = serde_json::to_string(&diff(&old, &new)).unwrap();
         assert_eq!(a, b);
+    }
+
+    // ── DiffResult API tests ────────────────────────────────────────
+
+    #[test]
+    fn diff_result_is_empty_when_no_changes() {
+        let result = DiffResult {
+            changes: Vec::new(),
+        };
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn diff_result_not_empty_with_changes() {
+        let result = DiffResult {
+            changes: vec![Change {
+                path: "x".to_string(),
+                kind: ChangeKind::Added,
+                old: None,
+                new: Some(json!(1)),
+            }],
+        };
+        assert!(!result.is_empty());
+    }
+
+    #[test]
+    fn diff_result_summary_only_added() {
+        let result = DiffResult {
+            changes: vec![
+                Change {
+                    path: "a".to_string(),
+                    kind: ChangeKind::Added,
+                    old: None,
+                    new: Some(json!(1)),
+                },
+                Change {
+                    path: "b".to_string(),
+                    kind: ChangeKind::Added,
+                    old: None,
+                    new: Some(json!(2)),
+                },
+            ],
+        };
+        let summary = result.summary();
+        assert!(summary.contains("+2 added"));
+        assert!(!summary.contains("removed"));
+        assert!(!summary.contains("modified"));
+    }
+
+    #[test]
+    fn diff_result_summary_only_removed() {
+        let result = DiffResult {
+            changes: vec![Change {
+                path: "x".to_string(),
+                kind: ChangeKind::Removed,
+                old: Some(json!(1)),
+                new: None,
+            }],
+        };
+        let summary = result.summary();
+        assert!(summary.contains("-1 removed"));
+        assert!(!summary.contains("added"));
+    }
+
+    #[test]
+    fn diff_result_summary_only_modified() {
+        let result = DiffResult {
+            changes: vec![Change {
+                path: "x".to_string(),
+                kind: ChangeKind::Modified,
+                old: Some(json!(1)),
+                new: Some(json!(2)),
+            }],
+        };
+        let summary = result.summary();
+        assert!(summary.contains("~1 modified"));
+        assert!(!summary.contains("added"));
+    }
+
+    #[test]
+    fn diff_result_count_by_kind_zero() {
+        let result = DiffResult {
+            changes: Vec::new(),
+        };
+        assert_eq!(result.count_by_kind(ChangeKind::Added), 0);
+        assert_eq!(result.count_by_kind(ChangeKind::Removed), 0);
+        assert_eq!(result.count_by_kind(ChangeKind::Modified), 0);
+    }
+
+    #[test]
+    fn diff_result_clone() {
+        let result = diff(&json!({"a": 1}), &json!({"a": 2}));
+        let cloned = result.clone();
+        assert_eq!(result, cloned);
+    }
+
+    #[test]
+    fn diff_result_serializes() {
+        let result = diff(&json!({"x": 1}), &json!({"x": 2}));
+        let json_str = serde_json::to_string(&result).unwrap();
+        assert!(json_str.contains("changes"));
+        assert!(json_str.contains("modified"));
+    }
+
+    // ── ChangeKind tests ────────────────────────────────────────────
+
+    #[test]
+    fn change_kind_eq() {
+        assert_eq!(ChangeKind::Added, ChangeKind::Added);
+        assert_eq!(ChangeKind::Removed, ChangeKind::Removed);
+        assert_eq!(ChangeKind::Modified, ChangeKind::Modified);
+    }
+
+    #[test]
+    fn change_kind_ne() {
+        assert_ne!(ChangeKind::Added, ChangeKind::Removed);
+        assert_ne!(ChangeKind::Removed, ChangeKind::Modified);
+    }
+
+    #[test]
+    fn change_kind_serializes_snake_case() {
+        assert_eq!(serde_json::to_string(&ChangeKind::Added).unwrap(), "\"added\"");
+        assert_eq!(
+            serde_json::to_string(&ChangeKind::Removed).unwrap(),
+            "\"removed\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ChangeKind::Modified).unwrap(),
+            "\"modified\""
+        );
+    }
+
+    #[test]
+    fn change_kind_copy() {
+        let k = ChangeKind::Added;
+        let k2 = k;
+        assert_eq!(k, k2);
+    }
+
+    // ── Additional scalar change tests ──────────────────────────────
+
+    #[test]
+    fn number_to_string_change() {
+        let result = diff(&json!({"v": 42}), &json!({"v": "42"}));
+        assert_eq!(result.changes.len(), 1);
+        assert_eq!(result.changes[0].kind, ChangeKind::Modified);
+        assert_eq!(result.changes[0].old, Some(json!(42)));
+        assert_eq!(result.changes[0].new, Some(json!("42")));
+    }
+
+    #[test]
+    fn boolean_to_number() {
+        let result = diff(&json!({"v": true}), &json!({"v": 1}));
+        assert_eq!(result.changes[0].kind, ChangeKind::Modified);
+    }
+
+    #[test]
+    fn null_to_string() {
+        let result = diff(&json!({"v": null}), &json!({"v": "hello"}));
+        assert_eq!(result.changes[0].kind, ChangeKind::Modified);
+    }
+
+    #[test]
+    fn string_to_null() {
+        let result = diff(&json!({"v": "hello"}), &json!({"v": null}));
+        assert_eq!(result.changes[0].kind, ChangeKind::Modified);
+    }
+
+    #[test]
+    fn integer_change() {
+        let result = diff(&json!({"n": 1}), &json!({"n": 2}));
+        assert_eq!(result.changes[0].old, Some(json!(1)));
+        assert_eq!(result.changes[0].new, Some(json!(2)));
+    }
+
+    // ── Multiple field changes ──────────────────────────────────────
+
+    #[test]
+    fn all_fields_changed() {
+        let old = json!({"a": 1, "b": 2, "c": 3});
+        let new = json!({"a": 10, "b": 20, "c": 30});
+        let result = diff(&old, &new);
+        assert_eq!(result.count_by_kind(ChangeKind::Modified), 3);
+    }
+
+    #[test]
+    fn all_fields_added() {
+        let result = diff(&json!({}), &json!({"a": 1, "b": 2, "c": 3}));
+        assert_eq!(result.count_by_kind(ChangeKind::Added), 3);
+    }
+
+    #[test]
+    fn all_fields_removed() {
+        let result = diff(&json!({"a": 1, "b": 2, "c": 3}), &json!({}));
+        assert_eq!(result.count_by_kind(ChangeKind::Removed), 3);
+    }
+
+    // ── Array edge cases ────────────────────────────────────────────
+
+    #[test]
+    fn array_completely_replaced() {
+        let old = json!({"arr": [1, 2, 3]});
+        let new = json!({"arr": [4, 5, 6]});
+        let result = diff(&old, &new);
+        assert_eq!(result.count_by_kind(ChangeKind::Modified), 3);
+    }
+
+    #[test]
+    fn array_shrink_to_empty() {
+        let old = json!({"arr": [1, 2, 3]});
+        let new = json!({"arr": []});
+        let result = diff(&old, &new);
+        assert_eq!(result.count_by_kind(ChangeKind::Removed), 3);
+    }
+
+    #[test]
+    fn array_grow_from_empty() {
+        let old = json!({"arr": []});
+        let new = json!({"arr": [1, 2]});
+        let result = diff(&old, &new);
+        assert_eq!(result.count_by_kind(ChangeKind::Added), 2);
+    }
+
+    #[test]
+    fn nested_array_item_change() {
+        let old = json!({"arr": [{"x": 1}, {"x": 2}]});
+        let new = json!({"arr": [{"x": 1}, {"x": 99}]});
+        let result = diff(&old, &new);
+        assert_eq!(result.changes.len(), 1);
+        assert_eq!(result.changes[0].path, "arr[1].x");
+    }
+
+    #[test]
+    fn root_arrays_differ() {
+        let old = json!([1, 2]);
+        let new = json!([1, 3]);
+        let result = diff(&old, &new);
+        assert_eq!(result.changes.len(), 1);
+        assert_eq!(result.changes[0].path, "[1]");
+    }
+
+    #[test]
+    fn root_arrays_different_lengths() {
+        let old = json!([1, 2]);
+        let new = json!([1, 2, 3]);
+        let result = diff(&old, &new);
+        assert_eq!(result.changes.len(), 1);
+        assert_eq!(result.changes[0].kind, ChangeKind::Added);
+        assert_eq!(result.changes[0].path, "[2]");
+    }
+
+    // ── Deeply nested changes ───────────────────────────────────────
+
+    #[test]
+    fn five_level_nested_change() {
+        let old = json!({"a": {"b": {"c": {"d": {"e": 1}}}}});
+        let new = json!({"a": {"b": {"c": {"d": {"e": 2}}}}});
+        let result = diff(&old, &new);
+        assert_eq!(result.changes[0].path, "a.b.c.d.e");
+    }
+
+    #[test]
+    fn nested_array_in_object_change() {
+        let old = json!({"data": {"items": [1, 2]}});
+        let new = json!({"data": {"items": [1, 3]}});
+        let result = diff(&old, &new);
+        assert_eq!(result.changes[0].path, "data.items[1]");
+    }
+
+    // ── format_path tests ───────────────────────────────────────────
+
+    #[test]
+    fn format_path_empty_is_root() {
+        assert_eq!(format_path(&[]), "<root>");
+    }
+
+    #[test]
+    fn format_path_single_segment() {
+        assert_eq!(
+            format_path(&["name".to_string()]),
+            "name"
+        );
+    }
+
+    #[test]
+    fn format_path_dotted() {
+        assert_eq!(
+            format_path(&["user".to_string(), "name".to_string()]),
+            "user.name"
+        );
+    }
+
+    #[test]
+    fn format_path_with_array_index() {
+        assert_eq!(
+            format_path(&["items".to_string(), "[0]".to_string()]),
+            "items[0]"
+        );
+    }
+
+    #[test]
+    fn format_path_mixed() {
+        assert_eq!(
+            format_path(&["data".to_string(), "[0]".to_string(), "name".to_string()]),
+            "data[0].name"
+        );
+    }
+
+    // ── format_value_compact tests ──────────────────────────────────
+
+    #[test]
+    fn compact_none_is_absent() {
+        assert_eq!(format_value_compact(None), "(absent)");
+    }
+
+    #[test]
+    fn compact_null() {
+        assert_eq!(format_value_compact(Some(&Value::Null)), "null");
+    }
+
+    #[test]
+    fn compact_bool_true() {
+        assert_eq!(format_value_compact(Some(&json!(true))), "true");
+    }
+
+    #[test]
+    fn compact_bool_false() {
+        assert_eq!(format_value_compact(Some(&json!(false))), "false");
+    }
+
+    #[test]
+    fn compact_number() {
+        assert_eq!(format_value_compact(Some(&json!(42))), "42");
+    }
+
+    #[test]
+    fn compact_short_string() {
+        assert_eq!(format_value_compact(Some(&json!("hi"))), "\"hi\"");
+    }
+
+    #[test]
+    fn compact_array_shows_count() {
+        assert_eq!(format_value_compact(Some(&json!([1, 2, 3]))), "[3 items]");
+    }
+
+    #[test]
+    fn compact_empty_array() {
+        assert_eq!(format_value_compact(Some(&json!([]))), "[0 items]");
+    }
+
+    #[test]
+    fn compact_object_shows_key_count() {
+        assert_eq!(
+            format_value_compact(Some(&json!({"a": 1, "b": 2}))),
+            "{2 keys}"
+        );
+    }
+
+    #[test]
+    fn compact_empty_object() {
+        assert_eq!(format_value_compact(Some(&json!({}))), "{0 keys}");
+    }
+
+    // ── Render lines edge cases ─────────────────────────────────────
+
+    #[test]
+    fn render_lines_added() {
+        let result = DiffResult {
+            changes: vec![Change {
+                path: "x".to_string(),
+                kind: ChangeKind::Added,
+                old: None,
+                new: Some(json!(42)),
+            }],
+        };
+        let lines = result.render_lines();
+        assert!(lines.starts_with("+ x:"));
+        assert!(lines.contains("42"));
+    }
+
+    #[test]
+    fn render_lines_removed() {
+        let result = DiffResult {
+            changes: vec![Change {
+                path: "y".to_string(),
+                kind: ChangeKind::Removed,
+                old: Some(json!("gone")),
+                new: None,
+            }],
+        };
+        let lines = result.render_lines();
+        assert!(lines.starts_with("- y:"));
+        assert!(lines.contains("gone"));
+    }
+
+    #[test]
+    fn render_lines_modified() {
+        let result = DiffResult {
+            changes: vec![Change {
+                path: "z".to_string(),
+                kind: ChangeKind::Modified,
+                old: Some(json!(1)),
+                new: Some(json!(2)),
+            }],
+        };
+        let lines = result.render_lines();
+        assert!(lines.starts_with("~ z:"));
+        assert!(lines.contains("1 -> 2"));
+    }
+
+    #[test]
+    fn render_lines_multiple_changes() {
+        let old = json!({"a": 1, "b": 2});
+        let new = json!({"a": 99, "c": 3});
+        let result = diff(&old, &new);
+        let lines = result.render_lines();
+        let line_count = lines.lines().count();
+        assert_eq!(line_count, 3); // modified a, removed b, added c
+    }
+
+    // ── Object to array type change ─────────────────────────────────
+
+    #[test]
+    fn object_to_array_is_modification() {
+        let old = json!({"v": {"key": 1}});
+        let new = json!({"v": [1, 2, 3]});
+        let result = diff(&old, &new);
+        assert_eq!(result.changes[0].kind, ChangeKind::Modified);
+        assert_eq!(result.changes[0].path, "v");
+    }
+
+    #[test]
+    fn array_to_object_is_modification() {
+        let old = json!({"v": [1, 2]});
+        let new = json!({"v": {"key": "val"}});
+        let result = diff(&old, &new);
+        assert_eq!(result.changes[0].kind, ChangeKind::Modified);
+    }
+
+    // ── Identical nested structures ─────────────────────────────────
+
+    #[test]
+    fn identical_nested_objects() {
+        let v = json!({"a": {"b": {"c": [1, 2, 3]}}});
+        let result = diff(&v, &v);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn identical_arrays_of_objects() {
+        let v = json!([{"id": 1, "name": "a"}, {"id": 2, "name": "b"}]);
+        let result = diff(&v, &v);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn identical_scalars() {
+        assert!(diff(&json!(42), &json!(42)).is_empty());
+        assert!(diff(&json!("hello"), &json!("hello")).is_empty());
+        assert!(diff(&json!(true), &json!(true)).is_empty());
+        assert!(diff(&json!(null), &json!(null)).is_empty());
     }
 }

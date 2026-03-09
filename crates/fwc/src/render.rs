@@ -1271,4 +1271,441 @@ mod tests {
         assert!(text.contains("github"));
         assert!(text.contains("slack"));
     }
+
+    // ── OutputFormat methods ───────────────────────────────────────
+
+    #[test]
+    fn format_as_str_all_variants() {
+        assert_eq!(OutputFormat::Json.as_str(), "json");
+        assert_eq!(OutputFormat::Jsonl.as_str(), "jsonl");
+        assert_eq!(OutputFormat::Ndjson.as_str(), "ndjson");
+        assert_eq!(OutputFormat::Toon.as_str(), "toon");
+        assert_eq!(OutputFormat::Table.as_str(), "table");
+        assert_eq!(OutputFormat::Csv.as_str(), "csv");
+        assert_eq!(OutputFormat::Tsv.as_str(), "tsv");
+        assert_eq!(OutputFormat::Markdown.as_str(), "markdown");
+    }
+
+    #[test]
+    fn format_is_tabular() {
+        assert!(!OutputFormat::Json.is_tabular());
+        assert!(!OutputFormat::Jsonl.is_tabular());
+        assert!(!OutputFormat::Ndjson.is_tabular());
+        assert!(!OutputFormat::Toon.is_tabular());
+        assert!(OutputFormat::Table.is_tabular());
+        assert!(OutputFormat::Csv.is_tabular());
+        assert!(OutputFormat::Tsv.is_tabular());
+        assert!(OutputFormat::Markdown.is_tabular());
+    }
+
+    #[test]
+    fn format_is_json_like() {
+        assert!(OutputFormat::Json.is_json_like());
+        assert!(OutputFormat::Jsonl.is_json_like());
+        assert!(OutputFormat::Ndjson.is_json_like());
+        assert!(!OutputFormat::Toon.is_json_like());
+        assert!(!OutputFormat::Table.is_json_like());
+        assert!(!OutputFormat::Csv.is_json_like());
+        assert!(!OutputFormat::Tsv.is_json_like());
+        assert!(!OutputFormat::Markdown.is_json_like());
+    }
+
+    // ── RenderOptions tests ───────────────────────────────────────
+
+    #[test]
+    fn render_options_default() {
+        let opts = RenderOptions::default();
+        assert!(!opts.has_template());
+        assert!(!opts.has_extract());
+        assert!(!opts.has_transform());
+        assert!(opts.tabular_columns.is_empty());
+        assert!(opts.tabular_sort_by.is_none());
+        assert_eq!(opts.tabular_limit, 0);
+        assert!(!opts.tabular_no_headers);
+    }
+
+    #[test]
+    fn render_options_has_template() {
+        let opts = RenderOptions {
+            template: Some(TemplateRender::inline("{{status}}").unwrap()),
+            ..RenderOptions::default()
+        };
+        assert!(opts.has_template());
+        assert!(opts.has_transform());
+    }
+
+    #[test]
+    fn render_options_has_extract() {
+        let opts = RenderOptions {
+            extract: Some(ExtractRender::inline(".status").unwrap()),
+            ..RenderOptions::default()
+        };
+        assert!(opts.has_extract());
+        assert!(opts.has_transform());
+    }
+
+    #[test]
+    fn render_options_without_extract() {
+        let opts = RenderOptions {
+            template: Some(TemplateRender::inline("{{status}}").unwrap()),
+            extract: Some(ExtractRender::inline(".status").unwrap()),
+            tabular_columns: vec!["a".to_owned()],
+            tabular_sort_by: Some("b".to_owned()),
+            tabular_limit: 10,
+            tabular_no_headers: true,
+        };
+        let without = opts.without_extract();
+        assert!(without.template.is_some());
+        assert!(without.extract.is_none());
+        assert_eq!(without.tabular_columns, vec!["a".to_owned()]);
+        assert_eq!(without.tabular_sort_by, Some("b".to_owned()));
+        assert_eq!(without.tabular_limit, 10);
+        assert!(without.tabular_no_headers);
+    }
+
+    #[test]
+    fn render_options_transform_metadata_template() {
+        let opts = RenderOptions {
+            template: Some(TemplateRender::inline("{{status}}").unwrap()),
+            ..RenderOptions::default()
+        };
+        let meta = opts.transform_metadata().unwrap();
+        assert_eq!(meta["kind"], "handlebars");
+    }
+
+    #[test]
+    fn render_options_transform_metadata_extract() {
+        let opts = RenderOptions {
+            extract: Some(ExtractRender::inline(".status").unwrap()),
+            ..RenderOptions::default()
+        };
+        let meta = opts.transform_metadata().unwrap();
+        assert_eq!(meta["kind"], "jq");
+        assert_eq!(meta["engine"], "jaq");
+    }
+
+    #[test]
+    fn render_options_transform_metadata_none() {
+        let opts = RenderOptions::default();
+        assert!(opts.transform_metadata().is_none());
+    }
+
+    // ── TemplateSource tests ──────────────────────────────────────
+
+    #[test]
+    fn template_source_as_str() {
+        assert_eq!(TemplateSource::Inline.as_str(), "inline");
+        assert_eq!(TemplateSource::File.as_str(), "file");
+    }
+
+    #[test]
+    fn template_source_serde() {
+        let json = serde_json::to_string(&TemplateSource::Inline).unwrap();
+        assert_eq!(json, "\"inline\"");
+        let json = serde_json::to_string(&TemplateSource::File).unwrap();
+        assert_eq!(json, "\"file\"");
+    }
+
+    // ── Additional extract tests ──────────────────────────────────
+
+    #[test]
+    fn extract_render_supports_keys() {
+        let extract = ExtractRender::inline(".data | keys").unwrap();
+        let text = render_with_options(
+            json!({"data": {"alpha": 1, "beta": 2}}),
+            OutputFormat::Json,
+            &RenderOptions {
+                extract: Some(extract),
+                ..RenderOptions::default()
+            },
+        )
+        .unwrap();
+        let parsed: Value = serde_json::from_str(text.trim()).unwrap();
+        assert!(parsed.as_array().unwrap().contains(&json!("alpha")));
+        assert!(parsed.as_array().unwrap().contains(&json!("beta")));
+    }
+
+    #[test]
+    fn extract_render_supports_map() {
+        let extract = ExtractRender::inline("[.items[] | . * 2]").unwrap();
+        let text = render_with_options(
+            json!({"items": [1, 2, 3]}),
+            OutputFormat::Json,
+            &RenderOptions {
+                extract: Some(extract),
+                ..RenderOptions::default()
+            },
+        )
+        .unwrap();
+        let parsed: Value = serde_json::from_str(text.trim()).unwrap();
+        assert_eq!(parsed, json!([2, 4, 6]));
+    }
+
+    #[test]
+    fn extract_metadata_captures_filter() {
+        let extract = ExtractRender::inline(".foo").unwrap();
+        let meta = extract.metadata();
+        assert_eq!(meta["kind"], "jq");
+        assert_eq!(meta["engine"], "jaq");
+        assert_eq!(meta["filter"], ".foo");
+    }
+
+    // ── Additional NDJSON rendering ───────────────────────────────
+
+    #[test]
+    fn ndjson_wrapper_results_field() {
+        let data = json!({
+            "count": 2,
+            "results": [{"id": 1}, {"id": 2}]
+        });
+        let text = render(data, OutputFormat::Ndjson).unwrap();
+        assert_eq!(text.lines().count(), 2);
+    }
+
+    #[test]
+    fn ndjson_wrapper_data_field() {
+        let data = json!({
+            "meta": {},
+            "data": [{"x": 1}]
+        });
+        let text = render(data, OutputFormat::Ndjson).unwrap();
+        assert_eq!(text.lines().count(), 1);
+    }
+
+    #[test]
+    fn ndjson_wrapper_operations_field() {
+        let data = json!({
+            "operations": [{"id": "op1"}, {"id": "op2"}, {"id": "op3"}]
+        });
+        let text = render(data, OutputFormat::Ndjson).unwrap();
+        assert_eq!(text.lines().count(), 3);
+    }
+
+    #[test]
+    fn ndjson_wrapper_no_recognized_array_field() {
+        let data = json!({
+            "custom_field": [1, 2, 3]
+        });
+        let text = render(data, OutputFormat::Ndjson).unwrap();
+        // Falls back to emitting the whole object as one line
+        assert_eq!(text.lines().count(), 1);
+    }
+
+    #[test]
+    fn ndjson_null_value() {
+        let text = render(json!(null), OutputFormat::Ndjson).unwrap();
+        assert_eq!(text.trim(), "null");
+    }
+
+    #[test]
+    fn ndjson_number_value() {
+        let text = render(json!(42), OutputFormat::Ndjson).unwrap();
+        assert_eq!(text.trim(), "42");
+    }
+
+    // ── relative_time_label tests ─────────────────────────────────
+
+    #[test]
+    fn relative_time_label_just_now() {
+        let now = Utc::now();
+        let label = relative_time_label(now, now);
+        assert_eq!(label, "just now");
+    }
+
+    #[test]
+    fn relative_time_label_seconds_ago() {
+        let now = Utc::now();
+        let label = relative_time_label(now - Duration::seconds(30), now);
+        assert_eq!(label, "30s ago");
+    }
+
+    #[test]
+    fn relative_time_label_minutes_ago() {
+        let now = Utc::now();
+        let label = relative_time_label(now - Duration::minutes(5), now);
+        assert_eq!(label, "5m ago");
+    }
+
+    #[test]
+    fn relative_time_label_hours_ago() {
+        let now = Utc::now();
+        let label = relative_time_label(now - Duration::hours(3), now);
+        assert_eq!(label, "3h ago");
+    }
+
+    #[test]
+    fn relative_time_label_days_ago() {
+        let now = Utc::now();
+        let label = relative_time_label(now - Duration::days(2), now);
+        assert_eq!(label, "2d ago");
+    }
+
+    #[test]
+    fn relative_time_label_weeks_ago() {
+        let now = Utc::now();
+        let label = relative_time_label(now - Duration::weeks(3), now);
+        assert_eq!(label, "3w ago");
+    }
+
+    #[test]
+    fn relative_time_label_future_seconds() {
+        let now = Utc::now();
+        let label = relative_time_label(now + Duration::seconds(45), now);
+        assert_eq!(label, "in 45s");
+    }
+
+    #[test]
+    fn relative_time_label_future_days() {
+        let now = Utc::now();
+        let label = relative_time_label(now + Duration::days(7), now);
+        assert_eq!(label, "in 1w");
+    }
+
+    // ── TokenStats additional tests ───────────────────────────────
+
+    #[test]
+    fn token_stats_serializes() {
+        let v = json!({"key": "value"});
+        let stats = token_stats(&v, OutputFormat::Toon);
+        let json = serde_json::to_value(&stats).unwrap();
+        assert!(json.get("selected_format").is_some());
+        assert!(json.get("toon_bytes").is_some());
+        assert!(json.get("json_bytes").is_some());
+        assert!(json.get("savings_pct").is_some());
+    }
+
+    #[test]
+    fn token_stats_null_value() {
+        let stats = token_stats(&json!(null), OutputFormat::Json);
+        assert!(stats.json_bytes > 0);
+        assert_eq!(stats.selected_format, "json");
+    }
+
+    #[test]
+    fn token_stats_string_value() {
+        let stats = token_stats(&json!("hello world"), OutputFormat::Jsonl);
+        assert!(stats.jsonl_bytes > 0);
+        assert_eq!(stats.selected_format, "jsonl");
+    }
+
+    // ── Template with helpers ─────────────────────────────────────
+
+    #[test]
+    fn template_render_simple_interpolation() {
+        let template = TemplateRender::inline("Hello {{name}}!").unwrap();
+        let text = render_with_options(
+            json!({"name": "World"}),
+            OutputFormat::Json,
+            &RenderOptions {
+                template: Some(template),
+                ..RenderOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(text, "Hello World!\n");
+    }
+
+    #[test]
+    fn template_render_each_helper() {
+        let template = TemplateRender::inline("{{#each items}}{{this}}\n{{/each}}").unwrap();
+        let text = render_with_options(
+            json!({"items": ["a", "b", "c"]}),
+            OutputFormat::Json,
+            &RenderOptions {
+                template: Some(template),
+                ..RenderOptions::default()
+            },
+        )
+        .unwrap();
+        assert!(text.contains('a'));
+        assert!(text.contains('b'));
+        assert!(text.contains('c'));
+    }
+
+    #[test]
+    fn template_render_if_helper() {
+        let template = TemplateRender::inline("{{#if active}}ON{{else}}OFF{{/if}}").unwrap();
+        let text_on = render_with_options(
+            json!({"active": true}),
+            OutputFormat::Json,
+            &RenderOptions {
+                template: Some(template.clone()),
+                ..RenderOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(text_on.trim(), "ON");
+
+        let text_off = render_with_options(
+            json!({"active": false}),
+            OutputFormat::Json,
+            &RenderOptions {
+                template: Some(template),
+                ..RenderOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(text_off.trim(), "OFF");
+    }
+
+    // ── Edge case renders ─────────────────────────────────────────
+
+    #[test]
+    fn render_deeply_nested_json() {
+        let v = json!({"a": {"b": {"c": {"d": {"e": "deep"}}}}});
+        let text = render(v.clone(), OutputFormat::Json).unwrap();
+        let parsed: Value = serde_json::from_str(text.trim()).unwrap();
+        assert_eq!(parsed, v);
+    }
+
+    #[test]
+    fn render_array_of_scalars() {
+        let v = json!([1, "two", true, null]);
+        let text = render(v.clone(), OutputFormat::Json).unwrap();
+        let parsed: Value = serde_json::from_str(text.trim()).unwrap();
+        assert_eq!(parsed, v);
+    }
+
+    #[test]
+    fn render_empty_string() {
+        let text = render(json!(""), OutputFormat::Json).unwrap();
+        assert_eq!(text.trim(), "\"\"");
+    }
+
+    #[test]
+    fn render_empty_array() {
+        let text = render(json!([]), OutputFormat::Json).unwrap();
+        assert_eq!(text.trim(), "[]");
+    }
+
+    #[test]
+    fn render_special_chars_in_strings() {
+        let v = json!({"msg": "line1\nline2\ttab"});
+        let text = render(v.clone(), OutputFormat::Json).unwrap();
+        let parsed: Value = serde_json::from_str(text.trim()).unwrap();
+        assert_eq!(parsed, v);
+    }
+
+    #[test]
+    fn render_negative_and_float_numbers() {
+        let v = json!({"neg": -42, "pi": 1.23});
+        let text = render(v.clone(), OutputFormat::Jsonl).unwrap();
+        let parsed: Value = serde_json::from_str(text.trim()).unwrap();
+        assert_eq!(parsed, v);
+    }
+
+    // ── Format equality and debug ─────────────────────────────────
+
+    #[test]
+    fn format_debug_impl() {
+        let debug = format!("{:?}", OutputFormat::Json);
+        assert!(debug.contains("Json"));
+    }
+
+    #[test]
+    fn format_clone_and_copy() {
+        let original = OutputFormat::Csv;
+        let copied = original;
+        assert_eq!(original, copied);
+    }
 }

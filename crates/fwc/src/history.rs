@@ -947,4 +947,377 @@ mod tests {
         let json = serde_json::to_string(&entry).unwrap();
         assert!(json.contains("idem-abc-123"));
     }
+
+    // ── Additional content hash tests ──────────────────────────────
+
+    #[test]
+    fn content_hash_empty_object() {
+        let hash = content_hash(&json!({}));
+        assert_eq!(hash.len(), 16);
+        assert!(hash.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn content_hash_null() {
+        let hash = content_hash(&json!(null));
+        assert_eq!(hash.len(), 16);
+    }
+
+    #[test]
+    fn content_hash_array() {
+        let a = content_hash(&json!([1, 2, 3]));
+        let b = content_hash(&json!([1, 2, 4]));
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn content_hash_string() {
+        let a = content_hash(&json!("hello"));
+        let b = content_hash(&json!("world"));
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn content_hash_nested() {
+        let hash = content_hash(&json!({"a": {"b": {"c": 1}}}));
+        assert_eq!(hash.len(), 16);
+    }
+
+    // ── Additional summarize_input tests ───────────────────────────
+
+    #[test]
+    fn summarize_empty_object() {
+        let summary = summarize_input(&json!({}));
+        assert!(summary.is_empty());
+    }
+
+    #[test]
+    fn summarize_empty_array_value() {
+        let input = json!({"items": []});
+        let summary = summarize_input(&input);
+        assert!(summary.contains("[0 items]"));
+    }
+
+    #[test]
+    fn summarize_large_array_value() {
+        let arr: Vec<i32> = (0..100).collect();
+        let input = json!({"big": arr});
+        let summary = summarize_input(&input);
+        assert!(summary.contains("[100 items]"));
+    }
+
+    #[test]
+    fn summarize_exactly_five_fields() {
+        let input = json!({"a": 1, "b": 2, "c": 3, "d": 4, "e": 5});
+        let summary = summarize_input(&input);
+        assert!(!summary.contains("more)"));
+    }
+
+    #[test]
+    fn summarize_more_than_five_fields_count() {
+        let input = json!({"a": 1, "b": 2, "c": 3, "d": 4, "e": 5, "f": 6, "g": 7});
+        let summary = summarize_input(&input);
+        assert!(summary.contains("(+2 more)"));
+    }
+
+    #[test]
+    fn summarize_array_input_value() {
+        let input = json!([1, 2, 3]);
+        let summary = summarize_input(&input);
+        assert_eq!(summary, "[1,2,3]");
+    }
+
+    #[test]
+    fn summarize_number_input_value() {
+        let summary = summarize_input(&json!(42));
+        assert_eq!(summary, "42");
+    }
+
+    #[test]
+    fn summarize_null_input_value() {
+        let summary = summarize_input(&json!(null));
+        assert_eq!(summary, "null");
+    }
+
+    // ── Additional truncate_str tests ──────────────────────────────
+
+    #[test]
+    fn truncate_str_zero_max() {
+        let result = truncate_str("hello", 0);
+        assert_eq!(result, "...");
+    }
+
+    #[test]
+    fn truncate_str_one_char() {
+        let result = truncate_str("hello", 1);
+        assert_eq!(result, "h...");
+    }
+
+    #[test]
+    fn truncate_str_empty_input() {
+        let result = truncate_str("", 10);
+        assert_eq!(result, "");
+    }
+
+    // ── Additional OpStatus tests ──────────────────────────────────
+
+    #[test]
+    fn op_status_as_str() {
+        assert_eq!(OpStatus::Success.as_str(), "success");
+        assert_eq!(OpStatus::Error.as_str(), "error");
+        assert_eq!(OpStatus::Timeout.as_str(), "timeout");
+        assert_eq!(OpStatus::RateLimited.as_str(), "rate_limited");
+        assert_eq!(OpStatus::Denied.as_str(), "denied");
+        assert_eq!(OpStatus::Simulated.as_str(), "simulated");
+    }
+
+    #[test]
+    fn op_status_display_all() {
+        assert_eq!(OpStatus::Error.to_string(), "error");
+        assert_eq!(OpStatus::Timeout.to_string(), "timeout");
+        assert_eq!(OpStatus::Denied.to_string(), "denied");
+    }
+
+    #[test]
+    fn op_status_debug() {
+        let debug = format!("{:?}", OpStatus::RateLimited);
+        assert!(debug.contains("RateLimited"));
+    }
+
+    #[test]
+    fn op_status_clone_and_copy() {
+        let original = OpStatus::Timeout;
+        let copied = original;
+        assert_eq!(original, copied);
+    }
+
+    // ── Additional parse_since tests ───────────────────────────────
+
+    #[test]
+    fn parse_since_large_values() {
+        assert_eq!(parse_since("365d"), Some(chrono::Duration::days(365)));
+        assert_eq!(parse_since("1000s"), Some(chrono::Duration::seconds(1000)));
+    }
+
+    #[test]
+    fn parse_since_trims_whitespace() {
+        assert_eq!(parse_since(" 5m "), Some(chrono::Duration::minutes(5)));
+    }
+
+    #[test]
+    fn parse_since_negative_produces_negative_duration() {
+        // split_at gives "-5" as num_str and "m" as unit; -5 parses as i64
+        let dur = parse_since("-5m");
+        assert_eq!(dur, Some(chrono::Duration::minutes(-5)));
+    }
+
+    #[test]
+    fn parse_since_single_digit() {
+        assert_eq!(parse_since("1s"), Some(chrono::Duration::seconds(1)));
+        assert_eq!(parse_since("1m"), Some(chrono::Duration::minutes(1)));
+        assert_eq!(parse_since("1h"), Some(chrono::Duration::hours(1)));
+        assert_eq!(parse_since("1d"), Some(chrono::Duration::days(1)));
+        assert_eq!(parse_since("1w"), Some(chrono::Duration::weeks(1)));
+    }
+
+    // ── Additional parse_status tests ──────────────────────────────
+
+    #[test]
+    fn parse_status_case_sensitive() {
+        assert_eq!(parse_status("Success"), None);
+        assert_eq!(parse_status("ERROR"), None);
+        assert_eq!(parse_status("Timeout"), None);
+    }
+
+    // ── Additional HistoryStore tests ──────────────────────────────
+
+    #[test]
+    fn get_by_id_with_multiple_entries() {
+        let store = temp_store();
+        let entries: Vec<HistoryEntry> = (0..5)
+            .map(|i| {
+                let mut e = sample_entry("github", "create_issue", OpStatus::Success);
+                e.input_summary = format!("entry {i}");
+                e
+            })
+            .collect();
+        let target_id = entries[2].entry_id.clone();
+        for e in &entries {
+            store.append(e).unwrap();
+        }
+        let found = store.get(&target_id).unwrap().unwrap();
+        assert_eq!(found.input_summary, "entry 2");
+        cleanup(&store);
+    }
+
+    #[test]
+    fn query_combined_connector_and_status() {
+        let store = temp_store();
+        store.append(&sample_entry("github", "create_issue", OpStatus::Success)).unwrap();
+        store.append(&sample_entry("github", "list_issues", OpStatus::Error)).unwrap();
+        store.append(&sample_entry("slack", "send_message", OpStatus::Error)).unwrap();
+        let mut filter = HistoryFilter::new();
+        filter.connector = Some("github".to_owned());
+        filter.status = Some(OpStatus::Error);
+        let results = store.query(&filter).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].operation_id, "github.list_issues");
+        cleanup(&store);
+    }
+
+    #[test]
+    fn query_with_all_filters_combined() {
+        let store = temp_store();
+        let entry = sample_entry("github", "create_issue", OpStatus::Success);
+        let target_id = entry.entry_id.clone();
+        store.append(&entry).unwrap();
+        store.append(&sample_entry("slack", "send_message", OpStatus::Error)).unwrap();
+        let mut filter = HistoryFilter::new();
+        filter.connector = Some("github".to_owned());
+        filter.status = Some(OpStatus::Success);
+        filter.entry_id = Some(target_id);
+        filter.since = Some(Utc.with_ymd_and_hms(2020, 1, 1, 0, 0, 0).unwrap());
+        let results = store.query(&filter).unwrap();
+        assert_eq!(results.len(), 1);
+        cleanup(&store);
+    }
+
+    #[test]
+    fn count_after_multiple_appends_and_query() {
+        let store = temp_store();
+        for _ in 0..7 {
+            store.append(&sample_entry("github", "create_issue", OpStatus::Success)).unwrap();
+        }
+        assert_eq!(store.count().unwrap(), 7);
+        let mut filter = HistoryFilter::new();
+        filter.limit = 3;
+        let results = store.query(&filter).unwrap();
+        assert_eq!(results.len(), 3);
+        // Count should still be full
+        assert_eq!(store.count().unwrap(), 7);
+        cleanup(&store);
+    }
+
+    #[test]
+    fn query_nonexistent_file() {
+        let store = HistoryStore::new(PathBuf::from("/tmp/nonexistent-fwc-history-xyz/history.jsonl"));
+        let results = store.query(&HistoryFilter::new()).unwrap();
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn count_nonexistent_file() {
+        let store = HistoryStore::new(PathBuf::from("/tmp/nonexistent-fwc-history-xyz/history.jsonl"));
+        assert_eq!(store.count().unwrap(), 0);
+    }
+
+    #[test]
+    fn get_nonexistent_file() {
+        let store = HistoryStore::new(PathBuf::from("/tmp/nonexistent-fwc-history-xyz/history.jsonl"));
+        assert!(store.get("any-id").unwrap().is_none());
+    }
+
+    // ── Additional filter matching tests ───────────────────────────
+
+    #[test]
+    fn filter_matches_connector_contains() {
+        let entry = sample_entry("github", "create_issue", OpStatus::Success);
+        let mut filter = HistoryFilter::new();
+        filter.connector = Some("git".to_owned());
+        // "fcp.github" contains "git"
+        assert!(matches_filter(&entry, &filter));
+    }
+
+    #[test]
+    fn filter_entry_id_exact_match_required() {
+        let entry = sample_entry("github", "create_issue", OpStatus::Success);
+        let mut filter = HistoryFilter::new();
+        filter.entry_id = Some("wrong-id".to_owned());
+        assert!(!matches_filter(&entry, &filter));
+    }
+
+    #[test]
+    fn filter_since_exact_boundary() {
+        let mut entry = sample_entry("github", "create_issue", OpStatus::Success);
+        let boundary = Utc.with_ymd_and_hms(2026, 6, 1, 12, 0, 0).unwrap();
+        entry.timestamp = boundary;
+        let mut filter = HistoryFilter::new();
+        filter.since = Some(boundary);
+        // Entry timestamp == since boundary → should match
+        assert!(matches_filter(&entry, &filter));
+    }
+
+    // ── Additional serialization edge cases ────────────────────────
+
+    #[test]
+    fn entry_roundtrip_with_all_optional_fields() {
+        let mut entry = sample_entry("github", "create_issue", OpStatus::Error);
+        entry.error_code = Some("ERR_TIMEOUT".to_owned());
+        entry.idempotency_key = Some("key-123".to_owned());
+        entry.agent_session = Some("session-abc".to_owned());
+        entry.zone = Some("z:personal".to_owned());
+        let json = serde_json::to_string(&entry).unwrap();
+        let back: HistoryEntry = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.error_code.as_deref(), Some("ERR_TIMEOUT"));
+        assert_eq!(back.idempotency_key.as_deref(), Some("key-123"));
+        assert_eq!(back.agent_session.as_deref(), Some("session-abc"));
+        assert_eq!(back.zone.as_deref(), Some("z:personal"));
+    }
+
+    #[test]
+    fn entry_roundtrip_with_no_optional_fields() {
+        let mut entry = sample_entry("github", "create_issue", OpStatus::Success);
+        entry.zone = None;
+        entry.output_hash = None;
+        entry.output_summary = None;
+        entry.error_code = None;
+        entry.idempotency_key = None;
+        entry.agent_session = None;
+        let json = serde_json::to_string(&entry).unwrap();
+        let back: HistoryEntry = serde_json::from_str(&json).unwrap();
+        assert!(back.zone.is_none());
+        assert!(back.output_hash.is_none());
+        assert!(back.agent_session.is_none());
+    }
+
+    // ── HistoryFilter default tests ────────────────────────────────
+
+    #[test]
+    fn history_filter_default_vs_new() {
+        let def = HistoryFilter::default();
+        let new = HistoryFilter::new();
+        assert!(def.connector.is_none());
+        assert!(new.connector.is_none());
+        // Default has limit 0, new has DEFAULT_LIMIT
+        assert_eq!(new.limit, DEFAULT_LIMIT);
+    }
+
+    // ── Rotation path tests ────────────────────────────────────────
+
+    #[test]
+    fn rotated_path_with_nested_directory() {
+        let base = PathBuf::from("/home/user/.fwc/history.jsonl");
+        assert_eq!(
+            rotated_path(&base, 2),
+            PathBuf::from("/home/user/.fwc/history.jsonl.2")
+        );
+    }
+
+    #[test]
+    fn rotated_path_sequential_indices() {
+        let base = PathBuf::from("/tmp/log.jsonl");
+        for i in 1..=5 {
+            let expected = PathBuf::from(format!("/tmp/log.jsonl.{i}"));
+            assert_eq!(rotated_path(&base, i), expected);
+        }
+    }
+
+    // ── HistoryStore const new ─────────────────────────────────────
+
+    #[test]
+    fn history_store_new_const() {
+        let path = PathBuf::from("/tmp/test.jsonl");
+        let store = HistoryStore::new(path.clone());
+        assert_eq!(store.log_path, path);
+    }
 }

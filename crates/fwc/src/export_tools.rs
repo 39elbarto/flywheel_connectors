@@ -562,4 +562,373 @@ mod tests {
         let b = serde_json::to_string(&to_mcp_tool(&op, &opts)).unwrap();
         assert_eq!(a, b);
     }
+
+    // ── ToolSchemaFormat Display tests ───────────────────────────────
+
+    #[test]
+    fn format_display_mcp() {
+        assert_eq!(ToolSchemaFormat::Mcp.to_string(), "mcp");
+    }
+
+    #[test]
+    fn format_display_claude() {
+        assert_eq!(ToolSchemaFormat::Claude.to_string(), "claude");
+    }
+
+    #[test]
+    fn format_display_openai() {
+        assert_eq!(ToolSchemaFormat::OpenAi.to_string(), "openai");
+    }
+
+    #[test]
+    fn format_eq_same() {
+        assert_eq!(ToolSchemaFormat::Mcp, ToolSchemaFormat::Mcp);
+        assert_eq!(ToolSchemaFormat::Claude, ToolSchemaFormat::Claude);
+        assert_eq!(ToolSchemaFormat::OpenAi, ToolSchemaFormat::OpenAi);
+    }
+
+    #[test]
+    fn format_ne_different() {
+        assert_ne!(ToolSchemaFormat::Mcp, ToolSchemaFormat::Claude);
+        assert_ne!(ToolSchemaFormat::Claude, ToolSchemaFormat::OpenAi);
+    }
+
+    // ── ExportOptions defaults ──────────────────────────────────────
+
+    #[test]
+    fn export_options_defaults() {
+        let opts = ExportOptions::default();
+        assert!(opts.include_safety_metadata);
+        assert!(opts.include_ai_hints);
+        assert!(opts.include_examples);
+        assert!(opts.strip_prefix.is_none());
+        assert!(opts.risk_max.is_none());
+        assert!(opts.capability_filter.is_none());
+    }
+
+    // ── Description building edge cases ─────────────────────────────
+
+    #[test]
+    fn description_with_no_common_mistakes() {
+        let op = sample_op_no_hints();
+        let desc = build_description(&op, &ExportOptions::default());
+        assert!(!desc.contains("Common mistakes:"));
+    }
+
+    #[test]
+    fn description_with_no_examples() {
+        let op = sample_op_no_hints();
+        let desc = build_description(&op, &ExportOptions::default());
+        assert!(!desc.contains("Examples:"));
+    }
+
+    #[test]
+    fn description_with_no_when_to_use() {
+        let op = sample_op_no_hints();
+        let desc = build_description(&op, &ExportOptions::default());
+        assert!(!desc.contains("When to use:"));
+    }
+
+    #[test]
+    fn description_includes_examples_when_present() {
+        let op = sample_op();
+        let desc = build_description(&op, &ExportOptions::default());
+        assert!(desc.contains("Examples:"));
+    }
+
+    #[test]
+    fn description_includes_idempotency_when_not_none() {
+        let op = sample_op();
+        let desc = build_description(&op, &ExportOptions::default());
+        assert!(desc.contains("Idempotency: strict"));
+    }
+
+    #[test]
+    fn description_omits_approval_when_none() {
+        let op = sample_op();
+        let desc = build_description(&op, &ExportOptions::default());
+        assert!(!desc.contains("Approval:"));
+    }
+
+    #[test]
+    fn description_no_safety_when_disabled() {
+        let opts = ExportOptions {
+            include_safety_metadata: false,
+            ..ExportOptions::default()
+        };
+        let desc = build_description(&sample_op(), &opts);
+        assert!(!desc.contains("Risk:"));
+        assert!(!desc.contains("Safety:"));
+    }
+
+    #[test]
+    fn description_multiple_common_mistakes_joined() {
+        let mut op = sample_op();
+        op.common_mistakes = vec![
+            "Mistake A".to_string(),
+            "Mistake B".to_string(),
+        ];
+        let desc = build_description(&op, &ExportOptions::default());
+        assert!(desc.contains("Mistake A; Mistake B"));
+    }
+
+    // ── is_read_only / is_destructive ───────────────────────────────
+
+    #[test]
+    fn read_only_for_safe_strict() {
+        assert!(is_read_only(&sample_op()));
+    }
+
+    #[test]
+    fn not_read_only_for_risky() {
+        assert!(!is_read_only(&sample_write_op()));
+    }
+
+    #[test]
+    fn destructive_for_dangerous() {
+        assert!(is_destructive(&sample_write_op()));
+    }
+
+    #[test]
+    fn not_destructive_for_safe() {
+        assert!(!is_destructive(&sample_op()));
+    }
+
+    #[test]
+    fn destructive_for_critical() {
+        let mut op = sample_write_op();
+        op.summary.safety_tier = "critical".to_string();
+        assert!(is_destructive(&op));
+    }
+
+    #[test]
+    fn not_destructive_for_risky() {
+        let mut op = sample_write_op();
+        op.summary.safety_tier = "risky".to_string();
+        assert!(!is_destructive(&op));
+    }
+
+    // ── Name transformation edge cases ──────────────────────────────
+
+    #[test]
+    fn make_tool_name_no_prefix() {
+        let opts = ExportOptions::default();
+        assert_eq!(make_tool_name("op.id", &opts, false), "op.id");
+    }
+
+    #[test]
+    fn make_tool_name_sanitize_dots() {
+        let opts = ExportOptions::default();
+        assert_eq!(make_tool_name("a.b.c", &opts, true), "a_b_c");
+    }
+
+    #[test]
+    fn make_tool_name_no_sanitize() {
+        let opts = ExportOptions::default();
+        assert_eq!(make_tool_name("a.b.c", &opts, false), "a.b.c");
+    }
+
+    #[test]
+    fn make_tool_name_strip_and_sanitize() {
+        let opts = ExportOptions {
+            strip_prefix: Some("ns.".to_string()),
+            ..ExportOptions::default()
+        };
+        assert_eq!(make_tool_name("ns.op.sub", &opts, true), "op_sub");
+    }
+
+    #[test]
+    fn make_tool_name_empty_after_strip() {
+        let opts = ExportOptions {
+            strip_prefix: Some("full_id".to_string()),
+            ..ExportOptions::default()
+        };
+        assert_eq!(make_tool_name("full_id", &opts, false), "");
+    }
+
+    // ── Filter edge cases ───────────────────────────────────────────
+
+    #[test]
+    fn risk_filter_allows_low_when_max_low() {
+        assert!(passes_risk_filter(&sample_op(), Some("low")));
+    }
+
+    #[test]
+    fn risk_filter_blocks_low_for_unknown_level() {
+        let mut op = sample_op();
+        op.summary.risk_level = "unknown".to_string();
+        assert!(!passes_risk_filter(&op, Some("high")));
+    }
+
+    #[test]
+    fn risk_filter_allows_critical_when_max_critical() {
+        let mut op = sample_write_op();
+        op.summary.risk_level = "critical".to_string();
+        assert!(passes_risk_filter(&op, Some("critical")));
+    }
+
+    #[test]
+    fn capability_filter_exact_match() {
+        assert!(passes_capability_filter(&sample_op(), Some("github.read")));
+    }
+
+    #[test]
+    fn capability_filter_partial_prefix() {
+        assert!(passes_capability_filter(&sample_op(), Some("git")));
+    }
+
+    #[test]
+    fn capability_filter_no_match_different_prefix() {
+        assert!(!passes_capability_filter(&sample_op(), Some("slack")));
+    }
+
+    // ── MCP tool serialization ──────────────────────────────────────
+
+    #[test]
+    fn mcp_tool_equality() {
+        let a = to_mcp_tool(&sample_op(), &ExportOptions::default());
+        let b = to_mcp_tool(&sample_op(), &ExportOptions::default());
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn mcp_tool_clone() {
+        let tool = to_mcp_tool(&sample_op(), &ExportOptions::default());
+        let cloned = tool.clone();
+        assert_eq!(tool, cloned);
+    }
+
+    #[test]
+    fn mcp_annotations_serializes_skipping_none() {
+        let ann = McpToolAnnotations {
+            risk_level: Some("low".to_string()),
+            safety_tier: None,
+            idempotency: None,
+            capability: None,
+            read_only: None,
+            destructive: None,
+        };
+        let json = serde_json::to_value(&ann).unwrap();
+        assert_eq!(json["risk_level"], "low");
+        assert!(json.get("safety_tier").is_none());
+    }
+
+    // ── Claude tool tests ───────────────────────────────────────────
+
+    #[test]
+    fn claude_tool_preserves_input_schema() {
+        let op = sample_op();
+        let tool = to_claude_tool(&op, &ExportOptions::default());
+        assert_eq!(tool.input_schema, op.input_schema);
+    }
+
+    #[test]
+    fn claude_tool_with_strip_prefix() {
+        let opts = ExportOptions {
+            strip_prefix: Some("github.".to_string()),
+            ..ExportOptions::default()
+        };
+        let tool = to_claude_tool(&sample_op(), &opts);
+        assert_eq!(tool.name, "list_issues");
+    }
+
+    #[test]
+    fn claude_tool_equality() {
+        let a = to_claude_tool(&sample_op(), &ExportOptions::default());
+        let b = to_claude_tool(&sample_op(), &ExportOptions::default());
+        assert_eq!(a, b);
+    }
+
+    // ── OpenAI tool tests ───────────────────────────────────────────
+
+    #[test]
+    fn openai_tool_preserves_parameters() {
+        let op = sample_op();
+        let tool = to_openai_tool(&op, &ExportOptions::default());
+        assert_eq!(tool.function.parameters, op.input_schema);
+    }
+
+    #[test]
+    fn openai_tool_strict_is_none() {
+        let tool = to_openai_tool(&sample_op(), &ExportOptions::default());
+        assert!(tool.function.strict.is_none());
+    }
+
+    #[test]
+    fn openai_tool_with_strip_prefix() {
+        let opts = ExportOptions {
+            strip_prefix: Some("github.".to_string()),
+            ..ExportOptions::default()
+        };
+        let tool = to_openai_tool(&sample_op(), &opts);
+        assert_eq!(tool.function.name, "list_issues");
+    }
+
+    #[test]
+    fn openai_tool_serializes_type_field() {
+        let tool = to_openai_tool(&sample_op(), &ExportOptions::default());
+        let json = serde_json::to_value(&tool).unwrap();
+        assert_eq!(json["type"], "function");
+        assert!(json.get("tool_type").is_none());
+    }
+
+    // ── Batch export edge cases ─────────────────────────────────────
+
+    #[test]
+    fn export_multiple_operations() {
+        let op1 = sample_op();
+        let op2 = sample_write_op();
+        let ops: Vec<&DiscoveredOperation> = vec![&op1, &op2];
+        let result = export_tools(&ops, ToolSchemaFormat::Mcp, &ExportOptions::default());
+        assert_eq!(result.as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn export_openai_multiple_all_function_type() {
+        let op1 = sample_op();
+        let op2 = sample_write_op();
+        let ops: Vec<&DiscoveredOperation> = vec![&op1, &op2];
+        let result = export_tools(&ops, ToolSchemaFormat::OpenAi, &ExportOptions::default());
+        for item in result.as_array().unwrap() {
+            assert_eq!(item["type"], "function");
+        }
+    }
+
+    #[test]
+    fn export_claude_has_input_schema_field() {
+        let op = sample_op();
+        let ops: Vec<&DiscoveredOperation> = vec![&op];
+        let result = export_tools(&ops, ToolSchemaFormat::Claude, &ExportOptions::default());
+        assert!(result[0].get("input_schema").is_some());
+    }
+
+    /// Helper: operation with no hints/examples/mistakes.
+    fn sample_op_no_hints() -> DiscoveredOperation {
+        DiscoveredOperation {
+            actual_id: "test.op".to_string(),
+            local_id: "op".to_string(),
+            preferred_selector: "op".to_string(),
+            aliases: vec![],
+            description: "A test operation".to_string(),
+            summary: OperationSummary {
+                id: "test.op".to_string(),
+                summary: "A test operation".to_string(),
+                capability: "test.read".to_string(),
+                risk_level: "low".to_string(),
+                safety_tier: "safe".to_string(),
+                idempotency: "none".to_string(),
+                requires_approval: false,
+                supports_simulate: false,
+            },
+            input_schema: json!({"type": "object"}),
+            output_schema: json!({"type": "object"}),
+            approval_mode: "none".to_string(),
+            when_to_use: String::new(),
+            common_mistakes: vec![],
+            examples: vec![],
+            related: vec![],
+            network_constraints: None,
+            rate_limits: vec![],
+        }
+    }
 }

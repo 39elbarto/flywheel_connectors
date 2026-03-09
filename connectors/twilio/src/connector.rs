@@ -1318,6 +1318,122 @@ impl TwilioConnector {
                         ],
                     },
                 ),
+                // ── Verify API ──────────────────────────────────
+                op_info(
+                    "twilio.verify.send",
+                    "Send a verification code via SMS, call, or email",
+                    json!({
+                        "type": "object",
+                        "required": ["service_sid", "to", "channel"],
+                        "properties": {
+                            "service_sid": { "type": "string", "description": "Verify Service SID" },
+                            "to": { "type": "string", "description": "Recipient phone/email" },
+                            "channel": { "type": "string", "enum": ["sms", "call", "email", "whatsapp"], "description": "Delivery channel" }
+                        }
+                    }),
+                    json!({
+                        "type": "object",
+                        "properties": {
+                            "sid": { "type": "string" },
+                            "status": { "type": "string" },
+                            "to": { "type": "string" },
+                            "channel": { "type": "string" },
+                            "valid": { "type": "boolean" }
+                        }
+                    }),
+                    "twilio.verify",
+                    RiskLevel::High,
+                    SafetyTier::Dangerous,
+                    IdempotencyClass::None,
+                    AgentHint {
+                        when_to_use: "Send a one-time verification code to a phone number or email.".into(),
+                        common_mistakes: vec![
+                            "Must use a Verify Service SID, not an account SID.".into(),
+                            "Channel must match the contact format (sms/call for phone, email for email).".into(),
+                        ],
+                        examples: vec![
+                            r#"{"service_sid": "VAxxx", "to": "+15551234567", "channel": "sms"}"#.into(),
+                        ],
+                        related: vec![
+                            CapabilityId::from_static("twilio.verify.check"),
+                        ],
+                    },
+                ),
+                op_info(
+                    "twilio.verify.check",
+                    "Check a verification code",
+                    json!({
+                        "type": "object",
+                        "required": ["service_sid", "to", "code"],
+                        "properties": {
+                            "service_sid": { "type": "string", "description": "Verify Service SID" },
+                            "to": { "type": "string", "description": "Recipient phone/email" },
+                            "code": { "type": "string", "description": "Verification code to check" }
+                        }
+                    }),
+                    json!({
+                        "type": "object",
+                        "properties": {
+                            "sid": { "type": "string" },
+                            "status": { "type": "string" },
+                            "to": { "type": "string" },
+                            "valid": { "type": "boolean" }
+                        }
+                    }),
+                    "twilio.verify",
+                    RiskLevel::Medium,
+                    SafetyTier::Risky,
+                    IdempotencyClass::Strict,
+                    AgentHint {
+                        when_to_use: "Validate a verification code entered by the user.".into(),
+                        common_mistakes: vec![
+                            "Code is usually 4-8 digits.".into(),
+                            "Use the same service_sid as the send operation.".into(),
+                        ],
+                        examples: vec![
+                            r#"{"service_sid": "VAxxx", "to": "+15551234567", "code": "123456"}"#.into(),
+                        ],
+                        related: vec![
+                            CapabilityId::from_static("twilio.verify.send"),
+                        ],
+                    },
+                ),
+                op_info(
+                    "twilio.verify.cancel",
+                    "Cancel a pending verification",
+                    json!({
+                        "type": "object",
+                        "required": ["service_sid", "verification_sid"],
+                        "properties": {
+                            "service_sid": { "type": "string", "description": "Verify Service SID" },
+                            "verification_sid": { "type": "string", "description": "Verification SID to cancel" }
+                        }
+                    }),
+                    json!({
+                        "type": "object",
+                        "properties": {
+                            "sid": { "type": "string" },
+                            "status": { "type": "string" },
+                            "valid": { "type": "boolean" }
+                        }
+                    }),
+                    "twilio.verify",
+                    RiskLevel::Medium,
+                    SafetyTier::Risky,
+                    IdempotencyClass::BestEffort,
+                    AgentHint {
+                        when_to_use: "Cancel a pending verification that hasn't been checked yet.".into(),
+                        common_mistakes: vec![
+                            "Can only cancel pending verifications, not already-checked ones.".into(),
+                        ],
+                        examples: vec![
+                            r#"{"service_sid": "VAxxx", "verification_sid": "VExxx"}"#.into(),
+                        ],
+                        related: vec![
+                            CapabilityId::from_static("twilio.verify.send"),
+                        ],
+                    },
+                ),
             ],
             events: vec![],
             resource_types: vec![],
@@ -1435,6 +1551,10 @@ impl TwilioConnector {
             "twilio.conversation.message.list" => {
                 self.invoke_conversation_message_list(input).await
             }
+            // Verify API
+            "twilio.verify.send" => self.invoke_verify_send(input).await,
+            "twilio.verify.check" => self.invoke_verify_check(input).await,
+            "twilio.verify.cancel" => self.invoke_verify_cancel(input).await,
             _ => Err(FcpError::OperationNotGranted {
                 operation: operation.into(),
             }),
@@ -1939,6 +2059,58 @@ impl TwilioConnector {
         }))
     }
 
+    // ── Verify API implementations ─────────────────────────────
+
+    async fn invoke_verify_send(
+        &self,
+        input: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let service_sid = require_str(&input, "service_sid")?;
+        let to = require_str(&input, "to")?;
+        let channel = require_str(&input, "channel")?;
+        let resp = client
+            .send_verification(service_sid, to, channel)
+            .await
+            .map_err(|e: TwilioError| e.to_fcp_error())?;
+        serde_json::to_value(resp).map_err(|e| FcpError::Internal {
+            message: format!("Failed to serialize response: {e}"),
+        })
+    }
+
+    async fn invoke_verify_check(
+        &self,
+        input: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let service_sid = require_str(&input, "service_sid")?;
+        let to = require_str(&input, "to")?;
+        let code = require_str(&input, "code")?;
+        let resp = client
+            .check_verification(service_sid, to, code)
+            .await
+            .map_err(|e: TwilioError| e.to_fcp_error())?;
+        serde_json::to_value(resp).map_err(|e| FcpError::Internal {
+            message: format!("Failed to serialize response: {e}"),
+        })
+    }
+
+    async fn invoke_verify_cancel(
+        &self,
+        input: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let service_sid = require_str(&input, "service_sid")?;
+        let verification_sid = require_str(&input, "verification_sid")?;
+        let resp = client
+            .cancel_verification(service_sid, verification_sid)
+            .await
+            .map_err(|e: TwilioError| e.to_fcp_error())?;
+        serde_json::to_value(resp).map_err(|e| FcpError::Internal {
+            message: format!("Failed to serialize response: {e}"),
+        })
+    }
+
     /// Handle shutdown.
     pub async fn handle_shutdown(
         &self,
@@ -2143,7 +2315,11 @@ mod tests {
         assert!(op_ids.contains(&"twilio.conversation.participant.remove"));
         assert!(op_ids.contains(&"twilio.conversation.message.send"));
         assert!(op_ids.contains(&"twilio.conversation.message.list"));
-        assert_eq!(ops.len(), 26);
+        // Verify API
+        assert!(op_ids.contains(&"twilio.verify.send"));
+        assert!(op_ids.contains(&"twilio.verify.check"));
+        assert!(op_ids.contains(&"twilio.verify.cancel"));
+        assert_eq!(ops.len(), 29);
     }
 
     // ── Provisioning tests ─────────────────────────────────────────

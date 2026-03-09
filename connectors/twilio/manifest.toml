@@ -5,7 +5,7 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:7fcf0deedf57a8c19bbad51ab4a86dc7600ffffd4875126c19d4b49cbfbcc3d8"
+interface_hash = "blake3-256:fcp.interface.v2:ab60ebc4abaff3fe2c80dc12dbf29e08c66007a4d800661c2f0f76eebc4974dd"
 
 [connector]
 id = "fcp.twilio"
@@ -1861,6 +1861,173 @@ examples = ['{"conversation_sid": "CHxxx", "page_size": 50}']
 related = ["twilio.conversation.message.send"]
 
 # ---------------------------------------------------------------------------
+# Verify API Operations
+# ---------------------------------------------------------------------------
+
+[provides.operations."twilio.verify.send"]
+description = "Send a verification code via SMS, call, or email"
+capability = "twilio.verify"
+risk_level = "high"
+safety_tier = "dangerous"
+requires_approval = "none"
+idempotency = "none"
+
+[provides.operations."twilio.verify.send".rate_limit]
+max = 30
+per_ms = 60000
+
+[provides.operations."twilio.verify.send".input_schema]
+type = "object"
+required = ["service_sid", "to", "channel"]
+
+[provides.operations."twilio.verify.send".input_schema.properties.service_sid]
+type = "string"
+description = "Verify Service SID"
+
+[provides.operations."twilio.verify.send".input_schema.properties.to]
+type = "string"
+description = "Recipient phone number or email"
+
+[provides.operations."twilio.verify.send".input_schema.properties.channel]
+type = "string"
+description = "Delivery channel: sms, call, email, or whatsapp"
+
+[provides.operations."twilio.verify.send".output_schema]
+type = "object"
+required = ["sid"]
+
+[provides.operations."twilio.verify.send".output_schema.properties.sid]
+type = "string"
+
+[provides.operations."twilio.verify.send".output_schema.properties.status]
+type = "string"
+
+[provides.operations."twilio.verify.send".output_schema.properties.valid]
+type = "boolean"
+
+[provides.operations."twilio.verify.send".network_constraints]
+host_allow = ["verify.twilio.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+require_sni = true
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."twilio.verify.send".ai_hints]
+when_to_use = "Send a one-time verification code to a phone number or email."
+common_mistakes = ["Must use a Verify Service SID, not an account SID.", "Channel must match the contact format."]
+examples = ['{"service_sid": "VAxxx", "to": "+15551234567", "channel": "sms"}']
+related = ["twilio.verify.check"]
+
+[provides.operations."twilio.verify.check"]
+description = "Check a verification code"
+capability = "twilio.verify"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."twilio.verify.check".rate_limit]
+max = 60
+per_ms = 60000
+
+[provides.operations."twilio.verify.check".input_schema]
+type = "object"
+required = ["service_sid", "to", "code"]
+
+[provides.operations."twilio.verify.check".input_schema.properties.service_sid]
+type = "string"
+description = "Verify Service SID"
+
+[provides.operations."twilio.verify.check".input_schema.properties.to]
+type = "string"
+description = "Recipient phone number or email"
+
+[provides.operations."twilio.verify.check".input_schema.properties.code]
+type = "string"
+description = "Verification code to check"
+
+[provides.operations."twilio.verify.check".output_schema]
+type = "object"
+required = ["sid"]
+
+[provides.operations."twilio.verify.check".output_schema.properties.sid]
+type = "string"
+
+[provides.operations."twilio.verify.check".output_schema.properties.status]
+type = "string"
+
+[provides.operations."twilio.verify.check".output_schema.properties.valid]
+type = "boolean"
+
+[provides.operations."twilio.verify.check".network_constraints]
+host_allow = ["verify.twilio.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+require_sni = true
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."twilio.verify.check".ai_hints]
+when_to_use = "Validate a verification code entered by the user."
+common_mistakes = ["Code is usually 4-8 digits.", "Use the same service_sid as the send operation."]
+examples = ['{"service_sid": "VAxxx", "to": "+15551234567", "code": "123456"}']
+related = ["twilio.verify.send"]
+
+[provides.operations."twilio.verify.cancel"]
+description = "Cancel a pending verification"
+capability = "twilio.verify"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "none"
+idempotency = "best_effort"
+
+[provides.operations."twilio.verify.cancel".rate_limit]
+max = 60
+per_ms = 60000
+
+[provides.operations."twilio.verify.cancel".input_schema]
+type = "object"
+required = ["service_sid", "verification_sid"]
+
+[provides.operations."twilio.verify.cancel".input_schema.properties.service_sid]
+type = "string"
+description = "Verify Service SID"
+
+[provides.operations."twilio.verify.cancel".input_schema.properties.verification_sid]
+type = "string"
+description = "Verification SID to cancel"
+
+[provides.operations."twilio.verify.cancel".output_schema]
+type = "object"
+
+[provides.operations."twilio.verify.cancel".output_schema.properties.sid]
+type = "string"
+
+[provides.operations."twilio.verify.cancel".output_schema.properties.status]
+type = "string"
+
+[provides.operations."twilio.verify.cancel".network_constraints]
+host_allow = ["verify.twilio.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+require_sni = true
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."twilio.verify.cancel".ai_hints]
+when_to_use = "Cancel a pending verification that hasn't been checked yet."
+common_mistakes = ["Can only cancel pending verifications, not already-checked ones."]
+examples = ['{"service_sid": "VAxxx", "verification_sid": "VExxx"}']
+related = ["twilio.verify.send"]
+
+# ---------------------------------------------------------------------------
 # Streaming / Event Capabilities
 # ---------------------------------------------------------------------------
 
@@ -1930,6 +2097,14 @@ window_ms = 60000
 burst = 10
 scope = "instance"
 
+[[rate_limits.pools]]
+id = "twilio.verify"
+description = "Verify 2FA operations"
+requests = 30
+window_ms = 60000
+burst = 5
+scope = "instance"
+
 [rate_limits.operation_pools]
 "twilio.send_message" = ["twilio.message"]
 "twilio.get_message" = ["twilio.read"]
@@ -1957,3 +2132,6 @@ scope = "instance"
 "twilio.conversation.participant.remove" = ["twilio.conversations"]
 "twilio.conversation.message.send" = ["twilio.conversations"]
 "twilio.conversation.message.list" = ["twilio.read"]
+"twilio.verify.send" = ["twilio.verify"]
+"twilio.verify.check" = ["twilio.verify"]
+"twilio.verify.cancel" = ["twilio.verify"]

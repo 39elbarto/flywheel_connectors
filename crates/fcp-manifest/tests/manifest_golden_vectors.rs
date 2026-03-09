@@ -1625,6 +1625,10 @@ fn twilio_full_manifest_parses_with_all_operations() {
         "twilio.conversation.participant.remove",
         "twilio.conversation.message.send",
         "twilio.conversation.message.list",
+        // Verify 2FA API
+        "twilio.verify.send",
+        "twilio.verify.check",
+        "twilio.verify.cancel",
     ];
     for op_name in &expected_ops {
         assert!(ops.contains_key(*op_name), "missing operation: {op_name}");
@@ -1643,9 +1647,9 @@ fn twilio_full_manifest_parses_with_all_operations() {
     let nc = dl_rec.network_constraints.as_ref().expect("nc");
     assert!(nc.host_allow.iter().any(|h| h == "media.twiliocdn.com"));
 
-    // Verify 5 rate limit pools (read, message, voice, media, conversations)
+    // Verify 6 rate limit pools (read, message, voice, media, conversations, verify)
     let pools = parsed.rate_limits.as_ref().expect("rate_limits");
-    assert_eq!(pools.pools.len(), 5);
+    assert_eq!(pools.pools.len(), 6);
 }
 
 #[test]

@@ -17,8 +17,8 @@ use crate::{
         ApiErrorResponse, CallListResponse, ConversationListResponse,
         ConversationMessageListResponse, ConversationParticipant, MediaListResponse,
         MessageListResponse, PhoneNumberListResponse, RecordingListResponse, TwilioAccount,
-        TwilioCall, TwilioConversation, TwilioMediaResource, TwilioMessage, TwimlTemplate,
-        WhatsAppMessage,
+        TwilioCall, TwilioConversation, TwilioMediaResource, TwilioMessage, TwilioVerification,
+        TwimlTemplate, VerificationCheck, WhatsAppMessage,
     },
 };
 
@@ -27,6 +27,9 @@ pub const DEFAULT_API_BASE: &str = "https://api.twilio.com/2010-04-01/Accounts";
 
 /// Default Twilio Conversations API base URL.
 pub const DEFAULT_CONVERSATIONS_BASE: &str = "https://conversations.twilio.com/v1";
+
+/// Default Twilio Verify API base URL.
+pub const DEFAULT_VERIFY_BASE: &str = "https://verify.twilio.com/v2";
 
 /// Authentication mode for the Twilio client.
 #[derive(Clone)]
@@ -94,6 +97,7 @@ pub struct TwilioClient {
     auth: TwilioAuth,
     base_url: String,
     conversations_base_url: String,
+    verify_base_url: String,
     account_sid: String,
     max_retries: u32,
 }
@@ -104,6 +108,7 @@ impl std::fmt::Debug for TwilioClient {
             .field("auth", &self.auth)
             .field("base_url", &self.base_url)
             .field("conversations_base_url", &self.conversations_base_url)
+            .field("verify_base_url", &self.verify_base_url)
             .field("account_sid", &self.account_sid)
             .field("max_retries", &self.max_retries)
             .finish_non_exhaustive()
@@ -153,12 +158,14 @@ impl TwilioClient {
         let sid = auth.account_sid().to_string();
         let base_url = format!("{DEFAULT_API_BASE}/{sid}");
         let conversations_base_url = DEFAULT_CONVERSATIONS_BASE.to_string();
+        let verify_base_url = DEFAULT_VERIFY_BASE.to_string();
 
         Ok(Self {
             http,
             auth,
             base_url,
             conversations_base_url,
+            verify_base_url,
             account_sid: sid,
             max_retries: 2,
         })
@@ -750,6 +757,63 @@ impl TwilioClient {
             params.push(("Order", v.to_string()));
         }
         let data = self.get_with_params(&base_url, &params).await?;
+        Ok(serde_json::from_value(data)?)
+    }
+
+    // ── Verify API ─────────────────────────────────────────────
+
+    /// Send a verification code (create a verification).
+    pub async fn send_verification(
+        &self,
+        service_sid: &str,
+        to: &str,
+        channel: &str,
+    ) -> TwilioResult<TwilioVerification> {
+        let url = format!(
+            "{}/Services/{service_sid}/Verifications",
+            self.verify_base_url
+        );
+        let payload = serde_json::json!({
+            "To": to,
+            "Channel": channel,
+        });
+        let data = self.post_json(&url, &payload).await?;
+        Ok(serde_json::from_value(data)?)
+    }
+
+    /// Check a verification code.
+    pub async fn check_verification(
+        &self,
+        service_sid: &str,
+        to: &str,
+        code: &str,
+    ) -> TwilioResult<VerificationCheck> {
+        let url = format!(
+            "{}/Services/{service_sid}/VerificationCheck",
+            self.verify_base_url
+        );
+        let payload = serde_json::json!({
+            "To": to,
+            "Code": code,
+        });
+        let data = self.post_json(&url, &payload).await?;
+        Ok(serde_json::from_value(data)?)
+    }
+
+    /// Cancel a pending verification.
+    pub async fn cancel_verification(
+        &self,
+        service_sid: &str,
+        verification_sid: &str,
+    ) -> TwilioResult<TwilioVerification> {
+        let url = format!(
+            "{}/Services/{service_sid}/Verifications/{verification_sid}",
+            self.verify_base_url
+        );
+        let payload = serde_json::json!({
+            "Status": "canceled",
+        });
+        let data = self.post_json(&url, &payload).await?;
         Ok(serde_json::from_value(data)?)
     }
 

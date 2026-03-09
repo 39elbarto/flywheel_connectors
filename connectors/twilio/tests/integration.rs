@@ -879,12 +879,16 @@ async fn lifecycle_introspect_all_operations() {
         "twilio.conversation.participant.remove",
         "twilio.conversation.message.send",
         "twilio.conversation.message.list",
+        // Verify API
+        "twilio.verify.send",
+        "twilio.verify.check",
+        "twilio.verify.cancel",
     ];
 
     for expected in &expected_ops {
         assert!(op_ids.contains(expected), "missing operation: {expected}");
     }
-    assert_eq!(ops.len(), 26);
+    assert_eq!(ops.len(), 29);
 
     for op in ops {
         assert!(

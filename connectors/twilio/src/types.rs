@@ -238,6 +238,35 @@ pub struct ConversationMeta {
     pub previous_page_url: Option<String>,
 }
 
+// ── Verify API types ──────────────────────────────────────────
+
+/// A Twilio Verify verification attempt.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TwilioVerification {
+    pub sid: String,
+    pub service_sid: Option<String>,
+    pub to: Option<String>,
+    pub channel: Option<String>,
+    pub status: Option<String>,
+    pub valid: Option<bool>,
+    pub date_created: Option<String>,
+    pub date_updated: Option<String>,
+    pub url: Option<String>,
+}
+
+/// A Twilio Verify verification check result.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VerificationCheck {
+    pub sid: String,
+    pub service_sid: Option<String>,
+    pub to: Option<String>,
+    pub channel: Option<String>,
+    pub status: Option<String>,
+    pub valid: Option<bool>,
+    pub date_created: Option<String>,
+    pub date_updated: Option<String>,
+}
+
 /// Twilio API error response.
 #[derive(Debug, Clone, Deserialize)]
 pub struct ApiErrorResponse {

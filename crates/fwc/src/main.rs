@@ -7135,7 +7135,7 @@ default = "#general"
         let path = root.join("notify.toml");
         std::fs::write(
             &path,
-            r##"
+            r#"
 [pipeline]
 name = "notify-on-new-issues"
 
@@ -7148,7 +7148,7 @@ id = "notify"
 operation = "slack.send_message"
 depends_on = ["fetch"]
 condition = "{{steps.fetch.output.issues | length}} > 0"
-"##,
+"#,
         )
         .unwrap();
 

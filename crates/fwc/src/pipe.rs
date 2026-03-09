@@ -12,6 +12,8 @@ use std::{
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
+use crate::readiness::RateLimitSummary;
+
 // ── Map expression types ────────────────────────────────────────────────
 
 /// A single field mapping rule.
@@ -305,6 +307,87 @@ pub struct PipelinePlan {
     pub steps: Vec<PlannedPipelineStep>,
 }
 
+#[derive(Debug, Clone)]
+pub struct PipelineOperationMetadata {
+    pub connector: String,
+    pub selector: String,
+    pub canonical_id: String,
+    pub capability: String,
+    pub risk_level: String,
+    pub safety_tier: String,
+    pub requires_approval: bool,
+    pub approval_mode: String,
+    pub rate_limits: Vec<RateLimitSummary>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct EstimatedApiCalls {
+    pub min: u32,
+    pub max: u32,
+    pub summary: String,
+    pub conditional: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PipelineStepEstimate {
+    pub id: String,
+    pub operation: String,
+    pub connector: String,
+    pub selector: String,
+    pub canonical_id: String,
+    pub capability: String,
+    pub risk_level: String,
+    pub safety_tier: String,
+    pub requires_approval: bool,
+    pub approval_mode: String,
+    pub estimated_api_calls: EstimatedApiCalls,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub condition: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub rate_limits: Vec<RateLimitSummary>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PipelineRiskAssessment {
+    pub level: String,
+    pub highest_safety_tier: String,
+    pub summary: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub steps: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PipelineApprovalRequirement {
+    pub step_id: String,
+    pub operation: String,
+    pub capability: String,
+    pub mode: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PipelineRateLimitImpact {
+    pub capability: String,
+    pub estimated_api_calls: EstimatedApiCalls,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub steps: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub rate_limits: Vec<RateLimitSummary>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PipelineEstimate {
+    pub step_count: usize,
+    pub estimated_api_calls: EstimatedApiCalls,
+    pub risk_assessment: PipelineRiskAssessment,
+    pub required_capabilities: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub required_approvals: Vec<PipelineApprovalRequirement>,
+    pub rate_limit_impact: Vec<PipelineRateLimitImpact>,
+    pub steps: Vec<PipelineStepEstimate>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub notes: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct DiscoveredPipeline {
     pub name: String,
@@ -336,6 +419,15 @@ struct RenderedTemplate {
 struct RenderedValue {
     value: Value,
     unresolved: Vec<String>,
+}
+
+#[derive(Debug, Default)]
+struct RateLimitImpactAccumulator {
+    min_calls: u32,
+    max_calls: u32,
+    conditional: bool,
+    steps: BTreeSet<String>,
+    rate_limits: Vec<RateLimitSummary>,
 }
 
 fn default_pipeline_input() -> toml::Value {
@@ -553,6 +645,150 @@ pub fn build_pipeline_plan(
         execution_order,
         params: params.clone(),
         steps,
+    })
+}
+
+#[allow(clippy::too_many_lines)]
+pub fn estimate_pipeline(
+    plan: &PipelinePlan,
+    operations: &BTreeMap<String, PipelineOperationMetadata>,
+) -> Result<PipelineEstimate, String> {
+    let mut step_estimates = Vec::with_capacity(plan.steps.len());
+    let mut required_capabilities = BTreeSet::new();
+    let mut required_approvals = Vec::new();
+    let mut rate_limit_impact = BTreeMap::<String, RateLimitImpactAccumulator>::new();
+    let mut conditional_steps = Vec::new();
+    let mut steps_without_declared_limits = Vec::new();
+    let mut total_min_calls = 0u32;
+    let mut total_max_calls = 0u32;
+    let mut highest_risk = "low".to_owned();
+    let mut highest_safety_tier = "safe".to_owned();
+    let mut highest_risk_steps = Vec::new();
+
+    for step in &plan.steps {
+        let metadata = operations.get(&step.operation).ok_or_else(|| {
+            format!(
+                "pipeline estimate is missing manifest metadata for step `{}` (`{}`)",
+                step.id, step.operation
+            )
+        })?;
+        let estimated_api_calls = estimated_api_calls(step.condition.is_some());
+
+        total_min_calls += estimated_api_calls.min;
+        total_max_calls += estimated_api_calls.max;
+        required_capabilities.insert(metadata.capability.clone());
+
+        if estimated_api_calls.conditional {
+            conditional_steps.push(step.id.clone());
+        }
+        if metadata.rate_limits.is_empty() {
+            steps_without_declared_limits.push(step.id.clone());
+        }
+        if metadata.requires_approval {
+            required_approvals.push(PipelineApprovalRequirement {
+                step_id: step.id.clone(),
+                operation: step.operation.clone(),
+                capability: metadata.capability.clone(),
+                mode: metadata.approval_mode.clone(),
+            });
+        }
+
+        let risk_rank = pipeline_risk_rank(&metadata.risk_level);
+        let highest_risk_rank = pipeline_risk_rank(&highest_risk);
+        if risk_rank > highest_risk_rank {
+            highest_risk.clone_from(&metadata.risk_level);
+            highest_risk_steps = vec![step.id.clone()];
+        } else if risk_rank == highest_risk_rank {
+            highest_risk_steps.push(step.id.clone());
+        }
+
+        if pipeline_safety_tier_rank(&metadata.safety_tier)
+            > pipeline_safety_tier_rank(&highest_safety_tier)
+        {
+            highest_safety_tier.clone_from(&metadata.safety_tier);
+        }
+
+        let impact = rate_limit_impact
+            .entry(metadata.capability.clone())
+            .or_default();
+        impact.min_calls += estimated_api_calls.min;
+        impact.max_calls += estimated_api_calls.max;
+        impact.conditional |= estimated_api_calls.conditional;
+        impact.steps.insert(step.id.clone());
+        for rate_limit in &metadata.rate_limits {
+            push_unique_rate_limit(&mut impact.rate_limits, rate_limit);
+        }
+
+        step_estimates.push(PipelineStepEstimate {
+            id: step.id.clone(),
+            operation: step.operation.clone(),
+            connector: metadata.connector.clone(),
+            selector: metadata.selector.clone(),
+            canonical_id: metadata.canonical_id.clone(),
+            capability: metadata.capability.clone(),
+            risk_level: metadata.risk_level.clone(),
+            safety_tier: metadata.safety_tier.clone(),
+            requires_approval: metadata.requires_approval,
+            approval_mode: metadata.approval_mode.clone(),
+            estimated_api_calls,
+            condition: step.condition.clone(),
+            rate_limits: metadata.rate_limits.clone(),
+        });
+    }
+
+    let mut notes = vec![
+        "Rate-limit impact is derived from manifest-declared ceilings, not live remaining quota, because host-backed counters are not wired yet."
+            .to_owned(),
+    ];
+    if !conditional_steps.is_empty() {
+        notes.push(format!(
+            "Conditional steps are estimated as 0-1 API calls because dry-run cannot evaluate runtime predicates without real upstream outputs: {}.",
+            conditional_steps.join(", ")
+        ));
+    }
+    if !steps_without_declared_limits.is_empty() {
+        notes.push(format!(
+            "These steps do not declare manifest-backed rate limits, so impact is estimated only by API-call count: {}.",
+            steps_without_declared_limits.join(", ")
+        ));
+    }
+
+    let estimated_api_calls = EstimatedApiCalls {
+        min: total_min_calls,
+        max: total_max_calls,
+        summary: estimated_api_call_summary(total_min_calls, total_max_calls),
+        conditional: !conditional_steps.is_empty(),
+    };
+    let risk_assessment = PipelineRiskAssessment {
+        level: highest_risk,
+        highest_safety_tier,
+        summary: pipeline_risk_summary(&highest_risk_steps, &step_estimates),
+        steps: highest_risk_steps,
+    };
+    let rate_limit_impact = rate_limit_impact
+        .into_iter()
+        .map(|(capability, impact)| PipelineRateLimitImpact {
+            capability,
+            estimated_api_calls: EstimatedApiCalls {
+                min: impact.min_calls,
+                max: impact.max_calls,
+                summary: estimated_api_call_summary(impact.min_calls, impact.max_calls),
+                conditional: impact.conditional,
+            },
+            steps: impact.steps.into_iter().collect(),
+            rate_limits: impact.rate_limits,
+        })
+        .collect();
+
+    Ok(PipelineEstimate {
+        step_count: plan.step_count,
+        estimated_api_calls,
+        risk_assessment,
+        required_capabilities: required_capabilities.into_iter().collect(),
+        required_approvals,
+        rate_limit_impact,
+        steps: step_estimates,
+        notes,
     })
 }
 
@@ -778,6 +1014,79 @@ fn visit_step<'a>(
     states.insert(step_id, 2);
     order.push(step_id.to_owned());
     Ok(())
+}
+
+fn estimated_api_calls(conditional: bool) -> EstimatedApiCalls {
+    let (min, max) = if conditional { (0, 1) } else { (1, 1) };
+    EstimatedApiCalls {
+        min,
+        max,
+        summary: estimated_api_call_summary(min, max),
+        conditional,
+    }
+}
+
+fn estimated_api_call_summary(min: u32, max: u32) -> String {
+    if min == max {
+        let noun = if min == 1 { "API call" } else { "API calls" };
+        format!("~{min} {noun}")
+    } else {
+        format!("~{min}-{max} API calls")
+    }
+}
+
+fn pipeline_risk_summary(steps: &[String], step_estimates: &[PipelineStepEstimate]) -> String {
+    let Some(first_step) = steps.first() else {
+        return "Risk assessment unavailable because no pipeline steps were estimated.".to_owned();
+    };
+    let level = step_estimates
+        .iter()
+        .find(|step| step.id == *first_step)
+        .map_or_else(|| "UNKNOWN".to_owned(), |step| step.risk_level.to_ascii_uppercase());
+
+    match steps {
+        [step] => format!("{level} risk because step `{step}` is the highest-risk operation."),
+        _ => format!(
+            "{level} risk because these steps share the highest-risk operations: {}.",
+            steps
+                .iter()
+                .map(|step| format!("`{step}`"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    }
+}
+
+fn pipeline_risk_rank(level: &str) -> u8 {
+    match level {
+        "low" => 1,
+        "medium" => 2,
+        "high" => 3,
+        "critical" => 4,
+        _ => 0,
+    }
+}
+
+fn pipeline_safety_tier_rank(tier: &str) -> u8 {
+    match tier {
+        "safe" => 1,
+        "risky" => 2,
+        "dangerous" => 3,
+        "critical" => 4,
+        "forbidden" => 5,
+        _ => 0,
+    }
+}
+
+fn push_unique_rate_limit(target: &mut Vec<RateLimitSummary>, candidate: &RateLimitSummary) {
+    let already_present = target.iter().any(|existing| {
+        existing.scope == candidate.scope
+            && existing.requests == candidate.requests
+            && existing.window == candidate.window
+    });
+    if !already_present {
+        target.push(candidate.clone());
+    }
 }
 
 fn render_value_with_params(value: Value, params: &BTreeMap<String, Value>) -> RenderedValue {
@@ -1577,5 +1886,118 @@ operation = "github.list_issues"
         );
 
         let _ = std::fs::remove_dir_all(&temp_root);
+    }
+
+    #[test]
+    fn estimate_pipeline_summarizes_calls_risk_capabilities_and_approvals() {
+        let definition = parse_pipeline_definition(
+            r#"
+[pipeline]
+name = "notify-on-new-issues"
+
+[[steps]]
+id = "fetch"
+operation = "github.list_issues"
+
+[[steps]]
+id = "notify"
+operation = "slack.send_message"
+depends_on = ["fetch"]
+condition = "{{steps.fetch.output.issues | length}} > 0"
+"#,
+        )
+        .unwrap();
+
+        let plan = build_pipeline_plan(&definition, &BTreeMap::new()).unwrap();
+        let operations = BTreeMap::from([
+            (
+                "github.list_issues".to_owned(),
+                PipelineOperationMetadata {
+                    connector: "github".to_owned(),
+                    selector: "issues.list".to_owned(),
+                    canonical_id: "github.list_issues".to_owned(),
+                    capability: "github.read".to_owned(),
+                    risk_level: "low".to_owned(),
+                    safety_tier: "safe".to_owned(),
+                    requires_approval: false,
+                    approval_mode: "none".to_owned(),
+                    rate_limits: vec![RateLimitSummary {
+                        scope: "core".to_owned(),
+                        requests: 5_000,
+                        window: "1h".to_owned(),
+                    }],
+                },
+            ),
+            (
+                "slack.send_message".to_owned(),
+                PipelineOperationMetadata {
+                    connector: "slack".to_owned(),
+                    selector: "messages.send".to_owned(),
+                    canonical_id: "slack.send_message".to_owned(),
+                    capability: "slack.write".to_owned(),
+                    risk_level: "medium".to_owned(),
+                    safety_tier: "risky".to_owned(),
+                    requires_approval: true,
+                    approval_mode: "policy".to_owned(),
+                    rate_limits: vec![RateLimitSummary {
+                        scope: "messages-write".to_owned(),
+                        requests: 100,
+                        window: "1m".to_owned(),
+                    }],
+                },
+            ),
+        ]);
+
+        let estimate = estimate_pipeline(&plan, &operations).unwrap();
+        assert_eq!(estimate.step_count, 2);
+        assert_eq!(estimate.estimated_api_calls.min, 1);
+        assert_eq!(estimate.estimated_api_calls.max, 2);
+        assert_eq!(estimate.estimated_api_calls.summary, "~1-2 API calls");
+        assert_eq!(estimate.risk_assessment.level, "medium");
+        assert_eq!(estimate.risk_assessment.highest_safety_tier, "risky");
+        assert_eq!(
+            estimate.required_capabilities,
+            vec!["github.read", "slack.write"]
+        );
+        assert_eq!(estimate.required_approvals.len(), 1);
+        assert_eq!(estimate.required_approvals[0].step_id, "notify");
+        assert_eq!(estimate.required_approvals[0].mode, "policy");
+        assert_eq!(estimate.rate_limit_impact.len(), 2);
+        assert_eq!(estimate.rate_limit_impact[0].capability, "github.read");
+        assert_eq!(estimate.rate_limit_impact[1].capability, "slack.write");
+        assert_eq!(estimate.rate_limit_impact[1].estimated_api_calls.min, 0);
+        assert_eq!(estimate.rate_limit_impact[1].estimated_api_calls.max, 1);
+        assert!(
+            estimate
+                .notes
+                .iter()
+                .any(|note| note.contains("manifest-declared ceilings"))
+        );
+        assert!(
+            estimate
+                .notes
+                .iter()
+                .any(|note| note.contains("Conditional steps"))
+        );
+    }
+
+    #[test]
+    fn estimate_pipeline_requires_operation_metadata_for_every_step() {
+        let definition = parse_pipeline_definition(
+            r#"
+[pipeline]
+name = "missing-metadata"
+
+[[steps]]
+id = "fetch"
+operation = "github.list_issues"
+"#,
+        )
+        .unwrap();
+
+        let plan = build_pipeline_plan(&definition, &BTreeMap::new()).unwrap();
+        let error = estimate_pipeline(&plan, &BTreeMap::new()).unwrap_err();
+        assert!(error.contains("missing manifest metadata"));
+        assert!(error.contains("fetch"));
     }
 }

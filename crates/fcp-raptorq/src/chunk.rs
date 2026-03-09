@@ -672,4 +672,257 @@ mod tests {
         let deserialized: RawChunk = serde_json::from_str(&json).unwrap();
         assert!(deserialized.is_empty());
     }
+
+    // ── Additional chunk edge-case tests ──────────────────────────────────
+
+    #[test]
+    fn manifest_different_chunk_sizes_produce_different_chunk_counts() {
+        let payload = vec![42u8; 1000];
+        let (m1, c1) = ChunkedObjectManifest::from_payload(&payload, 100);
+        let (m2, c2) = ChunkedObjectManifest::from_payload(&payload, 200);
+        assert_eq!(m1.chunk_count(), 10);
+        assert_eq!(m2.chunk_count(), 5);
+        assert_eq!(c1.len(), 10);
+        assert_eq!(c2.len(), 5);
+        // But the payload hashes should be identical
+        assert_eq!(m1.payload_hash, m2.payload_hash);
+    }
+
+    #[test]
+    fn manifest_reconstruct_preserves_byte_ordering() {
+        let payload: Vec<u8> = (0..200_u8).collect();
+        let (manifest, chunks) = ChunkedObjectManifest::from_payload(&payload, 50);
+        let reconstructed = manifest.reconstruct(&chunks).unwrap();
+        assert_eq!(reconstructed, payload);
+        // Verify byte-by-byte ordering
+        for (i, &byte) in reconstructed.iter().enumerate() {
+            assert_eq!(byte, i as u8, "byte at position {i} differs");
+        }
+    }
+
+    #[test]
+    fn manifest_chunk_ids_differ_from_different_payloads() {
+        let payload_a = vec![1u8; 100];
+        let payload_b = vec![2u8; 100];
+        let (m_a, _) = ChunkedObjectManifest::from_payload(&payload_a, 50);
+        let (m_b, _) = ChunkedObjectManifest::from_payload(&payload_b, 50);
+        // All chunk IDs should differ because content differs
+        for (id_a, id_b) in m_a.chunks.iter().zip(m_b.chunks.iter()) {
+            assert_ne!(id_a, id_b);
+        }
+    }
+
+    #[test]
+    fn raw_chunk_content_id_is_unscoped() {
+        // Two identical chunks should always produce the same ID
+        let data = vec![99u8; 256];
+        let c1 = RawChunk::new(data.clone());
+        let c2 = RawChunk::new(data);
+        assert_eq!(c1.content_id(), c2.content_id());
+    }
+
+    #[test]
+    fn manifest_reconstruct_wrong_order_still_works() {
+        // Reconstruction uses chunks in order, so reversed chunks
+        // should produce incorrect data but not error on length match
+        let payload: Vec<u8> = (0..100_u8).collect();
+        let (manifest, mut chunks) = ChunkedObjectManifest::from_payload(&payload, 25);
+        assert_eq!(chunks.len(), 4);
+        // Reverse chunks: length matches but content is wrong
+        chunks.reverse();
+        let result = manifest.reconstruct(&chunks);
+        // Hash should not match since content order changed
+        assert!(matches!(result, Err(ChunkError::HashMismatch)));
+    }
+
+    #[test]
+    fn manifest_from_payload_large_chunk_size() {
+        // Chunk size larger than payload -> single chunk
+        let payload = vec![42u8; 100];
+        let (manifest, chunks) = ChunkedObjectManifest::from_payload(&payload, u32::MAX);
+        assert_eq!(manifest.chunk_count(), 1);
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].bytes, payload);
+    }
+
+    #[test]
+    fn manifest_serde_preserves_chunk_ids() {
+        let payload = vec![42u8; 500];
+        let (manifest, _) = ChunkedObjectManifest::from_payload(&payload, 100);
+        let json = serde_json::to_string(&manifest).unwrap();
+        let deserialized: ChunkedObjectManifest = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.chunks, manifest.chunks);
+    }
+
+    #[test]
+    fn raw_chunk_serde_large_payload() {
+        let chunk = RawChunk::new(vec![0xAB; 10_000]);
+        let json = serde_json::to_string(&chunk).unwrap();
+        let deserialized: RawChunk = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.bytes, chunk.bytes);
+    }
+
+    #[test]
+    fn manifest_chunk_size_at_with_one_byte_chunks() {
+        let payload = vec![1u8, 2, 3];
+        let (manifest, _) = ChunkedObjectManifest::from_payload(&payload, 1);
+        assert_eq!(manifest.chunk_count(), 3);
+        for i in 0..3 {
+            assert_eq!(manifest.chunk_size_at(i).unwrap(), 1);
+        }
+    }
+
+    #[test]
+    fn manifest_reconstruct_unchecked_corrupted_data_succeeds() {
+        let payload = vec![1u8; 100];
+        let (manifest, mut chunks) = ChunkedObjectManifest::from_payload(&payload, 50);
+        // Corrupt a byte
+        chunks[0].bytes[0] = 255;
+        // unchecked should succeed
+        let result = manifest.reconstruct_unchecked(&chunks).unwrap();
+        // But hash fails
+        assert!(!manifest.verify_hash(&result));
+        assert_eq!(result.len(), 100);
+    }
+
+    // ── Additional chunk edge-case tests (batch 2) ────────────────────────
+
+    #[test]
+    fn manifest_from_payload_binary_data() {
+        let payload: Vec<u8> = (0..255_u8).collect();
+        let (manifest, chunks) = ChunkedObjectManifest::from_payload(&payload, 64);
+        assert_eq!(manifest.total_len, 255);
+        // ceil(255 / 64) = 4 chunks
+        assert_eq!(manifest.chunk_count(), 4);
+        let reconstructed = manifest.reconstruct(&chunks).unwrap();
+        assert_eq!(reconstructed, payload);
+    }
+
+    #[test]
+    fn manifest_reconstruct_preserves_trailing_zeros() {
+        let mut payload = vec![0xAB_u8; 50];
+        payload.extend_from_slice(&[0u8; 50]);
+        let (manifest, chunks) = ChunkedObjectManifest::from_payload(&payload, 30);
+        let reconstructed = manifest.reconstruct(&chunks).unwrap();
+        assert_eq!(reconstructed, payload);
+        // Verify trailing zeros are preserved
+        for &b in &reconstructed[50..] {
+            assert_eq!(b, 0);
+        }
+    }
+
+    #[test]
+    fn manifest_chunk_size_at_two_chunks_last_smaller() {
+        let payload = vec![1u8; 70];
+        let (manifest, _) = ChunkedObjectManifest::from_payload(&payload, 50);
+        assert_eq!(manifest.chunk_count(), 2);
+        assert_eq!(manifest.chunk_size_at(0).unwrap(), 50);
+        assert_eq!(manifest.chunk_size_at(1).unwrap(), 20);
+    }
+
+    #[test]
+    fn manifest_reconstruct_single_byte_payload() {
+        let payload = vec![42u8];
+        let (manifest, chunks) = ChunkedObjectManifest::from_payload(&payload, 1024);
+        assert_eq!(manifest.chunk_count(), 1);
+        let reconstructed = manifest.reconstruct(&chunks).unwrap();
+        assert_eq!(reconstructed, payload);
+    }
+
+    #[test]
+    fn raw_chunk_debug_shows_bytes() {
+        let chunk = RawChunk::new(vec![0xDE, 0xAD]);
+        let debug = format!("{chunk:?}");
+        assert!(debug.contains("bytes"));
+    }
+
+    #[test]
+    fn manifest_serde_cbor_roundtrip_via_json() {
+        let payload = vec![42u8; 500];
+        let (manifest, _) = ChunkedObjectManifest::from_payload(&payload, 100);
+        let json = serde_json::to_vec(&manifest).unwrap();
+        let deserialized: ChunkedObjectManifest = serde_json::from_slice(&json).unwrap();
+        assert_eq!(deserialized.total_len, manifest.total_len);
+        assert_eq!(deserialized.chunk_size, manifest.chunk_size);
+        assert_eq!(deserialized.payload_hash, manifest.payload_hash);
+        assert!(deserialized.verify_hash(&payload));
+    }
+
+    #[test]
+    fn manifest_reconstruct_unchecked_preserves_corrupted_data() {
+        let payload = vec![0u8; 200];
+        let (manifest, mut chunks) = ChunkedObjectManifest::from_payload(&payload, 100);
+        chunks[0].bytes[0] = 0xFF;
+        chunks[1].bytes[0] = 0xFE;
+        let result = manifest.reconstruct_unchecked(&chunks).unwrap();
+        assert_eq!(result[0], 0xFF);
+        assert_eq!(result[100], 0xFE);
+    }
+
+    #[test]
+    fn manifest_chunk_ids_stable_across_manifest_creation() {
+        let payload = vec![42u8; 300];
+        let (m1, _) = ChunkedObjectManifest::from_payload(&payload, 100);
+        let (m2, _) = ChunkedObjectManifest::from_payload(&payload, 100);
+        assert_eq!(m1.chunks, m2.chunks);
+    }
+
+    #[test]
+    fn manifest_from_payload_exact_three_chunks() {
+        let payload = vec![7u8; 300];
+        let (manifest, chunks) = ChunkedObjectManifest::from_payload(&payload, 100);
+        assert_eq!(manifest.chunk_count(), 3);
+        assert_eq!(chunks.len(), 3);
+        for chunk in &chunks {
+            assert_eq!(chunk.len(), 100);
+        }
+        for i in 0..3 {
+            assert_eq!(manifest.chunk_size_at(i).unwrap(), 100);
+        }
+    }
+
+    #[test]
+    fn raw_chunk_content_id_all_zeros() {
+        let c1 = RawChunk::new(vec![0u8; 100]);
+        let c2 = RawChunk::new(vec![0u8; 100]);
+        assert_eq!(c1.content_id(), c2.content_id());
+    }
+
+    #[test]
+    fn raw_chunk_content_id_all_ones() {
+        let c1 = RawChunk::new(vec![0xFF; 100]);
+        let c2 = RawChunk::new(vec![0xFF; 100]);
+        assert_eq!(c1.content_id(), c2.content_id());
+    }
+
+    #[test]
+    fn manifest_verify_hash_wrong_content_same_length() {
+        let payload = vec![1u8; 500];
+        let (manifest, _) = ChunkedObjectManifest::from_payload(&payload, 100);
+        let wrong = vec![2u8; 500];
+        assert!(!manifest.verify_hash(&wrong));
+    }
+
+    #[test]
+    fn manifest_reconstruct_length_mismatch_with_extra_bytes() {
+        let payload = vec![1u8; 100];
+        let (manifest, mut chunks) = ChunkedObjectManifest::from_payload(&payload, 50);
+        // Replace a chunk with a longer one (same count, different length)
+        chunks[0] = RawChunk::new(vec![1u8; 55]);
+        let result = manifest.reconstruct(&chunks);
+        assert!(matches!(result, Err(ChunkError::LengthMismatch { .. })));
+    }
+
+    #[test]
+    fn manifest_clone_then_modify_original_is_independent() {
+        let payload = vec![1u8; 200];
+        let (manifest, _) = ChunkedObjectManifest::from_payload(&payload, 100);
+        let cloned = manifest.clone();
+        // Modify via re-creation with different payload
+        let payload2 = vec![2u8; 200];
+        let (manifest2, _) = ChunkedObjectManifest::from_payload(&payload2, 100);
+        // Clone should still match original
+        assert_eq!(cloned.payload_hash, manifest.payload_hash);
+        assert_ne!(cloned.payload_hash, manifest2.payload_hash);
+    }
 }

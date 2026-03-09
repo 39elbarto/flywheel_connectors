@@ -360,4 +360,63 @@ mod tests {
         let result = serde_json::from_str::<ObjectTransmissionInformation>(json);
         assert!(result.is_err());
     }
+
+    // ── Additional OTI edge-case tests ───────────────────────────────────
+
+    #[test]
+    fn oti_new_is_const() {
+        // Verify const construction works at compile time
+        const OTI: ObjectTransmissionInformation =
+            ObjectTransmissionInformation::new(1024, 64, 1, 1, 8);
+        assert_eq!(OTI.transfer_length(), 1024);
+        assert_eq!(OTI.symbol_size(), 64);
+    }
+
+    #[test]
+    fn oti_serde_bincode_style_roundtrip() {
+        let oti = ObjectTransmissionInformation::new(4096, 128, 1, 2, 8);
+        let json_bytes = serde_json::to_vec(&oti).unwrap();
+        let decoded: ObjectTransmissionInformation = serde_json::from_slice(&json_bytes).unwrap();
+        assert_eq!(oti, decoded);
+    }
+
+    #[test]
+    fn oti_multiple_source_blocks() {
+        let oti = ObjectTransmissionInformation::new(1_000_000, 1024, 4, 2, 8);
+        assert_eq!(oti.source_blocks(), 4);
+        assert_eq!(oti.sub_blocks(), 2);
+    }
+
+    #[test]
+    fn oti_alignment_values() {
+        for align in [1, 2, 4, 8, 16] {
+            let oti = ObjectTransmissionInformation::new(100, 64, 1, 1, align);
+            assert_eq!(oti.symbol_alignment(), align);
+        }
+    }
+
+    #[test]
+    fn oti_serde_empty_json_object_fails() {
+        let json = "{}";
+        let result = serde_json::from_str::<ObjectTransmissionInformation>(json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn oti_serde_overflow_symbol_size_fails() {
+        // u16 max is 65535, so 70000 should fail
+        let json = r#"{"transfer_length":100,"symbol_size":70000,"source_blocks":1,"sub_blocks":1,"alignment":8}"#;
+        let result = serde_json::from_str::<ObjectTransmissionInformation>(json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn oti_equality_transitive() {
+        let a = ObjectTransmissionInformation::new(100, 64, 1, 1, 8);
+        let b = ObjectTransmissionInformation::new(100, 64, 1, 1, 8);
+        let c = ObjectTransmissionInformation::new(100, 64, 1, 1, 8);
+        assert_eq!(a, b);
+        assert_eq!(b, c);
+        assert_eq!(a, c);
+    }
 }

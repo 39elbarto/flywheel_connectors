@@ -899,4 +899,148 @@ mod tests {
         assert!(debug.contains("55"));
         assert!(debug.contains("77"));
     }
+
+    // ── Error interoperability and formatting tests ──────────────────────
+
+    #[test]
+    fn chunk_error_display_is_not_empty() {
+        let variants: Vec<ChunkError> = vec![
+            ChunkError::MissingChunks {
+                expected: 1,
+                got: 0,
+            },
+            ChunkError::LengthMismatch {
+                expected: 1,
+                got: 0,
+            },
+            ChunkError::HashMismatch,
+            ChunkError::InvalidChunkIndex { index: 0, count: 0 },
+        ];
+        for v in &variants {
+            assert!(!v.to_string().is_empty());
+        }
+    }
+
+    #[test]
+    fn encode_error_display_is_not_empty() {
+        let variants: Vec<EncodeError> = vec![
+            EncodeError::PayloadTooLarge { size: 1, max: 0 },
+            EncodeError::EmptyPayload,
+        ];
+        for v in &variants {
+            assert!(!v.to_string().is_empty());
+        }
+    }
+
+    #[test]
+    fn decode_error_display_is_not_empty() {
+        let variants: Vec<DecodeError> = vec![
+            DecodeError::Timeout,
+            DecodeError::Cancelled,
+            DecodeError::InsufficientSymbols {
+                received: 0,
+                needed: 1,
+            },
+            DecodeError::AdmissionDenied {
+                reason: "test".into(),
+            },
+            DecodeError::SymbolBufferExceeded {
+                buffered: 1,
+                limit: 0,
+            },
+            DecodeError::MemoryLimitExceeded { used: 1, limit: 0 },
+            DecodeError::InvalidSymbol {
+                reason: "test".into(),
+            },
+            DecodeError::InvalidTransmissionInfo {
+                reason: "test".into(),
+            },
+            DecodeError::Runtime {
+                reason: "test".into(),
+            },
+        ];
+        for v in &variants {
+            assert!(!v.to_string().is_empty());
+        }
+    }
+
+    #[test]
+    fn chunk_error_clone_preserves_fields() {
+        let err = ChunkError::MissingChunks {
+            expected: 42,
+            got: 7,
+        };
+        let cloned = err.clone();
+        assert_eq!(err, cloned);
+        if let ChunkError::MissingChunks { expected, got } = cloned {
+            assert_eq!(expected, 42);
+            assert_eq!(got, 7);
+        }
+    }
+
+    #[test]
+    fn encode_error_clone_preserves_fields() {
+        let err = EncodeError::PayloadTooLarge {
+            size: 999,
+            max: 500,
+        };
+        let cloned = err.clone();
+        assert_eq!(err, cloned);
+        if let EncodeError::PayloadTooLarge { size, max } = cloned {
+            assert_eq!(size, 999);
+            assert_eq!(max, 500);
+        }
+    }
+
+    #[test]
+    fn decode_error_clone_preserves_string_fields() {
+        let err = DecodeError::AdmissionDenied {
+            reason: "max concurrent (16) exceeded".into(),
+        };
+        let cloned = err.clone();
+        assert_eq!(err, cloned);
+        if let DecodeError::AdmissionDenied { reason } = cloned {
+            assert_eq!(reason, "max concurrent (16) exceeded");
+        }
+    }
+
+    #[test]
+    fn decode_error_invalid_symbol_with_special_chars() {
+        let err = DecodeError::InvalidSymbol {
+            reason: "symbol contains \0 null bytes".into(),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("null bytes"));
+    }
+
+    #[test]
+    fn decode_error_runtime_with_long_message() {
+        let long_reason = "x".repeat(10_000);
+        let err = DecodeError::Runtime {
+            reason: long_reason.clone(),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains(&long_reason));
+    }
+
+    #[test]
+    fn chunk_error_hash_mismatch_eq() {
+        let a = ChunkError::HashMismatch;
+        let b = ChunkError::HashMismatch;
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn decode_error_timeout_eq() {
+        let a = DecodeError::Timeout;
+        let b = DecodeError::Timeout;
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn decode_error_cancelled_eq() {
+        let a = DecodeError::Cancelled;
+        let b = DecodeError::Cancelled;
+        assert_eq!(a, b);
+    }
 }

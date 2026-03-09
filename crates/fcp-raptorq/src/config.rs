@@ -975,4 +975,295 @@ mod tests {
         assert_eq!(config.symbol_size, 1024);
         assert_eq!(cloned.symbol_size, 2048);
     }
+
+    // ── Additional config edge cases ──────────────────────────────────────
+
+    #[test]
+    fn repair_symbols_exact_10000_bps_doubles_count() {
+        let config = RaptorQConfig {
+            repair_ratio_bps: 10000,
+            ..RaptorQConfig::default()
+        };
+        assert_eq!(config.repair_symbols(50), 50);
+        assert_eq!(config.repair_symbols(1), 1);
+    }
+
+    #[test]
+    fn repair_symbols_50_percent_overhead() {
+        let config = RaptorQConfig {
+            repair_ratio_bps: 5000,
+            ..RaptorQConfig::default()
+        };
+        assert_eq!(config.repair_symbols(200), 100);
+    }
+
+    #[test]
+    fn source_symbols_large_payload() {
+        let config = RaptorQConfig::default(); // symbol_size = 1024
+        // 1MB -> 1024 source symbols
+        assert_eq!(config.source_symbols(1024 * 1024), 1024);
+    }
+
+    #[test]
+    fn total_symbols_with_zero_repair() {
+        let config = RaptorQConfig {
+            repair_ratio_bps: 0,
+            ..RaptorQConfig::default()
+        };
+        assert_eq!(config.total_symbols(10240), 10);
+    }
+
+    #[test]
+    fn chunk_count_exact_multiple() {
+        let config = RaptorQConfig {
+            chunk_size: 100,
+            ..RaptorQConfig::default()
+        };
+        assert_eq!(config.chunk_count(500), 5);
+        assert_eq!(config.chunk_count(501), 6);
+    }
+
+    #[test]
+    fn mtu_safe_symbol_size_three_symbols_per_frame() {
+        let safe = RaptorQConfig::mtu_safe_symbol_size(1200, 3);
+        // (1200 - 114) / 3 = 362, minus 22 = 340
+        assert_eq!(safe, Some(340));
+    }
+
+    #[test]
+    fn from_preset_preferred_equals_mtu_safe() {
+        // When preferred exactly equals MTU-safe, it should use it
+        let mtu_safe = RaptorQConfig::mtu_safe_symbol_size(1200, 1).unwrap();
+        let preset = RaptorQPreset {
+            profile: RaptorQPathProfile::Lan,
+            max_datagram_bytes: 1200,
+            symbols_per_frame: 1,
+            preferred_symbol_size: mtu_safe,
+            repair_ratio_bps: 500,
+        };
+        let config = RaptorQConfig::from_preset(preset).unwrap();
+        assert_eq!(config.symbol_size, mtu_safe);
+    }
+
+    #[test]
+    fn bound_symbol_size_mutates_config() {
+        let mut config = RaptorQConfig {
+            symbol_size: 5000,
+            ..Default::default()
+        };
+        let before = config.symbol_size;
+        config.bound_symbol_size(1200, 1).unwrap();
+        assert!(config.symbol_size < before);
+        assert_eq!(config.symbol_size, 1064);
+    }
+
+    #[test]
+    fn requires_chunking_custom_threshold() {
+        let config = RaptorQConfig {
+            max_chunk_threshold: 50,
+            ..RaptorQConfig::default()
+        };
+        assert!(!config.requires_chunking(50));
+        assert!(config.requires_chunking(51));
+        assert!(!config.requires_chunking(0));
+    }
+
+    #[test]
+    fn config_serde_preserves_all_custom_fields() {
+        let config = RaptorQConfig {
+            symbol_size: 512,
+            repair_ratio_bps: 750,
+            max_object_size: 32 * 1024 * 1024,
+            decode_timeout: Duration::from_secs(15),
+            max_chunk_threshold: 128 * 1024,
+            chunk_size: 32 * 1024,
+        };
+        let json = serde_json::to_string(&config).unwrap();
+        let d: RaptorQConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(d.symbol_size, 512);
+        assert_eq!(d.repair_ratio_bps, 750);
+        assert_eq!(d.max_object_size, 32 * 1024 * 1024);
+        assert_eq!(d.decode_timeout, Duration::from_secs(15));
+        assert_eq!(d.max_chunk_threshold, 128 * 1024);
+        assert_eq!(d.chunk_size, 32 * 1024);
+    }
+
+    #[test]
+    fn preset_derp_serde_roundtrip() {
+        let preset = RaptorQPreset::derp();
+        let json = serde_json::to_string(&preset).unwrap();
+        let d: RaptorQPreset = serde_json::from_str(&json).unwrap();
+        assert_eq!(d.profile, RaptorQPathProfile::Derp);
+        assert_eq!(d.max_datagram_bytes, preset.max_datagram_bytes);
+    }
+
+    #[test]
+    fn path_profile_serde_from_string() {
+        let json = "\"Lan\"";
+        let p: RaptorQPathProfile = serde_json::from_str(json).unwrap();
+        assert_eq!(p, RaptorQPathProfile::Lan);
+
+        let json = "\"Derp\"";
+        let p: RaptorQPathProfile = serde_json::from_str(json).unwrap();
+        assert_eq!(p, RaptorQPathProfile::Derp);
+    }
+
+    #[test]
+    fn path_profile_invalid_serde_fails() {
+        let json = "\"Unknown\"";
+        let result = serde_json::from_str::<RaptorQPathProfile>(json);
+        assert!(result.is_err());
+    }
+
+    // ── Additional config tests (batch 2) ─────────────────────────────────
+
+    #[test]
+    fn repair_symbols_with_250_bps() {
+        let config = RaptorQConfig {
+            repair_ratio_bps: 250,
+            ..RaptorQConfig::default()
+        };
+        // 250 bps = 2.5% overhead
+        // 1000 source -> 1000 * 250 / 10000 = 25 repair
+        assert_eq!(config.repair_symbols(1000), 25);
+        // 40 source -> 40 * 250 / 10000 = 1 repair
+        assert_eq!(config.repair_symbols(40), 1);
+    }
+
+    #[test]
+    fn source_symbols_max_symbol_size() {
+        let config = RaptorQConfig {
+            symbol_size: u16::MAX,
+            ..RaptorQConfig::default()
+        };
+        // 65535 bytes -> 1 source symbol
+        assert_eq!(config.source_symbols(65535), 1);
+        // 65536 bytes -> 2 source symbols
+        assert_eq!(config.source_symbols(65536), 2);
+    }
+
+    #[test]
+    fn total_symbols_large_repair_ratio() {
+        let config = RaptorQConfig {
+            symbol_size: 64,
+            repair_ratio_bps: 5000, // 50%
+            ..RaptorQConfig::default()
+        };
+        // 640 bytes = 10 source symbols, 50% repair = 5
+        assert_eq!(config.total_symbols(640), 15);
+    }
+
+    #[test]
+    fn chunk_count_very_large_payload() {
+        let config = RaptorQConfig {
+            chunk_size: 1024,
+            ..RaptorQConfig::default()
+        };
+        // 1MB / 1KB = 1024 chunks
+        assert_eq!(config.chunk_count(1024 * 1024), 1024);
+    }
+
+    #[test]
+    fn mtu_safe_symbol_size_minimum_viable() {
+        // Minimum viable: header(114) + overhead(22) + 2 = 138
+        let safe = RaptorQConfig::mtu_safe_symbol_size(138, 1);
+        assert_eq!(safe, Some(2));
+    }
+
+    #[test]
+    fn from_preset_uses_default_non_symbol_fields() {
+        let preset = RaptorQPreset::lan();
+        let config = RaptorQConfig::from_preset(preset).unwrap();
+        // Non-symbol fields should be defaults
+        assert_eq!(config.max_object_size, 64 * 1024 * 1024);
+        assert_eq!(config.decode_timeout, Duration::from_secs(30));
+        assert_eq!(config.max_chunk_threshold, 256 * 1024);
+        assert_eq!(config.chunk_size, 64 * 1024);
+    }
+
+    #[test]
+    fn bound_symbol_size_does_not_increase() {
+        let mut config = RaptorQConfig {
+            symbol_size: 500,
+            ..Default::default()
+        };
+        // MTU-safe limit is 1064 for (1200, 1)
+        let adjusted = config.bound_symbol_size(1200, 1).unwrap();
+        // Should stay at 500 since it's below the limit
+        assert_eq!(adjusted, 500);
+        assert_eq!(config.symbol_size, 500);
+    }
+
+    #[test]
+    fn config_serde_decode_timeout_zero() {
+        let json = r#"{"symbol_size":1024,"repair_ratio_bps":500,"max_object_size":67108864,"decode_timeout":0,"max_chunk_threshold":262144,"chunk_size":65536}"#;
+        let config: RaptorQConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.decode_timeout, Duration::from_secs(0));
+    }
+
+    #[test]
+    fn preset_lan_and_derp_have_same_defaults() {
+        let lan = RaptorQPreset::lan();
+        let derp = RaptorQPreset::derp();
+        assert_eq!(lan.max_datagram_bytes, derp.max_datagram_bytes);
+        assert_eq!(lan.symbols_per_frame, derp.symbols_per_frame);
+        assert_eq!(lan.preferred_symbol_size, derp.preferred_symbol_size);
+        assert_eq!(lan.repair_ratio_bps, derp.repair_ratio_bps);
+        // Only profile differs
+        assert_ne!(lan.profile, derp.profile);
+    }
+
+    #[test]
+    fn config_requires_chunking_with_zero_threshold() {
+        let config = RaptorQConfig {
+            max_chunk_threshold: 0,
+            ..RaptorQConfig::default()
+        };
+        // Anything above 0 requires chunking
+        assert!(config.requires_chunking(1));
+        assert!(!config.requires_chunking(0));
+    }
+
+    #[test]
+    fn config_chunk_count_with_large_chunk_size() {
+        let config = RaptorQConfig {
+            chunk_size: u32::MAX,
+            ..RaptorQConfig::default()
+        };
+        // 100 bytes with enormous chunk size -> 1 chunk
+        assert_eq!(config.chunk_count(100), 1);
+    }
+
+    #[test]
+    fn mtu_safe_symbol_size_with_header_exactly() {
+        // max_datagram = header only (114) -> no room for anything
+        assert!(RaptorQConfig::mtu_safe_symbol_size(114, 1).is_none());
+    }
+
+    #[test]
+    fn preset_debug_contains_profile() {
+        let derp = RaptorQPreset::derp();
+        let debug = format!("{derp:?}");
+        assert!(debug.contains("Derp"));
+        assert!(debug.contains("1200"));
+    }
+
+    #[test]
+    fn config_serde_roundtrip_with_zero_repair() {
+        let config = RaptorQConfig {
+            repair_ratio_bps: 0,
+            ..RaptorQConfig::default()
+        };
+        let json = serde_json::to_string(&config).unwrap();
+        let d: RaptorQConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(d.repair_ratio_bps, 0);
+        assert_eq!(d.repair_symbols(1000), 0);
+    }
+
+    #[test]
+    fn mtu_safe_symbol_size_four_symbols_per_frame() {
+        let safe = RaptorQConfig::mtu_safe_symbol_size(1200, 4);
+        // (1200 - 114) / 4 = 271, minus 22 = 249
+        assert_eq!(safe, Some(249));
+    }
 }

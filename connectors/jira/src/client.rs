@@ -13,7 +13,8 @@ use crate::{
     error::{JiraError, JiraResult},
     types::{
         ApiErrorResponse, CommentListResponse, CreateIssueResponse, JiraAttachment, JiraComment,
-        JiraIssue, SearchResult, SprintListResponse, TransitionsResponse,
+        JiraIssue, JiraWorklog, SearchResult, SprintListResponse, TransitionsResponse,
+        WorklogListResponse,
     },
 };
 
@@ -385,6 +386,72 @@ impl JiraClient {
         self.get(&url).await
     }
 
+    // ── Worklog operations ────────────────────────────────────────
+
+    /// List worklogs for an issue.
+    #[instrument(skip(self))]
+    pub async fn list_worklogs(
+        &self,
+        issue_key: &str,
+        start_at: Option<u64>,
+        max_results: Option<u64>,
+    ) -> JiraResult<WorklogListResponse> {
+        let mut url = format!("{}/issue/{issue_key}/worklog", self.base_url);
+        let mut sep = '?';
+        if let Some(start_at) = start_at {
+            let _ = write!(url, "{sep}startAt={start_at}");
+            sep = '&';
+        }
+        if let Some(max_results) = max_results {
+            let _ = write!(url, "{sep}maxResults={max_results}");
+        }
+
+        self.get(&url).await
+    }
+
+    /// Add a worklog entry to an issue.
+    #[instrument(skip(self, body))]
+    pub async fn add_worklog(
+        &self,
+        issue_key: &str,
+        body: &serde_json::Value,
+    ) -> JiraResult<JiraWorklog> {
+        self.post(
+            &format!("{}/issue/{issue_key}/worklog", self.base_url),
+            body,
+        )
+        .await
+    }
+
+    /// Update a worklog entry.
+    #[instrument(skip(self, body))]
+    pub async fn update_worklog(
+        &self,
+        issue_key: &str,
+        worklog_id: &str,
+        body: &serde_json::Value,
+    ) -> JiraResult<JiraWorklog> {
+        let url = format!(
+            "{}/issue/{issue_key}/worklog/{worklog_id}",
+            self.base_url
+        );
+        self.put(&url, body).await
+    }
+
+    /// Delete a worklog entry.
+    #[instrument(skip(self))]
+    pub async fn delete_worklog(
+        &self,
+        issue_key: &str,
+        worklog_id: &str,
+    ) -> JiraResult<()> {
+        self.delete(&format!(
+            "{}/issue/{issue_key}/worklog/{worklog_id}",
+            self.base_url
+        ))
+        .await
+    }
+
     // ── Attachment operations ────────────────────────────────────
 
     /// Upload an attachment to an issue (multipart).
@@ -572,6 +639,43 @@ impl JiraClient {
                     }
                     return Err(err);
                 }
+                Err(e) if (e.is_timeout() || e.is_connect()) && attempts <= self.max_retries => {
+                    warn!(attempt = attempts, error = %e, "Retrying after connection error");
+                    fcp_async_core::time::sleep(delay).await;
+                    delay = std::cmp::min(delay * 2, Duration::from_millis(self.max_delay_ms));
+                }
+                Err(e) => return Err(JiraError::Http(e)),
+            }
+        }
+    }
+
+    async fn put<R>(&self, url: &str, body: &serde_json::Value) -> JiraResult<R>
+    where
+        R: serde::de::DeserializeOwned + Send,
+    {
+        self.total_requests.fetch_add(1, Ordering::Relaxed);
+        let mut delay = Duration::from_millis(self.initial_delay_ms);
+        let mut attempts = 0;
+
+        loop {
+            attempts += 1;
+            debug!(attempt = attempts, url, "Jira API PUT");
+
+            let result = self.client.put(url).json(body).send().await;
+
+            match result {
+                Ok(response) => match self.handle_response(response).await {
+                    Ok(data) => return Ok(data),
+                    Err(e) if e.is_retryable() && attempts <= self.max_retries => {
+                        if let Some(retry_after) = e.retry_after() {
+                            delay = retry_after;
+                        }
+                        warn!(attempt = attempts, error = %e, "Retrying");
+                        fcp_async_core::time::sleep(delay).await;
+                        delay = std::cmp::min(delay * 2, Duration::from_millis(self.max_delay_ms));
+                    }
+                    Err(e) => return Err(e),
+                },
                 Err(e) if (e.is_timeout() || e.is_connect()) && attempts <= self.max_retries => {
                     warn!(attempt = attempts, error = %e, "Retrying after connection error");
                     fcp_async_core::time::sleep(delay).await;
@@ -1108,5 +1212,174 @@ mod tests {
         assert!(DEFAULT_AGILE_BASE.contains("atlassian.net"));
         assert!(DEFAULT_REST_BASE.contains("rest/api/3"));
         assert!(DEFAULT_AGILE_BASE.contains("agile/1.0"));
+    }
+
+    // ── Worklog operations ─────────────────────────────────────
+
+    #[fcp_async_core::runtime::test]
+    async fn test_list_worklogs() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/issue/PROJ-1/worklog"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "worklogs": [
+                    {
+                        "id": "100028",
+                        "author": {"displayName": "Dev"},
+                        "timeSpent": "3h",
+                        "timeSpentSeconds": 10800,
+                        "started": "2026-03-01T09:00:00.000+0000"
+                    },
+                    {
+                        "id": "100029",
+                        "timeSpent": "1h 30m",
+                        "timeSpentSeconds": 5400
+                    }
+                ],
+                "total": 2,
+                "startAt": 0,
+                "maxResults": 50
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = test_client(&mock_server.uri());
+        let result = client.list_worklogs("PROJ-1", None, None).await.unwrap();
+        assert_eq!(result.total, 2);
+        assert_eq!(result.worklogs.len(), 2);
+        assert_eq!(result.worklogs[0].time_spent.as_deref(), Some("3h"));
+        assert_eq!(result.worklogs[0].time_spent_seconds, Some(10800));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_list_worklogs_with_pagination() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/issue/PROJ-1/worklog"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "worklogs": [{"id": "100030", "timeSpent": "2h", "timeSpentSeconds": 7200}],
+                "total": 10,
+                "startAt": 5,
+                "maxResults": 1
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = test_client(&mock_server.uri());
+        let result = client
+            .list_worklogs("PROJ-1", Some(5), Some(1))
+            .await
+            .unwrap();
+        assert_eq!(result.total, 10);
+        assert_eq!(result.worklogs.len(), 1);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_add_worklog() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/issue/PROJ-1/worklog"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "id": "100030",
+                "self": "https://example.atlassian.net/rest/api/3/issue/10001/worklog/100030",
+                "timeSpent": "2h",
+                "timeSpentSeconds": 7200,
+                "started": "2026-03-05T10:00:00.000+0000"
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = test_client(&mock_server.uri());
+        let result = client
+            .add_worklog(
+                "PROJ-1",
+                &serde_json::json!({
+                    "timeSpentSeconds": 7200,
+                    "started": "2026-03-05T10:00:00.000+0000"
+                }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.id.as_deref(), Some("100030"));
+        assert_eq!(result.time_spent_seconds, Some(7200));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_update_worklog() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("PUT"))
+            .and(path("/issue/PROJ-1/worklog/100030"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "100030",
+                "timeSpent": "4h",
+                "timeSpentSeconds": 14400,
+                "started": "2026-03-05T10:00:00.000+0000"
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = test_client(&mock_server.uri());
+        let result = client
+            .update_worklog(
+                "PROJ-1",
+                "100030",
+                &serde_json::json!({"timeSpentSeconds": 14400}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.time_spent_seconds, Some(14400));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_delete_worklog() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("DELETE"))
+            .and(path("/issue/PROJ-1/worklog/100030"))
+            .respond_with(ResponseTemplate::new(204))
+            .mount(&mock_server)
+            .await;
+
+        let client = test_client(&mock_server.uri());
+        client.delete_worklog("PROJ-1", "100030").await.unwrap();
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_list_worklogs_unauthorized() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/issue/PROJ-1/worklog"))
+            .respond_with(ResponseTemplate::new(401))
+            .mount(&mock_server)
+            .await;
+
+        let client = test_client(&mock_server.uri());
+        let result = client.list_worklogs("PROJ-1", None, None).await;
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), JiraError::Unauthorized));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_delete_worklog_not_found() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("DELETE"))
+            .and(path("/issue/PROJ-1/worklog/999999"))
+            .respond_with(ResponseTemplate::new(404).set_body_json(serde_json::json!({
+                "errorMessages": ["Worklog with id '999999' is not found."],
+                "errors": {}
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = test_client(&mock_server.uri());
+        let result = client.delete_worklog("PROJ-1", "999999").await;
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), JiraError::NotFound { .. }));
     }
 }

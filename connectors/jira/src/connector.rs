@@ -788,6 +788,155 @@ impl JiraConnector {
                         ],
                     },
                 ),
+                // ── Worklogs ────────────────────────────────────────
+                op_info(
+                    "jira.worklog.list",
+                    "List worklogs for an issue",
+                    json!({
+                        "type": "object",
+                        "required": ["issue_key"],
+                        "properties": {
+                            "issue_key": { "type": "string" },
+                            "start_at": { "type": "integer" },
+                            "max_results": { "type": "integer" }
+                        }
+                    }),
+                    json!({
+                        "type": "object",
+                        "properties": {
+                            "worklogs": { "type": "array" },
+                            "total": { "type": "integer" },
+                            "start_at": { "type": "integer" },
+                            "max_results": { "type": "integer" }
+                        }
+                    }),
+                    "jira.read",
+                    RiskLevel::Low,
+                    SafetyTier::Safe,
+                    IdempotencyClass::Strict,
+                    AgentHint {
+                        when_to_use: "List time tracking worklogs on a Jira issue.".into(),
+                        common_mistakes: vec![],
+                        examples: vec![
+                            r#"{"issue_key": "PROJ-123", "max_results": 50}"#.into(),
+                        ],
+                        related: vec![
+                            CapabilityId::from_static("jira.worklog.add"),
+                            CapabilityId::from_static("jira.get_issue"),
+                        ],
+                    },
+                ),
+                op_info(
+                    "jira.worklog.add",
+                    "Add a worklog entry to an issue",
+                    json!({
+                        "type": "object",
+                        "required": ["issue_key", "time_spent_seconds"],
+                        "properties": {
+                            "issue_key": { "type": "string" },
+                            "time_spent_seconds": { "type": "integer" },
+                            "started": { "type": "string" },
+                            "comment": { "type": "string" },
+                            "visibility": { "type": "object" }
+                        }
+                    }),
+                    json!({
+                        "type": "object",
+                        "properties": {
+                            "id": { "type": "string" },
+                            "timeSpent": { "type": "string" },
+                            "timeSpentSeconds": { "type": "integer" },
+                            "started": { "type": "string" }
+                        }
+                    }),
+                    "jira.write",
+                    RiskLevel::Medium,
+                    SafetyTier::Risky,
+                    IdempotencyClass::None,
+                    AgentHint {
+                        when_to_use: "Log time spent working on a Jira issue.".into(),
+                        common_mistakes: vec![
+                            "Providing time_spent string instead of time_spent_seconds integer.".into(),
+                        ],
+                        examples: vec![
+                            r#"{"issue_key": "PROJ-123", "time_spent_seconds": 7200, "started": "2026-03-01T09:00:00.000+0000"}"#.into(),
+                        ],
+                        related: vec![
+                            CapabilityId::from_static("jira.worklog.list"),
+                            CapabilityId::from_static("jira.worklog.update"),
+                        ],
+                    },
+                ),
+                op_info(
+                    "jira.worklog.update",
+                    "Update an existing worklog entry",
+                    json!({
+                        "type": "object",
+                        "required": ["issue_key", "worklog_id"],
+                        "properties": {
+                            "issue_key": { "type": "string" },
+                            "worklog_id": { "type": "string" },
+                            "time_spent_seconds": { "type": "integer" },
+                            "started": { "type": "string" },
+                            "comment": { "type": "string" },
+                            "visibility": { "type": "object" }
+                        }
+                    }),
+                    json!({
+                        "type": "object",
+                        "properties": {
+                            "id": { "type": "string" },
+                            "timeSpent": { "type": "string" },
+                            "timeSpentSeconds": { "type": "integer" }
+                        }
+                    }),
+                    "jira.write",
+                    RiskLevel::Medium,
+                    SafetyTier::Risky,
+                    IdempotencyClass::Strict,
+                    AgentHint {
+                        when_to_use: "Modify an existing worklog entry (e.g. correct logged time).".into(),
+                        common_mistakes: vec![
+                            "Using issue key as worklog_id. worklog_id is a separate numeric ID.".into(),
+                        ],
+                        examples: vec![
+                            r#"{"issue_key": "PROJ-123", "worklog_id": "100028", "time_spent_seconds": 10800}"#.into(),
+                        ],
+                        related: vec![
+                            CapabilityId::from_static("jira.worklog.list"),
+                            CapabilityId::from_static("jira.worklog.add"),
+                        ],
+                    },
+                ),
+                op_info(
+                    "jira.worklog.delete",
+                    "Delete a worklog entry (irreversible)",
+                    json!({
+                        "type": "object",
+                        "required": ["issue_key", "worklog_id"],
+                        "properties": {
+                            "issue_key": { "type": "string" },
+                            "worklog_id": { "type": "string" }
+                        }
+                    }),
+                    json!({ "type": "object" }),
+                    "jira.delete",
+                    RiskLevel::High,
+                    SafetyTier::Dangerous,
+                    IdempotencyClass::Strict,
+                    AgentHint {
+                        when_to_use: "Permanently delete a worklog entry. Cannot be undone.".into(),
+                        common_mistakes: vec![
+                            "Deleting worklogs without checking worklog.list first.".into(),
+                        ],
+                        examples: vec![
+                            r#"{"issue_key": "PROJ-123", "worklog_id": "100028"}"#.into(),
+                        ],
+                        related: vec![
+                            CapabilityId::from_static("jira.worklog.list"),
+                        ],
+                    },
+                ),
                 // ── Attachments ──────────────────────────────────────
                 op_info(
                     "jira.add_attachment",
@@ -916,6 +1065,10 @@ impl JiraConnector {
             "jira.move_to_sprint" => self.invoke_move_to_sprint(input).await,
             "jira.add_comment" => self.invoke_add_comment(input).await,
             "jira.list_comments" => self.invoke_list_comments(input).await,
+            "jira.worklog.list" => self.invoke_list_worklogs(input).await,
+            "jira.worklog.add" => self.invoke_add_worklog(input).await,
+            "jira.worklog.update" => self.invoke_update_worklog(input).await,
+            "jira.worklog.delete" => self.invoke_delete_worklog(input).await,
             "jira.add_attachment" => self.invoke_add_attachment(input).await,
             _ => Err(FcpError::OperationNotGranted {
                 operation: operation.into(),
@@ -1184,6 +1337,99 @@ impl JiraConnector {
         })
     }
 
+    async fn invoke_list_worklogs(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let issue_key = require_str(&input, "issue_key")?;
+        let start_at = input.get("start_at").and_then(|v| v.as_u64());
+        let max_results = input.get("max_results").and_then(|v| v.as_u64());
+
+        let resp = client
+            .list_worklogs(issue_key, start_at, max_results)
+            .await
+            .map_err(|e: JiraError| e.to_fcp_error())?;
+        serde_json::to_value(resp).map_err(|e| FcpError::Internal {
+            message: format!("Serialization error: {e}"),
+        })
+    }
+
+    async fn invoke_add_worklog(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let issue_key = require_str(&input, "issue_key")?;
+        let time_spent_seconds =
+            input
+                .get("time_spent_seconds")
+                .and_then(|v| v.as_u64())
+                .ok_or(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "Missing required field: time_spent_seconds".into(),
+                })?;
+
+        let mut body = json!({ "timeSpentSeconds": time_spent_seconds });
+        if let Some(started) = input.get("started").and_then(|v| v.as_str()) {
+            body["started"] = json!(started);
+        }
+        if let Some(comment) = input.get("comment").and_then(|v| v.as_str()) {
+            body["comment"] = json!(comment);
+        }
+        if let Some(visibility) = input.get("visibility") {
+            body["visibility"] = visibility.clone();
+        }
+
+        let resp = client
+            .add_worklog(issue_key, &body)
+            .await
+            .map_err(|e: JiraError| e.to_fcp_error())?;
+        serde_json::to_value(resp).map_err(|e| FcpError::Internal {
+            message: format!("Serialization error: {e}"),
+        })
+    }
+
+    async fn invoke_update_worklog(
+        &self,
+        input: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let issue_key = require_str(&input, "issue_key")?;
+        let worklog_id = require_str(&input, "worklog_id")?;
+
+        let mut body = json!({});
+        if let Some(seconds) = input.get("time_spent_seconds").and_then(|v| v.as_u64()) {
+            body["timeSpentSeconds"] = json!(seconds);
+        }
+        if let Some(started) = input.get("started").and_then(|v| v.as_str()) {
+            body["started"] = json!(started);
+        }
+        if let Some(comment) = input.get("comment").and_then(|v| v.as_str()) {
+            body["comment"] = json!(comment);
+        }
+        if let Some(visibility) = input.get("visibility") {
+            body["visibility"] = visibility.clone();
+        }
+
+        let resp = client
+            .update_worklog(issue_key, worklog_id, &body)
+            .await
+            .map_err(|e: JiraError| e.to_fcp_error())?;
+        serde_json::to_value(resp).map_err(|e| FcpError::Internal {
+            message: format!("Serialization error: {e}"),
+        })
+    }
+
+    async fn invoke_delete_worklog(
+        &self,
+        input: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let issue_key = require_str(&input, "issue_key")?;
+        let worklog_id = require_str(&input, "worklog_id")?;
+
+        client
+            .delete_worklog(issue_key, worklog_id)
+            .await
+            .map_err(|e: JiraError| e.to_fcp_error())?;
+        Ok(json!({ "deleted": true }))
+    }
+
     async fn invoke_add_attachment(
         &self,
         input: serde_json::Value,
@@ -1398,8 +1644,12 @@ mod tests {
         assert!(op_ids.contains(&"jira.move_to_sprint"));
         assert!(op_ids.contains(&"jira.add_comment"));
         assert!(op_ids.contains(&"jira.list_comments"));
+        assert!(op_ids.contains(&"jira.worklog.list"));
+        assert!(op_ids.contains(&"jira.worklog.add"));
+        assert!(op_ids.contains(&"jira.worklog.update"));
+        assert!(op_ids.contains(&"jira.worklog.delete"));
         assert!(op_ids.contains(&"jira.add_attachment"));
-        assert_eq!(ops.len(), 12);
+        assert_eq!(ops.len(), 16);
     }
 
     #[test]

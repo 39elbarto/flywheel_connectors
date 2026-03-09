@@ -5,7 +5,7 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:96fe436b2257a10bf0c5c25d234f9da9b62bfd17cd38818302a4882802897837"
+interface_hash = "blake3-256:fcp.interface.v2:90cbfa96b2b970005343071cf821174bdcec1c2627c32c8ad4af8e54971bc43c"
 
 [connector]
 id = "fcp.jira"
@@ -985,6 +985,297 @@ related = [
 ]
 
 # ---------------------------------------------------------------------------
+# Operations: Worklogs / Time Tracking
+# ---------------------------------------------------------------------------
+
+[provides.operations."jira.worklog.list"]
+description = "List worklog entries for a Jira issue"
+capability = "jira.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."jira.worklog.list".rate_limit]
+max = 100
+per_ms = 60000
+
+[provides.operations."jira.worklog.list".input_schema]
+required = ["issue_key"]
+type = "object"
+
+[provides.operations."jira.worklog.list".input_schema.properties.issue_key]
+description = "Issue key (e.g., 'PROJ-123') or numeric ID"
+type = "string"
+
+[provides.operations."jira.worklog.list".input_schema.properties.start_at]
+description = "Pagination offset (0-based)"
+type = "integer"
+
+[provides.operations."jira.worklog.list".input_schema.properties.max_results]
+description = "Maximum results per page (default 50)"
+type = "integer"
+
+[provides.operations."jira.worklog.list".output_schema]
+type = "object"
+
+[provides.operations."jira.worklog.list".output_schema.properties.worklogs]
+description = "Array of worklog entries"
+type = "array"
+
+[provides.operations."jira.worklog.list".output_schema.properties.total]
+description = "Total number of worklogs"
+type = "integer"
+
+[provides.operations."jira.worklog.list".output_schema.properties.startAt]
+description = "Pagination offset"
+type = "integer"
+
+[provides.operations."jira.worklog.list".output_schema.properties.maxResults]
+description = "Page size"
+type = "integer"
+
+[provides.operations."jira.worklog.list".network_constraints]
+host_allow = ["*.atlassian.net"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 2097152
+
+[provides.operations."jira.worklog.list".ai_hints]
+when_to_use = "Retrieve time tracking worklogs for a Jira issue."
+common_mistakes = []
+examples = ['{"issue_key": "PROJ-123", "max_results": 50}']
+related = ["jira.worklog.add", "jira.get_issue"]
+
+[provides.operations."jira.worklog.add"]
+description = "Add a worklog entry to a Jira issue for time tracking"
+capability = "jira.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "none"
+
+[provides.operations."jira.worklog.add".rate_limit]
+max = 60
+per_ms = 60000
+
+[provides.operations."jira.worklog.add".input_schema]
+required = ["issue_key", "time_spent_seconds"]
+type = "object"
+
+[provides.operations."jira.worklog.add".input_schema.properties.issue_key]
+description = "Issue key (e.g., 'PROJ-123')"
+type = "string"
+
+[provides.operations."jira.worklog.add".input_schema.properties.time_spent_seconds]
+description = "Time spent in seconds (e.g., 7200 for 2 hours)"
+type = "integer"
+
+[provides.operations."jira.worklog.add".input_schema.properties.started]
+description = "When the work was started (ISO 8601, e.g., '2026-03-01T09:00:00.000+0000')"
+type = "string"
+
+[provides.operations."jira.worklog.add".input_schema.properties.comment]
+description = "Description of work performed"
+type = "string"
+
+[provides.operations."jira.worklog.add".input_schema.properties.visibility]
+description = "Visibility restriction (role or group)"
+type = "object"
+
+[provides.operations."jira.worklog.add".output_schema]
+type = "object"
+
+[provides.operations."jira.worklog.add".output_schema.properties.id]
+description = "Created worklog ID"
+type = "string"
+
+[provides.operations."jira.worklog.add".output_schema.properties.timeSpent]
+description = "Human-readable time spent (e.g., '2h')"
+type = "string"
+
+[provides.operations."jira.worklog.add".output_schema.properties.timeSpentSeconds]
+description = "Time spent in seconds"
+type = "integer"
+
+[provides.operations."jira.worklog.add".output_schema.properties.started]
+description = "When the work was started"
+type = "string"
+
+[provides.operations."jira.worklog.add".network_constraints]
+host_allow = ["*.atlassian.net"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."jira.worklog.add".ai_hints]
+when_to_use = "Log time spent working on a Jira issue. Affects billing and reporting."
+common_mistakes = [
+    "Providing time as a string instead of time_spent_seconds integer.",
+    "Not including a started timestamp — Jira may default to current time.",
+]
+examples = ['{"issue_key": "PROJ-123", "time_spent_seconds": 7200, "started": "2026-03-01T09:00:00.000+0000", "comment": "Implemented login flow"}']
+related = ["jira.worklog.list", "jira.worklog.update", "jira.get_issue"]
+
+[provides.operations."jira.worklog.update"]
+description = "Update an existing worklog entry on a Jira issue"
+capability = "jira.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "strict"
+
+[provides.operations."jira.worklog.update".rate_limit]
+max = 60
+per_ms = 60000
+
+[provides.operations."jira.worklog.update".input_schema]
+required = ["issue_key", "worklog_id"]
+type = "object"
+
+[provides.operations."jira.worklog.update".input_schema.properties.issue_key]
+description = "Issue key (e.g., 'PROJ-123')"
+type = "string"
+
+[provides.operations."jira.worklog.update".input_schema.properties.worklog_id]
+description = "Worklog ID to update (from worklog.list)"
+type = "string"
+
+[provides.operations."jira.worklog.update".input_schema.properties.time_spent_seconds]
+description = "Updated time spent in seconds"
+type = "integer"
+
+[provides.operations."jira.worklog.update".input_schema.properties.started]
+description = "Updated start time (ISO 8601)"
+type = "string"
+
+[provides.operations."jira.worklog.update".input_schema.properties.comment]
+description = "Updated description of work performed"
+type = "string"
+
+[provides.operations."jira.worklog.update".input_schema.properties.visibility]
+description = "Visibility restriction (role or group)"
+type = "object"
+
+[provides.operations."jira.worklog.update".output_schema]
+type = "object"
+
+[provides.operations."jira.worklog.update".output_schema.properties.id]
+description = "Worklog ID"
+type = "string"
+
+[provides.operations."jira.worklog.update".output_schema.properties.timeSpent]
+description = "Human-readable time spent"
+type = "string"
+
+[provides.operations."jira.worklog.update".output_schema.properties.timeSpentSeconds]
+description = "Time spent in seconds"
+type = "integer"
+
+[provides.operations."jira.worklog.update".network_constraints]
+host_allow = ["*.atlassian.net"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."jira.worklog.update".ai_hints]
+when_to_use = "Modify an existing worklog entry (correct logged time, update comment)."
+common_mistakes = [
+    "Using issue key as worklog_id. worklog_id is a separate numeric ID from worklog.list.",
+]
+examples = ['{"issue_key": "PROJ-123", "worklog_id": "100028", "time_spent_seconds": 10800}']
+related = ["jira.worklog.list", "jira.worklog.add"]
+
+[provides.operations."jira.worklog.delete"]
+description = "Delete a worklog entry from a Jira issue (irreversible)"
+capability = "jira.delete"
+risk_level = "high"
+safety_tier = "dangerous"
+requires_approval = "interactive"
+idempotency = "strict"
+
+[provides.operations."jira.worklog.delete".rate_limit]
+max = 20
+per_ms = 60000
+
+[provides.operations."jira.worklog.delete".input_schema]
+required = ["issue_key", "worklog_id"]
+type = "object"
+
+[provides.operations."jira.worklog.delete".input_schema.properties.issue_key]
+description = "Issue key (e.g., 'PROJ-123')"
+type = "string"
+
+[provides.operations."jira.worklog.delete".input_schema.properties.worklog_id]
+description = "Worklog ID to delete (from worklog.list)"
+type = "string"
+
+[provides.operations."jira.worklog.delete".output_schema]
+type = "object"
+
+[provides.operations."jira.worklog.delete".network_constraints]
+host_allow = ["*.atlassian.net"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."jira.worklog.delete".ai_hints]
+when_to_use = "Permanently delete a worklog entry. Cannot be undone. Check worklog.list first."
+common_mistakes = [
+    "Deleting worklogs without verifying worklog_id from worklog.list.",
+]
+examples = ['{"issue_key": "PROJ-123", "worklog_id": "100028"}']
+related = ["jira.worklog.list"]
+
+# ---------------------------------------------------------------------------
 # Streaming / Event Capabilities
 # ---------------------------------------------------------------------------
 
@@ -1058,4 +1349,8 @@ scope = "instance"
 "jira.move_to_sprint" = ["jira.write"]
 "jira.add_comment" = ["jira.write"]
 "jira.list_comments" = ["jira.read"]
+"jira.worklog.list" = ["jira.read"]
+"jira.worklog.add" = ["jira.write"]
+"jira.worklog.update" = ["jira.write"]
+"jira.worklog.delete" = ["jira.delete"]
 "jira.add_attachment" = ["jira.attachment"]

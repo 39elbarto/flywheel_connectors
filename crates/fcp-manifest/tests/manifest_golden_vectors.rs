@@ -1342,7 +1342,7 @@ fn jira_full_manifest_parses_with_all_operations() {
 
     assert_eq!(parsed.connector.id.as_str(), "fcp.jira");
 
-    // Verify all 12 operations present
+    // Verify all 16 operations present
     let ops = &parsed.provides.operations;
     let expected_ops = [
         "jira.create_issue",
@@ -1356,6 +1356,10 @@ fn jira_full_manifest_parses_with_all_operations() {
         "jira.move_to_sprint",
         "jira.add_comment",
         "jira.list_comments",
+        "jira.worklog.list",
+        "jira.worklog.add",
+        "jira.worklog.update",
+        "jira.worklog.delete",
         "jira.add_attachment",
     ];
     for op_name in &expected_ops {

@@ -135,6 +135,37 @@ pub struct JiraAttachment {
     pub author: Option<serde_json::Value>,
 }
 
+// ── Worklog ─────────────────────────────────────────────────────
+
+/// Jira worklog entry.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JiraWorklog {
+    pub id: Option<String>,
+    #[serde(rename = "self")]
+    pub self_url: Option<String>,
+    pub author: Option<serde_json::Value>,
+    pub update_author: Option<serde_json::Value>,
+    pub comment: Option<serde_json::Value>,
+    pub started: Option<String>,
+    pub time_spent: Option<String>,
+    pub time_spent_seconds: Option<u64>,
+    pub issue_id: Option<String>,
+    pub created: Option<String>,
+    pub updated: Option<String>,
+    pub visibility: Option<serde_json::Value>,
+}
+
+/// Paginated worklog list response.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorklogListResponse {
+    pub worklogs: Vec<JiraWorklog>,
+    pub total: u64,
+    pub start_at: Option<u64>,
+    pub max_results: Option<u64>,
+}
+
 // ── API Error ───────────────────────────────────────────────────
 
 /// Jira REST API error response body.
@@ -1176,5 +1207,205 @@ mod tests {
         assert!(resp.values[1].start_date.is_none());
         assert!(resp.values[2].complete_date.is_some());
         assert_eq!(resp.is_last, Some(false));
+    }
+
+    // ════════════════════════════════════════════════════════════════
+    // JiraWorklog
+    // ════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn jira_worklog_all_fields() {
+        let json = json!({
+            "id": "100028",
+            "self": "https://jira.example.com/rest/api/3/issue/10010/worklog/100028",
+            "author": {"accountId": "abc123", "displayName": "Test User"},
+            "updateAuthor": {"accountId": "abc123"},
+            "comment": {"type": "doc", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "working on fix"}]}]},
+            "started": "2026-03-01T09:00:00.000+0000",
+            "timeSpent": "3h",
+            "timeSpentSeconds": 10800,
+            "issueId": "10010",
+            "created": "2026-03-01T10:00:00.000+0000",
+            "updated": "2026-03-01T10:00:00.000+0000",
+            "visibility": {"type": "role", "value": "Developers"}
+        });
+        let wl: JiraWorklog = serde_json::from_value(json).unwrap();
+        assert_eq!(wl.id.as_deref(), Some("100028"));
+        assert!(wl.self_url.is_some());
+        assert!(wl.author.is_some());
+        assert!(wl.update_author.is_some());
+        assert!(wl.comment.is_some());
+        assert_eq!(wl.started.as_deref(), Some("2026-03-01T09:00:00.000+0000"));
+        assert_eq!(wl.time_spent.as_deref(), Some("3h"));
+        assert_eq!(wl.time_spent_seconds, Some(10800));
+        assert_eq!(wl.issue_id.as_deref(), Some("10010"));
+        assert!(wl.created.is_some());
+        assert!(wl.updated.is_some());
+        assert!(wl.visibility.is_some());
+    }
+
+    #[test]
+    fn jira_worklog_minimal() {
+        let json = json!({});
+        let wl: JiraWorklog = serde_json::from_value(json).unwrap();
+        assert!(wl.id.is_none());
+        assert!(wl.self_url.is_none());
+        assert!(wl.time_spent.is_none());
+        assert!(wl.time_spent_seconds.is_none());
+    }
+
+    #[test]
+    fn jira_worklog_roundtrip() {
+        let wl = JiraWorklog {
+            id: Some("500".into()),
+            self_url: Some("https://example.com/worklog/500".into()),
+            author: Some(json!({"displayName": "Dev"})),
+            update_author: None,
+            comment: None,
+            started: Some("2026-03-01T08:00:00.000+0000".into()),
+            time_spent: Some("2h 30m".into()),
+            time_spent_seconds: Some(9000),
+            issue_id: Some("10001".into()),
+            created: Some("2026-03-01T09:00:00.000+0000".into()),
+            updated: None,
+            visibility: None,
+        };
+        let val = serde_json::to_value(&wl).unwrap();
+        let back: JiraWorklog = serde_json::from_value(val).unwrap();
+        assert_eq!(back.id, wl.id);
+        assert_eq!(back.time_spent, wl.time_spent);
+        assert_eq!(back.time_spent_seconds, wl.time_spent_seconds);
+    }
+
+    #[test]
+    fn jira_worklog_camel_case_serialization() {
+        let wl = JiraWorklog {
+            id: Some("1".into()),
+            self_url: None,
+            author: None,
+            update_author: Some(json!({"name": "u"})),
+            comment: None,
+            started: None,
+            time_spent: Some("1h".into()),
+            time_spent_seconds: Some(3600),
+            issue_id: Some("10".into()),
+            created: None,
+            updated: None,
+            visibility: None,
+        };
+        let val = serde_json::to_value(&wl).unwrap();
+        assert!(val.get("timeSpent").is_some());
+        assert!(val.get("timeSpentSeconds").is_some());
+        assert!(val.get("updateAuthor").is_some());
+        assert!(val.get("issueId").is_some());
+        assert!(val.get("self").is_some());
+        // snake_case must NOT appear
+        assert!(val.get("time_spent").is_none());
+        assert!(val.get("time_spent_seconds").is_none());
+        assert!(val.get("update_author").is_none());
+        assert!(val.get("issue_id").is_none());
+        assert!(val.get("self_url").is_none());
+    }
+
+    #[test]
+    fn jira_worklog_clone_debug() {
+        let wl = JiraWorklog {
+            id: Some("99".into()),
+            self_url: None,
+            author: None,
+            update_author: None,
+            comment: None,
+            started: None,
+            time_spent: None,
+            time_spent_seconds: None,
+            issue_id: None,
+            created: None,
+            updated: None,
+            visibility: None,
+        };
+        let cloned = wl.clone();
+        assert_eq!(cloned.id, wl.id);
+        let dbg = format!("{wl:?}");
+        assert!(dbg.contains("JiraWorklog"), "got: {dbg}");
+    }
+
+    #[test]
+    fn jira_worklog_zero_seconds() {
+        let json = json!({"timeSpentSeconds": 0, "timeSpent": "0m"});
+        let wl: JiraWorklog = serde_json::from_value(json).unwrap();
+        assert_eq!(wl.time_spent_seconds, Some(0));
+    }
+
+    // ════════════════════════════════════════════════════════════════
+    // WorklogListResponse
+    // ════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn worklog_list_response_camel_case() {
+        let json = json!({
+            "worklogs": [{"id": "1", "timeSpent": "2h", "timeSpentSeconds": 7200}],
+            "total": 1,
+            "startAt": 0,
+            "maxResults": 50
+        });
+        let resp: WorklogListResponse = serde_json::from_value(json).unwrap();
+        assert_eq!(resp.total, 1);
+        assert_eq!(resp.start_at, Some(0));
+        assert_eq!(resp.max_results, Some(50));
+        assert_eq!(resp.worklogs.len(), 1);
+    }
+
+    #[test]
+    fn worklog_list_response_empty() {
+        let json = json!({"worklogs": [], "total": 0});
+        let resp: WorklogListResponse = serde_json::from_value(json).unwrap();
+        assert!(resp.worklogs.is_empty());
+        assert_eq!(resp.total, 0);
+    }
+
+    #[test]
+    fn worklog_list_response_multiple() {
+        let json = json!({
+            "worklogs": [
+                {"id": "1", "timeSpent": "1h", "timeSpentSeconds": 3600},
+                {"id": "2", "timeSpent": "30m", "timeSpentSeconds": 1800},
+                {"id": "3", "timeSpent": "2h", "timeSpentSeconds": 7200}
+            ],
+            "total": 3,
+            "startAt": 0,
+            "maxResults": 100
+        });
+        let resp: WorklogListResponse = serde_json::from_value(json).unwrap();
+        assert_eq!(resp.worklogs.len(), 3);
+        assert_eq!(resp.total, 3);
+    }
+
+    #[test]
+    fn worklog_list_response_serializes_camel_case() {
+        let resp = WorklogListResponse {
+            worklogs: vec![],
+            total: 5,
+            start_at: Some(10),
+            max_results: Some(25),
+        };
+        let val = serde_json::to_value(&resp).unwrap();
+        assert!(val.get("startAt").is_some());
+        assert!(val.get("maxResults").is_some());
+        assert!(val.get("start_at").is_none());
+        assert!(val.get("max_results").is_none());
+    }
+
+    #[test]
+    fn worklog_list_response_clone_debug() {
+        let resp = WorklogListResponse {
+            worklogs: vec![],
+            total: 0,
+            start_at: None,
+            max_results: None,
+        };
+        let cloned = resp.clone();
+        assert_eq!(cloned.total, 0);
+        let dbg = format!("{resp:?}");
+        assert!(dbg.contains("WorklogListResponse"), "got: {dbg}");
     }
 }

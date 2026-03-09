@@ -5,7 +5,7 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:44f3fcd22a6d034549f782a5c9e4eba625d188b32a138e8fc8dc11d8483dc302"
+interface_hash = "blake3-256:fcp.interface.v2:d3e08331f5006c8a6fa0897fb70601c1dd8b58ad382de0b7e8147fe1b23e49e3"
 
 [connector]
 id = "fcp.sentry"
@@ -1687,6 +1687,408 @@ related = [
     "sentry.list_issues",
 ]
 
+[provides.operations."sentry.performance.transactions"]
+description = "Query performance transactions with project, environment, time range, and transaction name filters"
+capability = "sentry.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."sentry.performance.transactions".input_schema]
+required = [
+    "organization_slug",
+    "project_slug",
+]
+type = "object"
+
+[provides.operations."sentry.performance.transactions".input_schema.properties.organization_slug]
+description = "Sentry organization slug"
+type = "string"
+
+[provides.operations."sentry.performance.transactions".input_schema.properties.project_slug]
+description = "Sentry project slug"
+type = "string"
+
+[provides.operations."sentry.performance.transactions".input_schema.properties.transaction]
+description = "Filter by transaction name"
+type = "string"
+
+[provides.operations."sentry.performance.transactions".input_schema.properties.environment]
+description = "Filter by environment"
+type = "string"
+
+[provides.operations."sentry.performance.transactions".input_schema.properties.start]
+description = "ISO 8601 start time"
+type = "string"
+
+[provides.operations."sentry.performance.transactions".input_schema.properties.end]
+description = "ISO 8601 end time"
+type = "string"
+
+[provides.operations."sentry.performance.transactions".input_schema.properties.sort]
+description = "Sort field with optional - prefix for descending"
+type = "string"
+
+[provides.operations."sentry.performance.transactions".input_schema.properties.per_page]
+description = "Results per page"
+maximum = 100
+minimum = 1
+type = "integer"
+
+[provides.operations."sentry.performance.transactions".input_schema.properties.cursor]
+description = "Pagination cursor"
+type = "string"
+
+[provides.operations."sentry.performance.transactions".output_schema]
+required = ["data"]
+type = "object"
+
+[provides.operations."sentry.performance.transactions".output_schema.properties.data]
+description = "Transaction result rows"
+type = "array"
+
+[provides.operations."sentry.performance.transactions".output_schema.properties.data.items]
+type = "object"
+
+[provides.operations."sentry.performance.transactions".output_schema.properties.meta]
+description = "Field type metadata"
+type = "object"
+
+[provides.operations."sentry.performance.transactions".network_constraints]
+host_allow = [
+    "sentry.io",
+    "*.sentry.io",
+    "$sentry_host",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 60000
+max_response_bytes = 10485760
+
+[provides.operations."sentry.performance.transactions".ai_hints]
+when_to_use = "Query performance transactions with project, environment, time range, and transaction name filters."
+common_mistakes = [
+    "Not specifying start/end time range — queries without bounds may time out or return too much data.",
+    "Confusing this with get_transaction which fetches a single event by ID.",
+]
+examples = ['{"organization_slug": "my-org", "project_slug": "backend", "transaction": "/api/users", "start": "2026-03-01T00:00:00Z", "end": "2026-03-09T00:00:00Z"}']
+related = [
+    "sentry.performance.transaction.summary",
+    "sentry.discover_query",
+    "sentry.get_transaction",
+]
+
+[provides.operations."sentry.performance.transaction.summary"]
+description = "Get aggregated performance summary (p50, p75, p95, p99, throughput, failure rate) for a transaction"
+capability = "sentry.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."sentry.performance.transaction.summary".input_schema]
+required = [
+    "organization_slug",
+    "project_slug",
+    "transaction",
+]
+type = "object"
+
+[provides.operations."sentry.performance.transaction.summary".input_schema.properties.organization_slug]
+description = "Sentry organization slug"
+type = "string"
+
+[provides.operations."sentry.performance.transaction.summary".input_schema.properties.project_slug]
+description = "Sentry project slug"
+type = "string"
+
+[provides.operations."sentry.performance.transaction.summary".input_schema.properties.transaction]
+description = "Transaction name (e.g., /api/users)"
+type = "string"
+
+[provides.operations."sentry.performance.transaction.summary".input_schema.properties.environment]
+description = "Filter by environment"
+type = "string"
+
+[provides.operations."sentry.performance.transaction.summary".input_schema.properties.start]
+description = "ISO 8601 start time"
+type = "string"
+
+[provides.operations."sentry.performance.transaction.summary".input_schema.properties.end]
+description = "ISO 8601 end time"
+type = "string"
+
+[provides.operations."sentry.performance.transaction.summary".output_schema]
+required = ["data"]
+type = "object"
+
+[provides.operations."sentry.performance.transaction.summary".output_schema.properties.data]
+description = "Summary rows with percentiles and rates"
+type = "array"
+
+[provides.operations."sentry.performance.transaction.summary".output_schema.properties.data.items]
+type = "object"
+
+[provides.operations."sentry.performance.transaction.summary".output_schema.properties.meta]
+description = "Field type metadata"
+type = "object"
+
+[provides.operations."sentry.performance.transaction.summary".network_constraints]
+host_allow = [
+    "sentry.io",
+    "*.sentry.io",
+    "$sentry_host",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 60000
+max_response_bytes = 10485760
+
+[provides.operations."sentry.performance.transaction.summary".ai_hints]
+when_to_use = "Get aggregated performance summary (p50, p75, p95, p99, throughput, failure rate) for a specific transaction."
+common_mistakes = ["Using a partial transaction name — the name must match exactly as reported by Sentry SDKs."]
+examples = ['{"organization_slug": "my-org", "project_slug": "backend", "transaction": "/api/users"}']
+related = [
+    "sentry.performance.transactions",
+    "sentry.discover_query",
+]
+
+[provides.operations."sentry.performance.trace.summary"]
+description = "Get trace summary by trace ID with the full span tree"
+capability = "sentry.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."sentry.performance.trace.summary".input_schema]
+required = [
+    "organization_slug",
+    "trace_id",
+]
+type = "object"
+
+[provides.operations."sentry.performance.trace.summary".input_schema.properties.organization_slug]
+description = "Sentry organization slug"
+type = "string"
+
+[provides.operations."sentry.performance.trace.summary".input_schema.properties.trace_id]
+description = "Trace ID (32-character hex string)"
+type = "string"
+
+[provides.operations."sentry.performance.trace.summary".output_schema]
+required = ["trace"]
+type = "object"
+
+[provides.operations."sentry.performance.trace.summary".output_schema.properties.trace]
+description = "Trace summary with span tree"
+type = "object"
+
+[provides.operations."sentry.performance.trace.summary".network_constraints]
+host_allow = [
+    "sentry.io",
+    "*.sentry.io",
+    "$sentry_host",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 5242880
+
+[provides.operations."sentry.performance.trace.summary".ai_hints]
+when_to_use = "Retrieve the full trace tree for a distributed trace by trace ID."
+common_mistakes = ["Using a span ID or event ID instead of the trace ID (32-character hex)."]
+examples = ['{"organization_slug": "my-org", "trace_id": "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4"}']
+related = [
+    "sentry.performance.transactions",
+    "sentry.get_transaction",
+]
+
+[provides.operations."sentry.release.health"]
+description = "Get release health summary including sessions, crash-free rate, and adoption"
+capability = "sentry.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."sentry.release.health".input_schema]
+required = [
+    "organization_slug",
+    "project_slug",
+    "version",
+]
+type = "object"
+
+[provides.operations."sentry.release.health".input_schema.properties.organization_slug]
+description = "Sentry organization slug"
+type = "string"
+
+[provides.operations."sentry.release.health".input_schema.properties.project_slug]
+description = "Sentry project slug"
+type = "string"
+
+[provides.operations."sentry.release.health".input_schema.properties.version]
+description = "Release version identifier"
+type = "string"
+
+[provides.operations."sentry.release.health".output_schema]
+required = ["health"]
+type = "object"
+
+[provides.operations."sentry.release.health".output_schema.properties.health]
+description = "Release health with sessions, crash-free rate, and adoption metrics"
+type = "object"
+
+[provides.operations."sentry.release.health".network_constraints]
+host_allow = [
+    "sentry.io",
+    "*.sentry.io",
+    "$sentry_host",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 2097152
+
+[provides.operations."sentry.release.health".ai_hints]
+when_to_use = "Get release health metrics including session counts, crash-free rate, and adoption percentage."
+common_mistakes = [
+    "Not URL-encoding version strings that contain '@' or '+' characters.",
+    "Querying health for a release with no session data (returns empty metrics).",
+]
+examples = ['{"organization_slug": "my-org", "project_slug": "backend", "version": "backend@1.2.3"}']
+related = [
+    "sentry.get_release",
+    "sentry.list_releases",
+]
+
+[provides.operations."sentry.release.create"]
+description = "Create a release marker in Sentry to track deployments and correlate errors"
+capability = "sentry.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "none"
+
+[provides.operations."sentry.release.create".input_schema]
+required = [
+    "organization_slug",
+    "version",
+]
+type = "object"
+
+[provides.operations."sentry.release.create".input_schema.properties.organization_slug]
+description = "Sentry organization slug"
+type = "string"
+
+[provides.operations."sentry.release.create".input_schema.properties.version]
+description = "Release version identifier (e.g., 'backend@1.2.3')"
+type = "string"
+
+[provides.operations."sentry.release.create".input_schema.properties.projects]
+description = "Project slugs to associate with this release"
+type = "array"
+
+[provides.operations."sentry.release.create".input_schema.properties.projects.items]
+type = "string"
+
+[provides.operations."sentry.release.create".input_schema.properties.ref]
+description = "Git ref (commit SHA or tag)"
+type = "string"
+
+[provides.operations."sentry.release.create".input_schema.properties.url]
+description = "URL for the release (e.g., CI build link)"
+type = "string"
+
+[provides.operations."sentry.release.create".output_schema]
+required = ["release"]
+type = "object"
+
+[provides.operations."sentry.release.create".output_schema.properties.release]
+description = "Created release object"
+type = "object"
+
+[provides.operations."sentry.release.create".network_constraints]
+host_allow = [
+    "sentry.io",
+    "*.sentry.io",
+    "$sentry_host",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 2097152
+
+[provides.operations."sentry.release.create".ai_hints]
+when_to_use = "Create a new release marker in Sentry to track deployments and correlate errors."
+common_mistakes = [
+    "Not associating the release with projects — the release won't appear in project views.",
+    "Using duplicate version strings — Sentry treats version as a unique identifier per org.",
+]
+examples = ['{"organization_slug": "my-org", "version": "backend@1.3.0", "projects": ["backend"], "ref": "abc123def"}']
+related = [
+    "sentry.list_releases",
+    "sentry.get_release",
+    "sentry.release.health",
+]
+
 [event_caps]
 streaming = true
 replay = false
@@ -1760,3 +2162,8 @@ scope = "instance"
 "sentry.list_release_deploys" = ["sentry.read"]
 "sentry.stream_webhook_events" = ["sentry.read"]
 "sentry.get_transaction" = ["sentry.read"]
+"sentry.performance.transactions" = ["sentry.read"]
+"sentry.performance.transaction.summary" = ["sentry.read"]
+"sentry.performance.trace.summary" = ["sentry.read"]
+"sentry.release.health" = ["sentry.read"]
+"sentry.release.create" = ["sentry.write"]

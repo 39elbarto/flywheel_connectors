@@ -4,8 +4,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use fcp_core::{
-    AgentHint, BaseConnector, CapabilityId, ConnectorId, CredentialId, FcpError, FcpResult,
-    IdempotencyClass, OperationId, OperationInfo, RiskLevel, SafetyTier,
+    AgentHint, ApprovalMode, BaseConnector, CapabilityId, ConnectorId, CredentialId, FcpError,
+    FcpResult, IdempotencyClass, OperationId, OperationInfo, RiskLevel, SafetyTier,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -323,6 +323,17 @@ impl SentryConnector {
             "sentry.issue.assign" => self.invoke_issue_assign(client, &input).await,
             "sentry.issue.set_status" => self.invoke_issue_set_status(client, &input).await,
             "sentry.issue.set_priority" => self.invoke_issue_set_priority(client, &input).await,
+            "sentry.performance.transactions" => {
+                self.invoke_performance_transactions(client, &input).await
+            }
+            "sentry.performance.transaction.summary" => {
+                self.invoke_performance_transaction_summary(client, &input).await
+            }
+            "sentry.performance.trace.summary" => {
+                self.invoke_performance_trace_summary(client, &input).await
+            }
+            "sentry.release.health" => self.invoke_release_health(client, &input).await,
+            "sentry.release.create" => self.invoke_release_create(client, &input).await,
             _ => {
                 return Err(FcpError::InvalidRequest {
                     code: 1002,
@@ -691,6 +702,82 @@ impl SentryConnector {
         let body = json!({ "priority": priority });
         let data = client.update_issue(issue_id, &body).await?;
         Ok(json!({ "issue": data }))
+    }
+
+    async fn invoke_performance_transactions(
+        &self,
+        client: &SentryClient,
+        input: &serde_json::Value,
+    ) -> Result<serde_json::Value, SentryError> {
+        let org = require_str(input, "organization_slug")?;
+        let project = require_str(input, "project_slug")?;
+        let transaction = input.get("transaction").and_then(|v| v.as_str());
+        let environment = input.get("environment").and_then(|v| v.as_str());
+        let start = input.get("start").and_then(|v| v.as_str());
+        let end = input.get("end").and_then(|v| v.as_str());
+        let sort = input.get("sort").and_then(|v| v.as_str());
+        let per_page = input.get("per_page").and_then(|v| v.as_u64()).map(|v| v as u32);
+        let cursor = input.get("cursor").and_then(|v| v.as_str());
+        let data = client
+            .query_transactions(
+                org, project, transaction, environment, start, end, sort, per_page, cursor,
+            )
+            .await?;
+        Ok(data)
+    }
+
+    async fn invoke_performance_transaction_summary(
+        &self,
+        client: &SentryClient,
+        input: &serde_json::Value,
+    ) -> Result<serde_json::Value, SentryError> {
+        let org = require_str(input, "organization_slug")?;
+        let project = require_str(input, "project_slug")?;
+        let transaction = require_str(input, "transaction")?;
+        let environment = input.get("environment").and_then(|v| v.as_str());
+        let start = input.get("start").and_then(|v| v.as_str());
+        let end = input.get("end").and_then(|v| v.as_str());
+        let data = client
+            .get_transaction_summary(org, project, transaction, environment, start, end)
+            .await?;
+        Ok(data)
+    }
+
+    async fn invoke_performance_trace_summary(
+        &self,
+        client: &SentryClient,
+        input: &serde_json::Value,
+    ) -> Result<serde_json::Value, SentryError> {
+        let org = require_str(input, "organization_slug")?;
+        let trace_id = require_str(input, "trace_id")?;
+        let data = client.get_trace_summary(org, trace_id).await?;
+        Ok(json!({ "trace": data }))
+    }
+
+    async fn invoke_release_health(
+        &self,
+        client: &SentryClient,
+        input: &serde_json::Value,
+    ) -> Result<serde_json::Value, SentryError> {
+        let org = require_str(input, "organization_slug")?;
+        let project = require_str(input, "project_slug")?;
+        let version = require_str(input, "version")?;
+        let data = client.get_release_health(org, project, version).await?;
+        Ok(json!({ "health": data }))
+    }
+
+    async fn invoke_release_create(
+        &self,
+        client: &SentryClient,
+        input: &serde_json::Value,
+    ) -> Result<serde_json::Value, SentryError> {
+        let org = require_str(input, "organization_slug")?;
+        let mut body = input.clone();
+        if let Some(obj) = body.as_object_mut() {
+            obj.remove("organization_slug");
+        }
+        let data = client.create_release(org, &body).await?;
+        Ok(json!({ "release": data }))
     }
 }
 
@@ -1540,6 +1627,212 @@ fn operations_info() -> Vec<OperationInfo> {
                 ],
             },
         ),
+        op_info(
+            "sentry.performance.transactions",
+            "Query performance transactions with filters",
+            json!({
+                "type": "object",
+                "required": ["organization_slug", "project_slug"],
+                "properties": {
+                    "organization_slug": { "type": "string", "description": "Sentry organization slug" },
+                    "project_slug": { "type": "string", "description": "Sentry project slug" },
+                    "transaction": { "type": "string", "description": "Filter by transaction name" },
+                    "environment": { "type": "string", "description": "Filter by environment" },
+                    "start": { "type": "string", "description": "ISO 8601 start time" },
+                    "end": { "type": "string", "description": "ISO 8601 end time" },
+                    "sort": { "type": "string", "description": "Sort field with optional - prefix for descending" },
+                    "per_page": { "type": "integer", "minimum": 1, "maximum": 100, "description": "Results per page" },
+                    "cursor": { "type": "string", "description": "Pagination cursor" }
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["data"],
+                "properties": {
+                    "data": { "type": "array", "description": "Transaction result rows", "items": { "type": "object" } },
+                    "meta": { "type": "object", "description": "Field type metadata" }
+                }
+            }),
+            "sentry.read",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "Query performance transactions with project, environment, time range, and transaction name filters.".into(),
+                common_mistakes: vec![
+                    "Not specifying start/end time range — queries without bounds may time out or return too much data.".into(),
+                    "Confusing this with get_transaction which fetches a single event by ID.".into(),
+                ],
+                examples: vec![
+                    r#"{"organization_slug": "my-org", "project_slug": "backend", "transaction": "/api/users", "start": "2026-03-01T00:00:00Z", "end": "2026-03-09T00:00:00Z"}"#.into(),
+                ],
+                related: vec![
+                    CapabilityId::from_static("sentry.performance.transaction.summary"),
+                    CapabilityId::from_static("sentry.discover_query"),
+                    CapabilityId::from_static("sentry.get_transaction"),
+                ],
+            },
+        ),
+        op_info(
+            "sentry.performance.transaction.summary",
+            "Get performance summary for a transaction name",
+            json!({
+                "type": "object",
+                "required": ["organization_slug", "project_slug", "transaction"],
+                "properties": {
+                    "organization_slug": { "type": "string", "description": "Sentry organization slug" },
+                    "project_slug": { "type": "string", "description": "Sentry project slug" },
+                    "transaction": { "type": "string", "description": "Transaction name (e.g., /api/users)" },
+                    "environment": { "type": "string", "description": "Filter by environment" },
+                    "start": { "type": "string", "description": "ISO 8601 start time" },
+                    "end": { "type": "string", "description": "ISO 8601 end time" }
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["data"],
+                "properties": {
+                    "data": { "type": "array", "description": "Summary rows with percentiles and rates", "items": { "type": "object" } },
+                    "meta": { "type": "object", "description": "Field type metadata" }
+                }
+            }),
+            "sentry.read",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "Get aggregated performance summary (p50, p75, p95, p99, throughput, failure rate) for a specific transaction.".into(),
+                common_mistakes: vec![
+                    "Using a partial transaction name — the name must match exactly as reported by Sentry SDKs.".into(),
+                ],
+                examples: vec![
+                    r#"{"organization_slug": "my-org", "project_slug": "backend", "transaction": "/api/users"}"#.into(),
+                ],
+                related: vec![
+                    CapabilityId::from_static("sentry.performance.transactions"),
+                    CapabilityId::from_static("sentry.discover_query"),
+                ],
+            },
+        ),
+        op_info(
+            "sentry.performance.trace.summary",
+            "Get trace summary by trace ID",
+            json!({
+                "type": "object",
+                "required": ["organization_slug", "trace_id"],
+                "properties": {
+                    "organization_slug": { "type": "string", "description": "Sentry organization slug" },
+                    "trace_id": { "type": "string", "description": "Trace ID (32-character hex string)" }
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["trace"],
+                "properties": {
+                    "trace": { "type": "object", "description": "Trace summary with span tree" }
+                }
+            }),
+            "sentry.read",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "Retrieve the full trace tree for a distributed trace by trace ID.".into(),
+                common_mistakes: vec![
+                    "Using a span ID or event ID instead of the trace ID (32-character hex).".into(),
+                ],
+                examples: vec![
+                    r#"{"organization_slug": "my-org", "trace_id": "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4"}"#.into(),
+                ],
+                related: vec![
+                    CapabilityId::from_static("sentry.performance.transactions"),
+                    CapabilityId::from_static("sentry.get_transaction"),
+                ],
+            },
+        ),
+        op_info(
+            "sentry.release.health",
+            "Get release health summary",
+            json!({
+                "type": "object",
+                "required": ["organization_slug", "project_slug", "version"],
+                "properties": {
+                    "organization_slug": { "type": "string", "description": "Sentry organization slug" },
+                    "project_slug": { "type": "string", "description": "Sentry project slug" },
+                    "version": { "type": "string", "description": "Release version identifier" }
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["health"],
+                "properties": {
+                    "health": { "type": "object", "description": "Release health with sessions, crash-free rate, and adoption metrics" }
+                }
+            }),
+            "sentry.read",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "Get release health metrics including session counts, crash-free rate, and adoption percentage.".into(),
+                common_mistakes: vec![
+                    "Not URL-encoding version strings that contain '@' or '+' characters.".into(),
+                    "Querying health for a release with no session data (returns empty metrics).".into(),
+                ],
+                examples: vec![
+                    r#"{"organization_slug": "my-org", "project_slug": "backend", "version": "backend@1.2.3"}"#.into(),
+                ],
+                related: vec![
+                    CapabilityId::from_static("sentry.get_release"),
+                    CapabilityId::from_static("sentry.list_releases"),
+                ],
+            },
+        ),
+        {
+            let mut info = op_info(
+                "sentry.release.create",
+                "Create a release marker",
+                json!({
+                    "type": "object",
+                    "required": ["organization_slug", "version"],
+                    "properties": {
+                        "organization_slug": { "type": "string", "description": "Sentry organization slug" },
+                        "version": { "type": "string", "description": "Release version identifier (e.g., 'backend@1.2.3')" },
+                        "projects": { "type": "array", "items": { "type": "string" }, "description": "Project slugs to associate with this release" },
+                        "ref": { "type": "string", "description": "Git ref (commit SHA or tag)" },
+                        "url": { "type": "string", "description": "URL for the release (e.g., CI build link)" }
+                    }
+                }),
+                json!({
+                    "type": "object",
+                    "required": ["release"],
+                    "properties": {
+                        "release": { "type": "object", "description": "Created release object" }
+                    }
+                }),
+                "sentry.write",
+                RiskLevel::Medium,
+                SafetyTier::Risky,
+                IdempotencyClass::None,
+                AgentHint {
+                    when_to_use: "Create a new release marker in Sentry to track deployments and correlate errors.".into(),
+                    common_mistakes: vec![
+                        "Not associating the release with projects — the release won't appear in project views.".into(),
+                        "Using duplicate version strings — Sentry treats version as a unique identifier per org.".into(),
+                    ],
+                    examples: vec![
+                        r#"{"organization_slug": "my-org", "version": "backend@1.3.0", "projects": ["backend"], "ref": "abc123def"}"#.into(),
+                    ],
+                    related: vec![
+                        CapabilityId::from_static("sentry.list_releases"),
+                        CapabilityId::from_static("sentry.get_release"),
+                        CapabilityId::from_static("sentry.release.health"),
+                    ],
+                },
+            );
+            info.requires_approval = Some(ApprovalMode::Policy);
+            info
+        },
     ]
 }
 
@@ -1661,10 +1954,10 @@ mod tests {
     }
 
     #[test]
-    fn operations_info_has_21_operations() {
+    fn operations_info_has_26_operations() {
         let ops = ops_json();
         let arr = ops.as_array().unwrap();
-        assert_eq!(arr.len(), 21);
+        assert_eq!(arr.len(), 26);
     }
 
     #[test]

@@ -454,6 +454,128 @@ impl SentryClient {
             .await
     }
 
+    // ── Performance ──────────────────────────────────────────────────
+
+    /// Query performance transactions using Discover.
+    pub async fn query_transactions(
+        &self,
+        org: &str,
+        project: &str,
+        transaction: Option<&str>,
+        environment: Option<&str>,
+        start: Option<&str>,
+        end: Option<&str>,
+        sort: Option<&str>,
+        per_page: Option<u32>,
+        cursor: Option<&str>,
+    ) -> SentryResult<serde_json::Value> {
+        let mut params = vec![
+            format!("project={project}"),
+            "field=transaction".to_string(),
+            "field=count()".to_string(),
+            "field=p50()".to_string(),
+            "field=p95()".to_string(),
+            "field=failure_rate()".to_string(),
+        ];
+        let mut query_parts = vec!["event.type:transaction".to_string()];
+        if let Some(t) = transaction {
+            query_parts.push(format!("transaction:{t}"));
+        }
+        if let Some(e) = environment {
+            params.push(format!("environment={e}"));
+        }
+        let query = query_parts.join(" ");
+        params.push(format!("query={query}"));
+        if let Some(s) = start {
+            params.push(format!("start={s}"));
+        }
+        if let Some(e) = end {
+            params.push(format!("end={e}"));
+        }
+        if let Some(s) = sort {
+            params.push(format!("sort={s}"));
+        }
+        if let Some(pp) = per_page {
+            params.push(format!("per_page={pp}"));
+        }
+        if let Some(c) = cursor {
+            params.push(format!("cursor={c}"));
+        }
+        let qs = params.join("&");
+        self.get(&format!("/organizations/{org}/events/?{qs}")).await
+    }
+
+    /// Get performance summary for a transaction name.
+    pub async fn get_transaction_summary(
+        &self,
+        org: &str,
+        project: &str,
+        transaction: &str,
+        environment: Option<&str>,
+        start: Option<&str>,
+        end: Option<&str>,
+    ) -> SentryResult<serde_json::Value> {
+        let mut params = vec![
+            format!("project={project}"),
+            "field=count()".to_string(),
+            "field=p50(transaction.duration)".to_string(),
+            "field=p75(transaction.duration)".to_string(),
+            "field=p95(transaction.duration)".to_string(),
+            "field=p99(transaction.duration)".to_string(),
+            "field=failure_rate()".to_string(),
+            "field=apdex()".to_string(),
+            format!("query=event.type:transaction transaction:{transaction}"),
+        ];
+        if let Some(e) = environment {
+            params.push(format!("environment={e}"));
+        }
+        if let Some(s) = start {
+            params.push(format!("start={s}"));
+        }
+        if let Some(e) = end {
+            params.push(format!("end={e}"));
+        }
+        let qs = params.join("&");
+        self.get(&format!("/organizations/{org}/events/?{qs}")).await
+    }
+
+    /// Get trace summary.
+    pub async fn get_trace_summary(
+        &self,
+        org: &str,
+        trace_id: &str,
+    ) -> SentryResult<serde_json::Value> {
+        self.get(&format!("/organizations/{org}/events-trace/{trace_id}/"))
+            .await
+    }
+
+    // ── Release Health ───────────────────────────────────────────────
+
+    /// Get release health summary.
+    pub async fn get_release_health(
+        &self,
+        org: &str,
+        project: &str,
+        version: &str,
+    ) -> SentryResult<serde_json::Value> {
+        let qs = format!("project={project}");
+        let encoded_version = urlencoded(version);
+        self.get(&format!(
+            "/organizations/{org}/releases/{encoded_version}/health/?{qs}"
+        ))
+        .await
+    }
+
+    /// Create a release.
+    pub async fn create_release(
+        &self,
+        org: &str,
+        body: &serde_json::Value,
+    ) -> SentryResult<serde_json::Value> {
+        self.post(&format!("/organizations/{org}/releases/"), body)
+            .await
+    }
+
     // ── Alert Rules ───────────────────────────────────────────────────
 
     /// List alert rules for a project.

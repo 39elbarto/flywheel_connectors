@@ -115,7 +115,7 @@ async fn introspect_lists_operations() {
     let connector = SentryConnector::new();
     let result = connector.handle_introspect().await.unwrap();
     let ops = result["operations"].as_array().expect("operations array");
-    assert!(ops.len() >= 21, "should have at least 21 operations");
+    assert!(ops.len() >= 26, "should have at least 26 operations");
     let ids: Vec<&str> = ops.iter().filter_map(|o| o["id"].as_str()).collect();
     assert!(ids.contains(&"sentry.list_issues"));
     assert!(ids.contains(&"sentry.get_event"));
@@ -126,6 +126,11 @@ async fn introspect_lists_operations() {
     assert!(ids.contains(&"sentry.issue.assign"));
     assert!(ids.contains(&"sentry.issue.set_status"));
     assert!(ids.contains(&"sentry.issue.set_priority"));
+    assert!(ids.contains(&"sentry.performance.transactions"));
+    assert!(ids.contains(&"sentry.performance.transaction.summary"));
+    assert!(ids.contains(&"sentry.performance.trace.summary"));
+    assert!(ids.contains(&"sentry.release.health"));
+    assert!(ids.contains(&"sentry.release.create"));
 }
 
 #[fcp_async_core::runtime::test]
@@ -919,7 +924,7 @@ async fn doctor_fully_configured() {
     assert!(checks.iter().all(|c| c["passed"] == true));
 }
 
-// ── Simulate: all 21 operations ──────────────────────────────────────
+// ── Simulate: all 26 operations ──────────────────────────────────────
 
 #[fcp_async_core::runtime::test]
 async fn simulate_all_known_operations() {
@@ -946,6 +951,11 @@ async fn simulate_all_known_operations() {
         "sentry.issue.assign",
         "sentry.issue.set_status",
         "sentry.issue.set_priority",
+        "sentry.performance.transactions",
+        "sentry.performance.transaction.summary",
+        "sentry.performance.trace.summary",
+        "sentry.release.health",
+        "sentry.release.create",
     ];
     for op in &ops {
         let result = connector
@@ -1111,4 +1121,182 @@ async fn invoke_issue_set_priority() {
         .await
         .unwrap();
     assert_eq!(result["issue"]["priority"], "high");
+}
+
+// ── Invoke: Performance Transactions ─────────────────────────────────
+
+#[fcp_async_core::runtime::test]
+async fn invoke_performance_transactions() {
+    let mock = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/organizations/my-org/events/"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": [
+                {"transaction": "/api/users", "count()": 1500, "p50()": 120.0, "p95()": 450.0, "failure_rate()": 0.02},
+            ],
+            "meta": {"fields": {"transaction": "string", "count()": "integer"}},
+        })))
+        .mount(&mock)
+        .await;
+
+    let connector = configured_connector(&mock).await;
+    let result = connector
+        .handle_invoke(json!({
+            "operation_id": "sentry.performance.transactions",
+            "input": {
+                "organization_slug": "my-org",
+                "project_slug": "backend",
+                "transaction": "/api/users",
+            },
+        }))
+        .await
+        .unwrap();
+
+    let data = result["data"].as_array().unwrap();
+    assert_eq!(data.len(), 1);
+    assert_eq!(data[0]["transaction"], "/api/users");
+}
+
+// ── Invoke: Performance Transaction Summary ──────────────────────────
+
+#[fcp_async_core::runtime::test]
+async fn invoke_performance_transaction_summary() {
+    let mock = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/organizations/my-org/events/"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": [
+                {
+                    "count()": 5000,
+                    "p50(transaction.duration)": 120.5,
+                    "p75(transaction.duration)": 250.0,
+                    "p95(transaction.duration)": 450.0,
+                    "p99(transaction.duration)": 1200.0,
+                    "failure_rate()": 0.01,
+                    "apdex()": 0.95,
+                },
+            ],
+            "meta": {"fields": {"count()": "integer"}},
+        })))
+        .mount(&mock)
+        .await;
+
+    let connector = configured_connector(&mock).await;
+    let result = connector
+        .handle_invoke(json!({
+            "operation_id": "sentry.performance.transaction.summary",
+            "input": {
+                "organization_slug": "my-org",
+                "project_slug": "backend",
+                "transaction": "/api/users",
+            },
+        }))
+        .await
+        .unwrap();
+
+    let data = result["data"].as_array().unwrap();
+    assert_eq!(data.len(), 1);
+    assert_eq!(data[0]["count()"], 5000);
+}
+
+// ── Invoke: Performance Trace Summary ────────────────────────────────
+
+#[fcp_async_core::runtime::test]
+async fn invoke_performance_trace_summary() {
+    let mock = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path_regex(
+            "/organizations/my-org/events-trace/[a-f0-9]+/",
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "transactions": [
+                {"transaction": "/api/users", "span_id": "abc123", "children": []},
+            ],
+            "orphan_errors": [],
+        })))
+        .mount(&mock)
+        .await;
+
+    let connector = configured_connector(&mock).await;
+    let result = connector
+        .handle_invoke(json!({
+            "operation_id": "sentry.performance.trace.summary",
+            "input": {
+                "organization_slug": "my-org",
+                "trace_id": "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4",
+            },
+        }))
+        .await
+        .unwrap();
+
+    assert!(result.get("trace").is_some());
+    let transactions = result["trace"]["transactions"].as_array().unwrap();
+    assert_eq!(transactions.len(), 1);
+}
+
+// ── Invoke: Release Health ───────────────────────────────────────────
+
+#[fcp_async_core::runtime::test]
+async fn invoke_release_health() {
+    let mock = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path_regex(
+            "/organizations/my-org/releases/.*/health/",
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "sessionsCrashed": 5,
+            "sessionsHealthy": 995,
+            "crashFreeRate": 0.995,
+            "adoption": 0.85,
+            "totalSessions": 1000,
+        })))
+        .mount(&mock)
+        .await;
+
+    let connector = configured_connector(&mock).await;
+    let result = connector
+        .handle_invoke(json!({
+            "operation_id": "sentry.release.health",
+            "input": {
+                "organization_slug": "my-org",
+                "project_slug": "backend",
+                "version": "backend@1.2.3",
+            },
+        }))
+        .await
+        .unwrap();
+
+    assert!(result.get("health").is_some());
+    assert_eq!(result["health"]["totalSessions"], 1000);
+}
+
+// ── Invoke: Release Create ───────────────────────────────────────────
+
+#[fcp_async_core::runtime::test]
+async fn invoke_release_create() {
+    let mock = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/organizations/my-org/releases/"))
+        .respond_with(ResponseTemplate::new(201).set_body_json(json!({
+            "version": "backend@1.3.0",
+            "dateCreated": "2026-03-09T00:00:00Z",
+            "projects": [{"slug": "backend"}],
+        })))
+        .mount(&mock)
+        .await;
+
+    let connector = configured_connector(&mock).await;
+    let result = connector
+        .handle_invoke(json!({
+            "operation_id": "sentry.release.create",
+            "input": {
+                "organization_slug": "my-org",
+                "version": "backend@1.3.0",
+                "projects": ["backend"],
+            },
+        }))
+        .await
+        .unwrap();
+
+    assert_eq!(result["release"]["version"], "backend@1.3.0");
 }

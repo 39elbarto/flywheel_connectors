@@ -646,4 +646,329 @@ mod tests {
         let report = RepairReport::builder("z:test").build();
         assert_eq!(report.schema_version, RepairReport::SCHEMA_VERSION);
     }
+
+    // ---- CoverageMetrics serde ────────────────────────────────
+
+    #[test]
+    fn coverage_metrics_serde_roundtrip() {
+        let metrics = CoverageMetrics {
+            distinct_nodes: 5,
+            max_node_fraction_bps: 2500,
+            coverage_bps: 9500,
+            is_available: true,
+            min_symbols_required: Some(100),
+            symbols_available: Some(142),
+            target_coverage_bps: Some(10000),
+            deficit_bps: Some(500),
+        };
+        let json = serde_json::to_string(&metrics).unwrap();
+        let back: CoverageMetrics = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.distinct_nodes, 5);
+        assert_eq!(back.coverage_bps, 9500);
+        assert!(back.is_available);
+        assert_eq!(back.deficit_bps, Some(500));
+    }
+
+    #[test]
+    fn coverage_metrics_optional_fields_skipped() {
+        let metrics = CoverageMetrics {
+            distinct_nodes: 1,
+            max_node_fraction_bps: 10000,
+            coverage_bps: 5000,
+            is_available: true,
+            min_symbols_required: None,
+            symbols_available: None,
+            target_coverage_bps: None,
+            deficit_bps: None,
+        };
+        let json = serde_json::to_string(&metrics).unwrap();
+        assert!(!json.contains("min_symbols_required"));
+        assert!(!json.contains("symbols_available"));
+        assert!(!json.contains("target_coverage_bps"));
+        assert!(!json.contains("deficit_bps"));
+    }
+
+    #[test]
+    fn coverage_metrics_clone() {
+        let metrics = CoverageMetrics {
+            distinct_nodes: 3,
+            max_node_fraction_bps: 4000,
+            coverage_bps: 7500,
+            is_available: true,
+            ..Default::default()
+        };
+        let cloned = metrics.clone();
+        assert_eq!(cloned.distinct_nodes, metrics.distinct_nodes);
+        assert_eq!(cloned.coverage_bps, metrics.coverage_bps);
+    }
+
+    // ── PlacementSummary serde ─────────────────────────────────
+
+    #[test]
+    fn placement_summary_serde_roundtrip() {
+        let summary = PlacementSummary {
+            policy_name: "geo-distributed".to_string(),
+            target_replicas: 5,
+            current_avg_replicas: 4.6,
+            placement_nodes: vec!["us-east-1".to_string(), "eu-west-1".to_string()],
+            healthy_nodes: 4,
+            degraded_nodes: 1,
+        };
+        let json = serde_json::to_string(&summary).unwrap();
+        let back: PlacementSummary = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.policy_name, "geo-distributed");
+        assert_eq!(back.placement_nodes.len(), 2);
+        assert_eq!(back.healthy_nodes, 4);
+    }
+
+    #[test]
+    fn placement_summary_clone() {
+        let summary = PlacementSummary {
+            policy_name: "default".to_string(),
+            target_replicas: 3,
+            current_avg_replicas: 3.0,
+            placement_nodes: vec!["n0".to_string()],
+            healthy_nodes: 1,
+            degraded_nodes: 0,
+        };
+        let cloned = summary.clone();
+        assert_eq!(cloned.policy_name, summary.policy_name);
+        assert_eq!(cloned.target_replicas, summary.target_replicas);
+    }
+
+    // ── RepairAction ───────────────────────────────────────────
+
+    #[test]
+    fn repair_action_no_reason() {
+        let action = RepairAction {
+            action_type: RepairActionType::Redistribute,
+            object_id: "obj-456".to_string(),
+            source_nodes: vec!["n0".to_string()],
+            target_nodes: vec!["n1".to_string()],
+            symbols_needed: 20,
+            priority: 5,
+            reason: None,
+        };
+        let json = serde_json::to_string(&action).unwrap();
+        assert!(!json.contains("reason"));
+        let back: RepairAction = serde_json::from_str(&json).unwrap();
+        assert!(back.reason.is_none());
+    }
+
+    #[test]
+    fn repair_action_clone() {
+        let action = RepairAction {
+            action_type: RepairActionType::Recover,
+            object_id: "obj-789".to_string(),
+            source_nodes: vec!["a".to_string(), "b".to_string()],
+            target_nodes: vec!["c".to_string()],
+            symbols_needed: 50,
+            priority: 0,
+            reason: Some("data loss".to_string()),
+        };
+        let cloned = action.clone();
+        assert_eq!(cloned.object_id, action.object_id);
+        assert_eq!(cloned.symbols_needed, action.symbols_needed);
+        assert_eq!(cloned.reason, action.reason);
+    }
+
+    #[test]
+    fn repair_action_debug() {
+        let action = RepairAction {
+            action_type: RepairActionType::Prestage,
+            object_id: "obj-staging".to_string(),
+            source_nodes: vec![],
+            target_nodes: vec!["node-new".to_string()],
+            symbols_needed: 100,
+            priority: 10,
+            reason: None,
+        };
+        let dbg = format!("{action:?}");
+        assert!(dbg.contains("RepairAction"));
+        assert!(dbg.contains("Prestage"));
+    }
+
+    // ── RepairCycleSummary ─────────────────────────────────────
+
+    #[test]
+    fn repair_cycle_summary_clone() {
+        let now = Utc::now();
+        let cycle = RepairCycleSummary {
+            started_at: now,
+            completed_at: now,
+            duration_ms: 1000,
+            actions_completed: 5,
+            actions_failed: 2,
+            symbols_transferred: 150,
+            bytes_transferred: 37500,
+            coverage_before_bps: 6000,
+            coverage_after_bps: 8500,
+        };
+        let cloned = cycle.clone();
+        assert_eq!(cloned.duration_ms, cycle.duration_ms);
+        assert_eq!(cloned.actions_completed, cycle.actions_completed);
+        assert_eq!(cloned.actions_failed, cycle.actions_failed);
+    }
+
+    #[test]
+    fn repair_cycle_summary_debug() {
+        let now = Utc::now();
+        let cycle = RepairCycleSummary {
+            started_at: now,
+            completed_at: now,
+            duration_ms: 500,
+            actions_completed: 3,
+            actions_failed: 0,
+            symbols_transferred: 50,
+            bytes_transferred: 12500,
+            coverage_before_bps: 8000,
+            coverage_after_bps: 9000,
+        };
+        let dbg = format!("{cycle:?}");
+        assert!(dbg.contains("RepairCycleSummary"));
+    }
+
+    // ── Builder chaining ───────────────────────────────────────
+
+    #[test]
+    fn builder_multiple_pending_repairs() {
+        let report = RepairReport::builder("z:multi-repair")
+            .coverage(CoverageMetrics {
+                is_available: true,
+                coverage_bps: 6000,
+                ..Default::default()
+            })
+            .add_pending_repair(RepairAction {
+                action_type: RepairActionType::Replicate,
+                object_id: "obj-1".to_string(),
+                source_nodes: vec!["n0".to_string()],
+                target_nodes: vec!["n1".to_string()],
+                symbols_needed: 10,
+                priority: 1,
+                reason: None,
+            })
+            .add_pending_repair(RepairAction {
+                action_type: RepairActionType::Recover,
+                object_id: "obj-2".to_string(),
+                source_nodes: vec![],
+                target_nodes: vec!["n2".to_string()],
+                symbols_needed: 25,
+                priority: 0,
+                reason: Some("node crash".to_string()),
+            })
+            .build();
+        assert_eq!(report.pending_repairs.len(), 2);
+        assert_eq!(report.pending_repairs[0].object_id, "obj-1");
+        assert_eq!(report.pending_repairs[1].object_id, "obj-2");
+    }
+
+    #[test]
+    fn builder_full_chain() {
+        let now = Utc::now();
+        let report = RepairReport::builder("z:full")
+            .coverage(CoverageMetrics {
+                distinct_nodes: 4,
+                max_node_fraction_bps: 3000,
+                coverage_bps: 8500,
+                is_available: true,
+                ..Default::default()
+            })
+            .placement(PlacementSummary {
+                policy_name: "custom".to_string(),
+                target_replicas: 3,
+                current_avg_replicas: 2.7,
+                placement_nodes: vec!["a".to_string(), "b".to_string()],
+                healthy_nodes: 2,
+                degraded_nodes: 0,
+            })
+            .add_pending_repair(RepairAction {
+                action_type: RepairActionType::Redistribute,
+                object_id: "obj-x".to_string(),
+                source_nodes: vec!["a".to_string()],
+                target_nodes: vec!["b".to_string()],
+                symbols_needed: 5,
+                priority: 3,
+                reason: None,
+            })
+            .last_repair_cycle(RepairCycleSummary {
+                started_at: now,
+                completed_at: now,
+                duration_ms: 100,
+                actions_completed: 1,
+                actions_failed: 0,
+                symbols_transferred: 10,
+                bytes_transferred: 2500,
+                coverage_before_bps: 8000,
+                coverage_after_bps: 8500,
+            })
+            .build();
+        assert_eq!(report.overall_status, CoverageStatus::Healthy);
+        assert_eq!(report.placement.policy_name, "custom");
+        assert_eq!(report.pending_repairs.len(), 1);
+        assert!(report.last_repair_cycle.is_some());
+    }
+
+    // ── RepairReport clone and JSON ────────────────────────────
+
+    #[test]
+    fn repair_report_clone() {
+        let report = RepairReport::builder("z:clone")
+            .coverage(CoverageMetrics {
+                is_available: true,
+                coverage_bps: 9000,
+                ..Default::default()
+            })
+            .build();
+        let cloned = report.clone();
+        assert_eq!(cloned.zone_id, report.zone_id);
+        assert_eq!(cloned.overall_status, report.overall_status);
+    }
+
+    #[test]
+    fn repair_report_json_pretty() {
+        let report = RepairReport::builder("z:pretty")
+            .coverage(CoverageMetrics {
+                distinct_nodes: 2,
+                coverage_bps: 8500,
+                is_available: true,
+                ..Default::default()
+            })
+            .build();
+        let json = serde_json::to_string_pretty(&report).unwrap();
+        assert!(json.contains("z:pretty"));
+        assert!(json.contains("HEALTHY"));
+        assert!(json.contains("schema_version"));
+    }
+
+    // ── CoverageStatus equality/copy ───────────────────────────
+
+    #[test]
+    fn coverage_status_copy() {
+        let s = CoverageStatus::Healthy;
+        let copied = s;
+        assert_eq!(s, copied);
+    }
+
+    #[test]
+    fn coverage_status_debug() {
+        assert!(format!("{:?}", CoverageStatus::Healthy).contains("Healthy"));
+        assert!(format!("{:?}", CoverageStatus::Critical).contains("Critical"));
+    }
+
+    // ── RepairActionType equality/copy ──────────────────────────
+
+    #[test]
+    fn repair_action_type_copy() {
+        let t = RepairActionType::Replicate;
+        let copied = t;
+        assert_eq!(t, copied);
+    }
+
+    #[test]
+    fn repair_action_type_debug() {
+        assert!(format!("{:?}", RepairActionType::Replicate).contains("Replicate"));
+        assert!(format!("{:?}", RepairActionType::Redistribute).contains("Redistribute"));
+        assert!(format!("{:?}", RepairActionType::Recover).contains("Recover"));
+        assert!(format!("{:?}", RepairActionType::Prestage).contains("Prestage"));
+    }
 }

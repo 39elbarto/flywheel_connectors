@@ -269,4 +269,116 @@ mod tests {
         };
         assert_eq!(args.manifest_path, PathBuf::from("manifest.toml"));
     }
+
+    // ── print_human_report tests ────────────────────────────────
+
+    #[test]
+    fn print_human_report_no_change_check() {
+        let report = sample_report(false, false, None);
+        // Should not panic
+        print_human_report(&report, true);
+    }
+
+    #[test]
+    fn print_human_report_changed_check() {
+        let report = sample_report(true, false, None);
+        print_human_report(&report, true);
+    }
+
+    #[test]
+    fn print_human_report_changed_written() {
+        let report = sample_report(true, true, None);
+        print_human_report(&report, false);
+    }
+
+    #[test]
+    fn print_human_report_no_change_write_mode() {
+        let report = sample_report(false, false, None);
+        print_human_report(&report, false);
+    }
+
+    #[test]
+    fn print_human_report_with_validation_error_check() {
+        let report = sample_report(false, false, Some("invalid field: zones.forbidden"));
+        print_human_report(&report, true);
+    }
+
+    #[test]
+    fn print_human_report_with_validation_error_write() {
+        let report = sample_report(true, true, Some("missing capability"));
+        print_human_report(&report, false);
+    }
+
+    #[test]
+    fn print_human_report_changed_but_not_written_write_mode() {
+        let report = sample_report(true, false, None);
+        print_human_report(&report, false);
+    }
+
+    // ── ManifestFixReport serialization ─────────────────────────
+
+    #[test]
+    fn report_json_all_fields_present() {
+        let report = sample_report(true, true, Some("err"));
+        let json = serde_json::to_string_pretty(&report).unwrap();
+        assert!(json.contains("\"path\""));
+        assert!(json.contains("\"mode\""));
+        assert!(json.contains("\"changed\""));
+        assert!(json.contains("\"wrote\""));
+        assert!(json.contains("\"interface_hash_before\""));
+        assert!(json.contains("\"interface_hash_after\""));
+        assert!(json.contains("\"validation_error\""));
+    }
+
+    #[test]
+    fn report_json_pretty_parses_back() {
+        let report = sample_report(true, false, Some("bad"));
+        let json = serde_json::to_string_pretty(&report).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["changed"], true);
+        assert_eq!(v["wrote"], false);
+        assert_eq!(v["validation_error"], "bad");
+    }
+
+    // ── ManifestCommand/ManifestArgs tests ──────────────────────
+
+    #[test]
+    fn manifest_args_debug() {
+        let args = ManifestArgs {
+            command: ManifestCommand::Fix(FixArgs {
+                manifest_path: PathBuf::from("test.toml"),
+                check: true,
+                write: false,
+                json: false,
+            }),
+        };
+        let debug = format!("{args:?}");
+        assert!(debug.contains("Fix"));
+        assert!(debug.contains("test.toml"));
+    }
+
+    #[test]
+    fn fix_args_check_and_json() {
+        let args = FixArgs {
+            manifest_path: PathBuf::from("m.toml"),
+            check: true,
+            write: false,
+            json: true,
+        };
+        assert!(args.check);
+        assert!(!args.write);
+        assert!(args.json);
+    }
+
+    #[test]
+    fn fix_args_write_mode() {
+        let args = FixArgs {
+            manifest_path: PathBuf::from("m.toml"),
+            check: false,
+            write: true,
+            json: false,
+        };
+        assert!(args.write);
+        assert!(!args.check);
+    }
 }

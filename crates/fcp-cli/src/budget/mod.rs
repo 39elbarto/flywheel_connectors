@@ -236,4 +236,144 @@ mod tests {
         let dbg = format!("{report:?}");
         assert!(dbg.contains("BudgetReport"));
     }
+
+    // ── print_budget_report tests ─────────────────────────────
+
+    #[test]
+    fn print_budget_report_no_zones() {
+        let report = simulate_budget_report(Some("z:nonexistent"));
+        // Should not panic, prints "No budget data available"
+        print_budget_report(&report);
+    }
+
+    #[test]
+    fn print_budget_report_all_zones() {
+        let report = simulate_budget_report(None);
+        // Should not panic, prints both zones
+        print_budget_report(&report);
+    }
+
+    #[test]
+    fn print_budget_report_single_zone() {
+        let report = simulate_budget_report(Some("z:private"));
+        print_budget_report(&report);
+    }
+
+    #[test]
+    fn print_budget_report_with_exceeded() {
+        let report = simulate_budget_report(Some("z:private"));
+        let tokens = report.zones[0]
+            .budgets
+            .iter()
+            .find(|b| b.status == BudgetStatus::Exceeded);
+        assert!(tokens.is_some());
+        print_budget_report(&report);
+    }
+
+    #[test]
+    fn print_budget_report_empty_budgets() {
+        let report = BudgetReport {
+            schema_version: BudgetReport::SCHEMA_VERSION.to_string(),
+            generated_at: Utc::now(),
+            zones: vec![ZoneBudgetReport {
+                zone_id: "z:empty".to_string(),
+                enforcement: BudgetEnforcement::Warn,
+                budgets: vec![],
+                updated_at: 0,
+            }],
+        };
+        // Should print "No budgets configured."
+        print_budget_report(&report);
+    }
+
+    // ── BudgetArgs tests ──────────────────────────────────────
+
+    #[test]
+    fn budget_args_debug_no_zone() {
+        let args = BudgetArgs {
+            zone: None,
+            json: false,
+        };
+        let dbg = format!("{args:?}");
+        assert!(dbg.contains("BudgetArgs"));
+        assert!(dbg.contains("None"));
+    }
+
+    #[test]
+    fn budget_args_debug_with_zone() {
+        let args = BudgetArgs {
+            zone: Some("z:private".to_string()),
+            json: true,
+        };
+        let dbg = format!("{args:?}");
+        assert!(dbg.contains("z:private"));
+        assert!(dbg.contains("true"));
+    }
+
+    // ── budget metric types ───────────────────────────────────
+
+    #[test]
+    fn private_zone_has_requests_budget() {
+        let report = simulate_budget_report(Some("z:private"));
+        let requests = report.zones[0]
+            .budgets
+            .iter()
+            .find(|b| b.metric == UsageMetricKind::Requests)
+            .expect("should have requests budget");
+        assert_eq!(requests.status, BudgetStatus::Ok);
+        assert_eq!(requests.used, 120);
+        assert_eq!(requests.limit, 200);
+        assert_eq!(requests.remaining, 80);
+    }
+
+    #[test]
+    fn work_zone_has_bytes_budget() {
+        let report = simulate_budget_report(Some("z:work"));
+        let bytes = report.zones[0]
+            .budgets
+            .iter()
+            .find(|b| b.metric == UsageMetricKind::Bytes)
+            .expect("should have bytes budget");
+        assert_eq!(bytes.used, 8_000_000);
+        assert_eq!(bytes.limit, 10_000_000);
+        assert_eq!(bytes.remaining, 2_000_000);
+    }
+
+    #[test]
+    fn work_zone_tokens_under_limit() {
+        let report = simulate_budget_report(Some("z:work"));
+        let tokens = report.zones[0]
+            .budgets
+            .iter()
+            .find(|b| b.metric == UsageMetricKind::Tokens)
+            .expect("should have tokens budget");
+        assert!(tokens.used < tokens.limit);
+        assert!(tokens.remaining > 0);
+    }
+
+    #[test]
+    fn budget_report_json_pretty() {
+        let report = simulate_budget_report(None);
+        let json = serde_json::to_string_pretty(&report).unwrap();
+        assert!(json.contains("schema_version"));
+        assert!(json.contains("z:private"));
+        assert!(json.contains("z:work"));
+    }
+
+    #[test]
+    fn budget_report_generated_at_is_recent() {
+        let before = Utc::now();
+        let report = simulate_budget_report(None);
+        let after = Utc::now();
+        assert!(report.generated_at >= before);
+        assert!(report.generated_at <= after);
+    }
+
+    #[test]
+    fn budget_zone_updated_at_is_nonzero() {
+        let report = simulate_budget_report(None);
+        for zone in &report.zones {
+            assert!(zone.updated_at > 0);
+        }
+    }
 }

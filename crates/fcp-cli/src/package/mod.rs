@@ -498,4 +498,243 @@ foo = "bar"
         );
         let _ = fs::remove_dir_all(&dir);
     }
+
+    #[test]
+    fn compute_sha256_deterministic() {
+        let dir = std::env::temp_dir().join("fcp-test-sha256-det");
+        let _ = fs::create_dir_all(&dir);
+        let file = dir.join("det.txt");
+        fs::write(&file, b"deterministic content").unwrap();
+        let hash1 = compute_sha256(&file).unwrap();
+        let hash2 = compute_sha256(&file).unwrap();
+        assert_eq!(hash1, hash2);
+        assert_eq!(hash1.len(), 64);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn compute_sha256_different_content_different_hash() {
+        let dir = std::env::temp_dir().join("fcp-test-sha256-diff");
+        let _ = fs::create_dir_all(&dir);
+        let f1 = dir.join("a.txt");
+        let f2 = dir.join("b.txt");
+        fs::write(&f1, b"content A").unwrap();
+        fs::write(&f2, b"content B").unwrap();
+        let h1 = compute_sha256(&f1).unwrap();
+        let h2 = compute_sha256(&f2).unwrap();
+        assert_ne!(h1, h2);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn compute_sha256_binary_content() {
+        let dir = std::env::temp_dir().join("fcp-test-sha256-bin");
+        let _ = fs::create_dir_all(&dir);
+        let file = dir.join("bin.dat");
+        fs::write(&file, [0u8, 1, 2, 255, 254, 253, 128, 0]).unwrap();
+        let hash = compute_sha256(&file).unwrap();
+        assert_eq!(hash.len(), 64);
+        assert!(hash.chars().all(|c| c.is_ascii_hexdigit()));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // ── extract_manifest_metadata edge cases ──────────────────
+
+    #[test]
+    fn extract_manifest_metadata_extra_fields() {
+        let toml = r#"
+[connector]
+id = "vendor.analytics:tracker:3.0.0"
+version = "3.0.0"
+description = "Analytics connector"
+author = "vendor"
+"#;
+        let (id, version) = extract_manifest_metadata(toml).unwrap();
+        assert_eq!(id, "vendor.analytics:tracker:3.0.0");
+        assert_eq!(version, "3.0.0");
+    }
+
+    #[test]
+    fn extract_manifest_metadata_with_other_sections() {
+        let toml = r#"
+[package]
+name = "fcp-analytics"
+
+[connector]
+id = "analytics:core:1.0.0"
+version = "1.0.0"
+
+[capabilities]
+read = true
+"#;
+        let (id, version) = extract_manifest_metadata(toml).unwrap();
+        assert_eq!(id, "analytics:core:1.0.0");
+        assert_eq!(version, "1.0.0");
+    }
+
+    #[test]
+    fn extract_manifest_metadata_numeric_version_fails() {
+        // Version must be a string
+        let toml = r#"
+[connector]
+id = "test:c:1"
+version = 1
+"#;
+        let result = extract_manifest_metadata(toml);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn extract_manifest_metadata_semver_prerelease() {
+        let toml = r#"
+[connector]
+id = "beta:conn:0.1.0-rc.1"
+version = "0.1.0-rc.1"
+"#;
+        let (id, version) = extract_manifest_metadata(toml).unwrap();
+        assert_eq!(id, "beta:conn:0.1.0-rc.1");
+        assert_eq!(version, "0.1.0-rc.1");
+    }
+
+    // ── find_manifest tests ───────────────────────────────────
+
+    #[test]
+    fn find_manifest_with_manifest_toml() {
+        let dir = std::env::temp_dir().join("fcp-test-find-manifest-1");
+        let _ = fs::create_dir_all(&dir);
+        fs::write(dir.join("manifest.toml"), "# manifest").unwrap();
+        let result = find_manifest(&dir).unwrap();
+        assert_eq!(result, dir.join("manifest.toml"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn find_manifest_with_fcp_manifest_toml() {
+        let dir = std::env::temp_dir().join("fcp-test-find-manifest-2");
+        let _ = fs::create_dir_all(&dir);
+        fs::write(dir.join("fcp-manifest.toml"), "# manifest").unwrap();
+        let result = find_manifest(&dir).unwrap();
+        assert_eq!(result, dir.join("fcp-manifest.toml"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn find_manifest_with_connector_manifest_toml() {
+        let dir = std::env::temp_dir().join("fcp-test-find-manifest-3");
+        let _ = fs::create_dir_all(&dir);
+        fs::write(dir.join("connector-manifest.toml"), "# manifest").unwrap();
+        let result = find_manifest(&dir).unwrap();
+        assert_eq!(result, dir.join("connector-manifest.toml"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn find_manifest_prefers_manifest_toml() {
+        let dir = std::env::temp_dir().join("fcp-test-find-manifest-4");
+        let _ = fs::create_dir_all(&dir);
+        fs::write(dir.join("manifest.toml"), "# primary").unwrap();
+        fs::write(dir.join("fcp-manifest.toml"), "# secondary").unwrap();
+        let result = find_manifest(&dir).unwrap();
+        assert_eq!(result, dir.join("manifest.toml"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn find_manifest_empty_dir_fails() {
+        let dir = std::env::temp_dir().join("fcp-test-find-manifest-empty");
+        let _ = fs::create_dir_all(&dir);
+        // Ensure no manifest files exist
+        let _ = fs::remove_file(dir.join("manifest.toml"));
+        let _ = fs::remove_file(dir.join("fcp-manifest.toml"));
+        let _ = fs::remove_file(dir.join("connector-manifest.toml"));
+        let result = find_manifest(&dir);
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("No manifest.toml found"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // ── resolve_target_dir tests ──────────────────────────────
+
+    #[test]
+    fn resolve_target_dir_custom_profile() {
+        let resolved = resolve_target_dir(Path::new("/project"), "bench");
+        assert_eq!(resolved, Path::new("/project/target/bench"));
+    }
+
+    #[test]
+    fn resolve_target_dir_relative_path() {
+        let resolved = resolve_target_dir(Path::new("my-connector"), "release");
+        assert_eq!(resolved, Path::new("my-connector/target/release"));
+    }
+
+    // ── print_human_output tests ──────────────────────────────
+
+    #[test]
+    fn print_human_output_with_sbom() {
+        let output = PackageOutput {
+            output_dir: PathBuf::from("/tmp/pkg"),
+            binary_path: PathBuf::from("/tmp/pkg/connector"),
+            manifest_path: PathBuf::from("/tmp/pkg/manifest.toml"),
+            sbom_path: Some(PathBuf::from("/tmp/pkg/sbom.json")),
+            build_metadata_path: PathBuf::from("/tmp/pkg/build.json"),
+            binary_sha256: "abcdef0123456789".to_string(),
+            connector_id: "acme:storage:1.0.0".to_string(),
+            version: "1.0.0".to_string(),
+        };
+        // Should not panic
+        print_human_output(&output);
+    }
+
+    #[test]
+    fn print_human_output_without_sbom() {
+        let output = PackageOutput {
+            output_dir: PathBuf::from("/out"),
+            binary_path: PathBuf::from("/out/bin"),
+            manifest_path: PathBuf::from("/out/manifest.toml"),
+            sbom_path: None,
+            build_metadata_path: PathBuf::from("/out/build.json"),
+            binary_sha256: "deadbeef".to_string(),
+            connector_id: "test:conn:0.1.0".to_string(),
+            version: "0.1.0".to_string(),
+        };
+        print_human_output(&output);
+    }
+
+    // ── PackageOutput serde ───────────────────────────────────
+
+    #[test]
+    fn package_output_json_roundtrip() {
+        let output = PackageOutput {
+            output_dir: PathBuf::from("/build"),
+            binary_path: PathBuf::from("/build/bin"),
+            manifest_path: PathBuf::from("/build/m.toml"),
+            sbom_path: Some(PathBuf::from("/build/sbom.json")),
+            build_metadata_path: PathBuf::from("/build/meta.json"),
+            binary_sha256: "abc123".to_string(),
+            connector_id: "vendor:conn:1.0.0".to_string(),
+            version: "1.0.0".to_string(),
+        };
+        let json = serde_json::to_string_pretty(&output).unwrap();
+        let back: PackageOutput = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.connector_id, output.connector_id);
+        assert_eq!(back.version, output.version);
+        assert_eq!(back.binary_sha256, output.binary_sha256);
+    }
+
+    #[test]
+    fn package_output_no_sbom_skips_field() {
+        let output = PackageOutput {
+            output_dir: PathBuf::from("/out"),
+            binary_path: PathBuf::from("/out/bin"),
+            manifest_path: PathBuf::from("/out/m.toml"),
+            sbom_path: None,
+            build_metadata_path: PathBuf::from("/out/build.json"),
+            binary_sha256: "abc".to_string(),
+            connector_id: "c:t:1".to_string(),
+            version: "1".to_string(),
+        };
+        let json = serde_json::to_string(&output).unwrap();
+        assert!(!json.contains("sbom_path"));
+    }
 }

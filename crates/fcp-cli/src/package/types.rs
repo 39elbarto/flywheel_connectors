@@ -716,4 +716,242 @@ mod tests {
         assert!(meta.git_commit.is_none());
         assert!(meta.git_dirty.is_none());
     }
+
+    // ---- PackageArgs ----
+
+    #[test]
+    fn package_args_debug() {
+        let args = PackageArgs {
+            path: PathBuf::from("."),
+            output: None,
+            skip_sbom: false,
+            skip_sign: false,
+            release: true,
+            cargo_flags: vec![],
+            format: OutputFormat::Human,
+        };
+        let dbg = format!("{args:?}");
+        assert!(dbg.contains("PackageArgs"));
+        assert!(dbg.contains("release: true"));
+    }
+
+    #[test]
+    fn package_args_clone() {
+        let args = PackageArgs {
+            path: PathBuf::from("/my/project"),
+            output: Some(PathBuf::from("/out")),
+            skip_sbom: true,
+            skip_sign: false,
+            release: false,
+            cargo_flags: vec!["--locked".to_string()],
+            format: OutputFormat::Json,
+        };
+        let cloned = args.clone();
+        assert_eq!(args.path, PathBuf::from("/my/project"));
+        assert_eq!(cloned.output, Some(PathBuf::from("/out")));
+        assert!(cloned.skip_sbom);
+        assert!(!cloned.skip_sign);
+        assert!(!cloned.release);
+        assert_eq!(cloned.cargo_flags, vec!["--locked"]);
+    }
+
+    #[test]
+    fn package_args_default_values() {
+        let args = PackageArgs {
+            path: PathBuf::from("."),
+            output: None,
+            skip_sbom: false,
+            skip_sign: false,
+            release: true,
+            cargo_flags: vec![],
+            format: OutputFormat::Human,
+        };
+        assert_eq!(args.path, PathBuf::from("."));
+        assert!(args.output.is_none());
+        assert!(!args.skip_sbom);
+        assert!(!args.skip_sign);
+        assert!(args.release);
+        assert!(args.cargo_flags.is_empty());
+    }
+
+    #[test]
+    fn package_args_with_cargo_flags() {
+        let args = PackageArgs {
+            path: PathBuf::from("connectors/my-conn"),
+            output: Some(PathBuf::from("/build/output")),
+            skip_sbom: false,
+            skip_sign: true,
+            release: true,
+            cargo_flags: vec![
+                "--locked".to_string(),
+                "--target".to_string(),
+                "x86_64-unknown-linux-gnu".to_string(),
+            ],
+            format: OutputFormat::Json,
+        };
+        assert_eq!(args.cargo_flags.len(), 3);
+        assert!(args.skip_sign);
+    }
+
+    // ---- OutputFormat ----
+
+    #[test]
+    fn output_format_clone() {
+        let fmt = OutputFormat::Human;
+        let cloned = fmt;
+        assert!(matches!(cloned, OutputFormat::Human));
+    }
+
+    #[test]
+    fn output_format_json_variant() {
+        let fmt = OutputFormat::Json;
+        let dbg = format!("{fmt:?}");
+        assert!(dbg.contains("Json"));
+    }
+
+    // ---- PackageOutput JSON pretty ----
+
+    #[test]
+    fn package_output_json_pretty_contains_all_fields() {
+        let output = PackageOutput {
+            output_dir: PathBuf::from("/out"),
+            binary_path: PathBuf::from("/out/bin"),
+            manifest_path: PathBuf::from("/out/manifest.toml"),
+            sbom_path: Some(PathBuf::from("/out/sbom.json")),
+            build_metadata_path: PathBuf::from("/out/build.json"),
+            binary_sha256: "abc123".to_string(),
+            connector_id: "test:conn:1.0.0".to_string(),
+            version: "1.0.0".to_string(),
+        };
+        let json = serde_json::to_string_pretty(&output).unwrap();
+        assert!(json.contains("output_dir"));
+        assert!(json.contains("binary_path"));
+        assert!(json.contains("manifest_path"));
+        assert!(json.contains("sbom_path"));
+        assert!(json.contains("build_metadata_path"));
+        assert!(json.contains("binary_sha256"));
+        assert!(json.contains("connector_id"));
+        assert!(json.contains("version"));
+    }
+
+    // ---- BuildMetadata with cargo_flags ----
+
+    #[test]
+    fn build_metadata_with_cargo_flags() {
+        let meta = BuildMetadata {
+            rust_version: "1.85.0".to_string(),
+            cargo_version: "1.85.0".to_string(),
+            target_triple: "x86_64-unknown-linux-gnu".to_string(),
+            build_timestamp: "2026-03-08T00:00:00Z".to_string(),
+            profile: "release".to_string(),
+            git_commit: None,
+            git_dirty: None,
+            features: vec![],
+            build_env: std::collections::HashMap::new(),
+            cargo_flags: vec![
+                "--release".to_string(),
+                "--locked".to_string(),
+                "--target=x86_64-unknown-linux-gnu".to_string(),
+            ],
+        };
+        let json = serde_json::to_string(&meta).unwrap();
+        let back: BuildMetadata = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.cargo_flags.len(), 3);
+        assert!(back.cargo_flags.contains(&"--locked".to_string()));
+    }
+
+    // ---- SimpleSbom tool field ----
+
+    #[test]
+    fn simple_sbom_tool_field_preserved() {
+        let sbom = SimpleSbom {
+            format_version: "1.0".to_string(),
+            created: "2026-03-08T00:00:00Z".to_string(),
+            tool: "fcp-cli 0.5.0".to_string(),
+            component: SbomComponent {
+                component_type: "application".to_string(),
+                name: "test-conn".to_string(),
+                version: "1.0.0".to_string(),
+                purl: "pkg:fcp/test-conn@1.0.0".to_string(),
+            },
+            dependencies: vec![],
+        };
+        let json = serde_json::to_string(&sbom).unwrap();
+        let back: SimpleSbom = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.tool, "fcp-cli 0.5.0");
+        assert_eq!(back.format_version, "1.0");
+    }
+
+    // ---- SbomComponent purl format ----
+
+    #[test]
+    fn sbom_component_purl_fcp_format() {
+        let comp = SbomComponent {
+            component_type: "application".to_string(),
+            name: "weather-api".to_string(),
+            version: "2.1.0".to_string(),
+            purl: "pkg:fcp/weather-api@2.1.0".to_string(),
+        };
+        assert!(comp.purl.starts_with("pkg:fcp/"));
+        assert!(comp.purl.contains("@2.1.0"));
+    }
+
+    // ---- SbomDependency clone ----
+
+    #[test]
+    fn sbom_dependency_clone() {
+        let dep = SbomDependency {
+            name: "anyhow".to_string(),
+            version: "1.0.80".to_string(),
+            purl: "pkg:cargo/anyhow@1.0.80".to_string(),
+            source: "crates.io".to_string(),
+        };
+        let cloned = dep.clone();
+        assert_eq!(cloned.name, dep.name);
+        assert_eq!(cloned.version, dep.version);
+        assert_eq!(cloned.purl, dep.purl);
+        assert_eq!(cloned.source, dep.source);
+    }
+
+    // ---- SimpleSbom clone ----
+
+    #[test]
+    fn simple_sbom_clone() {
+        let sbom = SimpleSbom {
+            format_version: "1.0".to_string(),
+            created: "2026-01-01T00:00:00Z".to_string(),
+            tool: "fcp-cli".to_string(),
+            component: SbomComponent {
+                component_type: "application".to_string(),
+                name: "test".to_string(),
+                version: "0.1.0".to_string(),
+                purl: "pkg:cargo/test@0.1.0".to_string(),
+            },
+            dependencies: vec![SbomDependency {
+                name: "serde".to_string(),
+                version: "1.0.200".to_string(),
+                purl: "pkg:cargo/serde@1.0.200".to_string(),
+                source: "crates.io".to_string(),
+            }],
+        };
+        let cloned = sbom.clone();
+        assert_eq!(cloned.format_version, sbom.format_version);
+        assert_eq!(cloned.component.name, sbom.component.name);
+        assert_eq!(cloned.dependencies.len(), sbom.dependencies.len());
+    }
+
+    // ---- SbomComponent clone ----
+
+    #[test]
+    fn sbom_component_clone() {
+        let comp = SbomComponent {
+            component_type: "application".to_string(),
+            name: "connector-x".to_string(),
+            version: "3.0.0".to_string(),
+            purl: "pkg:fcp/connector-x@3.0.0".to_string(),
+        };
+        let cloned = comp.clone();
+        assert_eq!(cloned.name, comp.name);
+        assert_eq!(cloned.component_type, comp.component_type);
+    }
 }

@@ -267,4 +267,185 @@ mod tests {
         assert_eq!(back.overall_status, CoverageStatus::Healthy);
         assert_eq!(back.coverage.distinct_nodes, 5);
     }
+
+    // ── print_human_readable tests ────────────────────────────
+
+    #[test]
+    fn print_human_readable_healthy_report() {
+        let zone: ZoneId = "z:test".parse().unwrap();
+        let report = simulate_report(&zone);
+        // Should not panic
+        print_human_readable(&report);
+    }
+
+    #[test]
+    fn print_human_readable_with_deficit() {
+        let zone: ZoneId = "z:def".parse().unwrap();
+        let report = simulate_report(&zone);
+        assert!(report.coverage.deficit_bps.is_some());
+        print_human_readable(&report);
+    }
+
+    #[test]
+    fn print_human_readable_no_pending_repairs() {
+        let zone: ZoneId = "z:clean".parse().unwrap();
+        let report = simulate_report(&zone);
+        assert!(report.pending_repairs.is_empty());
+        print_human_readable(&report);
+    }
+
+    #[test]
+    fn print_human_readable_with_pending_repairs() {
+        let report = RepairReport::builder("z:repair")
+            .coverage(CoverageMetrics {
+                distinct_nodes: 3,
+                max_node_fraction_bps: 4000,
+                coverage_bps: 7500,
+                is_available: true,
+                deficit_bps: Some(2500),
+                ..Default::default()
+            })
+            .placement(PlacementSummary {
+                policy_name: "standard".to_string(),
+                target_replicas: 3,
+                current_avg_replicas: 2.1,
+                placement_nodes: vec!["n0".to_string(), "n1".to_string(), "n2".to_string()],
+                healthy_nodes: 2,
+                degraded_nodes: 1,
+            })
+            .add_pending_repair(types::RepairAction {
+                action_type: types::RepairActionType::Replicate,
+                object_id: "obj-abc".to_string(),
+                source_nodes: vec!["n0".to_string()],
+                target_nodes: vec!["n2".to_string()],
+                symbols_needed: 15,
+                priority: 1,
+                reason: Some("node-1 offline".to_string()),
+            })
+            .build();
+        print_human_readable(&report);
+    }
+
+    #[test]
+    fn print_human_readable_with_repair_cycle() {
+        let now = chrono::Utc::now();
+        let report = RepairReport::builder("z:cycle")
+            .coverage(CoverageMetrics {
+                distinct_nodes: 4,
+                max_node_fraction_bps: 3000,
+                coverage_bps: 9000,
+                is_available: true,
+                deficit_bps: Some(0),
+                ..Default::default()
+            })
+            .placement(PlacementSummary {
+                policy_name: "default".to_string(),
+                target_replicas: 3,
+                current_avg_replicas: 3.0,
+                placement_nodes: vec![
+                    "n0".to_string(),
+                    "n1".to_string(),
+                    "n2".to_string(),
+                    "n3".to_string(),
+                ],
+                healthy_nodes: 4,
+                degraded_nodes: 0,
+            })
+            .last_repair_cycle(types::RepairCycleSummary {
+                started_at: now,
+                completed_at: now,
+                duration_ms: 2500,
+                actions_completed: 8,
+                actions_failed: 0,
+                symbols_transferred: 350,
+                bytes_transferred: 87500,
+                coverage_before_bps: 7500,
+                coverage_after_bps: 9000,
+            })
+            .build();
+        print_human_readable(&report);
+    }
+
+    #[test]
+    fn print_human_readable_unavailable() {
+        let report = RepairReport::builder("z:down")
+            .coverage(CoverageMetrics {
+                distinct_nodes: 0,
+                coverage_bps: 0,
+                is_available: false,
+                ..Default::default()
+            })
+            .build();
+        print_human_readable(&report);
+        assert_eq!(report.overall_status, CoverageStatus::Unavailable);
+    }
+
+    #[test]
+    fn print_human_readable_zero_deficit() {
+        let report = RepairReport::builder("z:zero-deficit")
+            .coverage(CoverageMetrics {
+                distinct_nodes: 5,
+                coverage_bps: 10000,
+                is_available: true,
+                deficit_bps: Some(0),
+                ..Default::default()
+            })
+            .build();
+        print_human_readable(&report);
+    }
+
+    // ── RepairArgs/StatusArgs tests ───────────────────────────
+
+    #[test]
+    fn status_args_debug() {
+        let args = StatusArgs {
+            zone: "z:test".to_string(),
+            json: false,
+        };
+        let dbg = format!("{args:?}");
+        assert!(dbg.contains("z:test"));
+        assert!(dbg.contains("false"));
+    }
+
+    #[test]
+    fn status_args_json_mode() {
+        let args = StatusArgs {
+            zone: "z:private".to_string(),
+            json: true,
+        };
+        assert!(args.json);
+        assert_eq!(args.zone, "z:private");
+    }
+
+    #[test]
+    fn repair_args_debug() {
+        let args = RepairArgs {
+            command: RepairCommands::Status(StatusArgs {
+                zone: "z:work".to_string(),
+                json: false,
+            }),
+        };
+        let dbg = format!("{args:?}");
+        assert!(dbg.contains("Status"));
+        assert!(dbg.contains("z:work"));
+    }
+
+    // ── simulate_report for different zones ───────────────────
+
+    #[test]
+    fn simulate_report_different_zone_ids() {
+        for zone_str in ["z:private", "z:work", "z:staging", "z:prod"] {
+            let zone: ZoneId = zone_str.parse().unwrap();
+            let report = simulate_report(&zone);
+            assert_eq!(report.zone_id, zone_str);
+        }
+    }
+
+    #[test]
+    fn simulate_report_placement_avg_replicas() {
+        let zone: ZoneId = "z:test".parse().unwrap();
+        let report = simulate_report(&zone);
+        assert!(report.placement.current_avg_replicas > 0.0);
+        assert!(report.placement.current_avg_replicas <= f64::from(report.placement.target_replicas));
+    }
 }

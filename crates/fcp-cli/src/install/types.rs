@@ -418,4 +418,388 @@ mod tests {
         assert!(details.supply_chain_policy_satisfied);
         assert!(details.verified_attestations.is_empty());
     }
+
+    // ── InstallError constructors ───────────────────────────────
+
+    #[test]
+    fn install_error_version_not_found() {
+        let err = InstallError::version_not_found("fcp.test:v1", "9.9.9");
+        assert_eq!(err.code, "FCP-4011");
+        assert!(err.message.contains("9.9.9"));
+        assert!(err.message.contains("fcp.test:v1"));
+        assert_eq!(err.connector_id.as_deref(), Some("fcp.test:v1"));
+        assert_eq!(err.version.as_deref(), Some("9.9.9"));
+    }
+
+    #[test]
+    fn install_error_binary_checksum_mismatch() {
+        let err = InstallError::binary_checksum_mismatch("fcp.test:v1", "sha256:abc", "sha256:def");
+        assert_eq!(err.code, "FCP-4013");
+        assert!(err.message.contains("sha256:abc"));
+        assert!(err.message.contains("sha256:def"));
+    }
+
+    #[test]
+    fn install_error_capability_ceiling_violation() {
+        let err = InstallError::capability_ceiling_violation("fcp.test:v1", "system.exec");
+        assert_eq!(err.code, "FCP-4014");
+        assert!(err.message.contains("system.exec"));
+        assert!(err.message.contains("exceeds zone ceiling"));
+    }
+
+    #[test]
+    fn install_error_supply_chain_policy_violation() {
+        let err =
+            InstallError::supply_chain_policy_violation("fcp.test:v1", "transparency log missing");
+        assert_eq!(err.code, "FCP-4015");
+        assert!(err.message.contains("transparency log missing"));
+    }
+
+    #[test]
+    fn install_error_target_mismatch() {
+        let err = InstallError::target_mismatch("fcp.test:v1", "linux/amd64", "darwin/arm64");
+        assert_eq!(err.code, "FCP-4016");
+        assert!(err.message.contains("linux/amd64"));
+        assert!(err.message.contains("darwin/arm64"));
+        assert_eq!(err.hints.len(), 3);
+    }
+
+    #[test]
+    fn install_error_zone_not_found() {
+        let err = InstallError::zone_not_found("z:invalid");
+        assert_eq!(err.code, "FCP-4001");
+        assert!(err.message.contains("z:invalid"));
+        assert!(err.connector_id.is_none());
+        assert!(err.version.is_none());
+    }
+
+    #[test]
+    fn install_error_mirror_failed() {
+        let err = InstallError::mirror_failed("fcp.test:v1", "connection refused");
+        assert_eq!(err.code, "FCP-5020");
+        assert!(err.message.contains("connection refused"));
+        assert!(err.message.contains("mesh store"));
+    }
+
+    // ── InstallError Display ────────────────────────────────────
+
+    #[test]
+    fn install_error_display_format() {
+        let err = InstallError::connector_not_found("fcp.test:v1");
+        let display = format!("{err}");
+        assert!(display.starts_with("FCP-4010: "));
+        assert!(display.contains("fcp.test:v1"));
+    }
+
+    #[test]
+    fn install_error_is_std_error() {
+        let err = InstallError::connector_not_found("fcp.test:v1");
+        let _: &dyn std::error::Error = &err;
+    }
+
+    // ── InstallError JSON serialization ─────────────────────────
+
+    #[test]
+    fn install_error_json_roundtrip() {
+        let err = InstallError::connector_not_found("fcp.test:v1");
+        let json = serde_json::to_string(&err).unwrap();
+        let parsed: InstallError = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.code, err.code);
+        assert_eq!(parsed.message, err.message);
+        assert_eq!(parsed.hints.len(), err.hints.len());
+    }
+
+    #[test]
+    fn install_error_json_skips_none_fields() {
+        let err = InstallError::zone_not_found("z:test");
+        let json = serde_json::to_string(&err).unwrap();
+        // connector_id and version are None, should be skipped
+        assert!(!json.contains("connector_id"));
+        assert!(!json.contains("version"));
+    }
+
+    #[test]
+    fn install_error_json_includes_some_fields() {
+        let err = InstallError::version_not_found("fcp.test:v1", "2.0.0");
+        let json = serde_json::to_string(&err).unwrap();
+        assert!(json.contains("\"connector_id\""));
+        assert!(json.contains("\"version\""));
+    }
+
+    // ── InstallPhase tests ──────────────────────────────────────
+
+    #[test]
+    fn install_phase_all_labels() {
+        let phases = [
+            (InstallPhase::FetchingManifest, "Fetching manifest"),
+            (InstallPhase::VerifyingManifest, "Verifying manifest"),
+            (InstallPhase::FetchingBinary, "Fetching binary"),
+            (InstallPhase::VerifyingBinary, "Verifying binary"),
+            (InstallPhase::CheckingSupplyChain, "Checking supply chain"),
+            (InstallPhase::Mirroring, "Mirroring to store"),
+            (InstallPhase::EmittingAudit, "Emitting audit event"),
+            (InstallPhase::Complete, "Complete"),
+        ];
+        for (phase, expected) in phases {
+            assert_eq!(phase.label(), expected, "wrong label for {phase:?}");
+        }
+    }
+
+    #[test]
+    fn install_phase_all_symbols() {
+        // Fetch phases use ↓
+        assert_eq!(InstallPhase::FetchingManifest.symbol(), "↓");
+        assert_eq!(InstallPhase::FetchingBinary.symbol(), "↓");
+        // Verify phases use ✓
+        assert_eq!(InstallPhase::VerifyingManifest.symbol(), "✓");
+        assert_eq!(InstallPhase::VerifyingBinary.symbol(), "✓");
+        // Supply chain uses ⛓
+        assert_eq!(InstallPhase::CheckingSupplyChain.symbol(), "⛓");
+        // Mirror uses →
+        assert_eq!(InstallPhase::Mirroring.symbol(), "→");
+        // Complete uses ✔
+        assert_eq!(InstallPhase::Complete.symbol(), "✔");
+    }
+
+    #[test]
+    fn install_phase_colors() {
+        // Complete is green
+        assert_eq!(InstallPhase::Complete.color(), "\x1b[32m");
+        // All others are cyan
+        assert_eq!(InstallPhase::FetchingManifest.color(), "\x1b[36m");
+        assert_eq!(InstallPhase::VerifyingBinary.color(), "\x1b[36m");
+        assert_eq!(InstallPhase::Mirroring.color(), "\x1b[36m");
+    }
+
+    #[test]
+    fn install_phase_equality() {
+        assert_eq!(InstallPhase::Complete, InstallPhase::Complete);
+        assert_ne!(InstallPhase::Complete, InstallPhase::Mirroring);
+    }
+
+    #[test]
+    fn install_phase_serde_roundtrip() {
+        let phase = InstallPhase::CheckingSupplyChain;
+        let json = serde_json::to_string(&phase).unwrap();
+        assert_eq!(json, "\"checking_supply_chain\"");
+        let parsed: InstallPhase = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, phase);
+    }
+
+    #[test]
+    fn install_phase_all_serde_roundtrips() {
+        let phases = [
+            InstallPhase::FetchingManifest,
+            InstallPhase::VerifyingManifest,
+            InstallPhase::FetchingBinary,
+            InstallPhase::VerifyingBinary,
+            InstallPhase::CheckingSupplyChain,
+            InstallPhase::Mirroring,
+            InstallPhase::EmittingAudit,
+            InstallPhase::Complete,
+        ];
+        for phase in phases {
+            let json = serde_json::to_string(&phase).unwrap();
+            let parsed: InstallPhase = serde_json::from_str(&json).unwrap();
+            assert_eq!(parsed, phase);
+        }
+    }
+
+    // ── InstallProgress tests ───────────────────────────────────
+
+    #[test]
+    fn install_progress_json_roundtrip() {
+        let progress = InstallProgress {
+            phase: InstallPhase::VerifyingManifest,
+            message: "checking signatures".to_string(),
+            progress_percent: Some(50),
+        };
+        let json = serde_json::to_string(&progress).unwrap();
+        let parsed: InstallProgress = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.phase, InstallPhase::VerifyingManifest);
+        assert_eq!(parsed.message, "checking signatures");
+        assert_eq!(parsed.progress_percent, Some(50));
+    }
+
+    #[test]
+    fn install_progress_without_percent() {
+        let progress = InstallProgress {
+            phase: InstallPhase::FetchingManifest,
+            message: "downloading".to_string(),
+            progress_percent: None,
+        };
+        let json = serde_json::to_string(&progress).unwrap();
+        // progress_percent should be omitted
+        assert!(!json.contains("progress_percent"));
+    }
+
+    // ── VerificationDetails tests ───────────────────────────────
+
+    #[test]
+    fn verification_details_full_json_roundtrip() {
+        let details = VerificationDetails {
+            publisher_signature_verified: true,
+            registry_signature_verified: true,
+            publisher_signatures_valid: 3,
+            publisher_threshold: 2,
+            supply_chain_policy_satisfied: true,
+            capability_ceiling_respected: true,
+            verified_attestations: vec!["in-toto".to_string(), "sigstore".to_string()],
+            slsa_level: Some(3),
+        };
+        let json = serde_json::to_string(&details).unwrap();
+        let parsed: VerificationDetails = serde_json::from_str(&json).unwrap();
+        assert!(parsed.publisher_signature_verified);
+        assert!(parsed.registry_signature_verified);
+        assert_eq!(parsed.publisher_signatures_valid, 3);
+        assert_eq!(parsed.publisher_threshold, 2);
+        assert_eq!(parsed.verified_attestations.len(), 2);
+        assert_eq!(parsed.slsa_level, Some(3));
+    }
+
+    #[test]
+    fn verification_details_minimal_json_skips_optional() {
+        let details = VerificationDetails::default();
+        let json = serde_json::to_string(&details).unwrap();
+        // Empty verified_attestations should be skipped
+        assert!(!json.contains("verified_attestations"));
+        // None slsa_level should be skipped
+        assert!(!json.contains("slsa_level"));
+    }
+
+    // ── InstallOutput tests ─────────────────────────────────────
+
+    #[test]
+    fn install_output_verify_only_json() {
+        let output = InstallOutput {
+            connector_id: "fcp.test:base:v1".to_string(),
+            version: "1.0.0".to_string(),
+            target: "x86_64-unknown-linux-gnu".to_string(),
+            zone_id: "z:work".to_string(),
+            manifest_hash: "sha256:aaa".to_string(),
+            binary_hash: "sha256:bbb".to_string(),
+            manifest_object_id: None,
+            binary_object_id: None,
+            verification: VerificationDetails::default(),
+            installed_at: 0,
+            installed_at_iso: "1970-01-01T00:00:00Z".to_string(),
+        };
+        let json = serde_json::to_string(&output).unwrap();
+        // Optional object IDs should be omitted
+        assert!(!json.contains("manifest_object_id"));
+        assert!(!json.contains("binary_object_id"));
+    }
+
+    #[test]
+    fn install_output_with_object_ids_json() {
+        let output = InstallOutput {
+            connector_id: "fcp.test:base:v1".to_string(),
+            version: "1.0.0".to_string(),
+            target: "aarch64-apple-darwin".to_string(),
+            zone_id: "z:private".to_string(),
+            manifest_hash: "sha256:111".to_string(),
+            binary_hash: "sha256:222".to_string(),
+            manifest_object_id: Some("obj:m:abc".to_string()),
+            binary_object_id: Some("obj:b:def".to_string()),
+            verification: VerificationDetails {
+                publisher_signature_verified: true,
+                registry_signature_verified: false,
+                publisher_signatures_valid: 1,
+                publisher_threshold: 1,
+                supply_chain_policy_satisfied: true,
+                capability_ceiling_respected: true,
+                verified_attestations: Vec::new(),
+                slsa_level: None,
+            },
+            installed_at: 1_700_000_000,
+            installed_at_iso: "2023-11-14T22:13:20Z".to_string(),
+        };
+        let json = serde_json::to_string(&output).unwrap();
+        assert!(json.contains("\"manifest_object_id\""));
+        assert!(json.contains("\"binary_object_id\""));
+    }
+
+    #[test]
+    fn install_output_full_roundtrip() {
+        let output = InstallOutput {
+            connector_id: "fcp.telegram:base:v1".to_string(),
+            version: "1.0.0".to_string(),
+            target: "x86_64-unknown-linux-gnu".to_string(),
+            zone_id: "z:work".to_string(),
+            manifest_hash: "sha256:abc".to_string(),
+            binary_hash: "sha256:def".to_string(),
+            manifest_object_id: Some("obj:1".to_string()),
+            binary_object_id: Some("obj:2".to_string()),
+            verification: VerificationDetails {
+                publisher_signature_verified: true,
+                registry_signature_verified: true,
+                publisher_signatures_valid: 2,
+                publisher_threshold: 2,
+                supply_chain_policy_satisfied: true,
+                capability_ceiling_respected: true,
+                verified_attestations: vec!["in-toto".to_string()],
+                slsa_level: Some(2),
+            },
+            installed_at: 12345,
+            installed_at_iso: "2020-01-01T00:00:00Z".to_string(),
+        };
+        let json = serde_json::to_string_pretty(&output).unwrap();
+        let parsed: InstallOutput = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.connector_id, output.connector_id);
+        assert_eq!(parsed.version, output.version);
+        assert_eq!(parsed.target, output.target);
+        assert_eq!(parsed.zone_id, output.zone_id);
+        assert_eq!(parsed.installed_at, output.installed_at);
+        assert_eq!(
+            parsed.verification.publisher_signatures_valid,
+            output.verification.publisher_signatures_valid
+        );
+    }
+
+    // ── Hints content tests ─────────────────────────────────────
+
+    #[test]
+    fn all_error_types_have_hints() {
+        let errors = [
+            InstallError::connector_not_found("test"),
+            InstallError::version_not_found("test", "1.0.0"),
+            InstallError::signature_verification_failed("test", "reason"),
+            InstallError::binary_checksum_mismatch("test", "a", "b"),
+            InstallError::capability_ceiling_violation("test", "cap"),
+            InstallError::supply_chain_policy_violation("test", "reason"),
+            InstallError::target_mismatch("test", "a", "b"),
+            InstallError::zone_not_found("z:test"),
+            InstallError::mirror_failed("test", "reason"),
+        ];
+        for err in &errors {
+            assert!(
+                !err.hints.is_empty(),
+                "error {} has no hints",
+                err.code
+            );
+        }
+    }
+
+    #[test]
+    fn error_codes_are_unique() {
+        let codes: Vec<String> = vec![
+            InstallError::connector_not_found("t").code,
+            InstallError::version_not_found("t", "v").code,
+            InstallError::signature_verification_failed("t", "r").code,
+            InstallError::binary_checksum_mismatch("t", "a", "b").code,
+            InstallError::capability_ceiling_violation("t", "c").code,
+            InstallError::supply_chain_policy_violation("t", "r").code,
+            InstallError::target_mismatch("t", "a", "b").code,
+            InstallError::zone_not_found("z").code,
+            InstallError::mirror_failed("t", "r").code,
+        ];
+        let mut unique = codes.clone();
+        unique.sort();
+        unique.dedup();
+        assert_eq!(
+            unique.len(),
+            codes.len(),
+            "duplicate error codes found"
+        );
+    }
 }

@@ -867,4 +867,411 @@ mod tests {
     fn truncate_exact() {
         assert_eq!(truncate("abcdef", 6), "abcdef");
     }
+
+    // ── parse_connector_spec edge cases ─────────────────────────
+
+    #[test]
+    fn parse_connector_spec_empty_string() {
+        let (id, version) = parse_connector_spec("");
+        assert_eq!(id, "");
+        assert!(version.is_none());
+    }
+
+    #[test]
+    fn parse_connector_spec_with_empty_version() {
+        let (id, version) = parse_connector_spec("fcp.telegram:base:v1@");
+        assert_eq!(id, "fcp.telegram:base:v1");
+        assert_eq!(version, Some(String::new()));
+    }
+
+    #[test]
+    fn parse_connector_spec_multiple_at_signs() {
+        let (id, version) = parse_connector_spec("fcp.test@1.0.0@extra");
+        assert_eq!(id, "fcp.test");
+        assert_eq!(version, Some("1.0.0@extra".to_string()));
+    }
+
+    #[test]
+    fn parse_connector_spec_version_only() {
+        let (id, version) = parse_connector_spec("@1.0.0");
+        assert_eq!(id, "");
+        assert_eq!(version, Some("1.0.0".to_string()));
+    }
+
+    // ── parse_target_triple tests ───────────────────────────────
+
+    #[test]
+    fn parse_target_triple_x86_64_linux() {
+        let target = parse_target_triple("x86_64-unknown-linux-gnu");
+        assert_eq!(target.arch, "amd64");
+        assert_eq!(target.os, "linux");
+    }
+
+    #[test]
+    fn parse_target_triple_aarch64_macos() {
+        let target = parse_target_triple("aarch64-apple-darwin");
+        assert_eq!(target.arch, "arm64");
+        assert_eq!(target.os, "darwin");
+    }
+
+    #[test]
+    fn parse_target_triple_x86_64_macos() {
+        let target = parse_target_triple("x86_64-apple-darwin");
+        assert_eq!(target.arch, "amd64");
+        assert_eq!(target.os, "darwin");
+    }
+
+    #[test]
+    fn parse_target_triple_aarch64_linux() {
+        let target = parse_target_triple("aarch64-unknown-linux-gnu");
+        assert_eq!(target.arch, "arm64");
+        assert_eq!(target.os, "linux");
+    }
+
+    #[test]
+    fn parse_target_triple_unknown_arch() {
+        let target = parse_target_triple("riscv64-unknown-linux-gnu");
+        assert_eq!(target.arch, "riscv64");
+        assert_eq!(target.os, "linux");
+    }
+
+    #[test]
+    fn parse_target_triple_short() {
+        let target = parse_target_triple("x86_64");
+        assert_eq!(target.arch, "amd64");
+        assert_eq!(target.os, "unknown");
+    }
+
+    #[test]
+    fn parse_target_triple_two_parts() {
+        let target = parse_target_triple("x86_64-unknown");
+        assert_eq!(target.arch, "amd64");
+        assert_eq!(target.os, "unknown");
+    }
+
+    // ── registry_error_to_install_error mapping ─────────────────
+
+    #[test]
+    fn registry_error_missing_signatures() {
+        let err = registry_error_to_install_error("fcp.test:v1", RegistryError::MissingSignatures);
+        assert_eq!(err.code, "FCP-4012");
+        assert!(err.message.contains("signatures section missing"));
+    }
+
+    #[test]
+    fn registry_error_signature_invalid() {
+        let err = registry_error_to_install_error(
+            "fcp.test:v1",
+            RegistryError::SignatureInvalid {
+                kid: "key-1".to_string(),
+            },
+        );
+        assert_eq!(err.code, "FCP-4012");
+        assert!(err.message.contains("key-1"));
+    }
+
+    #[test]
+    fn registry_error_publisher_threshold_unmet() {
+        let err = registry_error_to_install_error(
+            "fcp.test:v1",
+            RegistryError::PublisherThresholdUnmet {
+                required: 3,
+                valid: 1,
+            },
+        );
+        assert_eq!(err.code, "FCP-4012");
+        assert!(err.message.contains("1/3"));
+    }
+
+    #[test]
+    fn registry_error_registry_signature_required() {
+        let err = registry_error_to_install_error(
+            "fcp.test:v1",
+            RegistryError::RegistrySignatureRequired,
+        );
+        assert_eq!(err.code, "FCP-4012");
+        assert!(err.message.contains("registry signature required"));
+    }
+
+    #[test]
+    fn registry_error_target_mismatch() {
+        let err = registry_error_to_install_error(
+            "fcp.test:v1",
+            RegistryError::TargetMismatch {
+                expected: "linux/amd64".to_string(),
+                found: "darwin/arm64".to_string(),
+            },
+        );
+        assert_eq!(err.code, "FCP-4016");
+        assert!(err.message.contains("linux/amd64"));
+        assert!(err.message.contains("darwin/arm64"));
+    }
+
+    #[test]
+    fn registry_error_capability_ceiling_violation() {
+        let err = registry_error_to_install_error(
+            "fcp.test:v1",
+            RegistryError::CapabilityCeilingViolation {
+                capability: "system.exec".to_string(),
+            },
+        );
+        assert_eq!(err.code, "FCP-4014");
+        assert!(err.message.contains("system.exec"));
+    }
+
+    #[test]
+    fn registry_error_transparency_log_missing() {
+        let err = registry_error_to_install_error(
+            "fcp.test:v1",
+            RegistryError::TransparencyLogMissing,
+        );
+        assert_eq!(err.code, "FCP-4015");
+    }
+
+    #[test]
+    fn registry_error_transparency_evidence_missing() {
+        let err = registry_error_to_install_error(
+            "fcp.test:v1",
+            RegistryError::TransparencyEvidenceMissing,
+        );
+        assert_eq!(err.code, "FCP-4015");
+    }
+
+    #[test]
+    fn registry_error_attestation_evidence_missing() {
+        let err = registry_error_to_install_error(
+            "fcp.test:v1",
+            RegistryError::AttestationEvidenceMissing,
+        );
+        assert_eq!(err.code, "FCP-4015");
+    }
+
+    // ── fetch_connector_bundle additional tests ─────────────────
+
+    #[test]
+    fn fetch_all_known_connectors() {
+        let target = parse_target_triple("x86_64-unknown-linux-gnu");
+        for connector in &[
+            "fcp.telegram:base:v1",
+            "fcp.discord:base:v1",
+            "fcp.openai:base:v1",
+            "fcp.anthropic:base:v1",
+        ] {
+            let result = fetch_connector_bundle(connector, None, &target);
+            assert!(result.is_ok(), "failed to fetch {connector}");
+            let (bundle, _) = result.unwrap();
+            assert!(bundle.manifest_toml.contains(connector));
+        }
+    }
+
+    #[test]
+    fn fetch_connector_version_1_0_1() {
+        let target = parse_target_triple("aarch64-apple-darwin");
+        for connector in &[
+            "fcp.telegram:base:v1",
+            "fcp.discord:base:v1",
+        ] {
+            let result = fetch_connector_bundle(connector, Some("1.0.1"), &target);
+            assert!(result.is_ok(), "failed to fetch {connector}@1.0.1");
+        }
+    }
+
+    #[test]
+    fn fetch_connector_different_targets() {
+        for triple in &[
+            "x86_64-unknown-linux-gnu",
+            "aarch64-unknown-linux-gnu",
+            "x86_64-apple-darwin",
+            "aarch64-apple-darwin",
+        ] {
+            let target = parse_target_triple(triple);
+            let result = fetch_connector_bundle("fcp.telegram:base:v1", None, &target);
+            assert!(result.is_ok(), "failed for target {triple}");
+        }
+    }
+
+    // ── generate_demo_binary tests ──────────────────────────────
+
+    #[test]
+    fn demo_binary_deterministic() {
+        let b1 = generate_demo_binary("fcp.test:v1", "1.0.0");
+        let b2 = generate_demo_binary("fcp.test:v1", "1.0.0");
+        assert_eq!(b1, b2);
+    }
+
+    #[test]
+    fn demo_binary_differs_by_connector() {
+        let b1 = generate_demo_binary("fcp.a:v1", "1.0.0");
+        let b2 = generate_demo_binary("fcp.b:v1", "1.0.0");
+        assert_ne!(b1, b2);
+    }
+
+    #[test]
+    fn demo_binary_differs_by_version() {
+        let b1 = generate_demo_binary("fcp.test:v1", "1.0.0");
+        let b2 = generate_demo_binary("fcp.test:v1", "1.0.1");
+        assert_ne!(b1, b2);
+    }
+
+    #[test]
+    fn demo_binary_contains_id_and_version() {
+        let binary = generate_demo_binary("fcp.test:v1", "2.0.0");
+        let s = String::from_utf8(binary).unwrap();
+        assert!(s.contains("fcp.test:v1"));
+        assert!(s.contains("2.0.0"));
+    }
+
+    // ── generate_demo_manifest tests ────────────────────────────
+
+    #[test]
+    fn demo_manifest_contains_connector_id() {
+        let keys = DemoKeys::new();
+        let binary = generate_demo_binary("fcp.telegram:base:v1", "1.0.0");
+        let manifest = generate_demo_manifest("fcp.telegram:base:v1", "1.0.0", &binary, &keys);
+        assert!(manifest.contains("fcp.telegram:base:v1"));
+        assert!(manifest.contains("version = \"1.0.0\""));
+    }
+
+    #[test]
+    fn demo_manifest_has_signature_section() {
+        let keys = DemoKeys::new();
+        let binary = generate_demo_binary("fcp.test:v1", "1.0.0");
+        let manifest = generate_demo_manifest("fcp.test:v1", "1.0.0", &binary, &keys);
+        assert!(manifest.contains("[signatures]"));
+        assert!(manifest.contains("publisher_threshold"));
+        assert!(manifest.contains("[[signatures.publisher_signatures]]"));
+        assert!(manifest.contains("kid = \"demo-publisher\""));
+    }
+
+    #[test]
+    fn demo_manifest_has_computed_interface_hash() {
+        let keys = DemoKeys::new();
+        let binary = generate_demo_binary("fcp.discord:base:v1", "1.0.0");
+        let manifest = generate_demo_manifest("fcp.discord:base:v1", "1.0.0", &binary, &keys);
+        // Should not contain the placeholder anymore
+        assert!(!manifest.contains(PLACEHOLDER_INTERFACE_HASH));
+        // Should contain a proper interface hash
+        assert!(manifest.contains("interface_hash = \"blake3-256:fcp.interface.v2:"));
+    }
+
+    #[test]
+    fn demo_manifest_parses_as_valid() {
+        let keys = DemoKeys::new();
+        let binary = generate_demo_binary("fcp.openai:base:v1", "1.0.0");
+        let manifest = generate_demo_manifest("fcp.openai:base:v1", "1.0.0", &binary, &keys);
+        let parsed = ConnectorManifest::parse_str(&manifest);
+        assert!(parsed.is_ok(), "manifest should parse: {parsed:?}");
+    }
+
+    // ── DemoKeys tests ──────────────────────────────────────────
+
+    #[test]
+    fn demo_keys_deterministic() {
+        let k1 = DemoKeys::new();
+        let k2 = DemoKeys::new();
+        assert_eq!(k1.verifying_key.to_bytes(), k2.verifying_key.to_bytes());
+    }
+
+    // ── verify_bundle edge cases ────────────────────────────────
+
+    #[test]
+    fn verify_bundle_all_known_connectors() {
+        let target = parse_target_triple("aarch64-apple-darwin");
+        for connector in &[
+            "fcp.telegram:base:v1",
+            "fcp.discord:base:v1",
+            "fcp.openai:base:v1",
+            "fcp.anthropic:base:v1",
+        ] {
+            let (bundle, keys) = fetch_connector_bundle(connector, None, &target).unwrap();
+            let result = verify_bundle(&bundle, &keys, None, Some(&target));
+            assert!(
+                result.is_ok(),
+                "verify failed for {connector}: {result:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn verify_bundle_version_1_0_1() {
+        let target = parse_target_triple("x86_64-unknown-linux-gnu");
+        let (bundle, keys) =
+            fetch_connector_bundle("fcp.telegram:base:v1", Some("1.0.1"), &target).unwrap();
+        let result = verify_bundle(&bundle, &keys, None, Some(&target));
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn verify_bundle_details_populated() {
+        let target = parse_target_triple("x86_64-unknown-linux-gnu");
+        let (bundle, keys) =
+            fetch_connector_bundle("fcp.telegram:base:v1", None, &target).unwrap();
+        let (_, details) = verify_bundle(&bundle, &keys, None, Some(&target)).unwrap();
+        assert!(details.publisher_signature_verified);
+        assert_eq!(details.publisher_signatures_valid, 1);
+        assert_eq!(details.publisher_threshold, 1);
+        assert!(details.supply_chain_policy_satisfied);
+        assert!(details.capability_ceiling_respected);
+    }
+
+    #[test]
+    fn verified_bundle_has_hashes() {
+        let target = parse_target_triple("x86_64-unknown-linux-gnu");
+        let (bundle, keys) =
+            fetch_connector_bundle("fcp.telegram:base:v1", None, &target).unwrap();
+        let (verified, _) = verify_bundle(&bundle, &keys, None, Some(&target)).unwrap();
+        assert!(!verified.manifest_hash.is_empty());
+        assert!(!verified.binary_hash.is_empty());
+        assert!(verified.binary_hash.starts_with("sha256:"));
+    }
+
+    // ── mirror_to_store additional tests ────────────────────────
+
+    #[fcp_async_core::runtime::test]
+    async fn mirror_to_store_all_connectors() {
+        let target = parse_target_triple("x86_64-unknown-linux-gnu");
+        for connector in &["fcp.telegram:base:v1", "fcp.discord:base:v1"] {
+            let (bundle, keys) = fetch_connector_bundle(connector, None, &target).unwrap();
+            let (verified, _) = verify_bundle(&bundle, &keys, None, Some(&target)).unwrap();
+            let result = mirror_to_store(&verified, &bundle, "z:private", &keys).await;
+            assert!(result.is_ok(), "mirror failed for {connector}");
+        }
+    }
+
+    // ── truncate additional edge cases ──────────────────────────
+
+    #[test]
+    fn truncate_max_len_zero() {
+        assert_eq!(truncate("abc", 0), "");
+    }
+
+    #[test]
+    fn truncate_max_len_one() {
+        assert_eq!(truncate("abc", 1), "a");
+    }
+
+    #[test]
+    fn truncate_max_len_two() {
+        assert_eq!(truncate("abc", 2), "ab");
+    }
+
+    #[test]
+    fn truncate_max_len_three() {
+        assert_eq!(truncate("abc", 3), "abc");
+    }
+
+    #[test]
+    fn truncate_long_max_four() {
+        assert_eq!(truncate("abcdef", 4), "a...");
+    }
+
+    #[test]
+    fn truncate_empty_string() {
+        assert_eq!(truncate("", 5), "");
+    }
+
+    #[test]
+    fn truncate_single_char() {
+        assert_eq!(truncate("a", 5), "a");
+    }
 }

@@ -231,4 +231,156 @@ mod tests {
             let _: TraceReplayInputFormat = v.into();
         }
     }
+
+    // ── print_human_readable tests ──────────────────────────────
+
+    fn make_report(
+        mismatched_events: usize,
+        mismatched_decisions: usize,
+        diffs: Vec<fcp_mesh::TraceReplayDiff>,
+    ) -> TraceReplayReport {
+        use std::collections::BTreeMap;
+        let mut event_type_counts = BTreeMap::new();
+        event_type_counts.insert("routing".to_string(), 5);
+        event_type_counts.insert("admission".to_string(), 3);
+
+        TraceReplayReport {
+            source_trace_id: "trace-001".to_string(),
+            source_capturing_node: Some("node-a".to_string()),
+            input_events: 10,
+            replayed_events: 10,
+            summary: fcp_mesh::TraceReplaySummary {
+                total_events: 10,
+                event_type_counts,
+                expected_decision_counts: BTreeMap::new(),
+                actual_decision_counts: BTreeMap::new(),
+                matched_events: 10 - mismatched_events,
+                mismatched_events,
+                matched_decisions: 8 - mismatched_decisions,
+                mismatched_decisions,
+            },
+            diffs,
+        }
+    }
+
+    #[test]
+    fn print_human_readable_no_mismatches() {
+        let report = make_report(0, 0, vec![]);
+        // Should not panic
+        print_human_readable(&report);
+    }
+
+    #[test]
+    fn print_human_readable_with_diffs() {
+        let diffs = vec![fcp_mesh::TraceReplayDiff {
+            index: 3,
+            event_type: "routing".to_string(),
+            expected_decision: Some("allow".to_string()),
+            actual_decision: Some("deny".to_string()),
+            detail: "zone mismatch".to_string(),
+        }];
+        let report = make_report(0, 1, diffs);
+        print_human_readable(&report);
+    }
+
+    #[test]
+    fn print_human_readable_unknown_node() {
+        let report = TraceReplayReport {
+            source_trace_id: "trace-002".to_string(),
+            source_capturing_node: None,
+            input_events: 0,
+            replayed_events: 0,
+            summary: fcp_mesh::TraceReplaySummary {
+                total_events: 0,
+                event_type_counts: std::collections::BTreeMap::new(),
+                expected_decision_counts: std::collections::BTreeMap::new(),
+                actual_decision_counts: std::collections::BTreeMap::new(),
+                matched_events: 0,
+                mismatched_events: 0,
+                matched_decisions: 0,
+                mismatched_decisions: 0,
+            },
+            diffs: vec![],
+        };
+        print_human_readable(&report);
+    }
+
+    #[test]
+    fn print_human_readable_with_decision_counts() {
+        use std::collections::BTreeMap;
+        let mut expected = BTreeMap::new();
+        expected.insert("allow".to_string(), 7);
+        expected.insert("deny".to_string(), 3);
+        let mut actual = BTreeMap::new();
+        actual.insert("allow".to_string(), 6);
+        actual.insert("deny".to_string(), 4);
+
+        let report = TraceReplayReport {
+            source_trace_id: "trace-003".to_string(),
+            source_capturing_node: Some("mesh-node-1".to_string()),
+            input_events: 10,
+            replayed_events: 10,
+            summary: fcp_mesh::TraceReplaySummary {
+                total_events: 10,
+                event_type_counts: BTreeMap::new(),
+                expected_decision_counts: expected,
+                actual_decision_counts: actual,
+                matched_events: 10,
+                mismatched_events: 0,
+                matched_decisions: 9,
+                mismatched_decisions: 1,
+            },
+            diffs: vec![],
+        };
+        print_human_readable(&report);
+    }
+
+    #[test]
+    fn print_human_readable_multiple_diffs() {
+        let diffs = vec![
+            fcp_mesh::TraceReplayDiff {
+                index: 0,
+                event_type: "routing".to_string(),
+                expected_decision: Some("allow".to_string()),
+                actual_decision: Some("deny".to_string()),
+                detail: "capability missing".to_string(),
+            },
+            fcp_mesh::TraceReplayDiff {
+                index: 5,
+                event_type: "admission".to_string(),
+                expected_decision: None,
+                actual_decision: Some("reject".to_string()),
+                detail: "rate limit exceeded".to_string(),
+            },
+        ];
+        let report = make_report(1, 2, diffs);
+        print_human_readable(&report);
+    }
+
+    // ── TraceReplayReport JSON serialization ────────────────────
+
+    #[test]
+    fn report_json_roundtrip() {
+        let report = make_report(0, 0, vec![]);
+        let json = serde_json::to_string(&report).unwrap();
+        let parsed: TraceReplayReport = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.source_trace_id, "trace-001");
+        assert_eq!(parsed.input_events, 10);
+    }
+
+    #[test]
+    fn report_with_diffs_json_roundtrip() {
+        let diffs = vec![fcp_mesh::TraceReplayDiff {
+            index: 1,
+            event_type: "routing".to_string(),
+            expected_decision: Some("allow".to_string()),
+            actual_decision: Some("deny".to_string()),
+            detail: "zone changed".to_string(),
+        }];
+        let report = make_report(0, 1, diffs);
+        let json = serde_json::to_string_pretty(&report).unwrap();
+        let parsed: TraceReplayReport = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.diffs.len(), 1);
+        assert_eq!(parsed.diffs[0].event_type, "routing");
+    }
 }

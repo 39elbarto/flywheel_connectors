@@ -2,12 +2,13 @@
 
 use std::fmt;
 use std::fmt::Write;
+use std::net::IpAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use base64::Engine;
 use fcp_core::CredentialId;
-use reqwest::{Client, Response, StatusCode};
+use reqwest::{Client, Response, StatusCode, Url, header, redirect::Policy};
 use tracing::{instrument, warn};
 
 use crate::{
@@ -21,6 +22,11 @@ use crate::{
 
 /// Default Airtable API base URL.
 pub const DEFAULT_BASE_URL: &str = "https://api.airtable.com/v0";
+const DEFAULT_API_TIMEOUT: Duration = Duration::from_secs(30);
+const ATTACHMENT_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+const ATTACHMENT_TOTAL_TIMEOUT: Duration = Duration::from_secs(120);
+const MAX_ATTACHMENT_DOWNLOAD_BYTES: u64 = 100 * 1024 * 1024;
+const MAX_ATTACHMENT_REDIRECTS: usize = 5;
 
 /// Authentication mode for the Airtable API.
 #[derive(Clone)]
@@ -87,7 +93,7 @@ impl AirtableClient {
     /// Create a new Airtable client with explicit auth mode.
     pub fn new_with_auth(auth: AirtableAuth) -> AirtableResult<Self> {
         let client = Client::builder()
-            .timeout(Duration::from_secs(30))
+            .timeout(DEFAULT_API_TIMEOUT)
             .user_agent("fcp-airtable/0.1.0")
             .build()
             .map_err(AirtableError::Http)?;
@@ -379,51 +385,98 @@ impl AirtableClient {
     // ── Attachment operations ───────────────────────────────────────
 
     /// Download an attachment from a URL.
-    #[instrument(skip(self))]
+    #[instrument(skip(self, url))]
     pub async fn download_attachment(&self, url: &str) -> AirtableResult<AttachmentDownload> {
-        self.total_requests.fetch_add(1, Ordering::Relaxed);
+        let allow_local_test_hosts = self.allows_local_attachment_hosts();
+        let attachment_client = Self::build_attachment_download_client()?;
+        let mut current_url = Self::validate_attachment_url(url, allow_local_test_hosts)?;
 
-        let response = self
-            .client
-            .get(url)
-            .send()
-            .await
-            .map_err(AirtableError::Http)?;
+        for redirect_count in 0..=MAX_ATTACHMENT_REDIRECTS {
+            self.total_requests.fetch_add(1, Ordering::Relaxed);
 
-        let status = response.status();
-        if !status.is_success() {
-            return Err(AirtableError::Api {
-                error_type: "DOWNLOAD_ERROR".into(),
-                message: format!("Attachment download failed with status {status}"),
-                status_code: Some(status.as_u16()),
+            let mut response = attachment_client
+                .get(current_url.clone())
+                .send()
+                .await
+                .map_err(AirtableError::Http)?;
+
+            if response.status().is_redirection() {
+                if redirect_count == MAX_ATTACHMENT_REDIRECTS {
+                    return Err(AirtableError::InvalidAttachmentUrl {
+                        message: format!(
+                            "Attachment URL exceeded redirect limit of {MAX_ATTACHMENT_REDIRECTS}"
+                        ),
+                    });
+                }
+
+                current_url = Self::resolve_attachment_redirect(
+                    &current_url,
+                    response.headers().get(header::LOCATION),
+                    allow_local_test_hosts,
+                )?;
+                continue;
+            }
+
+            let status = response.status();
+            if !status.is_success() {
+                return Err(AirtableError::Api {
+                    error_type: "DOWNLOAD_ERROR".into(),
+                    message: format!("Attachment download failed with status {status}"),
+                    status_code: Some(status.as_u16()),
+                });
+            }
+
+            if response
+                .content_length()
+                .is_some_and(|len| len > MAX_ATTACHMENT_DOWNLOAD_BYTES)
+            {
+                return Err(AirtableError::AttachmentTooLarge {
+                    max_bytes: MAX_ATTACHMENT_DOWNLOAD_BYTES,
+                });
+            }
+
+            let content_type = response
+                .headers()
+                .get("content-type")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("application/octet-stream")
+                .to_string();
+
+            // Try to extract filename from content-disposition header.
+            let filename = response
+                .headers()
+                .get("content-disposition")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| {
+                    v.split("filename=")
+                        .nth(1)
+                        .map(|f| f.trim_matches('"').to_string())
+                });
+
+            let mut bytes = Vec::new();
+            let mut total_bytes = 0_u64;
+            while let Some(chunk) = response.chunk().await.map_err(AirtableError::Http)? {
+                total_bytes = total_bytes
+                    .checked_add(u64::try_from(chunk.len()).unwrap_or(u64::MAX))
+                    .unwrap_or(u64::MAX);
+                if total_bytes > MAX_ATTACHMENT_DOWNLOAD_BYTES {
+                    return Err(AirtableError::AttachmentTooLarge {
+                        max_bytes: MAX_ATTACHMENT_DOWNLOAD_BYTES,
+                    });
+                }
+                bytes.extend_from_slice(&chunk);
+            }
+
+            let data = base64::engine::general_purpose::STANDARD.encode(&bytes);
+            return Ok(AttachmentDownload {
+                data,
+                content_type,
+                filename,
             });
         }
 
-        let content_type = response
-            .headers()
-            .get("content-type")
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("application/octet-stream")
-            .to_string();
-
-        // Try to extract filename from content-disposition header
-        let filename = response
-            .headers()
-            .get("content-disposition")
-            .and_then(|v| v.to_str().ok())
-            .and_then(|v| {
-                v.split("filename=")
-                    .nth(1)
-                    .map(|f| f.trim_matches('"').to_string())
-            });
-
-        let bytes = response.bytes().await.map_err(AirtableError::Http)?;
-        let data = base64::engine::general_purpose::STANDARD.encode(&bytes);
-
-        Ok(AttachmentDownload {
-            data,
-            content_type,
-            filename,
+        Err(AirtableError::InvalidAttachmentUrl {
+            message: "Attachment URL exceeded redirect limit".into(),
         })
     }
 
@@ -698,6 +751,96 @@ impl AirtableClient {
         }
     }
 
+    fn build_attachment_download_client() -> AirtableResult<Client> {
+        Client::builder()
+            .connect_timeout(ATTACHMENT_CONNECT_TIMEOUT)
+            .timeout(ATTACHMENT_TOTAL_TIMEOUT)
+            .redirect(Policy::none())
+            .user_agent("fcp-airtable/0.1.0")
+            .build()
+            .map_err(AirtableError::Http)
+    }
+
+    fn allows_local_attachment_hosts(&self) -> bool {
+        Url::parse(&self.base_url)
+            .ok()
+            .and_then(|parsed| parsed.host_str().map(|host| host.to_ascii_lowercase()))
+            .is_some_and(|host| is_local_test_host(&host))
+    }
+
+    fn validate_attachment_url(raw_url: &str, allow_local_test_hosts: bool) -> AirtableResult<Url> {
+        let trimmed = raw_url.trim();
+        if trimmed.is_empty() {
+            return Err(AirtableError::InvalidAttachmentUrl {
+                message: "Attachment URL cannot be empty".into(),
+            });
+        }
+
+        let parsed = Url::parse(trimmed).map_err(|e| AirtableError::InvalidAttachmentUrl {
+            message: format!("Attachment URL is invalid: {e}"),
+        })?;
+
+        let host = parsed
+            .host_str()
+            .ok_or_else(|| AirtableError::InvalidAttachmentUrl {
+                message: "Attachment URL must include a host".into(),
+            })?;
+        let host_lower = host.to_ascii_lowercase();
+        let local_test_host = allow_local_test_hosts && is_local_test_host(&host_lower);
+
+        if parsed.scheme() != "https" && !local_test_host {
+            return Err(AirtableError::InvalidAttachmentUrl {
+                message: "Attachment URL must use https".into(),
+            });
+        }
+
+        if host_lower.parse::<IpAddr>().is_ok() && !local_test_host {
+            return Err(AirtableError::InvalidAttachmentUrl {
+                message: "Attachment URL must not use an IP literal".into(),
+            });
+        }
+
+        if !local_test_host && parsed.port_or_known_default() != Some(443) {
+            return Err(AirtableError::InvalidAttachmentUrl {
+                message: "Attachment URL must use port 443".into(),
+            });
+        }
+
+        if attachment_host_allowed(&host_lower) || local_test_host {
+            Ok(parsed)
+        } else {
+            Err(AirtableError::InvalidAttachmentUrl {
+                message: format!(
+                    "Attachment URL host '{host}' is not allowed by connector NetworkConstraints"
+                ),
+            })
+        }
+    }
+
+    fn resolve_attachment_redirect(
+        current_url: &Url,
+        location: Option<&header::HeaderValue>,
+        allow_local_test_hosts: bool,
+    ) -> AirtableResult<Url> {
+        let location = location
+            .ok_or_else(|| AirtableError::InvalidAttachmentUrl {
+                message: "Attachment redirect response is missing a Location header".into(),
+            })?
+            .to_str()
+            .map_err(|_| AirtableError::InvalidAttachmentUrl {
+                message: "Attachment redirect Location header is invalid".into(),
+            })?;
+
+        let resolved = current_url
+            .join(location)
+            .or_else(|_| Url::parse(location))
+            .map_err(|e| AirtableError::InvalidAttachmentUrl {
+                message: format!("Attachment redirect target is invalid: {e}"),
+            })?;
+
+        Self::validate_attachment_url(resolved.as_str(), allow_local_test_hosts)
+    }
+
     async fn parse_error_response(resp: Response) -> AirtableError {
         let status_code = resp.status().as_u16();
         match resp.json::<AirtableApiError>().await {
@@ -725,6 +868,16 @@ impl AirtableClient {
             },
         }
     }
+}
+
+fn attachment_host_allowed(host: &str) -> bool {
+    host == "dl.airtable.com"
+        || host.ends_with(".dl.airtable.com")
+        || host == "v5.airtableusercontent.com"
+}
+
+fn is_local_test_host(host: &str) -> bool {
+    host == "localhost" || host == "127.0.0.1" || host == "::1"
 }
 
 #[cfg(test)]
@@ -1249,5 +1402,48 @@ mod tests {
         let dbg = format!("{auth:?}");
         assert!(dbg.contains("redacted"));
         assert!(!dbg.contains("my-long-secret-token-value"));
+    }
+
+    #[test]
+    fn attachment_host_allowlist_matches_manifest() {
+        assert!(attachment_host_allowed("dl.airtable.com"));
+        assert!(attachment_host_allowed("cdn.dl.airtable.com"));
+        assert!(attachment_host_allowed("v5.airtableusercontent.com"));
+        assert!(!attachment_host_allowed("example.com"));
+    }
+
+    #[test]
+    fn validate_attachment_url_rejects_non_airtable_host_without_leaking_query() {
+        let err = AirtableClient::validate_attachment_url(
+            "https://evil.example.com/file.txt?sig=super-secret-token",
+            false,
+        )
+        .unwrap_err();
+        let rendered = err.to_string();
+        assert!(rendered.contains("evil.example.com"));
+        assert!(!rendered.contains("super-secret-token"));
+        assert!(!rendered.contains("file.txt?"));
+    }
+
+    #[test]
+    fn validate_attachment_url_accepts_airtable_download_hosts() {
+        assert!(
+            AirtableClient::validate_attachment_url(
+                "https://dl.airtable.com/.attachments/file.bin",
+                false
+            )
+            .is_ok()
+        );
+        assert!(
+            AirtableClient::validate_attachment_url("https://foo.dl.airtable.com/file.bin", false)
+                .is_ok()
+        );
+        assert!(
+            AirtableClient::validate_attachment_url(
+                "https://v5.airtableusercontent.com/v3/file.bin",
+                false
+            )
+            .is_ok()
+        );
     }
 }

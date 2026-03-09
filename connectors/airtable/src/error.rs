@@ -43,6 +43,14 @@ pub enum AirtableError {
     /// Table not found
     #[error("Table not found: {table_id}")]
     TableNotFound { table_id: String },
+
+    /// Attachment URL violates connector network constraints.
+    #[error("Invalid attachment URL: {message}")]
+    InvalidAttachmentUrl { message: String },
+
+    /// Attachment exceeds the connector's response size limit.
+    #[error("Attachment download exceeds maximum allowed size of {max_bytes} bytes")]
+    AttachmentTooLarge { max_bytes: u64 },
 }
 
 impl AirtableError {
@@ -126,6 +134,16 @@ impl AirtableError {
             Self::TableNotFound { table_id } => FcpError::ResourceNotFound {
                 resource: format!("table:{table_id}"),
             },
+            Self::InvalidAttachmentUrl { message } => FcpError::InvalidRequest {
+                code: 1003,
+                message: message.clone(),
+            },
+            Self::AttachmentTooLarge { max_bytes } => FcpError::InvalidRequest {
+                code: 1003,
+                message: format!(
+                    "Attachment download exceeds maximum allowed size of {max_bytes} bytes"
+                ),
+            },
             Self::Json(e) => FcpError::Internal {
                 message: format!("JSON error: {e}"),
             },
@@ -195,6 +213,26 @@ mod tests {
     }
 
     #[test]
+    fn display_invalid_attachment_url() {
+        let err = AirtableError::InvalidAttachmentUrl {
+            message: "Attachment URL must use https".into(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "Invalid attachment URL: Attachment URL must use https"
+        );
+    }
+
+    #[test]
+    fn display_attachment_too_large() {
+        let err = AirtableError::AttachmentTooLarge { max_bytes: 1024 };
+        assert_eq!(
+            err.to_string(),
+            "Attachment download exceeds maximum allowed size of 1024 bytes"
+        );
+    }
+
+    #[test]
     fn display_json_error() {
         let json_err = serde_json::from_str::<i32>("bad").unwrap_err();
         let err = AirtableError::Json(json_err);
@@ -209,6 +247,28 @@ mod tests {
             retry_after_secs: 5,
         };
         assert!(err.is_retryable());
+    }
+
+    #[test]
+    fn invalid_attachment_url_maps_to_invalid_request() {
+        let err = AirtableError::InvalidAttachmentUrl {
+            message: "bad attachment host".into(),
+        };
+        assert!(matches!(
+            err.to_fcp_error(),
+            FcpError::InvalidRequest { code: 1003, message }
+                if message == "bad attachment host"
+        ));
+    }
+
+    #[test]
+    fn attachment_too_large_maps_to_invalid_request() {
+        let err = AirtableError::AttachmentTooLarge { max_bytes: 2048 };
+        assert!(matches!(
+            err.to_fcp_error(),
+            FcpError::InvalidRequest { code: 1003, message }
+                if message.contains("2048")
+        ));
     }
 
     #[test]

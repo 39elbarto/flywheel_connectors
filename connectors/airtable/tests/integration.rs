@@ -117,6 +117,30 @@ async fn error_api_not_found_maps_to_resource_not_found() {
 }
 
 #[fcp_async_core::runtime::test]
+async fn error_invalid_attachment_url_maps_to_invalid_request() {
+    let err = AirtableError::InvalidAttachmentUrl {
+        message: "Attachment URL must use https".into(),
+    };
+    let fcp = err.to_fcp_error();
+    assert!(matches!(
+        fcp,
+        FcpError::InvalidRequest { code: 1003, message }
+            if message == "Attachment URL must use https"
+    ));
+}
+
+#[fcp_async_core::runtime::test]
+async fn error_attachment_too_large_maps_to_invalid_request() {
+    let err = AirtableError::AttachmentTooLarge { max_bytes: 4096 };
+    let fcp = err.to_fcp_error();
+    assert!(matches!(
+        fcp,
+        FcpError::InvalidRequest { code: 1003, message }
+            if message.contains("4096")
+    ));
+}
+
+#[fcp_async_core::runtime::test]
 async fn error_api_server_error_is_retryable() {
     let err = AirtableError::Api {
         error_type: "SERVER_ERROR".into(),
@@ -626,7 +650,119 @@ async fn client_unauthorized() {
     assert!(matches!(result.unwrap_err(), AirtableError::Unauthorized));
 }
 
+#[fcp_async_core::runtime::test]
+async fn client_download_attachment_rejects_disallowed_host_without_leaking_query() {
+    let client = AirtableClient::new("test_tok")
+        .unwrap()
+        .with_base_url("https://api.airtable.com/v0");
+
+    let result = client
+        .download_attachment("https://evil.example.com/file.txt?sig=super-secret-token")
+        .await;
+
+    let err = result.unwrap_err();
+    let rendered = err.to_string();
+    assert!(matches!(err, AirtableError::InvalidAttachmentUrl { .. }));
+    assert!(rendered.contains("evil.example.com"));
+    assert!(!rendered.contains("super-secret-token"));
+    assert!(!rendered.contains("file.txt?"));
+}
+
+#[fcp_async_core::runtime::test]
+async fn client_download_attachment_rejects_oversized_content_length() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/attachment.bin"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "application/octet-stream")
+                .insert_header("content-length", "104857601")
+                .set_body_bytes(Vec::new()),
+        )
+        .mount(&server)
+        .await;
+
+    let client = AirtableClient::new("test_tok")
+        .unwrap()
+        .with_base_url(server.uri());
+    let url = format!("{}/attachment.bin", server.uri());
+    let result = client.download_attachment(&url).await;
+
+    assert!(matches!(
+        result.unwrap_err(),
+        AirtableError::AttachmentTooLarge {
+            max_bytes: 104857600
+        }
+    ));
+}
+
+#[fcp_async_core::runtime::test]
+async fn client_download_attachment_follows_local_redirects() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/redirect"))
+        .respond_with(ResponseTemplate::new(302).insert_header("location", "/final/attachment.txt"))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/final/attachment.txt"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/plain")
+                .insert_header(
+                    "content-disposition",
+                    "attachment; filename=\"attachment.txt\"",
+                )
+                .set_body_bytes(b"hello airtable".to_vec()),
+        )
+        .mount(&server)
+        .await;
+
+    let client = AirtableClient::new("test_tok")
+        .unwrap()
+        .with_base_url(server.uri());
+    let url = format!("{}/redirect", server.uri());
+    let result = client.download_attachment(&url).await.unwrap();
+
+    assert_eq!(result.content_type, "text/plain");
+    assert_eq!(result.filename.as_deref(), Some("attachment.txt"));
+    assert_eq!(result.data, "aGVsbG8gYWlydGFibGU=");
+}
+
 // ── Connector-level invoke ──────────────────────────────────────────
+
+#[fcp_async_core::runtime::test]
+async fn invoke_download_attachment_rejects_disallowed_host() {
+    let server = MockServer::start().await;
+    let mut connector = AirtableConnector::new();
+    let signing_key = Ed25519SigningKey::generate();
+    setup_handshake(
+        &mut connector,
+        &signing_key,
+        &["airtable.download_attachment"],
+    )
+    .await;
+    setup_configure(&mut connector, &server.uri()).await;
+
+    let token = generate_valid_token(&signing_key, "airtable.download_attachment");
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "airtable.download_attachment",
+            "input": {
+                "url": "https://evil.example.com/file.txt?sig=super-secret-token"
+            },
+            "capability_token": token
+        }))
+        .await;
+
+    match result.unwrap_err() {
+        FcpError::InvalidRequest { message, .. } => {
+            assert!(message.contains("evil.example.com"));
+            assert!(!message.contains("super-secret-token"));
+        }
+        other => panic!("Expected InvalidRequest, got {other:?}"),
+    }
+}
 
 #[fcp_async_core::runtime::test]
 async fn invoke_list_bases_through_connector() {

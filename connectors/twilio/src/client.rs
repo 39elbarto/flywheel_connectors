@@ -350,34 +350,30 @@ impl TwilioClient {
                 let msg = Self::escape_xml(message.unwrap_or("Hello from FCP."));
                 let v = voice.unwrap_or("alice");
                 let lang = language.unwrap_or("en-US");
-                xml.push_str(&format!(
-                    "  <Say voice=\"{v}\" language=\"{lang}\">{msg}</Say>\n"
-                ));
+                let _ = writeln!(xml, "  <Say voice=\"{v}\" language=\"{lang}\">{msg}</Say>");
             }
             TwimlTemplate::Play => {
                 let u = Self::escape_xml(url.unwrap_or(""));
-                xml.push_str(&format!("  <Play>{u}</Play>\n"));
+                let _ = writeln!(xml, "  <Play>{u}</Play>");
             }
             TwimlTemplate::Gather => {
                 let prompt = Self::escape_xml(message.unwrap_or("Please enter your selection."));
                 let v = voice.unwrap_or("alice");
                 let lang = language.unwrap_or("en-US");
                 let num_digits = digits.unwrap_or("1");
-                xml.push_str(&format!(
-                    "  <Gather numDigits=\"{num_digits}\">\n    <Say voice=\"{v}\" language=\"{lang}\">{prompt}</Say>\n  </Gather>\n"
-                ));
+                let _ = write!(xml, "  <Gather numDigits=\"{num_digits}\">\n    <Say voice=\"{v}\" language=\"{lang}\">{prompt}</Say>\n  </Gather>\n");
             }
             TwimlTemplate::Dial => {
                 let num = Self::escape_xml(number.unwrap_or(""));
-                xml.push_str(&format!("  <Dial>{num}</Dial>\n"));
+                let _ = writeln!(xml, "  <Dial>{num}</Dial>");
             }
             TwimlTemplate::Pause => {
                 let len = length.unwrap_or(1);
-                xml.push_str(&format!("  <Pause length=\"{len}\"/>\n"));
+                let _ = writeln!(xml, "  <Pause length=\"{len}\"/>");
             }
             TwimlTemplate::Reject => {
                 let r = reason.unwrap_or("rejected");
-                xml.push_str(&format!("  <Reject reason=\"{r}\"/>\n"));
+                let _ = writeln!(xml, "  <Reject reason=\"{r}\"/>");
             }
             TwimlTemplate::Hangup => {
                 xml.push_str("  <Hangup/>\n");
@@ -823,6 +819,15 @@ impl TwilioClient {
         } else {
             None
         }
+    }
+}
+
+/// Ensure a phone number has the `whatsapp:` prefix.
+fn ensure_whatsapp_prefix(number: &str) -> String {
+    if number.starts_with("whatsapp:") {
+        number.to_string()
+    } else {
+        format!("whatsapp:{number}")
     }
 }
 

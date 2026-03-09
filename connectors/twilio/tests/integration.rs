@@ -859,17 +859,24 @@ async fn lifecycle_introspect_all_operations() {
         "twilio.get_media",
         "twilio.create_call",
         "twilio.get_call",
+        "twilio.hangup_call",
+        "twilio.list_calls",
+        "twilio.generate_twiml",
         "twilio.list_recordings",
         "twilio.download_recording",
         "twilio.download_media",
         "twilio.get_account",
         "twilio.list_phone_numbers",
+        "twilio.whatsapp_send",
+        "twilio.whatsapp_send_template",
+        "twilio.whatsapp_get",
+        "twilio.whatsapp_list",
     ];
 
     for expected in &expected_ops {
         assert!(op_ids.contains(expected), "missing operation: {expected}");
     }
-    assert_eq!(ops.len(), 12);
+    assert_eq!(ops.len(), 19);
 
     for op in ops {
         assert!(

@@ -5,7 +5,7 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "PLACEHOLDER_HASH"
+interface_hash = "blake3-256:fcp.interface.v2:9cd41f1d641e37715cdcd21c3da9f970748d16868fefcc0b41034f002a343463"
 
 [connector]
 id = "fcp.twilio"
@@ -660,7 +660,7 @@ capability = "twilio.voice"
 risk_level = "high"
 safety_tier = "dangerous"
 requires_approval = "interactive"
-idempotency = "at_most_once"
+idempotency = "best_effort"
 
 [provides.operations."twilio.hangup_call".rate_limit]
 max = 30
@@ -1252,6 +1252,245 @@ related = [
 ]
 
 # ---------------------------------------------------------------------------
+# WhatsApp Operations
+# ---------------------------------------------------------------------------
+
+[provides.operations."twilio.whatsapp_send"]
+description = "Send a freeform WhatsApp message"
+capability = "twilio.whatsapp"
+risk_level = "high"
+safety_tier = "dangerous"
+requires_approval = "interactive"
+idempotency = "none"
+
+[provides.operations."twilio.whatsapp_send".input_schema]
+required = ["to", "from", "body"]
+type = "object"
+
+[provides.operations."twilio.whatsapp_send".input_schema.properties.to]
+type = "string"
+
+[provides.operations."twilio.whatsapp_send".input_schema.properties.from]
+type = "string"
+
+[provides.operations."twilio.whatsapp_send".input_schema.properties.body]
+type = "string"
+
+[provides.operations."twilio.whatsapp_send".input_schema.properties.media_url]
+type = "array"
+
+[provides.operations."twilio.whatsapp_send".input_schema.properties.media_url.items]
+type = "string"
+
+[provides.operations."twilio.whatsapp_send".input_schema.properties.status_callback]
+type = "string"
+
+[provides.operations."twilio.whatsapp_send".output_schema]
+required = ["sid", "status"]
+type = "object"
+
+[provides.operations."twilio.whatsapp_send".output_schema.properties.sid]
+type = "string"
+
+[provides.operations."twilio.whatsapp_send".output_schema.properties.status]
+type = "string"
+
+[provides.operations."twilio.whatsapp_send".network_constraints]
+host_allow = ["api.twilio.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 2097152
+
+[provides.operations."twilio.whatsapp_send".ai_hints]
+when_to_use = "Send a freeform WhatsApp message. Requires whatsapp-enabled sender number."
+common_mistakes = [
+    "Sending freeform messages outside the 24-hour messaging window (use template instead).",
+]
+examples = ['{"to": "+15551234567", "from": "+14155238886", "body": "Hello!"}']
+related = ["twilio.whatsapp_send_template", "twilio.whatsapp_get"]
+
+[provides.operations."twilio.whatsapp_send_template"]
+description = "Send a template-based WhatsApp message"
+capability = "twilio.whatsapp"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "none"
+idempotency = "none"
+
+[provides.operations."twilio.whatsapp_send_template".input_schema]
+required = ["to", "from", "content_sid"]
+type = "object"
+
+[provides.operations."twilio.whatsapp_send_template".input_schema.properties.to]
+type = "string"
+
+[provides.operations."twilio.whatsapp_send_template".input_schema.properties.from]
+type = "string"
+
+[provides.operations."twilio.whatsapp_send_template".input_schema.properties.content_sid]
+type = "string"
+
+[provides.operations."twilio.whatsapp_send_template".input_schema.properties.content_variables]
+type = "object"
+
+[provides.operations."twilio.whatsapp_send_template".input_schema.properties.status_callback]
+type = "string"
+
+[provides.operations."twilio.whatsapp_send_template".output_schema]
+required = ["sid", "status"]
+type = "object"
+
+[provides.operations."twilio.whatsapp_send_template".output_schema.properties.sid]
+type = "string"
+
+[provides.operations."twilio.whatsapp_send_template".output_schema.properties.status]
+type = "string"
+
+[provides.operations."twilio.whatsapp_send_template".network_constraints]
+host_allow = ["api.twilio.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 2097152
+
+[provides.operations."twilio.whatsapp_send_template".ai_hints]
+when_to_use = "Send a pre-approved WhatsApp template message."
+common_mistakes = ["Using wrong ContentSid for the template."]
+examples = ['{"to": "+15551234567", "from": "+14155238886", "content_sid": "HXb5b62575e6e4ff6129ad7c8efe1f983e"}']
+related = ["twilio.whatsapp_send", "twilio.whatsapp_get"]
+
+[provides.operations."twilio.whatsapp_get"]
+description = "Get a WhatsApp message by SID"
+capability = "twilio.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."twilio.whatsapp_get".input_schema]
+required = ["message_sid"]
+type = "object"
+
+[provides.operations."twilio.whatsapp_get".input_schema.properties.message_sid]
+type = "string"
+
+[provides.operations."twilio.whatsapp_get".output_schema]
+required = ["sid", "status"]
+type = "object"
+
+[provides.operations."twilio.whatsapp_get".output_schema.properties.sid]
+type = "string"
+
+[provides.operations."twilio.whatsapp_get".output_schema.properties.status]
+type = "string"
+
+[provides.operations."twilio.whatsapp_get".network_constraints]
+host_allow = ["api.twilio.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 2097152
+
+[provides.operations."twilio.whatsapp_get".ai_hints]
+when_to_use = "Check status and delivery receipt for a WhatsApp message."
+common_mistakes = []
+examples = ['{"message_sid": "SMxxx"}']
+related = ["twilio.whatsapp_send", "twilio.whatsapp_list"]
+
+[provides.operations."twilio.whatsapp_list"]
+description = "List WhatsApp messages"
+capability = "twilio.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."twilio.whatsapp_list".input_schema]
+type = "object"
+
+[provides.operations."twilio.whatsapp_list".input_schema.properties.to]
+type = "string"
+
+[provides.operations."twilio.whatsapp_list".input_schema.properties.from]
+type = "string"
+
+[provides.operations."twilio.whatsapp_list".input_schema.properties.date_sent]
+type = "string"
+
+[provides.operations."twilio.whatsapp_list".input_schema.properties.page_size]
+type = "integer"
+
+[provides.operations."twilio.whatsapp_list".input_schema.properties.page]
+type = "integer"
+
+[provides.operations."twilio.whatsapp_list".output_schema]
+type = "object"
+
+[provides.operations."twilio.whatsapp_list".output_schema.properties.messages]
+type = "array"
+
+[provides.operations."twilio.whatsapp_list".output_schema.properties.next_page_uri]
+type = "string"
+
+[provides.operations."twilio.whatsapp_list".network_constraints]
+host_allow = ["api.twilio.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 2097152
+
+[provides.operations."twilio.whatsapp_list".ai_hints]
+when_to_use = "List WhatsApp messages with optional filters."
+common_mistakes = []
+examples = ['{"from": "+14155238886", "page_size": 20}']
+related = ["twilio.whatsapp_get", "twilio.whatsapp_send"]
+
+# ---------------------------------------------------------------------------
 # Streaming / Event Capabilities
 # ---------------------------------------------------------------------------
 
@@ -1329,3 +1568,7 @@ scope = "instance"
 "twilio.download_media" = ["twilio.media"]
 "twilio.get_account" = ["twilio.read"]
 "twilio.list_phone_numbers" = ["twilio.read"]
+"twilio.whatsapp_send" = ["twilio.message"]
+"twilio.whatsapp_send_template" = ["twilio.message"]
+"twilio.whatsapp_get" = ["twilio.read"]
+"twilio.whatsapp_list" = ["twilio.read"]

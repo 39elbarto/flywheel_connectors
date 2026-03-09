@@ -666,7 +666,7 @@ impl TwilioConnector {
                     "twilio.voice",
                     RiskLevel::High,
                     SafetyTier::Dangerous,
-                    IdempotencyClass::AtMostOnce,
+                    IdempotencyClass::BestEffort,
                     AgentHint {
                         when_to_use: "End an active call. The call must be in-progress.".into(),
                         common_mistakes: vec![
@@ -922,6 +922,150 @@ impl TwilioConnector {
                         ],
                     },
                 ),
+                // ── WhatsApp ─────────────────────────────────────
+                op_info(
+                    "twilio.whatsapp_send",
+                    "Send a freeform WhatsApp message",
+                    json!({
+                        "type": "object",
+                        "required": ["to", "from", "body"],
+                        "properties": {
+                            "to": { "type": "string" },
+                            "from": { "type": "string" },
+                            "body": { "type": "string" },
+                            "media_url": { "type": "array", "items": { "type": "string" } },
+                            "status_callback": { "type": "string" }
+                        }
+                    }),
+                    json!({
+                        "type": "object",
+                        "properties": {
+                            "sid": { "type": "string" },
+                            "status": { "type": "string" }
+                        }
+                    }),
+                    "twilio.whatsapp",
+                    RiskLevel::High,
+                    SafetyTier::Dangerous,
+                    IdempotencyClass::None,
+                    AgentHint {
+                        when_to_use: "Send a freeform WhatsApp message to a contact.".into(),
+                        common_mistakes: vec![
+                            "Sending freeform outside the 24-hour messaging window (use template instead).".into(),
+                        ],
+                        examples: vec![
+                            r#"{"to": "+15551234567", "from": "+14155238886", "body": "Hello!"}"#.into(),
+                        ],
+                        related: vec![
+                            CapabilityId::from_static("twilio.whatsapp_send_template"),
+                            CapabilityId::from_static("twilio.whatsapp_get"),
+                        ],
+                    },
+                ),
+                op_info(
+                    "twilio.whatsapp_send_template",
+                    "Send a template-based WhatsApp message",
+                    json!({
+                        "type": "object",
+                        "required": ["to", "from", "content_sid"],
+                        "properties": {
+                            "to": { "type": "string" },
+                            "from": { "type": "string" },
+                            "content_sid": { "type": "string" },
+                            "content_variables": { "type": "object" },
+                            "status_callback": { "type": "string" }
+                        }
+                    }),
+                    json!({
+                        "type": "object",
+                        "properties": {
+                            "sid": { "type": "string" },
+                            "status": { "type": "string" }
+                        }
+                    }),
+                    "twilio.whatsapp",
+                    RiskLevel::Medium,
+                    SafetyTier::Risky,
+                    IdempotencyClass::None,
+                    AgentHint {
+                        when_to_use: "Send a pre-approved WhatsApp template message.".into(),
+                        common_mistakes: vec![
+                            "Using wrong ContentSid for the template.".into(),
+                        ],
+                        examples: vec![
+                            r#"{"to": "+15551234567", "from": "+14155238886", "content_sid": "HXb5b62575e6e4ff6129ad7c8efe1f983e"}"#.into(),
+                        ],
+                        related: vec![
+                            CapabilityId::from_static("twilio.whatsapp_send"),
+                            CapabilityId::from_static("twilio.whatsapp_get"),
+                        ],
+                    },
+                ),
+                op_info(
+                    "twilio.whatsapp_get",
+                    "Get a WhatsApp message by SID",
+                    json!({
+                        "type": "object",
+                        "required": ["message_sid"],
+                        "properties": {
+                            "message_sid": { "type": "string" }
+                        }
+                    }),
+                    json!({
+                        "type": "object",
+                        "properties": {
+                            "sid": { "type": "string" },
+                            "status": { "type": "string" }
+                        }
+                    }),
+                    "twilio.read",
+                    RiskLevel::Low,
+                    SafetyTier::Safe,
+                    IdempotencyClass::Strict,
+                    AgentHint {
+                        when_to_use: "Get status and details of a WhatsApp message.".into(),
+                        common_mistakes: vec![],
+                        examples: vec![r#"{"message_sid": "SMxxx"}"#.into()],
+                        related: vec![
+                            CapabilityId::from_static("twilio.whatsapp_send"),
+                            CapabilityId::from_static("twilio.whatsapp_list"),
+                        ],
+                    },
+                ),
+                op_info(
+                    "twilio.whatsapp_list",
+                    "List WhatsApp messages",
+                    json!({
+                        "type": "object",
+                        "properties": {
+                            "to": { "type": "string" },
+                            "from": { "type": "string" },
+                            "date_sent": { "type": "string" },
+                            "page_size": { "type": "integer" },
+                            "page": { "type": "integer" }
+                        }
+                    }),
+                    json!({
+                        "type": "object",
+                        "properties": {
+                            "messages": { "type": "array" },
+                            "next_page_uri": { "type": "string" }
+                        }
+                    }),
+                    "twilio.read",
+                    RiskLevel::Low,
+                    SafetyTier::Safe,
+                    IdempotencyClass::Strict,
+                    AgentHint {
+                        when_to_use: "List WhatsApp messages with optional filters.".into(),
+                        common_mistakes: vec![],
+                        examples: vec![r#"{"from": "+14155238886", "page_size": 20}"#.into()],
+                        related: vec![
+                            CapabilityId::from_static("twilio.whatsapp_get"),
+                            CapabilityId::from_static("twilio.whatsapp_send"),
+                        ],
+                    },
+                ),
             ],
             events: vec![],
             resource_types: vec![],
@@ -1011,12 +1155,18 @@ impl TwilioConnector {
             "twilio.get_call" => self.invoke_get_call(input).await,
             "twilio.hangup_call" => self.invoke_hangup_call(input).await,
             "twilio.list_calls" => self.invoke_list_calls(input).await,
-            "twilio.generate_twiml" => self.invoke_generate_twiml(input),
+            "twilio.generate_twiml" => self.invoke_generate_twiml(&input),
             "twilio.list_recordings" => self.invoke_list_recordings(input).await,
             "twilio.download_recording" => self.invoke_download_recording(input).await,
             "twilio.download_media" => self.invoke_download_media(input).await,
             "twilio.get_account" => self.invoke_get_account().await,
             "twilio.list_phone_numbers" => self.invoke_list_phone_numbers(input).await,
+            "twilio.whatsapp_send" => self.invoke_whatsapp_send(input).await,
+            "twilio.whatsapp_send_template" => {
+                self.invoke_whatsapp_send_template(input).await
+            }
+            "twilio.whatsapp_get" => self.invoke_whatsapp_get(input).await,
+            "twilio.whatsapp_list" => self.invoke_whatsapp_list(input).await,
             _ => Err(FcpError::OperationNotGranted {
                 operation: operation.into(),
             }),
@@ -1188,10 +1338,11 @@ impl TwilioConnector {
         }))
     }
 
-    fn invoke_generate_twiml(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
+    #[allow(clippy::unused_self)]
+    fn invoke_generate_twiml(&self, input: &serde_json::Value) -> FcpResult<serde_json::Value> {
         use crate::types::TwimlTemplate;
 
-        let template_str = require_str(&input, "template")?;
+        let template_str = require_str(input, "template")?;
         let template: TwimlTemplate =
             serde_json::from_value(serde_json::Value::String(template_str.to_string())).map_err(
                 |_| FcpError::InvalidRequest {
@@ -1301,6 +1452,95 @@ impl TwilioConnector {
             .map_err(|e: TwilioError| e.to_fcp_error())?;
         Ok(json!({
             "incoming_phone_numbers": resp.incoming_phone_numbers,
+            "next_page_uri": resp.next_page_uri,
+        }))
+    }
+
+    // ── WhatsApp operation implementations ─────────────────────
+
+    async fn invoke_whatsapp_send(
+        &self,
+        input: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let to = require_str(&input, "to")?;
+        let from = require_str(&input, "from")?;
+        let body = require_str(&input, "body")?;
+        let media_url: Option<Vec<String>> =
+            input
+                .get("media_url")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect()
+                });
+        let status_callback = input.get("status_callback").and_then(|v| v.as_str());
+        let resp = client
+            .whatsapp_send(to, from, body, media_url.as_deref(), status_callback)
+            .await
+            .map_err(|e: TwilioError| e.to_fcp_error())?;
+        serde_json::to_value(resp).map_err(|e| FcpError::Internal {
+            message: format!("Serialization error: {e}"),
+        })
+    }
+
+    async fn invoke_whatsapp_send_template(
+        &self,
+        input: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let to = require_str(&input, "to")?;
+        let from = require_str(&input, "from")?;
+        let content_sid = require_str(&input, "content_sid")?;
+        let content_variables = input.get("content_variables");
+        let status_callback = input.get("status_callback").and_then(|v| v.as_str());
+        let resp = client
+            .whatsapp_send_template(to, from, content_sid, content_variables, status_callback)
+            .await
+            .map_err(|e: TwilioError| e.to_fcp_error())?;
+        serde_json::to_value(resp).map_err(|e| FcpError::Internal {
+            message: format!("Serialization error: {e}"),
+        })
+    }
+
+    async fn invoke_whatsapp_get(
+        &self,
+        input: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let message_sid = require_str(&input, "message_sid")?;
+        let resp = client
+            .whatsapp_get(message_sid)
+            .await
+            .map_err(|e: TwilioError| e.to_fcp_error())?;
+        serde_json::to_value(resp).map_err(|e| FcpError::Internal {
+            message: format!("Serialization error: {e}"),
+        })
+    }
+
+    async fn invoke_whatsapp_list(
+        &self,
+        input: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let to = input.get("to").and_then(|v| v.as_str());
+        let from = input.get("from").and_then(|v| v.as_str());
+        let date_sent = input.get("date_sent").and_then(|v| v.as_str());
+        let page_size = input
+            .get("page_size")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as u32);
+        let page = input
+            .get("page")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as u32);
+        let resp = client
+            .whatsapp_list(to, from, date_sent, page_size, page)
+            .await
+            .map_err(|e: TwilioError| e.to_fcp_error())?;
+        Ok(json!({
+            "messages": resp.messages,
             "next_page_uri": resp.next_page_uri,
         }))
     }
@@ -1497,7 +1737,11 @@ mod tests {
         assert!(op_ids.contains(&"twilio.download_media"));
         assert!(op_ids.contains(&"twilio.get_account"));
         assert!(op_ids.contains(&"twilio.list_phone_numbers"));
-        assert_eq!(ops.len(), 15);
+        assert!(op_ids.contains(&"twilio.whatsapp_send"));
+        assert!(op_ids.contains(&"twilio.whatsapp_send_template"));
+        assert!(op_ids.contains(&"twilio.whatsapp_get"));
+        assert!(op_ids.contains(&"twilio.whatsapp_list"));
+        assert_eq!(ops.len(), 19);
     }
 
     // ── Provisioning tests ─────────────────────────────────────────
@@ -2074,12 +2318,12 @@ mod tests {
             );
         }
 
-        // hangup_call has at_most_once idempotency
+        // hangup_call has best_effort idempotency
         let hangup = ops
             .iter()
             .find(|o| o["id"] == "twilio.hangup_call")
             .unwrap();
-        assert_eq!(hangup["idempotency"].as_str().unwrap(), "at_most_once");
+        assert_eq!(hangup["idempotency"].as_str().unwrap(), "best_effort");
     }
 
     // ── Required fields in schemas ───────────────────────────────

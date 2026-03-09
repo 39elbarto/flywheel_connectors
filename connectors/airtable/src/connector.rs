@@ -485,7 +485,7 @@ impl AirtableConnector {
                         "type": "object",
                         "required": ["tables"],
                         "properties": {
-                            "tables": { "type": "array" }
+                            "tables": { "type": "array", "description": "Tables with fields enriched by read_only/computed metadata for formula and other derived columns." }
                         }
                     }),
                     "airtable.read",
@@ -548,7 +548,7 @@ impl AirtableConnector {
                         "type": "object",
                         "required": ["table"],
                         "properties": {
-                            "table": { "type": "object", "description": "Resolved table with fields and views" }
+                            "table": { "type": "object", "description": "Resolved table with fields enriched by read_only/computed metadata." }
                         }
                     }),
                     "airtable.read",
@@ -588,7 +588,7 @@ impl AirtableConnector {
                         "type": "object",
                         "required": ["fields"],
                         "properties": {
-                            "fields": { "type": "array", "description": "Resolved field definitions with id and name" }
+                            "fields": { "type": "array", "description": "Resolved field definitions with explicit read_only/computed metadata and linked-table summaries where relevant." }
                         }
                     }),
                     "airtable.read",
@@ -717,6 +717,7 @@ impl AirtableConnector {
                             "table": { "type": "object" },
                             "view": { "type": "object" },
                             "records": { "type": "array" },
+                            "field_metadata": { "type": "object", "description": "Per-field type metadata including read_only/computed markers and linked-table summaries." },
                             "offset": { "type": "string" }
                         }
                     }),
@@ -1307,7 +1308,12 @@ impl AirtableConnector {
         let base_id = require_base_id(&input)?;
         let result = self.get_base_schema_cached(base_id).await?;
 
-        Ok(json!({ "tables": result.tables }))
+        let tables = result
+            .tables
+            .iter()
+            .map(|table| serialize_table_schema(table, &result))
+            .collect::<Vec<_>>();
+        Ok(json!({ "tables": tables }))
     }
 
     async fn invoke_list_tables(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
@@ -1338,7 +1344,7 @@ impl AirtableConnector {
         let schema = self.get_base_schema_cached(base_id).await?;
         let table = resolve_table(&schema.tables, table_ref)?;
 
-        Ok(json!({ "table": table }))
+        Ok(json!({ "table": serialize_table_schema(table, &schema) }))
     }
 
     async fn invoke_list_fields(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
@@ -1357,6 +1363,10 @@ impl AirtableConnector {
             table.fields.clone()
         };
 
+        let fields = fields
+            .iter()
+            .map(|field| serialize_field_schema(field, &schema))
+            .collect::<Vec<_>>();
         Ok(json!({ "fields": fields }))
     }
 
@@ -1436,6 +1446,11 @@ impl AirtableConnector {
             },
             "view": view,
             "records": result.records,
+            "field_metadata": build_field_metadata(
+                table,
+                &schema,
+                &fields.iter().cloned().collect(),
+            ),
         });
         if let Some(offset) = result.offset {
             resp["offset"] = json!(offset);
@@ -2129,13 +2144,18 @@ fn build_field_metadata(
         .iter()
         .filter(|field| visible_fields.contains(&field.name))
     {
+        let access = classify_field_access(field);
         let mut entry = serde_json::Map::new();
         entry.insert("field_id".into(), json!(field.id));
         entry.insert("field_type".into(), json!(field.field_type));
-        entry.insert(
-            "read_only".into(),
-            json!(is_read_only_computed_field(field)),
-        );
+        entry.insert("read_only".into(), json!(access.read_only));
+        entry.insert("computed".into(), json!(access.computed));
+        if let Some(kind) = access.computed_kind {
+            entry.insert("computed_kind".into(), json!(kind));
+        }
+        if let Some(reason) = access.read_only_reason {
+            entry.insert("read_only_reason".into(), json!(reason));
+        }
 
         if let Some(linked_table_id) = linked_table_id(field) {
             if let Ok(linked_table) = resolve_table_by_id(&schema.tables, linked_table_id) {
@@ -2152,6 +2172,61 @@ fn build_field_metadata(
         metadata.insert(field.name.clone(), serde_json::Value::Object(entry));
     }
     serde_json::Value::Object(metadata)
+}
+
+#[derive(Clone, Copy)]
+struct FieldAccessProfile {
+    read_only: bool,
+    computed: bool,
+    computed_kind: Option<&'static str>,
+    read_only_reason: Option<&'static str>,
+}
+
+fn serialize_table_schema(table: &TableSchema, schema: &BaseSchemaResponse) -> serde_json::Value {
+    json!({
+        "id": table.id,
+        "name": table.name,
+        "description": table.description,
+        "primaryFieldId": table.primary_field_id,
+        "fields": table
+            .fields
+            .iter()
+            .map(|field| serialize_field_schema(field, schema))
+            .collect::<Vec<_>>(),
+        "views": table.views,
+    })
+}
+
+fn serialize_field_schema(field: &FieldSchema, schema: &BaseSchemaResponse) -> serde_json::Value {
+    let access = classify_field_access(field);
+    let mut entry = serde_json::Map::new();
+    entry.insert("id".into(), json!(field.id));
+    entry.insert("name".into(), json!(field.name));
+    entry.insert("type".into(), json!(field.field_type));
+    entry.insert("description".into(), json!(field.description));
+    entry.insert("options".into(), json!(field.options));
+    entry.insert("read_only".into(), json!(access.read_only));
+    entry.insert("computed".into(), json!(access.computed));
+
+    if let Some(kind) = access.computed_kind {
+        entry.insert("computed_kind".into(), json!(kind));
+    }
+    if let Some(reason) = access.read_only_reason {
+        entry.insert("read_only_reason".into(), json!(reason));
+    }
+    if let Some(linked_table_id) = linked_table_id(field) {
+        if let Ok(linked_table) = resolve_table_by_id(&schema.tables, linked_table_id) {
+            entry.insert(
+                "linked_table".into(),
+                json!({
+                    "id": linked_table.id,
+                    "name": linked_table.name,
+                }),
+            );
+        }
+    }
+
+    serde_json::Value::Object(entry)
 }
 
 fn resolve_table<'a>(tables: &'a [TableSchema], table_ref: &str) -> FcpResult<&'a TableSchema> {
@@ -2521,11 +2596,32 @@ fn is_linked_record_field(field: &FieldSchema) -> bool {
     field.field_type == "multipleRecordLinks"
 }
 
-fn is_read_only_computed_field(field: &FieldSchema) -> bool {
-    matches!(
-        field.field_type.as_str(),
-        "lookup" | "multipleLookupValues" | "rollup"
-    )
+fn classify_field_access(field: &FieldSchema) -> FieldAccessProfile {
+    let computed_kind = match field.field_type.as_str() {
+        "formula" => Some("formula"),
+        "lookup" | "multipleLookupValues" => Some("lookup"),
+        "rollup" => Some("rollup"),
+        "count" => Some("count"),
+        "createdTime" => Some("created_time"),
+        "lastModifiedTime" => Some("last_modified_time"),
+        "createdBy" => Some("created_by"),
+        "lastModifiedBy" => Some("last_modified_by"),
+        _ => None,
+    };
+    let read_only_reason = if computed_kind.is_some() {
+        Some("computed")
+    } else if matches!(field.field_type.as_str(), "autoNumber" | "button") {
+        Some("system_managed")
+    } else {
+        None
+    };
+
+    FieldAccessProfile {
+        read_only: read_only_reason.is_some(),
+        computed: computed_kind.is_some(),
+        computed_kind,
+        read_only_reason,
+    }
 }
 
 fn parse_sort_specs(

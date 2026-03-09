@@ -68,6 +68,15 @@ fn record_json(id: &str, fields: &serde_json::Value) -> serde_json::Value {
     })
 }
 
+fn field_named<'a>(fields: &'a serde_json::Value, name: &str) -> &'a serde_json::Value {
+    fields
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|field| field["name"] == name)
+        .unwrap()
+}
+
 // ── Error taxonomy ──────────────────────────────────────────────────
 
 #[fcp_async_core::runtime::test]
@@ -114,6 +123,21 @@ async fn error_api_not_found_maps_to_resource_not_found() {
     };
     let fcp = err.to_fcp_error();
     assert!(matches!(fcp, FcpError::ResourceNotFound { .. }));
+}
+
+#[fcp_async_core::runtime::test]
+async fn error_api_invalid_formula_maps_to_invalid_request() {
+    let err = AirtableError::Api {
+        error_type: "INVALID_REQUEST_UNKNOWN".into(),
+        message: "Unknown field names in formula".into(),
+        status_code: Some(422),
+    };
+    let fcp = err.to_fcp_error();
+    assert!(matches!(
+        fcp,
+        FcpError::InvalidRequest { code: 1003, message }
+            if message == "Unknown field names in formula"
+    ));
 }
 
 #[fcp_async_core::runtime::test]
@@ -1086,6 +1110,72 @@ async fn invoke_list_fields_resolves_ids_and_names() {
 }
 
 #[fcp_async_core::runtime::test]
+async fn invoke_get_base_schema_marks_formula_and_system_fields_read_only() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/meta/bases/appABC123/tables"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "tables": [
+                {
+                    "id": "tblTASK",
+                    "name": "Tasks",
+                    "fields": [
+                        { "id": "fldNAME", "name": "Name", "type": "singleLineText" },
+                        { "id": "fldFORM", "name": "Formula Score", "type": "formula" },
+                        {
+                            "id": "fldLOOK",
+                            "name": "Project Name",
+                            "type": "lookup",
+                            "options": { "linkedTableId": "tblPROJ" }
+                        },
+                        { "id": "fldAUTO", "name": "Autonumber", "type": "autoNumber" }
+                    ],
+                    "views": []
+                },
+                {
+                    "id": "tblPROJ",
+                    "name": "Projects",
+                    "fields": [{ "id": "fldP", "name": "Name", "type": "singleLineText" }],
+                    "views": []
+                }
+            ]
+        })))
+        .mount(&server)
+        .await;
+
+    let mut connector = AirtableConnector::new();
+    let signing_key = Ed25519SigningKey::generate();
+    setup_handshake(&mut connector, &signing_key, &["airtable.get_base_schema"]).await;
+    setup_configure(&mut connector, &server.uri()).await;
+
+    let token = generate_valid_token(&signing_key, "airtable.get_base_schema");
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "airtable.get_base_schema",
+            "input": { "base_id": "appABC123" },
+            "capability_token": token
+        }))
+        .await
+        .unwrap();
+
+    let fields = &result["tables"][0]["fields"];
+    let formula = field_named(fields, "Formula Score");
+    assert_eq!(formula["read_only"], true);
+    assert_eq!(formula["computed"], true);
+    assert_eq!(formula["computed_kind"], "formula");
+    assert_eq!(formula["read_only_reason"], "computed");
+
+    let lookup = field_named(fields, "Project Name");
+    assert_eq!(lookup["computed"], true);
+    assert_eq!(lookup["linked_table"]["id"], "tblPROJ");
+
+    let auto_number = field_named(fields, "Autonumber");
+    assert_eq!(auto_number["read_only"], true);
+    assert_eq!(auto_number["computed"], false);
+    assert_eq!(auto_number["read_only_reason"], "system_managed");
+}
+
+#[fcp_async_core::runtime::test]
 async fn invoke_list_views_through_connector() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -1341,6 +1431,129 @@ async fn invoke_list_records_rejects_control_chars_in_filter_formula() {
         }
         other => panic!("Expected InvalidRequest, got {other:?}"),
     }
+}
+
+#[fcp_async_core::runtime::test]
+async fn invoke_list_records_marks_formula_field_metadata_and_maps_formula_errors() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/meta/bases/appABC123/tables"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "tables": [
+                {
+                    "id": "tblTASK",
+                    "name": "Tasks",
+                    "fields": [
+                        { "id": "fldNAME", "name": "Name", "type": "singleLineText" },
+                        { "id": "fldFORM", "name": "Formula Score", "type": "formula" }
+                    ],
+                    "views": []
+                }
+            ]
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/appABC123/tblTASK"))
+        .and(query_param("filterByFormula", "{Formula Score} > 10"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "records": [
+                record_json("rec001", &json!({
+                    "Name": "Alpha",
+                    "Formula Score": 42
+                }))
+            ]
+        })))
+        .mount(&server)
+        .await;
+
+    let mut connector = AirtableConnector::new();
+    let signing_key = Ed25519SigningKey::generate();
+    setup_handshake(&mut connector, &signing_key, &["airtable.list_records"]).await;
+    setup_configure(&mut connector, &server.uri()).await;
+
+    let token = generate_valid_token(&signing_key, "airtable.list_records");
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "airtable.list_records",
+            "input": {
+                "base_id": "appABC123",
+                "table_id": "tblTASK",
+                "fields": ["Name", "Formula Score"],
+                "filter_by_formula": "{Formula Score} > 10"
+            },
+            "capability_token": token
+        }))
+        .await
+        .unwrap();
+
+    assert_eq!(result["field_metadata"]["Formula Score"]["read_only"], true);
+    assert_eq!(result["field_metadata"]["Formula Score"]["computed"], true);
+    assert_eq!(
+        result["field_metadata"]["Formula Score"]["computed_kind"],
+        "formula"
+    );
+    assert_eq!(
+        result["field_metadata"]["Formula Score"]["read_only_reason"],
+        "computed"
+    );
+
+    let failing_server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/meta/bases/appABC123/tables"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "tables": [
+                {
+                    "id": "tblTASK",
+                    "name": "Tasks",
+                    "fields": [{ "id": "fldNAME", "name": "Name", "type": "singleLineText" }],
+                    "views": []
+                }
+            ]
+        })))
+        .mount(&failing_server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/appABC123/tblTASK"))
+        .and(query_param(
+            "filterByFormula",
+            "{Missing Field} = \"Alpha\"",
+        ))
+        .respond_with(ResponseTemplate::new(422).set_body_json(json!({
+            "error": {
+                "type": "INVALID_REQUEST_UNKNOWN",
+                "message": "Unknown field names in formula"
+            }
+        })))
+        .mount(&failing_server)
+        .await;
+
+    let mut failing_connector = AirtableConnector::new();
+    setup_handshake(
+        &mut failing_connector,
+        &signing_key,
+        &["airtable.list_records"],
+    )
+    .await;
+    setup_configure(&mut failing_connector, &failing_server.uri()).await;
+
+    let failing_result = failing_connector
+        .handle_invoke(json!({
+            "operation": "airtable.list_records",
+            "input": {
+                "base_id": "appABC123",
+                "table_id": "tblTASK",
+                "filter_by_formula": "{Missing Field} = \"Alpha\""
+            },
+            "capability_token": token
+        }))
+        .await;
+
+    assert!(matches!(
+        failing_result,
+        Err(FcpError::InvalidRequest { code: 1003, message })
+            if message == "Unknown field names in formula"
+    ));
 }
 
 #[fcp_async_core::runtime::test]

@@ -107,6 +107,16 @@ impl AirtableError {
                     FcpError::ResourceNotFound {
                         resource: message.clone(),
                     }
+                } else if matches!(status_code, Some(400 | 422))
+                    || matches!(
+                        error_type.as_str(),
+                        "INVALID_REQUEST" | "INVALID_REQUEST_UNKNOWN"
+                    )
+                {
+                    FcpError::InvalidRequest {
+                        code: 1003,
+                        message: message.clone(),
+                    }
                 } else {
                     FcpError::External {
                         service: "airtable".into(),
@@ -488,15 +498,27 @@ mod tests {
             status_code: Some(422),
         };
         match err.to_fcp_error() {
-            FcpError::External {
-                retryable,
-                status_code,
-                ..
-            } => {
-                assert!(!retryable);
-                assert_eq!(status_code, Some(422));
+            FcpError::InvalidRequest { code, message } => {
+                assert_eq!(code, 1003);
+                assert_eq!(message, "bad");
             }
-            other => panic!("Expected External, got: {other:?}"),
+            other => panic!("Expected InvalidRequest, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn to_fcp_error_api_invalid_request_unknown_maps_to_invalid_request() {
+        let err = AirtableError::Api {
+            error_type: "INVALID_REQUEST_UNKNOWN".into(),
+            message: "Unknown field names in formula".into(),
+            status_code: Some(422),
+        };
+        match err.to_fcp_error() {
+            FcpError::InvalidRequest { code, message } => {
+                assert_eq!(code, 1003);
+                assert_eq!(message, "Unknown field names in formula");
+            }
+            other => panic!("Expected InvalidRequest, got: {other:?}"),
         }
     }
 

@@ -876,7 +876,7 @@ async fn lifecycle_introspect_lists_all_operations() {
     let result = connector.handle_introspect().await.unwrap();
 
     let ops = result["operations"].as_array().unwrap();
-    assert_eq!(ops.len(), 17);
+    assert_eq!(ops.len(), 19);
 
     let op_ids: Vec<&str> = ops.iter().map(|o| o["id"].as_str().unwrap()).collect();
     for expected in &[
@@ -897,6 +897,8 @@ async fn lifecycle_introspect_lists_all_operations() {
         "figma.delete_webhook",
         "figma.styles.list",
         "figma.tokens.export",
+        "figma.macro.export_component_bundle",
+        "figma.macro.design_audit",
     ] {
         assert!(op_ids.contains(expected), "Missing op: {expected}");
     }
@@ -917,9 +919,9 @@ async fn introspect_risk_levels() {
     let result = connector.handle_introspect().await.unwrap();
 
     let ops = result["operations"].as_array().unwrap();
-    assert_eq!(ops.len(), 17);
+    assert_eq!(ops.len(), 19);
 
-    // Low-risk: all read ops + post_comment + list_webhooks + design token ops
+    // Low-risk: all read ops + post_comment + list_webhooks + design token ops + macro ops
     let low_ops = [
         "figma.list_team_projects",
         "figma.list_project_files",
@@ -935,6 +937,8 @@ async fn introspect_risk_levels() {
         "figma.list_webhooks",
         "figma.styles.list",
         "figma.tokens.export",
+        "figma.macro.export_component_bundle",
+        "figma.macro.design_audit",
     ];
     // Medium-risk: delete_comment, create_webhook, delete_webhook
     let medium_ops = [
@@ -963,7 +967,7 @@ async fn introspect_risk_levels() {
         .iter()
         .filter(|o| o["risk_level"].as_str() == Some("medium"))
         .count();
-    assert_eq!(low_count, 14, "should have 14 low-risk ops");
+    assert_eq!(low_count, 16, "should have 16 low-risk ops");
     assert_eq!(medium_count, 3, "should have 3 medium-risk ops");
 }
 

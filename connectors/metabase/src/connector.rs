@@ -5,8 +5,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use fcp_core::{
     AgentHint, BaseConnector, CapabilityId, ConnectorId, CredentialId, FcpError, FcpResult,
-    IdempotencyClass, Introspection, OperationId, OperationInfo, RiskLevel, SafetyTier,
+    IdempotencyClass, Introspection, OperationId, OperationInfo, ProvisioningRecipe,
+    ProvisioningStep, ProvisioningStepType, RecipeId, RiskLevel, SafetyTier, SelfCheckReport,
+    StepId,
 };
+use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tracing::{info, instrument};
@@ -76,6 +79,35 @@ impl MetabaseConfig {
 
         Ok(Self { auth, base_url })
     }
+
+    fn provisioning_readiness(&self) -> ProvisioningReadiness {
+        let (network_ok, network_message) = base_url_policy(&self.base_url);
+
+        ProvisioningReadiness {
+            auth_mode: match &self.auth {
+                MetabaseAuth::SessionToken(_) => "session_token",
+                MetabaseAuth::CredentialId(_) => "credential_id",
+            },
+            token_configured: matches!(&self.auth, MetabaseAuth::SessionToken(_)),
+            credential_id_configured: self.auth.is_secretless(),
+            requires_credential_injection: self.auth.is_secretless(),
+            network_ok,
+            network_message,
+            base_url: self.base_url.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[allow(clippy::struct_excessive_bools)]
+struct ProvisioningReadiness {
+    auth_mode: &'static str,
+    token_configured: bool,
+    credential_id_configured: bool,
+    requires_credential_injection: bool,
+    network_ok: bool,
+    network_message: String,
+    base_url: String,
 }
 
 /// Doctor check result.
@@ -263,11 +295,43 @@ impl MetabaseConnector {
 
     /// Handle the `self_check` method.
     pub async fn handle_self_check(&self) -> FcpResult<serde_json::Value> {
-        Ok(json!({
-            "connector_id": "fcp.metabase",
-            "version": "0.1.0",
-            "status": if self.config.is_some() { "ready" } else { "unconfigured" },
-        }))
+        let Some(config) = &self.config else {
+            let report =
+                SelfCheckReport::degraded("not_configured", "Connector is not configured");
+            return Self::serialize_self_check_report(report);
+        };
+
+        let readiness = config.provisioning_readiness();
+        if !readiness.network_ok {
+            let mut report = SelfCheckReport::failed(
+                "network_constraints_invalid",
+                readiness.network_message.clone(),
+            );
+            report.details = Some(json!({ "provisioning": readiness }));
+            return Self::serialize_self_check_report(report);
+        }
+
+        let Some(_client) = &self.client else {
+            let mut report = SelfCheckReport::failed(
+                "client_missing",
+                "API client not initialized; re-run configure",
+            );
+            report.details = Some(json!({ "provisioning": readiness }));
+            return Self::serialize_self_check_report(report);
+        };
+
+        if readiness.requires_credential_injection {
+            let mut report = SelfCheckReport::degraded(
+                "credential_injection_required",
+                "credential_id mode requires egress proxy injection; skipping live probe",
+            );
+            report.details = Some(json!({ "provisioning": readiness }));
+            return Self::serialize_self_check_report(report);
+        }
+
+        let mut report = SelfCheckReport::ok();
+        report.details = Some(json!({ "provisioning": readiness }));
+        Self::serialize_self_check_report(report)
     }
 
     /// Handle the `introspect` method.
@@ -482,6 +546,19 @@ impl MetabaseConnector {
             .to_string();
         Ok(json!({ "data": data, "status": status }))
     }
+
+    fn serialize_self_check_report(report: SelfCheckReport) -> FcpResult<serde_json::Value> {
+        info!(
+            event = "metabase.provisioning.self_check",
+            status = ?report.status,
+            reason_code = ?report.reason_code,
+            "Metabase self-check completed"
+        );
+
+        serde_json::to_value(report).map_err(|e| FcpError::Internal {
+            message: format!("Failed to serialize self-check report: {e}"),
+        })
+    }
 }
 
 /// Extract a required string field from input.
@@ -493,6 +570,83 @@ fn require_str<'a>(input: &'a serde_json::Value, field: &str) -> Result<&'a str,
             status_code: 400,
             message: format!("Missing required field: {field}"),
         })
+}
+
+/// Build the provisioning recipe for the `Metabase` connector.
+///
+/// `Metabase` is self-hosted, so the recipe prompts for the instance URL first,
+/// then asks for the session token, and finally stores the secret.
+pub fn provisioning_recipe() -> ProvisioningRecipe {
+    ProvisioningRecipe::new(
+        RecipeId::new("metabase.session_token"),
+        "1",
+        "Provision `Metabase` connector with an instance URL and session token",
+    )
+    .with_step(ProvisioningStep::new(
+        StepId::new("enter_url"),
+        ProvisioningStepType::PromptUser {
+            message: "Enter your `Metabase` instance URL (e.g. https://metabase.example.com)"
+                .into(),
+        },
+    ))
+    .with_step(
+        ProvisioningStep::new(
+            StepId::new("enter_token"),
+            ProvisioningStepType::PromptSecret {
+                message: "Paste your `Metabase` session token".into(),
+            },
+        )
+        .depends_on(StepId::new("enter_url")),
+    )
+    .with_step(
+        ProvisioningStep::new(
+            StepId::new("store_token"),
+            ProvisioningStepType::StoreSecret {
+                key: "session_token".into(),
+                value_from: StepId::new("enter_token"),
+                scope: "connector:fcp.metabase".into(),
+            },
+        )
+        .depends_on(StepId::new("enter_token")),
+    )
+}
+
+/// `Metabase` base URL policy.
+///
+/// Permissive: any host is accepted (self-hosted product), but HTTPS is
+/// required for non-local endpoints.
+fn base_url_policy(base_url: &str) -> (bool, String) {
+    let parsed = match Url::parse(base_url) {
+        Ok(parsed) => parsed,
+        Err(error) => {
+            return (false, format!("base_url could not be parsed: {error}"));
+        }
+    };
+
+    let Some(host) = parsed.host_str() else {
+        return (false, "base_url must include a host".into());
+    };
+
+    let local = is_local_test_host(host);
+    let secure_or_local = parsed.scheme() == "https" || local;
+
+    if secure_or_local {
+        (
+            true,
+            format!("Endpoint accepted by policy checks: {base_url}"),
+        )
+    } else {
+        (
+            false,
+            format!(
+                "Endpoint must use HTTPS for non-local hosts (localhost/127.0.0.1/::1 allowed for tests): {base_url}"
+            ),
+        )
+    }
+}
+
+fn is_local_test_host(host: &str) -> bool {
+    matches!(host, "localhost" | "127.0.0.1" | "::1" | "[::1]")
 }
 
 /// Build the operations info for introspection.
@@ -1135,5 +1289,216 @@ mod tests {
         let cloned = c.clone();
         assert_eq!(cloned.name, "check");
         assert_eq!(cloned.message, Some("msg".into()));
+    }
+
+    // -- Provisioning readiness tests --
+
+    #[test]
+    fn provisioning_readiness_session_token_mode() {
+        let config = MetabaseConfig::from_params(&json!({
+            "session_token": "tok",
+            "base_url": "https://metabase.example.com/api",
+        }))
+        .unwrap();
+        let readiness = config.provisioning_readiness();
+        assert_eq!(readiness.auth_mode, "session_token");
+        assert!(readiness.token_configured);
+        assert!(!readiness.credential_id_configured);
+        assert!(!readiness.requires_credential_injection);
+        assert!(readiness.network_ok);
+        assert_eq!(readiness.base_url, "https://metabase.example.com/api");
+    }
+
+    #[test]
+    fn provisioning_readiness_credential_id_mode() {
+        let config = MetabaseConfig::from_params(&json!({
+            "credential_id": "550e8400-e29b-41d4-a716-446655440000",
+            "base_url": "https://metabase.example.com/api",
+        }))
+        .unwrap();
+        let readiness = config.provisioning_readiness();
+        assert_eq!(readiness.auth_mode, "credential_id");
+        assert!(!readiness.token_configured);
+        assert!(readiness.credential_id_configured);
+        assert!(readiness.requires_credential_injection);
+        assert!(readiness.network_ok);
+    }
+
+    #[test]
+    fn provisioning_readiness_serializes() {
+        let config = MetabaseConfig::from_params(&json!({
+            "session_token": "tok",
+            "base_url": "https://metabase.example.com/api",
+        }))
+        .unwrap();
+        let readiness = config.provisioning_readiness();
+        let v = serde_json::to_value(&readiness).unwrap();
+        assert_eq!(v["auth_mode"], "session_token");
+        assert_eq!(v["token_configured"], true);
+        assert_eq!(v["network_ok"], true);
+    }
+
+    #[test]
+    fn provisioning_readiness_localhost_ok() {
+        let config = MetabaseConfig::from_params(&json!({
+            "session_token": "tok",
+            "base_url": "http://localhost:3000/api",
+        }))
+        .unwrap();
+        let readiness = config.provisioning_readiness();
+        assert!(readiness.network_ok);
+    }
+
+    #[test]
+    fn provisioning_readiness_http_non_local_rejected() {
+        let config = MetabaseConfig::from_params(&json!({
+            "session_token": "tok",
+            "base_url": "http://metabase.example.com/api",
+        }))
+        .unwrap();
+        let readiness = config.provisioning_readiness();
+        assert!(!readiness.network_ok);
+        assert!(readiness.network_message.contains("HTTPS"));
+    }
+
+    // -- Provisioning recipe tests --
+
+    #[test]
+    fn provisioning_recipe_has_3_steps() {
+        let recipe = provisioning_recipe();
+        assert_eq!(recipe.id.as_str(), "metabase.session_token");
+        assert_eq!(recipe.version, "1");
+        assert_eq!(recipe.steps.len(), 3);
+    }
+
+    #[test]
+    fn provisioning_recipe_step_order() {
+        let recipe = provisioning_recipe();
+        assert_eq!(recipe.steps[0].id.as_str(), "enter_url");
+        assert_eq!(recipe.steps[1].id.as_str(), "enter_token");
+        assert_eq!(recipe.steps[2].id.as_str(), "store_token");
+    }
+
+    #[test]
+    fn provisioning_recipe_step_dependencies() {
+        let recipe = provisioning_recipe();
+        assert!(recipe.steps[0].depends_on.is_empty());
+        assert_eq!(recipe.steps[1].depends_on.len(), 1);
+        assert_eq!(recipe.steps[1].depends_on[0].as_str(), "enter_url");
+        assert_eq!(recipe.steps[2].depends_on.len(), 1);
+        assert_eq!(recipe.steps[2].depends_on[0].as_str(), "enter_token");
+    }
+
+    #[test]
+    fn provisioning_recipe_serializes() {
+        let recipe = provisioning_recipe();
+        let v = serde_json::to_value(&recipe).unwrap();
+        assert_eq!(v["id"], "metabase.session_token");
+        assert!(v["steps"].as_array().unwrap().len() == 3);
+    }
+
+    #[test]
+    fn provisioning_recipe_first_step_is_prompt_user() {
+        let recipe = provisioning_recipe();
+        let v = serde_json::to_value(recipe.steps[0].kind.clone()).unwrap();
+        assert_eq!(v["type"], "prompt_user");
+    }
+
+    #[test]
+    fn provisioning_recipe_second_step_is_prompt_secret() {
+        let recipe = provisioning_recipe();
+        let v = serde_json::to_value(recipe.steps[1].kind.clone()).unwrap();
+        assert_eq!(v["type"], "prompt_secret");
+    }
+
+    #[test]
+    fn provisioning_recipe_third_step_is_store_secret() {
+        let recipe = provisioning_recipe();
+        let v = serde_json::to_value(recipe.steps[2].kind.clone()).unwrap();
+        assert_eq!(v["type"], "store_secret");
+        assert_eq!(v["key"], "session_token");
+        assert_eq!(v["scope"], "connector:fcp.metabase");
+    }
+
+    // -- base_url_policy tests --
+
+    #[test]
+    fn base_url_policy_accepts_https_any_host() {
+        let (ok, message) = base_url_policy("https://metabase.example.com/api");
+        assert!(ok);
+        assert!(message.contains("accepted"));
+    }
+
+    #[test]
+    fn base_url_policy_accepts_https_custom_domain() {
+        let (ok, _) = base_url_policy("https://analytics.mycompany.io:8443");
+        assert!(ok);
+    }
+
+    #[test]
+    fn base_url_policy_accepts_localhost() {
+        let (ok, _) = base_url_policy("http://localhost:3000");
+        assert!(ok);
+    }
+
+    #[test]
+    fn base_url_policy_accepts_127_0_0_1() {
+        let (ok, _) = base_url_policy("http://127.0.0.1:3000");
+        assert!(ok);
+    }
+
+    #[test]
+    fn base_url_policy_accepts_ipv6_loopback() {
+        let (ok, _) = base_url_policy("http://[::1]:3000");
+        assert!(ok);
+    }
+
+    #[test]
+    fn base_url_policy_rejects_http_non_local() {
+        let (ok, message) = base_url_policy("http://metabase.example.com/api");
+        assert!(!ok);
+        assert!(message.contains("HTTPS"));
+    }
+
+    #[test]
+    fn base_url_policy_rejects_invalid_url() {
+        let (ok, message) = base_url_policy("not a url");
+        assert!(!ok);
+        assert!(message.contains("could not be parsed"));
+    }
+
+    #[test]
+    fn base_url_policy_rejects_no_host() {
+        let (ok, message) = base_url_policy("file:///etc/passwd");
+        assert!(!ok);
+        assert!(message.contains("must include a host"));
+    }
+
+    // -- ProvisioningReadiness debug/clone --
+
+    #[test]
+    fn provisioning_readiness_debug() {
+        let config = MetabaseConfig::from_params(&json!({
+            "session_token": "tok",
+            "base_url": "https://metabase.example.com/api",
+        }))
+        .unwrap();
+        let readiness = config.provisioning_readiness();
+        let dbg = format!("{readiness:?}");
+        assert!(dbg.contains("ProvisioningReadiness"));
+    }
+
+    #[test]
+    #[allow(clippy::redundant_clone)]
+    fn provisioning_readiness_clone() {
+        let config = MetabaseConfig::from_params(&json!({
+            "session_token": "tok",
+            "base_url": "https://metabase.example.com/api",
+        }))
+        .unwrap();
+        let readiness = config.provisioning_readiness();
+        let cloned = readiness.clone();
+        assert_eq!(cloned.auth_mode, "session_token");
+        assert_eq!(cloned.base_url, "https://metabase.example.com/api");
     }
 }

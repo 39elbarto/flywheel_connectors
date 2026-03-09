@@ -64,7 +64,19 @@ async fn lifecycle_self_check() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
     let check = c.handle_self_check().await.unwrap();
-    assert_eq!(check["status"], "ready");
+    assert_eq!(check["status"], "ok");
+    assert!(check.get("details").is_some());
+    let prov = &check["details"]["provisioning"];
+    assert_eq!(prov["auth_mode"], "service_token");
+    assert_eq!(prov["token_configured"], true);
+}
+
+#[fcp_async_core::runtime::test]
+async fn lifecycle_self_check_unconfigured() {
+    let c = DuckDbConnector::new();
+    let check = c.handle_self_check().await.unwrap();
+    assert_eq!(check["status"], "degraded");
+    assert_eq!(check["reason_code"], "not_configured");
 }
 
 #[fcp_async_core::runtime::test]

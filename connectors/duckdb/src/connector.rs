@@ -5,7 +5,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use fcp_core::{
     AgentHint, BaseConnector, CapabilityId, ConnectorId, CredentialId, FcpError, FcpResult,
-    IdempotencyClass, OperationId, OperationInfo, RiskLevel, SafetyTier,
+    IdempotencyClass, OperationId, OperationInfo, ProvisioningRecipe, ProvisioningStep,
+    ProvisioningStepType, RecipeId, RiskLevel, SafetyTier, SelfCheckReport, StepId,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -83,6 +84,31 @@ impl DuckDbConfig {
             default_database,
         })
     }
+
+    fn provisioning_readiness(&self) -> ProvisioningReadiness {
+        ProvisioningReadiness {
+            auth_mode: match &self.auth {
+                DuckDbAuth::ServiceToken(_) => "service_token",
+                DuckDbAuth::CredentialId(_) => "credential_id",
+            },
+            token_configured: matches!(&self.auth, DuckDbAuth::ServiceToken(_)),
+            credential_id_configured: self.auth.is_secretless(),
+            requires_credential_injection: self.auth.is_secretless(),
+            database_configured: self.default_database.is_some(),
+            base_url: self.base_url.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[allow(clippy::struct_excessive_bools)]
+struct ProvisioningReadiness {
+    auth_mode: &'static str,
+    token_configured: bool,
+    credential_id_configured: bool,
+    requires_credential_injection: bool,
+    database_configured: bool,
+    base_url: String,
 }
 
 /// Doctor check result.
@@ -270,11 +296,35 @@ impl DuckDbConnector {
 
     /// Handle the `self_check` method.
     pub async fn handle_self_check(&self) -> FcpResult<serde_json::Value> {
-        Ok(json!({
-            "connector_id": "fcp.duckdb",
-            "version": "0.1.0",
-            "status": if self.config.is_some() { "ready" } else { "unconfigured" },
-        }))
+        let Some(config) = &self.config else {
+            let report =
+                SelfCheckReport::degraded("not_configured", "Connector is not configured");
+            return Self::serialize_self_check_report(report);
+        };
+
+        let readiness = config.provisioning_readiness();
+
+        let Some(_client) = &self.client else {
+            let mut report = SelfCheckReport::failed(
+                "client_missing",
+                "API client not initialized; re-run configure",
+            );
+            report.details = Some(json!({ "provisioning": readiness }));
+            return Self::serialize_self_check_report(report);
+        };
+
+        if readiness.requires_credential_injection {
+            let mut report = SelfCheckReport::degraded(
+                "credential_injection_required",
+                "credential_id mode requires egress proxy injection; skipping live probe",
+            );
+            report.details = Some(json!({ "provisioning": readiness }));
+            return Self::serialize_self_check_report(report);
+        }
+
+        let mut report = SelfCheckReport::ok();
+        report.details = Some(json!({ "provisioning": readiness }));
+        Self::serialize_self_check_report(report)
     }
 
     /// Handle the `introspect` method.
@@ -468,6 +518,51 @@ impl DuckDbConnector {
         let resp = client.create_share(&body).await?;
         Ok(json!({ "share": resp }))
     }
+
+    fn serialize_self_check_report(report: SelfCheckReport) -> FcpResult<serde_json::Value> {
+        info!(
+            event = "duckdb.provisioning.self_check",
+            status = ?report.status,
+            reason_code = ?report.reason_code,
+            "DuckDB self-check completed"
+        );
+
+        serde_json::to_value(report).map_err(|e| FcpError::Internal {
+            message: format!("Failed to serialize self-check report: {e}"),
+        })
+    }
+}
+
+/// Build the provisioning recipe for the `DuckDB` connector.
+///
+/// `DuckDB` is an embedded database — no remote API and no authentication
+/// token are strictly required for local-file operation. The minimal recipe
+/// asks the operator for the database file path and stores it for later
+/// configuration.
+pub fn provisioning_recipe() -> ProvisioningRecipe {
+    ProvisioningRecipe::new(
+        RecipeId::new("duckdb.local_file"),
+        "1",
+        "Provision DuckDB connector with a local database file path",
+    )
+    .with_step(ProvisioningStep::new(
+        StepId::new("enter_database_path"),
+        ProvisioningStepType::PromptUser {
+            message: "Enter the path to your DuckDB database file (e.g. /data/analytics.duckdb)"
+                .into(),
+        },
+    ))
+    .with_step(
+        ProvisioningStep::new(
+            StepId::new("store_database_path"),
+            ProvisioningStepType::StoreSecret {
+                key: "database_path".into(),
+                value_from: StepId::new("enter_database_path"),
+                scope: "connector:fcp.duckdb".into(),
+            },
+        )
+        .depends_on(StepId::new("enter_database_path")),
+    )
 }
 
 /// Extract a required string field from input.
@@ -1249,5 +1344,124 @@ mod tests {
         .unwrap();
         assert_eq!(config.base_url, "https://custom.motherduck.com/v0");
         assert_eq!(config.default_database, Some("my_db".into()));
+    }
+
+    // -- Provisioning readiness --
+
+    #[test]
+    fn provisioning_readiness_service_token_mode() {
+        let config = DuckDbConfig::from_params(&json!({
+            "service_token": "tok",
+        }))
+        .unwrap();
+        let readiness = config.provisioning_readiness();
+        assert_eq!(readiness.auth_mode, "service_token");
+        assert!(readiness.token_configured);
+        assert!(!readiness.credential_id_configured);
+        assert!(!readiness.requires_credential_injection);
+        assert!(!readiness.database_configured);
+    }
+
+    #[test]
+    fn provisioning_readiness_credential_id_mode() {
+        let config = DuckDbConfig::from_params(&json!({
+            "credential_id": "550e8400-e29b-41d4-a716-446655440000",
+        }))
+        .unwrap();
+        let readiness = config.provisioning_readiness();
+        assert_eq!(readiness.auth_mode, "credential_id");
+        assert!(!readiness.token_configured);
+        assert!(readiness.credential_id_configured);
+        assert!(readiness.requires_credential_injection);
+    }
+
+    #[test]
+    fn provisioning_readiness_with_database() {
+        let config = DuckDbConfig::from_params(&json!({
+            "service_token": "tok",
+            "database": "analytics",
+        }))
+        .unwrap();
+        let readiness = config.provisioning_readiness();
+        assert!(readiness.database_configured);
+    }
+
+    #[test]
+    fn provisioning_readiness_serializes() {
+        let config = DuckDbConfig::from_params(&json!({
+            "service_token": "tok",
+        }))
+        .unwrap();
+        let readiness = config.provisioning_readiness();
+        let v = serde_json::to_value(&readiness).unwrap();
+        assert_eq!(v["auth_mode"], "service_token");
+        assert_eq!(v["token_configured"], true);
+    }
+
+    // -- Provisioning recipe --
+
+    #[test]
+    fn provisioning_recipe_has_2_steps() {
+        let recipe = provisioning_recipe();
+        assert_eq!(recipe.id.as_str(), "duckdb.local_file");
+        assert_eq!(recipe.version, "1");
+        assert_eq!(recipe.steps.len(), 2);
+    }
+
+    #[test]
+    fn provisioning_recipe_step_order() {
+        let recipe = provisioning_recipe();
+        assert_eq!(recipe.steps[0].id.as_str(), "enter_database_path");
+        assert_eq!(recipe.steps[1].id.as_str(), "store_database_path");
+    }
+
+    #[test]
+    fn provisioning_recipe_step_dependencies() {
+        let recipe = provisioning_recipe();
+        assert!(recipe.steps[0].depends_on.is_empty());
+        assert_eq!(recipe.steps[1].depends_on.len(), 1);
+        assert_eq!(
+            recipe.steps[1].depends_on[0].as_str(),
+            "enter_database_path"
+        );
+    }
+
+    #[test]
+    fn provisioning_recipe_serializes() {
+        let recipe = provisioning_recipe();
+        let v = serde_json::to_value(&recipe).unwrap();
+        assert_eq!(v["id"], "duckdb.local_file");
+        assert_eq!(v["steps"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn provisioning_recipe_first_step_is_prompt_user() {
+        let recipe = provisioning_recipe();
+        let v = serde_json::to_value(recipe.steps[0].kind.clone()).unwrap();
+        assert_eq!(v["type"], "prompt_user");
+        assert!(v["message"].as_str().unwrap().contains("database file"));
+    }
+
+    #[test]
+    fn provisioning_recipe_second_step_is_store_secret() {
+        let recipe = provisioning_recipe();
+        let v = serde_json::to_value(recipe.steps[1].kind.clone()).unwrap();
+        assert_eq!(v["type"], "store_secret");
+        assert_eq!(v["key"], "database_path");
+        assert_eq!(v["scope"], "connector:fcp.duckdb");
+    }
+
+    #[test]
+    fn provisioning_recipe_description_mentions_duckdb() {
+        let recipe = provisioning_recipe();
+        assert!(recipe.description.contains("DuckDB"));
+    }
+
+    #[test]
+    fn provisioning_recipe_no_approval_required() {
+        let recipe = provisioning_recipe();
+        for step in &recipe.steps {
+            assert!(!step.requires_approval);
+        }
     }
 }

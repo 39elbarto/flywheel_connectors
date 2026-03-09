@@ -69,7 +69,33 @@ async fn lifecycle_self_check() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
     let check = c.handle_self_check().await.unwrap();
-    assert_eq!(check["status"], "ready");
+    assert_eq!(check["status"], "ok");
+    assert!(check["details"]["provisioning"]["network_ok"].as_bool().unwrap());
+    assert_eq!(check["details"]["provisioning"]["auth_mode"], "api_key");
+}
+
+#[fcp_async_core::runtime::test]
+async fn lifecycle_self_check_unconfigured() {
+    let c = PostHogConnector::new();
+    let check = c.handle_self_check().await.unwrap();
+    assert_eq!(check["status"], "degraded");
+    assert_eq!(check["reason_code"], "not_configured");
+}
+
+#[fcp_async_core::runtime::test]
+async fn lifecycle_self_check_credential_id() {
+    let server = MockServer::start().await;
+    let mut c = PostHogConnector::new();
+    c.handle_configure(json!({
+        "credential_id": "550e8400-e29b-41d4-a716-446655440000",
+        "project_id": "12345",
+        "base_url": server.uri()
+    }))
+    .await
+    .unwrap();
+    let check = c.handle_self_check().await.unwrap();
+    assert_eq!(check["status"], "degraded");
+    assert_eq!(check["reason_code"], "credential_injection_required");
 }
 
 #[fcp_async_core::runtime::test]

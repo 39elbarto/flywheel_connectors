@@ -5,8 +5,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use fcp_core::{
     AgentHint, BaseConnector, CapabilityId, ConnectorId, CredentialId, FcpError, FcpResult,
-    IdempotencyClass, OperationId, OperationInfo, RiskLevel, SafetyTier,
+    IdempotencyClass, OperationId, OperationInfo, ProvisioningRecipe, ProvisioningStep,
+    ProvisioningStepType, RecipeId, RiskLevel, SafetyTier, SelfCheckReport, StepId,
 };
+use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tracing::{info, instrument};
@@ -73,6 +75,35 @@ impl SegmentConfig {
 
         Ok(Self { auth, base_url })
     }
+
+    fn provisioning_readiness(&self) -> ProvisioningReadiness {
+        let (network_ok, network_message) = base_url_policy(&self.base_url);
+
+        ProvisioningReadiness {
+            auth_mode: match &self.auth {
+                SegmentAuth::BearerToken(_) => "bearer_token",
+                SegmentAuth::CredentialId(_) => "credential_id",
+            },
+            token_configured: matches!(&self.auth, SegmentAuth::BearerToken(_)),
+            credential_id_configured: self.auth.is_secretless(),
+            requires_credential_injection: self.auth.is_secretless(),
+            network_ok,
+            network_message,
+            base_url: self.base_url.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[allow(clippy::struct_excessive_bools)]
+struct ProvisioningReadiness {
+    auth_mode: &'static str,
+    token_configured: bool,
+    credential_id_configured: bool,
+    requires_credential_injection: bool,
+    network_ok: bool,
+    network_message: String,
+    base_url: String,
 }
 
 /// Doctor check result.
@@ -261,11 +292,43 @@ impl SegmentConnector {
 
     /// Handle the `self_check` method.
     pub async fn handle_self_check(&self) -> FcpResult<serde_json::Value> {
-        Ok(json!({
-            "connector_id": "fcp.segment",
-            "version": "0.1.0",
-            "status": if self.config.is_some() { "ready" } else { "unconfigured" },
-        }))
+        let Some(config) = &self.config else {
+            let report =
+                SelfCheckReport::degraded("not_configured", "Connector is not configured");
+            return Self::serialize_self_check_report(report);
+        };
+
+        let readiness = config.provisioning_readiness();
+        if !readiness.network_ok {
+            let mut report = SelfCheckReport::failed(
+                "network_constraints_invalid",
+                readiness.network_message.clone(),
+            );
+            report.details = Some(json!({ "provisioning": readiness }));
+            return Self::serialize_self_check_report(report);
+        }
+
+        let Some(_client) = &self.client else {
+            let mut report = SelfCheckReport::failed(
+                "client_missing",
+                "API client not initialized; re-run configure",
+            );
+            report.details = Some(json!({ "provisioning": readiness }));
+            return Self::serialize_self_check_report(report);
+        };
+
+        if readiness.requires_credential_injection {
+            let mut report = SelfCheckReport::degraded(
+                "credential_injection_required",
+                "credential_id mode requires egress proxy injection; skipping live probe",
+            );
+            report.details = Some(json!({ "provisioning": readiness }));
+            return Self::serialize_self_check_report(report);
+        }
+
+        let mut report = SelfCheckReport::ok();
+        report.details = Some(json!({ "provisioning": readiness }));
+        Self::serialize_self_check_report(report)
     }
 
     /// Handle the `introspect` method.
@@ -391,6 +454,83 @@ impl SegmentConnector {
             .unwrap_or(false);
         Ok(json!({ "success": success }))
     }
+
+    fn serialize_self_check_report(report: SelfCheckReport) -> FcpResult<serde_json::Value> {
+        info!(
+            event = "segment.provisioning.self_check",
+            status = ?report.status,
+            reason_code = ?report.reason_code,
+            "`Segment` self-check completed"
+        );
+
+        serde_json::to_value(report).map_err(|e| FcpError::Internal {
+            message: format!("Failed to serialize self-check report: {e}"),
+        })
+    }
+}
+
+/// Build the provisioning recipe for the `Segment` connector.
+pub fn provisioning_recipe() -> ProvisioningRecipe {
+    ProvisioningRecipe::new(
+        RecipeId::new("segment.write_key"),
+        "1",
+        "Provision `Segment` connector with a write key (API token)",
+    )
+    .with_step(ProvisioningStep::new(
+        StepId::new("enter_write_key"),
+        ProvisioningStepType::PromptSecret {
+            message: "Paste your `Segment` write key".into(),
+        },
+    ))
+    .with_step(
+        ProvisioningStep::new(
+            StepId::new("store_write_key"),
+            ProvisioningStepType::StoreSecret {
+                key: "api_token".into(),
+                value_from: StepId::new("enter_write_key"),
+                scope: "connector:fcp.segment".into(),
+            },
+        )
+        .depends_on(StepId::new("enter_write_key")),
+    )
+}
+
+fn base_url_policy(base_url: &str) -> (bool, String) {
+    let parsed = match Url::parse(base_url) {
+        Ok(parsed) => parsed,
+        Err(error) => {
+            return (false, format!("base_url could not be parsed: {error}"));
+        }
+    };
+
+    let Some(host) = parsed.host_str() else {
+        return (false, "base_url must include a host".into());
+    };
+
+    let local = is_local_test_host(host);
+    let allowed_host = host.eq_ignore_ascii_case("api.segment.io")
+        || host.eq_ignore_ascii_case("cdn.segment.com")
+        || host.eq_ignore_ascii_case("api.segmentapis.com")
+        || local;
+    let secure_or_local = parsed.scheme() == "https" || local;
+
+    if allowed_host && secure_or_local {
+        (
+            true,
+            format!("Endpoint accepted by policy checks: {base_url}"),
+        )
+    } else {
+        (
+            false,
+            format!(
+                "Endpoint must use https and api.segment.io / cdn.segment.com / api.segmentapis.com (localhost/127.0.0.1/::1 allowed for tests): {base_url}"
+            ),
+        )
+    }
+}
+
+fn is_local_test_host(host: &str) -> bool {
+    matches!(host, "localhost" | "127.0.0.1" | "::1")
 }
 
 /// Extract a required string field from input.
@@ -1243,5 +1383,240 @@ mod tests {
     fn require_str_object_value_fails() {
         let input = json!({"source_id": {"nested": "value"}});
         assert!(require_str(&input, "source_id").is_err());
+    }
+
+    // ── Provisioning tests ────────────────────────────────────────
+
+    #[test]
+    fn provisioning_readiness_bearer_token_mode() {
+        let config = SegmentConfig::from_params(&json!({
+            "api_token": "test-token",
+        }))
+        .unwrap();
+        let readiness = config.provisioning_readiness();
+        assert_eq!(readiness.auth_mode, "bearer_token");
+        assert!(readiness.token_configured);
+        assert!(!readiness.credential_id_configured);
+        assert!(!readiness.requires_credential_injection);
+        assert!(readiness.network_ok);
+        assert_eq!(readiness.base_url, DEFAULT_BASE_URL);
+    }
+
+    #[test]
+    fn provisioning_readiness_credential_id_mode() {
+        let config = SegmentConfig::from_params(&json!({
+            "credential_id": "550e8400-e29b-41d4-a716-446655440000",
+        }))
+        .unwrap();
+        let readiness = config.provisioning_readiness();
+        assert_eq!(readiness.auth_mode, "credential_id");
+        assert!(!readiness.token_configured);
+        assert!(readiness.credential_id_configured);
+        assert!(readiness.requires_credential_injection);
+        assert!(readiness.network_ok);
+    }
+
+    #[test]
+    fn provisioning_readiness_serializes() {
+        let config = SegmentConfig::from_params(&json!({
+            "api_token": "tok",
+        }))
+        .unwrap();
+        let readiness = config.provisioning_readiness();
+        let v = serde_json::to_value(&readiness).unwrap();
+        assert_eq!(v["auth_mode"], "bearer_token");
+        assert_eq!(v["token_configured"], true);
+        assert_eq!(v["network_ok"], true);
+    }
+
+    #[test]
+    fn provisioning_readiness_debug_format() {
+        let config = SegmentConfig::from_params(&json!({
+            "api_token": "tok",
+        }))
+        .unwrap();
+        let readiness = config.provisioning_readiness();
+        let dbg = format!("{readiness:?}");
+        assert!(dbg.contains("ProvisioningReadiness"));
+    }
+
+    #[test]
+    fn provisioning_readiness_clone() {
+        let config = SegmentConfig::from_params(&json!({
+            "api_token": "tok",
+        }))
+        .unwrap();
+        let readiness = config.provisioning_readiness();
+        let cloned = readiness.clone();
+        assert_eq!(readiness.auth_mode, cloned.auth_mode);
+        assert_eq!(readiness.network_ok, cloned.network_ok);
+    }
+
+    #[test]
+    fn provisioning_recipe_has_2_steps() {
+        let recipe = provisioning_recipe();
+        assert_eq!(recipe.id.as_str(), "segment.write_key");
+        assert_eq!(recipe.version, "1");
+        assert_eq!(recipe.steps.len(), 2);
+    }
+
+    #[test]
+    fn provisioning_recipe_step_order() {
+        let recipe = provisioning_recipe();
+        assert_eq!(recipe.steps[0].id.as_str(), "enter_write_key");
+        assert_eq!(recipe.steps[1].id.as_str(), "store_write_key");
+    }
+
+    #[test]
+    fn provisioning_recipe_step_dependencies() {
+        let recipe = provisioning_recipe();
+        assert!(recipe.steps[0].depends_on.is_empty());
+        assert_eq!(recipe.steps[1].depends_on.len(), 1);
+        assert_eq!(recipe.steps[1].depends_on[0].as_str(), "enter_write_key");
+    }
+
+    #[test]
+    fn provisioning_recipe_serializes() {
+        let recipe = provisioning_recipe();
+        let v = serde_json::to_value(&recipe).unwrap();
+        assert_eq!(v["id"], "segment.write_key");
+        assert!(v["steps"].as_array().unwrap().len() == 2);
+    }
+
+    #[test]
+    fn provisioning_recipe_description_contains_segment() {
+        let recipe = provisioning_recipe();
+        assert!(recipe.description.contains("Segment"));
+    }
+
+    #[test]
+    fn provisioning_recipe_store_step_scope() {
+        let recipe = provisioning_recipe();
+        let store_step = &recipe.steps[1];
+        match &store_step.kind {
+            ProvisioningStepType::StoreSecret { key, scope, .. } => {
+                assert_eq!(key, "api_token");
+                assert_eq!(scope, "connector:fcp.segment");
+            }
+            other => panic!("expected StoreSecret, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn provisioning_recipe_prompt_step_message() {
+        let recipe = provisioning_recipe();
+        let prompt_step = &recipe.steps[0];
+        match &prompt_step.kind {
+            ProvisioningStepType::PromptSecret { message } => {
+                assert!(message.contains("write key"));
+            }
+            other => panic!("expected PromptSecret, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn base_url_policy_accepts_segment_io_https() {
+        let (ok, message) = base_url_policy("https://api.segment.io");
+        assert!(ok);
+        assert!(message.contains("accepted"));
+    }
+
+    #[test]
+    fn base_url_policy_accepts_cdn_segment_com() {
+        let (ok, message) = base_url_policy("https://cdn.segment.com");
+        assert!(ok);
+        assert!(message.contains("accepted"));
+    }
+
+    #[test]
+    fn base_url_policy_accepts_segmentapis_com() {
+        let (ok, message) = base_url_policy("https://api.segmentapis.com/v2");
+        assert!(ok);
+        assert!(message.contains("accepted"));
+    }
+
+    #[test]
+    fn base_url_policy_accepts_localhost() {
+        let (ok, _) = base_url_policy("http://localhost:8080");
+        assert!(ok);
+    }
+
+    #[test]
+    fn base_url_policy_accepts_127_0_0_1() {
+        let (ok, _) = base_url_policy("http://127.0.0.1:9090");
+        assert!(ok);
+    }
+
+    #[test]
+    fn base_url_policy_rejects_http_non_local() {
+        let (ok, message) = base_url_policy("http://api.segment.io");
+        assert!(!ok);
+        assert!(message.contains("must use https"));
+    }
+
+    #[test]
+    fn base_url_policy_rejects_unknown_host() {
+        let (ok, message) = base_url_policy("https://evil.example.com");
+        assert!(!ok);
+        assert!(message.contains("api.segment.io"));
+    }
+
+    #[test]
+    fn base_url_policy_rejects_invalid_url() {
+        let (ok, message) = base_url_policy("not a url");
+        assert!(!ok);
+        assert!(message.contains("could not be parsed"));
+    }
+
+    #[test]
+    fn base_url_policy_case_insensitive() {
+        let (ok, _) = base_url_policy("https://API.SEGMENT.IO");
+        assert!(ok);
+        let (ok, _) = base_url_policy("https://CDN.SEGMENT.COM");
+        assert!(ok);
+    }
+
+    #[test]
+    fn provisioning_readiness_custom_base_url_rejected() {
+        let config = SegmentConfig::from_params(&json!({
+            "api_token": "tok",
+            "base_url": "https://evil.example.com",
+        }))
+        .unwrap();
+        let readiness = config.provisioning_readiness();
+        assert!(!readiness.network_ok);
+        assert!(readiness.network_message.contains("api.segment.io"));
+    }
+
+    #[test]
+    fn provisioning_readiness_localhost_base_url_accepted() {
+        let config = SegmentConfig::from_params(&json!({
+            "api_token": "tok",
+            "base_url": "http://localhost:8080",
+        }))
+        .unwrap();
+        let readiness = config.provisioning_readiness();
+        assert!(readiness.network_ok);
+    }
+
+    #[test]
+    fn is_local_test_host_localhost() {
+        assert!(is_local_test_host("localhost"));
+    }
+
+    #[test]
+    fn is_local_test_host_ipv4() {
+        assert!(is_local_test_host("127.0.0.1"));
+    }
+
+    #[test]
+    fn is_local_test_host_ipv6() {
+        assert!(is_local_test_host("::1"));
+    }
+
+    #[test]
+    fn is_local_test_host_rejects_other() {
+        assert!(!is_local_test_host("api.segment.io"));
+        assert!(!is_local_test_host("example.com"));
     }
 }

@@ -95,6 +95,7 @@ impl ClickUpConfig {
 
 /// Provisioning readiness state.
 #[derive(Debug, Clone, Serialize)]
+#[allow(clippy::struct_excessive_bools)]
 struct ProvisioningReadiness {
     auth_mode: &'static str,
     token_configured: bool,
@@ -485,7 +486,7 @@ impl ClickUpConnector {
     }
 }
 
-/// Build the provisioning recipe for the ClickUp connector.
+/// Build the provisioning recipe for the `ClickUp` connector.
 pub fn provisioning_recipe() -> ProvisioningRecipe {
     ProvisioningRecipe::new(
         RecipeId::new("clickup.api_token"),
@@ -523,16 +524,12 @@ pub fn provisioning_recipe() -> ProvisioningRecipe {
 }
 
 fn base_url_policy(base_url: &str) -> (bool, String) {
-    let parsed = match Url::parse(base_url) {
-        Ok(parsed) => parsed,
-        Err(error) => {
-            return (false, format!("base_url could not be parsed: {error}"));
-        }
+    let Ok(parsed) = Url::parse(base_url) else {
+        return (false, format!("base_url could not be parsed: {base_url}"));
     };
 
-    let host = match parsed.host_str() {
-        Some(h) => h,
-        None => return (false, "base_url has no host".into()),
+    let Some(host) = parsed.host_str() else {
+        return (false, "base_url has no host".into());
     };
 
     if is_local_test_host(host) {

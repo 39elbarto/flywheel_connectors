@@ -5,8 +5,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use fcp_core::{
     AgentHint, BaseConnector, CapabilityId, ConnectorId, CredentialId, FcpError, FcpResult,
-    IdempotencyClass, Introspection, OperationId, OperationInfo, RiskLevel, SafetyTier,
+    IdempotencyClass, Introspection, OAuthRecipe, OperationId, OperationInfo, ProvisioningRecipe,
+    ProvisioningStep, ProvisioningStepType, RecipeId, RiskLevel, SafetyTier, SelfCheckReport,
+    StepId, WebhookRecipe, WebhookVerification,
 };
+use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tracing::{info, instrument};
@@ -73,6 +76,35 @@ impl HubSpotConfig {
 
         Ok(Self { auth, base_url })
     }
+
+    fn provisioning_readiness(&self) -> ProvisioningReadiness {
+        let (network_ok, network_message) = base_url_policy(&self.base_url);
+
+        ProvisioningReadiness {
+            auth_mode: match &self.auth {
+                HubSpotAuth::BearerToken(_) => "bearer_token",
+                HubSpotAuth::CredentialId(_) => "credential_id",
+            },
+            token_configured: matches!(&self.auth, HubSpotAuth::BearerToken(_)),
+            credential_id_configured: self.auth.is_secretless(),
+            requires_credential_injection: self.auth.is_secretless(),
+            network_ok,
+            network_message,
+            base_url: self.base_url.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[allow(clippy::struct_excessive_bools)]
+struct ProvisioningReadiness {
+    auth_mode: &'static str,
+    token_configured: bool,
+    credential_id_configured: bool,
+    requires_credential_injection: bool,
+    network_ok: bool,
+    network_message: String,
+    base_url: String,
 }
 
 /// Doctor check result.
@@ -266,11 +298,43 @@ impl HubSpotConnector {
 
     /// Handle the `self_check` method.
     pub async fn handle_self_check(&self) -> FcpResult<serde_json::Value> {
-        Ok(json!({
-            "connector_id": "fcp.hubspot",
-            "version": "0.1.0",
-            "status": if self.config.is_some() { "ready" } else { "unconfigured" },
-        }))
+        let Some(config) = &self.config else {
+            let report =
+                SelfCheckReport::degraded("not_configured", "Connector is not configured");
+            return Self::serialize_self_check_report(report);
+        };
+
+        let readiness = config.provisioning_readiness();
+        if !readiness.network_ok {
+            let mut report = SelfCheckReport::failed(
+                "network_constraints_invalid",
+                readiness.network_message.clone(),
+            );
+            report.details = Some(json!({ "provisioning": readiness }));
+            return Self::serialize_self_check_report(report);
+        }
+
+        let Some(_client) = &self.client else {
+            let mut report = SelfCheckReport::failed(
+                "client_missing",
+                "API client not initialized; re-run configure",
+            );
+            report.details = Some(json!({ "provisioning": readiness }));
+            return Self::serialize_self_check_report(report);
+        };
+
+        if readiness.requires_credential_injection {
+            let mut report = SelfCheckReport::degraded(
+                "credential_injection_required",
+                "credential_id mode requires egress proxy injection; skipping live probe",
+            );
+            report.details = Some(json!({ "provisioning": readiness }));
+            return Self::serialize_self_check_report(report);
+        }
+
+        let mut report = SelfCheckReport::ok();
+        report.details = Some(json!({ "provisioning": readiness }));
+        Self::serialize_self_check_report(report)
     }
 
     /// Handle the `introspect` method.
@@ -758,6 +822,19 @@ impl HubSpotConnector {
         Ok(json!({}))
     }
 
+    fn serialize_self_check_report(report: SelfCheckReport) -> FcpResult<serde_json::Value> {
+        info!(
+            event = "hubspot.provisioning.self_check",
+            status = ?report.status,
+            reason_code = ?report.reason_code,
+            "HubSpot self-check completed"
+        );
+
+        serde_json::to_value(report).map_err(|e| FcpError::Internal {
+            message: format!("Failed to serialize self-check report: {e}"),
+        })
+    }
+
     // ── Operation implementations ─────────────────────────────────────
 
     async fn invoke_contacts_list(
@@ -930,6 +1007,107 @@ fn extract_string_array(input: &serde_json::Value, field: &str) -> Option<Vec<St
             .filter_map(|v| v.as_str().map(String::from))
             .collect()
     })
+}
+
+/// Build the provisioning recipe for the `HubSpot` connector.
+///
+/// Uses `OAuth2` Authorization Code with PKCE for browser-based interactive
+/// setup, plus a webhook registration step for CRM object change notifications.
+pub fn provisioning_recipe() -> ProvisioningRecipe {
+    ProvisioningRecipe::new(
+        RecipeId::new("hubspot.oauth2_pkce"),
+        "1",
+        "Provision HubSpot connector with OAuth2 Authorization Code + PKCE",
+    )
+    .with_step(ProvisioningStep::new(
+        StepId::new("oauth_authorize"),
+        ProvisioningStepType::Oauth {
+            flow: OAuthRecipe::AuthorizationCodePkce {
+                authorization_url: "https://app.hubspot.com/oauth/authorize".into(),
+                token_url: "https://api.hubapi.com/oauth/v1/token".into(),
+                scopes: vec![
+                    "crm.objects.contacts.read".into(),
+                    "crm.objects.deals.read".into(),
+                    "crm.objects.companies.read".into(),
+                ],
+                auto_browser: true,
+                callback_port: 9807,
+            },
+        },
+    ))
+    .with_step(
+        ProvisioningStep::new(
+            StepId::new("store_token"),
+            ProvisioningStepType::StoreSecret {
+                key: "access_token".into(),
+                value_from: StepId::new("oauth_authorize"),
+                scope: "connector:fcp.hubspot".into(),
+            },
+        )
+        .depends_on(StepId::new("oauth_authorize")),
+    )
+    .with_step(
+        ProvisioningStep::new(
+            StepId::new("register_webhooks"),
+            ProvisioningStepType::Webhook {
+                registration: WebhookRecipe {
+                    registration_url:
+                        "https://api.hubapi.com/webhooks/v3/{appId}/subscriptions".into(),
+                    events: vec![
+                        "contact.creation".into(),
+                        "contact.propertyChange".into(),
+                        "deal.creation".into(),
+                        "deal.propertyChange".into(),
+                        "company.creation".into(),
+                        "company.propertyChange".into(),
+                    ],
+                    verification: WebhookVerification::HmacSignature {
+                        algorithm: "sha256".into(),
+                        header: "X-HubSpot-Signature-v3".into(),
+                    },
+                    retry_policy: fcp_core::RetryConfig::default(),
+                },
+            },
+        )
+        .depends_on(StepId::new("store_token")),
+    )
+}
+
+fn base_url_policy(base_url: &str) -> (bool, String) {
+    let parsed = match Url::parse(base_url) {
+        Ok(parsed) => parsed,
+        Err(error) => {
+            return (false, format!("base_url could not be parsed: {error}"));
+        }
+    };
+
+    let Some(host) = parsed.host_str() else {
+        return (false, "base_url must include a host".into());
+    };
+
+    let local = is_local_test_host(host);
+    let allowed_host = host.eq_ignore_ascii_case("api.hubapi.com")
+        || host.eq_ignore_ascii_case("api.hubspot.com")
+        || local;
+    let secure_or_local = parsed.scheme() == "https" || local;
+
+    if allowed_host && secure_or_local {
+        (
+            true,
+            format!("Endpoint accepted by policy checks: {base_url}"),
+        )
+    } else {
+        (
+            false,
+            format!(
+                "Endpoint must use https and api.hubapi.com or api.hubspot.com (localhost/127.0.0.1/::1 allowed for tests): {base_url}"
+            ),
+        )
+    }
+}
+
+fn is_local_test_host(host: &str) -> bool {
+    matches!(host, "localhost" | "127.0.0.1" | "::1")
 }
 
 /// Build the operations info for introspection.
@@ -1725,5 +1903,227 @@ mod tests {
                 "op {id} should start with hubspot."
             );
         }
+    }
+
+    // ── Provisioning tests ───────────────────────────────────────────
+
+    #[test]
+    fn provisioning_recipe_has_correct_id() {
+        let recipe = provisioning_recipe();
+        assert_eq!(recipe.id.as_str(), "hubspot.oauth2_pkce");
+    }
+
+    #[test]
+    fn provisioning_recipe_has_three_steps() {
+        let recipe = provisioning_recipe();
+        assert_eq!(recipe.steps.len(), 3);
+    }
+
+    #[test]
+    fn provisioning_recipe_step_ids() {
+        let recipe = provisioning_recipe();
+        let ids: Vec<&str> = recipe.steps.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(ids, ["oauth_authorize", "store_token", "register_webhooks"]);
+    }
+
+    #[test]
+    fn provisioning_recipe_oauth_step_is_pkce() {
+        let recipe = provisioning_recipe();
+        let oauth_step = &recipe.steps[0];
+        match &oauth_step.kind {
+            ProvisioningStepType::Oauth { flow } => match flow {
+                OAuthRecipe::AuthorizationCodePkce {
+                    authorization_url,
+                    token_url,
+                    scopes,
+                    ..
+                } => {
+                    assert_eq!(
+                        authorization_url,
+                        "https://app.hubspot.com/oauth/authorize"
+                    );
+                    assert_eq!(token_url, "https://api.hubapi.com/oauth/v1/token");
+                    assert!(scopes.contains(&"crm.objects.contacts.read".to_string()));
+                    assert!(scopes.contains(&"crm.objects.deals.read".to_string()));
+                    assert!(scopes.contains(&"crm.objects.companies.read".to_string()));
+                }
+                other => panic!("expected AuthorizationCodePkce, got {other:?}"),
+            },
+            other => panic!("expected Oauth step, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn provisioning_recipe_store_step_depends_on_oauth() {
+        let recipe = provisioning_recipe();
+        let store_step = &recipe.steps[1];
+        assert!(store_step
+            .depends_on
+            .iter()
+            .any(|d| d.as_str() == "oauth_authorize"));
+    }
+
+    #[test]
+    fn provisioning_recipe_webhook_step_depends_on_store() {
+        let recipe = provisioning_recipe();
+        let webhook_step = &recipe.steps[2];
+        assert!(webhook_step
+            .depends_on
+            .iter()
+            .any(|d| d.as_str() == "store_token"));
+    }
+
+    #[test]
+    fn provisioning_recipe_webhook_events() {
+        let recipe = provisioning_recipe();
+        let webhook_step = &recipe.steps[2];
+        match &webhook_step.kind {
+            ProvisioningStepType::Webhook { registration } => {
+                assert!(registration.events.contains(&"contact.creation".to_string()));
+                assert!(registration
+                    .events
+                    .contains(&"deal.propertyChange".to_string()));
+                assert_eq!(registration.events.len(), 6);
+            }
+            other => panic!("expected Webhook step, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn provisioning_recipe_webhook_hmac_verification() {
+        let recipe = provisioning_recipe();
+        let webhook_step = &recipe.steps[2];
+        match &webhook_step.kind {
+            ProvisioningStepType::Webhook { registration } => match &registration.verification {
+                WebhookVerification::HmacSignature { algorithm, header } => {
+                    assert_eq!(algorithm, "sha256");
+                    assert_eq!(header, "X-HubSpot-Signature-v3");
+                }
+                other => panic!("expected HmacSignature, got {other:?}"),
+            },
+            other => panic!("expected Webhook step, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn provisioning_recipe_serializes() {
+        let recipe = provisioning_recipe();
+        let v = serde_json::to_value(&recipe).unwrap();
+        assert_eq!(v["id"], "hubspot.oauth2_pkce");
+        assert_eq!(v["version"], "1");
+        assert!(v["description"]
+            .as_str()
+            .unwrap()
+            .contains("OAuth2"));
+    }
+
+    // ── base_url_policy tests ────────────────────────────────────────
+
+    #[test]
+    fn base_url_policy_accepts_hubapi() {
+        let (ok, msg) = base_url_policy("https://api.hubapi.com");
+        assert!(ok, "should accept api.hubapi.com: {msg}");
+    }
+
+    #[test]
+    fn base_url_policy_accepts_hubspot_api() {
+        let (ok, msg) = base_url_policy("https://api.hubspot.com");
+        assert!(ok, "should accept api.hubspot.com: {msg}");
+    }
+
+    #[test]
+    fn base_url_policy_accepts_localhost() {
+        let (ok, _) = base_url_policy("http://localhost:8080");
+        assert!(ok);
+    }
+
+    #[test]
+    fn base_url_policy_accepts_loopback() {
+        let (ok, _) = base_url_policy("http://127.0.0.1:9999");
+        assert!(ok);
+    }
+
+    #[test]
+    fn base_url_policy_rejects_unknown_host() {
+        let (ok, msg) = base_url_policy("https://evil.example.com");
+        assert!(!ok);
+        assert!(msg.contains("api.hubapi.com"));
+    }
+
+    #[test]
+    fn base_url_policy_rejects_http_non_local() {
+        let (ok, _) = base_url_policy("http://api.hubapi.com");
+        assert!(!ok);
+    }
+
+    #[test]
+    fn base_url_policy_rejects_invalid_url() {
+        let (ok, msg) = base_url_policy("not a url");
+        assert!(!ok);
+        assert!(msg.contains("could not be parsed"));
+    }
+
+    // ── ProvisioningReadiness tests ──────────────────────────────────
+
+    #[test]
+    fn provisioning_readiness_bearer_token() {
+        let config =
+            HubSpotConfig::from_params(&json!({ "access_token": "pat-na1-test" })).unwrap();
+        let readiness = config.provisioning_readiness();
+        assert_eq!(readiness.auth_mode, "bearer_token");
+        assert!(readiness.token_configured);
+        assert!(!readiness.credential_id_configured);
+        assert!(!readiness.requires_credential_injection);
+    }
+
+    #[test]
+    fn provisioning_readiness_credential_id() {
+        let config = HubSpotConfig::from_params(
+            &json!({ "credential_id": "550e8400-e29b-41d4-a716-446655440000" }),
+        )
+        .unwrap();
+        let readiness = config.provisioning_readiness();
+        assert_eq!(readiness.auth_mode, "credential_id");
+        assert!(!readiness.token_configured);
+        assert!(readiness.credential_id_configured);
+        assert!(readiness.requires_credential_injection);
+    }
+
+    #[test]
+    fn provisioning_readiness_network_ok_default_url() {
+        let config =
+            HubSpotConfig::from_params(&json!({ "access_token": "tok" })).unwrap();
+        let readiness = config.provisioning_readiness();
+        assert!(readiness.network_ok);
+        assert_eq!(readiness.base_url, DEFAULT_BASE_URL);
+    }
+
+    #[test]
+    fn provisioning_readiness_network_fail_bad_url() {
+        let config = HubSpotConfig::from_params(
+            &json!({ "access_token": "tok", "base_url": "https://evil.example.com" }),
+        )
+        .unwrap();
+        let readiness = config.provisioning_readiness();
+        assert!(!readiness.network_ok);
+    }
+
+    #[test]
+    fn provisioning_readiness_serializes() {
+        let config =
+            HubSpotConfig::from_params(&json!({ "access_token": "pat-na1-test" })).unwrap();
+        let readiness = config.provisioning_readiness();
+        let v = serde_json::to_value(&readiness).unwrap();
+        assert_eq!(v["auth_mode"], "bearer_token");
+        assert_eq!(v["token_configured"], true);
+    }
+
+    #[test]
+    fn is_local_test_host_cases() {
+        assert!(is_local_test_host("localhost"));
+        assert!(is_local_test_host("127.0.0.1"));
+        assert!(is_local_test_host("::1"));
+        assert!(!is_local_test_host("api.hubapi.com"));
+        assert!(!is_local_test_host("example.com"));
     }
 }

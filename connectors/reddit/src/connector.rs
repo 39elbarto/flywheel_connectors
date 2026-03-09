@@ -5,8 +5,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use fcp_core::{
     AgentHint, BaseConnector, CapabilityId, ConnectorId, CredentialId, FcpError, FcpResult,
-    IdempotencyClass, Introspection, OperationId, OperationInfo, RiskLevel, SafetyTier,
+    IdempotencyClass, Introspection, OAuthRecipe, OperationId, OperationInfo,
+    ProvisioningRecipe, ProvisioningStep, ProvisioningStepType, RecipeId, RiskLevel, SafetyTier,
+    SelfCheckReport, StepId,
 };
+use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tracing::{info, instrument};
@@ -74,6 +77,35 @@ impl RedditConfig {
 
         Ok(Self { auth, base_url })
     }
+
+    fn provisioning_readiness(&self) -> ProvisioningReadiness {
+        let (network_ok, network_message) = base_url_policy(&self.base_url);
+
+        ProvisioningReadiness {
+            auth_mode: match &self.auth {
+                RedditAuth::BearerToken(_) => "bearer_token",
+                RedditAuth::CredentialId(_) => "credential_id",
+            },
+            token_configured: matches!(&self.auth, RedditAuth::BearerToken(_)),
+            credential_id_configured: self.auth.is_secretless(),
+            requires_credential_injection: self.auth.is_secretless(),
+            network_ok,
+            network_message,
+            base_url: self.base_url.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[allow(clippy::struct_excessive_bools)]
+struct ProvisioningReadiness {
+    auth_mode: &'static str,
+    token_configured: bool,
+    credential_id_configured: bool,
+    requires_credential_injection: bool,
+    network_ok: bool,
+    network_message: String,
+    base_url: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -238,9 +270,43 @@ impl RedditConnector {
     }
 
     pub async fn handle_self_check(&self) -> FcpResult<serde_json::Value> {
-        Ok(
-            json!({ "connector_id": "fcp.reddit", "version": "0.1.0", "status": if self.config.is_some() { "ready" } else { "unconfigured" } }),
-        )
+        let Some(config) = &self.config else {
+            let report =
+                SelfCheckReport::degraded("not_configured", "Connector is not configured");
+            return Self::serialize_self_check_report(report);
+        };
+
+        let readiness = config.provisioning_readiness();
+        if !readiness.network_ok {
+            let mut report = SelfCheckReport::failed(
+                "network_constraints_invalid",
+                readiness.network_message.clone(),
+            );
+            report.details = Some(json!({ "provisioning": readiness }));
+            return Self::serialize_self_check_report(report);
+        }
+
+        let Some(_client) = &self.client else {
+            let mut report = SelfCheckReport::failed(
+                "client_missing",
+                "API client not initialized; re-run configure",
+            );
+            report.details = Some(json!({ "provisioning": readiness }));
+            return Self::serialize_self_check_report(report);
+        };
+
+        if readiness.requires_credential_injection {
+            let mut report = SelfCheckReport::degraded(
+                "credential_injection_required",
+                "credential_id mode requires egress proxy injection; skipping live probe",
+            );
+            report.details = Some(json!({ "provisioning": readiness }));
+            return Self::serialize_self_check_report(report);
+        }
+
+        let mut report = SelfCheckReport::ok();
+        report.details = Some(json!({ "provisioning": readiness }));
+        Self::serialize_self_check_report(report)
     }
 
     pub async fn handle_introspect(&self) -> FcpResult<serde_json::Value> {
@@ -858,6 +924,98 @@ impl RedditConnector {
         let next_checkpoint = listing.get("next_after").cloned().unwrap_or(json!(null));
         Ok(json!({ "events": events, "next_checkpoint": next_checkpoint }))
     }
+
+    fn serialize_self_check_report(report: SelfCheckReport) -> FcpResult<serde_json::Value> {
+        info!(
+            event = "reddit.provisioning.self_check",
+            status = ?report.status,
+            reason_code = ?report.reason_code,
+            "Reddit self-check completed"
+        );
+
+        serde_json::to_value(report).map_err(|e| FcpError::Internal {
+            message: format!("Failed to serialize self-check report: {e}"),
+        })
+    }
+}
+
+/// Build the provisioning recipe for the Reddit connector.
+///
+/// Uses `OAuth2` Authorization Code with PKCE (Reddit supports this natively).
+/// Scopes cover read-only research plus optional posting/messaging/moderation.
+pub fn provisioning_recipe() -> ProvisioningRecipe {
+    ProvisioningRecipe::new(
+        RecipeId::new("reddit.oauth2_pkce"),
+        "1",
+        "Provision Reddit connector with OAuth2 Authorization Code + PKCE",
+    )
+    .with_step(ProvisioningStep::new(
+        StepId::new("oauth_authorize"),
+        ProvisioningStepType::Oauth {
+            flow: OAuthRecipe::AuthorizationCodePkce {
+                authorization_url: "https://www.reddit.com/api/v1/authorize".into(),
+                token_url: "https://www.reddit.com/api/v1/access_token".into(),
+                scopes: vec![
+                    "read".into(),
+                    "identity".into(),
+                    "history".into(),
+                    "mysubreddits".into(),
+                    "submit".into(),
+                    "privatemessages".into(),
+                ],
+                auto_browser: true,
+                callback_port: 8484,
+            },
+        },
+    ))
+    .with_step(
+        ProvisioningStep::new(
+            StepId::new("store_token"),
+            ProvisioningStepType::StoreSecret {
+                key: "bearer_token".into(),
+                value_from: StepId::new("oauth_authorize"),
+                scope: "connector:fcp.reddit".into(),
+            },
+        )
+        .depends_on(StepId::new("oauth_authorize")),
+    )
+}
+
+fn base_url_policy(base_url: &str) -> (bool, String) {
+    let parsed = match Url::parse(base_url) {
+        Ok(parsed) => parsed,
+        Err(error) => {
+            return (false, format!("base_url could not be parsed: {error}"));
+        }
+    };
+
+    let Some(host) = parsed.host_str() else {
+        return (false, "base_url must include a host".into());
+    };
+
+    let local = is_local_test_host(host);
+    let allowed_host = host.eq_ignore_ascii_case("oauth.reddit.com")
+        || host.eq_ignore_ascii_case("www.reddit.com")
+        || local;
+    let secure_or_local = parsed.scheme() == "https" || local;
+
+    if allowed_host && secure_or_local {
+        (
+            true,
+            format!("Endpoint accepted by policy checks: {base_url}"),
+        )
+    } else {
+        (
+            false,
+            format!(
+                "Endpoint must use https and oauth.reddit.com or www.reddit.com (localhost/127.0.0.1/::1 allowed for tests): {base_url}"
+            ),
+        )
+    }
+}
+
+fn is_local_test_host(host: &str) -> bool {
+    matches!(host, "localhost" | "127.0.0.1" | "::1")
 }
 
 fn require_str<'a>(input: &'a serde_json::Value, field: &str) -> Result<&'a str, RedditError> {
@@ -1626,5 +1784,158 @@ mod tests {
             .unwrap();
         assert_eq!(op["safety_tier"], "safe");
         assert_eq!(op["risk_level"], "low");
+    }
+
+    // ── Provisioning tests ────────────────────────────────────────
+
+    #[test]
+    fn provisioning_readiness_bearer_token_mode() {
+        let config = RedditConfig::from_params(&json!({
+            "bearer_token": "test-token",
+        }))
+        .unwrap();
+        let readiness = config.provisioning_readiness();
+        assert_eq!(readiness.auth_mode, "bearer_token");
+        assert!(readiness.token_configured);
+        assert!(!readiness.credential_id_configured);
+        assert!(!readiness.requires_credential_injection);
+        assert!(readiness.network_ok);
+        assert_eq!(readiness.base_url, DEFAULT_BASE_URL);
+    }
+
+    #[test]
+    fn provisioning_readiness_credential_id_mode() {
+        let config = RedditConfig::from_params(&json!({
+            "credential_id": "550e8400-e29b-41d4-a716-446655440000",
+        }))
+        .unwrap();
+        let readiness = config.provisioning_readiness();
+        assert_eq!(readiness.auth_mode, "credential_id");
+        assert!(!readiness.token_configured);
+        assert!(readiness.credential_id_configured);
+        assert!(readiness.requires_credential_injection);
+        assert!(readiness.network_ok);
+    }
+
+    #[test]
+    fn provisioning_readiness_serializes() {
+        let config = RedditConfig::from_params(&json!({
+            "bearer_token": "tok",
+        }))
+        .unwrap();
+        let readiness = config.provisioning_readiness();
+        let v = serde_json::to_value(&readiness).unwrap();
+        assert_eq!(v["auth_mode"], "bearer_token");
+        assert_eq!(v["token_configured"], true);
+        assert_eq!(v["network_ok"], true);
+    }
+
+    #[test]
+    fn provisioning_recipe_has_2_steps() {
+        let recipe = provisioning_recipe();
+        assert_eq!(recipe.id.as_str(), "reddit.oauth2_pkce");
+        assert_eq!(recipe.version, "1");
+        assert_eq!(recipe.steps.len(), 2);
+    }
+
+    #[test]
+    fn provisioning_recipe_step_order() {
+        let recipe = provisioning_recipe();
+        assert_eq!(recipe.steps[0].id.as_str(), "oauth_authorize");
+        assert_eq!(recipe.steps[1].id.as_str(), "store_token");
+    }
+
+    #[test]
+    fn provisioning_recipe_step_dependencies() {
+        let recipe = provisioning_recipe();
+        assert!(recipe.steps[0].depends_on.is_empty());
+        assert_eq!(recipe.steps[1].depends_on.len(), 1);
+        assert_eq!(recipe.steps[1].depends_on[0].as_str(), "oauth_authorize");
+    }
+
+    #[test]
+    fn provisioning_recipe_oauth_has_scopes() {
+        let recipe = provisioning_recipe();
+        match &recipe.steps[0].kind {
+            ProvisioningStepType::Oauth {
+                flow: OAuthRecipe::AuthorizationCodePkce { scopes, .. },
+            } => {
+                assert!(scopes.contains(&"read".to_string()));
+                assert!(scopes.contains(&"identity".to_string()));
+                assert!(scopes.contains(&"history".to_string()));
+                assert!(scopes.contains(&"mysubreddits".to_string()));
+                assert!(scopes.contains(&"submit".to_string()));
+                assert!(scopes.contains(&"privatemessages".to_string()));
+                assert_eq!(scopes.len(), 6);
+            }
+            other => panic!("expected Oauth AuthorizationCodePkce, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn provisioning_recipe_serializes() {
+        let recipe = provisioning_recipe();
+        let v = serde_json::to_value(&recipe).unwrap();
+        assert_eq!(v["id"], "reddit.oauth2_pkce");
+        assert!(v["steps"].as_array().unwrap().len() == 2);
+    }
+
+    #[test]
+    fn base_url_policy_accepts_oauth_reddit_https() {
+        let (ok, message) = base_url_policy("https://oauth.reddit.com");
+        assert!(ok);
+        assert!(message.contains("accepted"));
+    }
+
+    #[test]
+    fn base_url_policy_accepts_www_reddit_https() {
+        let (ok, message) = base_url_policy("https://www.reddit.com");
+        assert!(ok);
+        assert!(message.contains("accepted"));
+    }
+
+    #[test]
+    fn base_url_policy_accepts_localhost() {
+        let (ok, _) = base_url_policy("http://localhost:8080");
+        assert!(ok);
+    }
+
+    #[test]
+    fn base_url_policy_accepts_127_0_0_1() {
+        let (ok, _) = base_url_policy("http://127.0.0.1:9090");
+        assert!(ok);
+    }
+
+    #[test]
+    fn base_url_policy_rejects_http_non_local() {
+        let (ok, message) = base_url_policy("http://oauth.reddit.com");
+        assert!(!ok);
+        assert!(message.contains("must use https"));
+    }
+
+    #[test]
+    fn base_url_policy_rejects_unknown_host() {
+        let (ok, message) = base_url_policy("https://evil.example.com");
+        assert!(!ok);
+        assert!(message.contains("oauth.reddit.com"));
+    }
+
+    #[test]
+    fn base_url_policy_rejects_invalid_url() {
+        let (ok, message) = base_url_policy("not a url");
+        assert!(!ok);
+        assert!(message.contains("could not be parsed"));
+    }
+
+    #[test]
+    fn provisioning_readiness_custom_base_url_rejected() {
+        let config = RedditConfig::from_params(&json!({
+            "bearer_token": "tok",
+            "base_url": "https://evil.example.com",
+        }))
+        .unwrap();
+        let readiness = config.provisioning_readiness();
+        assert!(!readiness.network_ok);
+        assert!(readiness.network_message.contains("oauth.reddit.com"));
     }
 }

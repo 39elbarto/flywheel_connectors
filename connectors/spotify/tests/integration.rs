@@ -75,9 +75,7 @@ async fn lifecycle_self_check() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
     let check = c.handle_self_check().await.unwrap();
-    assert_eq!(check["status"], "ready");
-    assert_eq!(check["connector_id"], "fcp.spotify");
-    assert_eq!(check["version"], "0.1.0");
+    assert_eq!(check["status"], "ok");
 }
 
 #[fcp_async_core::runtime::test]
@@ -112,9 +110,10 @@ async fn lifecycle_introspect() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
     let intro = c.handle_introspect().await.unwrap();
-    let ops = intro["operations"].as_array().expect("operations array");
-    assert!(!ops.is_empty(), "introspect should list operations");
-    assert!(ops[0]["id"].is_string());
+    assert_eq!(intro["connector_id"], "fcp.spotify");
+    assert_eq!(intro["version"], "0.1.0");
+    let ops = intro["operations"].as_array().unwrap();
+    assert_eq!(ops.len(), 10);
 }
 
 #[fcp_async_core::runtime::test]
@@ -1305,8 +1304,8 @@ async fn health_degraded_after_configure_only() {
 async fn self_check_unconfigured() {
     let c = SpotifyConnector::new();
     let check = c.handle_self_check().await.unwrap();
-    assert_eq!(check["status"], "unconfigured");
-    assert_eq!(check["connector_id"], "fcp.spotify");
+    assert_eq!(check["status"], "degraded");
+    assert_eq!(check["reason_code"], "not_configured");
 }
 
 #[fcp_async_core::runtime::test]

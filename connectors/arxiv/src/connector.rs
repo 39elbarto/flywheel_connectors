@@ -5,8 +5,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use fcp_core::{
     AgentHint, BaseConnector, CapabilityId, ConnectorId, FcpError, FcpResult, IdempotencyClass,
-    Introspection, OperationId, OperationInfo, RiskLevel, SafetyTier,
+    Introspection, OperationId, OperationInfo, ProvisioningRecipe, ProvisioningStep,
+    ProvisioningStepType, RecipeId, RiskLevel, SafetyTier, SelfCheckReport, StepId,
 };
+use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tracing::{info, instrument};
@@ -19,6 +21,7 @@ struct ArxivConfig {
     arxiv_base_url: String,
     scholar_base_url: String,
     scholar_api_key: Option<String>,
+    rate_limit_rps: f64,
 }
 
 impl ArxivConfig {
@@ -42,12 +45,43 @@ impl ArxivConfig {
             .filter(|v| !v.is_empty())
             .map(str::to_string);
 
+        let rate_limit_rps = params
+            .get("rate_limit_rps")
+            .and_then(serde_json::Value::as_f64)
+            .unwrap_or(3.0);
+
         Self {
             arxiv_base_url,
             scholar_base_url,
             scholar_api_key,
+            rate_limit_rps,
         }
     }
+
+    fn provisioning_readiness(&self) -> ProvisioningReadiness {
+        let (network_ok, network_message) = base_url_policy(&self.arxiv_base_url);
+        let rate_limit_configured = self.rate_limit_rps > 0.0 && self.rate_limit_rps <= 10.0;
+
+        ProvisioningReadiness {
+            network_ok,
+            network_message,
+            base_url: self.arxiv_base_url.clone(),
+            rate_limit_rps: self.rate_limit_rps,
+            rate_limit_configured,
+            has_scholar_key: self.scholar_api_key.is_some(),
+        }
+    }
+}
+
+/// Provisioning readiness assessment for the arXiv connector.
+#[derive(Debug, Clone, Serialize)]
+struct ProvisioningReadiness {
+    network_ok: bool,
+    network_message: String,
+    base_url: String,
+    rate_limit_rps: f64,
+    rate_limit_configured: bool,
+    has_scholar_key: bool,
 }
 
 /// Doctor check result.
@@ -248,11 +282,59 @@ impl ArxivConnector {
 
     /// Handle the `self_check` method.
     pub async fn handle_self_check(&self) -> FcpResult<serde_json::Value> {
-        Ok(json!({
-            "connector_id": "fcp.arxiv",
-            "version": "0.1.0",
-            "status": if self.config.is_some() { "ready" } else { "unconfigured" },
-        }))
+        let Some(config) = &self.config else {
+            let report =
+                SelfCheckReport::degraded("not_configured", "Connector is not configured");
+            return Self::serialize_self_check_report(report);
+        };
+
+        let readiness = config.provisioning_readiness();
+        if !readiness.network_ok {
+            let mut report = SelfCheckReport::failed(
+                "network_constraints_invalid",
+                readiness.network_message.clone(),
+            );
+            report.details = Some(json!({ "provisioning": readiness }));
+            return Self::serialize_self_check_report(report);
+        }
+
+        if self.client.is_none() {
+            let mut report = SelfCheckReport::failed(
+                "client_missing",
+                "API client not initialized; re-run configure",
+            );
+            report.details = Some(json!({ "provisioning": readiness }));
+            return Self::serialize_self_check_report(report);
+        }
+
+        if !readiness.rate_limit_configured {
+            let mut report = SelfCheckReport::degraded(
+                "rate_limit_misconfigured",
+                format!(
+                    "Rate limit {} req/s is outside safe range (0 < rps <= 10); defaulting to 3 req/s",
+                    readiness.rate_limit_rps
+                ),
+            );
+            report.details = Some(json!({ "provisioning": readiness }));
+            return Self::serialize_self_check_report(report);
+        }
+
+        let mut report = SelfCheckReport::ok();
+        report.details = Some(json!({ "provisioning": readiness }));
+        Self::serialize_self_check_report(report)
+    }
+
+    fn serialize_self_check_report(report: SelfCheckReport) -> FcpResult<serde_json::Value> {
+        info!(
+            event = "arxiv.provisioning.self_check",
+            status = ?report.status,
+            reason_code = ?report.reason_code,
+            "arXiv self-check completed"
+        );
+
+        serde_json::to_value(report).map_err(|e| FcpError::Internal {
+            message: format!("Failed to serialize self-check report: {e}"),
+        })
     }
 
     /// Handle the `introspect` method.
@@ -990,6 +1072,72 @@ fn require_str<'a>(input: &'a serde_json::Value, field: &str) -> Result<&'a str,
         })
 }
 
+/// Build the provisioning recipe for the arXiv connector.
+///
+/// arXiv is open-access and does not require authentication, so the recipe
+/// is simpler than OAuth-based connectors: it just confirms the base URL
+/// and rate-limit configuration.
+pub fn provisioning_recipe() -> ProvisioningRecipe {
+    ProvisioningRecipe::new(
+        RecipeId::new("arxiv.open_access"),
+        "1",
+        "Provision arXiv connector (open access, no credentials required)",
+    )
+    .with_step(ProvisioningStep::new(
+        StepId::new("confirm_base_url"),
+        ProvisioningStepType::PromptUser {
+            message: "Confirm arXiv API base URL (default: https://export.arxiv.org)".into(),
+        },
+    ))
+    .with_step(
+        ProvisioningStep::new(
+            StepId::new("configure_rate_limit"),
+            ProvisioningStepType::PromptUser {
+                message: "Configure rate limit in requests/second (default: 3, max: 10). arXiv will IP-ban aggressive clients.".into(),
+            },
+        )
+        .depends_on(StepId::new("confirm_base_url")),
+    )
+}
+
+fn base_url_policy(base_url: &str) -> (bool, String) {
+    let parsed = match Url::parse(base_url) {
+        Ok(parsed) => parsed,
+        Err(error) => {
+            return (false, format!("base_url could not be parsed: {error}"));
+        }
+    };
+
+    let Some(host) = parsed.host_str() else {
+        return (false, "base_url must include a host".into());
+    };
+
+    let local = is_local_test_host(host);
+    let allowed_host = host.eq_ignore_ascii_case("export.arxiv.org")
+        || host.eq_ignore_ascii_case("arxiv.org")
+        || local;
+    let secure_or_local = parsed.scheme() == "https" || local;
+
+    if allowed_host && secure_or_local {
+        (
+            true,
+            format!("Endpoint accepted by policy checks: {base_url}"),
+        )
+    } else {
+        (
+            false,
+            format!(
+                "Endpoint must use https and export.arxiv.org or arxiv.org \
+                 (localhost/127.0.0.1/::1 allowed for tests): {base_url}"
+            ),
+        )
+    }
+}
+
+fn is_local_test_host(host: &str) -> bool {
+    matches!(host, "localhost" | "127.0.0.1" | "::1" | "[::1]")
+}
+
 /// Build the operations info for introspection.
 #[allow(clippy::too_many_lines)]
 fn operations_info() -> serde_json::Value {
@@ -1114,6 +1262,7 @@ mod tests {
             crate::client::DEFAULT_SCHOLAR_BASE_URL
         );
         assert!(config.scholar_api_key.is_none());
+        assert!((config.rate_limit_rps - 3.0).abs() < f64::EPSILON);
     }
 
     #[test]
@@ -1396,5 +1545,146 @@ mod tests {
         let c = ArxivConnector::new();
         assert_eq!(c.request_count.load(Ordering::Relaxed), 0);
         assert_eq!(c.error_count.load(Ordering::Relaxed), 0);
+    }
+
+    // ── Provisioning tests ───────────────────────────────────────────
+
+    #[test]
+    fn config_rate_limit_custom() {
+        let config = ArxivConfig::from_params(&json!({"rate_limit_rps": 5.0}));
+        assert!((config.rate_limit_rps - 5.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn provisioning_readiness_default_config() {
+        let config = ArxivConfig::from_params(&json!({}));
+        let readiness = config.provisioning_readiness();
+        assert!(readiness.network_ok);
+        assert!(readiness.rate_limit_configured);
+        assert!(!readiness.has_scholar_key);
+        assert!(readiness.network_message.contains("accepted"));
+    }
+
+    #[test]
+    fn provisioning_readiness_with_scholar_key() {
+        let config = ArxivConfig::from_params(&json!({"scholar_api_key": "key123"}));
+        let readiness = config.provisioning_readiness();
+        assert!(readiness.has_scholar_key);
+    }
+
+    #[test]
+    fn provisioning_readiness_bad_rate_limit() {
+        let config = ArxivConfig::from_params(&json!({"rate_limit_rps": 0.0}));
+        let readiness = config.provisioning_readiness();
+        assert!(!readiness.rate_limit_configured);
+    }
+
+    #[test]
+    fn provisioning_readiness_excessive_rate_limit() {
+        let config = ArxivConfig::from_params(&json!({"rate_limit_rps": 20.0}));
+        let readiness = config.provisioning_readiness();
+        assert!(!readiness.rate_limit_configured);
+    }
+
+    #[test]
+    fn provisioning_readiness_bad_url_rejected() {
+        let config = ArxivConfig::from_params(&json!({"arxiv_base_url": "https://evil.example.com"}));
+        let readiness = config.provisioning_readiness();
+        assert!(!readiness.network_ok);
+        assert!(readiness.network_message.contains("export.arxiv.org"));
+    }
+
+    #[test]
+    fn provisioning_readiness_serializes() {
+        let config = ArxivConfig::from_params(&json!({}));
+        let readiness = config.provisioning_readiness();
+        let v = serde_json::to_value(&readiness).unwrap();
+        assert_eq!(v["network_ok"], true);
+        assert_eq!(v["rate_limit_configured"], true);
+        assert_eq!(v["has_scholar_key"], false);
+    }
+
+    #[test]
+    fn provisioning_recipe_has_2_steps() {
+        let recipe = provisioning_recipe();
+        assert_eq!(recipe.id.as_str(), "arxiv.open_access");
+        assert_eq!(recipe.version, "1");
+        assert_eq!(recipe.steps.len(), 2);
+    }
+
+    #[test]
+    fn provisioning_recipe_step_order() {
+        let recipe = provisioning_recipe();
+        assert_eq!(recipe.steps[0].id.as_str(), "confirm_base_url");
+        assert_eq!(recipe.steps[1].id.as_str(), "configure_rate_limit");
+    }
+
+    #[test]
+    fn provisioning_recipe_step_dependencies() {
+        let recipe = provisioning_recipe();
+        assert!(recipe.steps[0].depends_on.is_empty());
+        assert_eq!(recipe.steps[1].depends_on.len(), 1);
+        assert_eq!(recipe.steps[1].depends_on[0].as_str(), "confirm_base_url");
+    }
+
+    #[test]
+    fn provisioning_recipe_serializes() {
+        let recipe = provisioning_recipe();
+        let v = serde_json::to_value(&recipe).unwrap();
+        assert_eq!(v["id"], "arxiv.open_access");
+        assert_eq!(v["steps"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn base_url_policy_accepts_export_arxiv() {
+        let (ok, message) = base_url_policy("https://export.arxiv.org");
+        assert!(ok);
+        assert!(message.contains("accepted"));
+    }
+
+    #[test]
+    fn base_url_policy_accepts_arxiv_org() {
+        let (ok, message) = base_url_policy("https://arxiv.org");
+        assert!(ok);
+        assert!(message.contains("accepted"));
+    }
+
+    #[test]
+    fn base_url_policy_accepts_localhost() {
+        let (ok, _) = base_url_policy("http://localhost:8080");
+        assert!(ok);
+    }
+
+    #[test]
+    fn base_url_policy_accepts_127_0_0_1() {
+        let (ok, _) = base_url_policy("http://127.0.0.1:9090");
+        assert!(ok);
+    }
+
+    #[test]
+    fn base_url_policy_rejects_http_non_local() {
+        let (ok, message) = base_url_policy("http://export.arxiv.org");
+        assert!(!ok);
+        assert!(message.contains("must use https"));
+    }
+
+    #[test]
+    fn base_url_policy_rejects_unknown_host() {
+        let (ok, message) = base_url_policy("https://evil.example.com");
+        assert!(!ok);
+        assert!(message.contains("export.arxiv.org"));
+    }
+
+    #[test]
+    fn base_url_policy_rejects_invalid_url() {
+        let (ok, message) = base_url_policy("not a url");
+        assert!(!ok);
+        assert!(message.contains("could not be parsed"));
+    }
+
+    #[test]
+    fn base_url_policy_accepts_ipv6_loopback() {
+        let (ok, _) = base_url_policy("http://[::1]:8080");
+        assert!(ok);
     }
 }

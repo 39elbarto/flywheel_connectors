@@ -5,8 +5,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use fcp_core::{
     AgentHint, BaseConnector, CapabilityId, ConnectorId, CredentialId, FcpError, FcpResult,
-    IdempotencyClass, OperationId, OperationInfo, RiskLevel, SafetyTier,
+    IdempotencyClass, OAuthRecipe, OperationId, OperationInfo, ProvisioningRecipe,
+    ProvisioningStep, ProvisioningStepType, RecipeId, RetryConfig, RiskLevel, SafetyTier,
+    SelfCheckReport, StepId, WebhookRecipe, WebhookVerification,
 };
+use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tracing::{info, instrument};
@@ -73,6 +76,35 @@ impl DocuSignConfig {
 
         Ok(Self { auth, base_url })
     }
+
+    fn provisioning_readiness(&self) -> ProvisioningReadiness {
+        let (network_ok, network_message) = base_url_policy(&self.base_url);
+
+        ProvisioningReadiness {
+            auth_mode: match &self.auth {
+                DocuSignAuth::BearerToken(_) => "bearer_token",
+                DocuSignAuth::CredentialId(_) => "credential_id",
+            },
+            token_configured: matches!(&self.auth, DocuSignAuth::BearerToken(_)),
+            credential_id_configured: self.auth.is_secretless(),
+            requires_credential_injection: self.auth.is_secretless(),
+            network_ok,
+            network_message,
+            base_url: self.base_url.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[allow(clippy::struct_excessive_bools)]
+struct ProvisioningReadiness {
+    auth_mode: &'static str,
+    token_configured: bool,
+    credential_id_configured: bool,
+    requires_credential_injection: bool,
+    network_ok: bool,
+    network_message: String,
+    base_url: String,
 }
 
 /// Doctor check result.
@@ -261,11 +293,56 @@ impl DocuSignConnector {
 
     /// Handle the `self_check` method.
     pub async fn handle_self_check(&self) -> FcpResult<serde_json::Value> {
-        Ok(json!({
-            "connector_id": "fcp.docusign",
-            "version": "0.1.0",
-            "status": if self.config.is_some() { "ready" } else { "unconfigured" },
-        }))
+        let Some(config) = &self.config else {
+            let report =
+                SelfCheckReport::degraded("not_configured", "Connector is not configured");
+            return Self::serialize_self_check_report(report);
+        };
+
+        let readiness = config.provisioning_readiness();
+        if !readiness.network_ok {
+            let mut report = SelfCheckReport::failed(
+                "network_constraints_invalid",
+                readiness.network_message.clone(),
+            );
+            report.details = Some(json!({ "provisioning": readiness }));
+            return Self::serialize_self_check_report(report);
+        }
+
+        let Some(_client) = &self.client else {
+            let mut report = SelfCheckReport::failed(
+                "client_missing",
+                "API client not initialized; re-run configure",
+            );
+            report.details = Some(json!({ "provisioning": readiness }));
+            return Self::serialize_self_check_report(report);
+        };
+
+        if readiness.requires_credential_injection {
+            let mut report = SelfCheckReport::degraded(
+                "credential_injection_required",
+                "credential_id mode requires egress proxy injection; skipping live probe",
+            );
+            report.details = Some(json!({ "provisioning": readiness }));
+            return Self::serialize_self_check_report(report);
+        }
+
+        let mut report = SelfCheckReport::ok();
+        report.details = Some(json!({ "provisioning": readiness }));
+        Self::serialize_self_check_report(report)
+    }
+
+    fn serialize_self_check_report(report: SelfCheckReport) -> FcpResult<serde_json::Value> {
+        info!(
+            event = "docusign.provisioning.self_check",
+            status = ?report.status,
+            reason_code = ?report.reason_code,
+            "DocuSign self-check completed"
+        );
+
+        serde_json::to_value(report).map_err(|e| FcpError::Internal {
+            message: format!("Failed to serialize self-check report: {e}"),
+        })
     }
 
     /// Handle the `introspect` method.
@@ -753,6 +830,122 @@ fn typed_operations_info() -> Vec<OperationInfo> {
 /// Build the operations info for introspection (JSON format for simulate).
 fn operations_info() -> serde_json::Value {
     serde_json::to_value(typed_operations_info()).unwrap_or_default()
+}
+
+/// Build the provisioning recipe for the `DocuSign` connector.
+///
+/// Uses `OAuth2` Authorization Code with PKCE for interactive browser-based
+/// authentication, followed by a base URI discovery prompt (`DocuSign` requires
+/// per-account base URI) and optional webhook registration for envelope
+/// lifecycle events.
+pub fn provisioning_recipe() -> ProvisioningRecipe {
+    ProvisioningRecipe::new(
+        RecipeId::new("docusign.oauth2_pkce"),
+        "1",
+        "Provision DocuSign connector via OAuth2 Authorization Code with PKCE",
+    )
+    .with_step(ProvisioningStep::new(
+        StepId::new("oauth_authorize"),
+        ProvisioningStepType::Oauth {
+            flow: OAuthRecipe::AuthorizationCodePkce {
+                authorization_url: "https://account-d.docusign.com/oauth/auth".into(),
+                token_url: "https://account-d.docusign.com/oauth/token".into(),
+                scopes: vec!["signature".into(), "extended".into()],
+                auto_browser: true,
+                callback_port: 8743,
+            },
+        },
+    ))
+    .with_step(
+        ProvisioningStep::new(
+            StepId::new("store_token"),
+            ProvisioningStepType::StoreSecret {
+                key: "access_token".into(),
+                value_from: StepId::new("oauth_authorize"),
+                scope: "connector:fcp.docusign".into(),
+            },
+        )
+        .depends_on(StepId::new("oauth_authorize")),
+    )
+    .with_step(
+        ProvisioningStep::new(
+            StepId::new("prompt_base_uri"),
+            ProvisioningStepType::PromptUser {
+                message: "Enter your DocuSign account base URI (e.g. https://demo.docusign.net/restapi/v2.1/accounts or https://na1.docusign.net/restapi/v2.1/accounts)".into(),
+            },
+        )
+        .depends_on(StepId::new("store_token")),
+    )
+    .with_step(
+        ProvisioningStep::new(
+            StepId::new("register_webhook"),
+            ProvisioningStepType::Webhook {
+                registration: WebhookRecipe {
+                    registration_url: "https://demo.docusign.net/restapi/v2.1/accounts/{account_id}/connect".into(),
+                    events: vec![
+                        "envelope-sent".into(),
+                        "envelope-delivered".into(),
+                        "envelope-completed".into(),
+                        "envelope-declined".into(),
+                        "envelope-voided".into(),
+                        "recipient-sent".into(),
+                        "recipient-delivered".into(),
+                        "recipient-completed".into(),
+                        "recipient-declined".into(),
+                    ],
+                    verification: WebhookVerification::HmacSignature {
+                        algorithm: "sha256".into(),
+                        header: "X-DocuSign-Signature-1".into(),
+                    },
+                    retry_policy: RetryConfig::default(),
+                },
+            },
+        )
+        .depends_on(StepId::new("prompt_base_uri")),
+    )
+}
+
+/// Validate a base URL against the `DocuSign` network constraints policy.
+///
+/// Accepts `*.docusign.net`, `*.docusign.com`, `localhost`, `127.0.0.1`, and `::1`.
+/// Non-local endpoints must use HTTPS.
+fn base_url_policy(base_url: &str) -> (bool, String) {
+    let parsed = match Url::parse(base_url) {
+        Ok(parsed) => parsed,
+        Err(error) => {
+            return (false, format!("base_url could not be parsed: {error}"));
+        }
+    };
+
+    let Some(host) = parsed.host_str() else {
+        return (false, "base_url must include a host".into());
+    };
+
+    let local = is_local_test_host(host);
+    let allowed_host = host.ends_with(".docusign.net")
+        || host.ends_with(".docusign.com")
+        || host.eq_ignore_ascii_case("docusign.net")
+        || host.eq_ignore_ascii_case("docusign.com")
+        || local;
+    let secure_or_local = parsed.scheme() == "https" || local;
+
+    if allowed_host && secure_or_local {
+        (
+            true,
+            format!("Endpoint accepted by policy checks: {base_url}"),
+        )
+    } else {
+        (
+            false,
+            format!(
+                "Endpoint must use https and *.docusign.net or *.docusign.com (localhost/127.0.0.1/::1 allowed for tests): {base_url}"
+            ),
+        )
+    }
+}
+
+fn is_local_test_host(host: &str) -> bool {
+    matches!(host, "localhost" | "127.0.0.1" | "::1" | "[::1]")
 }
 
 #[cfg(test)]
@@ -1356,5 +1549,196 @@ mod tests {
     fn require_str_object_value() {
         let input = json!({"x": {"nested": true}});
         assert!(require_str(&input, "x").is_err());
+    }
+
+    // ── Provisioning tests ────────────────────────────────────────
+
+    #[test]
+    fn provisioning_readiness_bearer_token_mode() {
+        let config = DocuSignConfig::from_params(&json!({
+            "access_token": "test-token",
+        }))
+        .unwrap();
+        let readiness = config.provisioning_readiness();
+        assert_eq!(readiness.auth_mode, "bearer_token");
+        assert!(readiness.token_configured);
+        assert!(!readiness.credential_id_configured);
+        assert!(!readiness.requires_credential_injection);
+        assert!(readiness.network_ok);
+        assert_eq!(readiness.base_url, DEFAULT_BASE_URL);
+    }
+
+    #[test]
+    fn provisioning_readiness_credential_id_mode() {
+        let config = DocuSignConfig::from_params(&json!({
+            "credential_id": "550e8400-e29b-41d4-a716-446655440000",
+        }))
+        .unwrap();
+        let readiness = config.provisioning_readiness();
+        assert_eq!(readiness.auth_mode, "credential_id");
+        assert!(!readiness.token_configured);
+        assert!(readiness.credential_id_configured);
+        assert!(readiness.requires_credential_injection);
+        assert!(readiness.network_ok);
+    }
+
+    #[test]
+    fn provisioning_readiness_serializes() {
+        let config = DocuSignConfig::from_params(&json!({
+            "access_token": "tok",
+        }))
+        .unwrap();
+        let readiness = config.provisioning_readiness();
+        let v = serde_json::to_value(&readiness).unwrap();
+        assert_eq!(v["auth_mode"], "bearer_token");
+        assert_eq!(v["token_configured"], true);
+        assert_eq!(v["network_ok"], true);
+    }
+
+    #[test]
+    fn provisioning_recipe_has_4_steps() {
+        let recipe = provisioning_recipe();
+        assert_eq!(recipe.id.as_str(), "docusign.oauth2_pkce");
+        assert_eq!(recipe.version, "1");
+        assert_eq!(recipe.steps.len(), 4);
+    }
+
+    #[test]
+    fn provisioning_recipe_step_order() {
+        let recipe = provisioning_recipe();
+        assert_eq!(recipe.steps[0].id.as_str(), "oauth_authorize");
+        assert_eq!(recipe.steps[1].id.as_str(), "store_token");
+        assert_eq!(recipe.steps[2].id.as_str(), "prompt_base_uri");
+        assert_eq!(recipe.steps[3].id.as_str(), "register_webhook");
+    }
+
+    #[test]
+    fn provisioning_recipe_step_dependencies() {
+        let recipe = provisioning_recipe();
+        assert!(recipe.steps[0].depends_on.is_empty());
+        assert_eq!(recipe.steps[1].depends_on.len(), 1);
+        assert_eq!(recipe.steps[1].depends_on[0].as_str(), "oauth_authorize");
+        assert_eq!(recipe.steps[2].depends_on.len(), 1);
+        assert_eq!(recipe.steps[2].depends_on[0].as_str(), "store_token");
+        assert_eq!(recipe.steps[3].depends_on.len(), 1);
+        assert_eq!(recipe.steps[3].depends_on[0].as_str(), "prompt_base_uri");
+    }
+
+    #[test]
+    fn provisioning_recipe_serializes() {
+        let recipe = provisioning_recipe();
+        let v = serde_json::to_value(&recipe).unwrap();
+        assert_eq!(v["id"], "docusign.oauth2_pkce");
+        assert!(v["steps"].as_array().unwrap().len() == 4);
+    }
+
+    #[test]
+    fn provisioning_recipe_oauth_step_has_scopes() {
+        let recipe = provisioning_recipe();
+        let v = serde_json::to_value(&recipe).unwrap();
+        let oauth_step = &v["steps"][0];
+        // ProvisioningStepType uses #[serde(flatten)] + tag="type", so flow is a top-level field
+        let flow = &oauth_step["flow"];
+        let scopes = flow["scopes"].as_array().unwrap();
+        assert_eq!(scopes.len(), 2);
+        assert_eq!(scopes[0], "signature");
+        assert_eq!(scopes[1], "extended");
+    }
+
+    #[test]
+    fn provisioning_recipe_webhook_step_has_events() {
+        let recipe = provisioning_recipe();
+        let v = serde_json::to_value(&recipe).unwrap();
+        let webhook_step = &v["steps"][3];
+        // Flattened: registration is a top-level field on the step
+        let events = webhook_step["registration"]["events"]
+            .as_array()
+            .unwrap();
+        assert!(events.len() >= 9);
+        let event_strs: Vec<&str> = events.iter().filter_map(|e| e.as_str()).collect();
+        assert!(event_strs.contains(&"envelope-sent"));
+        assert!(event_strs.contains(&"envelope-completed"));
+        assert!(event_strs.contains(&"envelope-voided"));
+    }
+
+    #[test]
+    fn base_url_policy_accepts_demo_docusign_net() {
+        let (ok, message) =
+            base_url_policy("https://demo.docusign.net/restapi/v2.1/accounts");
+        assert!(ok);
+        assert!(message.contains("accepted"));
+    }
+
+    #[test]
+    fn base_url_policy_accepts_na1_docusign_net() {
+        let (ok, message) =
+            base_url_policy("https://na1.docusign.net/restapi/v2.1/accounts");
+        assert!(ok);
+        assert!(message.contains("accepted"));
+    }
+
+    #[test]
+    fn base_url_policy_accepts_account_docusign_com() {
+        let (ok, _) = base_url_policy("https://account.docusign.com/oauth/auth");
+        assert!(ok);
+    }
+
+    #[test]
+    fn base_url_policy_accepts_localhost() {
+        let (ok, _) = base_url_policy("http://localhost:8080");
+        assert!(ok);
+    }
+
+    #[test]
+    fn base_url_policy_accepts_127_0_0_1() {
+        let (ok, _) = base_url_policy("http://127.0.0.1:9090");
+        assert!(ok);
+    }
+
+    #[test]
+    fn base_url_policy_rejects_http_non_local() {
+        let (ok, message) =
+            base_url_policy("http://demo.docusign.net/restapi/v2.1/accounts");
+        assert!(!ok);
+        assert!(message.contains("must use https"));
+    }
+
+    #[test]
+    fn base_url_policy_rejects_unknown_host() {
+        let (ok, message) = base_url_policy("https://evil.example.com");
+        assert!(!ok);
+        assert!(message.contains("docusign"));
+    }
+
+    #[test]
+    fn base_url_policy_rejects_invalid_url() {
+        let (ok, message) = base_url_policy("not a url");
+        assert!(!ok);
+        assert!(message.contains("could not be parsed"));
+    }
+
+    #[test]
+    fn provisioning_readiness_custom_base_url_rejected() {
+        let config = DocuSignConfig::from_params(&json!({
+            "access_token": "tok",
+            "base_url": "https://evil.example.com",
+        }))
+        .unwrap();
+        let readiness = config.provisioning_readiness();
+        assert!(!readiness.network_ok);
+        assert!(readiness.network_message.contains("docusign"));
+    }
+
+    #[test]
+    fn base_url_policy_accepts_ipv6_loopback() {
+        let (ok, msg) = base_url_policy("http://[::1]:8080");
+        assert!(ok, "IPv6 loopback should be accepted: {msg}");
+    }
+
+    #[test]
+    fn base_url_policy_rejects_url_without_host() {
+        let (ok, message) = base_url_policy("file:///etc/passwd");
+        assert!(!ok);
+        assert!(message.contains("must include a host"));
     }
 }

@@ -5,8 +5,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use fcp_core::{
     AgentHint, BaseConnector, CapabilityId, ConnectorId, CredentialId, FcpError, FcpResult,
-    IdempotencyClass, OperationId, OperationInfo, RiskLevel, SafetyTier,
+    IdempotencyClass, OAuthRecipe, OperationId, OperationInfo, ProvisioningRecipe,
+    ProvisioningStep, ProvisioningStepType, RecipeId, RiskLevel, SafetyTier, SelfCheckReport,
+    StepId,
 };
+use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tracing::{info, instrument};
@@ -73,6 +76,42 @@ impl SpotifyConfig {
 
         Ok(Self { auth, base_url })
     }
+
+    /// Auth mode label for provisioning readiness.
+    const fn auth_mode(&self) -> &'static str {
+        match &self.auth {
+            SpotifyAuth::AccessToken(_) => "access_token",
+            SpotifyAuth::CredentialId(_) => "credential_id",
+        }
+    }
+
+    /// Compute provisioning readiness from current configuration.
+    fn provisioning_readiness(&self) -> ProvisioningReadiness {
+        let (network_ok, network_message) = base_url_policy(&self.base_url);
+
+        ProvisioningReadiness {
+            auth_mode: self.auth_mode(),
+            token_configured: matches!(&self.auth, SpotifyAuth::AccessToken(_)),
+            credential_id_configured: self.auth.is_secretless(),
+            requires_credential_injection: self.auth.is_secretless(),
+            network_ok,
+            network_message,
+            base_url: self.base_url.clone(),
+        }
+    }
+}
+
+/// Provisioning readiness snapshot.
+#[derive(Debug, Clone, Serialize)]
+#[allow(clippy::struct_excessive_bools)]
+struct ProvisioningReadiness {
+    auth_mode: &'static str,
+    token_configured: bool,
+    credential_id_configured: bool,
+    requires_credential_injection: bool,
+    network_ok: bool,
+    network_message: String,
+    base_url: String,
 }
 
 /// Doctor check result.
@@ -152,7 +191,20 @@ impl SpotifyConnector {
         params: serde_json::Value,
     ) -> FcpResult<serde_json::Value> {
         let config = SpotifyConfig::from_params(&params)?;
-        info!(auth = %config.auth.redacted_label(), base_url = %config.base_url, "Configuring Spotify connector");
+        let provisioning = config.provisioning_readiness();
+        let status = if provisioning.network_ok {
+            "configured"
+        } else {
+            "configured_with_warnings"
+        };
+        info!(
+            event = "spotify.provisioning.configure",
+            auth = %config.auth.redacted_label(),
+            auth_mode = provisioning.auth_mode,
+            network_ok = provisioning.network_ok,
+            base_url = %config.base_url,
+            "Configuring Spotify connector"
+        );
 
         let client = SpotifyClient::new(config.auth.clone(), Some(&config.base_url))
             .map_err(|e| e.to_fcp_error())?;
@@ -160,7 +212,10 @@ impl SpotifyConnector {
         self.client = Some(Arc::new(client));
         self.config = Some(config);
         self.base.set_configured(true);
-        Ok(json!({}))
+        Ok(json!({
+            "status": status,
+            "provisioning": provisioning,
+        }))
     }
 
     /// Handle the `handshake` method.
@@ -197,6 +252,10 @@ impl SpotifyConnector {
     pub async fn handle_health(&self) -> FcpResult<serde_json::Value> {
         let configured = self.config.is_some();
         let handshaken = self.session_id.is_some();
+        let provisioning = self
+            .config
+            .as_ref()
+            .map(SpotifyConfig::provisioning_readiness);
 
         let status = if configured && handshaken {
             "healthy"
@@ -212,6 +271,7 @@ impl SpotifyConnector {
             "handshaken": handshaken,
             "requests": self.request_count.load(Ordering::Relaxed),
             "errors": self.error_count.load(Ordering::Relaxed),
+            "provisioning": provisioning,
         }))
     }
 
@@ -222,34 +282,62 @@ impl SpotifyConnector {
         checks.push(DoctorCheck {
             name: "configuration".into(),
             passed: self.config.is_some(),
-            message: if self.config.is_none() {
-                Some("Not configured — call configure first".into())
+            message: Some(if self.config.is_some() {
+                "Configuration loaded".into()
             } else {
-                None
-            },
+                "Not configured — call configure first".into()
+            }),
             critical: true,
         });
 
         checks.push(DoctorCheck {
             name: "client_initialized".into(),
             passed: self.client.is_some(),
-            message: if self.client.is_none() {
-                Some("API client not initialized".into())
+            message: Some(if self.client.is_some() {
+                "API client initialized".into()
             } else {
-                None
-            },
+                "API client not initialized".into()
+            }),
             critical: true,
         });
+
+        if let Some(config) = &self.config {
+            let readiness = config.provisioning_readiness();
+            checks.push(DoctorCheck {
+                name: "network_constraints".into(),
+                passed: readiness.network_ok,
+                message: Some(readiness.network_message),
+                critical: true,
+            });
+
+            checks.push(DoctorCheck {
+                name: "auth_mode".into(),
+                passed: true,
+                message: Some(format!("Auth mode: {}", readiness.auth_mode)),
+                critical: false,
+            });
+
+            checks.push(DoctorCheck {
+                name: "credential_injection".into(),
+                passed: !readiness.requires_credential_injection,
+                message: Some(if readiness.requires_credential_injection {
+                    "credential_id mode requires egress proxy injection".into()
+                } else {
+                    "Credential injection not required".into()
+                }),
+                critical: false,
+            });
+        }
 
         let handshaken = self.session_id.is_some();
         checks.push(DoctorCheck {
             name: "handshake".into(),
             passed: handshaken,
-            message: if handshaken {
-                None
+            message: Some(if handshaken {
+                "Handshake completed".into()
             } else {
-                Some("Handshake not completed".into())
-            },
+                "Handshake not completed".into()
+            }),
             critical: false,
         });
 
@@ -259,11 +347,43 @@ impl SpotifyConnector {
 
     /// Handle the `self_check` method.
     pub async fn handle_self_check(&self) -> FcpResult<serde_json::Value> {
-        Ok(json!({
-            "connector_id": "fcp.spotify",
-            "version": "0.1.0",
-            "status": if self.config.is_some() { "ready" } else { "unconfigured" },
-        }))
+        let Some(config) = &self.config else {
+            let report =
+                SelfCheckReport::degraded("not_configured", "Connector is not configured");
+            return Self::serialize_self_check_report(report);
+        };
+
+        let readiness = config.provisioning_readiness();
+        if !readiness.network_ok {
+            let mut report = SelfCheckReport::failed(
+                "network_constraints_invalid",
+                readiness.network_message.clone(),
+            );
+            report.details = Some(json!({ "provisioning": readiness }));
+            return Self::serialize_self_check_report(report);
+        }
+
+        let Some(_client) = &self.client else {
+            let mut report = SelfCheckReport::failed(
+                "client_missing",
+                "API client not initialized; re-run configure",
+            );
+            report.details = Some(json!({ "provisioning": readiness }));
+            return Self::serialize_self_check_report(report);
+        };
+
+        if readiness.requires_credential_injection {
+            let mut report = SelfCheckReport::degraded(
+                "credential_injection_required",
+                "credential_id mode requires egress proxy injection; skipping live probe",
+            );
+            report.details = Some(json!({ "provisioning": readiness }));
+            return Self::serialize_self_check_report(report);
+        }
+
+        let mut report = SelfCheckReport::ok();
+        report.details = Some(json!({ "provisioning": readiness }));
+        Self::serialize_self_check_report(report)
     }
 
     /// Handle the `introspect` method.
@@ -482,6 +602,97 @@ impl SpotifyConnector {
         let tracks = resp.get("tracks").cloned().unwrap_or_else(|| json!([]));
         Ok(json!({ "tracks": tracks }))
     }
+
+    fn serialize_self_check_report(report: SelfCheckReport) -> FcpResult<serde_json::Value> {
+        info!(
+            event = "spotify.provisioning.self_check",
+            status = ?report.status,
+            reason_code = ?report.reason_code,
+            "Spotify self-check completed"
+        );
+
+        serde_json::to_value(report).map_err(|e| FcpError::Internal {
+            message: format!("Failed to serialize self-check report: {e}"),
+        })
+    }
+}
+
+/// Build the `OAuth2` Authorization Code + PKCE provisioning recipe for Spotify.
+#[must_use]
+pub fn provisioning_recipe() -> ProvisioningRecipe {
+    ProvisioningRecipe::new(
+        RecipeId::new("spotify.oauth2_pkce"),
+        "1",
+        "Spotify OAuth2 Authorization Code + PKCE provisioning",
+    )
+    .with_step(ProvisioningStep::new(
+        StepId::new("oauth_authorize"),
+        ProvisioningStepType::Oauth {
+            flow: OAuthRecipe::AuthorizationCodePkce {
+                authorization_url: "https://accounts.spotify.com/authorize".into(),
+                token_url: "https://accounts.spotify.com/api/token".into(),
+                scopes: vec![
+                    "user-read-playback-state".into(),
+                    "user-read-currently-playing".into(),
+                    "user-library-read".into(),
+                    "playlist-read-private".into(),
+                    "user-read-email".into(),
+                    "user-read-private".into(),
+                ],
+                auto_browser: true,
+                callback_port: 8_899,
+            },
+        },
+    ))
+    .with_step(
+        ProvisioningStep::new(
+            StepId::new("store_token"),
+            ProvisioningStepType::StoreSecret {
+                key: "spotify_access_token".into(),
+                value_from: StepId::new("oauth_authorize"),
+                scope: "connector:fcp.spotify".into(),
+            },
+        )
+        .depends_on(StepId::new("oauth_authorize")),
+    )
+}
+
+/// Validate base URL against network constraints policy.
+fn base_url_policy(base_url: &str) -> (bool, String) {
+    let parsed = match Url::parse(base_url) {
+        Ok(parsed) => parsed,
+        Err(error) => {
+            return (false, format!("base_url could not be parsed: {error}"));
+        }
+    };
+
+    let Some(host) = parsed.host_str() else {
+        return (false, "base_url must include a host".into());
+    };
+
+    let local = is_local_test_host(host);
+    let allowed_host = host.eq_ignore_ascii_case("api.spotify.com")
+        || host.eq_ignore_ascii_case("accounts.spotify.com")
+        || local;
+    let secure_or_local = parsed.scheme() == "https" || local;
+
+    if allowed_host && secure_or_local {
+        (
+            true,
+            format!("Endpoint accepted by policy checks: {base_url}"),
+        )
+    } else {
+        (
+            false,
+            format!(
+                "Endpoint must use https and api.spotify.com or accounts.spotify.com (localhost/127.0.0.1 allowed for tests): {base_url}"
+            ),
+        )
+    }
+}
+
+fn is_local_test_host(host: &str) -> bool {
+    matches!(host, "localhost" | "127.0.0.1" | "::1")
 }
 
 /// Extract a required string field from input.
@@ -1382,5 +1593,190 @@ mod tests {
         assert_eq!(cloned.status, DoctorStatus::Healthy);
         let dbg = format!("{r:?}");
         assert!(dbg.contains("DoctorResult"));
+    }
+
+    // ── Provisioning tests ──────────────────────────────────────────
+
+    #[test]
+    fn provisioning_recipe_has_expected_steps() {
+        let recipe = provisioning_recipe();
+        assert_eq!(recipe.id.as_str(), "spotify.oauth2_pkce");
+        assert_eq!(recipe.version, "1");
+        assert_eq!(recipe.steps.len(), 2);
+        assert_eq!(recipe.steps[0].id.as_str(), "oauth_authorize");
+        assert_eq!(recipe.steps[1].id.as_str(), "store_token");
+    }
+
+    #[test]
+    fn provisioning_recipe_oauth_pkce_step() {
+        let recipe = provisioning_recipe();
+        let step = &recipe.steps[0];
+        match &step.kind {
+            ProvisioningStepType::Oauth { flow } => match flow {
+                OAuthRecipe::AuthorizationCodePkce {
+                    authorization_url,
+                    token_url,
+                    scopes,
+                    auto_browser,
+                    callback_port,
+                } => {
+                    assert_eq!(
+                        authorization_url,
+                        "https://accounts.spotify.com/authorize"
+                    );
+                    assert_eq!(token_url, "https://accounts.spotify.com/api/token");
+                    assert!(scopes.contains(&"user-read-playback-state".to_string()));
+                    assert!(scopes.contains(&"user-read-currently-playing".to_string()));
+                    assert!(scopes.contains(&"user-library-read".to_string()));
+                    assert!(scopes.contains(&"playlist-read-private".to_string()));
+                    assert!(scopes.contains(&"user-read-email".to_string()));
+                    assert!(scopes.contains(&"user-read-private".to_string()));
+                    assert_eq!(scopes.len(), 6);
+                    assert!(*auto_browser);
+                    assert_eq!(*callback_port, 8_899);
+                }
+                _ => panic!("expected AuthorizationCodePkce, got {flow:?}"),
+            },
+            _ => panic!("expected Oauth step type, got {:?}", step.kind),
+        }
+    }
+
+    #[test]
+    fn provisioning_recipe_step_dependencies() {
+        let recipe = provisioning_recipe();
+        // First step has no dependencies
+        assert!(recipe.steps[0].depends_on.is_empty());
+        // Second step depends on the first
+        assert_eq!(recipe.steps[1].depends_on.len(), 1);
+        assert_eq!(recipe.steps[1].depends_on[0].as_str(), "oauth_authorize");
+    }
+
+    #[test]
+    fn provisioning_readiness_unconfigured() {
+        // Build a config with access_token and default base_url
+        let config = SpotifyConfig::from_params(&json!({
+            "access_token": "BQtoken",
+        }))
+        .unwrap();
+        let readiness = config.provisioning_readiness();
+        assert_eq!(readiness.auth_mode, "access_token");
+        assert!(readiness.token_configured);
+        assert!(!readiness.credential_id_configured);
+        assert!(!readiness.requires_credential_injection);
+        // Default base_url (api.spotify.com) should pass network policy
+        assert!(readiness.network_ok);
+    }
+
+    #[test]
+    fn provisioning_readiness_bearer_token() {
+        let config = SpotifyConfig::from_params(&json!({
+            "access_token": "BQtoken123",
+        }))
+        .unwrap();
+        let readiness = config.provisioning_readiness();
+        assert_eq!(readiness.auth_mode, "access_token");
+        assert!(readiness.token_configured);
+        assert!(!readiness.credential_id_configured);
+        assert!(!readiness.requires_credential_injection);
+        assert!(readiness.network_ok);
+        assert_eq!(readiness.base_url, DEFAULT_BASE_URL);
+    }
+
+    #[test]
+    fn provisioning_readiness_credential_id() {
+        let config = SpotifyConfig::from_params(&json!({
+            "credential_id": "550e8400-e29b-41d4-a716-446655440000",
+        }))
+        .unwrap();
+        let readiness = config.provisioning_readiness();
+        assert_eq!(readiness.auth_mode, "credential_id");
+        assert!(!readiness.token_configured);
+        assert!(readiness.credential_id_configured);
+        assert!(readiness.requires_credential_injection);
+        assert!(readiness.network_ok);
+    }
+
+    #[test]
+    fn base_url_policy_accepts_spotify() {
+        let (ok, message) = base_url_policy("https://api.spotify.com/v1");
+        assert!(ok, "expected accepted, got: {message}");
+        assert!(message.contains("accepted"));
+
+        let (ok2, _) = base_url_policy("https://accounts.spotify.com/authorize");
+        assert!(ok2);
+    }
+
+    #[test]
+    fn base_url_policy_rejects_http_non_local() {
+        let (ok, message) = base_url_policy("http://api.spotify.com/v1");
+        assert!(!ok, "expected rejected, got: {message}");
+        assert!(message.contains("must use https"));
+    }
+
+    #[test]
+    fn base_url_policy_rejects_unknown_host() {
+        let (ok, message) = base_url_policy("https://evil.example.com/api");
+        assert!(!ok, "expected rejected, got: {message}");
+        assert!(message.contains("must use https"));
+    }
+
+    #[test]
+    fn base_url_policy_accepts_localhost() {
+        let (ok, _) = base_url_policy("http://localhost:8080");
+        assert!(ok);
+
+        let (ok2, _) = base_url_policy("http://127.0.0.1:9090");
+        assert!(ok2);
+    }
+
+    #[test]
+    fn provisioning_readiness_serializes() {
+        let config = SpotifyConfig::from_params(&json!({
+            "access_token": "BQtoken",
+        }))
+        .unwrap();
+        let readiness = config.provisioning_readiness();
+        let json = serde_json::to_value(&readiness).unwrap();
+        assert_eq!(json["auth_mode"], "access_token");
+        assert_eq!(json["token_configured"], true);
+        assert_eq!(json["credential_id_configured"], false);
+        assert_eq!(json["requires_credential_injection"], false);
+        assert_eq!(json["network_ok"], true);
+        assert!(json["network_message"].as_str().unwrap().contains("accepted"));
+        assert_eq!(json["base_url"], DEFAULT_BASE_URL);
+    }
+
+    #[test]
+    fn provisioning_recipe_serializes() {
+        let recipe = provisioning_recipe();
+        let json = serde_json::to_value(&recipe).unwrap();
+        assert_eq!(json["id"], "spotify.oauth2_pkce");
+        assert_eq!(json["version"], "1");
+        assert!(json["steps"].as_array().unwrap().len() == 2);
+    }
+
+    #[test]
+    fn base_url_policy_rejects_unparseable() {
+        let (ok, message) = base_url_policy("not a url at all");
+        assert!(!ok);
+        assert!(message.contains("could not be parsed"));
+    }
+
+    #[test]
+    fn provisioning_recipe_store_secret_step() {
+        let recipe = provisioning_recipe();
+        let step = &recipe.steps[1];
+        match &step.kind {
+            ProvisioningStepType::StoreSecret {
+                key,
+                value_from,
+                scope,
+            } => {
+                assert_eq!(key, "spotify_access_token");
+                assert_eq!(value_from.as_str(), "oauth_authorize");
+                assert_eq!(scope, "connector:fcp.spotify");
+            }
+            _ => panic!("expected StoreSecret step type, got {:?}", step.kind),
+        }
     }
 }

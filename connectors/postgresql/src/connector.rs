@@ -553,8 +553,11 @@ fn typed_operations_info() -> Vec<OperationInfo> {
             safety_tier: SafetyTier::Safe,
             idempotency: IdempotencyClass::Strict,
             ai_hints: AgentHint {
-                when_to_use: "Use to execute SELECT queries and retrieve rows from the database".into(),
-                common_mistakes: vec!["Using string interpolation instead of parameterized queries".into()],
+                when_to_use: "Use to execute SELECT queries and retrieve rows from the database"
+                    .into(),
+                common_mistakes: vec![
+                    "Using string interpolation instead of parameterized queries".into(),
+                ],
                 examples: vec![],
                 related: vec![CapabilityId::from_static("pg.read")],
             },
@@ -572,8 +575,11 @@ fn typed_operations_info() -> Vec<OperationInfo> {
             safety_tier: SafetyTier::Risky,
             idempotency: IdempotencyClass::None,
             ai_hints: AgentHint {
-                when_to_use: "Use for INSERT, UPDATE, DELETE or DDL statements that modify data".into(),
-                common_mistakes: vec!["Running destructive statements without a WHERE clause".into()],
+                when_to_use: "Use for INSERT, UPDATE, DELETE or DDL statements that modify data"
+                    .into(),
+                common_mistakes: vec![
+                    "Running destructive statements without a WHERE clause".into(),
+                ],
                 examples: vec![],
                 related: vec![CapabilityId::from_static("pg.write")],
             },
@@ -591,7 +597,8 @@ fn typed_operations_info() -> Vec<OperationInfo> {
             safety_tier: SafetyTier::Safe,
             idempotency: IdempotencyClass::Strict,
             ai_hints: AgentHint {
-                when_to_use: "Use to analyze query performance before running expensive queries".into(),
+                when_to_use: "Use to analyze query performance before running expensive queries"
+                    .into(),
                 common_mistakes: vec![],
                 examples: vec![],
                 related: vec![CapabilityId::from_static("pg.read")],
@@ -629,7 +636,8 @@ fn typed_operations_info() -> Vec<OperationInfo> {
             safety_tier: SafetyTier::Safe,
             idempotency: IdempotencyClass::Strict,
             ai_hints: AgentHint {
-                when_to_use: "Use to inspect column names, types, and constraints for a table".into(),
+                when_to_use: "Use to inspect column names, types, and constraints for a table"
+                    .into(),
                 common_mistakes: vec![],
                 examples: vec![],
                 related: vec![CapabilityId::from_static("pg.read")],
@@ -667,7 +675,8 @@ fn typed_operations_info() -> Vec<OperationInfo> {
             safety_tier: SafetyTier::Safe,
             idempotency: IdempotencyClass::None,
             ai_hints: AgentHint {
-                when_to_use: "Use to start a transaction for atomic multi-statement operations".into(),
+                when_to_use: "Use to start a transaction for atomic multi-statement operations"
+                    .into(),
                 common_mistakes: vec!["Forgetting to commit or rollback the transaction".into()],
                 examples: vec![],
                 related: vec![CapabilityId::from_static("pg.write")],

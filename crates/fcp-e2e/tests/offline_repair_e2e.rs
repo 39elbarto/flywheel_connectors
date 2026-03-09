@@ -1158,7 +1158,10 @@ fn predictive_prestage_flow() {
     // Pre-stage: add symbols based on priority
     cap.get_mut(&hot_obj).unwrap().set_local_symbols(10);
     assert!(cap.can_access(&hot_obj));
-    assert_eq!(cap.get(&hot_obj).unwrap().status(), OfflineStatus::Available);
+    assert_eq!(
+        cap.get(&hot_obj).unwrap().status(),
+        OfflineStatus::Available
+    );
 }
 
 #[test]
@@ -1273,10 +1276,7 @@ fn repair_result_with_error_serialization() {
     let json = serde_json::to_string(&result).unwrap();
     let deserialized: RepairResult = serde_json::from_str(&json).unwrap();
     assert!(!deserialized.success);
-    assert_eq!(
-        deserialized.error.as_deref(),
-        Some("connection refused")
-    );
+    assert_eq!(deserialized.error.as_deref(), Some("connection refused"));
 }
 
 #[test]
@@ -1334,10 +1334,10 @@ fn multi_object_repair_prioritization() {
 
     // Create 4 objects with varying coverage levels
     let scenarios: Vec<(&[u8], u32)> = vec![
-        (b"obj-full", 10),     // fully covered — no repair
-        (b"obj-slight", 9),    // barely degraded — low priority
-        (b"obj-half", 5),      // half covered — unavailable
-        (b"obj-empty", 0),     // empty — unavailable, highest priority
+        (b"obj-full", 10),  // fully covered — no repair
+        (b"obj-slight", 9), // barely degraded — low priority
+        (b"obj-half", 5),   // half covered — unavailable
+        (b"obj-empty", 0),  // empty — unavailable, highest priority
     ];
 
     let mut queued = 0;

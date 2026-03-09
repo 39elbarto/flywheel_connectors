@@ -1656,10 +1656,7 @@ mod tests {
         let cloned = config.clone();
         assert_eq!(config.cache_capacity, cloned.cache_capacity);
         assert_eq!(config.allow_dev_overrides, cloned.allow_dev_overrides);
-        assert_eq!(
-            config.policy.min_slsa_level,
-            cloned.policy.min_slsa_level
-        );
+        assert_eq!(config.policy.min_slsa_level, cloned.policy.min_slsa_level);
         assert_eq!(
             config.policy.trusted_builders,
             cloned.policy.trusted_builders
@@ -1714,22 +1711,13 @@ mod tests {
         let cloned = outcome.audit_event.clone();
         assert_eq!(outcome.audit_event.connector_id, cloned.connector_id);
         assert_eq!(outcome.audit_event.version, cloned.version);
-        assert_eq!(
-            outcome.audit_event.artifact_digest,
-            cloned.artifact_digest
-        );
+        assert_eq!(outcome.audit_event.artifact_digest, cloned.artifact_digest);
         assert_eq!(outcome.audit_event.decision, cloned.decision);
         assert_eq!(outcome.audit_event.reason_code, cloned.reason_code);
-        assert_eq!(
-            outcome.audit_event.steps_executed,
-            cloned.steps_executed
-        );
+        assert_eq!(outcome.audit_event.steps_executed, cloned.steps_executed);
         assert_eq!(outcome.audit_event.steps_passed, cloned.steps_passed);
         assert_eq!(outcome.audit_event.cached, cloned.cached);
-        assert_eq!(
-            outcome.audit_event.evidence_digest,
-            cloned.evidence_digest
-        );
+        assert_eq!(outcome.audit_event.evidence_digest, cloned.evidence_digest);
         assert_eq!(outcome.audit_event.verified_at, cloned.verified_at);
     }
 
@@ -2189,7 +2177,10 @@ mod tests {
 
         // Permissive policy with no attestation/sbom should have few or no steps.
         assert!(outcome.allowed);
-        assert_eq!(outcome.audit_event.steps_executed, outcome.evidence.steps.len());
+        assert_eq!(
+            outcome.audit_event.steps_executed,
+            outcome.evidence.steps.len()
+        );
     }
 
     // ── Boundary / Edge Cases ───────────────────────────────────
@@ -2607,8 +2598,12 @@ mod tests {
         let d1 = format!("blake3-256:{}", "a".repeat(64));
         let d2 = format!("blake3-256:{}", "b".repeat(64));
 
-        let o1 = gate.verify_at(&cid_a, "1.0.0", &d1, None, None, test_time()).unwrap();
-        let o2 = gate.verify_at(&cid_b, "2.0.0", &d2, None, None, test_time()).unwrap();
+        let o1 = gate
+            .verify_at(&cid_a, "1.0.0", &d1, None, None, test_time())
+            .unwrap();
+        let o2 = gate
+            .verify_at(&cid_b, "2.0.0", &d2, None, None, test_time())
+            .unwrap();
 
         assert_eq!(o1.connector_id, cid_a);
         assert_eq!(o2.connector_id, cid_b);
@@ -2627,8 +2622,10 @@ mod tests {
         let d1 = format!("blake3-256:{}", "a".repeat(64));
         let d2 = format!("blake3-256:{}", "b".repeat(64));
 
-        gate.verify_at(&cid, "1.0.0", &d1, None, None, test_time()).unwrap();
-        gate.verify_at(&cid, "1.0.0", &d2, None, None, test_time()).unwrap();
+        gate.verify_at(&cid, "1.0.0", &d1, None, None, test_time())
+            .unwrap();
+        gate.verify_at(&cid, "1.0.0", &d2, None, None, test_time())
+            .unwrap();
         assert_eq!(gate.cache_size(), 2);
     }
 
@@ -3040,8 +3037,7 @@ mod tests {
 
     #[test]
     fn reason_code_slsa_level_insufficient_serde() {
-        let json =
-            serde_json::to_string(&VerificationReasonCode::SlsaLevelInsufficient).unwrap();
+        let json = serde_json::to_string(&VerificationReasonCode::SlsaLevelInsufficient).unwrap();
         let rt: VerificationReasonCode = serde_json::from_str(&json).unwrap();
         assert_eq!(rt, VerificationReasonCode::SlsaLevelInsufficient);
     }
@@ -3055,8 +3051,7 @@ mod tests {
 
     #[test]
     fn reason_code_subject_digest_mismatch_serde() {
-        let json =
-            serde_json::to_string(&VerificationReasonCode::SubjectDigestMismatch).unwrap();
+        let json = serde_json::to_string(&VerificationReasonCode::SubjectDigestMismatch).unwrap();
         let rt: VerificationReasonCode = serde_json::from_str(&json).unwrap();
         assert_eq!(rt, VerificationReasonCode::SubjectDigestMismatch);
     }
@@ -3077,8 +3072,7 @@ mod tests {
 
     #[test]
     fn reason_code_attestation_invalid_serde() {
-        let json =
-            serde_json::to_string(&VerificationReasonCode::AttestationInvalid).unwrap();
+        let json = serde_json::to_string(&VerificationReasonCode::AttestationInvalid).unwrap();
         let rt: VerificationReasonCode = serde_json::from_str(&json).unwrap();
         assert_eq!(rt, VerificationReasonCode::AttestationInvalid);
     }
@@ -3125,12 +3119,16 @@ mod tests {
         let d1 = format!("blake3-256:{}", "1".repeat(64));
         let d2 = format!("blake3-256:{}", "2".repeat(64));
 
-        gate.verify_at(&cid, "1.0.0", &d1, None, None, test_time()).unwrap();
-        gate.verify_at(&cid, "2.0.0", &d2, None, None, test_time()).unwrap();
+        gate.verify_at(&cid, "1.0.0", &d1, None, None, test_time())
+            .unwrap();
+        gate.verify_at(&cid, "2.0.0", &d2, None, None, test_time())
+            .unwrap();
         assert_eq!(gate.cache_size(), 2);
 
         // Re-verify d1 — should be a cache hit, no eviction.
-        let r = gate.verify_at(&cid, "1.0.0", &d1, None, None, test_time()).unwrap();
+        let r = gate
+            .verify_at(&cid, "1.0.0", &d1, None, None, test_time())
+            .unwrap();
         assert!(r.cached);
         assert_eq!(gate.cache_size(), 2);
     }

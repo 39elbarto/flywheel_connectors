@@ -1745,15 +1745,15 @@ mod tests {
         let config = test_config()
             .with_redirect_uri("https://first.com")
             .with_redirect_uri("https://second.com");
-        assert_eq!(
-            config.redirect_uri,
-            Some("https://second.com".to_string())
-        );
+        assert_eq!(config.redirect_uri, Some("https://second.com".to_string()));
     }
 
     #[test]
     fn test_config_pkce_toggle() {
-        let config = test_config().with_pkce(true).with_pkce(false).with_pkce(true);
+        let config = test_config()
+            .with_pkce(true)
+            .with_pkce(false)
+            .with_pkce(true);
         assert!(config.use_pkce);
     }
 
@@ -1859,18 +1859,16 @@ mod tests {
 
     #[test]
     fn test_callback_from_query_preserves_special_chars() {
-        let callback =
-            AuthorizationCallback::from_query("code=abc%3Ddef&state=x%26y").unwrap();
+        let callback = AuthorizationCallback::from_query("code=abc%3Ddef&state=x%26y").unwrap();
         assert_eq!(callback.code, Some("abc=def".to_string()));
         assert_eq!(callback.state, Some("x&y".to_string()));
     }
 
     #[test]
     fn test_callback_from_url_with_port() {
-        let callback = AuthorizationCallback::from_url(
-            "https://localhost:8443/callback?code=c&state=s",
-        )
-        .unwrap();
+        let callback =
+            AuthorizationCallback::from_url("https://localhost:8443/callback?code=c&state=s")
+                .unwrap();
         assert_eq!(callback.code, Some("c".to_string()));
         assert_eq!(callback.state, Some("s".to_string()));
     }
@@ -1893,7 +1891,8 @@ mod tests {
 
     #[test]
     fn test_callback_serde_null_fields() {
-        let json = r#"{"code":null,"state":null,"error":null,"error_description":null,"error_uri":null}"#;
+        let json =
+            r#"{"code":null,"state":null,"error":null,"error_description":null,"error_uri":null}"#;
         let callback: AuthorizationCallback = serde_json::from_str(json).unwrap();
         assert!(callback.code.is_none());
         assert!(callback.state.is_none());

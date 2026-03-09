@@ -3522,9 +3522,7 @@ mod tests {
     fn verify_report_display_with_issues() {
         let mut report = VerifyReport::ok(10);
         report.status = VerifyStatus::Fail;
-        report
-            .issues
-            .push(VerifyIssue::new("audit.seq_gap", "gap"));
+        report.issues.push(VerifyIssue::new("audit.seq_gap", "gap"));
         report
             .issues
             .push(VerifyIssue::new("audit.prev_mismatch", "mismatch"));

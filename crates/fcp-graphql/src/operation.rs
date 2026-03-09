@@ -519,10 +519,7 @@ mod tests {
 
     #[test]
     fn request_with_empty_variables() {
-        let req = GraphqlRequest::new(
-            GraphqlQuery::new("{ ping }"),
-            serde_json::json!({}),
-        );
+        let req = GraphqlRequest::new(GraphqlQuery::new("{ ping }"), serde_json::json!({}));
         let json = serde_json::to_string(&req).unwrap();
         assert!(json.contains("{}"));
     }
@@ -530,7 +527,10 @@ mod tests {
     #[test]
     fn request_with_array_variables() {
         let vars = serde_json::json!({"ids": [1, 2, 3]});
-        let req = GraphqlRequest::new(GraphqlQuery::new("query($ids: [Int!]!) { byIds(ids: $ids) { id } }"), vars);
+        let req = GraphqlRequest::new(
+            GraphqlQuery::new("query($ids: [Int!]!) { byIds(ids: $ids) { id } }"),
+            vars,
+        );
         let json = serde_json::to_string(&req).unwrap();
         let back: GraphqlRequest<serde_json::Value> = serde_json::from_str(&json).unwrap();
         assert!(back.variables["ids"].is_array());

@@ -380,7 +380,9 @@ fn create_demo_deny_revoked_receipt(request_id: &str) -> ExplainReport {
         explanation: Some(
             "Token was revoked by zone administrator due to credential rotation".to_string(),
         ),
-        recovery_hint: Some("Request a fresh capability token after revocation sync completes".to_string()),
+        recovery_hint: Some(
+            "Request a fresh capability token after revocation sync completes".to_string(),
+        ),
         zone_id: "z:work".to_string(),
         signed_by: SignerInfo {
             node_id: "node-mesh-1".to_string(),
@@ -415,7 +417,9 @@ fn create_demo_deny_zone_violation_receipt(request_id: &str) -> ExplainReport {
             "Cross-zone access denied: z:external cannot invoke operations in z:sensitive"
                 .to_string(),
         ),
-        recovery_hint: Some("Reissue the request with a token scoped to the target zone".to_string()),
+        recovery_hint: Some(
+            "Reissue the request with a token scoped to the target zone".to_string(),
+        ),
         zone_id: "z:sensitive".to_string(),
         signed_by: SignerInfo {
             node_id: "node-mesh-2".to_string(),

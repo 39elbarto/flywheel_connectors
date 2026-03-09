@@ -567,16 +567,15 @@ mod tests {
     #[test]
     fn event_envelope_with_stream_key() {
         let data = sample_event_data();
-        let envelope = EventEnvelope::new("events.test", data)
-            .with_stream_key("channel-123");
+        let envelope = EventEnvelope::new("events.test", data).with_stream_key("channel-123");
         assert_eq!(envelope.stream_key, Some("channel-123".to_string()));
     }
 
     #[test]
     fn event_envelope_with_ordering() {
         let data = sample_event_data();
-        let envelope = EventEnvelope::new("events.test", data)
-            .with_ordering(OrderingPolicy::PerKey);
+        let envelope =
+            EventEnvelope::new("events.test", data).with_ordering(OrderingPolicy::PerKey);
         assert_eq!(envelope.ordering, Some(OrderingPolicy::PerKey));
     }
 
@@ -659,8 +658,8 @@ mod tests {
     fn event_envelope_gateway_ordering_no_stream_key() {
         // Gateway ordering doesn't require a stream_key (global ordering)
         let data = sample_event_data();
-        let envelope = EventEnvelope::new("events.global", data)
-            .with_ordering(OrderingPolicy::Gateway);
+        let envelope =
+            EventEnvelope::new("events.global", data).with_ordering(OrderingPolicy::Gateway);
 
         assert!(envelope.stream_key.is_none());
         assert_eq!(envelope.ordering, Some(OrderingPolicy::Gateway));

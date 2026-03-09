@@ -859,11 +859,7 @@ mod tests {
 
     #[test]
     fn description_key_generation_contains_key() {
-        assert!(
-            BootstrapPhase::KeyGeneration
-                .description()
-                .contains("key")
-        );
+        assert!(BootstrapPhase::KeyGeneration.description().contains("key"));
     }
 
     #[test]

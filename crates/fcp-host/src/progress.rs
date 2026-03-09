@@ -1668,12 +1668,7 @@ mod tests {
         let ctrl = ProgressController::new();
         ctrl.start_tracking("op1", 1, "phase_0", &default_opts());
         for i in 1..=5 {
-            ctrl.record_phase_transition(
-                "op1",
-                &format!("phase_{i}"),
-                &[],
-                fixed_now(),
-            );
+            ctrl.record_phase_transition("op1", &format!("phase_{i}"), &[], fixed_now());
         }
         assert_eq!(ctrl.current_phase("op1").unwrap(), "phase_5");
         let completed = ctrl.completed_phases("op1");
@@ -2037,11 +2032,7 @@ mod tests {
         let ctrl = ProgressController::new();
         ctrl.start_tracking("op1", 1, "work", &zero_throttle_opts());
         for i in 0..100 {
-            let emitted = ctrl.record_update(
-                "op1",
-                make_update("work", i, Some(100)),
-                fixed_now(),
-            );
+            let emitted = ctrl.record_update("op1", make_update("work", i, Some(100)), fixed_now());
             assert!(emitted);
         }
         assert_eq!(ctrl.notifications("op1").len(), 100);

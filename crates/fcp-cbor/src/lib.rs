@@ -4389,8 +4389,11 @@ mod tests {
 
     #[test]
     fn schema_id_serde_cbor_preserves_prerelease() {
-        let schema =
-            SchemaId::new("fcp.protocol", "Msg", Version::parse("2.0.0-beta.3").unwrap());
+        let schema = SchemaId::new(
+            "fcp.protocol",
+            "Msg",
+            Version::parse("2.0.0-beta.3").unwrap(),
+        );
         let cbor_bytes = to_canonical_cbor(&schema).unwrap();
         let decoded: SchemaId = ciborium::de::from_reader(cbor_bytes.as_slice()).unwrap();
         assert_eq!(decoded, schema);
@@ -4483,10 +4486,7 @@ mod tests {
 
     #[test]
     fn error_payload_too_large_boundary_values() {
-        let err = SerializationError::PayloadTooLarge {
-            len: 0,
-            max: 0,
-        };
+        let err = SerializationError::PayloadTooLarge { len: 0, max: 0 };
         assert_eq!(err.to_string(), "payload too large (0 bytes > 0 bytes)");
     }
 
@@ -4567,8 +4567,7 @@ mod tests {
     #[test]
     fn deserialize_unchecked_rejects_one_byte_input() {
         let schema = SchemaId::new("fcp.test", "Tiny2", Version::new(1, 0, 0));
-        let err =
-            CanonicalSerializer::deserialize_unchecked::<u8>(&[0x42], &schema).unwrap_err();
+        let err = CanonicalSerializer::deserialize_unchecked::<u8>(&[0x42], &schema).unwrap_err();
         assert!(matches!(err, SerializationError::MissingSchemaHashPrefix));
     }
 
@@ -4694,12 +4693,7 @@ mod tests {
     #[test]
     fn canonicalize_map_large_number_of_entries() {
         let mut entries: Vec<(Value, Value)> = (0..100)
-            .map(|i| {
-                (
-                    Value::Text(format!("key_{i:04}")),
-                    Value::Integer(i.into()),
-                )
-            })
+            .map(|i| (Value::Text(format!("key_{i:04}")), Value::Integer(i.into())))
             .collect();
         canonicalize_map(&mut entries, 0).unwrap();
         // All keys have same length (8 chars), so they should be in lex order.
@@ -5084,11 +5078,17 @@ mod tests {
     fn roundtrip_vec_of_maps_with_mixed_values() {
         let schema = SchemaId::new("fcp.test", "VecMaps", Version::new(1, 0, 0));
         let mut m1 = std::collections::BTreeMap::new();
-        m1.insert("name".to_string(), serde_json::Value::String("alice".to_string()));
+        m1.insert(
+            "name".to_string(),
+            serde_json::Value::String("alice".to_string()),
+        );
         m1.insert("age".to_string(), serde_json::Value::Number(30.into()));
 
         let mut m2 = std::collections::BTreeMap::new();
-        m2.insert("name".to_string(), serde_json::Value::String("bob".to_string()));
+        m2.insert(
+            "name".to_string(),
+            serde_json::Value::String("bob".to_string()),
+        );
         m2.insert("active".to_string(), serde_json::Value::Bool(true));
 
         let val = vec![m1, m2];

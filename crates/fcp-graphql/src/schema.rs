@@ -607,8 +607,16 @@ mod tests {
             "else": {"required": ["phone"]}
         }"#;
         let cache = SchemaCache::default();
-        assert!(cache.validate(schema, &json!({"type": "email", "address": "a@b.com"})).is_ok());
-        assert!(cache.validate(schema, &json!({"type": "sms", "phone": "123"})).is_ok());
+        assert!(
+            cache
+                .validate(schema, &json!({"type": "email", "address": "a@b.com"}))
+                .is_ok()
+        );
+        assert!(
+            cache
+                .validate(schema, &json!({"type": "sms", "phone": "123"}))
+                .is_ok()
+        );
     }
 
     // ---- validate with definitions/refs ----

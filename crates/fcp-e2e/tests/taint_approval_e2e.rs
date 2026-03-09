@@ -217,11 +217,7 @@ fn elevation_approval_raises_integrity() {
     assert!(record.can_drive_operation(SafetyTier::Dangerous).is_err());
 
     // Elevate integrity from Untrusted to Work
-    let result = record.apply_elevation(
-        IntegrityLevel::Work,
-        oid("elevation-token-1"),
-        1000,
-    );
+    let result = record.apply_elevation(IntegrityLevel::Work, oid("elevation-token-1"), 1000);
     assert!(result.is_ok());
     assert_eq!(record.integrity_label, IntegrityLevel::Work);
 
@@ -247,11 +243,7 @@ fn elevation_requires_higher_level() {
     assert_eq!(record.integrity_label, IntegrityLevel::Work);
 
     // Attempt to elevate to same level
-    let result = record.apply_elevation(
-        IntegrityLevel::Work,
-        oid("token-same"),
-        1000,
-    );
+    let result = record.apply_elevation(IntegrityLevel::Work, oid("token-same"), 1000);
     assert!(result.is_err());
     match result.unwrap_err() {
         ProvenanceViolation::InvalidElevation { current, requested } => {
@@ -262,11 +254,7 @@ fn elevation_requires_higher_level() {
     }
 
     // Attempt to elevate to lower level
-    let result = record.apply_elevation(
-        IntegrityLevel::Community,
-        oid("token-lower"),
-        1001,
-    );
+    let result = record.apply_elevation(IntegrityLevel::Community, oid("token-lower"), 1001);
     assert!(result.is_err());
     match result.unwrap_err() {
         ProvenanceViolation::InvalidElevation { current, requested } => {
@@ -396,11 +384,7 @@ fn elevation_records_label_adjustment() {
     let mut record = ProvenanceRecord::new(ZoneId::public());
     assert!(record.label_adjustments.is_empty());
 
-    let _ = record.apply_elevation(
-        IntegrityLevel::Work,
-        oid("elev-tok"),
-        42,
-    );
+    let _ = record.apply_elevation(IntegrityLevel::Work, oid("elev-tok"), 42);
 
     assert_eq!(record.label_adjustments.len(), 1);
     let adj = &record.label_adjustments[0];
@@ -430,8 +414,14 @@ fn sanitizer_receipt_clears_public_input() {
     assert!(!record.taint_flags.contains(TaintFlag::PublicInput));
     assert!(record.taint_flags.is_empty());
     assert_eq!(record.taint_reductions.len(), 1);
-    assert_eq!(record.taint_reductions[0].cleared_flags, vec![TaintFlag::PublicInput]);
-    assert_eq!(record.taint_reductions[0].covered_inputs, vec![oid("input-a")]);
+    assert_eq!(
+        record.taint_reductions[0].cleared_flags,
+        vec![TaintFlag::PublicInput]
+    );
+    assert_eq!(
+        record.taint_reductions[0].covered_inputs,
+        vec![oid("input-a")]
+    );
 }
 
 #[test]
@@ -494,11 +484,7 @@ fn taint_reduction_then_dangerous_allowed() {
     assert!(record.can_drive_operation(SafetyTier::Dangerous).is_err());
 
     // Elevate integrity
-    let _ = record.apply_elevation(
-        IntegrityLevel::Work,
-        oid("elev-tok-2"),
-        1000,
-    );
+    let _ = record.apply_elevation(IntegrityLevel::Work, oid("elev-tok-2"), 1000);
 
     // Still blocked (PublicInput taint)
     assert!(record.can_drive_operation(SafetyTier::Dangerous).is_err());
@@ -660,14 +646,20 @@ fn flow_integrity_down_allowed() {
     let mut record = ProvenanceRecord::new(ZoneId::work());
     // Lower confidentiality to Public so it doesn't need declassification
     record.confidentiality_label = ConfidentialityLevel::Public;
-    assert_eq!(record.can_flow_to(&ZoneId::public()), FlowCheckResult::Allowed);
+    assert_eq!(
+        record.can_flow_to(&ZoneId::public()),
+        FlowCheckResult::Allowed
+    );
 }
 
 #[test]
 fn flow_integrity_up_requires_elevation() {
     // Public → Work: integrity needs to go UP, requires elevation
     let record = ProvenanceRecord::new(ZoneId::public());
-    assert_eq!(record.can_flow_to(&ZoneId::work()), FlowCheckResult::RequiresElevation);
+    assert_eq!(
+        record.can_flow_to(&ZoneId::work()),
+        FlowCheckResult::RequiresElevation
+    );
 }
 
 #[test]
@@ -677,13 +669,19 @@ fn flow_confidentiality_up_allowed() {
     // For public→private: integrity check: target_integrity(Private=3) <= current(Untrusted=0) → NO
     // confidentiality check: target_conf(Private=3) >= current_conf(Public=0) → YES
     // So it requires elevation (for integrity), not declassification
-    assert_eq!(record.can_flow_to(&ZoneId::private()), FlowCheckResult::RequiresElevation);
+    assert_eq!(
+        record.can_flow_to(&ZoneId::private()),
+        FlowCheckResult::RequiresElevation
+    );
 }
 
 #[test]
 fn flow_same_zone_allowed() {
     let record = ProvenanceRecord::new(ZoneId::work());
-    assert_eq!(record.can_flow_to(&ZoneId::work()), FlowCheckResult::Allowed);
+    assert_eq!(
+        record.can_flow_to(&ZoneId::work()),
+        FlowCheckResult::Allowed
+    );
 }
 
 #[test]
@@ -710,7 +708,10 @@ fn flow_requires_both_elevation_and_declassification() {
     // Flow to work zone: requires integrity UP (elevation) AND confidentiality DOWN (declassification)
     // target_integrity(Work=2) <= Untrusted(0)? NO → needs elevation
     // target_conf(Work=2) >= Private(3)? NO → needs declassification
-    assert_eq!(record.can_flow_to(&ZoneId::work()), FlowCheckResult::RequiresBoth);
+    assert_eq!(
+        record.can_flow_to(&ZoneId::work()),
+        FlowCheckResult::RequiresBoth
+    );
 }
 
 #[test]
@@ -746,7 +747,10 @@ fn zone_crossing_approved_no_taint() {
     assert_eq!(record.current_zone, ZoneId::public());
     assert_eq!(record.zone_crossings.len(), 1);
     assert!(record.zone_crossings[0].approved);
-    assert_eq!(record.zone_crossings[0].approval_token_id, Some(oid("approval-tok")));
+    assert_eq!(
+        record.zone_crossings[0].approval_token_id,
+        Some(oid("approval-tok"))
+    );
 }
 
 #[test]
@@ -754,11 +758,8 @@ fn declassification_lowers_confidentiality() {
     let mut record = ProvenanceRecord::new(ZoneId::private());
     assert_eq!(record.confidentiality_label, ConfidentialityLevel::Private);
 
-    let result = record.apply_declassification(
-        ConfidentialityLevel::Work,
-        oid("declass-tok"),
-        2000,
-    );
+    let result =
+        record.apply_declassification(ConfidentialityLevel::Work, oid("declass-tok"), 2000);
     assert!(result.is_ok());
     assert_eq!(record.confidentiality_label, ConfidentialityLevel::Work);
     assert_eq!(record.label_adjustments.len(), 1);
@@ -778,11 +779,8 @@ fn declassification_requires_lower_level() {
     assert_eq!(record.confidentiality_label, ConfidentialityLevel::Work);
 
     // Attempt to "declassify" to same level
-    let result = record.apply_declassification(
-        ConfidentialityLevel::Work,
-        oid("declass-same"),
-        1000,
-    );
+    let result =
+        record.apply_declassification(ConfidentialityLevel::Work, oid("declass-same"), 1000);
     assert!(result.is_err());
     match result.unwrap_err() {
         ProvenanceViolation::InvalidDeclassification { current, requested } => {
@@ -793,11 +791,8 @@ fn declassification_requires_lower_level() {
     }
 
     // Attempt to "declassify" upward
-    let result = record.apply_declassification(
-        ConfidentialityLevel::Private,
-        oid("declass-up"),
-        1001,
-    );
+    let result =
+        record.apply_declassification(ConfidentialityLevel::Private, oid("declass-up"), 1001);
     assert!(result.is_err());
     match result.unwrap_err() {
         ProvenanceViolation::InvalidDeclassification { current, requested } => {
@@ -864,11 +859,7 @@ fn taint_approval_full_flow_logged() {
     ));
 
     // Phase 3: Execute — elevate integrity
-    let elev = record.apply_elevation(
-        IntegrityLevel::Work,
-        oid("full-flow-elev"),
-        5000,
-    );
+    let elev = record.apply_elevation(IntegrityLevel::Work, oid("full-flow-elev"), 5000);
     assert!(elev.is_ok());
     logger.push(log_entry(
         "taint_approval_full_flow",
@@ -920,7 +911,10 @@ fn taint_approval_full_flow_logged() {
     let entries = logger.entries();
     assert_eq!(entries.len(), 5);
     for entry in entries {
-        assert!(entry.validate().is_ok(), "log entry failed validation: {entry:?}");
+        assert!(
+            entry.validate().is_ok(),
+            "log entry failed validation: {entry:?}"
+        );
     }
 }
 
@@ -1075,10 +1069,22 @@ fn taint_flags_from_iter() {
 
 #[test]
 fn integrity_level_from_zone_mapping() {
-    assert_eq!(IntegrityLevel::from_zone(&ZoneId::owner()), IntegrityLevel::Owner);
-    assert_eq!(IntegrityLevel::from_zone(&ZoneId::private()), IntegrityLevel::Private);
-    assert_eq!(IntegrityLevel::from_zone(&ZoneId::work()), IntegrityLevel::Work);
-    assert_eq!(IntegrityLevel::from_zone(&ZoneId::public()), IntegrityLevel::Untrusted);
+    assert_eq!(
+        IntegrityLevel::from_zone(&ZoneId::owner()),
+        IntegrityLevel::Owner
+    );
+    assert_eq!(
+        IntegrityLevel::from_zone(&ZoneId::private()),
+        IntegrityLevel::Private
+    );
+    assert_eq!(
+        IntegrityLevel::from_zone(&ZoneId::work()),
+        IntegrityLevel::Work
+    );
+    assert_eq!(
+        IntegrityLevel::from_zone(&ZoneId::public()),
+        IntegrityLevel::Untrusted
+    );
 }
 
 #[test]
@@ -1247,18 +1253,15 @@ fn full_cycle_taint_elevate_sanitize_cross_declassify() {
     assert!(record.can_drive_operation(SafetyTier::Dangerous).is_err());
 
     // Step 2: elevate
-    assert!(record
-        .apply_elevation(IntegrityLevel::Work, oid("cycle-elev"), 100)
-        .is_ok());
+    assert!(
+        record
+            .apply_elevation(IntegrityLevel::Work, oid("cycle-elev"), 100)
+            .is_ok()
+    );
     assert_eq!(record.integrity_label, IntegrityLevel::Work);
 
     // Step 3: sanitize
-    record.apply_taint_reduction(
-        &[TaintFlag::PublicInput],
-        oid("cycle-san"),
-        vec![],
-        200,
-    );
+    record.apply_taint_reduction(&[TaintFlag::PublicInput], oid("cycle-san"), vec![], 200);
     assert!(!record.taint_flags.contains(TaintFlag::PublicInput));
     assert!(record.can_drive_operation(SafetyTier::Dangerous).is_ok());
 
@@ -1272,23 +1275,40 @@ fn full_cycle_taint_elevate_sanitize_cross_declassify() {
     record.confidentiality_label = ConfidentialityLevel::Private;
 
     // Now declassify so it can flow back to work
-    assert!(record
-        .apply_declassification(ConfidentialityLevel::Work, oid("cycle-declass"), 400)
-        .is_ok());
+    assert!(
+        record
+            .apply_declassification(ConfidentialityLevel::Work, oid("cycle-declass"), 400)
+            .is_ok()
+    );
     assert_eq!(record.confidentiality_label, ConfidentialityLevel::Work);
-    assert_eq!(record.can_flow_to(&ZoneId::work()), FlowCheckResult::Allowed);
+    assert_eq!(
+        record.can_flow_to(&ZoneId::work()),
+        FlowCheckResult::Allowed
+    );
 }
 
 #[test]
 fn taint_flag_display() {
     assert_eq!(format!("{}", TaintFlag::PublicInput), "PUBLIC_INPUT");
-    assert_eq!(format!("{}", TaintFlag::PotentiallyMalicious), "POTENTIALLY_MALICIOUS");
-    assert_eq!(format!("{}", TaintFlag::CrossZoneUnapproved), "CROSS_ZONE_UNAPPROVED");
+    assert_eq!(
+        format!("{}", TaintFlag::PotentiallyMalicious),
+        "POTENTIALLY_MALICIOUS"
+    );
+    assert_eq!(
+        format!("{}", TaintFlag::CrossZoneUnapproved),
+        "CROSS_ZONE_UNAPPROVED"
+    );
     assert_eq!(format!("{}", TaintFlag::AiGenerated), "AI_GENERATED");
-    assert_eq!(format!("{}", TaintFlag::WebhookInjected), "WEBHOOK_INJECTED");
+    assert_eq!(
+        format!("{}", TaintFlag::WebhookInjected),
+        "WEBHOOK_INJECTED"
+    );
     assert_eq!(format!("{}", TaintFlag::UserGenerated), "USER_GENERATED");
     assert_eq!(format!("{}", TaintFlag::UnverifiedLink), "UNVERIFIED_LINK");
-    assert_eq!(format!("{}", TaintFlag::UntrustedTransform), "UNTRUSTED_TRANSFORM");
+    assert_eq!(
+        format!("{}", TaintFlag::UntrustedTransform),
+        "UNTRUSTED_TRANSFORM"
+    );
 }
 
 #[test]
@@ -1342,18 +1362,26 @@ fn elevation_chain_incremental() {
     let mut record = ProvenanceRecord::new(ZoneId::public());
     assert_eq!(record.integrity_label, IntegrityLevel::Untrusted);
 
-    assert!(record
-        .apply_elevation(IntegrityLevel::Community, oid("e1"), 10)
-        .is_ok());
-    assert!(record
-        .apply_elevation(IntegrityLevel::Work, oid("e2"), 20)
-        .is_ok());
-    assert!(record
-        .apply_elevation(IntegrityLevel::Private, oid("e3"), 30)
-        .is_ok());
-    assert!(record
-        .apply_elevation(IntegrityLevel::Owner, oid("e4"), 40)
-        .is_ok());
+    assert!(
+        record
+            .apply_elevation(IntegrityLevel::Community, oid("e1"), 10)
+            .is_ok()
+    );
+    assert!(
+        record
+            .apply_elevation(IntegrityLevel::Work, oid("e2"), 20)
+            .is_ok()
+    );
+    assert!(
+        record
+            .apply_elevation(IntegrityLevel::Private, oid("e3"), 30)
+            .is_ok()
+    );
+    assert!(
+        record
+            .apply_elevation(IntegrityLevel::Owner, oid("e4"), 40)
+            .is_ok()
+    );
 
     assert_eq!(record.integrity_label, IntegrityLevel::Owner);
     assert_eq!(record.label_adjustments.len(), 4);
@@ -1365,18 +1393,26 @@ fn declassification_chain_incremental() {
     let mut record = ProvenanceRecord::new(ZoneId::owner());
     assert_eq!(record.confidentiality_label, ConfidentialityLevel::Owner);
 
-    assert!(record
-        .apply_declassification(ConfidentialityLevel::Private, oid("d1"), 10)
-        .is_ok());
-    assert!(record
-        .apply_declassification(ConfidentialityLevel::Work, oid("d2"), 20)
-        .is_ok());
-    assert!(record
-        .apply_declassification(ConfidentialityLevel::Community, oid("d3"), 30)
-        .is_ok());
-    assert!(record
-        .apply_declassification(ConfidentialityLevel::Public, oid("d4"), 40)
-        .is_ok());
+    assert!(
+        record
+            .apply_declassification(ConfidentialityLevel::Private, oid("d1"), 10)
+            .is_ok()
+    );
+    assert!(
+        record
+            .apply_declassification(ConfidentialityLevel::Work, oid("d2"), 20)
+            .is_ok()
+    );
+    assert!(
+        record
+            .apply_declassification(ConfidentialityLevel::Community, oid("d3"), 30)
+            .is_ok()
+    );
+    assert!(
+        record
+            .apply_declassification(ConfidentialityLevel::Public, oid("d4"), 40)
+            .is_ok()
+    );
 
     assert_eq!(record.confidentiality_label, ConfidentialityLevel::Public);
     assert_eq!(record.label_adjustments.len(), 4);
@@ -1386,7 +1422,10 @@ fn declassification_chain_incremental() {
 fn community_zone_integrity_level() {
     let record = ProvenanceRecord::new(ZoneId::community());
     assert_eq!(record.integrity_label, IntegrityLevel::Community);
-    assert_eq!(record.confidentiality_label, ConfidentialityLevel::Community);
+    assert_eq!(
+        record.confidentiality_label,
+        ConfidentialityLevel::Community
+    );
 }
 
 #[test]

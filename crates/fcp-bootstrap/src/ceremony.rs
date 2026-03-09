@@ -1895,8 +1895,7 @@ mod tests {
 
     #[test]
     fn threshold_config_with_timeout_chaining() {
-        let config = ThresholdConfig::new(2, 3)
-            .with_timeout(Duration::minutes(5));
+        let config = ThresholdConfig::new(2, 3).with_timeout(Duration::minutes(5));
         assert_eq!(config.phase_timeout, Duration::minutes(5));
         assert_eq!(config.threshold, 2);
     }
@@ -2047,12 +2046,7 @@ mod tests {
 
         let mut rng = ChaCha20Rng::seed_from_u64(99);
         let artifact = ceremony
-            .sign_with_participants_and_rng(
-                &[1, 2],
-                b"ctx",
-                b"msg",
-                &mut rng,
-            )
+            .sign_with_participants_and_rng(&[1, 2], b"ctx", b"msg", &mut rng)
             .unwrap();
 
         let cloned = artifact.clone();
@@ -2076,12 +2070,7 @@ mod tests {
 
         let mut rng = ChaCha20Rng::seed_from_u64(55);
         let artifact = ceremony
-            .sign_with_participants_and_rng(
-                &[1, 3],
-                b"correct-context",
-                b"message",
-                &mut rng,
-            )
+            .sign_with_participants_and_rng(&[1, 3], b"correct-context", b"message", &mut rng)
             .unwrap();
 
         // Verify with wrong context should fail
@@ -2108,12 +2097,7 @@ mod tests {
 
         let mut rng = ChaCha20Rng::seed_from_u64(77);
         let artifact = ceremony
-            .sign_with_participants_and_rng(
-                &[2, 3],
-                b"context",
-                b"correct-message",
-                &mut rng,
-            )
+            .sign_with_participants_and_rng(&[2, 3], b"context", b"correct-message", &mut rng)
             .unwrap();
 
         let err = ceremony

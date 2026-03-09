@@ -563,7 +563,8 @@ fn typed_operations_info() -> Vec<OperationInfo> {
             safety_tier: SafetyTier::Safe,
             idempotency: IdempotencyClass::Strict,
             ai_hints: AgentHint {
-                when_to_use: "Use to browse or search envelopes by status, date range, or text".into(),
+                when_to_use: "Use to browse or search envelopes by status, date range, or text"
+                    .into(),
                 common_mistakes: vec!["Forgetting to provide account_id".into()],
                 examples: vec![],
                 related: vec![CapabilityId::from_static("docusign.read")],
@@ -602,7 +603,9 @@ fn typed_operations_info() -> Vec<OperationInfo> {
             idempotency: IdempotencyClass::None,
             ai_hints: AgentHint {
                 when_to_use: "Use to create a new envelope for document signing workflows".into(),
-                common_mistakes: vec!["Not including envelope_definition with documents and recipients".into()],
+                common_mistakes: vec![
+                    "Not including envelope_definition with documents and recipients".into(),
+                ],
                 examples: vec![],
                 related: vec![CapabilityId::from_static("docusign.write")],
             },
@@ -620,7 +623,8 @@ fn typed_operations_info() -> Vec<OperationInfo> {
             safety_tier: SafetyTier::Dangerous,
             idempotency: IdempotencyClass::BestEffort,
             ai_hints: AgentHint {
-                when_to_use: "Use to send a created draft envelope to recipients for signing".into(),
+                when_to_use: "Use to send a created draft envelope to recipients for signing"
+                    .into(),
                 common_mistakes: vec!["Sending an envelope that is not in draft status".into()],
                 examples: vec![],
                 related: vec![CapabilityId::from_static("docusign.send")],
@@ -639,7 +643,8 @@ fn typed_operations_info() -> Vec<OperationInfo> {
             safety_tier: SafetyTier::Dangerous,
             idempotency: IdempotencyClass::Strict,
             ai_hints: AgentHint {
-                when_to_use: "Use to void/cancel an envelope that has been sent but not completed".into(),
+                when_to_use: "Use to void/cancel an envelope that has been sent but not completed"
+                    .into(),
                 common_mistakes: vec!["Trying to void an already completed envelope".into()],
                 examples: vec![],
                 related: vec![CapabilityId::from_static("docusign.send")],

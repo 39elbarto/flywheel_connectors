@@ -16,8 +16,8 @@ use fcp_core::{
     PrincipalId, SafetyTier, ZoneId,
 };
 use fcp_telemetry::{
-    CapabilityUsageAggregate, CapabilityUsageStore, RecommendationConfig,
-    UsageTelemetryConfig, recommend_capabilities,
+    CapabilityUsageAggregate, CapabilityUsageStore, RecommendationConfig, UsageTelemetryConfig,
+    recommend_capabilities,
 };
 use types::{
     CapabilitiesReport, CapabilityTotals, CapabilityUsageLine, ExportPayload, SuggestReport,
@@ -264,10 +264,7 @@ fn build_report(
 // ---------------------------------------------------------------------------
 
 fn print_report(report: &CapabilitiesReport) {
-    println!(
-        "Capability Usage Report (schema {})",
-        report.schema_version
-    );
+    println!("Capability Usage Report (schema {})", report.schema_version);
     println!("Generated at: {}", report.generated_at.to_rfc3339());
     println!();
 

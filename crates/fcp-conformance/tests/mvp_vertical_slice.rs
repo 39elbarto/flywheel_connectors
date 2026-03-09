@@ -12,20 +12,24 @@
 //! All tests use the deterministic harness with `MockClock`, `SimulatedNetwork`,
 //! seeded RNG, and structured `LogCollector` for reproducible execution.
 
-#![allow(clippy::too_many_lines, clippy::cast_precision_loss, clippy::needless_pass_by_value)]
+#![allow(
+    clippy::too_many_lines,
+    clippy::cast_precision_loss,
+    clippy::needless_pass_by_value
+)]
 
 use std::time::Duration;
 
+use fcp_cbor::SchemaId;
 use fcp_conformance::harness::{LogCollector, LogEntry, TestHarness};
-use fcp_core::{
-    AuditEvent, AuditHead, ConnectorId, CorrelationId, Decision, DecisionReceipt, EpochId,
-    NodeSignature, ObjectHeader, ObjectId, PrincipalId, Provenance,
-    SignatureSet, ZoneCheckpoint, ZoneId, EVENT_CAPABILITY_INVOKE, EVENT_REVOCATION_ISSUED,
-    EVENT_SECRET_ACCESS, EVENT_SECURITY_VIOLATION,
-};
 #[allow(unused_imports)]
 use fcp_core::RiskTier;
-use fcp_cbor::SchemaId;
+use fcp_core::{
+    AuditEvent, AuditHead, ConnectorId, CorrelationId, Decision, DecisionReceipt,
+    EVENT_CAPABILITY_INVOKE, EVENT_REVOCATION_ISSUED, EVENT_SECRET_ACCESS,
+    EVENT_SECURITY_VIOLATION, EpochId, NodeSignature, ObjectHeader, ObjectId, PrincipalId,
+    Provenance, SignatureSet, ZoneCheckpoint, ZoneId,
+};
 use fcp_mesh::ObjectAdmissionClass;
 use fcp_tailscale::NodeId;
 use semver::Version;
@@ -194,7 +198,13 @@ fn happy_path_install_invoke_receipt_audit_verify() {
     );
 
     // Phase 3: Invoke — create audit event for capability.invoke.
-    let genesis_event = create_audit_event(0, None, EVENT_CAPABILITY_INVOKE, Some("fcp.test-echo:echo:0.1.0"), Some("echo"));
+    let genesis_event = create_audit_event(
+        0,
+        None,
+        EVENT_CAPABILITY_INVOKE,
+        Some("fcp.test-echo:echo:0.1.0"),
+        Some("echo"),
+    );
     assert!(genesis_event.is_genesis());
 
     let genesis_id = test_object_id("audit-event-0");
@@ -217,7 +227,11 @@ fn happy_path_install_invoke_receipt_audit_verify() {
     );
 
     // Phase 4: Receipt — create allow receipt.
-    let receipt = create_decision_receipt(Decision::Allow, "FCP-0000", Some("Capability present and valid"));
+    let receipt = create_decision_receipt(
+        Decision::Allow,
+        "FCP-0000",
+        Some("Capability present and valid"),
+    );
     assert!(receipt.is_allow());
     assert!(!receipt.is_deny());
     assert_eq!(receipt.reason_code, "FCP-0000");
@@ -348,12 +362,7 @@ fn denial_path_invoke_without_cap_produces_receipt() {
     let logs = harness.log_entries();
     let count = logs
         .iter()
-        .filter(|e| {
-            e.details
-                .get("scenario")
-                .and_then(|v| v.as_str())
-                == Some("denial_path")
-        })
+        .filter(|e| e.details.get("scenario").and_then(|v| v.as_str()) == Some("denial_path"))
         .count();
     assert_eq!(count, 3);
 
@@ -515,12 +524,7 @@ fn revocation_flow_issue_use_revoke_deny() {
     let logs = harness.log_entries();
     let count = logs
         .iter()
-        .filter(|e| {
-            e.details
-                .get("scenario")
-                .and_then(|v| v.as_str())
-                == Some("revocation")
-        })
+        .filter(|e| e.details.get("scenario").and_then(|v| v.as_str()) == Some("revocation"))
         .count();
     assert_eq!(count, 4);
 
@@ -614,12 +618,7 @@ fn taint_approval_deny_then_approve_then_succeed() {
     let logs = harness.log_entries();
     let count = logs
         .iter()
-        .filter(|e| {
-            e.details
-                .get("scenario")
-                .and_then(|v| v.as_str())
-                == Some("taint_approval")
-        })
+        .filter(|e| e.details.get("scenario").and_then(|v| v.as_str()) == Some("taint_approval"))
         .count();
     assert_eq!(count, 3);
 
@@ -737,12 +736,7 @@ fn offline_repair_reduced_availability_then_recovery() {
     let logs = harness.log_entries();
     let count = logs
         .iter()
-        .filter(|e| {
-            e.details
-                .get("scenario")
-                .and_then(|v| v.as_str())
-                == Some("offline_repair")
-        })
+        .filter(|e| e.details.get("scenario").and_then(|v| v.as_str()) == Some("offline_repair"))
         .count();
     assert_eq!(count, 4);
 
@@ -852,12 +846,7 @@ fn epoch_replay_install_and_replay_events() {
     let logs = harness.log_entries();
     let count = logs
         .iter()
-        .filter(|e| {
-            e.details
-                .get("scenario")
-                .and_then(|v| v.as_str())
-                == Some("epoch_replay")
-        })
+        .filter(|e| e.details.get("scenario").and_then(|v| v.as_str()) == Some("epoch_replay"))
         .count();
     assert_eq!(count, 3);
 
@@ -876,7 +865,13 @@ fn determinism_same_seed_produces_identical_results() {
         harness.start_all().unwrap();
         harness.register_all_peers();
 
-        let event = create_audit_event(0, None, EVENT_CAPABILITY_INVOKE, Some("fcp.test-echo:echo:0.1.0"), Some("echo"));
+        let event = create_audit_event(
+            0,
+            None,
+            EVENT_CAPABILITY_INVOKE,
+            Some("fcp.test-echo:echo:0.1.0"),
+            Some("echo"),
+        );
         let receipt = create_decision_receipt(Decision::Allow, "FCP-0000", None);
 
         harness.advance_time(Duration::from_secs(5));
@@ -900,12 +895,7 @@ fn determinism_same_seed_produces_identical_results() {
 
         let logs = harness.log_entries();
         logs.iter()
-            .filter(|e| {
-                e.details
-                    .get("scenario")
-                    .and_then(|v| v.as_str())
-                    == Some("determinism")
-            })
+            .filter(|e| e.details.get("scenario").and_then(|v| v.as_str()) == Some("determinism"))
             .map(|e| e.details.clone())
             .collect()
     };
@@ -1055,13 +1045,28 @@ fn mvp_log_collector_filters_by_correlation() {
     let logs = LogCollector::new();
 
     logs.push(LogEntry::new(
-        "node-1", "scenario-a", "phase-1", "corr-AAA", "assert-1", json!({}),
+        "node-1",
+        "scenario-a",
+        "phase-1",
+        "corr-AAA",
+        "assert-1",
+        json!({}),
     ));
     logs.push(LogEntry::new(
-        "node-1", "scenario-a", "phase-2", "corr-BBB", "assert-2", json!({}),
+        "node-1",
+        "scenario-a",
+        "phase-2",
+        "corr-BBB",
+        "assert-2",
+        json!({}),
     ));
     logs.push(LogEntry::new(
-        "node-2", "scenario-a", "phase-3", "corr-AAA", "assert-3", json!({}),
+        "node-2",
+        "scenario-a",
+        "phase-3",
+        "corr-AAA",
+        "assert-3",
+        json!({}),
     ));
 
     let filtered = logs.for_correlation("corr-AAA");
@@ -1072,15 +1077,9 @@ fn mvp_log_collector_filters_by_correlation() {
 fn mvp_log_collector_filters_by_node() {
     let logs = LogCollector::new();
 
-    logs.push(LogEntry::new(
-        "node-1", "s", "p", "c", "a", json!({}),
-    ));
-    logs.push(LogEntry::new(
-        "node-2", "s", "p", "c", "a", json!({}),
-    ));
-    logs.push(LogEntry::new(
-        "node-1", "s", "p", "c", "a", json!({}),
-    ));
+    logs.push(LogEntry::new("node-1", "s", "p", "c", "a", json!({})));
+    logs.push(LogEntry::new("node-2", "s", "p", "c", "a", json!({})));
+    logs.push(LogEntry::new("node-1", "s", "p", "c", "a", json!({})));
 
     let filtered = logs.for_node(&NodeId::new("node-1"));
     assert_eq!(filtered.len(), 2);
@@ -1102,12 +1101,8 @@ fn multi_node_gossip_converges_all_objects() {
     for i in 0..10 {
         let obj_id = test_object_id(&format!("obj-{i}"));
         if let Some(mesh) = harness.nodes[0].mesh_mut() {
-            mesh.gossip_mut().announce_object(
-                &zone,
-                &obj_id,
-                ObjectAdmissionClass::Admitted,
-                0,
-            );
+            mesh.gossip_mut()
+                .announce_object(&zone, &obj_id, ObjectAdmissionClass::Admitted, 0);
         }
     }
 
@@ -1147,12 +1142,8 @@ fn multi_node_partition_prevents_gossip() {
     // Announce object from node 0.
     let obj_id = test_object_id("partitioned-obj");
     if let Some(mesh) = harness.nodes[0].mesh_mut() {
-        mesh.gossip_mut().announce_object(
-            &zone,
-            &obj_id,
-            ObjectAdmissionClass::Admitted,
-            0,
-        );
+        mesh.gossip_mut()
+            .announce_object(&zone, &obj_id, ObjectAdmissionClass::Admitted, 0);
     }
 
     // Run gossip — node 2 should NOT receive the object.

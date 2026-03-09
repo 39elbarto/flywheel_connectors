@@ -1373,11 +1373,11 @@ mod tests {
 
     #[test]
     fn parse_retry_after_max_u64() {
-        let headers = vec![(
-            RETRY_AFTER_HEADER.to_string(),
-            u64::MAX.to_string(),
-        )];
-        assert_eq!(parse_retry_after(&headers), Some(Duration::from_secs(u64::MAX)));
+        let headers = vec![(RETRY_AFTER_HEADER.to_string(), u64::MAX.to_string())];
+        assert_eq!(
+            parse_retry_after(&headers),
+            Some(Duration::from_secs(u64::MAX))
+        );
     }
 
     #[test]
@@ -1473,15 +1473,15 @@ mod tests {
 
     #[test]
     fn builder_with_dedup_false() {
-        let builder = GraphqlClientBuilder::new("https://api.test.com/graphql")
-            .with_dedup_in_flight(false);
+        let builder =
+            GraphqlClientBuilder::new("https://api.test.com/graphql").with_dedup_in_flight(false);
         assert!(!builder.config.dedup_in_flight);
     }
 
     #[test]
     fn builder_with_zero_timeout() {
-        let builder = GraphqlClientBuilder::new("https://api.test.com/graphql")
-            .with_timeout(Duration::ZERO);
+        let builder =
+            GraphqlClientBuilder::new("https://api.test.com/graphql").with_timeout(Duration::ZERO);
         assert_eq!(builder.config.timeout, Duration::ZERO);
     }
 

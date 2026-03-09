@@ -3080,8 +3080,7 @@ mod tests {
             &SelfCheckReport::ok(),
             0,
             true,
-            &RolloutObservation::new(true, rollout_policy())
-                .with_uptime_secs(200),
+            &RolloutObservation::new(true, rollout_policy()).with_uptime_secs(200),
             &RolloutControllerConfig::default(),
         );
         assert_eq!(p.decision, RolloutDecision::Rollback);

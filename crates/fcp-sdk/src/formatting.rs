@@ -988,8 +988,7 @@ mod tests {
 
     #[test]
     fn render_with_fallback_markdown_control_chars_falls_back() {
-        let result =
-            Formatter::render_with_fallback("hello\x01world", FormatMode::MarkdownV2);
+        let result = Formatter::render_with_fallback("hello\x01world", FormatMode::MarkdownV2);
         assert!(result.parse_mode_used.is_none());
     }
 

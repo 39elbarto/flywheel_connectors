@@ -840,7 +840,10 @@ async fn wasi_runtime_reports_missing_export() {
     let component = runtime.load_component(minimal_command_component()).unwrap();
     let args = Vec::new();
 
-    let err = runtime.invoke(&component, "missing", &args).await.unwrap_err();
+    let err = runtime
+        .invoke(&component, "missing", &args)
+        .await
+        .unwrap_err();
     let message = err.to_string();
     assert!(message.contains("missing"));
     assert!(message.contains("failed to resolve"));

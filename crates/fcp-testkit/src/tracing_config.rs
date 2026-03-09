@@ -746,8 +746,7 @@ mod tests {
             }
         });
         capture.push_value(&val).unwrap();
-        let parsed: serde_json::Value =
-            serde_json::from_str(capture.jsonl().trim()).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(capture.jsonl().trim()).unwrap();
         assert_eq!(parsed["outer"]["inner"]["deep"][1], 2);
     }
 

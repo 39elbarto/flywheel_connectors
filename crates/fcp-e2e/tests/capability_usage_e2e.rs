@@ -53,10 +53,7 @@ fn new_store() -> CapabilityUsageStore {
     })
 }
 
-fn count_by_kind(
-    report: &CapabilityRecommendationReport,
-    kind: CapabilitySuggestionKind,
-) -> usize {
+fn count_by_kind(report: &CapabilityRecommendationReport, kind: CapabilitySuggestionKind) -> usize {
     report
         .recommendations
         .iter()
@@ -271,7 +268,9 @@ fn recommend_active_safe_gets_keep() {
         ));
     }
     let snap = store.snapshot();
-    let config = RecommendationConfig { unused_after_secs: 86400 };
+    let config = RecommendationConfig {
+        unused_after_secs: 86400,
+    };
     let report = recommend_capabilities(&snap, now, config);
     assert_eq!(report.recommendations.len(), 1);
     assert_eq!(
@@ -294,7 +293,9 @@ fn recommend_stale_gets_remove_unused() {
         now - 90 * 86400, // 90 days ago
     ));
     let snap = store.snapshot();
-    let config = RecommendationConfig { unused_after_secs: 30 * 86400 };
+    let config = RecommendationConfig {
+        unused_after_secs: 30 * 86400,
+    };
     let report = recommend_capabilities(&snap, now, config);
     assert_eq!(report.recommendations.len(), 1);
     assert_eq!(
@@ -319,7 +320,9 @@ fn recommend_dangerous_active_gets_review_risky() {
         ));
     }
     let snap = store.snapshot();
-    let config = RecommendationConfig { unused_after_secs: 86400 };
+    let config = RecommendationConfig {
+        unused_after_secs: 86400,
+    };
     let report = recommend_capabilities(&snap, now, config);
     assert_eq!(report.recommendations.len(), 1);
     assert_eq!(
@@ -342,7 +345,9 @@ fn recommend_critical_active_gets_review_risky() {
         now - 10,
     ));
     let snap = store.snapshot();
-    let config = RecommendationConfig { unused_after_secs: 86400 };
+    let config = RecommendationConfig {
+        unused_after_secs: 86400,
+    };
     let report = recommend_capabilities(&snap, now, config);
     assert_eq!(
         report.recommendations[0].suggestion,
@@ -393,7 +398,9 @@ fn recommend_mixed_usage_produces_all_kinds() {
     ));
 
     let snap = store.snapshot();
-    let config = RecommendationConfig { unused_after_secs: 30 * 86400 };
+    let config = RecommendationConfig {
+        unused_after_secs: 30 * 86400,
+    };
     let report = recommend_capabilities(&snap, now, config);
 
     assert_eq!(report.recommendations.len(), 3);
@@ -437,7 +444,9 @@ fn report_summary_counts_match() {
         now - 90 * 86400,
     ));
     let snap = store.snapshot();
-    let config = RecommendationConfig { unused_after_secs: 30 * 86400 };
+    let config = RecommendationConfig {
+        unused_after_secs: 30 * 86400,
+    };
     let report = recommend_capabilities(&snap, now, config);
     let summary = report.summary();
     assert_eq!(summary.total, report.recommendations.len());
@@ -518,7 +527,9 @@ fn report_by_suggestion_filters_correctly() {
         now - 90 * 86400,
     ));
     let snap = store.snapshot();
-    let config = RecommendationConfig { unused_after_secs: 30 * 86400 };
+    let config = RecommendationConfig {
+        unused_after_secs: 30 * 86400,
+    };
     let report = recommend_capabilities(&snap, now, config);
     let keep = report.by_suggestion(CapabilitySuggestionKind::Keep);
     let unused = report.by_suggestion(CapabilitySuggestionKind::RemoveUnused);
@@ -640,7 +651,9 @@ fn recommendation_reason_codes_are_set() {
         now - 90 * 86400,
     ));
     let snap = store.snapshot();
-    let config = RecommendationConfig { unused_after_secs: 30 * 86400 };
+    let config = RecommendationConfig {
+        unused_after_secs: 30 * 86400,
+    };
     let report = recommend_capabilities(&snap, now, config);
     for rec in &report.recommendations {
         assert!(
@@ -706,7 +719,9 @@ fn unused_threshold_boundary_exactly_at_threshold() {
         now - threshold,
     ));
     let snap = store.snapshot();
-    let config = RecommendationConfig { unused_after_secs: threshold };
+    let config = RecommendationConfig {
+        unused_after_secs: threshold,
+    };
     let report = recommend_capabilities(&snap, now, config);
     // At exactly the boundary, still considered unused (> threshold check)
     assert!(!report.recommendations.is_empty());
@@ -862,7 +877,9 @@ fn full_usage_suggestion_flow_logged() {
     ));
 
     // Step 3: Recommendations
-    let config = RecommendationConfig { unused_after_secs: 30 * 86400 };
+    let config = RecommendationConfig {
+        unused_after_secs: 30 * 86400,
+    };
     let report = recommend_capabilities(&snap, now, config);
     let summary = report.summary();
 
@@ -894,8 +911,7 @@ fn full_usage_suggestion_flow_logged() {
 
     // Step 4: JSON export
     let json = report.to_json().expect("json export");
-    let back: CapabilityRecommendationReport =
-        serde_json::from_str(&json).expect("json roundtrip");
+    let back: CapabilityRecommendationReport = serde_json::from_str(&json).expect("json roundtrip");
     let export_ok = back.recommendations.len() == report.recommendations.len();
     if export_ok {
         passed_count += 1;
@@ -996,7 +1012,9 @@ fn multi_zone_flow_logged() {
     let snap = store.snapshot();
     assert_eq!(snap.len(), 4, "should have 4 distinct aggregates");
 
-    let config = RecommendationConfig { unused_after_secs: 86400 };
+    let config = RecommendationConfig {
+        unused_after_secs: 86400,
+    };
     let report = recommend_capabilities(&snap, now, config);
     assert_eq!(report.recommendations.len(), 4);
 
@@ -1014,8 +1032,7 @@ fn multi_zone_flow_logged() {
 
     // Verify JSON serialization
     let json = report.to_json_pretty().expect("pretty json");
-    let back: CapabilityRecommendationReport =
-        serde_json::from_str(&json).expect("roundtrip");
+    let back: CapabilityRecommendationReport = serde_json::from_str(&json).expect("roundtrip");
     assert_eq!(back.recommendations.len(), 4);
 }
 

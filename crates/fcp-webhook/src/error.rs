@@ -386,10 +386,7 @@ mod tests {
         let e = WebhookError::ReplayDetected {
             event_id: String::new(),
         };
-        assert_eq!(
-            e.to_string(),
-            "Replay detected: event  already processed"
-        );
+        assert_eq!(e.to_string(), "Replay detected: event  already processed");
     }
 
     #[test]
@@ -446,10 +443,7 @@ mod tests {
             WebhookError::ReplayDetected {
                 event_id: "e".into(),
             },
-            WebhookError::PayloadTooLarge {
-                size: 10,
-                limit: 5,
-            },
+            WebhookError::PayloadTooLarge { size: 10, limit: 5 },
             WebhookError::InvalidPayload("p".into()),
             WebhookError::UnsupportedEventType("u".into()),
             WebhookError::ProviderNotConfigured("c".into()),
@@ -474,10 +468,7 @@ mod tests {
     #[test]
     fn error_source_for_payload_too_large_is_none() {
         use std::error::Error;
-        let e = WebhookError::PayloadTooLarge {
-            size: 10,
-            limit: 5,
-        };
+        let e = WebhookError::PayloadTooLarge { size: 10, limit: 5 };
         assert!(e.source().is_none());
     }
 

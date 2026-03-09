@@ -491,10 +491,9 @@ mod tests {
     #[test]
     fn test_from_words_exact_24() {
         let words: Vec<&str> = vec![
-            "abandon", "abandon", "abandon", "abandon", "abandon", "abandon",
-            "abandon", "abandon", "abandon", "abandon", "abandon", "abandon",
-            "abandon", "abandon", "abandon", "abandon", "abandon", "abandon",
-            "abandon", "abandon", "abandon", "abandon", "abandon", "art",
+            "abandon", "abandon", "abandon", "abandon", "abandon", "abandon", "abandon", "abandon",
+            "abandon", "abandon", "abandon", "abandon", "abandon", "abandon", "abandon", "abandon",
+            "abandon", "abandon", "abandon", "abandon", "abandon", "abandon", "abandon", "art",
         ];
         let phrase = RecoveryPhrase::from_words(&words).unwrap();
         assert_eq!(phrase.words().len(), 24);

@@ -1041,14 +1041,20 @@ mod tests {
     #[test]
     fn operations_files_list_is_strict_idempotent() {
         let ops = operations_info();
-        let op = ops.iter().find(|o| o.id.as_ref() == "dropbox.files.list").unwrap();
+        let op = ops
+            .iter()
+            .find(|o| o.id.as_ref() == "dropbox.files.list")
+            .unwrap();
         assert!(matches!(op.idempotency, IdempotencyClass::Strict));
     }
 
     #[test]
     fn operations_files_delete_is_dangerous() {
         let ops = operations_info();
-        let del_op = ops.iter().find(|o| o.id.as_ref() == "dropbox.files.delete").unwrap();
+        let del_op = ops
+            .iter()
+            .find(|o| o.id.as_ref() == "dropbox.files.delete")
+            .unwrap();
         assert!(matches!(del_op.safety_tier, SafetyTier::Dangerous));
         assert!(matches!(del_op.risk_level, RiskLevel::High));
     }
@@ -1056,24 +1062,36 @@ mod tests {
     #[test]
     fn operations_account_capability_correct() {
         let ops = operations_info();
-        let account_op = ops.iter().find(|o| o.id.as_ref() == "dropbox.account.get_current").unwrap();
+        let account_op = ops
+            .iter()
+            .find(|o| o.id.as_ref() == "dropbox.account.get_current")
+            .unwrap();
         assert_eq!(account_op.capability.as_ref(), "dropbox.account.read");
     }
 
     #[test]
     fn operations_files_read_capability_correct() {
         let ops = operations_info();
-        let list_op = ops.iter().find(|o| o.id.as_ref() == "dropbox.files.list").unwrap();
+        let list_op = ops
+            .iter()
+            .find(|o| o.id.as_ref() == "dropbox.files.list")
+            .unwrap();
         assert_eq!(list_op.capability.as_ref(), "dropbox.files.read");
 
-        let meta_op = ops.iter().find(|o| o.id.as_ref() == "dropbox.files.get_metadata").unwrap();
+        let meta_op = ops
+            .iter()
+            .find(|o| o.id.as_ref() == "dropbox.files.get_metadata")
+            .unwrap();
         assert_eq!(meta_op.capability.as_ref(), "dropbox.files.read");
     }
 
     #[test]
     fn operations_delete_capability_correct() {
         let ops = operations_info();
-        let del_op = ops.iter().find(|o| o.id.as_ref() == "dropbox.files.delete").unwrap();
+        let del_op = ops
+            .iter()
+            .find(|o| o.id.as_ref() == "dropbox.files.delete")
+            .unwrap();
         assert_eq!(del_op.capability.as_ref(), "dropbox.files.write");
     }
 
@@ -1306,21 +1324,30 @@ mod tests {
     #[test]
     fn operations_files_move_capability() {
         let ops = operations_info();
-        let mv = ops.iter().find(|o| o.id.as_ref() == "dropbox.files.move").unwrap();
+        let mv = ops
+            .iter()
+            .find(|o| o.id.as_ref() == "dropbox.files.move")
+            .unwrap();
         assert_eq!(mv.capability.as_ref(), "dropbox.files.write");
     }
 
     #[test]
     fn operations_files_copy_capability() {
         let ops = operations_info();
-        let cp = ops.iter().find(|o| o.id.as_ref() == "dropbox.files.copy").unwrap();
+        let cp = ops
+            .iter()
+            .find(|o| o.id.as_ref() == "dropbox.files.copy")
+            .unwrap();
         assert_eq!(cp.capability.as_ref(), "dropbox.files.write");
     }
 
     #[test]
     fn operations_search_capability() {
         let ops = operations_info();
-        let search = ops.iter().find(|o| o.id.as_ref() == "dropbox.files.search").unwrap();
+        let search = ops
+            .iter()
+            .find(|o| o.id.as_ref() == "dropbox.files.search")
+            .unwrap();
         assert_eq!(search.capability.as_ref(), "dropbox.files.read");
         assert!(matches!(search.safety_tier, SafetyTier::Safe));
     }
@@ -1328,7 +1355,10 @@ mod tests {
     #[test]
     fn operations_space_usage_capability() {
         let ops = operations_info();
-        let sp = ops.iter().find(|o| o.id.as_ref() == "dropbox.account.get_space_usage").unwrap();
+        let sp = ops
+            .iter()
+            .find(|o| o.id.as_ref() == "dropbox.account.get_space_usage")
+            .unwrap();
         assert_eq!(sp.capability.as_ref(), "dropbox.account.read");
     }
 
@@ -1395,7 +1425,11 @@ mod tests {
     fn operations_summaries_are_non_empty() {
         let ops = operations_info();
         for op in &ops {
-            assert!(!op.summary.is_empty(), "op {} has empty summary", op.id.as_ref());
+            assert!(
+                !op.summary.is_empty(),
+                "op {} has empty summary",
+                op.id.as_ref()
+            );
         }
     }
 

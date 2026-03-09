@@ -1800,8 +1800,7 @@ impl AirtableConnector {
                 );
             }
 
-            if let (Some(config), Some(state)) =
-                (linked_expansion, expansion_state.as_deref_mut())
+            if let (Some(config), Some(state)) = (linked_expansion, expansion_state.as_deref_mut())
             {
                 let linked_records = self
                     .build_linked_records(
@@ -1815,7 +1814,10 @@ impl AirtableConnector {
                     )
                     .await?;
                 if !linked_records.is_empty() {
-                    object.insert("linked_records".into(), serde_json::Value::Object(linked_records));
+                    object.insert(
+                        "linked_records".into(),
+                        serde_json::Value::Object(linked_records),
+                    );
                 }
             }
 
@@ -1870,14 +1872,12 @@ impl AirtableConnector {
                 for linked_id in linked_ids {
                     let linked_path = (target_table.id.clone(), linked_id.clone());
                     if state.path.contains(&linked_path) {
-                        resolved_records
-                            .push(json!({ "id": linked_id, "status": "cycle" }));
+                        resolved_records.push(json!({ "id": linked_id, "status": "cycle" }));
                         continue;
                     }
                     if state.remaining_records == 0 {
                         partial = true;
-                        resolved_records
-                            .push(json!({ "id": linked_id, "status": "truncated" }));
+                        resolved_records.push(json!({ "id": linked_id, "status": "truncated" }));
                         continue;
                     }
 
@@ -1906,8 +1906,7 @@ impl AirtableConnector {
                             ..
                         })
                         | Err(AirtableError::RecordNotFound { .. }) => {
-                            resolved_records
-                                .push(json!({ "id": linked_id, "status": "missing" }));
+                            resolved_records.push(json!({ "id": linked_id, "status": "missing" }));
                         }
                         Err(error) => return Err(error.to_fcp_error()),
                     }
@@ -2014,20 +2013,11 @@ fn parse_linked_expansion_config(
         None => None,
     };
     let linked_field_refs = parse_optional_string_array(input, "linked_field_refs")?;
-    let max_depth = parse_bounded_integer(
-        input,
-        "linked_record_depth",
-        1,
-        MAX_LINKED_RECORD_DEPTH,
-    )?
-    .unwrap_or(DEFAULT_LINKED_RECORD_DEPTH) as usize;
-    let max_records = parse_bounded_integer(
-        input,
-        "linked_record_limit",
-        1,
-        MAX_LINKED_RECORD_LIMIT,
-    )?
-    .unwrap_or(DEFAULT_LINKED_RECORD_LIMIT) as usize;
+    let max_depth = parse_bounded_integer(input, "linked_record_depth", 1, MAX_LINKED_RECORD_DEPTH)?
+        .unwrap_or(DEFAULT_LINKED_RECORD_DEPTH) as usize;
+    let max_records =
+        parse_bounded_integer(input, "linked_record_limit", 1, MAX_LINKED_RECORD_LIMIT)?
+            .unwrap_or(DEFAULT_LINKED_RECORD_LIMIT) as usize;
 
     let enabled = expand_flag.unwrap_or(false)
         || linked_field_refs.is_some()
@@ -2139,7 +2129,10 @@ fn build_field_metadata(
         let mut entry = serde_json::Map::new();
         entry.insert("field_id".into(), json!(field.id));
         entry.insert("field_type".into(), json!(field.field_type));
-        entry.insert("read_only".into(), json!(is_read_only_computed_field(field)));
+        entry.insert(
+            "read_only".into(),
+            json!(is_read_only_computed_field(field)),
+        );
 
         if let Some(linked_table_id) = linked_table_id(field) {
             if let Ok(linked_table) = resolve_table_by_id(&schema.tables, linked_table_id) {
@@ -2181,12 +2174,16 @@ fn resolve_table<'a>(tables: &'a [TableSchema], table_ref: &str) -> FcpResult<&'
     }
 }
 
-fn resolve_table_by_id<'a>(tables: &'a [TableSchema], table_id: &str) -> FcpResult<&'a TableSchema> {
-    tables.iter().find(|table| table.id == table_id).ok_or(
-        FcpError::ResourceNotFound {
+fn resolve_table_by_id<'a>(
+    tables: &'a [TableSchema],
+    table_id: &str,
+) -> FcpResult<&'a TableSchema> {
+    tables
+        .iter()
+        .find(|table| table.id == table_id)
+        .ok_or(FcpError::ResourceNotFound {
             resource: format!("airtable.table:{table_id}"),
-        },
-    )
+        })
 }
 
 fn resolve_view<'a>(views: &'a [ViewSchema], view_ref: &str) -> FcpResult<&'a ViewSchema> {

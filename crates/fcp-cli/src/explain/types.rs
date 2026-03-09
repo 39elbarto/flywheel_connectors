@@ -368,7 +368,9 @@ mod tests {
                 },
             ],
             explanation: Some("Demo revocation recorded".to_string()),
-            recovery_hint: Some("Rotate the token and request a fresh capability grant".to_string()),
+            recovery_hint: Some(
+                "Rotate the token and request a fresh capability grant".to_string(),
+            ),
             zone_id: "z:work".to_string(),
             signed_by: SignerInfo {
                 node_id: "node-demo".to_string(),
@@ -383,7 +385,9 @@ mod tests {
         assert!(json.contains("\"decision\": \"deny\""));
         assert!(json.contains("\"reason_code\": \"FCP-4030\""));
         assert!(json.contains("\"evidence_type\": \"capability_token\""));
-        assert!(json.contains("\"recovery_hint\": \"Rotate the token and request a fresh capability grant\""));
+        assert!(json.contains(
+            "\"recovery_hint\": \"Rotate the token and request a fresh capability grant\""
+        ));
 
         // Verify roundtrip
         let parsed: ExplainReport = serde_json::from_str(&json).unwrap();

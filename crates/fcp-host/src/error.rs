@@ -223,10 +223,7 @@ mod tests {
     #[test]
     fn invalid_filter_display_exact() {
         let err = HostError::InvalidFilter("zone_id must be non-empty".into());
-        assert_eq!(
-            err.to_string(),
-            "invalid filter: zone_id must be non-empty"
-        );
+        assert_eq!(err.to_string(), "invalid filter: zone_id must be non-empty");
     }
 
     #[test]
@@ -259,10 +256,7 @@ mod tests {
     #[test]
     fn internal_error_display_exact() {
         let err = HostError::Internal("null pointer in scheduler".into());
-        assert_eq!(
-            err.to_string(),
-            "internal error: null pointer in scheduler"
-        );
+        assert_eq!(err.to_string(), "internal error: null pointer in scheduler");
     }
 
     // ── Error source chain (thiserror) ──
@@ -362,7 +356,10 @@ mod tests {
         for err in &variants {
             let display = err.to_string();
             let debug = format!("{err:?}");
-            assert_ne!(display, debug, "Display and Debug should differ for {display}");
+            assert_ne!(
+                display, debug,
+                "Display and Debug should differ for {display}"
+            );
         }
     }
 
@@ -443,7 +440,10 @@ mod tests {
     #[test]
     fn different_variants_have_different_display_prefixes() {
         let pairs = [
-            (HostError::ConnectorNotFound("x".into()), "connector not found"),
+            (
+                HostError::ConnectorNotFound("x".into()),
+                "connector not found",
+            ),
             (HostError::InvalidFilter("x".into()), "invalid filter"),
             (HostError::RegistryError("x".into()), "registry error"),
             (HostError::PreflightFailed("x".into()), "preflight failed"),

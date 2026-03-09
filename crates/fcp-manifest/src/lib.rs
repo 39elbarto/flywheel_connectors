@@ -6913,10 +6913,7 @@ deny_ptrace = true
             deny_private_ranges: true,
             deny_tailnet_ranges: true,
             require_sni: true,
-            spki_pins: vec![
-                Base64Bytes(vec![1, 2, 3]),
-                Base64Bytes(vec![4, 5, 6]),
-            ],
+            spki_pins: vec![Base64Bytes(vec![1, 2, 3]), Base64Bytes(vec![4, 5, 6])],
             deny_ip_literals: true,
             require_host_canonicalization: false,
             dns_max_ips: 16,
@@ -7001,28 +6998,26 @@ deny_ptrace = true
 
     #[test]
     fn lint_allows_three_segments_non_tld() {
-        assert!(lint_capability_id_no_network_addressing(
-            "my.custom.capability",
-            "capabilities.required"
-        )
-        .is_ok());
+        assert!(
+            lint_capability_id_no_network_addressing(
+                "my.custom.capability",
+                "capabilities.required"
+            )
+            .is_ok()
+        );
     }
 
     #[test]
     fn lint_allows_deep_nested_capability() {
-        assert!(lint_capability_id_no_network_addressing(
-            "a.b.c.d.e.f",
-            "capabilities.required"
-        )
-        .is_ok());
+        assert!(
+            lint_capability_id_no_network_addressing("a.b.c.d.e.f", "capabilities.required")
+                .is_ok()
+        );
     }
 
     #[test]
     fn lint_rejects_ipv4_at_start() {
-        let err = lint_capability_id_no_network_addressing(
-            "192.168.0.1",
-            "capabilities.required",
-        );
+        let err = lint_capability_id_no_network_addressing("192.168.0.1", "capabilities.required");
         assert!(err.is_err());
         assert!(err.unwrap_err().to_string().contains("IPv4"));
     }
@@ -7030,47 +7025,36 @@ deny_ptrace = true
     #[test]
     fn lint_allows_three_digit_segments_if_not_four_consecutive() {
         // Only 3 consecutive digit segments, not 4
-        assert!(lint_capability_id_no_network_addressing(
-            "prefix.10.0.1",
-            "capabilities.required"
-        )
-        .is_ok());
+        assert!(
+            lint_capability_id_no_network_addressing("prefix.10.0.1", "capabilities.required")
+                .is_ok()
+        );
     }
 
     #[test]
     fn lint_allows_colon_followed_by_non_digit() {
-        assert!(lint_capability_id_no_network_addressing(
-            "scope:read",
-            "capabilities.required"
-        )
-        .is_ok());
+        assert!(
+            lint_capability_id_no_network_addressing("scope:read", "capabilities.required").is_ok()
+        );
     }
 
     #[test]
     fn lint_allows_colon_with_single_digit() {
-        assert!(lint_capability_id_no_network_addressing(
-            "version:2",
-            "capabilities.required"
-        )
-        .is_ok());
+        assert!(
+            lint_capability_id_no_network_addressing("version:2", "capabilities.required").is_ok()
+        );
     }
 
     #[test]
     fn lint_rejects_port_number_80() {
-        let err = lint_capability_id_no_network_addressing(
-            "service:80",
-            "capabilities.required",
-        );
+        let err = lint_capability_id_no_network_addressing("service:80", "capabilities.required");
         assert!(err.is_err());
         assert!(err.unwrap_err().to_string().contains("port number"));
     }
 
     #[test]
     fn lint_rejects_port_number_3000() {
-        let err = lint_capability_id_no_network_addressing(
-            "dev:3000",
-            "capabilities.required",
-        );
+        let err = lint_capability_id_no_network_addressing("dev:3000", "capabilities.required");
         assert!(err.is_err());
         assert!(err.unwrap_err().to_string().contains("port number"));
     }
@@ -7608,10 +7592,7 @@ schema_version = "2.1"
         let json = serde_json::to_string(&section).unwrap();
         let deserialized: ConnectorStateSection = serde_json::from_str(&json).unwrap();
         assert_eq!(deserialized.state_schema_version, "2.0");
-        assert_eq!(
-            deserialized.crdt_type,
-            Some(ConnectorCrdtType::PnCounter)
-        );
+        assert_eq!(deserialized.crdt_type, Some(ConnectorCrdtType::PnCounter));
         assert_eq!(deserialized.migration_hint.as_deref(), Some("migrate_v2"));
         assert_eq!(deserialized.snapshot_every_updates, Some(500));
         assert_eq!(deserialized.snapshot_every_bytes, Some(32768));

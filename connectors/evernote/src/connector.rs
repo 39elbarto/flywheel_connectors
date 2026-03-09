@@ -503,7 +503,8 @@ fn typed_operations_info() -> Vec<OperationInfo> {
             safety_tier: SafetyTier::Dangerous,
             idempotency: IdempotencyClass::Strict,
             ai_hints: AgentHint {
-                when_to_use: "Use to permanently delete a note — this action cannot be undone".into(),
+                when_to_use: "Use to permanently delete a note — this action cannot be undone"
+                    .into(),
                 common_mistakes: vec!["Deleting without confirming the correct note_id".into()],
                 examples: vec![],
                 related: vec![CapabilityId::from_static("evernote.notes.write")],

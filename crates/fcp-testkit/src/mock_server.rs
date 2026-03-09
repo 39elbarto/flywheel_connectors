@@ -727,9 +727,7 @@ mod tests {
             path: "/api/item/7".to_string(),
             query: None,
             body: None,
-            headers: vec![
-                ("X-Custom".to_string(), "val".to_string()),
-            ],
+            headers: vec![("X-Custom".to_string(), "val".to_string())],
         };
         let cloned = req.clone();
         assert_eq!(req.headers.len(), cloned.headers.len());
@@ -937,16 +935,12 @@ mod tests {
     async fn scenario_builder_multiple_mocks() {
         let server = MockScenarioBuilder::new()
             .await
-            .with_mock(
-                Mock::given(method("GET"))
-                    .and(path("/one"))
-                    .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"n": 1}))),
-            )
-            .with_mock(
-                Mock::given(method("GET"))
-                    .and(path("/two"))
-                    .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"n": 2}))),
-            )
+            .with_mock(Mock::given(method("GET")).and(path("/one")).respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"n": 1})),
+            ))
+            .with_mock(Mock::given(method("GET")).and(path("/two")).respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"n": 2})),
+            ))
             .build()
             .await;
 

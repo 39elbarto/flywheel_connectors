@@ -1736,8 +1736,7 @@ mod tests {
 
     #[test]
     fn peer_info_serde_value_is_object() {
-        let peer =
-            MockTailscaleClient::mock_peer("n1", "h1", "100.64.0.1".parse().unwrap(), &[]);
+        let peer = MockTailscaleClient::mock_peer("n1", "h1", "100.64.0.1".parse().unwrap(), &[]);
         let val: serde_json::Value = serde_json::to_value(&peer).unwrap();
         assert!(val.is_object());
         let obj = val.as_object().unwrap();
@@ -1778,12 +1777,8 @@ mod tests {
 
     #[test]
     fn self_node_json_field_names() {
-        let node = MockTailscaleClient::mock_self_node(
-            "s1",
-            "h1",
-            "100.64.0.1".parse().unwrap(),
-            &[],
-        );
+        let node =
+            MockTailscaleClient::mock_self_node("s1", "h1", "100.64.0.1".parse().unwrap(), &[]);
         let json = serde_json::to_string(&node).unwrap();
         assert!(json.contains("\"ID\""));
         assert!(json.contains("\"PublicKey\""));
@@ -1803,11 +1798,7 @@ mod tests {
             host_name: "h".into(),
             dns_name: "d".into(),
             tailscale_ips: vec![],
-            tags: vec![
-                "no-prefix".into(),
-                "also-bad".into(),
-                "123".into(),
-            ],
+            tags: vec!["no-prefix".into(), "also-bad".into(), "123".into()],
             online: true,
             os: None,
             last_seen: None,
@@ -1870,12 +1861,8 @@ mod tests {
         let client = MockTailscaleClient::new();
         for i in 0..10 {
             let ip: IpAddr = format!("100.64.0.{}", 10 + i).parse().unwrap();
-            let mut peer = MockTailscaleClient::mock_peer(
-                &format!("n{i}"),
-                &format!("h{i}"),
-                ip,
-                &[],
-            );
+            let mut peer =
+                MockTailscaleClient::mock_peer(&format!("n{i}"), &format!("h{i}"), ip, &[]);
             peer.online = i % 3 == 0; // nodes 0, 3, 6, 9 online
             client.add_peer(peer).await;
         }
@@ -1928,12 +1915,8 @@ mod tests {
     #[fcp_async_core::runtime::test]
     async fn test_mock_client_set_peer_online_toggle() {
         let client = MockTailscaleClient::new();
-        let peer = MockTailscaleClient::mock_peer(
-            "toggle",
-            "host",
-            "100.64.0.5".parse().unwrap(),
-            &[],
-        );
+        let peer =
+            MockTailscaleClient::mock_peer("toggle", "host", "100.64.0.5".parse().unwrap(), &[]);
         client.add_peer(peer).await;
 
         // Initially online
@@ -2088,12 +2071,8 @@ mod tests {
         let cloned = client.clone();
 
         // Add peer via original
-        let peer = MockTailscaleClient::mock_peer(
-            "shared",
-            "host",
-            "100.64.0.5".parse().unwrap(),
-            &[],
-        );
+        let peer =
+            MockTailscaleClient::mock_peer("shared", "host", "100.64.0.5".parse().unwrap(), &[]);
         client.add_peer(peer).await;
 
         // Clone should see the peer

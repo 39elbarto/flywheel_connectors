@@ -799,21 +799,30 @@ mod tests {
     #[test]
     fn operations_files_get_is_strict_idempotent() {
         let ops = operations_info();
-        let get_op = ops.iter().find(|o| o.id.as_ref() == "box.files.get").unwrap();
+        let get_op = ops
+            .iter()
+            .find(|o| o.id.as_ref() == "box.files.get")
+            .unwrap();
         assert!(matches!(get_op.idempotency, IdempotencyClass::Strict));
     }
 
     #[test]
     fn operations_files_upload_is_not_idempotent() {
         let ops = operations_info();
-        let up_op = ops.iter().find(|o| o.id.as_ref() == "box.files.upload").unwrap();
+        let up_op = ops
+            .iter()
+            .find(|o| o.id.as_ref() == "box.files.upload")
+            .unwrap();
         assert!(matches!(up_op.idempotency, IdempotencyClass::None));
     }
 
     #[test]
     fn operations_files_delete_is_dangerous() {
         let ops = operations_info();
-        let del_op = ops.iter().find(|o| o.id.as_ref() == "box.files.delete").unwrap();
+        let del_op = ops
+            .iter()
+            .find(|o| o.id.as_ref() == "box.files.delete")
+            .unwrap();
         assert!(matches!(del_op.safety_tier, SafetyTier::Dangerous));
         assert!(matches!(del_op.risk_level, RiskLevel::High));
     }
@@ -821,14 +830,20 @@ mod tests {
     #[test]
     fn operations_sharing_capability_correct() {
         let ops = operations_info();
-        let share_op = ops.iter().find(|o| o.id.as_ref() == "box.sharing.list").unwrap();
+        let share_op = ops
+            .iter()
+            .find(|o| o.id.as_ref() == "box.sharing.list")
+            .unwrap();
         assert_eq!(share_op.capability.as_ref(), "box.sharing.read");
     }
 
     #[test]
     fn operations_folders_list_capability_correct() {
         let ops = operations_info();
-        let folder_op = ops.iter().find(|o| o.id.as_ref() == "box.folders.list").unwrap();
+        let folder_op = ops
+            .iter()
+            .find(|o| o.id.as_ref() == "box.folders.list")
+            .unwrap();
         assert_eq!(folder_op.capability.as_ref(), "box.folders.read");
     }
 
@@ -1131,7 +1146,10 @@ mod tests {
     #[test]
     fn operations_files_upload_is_risky() {
         let ops = operations_info();
-        let up_op = ops.iter().find(|o| o.id.as_ref() == "box.files.upload").unwrap();
+        let up_op = ops
+            .iter()
+            .find(|o| o.id.as_ref() == "box.files.upload")
+            .unwrap();
         assert!(matches!(up_op.safety_tier, SafetyTier::Risky));
         assert!(matches!(up_op.risk_level, RiskLevel::Medium));
     }
@@ -1139,7 +1157,10 @@ mod tests {
     #[test]
     fn operations_files_get_capability_correct() {
         let ops = operations_info();
-        let get_op = ops.iter().find(|o| o.id.as_ref() == "box.files.get").unwrap();
+        let get_op = ops
+            .iter()
+            .find(|o| o.id.as_ref() == "box.files.get")
+            .unwrap();
         assert_eq!(get_op.capability.as_ref(), "box.files.read");
     }
 }

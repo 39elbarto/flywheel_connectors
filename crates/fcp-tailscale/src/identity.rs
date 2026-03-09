@@ -1750,10 +1750,8 @@ mod tests {
         let (_, node_keys) = create_test_keys();
         let node_id = NodeId::new("kid-diff");
 
-        let a1 =
-            NodeKeyAttestation::sign(&key1, &node_id, &node_keys, &[], 24).unwrap();
-        let a2 =
-            NodeKeyAttestation::sign(&key2, &node_id, &node_keys, &[], 24).unwrap();
+        let a1 = NodeKeyAttestation::sign(&key1, &node_id, &node_keys, &[], 24).unwrap();
+        let a2 = NodeKeyAttestation::sign(&key2, &node_id, &node_keys, &[], 24).unwrap();
 
         assert_ne!(a1.signer_kid, a2.signer_kid);
     }
@@ -1785,8 +1783,7 @@ mod tests {
         let (owner_key, node_keys) = create_test_keys();
         let node_id = NodeId::new("chain");
         let tags = vec![];
-        let a =
-            NodeKeyAttestation::sign(&owner_key, &node_id, &node_keys, &tags, 24).unwrap();
+        let a = NodeKeyAttestation::sign(&owner_key, &node_id, &node_keys, &tags, 24).unwrap();
 
         let identity = MeshIdentity::new(
             node_id,

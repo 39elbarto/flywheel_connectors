@@ -877,9 +877,6 @@ mod tests {
             config.authorization_url,
             "https://www.dropbox.com/oauth2/authorize"
         );
-        assert_eq!(
-            config.token_url,
-            "https://api.dropboxapi.com/oauth2/token"
-        );
+        assert_eq!(config.token_url, "https://api.dropboxapi.com/oauth2/token");
     }
 }

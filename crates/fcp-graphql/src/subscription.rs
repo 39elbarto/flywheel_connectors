@@ -1147,7 +1147,12 @@ mod tests {
         let back: GraphqlWsMessage = serde_json::from_str(&json).unwrap();
         assert_eq!(back.message_type, "subscribe");
         assert_eq!(back.id.as_deref(), Some("sub-123"));
-        assert!(back.payload.unwrap()["query"].as_str().unwrap().contains("events"));
+        assert!(
+            back.payload.unwrap()["query"]
+                .as_str()
+                .unwrap()
+                .contains("events")
+        );
     }
 
     // ---- GraphqlSubscriptionConfig edge cases ----
@@ -1177,10 +1182,7 @@ mod tests {
             ..GraphqlSubscriptionConfig::default()
         };
         let cloned = config.clone();
-        assert_eq!(
-            cloned.init_payload.unwrap()["auth"],
-            "bearer xyz"
-        );
+        assert_eq!(cloned.init_payload.unwrap()["auth"], "bearer xyz");
         // Use original after clone to avoid redundant_clone
         assert!(config.init_payload.is_some());
     }

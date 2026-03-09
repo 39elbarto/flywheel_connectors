@@ -898,7 +898,10 @@ mod tests {
             timestamp: chrono::Utc::now(),
         };
         assert_eq!(
-            op.input.as_ref().unwrap()["items"].as_array().unwrap().len(),
+            op.input.as_ref().unwrap()["items"]
+                .as_array()
+                .unwrap()
+                .len(),
             50
         );
     }

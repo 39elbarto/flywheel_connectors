@@ -472,11 +472,8 @@ mod tests {
         tx.send(1).await.expect("send 1");
         tx.send(2).await.expect("send 2");
         // Channel is now full; verify by trying send with timeout
-        let result = fcp_async_core::time::timeout(
-            std::time::Duration::from_millis(5),
-            tx.send(3),
-        )
-        .await;
+        let result =
+            fcp_async_core::time::timeout(std::time::Duration::from_millis(5), tx.send(3)).await;
         // Should timeout because channel is full
         assert!(result.is_err());
     }

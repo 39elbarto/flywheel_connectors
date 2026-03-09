@@ -3980,7 +3980,11 @@ mod tests {
             ..Default::default()
         };
         let errors = config.validate().unwrap_err();
-        assert!(errors.iter().any(|e| e.contains("max_consecutive_failures")));
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.contains("max_consecutive_failures"))
+        );
     }
 
     #[test]
@@ -3990,9 +3994,11 @@ mod tests {
             ..Default::default()
         };
         let errors = config.validate().unwrap_err();
-        assert!(errors
-            .iter()
-            .any(|e| e.contains("heartbeat_timeout_multiplier")));
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.contains("heartbeat_timeout_multiplier"))
+        );
     }
 
     #[test]

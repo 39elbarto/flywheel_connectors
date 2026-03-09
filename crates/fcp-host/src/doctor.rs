@@ -2214,7 +2214,8 @@ mod tests {
     #[test]
     fn doctor_service_custom_timeout_preserved() {
         let registry = Arc::new(TestRegistry::always_ok());
-        let service = DoctorService::with_timeout(Arc::clone(&registry), Duration::from_millis(500));
+        let service =
+            DoctorService::with_timeout(Arc::clone(&registry), Duration::from_millis(500));
         assert_eq!(service.self_check_timeout, Duration::from_millis(500));
     }
 

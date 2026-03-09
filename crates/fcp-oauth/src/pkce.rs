@@ -489,7 +489,9 @@ mod tests {
 
     #[test]
     fn test_pkce_ten_generations_all_unique() {
-        let verifiers: Vec<String> = (0..10).map(|_| Pkce::new().verifier().to_string()).collect();
+        let verifiers: Vec<String> = (0..10)
+            .map(|_| Pkce::new().verifier().to_string())
+            .collect();
         for i in 0..verifiers.len() {
             for j in (i + 1)..verifiers.len() {
                 assert_ne!(verifiers[i], verifiers[j], "duplicate at {i} and {j}");

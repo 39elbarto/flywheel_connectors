@@ -1821,13 +1821,7 @@ mod tests {
     fn execution_plan_single_wide_tier() {
         let plan = ExecutionPlan {
             tiers: vec![ExecutionTier {
-                operation_ids: vec![
-                    "a".into(),
-                    "b".into(),
-                    "c".into(),
-                    "d".into(),
-                    "e".into(),
-                ],
+                operation_ids: vec!["a".into(), "b".into(), "c".into(), "d".into(), "e".into()],
             }],
             total_operations: 5,
         };
@@ -2201,7 +2195,9 @@ mod tests {
             op("b", "t", &["a"]),
             op("a", "t", &[]),
         ]);
-        let resp = executor.execute_sync(&req, |o| Ok(serde_json::json!({"id": o.id}))).unwrap();
+        let resp = executor
+            .execute_sync(&req, |o| Ok(serde_json::json!({"id": o.id})))
+            .unwrap();
         // Results must be in submission order regardless of execution order
         let ids: Vec<&str> = resp.results.iter().map(|r| r.id.as_str()).collect();
         assert_eq!(ids, vec!["e", "d", "c", "b", "a"]);
@@ -2361,11 +2357,7 @@ mod tests {
         let executor = BatchExecutor::new();
         let call_order = std::sync::Mutex::new(Vec::new());
         let req = BatchInvokeRequest {
-            operations: vec![
-                op("a", "t", &[]),
-                op("b", "t", &[]),
-                op("c", "t", &[]),
-            ],
+            operations: vec![op("a", "t", &[]), op("b", "t", &[]), op("c", "t", &[])],
             options: BatchOptions {
                 max_parallelism: 1,
                 ..Default::default()
@@ -2392,11 +2384,7 @@ mod tests {
         let executor = BatchExecutor::new();
         let mut ops = vec![op("op000", "t", &[])];
         for i in 1..100 {
-            ops.push(op(
-                &format!("op{i:03}"),
-                "t",
-                &[&format!("op{:03}", i - 1)],
-            ));
+            ops.push(op(&format!("op{i:03}"), "t", &[&format!("op{:03}", i - 1)]));
         }
         let req = simple_request(ops);
         let plan = executor.plan(&req).unwrap();
@@ -2441,7 +2429,10 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status, BatchStatus::Success);
         let output_a = resp.results[0].output.as_ref().unwrap();
-        assert_eq!(output_a["deeply"]["nested"]["structure"]["array"][4]["inner"], "obj");
+        assert_eq!(
+            output_a["deeply"]["nested"]["structure"]["array"][4]["inner"],
+            "obj"
+        );
         let output_b = resp.results[1].output.as_ref().unwrap();
         assert_eq!(output_b[0]["items"][2], 30);
         assert_eq!(output_b[1]["items"].as_array().unwrap().len(), 0);
@@ -2454,19 +2445,17 @@ mod tests {
             completed: 3,
             failed: 2,
             skipped: 5,
-            results: vec![
-                OperationResult {
-                    id: "x".into(),
-                    status: OperationResultStatus::Skipped,
-                    output: None,
-                    error: Some(BatchOperationError {
-                        code: "BATCH_TIMEOUT".into(),
-                        message: "batch timeout exceeded".into(),
-                        retry_after_ms: None,
-                    }),
-                    duration_ms: 0,
-                },
-            ],
+            results: vec![OperationResult {
+                id: "x".into(),
+                status: OperationResultStatus::Skipped,
+                output: None,
+                error: Some(BatchOperationError {
+                    code: "BATCH_TIMEOUT".into(),
+                    message: "batch timeout exceeded".into(),
+                    retry_after_ms: None,
+                }),
+                duration_ms: 0,
+            }],
             total_duration_ms: 30_000,
         };
         let json = serde_json::to_string(&resp).unwrap();
@@ -2475,7 +2464,10 @@ mod tests {
         assert_eq!(parsed.completed, 3);
         assert_eq!(parsed.failed, 2);
         assert_eq!(parsed.skipped, 5);
-        assert_eq!(parsed.results[0].error.as_ref().unwrap().code, "BATCH_TIMEOUT");
+        assert_eq!(
+            parsed.results[0].error.as_ref().unwrap().code,
+            "BATCH_TIMEOUT"
+        );
     }
 
     #[test]

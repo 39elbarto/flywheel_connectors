@@ -1019,8 +1019,8 @@ mod tests {
 
     #[test]
     fn test_event_get_root_primitive() {
-        let event = WebhookEvent::new("e1", "test", "p")
-            .with_payload(serde_json::json!("a plain string"));
+        let event =
+            WebhookEvent::new("e1", "test", "p").with_payload(serde_json::json!("a plain string"));
         // Root is a string, so get("") tries key "" which won't work on a string
         assert!(event.get("anything").is_none());
         // But the raw payload is accessible
@@ -1030,8 +1030,8 @@ mod tests {
     #[test]
     fn test_event_get_with_dots_in_key_name() {
         // If a key literally contains a dot, the path traversal will split on it
-        let event = WebhookEvent::new("e1", "test", "p")
-            .with_payload(serde_json::json!({"a.b": "value"}));
+        let event =
+            WebhookEvent::new("e1", "test", "p").with_payload(serde_json::json!({"a.b": "value"}));
         // "a.b" splits to ["a", "b"] so this won't find the literal key "a.b"
         assert!(event.get("a.b").is_none());
     }
@@ -1100,16 +1100,16 @@ mod tests {
 
     #[test]
     fn test_event_get_i64_string_value() {
-        let event = WebhookEvent::new("e1", "test", "p")
-            .with_payload(serde_json::json!({"num_str": "42"}));
+        let event =
+            WebhookEvent::new("e1", "test", "p").with_payload(serde_json::json!({"num_str": "42"}));
         // String "42" is not an i64
         assert_eq!(event.get_i64("num_str"), None);
     }
 
     #[test]
     fn test_event_get_str_number_value() {
-        let event = WebhookEvent::new("e1", "test", "p")
-            .with_payload(serde_json::json!({"count": 42}));
+        let event =
+            WebhookEvent::new("e1", "test", "p").with_payload(serde_json::json!({"count": 42}));
         // Number 42 is not a string
         assert_eq!(event.get_str("count"), None);
     }
@@ -1127,10 +1127,7 @@ mod tests {
     #[test]
     fn test_event_metadata_custom_nested_json() {
         let mut custom = HashMap::new();
-        custom.insert(
-            "nested".into(),
-            serde_json::json!({"a": {"b": [1, 2, 3]}}),
-        );
+        custom.insert("nested".into(), serde_json::json!({"a": {"b": [1, 2, 3]}}));
         let meta = EventMetadata {
             custom,
             ..EventMetadata::default()
@@ -1166,8 +1163,8 @@ mod tests {
 
     #[test]
     fn test_event_get_i64_negative() {
-        let event = WebhookEvent::new("e1", "test", "p")
-            .with_payload(serde_json::json!({"val": -999}));
+        let event =
+            WebhookEvent::new("e1", "test", "p").with_payload(serde_json::json!({"val": -999}));
         assert_eq!(event.get_i64("val"), Some(-999));
     }
 

@@ -688,9 +688,15 @@ mod tests {
         let cases: Vec<AsyncError> = vec![
             AsyncError::Timeout { timeout_ms: 100 },
             AsyncError::Cancelled,
-            AsyncError::ProtocolIo { message: "io".into() },
-            AsyncError::Join { message: "join".into() },
-            AsyncError::Runtime { message: "rt".into() },
+            AsyncError::ProtocolIo {
+                message: "io".into(),
+            },
+            AsyncError::Join {
+                message: "join".into(),
+            },
+            AsyncError::Runtime {
+                message: "rt".into(),
+            },
             AsyncError::ChannelClosed,
             AsyncError::ChannelFull,
         ];
@@ -707,22 +713,22 @@ mod tests {
 
     #[test]
     fn tailscale_result_with_string() {
-        let result: TailscaleResult<String> = serde_json::from_str("\"hello\"")
-            .map_err(TailscaleError::from);
+        let result: TailscaleResult<String> =
+            serde_json::from_str("\"hello\"").map_err(TailscaleError::from);
         assert_eq!(result.unwrap(), "hello");
     }
 
     #[test]
     fn tailscale_result_with_vec() {
-        let result: TailscaleResult<Vec<u8>> = serde_json::from_str("[1,2,3]")
-            .map_err(TailscaleError::from);
+        let result: TailscaleResult<Vec<u8>> =
+            serde_json::from_str("[1,2,3]").map_err(TailscaleError::from);
         assert_eq!(result.unwrap().len(), 3);
     }
 
     #[test]
     fn tailscale_result_with_option() {
-        let result: TailscaleResult<Option<u32>> = serde_json::from_str("null")
-            .map_err(TailscaleError::from);
+        let result: TailscaleResult<Option<u32>> =
+            serde_json::from_str("null").map_err(TailscaleError::from);
         assert!(result.unwrap().is_none());
     }
 

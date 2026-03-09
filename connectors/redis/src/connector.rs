@@ -661,10 +661,10 @@ fn typed_operations_info() -> Vec<OperationInfo> {
             safety_tier: SafetyTier::Risky,
             idempotency: IdempotencyClass::BestEffort,
             ai_hints: AgentHint {
-                when_to_use: "Use to store a value at a key, optionally with expiration or conditional flags".into(),
-                common_mistakes: vec![
-                    "Using both nx and xx flags simultaneously".into(),
-                ],
+                when_to_use:
+                    "Use to store a value at a key, optionally with expiration or conditional flags"
+                        .into(),
+                common_mistakes: vec!["Using both nx and xx flags simultaneously".into()],
                 examples: vec![],
                 related: vec![
                     CapabilityId::from_static("redis.get"),
@@ -701,13 +701,9 @@ fn typed_operations_info() -> Vec<OperationInfo> {
             idempotency: IdempotencyClass::None,
             ai_hints: AgentHint {
                 when_to_use: "Use to permanently remove keys and their associated values".into(),
-                common_mistakes: vec![
-                    "Deleting keys without confirming they exist first".into(),
-                ],
+                common_mistakes: vec!["Deleting keys without confirming they exist first".into()],
                 examples: vec![],
-                related: vec![
-                    CapabilityId::from_static("redis.exists"),
-                ],
+                related: vec![CapabilityId::from_static("redis.exists")],
             },
             rate_limit: None,
             requires_approval: None,
@@ -808,9 +804,7 @@ fn typed_operations_info() -> Vec<OperationInfo> {
                 when_to_use: "Use to check remaining TTL before a key expires".into(),
                 common_mistakes: vec![],
                 examples: vec![],
-                related: vec![
-                    CapabilityId::from_static("redis.expire"),
-                ],
+                related: vec![CapabilityId::from_static("redis.expire")],
             },
             rate_limit: None,
             requires_approval: None,
@@ -837,10 +831,9 @@ fn typed_operations_info() -> Vec<OperationInfo> {
             safety_tier: SafetyTier::Risky,
             idempotency: IdempotencyClass::None,
             ai_hints: AgentHint {
-                when_to_use: "Use for atomic counters, rate limiters, or sequence generators".into(),
-                common_mistakes: vec![
-                    "Using on keys that hold non-integer values".into(),
-                ],
+                when_to_use: "Use for atomic counters, rate limiters, or sequence generators"
+                    .into(),
+                common_mistakes: vec!["Using on keys that hold non-integer values".into()],
                 examples: vec![],
                 related: vec![
                     CapabilityId::from_static("redis.get"),
@@ -988,9 +981,7 @@ fn typed_operations_info() -> Vec<OperationInfo> {
                     "Elements are prepended in reverse order of the array".into(),
                 ],
                 examples: vec![],
-                related: vec![
-                    CapabilityId::from_static("redis.lrange"),
-                ],
+                related: vec![CapabilityId::from_static("redis.lrange")],
             },
             rate_limit: None,
             requires_approval: None,
@@ -1025,9 +1016,7 @@ fn typed_operations_info() -> Vec<OperationInfo> {
                 when_to_use: "Use to retrieve elements from a list by index range".into(),
                 common_mistakes: vec![],
                 examples: vec![],
-                related: vec![
-                    CapabilityId::from_static("redis.lpush"),
-                ],
+                related: vec![CapabilityId::from_static("redis.lpush")],
             },
             rate_limit: None,
             requires_approval: None,
@@ -1062,9 +1051,7 @@ fn typed_operations_info() -> Vec<OperationInfo> {
                 when_to_use: "Use to add members to a set; duplicates are ignored".into(),
                 common_mistakes: vec![],
                 examples: vec![],
-                related: vec![
-                    CapabilityId::from_static("redis.smembers"),
-                ],
+                related: vec![CapabilityId::from_static("redis.smembers")],
             },
             rate_limit: None,
             requires_approval: None,
@@ -1099,9 +1086,7 @@ fn typed_operations_info() -> Vec<OperationInfo> {
                     "Using on very large sets without considering memory impact".into(),
                 ],
                 examples: vec![],
-                related: vec![
-                    CapabilityId::from_static("redis.sadd"),
-                ],
+                related: vec![CapabilityId::from_static("redis.sadd")],
             },
             rate_limit: None,
             requires_approval: None,

@@ -2038,8 +2038,14 @@ mod tests {
         assert_eq!(cloned.snapshot.zone_id, eval.snapshot.zone_id);
         assert_eq!(cloned.snapshot.enforcement, eval.snapshot.enforcement);
         assert_eq!(cloned.snapshot.budgets.len(), eval.snapshot.budgets.len());
-        assert_eq!(cloned.snapshot.budgets[0].used, eval.snapshot.budgets[0].used);
-        assert_eq!(cloned.snapshot.budgets[1].remaining, eval.snapshot.budgets[1].remaining);
+        assert_eq!(
+            cloned.snapshot.budgets[0].used,
+            eval.snapshot.budgets[0].used
+        );
+        assert_eq!(
+            cloned.snapshot.budgets[1].remaining,
+            eval.snapshot.budgets[1].remaining
+        );
         assert_eq!(cloned.snapshot.updated_at, eval.snapshot.updated_at);
     }
 
@@ -2184,7 +2190,13 @@ mod tests {
             },
         };
         let error = eval.to_error().expect("should produce error");
-        if let FcpError::BudgetExceeded { metric, used, limit, .. } = error {
+        if let FcpError::BudgetExceeded {
+            metric,
+            used,
+            limit,
+            ..
+        } = error
+        {
             assert_eq!(metric, UsageMetricKind::Requests);
             assert_eq!(used, 20);
             assert_eq!(limit, 10);
@@ -2352,8 +2364,7 @@ mod tests {
         let zone = ZoneId::private();
 
         let request = PreflightRequest {
-            connector_id: fcp_core::ConnectorId::new("test", "budget", "v1")
-                .expect("connector id"),
+            connector_id: fcp_core::ConnectorId::new("test", "budget", "v1").expect("connector id"),
             operation: "read".to_string(),
             params: None,
             principal: None,

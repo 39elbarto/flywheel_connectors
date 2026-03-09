@@ -109,7 +109,10 @@ fn default_resilience_config_is_sane() {
     assert_eq!(config.circuit_breaker.failure_threshold, 3);
     assert_eq!(config.circuit_breaker.success_threshold, 2);
     assert_eq!(config.circuit_breaker.open_duration, Duration::from_secs(5));
-    assert_eq!(config.circuit_breaker.failure_predicate, FailurePredicate::AnyError);
+    assert_eq!(
+        config.circuit_breaker.failure_predicate,
+        FailurePredicate::AnyError
+    );
     assert_eq!(config.bulkhead.max_concurrent, 16);
     assert_eq!(config.bulkhead.max_queued, 32);
     assert_eq!(config.bulkhead.queue_timeout, Duration::from_millis(250));
@@ -141,7 +144,10 @@ fn health_router_config_defaults() {
     let config = HealthRouterConfig::default();
     assert_eq!(config.unhealthy_threshold, 3);
     assert_eq!(config.recovery_success_threshold, 2);
-    assert_eq!(config.latency_degraded_threshold, Duration::from_millis(750));
+    assert_eq!(
+        config.latency_degraded_threshold,
+        Duration::from_millis(750)
+    );
     assert_eq!(config.error_rate_degraded_threshold_per_mille, 500);
     assert_eq!(config.probe_interval, Duration::from_secs(5));
     assert_eq!(config.error_window, Duration::from_secs(30));
@@ -199,7 +205,10 @@ fn failure_predicate_any_error() {
 
 #[test]
 fn failure_predicate_timeouts_only() {
-    assert_eq!(FailurePredicate::TimeoutsOnly, FailurePredicate::TimeoutsOnly);
+    assert_eq!(
+        FailurePredicate::TimeoutsOnly,
+        FailurePredicate::TimeoutsOnly
+    );
 }
 
 #[test]
@@ -288,7 +297,9 @@ fn routing_decision_reject() {
 
 #[test]
 fn resilience_error_display_load_shed() {
-    let e: ResilienceError<String> = ResilienceError::LoadShed { load_per_mille: 900 };
+    let e: ResilienceError<String> = ResilienceError::LoadShed {
+        load_per_mille: 900,
+    };
     let msg = e.to_string();
     assert!(msg.contains("900"), "expected load value in message: {msg}");
     assert!(msg.contains("shed"), "expected 'shed' in message: {msg}");
@@ -301,7 +312,10 @@ fn resilience_error_display_unhealthy() {
     };
     let msg = e.to_string();
     assert!(msg.contains("unhealthy"), "expected 'unhealthy': {msg}");
-    assert!(msg.contains("3 consecutive failures"), "expected reason: {msg}");
+    assert!(
+        msg.contains("3 consecutive failures"),
+        "expected reason: {msg}"
+    );
 }
 
 #[test]
@@ -430,7 +444,9 @@ async fn circuit_transitions_to_half_open_after_duration() {
 
     // Next request should be a probe (half-open)
     let result: Result<(), ResilienceError<String>> = layer
-        .execute(&connector, RequestPriority::Normal, "probe", async { Ok(()) })
+        .execute(&connector, RequestPriority::Normal, "probe", async {
+            Ok(())
+        })
         .await;
     assert!(result.is_ok(), "probe should succeed: {result:?}");
 }
@@ -640,9 +656,14 @@ async fn load_shedding_critical_never_shed() {
 
     // Critical should never be shed
     let result: Result<(), ResilienceError<String>> = layer
-        .execute(&connector, RequestPriority::Critical, "op", async { Ok(()) })
+        .execute(&connector, RequestPriority::Critical, "op", async {
+            Ok(())
+        })
         .await;
-    assert!(result.is_ok(), "critical priority should not be shed: {result:?}");
+    assert!(
+        result.is_ok(),
+        "critical priority should not be shed: {result:?}"
+    );
 }
 
 #[fcp_async_core::runtime::test]
@@ -663,7 +684,10 @@ async fn load_shedding_high_never_shed_if_not_sheddable() {
     let result: Result<(), ResilienceError<String>> = layer
         .execute(&connector, RequestPriority::High, "op", async { Ok(()) })
         .await;
-    assert!(result.is_ok(), "high priority should not be shed: {result:?}");
+    assert!(
+        result.is_ok(),
+        "high priority should not be shed: {result:?}"
+    );
 }
 
 #[fcp_async_core::runtime::test]
@@ -691,7 +715,10 @@ async fn load_shedding_low_shed_at_full_load() {
             shed_count += 1;
         }
     }
-    assert!(shed_count > 0, "expected at least some load shedding at full load");
+    assert!(
+        shed_count > 0,
+        "expected at least some load shedding at full load"
+    );
 }
 
 #[fcp_async_core::runtime::test]
@@ -706,7 +733,10 @@ async fn load_shedding_none_below_threshold() {
         let result: Result<(), ResilienceError<String>> = layer
             .execute(&connector, RequestPriority::Low, "op", async { Ok(()) })
             .await;
-        assert!(result.is_ok(), "should not shed below threshold: {result:?}");
+        assert!(
+            result.is_ok(),
+            "should not shed below threshold: {result:?}"
+        );
     }
 }
 
@@ -732,7 +762,11 @@ async fn load_shedding_metrics_tracked() {
     }
 
     let m = layer.metrics(&connector);
-    assert!(m.load_shed > 0, "expected load_shed metrics > 0, got {}", m.load_shed);
+    assert!(
+        m.load_shed > 0,
+        "expected load_shed metrics > 0, got {}",
+        m.load_shed
+    );
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -819,7 +853,10 @@ async fn connector_state_isolated() {
     let result: Result<(), ResilienceError<String>> = layer
         .execute(&c1, RequestPriority::Normal, "op", async { Ok(()) })
         .await;
-    assert!(result.is_ok(), "c1 should not be affected by c2: {result:?}");
+    assert!(
+        result.is_ok(),
+        "c1 should not be affected by c2: {result:?}"
+    );
 }
 
 #[fcp_async_core::runtime::test]
@@ -908,8 +945,14 @@ fn merge_both_degraded_combines_reasons() {
     );
     match result {
         ConnectorHealth::Degraded { reason } => {
-            assert!(reason.contains("high latency"), "expected latency: {reason}");
-            assert!(reason.contains("high error rate"), "expected error rate: {reason}");
+            assert!(
+                reason.contains("high latency"),
+                "expected latency: {reason}"
+            );
+            assert!(
+                reason.contains("high error rate"),
+                "expected error rate: {reason}"
+            );
         }
         other => panic!("expected Degraded, got {other:?}"),
     }
@@ -1200,7 +1243,9 @@ async fn logged_load_shed_flow() {
 
     // Critical should pass through
     let critical_result: Result<(), ResilienceError<String>> = layer
-        .execute(&connector, RequestPriority::Critical, "op", async { Ok(()) })
+        .execute(&connector, RequestPriority::Critical, "op", async {
+            Ok(())
+        })
         .await;
     let critical_ok = critical_result.is_ok();
     logger.push(log_entry(
@@ -1261,7 +1306,10 @@ fn health_router_config_clone() {
 fn load_shed_config_clone() {
     let config = LoadShedConfig::default();
     let cloned = config.clone();
-    assert_eq!(cloned.shed_threshold_per_mille, config.shed_threshold_per_mille);
+    assert_eq!(
+        cloned.shed_threshold_per_mille,
+        config.shed_threshold_per_mille
+    );
 }
 
 #[test]

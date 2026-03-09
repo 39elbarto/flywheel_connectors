@@ -849,9 +849,13 @@ impl WasiRuntime {
         let started = Instant::now();
         let mut store = self.create_store_for_args(Some(args))?;
         let instance = self.instantiate(&mut store, component).await?;
-        let func = instance.get_typed_func::<(), ()>(&mut store, export_name).map_err(|e| {
-            WasiError::Execution(format!("failed to resolve zero-arg export `{export_name}`: {e}"))
-        })?;
+        let func = instance
+            .get_typed_func::<(), ()>(&mut store, export_name)
+            .map_err(|e| {
+                WasiError::Execution(format!(
+                    "failed to resolve zero-arg export `{export_name}`: {e}"
+                ))
+            })?;
 
         tokio::time::timeout(self.config.wall_clock_timeout, async {
             func.call_async(&mut store, ()).await.map_err(|e| {
@@ -1699,7 +1703,10 @@ mod tests {
         let component = runtime.load_component(minimal_command_component()).unwrap();
         let args = Vec::new();
 
-        let err = runtime.invoke(&component, "missing", &args).await.unwrap_err();
+        let err = runtime
+            .invoke(&component, "missing", &args)
+            .await
+            .unwrap_err();
         let message = err.to_string();
         assert!(message.contains("missing"));
         assert!(message.contains("failed to resolve"));

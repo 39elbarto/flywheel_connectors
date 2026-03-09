@@ -1944,5 +1944,4 @@ mod tests {
         let events = ctrl.audit_events();
         assert_eq!(events[0].timestamp, now);
     }
-
 }

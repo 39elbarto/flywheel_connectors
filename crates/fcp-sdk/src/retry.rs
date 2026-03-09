@@ -883,9 +883,7 @@ mod tests {
         assert_eq!(decision, RetryDecision::Backoff);
         match error {
             FcpError::External {
-                service,
-                retryable,
-                ..
+                service, retryable, ..
             } => {
                 assert_eq!(service, "service");
                 assert!(retryable);
@@ -913,8 +911,7 @@ mod tests {
 
     #[test]
     fn map_external_error_no_status_transient_message() {
-        let (decision, error) =
-            map_external_error("api", None, "connection refused", None);
+        let (decision, error) = map_external_error("api", None, "connection refused", None);
         assert_eq!(decision, RetryDecision::Backoff);
         match error {
             FcpError::External {
@@ -932,8 +929,7 @@ mod tests {
     #[test]
     fn map_external_error_with_retry_after_non_429() {
         let hint = Duration::from_secs(10);
-        let (_decision, error) =
-            map_external_error("api", Some(503), "unavailable", Some(hint));
+        let (_decision, error) = map_external_error("api", Some(503), "unavailable", Some(hint));
         match error {
             FcpError::External { retry_after, .. } => {
                 assert_eq!(retry_after, Some(hint));

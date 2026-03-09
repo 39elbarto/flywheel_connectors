@@ -12,9 +12,23 @@
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use fcp_manifest::{NetworkConstraints, SandboxProfile, SandboxSection};
 use fcp_sandbox::*;
+use wasmtime::{Store, component::Resource};
+use wasmtime_wasi::{
+    clocks::WasiClocksView,
+    filesystem::WasiFilesystemView,
+    p2::bindings::{
+        clocks::{monotonic_clock, wall_clock},
+        filesystem::{preopens, types},
+        random::{insecure_seed, random},
+        sockets::{instance_network, ip_name_lookup},
+    },
+    random::WasiRandomView,
+    sockets::{SocketAddrUse, WasiSocketsView},
+};
 
 // ============================================================================
 // Helpers
@@ -95,6 +109,97 @@ const fn minimal_command_component() -> &'static [u8] {
         (func (export "run") (canon lift (core func $i "run")))
     )
     "#
+}
+
+fn unique_temp_dir(prefix: &str) -> PathBuf {
+    let mut path = std::env::temp_dir();
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    path.push(format!("{prefix}-{}-{nanos}", std::process::id()));
+    std::fs::create_dir_all(&path).unwrap();
+    path
+}
+
+fn preopen_descriptor(
+    store: &mut Store<WasiHostState>,
+    guest_path: &str,
+) -> Resource<types::Descriptor> {
+    let mut filesystem = store.data_mut().filesystem();
+    preopens::Host::get_directories(&mut filesystem)
+        .unwrap()
+        .into_iter()
+        .find(|(_, path)| path == guest_path)
+        .map(|(descriptor, _)| descriptor)
+        .unwrap()
+}
+
+async fn read_preopened_file(
+    store: &mut Store<WasiHostState>,
+    guest_path: &str,
+    relative_path: &str,
+) -> (Vec<u8>, bool) {
+    let descriptor = preopen_descriptor(store, guest_path);
+    let mut filesystem = store.data_mut().filesystem();
+    let file_descriptor = types::HostDescriptor::open_at(
+        &mut filesystem,
+        descriptor,
+        types::PathFlags::empty(),
+        relative_path.to_string(),
+        types::OpenFlags::empty(),
+        types::DescriptorFlags::READ,
+    )
+    .await
+    .unwrap();
+
+    types::HostDescriptor::read(&mut filesystem, file_descriptor, 64, 0)
+        .await
+        .unwrap()
+}
+
+async fn open_preopened_for_write_error(
+    store: &mut Store<WasiHostState>,
+    guest_path: &str,
+    relative_path: &str,
+) -> String {
+    let descriptor = preopen_descriptor(store, guest_path);
+    let mut filesystem = store.data_mut().filesystem();
+    types::HostDescriptor::open_at(
+        &mut filesystem,
+        descriptor,
+        types::PathFlags::empty(),
+        relative_path.to_string(),
+        types::OpenFlags::CREATE,
+        types::DescriptorFlags::WRITE,
+    )
+    .await
+    .unwrap_err()
+    .to_string()
+}
+
+async fn write_preopened_file(
+    store: &mut Store<WasiHostState>,
+    guest_path: &str,
+    relative_path: &str,
+    bytes: Vec<u8>,
+) -> u64 {
+    let descriptor = preopen_descriptor(store, guest_path);
+    let mut filesystem = store.data_mut().filesystem();
+    let file_descriptor = types::HostDescriptor::open_at(
+        &mut filesystem,
+        descriptor,
+        types::PathFlags::empty(),
+        relative_path.to_string(),
+        types::OpenFlags::CREATE | types::OpenFlags::TRUNCATE,
+        types::DescriptorFlags::WRITE,
+    )
+    .await
+    .unwrap();
+
+    types::HostDescriptor::write(&mut filesystem, file_descriptor, bytes, 0)
+        .await
+        .unwrap()
 }
 
 // ============================================================================
@@ -847,6 +952,157 @@ async fn wasi_runtime_reports_missing_export() {
     let message = err.to_string();
     assert!(message.contains("missing"));
     assert!(message.contains("failed to resolve"));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn wasi_runtime_hostcalls_enforce_preopened_filesystem_permissions() {
+    let readonly_dir = unique_temp_dir("fcp-sandbox-wasi-readonly");
+    let writable_dir = unique_temp_dir("fcp-sandbox-wasi-writable");
+    std::fs::write(readonly_dir.join("input.txt"), b"readonly-ok").unwrap();
+
+    let runtime = WasiRuntime::new(WasiConfig {
+        readonly_paths: vec![readonly_dir.clone()],
+        writable_paths: vec![writable_dir.clone()],
+        ..WasiConfig::default()
+    })
+    .unwrap();
+    let mut store = runtime.create_store().unwrap();
+
+    let readonly_guest_path = readonly_dir.display().to_string();
+    let writable_guest_path = writable_dir.display().to_string();
+
+    let (bytes, eof) = read_preopened_file(&mut store, &readonly_guest_path, "input.txt").await;
+    assert_eq!(bytes, b"readonly-ok");
+    assert!(!eof);
+
+    let readonly_err =
+        open_preopened_for_write_error(&mut store, &readonly_guest_path, "blocked.txt").await;
+    assert!(readonly_err.contains("not-permitted"));
+
+    let written = write_preopened_file(
+        &mut store,
+        &writable_guest_path,
+        "output.txt",
+        b"written-ok".to_vec(),
+    )
+    .await;
+    assert_eq!(written, 10);
+
+    assert_eq!(
+        std::fs::read(writable_dir.join("output.txt")).unwrap(),
+        b"written-ok"
+    );
+
+    let escape_err =
+        open_preopened_for_write_error(&mut store, &writable_guest_path, "../escape.txt").await;
+    assert!(escape_err.contains("not-permitted"));
+}
+
+#[test]
+fn wasi_runtime_deterministic_hostcalls_are_stable_across_stores() {
+    let runtime =
+        WasiRuntime::new(WasiConfig::default().with_deterministic_mode(1_700_000_000, 42)).unwrap();
+    let mut store_a = runtime.create_store().unwrap();
+    let mut store_b = runtime.create_store().unwrap();
+
+    let wall_a = {
+        let mut clocks = store_a.data_mut().clocks();
+        wall_clock::Host::now(&mut clocks).unwrap()
+    };
+    let wall_b = {
+        let mut clocks = store_b.data_mut().clocks();
+        wall_clock::Host::now(&mut clocks).unwrap()
+    };
+    assert_eq!(wall_a.seconds, 1_700_000_000);
+    assert_eq!(wall_a.seconds, wall_b.seconds);
+    assert_eq!(wall_a.nanoseconds, wall_b.nanoseconds);
+
+    let mono_a_1 = {
+        let mut clocks = store_a.data_mut().clocks();
+        monotonic_clock::Host::now(&mut clocks).unwrap()
+    };
+    let mono_a_2 = {
+        let mut clocks = store_a.data_mut().clocks();
+        monotonic_clock::Host::now(&mut clocks).unwrap()
+    };
+    let other_mono_start = {
+        let mut clocks = store_b.data_mut().clocks();
+        monotonic_clock::Host::now(&mut clocks).unwrap()
+    };
+    assert_eq!(mono_a_1, 0);
+    assert_eq!(mono_a_2, 1_000_000);
+    assert_eq!(other_mono_start, 0);
+
+    let random_a = random::Host::get_random_bytes(store_a.data_mut().random(), 16).unwrap();
+    let random_b = random::Host::get_random_bytes(store_b.data_mut().random(), 16).unwrap();
+    assert_eq!(random_a, random_b);
+
+    let seed = insecure_seed::Host::insecure_seed(store_a.data_mut().random()).unwrap();
+    assert_eq!(seed, (42, 42));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn wasi_runtime_network_policy_controls_preview2_socket_hostcalls() {
+    let default_runtime = WasiRuntime::new(WasiConfig::default()).unwrap();
+    let mut default_store = default_runtime.create_store().unwrap();
+    {
+        let mut sockets = default_store.data_mut().sockets();
+        let network = instance_network::Host::instance_network(&mut sockets).unwrap();
+        let err =
+            ip_name_lookup::Host::resolve_addresses(&mut sockets, network, "example.com".into())
+                .unwrap_err();
+        assert!(err.to_string().contains("resolver-failure"));
+    }
+
+    let constrained_runtime =
+        WasiRuntime::new(WasiConfig::default().with_network_constraints(open_constraints()))
+            .unwrap();
+    let mut constrained_store = constrained_runtime.create_store().unwrap();
+    {
+        let mut sockets = constrained_store.data_mut().sockets();
+        let lookup_network = instance_network::Host::instance_network(&mut sockets).unwrap();
+        assert!(
+            ip_name_lookup::Host::resolve_addresses(
+                &mut sockets,
+                lookup_network,
+                "example.com".into()
+            )
+            .is_ok()
+        );
+
+        let allowed_network = instance_network::Host::instance_network(&mut sockets).unwrap();
+        let allowed = sockets
+            .table
+            .get(&allowed_network)
+            .unwrap()
+            .check_socket_addr(
+                "93.184.216.34:443".parse().unwrap(),
+                SocketAddrUse::TcpConnect,
+            )
+            .await;
+        assert!(allowed.is_ok());
+
+        let blocked_port_network = instance_network::Host::instance_network(&mut sockets).unwrap();
+        let blocked_port = sockets
+            .table
+            .get(&blocked_port_network)
+            .unwrap()
+            .check_socket_addr(
+                "93.184.216.34:8443".parse().unwrap(),
+                SocketAddrUse::TcpConnect,
+            )
+            .await;
+        assert!(blocked_port.is_err());
+
+        let blocked_bind_network = instance_network::Host::instance_network(&mut sockets).unwrap();
+        let blocked_bind = sockets
+            .table
+            .get(&blocked_bind_network)
+            .unwrap()
+            .check_socket_addr("93.184.216.34:443".parse().unwrap(), SocketAddrUse::TcpBind)
+            .await;
+        assert!(blocked_bind.is_err());
+    }
 }
 
 // ============================================================================

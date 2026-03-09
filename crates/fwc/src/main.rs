@@ -2,9 +2,11 @@
 
 #[allow(dead_code)] // Audit types used by later CLI commands.
 mod audit;
+#[allow(dead_code, clippy::str_split_at_newline, clippy::needless_raw_string_hashes)] mod batch;
 mod catalog;
 mod export_tools;
 mod format_table;
+#[allow(dead_code)] mod json_diff;
 #[allow(
     dead_code,
     clippy::writeln_empty_string,
@@ -25,6 +27,7 @@ mod recovery;
 mod render;
 mod schema_nav;
 mod search;
+#[allow(dead_code)] mod session;
 mod template;
 mod validate;
 mod workflow;
@@ -266,6 +269,13 @@ enum Commands {
     /// for complex mappings defined in a JSON file.
     #[command(visible_alias = "chain")]
     Pipe(PipeArgs),
+
+    /// Apply one operation to many inputs in parallel.
+    ///
+    /// Feed an inline JSON array, JSONL file, or template + items list
+    /// and execute the same operation for each input with concurrency control.
+    #[command(visible_alias = "batch")]
+    Map(MapArgs),
 }
 
 #[derive(Args, Debug, Serialize)]
@@ -818,6 +828,36 @@ struct PipeArgs {
     include_intermediate: bool,
 }
 
+#[derive(Args, Debug, Serialize)]
+struct MapArgs {
+    /// Operation to apply to every input (e.g. `github.get_issue`).
+    operation: String,
+
+    /// Inline JSON array of inputs.
+    #[arg(long, value_name = "JSON")]
+    inputs: Option<String>,
+
+    /// Path to a JSONL file of inputs (one JSON object per line).
+    #[arg(long, value_name = "PATH")]
+    input_file: Option<PathBuf>,
+
+    /// JSON template with `{{item}}` placeholder.
+    #[arg(long, value_name = "TEMPLATE")]
+    input_template: Option<String>,
+
+    /// Comma-separated items to substitute into the template.
+    #[arg(long, value_name = "ITEMS")]
+    items: Option<String>,
+
+    /// Maximum number of concurrent operations.
+    #[arg(long, default_value_t = 5)]
+    concurrency: usize,
+
+    /// What to do when an item fails: `abort` or `continue`.
+    #[arg(long, default_value = "abort")]
+    on_error: String,
+}
+
 fn main() -> ExitCode {
     let raw_args = std::env::args().collect::<Vec<_>>();
     let fallback_format = infer_output_format(&raw_args);
@@ -1301,6 +1341,7 @@ fn dispatch(cli: &Cli) -> Result<DispatchOutcome> {
         Commands::Validate(args) => validate_dispatch(args)?,
         Commands::History(args) => history_dispatch(args)?,
         Commands::Pipe(args) => pipe_dispatch(args)?,
+        Commands::Map(args) => map_dispatch(args)?,
     };
 
     Ok(outcome)
@@ -2399,6 +2440,76 @@ fn pipe_dispatch(args: &PipeArgs) -> Result<DispatchOutcome> {
             "next_actions": [
                 format!("fwc schema {} --scaffold", args.source),
                 format!("fwc schema {} --required-only", args.target),
+            ],
+        }),
+        exit_code: CliExitCode::Success,
+    })
+}
+
+fn map_dispatch(args: &MapArgs) -> Result<DispatchOutcome> {
+    // Parse the on-error mode.
+    let on_error = batch::OnError::parse(&args.on_error).ok_or_else(|| {
+        anyhow::anyhow!(
+            "invalid --on-error value '{}'. Use 'abort' or 'continue'.",
+            args.on_error
+        )
+    })?;
+
+    // Parse inputs from exactly one source.
+    let inputs = if let Some(ref json) = args.inputs {
+        batch::BatchInputs::from_json_array(json).map_err(|e| anyhow::anyhow!("{e}"))?
+    } else if let Some(ref path) = args.input_file {
+        let content = std::fs::read_to_string(path)?;
+        batch::BatchInputs::from_jsonl(&content).map_err(|e| anyhow::anyhow!("{e}"))?
+    } else if let Some(ref template) = args.input_template {
+        let items_csv = args.items.as_deref().unwrap_or("");
+        batch::BatchInputs::from_template(template, items_csv)
+            .map_err(|e| anyhow::anyhow!("{e}"))?
+    } else {
+        return Ok(DispatchOutcome {
+            payload: json!({
+                "status": "error",
+                "command": "map",
+                "error": {
+                    "type": "missing-inputs",
+                    "message": "No inputs provided. Use --inputs, --input-file, or --input-template + --items.",
+                },
+                "next_actions": [
+                    format!("fwc map {} --inputs '[{{\"id\":1}},{{\"id\":2}}]'", args.operation),
+                    format!("fwc map {} --input-file inputs.jsonl", args.operation),
+                    format!(
+                        "fwc map {} --input-template '{{\"id\":{{{{item}}}}}}' --items '1,2,3'",
+                        args.operation
+                    ),
+                ],
+            }),
+            exit_code: CliExitCode::UnknownCommand,
+        });
+    };
+
+    // Build batch plan.
+    let preview_count = inputs.len().min(3);
+    let plan = batch::BatchPlan {
+        operation: args.operation.clone(),
+        input_count: inputs.len(),
+        concurrency: args.concurrency,
+        on_error,
+        preview_inputs: inputs.items[..preview_count].to_vec(),
+    };
+
+    Ok(DispatchOutcome {
+        payload: json!({
+            "status": "planned",
+            "command": "map",
+            "message": format!(
+                "Batch plan: {} x {} inputs (concurrency={}, on_error={}). \
+                 Execution requires host integration (not yet available).",
+                args.operation, inputs.len(), args.concurrency, on_error
+            ),
+            "plan": plan,
+            "next_actions": [
+                format!("fwc schema {}", args.operation),
+                format!("fwc validate {} --input '<first_input>'", args.operation),
             ],
         }),
         exit_code: CliExitCode::Success,
@@ -5954,5 +6065,109 @@ mod tests {
                 "mutating typo should use ambiguous exit code: {args:?}"
             );
         }
+    }
+
+    // ── Map (batch) integration tests ──────────────────────────────
+
+    #[test]
+    fn execute_map_inline_json_array() {
+        let args: Vec<String> = vec![
+            "fwc", "--json", "map", "github.get_issue",
+            "--inputs", r#"[{"number":1},{"number":2},{"number":3}]"#,
+        ].into_iter().map(str::to_owned).collect();
+        let outcome = execute(&args).unwrap();
+        let payload: Value = serde_json::from_str(&outcome.text).unwrap();
+        assert_eq!(payload["status"], "planned");
+        assert_eq!(payload["command"], "map");
+        assert_eq!(payload["plan"]["operation"], "github.get_issue");
+        assert_eq!(payload["plan"]["input_count"], 3);
+        assert_eq!(payload["plan"]["concurrency"], 5);
+        assert_eq!(payload["plan"]["on_error"], "abort");
+        assert_eq!(payload["plan"]["preview_inputs"].as_array().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn execute_map_on_error_continue() {
+        let args: Vec<String> = vec![
+            "fwc", "--json", "map", "slack.send_message",
+            "--inputs", r#"[{"channel":"general","text":"hi"}]"#,
+            "--on-error", "continue",
+        ].into_iter().map(str::to_owned).collect();
+        let outcome = execute(&args).unwrap();
+        let payload: Value = serde_json::from_str(&outcome.text).unwrap();
+        assert_eq!(payload["plan"]["on_error"], "continue");
+    }
+
+    #[test]
+    fn execute_map_custom_concurrency() {
+        let args: Vec<String> = vec![
+            "fwc", "--json", "map", "github.get_issue",
+            "--inputs", r#"[{"n":1},{"n":2}]"#,
+            "--concurrency", "10",
+        ].into_iter().map(str::to_owned).collect();
+        let outcome = execute(&args).unwrap();
+        let payload: Value = serde_json::from_str(&outcome.text).unwrap();
+        assert_eq!(payload["plan"]["concurrency"], 10);
+    }
+
+    #[test]
+    fn execute_map_no_inputs_error() {
+        let args: Vec<String> = vec![
+            "fwc", "--json", "map", "github.get_issue",
+        ].into_iter().map(str::to_owned).collect();
+        let outcome = execute(&args).unwrap();
+        let payload: Value = serde_json::from_str(&outcome.text).unwrap();
+        assert_eq!(payload["status"], "error");
+        assert_eq!(payload["error"]["type"], "missing-inputs");
+    }
+
+    #[test]
+    fn execute_map_invalid_on_error() {
+        let args: Vec<String> = vec![
+            "fwc", "--json", "map", "github.get_issue",
+            "--inputs", r#"[{"n":1}]"#,
+            "--on-error", "panic",
+        ].into_iter().map(str::to_owned).collect();
+        let result = execute(&args);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn execute_map_template_with_items() {
+        let args: Vec<String> = vec![
+            "fwc", "--json", "map", "github.get_issue",
+            "--input-template", r#"{"owner":"octocat","repo":"hw","number":{{item}}}"#,
+            "--items", "1,2,3",
+        ].into_iter().map(str::to_owned).collect();
+        let outcome = execute(&args).unwrap();
+        let payload: Value = serde_json::from_str(&outcome.text).unwrap();
+        assert_eq!(payload["status"], "planned");
+        assert_eq!(payload["plan"]["input_count"], 3);
+        assert_eq!(payload["plan"]["preview_inputs"][0]["number"], 1);
+        assert_eq!(payload["plan"]["preview_inputs"][2]["number"], 3);
+    }
+
+    #[test]
+    fn execute_map_preview_capped_at_three() {
+        let args: Vec<String> = vec![
+            "fwc", "--json", "map", "github.get_issue",
+            "--inputs", r#"[{"n":1},{"n":2},{"n":3},{"n":4},{"n":5}]"#,
+        ].into_iter().map(str::to_owned).collect();
+        let outcome = execute(&args).unwrap();
+        let payload: Value = serde_json::from_str(&outcome.text).unwrap();
+        assert_eq!(payload["plan"]["input_count"], 5);
+        assert_eq!(payload["plan"]["preview_inputs"].as_array().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn execute_map_batch_alias() {
+        let args: Vec<String> = vec![
+            "fwc", "--json", "batch", "github.get_issue",
+            "--inputs", r#"[{"n":1}]"#,
+        ].into_iter().map(str::to_owned).collect();
+        let outcome = execute(&args).unwrap();
+        let payload: Value = serde_json::from_str(&outcome.text).unwrap();
+        assert_eq!(payload["status"], "planned");
+        assert_eq!(payload["command"], "map");
     }
 }

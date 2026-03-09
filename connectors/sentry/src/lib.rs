@@ -31,4 +31,5 @@ pub mod alerts;
 pub mod client;
 pub mod connector;
 pub mod error;
+pub mod triage;
 pub mod types;

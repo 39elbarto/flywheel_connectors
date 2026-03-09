@@ -2708,4 +2708,240 @@ mod tests {
         tracker.clear();
         assert_eq!(tracker.tracked_count(), 0);
     }
+
+    // --- OfflineAccess edge cases ---
+
+    #[test]
+    fn offline_access_coverage_bps_zero_k() {
+        let access = OfflineAccess::new(ObjectId::from_bytes([1; 32]), 0, 10, 64);
+        assert_eq!(access.coverage_bps(), 0);
+    }
+
+    #[test]
+    fn offline_access_coverage_float_zero_k() {
+        let access = OfflineAccess::new(ObjectId::from_bytes([1; 32]), 0, 10, 64);
+        assert!(access.coverage().abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn offline_access_overcoverage_bps() {
+        let mut access = OfflineAccess::new(ObjectId::from_bytes([1; 32]), 5, 10, 64);
+        access.set_local_symbols(15);
+        // 15/5 * 10000 = 30000
+        assert_eq!(access.coverage_bps(), 30_000);
+    }
+
+    #[test]
+    fn offline_access_add_symbols_saturating() {
+        let mut access = OfflineAccess::new(ObjectId::from_bytes([1; 32]), 10, 20, 64);
+        access.add_symbols(u32::MAX);
+        assert_eq!(access.local_symbols, u32::MAX);
+        // Adding more should saturate
+        access.add_symbols(1);
+        assert_eq!(access.local_symbols, u32::MAX);
+    }
+
+    #[test]
+    fn offline_access_remove_symbols_saturating() {
+        let mut access = OfflineAccess::new(ObjectId::from_bytes([1; 32]), 10, 20, 64);
+        access.set_local_symbols(5);
+        access.remove_symbols(100);
+        assert_eq!(access.local_symbols, 0);
+    }
+
+    #[test]
+    fn offline_access_bytes_needed_zero_when_available() {
+        let mut access = OfflineAccess::new(ObjectId::from_bytes([1; 32]), 10, 20, 64);
+        access.set_local_symbols(10);
+        assert_eq!(access.bytes_needed(), 0);
+    }
+
+    #[test]
+    fn offline_access_bytes_needed_calculation() {
+        let access = OfflineAccess::new(ObjectId::from_bytes([1; 32]), 10, 20, 128);
+        // Need 10 symbols * 128 bytes = 1280
+        assert_eq!(access.bytes_needed(), 1280);
+    }
+
+    #[test]
+    fn offline_access_serde_json_rt() {
+        let mut access = OfflineAccess::new(ObjectId::from_bytes([1; 32]), 10, 20, 64);
+        access.set_local_symbols(5);
+        let json = serde_json::to_string(&access).unwrap();
+        let rt: OfflineAccess = serde_json::from_str(&json).unwrap();
+        assert_eq!(rt.local_symbols, 5);
+        assert_eq!(rt.k, 10);
+        assert_eq!(rt.n, 20);
+    }
+
+    // --- OfflineStatus ---
+
+    #[test]
+    fn offline_status_serde_all_variants() {
+        for status in [
+            OfflineStatus::Available,
+            OfflineStatus::Partial,
+            OfflineStatus::NotCached,
+        ] {
+            let json = serde_json::to_string(&status).unwrap();
+            let rt: OfflineStatus = serde_json::from_str(&json).unwrap();
+            assert_eq!(rt, status);
+        }
+    }
+
+    #[test]
+    fn offline_status_copy_eq() {
+        let s = OfflineStatus::Partial;
+        let s2 = s;
+        assert_eq!(s, s2);
+        assert_ne!(s, OfflineStatus::Available);
+    }
+
+    // --- OfflineCapability ---
+
+    #[test]
+    fn offline_capability_remove() {
+        let mut cap = OfflineCapability::new();
+        let id = ObjectId::from_bytes([1; 32]);
+        let access = OfflineAccess::new(id, 10, 20, 64);
+        cap.track(access);
+        assert_eq!(cap.object_count(), 1);
+        let removed = cap.remove(&id);
+        assert!(removed.is_some());
+        assert_eq!(cap.object_count(), 0);
+    }
+
+    #[test]
+    fn offline_capability_remove_nonexistent() {
+        let mut cap = OfflineCapability::new();
+        let id = ObjectId::from_bytes([99; 32]);
+        assert!(cap.remove(&id).is_none());
+    }
+
+    #[test]
+    fn offline_capability_readiness_bps_empty() {
+        let cap = OfflineCapability::new();
+        assert_eq!(cap.readiness_bps(), 0);
+    }
+
+    #[test]
+    fn offline_capability_readiness_bps_all_available() {
+        let mut cap = OfflineCapability::new();
+        for i in 0..5 {
+            let mut access = OfflineAccess::new(ObjectId::from_bytes([i; 32]), 10, 20, 64);
+            access.set_local_symbols(10);
+            cap.track(access);
+        }
+        assert_eq!(cap.readiness_bps(), 10_000);
+    }
+
+    #[test]
+    fn offline_capability_readiness_bps_half_available() {
+        let mut cap = OfflineCapability::new();
+        for i in 0..4 {
+            let mut access = OfflineAccess::new(ObjectId::from_bytes([i; 32]), 10, 20, 64);
+            if i < 2 {
+                access.set_local_symbols(10);
+            }
+            cap.track(access);
+        }
+        assert_eq!(cap.readiness_bps(), 5000);
+    }
+
+    // --- OfflineSummary ---
+
+    #[test]
+    fn offline_summary_all_not_cached() {
+        let mut cap = OfflineCapability::new();
+        for i in 0..3 {
+            let access = OfflineAccess::new(ObjectId::from_bytes([i; 32]), 10, 20, 64);
+            cap.track(access);
+        }
+        let summary = cap.summary();
+        assert_eq!(summary.total_objects, 3);
+        assert_eq!(summary.available_objects, 0);
+        assert_eq!(summary.not_cached_objects, 3);
+        assert_eq!(summary.partial_objects, 0);
+    }
+
+    #[test]
+    fn offline_summary_mixed_states() {
+        let mut cap = OfflineCapability::new();
+        // Available
+        let mut a1 = OfflineAccess::new(ObjectId::from_bytes([1; 32]), 10, 20, 64);
+        a1.set_local_symbols(10);
+        cap.track(a1);
+        // Partial
+        let mut a2 = OfflineAccess::new(ObjectId::from_bytes([2; 32]), 10, 20, 64);
+        a2.set_local_symbols(5);
+        cap.track(a2);
+        // Not cached
+        let a3 = OfflineAccess::new(ObjectId::from_bytes([3; 32]), 10, 20, 64);
+        cap.track(a3);
+
+        let summary = cap.summary();
+        assert_eq!(summary.available_objects, 1);
+        assert_eq!(summary.partial_objects, 1);
+        assert_eq!(summary.not_cached_objects, 1);
+    }
+
+    #[test]
+    fn offline_summary_serde_json_rt() {
+        let summary = OfflineSummary {
+            total_objects: 10,
+            available_objects: 5,
+            partial_objects: 3,
+            not_cached_objects: 2,
+            readiness_bps: 5000,
+            bytes_needed: 1024,
+        };
+        let json = serde_json::to_string(&summary).unwrap();
+        let rt: OfflineSummary = serde_json::from_str(&json).unwrap();
+        assert_eq!(rt.total_objects, 10);
+        assert_eq!(rt.readiness_bps, 5000);
+    }
+
+    // --- AccessPatternTracker edge cases ---
+
+    #[test]
+    fn access_pattern_tracker_decay_all_zeros_out() {
+        let mut tracker = AccessPatternTracker::new();
+        let id = ObjectId::from_bytes([1; 32]);
+        tracker.record_access(id);
+        tracker.decay_all(0.0);
+        // After decaying to 0, priority should be 0 (frequency = 0)
+        let score = tracker.priority_score(&id);
+        assert!(score.abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn access_pattern_tracker_config_alpha_clamped_high() {
+        let tracker = AccessPatternTracker::with_config(
+            2.0, // > 1.0, should be clamped
+            Duration::from_secs(60),
+            100,
+        );
+        assert_eq!(tracker.tracked_count(), 0);
+    }
+
+    #[test]
+    fn access_pattern_tracker_top_n_empty() {
+        let tracker = AccessPatternTracker::new();
+        let top = tracker.top_n(5);
+        assert!(top.is_empty());
+    }
+
+    #[test]
+    fn access_pattern_tracker_access_count_untracked() {
+        let tracker = AccessPatternTracker::new();
+        let id = ObjectId::from_bytes([1; 32]);
+        assert_eq!(tracker.access_count(&id), 0);
+    }
+
+    #[test]
+    fn access_pattern_tracker_priority_score_untracked() {
+        let tracker = AccessPatternTracker::new();
+        let id = ObjectId::from_bytes([1; 32]);
+        assert!(tracker.priority_score(&id).abs() < f64::EPSILON);
+    }
 }

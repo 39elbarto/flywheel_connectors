@@ -1518,4 +1518,111 @@ mod tests {
         let all = roots.all_roots();
         assert_eq!(all.len(), 1);
     }
+
+    // --- Additional GcRoots edge case tests ---
+
+    #[test]
+    fn gc_roots_multiple_pins() {
+        let mut roots = GcRoots::new();
+        for i in 0..5 {
+            roots.add_pin(ObjectId::from_bytes([i; 32]));
+        }
+        assert_eq!(roots.all_roots().len(), 5);
+    }
+
+    #[test]
+    fn gc_roots_remove_nonexistent_pin() {
+        let mut roots = GcRoots::new();
+        let id = ObjectId::from_bytes([77; 32]);
+        roots.remove_pin(&id); // should not panic
+        assert!(!roots.is_root(&id));
+    }
+
+    #[test]
+    fn gc_roots_checkpoint_overwrite() {
+        let mut roots = GcRoots::new();
+        let cp1 = ObjectId::from_bytes([1; 32]);
+        let cp2 = ObjectId::from_bytes([2; 32]);
+        roots.set_checkpoint(cp1);
+        roots.set_checkpoint(cp2);
+        assert!(roots.is_root(&cp2));
+        assert!(!roots.is_root(&cp1));
+    }
+
+    #[test]
+    fn gc_roots_all_roots_checkpoint_plus_pins() {
+        let mut roots = GcRoots::new();
+        let cp = ObjectId::from_bytes([10; 32]);
+        roots.set_checkpoint(cp);
+        roots.add_pin(ObjectId::from_bytes([20; 32]));
+        roots.add_pin(ObjectId::from_bytes([30; 32]));
+        let all = roots.all_roots();
+        assert_eq!(all.len(), 3);
+        assert!(all.contains(&cp));
+    }
+
+    #[test]
+    fn gc_roots_debug_format() {
+        let roots = GcRoots::new();
+        let dbg = format!("{roots:?}");
+        assert!(dbg.contains("GcRoots"));
+    }
+
+    #[test]
+    fn gc_roots_clone_preserves_pins() {
+        let mut roots = GcRoots::new();
+        roots.add_pin(ObjectId::from_bytes([1; 32]));
+        let cloned = roots.clone();
+        assert_eq!(roots.all_roots().len(), cloned.all_roots().len());
+    }
+
+    // --- GcResult serde ---
+
+    #[test]
+    fn gc_result_serde_all_fields_rt() {
+        let result = GcResult {
+            live: 42,
+            evicted: 7,
+            expired_leases: 3,
+            pinned: 5,
+        };
+        let json = serde_json::to_string(&result).unwrap();
+        let rt: GcResult = serde_json::from_str(&json).unwrap();
+        assert_eq!(rt.live, 42);
+        assert_eq!(rt.evicted, 7);
+        assert_eq!(rt.expired_leases, 3);
+        assert_eq!(rt.pinned, 5);
+    }
+
+    #[test]
+    fn gc_result_debug_format() {
+        let result = GcResult {
+            live: 1,
+            evicted: 2,
+            expired_leases: 3,
+            pinned: 4,
+        };
+        let dbg = format!("{result:?}");
+        assert!(dbg.contains("GcResult"));
+        assert!(dbg.contains("evicted"));
+    }
+
+    #[test]
+    fn gc_config_clone() {
+        let config = GcConfig {
+            max_evictions_per_run: 42,
+            enforce_lease_expiry: false,
+        };
+        let cloned = config.clone();
+        assert_eq!(config.max_evictions_per_run, cloned.max_evictions_per_run);
+        assert_eq!(config.enforce_lease_expiry, cloned.enforce_lease_expiry);
+    }
+
+    #[test]
+    fn gc_config_debug_format() {
+        let config = GcConfig::default();
+        let dbg = format!("{config:?}");
+        assert!(dbg.contains("GcConfig"));
+        assert!(dbg.contains("max_evictions_per_run"));
+    }
 }

@@ -1893,4 +1893,145 @@ mod tests {
         };
         assert!(!stats.is_near_capacity(90));
     }
+
+    // --- QuarantineStats additional tests ---
+
+    #[test]
+    fn quarantine_stats_serde_all_fields_rt() {
+        let stats = QuarantineStats {
+            object_count: 42,
+            used_bytes: 1024,
+            max_bytes: 4096,
+            max_objects: 100,
+        };
+        let json = serde_json::to_string(&stats).unwrap();
+        let rt: QuarantineStats = serde_json::from_str(&json).unwrap();
+        assert_eq!(rt.object_count, 42);
+        assert_eq!(rt.used_bytes, 1024);
+        assert_eq!(rt.max_bytes, 4096);
+        assert_eq!(rt.max_objects, 100);
+    }
+
+    #[test]
+    fn quarantine_stats_debug_contains_fields() {
+        let stats = QuarantineStats {
+            object_count: 0,
+            used_bytes: 0,
+            max_bytes: 1000,
+            max_objects: 50,
+        };
+        let dbg = format!("{stats:?}");
+        assert!(dbg.contains("QuarantineStats"));
+    }
+
+    #[test]
+    fn quarantine_stats_clone_all_fields() {
+        let stats = QuarantineStats {
+            object_count: 5,
+            used_bytes: 500,
+            max_bytes: 1000,
+            max_objects: 10,
+        };
+        let cloned = stats.clone();
+        assert_eq!(stats.object_count, cloned.object_count);
+        assert_eq!(stats.used_bytes, cloned.used_bytes);
+    }
+
+    // --- ObjectAdmissionClass additional tests ---
+
+    #[test]
+    fn object_admission_class_serde_both_variants() {
+        let q = ObjectAdmissionClass::Quarantined;
+        let json = serde_json::to_string(&q).unwrap();
+        let rt: ObjectAdmissionClass = serde_json::from_str(&json).unwrap();
+        assert_eq!(rt, ObjectAdmissionClass::Quarantined);
+
+        let a = ObjectAdmissionClass::Admitted;
+        let json = serde_json::to_string(&a).unwrap();
+        let rt: ObjectAdmissionClass = serde_json::from_str(&json).unwrap();
+        assert_eq!(rt, ObjectAdmissionClass::Admitted);
+    }
+
+    #[test]
+    fn object_admission_class_copy_and_ne() {
+        let a = ObjectAdmissionClass::Quarantined;
+        let b = a;
+        assert_eq!(a, b);
+        assert_ne!(a, ObjectAdmissionClass::Admitted);
+    }
+
+    #[test]
+    fn object_admission_class_debug_fmt() {
+        let dbg = format!("{:?}", ObjectAdmissionClass::Quarantined);
+        assert!(dbg.contains("Quarantined"));
+    }
+
+    // --- PromotionReason additional tests ---
+
+    #[test]
+    fn promotion_reason_local_pin_json_rt() {
+        let reason = PromotionReason::LocalPin {
+            reason: "test pin".into(),
+        };
+        let json = serde_json::to_string(&reason).unwrap();
+        let rt: PromotionReason = serde_json::from_str(&json).unwrap();
+        assert_eq!(reason, rt);
+    }
+
+    #[test]
+    fn promotion_reason_checkpoint_json_rt() {
+        let reason = PromotionReason::ReachableFromCheckpoint {
+            checkpoint_id: ObjectId::from_bytes([5; 32]),
+        };
+        let json = serde_json::to_string(&reason).unwrap();
+        let rt: PromotionReason = serde_json::from_str(&json).unwrap();
+        assert_eq!(reason, rt);
+    }
+
+    #[test]
+    fn promotion_reason_debug_peer_request() {
+        let reason = PromotionReason::AuthenticatedPeerRequest {
+            peer_id: 42,
+            request_token: vec![1, 2, 3],
+        };
+        let dbg = format!("{reason:?}");
+        assert!(dbg.contains("AuthenticatedPeerRequest"));
+        assert!(dbg.contains("42"));
+    }
+
+    // --- ObjectAdmissionPolicy additional tests ---
+
+    #[test]
+    fn object_admission_policy_default_field_values() {
+        let policy = ObjectAdmissionPolicy::default();
+        assert_eq!(policy.max_quarantine_bytes_per_zone, 256 * 1024 * 1024);
+        assert_eq!(policy.max_quarantine_objects_per_zone, 100_000);
+        assert_eq!(policy.quarantine_ttl_secs, 3600);
+        assert!(policy.require_schema_validation);
+    }
+
+    #[test]
+    fn object_admission_policy_serde_json_rt() {
+        let policy = ObjectAdmissionPolicy {
+            max_quarantine_bytes_per_zone: 512,
+            max_quarantine_objects_per_zone: 10,
+            quarantine_ttl_secs: 60,
+            require_schema_validation: false,
+        };
+        let json = serde_json::to_string(&policy).unwrap();
+        let rt: ObjectAdmissionPolicy = serde_json::from_str(&json).unwrap();
+        assert_eq!(rt.max_quarantine_bytes_per_zone, 512);
+        assert!(!rt.require_schema_validation);
+    }
+
+    #[test]
+    fn quarantine_stats_is_near_capacity_by_bytes() {
+        let stats = QuarantineStats {
+            object_count: 1,
+            used_bytes: 95,
+            max_bytes: 100,
+            max_objects: 1000,
+        };
+        assert!(stats.is_near_capacity(90));
+    }
 }

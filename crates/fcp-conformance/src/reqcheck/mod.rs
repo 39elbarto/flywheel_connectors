@@ -1510,4 +1510,86 @@ not valid json at all
         // Should complete quickly (under 100ms for 50 entries)
         assert!(duration.as_millis() < 100, "Parsing should be fast");
     }
+
+    // ── RequirementsIndexParser additional tests ──
+
+    #[test]
+    fn parser_default_is_empty() {
+        let parser = RequirementsIndexParser::default();
+        assert!(parser.entries().is_empty());
+        assert!(parser.all_bead_ids().is_empty());
+    }
+
+    #[test]
+    fn parser_debug_format() {
+        let parser = RequirementsIndexParser::new();
+        let dbg = format!("{parser:?}");
+        assert!(dbg.contains("RequirementsIndexParser"));
+    }
+
+    #[test]
+    fn validation_report_debug_format() {
+        let report = ValidationReport {
+            total_entries: 0,
+            unique_beads: 0,
+            missing_beads: vec![],
+            errors: vec![],
+            warnings: vec![],
+            entries: None,
+        };
+        let dbg = format!("{report:?}");
+        assert!(dbg.contains("ValidationReport"));
+    }
+
+    #[test]
+    fn validation_error_debug_and_clone() {
+        let err = ValidationError {
+            section: "s".into(),
+            line_number: Some(10),
+            error_type: "missing_bead".into(),
+            value: "bd-x".into(),
+            message: "not found".into(),
+        };
+        let cloned = err.clone();
+        assert_eq!(err.section, cloned.section);
+        assert_eq!(err.line_number, cloned.line_number);
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("ValidationError"));
+    }
+
+    #[test]
+    fn validation_warning_debug_and_clone() {
+        let w = ValidationWarning {
+            section: "s".into(),
+            line_number: None,
+            warning_type: "test".into(),
+            message: "msg".into(),
+        };
+        let cloned = w.clone();
+        assert_eq!(w.warning_type, cloned.warning_type);
+        assert!(w.line_number.is_none());
+        let dbg = format!("{w:?}");
+        assert!(dbg.contains("ValidationWarning"));
+    }
+
+    #[test]
+    fn requirement_entry_debug_format() {
+        let entry = RequirementEntry {
+            section: "§1".into(),
+            line_number: 5,
+            owners: vec!["bd-o".into()],
+            tests: vec!["bd-t".into()],
+            notes: Some("note".into()),
+        };
+        let dbg = format!("{entry:?}");
+        assert!(dbg.contains("RequirementEntry"));
+        assert!(dbg.contains("bd-o"));
+    }
+
+    #[test]
+    fn is_bead_id_no_hyphen_rejected() {
+        assert!(!is_bead_id("nohyphen"));
+        assert!(!is_bead_id("flywheel_connectors"));
+        assert!(!is_bead_id("bd"));
+    }
 }

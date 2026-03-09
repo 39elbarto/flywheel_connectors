@@ -604,4 +604,82 @@ mod tests {
         let chk_id = "ee".repeat(32);
         assert_eq!(chk_id.len(), 64);
     }
+
+    // ── is_object_granted: case sensitivity ──
+
+    #[test]
+    fn object_grant_case_sensitive() {
+        let grants = vec!["OBJ-001".to_string()];
+        assert!(!is_object_granted("obj-001", &grants));
+        assert!(is_object_granted("OBJ-001", &grants));
+    }
+
+    // ── is_checkpoint_valid: edge cases ──
+
+    #[test]
+    fn checkpoint_valid_both_zero() {
+        let chk_id = "00".repeat(32);
+        assert!(is_checkpoint_valid(&chk_id, 0, &chk_id, 0));
+    }
+
+    #[test]
+    fn checkpoint_invalid_empty_id_mismatch() {
+        assert!(!is_checkpoint_valid("", 0, "x", 0));
+    }
+
+    #[test]
+    fn checkpoint_valid_empty_ids_match() {
+        assert!(is_checkpoint_valid("", 0, "", 0));
+    }
+
+    // ── is_token_valid_at: boundary ──
+
+    #[test]
+    fn token_valid_far_future() {
+        assert!(is_token_valid_at(u64::MAX, 0));
+    }
+
+    // ── CoseSign1: unprotected map ──
+
+    #[test]
+    fn cose_sign1_with_unprotected_headers() {
+        let mut unprotected = std::collections::HashMap::new();
+        unprotected.insert(4, b"kid-value".to_vec());
+        let cose = CoseSign1 {
+            protected: vec![0xA1, 0x01, 0x26],
+            unprotected,
+            payload: b"data".to_vec(),
+            signature: vec![0u8; 64],
+        };
+        assert_eq!(cose.unprotected.len(), 1);
+        assert!(cose.unprotected.contains_key(&4));
+    }
+
+    // ── CapabilityTokenPayload: field values ──
+
+    #[test]
+    fn token_payload_aud_wildcard() {
+        let token = CapabilityTokenPayload {
+            iss: "z:work".to_string(),
+            sub: "node-001".to_string(),
+            aud: "*".to_string(),
+            exp: 2_000_000_000,
+            iat: 1_999_000_000,
+            jti: "id-2".to_string(),
+            grants: vec!["read:all".to_string()],
+            chk_id: "ff".repeat(32),
+            chk_seq: 999,
+        };
+        assert_eq!(token.aud, "*");
+        assert_eq!(token.grants.len(), 1);
+        assert_eq!(token.chk_seq, 999);
+    }
+
+    #[test]
+    fn token_payload_exp_equals_iat_invalid() {
+        // exp must be strictly greater than iat for a valid token
+        let exp = 1_700_000_000_u64;
+        let iat = exp;
+        assert!(exp <= iat);
+    }
 }

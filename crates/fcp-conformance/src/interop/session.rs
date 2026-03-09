@@ -709,4 +709,122 @@ mod tests {
         assert!(summary.all_passed());
         assert_eq!(summary.total, 7);
     }
+
+    // ── negotiate_suite: additional tests ──
+
+    #[test]
+    fn negotiate_suite_preserves_offered_order() {
+        // First match wins
+        assert_eq!(
+            negotiate_suite(&["C", "A", "B"], &["B", "A"]),
+            Some("A")
+        );
+    }
+
+    #[test]
+    fn negotiate_suite_duplicate_in_offered() {
+        assert_eq!(
+            negotiate_suite(&["X", "X", "Y"], &["Y", "X"]),
+            Some("X")
+        );
+    }
+
+    // ── negotiate_limits: additional tests ──
+
+    #[test]
+    fn negotiate_limits_max_values() {
+        let max = TransportLimits {
+            max_datagram_bytes: u32::MAX,
+            max_frame_bytes: u32::MAX,
+            max_symbols_per_frame: u32::MAX,
+        };
+        let small = TransportLimits {
+            max_datagram_bytes: 100,
+            max_frame_bytes: 200,
+            max_symbols_per_frame: 5,
+        };
+        let result = negotiate_limits(&max, &small);
+        assert_eq!(result.max_datagram_bytes, 100);
+        assert_eq!(result.max_frame_bytes, 200);
+        assert_eq!(result.max_symbols_per_frame, 5);
+    }
+
+    #[test]
+    fn negotiate_limits_symmetric() {
+        let a = TransportLimits {
+            max_datagram_bytes: 500,
+            max_frame_bytes: 1000,
+            max_symbols_per_frame: 10,
+        };
+        let b = TransportLimits {
+            max_datagram_bytes: 800,
+            max_frame_bytes: 600,
+            max_symbols_per_frame: 20,
+        };
+        let ab = negotiate_limits(&a, &b);
+        let ba = negotiate_limits(&b, &a);
+        assert_eq!(ab.max_datagram_bytes, ba.max_datagram_bytes);
+        assert_eq!(ab.max_frame_bytes, ba.max_frame_bytes);
+        assert_eq!(ab.max_symbols_per_frame, ba.max_symbols_per_frame);
+    }
+
+    // ── build_retry_hello: additional tests ──
+
+    #[test]
+    fn retry_hello_large_cookie() {
+        let cookie = vec![0xABu8; 1024];
+        let hello = build_retry_hello(&cookie);
+        let cookie_len = u16::from_le_bytes([hello[8], hello[9]]);
+        assert_eq!(cookie_len, 1024);
+        assert_eq!(&hello[10..10 + 1024], cookie.as_slice());
+    }
+
+    // ── is_datagram_valid: additional tests ──
+
+    #[test]
+    fn datagram_valid_zero_max() {
+        let limits = TransportLimits {
+            max_datagram_bytes: 0,
+            max_frame_bytes: 0,
+            max_symbols_per_frame: 0,
+        };
+        assert!(is_datagram_valid(&[], &limits));
+        assert!(!is_datagram_valid(&[0], &limits));
+    }
+
+    // ── is_nonce_fresh: additional tests ──
+
+    #[test]
+    fn nonce_fresh_all_ones() {
+        let mut seen = std::collections::HashSet::new();
+        let all_ones = [0xFF; 16];
+        assert!(is_nonce_fresh(&all_ones, &mut seen));
+        assert!(!is_nonce_fresh(&all_ones, &mut seen));
+    }
+
+    // ── TransportLimits Debug and Copy ──
+
+    #[test]
+    fn transport_limits_debug() {
+        let limits = TransportLimits {
+            max_datagram_bytes: 1280,
+            max_frame_bytes: 4096,
+            max_symbols_per_frame: 50,
+        };
+        let dbg = format!("{limits:?}");
+        assert!(dbg.contains("TransportLimits"));
+        assert!(dbg.contains("1280"));
+    }
+
+    #[test]
+    fn transport_limits_copy() {
+        let a = TransportLimits {
+            max_datagram_bytes: 100,
+            max_frame_bytes: 200,
+            max_symbols_per_frame: 10,
+        };
+        let b = a;
+        assert_eq!(a.max_datagram_bytes, b.max_datagram_bytes);
+        assert_eq!(a.max_frame_bytes, b.max_frame_bytes);
+    }
 }

@@ -3877,4 +3877,221 @@ mod tests {
         assert_eq!(rt.object_count_tracked, 10);
         assert_eq!(rt.object_count_below_target, 3);
     }
+
+    // --- RepairReasonCode additional tests ---
+
+    #[test]
+    fn repair_reason_code_as_str_all_variants() {
+        assert_eq!(
+            RepairReasonCode::PolicySloDeficit.as_str(),
+            "repair.policy_slo_deficit"
+        );
+        assert_eq!(
+            RepairReasonCode::DiversityDeficit.as_str(),
+            "repair.diversity_deficit"
+        );
+        assert_eq!(
+            RepairReasonCode::HotObjectPreStage.as_str(),
+            "repair.hot_object_pre_stage"
+        );
+        assert_eq!(
+            RepairReasonCode::DeferredPowerBudget.as_str(),
+            "repair.deferred_power_budget"
+        );
+    }
+
+    #[test]
+    fn repair_reason_code_display_matches_as_str() {
+        for code in [
+            RepairReasonCode::PolicySloDeficit,
+            RepairReasonCode::DiversityDeficit,
+            RepairReasonCode::HotObjectPreStage,
+            RepairReasonCode::DeferredPowerBudget,
+        ] {
+            assert_eq!(code.to_string(), code.as_str());
+        }
+    }
+
+    #[test]
+    fn repair_reason_code_copy_eq() {
+        let a = RepairReasonCode::PolicySloDeficit;
+        let b = a;
+        assert_eq!(a, b);
+        assert_ne!(a, RepairReasonCode::DiversityDeficit);
+    }
+
+    // --- RepairCycleBudget tests ---
+
+    #[test]
+    fn repair_cycle_budget_default_is_unlimited() {
+        let budget = RepairCycleBudget::default();
+        assert_eq!(budget.max_repairs, usize::MAX);
+        assert_eq!(budget.max_bytes, u64::MAX);
+        assert_eq!(budget.max_decode_ms, u32::MAX);
+    }
+
+    #[test]
+    fn repair_cycle_budget_serde_json_rt() {
+        let budget = RepairCycleBudget {
+            max_repairs: 42,
+            max_bytes: 1024,
+            max_decode_ms: 500,
+        };
+        let json = serde_json::to_string(&budget).unwrap();
+        let rt: RepairCycleBudget = serde_json::from_str(&json).unwrap();
+        assert_eq!(rt.max_repairs, 42);
+        assert_eq!(rt.max_bytes, 1024);
+        assert_eq!(rt.max_decode_ms, 500);
+    }
+
+    #[test]
+    fn repair_cycle_budget_copy_eq() {
+        let a = RepairCycleBudget {
+            max_repairs: 10,
+            max_bytes: 100,
+            max_decode_ms: 50,
+        };
+        let b = a;
+        assert_eq!(a, b);
+    }
+
+    // --- RepairCycleUsage tests ---
+
+    #[test]
+    fn repair_cycle_usage_default_all_zero() {
+        let usage = RepairCycleUsage::default();
+        assert_eq!(usage.repairs, 0);
+        assert_eq!(usage.bytes, 0);
+        assert_eq!(usage.decode_ms, 0);
+    }
+
+    #[test]
+    fn repair_cycle_usage_serde_json_rt() {
+        let usage = RepairCycleUsage {
+            repairs: 5,
+            bytes: 2048,
+            decode_ms: 100,
+        };
+        let json = serde_json::to_string(&usage).unwrap();
+        let rt: RepairCycleUsage = serde_json::from_str(&json).unwrap();
+        assert_eq!(rt.repairs, 5);
+        assert_eq!(rt.bytes, 2048);
+        assert_eq!(rt.decode_ms, 100);
+    }
+
+    // --- RepairPolicyTargets tests ---
+
+    #[test]
+    fn repair_policy_targets_default_values() {
+        let targets = RepairPolicyTargets::default();
+        assert_eq!(targets.target_coverage_bps, 0);
+        assert_eq!(targets.min_source_diversity, 0);
+        assert_eq!(targets.max_node_fraction_bps, 10_000);
+    }
+
+    #[test]
+    fn repair_policy_targets_serde_json_rt() {
+        let targets = RepairPolicyTargets {
+            target_coverage_bps: 15_000,
+            min_source_diversity: 3,
+            max_node_fraction_bps: 5000,
+        };
+        let json = serde_json::to_string(&targets).unwrap();
+        let rt: RepairPolicyTargets = serde_json::from_str(&json).unwrap();
+        assert_eq!(rt.target_coverage_bps, 15_000);
+        assert_eq!(rt.min_source_diversity, 3);
+        assert_eq!(rt.max_node_fraction_bps, 5000);
+    }
+
+    // --- RepairPlanningOptions tests ---
+
+    #[test]
+    fn repair_planning_options_default_values() {
+        let opts = RepairPlanningOptions::default();
+        assert_eq!(opts.cycle_id, 0);
+        assert!(opts.hot_objects.is_empty());
+        assert!(!opts.power_saver);
+        assert_eq!(opts.derp_penalty_bps, 0);
+    }
+
+    #[test]
+    fn repair_planning_options_serde_json_rt() {
+        let opts = RepairPlanningOptions {
+            cycle_id: 42,
+            budget: RepairCycleBudget::default(),
+            hot_objects: vec![ObjectId::from_bytes([1; 32])],
+            hot_object_min_coverage_bps: 20_000,
+            power_saver: true,
+            derp_penalty_bps: 500,
+        };
+        let json = serde_json::to_string(&opts).unwrap();
+        let rt: RepairPlanningOptions = serde_json::from_str(&json).unwrap();
+        assert_eq!(rt.cycle_id, 42);
+        assert!(rt.power_saver);
+        assert_eq!(rt.derp_penalty_bps, 500);
+        assert_eq!(rt.hot_objects.len(), 1);
+    }
+
+    // --- RepairStats tests ---
+
+    #[test]
+    fn repair_stats_default_fields_zero() {
+        let stats = RepairStats::default();
+        assert_eq!(stats.repairs_attempted, 0);
+        assert_eq!(stats.repairs_succeeded, 0);
+        assert_eq!(stats.repairs_failed, 0);
+        assert_eq!(stats.symbols_added, 0);
+        assert_eq!(stats.queue_depth, 0);
+        assert_eq!(stats.rate_limited, 0);
+    }
+
+    #[test]
+    fn repair_stats_serde_json_all_fields_rt() {
+        let stats = RepairStats {
+            repairs_attempted: 100,
+            repairs_succeeded: 80,
+            repairs_failed: 20,
+            symbols_added: 500,
+            queue_depth: 5,
+            rate_limited: 3,
+        };
+        let json = serde_json::to_string(&stats).unwrap();
+        let rt: RepairStats = serde_json::from_str(&json).unwrap();
+        assert_eq!(rt.repairs_attempted, 100);
+        assert_eq!(rt.repairs_succeeded, 80);
+        assert_eq!(rt.rate_limited, 3);
+    }
+
+    // --- RepairResult tests ---
+
+    #[test]
+    fn repair_result_success_serde() {
+        let result = RepairResult {
+            object_id: ObjectId::from_bytes([1; 32]),
+            success: true,
+            new_coverage_bps: 12_000,
+            symbols_added: 5,
+            error: None,
+        };
+        let json = serde_json::to_string(&result).unwrap();
+        let rt: RepairResult = serde_json::from_str(&json).unwrap();
+        assert!(rt.success);
+        assert_eq!(rt.new_coverage_bps, 12_000);
+        assert!(rt.error.is_none());
+    }
+
+    #[test]
+    fn repair_result_failure_serde() {
+        let result = RepairResult {
+            object_id: ObjectId::from_bytes([2; 32]),
+            success: false,
+            new_coverage_bps: 3000,
+            symbols_added: 0,
+            error: Some("decode failed".into()),
+        };
+        let json = serde_json::to_string(&result).unwrap();
+        let rt: RepairResult = serde_json::from_str(&json).unwrap();
+        assert!(!rt.success);
+        assert_eq!(rt.error.as_deref(), Some("decode failed"));
+    }
 }

@@ -615,4 +615,102 @@ mod tests {
         assert!(summary.all_passed());
         assert_eq!(summary.total, 7);
     }
+
+    // ── ControlPlaneReplayWindow: additional edge cases ──
+
+    #[test]
+    fn replay_window_size_clamped_to_64() {
+        let mut window = ControlPlaneReplayWindow::new(128);
+        assert_eq!(window.size, 64);
+        // Should behave like a 64-bit window
+        assert!(window.accept(63));
+        assert!(window.accept(0));
+        assert!(!window.accept(0));
+    }
+
+    #[test]
+    fn replay_window_size_zero() {
+        let mut window = ControlPlaneReplayWindow::new(0);
+        assert_eq!(window.size, 0);
+        // With size 0, initial seq 0 is "too old" (0 >= 0)
+        // but advancing to a new higher seq works
+        assert!(!window.accept(0));
+        assert!(window.accept(1)); // new highest, accepted
+        assert!(!window.accept(0)); // still too old
+    }
+
+    #[test]
+    fn replay_window_large_gap_resets() {
+        let mut window = ControlPlaneReplayWindow::new(64);
+        assert!(window.accept(0));
+        // Jump far beyond window
+        assert!(window.accept(200));
+        // Old sequences are all outside window
+        assert!(!window.accept(0));
+        assert!(!window.accept(136)); // 200-136=64, at boundary
+        assert!(window.accept(137)); // 200-137=63, inside window
+    }
+
+    // ── build_fcpc_nonce: determinism ──
+
+    #[test]
+    fn fcpc_nonce_deterministic() {
+        let n1 = build_fcpc_nonce(12345, 1);
+        let n2 = build_fcpc_nonce(12345, 1);
+        assert_eq!(n1, n2);
+    }
+
+    #[test]
+    fn fcpc_nonce_zero_seq_zero_dir() {
+        let nonce = build_fcpc_nonce(0, 0);
+        assert_eq!(nonce, [0u8; 12]);
+    }
+
+    // ── OrderedProcessor: additional patterns ──
+
+    #[test]
+    fn ordered_processor_reverse_order() {
+        let mut proc = OrderedProcessor::new();
+        proc.process(9);
+        proc.process(8);
+        proc.process(7);
+        proc.process(6);
+        proc.process(5);
+        assert_eq!(proc.next_expected, 0);
+        assert_eq!(proc.buffered.len(), 5);
+
+        proc.process(0);
+        // Should drain through 0 only (1 is missing)
+        assert_eq!(proc.next_expected, 1);
+    }
+
+    #[test]
+    fn ordered_processor_past_seq_ignored() {
+        let mut proc = OrderedProcessor::new();
+        proc.process(0);
+        proc.process(1);
+        proc.process(2);
+        assert_eq!(proc.next_expected, 3);
+        proc.process(1); // Already processed
+        assert_eq!(proc.next_expected, 3);
+        assert!(proc.buffered.is_empty());
+    }
+
+    // ── build_fcpc_aad: edge cases ──
+
+    #[test]
+    fn fcpc_aad_zero_values() {
+        let aad = build_fcpc_aad(&[0u8; 16], 0, 0);
+        assert_eq!(aad.len(), 26);
+        assert!(aad.iter().all(|&b| b == 0));
+    }
+
+    #[test]
+    fn fcpc_aad_max_values() {
+        let aad = build_fcpc_aad(&[0xFF; 16], u64::MAX, u16::MAX);
+        assert_eq!(aad.len(), 26);
+        assert_eq!(&aad[0..16], &[0xFF; 16]);
+        assert_eq!(&aad[16..24], &u64::MAX.to_le_bytes());
+        assert_eq!(&aad[24..26], &u16::MAX.to_le_bytes());
+    }
 }

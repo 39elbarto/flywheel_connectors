@@ -1802,4 +1802,153 @@ mod tests {
         };
         assert!(!eval.meets_diversity_for_reconstruction(&policy));
     }
+
+    // --- concentration_repair_symbols_needed edge cases ---
+
+    #[test]
+    fn concentration_repair_symbols_single_node_over_limit() {
+        let mut dist = SymbolDistribution::new(10);
+        for _ in 0..20 {
+            dist.add_symbol(1, 64);
+        }
+        let eval = CoverageEvaluation::from_distribution(test_object_id(), &dist);
+        // All 20 symbols on one node: fraction = 10000 bps
+        // max_concentration_bps = 5000 means we need to dilute
+        let needed = eval.concentration_repair_symbols_needed(5000);
+        assert!(needed > 0);
+    }
+
+    #[test]
+    fn concentration_repair_symbols_two_nodes_balanced() {
+        let mut dist = SymbolDistribution::new(10);
+        for _ in 0..10 {
+            dist.add_symbol(1, 64);
+        }
+        for _ in 0..10 {
+            dist.add_symbol(2, 64);
+        }
+        let eval = CoverageEvaluation::from_distribution(test_object_id(), &dist);
+        // Both nodes have 10 symbols each: fraction = 5000 bps
+        let needed = eval.concentration_repair_symbols_needed(5000);
+        assert_eq!(needed, 0);
+    }
+
+    #[test]
+    fn concentration_deficit_bps_no_excess() {
+        let mut dist = SymbolDistribution::new(10);
+        for _ in 0..5 {
+            dist.add_symbol(1, 64);
+            dist.add_symbol(2, 64);
+        }
+        let eval = CoverageEvaluation::from_distribution(test_object_id(), &dist);
+        assert_eq!(eval.concentration_deficit_bps(5000), 0);
+    }
+
+    #[test]
+    fn concentration_deficit_bps_with_excess() {
+        let mut dist = SymbolDistribution::new(10);
+        for _ in 0..10 {
+            dist.add_symbol(1, 64);
+        }
+        let eval = CoverageEvaluation::from_distribution(test_object_id(), &dist);
+        // All on node 1: 10000 bps; max allowed 3000; deficit = 7000
+        assert_eq!(eval.concentration_deficit_bps(3000), 7000);
+    }
+
+    // --- from_distribution edge cases ---
+
+    #[test]
+    fn from_distribution_large_overcoverage() {
+        let mut dist = SymbolDistribution::new(5);
+        for _ in 0..100 {
+            dist.add_symbol(1, 64);
+        }
+        let eval = CoverageEvaluation::from_distribution(test_object_id(), &dist);
+        assert_eq!(eval.coverage_bps, 200_000); // 100/5 * 10000
+        assert!(eval.is_available);
+    }
+
+    #[test]
+    fn symbols_needed_overcoverage_returns_zero() {
+        let mut dist = SymbolDistribution::new(5);
+        for _ in 0..50 {
+            dist.add_symbol(1, 64);
+        }
+        let eval = CoverageEvaluation::from_distribution(test_object_id(), &dist);
+        assert_eq!(eval.symbols_needed(10000), 0);
+        assert_eq!(eval.symbols_needed(50000), 0);
+    }
+
+    #[test]
+    fn coverage_health_all_variants_debug() {
+        let variants = [
+            CoverageHealth::Healthy,
+            CoverageHealth::Degraded,
+            CoverageHealth::Unavailable,
+        ];
+        for v in &variants {
+            let dbg = format!("{v:?}");
+            assert!(!dbg.is_empty());
+        }
+    }
+
+    #[test]
+    fn coverage_health_copy_semantics() {
+        let h = CoverageHealth::Degraded;
+        let h2 = h;
+        assert_eq!(h, h2);
+    }
+
+    #[test]
+    fn symbol_distribution_add_multiple_nodes() {
+        let mut dist = SymbolDistribution::new(100);
+        for node in 0..10 {
+            dist.add_symbol(node, 32);
+        }
+        assert_eq!(dist.distinct_nodes(), 10);
+        assert_eq!(dist.total_symbols, 10);
+        assert_eq!(dist.max_node_symbols(), 1);
+    }
+
+    #[test]
+    fn symbol_distribution_remove_below_zero_saturates() {
+        let mut dist = SymbolDistribution::new(10);
+        dist.add_symbol(1, 100);
+        // Remove more bytes than were added
+        dist.remove_symbol(1, 200);
+        // Node should be removed since count went to 0
+        assert_eq!(dist.distinct_nodes(), 0);
+        assert_eq!(dist.total_symbols, 0);
+    }
+
+    #[test]
+    fn meets_policy_min_source_diversity_requirement() {
+        let mut dist = SymbolDistribution::new(10);
+        for _ in 0..10 {
+            dist.add_symbol(1, 64);
+        }
+        let eval = CoverageEvaluation::from_distribution(test_object_id(), &dist);
+        let policy = fcp_core::ObjectPlacementPolicy {
+            min_nodes: 1,
+            max_node_fraction_bps: 10_000,
+            preferred_devices: vec![],
+            excluded_devices: vec![],
+            target_coverage_bps: 10_000,
+            min_source_diversity: 3,
+        };
+        // Only 1 node, need 3 for diversity
+        assert!(!eval.meets_policy(&policy));
+    }
+
+    #[test]
+    fn diversity_bps_partial_diversity() {
+        let mut dist = SymbolDistribution::new(10);
+        for _ in 0..5 {
+            dist.add_symbol(1, 64);
+            dist.add_symbol(2, 64);
+        }
+        let eval = CoverageEvaluation::from_distribution(test_object_id(), &dist);
+        // 2 nodes, min_diversity=4 -> 2/4 * 10000 = 5000
+        assert_eq!(eval.diversity_bps(4), 5000);
+    }
 }

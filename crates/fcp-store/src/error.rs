@@ -519,4 +519,101 @@ mod tests {
         let err = RepairError::Decode("bad data".into());
         assert!(err.source().is_none());
     }
+
+    // --- Display exact format tests ---
+
+    #[test]
+    fn object_store_quota_display_exact_format() {
+        let err = ObjectStoreError::QuotaExceeded {
+            used: 999,
+            max: 2000,
+        };
+        assert_eq!(err.to_string(), "storage quota exceeded: 999 / 2000 bytes");
+    }
+
+    #[test]
+    fn symbol_store_not_found_display_exact_format() {
+        let err = SymbolStoreError::NotFound {
+            object_id: test_id(),
+            esi: 7,
+        };
+        let msg = err.to_string();
+        assert!(msg.starts_with("symbol not found:"));
+        assert!(msg.contains("esi=7"));
+    }
+
+    #[test]
+    fn quarantine_schema_display_exact_format() {
+        let err = QuarantineError::SchemaValidationFailed {
+            reason: "field X missing".into(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "schema validation failed: field X missing"
+        );
+    }
+
+    #[test]
+    fn gc_error_invalid_root_display_exact() {
+        let err = GcError::InvalidRoot(test_id());
+        let msg = err.to_string();
+        assert!(msg.starts_with("invalid root:"));
+    }
+
+    // --- Cross-conversion chained source tests ---
+
+    #[test]
+    fn repair_error_object_store_source_display() {
+        use std::error::Error;
+        let inner = ObjectStoreError::AlreadyExists(test_id());
+        let err: RepairError = inner.into();
+        let src = err.source().unwrap();
+        assert!(src.to_string().contains("already exists"));
+    }
+
+    #[test]
+    fn gc_error_object_store_source_display() {
+        use std::error::Error;
+        let inner = ObjectStoreError::Io("permission denied".into());
+        let err: GcError = inner.into();
+        let src = err.source().unwrap();
+        assert!(src.to_string().contains("permission denied"));
+    }
+
+    #[test]
+    fn gc_error_no_source_for_invalid_root() {
+        use std::error::Error;
+        let err = GcError::InvalidRoot(test_id());
+        assert!(err.source().is_none());
+    }
+
+    #[test]
+    fn repair_error_symbol_store_quota_source() {
+        use std::error::Error;
+        let inner = SymbolStoreError::QuotaExceeded {
+            used: 50,
+            max: 100,
+        };
+        let err: RepairError = inner.into();
+        let src = err.source().unwrap();
+        assert!(src.to_string().contains("50"));
+    }
+
+    #[test]
+    fn object_store_error_not_found_different_ids() {
+        let id_a = ObjectId::from_bytes([10; 32]);
+        let id_b = ObjectId::from_bytes([20; 32]);
+        let err_a = ObjectStoreError::NotFound(id_a);
+        let err_b = ObjectStoreError::NotFound(id_b);
+        assert_ne!(err_a.to_string(), err_b.to_string());
+    }
+
+    #[test]
+    fn symbol_store_invalid_symbol_debug_contains_reason() {
+        let err = SymbolStoreError::InvalidSymbol {
+            reason: "truncated payload".into(),
+        };
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("truncated payload"));
+    }
 }

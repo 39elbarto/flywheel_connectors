@@ -1143,4 +1143,207 @@ mod tests {
             );
         }
     }
+
+    // ── Additional CheckStatus edge cases ──
+
+    #[test]
+    fn check_status_deserialize_from_string() {
+        let pass: CheckStatus = serde_json::from_str("\"pass\"").unwrap();
+        assert_eq!(pass, CheckStatus::Pass);
+        let fail: CheckStatus = serde_json::from_str("\"fail\"").unwrap();
+        assert_eq!(fail, CheckStatus::Fail);
+        let skip: CheckStatus = serde_json::from_str("\"skipped\"").unwrap();
+        assert_eq!(skip, CheckStatus::Skipped);
+    }
+
+    #[test]
+    fn check_status_invalid_string_errors() {
+        let result: Result<CheckStatus, _> = serde_json::from_str("\"unknown\"");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn check_status_eq_reflexive() {
+        let s = CheckStatus::Skipped;
+        assert_eq!(s, s);
+    }
+
+    // ── ComplianceFinding additional tests ──
+
+    #[test]
+    fn finding_pass_accepts_string_owned() {
+        let f = ComplianceFinding::pass(String::from("owned.check"), String::from("detail"));
+        assert_eq!(f.check, "owned.check");
+        assert_eq!(f.message, "detail");
+        assert_eq!(f.status, CheckStatus::Pass);
+    }
+
+    #[test]
+    fn finding_fail_message_preserved() {
+        let msg = "very long error message with special chars: <>&\"'";
+        let f = ComplianceFinding::fail("err.check", msg);
+        assert_eq!(f.message, msg);
+    }
+
+    #[test]
+    fn finding_skipped_serde_roundtrip() {
+        let f = ComplianceFinding::skipped("skip.test", "not applicable here");
+        let json = serde_json::to_string(&f).unwrap();
+        let deserialized: ComplianceFinding = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.status, CheckStatus::Skipped);
+        assert_eq!(deserialized.check, "skip.test");
+        assert_eq!(deserialized.message, "not applicable here");
+    }
+
+    #[test]
+    fn finding_clone_independence() {
+        let f = ComplianceFinding::pass("orig", "val");
+        let cloned = f.clone();
+        assert_eq!(f.check, cloned.check);
+        assert_eq!(f.status, cloned.status);
+        assert_eq!(f.message, cloned.message);
+    }
+
+    // ── StaticCompliance additional tests ──
+
+    #[test]
+    fn static_compliance_clone_independence() {
+        let sc = StaticCompliance {
+            passed: true,
+            findings: vec![ComplianceFinding::pass("a", "ok")],
+        };
+        let cloned = sc.clone();
+        assert_eq!(sc.passed, cloned.passed);
+        assert_eq!(sc.findings.len(), cloned.findings.len());
+    }
+
+    #[test]
+    fn static_compliance_multiple_findings_serde() {
+        let sc = StaticCompliance {
+            passed: false,
+            findings: vec![
+                ComplianceFinding::pass("a", "ok"),
+                ComplianceFinding::fail("b", "bad"),
+                ComplianceFinding::skipped("c", "skip"),
+            ],
+        };
+        let json = serde_json::to_string(&sc).unwrap();
+        let deserialized: StaticCompliance = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.findings.len(), 3);
+        assert!(!deserialized.passed);
+    }
+
+    // ── DynamicCompliance additional tests ──
+
+    #[test]
+    fn dynamic_compliance_clone_independence() {
+        let dc = DynamicCompliance {
+            passed: false,
+            findings: vec![ComplianceFinding::fail("f", "msg")],
+        };
+        let cloned = dc.clone();
+        assert_eq!(dc.passed, cloned.passed);
+        assert_eq!(dc.findings.len(), cloned.findings.len());
+    }
+
+    #[test]
+    fn dynamic_compliance_empty_findings_serializes() {
+        let dc = DynamicCompliance {
+            passed: true,
+            findings: vec![],
+        };
+        let json = serde_json::to_string(&dc).unwrap();
+        assert!(json.contains("\"passed\":true"));
+        assert!(json.contains("\"findings\":[]"));
+    }
+
+    // ── ComplianceReport additional tests ──
+
+    #[test]
+    fn compliance_report_json_deserialize_roundtrip() {
+        let report = ComplianceReport {
+            static_checks: StaticCompliance {
+                passed: false,
+                findings: vec![ComplianceFinding::fail("s1", "err1")],
+            },
+            dynamic_checks: DynamicCompliance {
+                passed: true,
+                findings: vec![ComplianceFinding::pass("d1", "ok1")],
+            },
+        };
+        let json = serde_json::to_string_pretty(&report).unwrap();
+        let parsed: ComplianceReport = serde_json::from_str(&json).unwrap();
+        assert!(!parsed.passed());
+        assert!(!parsed.static_checks.passed);
+        assert!(parsed.dynamic_checks.passed);
+    }
+
+    // ── is_capability_denial exhaustive ──
+
+    #[test]
+    fn is_capability_denial_false_for_timeout() {
+        let err = FcpError::UpstreamTimeout {
+            service: "test".into(),
+        };
+        assert!(!is_capability_denial(&err));
+    }
+
+    #[test]
+    fn is_capability_denial_false_for_invalid_request() {
+        let err = FcpError::InvalidRequest {
+            code: 1001,
+            message: "bad request".into(),
+        };
+        assert!(!is_capability_denial(&err));
+    }
+
+    // ── DynamicSuite clone ──
+
+    #[test]
+    fn dynamic_suite_clone_preserves_fields() {
+        let hs = make_handshake();
+        let original = DynamicSuite::minimal(hs);
+        let cloned = original.clone();
+        assert_eq!(
+            serde_json::to_string(&original.config).unwrap(),
+            serde_json::to_string(&cloned.config).unwrap()
+        );
+        assert!(cloned.invoke.is_none());
+        assert!(cloned.simulate.is_none());
+        assert!(!cloned.expect_invoke_error);
+    }
+
+    // ── MockConnector factories ──
+
+    #[test]
+    fn mock_connector_healthy_fields() {
+        let c = MockConnector::healthy();
+        assert!(c.configure_ok);
+        assert!(c.handshake_accepted);
+        assert!(c.health_ok);
+    }
+
+    #[test]
+    fn mock_connector_failing_configure_fields() {
+        let c = MockConnector::failing_configure();
+        assert!(!c.configure_ok);
+        assert!(c.handshake_accepted);
+        assert!(c.health_ok);
+    }
+
+    #[test]
+    fn mock_connector_failing_handshake_fields() {
+        let c = MockConnector::failing_handshake();
+        assert!(c.configure_ok);
+        assert!(!c.handshake_accepted);
+        assert!(c.health_ok);
+    }
+
+    #[test]
+    fn mock_connector_unhealthy_fields() {
+        let c = MockConnector::unhealthy();
+        assert!(c.configure_ok);
+        assert!(c.handshake_accepted);
+        assert!(!c.health_ok);
+    }
 }

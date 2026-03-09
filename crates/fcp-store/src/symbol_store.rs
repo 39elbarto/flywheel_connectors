@@ -2452,4 +2452,149 @@ mod tests {
         assert_eq!(sym.meta.esi, cloned.meta.esi);
         assert_eq!(sym.data.len(), cloned.data.len());
     }
+
+    // --- ObjectTransmissionInfo tests ---
+
+    #[test]
+    fn object_transmission_info_serde_roundtrip() {
+        let info = ObjectTransmissionInfo {
+            transfer_length: 65536,
+            symbol_size: 256,
+            source_blocks: 1,
+            sub_blocks: 1,
+            alignment: 8,
+        };
+        let json = serde_json::to_string(&info).unwrap();
+        let rt: ObjectTransmissionInfo = serde_json::from_str(&json).unwrap();
+        assert_eq!(info, rt);
+    }
+
+    #[test]
+    fn object_transmission_info_copy_eq() {
+        let a = ObjectTransmissionInfo {
+            transfer_length: 1024,
+            symbol_size: 64,
+            source_blocks: 1,
+            sub_blocks: 1,
+            alignment: 1,
+        };
+        let b = a;
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn object_transmission_info_debug() {
+        let info = ObjectTransmissionInfo {
+            transfer_length: 512,
+            symbol_size: 32,
+            source_blocks: 2,
+            sub_blocks: 1,
+            alignment: 4,
+        };
+        let dbg = format!("{info:?}");
+        assert!(dbg.contains("ObjectTransmissionInfo"));
+    }
+
+    #[test]
+    fn object_transmission_info_from_oti_roundtrip() {
+        let oti = ObjectTransmissionInformation::new(8192, 128, 1, 1, 8);
+        let info = ObjectTransmissionInfo::from_oti(oti);
+        let back = info.to_oti();
+        assert_eq!(back.transfer_length(), 8192);
+        assert_eq!(back.symbol_size(), 128);
+    }
+
+    #[test]
+    fn object_transmission_info_from_trait() {
+        let oti = ObjectTransmissionInformation::new(4096, 64, 1, 1, 1);
+        let info: ObjectTransmissionInfo = oti.into();
+        assert_eq!(info.transfer_length, 4096);
+        assert_eq!(info.symbol_size, 64);
+    }
+
+    #[test]
+    fn object_transmission_info_into_oti_trait() {
+        let info = ObjectTransmissionInfo {
+            transfer_length: 2048,
+            symbol_size: 32,
+            source_blocks: 1,
+            sub_blocks: 1,
+            alignment: 1,
+        };
+        let oti: ObjectTransmissionInformation = info.into();
+        assert_eq!(oti.transfer_length(), 2048);
+    }
+
+    // --- SymbolMeta additional tests ---
+
+    #[test]
+    fn symbol_meta_serde_json_rt() {
+        let meta = SymbolMeta {
+            object_id: ObjectId::from_bytes([1; 32]),
+            esi: 42,
+            zone_id: "z:test".parse().unwrap(),
+            source_node: Some(99),
+            stored_at: 1_000_000,
+        };
+        let json = serde_json::to_string(&meta).unwrap();
+        let rt: SymbolMeta = serde_json::from_str(&json).unwrap();
+        assert_eq!(rt.esi, 42);
+        assert_eq!(rt.source_node, Some(99));
+        assert_eq!(rt.stored_at, 1_000_000);
+    }
+
+    #[test]
+    fn symbol_meta_clone_preserves_all() {
+        let meta = SymbolMeta {
+            object_id: ObjectId::from_bytes([2; 32]),
+            esi: 7,
+            zone_id: "z:test".parse().unwrap(),
+            source_node: None,
+            stored_at: 500,
+        };
+        let cloned = meta.clone();
+        assert_eq!(meta.esi, cloned.esi);
+        assert_eq!(meta.source_node, cloned.source_node);
+    }
+
+    // --- ObjectSymbolMeta additional tests ---
+
+    #[test]
+    fn object_symbol_meta_serde_json_rt() {
+        let meta = ObjectSymbolMeta {
+            object_id: ObjectId::from_bytes([3; 32]),
+            zone_id: "z:test".parse().unwrap(),
+            oti: ObjectTransmissionInfo {
+                transfer_length: 1024,
+                symbol_size: 64,
+                source_blocks: 1,
+                sub_blocks: 1,
+                alignment: 1,
+            },
+            source_symbols: 16,
+            first_symbol_at: 12345,
+        };
+        let json = serde_json::to_string(&meta).unwrap();
+        let rt: ObjectSymbolMeta = serde_json::from_str(&json).unwrap();
+        assert_eq!(meta, rt);
+    }
+
+    #[test]
+    fn object_symbol_meta_clone_eq() {
+        let meta1 = ObjectSymbolMeta {
+            object_id: ObjectId::from_bytes([1; 32]),
+            zone_id: "z:test".parse().unwrap(),
+            oti: ObjectTransmissionInfo {
+                transfer_length: 512,
+                symbol_size: 32,
+                source_blocks: 1,
+                sub_blocks: 1,
+                alignment: 1,
+            },
+            source_symbols: 16,
+            first_symbol_at: 100,
+        };
+        let meta2 = meta1.clone();
+        assert_eq!(meta1, meta2);
+    }
 }

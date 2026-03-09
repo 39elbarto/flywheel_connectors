@@ -253,4 +253,148 @@ mod tests {
         // Should have tests from all 5 categories
         assert!(summary.total >= 36);
     }
+
+    // ── InteropTestSummary additional tests ──
+
+    #[test]
+    fn interop_test_summary_merge_preserves_failures() {
+        let mut a = InteropTestSummary {
+            total: 2,
+            passed: 1,
+            failed: 1,
+            failures: vec![TestFailure {
+                name: "f1".to_string(),
+                category: "c1".to_string(),
+                message: "m1".to_string(),
+            }],
+        };
+        let b = InteropTestSummary {
+            total: 3,
+            passed: 1,
+            failed: 2,
+            failures: vec![
+                TestFailure {
+                    name: "f2".to_string(),
+                    category: "c2".to_string(),
+                    message: "m2".to_string(),
+                },
+                TestFailure {
+                    name: "f3".to_string(),
+                    category: "c3".to_string(),
+                    message: "m3".to_string(),
+                },
+            ],
+        };
+        a.merge(b);
+        assert_eq!(a.total, 5);
+        assert_eq!(a.passed, 2);
+        assert_eq!(a.failed, 3);
+        assert_eq!(a.failures.len(), 3);
+        assert_eq!(a.failures[0].name, "f1");
+        assert_eq!(a.failures[1].name, "f2");
+        assert_eq!(a.failures[2].name, "f3");
+    }
+
+    #[test]
+    fn interop_test_summary_all_passed_zero_total() {
+        let summary = InteropTestSummary {
+            total: 0,
+            passed: 0,
+            failed: 0,
+            failures: vec![],
+        };
+        assert!(summary.all_passed());
+    }
+
+    #[test]
+    fn interop_test_summary_debug_format() {
+        let summary = InteropTestSummary {
+            total: 5,
+            passed: 3,
+            failed: 2,
+            failures: vec![],
+        };
+        let dbg = format!("{summary:?}");
+        assert!(dbg.contains("InteropTestSummary"));
+        assert!(dbg.contains('5'));
+    }
+
+    #[test]
+    fn interop_test_summary_clone_deep() {
+        let summary = InteropTestSummary {
+            total: 7,
+            passed: 6,
+            failed: 1,
+            failures: vec![TestFailure {
+                name: "deep".to_string(),
+                category: "cat".to_string(),
+                message: "msg".to_string(),
+            }],
+        };
+        let cloned = summary.clone();
+        assert_eq!(summary.total, cloned.total);
+        assert_eq!(summary.failures.len(), cloned.failures.len());
+        assert_eq!(cloned.failures[0].name, "deep");
+    }
+
+    // ── TestFailure additional tests ──
+
+    #[test]
+    fn test_failure_clone_independence() {
+        let f = TestFailure {
+            name: "orig".to_string(),
+            category: "cat".to_string(),
+            message: "msg".to_string(),
+        };
+        let cloned = f.clone();
+        assert_eq!(f.name, cloned.name);
+        assert_eq!(f.category, cloned.category);
+        assert_eq!(f.message, cloned.message);
+    }
+
+    #[test]
+    fn test_failure_empty_fields() {
+        let f = TestFailure {
+            name: String::new(),
+            category: String::new(),
+            message: String::new(),
+        };
+        assert!(f.name.is_empty());
+        let dbg = format!("{f:?}");
+        assert!(dbg.contains("TestFailure"));
+    }
+
+    #[test]
+    fn interop_test_summary_merge_two_empties() {
+        let mut a = InteropTestSummary::default();
+        let b = InteropTestSummary::default();
+        a.merge(b);
+        assert_eq!(a.total, 0);
+        assert!(a.all_passed());
+    }
+
+    #[test]
+    fn interop_test_summary_merge_chain() {
+        let mut summary = InteropTestSummary::default();
+        for i in 0..5 {
+            summary.merge(InteropTestSummary {
+                total: 1,
+                passed: usize::from(i % 2 == 0),
+                failed: usize::from(i % 2 != 0),
+                failures: if i % 2 == 0 {
+                    vec![]
+                } else {
+                    vec![TestFailure {
+                        name: format!("test_{i}"),
+                        category: "chain".to_string(),
+                        message: "err".to_string(),
+                    }]
+                },
+            });
+        }
+        assert_eq!(summary.total, 5);
+        assert_eq!(summary.passed, 3);
+        assert_eq!(summary.failed, 2);
+        assert!(!summary.all_passed());
+    }
 }

@@ -624,4 +624,92 @@ mod tests {
         assert!(summary.all_passed());
         assert_eq!(summary.total, 8);
     }
+
+    // ── ReplayWindow: additional edge cases ──
+
+    #[test]
+    fn replay_window_size_clamped_to_64() {
+        let window = ReplayWindow::new(100);
+        assert_eq!(window.size, 64);
+    }
+
+    #[test]
+    fn replay_window_max_seq_accepted() {
+        let mut window = ReplayWindow::new(64);
+        assert!(window.accept(u64::MAX));
+        assert!(!window.accept(u64::MAX)); // Replay
+    }
+
+    #[test]
+    fn replay_window_zigzag_pattern() {
+        let mut window = ReplayWindow::new(64);
+        // Accept every other seq
+        assert!(window.accept(0));
+        assert!(window.accept(2));
+        assert!(window.accept(4));
+        assert!(window.accept(6));
+        // Now fill gaps
+        assert!(window.accept(1));
+        assert!(window.accept(3));
+        assert!(window.accept(5));
+        // All should now be seen
+        for i in 0..=6 {
+            assert!(!window.accept(i), "replay of {i} should fail");
+        }
+    }
+
+    // ── derive_symbol_nonce: additional tests ──
+
+    #[test]
+    fn symbol_nonce_xor_symmetry() {
+        let zone_key_id = [0u8; 8];
+        // XOR is symmetric: epoch^esi == esi^epoch
+        let n1 = derive_symbol_nonce(zone_key_id, 0xAB, 0xCD);
+        let expected_xor = (0xABu32 ^ 0xCDu32).to_le_bytes();
+        assert_eq!(&n1[8..12], &expected_xor);
+    }
+
+    #[test]
+    fn symbol_nonce_same_epoch_esi_gives_zero_suffix() {
+        let zone_key_id = [0x11u8; 8];
+        let nonce = derive_symbol_nonce(zone_key_id, 42, 42);
+        // XOR of same values is 0
+        assert_eq!(&nonce[8..12], &[0, 0, 0, 0]);
+    }
+
+    // ── build_symbol_aad: additional tests ──
+
+    #[test]
+    fn symbol_aad_different_inputs_differ() {
+        let obj1 = [0xAAu8; 32];
+        let obj2 = [0xBBu8; 32];
+        let zone = [0xCCu8; 32];
+        let aad1 = build_symbol_aad(&obj1, &zone, 0, 0);
+        let aad2 = build_symbol_aad(&obj2, &zone, 0, 0);
+        assert_ne!(aad1, aad2);
+    }
+
+    #[test]
+    fn symbol_aad_max_esi_and_k() {
+        let aad = build_symbol_aad(&[0u8; 32], &[0u8; 32], u32::MAX, u16::MAX);
+        assert_eq!(aad.len(), 70);
+        assert_eq!(&aad[64..68], &u32::MAX.to_le_bytes());
+        assert_eq!(&aad[68..70], &u16::MAX.to_le_bytes());
+    }
+
+    // ── is_within_mtu: additional tests ──
+
+    #[test]
+    fn mtu_max_u32_accepts_large() {
+        assert!(is_within_mtu(&vec![0u8; 10000], u32::MAX));
+    }
+
+    // ── is_payload_complete: additional tests ──
+
+    #[test]
+    fn payload_complete_extra_data_accepted() {
+        // Extra bytes beyond expected are ok (>= check)
+        let record_size = 22 + 256;
+        assert!(is_payload_complete(&vec![0u8; record_size + 100], 1, 256));
+    }
 }

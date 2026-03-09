@@ -884,4 +884,107 @@ mod tests {
         assert!(summary.all_passed());
         assert_eq!(summary.total, 7);
     }
+
+    // ── ReasonCode: additional coverage ──
+
+    #[test]
+    fn reason_code_copy_semantics() {
+        let a = ReasonCode::ObjectNotGranted;
+        let b = a;
+        assert_eq!(a, b);
+        assert_eq!(a.to_u8(), b.to_u8());
+    }
+
+    #[test]
+    fn reason_code_from_u8_boundary_values() {
+        assert_eq!(ReasonCode::from_u8(0), ReasonCode::Allowed);
+        assert_eq!(ReasonCode::from_u8(7), ReasonCode::PolicyViolation);
+        // 8 and above all map to PolicyViolation
+        assert_eq!(ReasonCode::from_u8(8), ReasonCode::PolicyViolation);
+        assert_eq!(ReasonCode::from_u8(100), ReasonCode::PolicyViolation);
+    }
+
+    // ── zone_level: additional zones ──
+
+    #[test]
+    fn zone_level_whitespace_zone() {
+        // Whitespace-only zone name is treated as unknown (public)
+        assert_eq!(zone_level(" "), 0);
+    }
+
+    // ── can_traverse_implicitly: exhaustive pairs ──
+
+    #[test]
+    fn traverse_private_can_reach_work_and_below() {
+        assert!(can_traverse_implicitly("z:private", "z:work"));
+        assert!(can_traverse_implicitly("z:private", "z:community"));
+        assert!(can_traverse_implicitly("z:private", "z:public"));
+        assert!(!can_traverse_implicitly("z:private", "z:owner"));
+    }
+
+    #[test]
+    fn traverse_community_limited() {
+        assert!(can_traverse_implicitly("z:community", "z:public"));
+        assert!(can_traverse_implicitly("z:community", "z:community"));
+        assert!(!can_traverse_implicitly("z:community", "z:work"));
+        assert!(!can_traverse_implicitly("z:community", "z:private"));
+    }
+
+    // ── evaluate_cross_zone_access: token expiry ──
+
+    #[test]
+    fn cross_zone_expired_token_rejected() {
+        let token = ApprovalToken {
+            source_zone: "z:community".to_string(),
+            target_zone: "z:private".to_string(),
+            granted_objects: vec!["*".to_string()],
+            issuer: "key-1".to_string(),
+            expires_at: 0, // Already expired
+            signature: vec![0u8; 64],
+        };
+        let request = CrossZoneRequest {
+            source_zone: "z:community".to_string(),
+            target_zone: "z:private".to_string(),
+            object_id: "test-obj".to_string(),
+            approval_token: Some(token),
+        };
+        let decision = evaluate_cross_zone_access(&request);
+        assert!(!decision.allowed);
+        assert_eq!(decision.reason_code, ReasonCode::ApprovalExpired);
+    }
+
+    // ── is_chain_valid: additional chain patterns ──
+
+    #[test]
+    fn chain_self_loop_valid() {
+        let t = ApprovalToken {
+            source_zone: "a".to_string(),
+            target_zone: "a".to_string(),
+            granted_objects: vec![],
+            issuer: String::new(),
+            expires_at: 0,
+            signature: vec![],
+        };
+        assert!(is_chain_valid(&[t], "a", "a"));
+    }
+
+    #[test]
+    fn chain_four_hops() {
+        let tokens: Vec<ApprovalToken> = (0..4)
+            .map(|i| {
+                let src = format!("zone-{i}");
+                let tgt = format!("zone-{}", i + 1);
+                ApprovalToken {
+                    source_zone: src,
+                    target_zone: tgt,
+                    granted_objects: vec![],
+                    issuer: String::new(),
+                    expires_at: 0,
+                    signature: vec![],
+                }
+            })
+            .collect();
+        assert!(is_chain_valid(&tokens, "zone-0", "zone-4"));
+        assert!(!is_chain_valid(&tokens, "zone-0", "zone-3"));
+    }
 }

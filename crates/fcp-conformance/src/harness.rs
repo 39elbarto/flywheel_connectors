@@ -1759,6 +1759,36 @@ mod tests {
     // ── Log schema validation ──
 
     #[test]
+    fn harness_error_eq_same_variant() {
+        assert_eq!(HarnessError::NodeAlreadyRunning, HarnessError::NodeAlreadyRunning);
+        assert_eq!(HarnessError::NodeNotRunning, HarnessError::NodeNotRunning);
+    }
+
+    #[test]
+    fn harness_error_ne_different_variants() {
+        assert_ne!(HarnessError::NodeAlreadyRunning, HarnessError::NodeNotRunning);
+    }
+
+    #[test]
+    fn harness_error_clone_preserves_variant() {
+        let err = HarnessError::NodeAlreadyRunning;
+        let cloned = err.clone();
+        assert_eq!(err, cloned);
+    }
+
+    #[test]
+    fn harness_timeout_clone_and_eq() {
+        let t = HarnessTimeout {
+            waited_ms: 123,
+            timeout_ms: 456,
+        };
+        let cloned = t.clone();
+        assert_eq!(t, cloned);
+        assert_eq!(t.waited_ms, cloned.waited_ms);
+        assert_eq!(t.timeout_ms, cloned.timeout_ms);
+    }
+
+    #[test]
     fn log_collector_validate_jsonl_passes_for_valid_entries() {
         let clock = Arc::new(Mutex::new(MockClock::new(1_000_000)));
         let collector = LogCollector::new();

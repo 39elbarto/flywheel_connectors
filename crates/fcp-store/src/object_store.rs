@@ -1165,4 +1165,157 @@ mod tests {
             StoreLogData::default()
         });
     }
+
+    // --- Additional MemoryObjectStore edge case tests ---
+
+    #[test]
+    fn empty_body_object_stored_and_retrieved() {
+        run_store_test("empty_body_object", "verify", "write", 2, || async {
+            let store = MemoryObjectStore::new(MemoryObjectStoreConfig::default());
+            let obj = test_stored_object(1, b"");
+            let id = obj.object_id;
+            store.put(obj).await.unwrap();
+
+            let retrieved = store.get(&id).await.unwrap();
+            assert!(retrieved.body.is_empty());
+            assert!(store.exists(&id).await);
+
+            StoreLogData::default()
+        });
+    }
+
+    #[test]
+    fn large_body_object_stored() {
+        run_store_test("large_body_object", "verify", "write", 1, || async {
+            let store = MemoryObjectStore::new(MemoryObjectStoreConfig {
+                max_bytes: 10 * 1024 * 1024,
+            });
+            let body = vec![0xAB_u8; 8192];
+            let obj = test_stored_object(1, &body);
+            let id = obj.object_id;
+            store.put(obj).await.unwrap();
+
+            let retrieved = store.get(&id).await.unwrap();
+            assert_eq!(retrieved.body.len(), 8192);
+
+            StoreLogData::default()
+        });
+    }
+
+    #[test]
+    fn storage_used_zero_after_construction() {
+        run_store_test("storage_used_zero_init", "verify", "accounting", 1, || async {
+            let store = MemoryObjectStore::new(MemoryObjectStoreConfig::default());
+            assert_eq!(store.storage_used().await, 0);
+            StoreLogData::default()
+        });
+    }
+
+    #[test]
+    fn delete_then_reinsert_same_id() {
+        run_store_test("delete_then_reinsert", "verify", "write", 2, || async {
+            let store = MemoryObjectStore::new(MemoryObjectStoreConfig::default());
+            let obj = test_stored_object(1, b"original");
+            let id = obj.object_id;
+            store.put(obj).await.unwrap();
+            store.delete(&id).await.unwrap();
+
+            let obj2 = test_stored_object(1, b"replaced");
+            store.put(obj2).await.unwrap();
+            let retrieved = store.get(&id).await.unwrap();
+            assert_eq!(retrieved.body, b"replaced");
+
+            StoreLogData::default()
+        });
+    }
+
+    #[test]
+    fn exists_false_after_delete() {
+        run_store_test("exists_false_after_delete", "verify", "read", 2, || async {
+            let store = MemoryObjectStore::new(MemoryObjectStoreConfig::default());
+            let obj = test_stored_object(1, b"data");
+            let id = obj.object_id;
+            store.put(obj).await.unwrap();
+            assert!(store.exists(&id).await);
+            store.delete(&id).await.unwrap();
+            assert!(!store.exists(&id).await);
+
+            StoreLogData::default()
+        });
+    }
+
+    #[test]
+    fn list_zone_after_delete() {
+        run_store_test("list_zone_after_delete", "verify", "list", 1, || async {
+            let store = MemoryObjectStore::new(MemoryObjectStoreConfig::default());
+            store.put(test_stored_object(1, b"a")).await.unwrap();
+            store.put(test_stored_object(2, b"b")).await.unwrap();
+            store.delete(&ObjectId::from_bytes([1; 32])).await.unwrap();
+
+            let ids = store.list_zone(&test_zone()).await;
+            assert_eq!(ids.len(), 1);
+
+            StoreLogData::default()
+        });
+    }
+
+    #[test]
+    fn get_header_refs_empty() {
+        run_store_test("get_header_refs_empty", "verify", "read", 1, || async {
+            let store = MemoryObjectStore::new(MemoryObjectStoreConfig::default());
+            let obj = test_stored_object(1, b"body");
+            store.put(obj).await.unwrap();
+
+            let hdr = store
+                .get_header(&ObjectId::from_bytes([1; 32]))
+                .await
+                .unwrap();
+            assert!(hdr.refs.is_empty());
+            assert!(hdr.foreign_refs.is_empty());
+
+            StoreLogData::default()
+        });
+    }
+
+    #[test]
+    fn config_custom_max_bytes() {
+        let config = MemoryObjectStoreConfig { max_bytes: 42 };
+        assert_eq!(config.max_bytes, 42);
+    }
+
+    #[test]
+    fn storage_decreases_after_delete() {
+        run_store_test("storage_decreases", "verify", "accounting", 1, || async {
+            let store = MemoryObjectStore::new(MemoryObjectStoreConfig::default());
+            let obj = test_stored_object(1, b"some data");
+            let id = obj.object_id;
+            store.put(obj).await.unwrap();
+            let used_before = store.storage_used().await;
+
+            store.delete(&id).await.unwrap();
+            let used_after = store.storage_used().await;
+            assert!(used_after < used_before);
+
+            StoreLogData::default()
+        });
+    }
+
+    #[test]
+    fn set_retention_lease_preserves_body() {
+        run_store_test("retention_preserves_body", "verify", "retention", 1, || async {
+            let store = MemoryObjectStore::new(MemoryObjectStoreConfig::default());
+            let obj = test_stored_object(1, b"important data");
+            let id = obj.object_id;
+            store.put(obj).await.unwrap();
+            store
+                .set_retention(&id, RetentionClass::Lease { expires_at: 9999 })
+                .await
+                .unwrap();
+
+            let retrieved = store.get(&id).await.unwrap();
+            assert_eq!(retrieved.body, b"important data");
+
+            StoreLogData::default()
+        });
+    }
 }

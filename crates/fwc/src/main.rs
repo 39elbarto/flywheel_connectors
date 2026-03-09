@@ -2,11 +2,19 @@
 
 #[allow(dead_code)] // Audit types used by later CLI commands.
 mod audit;
-#[allow(dead_code, clippy::str_split_at_newline, clippy::needless_raw_string_hashes)] mod batch;
+#[allow(
+    dead_code,
+    clippy::str_split_at_newline,
+    clippy::needless_raw_string_hashes
+)]
+mod batch;
+#[allow(dead_code)] // Result types wired when host integration lands.
+mod batch_file;
+#[allow(dead_code)]
+mod credential_store;
 mod catalog;
 mod export_tools;
 mod format_table;
-#[allow(dead_code)] mod json_diff;
 #[allow(
     dead_code,
     clippy::writeln_empty_string,
@@ -19,6 +27,8 @@ mod history;
 mod identifier;
 mod intent;
 #[allow(dead_code)]
+mod json_diff;
+#[allow(dead_code)]
 mod pipe;
 #[allow(dead_code)] // Contract types wired into host-backed commands in later beads.
 mod readiness;
@@ -27,7 +37,8 @@ mod recovery;
 mod render;
 mod schema_nav;
 mod search;
-#[allow(dead_code)] mod session;
+#[allow(dead_code)]
+mod session;
 mod template;
 mod validate;
 mod workflow;
@@ -86,6 +97,9 @@ Examples:
   fwc invoke github issues.create --file payload.json
   fwc invoke github issues.create --template-file issue_summary.hbs
   fwc show github --json --extract '.connector.slug'
+  fwc pipeline list
+  fwc pipeline validate .fwc/pipelines/notify-on-new-issues.toml
+  fwc pipeline dry-run .fwc/pipelines/notify-on-new-issues.toml --param owner=octocat --param repo=hello-world
   fwc export-tools --format mcp --json
   fwc export-tools --format claude github
   fwc export-tools --format openai --risk-max medium --output tools.json
@@ -270,12 +284,26 @@ enum Commands {
     #[command(visible_alias = "chain")]
     Pipe(PipeArgs),
 
+    /// Define and plan named multi-step pipelines from TOML files.
+    ///
+    /// Pipelines let agents reuse validated step graphs instead of rebuilding
+    /// multi-step connector workflows from scratch every time.
+    #[command(visible_alias = "pipelines")]
+    Pipeline(PipelineArgs),
+
     /// Apply one operation to many inputs in parallel.
     ///
     /// Feed an inline JSON array, JSONL file, or template + items list
     /// and execute the same operation for each input with concurrency control.
     #[command(visible_alias = "batch")]
     Map(MapArgs),
+
+    /// Execute a JSONL file of heterogeneous operations with dependency ordering.
+    ///
+    /// Each line is a different operation (possibly different connectors).
+    /// Independent operations run in parallel; dependent ones follow topological order.
+    #[command(name = "batch-file", visible_alias = "batch-ops")]
+    BatchFile(BatchFileArgs),
 }
 
 #[derive(Args, Debug, Serialize)]
@@ -829,6 +857,50 @@ struct PipeArgs {
 }
 
 #[derive(Args, Debug, Serialize)]
+struct PipelineArgs {
+    #[command(subcommand)]
+    command: PipelineCommand,
+}
+
+#[derive(Subcommand, Debug, Serialize)]
+enum PipelineCommand {
+    /// List discovered project and user pipeline definitions.
+    List(PipelineListArgs),
+
+    /// Show one pipeline definition and its validation report.
+    Show(PipelineRefArgs),
+
+    /// Validate one pipeline definition without planning execution.
+    Validate(PipelineRefArgs),
+
+    /// Plan a pipeline run with bound parameters.
+    Run(PipelineRunArgs),
+
+    /// Build a pipeline plan without pretending to execute it.
+    #[command(name = "dry-run", visible_alias = "preview")]
+    DryRun(PipelineRunArgs),
+}
+
+#[derive(Args, Debug, Default, Serialize)]
+struct PipelineListArgs {}
+
+#[derive(Args, Debug, Serialize)]
+struct PipelineRefArgs {
+    /// Pipeline name or explicit TOML path.
+    pipeline: String,
+}
+
+#[derive(Args, Debug, Serialize)]
+struct PipelineRunArgs {
+    /// Pipeline name or explicit TOML path.
+    pipeline: String,
+
+    /// Bind a pipeline parameter as KEY=VALUE.
+    #[arg(long = "param", value_name = "KEY=VALUE")]
+    params: Vec<String>,
+}
+
+#[derive(Args, Debug, Serialize)]
 struct MapArgs {
     /// Operation to apply to every input (e.g. `github.get_issue`).
     operation: String,
@@ -854,6 +926,24 @@ struct MapArgs {
     concurrency: usize,
 
     /// What to do when an item fails: `abort` or `continue`.
+    #[arg(long, default_value = "abort")]
+    on_error: String,
+}
+
+#[derive(Args, Debug, Serialize)]
+struct BatchFileArgs {
+    /// Path to a JSONL batch file.
+    file: PathBuf,
+
+    /// Preview the execution plan without running anything.
+    #[arg(long)]
+    dry_run: bool,
+
+    /// Maximum number of concurrent operations per wave.
+    #[arg(long, default_value_t = 5)]
+    concurrency: usize,
+
+    /// What to do when an operation fails: `abort` or `continue`.
     #[arg(long, default_value = "abort")]
     on_error: String,
 }
@@ -1341,7 +1431,9 @@ fn dispatch(cli: &Cli) -> Result<DispatchOutcome> {
         Commands::Validate(args) => validate_dispatch(args)?,
         Commands::History(args) => history_dispatch(args)?,
         Commands::Pipe(args) => pipe_dispatch(args)?,
+        Commands::Pipeline(args) => pipeline_dispatch(args)?,
         Commands::Map(args) => map_dispatch(args)?,
+        Commands::BatchFile(args) => batch_file_dispatch(args)?,
     };
 
     Ok(outcome)
@@ -2446,6 +2538,307 @@ fn pipe_dispatch(args: &PipeArgs) -> Result<DispatchOutcome> {
     })
 }
 
+fn pipeline_dispatch(args: &PipelineArgs) -> Result<DispatchOutcome> {
+    let cwd = std::env::current_dir()?;
+    let roots = pipe::default_pipeline_roots(&cwd);
+
+    match &args.command {
+        PipelineCommand::List(_) => pipeline_list_dispatch(&roots),
+        PipelineCommand::Show(args) => Ok(pipeline_show_dispatch(&roots, args)),
+        PipelineCommand::Validate(args) => Ok(pipeline_validate_dispatch(&roots, args)),
+        PipelineCommand::Run(args) => pipeline_run_dispatch(&roots, args, false),
+        PipelineCommand::DryRun(args) => pipeline_run_dispatch(&roots, args, true),
+    }
+}
+
+fn pipeline_list_dispatch(roots: &pipe::PipelineRoots) -> Result<DispatchOutcome> {
+    let pipelines = pipe::discover_pipelines(roots).map_err(|error| anyhow::anyhow!("{error}"))?;
+    let search_paths = vec![
+        roots.project.display().to_string(),
+        roots.user.as_ref().map_or_else(
+            || "<home unavailable>".to_owned(),
+            |path| path.display().to_string(),
+        ),
+    ];
+    let valid_count = pipelines.iter().filter(|pipeline| pipeline.valid).count();
+
+    Ok(DispatchOutcome {
+        payload: json!({
+            "status": "ok",
+            "command": "pipeline",
+            "subcommand": "list",
+            "message": if pipelines.is_empty() {
+                "No pipeline definitions were found in the project or user pipeline directories."
+            } else {
+                "Discovered pipeline definitions from the project and user pipeline directories."
+            },
+            "search_paths": search_paths,
+            "pipeline_count": pipelines.len(),
+            "valid_count": valid_count,
+            "pipelines": pipelines,
+            "next_actions": [
+                "Create `.fwc/pipelines/<name>.toml` in the current project to register a project-scoped pipeline."
+                    .to_owned(),
+                "Run `fwc pipeline validate <name-or-path>` before attempting `fwc pipeline dry-run`."
+                    .to_owned(),
+            ],
+        }),
+        exit_code: CliExitCode::Success,
+    })
+}
+
+fn pipeline_show_dispatch(roots: &pipe::PipelineRoots, args: &PipelineRefArgs) -> DispatchOutcome {
+    let (path, definition, validation) = match load_pipeline_definition(roots, &args.pipeline) {
+        Ok(v) => v,
+        Err(outcome) => return outcome,
+    };
+    if !validation.valid {
+        return pipeline_invalid_definition_dispatch("show", &path, Some(&definition), &validation);
+    }
+
+    DispatchOutcome {
+        payload: json!({
+            "status": "ok",
+            "command": "pipeline",
+            "subcommand": "show",
+            "path": path.display().to_string(),
+            "definition": definition,
+            "validation": validation,
+            "next_actions": [
+                format!("fwc pipeline validate {}", path.display()),
+                format!("fwc pipeline dry-run {} --param key=value", path.display()),
+            ],
+        }),
+        exit_code: CliExitCode::Success,
+    }
+}
+
+fn pipeline_validate_dispatch(
+    roots: &pipe::PipelineRoots,
+    args: &PipelineRefArgs,
+) -> DispatchOutcome {
+    let (path, definition, validation) = match load_pipeline_definition(roots, &args.pipeline) {
+        Ok(v) => v,
+        Err(outcome) => return outcome,
+    };
+    if !validation.valid {
+        return pipeline_invalid_definition_dispatch(
+            "validate",
+            &path,
+            Some(&definition),
+            &validation,
+        );
+    }
+
+    DispatchOutcome {
+        payload: json!({
+            "status": "ok",
+            "command": "pipeline",
+            "subcommand": "validate",
+            "path": path.display().to_string(),
+            "validation": validation,
+            "next_actions": [
+                format!("fwc pipeline show {}", path.display()),
+                format!("fwc pipeline dry-run {} --param key=value", path.display()),
+            ],
+        }),
+        exit_code: CliExitCode::Success,
+    }
+}
+
+fn pipeline_run_dispatch(
+    roots: &pipe::PipelineRoots,
+    args: &PipelineRunArgs,
+    dry_run: bool,
+) -> Result<DispatchOutcome> {
+    let (path, definition, validation) = match load_pipeline_definition(roots, &args.pipeline) {
+        Ok(v) => v,
+        Err(outcome) => return Ok(outcome),
+    };
+    let subcommand = if dry_run { "dry-run" } else { "run" };
+
+    if !validation.valid {
+        return Ok(pipeline_invalid_definition_dispatch(
+            subcommand,
+            &path,
+            Some(&definition),
+            &validation,
+        ));
+    }
+
+    let params = match pipe::bind_pipeline_params(&definition, &args.params) {
+        Ok(params) => params,
+        Err(errors) => {
+            return Ok(pipeline_error_dispatch(
+                subcommand,
+                "invalid-pipeline-parameters",
+                "The provided pipeline parameters are incomplete or invalid.",
+                Some(&path),
+                &errors,
+                &[
+                    format!("fwc pipeline show {}", path.display()),
+                    format!("fwc pipeline validate {}", path.display()),
+                ],
+            ));
+        }
+    };
+
+    let plan = pipe::build_pipeline_plan(&definition, &params)
+        .map_err(|error| anyhow::anyhow!("{error}"))?;
+
+    Ok(DispatchOutcome {
+        payload: json!({
+            "status": "planned",
+            "command": "pipeline",
+            "subcommand": subcommand,
+            "path": path.display().to_string(),
+            "message": format!(
+                "Pipeline plan: {} ({} step(s)). Execution requires host integration (not yet available).",
+                definition.pipeline.name,
+                plan.step_count,
+            ),
+            "plan": plan,
+            "dry_run": dry_run,
+            "next_actions": [
+                format!("fwc pipeline show {}", path.display()),
+                format!("fwc pipeline validate {}", path.display()),
+            ],
+        }),
+        exit_code: CliExitCode::Success,
+    })
+}
+
+fn load_pipeline_definition(
+    roots: &pipe::PipelineRoots,
+    reference: &str,
+) -> Result<(PathBuf, pipe::PipelineDefinition, pipe::PipelineValidation), DispatchOutcome> {
+    let path = match pipe::resolve_pipeline_reference(reference, roots) {
+        Ok(path) => path,
+        Err(error) => {
+            return Err(pipeline_error_dispatch(
+                "load",
+                "pipeline-not-found",
+                error,
+                None,
+                &[],
+                &[
+                    "Run `fwc pipeline list` to discover available pipeline names.".to_owned(),
+                    "Or pass an explicit TOML path such as `.fwc/pipelines/<name>.toml`."
+                        .to_owned(),
+                ],
+            ));
+        }
+    };
+
+    let content = match std::fs::read_to_string(&path) {
+        Ok(content) => content,
+        Err(error) => {
+            return Err(pipeline_error_dispatch(
+                "load",
+                "pipeline-read-failed",
+                format!("The pipeline definition could not be read: {error}"),
+                Some(&path),
+                &[],
+                &[
+                    "Check that the pipeline file exists and is readable.".to_owned(),
+                    "Re-run `fwc pipeline list` to confirm the expected search roots.".to_owned(),
+                ],
+            ));
+        }
+    };
+
+    let definition = match pipe::parse_pipeline_definition(&content) {
+        Ok(definition) => definition,
+        Err(error) => {
+            return Err(pipeline_error_dispatch(
+                "load",
+                "invalid-pipeline-toml",
+                error,
+                Some(&path),
+                &[],
+                &["Fix the TOML syntax and re-run `fwc pipeline validate <path>`.".to_owned()],
+            ));
+        }
+    };
+
+    let validation = pipe::validate_pipeline_definition(&definition);
+    Ok((path, definition, validation))
+}
+
+fn pipeline_invalid_definition_dispatch(
+    subcommand: &str,
+    path: &std::path::Path,
+    definition: Option<&pipe::PipelineDefinition>,
+    validation: &pipe::PipelineValidation,
+) -> DispatchOutcome {
+    let payload = definition.map_or_else(
+        || {
+            json!({
+                "status": "error",
+                "command": "pipeline",
+                "subcommand": subcommand,
+                "path": path.display().to_string(),
+                "error": {
+                    "type": "invalid-pipeline-definition",
+                    "message": "The pipeline definition is structurally invalid.",
+                    "details": validation.errors,
+                    "next_actions": [
+                        format!("fwc pipeline validate {}", path.display()),
+                    ],
+                },
+            })
+        },
+        |definition| {
+            json!({
+                "status": "error",
+                "command": "pipeline",
+                "subcommand": subcommand,
+                "path": path.display().to_string(),
+                "definition": definition,
+                "error": {
+                    "type": "invalid-pipeline-definition",
+                    "message": "The pipeline definition is structurally invalid.",
+                    "details": validation.errors,
+                    "next_actions": [
+                        format!("fwc pipeline show {}", path.display()),
+                        format!("fwc pipeline validate {}", path.display()),
+                    ],
+                },
+            })
+        },
+    );
+
+    DispatchOutcome {
+        payload,
+        exit_code: CliExitCode::Validation,
+    }
+}
+
+fn pipeline_error_dispatch(
+    subcommand: &str,
+    error_type: &str,
+    message: impl Into<String>,
+    path: Option<&std::path::Path>,
+    details: &[String],
+    next_actions: &[String],
+) -> DispatchOutcome {
+    DispatchOutcome {
+        payload: json!({
+            "status": "error",
+            "command": "pipeline",
+            "subcommand": subcommand,
+            "path": path.map(|path| path.display().to_string()),
+            "error": {
+                "type": error_type,
+                "message": message.into(),
+                "details": details,
+                "next_actions": next_actions,
+            },
+        }),
+        exit_code: CliExitCode::Validation,
+    }
+}
+
 fn map_dispatch(args: &MapArgs) -> Result<DispatchOutcome> {
     // Parse the on-error mode.
     let on_error = batch::OnError::parse(&args.on_error).ok_or_else(|| {
@@ -2511,6 +2904,33 @@ fn map_dispatch(args: &MapArgs) -> Result<DispatchOutcome> {
                 format!("fwc schema {}", args.operation),
                 format!("fwc validate {} --input '<first_input>'", args.operation),
             ],
+        }),
+        exit_code: CliExitCode::Success,
+    })
+}
+
+fn batch_file_dispatch(args: &BatchFileArgs) -> Result<DispatchOutcome> {
+    let content = std::fs::read_to_string(&args.file)?;
+    let batch = batch_file::BatchFile::parse(&content).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let plan = batch_file::ExecutionPlan::from_batch(&batch, args.concurrency, &args.on_error);
+
+    Ok(DispatchOutcome {
+        payload: json!({
+            "status": "planned",
+            "command": "batch-file",
+            "message": format!(
+                "Batch file: {} operations across {} connectors in {} waves. \
+                 Execution requires host integration (not yet available).",
+                plan.total_operations,
+                plan.connectors.len(),
+                plan.waves.len()
+            ),
+            "plan": plan,
+            "dry_run": args.dry_run,
+            "file": args.file.display().to_string(),
+            "next_actions": plan.connectors.iter().map(|c| {
+                format!("fwc show {c}")
+            }).collect::<Vec<_>>(),
         }),
         exit_code: CliExitCode::Success,
     })
@@ -3579,6 +3999,7 @@ struct ErrorDetails {
 const CONFIG_SUBCOMMANDS: &[&str] = &[
     "schema", "get", "set", "unset", "import", "export", "doctor",
 ];
+const PIPELINE_SUBCOMMANDS: &[&str] = &["list", "show", "validate", "run", "dry-run"];
 
 fn prepare_cli(received_args: &[String]) -> std::result::Result<PreparedCli, PrepareCliError> {
     let normalized = normalize_args(received_args).map_err(PrepareCliError::Structured)?;
@@ -3979,6 +4400,30 @@ fn parse_failure_dispatch(args: &[String], error: &clap::Error) -> DispatchOutco
                 );
             }
 
+            if command == Some("pipeline") {
+                return structured_error(
+                    "missing-pipeline-subcommand",
+                    "No pipeline subcommand was provided.",
+                    CliExitCode::Parse,
+                    true,
+                    args,
+                    &normalized_args,
+                    ErrorDetails {
+                        did_you_mean: Vec::new(),
+                        examples: vec![
+                            "fwc pipeline list".to_owned(),
+                            "fwc pipeline validate .fwc/pipelines/<name>.toml".to_owned(),
+                        ],
+                        next_actions: vec![
+                            "Use `fwc pipeline list` to discover registered pipeline definitions."
+                                .to_owned(),
+                            "Use `fwc pipeline show|validate|run|dry-run <name-or-path>` once you know the target pipeline."
+                                .to_owned(),
+                        ],
+                    },
+                );
+            }
+
             structured_error(
                 "missing-command",
                 "No `fwc` command was provided.",
@@ -4009,6 +4454,21 @@ fn parse_failure_dispatch(args: &[String], error: &clap::Error) -> DispatchOutco
                 vec![
                     "fwc config schema github".to_owned(),
                     "fwc config doctor github".to_owned(),
+                ],
+            ),
+            Some("pipeline") => unknown_subcommand_dispatch(
+                "pipeline-subcommand",
+                "pipeline",
+                args,
+                &normalized_args,
+                command_index
+                    .and_then(|index| args.get(index + 1))
+                    .map(String::as_str),
+                PIPELINE_SUBCOMMANDS,
+                vec![
+                    "fwc pipeline list".to_owned(),
+                    "fwc pipeline validate .fwc/pipelines/<name>.toml".to_owned(),
+                    "fwc pipeline dry-run .fwc/pipelines/<name>.toml --param key=value".to_owned(),
                 ],
             ),
             Some("task") => unknown_subcommand_dispatch(
@@ -4361,6 +4821,7 @@ fn enrich_unknown_guide_command(payload: &mut Value, command: Option<&str>) {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::{Cli, CliExitCode, PrepareCliError, catalog, execute, normalize_args, prepare_cli};
@@ -6072,9 +6533,16 @@ mod tests {
     #[test]
     fn execute_map_inline_json_array() {
         let args: Vec<String> = vec![
-            "fwc", "--json", "map", "github.get_issue",
-            "--inputs", r#"[{"number":1},{"number":2},{"number":3}]"#,
-        ].into_iter().map(str::to_owned).collect();
+            "fwc",
+            "--json",
+            "map",
+            "github.get_issue",
+            "--inputs",
+            r#"[{"number":1},{"number":2},{"number":3}]"#,
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
         let outcome = execute(&args).unwrap();
         let payload: Value = serde_json::from_str(&outcome.text).unwrap();
         assert_eq!(payload["status"], "planned");
@@ -6083,16 +6551,27 @@ mod tests {
         assert_eq!(payload["plan"]["input_count"], 3);
         assert_eq!(payload["plan"]["concurrency"], 5);
         assert_eq!(payload["plan"]["on_error"], "abort");
-        assert_eq!(payload["plan"]["preview_inputs"].as_array().unwrap().len(), 3);
+        assert_eq!(
+            payload["plan"]["preview_inputs"].as_array().unwrap().len(),
+            3
+        );
     }
 
     #[test]
     fn execute_map_on_error_continue() {
         let args: Vec<String> = vec![
-            "fwc", "--json", "map", "slack.send_message",
-            "--inputs", r#"[{"channel":"general","text":"hi"}]"#,
-            "--on-error", "continue",
-        ].into_iter().map(str::to_owned).collect();
+            "fwc",
+            "--json",
+            "map",
+            "slack.send_message",
+            "--inputs",
+            r#"[{"channel":"general","text":"hi"}]"#,
+            "--on-error",
+            "continue",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
         let outcome = execute(&args).unwrap();
         let payload: Value = serde_json::from_str(&outcome.text).unwrap();
         assert_eq!(payload["plan"]["on_error"], "continue");
@@ -6101,10 +6580,18 @@ mod tests {
     #[test]
     fn execute_map_custom_concurrency() {
         let args: Vec<String> = vec![
-            "fwc", "--json", "map", "github.get_issue",
-            "--inputs", r#"[{"n":1},{"n":2}]"#,
-            "--concurrency", "10",
-        ].into_iter().map(str::to_owned).collect();
+            "fwc",
+            "--json",
+            "map",
+            "github.get_issue",
+            "--inputs",
+            r#"[{"n":1},{"n":2}]"#,
+            "--concurrency",
+            "10",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
         let outcome = execute(&args).unwrap();
         let payload: Value = serde_json::from_str(&outcome.text).unwrap();
         assert_eq!(payload["plan"]["concurrency"], 10);
@@ -6112,9 +6599,10 @@ mod tests {
 
     #[test]
     fn execute_map_no_inputs_error() {
-        let args: Vec<String> = vec![
-            "fwc", "--json", "map", "github.get_issue",
-        ].into_iter().map(str::to_owned).collect();
+        let args: Vec<String> = vec!["fwc", "--json", "map", "github.get_issue"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
         let outcome = execute(&args).unwrap();
         let payload: Value = serde_json::from_str(&outcome.text).unwrap();
         assert_eq!(payload["status"], "error");
@@ -6124,10 +6612,18 @@ mod tests {
     #[test]
     fn execute_map_invalid_on_error() {
         let args: Vec<String> = vec![
-            "fwc", "--json", "map", "github.get_issue",
-            "--inputs", r#"[{"n":1}]"#,
-            "--on-error", "panic",
-        ].into_iter().map(str::to_owned).collect();
+            "fwc",
+            "--json",
+            "map",
+            "github.get_issue",
+            "--inputs",
+            r#"[{"n":1}]"#,
+            "--on-error",
+            "panic",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
         let result = execute(&args);
         assert!(result.is_err());
     }
@@ -6135,10 +6631,18 @@ mod tests {
     #[test]
     fn execute_map_template_with_items() {
         let args: Vec<String> = vec![
-            "fwc", "--json", "map", "github.get_issue",
-            "--input-template", r#"{"owner":"octocat","repo":"hw","number":{{item}}}"#,
-            "--items", "1,2,3",
-        ].into_iter().map(str::to_owned).collect();
+            "fwc",
+            "--json",
+            "map",
+            "github.get_issue",
+            "--input-template",
+            r#"{"owner":"octocat","repo":"hw","number":{{item}}}"#,
+            "--items",
+            "1,2,3",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
         let outcome = execute(&args).unwrap();
         let payload: Value = serde_json::from_str(&outcome.text).unwrap();
         assert_eq!(payload["status"], "planned");
@@ -6150,24 +6654,319 @@ mod tests {
     #[test]
     fn execute_map_preview_capped_at_three() {
         let args: Vec<String> = vec![
-            "fwc", "--json", "map", "github.get_issue",
-            "--inputs", r#"[{"n":1},{"n":2},{"n":3},{"n":4},{"n":5}]"#,
-        ].into_iter().map(str::to_owned).collect();
+            "fwc",
+            "--json",
+            "map",
+            "github.get_issue",
+            "--inputs",
+            r#"[{"n":1},{"n":2},{"n":3},{"n":4},{"n":5}]"#,
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
         let outcome = execute(&args).unwrap();
         let payload: Value = serde_json::from_str(&outcome.text).unwrap();
         assert_eq!(payload["plan"]["input_count"], 5);
-        assert_eq!(payload["plan"]["preview_inputs"].as_array().unwrap().len(), 3);
+        assert_eq!(
+            payload["plan"]["preview_inputs"].as_array().unwrap().len(),
+            3
+        );
     }
 
     #[test]
     fn execute_map_batch_alias() {
         let args: Vec<String> = vec![
-            "fwc", "--json", "batch", "github.get_issue",
-            "--inputs", r#"[{"n":1}]"#,
-        ].into_iter().map(str::to_owned).collect();
+            "fwc",
+            "--json",
+            "batch",
+            "github.get_issue",
+            "--inputs",
+            r#"[{"n":1}]"#,
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
         let outcome = execute(&args).unwrap();
         let payload: Value = serde_json::from_str(&outcome.text).unwrap();
         assert_eq!(payload["status"], "planned");
         assert_eq!(payload["command"], "map");
+    }
+
+    #[test]
+    fn execute_pipeline_validate_with_explicit_path() {
+        let root = std::env::temp_dir().join(format!(
+            "fwc-pipeline-validate-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("notify.toml");
+        std::fs::write(
+            &path,
+            r##"
+[pipeline]
+name = "notify-on-new-issues"
+
+[[steps]]
+id = "fetch"
+operation = "github.list_issues"
+input = { owner = "{{params.owner}}", repo = "{{params.repo}}" }
+
+[[steps]]
+id = "notify"
+operation = "slack.send_message"
+depends_on = ["fetch"]
+input = { channel = "{{params.channel}}", text = "New issues: {{steps.fetch.output.issues | length}}" }
+
+[params.owner]
+type = "string"
+required = true
+
+[params.repo]
+type = "string"
+required = true
+
+[params.channel]
+type = "string"
+default = "#general"
+"##,
+        )
+        .unwrap();
+
+        let path_str = path.display().to_string();
+        let (exit_code, payload) =
+            execute_json(&["fwc", "--json", "pipeline", "validate", &path_str]);
+
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["command"], "pipeline");
+        assert_eq!(payload["subcommand"], "validate");
+        assert_eq!(payload["validation"]["valid"], true);
+        assert_eq!(payload["validation"]["execution_order"][0], "fetch");
+        assert_eq!(payload["validation"]["execution_order"][1], "notify");
+    }
+
+    #[test]
+    fn execute_pipeline_dry_run_binds_params_and_defers_dynamic_templates() {
+        let root = std::env::temp_dir().join(format!(
+            "fwc-pipeline-dry-run-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("notify.toml");
+        std::fs::write(
+            &path,
+            r##"
+[pipeline]
+name = "notify-on-new-issues"
+
+[[steps]]
+id = "fetch"
+operation = "github.list_issues"
+input = { owner = "{{params.owner}}", repo = "{{params.repo}}" }
+
+[[steps]]
+id = "notify"
+operation = "slack.send_message"
+depends_on = ["fetch"]
+input = { channel = "{{params.channel}}", text = "New issues: {{steps.fetch.output.issues | length}}" }
+condition = "{{steps.fetch.output.issues | length}} > 0"
+
+[params.owner]
+type = "string"
+required = true
+
+[params.repo]
+type = "string"
+required = true
+
+[params.channel]
+type = "string"
+default = "#general"
+"##,
+        )
+        .unwrap();
+
+        let path_str = path.display().to_string();
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "pipeline",
+            "dry-run",
+            &path_str,
+            "--param",
+            "owner=octocat",
+            "--param",
+            "repo=hello-world",
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["status"], "planned");
+        assert_eq!(payload["plan"]["execution_order"][0], "fetch");
+        assert_eq!(payload["plan"]["steps"][0]["input"]["owner"], "octocat");
+        assert_eq!(payload["plan"]["steps"][0]["input"]["repo"], "hello-world");
+        assert_eq!(payload["plan"]["steps"][1]["input"]["channel"], "#general");
+        assert_eq!(
+            payload["plan"]["steps"][1]["unresolved_templates"][0],
+            "steps.fetch.output.issues | length"
+        );
+        assert_eq!(
+            payload["plan"]["steps"][1]["condition"],
+            "{{steps.fetch.output.issues | length}} > 0"
+        );
+    }
+
+    #[test]
+    fn execute_pipeline_validate_reports_definition_errors() {
+        let root = std::env::temp_dir().join(format!(
+            "fwc-pipeline-invalid-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("broken.toml");
+        std::fs::write(
+            &path,
+            r#"
+[pipeline]
+name = "broken"
+
+[[steps]]
+id = "fetch"
+operation = "github.list_issues"
+depends_on = ["missing"]
+"#,
+        )
+        .unwrap();
+
+        let path_str = path.display().to_string();
+        let (exit_code, payload) =
+            execute_json(&["fwc", "--json", "pipeline", "validate", &path_str]);
+
+        assert_eq!(exit_code, CliExitCode::Validation.into());
+        assert_eq!(payload["error"]["type"], "invalid-pipeline-definition");
+        assert!(
+            payload["error"]["details"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|detail| detail
+                    .as_str()
+                    .is_some_and(|text| text.contains("unknown step")))
+        );
+    }
+
+    // ── BatchFile (heterogeneous batch) integration tests ──────────
+
+    fn batch_test_file(name: &str, content: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join("fwc-batch-tests");
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join(name);
+        std::fs::write(&file, content).unwrap();
+        file
+    }
+
+    #[test]
+    fn execute_batch_file_valid() {
+        let file = batch_test_file(
+            "valid.jsonl",
+            r#"{"id":"s1","connector":"github","operation":"list_issues","input":{"owner":"o","repo":"r"}}
+{"id":"s2","connector":"slack","operation":"send_message","input":{"channel":"dev","text":"hi"},"depends_on":["s1"]}"#,
+        );
+        let args: Vec<String> = vec![
+            "fwc".to_owned(),
+            "--json".to_owned(),
+            "batch-file".to_owned(),
+            file.display().to_string(),
+        ];
+        let outcome = execute(&args).unwrap();
+        let payload: Value = serde_json::from_str(&outcome.text).unwrap();
+        assert_eq!(payload["status"], "planned");
+        assert_eq!(payload["command"], "batch-file");
+        assert_eq!(payload["plan"]["total_operations"], 2);
+        assert_eq!(payload["plan"]["waves"].as_array().unwrap().len(), 2);
+        assert_eq!(payload["plan"]["connectors"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn execute_batch_file_all_independent_single_wave() {
+        let file = batch_test_file(
+            "independent.jsonl",
+            r#"{"id":"a","connector":"g","operation":"o","input":{}}
+{"id":"b","connector":"g","operation":"o","input":{}}
+{"id":"c","connector":"g","operation":"o","input":{}}"#,
+        );
+        let args: Vec<String> = vec![
+            "fwc".to_owned(),
+            "--json".to_owned(),
+            "batch-file".to_owned(),
+            file.display().to_string(),
+        ];
+        let outcome = execute(&args).unwrap();
+        let payload: Value = serde_json::from_str(&outcome.text).unwrap();
+        assert_eq!(payload["plan"]["waves"].as_array().unwrap().len(), 1);
+        assert_eq!(payload["plan"]["total_operations"], 3);
+    }
+
+    #[test]
+    fn execute_batch_file_custom_concurrency() {
+        let file = batch_test_file(
+            "concurrency.jsonl",
+            r#"{"id":"a","connector":"g","operation":"o","input":{}}"#,
+        );
+        let args: Vec<String> = vec![
+            "fwc".to_owned(),
+            "--json".to_owned(),
+            "batch-file".to_owned(),
+            file.display().to_string(),
+            "--concurrency".to_owned(),
+            "10".to_owned(),
+        ];
+        let outcome = execute(&args).unwrap();
+        let payload: Value = serde_json::from_str(&outcome.text).unwrap();
+        assert_eq!(payload["plan"]["concurrency"], 10);
+    }
+
+    #[test]
+    fn execute_batch_file_invalid_content() {
+        let file = batch_test_file("invalid.jsonl", "not json");
+        let args: Vec<String> = vec![
+            "fwc".to_owned(),
+            "--json".to_owned(),
+            "batch-file".to_owned(),
+            file.display().to_string(),
+        ];
+        let result = execute(&args);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn execute_batch_file_missing_file() {
+        let args: Vec<String> = vec![
+            "fwc".to_owned(),
+            "--json".to_owned(),
+            "batch-file".to_owned(),
+            "/nonexistent/ops.jsonl".to_owned(),
+        ];
+        let result = execute(&args);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn execute_batch_ops_alias() {
+        let file = batch_test_file(
+            "alias.jsonl",
+            r#"{"id":"a","connector":"g","operation":"o","input":{}}"#,
+        );
+        let args: Vec<String> = vec![
+            "fwc".to_owned(),
+            "--json".to_owned(),
+            "batch-ops".to_owned(),
+            file.display().to_string(),
+        ];
+        let outcome = execute(&args).unwrap();
+        let payload: Value = serde_json::from_str(&outcome.text).unwrap();
+        assert_eq!(payload["status"], "planned");
+        assert_eq!(payload["command"], "batch-file");
     }
 }

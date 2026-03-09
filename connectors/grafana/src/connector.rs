@@ -5,7 +5,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use fcp_core::{
     AgentHint, BaseConnector, CapabilityId, ConnectorId, CredentialId, FcpError, FcpResult,
-    IdempotencyClass, OperationId, OperationInfo, RiskLevel, SafetyTier,
+    IdempotencyClass, OperationId, OperationInfo, ProvisioningRecipe, ProvisioningStep,
+    ProvisioningStepType, RecipeId, RiskLevel, SafetyTier, StepId,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -264,11 +265,39 @@ impl GrafanaConnector {
 
     /// Handle the `self_check` method.
     pub async fn handle_self_check(&self) -> FcpResult<serde_json::Value> {
+        let provisioning = self.provisioning_readiness();
         Ok(json!({
             "connector_id": "fcp.grafana",
             "version": "0.1.0",
             "status": if self.config.is_some() { "ready" } else { "unconfigured" },
+            "provisioning": provisioning,
         }))
+    }
+
+    /// Return provisioning readiness information.
+    fn provisioning_readiness(&self) -> serde_json::Value {
+        let (auth_mode, token_configured, credential_id_configured) = match &self.config {
+            Some(cfg) => match &cfg.auth {
+                GrafanaAuth::BearerToken(_) => ("bearer_token", true, false),
+                GrafanaAuth::CredentialId(_) => ("credential_id", false, true),
+            },
+            None => ("unconfigured", false, false),
+        };
+
+        let base_url = self
+            .config
+            .as_ref()
+            .map_or_else(|| DEFAULT_BASE_URL.to_string(), |c| c.base_url.clone());
+
+        let network_ok = check_network_allowed(&base_url);
+
+        json!({
+            "auth_mode": auth_mode,
+            "token_configured": token_configured,
+            "credential_id_configured": credential_id_configured,
+            "network_ok": network_ok,
+            "base_url": base_url,
+        })
     }
 
     /// Handle the `introspect` method.
@@ -516,6 +545,25 @@ fn require_str<'a>(input: &'a serde_json::Value, field: &str) -> Result<&'a str,
             status_code: 400,
             message: format!("Missing required field: {field}"),
         })
+}
+
+/// Check whether a base URL's host matches the allowed Grafana manifest hosts.
+///
+/// The manifest allows `*.grafana.net` and `*.grafana.com`.
+fn check_network_allowed(base_url: &str) -> bool {
+    let host = base_url
+        .strip_prefix("https://")
+        .or_else(|| base_url.strip_prefix("http://"))
+        .and_then(|rest| rest.split('/').next())
+        .unwrap_or("");
+
+    // Strip optional port
+    let host = host.split(':').next().unwrap_or(host);
+
+    ALLOWED_HOST_SUFFIXES.iter().any(|suffix| {
+        let bare = suffix.strip_prefix('.').unwrap_or(suffix);
+        host == bare || host.ends_with(suffix)
+    })
 }
 
 /// Build a single [`OperationInfo`] entry.
@@ -855,6 +903,50 @@ fn operations_info() -> Vec<OperationInfo> {
             },
         ),
     ]
+}
+
+/// Allowed host suffixes for the Grafana manifest network policy.
+const ALLOWED_HOST_SUFFIXES: &[&str] = &[".grafana.net", ".grafana.com"];
+
+/// Build the provisioning recipe for the Grafana connector.
+pub fn provisioning_recipe() -> ProvisioningRecipe {
+    ProvisioningRecipe::new(
+        RecipeId::new("grafana_setup"),
+        "1",
+        "Set up the Grafana connector with API key or credential injection",
+    )
+    .with_step(ProvisioningStep::new(
+        StepId::new("prompt_auth_mode"),
+        ProvisioningStepType::PromptUser {
+            message: "Choose authentication mode: api_key or credential_injection".into(),
+        },
+    ))
+    .with_step(
+        ProvisioningStep::new(
+            StepId::new("prompt_api_key"),
+            ProvisioningStepType::PromptSecret {
+                message: "Enter your Grafana API key or service account token".into(),
+            },
+        )
+        .depends_on(StepId::new("prompt_auth_mode")),
+    )
+    .with_step(
+        ProvisioningStep::new(
+            StepId::new("store_api_key"),
+            ProvisioningStepType::StoreSecret {
+                key: "grafana_api_key".into(),
+                value_from: StepId::new("prompt_api_key"),
+                scope: "connector:fcp.grafana".into(),
+            },
+        )
+        .depends_on(StepId::new("prompt_api_key")),
+    )
+    .with_step(ProvisioningStep::new(
+        StepId::new("prompt_base_url"),
+        ProvisioningStepType::PromptUser {
+            message: "Enter Grafana base URL (optional, default https://grafana.com/api)".into(),
+        },
+    ))
 }
 
 #[cfg(test)]
@@ -1626,5 +1718,139 @@ mod tests {
         assert_ne!(DoctorStatus::Healthy, DoctorStatus::Degraded);
         assert_ne!(DoctorStatus::Degraded, DoctorStatus::Unhealthy);
         assert_ne!(DoctorStatus::Healthy, DoctorStatus::Unhealthy);
+    }
+
+    // ── Provisioning recipe ─────────────────────────────────────
+
+    #[test]
+    fn provisioning_recipe_has_expected_steps() {
+        let recipe = provisioning_recipe();
+        assert_eq!(recipe.steps.len(), 4);
+        assert_eq!(recipe.id.as_str(), "grafana_setup");
+        assert_eq!(recipe.version, "1");
+
+        // Verify step types
+        assert!(
+            matches!(recipe.steps[0].kind, ProvisioningStepType::PromptUser { .. }),
+            "step 0 should be PromptUser"
+        );
+        assert!(
+            matches!(recipe.steps[1].kind, ProvisioningStepType::PromptSecret { .. }),
+            "step 1 should be PromptSecret"
+        );
+        assert!(
+            matches!(recipe.steps[2].kind, ProvisioningStepType::StoreSecret { .. }),
+            "step 2 should be StoreSecret"
+        );
+        assert!(
+            matches!(recipe.steps[3].kind, ProvisioningStepType::PromptUser { .. }),
+            "step 3 should be PromptUser"
+        );
+    }
+
+    #[test]
+    fn provisioning_recipe_step_dependencies() {
+        let recipe = provisioning_recipe();
+
+        // prompt_auth_mode has no dependencies
+        assert!(recipe.steps[0].depends_on.is_empty());
+        assert_eq!(recipe.steps[0].id.as_str(), "prompt_auth_mode");
+
+        // prompt_api_key depends on prompt_auth_mode
+        assert_eq!(recipe.steps[1].id.as_str(), "prompt_api_key");
+        assert_eq!(recipe.steps[1].depends_on.len(), 1);
+        assert_eq!(recipe.steps[1].depends_on[0].as_str(), "prompt_auth_mode");
+
+        // store_api_key depends on prompt_api_key
+        assert_eq!(recipe.steps[2].id.as_str(), "store_api_key");
+        assert_eq!(recipe.steps[2].depends_on.len(), 1);
+        assert_eq!(recipe.steps[2].depends_on[0].as_str(), "prompt_api_key");
+
+        // prompt_base_url has no dependencies
+        assert_eq!(recipe.steps[3].id.as_str(), "prompt_base_url");
+        assert!(recipe.steps[3].depends_on.is_empty());
+    }
+
+    #[test]
+    fn provisioning_recipe_store_secret_scope() {
+        let recipe = provisioning_recipe();
+        let store_step = &recipe.steps[2];
+        match &store_step.kind {
+            ProvisioningStepType::StoreSecret { scope, key, value_from } => {
+                assert_eq!(scope, "connector:fcp.grafana");
+                assert_eq!(key, "grafana_api_key");
+                assert_eq!(value_from.as_str(), "prompt_api_key");
+            }
+            other => panic!("expected StoreSecret, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn provisioning_readiness_unconfigured() {
+        let c = GrafanaConnector::new();
+        let readiness = c.provisioning_readiness();
+        assert_eq!(readiness["auth_mode"], "unconfigured");
+        assert_eq!(readiness["token_configured"], false);
+        assert_eq!(readiness["credential_id_configured"], false);
+        assert_eq!(readiness["base_url"], DEFAULT_BASE_URL);
+    }
+
+    #[test]
+    fn provisioning_readiness_bearer_token() {
+        let mut c = GrafanaConnector::new();
+        c.config = Some(GrafanaConfig {
+            auth: GrafanaAuth::BearerToken("glsa_test_token".into()),
+            base_url: "https://my-org.grafana.net/api".into(),
+        });
+        let readiness = c.provisioning_readiness();
+        assert_eq!(readiness["auth_mode"], "bearer_token");
+        assert_eq!(readiness["token_configured"], true);
+        assert_eq!(readiness["credential_id_configured"], false);
+        assert_eq!(readiness["base_url"], "https://my-org.grafana.net/api");
+        assert_eq!(readiness["network_ok"], true);
+    }
+
+    #[test]
+    fn provisioning_readiness_credential_id() {
+        let mut c = GrafanaConnector::new();
+        c.config = Some(GrafanaConfig {
+            auth: GrafanaAuth::CredentialId(
+                CredentialId::parse("550e8400-e29b-41d4-a716-446655440000").unwrap(),
+            ),
+            base_url: "https://my-org.grafana.com/api".into(),
+        });
+        let readiness = c.provisioning_readiness();
+        assert_eq!(readiness["auth_mode"], "credential_id");
+        assert_eq!(readiness["token_configured"], false);
+        assert_eq!(readiness["credential_id_configured"], true);
+        assert_eq!(readiness["network_ok"], true);
+    }
+
+    #[test]
+    fn provisioning_readiness_network_check() {
+        // Valid hosts
+        assert!(check_network_allowed("https://my-org.grafana.net/api"));
+        assert!(check_network_allowed("https://my-org.grafana.com/api"));
+        assert!(check_network_allowed("https://grafana.com/api"));
+        assert!(check_network_allowed("https://grafana.net/api"));
+        assert!(check_network_allowed("https://sub.domain.grafana.net/path"));
+
+        // Invalid hosts
+        assert!(!check_network_allowed("https://evil.example.com/api"));
+        assert!(!check_network_allowed("http://localhost:3000/api"));
+        assert!(!check_network_allowed("https://not-grafana.io/api"));
+        assert!(!check_network_allowed("https://fakegrafana.com/api"));
+    }
+
+    #[test]
+    fn self_check_includes_provisioning() {
+        let c = GrafanaConnector::new();
+        // Call provisioning_readiness directly since handle_self_check is async
+        let readiness = c.provisioning_readiness();
+        assert_eq!(readiness["auth_mode"], "unconfigured");
+        assert!(readiness.get("token_configured").is_some());
+        assert!(readiness.get("credential_id_configured").is_some());
+        assert!(readiness.get("network_ok").is_some());
+        assert!(readiness.get("base_url").is_some());
     }
 }

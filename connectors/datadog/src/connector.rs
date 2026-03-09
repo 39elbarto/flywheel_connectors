@@ -5,7 +5,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use fcp_core::{
     AgentHint, BaseConnector, CapabilityId, ConnectorId, CredentialId, FcpError, FcpResult,
-    IdempotencyClass, OperationId, OperationInfo, RiskLevel, SafetyTier,
+    IdempotencyClass, OperationId, OperationInfo, ProvisioningRecipe, ProvisioningStep,
+    ProvisioningStepType, RecipeId, RiskLevel, SafetyTier, StepId,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -291,7 +292,52 @@ impl DatadogConnector {
             "connector_id": "fcp.datadog",
             "version": "0.1.0",
             "status": if self.config.is_some() { "ready" } else { "unconfigured" },
+            "provisioning": self.provisioning_readiness(),
         }))
+    }
+
+    /// Return provisioning readiness diagnostics.
+    #[allow(clippy::similar_names)]
+    pub fn provisioning_readiness(&self) -> serde_json::Value {
+        let (auth_mode, has_api_key, has_app_key, has_credential) = match &self.config {
+            Some(cfg) => match &cfg.auth {
+                DatadogAuth::ApiKeys { .. } => ("api_keys", true, true, false),
+                DatadogAuth::CredentialId(_) => ("credential_id", false, false, true),
+            },
+            None => ("unconfigured", false, false, false),
+        };
+
+        let base_url = self
+            .config
+            .as_ref()
+            .map_or(DEFAULT_BASE_URL, |c| &c.base_url)
+            .to_string();
+
+        let network_ok = base_url.contains("datadoghq.com") || base_url.contains("datadoghq.eu");
+
+        let region = if base_url.contains("us3.datadoghq") {
+            "us3"
+        } else if base_url.contains("us5.datadoghq") {
+            "us5"
+        } else if base_url.contains("ap1.datadoghq") {
+            "ap1"
+        } else if base_url.contains("datadoghq.eu") {
+            "eu1"
+        } else if base_url.contains("datadoghq.com") {
+            "us1"
+        } else {
+            "unknown"
+        };
+
+        json!({
+            "auth_mode": auth_mode,
+            "api_key_configured": has_api_key,
+            "app_key_configured": has_app_key,
+            "credential_id_configured": has_credential,
+            "network_ok": network_ok,
+            "base_url": base_url,
+            "region": region,
+        })
     }
 
     /// Handle the `introspect` method.
@@ -529,6 +575,67 @@ fn op_info(
         idempotency,
         ai_hints,
     }
+}
+
+/// Build the provisioning recipe for the Datadog connector.
+pub fn provisioning_recipe() -> ProvisioningRecipe {
+    ProvisioningRecipe::new(
+        RecipeId::new("fcp.datadog.setup"),
+        "1",
+        "Datadog connector provisioning — configure API keys or credential injection",
+    )
+    .with_step(ProvisioningStep::new(
+        StepId::new("prompt_auth_mode"),
+        ProvisioningStepType::PromptUser {
+            message: "Choose authentication mode: (1) API key + Application key, or (2) Credential injection (secretless via egress proxy)".into(),
+        },
+    ))
+    .with_step(
+        ProvisioningStep::new(
+            StepId::new("prompt_api_key"),
+            ProvisioningStepType::PromptSecret {
+                message: "Enter your Datadog API key".into(),
+            },
+        )
+        .depends_on(StepId::new("prompt_auth_mode")),
+    )
+    .with_step(
+        ProvisioningStep::new(
+            StepId::new("prompt_app_key"),
+            ProvisioningStepType::PromptSecret {
+                message: "Enter your Datadog Application key".into(),
+            },
+        )
+        .depends_on(StepId::new("prompt_auth_mode")),
+    )
+    .with_step(
+        ProvisioningStep::new(
+            StepId::new("store_api_key"),
+            ProvisioningStepType::StoreSecret {
+                key: "api_key".into(),
+                value_from: StepId::new("prompt_api_key"),
+                scope: "connector:fcp.datadog".into(),
+            },
+        )
+        .depends_on(StepId::new("prompt_api_key")),
+    )
+    .with_step(
+        ProvisioningStep::new(
+            StepId::new("store_app_key"),
+            ProvisioningStepType::StoreSecret {
+                key: "app_key".into(),
+                value_from: StepId::new("prompt_app_key"),
+                scope: "connector:fcp.datadog".into(),
+            },
+        )
+        .depends_on(StepId::new("prompt_app_key")),
+    )
+    .with_step(ProvisioningStep::new(
+        StepId::new("prompt_region"),
+        ProvisioningStepType::PromptUser {
+            message: "Select Datadog region (us1/us3/us5/eu1/ap1, default: us1)".into(),
+        },
+    ))
 }
 
 /// Build the operations info for introspection.
@@ -1581,5 +1688,294 @@ mod tests {
         assert_eq!(DoctorStatus::Healthy, DoctorStatus::Healthy);
         assert_ne!(DoctorStatus::Healthy, DoctorStatus::Degraded);
         assert_ne!(DoctorStatus::Degraded, DoctorStatus::Unhealthy);
+    }
+
+    // ── Provisioning recipe ─────────────────────────────────────────
+
+    #[test]
+    fn provisioning_recipe_has_expected_steps() {
+        let recipe = provisioning_recipe();
+        assert_eq!(recipe.id.as_str(), "fcp.datadog.setup");
+        assert_eq!(recipe.version, "1");
+        assert_eq!(recipe.steps.len(), 6);
+
+        let step_ids: Vec<&str> = recipe.steps.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(
+            step_ids,
+            vec![
+                "prompt_auth_mode",
+                "prompt_api_key",
+                "prompt_app_key",
+                "store_api_key",
+                "store_app_key",
+                "prompt_region",
+            ]
+        );
+    }
+
+    #[test]
+    fn provisioning_recipe_dual_secret_steps() {
+        let recipe = provisioning_recipe();
+        let secret_steps: Vec<&ProvisioningStep> = recipe
+            .steps
+            .iter()
+            .filter(|s| matches!(s.kind, ProvisioningStepType::PromptSecret { .. }))
+            .collect();
+        assert_eq!(secret_steps.len(), 2);
+        assert_eq!(secret_steps[0].id.as_str(), "prompt_api_key");
+        assert_eq!(secret_steps[1].id.as_str(), "prompt_app_key");
+    }
+
+    #[test]
+    fn provisioning_recipe_store_secret_scope() {
+        let recipe = provisioning_recipe();
+        let store_steps: Vec<&ProvisioningStep> = recipe
+            .steps
+            .iter()
+            .filter(|s| matches!(s.kind, ProvisioningStepType::StoreSecret { .. }))
+            .collect();
+        assert_eq!(store_steps.len(), 2);
+        for step in &store_steps {
+            if let ProvisioningStepType::StoreSecret { scope, .. } = &step.kind {
+                assert_eq!(scope, "connector:fcp.datadog");
+            }
+        }
+    }
+
+    #[test]
+    fn provisioning_recipe_store_secret_value_from() {
+        let recipe = provisioning_recipe();
+        for step in &recipe.steps {
+            if let ProvisioningStepType::StoreSecret {
+                key, value_from, ..
+            } = &step.kind
+            {
+                match key.as_str() {
+                    "api_key" => assert_eq!(value_from.as_str(), "prompt_api_key"),
+                    "app_key" => assert_eq!(value_from.as_str(), "prompt_app_key"),
+                    other => panic!("unexpected store key: {other}"),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn provisioning_recipe_dependencies() {
+        let recipe = provisioning_recipe();
+        let find_step = |id: &str| recipe.steps.iter().find(|s| s.id.as_str() == id).unwrap();
+
+        assert!(find_step("prompt_auth_mode").depends_on.is_empty());
+        assert_eq!(
+            find_step("prompt_api_key").depends_on[0].as_str(),
+            "prompt_auth_mode"
+        );
+        assert_eq!(
+            find_step("prompt_app_key").depends_on[0].as_str(),
+            "prompt_auth_mode"
+        );
+        assert_eq!(
+            find_step("store_api_key").depends_on[0].as_str(),
+            "prompt_api_key"
+        );
+        assert_eq!(
+            find_step("store_app_key").depends_on[0].as_str(),
+            "prompt_app_key"
+        );
+        assert!(find_step("prompt_region").depends_on.is_empty());
+    }
+
+    #[test]
+    fn provisioning_recipe_prompt_user_steps() {
+        let recipe = provisioning_recipe();
+        let prompt_user_steps: Vec<&ProvisioningStep> = recipe
+            .steps
+            .iter()
+            .filter(|s| matches!(s.kind, ProvisioningStepType::PromptUser { .. }))
+            .collect();
+        assert_eq!(prompt_user_steps.len(), 2);
+        assert_eq!(prompt_user_steps[0].id.as_str(), "prompt_auth_mode");
+        assert_eq!(prompt_user_steps[1].id.as_str(), "prompt_region");
+    }
+
+    #[test]
+    fn provisioning_recipe_no_approval_required() {
+        let recipe = provisioning_recipe();
+        for step in &recipe.steps {
+            assert!(
+                !step.requires_approval,
+                "step {} should not require approval",
+                step.id.as_str()
+            );
+        }
+    }
+
+    #[test]
+    fn provisioning_recipe_serializes() {
+        let recipe = provisioning_recipe();
+        let v = serde_json::to_value(&recipe).unwrap();
+        assert_eq!(v["id"], "fcp.datadog.setup");
+        assert_eq!(v["version"], "1");
+        assert!(v["steps"].as_array().unwrap().len() == 6);
+    }
+
+    // ── Provisioning readiness ──────────────────────────────────────
+
+    #[test]
+    fn provisioning_readiness_unconfigured() {
+        let c = DatadogConnector::new();
+        let r = c.provisioning_readiness();
+        assert_eq!(r["auth_mode"], "unconfigured");
+        assert_eq!(r["api_key_configured"], false);
+        assert_eq!(r["app_key_configured"], false);
+        assert_eq!(r["credential_id_configured"], false);
+        assert_eq!(r["network_ok"], true); // default URL is datadoghq.com
+        assert_eq!(r["region"], "us1");
+    }
+
+    #[test]
+    fn provisioning_readiness_api_keys() {
+        let mut c = DatadogConnector::new();
+        c.config = Some(DatadogConfig {
+            auth: DatadogAuth::ApiKeys {
+                api_key: "test-key".into(),
+                app_key: "test-app".into(),
+            },
+            base_url: DEFAULT_BASE_URL.into(),
+        });
+        let r = c.provisioning_readiness();
+        assert_eq!(r["auth_mode"], "api_keys");
+        assert_eq!(r["api_key_configured"], true);
+        assert_eq!(r["app_key_configured"], true);
+        assert_eq!(r["credential_id_configured"], false);
+        assert_eq!(r["network_ok"], true);
+        assert_eq!(r["region"], "us1");
+    }
+
+    #[test]
+    fn provisioning_readiness_credential_id() {
+        let mut c = DatadogConnector::new();
+        c.config = Some(DatadogConfig {
+            auth: DatadogAuth::CredentialId(CredentialId::new()),
+            base_url: DEFAULT_BASE_URL.into(),
+        });
+        let r = c.provisioning_readiness();
+        assert_eq!(r["auth_mode"], "credential_id");
+        assert_eq!(r["api_key_configured"], false);
+        assert_eq!(r["app_key_configured"], false);
+        assert_eq!(r["credential_id_configured"], true);
+        assert_eq!(r["network_ok"], true);
+    }
+
+    #[test]
+    fn provisioning_readiness_network_check() {
+        let mut c = DatadogConnector::new();
+
+        // Valid datadoghq.com URL
+        c.config = Some(DatadogConfig {
+            auth: DatadogAuth::ApiKeys {
+                api_key: "k".into(),
+                app_key: "a".into(),
+            },
+            base_url: "https://api.datadoghq.com/api/v1".into(),
+        });
+        assert_eq!(c.provisioning_readiness()["network_ok"], true);
+
+        // Valid datadoghq.eu URL
+        c.config = Some(DatadogConfig {
+            auth: DatadogAuth::ApiKeys {
+                api_key: "k".into(),
+                app_key: "a".into(),
+            },
+            base_url: "https://api.datadoghq.eu/api/v1".into(),
+        });
+        assert_eq!(c.provisioning_readiness()["network_ok"], true);
+
+        // Invalid URL
+        c.config = Some(DatadogConfig {
+            auth: DatadogAuth::ApiKeys {
+                api_key: "k".into(),
+                app_key: "a".into(),
+            },
+            base_url: "https://custom.example.com/api/v1".into(),
+        });
+        assert_eq!(c.provisioning_readiness()["network_ok"], false);
+    }
+
+    #[test]
+    fn provisioning_readiness_region_detection() {
+        let mut c = DatadogConnector::new();
+
+        let cases = vec![
+            ("https://api.datadoghq.com/api/v1", "us1"),
+            ("https://api.us3.datadoghq.com/api/v1", "us3"),
+            ("https://api.us5.datadoghq.com/api/v1", "us5"),
+            ("https://api.datadoghq.eu/api/v1", "eu1"),
+            ("https://api.ap1.datadoghq.com/api/v1", "ap1"),
+            ("https://custom.example.com/api/v1", "unknown"),
+        ];
+
+        for (url, expected_region) in cases {
+            c.config = Some(DatadogConfig {
+                auth: DatadogAuth::ApiKeys {
+                    api_key: "k".into(),
+                    app_key: "a".into(),
+                },
+                base_url: url.into(),
+            });
+            assert_eq!(
+                c.provisioning_readiness()["region"],
+                expected_region,
+                "URL {url} should map to region {expected_region}"
+            );
+        }
+    }
+
+    #[test]
+    fn provisioning_readiness_includes_base_url() {
+        let mut c = DatadogConnector::new();
+        c.config = Some(DatadogConfig {
+            auth: DatadogAuth::ApiKeys {
+                api_key: "k".into(),
+                app_key: "a".into(),
+            },
+            base_url: "https://api.us3.datadoghq.com/api/v1".into(),
+        });
+        let r = c.provisioning_readiness();
+        assert_eq!(r["base_url"], "https://api.us3.datadoghq.com/api/v1");
+    }
+
+    // ── Self-check includes provisioning ────────────────────────────
+
+    #[fcp_async_core::runtime::test]
+    async fn self_check_includes_provisioning() {
+        let c = DatadogConnector::new();
+        let result = c.handle_self_check().await.unwrap();
+        assert_eq!(result["connector_id"], "fcp.datadog");
+        assert_eq!(result["status"], "unconfigured");
+        let prov = &result["provisioning"];
+        assert_eq!(prov["auth_mode"], "unconfigured");
+        assert_eq!(prov["api_key_configured"], false);
+        assert_eq!(prov["app_key_configured"], false);
+        assert_eq!(prov["network_ok"], true);
+        assert_eq!(prov["region"], "us1");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn self_check_configured_includes_provisioning() {
+        let mut c = DatadogConnector::new();
+        c.config = Some(DatadogConfig {
+            auth: DatadogAuth::ApiKeys {
+                api_key: "k".into(),
+                app_key: "a".into(),
+            },
+            base_url: "https://api.datadoghq.eu/api/v1".into(),
+        });
+        let result = c.handle_self_check().await.unwrap();
+        assert_eq!(result["status"], "ready");
+        let prov = &result["provisioning"];
+        assert_eq!(prov["auth_mode"], "api_keys");
+        assert_eq!(prov["region"], "eu1");
+        assert_eq!(prov["api_key_configured"], true);
+        assert_eq!(prov["app_key_configured"], true);
     }
 }

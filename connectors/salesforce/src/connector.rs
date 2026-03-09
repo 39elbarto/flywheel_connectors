@@ -5,7 +5,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use fcp_core::{
     AgentHint, BaseConnector, CapabilityId, ConnectorId, CredentialId, FcpError, FcpResult,
-    IdempotencyClass, OperationId, OperationInfo, RiskLevel, SafetyTier,
+    IdempotencyClass, OAuthRecipe, OperationId, OperationInfo, ProvisioningRecipe,
+    ProvisioningStep, ProvisioningStepType, RecipeId, RiskLevel, SafetyTier, StepId,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -248,11 +249,37 @@ impl SalesforceConnector {
         Ok(serde_json::to_value(result).unwrap_or_else(|_| json!({"status": "error"})))
     }
 
+    pub fn provisioning_readiness(&self) -> serde_json::Value {
+        let (auth_mode, token_configured, credential_id_configured, base_url) =
+            match &self.config {
+                Some(cfg) => {
+                    let (am, tc, cc) = match &cfg.auth {
+                        SalesforceAuth::AccessToken(_) => ("access_token", true, false),
+                        SalesforceAuth::CredentialId(_) => ("credential_id", false, true),
+                    };
+                    (am, tc, cc, cfg.base_url.as_str())
+                }
+                None => ("unconfigured", false, false, DEFAULT_BASE_URL),
+            };
+
+        let network_ok = is_salesforce_domain(base_url);
+
+        json!({
+            "auth_mode": auth_mode,
+            "token_configured": token_configured,
+            "credential_id_configured": credential_id_configured,
+            "network_ok": network_ok,
+            "base_url": base_url,
+        })
+    }
+
     pub async fn handle_self_check(&self) -> FcpResult<serde_json::Value> {
+        let readiness = self.provisioning_readiness();
         Ok(json!({
             "connector_id": "fcp.salesforce",
             "version": "0.1.0",
-            "status": if self.config.is_some() { "ready" } else { "unconfigured" }
+            "status": if self.config.is_some() { "ready" } else { "unconfigured" },
+            "provisioning": readiness,
         }))
     }
 
@@ -563,6 +590,67 @@ fn soql_to_output(data: &serde_json::Value) -> serde_json::Value {
         out["done"] = d;
     }
     out
+}
+
+/// Check whether the given URL looks like a valid Salesforce domain.
+fn is_salesforce_domain(url: &str) -> bool {
+    let host = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))
+        .and_then(|rest| rest.split('/').next())
+        .unwrap_or(url);
+
+    host.ends_with(".salesforce.com")
+        || host.ends_with(".force.com")
+        || host == "salesforce.com"
+        || host == "force.com"
+}
+
+/// Build the provisioning recipe for the Salesforce connector.
+pub fn provisioning_recipe() -> ProvisioningRecipe {
+    ProvisioningRecipe::new(
+        RecipeId::new("salesforce_setup"),
+        "1",
+        "Salesforce connector provisioning via OAuth2 or credential injection",
+    )
+    .with_step(ProvisioningStep::new(
+        StepId::new("prompt_auth_mode"),
+        ProvisioningStepType::PromptUser {
+            message: "Choose authentication mode: oauth (interactive browser flow) or credential_id (egress proxy injection)".into(),
+        },
+    ))
+    .with_step(
+        ProvisioningStep::new(
+            StepId::new("oauth_flow"),
+            ProvisioningStepType::Oauth {
+                flow: OAuthRecipe::AuthorizationCodePkce {
+                    authorization_url: "https://login.salesforce.com/services/oauth2/authorize".into(),
+                    token_url: "https://login.salesforce.com/services/oauth2/token".into(),
+                    scopes: vec!["api".into(), "refresh_token".into()],
+                    auto_browser: true,
+                    callback_port: 8400,
+                },
+            },
+        )
+        .depends_on(StepId::new("prompt_auth_mode")),
+    )
+    .with_step(
+        ProvisioningStep::new(
+            StepId::new("store_token"),
+            ProvisioningStepType::StoreSecret {
+                key: "salesforce_oauth_token".into(),
+                value_from: StepId::new("oauth_flow"),
+                scope: "connector:fcp.salesforce".into(),
+            },
+        )
+        .depends_on(StepId::new("oauth_flow")),
+    )
+    .with_step(ProvisioningStep::new(
+        StepId::new("prompt_instance_url"),
+        ProvisioningStepType::PromptUser {
+            message: "Enter your Salesforce instance URL (e.g., https://myorg.my.salesforce.com)".into(),
+        },
+    ))
 }
 
 /// Construct a single [`OperationInfo`].
@@ -1771,5 +1859,157 @@ mod tests {
         });
         let out = soql_to_output(&data);
         assert_eq!(out["records"][0]["Account"]["Name"], "Acme");
+    }
+
+    // -- provisioning_recipe --
+
+    #[test]
+    fn provisioning_recipe_has_expected_steps() {
+        let recipe = provisioning_recipe();
+        assert_eq!(recipe.steps.len(), 4);
+        let ids: Vec<&str> = recipe.steps.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec![
+                "prompt_auth_mode",
+                "oauth_flow",
+                "store_token",
+                "prompt_instance_url"
+            ]
+        );
+    }
+
+    #[test]
+    fn provisioning_recipe_has_oauth_step() {
+        let recipe = provisioning_recipe();
+        let oauth_step = recipe
+            .steps
+            .iter()
+            .find(|s| s.id.as_str() == "oauth_flow")
+            .expect("oauth_flow step missing");
+        match &oauth_step.kind {
+            ProvisioningStepType::Oauth { flow } => match flow {
+                OAuthRecipe::AuthorizationCodePkce {
+                    authorization_url,
+                    token_url,
+                    scopes,
+                    auto_browser,
+                    callback_port,
+                } => {
+                    assert_eq!(
+                        authorization_url,
+                        "https://login.salesforce.com/services/oauth2/authorize"
+                    );
+                    assert_eq!(
+                        token_url,
+                        "https://login.salesforce.com/services/oauth2/token"
+                    );
+                    assert_eq!(scopes, &["api", "refresh_token"]);
+                    assert!(auto_browser);
+                    assert_eq!(*callback_port, 8400);
+                }
+                other => panic!("expected AuthorizationCodePkce, got {other:?}"),
+            },
+            other => panic!("expected Oauth step, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn provisioning_recipe_store_secret_scope() {
+        let recipe = provisioning_recipe();
+        let store_step = recipe
+            .steps
+            .iter()
+            .find(|s| s.id.as_str() == "store_token")
+            .expect("store_token step missing");
+        match &store_step.kind {
+            ProvisioningStepType::StoreSecret { scope, value_from, .. } => {
+                assert_eq!(scope, "connector:fcp.salesforce");
+                assert_eq!(value_from.as_str(), "oauth_flow");
+            }
+            other => panic!("expected StoreSecret step, got {other:?}"),
+        }
+        assert!(store_step
+            .depends_on
+            .iter()
+            .any(|d| d.as_str() == "oauth_flow"));
+    }
+
+    // -- provisioning_readiness --
+
+    #[test]
+    fn provisioning_readiness_unconfigured() {
+        let c = SalesforceConnector::new();
+        let r = c.provisioning_readiness();
+        assert_eq!(r["auth_mode"], "unconfigured");
+        assert_eq!(r["token_configured"], false);
+        assert_eq!(r["credential_id_configured"], false);
+        assert_eq!(r["base_url"], DEFAULT_BASE_URL);
+    }
+
+    #[test]
+    fn provisioning_readiness_access_token() {
+        let mut c = SalesforceConnector::new();
+        c.config = Some(SalesforceConfig {
+            auth: SalesforceAuth::AccessToken("test-token".into()),
+            base_url: "https://myorg.my.salesforce.com".into(),
+        });
+        let r = c.provisioning_readiness();
+        assert_eq!(r["auth_mode"], "access_token");
+        assert_eq!(r["token_configured"], true);
+        assert_eq!(r["credential_id_configured"], false);
+        assert_eq!(r["network_ok"], true);
+    }
+
+    #[test]
+    fn provisioning_readiness_credential_id() {
+        let mut c = SalesforceConnector::new();
+        c.config = Some(SalesforceConfig {
+            auth: SalesforceAuth::CredentialId(
+                CredentialId::parse("550e8400-e29b-41d4-a716-446655440000").unwrap(),
+            ),
+            base_url: "https://myorg.my.salesforce.com".into(),
+        });
+        let r = c.provisioning_readiness();
+        assert_eq!(r["auth_mode"], "credential_id");
+        assert_eq!(r["token_configured"], false);
+        assert_eq!(r["credential_id_configured"], true);
+        assert_eq!(r["network_ok"], true);
+    }
+
+    #[test]
+    fn provisioning_readiness_network_check() {
+        assert!(is_salesforce_domain("https://myorg.my.salesforce.com"));
+        assert!(is_salesforce_domain("https://login.salesforce.com"));
+        assert!(is_salesforce_domain("https://myorg.lightning.force.com"));
+        assert!(!is_salesforce_domain("https://evil.example.com"));
+        assert!(!is_salesforce_domain("https://notsalesforce.com"));
+        assert!(!is_salesforce_domain("https://salesforce.com.evil.com"));
+
+        let mut c = SalesforceConnector::new();
+        c.config = Some(SalesforceConfig {
+            auth: SalesforceAuth::AccessToken("tok".into()),
+            base_url: "https://evil.example.com".into(),
+        });
+        let r = c.provisioning_readiness();
+        assert_eq!(r["network_ok"], false);
+    }
+
+    // -- self_check with provisioning --
+
+    #[test]
+    fn self_check_includes_provisioning() {
+        let c = SalesforceConnector::new();
+        let rt = fcp_async_core::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let result = rt.block_on(c.handle_self_check()).unwrap();
+        assert!(result.get("provisioning").is_some());
+        let prov = &result["provisioning"];
+        assert_eq!(prov["auth_mode"], "unconfigured");
+        assert!(prov.get("token_configured").is_some());
+        assert!(prov.get("network_ok").is_some());
+        assert!(prov.get("base_url").is_some());
     }
 }

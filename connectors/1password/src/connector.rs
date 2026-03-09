@@ -5,7 +5,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use fcp_core::{
     AgentHint, BaseConnector, CapabilityId, ConnectorId, CredentialId, FcpError, FcpResult,
-    IdempotencyClass, OperationId, OperationInfo, RiskLevel, SafetyTier,
+    IdempotencyClass, OperationId, OperationInfo, ProvisioningRecipe, ProvisioningStep,
+    ProvisioningStepType, RecipeId, RiskLevel, SafetyTier, StepId,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -259,12 +260,37 @@ impl OnePasswordConnector {
         Ok(serde_json::to_value(result).unwrap_or_else(|_| json!({"status": "error"})))
     }
 
+    /// Return provisioning readiness information.
+    #[must_use]
+    pub fn provisioning_readiness(&self) -> serde_json::Value {
+        let (auth_mode, token_configured, credential_id_configured) = match &self.config {
+            Some(cfg) => match &cfg.auth {
+                OnePasswordAuth::BearerToken(_) => ("bearer_token", true, false),
+                OnePasswordAuth::CredentialId(_) => ("credential_id", false, true),
+            },
+            None => ("unconfigured", false, false),
+        };
+
+        let base_url = self
+            .config
+            .as_ref()
+            .map_or(DEFAULT_BASE_URL, |c| &c.base_url);
+
+        json!({
+            "auth_mode": auth_mode,
+            "token_configured": token_configured,
+            "credential_id_configured": credential_id_configured,
+            "base_url": base_url,
+        })
+    }
+
     /// Handle the `self_check` method.
     pub async fn handle_self_check(&self) -> FcpResult<serde_json::Value> {
         Ok(json!({
             "connector_id": "fcp.1password",
             "version": "0.1.0",
             "status": if self.config.is_some() { "ready" } else { "unconfigured" },
+            "provisioning": self.provisioning_readiness(),
         }))
     }
 
@@ -448,6 +474,49 @@ fn op_info(
         idempotency,
         ai_hints,
     }
+}
+
+/// Build the provisioning recipe for the `1Password` connector.
+pub fn provisioning_recipe() -> ProvisioningRecipe {
+    ProvisioningRecipe::new(
+        RecipeId::new("1password-setup"),
+        "1",
+        "Provision 1Password Connect Server access for the FCP connector",
+    )
+    .with_step(ProvisioningStep::new(
+        StepId::new("prompt_auth_mode"),
+        ProvisioningStepType::PromptUser {
+            message: "Choose authentication mode: (1) Service account token or (2) Credential injection".into(),
+        },
+    ))
+    .with_step(
+        ProvisioningStep::new(
+            StepId::new("prompt_access_token"),
+            ProvisioningStepType::PromptSecret {
+                message: "Enter your 1Password Connect Server access token".into(),
+            },
+        )
+        .depends_on(StepId::new("prompt_auth_mode")),
+    )
+    .with_step(
+        ProvisioningStep::new(
+            StepId::new("store_access_token"),
+            ProvisioningStepType::StoreSecret {
+                key: "access_token".into(),
+                value_from: StepId::new("prompt_access_token"),
+                scope: "connector:fcp.1password".into(),
+            },
+        )
+        .depends_on(StepId::new("prompt_access_token")),
+    )
+    .with_step(ProvisioningStep::new(
+        StepId::new("prompt_base_url"),
+        ProvisioningStepType::PromptUser {
+            message: format!(
+                "Enter the 1Password Connect Server URL (default: {DEFAULT_BASE_URL})"
+            ),
+        },
+    ))
 }
 
 /// Build the operations info for introspection.
@@ -1157,5 +1226,117 @@ mod tests {
         let dbg = format!("{c:?}");
         assert!(dbg.contains("connectivity"));
         assert!(dbg.contains("unreachable"));
+    }
+
+    // -- Provisioning tests --
+
+    #[test]
+    fn provisioning_recipe_has_expected_steps() {
+        let recipe = provisioning_recipe();
+        assert_eq!(recipe.steps.len(), 4);
+        assert_eq!(recipe.id.as_str(), "1password-setup");
+        assert_eq!(recipe.version, "1");
+    }
+
+    #[test]
+    fn provisioning_recipe_step_dependencies() {
+        let recipe = provisioning_recipe();
+        let ids: Vec<&str> = recipe.steps.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            &[
+                "prompt_auth_mode",
+                "prompt_access_token",
+                "store_access_token",
+                "prompt_base_url",
+            ]
+        );
+
+        // prompt_auth_mode has no dependencies
+        assert!(recipe.steps[0].depends_on.is_empty());
+
+        // prompt_access_token depends on prompt_auth_mode
+        assert_eq!(recipe.steps[1].depends_on.len(), 1);
+        assert_eq!(recipe.steps[1].depends_on[0].as_str(), "prompt_auth_mode");
+
+        // store_access_token depends on prompt_access_token
+        assert_eq!(recipe.steps[2].depends_on.len(), 1);
+        assert_eq!(
+            recipe.steps[2].depends_on[0].as_str(),
+            "prompt_access_token"
+        );
+
+        // prompt_base_url has no dependencies
+        assert!(recipe.steps[3].depends_on.is_empty());
+    }
+
+    #[test]
+    fn provisioning_recipe_store_secret_scope() {
+        let recipe = provisioning_recipe();
+        let store_step = recipe
+            .steps
+            .iter()
+            .find(|s| s.id.as_str() == "store_access_token")
+            .expect("store_access_token step not found");
+
+        match &store_step.kind {
+            ProvisioningStepType::StoreSecret { scope, key, value_from } => {
+                assert_eq!(scope, "connector:fcp.1password");
+                assert_eq!(key, "access_token");
+                assert_eq!(value_from.as_str(), "prompt_access_token");
+            }
+            other => panic!("expected StoreSecret, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn provisioning_readiness_unconfigured() {
+        let c = OnePasswordConnector::new();
+        let readiness = c.provisioning_readiness();
+        assert_eq!(readiness["auth_mode"], "unconfigured");
+        assert_eq!(readiness["token_configured"], false);
+        assert_eq!(readiness["credential_id_configured"], false);
+        assert_eq!(readiness["base_url"], DEFAULT_BASE_URL);
+    }
+
+    #[test]
+    fn provisioning_readiness_bearer_token() {
+        let mut c = OnePasswordConnector::new();
+        c.config = Some(OnePasswordConfig {
+            auth: OnePasswordAuth::BearerToken("test-token".into()),
+            base_url: "https://connect.example.com".into(),
+        });
+        let readiness = c.provisioning_readiness();
+        assert_eq!(readiness["auth_mode"], "bearer_token");
+        assert_eq!(readiness["token_configured"], true);
+        assert_eq!(readiness["credential_id_configured"], false);
+        assert_eq!(readiness["base_url"], "https://connect.example.com");
+    }
+
+    #[test]
+    fn provisioning_readiness_credential_id() {
+        let mut c = OnePasswordConnector::new();
+        c.config = Some(OnePasswordConfig {
+            auth: OnePasswordAuth::CredentialId(
+                CredentialId::parse("550e8400-e29b-41d4-a716-446655440000").unwrap(),
+            ),
+            base_url: DEFAULT_BASE_URL.into(),
+        });
+        let readiness = c.provisioning_readiness();
+        assert_eq!(readiness["auth_mode"], "credential_id");
+        assert_eq!(readiness["token_configured"], false);
+        assert_eq!(readiness["credential_id_configured"], true);
+        assert_eq!(readiness["base_url"], DEFAULT_BASE_URL);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn self_check_includes_provisioning() {
+        let c = OnePasswordConnector::new();
+        let result = c.handle_self_check().await.unwrap();
+        assert!(result.get("provisioning").is_some());
+        let prov = &result["provisioning"];
+        assert_eq!(prov["auth_mode"], "unconfigured");
+        assert_eq!(prov["token_configured"], false);
+        assert_eq!(prov["credential_id_configured"], false);
     }
 }

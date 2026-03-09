@@ -5,7 +5,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use fcp_core::{
     AgentHint, BaseConnector, CapabilityId, ConnectorId, CredentialId, FcpError, FcpResult,
-    IdempotencyClass, Introspection, OperationId, OperationInfo, RiskLevel, SafetyTier,
+    IdempotencyClass, Introspection, OperationId, OperationInfo, ProvisioningRecipe,
+    ProvisioningStep, ProvisioningStepType, RecipeId, RiskLevel, SafetyTier, StepId,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -263,12 +264,40 @@ impl ElasticsearchConnector {
         Ok(serde_json::to_value(result).unwrap_or(json!({"status": "error"})))
     }
 
+    /// Return provisioning readiness information.
+    pub fn provisioning_readiness(&self) -> serde_json::Value {
+        let (auth_mode, api_key_configured, credential_id_configured) = match &self.config {
+            Some(config) => match &config.auth {
+                ElasticsearchAuth::ApiKey(_) => ("api_key", true, false),
+                ElasticsearchAuth::CredentialId(_) => ("credential_id", false, true),
+            },
+            None => ("unconfigured", false, false),
+        };
+
+        let base_url = self
+            .config
+            .as_ref()
+            .map_or_else(|| DEFAULT_BASE_URL.to_string(), |c| c.base_url.clone());
+
+        let network_ok = base_url.contains(".elastic-cloud.com")
+            || base_url.contains(".found.io");
+
+        json!({
+            "auth_mode": auth_mode,
+            "api_key_configured": api_key_configured,
+            "credential_id_configured": credential_id_configured,
+            "network_ok": network_ok,
+            "base_url": base_url,
+        })
+    }
+
     /// Handle the `self_check` method.
     pub async fn handle_self_check(&self) -> FcpResult<serde_json::Value> {
         Ok(json!({
             "connector_id": "fcp.elasticsearch",
             "version": "0.1.0",
             "status": if self.config.is_some() { "ready" } else { "unconfigured" },
+            "provisioning": self.provisioning_readiness(),
         }))
     }
 
@@ -774,6 +803,47 @@ fn operations_info() -> serde_json::Value {
             "idempotency": "strict",
         },
     ])
+}
+
+/// Build the provisioning recipe for the Elasticsearch connector.
+pub fn provisioning_recipe() -> ProvisioningRecipe {
+    ProvisioningRecipe::new(
+        RecipeId::new("elasticsearch/setup"),
+        "1",
+        "Provision Elasticsearch connector with API key or credential injection",
+    )
+    .with_step(ProvisioningStep::new(
+        StepId::new("prompt_auth_mode"),
+        ProvisioningStepType::PromptUser {
+            message: "Choose authentication mode: api_key or credential_id".into(),
+        },
+    ))
+    .with_step(
+        ProvisioningStep::new(
+            StepId::new("prompt_api_key"),
+            ProvisioningStepType::PromptSecret {
+                message: "Enter the Elasticsearch API key (base64-encoded id:api_key)".into(),
+            },
+        )
+        .depends_on(StepId::new("prompt_auth_mode")),
+    )
+    .with_step(
+        ProvisioningStep::new(
+            StepId::new("store_api_key"),
+            ProvisioningStepType::StoreSecret {
+                key: "elasticsearch_api_key".into(),
+                value_from: StepId::new("prompt_api_key"),
+                scope: "connector:fcp.elasticsearch".into(),
+            },
+        )
+        .depends_on(StepId::new("prompt_api_key")),
+    )
+    .with_step(ProvisioningStep::new(
+        StepId::new("prompt_base_url"),
+        ProvisioningStepType::PromptUser {
+            message: "Enter the Elasticsearch cluster URL (default: https://localhost:9200)".into(),
+        },
+    ))
 }
 
 #[cfg(test)]
@@ -1381,5 +1451,148 @@ mod tests {
             }
             e => panic!("expected InvalidRequest, got {e:?}"),
         }
+    }
+
+    // ── provisioning_recipe ─────────────────────────────────────────
+
+    #[test]
+    fn provisioning_recipe_has_expected_steps() {
+        let recipe = provisioning_recipe();
+        assert_eq!(recipe.steps.len(), 4);
+        assert_eq!(recipe.id.as_str(), "elasticsearch/setup");
+        assert_eq!(recipe.version, "1");
+    }
+
+    #[test]
+    fn provisioning_recipe_step_dependencies() {
+        let recipe = provisioning_recipe();
+        let steps = &recipe.steps;
+
+        // prompt_auth_mode has no deps
+        assert_eq!(steps[0].id.as_str(), "prompt_auth_mode");
+        assert!(steps[0].depends_on.is_empty());
+
+        // prompt_api_key depends on prompt_auth_mode
+        assert_eq!(steps[1].id.as_str(), "prompt_api_key");
+        assert_eq!(steps[1].depends_on.len(), 1);
+        assert_eq!(steps[1].depends_on[0].as_str(), "prompt_auth_mode");
+
+        // store_api_key depends on prompt_api_key
+        assert_eq!(steps[2].id.as_str(), "store_api_key");
+        assert_eq!(steps[2].depends_on.len(), 1);
+        assert_eq!(steps[2].depends_on[0].as_str(), "prompt_api_key");
+
+        // prompt_base_url has no deps
+        assert_eq!(steps[3].id.as_str(), "prompt_base_url");
+        assert!(steps[3].depends_on.is_empty());
+    }
+
+    #[test]
+    fn provisioning_recipe_store_secret_scope() {
+        let recipe = provisioning_recipe();
+        let store_step = &recipe.steps[2];
+        assert_eq!(store_step.id.as_str(), "store_api_key");
+        match &store_step.kind {
+            ProvisioningStepType::StoreSecret { scope, key, value_from } => {
+                assert_eq!(scope, "connector:fcp.elasticsearch");
+                assert_eq!(key, "elasticsearch_api_key");
+                assert_eq!(value_from.as_str(), "prompt_api_key");
+            }
+            other => panic!("expected StoreSecret, got {other:?}"),
+        }
+    }
+
+    // ── provisioning_readiness ──────────────────────────────────────
+
+    #[test]
+    fn provisioning_readiness_unconfigured() {
+        let connector = ElasticsearchConnector::new();
+        let readiness = connector.provisioning_readiness();
+        assert_eq!(readiness["auth_mode"], "unconfigured");
+        assert_eq!(readiness["api_key_configured"], false);
+        assert_eq!(readiness["credential_id_configured"], false);
+        assert_eq!(readiness["base_url"], DEFAULT_BASE_URL);
+    }
+
+    #[test]
+    fn provisioning_readiness_api_key() {
+        let mut connector = ElasticsearchConnector::new();
+        connector.config = Some(ElasticsearchConfig {
+            auth: ElasticsearchAuth::ApiKey("test-key".into()),
+            base_url: "https://my-cluster.elastic-cloud.com:9243".into(),
+        });
+        let readiness = connector.provisioning_readiness();
+        assert_eq!(readiness["auth_mode"], "api_key");
+        assert_eq!(readiness["api_key_configured"], true);
+        assert_eq!(readiness["credential_id_configured"], false);
+        assert_eq!(readiness["network_ok"], true);
+        assert_eq!(
+            readiness["base_url"],
+            "https://my-cluster.elastic-cloud.com:9243"
+        );
+    }
+
+    #[test]
+    fn provisioning_readiness_credential_id() {
+        let mut connector = ElasticsearchConnector::new();
+        connector.config = Some(ElasticsearchConfig {
+            auth: ElasticsearchAuth::CredentialId(CredentialId::new()),
+            base_url: "https://abc.found.io:9243".into(),
+        });
+        let readiness = connector.provisioning_readiness();
+        assert_eq!(readiness["auth_mode"], "credential_id");
+        assert_eq!(readiness["api_key_configured"], false);
+        assert_eq!(readiness["credential_id_configured"], true);
+        assert_eq!(readiness["network_ok"], true);
+    }
+
+    #[test]
+    fn provisioning_readiness_network_check() {
+        let mut connector = ElasticsearchConnector::new();
+
+        // Valid: elastic-cloud.com domain
+        connector.config = Some(ElasticsearchConfig {
+            auth: ElasticsearchAuth::ApiKey("k".into()),
+            base_url: "https://deploy.elastic-cloud.com:443".into(),
+        });
+        assert_eq!(connector.provisioning_readiness()["network_ok"], true);
+
+        // Valid: found.io domain
+        connector.config = Some(ElasticsearchConfig {
+            auth: ElasticsearchAuth::ApiKey("k".into()),
+            base_url: "https://my-deploy.found.io:9243".into(),
+        });
+        assert_eq!(connector.provisioning_readiness()["network_ok"], true);
+
+        // Invalid: localhost
+        connector.config = Some(ElasticsearchConfig {
+            auth: ElasticsearchAuth::ApiKey("k".into()),
+            base_url: "https://localhost:9200".into(),
+        });
+        assert_eq!(connector.provisioning_readiness()["network_ok"], false);
+
+        // Invalid: arbitrary domain
+        connector.config = Some(ElasticsearchConfig {
+            auth: ElasticsearchAuth::ApiKey("k".into()),
+            base_url: "https://es.example.com:9200".into(),
+        });
+        assert_eq!(connector.provisioning_readiness()["network_ok"], false);
+
+        // Unconfigured: defaults to localhost
+        connector.config = None;
+        assert_eq!(connector.provisioning_readiness()["network_ok"], false);
+    }
+
+    // ── self_check includes provisioning ────────────────────────────
+
+    #[fcp_async_core::runtime::test]
+    async fn self_check_includes_provisioning() {
+        let connector = ElasticsearchConnector::new();
+        let result = connector.handle_self_check().await.unwrap();
+        assert!(result.get("provisioning").is_some());
+        let prov = &result["provisioning"];
+        assert_eq!(prov["auth_mode"], "unconfigured");
+        assert_eq!(prov["api_key_configured"], false);
+        assert_eq!(prov["credential_id_configured"], false);
     }
 }

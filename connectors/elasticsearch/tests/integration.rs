@@ -144,9 +144,9 @@ async fn lifecycle_introspect() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
     let intro = c.handle_introspect().await.unwrap();
-    assert_eq!(intro["connector_id"], "fcp.elasticsearch");
     let ops = intro["operations"].as_array().unwrap();
     assert_eq!(ops.len(), 7);
+    assert_eq!(ops[0]["id"], "elasticsearch.search");
 }
 
 // ── Search ───────────────────────────────────────────────────────────

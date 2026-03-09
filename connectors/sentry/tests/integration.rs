@@ -115,7 +115,7 @@ async fn introspect_lists_operations() {
     let connector = SentryConnector::new();
     let result = connector.handle_introspect().await.unwrap();
     let ops = result["operations"].as_array().expect("operations array");
-    assert!(ops.len() >= 18, "should have at least 18 operations");
+    assert!(ops.len() >= 21, "should have at least 21 operations");
     let ids: Vec<&str> = ops.iter().filter_map(|o| o["id"].as_str()).collect();
     assert!(ids.contains(&"sentry.list_issues"));
     assert!(ids.contains(&"sentry.get_event"));
@@ -123,6 +123,9 @@ async fn introspect_lists_operations() {
     assert!(ids.contains(&"sentry.create_alert_rule"));
     assert!(ids.contains(&"sentry.issue.search"));
     assert!(ids.contains(&"sentry.issue.get_summary"));
+    assert!(ids.contains(&"sentry.issue.assign"));
+    assert!(ids.contains(&"sentry.issue.set_status"));
+    assert!(ids.contains(&"sentry.issue.set_priority"));
 }
 
 #[fcp_async_core::runtime::test]
@@ -916,7 +919,7 @@ async fn doctor_fully_configured() {
     assert!(checks.iter().all(|c| c["passed"] == true));
 }
 
-// ── Simulate: all 18 operations ──────────────────────────────────────
+// ── Simulate: all 21 operations ──────────────────────────────────────
 
 #[fcp_async_core::runtime::test]
 async fn simulate_all_known_operations() {
@@ -940,6 +943,9 @@ async fn simulate_all_known_operations() {
         "sentry.delete_alert_rule",
         "sentry.issue.search",
         "sentry.issue.get_summary",
+        "sentry.issue.assign",
+        "sentry.issue.set_status",
+        "sentry.issue.set_priority",
     ];
     for op in &ops {
         let result = connector
@@ -1019,4 +1025,90 @@ async fn invoke_list_issue_events_full() {
 
     let events = result["events"].as_array().unwrap();
     assert_eq!(events.len(), 1);
+}
+
+// ── Invoke: Issue Assign ─────────────────────────────────────────────
+
+#[fcp_async_core::runtime::test]
+async fn invoke_issue_assign() {
+    let mock = MockServer::start().await;
+    Mock::given(method("PUT"))
+        .and(path("/issues/123/"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "123",
+            "assignedTo": {"type": "user", "email": "alice@example.com"},
+            "status": "unresolved"
+        })))
+        .mount(&mock)
+        .await;
+
+    let connector = configured_connector(&mock).await;
+    let result = connector
+        .handle_invoke(json!({
+            "operation_id": "sentry.issue.assign",
+            "input": {
+                "issue_id": "123",
+                "assignee": "alice@example.com"
+            }
+        }))
+        .await
+        .unwrap();
+    assert!(result.get("issue").is_some());
+    assert_eq!(result["issue"]["assignedTo"]["email"], "alice@example.com");
+}
+
+// ── Invoke: Issue Set Status ─────────────────────────────────────────
+
+#[fcp_async_core::runtime::test]
+async fn invoke_issue_set_status() {
+    let mock = MockServer::start().await;
+    Mock::given(method("PUT"))
+        .and(path("/issues/456/"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "456",
+            "status": "resolved"
+        })))
+        .mount(&mock)
+        .await;
+
+    let connector = configured_connector(&mock).await;
+    let result = connector
+        .handle_invoke(json!({
+            "operation_id": "sentry.issue.set_status",
+            "input": {
+                "issue_id": "456",
+                "status": "resolved"
+            }
+        }))
+        .await
+        .unwrap();
+    assert_eq!(result["issue"]["status"], "resolved");
+}
+
+// ── Invoke: Issue Set Priority ───────────────────────────────────────
+
+#[fcp_async_core::runtime::test]
+async fn invoke_issue_set_priority() {
+    let mock = MockServer::start().await;
+    Mock::given(method("PUT"))
+        .and(path("/issues/789/"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "789",
+            "priority": "high"
+        })))
+        .mount(&mock)
+        .await;
+
+    let connector = configured_connector(&mock).await;
+    let result = connector
+        .handle_invoke(json!({
+            "operation_id": "sentry.issue.set_priority",
+            "input": {
+                "issue_id": "789",
+                "priority": "high"
+            }
+        }))
+        .await
+        .unwrap();
+    assert_eq!(result["issue"]["priority"], "high");
 }

@@ -1480,7 +1480,7 @@ fn figma_full_manifest_parses_with_all_operations() {
 
     assert_eq!(parsed.connector.id.as_str(), "fcp.figma");
 
-    // Verify all 17 operations present
+    // Verify all 19 operations present
     let ops = &parsed.provides.operations;
     let expected_ops = [
         "figma.list_team_projects",
@@ -1500,6 +1500,8 @@ fn figma_full_manifest_parses_with_all_operations() {
         "figma.create_webhook",
         "figma.list_webhooks",
         "figma.delete_webhook",
+        "figma.macro.export_component_bundle",
+        "figma.macro.design_audit",
     ];
     for op_name in &expected_ops {
         assert!(ops.contains_key(*op_name), "missing operation: {op_name}");
@@ -3991,8 +3993,11 @@ fn sentry_full_manifest_parses_with_all_operations() {
         "sentry.get_issue",
         "sentry.get_release",
         "sentry.get_transaction",
+        "sentry.issue.assign",
         "sentry.issue.get_summary",
         "sentry.issue.search",
+        "sentry.issue.set_priority",
+        "sentry.issue.set_status",
         "sentry.list_alert_rules",
         "sentry.list_issue_events",
         "sentry.list_issues",

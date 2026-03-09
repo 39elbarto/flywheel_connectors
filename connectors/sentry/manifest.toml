@@ -5,7 +5,7 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:c7a675e92e4d520ba2363e563a6e8a8b7fcbff59e22cd5c5ff13a43c30ee3b36"
+interface_hash = "blake3-256:fcp.interface.v2:44f3fcd22a6d034549f782a5c9e4eba625d188b32a138e8fc8dc11d8483dc302"
 
 [connector]
 id = "fcp.sentry"
@@ -691,6 +691,68 @@ related = [
     "sentry.list_issues",
 ]
 
+[provides.operations."sentry.issue.assign"]
+description = "Assign or unassign a Sentry issue"
+capability = "sentry.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "strict"
+
+[provides.operations."sentry.issue.assign".input_schema]
+required = ["issue_id"]
+type = "object"
+
+[provides.operations."sentry.issue.assign".input_schema.properties.issue_id]
+description = "Sentry issue ID"
+type = "string"
+
+[provides.operations."sentry.issue.assign".input_schema.properties.assignee]
+description = "User email or team slug to assign; null/omitted to unassign"
+type = "string"
+
+[provides.operations."sentry.issue.assign".output_schema]
+required = ["issue"]
+type = "object"
+
+[provides.operations."sentry.issue.assign".output_schema.properties.issue]
+description = "Updated issue object"
+type = "object"
+
+[provides.operations."sentry.issue.assign".network_constraints]
+host_allow = [
+    "sentry.io",
+    "*.sentry.io",
+    "$sentry_host",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 2097152
+
+[provides.operations."sentry.issue.assign".ai_hints]
+when_to_use = "Assign a Sentry issue to a user or team. Pass null assignee to unassign."
+common_mistakes = ["Using display name instead of email or 'team:slug' for assignee."]
+examples = [
+    '{"issue_id": "1234567890", "assignee": "alice@example.com"}',
+    '{"issue_id": "1234567890"}',
+]
+related = [
+    "sentry.update_issue",
+    "sentry.get_issue",
+]
+
 [provides.operations."sentry.issue.search"]
 description = "Search Sentry issues with structured filters (status, assignee, level, time range)"
 capability = "sentry.read"
@@ -807,6 +869,148 @@ related = [
     "sentry.list_issues",
     "sentry.get_issue",
     "sentry.issue.get_summary",
+]
+
+[provides.operations."sentry.issue.set_priority"]
+description = "Set issue priority level for triage"
+capability = "sentry.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "strict"
+
+[provides.operations."sentry.issue.set_priority".input_schema]
+required = [
+    "issue_id",
+    "priority",
+]
+type = "object"
+
+[provides.operations."sentry.issue.set_priority".input_schema.properties.issue_id]
+description = "Sentry issue ID"
+type = "string"
+
+[provides.operations."sentry.issue.set_priority".input_schema.properties.priority]
+description = "Issue priority level"
+enum = [
+    "critical",
+    "high",
+    "medium",
+    "low",
+]
+type = "string"
+
+[provides.operations."sentry.issue.set_priority".output_schema]
+required = ["issue"]
+type = "object"
+
+[provides.operations."sentry.issue.set_priority".output_schema.properties.issue]
+description = "Updated issue object"
+type = "object"
+
+[provides.operations."sentry.issue.set_priority".network_constraints]
+host_allow = [
+    "sentry.io",
+    "*.sentry.io",
+    "$sentry_host",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 2097152
+
+[provides.operations."sentry.issue.set_priority".ai_hints]
+when_to_use = "Set issue priority level for triage. Affects alerting and SLA tracking."
+common_mistakes = ["Using numeric priority values instead of string names (critical/high/medium/low)."]
+examples = ['{"issue_id": "1234567890", "priority": "high"}']
+related = [
+    "sentry.update_issue",
+    "sentry.get_issue",
+]
+
+[provides.operations."sentry.issue.set_status"]
+description = "Set issue status (resolved/unresolved/ignored)"
+capability = "sentry.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "strict"
+
+[provides.operations."sentry.issue.set_status".input_schema]
+required = [
+    "issue_id",
+    "status",
+]
+type = "object"
+
+[provides.operations."sentry.issue.set_status".input_schema.properties.issue_id]
+description = "Sentry issue ID"
+type = "string"
+
+[provides.operations."sentry.issue.set_status".input_schema.properties.status]
+description = "Issue status"
+enum = [
+    "resolved",
+    "unresolved",
+    "ignored",
+]
+type = "string"
+
+[provides.operations."sentry.issue.set_status".input_schema.properties.substatus]
+description = "Issue substatus (e.g., 'ongoing', 'escalating', 'new', 'archived_until_escalating', 'archived_forever', 'archived_until_condition_met')"
+type = "string"
+
+[provides.operations."sentry.issue.set_status".output_schema]
+required = ["issue"]
+type = "object"
+
+[provides.operations."sentry.issue.set_status".output_schema.properties.issue]
+description = "Updated issue object"
+type = "object"
+
+[provides.operations."sentry.issue.set_status".network_constraints]
+host_allow = [
+    "sentry.io",
+    "*.sentry.io",
+    "$sentry_host",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 2097152
+
+[provides.operations."sentry.issue.set_status".ai_hints]
+when_to_use = "Set issue status. Use 'resolved' to close, 'ignored' to suppress, 'unresolved' to reopen."
+common_mistakes = ["Not specifying substatus when using 'ignored' status (defaults may not match intent)."]
+examples = [
+    '{"issue_id": "1234567890", "status": "resolved"}',
+    '{"issue_id": "1234567890", "status": "ignored", "substatus": "archived_until_escalating"}',
+]
+related = [
+    "sentry.update_issue",
+    "sentry.get_issue",
 ]
 
 [provides.operations."sentry.list_alert_rules"]
@@ -1539,6 +1743,9 @@ scope = "instance"
 "sentry.update_alert_rule" = ["sentry.alerts"]
 "sentry.get_event" = ["sentry.read"]
 "sentry.update_issue" = ["sentry.write"]
+"sentry.issue.assign" = ["sentry.write"]
+"sentry.issue.set_status" = ["sentry.write"]
+"sentry.issue.set_priority" = ["sentry.write"]
 "sentry.create_alert_rule" = ["sentry.alerts"]
 "sentry.list_projects" = ["sentry.read"]
 "sentry.list_releases" = ["sentry.read"]

@@ -320,6 +320,9 @@ impl SentryConnector {
             "sentry.delete_alert_rule" => self.invoke_delete_alert_rule(client, &input).await,
             "sentry.issue.search" => self.invoke_issue_search(client, &input).await,
             "sentry.issue.get_summary" => self.invoke_issue_get_summary(client, &input).await,
+            "sentry.issue.assign" => self.invoke_issue_assign(client, &input).await,
+            "sentry.issue.set_status" => self.invoke_issue_set_status(client, &input).await,
+            "sentry.issue.set_priority" => self.invoke_issue_set_priority(client, &input).await,
             _ => {
                 return Err(FcpError::InvalidRequest {
                     code: 1002,
@@ -646,6 +649,48 @@ impl SentryConnector {
                 "platform": data.get("platform")
             }
         }))
+    }
+
+    async fn invoke_issue_assign(
+        &self,
+        client: &SentryClient,
+        input: &serde_json::Value,
+    ) -> Result<serde_json::Value, SentryError> {
+        let issue_id = require_str(input, "issue_id")?;
+        let assignee = input.get("assignee").and_then(|v| v.as_str());
+        let body = match assignee {
+            Some(a) => json!({ "assignedTo": a }),
+            None => json!({ "assignedTo": "" }),
+        };
+        let data = client.update_issue(issue_id, &body).await?;
+        Ok(json!({ "issue": data }))
+    }
+
+    async fn invoke_issue_set_status(
+        &self,
+        client: &SentryClient,
+        input: &serde_json::Value,
+    ) -> Result<serde_json::Value, SentryError> {
+        let issue_id = require_str(input, "issue_id")?;
+        let status = require_str(input, "status")?;
+        let mut body = json!({ "status": status });
+        if let Some(substatus) = input.get("substatus").and_then(|v| v.as_str()) {
+            body["substatus"] = json!(substatus);
+        }
+        let data = client.update_issue(issue_id, &body).await?;
+        Ok(json!({ "issue": data }))
+    }
+
+    async fn invoke_issue_set_priority(
+        &self,
+        client: &SentryClient,
+        input: &serde_json::Value,
+    ) -> Result<serde_json::Value, SentryError> {
+        let issue_id = require_str(input, "issue_id")?;
+        let priority = require_str(input, "priority")?;
+        let body = json!({ "priority": priority });
+        let data = client.update_issue(issue_id, &body).await?;
+        Ok(json!({ "issue": data }))
     }
 }
 
@@ -1384,6 +1429,117 @@ fn operations_info() -> Vec<OperationInfo> {
                 ],
             },
         ),
+        op_info(
+            "sentry.issue.assign",
+            "Assign or unassign a Sentry issue",
+            json!({
+                "type": "object",
+                "required": ["issue_id"],
+                "properties": {
+                    "issue_id": { "type": "string", "description": "Sentry issue ID" },
+                    "assignee": { "type": "string", "description": "User email or team slug to assign; null/omitted to unassign" }
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["issue"],
+                "properties": {
+                    "issue": { "type": "object", "description": "Updated issue object" }
+                }
+            }),
+            "sentry.write",
+            RiskLevel::Medium,
+            SafetyTier::Risky,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "Assign a Sentry issue to a user or team. Pass null assignee to unassign.".into(),
+                common_mistakes: vec![
+                    "Using display name instead of email or 'team:slug' for assignee.".into(),
+                ],
+                examples: vec![
+                    r#"{"issue_id": "1234567890", "assignee": "alice@example.com"}"#.into(),
+                    r#"{"issue_id": "1234567890"}"#.into(),
+                ],
+                related: vec![
+                    CapabilityId::from_static("sentry.update_issue"),
+                    CapabilityId::from_static("sentry.get_issue"),
+                ],
+            },
+        ),
+        op_info(
+            "sentry.issue.set_status",
+            "Set issue status (resolved/unresolved/ignored)",
+            json!({
+                "type": "object",
+                "required": ["issue_id", "status"],
+                "properties": {
+                    "issue_id": { "type": "string", "description": "Sentry issue ID" },
+                    "status": { "type": "string", "enum": ["resolved", "unresolved", "ignored"], "description": "Issue status" },
+                    "substatus": { "type": "string", "description": "Issue substatus (e.g., 'ongoing', 'escalating', 'new', 'archived_until_escalating', 'archived_forever', 'archived_until_condition_met')" }
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["issue"],
+                "properties": {
+                    "issue": { "type": "object", "description": "Updated issue object" }
+                }
+            }),
+            "sentry.write",
+            RiskLevel::Medium,
+            SafetyTier::Risky,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "Set issue status. Use 'resolved' to close, 'ignored' to suppress, 'unresolved' to reopen.".into(),
+                common_mistakes: vec![
+                    "Not specifying substatus when using 'ignored' status (defaults may not match intent).".into(),
+                ],
+                examples: vec![
+                    r#"{"issue_id": "1234567890", "status": "resolved"}"#.into(),
+                    r#"{"issue_id": "1234567890", "status": "ignored", "substatus": "archived_until_escalating"}"#.into(),
+                ],
+                related: vec![
+                    CapabilityId::from_static("sentry.update_issue"),
+                    CapabilityId::from_static("sentry.get_issue"),
+                ],
+            },
+        ),
+        op_info(
+            "sentry.issue.set_priority",
+            "Set issue priority level",
+            json!({
+                "type": "object",
+                "required": ["issue_id", "priority"],
+                "properties": {
+                    "issue_id": { "type": "string", "description": "Sentry issue ID" },
+                    "priority": { "type": "string", "enum": ["critical", "high", "medium", "low"], "description": "Issue priority level" }
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["issue"],
+                "properties": {
+                    "issue": { "type": "object", "description": "Updated issue object" }
+                }
+            }),
+            "sentry.write",
+            RiskLevel::Medium,
+            SafetyTier::Risky,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "Set issue priority level for triage. Affects alerting and SLA tracking.".into(),
+                common_mistakes: vec![
+                    "Using numeric priority values instead of string names (critical/high/medium/low).".into(),
+                ],
+                examples: vec![
+                    r#"{"issue_id": "1234567890", "priority": "high"}"#.into(),
+                ],
+                related: vec![
+                    CapabilityId::from_static("sentry.update_issue"),
+                    CapabilityId::from_static("sentry.get_issue"),
+                ],
+            },
+        ),
     ]
 }
 
@@ -1505,10 +1661,10 @@ mod tests {
     }
 
     #[test]
-    fn operations_info_has_18_operations() {
+    fn operations_info_has_21_operations() {
         let ops = ops_json();
         let arr = ops.as_array().unwrap();
-        assert_eq!(arr.len(), 18);
+        assert_eq!(arr.len(), 21);
     }
 
     #[test]
